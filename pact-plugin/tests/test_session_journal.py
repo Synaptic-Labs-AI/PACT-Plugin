@@ -3545,6 +3545,7 @@ class TestValidateEventSchemaPerType:
             "session_id": "test-session-id",
             "project_dir": "/tmp/proj",
         },
+        "compaction_attributed": {"verdict": "teammate", "basis": "content"},
         "variety_assessed": {
             "task_id": "42",
             "variety": {"novelty": 1, "scope": 1, "uncertainty": 1, "risk": 1, "total": 4},
@@ -4141,6 +4142,21 @@ class TestValidateOptionalFieldTypes:
         from shared.session_journal import _OPTIONAL_FIELDS_BY_TYPE
 
         assert _OPTIONAL_FIELDS_BY_TYPE.get("session_start") == {"source": str}
+
+    def test_compaction_attributed_latency_declared_optional(self):
+        """compaction_attributed has `latency_s: float`, the seconds from staging
+        a compaction summary to resolving it; present, it must be a float."""
+        from shared.session_journal import (
+            _OPTIONAL_FIELDS_BY_TYPE,
+            _validate_event_schema,
+            make_event,
+        )
+
+        assert _OPTIONAL_FIELDS_BY_TYPE.get("compaction_attributed") == {"latency_s": float}
+        assert _validate_event_schema(make_event(
+            "compaction_attributed", verdict="lead", basis="content", latency_s=8.5))[0]
+        assert not _validate_event_schema(make_event(
+            "compaction_attributed", verdict="lead", basis="content", latency_s="8.5"))[0]
 
     def test_background_stop_gate_optional_fields_are_typed(self):
         """background_stop_gate's `ids` must be a list and `cause` a string.

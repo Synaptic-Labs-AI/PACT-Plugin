@@ -11,11 +11,16 @@ Used by: hooks.json PostCompact hook
 
 After compaction completes:
 1. Reads compact_summary from stdin (PostCompact input field)
-2. Writes it to {session_dir}/compact-summary.txt — the SESSION that produced
-   it owns the file (#1504) — degrading LOSS-FREE to the root singleton when
-   the frame is unidentified. The resolution and its degradation live in ONE
-   total call: pact_context.resolve_compact_summary_path.
-3. Emits suppressOutput to avoid false "hook error" UI display on clean exits
+2. Resolves the destination: {session_dir} when the frame names its session
+   (#1504), else the root singleton. The resolution and its degradation live in
+   ONE total call: pact_context.resolve_compact_summary_path.
+3. In a session dir, settles earlier staged summaries, then STAGES this one
+   through shared.compaction_owner and never writes compact-summary.txt. An
+   in-process teammate compacts inside the lead's process with a lead-shaped
+   frame, and the transcripts that tell the two apart are written only after
+   this hook returns, so a later hook decides whose summary it is. The root
+   singleton names no session, so it is written directly, as before.
+4. Emits suppressOutput to avoid false "hook error" UI display on clean exits
 
 This is a non-blocking side effect (always exits 0), not a gate.
 
@@ -30,6 +35,7 @@ import os
 import sys
 from pathlib import Path
 
+from shared import compaction_owner
 from shared.constants import COMPACT_SUMMARY_NAME, get_compact_summary_path
 from shared.error_output import hook_error_json
 from shared.pact_context import is_lead, resolve_compact_summary_path
@@ -94,8 +100,8 @@ def main():
         # the LEAD's — so ungated, a teammate PostCompact writes into the
         # lead's own session directory, resurrecting the clobber #881 fixed,
         # now inside it. is_lead keeps a separate-process teammate's frame and
-        # a plain frame out; an in-process teammate's compaction frame is
-        # lead-shaped and passes it. is_lead is total and only reaches
+        # a plain frame out; an in-process teammate's frame passes it, and
+        # compaction_owner decides below. is_lead is total and only reaches
         # stdin_data here when compact_summary is truthy, which the
         # isinstance(dict) guard above already established — so stdin_data is
         # a dict and the .get inside is_lead cannot raise.
@@ -103,9 +109,19 @@ def main():
         # The destination resolves via the TOTAL resolver: session-scoped when
         # the frame is identifiable, root singleton otherwise. Degradation
         # lives INSIDE that one call — no fallback branch here.
+        #
+        # An in-process teammate's frame is lead-shaped: it carries the
+        # lead's agent_type, session_id and transcript_path, and the records
+        # that tell them apart land after this hook returns. So a session
+        # destination gets a staged copy that compaction_owner.settle later
+        # promotes only when it is the lead's.
         if compact_summary and is_lead(stdin_data):
             destination = resolve_compact_summary_path(stdin_data)
-            write_compact_summary(compact_summary, str(destination.parent))
+            if destination == get_compact_summary_path():
+                write_compact_summary(compact_summary, str(destination.parent))
+            else:
+                compaction_owner.settle(str(destination.parent))
+                compaction_owner.stage_summary(stdin_data, str(destination.parent))
 
         # Suppress output to avoid false "hook error" UI display on clean exits.
         print(json.dumps({"suppressOutput": True}))

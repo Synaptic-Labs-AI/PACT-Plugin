@@ -103,19 +103,19 @@ class TestTwoSessionWriterNonInterference:
     merely as existence.
     """
 
-    def test_both_writes_land_byte_intact_in_own_dirs(self, tmp_path, monkeypatch):
+    def test_both_summaries_stage_byte_intact_in_own_dirs(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", _PROJECT)
-        for sid, body in ((_SID_A, "SENTINEL-A summary bytes"),
-                          (_SID_B, "SENTINEL-B summary bytes")):
+        bodies = ((_SID_A, "SENTINEL-A summary bytes"), (_SID_B, "SENTINEL-B summary bytes"))
+        for sid, body in bodies:
             frame = {"session_id": sid, "agent_type": "PACT:pact-orchestrator",
                      "hook_event_name": "PostCompact", "compact_summary": body}
             assert _run_postcompact_main(frame, monkeypatch, tmp_path) == 0
 
         base = tmp_path / "pact-sessions" / "my-project"
-        assert (base / _SID_A / "compact-summary.txt").read_text(
-            encoding="utf-8") == "SENTINEL-A summary bytes"
-        assert (base / _SID_B / "compact-summary.txt").read_text(
-            encoding="utf-8") == "SENTINEL-B summary bytes"
+        for sid, body in bodies:
+            [pending] = (base / sid).glob("compact-summary.pending-*.json")
+            assert json.loads(pending.read_text(encoding="utf-8"))["summary"] == body
+            assert not (base / sid / "compact-summary.txt").exists()
 
 
 class TestOwnDirClearDoesNotCrossSessions:

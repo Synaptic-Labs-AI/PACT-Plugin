@@ -81,6 +81,11 @@ SEAM_DEPENDENT_HOOKS: frozenset[str] = frozenset({
     # background-work registry, and writes a told-once file and a journal
     # trace. Its block fails silent on a broken seam: see L3_LIVE_PROBE_HOOKS.
     "stop_background_gate",
+    # postcompact_archive: it stages the session's compaction summary and
+    # settles earlier ones, reading the platform's transcripts to decide whose
+    # compaction each was and journaling the verdict. Its L2 test runs the real
+    # hooks over a temporary projects tree.
+    "postcompact_archive",
 })
 
 # Hooks confirmed to FAIL SILENTLY on a broken seam (a consequential effect that
@@ -105,9 +110,16 @@ SEAM_DEPENDENT_HOOKS: frozenset[str] = frozenset({
 # broken seam the role resolves to nothing and the stop is allowed with no
 # error, so the block silently never fires. validate_handoff was promoted from
 # L3_CANDIDATE_HOOKS for that reason.
+#
+# session_init, postcompact_archive and bootstrap_gate settle staged compaction
+# summaries by reading the platform's transcripts. On a broken seam, such as a
+# changed transcript layout, every staged summary expires unmatched: it is
+# journaled, but a lead summary is then parked beside an existing
+# compact-summary.txt instead of replacing it, and the lead reads the older file.
 L3_LIVE_PROBE_HOOKS: frozenset[str] = frozenset({
     "missed_wake_scan", "teammate_idle", "agent_handoff_emitter",
     "task_lifecycle_gate", "stop_background_gate", "validate_handoff",
+    "session_init", "postcompact_archive", "bootstrap_gate",
 })
 
 # Seam-dependent hooks ASSESSED in the CODE-phase fails-silent check and HELD at
@@ -187,7 +199,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # (agent_handoff_marker, session_journal) were already here.
     "session_init": frozenset({
         "backlog_store",
-        "claude_md_manager", "constants", "dispatch_helpers", "failure_cause",
+        "claude_md_manager", "compaction_owner", "constants", "dispatch_helpers", "failure_cause",
         "failure_log", "git_helpers", "handoff_schema",
         "merge_guard_common", "pact_config", "pact_context", "paths",
         "peer_context", "pin_caps", "plugin_manifest", "project_scope",
@@ -208,6 +220,11 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "constants", "error_output", "pact_context", "paths", "session_journal",
         "session_registry", "session_state", "task_utils",
     }),
+    "postcompact_archive": frozenset({
+        "compaction_owner", "constants", "error_output", "pact_context", "paths",
+        "session_journal", "session_registry", "session_state",
+    }),  # compaction_owner reached via staging and settling the summary;
+         # session_journal via compaction_owner's compaction_attributed event.
     "dispatch_gate": frozenset({
         "background_launch", "background_work", "constants",
         "dispatch_helpers", "intentional_wait", "pact_config", "pact_context",
@@ -238,10 +255,12 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # + completion-time); it is a pure stdlib-free leaf, so it adds no
          # further transitive edges.
     "bootstrap_gate": frozenset({
-        "constants", "marker_schema", "pact_context",
+        "compaction_owner", "constants", "marker_schema", "pact_context",
         "paths", "session_journal", "session_registry",
         "session_state",
-    }),  # #1023 SHRANK this closure: the carve-out's binding 5 no longer
+    }),  # compaction_owner reached via the function-level import that settles
+         # staged compaction summaries before a Read or Bash names one.
+         # #1023 SHRANK this closure: the carve-out's binding 5 no longer
          # imports bootstrap_marker_writer (it reads the gate-local
          # _secretary_in_members JOIN witness via the already-top-level
          # pact_context._iter_members), so bootstrap_gate no longer reaches
@@ -253,7 +272,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # staleness -> pin_caps) and are now gone from this closure.
          # bootstrap_marker_writer's OWN closure (below) is unchanged.
     "bootstrap_marker_writer": frozenset({
-        "claude_md_manager", "constants", "failure_cause", "git_helpers", "handoff_schema",
+        "compaction_owner", "claude_md_manager", "constants", "failure_cause", "git_helpers", "handoff_schema",
         "marker_schema",
         "pact_context", "paths", "pin_caps", "project_scope", "session_journal",
         "session_registry", "session_resume", "session_state", "staleness",

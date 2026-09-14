@@ -736,6 +736,36 @@ def _check_tool_allowed(input_data: dict) -> str | None:
     return None
 
 
+# The tools a read of the compaction summary arrives as: the lead's recovery
+# Read, and the secretary's Read or Bash.
+_SUMMARY_READ_TOOLS = frozenset({"Read", "Bash"})
+
+
+def _settle_before_summary_read(input_data: dict) -> None:
+    """Settle staged compaction summaries before a Read or Bash that names one.
+
+    postcompact_archive stages each summary instead of writing
+    compact-summary.txt, because the transcript records that say whose
+    compaction it was are written after the compaction hooks return. This hook
+    runs before the tool does, so settling here puts the lead's summary in place
+    before the read opens the file. Every other call pays one string test: the
+    import sits after that test and inside the try, so a broken module can never
+    reach this gate's decision. Never raises, and never changes the decision.
+    """
+    try:
+        if input_data.get("tool_name") not in _SUMMARY_READ_TOOLS:
+            return
+        if "compact-summary" not in json.dumps(input_data.get("tool_input")):
+            return
+        from shared import compaction_owner
+
+        session_dir = pact_context.get_session_dir()
+        if session_dir:
+            compaction_owner.settle(session_dir, wait_s=compaction_owner.READ_WAIT_S)
+    except Exception:
+        pass
+
+
 def main():
     try:
         input_data = json.loads(sys.stdin.read(_STDIN_READ_MAX))
@@ -761,6 +791,8 @@ def main():
         _degraded_decision(
             "runtime", e, _tool if isinstance(_tool, str) and _tool else None
         )
+
+    _settle_before_summary_read(input_data)
 
     if deny_reason:
         # hookEventName is required by the harness; missing it silently fails open

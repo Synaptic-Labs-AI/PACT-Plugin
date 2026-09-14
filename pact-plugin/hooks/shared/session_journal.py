@@ -101,6 +101,12 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # the load-bearing fields downstream consumers depend on; team is
     # redundant with CLAUDE.md and worktree is empty at write time.
     "session_start": {"session_id": str, "project_dir": str},
+    # shared/compaction_owner.py writes compaction_attributed each time settle()
+    # resolves a staged compaction summary. verdict is teammate, lead or
+    # unknown; basis is content (a transcript holds the summary) or expired
+    # (none did in time). An unknown verdict is the alarm that attribution
+    # failed for that compaction.
+    "compaction_attributed": {"verdict": str, "basis": str},
     # commands/orchestrate.md writes variety_assessed with task_id (quoted
     # string) and variety (nested JSON object → dict). This is the FEATURE-level
     # variety (written once for the feature task) — distinct from the
@@ -448,6 +454,9 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # the optional loop. Symmetric with the cleanup_summary registration
     # shipped in the same PR (#412 Fix B).
     "session_end": {"warning": str},
+    # shared/compaction_owner.py adds `latency_s`, the seconds from staging a
+    # summary to resolving it, whenever the staged record's time is readable.
+    "compaction_attributed": {"latency_s": float},
     # background_stop_gate (registered above): `ids` lists the running job
     # ids the verdict concerns, `cause` names why an allow was chosen
     # (e.g. session_cron, no_session_dir, or an exception class).

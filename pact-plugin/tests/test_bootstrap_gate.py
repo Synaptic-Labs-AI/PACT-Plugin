@@ -4024,3 +4024,139 @@ class TestCanonicalSecretarySpawnAdversarial:
             assert sensitive not in result
             assert "deadbeef" not in result
             assert "/Users/" not in result
+
+
+# =============================================================================
+# The compaction-summary settle seat
+# =============================================================================
+
+
+class TestSummaryReadSettleSeat:
+    """bootstrap_gate settles staged compaction summaries before a Read or Bash
+    that names one. Every other call pays one string test: no filesystem access
+    and no import. The seat never changes the gate's decision."""
+
+    SESSION_DIR = "/sessions/proj/sid"
+
+    def _spy(self, monkeypatch):
+        import bootstrap_gate
+        from shared import compaction_owner
+
+        calls = []
+        monkeypatch.setattr(compaction_owner, "settle", lambda *a, **k: calls.append((a, k)) or [])
+        monkeypatch.setattr(bootstrap_gate.pact_context, "get_session_dir", lambda: self.SESSION_DIR)
+        return calls
+
+    @pytest.mark.parametrize("tool_name, tool_input", [
+        ("Read", {"file_path": "/sessions/proj/sid/compact-summary.txt"}),
+        ("Bash", {"command": "cat /sessions/proj/sid/compact-summary.txt"}),
+        ("Bash", {"command": "mv compact-summary.txt compact-summary-2026-09-14T01-24-47.txt"}),
+    ], ids=["read", "bash-cat", "bash-mv"])
+    def test_a_read_or_bash_naming_the_summary_settles_with_the_read_wait(self, monkeypatch, tool_name, tool_input):
+        import bootstrap_gate
+        from shared import compaction_owner
+
+        calls = self._spy(monkeypatch)
+        bootstrap_gate._settle_before_summary_read({"tool_name": tool_name, "tool_input": tool_input})
+        assert calls == [((self.SESSION_DIR,), {"wait_s": compaction_owner.READ_WAIT_S})]
+        assert compaction_owner.READ_WAIT_S == 5.0
+
+    @pytest.mark.parametrize("tool_name, tool_input", [
+        ("Read", {"file_path": "/project/README.md"}),
+        ("Edit", {"file_path": "/sessions/proj/sid/compact-summary.txt", "old_string": "a", "new_string": "b"}),
+        ("Write", {"file_path": "compact-summary.txt", "content": ""}),
+        ("Agent", {"prompt": "read compact-summary.txt"}),
+    ], ids=["read-other-file", "edit", "write", "agent"])
+    def test_any_other_call_costs_one_string_test_and_no_filesystem_or_import(self, monkeypatch, tool_name, tool_input):
+        import builtins
+        import os
+
+        import bootstrap_gate
+
+        calls = self._spy(monkeypatch)
+        touched = []
+        real_import = builtins.__import__
+
+        def recording_import(name, *args, **kwargs):
+            touched.append(("import", name))
+            return real_import(name, *args, **kwargs)
+
+        def forbidden(label):
+            def refuse(*args, **kwargs):
+                touched.append((label, args))
+                raise AssertionError(label)
+            return refuse
+
+        monkeypatch.setattr(bootstrap_gate.pact_context, "get_session_dir", forbidden("get_session_dir"))
+        for name in ("stat", "listdir", "scandir", "open"):
+            monkeypatch.setattr(os, name, forbidden(f"os.{name}"))
+        monkeypatch.setattr(builtins, "open", forbidden("open"))
+        monkeypatch.setattr(builtins, "__import__", recording_import)
+        bootstrap_gate._settle_before_summary_read({"tool_name": tool_name, "tool_input": tool_input})
+        monkeypatch.undo()
+        assert touched == []
+        assert calls == []
+
+    def test_the_gate_settles_before_it_answers_a_summary_read(self, monkeypatch, tmp_path, capsys):
+        from shared import compaction_owner
+
+        session_dir = _setup_pact_session(monkeypatch, tmp_path)
+        seen = []
+        monkeypatch.setattr(compaction_owner, "settle", lambda *a, **k: seen.append((a, k)) or [])
+        frame = {**_make_input(tool_name="Read"), "tool_input": {"file_path": str(session_dir / "compact-summary.txt")}}
+        code, output = _run_main(frame, capsys)
+        assert code == 0
+        assert "permissionDecision" not in json.dumps(output)
+        [(args, kwargs)] = seen
+        assert Path(args[0]) == session_dir
+        assert kwargs == {"wait_s": compaction_owner.READ_WAIT_S}
+
+    @pytest.mark.parametrize("tool_name, with_marker, denied", [
+        ("Read", False, False), ("Edit", False, True), ("Read", True, False),
+    ], ids=["allow-unmarked", "deny-unmarked", "allow-marked"])
+    def test_a_failing_settle_or_import_changes_no_decision(self, monkeypatch, tmp_path, capsys, tool_name, with_marker, denied):
+        import shared
+        from shared import compaction_owner
+
+        session_dir = _setup_pact_session(monkeypatch, tmp_path, with_marker=with_marker)
+        frame = {**_make_input(tool_name=tool_name), "tool_input": {"file_path": str(session_dir / "compact-summary.txt")}}
+        baseline = _run_main(frame, capsys)
+        assert ('"deny"' in json.dumps(baseline[1])) is denied
+        assert "degraded" not in json.dumps(baseline[1]).lower()
+
+        def raising(*args, **kwargs):
+            raise RuntimeError("settle failed")
+
+        monkeypatch.setattr(compaction_owner, "settle", raising)
+        assert _run_main(frame, capsys) == baseline
+        monkeypatch.delattr(shared, "compaction_owner")
+        monkeypatch.setitem(sys.modules, "shared.compaction_owner", None)
+        assert _run_main(frame, capsys) == baseline
+
+    def test_a_broken_compaction_module_never_reaches_a_fresh_gate_process(self, tmp_path):
+        """The import sits inside the seat. At module level it would fall under the
+        gate's fail-closed import stage, and a broken module would change every
+        tool call's output."""
+        import os
+        import subprocess
+
+        hooks = Path(__file__).resolve().parent.parent / "hooks"
+        gate = str(hooks / "bootstrap_gate.py")
+        child = (
+            "import runpy, sys\n"
+            "if sys.argv[1] == 'broken':\n"
+            "    sys.modules['shared.compaction_owner'] = None\n"
+            f"sys.argv = [{gate!r}]\n"
+            f"runpy.run_path({gate!r}, run_name='__main__')\n"
+        )
+        frame = json.dumps({"hook_event_name": "PreToolUse", "session_id": _SESSION_ID, "agent_type": "pact-orchestrator",
+                            "tool_name": "Read", "tool_input": {"file_path": "compact-summary.txt"}})
+        env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
+        env.update(PYTHONPATH=str(hooks), HOME=str(tmp_path), CLAUDE_CONFIG_DIR=str(tmp_path / ".claude"))
+        runs = {
+            mode: subprocess.run([sys.executable, "-c", child, mode], input=frame, capture_output=True,
+                                 text=True, timeout=30, env=env)
+            for mode in ("intact", "broken")
+        }
+        assert runs["intact"].returncode == 0, runs["intact"].stderr
+        assert (runs["broken"].returncode, runs["broken"].stdout) == (runs["intact"].returncode, runs["intact"].stdout)

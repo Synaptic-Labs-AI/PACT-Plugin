@@ -7311,3 +7311,71 @@ class TestAdoptOldSlugSessionDir:
         assert journal.startswith('{"type":"session_start"}\n')
         assert not old.exists()
         assert not root_summary.exists()
+
+
+class TestCompactionSeats:
+    """session_init settles the compaction summaries postcompact_archive staged,
+    before either clear moves compact-summary.txt."""
+
+    SID = "4ec31948-bbe5-4ef4-841c-631d1ef31e61"
+    LEAD = "PACT:pact-orchestrator"
+
+    def _project(self, tmp_path):
+        project = tmp_path / "cmp-lead"
+        project.mkdir(exist_ok=True)
+        return project
+
+    def _session_dir(self, tmp_path):
+        from shared.pact_context import _build_session_path, project_slug
+
+        return _build_session_path(project_slug(str(self._project(tmp_path))), self.SID)
+
+    def _run(self, monkeypatch, tmp_path, *, source="compact"):
+        from contextlib import ExitStack
+
+        import session_init
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(self._project(tmp_path)))
+        payload = {
+            "hook_event_name": "SessionStart", "source": source, "session_id": self.SID,
+            "transcript_path": str(tmp_path / "absent.jsonl"), "agent_type": self.LEAD,
+        }
+        quiet = [
+            "session_init.setup_plugin_symlinks", "session_init.ensure_project_memory_md",
+            "session_init.check_pinned_staleness", "session_init.get_task_list",
+            "session_init.restore_last_session", "session_init.check_resume_state",
+        ]
+        with ExitStack() as stack:
+            for target in quiet:
+                stack.enter_context(patch(target, return_value=None))
+            stack.enter_context(patch("sys.stdin", io.StringIO(json.dumps(payload))))
+            out = stack.enter_context(patch("sys.stdout", new_callable=io.StringIO))
+            with pytest.raises(SystemExit) as exc:
+                session_init.main()
+        assert exc.value.code == 0
+        return json.loads(out.getvalue())
+    def test_a_staged_lead_summary_is_promoted_before_a_resume_archives_it(self, monkeypatch, tmp_path):
+        from shared import compaction_owner
+
+        session_dir = self._session_dir(tmp_path)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "compact-summary.txt").write_text("A STALE SUMMARY", encoding="utf-8")
+        transcripts = tmp_path / ".claude" / "projects" / "-cmp-lead"
+        transcripts.mkdir(parents=True)
+        lead = transcripts / f"{self.SID}.jsonl"
+        lead.write_text("", encoding="utf-8")
+        body = "The lead gathered three counts and sent them to the secretary. " * 5
+        summary = f"<summary>\n{body}\n</summary>"
+        frame = {"session_id": self.SID, "transcript_path": str(lead), "compact_summary": summary}
+        assert compaction_owner.stage_summary(frame, str(session_dir))
+        with open(lead, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"type": "user", "isCompactSummary": True,
+                                     "message": {"role": "user", "content": "Summary:\n" + body.strip()}}) + "\n")
+
+        context = self._run(monkeypatch, tmp_path, source="resume")["hookSpecificOutput"]["additionalContext"]
+
+        archives = sorted(session_dir.glob("compact-summary-*.txt"))
+        assert [archive.read_text(encoding="utf-8") for archive in archives] == [summary]
+        assert not (session_dir / "compact-summary.txt").exists()
+        assert not list(session_dir.glob("compact-summary.pending-*"))
+        assert str(archives[0]) in context

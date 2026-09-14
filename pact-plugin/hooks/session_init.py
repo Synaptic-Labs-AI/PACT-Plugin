@@ -50,6 +50,7 @@ if str(_hooks_dir) not in sys.path:
     sys.path.insert(0, str(_hooks_dir))
 
 # Import shared Task utilities (DRY - used by multiple hooks)
+from shared import compaction_owner
 from shared.task_utils import (
     get_task_list,
     find_feature_task,
@@ -907,6 +908,22 @@ def _archive_stale_compact_summary(session_id: str, project_dir: str) -> None:
         pass  # Fail-open: keep the bytes; never block session init for cleanup
 
 
+def _settle_staged_summaries(session_id: str, project_dir: str) -> None:
+    """Settle the compaction summaries postcompact_archive staged for this session.
+
+    Runs before either clear below, so a lead summary still waiting to be
+    promoted is promoted first and then cleared with the rest. Never raises.
+    """
+    if not (session_id and project_dir):
+        return
+    try:
+        compaction_owner.settle(
+            str(build_session_path(project_slug(project_dir), str(session_id)))
+        )
+    except Exception:
+        pass
+
+
 def _archive_own_dir_stale_summary(session_id: str, project_dir: str) -> None:
     """Clear THIS session's stale compact summary BY MOVING IT in place.
 
@@ -1348,6 +1365,8 @@ def main():
         # Adopt a session dir written under the unresolved project basename
         # BEFORE any writer below can create the resolved-slug dir.
         _adopt_old_slug_session_dir(input_data.get("session_id", ""), project_dir)
+
+        _settle_staged_summaries(input_data.get("session_id", ""), project_dir)
 
         if source != "compact":
             _archive_stale_compact_summary(
