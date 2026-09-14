@@ -11,11 +11,15 @@ Used by: hooks.json PostCompact hook
 
 After compaction completes:
 1. Reads compact_summary from stdin (PostCompact input field)
-2. Writes it to {session_dir}/compact-summary.txt — the SESSION that produced
+2. Asks shared.compaction_owner whose compaction it is. An in-process
+   teammate compacts inside the lead's process and its frame is lead-shaped,
+   so the transcripts decide. The verdict is journaled as compaction_attributed
+   in the destination's session, and a teammate verdict skips step 3.
+3. Writes it to {session_dir}/compact-summary.txt — the SESSION that produced
    it owns the file (#1504) — degrading LOSS-FREE to the root singleton when
    the frame is unidentified. The resolution and its degradation live in ONE
    total call: pact_context.resolve_compact_summary_path.
-3. Emits suppressOutput to avoid false "hook error" UI display on clean exits
+4. Emits suppressOutput to avoid false "hook error" UI display on clean exits
 
 This is a non-blocking side effect (always exits 0), not a gate.
 
@@ -30,9 +34,11 @@ import os
 import sys
 from pathlib import Path
 
+from shared import compaction_owner
 from shared.constants import COMPACT_SUMMARY_NAME, get_compact_summary_path
 from shared.error_output import hook_error_json
 from shared.pact_context import is_lead, resolve_compact_summary_path
+from shared.session_journal import append_event, make_event
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +77,24 @@ def write_compact_summary(
         return False
 
 
+def record_attribution(destination: Path, verdict: str, basis: str) -> None:
+    """Journal the compaction verdict in the destination's session.
+
+    A root-singleton destination means the frame named no session, so there is
+    no session journal to write to. Never raises: the summary write must not
+    depend on the journal.
+    """
+    if destination == get_compact_summary_path():
+        return
+    try:
+        append_event(
+            make_event("compaction_attributed", verdict=verdict, basis=basis),
+            session_dir=str(destination.parent),
+        )
+    except Exception:
+        pass
+
+
 def main():
     try:
         # Read PostCompact input
@@ -101,9 +125,17 @@ def main():
         # The destination resolves via the TOTAL resolver: session-scoped when
         # the frame is identifiable, root singleton otherwise. Degradation
         # lives INSIDE that one call — no fallback branch here.
+        #
+        # An in-process teammate's frame is ALSO lead-shaped: it carries the
+        # lead's agent_type, session_id and transcript_path. compaction_owner
+        # reads the transcripts to tell them apart, and only a teammate verdict
+        # skips the write; lead and unknown write as before.
         if compact_summary and is_lead(stdin_data):
             destination = resolve_compact_summary_path(stdin_data)
-            write_compact_summary(compact_summary, str(destination.parent))
+            verdict, basis = compaction_owner.attribute_compaction(stdin_data)
+            record_attribution(destination, verdict, basis)
+            if verdict != compaction_owner.TEAMMATE:
+                write_compact_summary(compact_summary, str(destination.parent))
 
         # Suppress output to avoid false "hook error" UI display on clean exits.
         print(json.dumps({"suppressOutput": True}))

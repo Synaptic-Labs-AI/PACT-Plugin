@@ -50,6 +50,7 @@ if str(_hooks_dir) not in sys.path:
     sys.path.insert(0, str(_hooks_dir))
 
 # Import shared Task utilities (DRY - used by multiple hooks)
+from shared import compaction_owner
 from shared.task_utils import (
     get_task_list,
     find_feature_task,
@@ -1278,6 +1279,20 @@ def main():
         except json.JSONDecodeError as exc:
             input_data = {}
             stdin_json_error = str(exc)
+
+        # An in-process teammate compacts inside the lead's process, and its
+        # SessionStart frame is lead-shaped. When the transcripts attribute the
+        # compaction to a teammate, stop before any output or write: the lead's
+        # env file, session dir, context file, journal and CLAUDE.md stay as
+        # they are. Lead and unknown verdicts continue below unchanged.
+        if (
+            isinstance(input_data, dict)
+            and input_data.get("source") == "compact"
+            and is_lead(input_data)
+            and compaction_owner.teammate_compaction(input_data)
+        ):
+            print(json.dumps({"suppressOutput": True}))
+            sys.exit(0)
 
         # Resolve-once: the env value verbatim when the platform delivers it,
         # else the absolute cwd (os.getcwd() is always absolute and physical —

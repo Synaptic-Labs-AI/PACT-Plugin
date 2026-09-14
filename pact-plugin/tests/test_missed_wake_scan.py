@@ -1042,3 +1042,59 @@ class TestResponseClassTwoPrescribesNothing:
             "green says nothing. Segment read back: %r"
             % (_class_segments(mutated)[1],)
         )
+
+
+# ===========================================================================
+# Teammate compaction: a lead-shaped SessionStart(compact) frame the
+# transcripts attribute to a teammate skips the scan
+# ===========================================================================
+class TestTeammateCompactionGate:
+    def _compact_frame(self):
+        frame = {**captured_lead_sessionstart_qualified(), "source": "compact"}
+        assert frame["hook_event_name"] == "SessionStart"
+        return frame
+
+    def _patch(self, monkeypatch, teammate):
+        from shared import compaction_owner
+
+        asked, scanned = [], []
+
+        def teammate_compaction(frame, **_clocks):
+            asked.append(frame)
+            return teammate
+
+        def get_task_list():
+            scanned.append(True)
+            return [_task()]
+
+        monkeypatch.setattr(compaction_owner, "teammate_compaction", teammate_compaction)
+        monkeypatch.setattr(mw, "get_task_list", get_task_list)
+        return asked, scanned
+
+    def test_a_teammate_compaction_skips_the_scan(self, journal, monkeypatch):
+        asked, scanned = self._patch(monkeypatch, teammate=True)
+        assert mw.run_surface(self._compact_frame()) is None
+        assert len(asked) == 1
+        assert scanned == []
+        assert journal["emitted"] == []
+
+    def test_a_lead_or_unknown_verdict_scans_as_before(self, journal, monkeypatch):
+        asked, scanned = self._patch(monkeypatch, teammate=False)
+        out = mw.run_surface(self._compact_frame())
+        assert len(asked) == 1
+        assert scanned == [True]
+        assert out is not None and "missed-wake" in out.lower()
+
+    @pytest.mark.parametrize("build", [
+        captured_lead_userpromptsubmit_qualified,
+        captured_lead_sessionstart_qualified,
+        lambda: {**captured_lead_sessionstart_qualified(), "source": "resume"},
+        lambda: {**captured_teammate_sessionstart(), "source": "compact"},
+        lambda: {**captured_plain_sessionstart(), "source": "compact"},
+    ])
+    def test_the_predicate_is_not_asked_outside_a_lead_compact_start(self, journal, monkeypatch, build):
+        asked, _scanned = self._patch(monkeypatch, teammate=True)
+        frame = build()
+        assert frame.get("source") != "compact" or not mw.is_lead(frame) or frame.get("hook_event_name") != "SessionStart"
+        mw.run_surface(frame)
+        assert asked == []

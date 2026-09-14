@@ -3545,6 +3545,7 @@ class TestValidateEventSchemaPerType:
             "session_id": "test-session-id",
             "project_dir": "/tmp/proj",
         },
+        "compaction_attributed": {"verdict": "teammate", "basis": "content"},
         "variety_assessed": {
             "task_id": "42",
             "variety": {"novelty": 1, "scope": 1, "uncertainty": 1, "risk": 1, "total": 4},

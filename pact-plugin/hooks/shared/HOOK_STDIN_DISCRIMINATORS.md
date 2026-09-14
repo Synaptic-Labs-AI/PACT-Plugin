@@ -101,22 +101,28 @@ empty.
 
 | Hook event | Role field | Lead value | Teammate value | Plain | `team_name` in stdin? | journal-resolvable here? |
 |---|---|---|---|---|---|---|
-| SessionStart | `agent_type` | lead spelling | `pact-<specialist>` | absent | no | lead: yes (persists context) · teammate: no |
+| SessionStart | `agent_type` (none for an in-process teammate's `source: compact`) | lead spelling | `pact-<specialist>`; an in-process teammate's `source: compact` frame carries the lead spelling | absent | no | lead: yes (persists context) · teammate: no |
 | UserPromptSubmit | `agent_type` | lead spelling | *(no teammate fire path — see note)* | absent | no | lead: yes |
 | PreToolUse | `agent_type` | lead spelling | `pact-<specialist>` | — | **no** | lead: yes · teammate: no |
 | PostToolUse (incl. `TaskCreate` / `TaskUpdate`) | `agent_type` | lead spelling | `pact-<specialist>` | — | **no** | lead: yes · teammate: no |
 | TaskCompleted | `agent_type` | lead spelling | `pact-<specialist>` | — | lead: **no** · teammate: **yes** (also `teammate_name`) | lead: yes · teammate: no |
-| PostCompact | `agent_type` | lead spelling | `pact-<specialist>` | — | no | lead: yes · teammate: no |
+| PreCompact | none for an in-process teammate | lead spelling | in-process: lead spelling · separate-process: `pact-<specialist>` (inferred) | — | no | not read |
+| PostCompact | `agent_type` (none for an in-process teammate) | lead spelling | in-process: lead spelling · separate-process: `pact-<specialist>` (inferred) | — | no | lead: yes · teammate: no |
 
 PostCompact capture provenance: live append-only hook dump, 2026-08-26, lead
 manual `/compact` in the in-process dogfood session (PACT 4.6.44). The committed
 verbatim shape is `tests/fixtures/role_frames.py` `postcompact_lead_manual`; its
 `session_id` presence is the premise the #1504 session-scoped writer resolves on.
-Teammate and plain PostCompact shapes remain matrix-inferred (no teammate compact
-has been captured): in-process teammates do NOT compact independently, so no
-teammate PostCompact event exists to capture in that topology; capturing a
-teammate frame requires a tmux teammate compact. The `session_id` collapse is a
-field-equality fact of the in-process topology, not the unreachability mechanism.
+In-process teammates DO compact on their own, and their compaction frames were
+captured live on 2026-09-14. PreCompact, SessionStart with `source: compact` and
+PostCompact all fire in the lead's process carrying the lead's `agent_type`,
+`session_id` and `transcript_path`, and no `agent_id`, `agent_name` or
+`agent_transcript_path`. No field separates them from the lead's own compaction
+frames, so `is_lead` is True for both. `shared/compaction_owner.py` attributes
+them from the transcripts instead. Committed shapes: `tests/fixtures/role_frames.py`
+`captured_compaction_teammate_*` and `captured_compaction_lead_*`.
+Separate-process (tmux) teammate compaction frames and plain PostCompact shapes
+remain matrix-inferred.
 `is_lead` is READ on PreToolUse and PostCompact (and SessionStart /
 UserPromptSubmit / PostToolUse) but is NOT read on TaskCompleted — that frame is
 captured for the #917 emit-path, which gates on `team_name` + journal

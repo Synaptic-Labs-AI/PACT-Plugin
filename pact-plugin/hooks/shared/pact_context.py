@@ -1297,7 +1297,12 @@ def is_lead(input_data: dict) -> bool:
     it is the field that carries the lead/teammate signal on every hook event
     where this predicate is READ — SessionStart, UserPromptSubmit, PreToolUse,
     PostToolUse (including the ``TaskCreate`` / ``TaskUpdate``-matched frames),
-    and PostCompact. The signal is VALUE-MEMBERSHIP, not field-presence: a lead
+    and PostCompact. ONE EXCEPTION, captured live: an in-process teammate's
+    compaction frames (PreCompact, SessionStart with ``source: compact``, and
+    PostCompact) fire in the lead's process carrying the LEAD's ``agent_type``,
+    so this predicate returns True for them. ``shared/compaction_owner.py``
+    attributes those frames from the transcripts. The signal is VALUE-MEMBERSHIP,
+    not field-presence: a lead
     stamps one of the two ``LEAD_AGENT_TYPES`` spellings, a teammate stamps its
     specialist value (e.g. ``pact-architect``), and a plain / non-PACT primary
     frame omits the field entirely. ``agent_id`` / ``agent_name`` / ``team_name``
@@ -1308,10 +1313,10 @@ def is_lead(input_data: dict) -> bool:
     SessionStart, UserPromptSubmit, PostToolUse, and TaskCompleted — note
     TaskCompleted was captured for the #917 emit-path, NOT because is_lead is
     read there (it is not; the TaskCompleted hook gates on ``team_name`` +
-    journal writability, not this predicate). PreToolUse and PostCompact were
-    NOT separately captured: their ``agent_type`` shape is inferred from the
-    uniform harness-stamping the captured frames establish (PostCompact has only
-    a synthesized-from-matrix builder; PreToolUse has no frame). The captured
+    journal writability, not this predicate). PreToolUse was captured later
+    (Claude Code 2.1.177), and PostCompact was captured for a lead on 2026-08-26
+    and, with PreCompact and SessionStart(compact), for an in-process teammate
+    and a lead on 2026-09-14. The captured
     frames live in ``tests/fixtures/role_frames.py`` (the ``captured_*``
     accessors); the per-event truth table — which rows are captured vs inferred
     — is in ``hooks/shared/HOOK_STDIN_DISCRIMINATORS.md``.

@@ -369,6 +369,10 @@ COVERED_L2 = {
     # gate. Its non-mocked L2 test drives the production hook against a real
     # team config, task store, background-work registry and session registry.
     "stop_background_gate": "test_stop_background_gate.py",
+    # postcompact_archive joined SEAM_DEPENDENT_HOOKS with teammate-compaction
+    # attribution. Its non-mocked L2 test runs the real hooks over a temporary
+    # projects tree with the platform's transcript layout.
+    "postcompact_archive": "test_compaction_owner_seam.py",
 }
 
 # Documented forward-only BACKLOG: seam hooks whose non-mocked L2 test is a named

@@ -7311,3 +7311,86 @@ class TestAdoptOldSlugSessionDir:
         assert journal.startswith('{"type":"session_start"}\n')
         assert not old.exists()
         assert not root_summary.exists()
+
+
+class TestTeammateCompactionGate:
+    """session_init stops before any output or write when shared.compaction_owner
+    attributes a lead-shaped SessionStart(compact) frame to a teammate. Lead and
+    unknown verdicts run the compact path unchanged."""
+
+    WRITES = (
+        "_persist_project_dir_env", "_adopt_old_slug_session_dir", "persist_context",
+        "append_event", "update_session_info",
+    )
+    LEAD = "PACT:pact-orchestrator"
+
+    def _run(self, monkeypatch, tmp_path, *, source="compact", agent_type=LEAD, teammate=True):
+        from unittest.mock import MagicMock
+
+        import session_init
+        from shared import compaction_owner
+
+        project = tmp_path / "cmp-lead"
+        project.mkdir(exist_ok=True)
+        env_file = tmp_path / "env-file"
+        env_file.write_text("", encoding="utf-8")
+        monkeypatch.setenv("CLAUDE_ENV_FILE", str(env_file))
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+        asked = []
+
+        def teammate_compaction(frame, **_clocks):
+            asked.append(frame)
+            return teammate
+
+        monkeypatch.setattr(compaction_owner, "teammate_compaction", teammate_compaction)
+        spies = {}
+        for name in self.WRITES:
+            spies[name] = MagicMock(wraps=getattr(session_init, name))
+            monkeypatch.setattr(session_init, name, spies[name])
+        payload = {
+            "hook_event_name": "SessionStart", "source": source,
+            "session_id": "4ec31948-bbe5-4ef4-841c-631d1ef31e61",
+            "transcript_path": "<transcript_path>",
+        }
+        if agent_type is not None:
+            payload["agent_type"] = agent_type
+        with patch("session_init.setup_plugin_symlinks", return_value=None), \
+             patch("session_init.ensure_project_memory_md", return_value=None), \
+             patch("session_init.check_pinned_staleness", return_value=None), \
+             patch("session_init.get_task_list", return_value=None), \
+             patch("session_init.restore_last_session", return_value=None), \
+             patch("session_init.check_resume_state", return_value=None), \
+             patch("sys.stdin", io.StringIO(json.dumps(payload))), \
+             patch("sys.stdout", new_callable=io.StringIO) as out:
+            with pytest.raises(SystemExit) as exc:
+                session_init.main()
+        calls = {name: spy.call_count for name, spy in spies.items()}
+        return exc.value.code, out.getvalue(), calls, asked, env_file.read_text(encoding="utf-8")
+
+    def test_a_teammate_compaction_prints_suppress_output_and_writes_nothing(self, monkeypatch, tmp_path):
+        code, out, calls, asked, env_file = self._run(monkeypatch, tmp_path)
+        assert code == 0
+        assert json.loads(out) == {"suppressOutput": True}
+        assert calls == dict.fromkeys(self.WRITES, 0)
+        assert len(asked) == 1
+        assert env_file == ""
+
+    def test_a_lead_or_unknown_verdict_runs_the_compact_path(self, monkeypatch, tmp_path):
+        code, out, calls, asked, env_file = self._run(monkeypatch, tmp_path, teammate=False)
+        assert code == 0
+        assert len(asked) == 1
+        assert "YOUR PACT ROLE: orchestrator" in json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        assert calls["_persist_project_dir_env"] == 1
+        assert calls["_adopt_old_slug_session_dir"] == 1
+        assert calls["persist_context"] >= 1
+        assert calls["append_event"] >= 1
+        assert "CLAUDE_PROJECT_DIR" in env_file
+
+    @pytest.mark.parametrize("source, agent_type", [
+        ("startup", LEAD), ("resume", LEAD), ("clear", LEAD),
+        ("compact", "pact-architect"), ("compact", None),
+    ])
+    def test_the_predicate_is_not_asked_outside_a_lead_compact_start(self, monkeypatch, tmp_path, source, agent_type):
+        code, _out, _calls, asked, _env = self._run(monkeypatch, tmp_path, source=source, agent_type=agent_type)
+        assert code == 0
+        assert asked == []
