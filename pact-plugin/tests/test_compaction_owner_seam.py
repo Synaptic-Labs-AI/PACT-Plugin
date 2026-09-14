@@ -11,7 +11,8 @@ summary file settles it through bootstrap_gate. Nothing is patched.
 REVERT CARDINALITY, measured on this file alone: with the settle call removed
 from bootstrap_gate's main, both arms fail (2 failed); with postcompact_archive
 writing compact-summary.txt directly instead of staging, both arms fail (2
-failed).
+failed); with build_context_cache recording now on a compaction, the teammate
+arm fails and the lead arm passes (1 failed).
 """
 
 import json
@@ -107,6 +108,7 @@ def test_a_teammate_compaction_never_replaces_the_lead_summary(tmp_path):
 
     session.compact(captured_compaction_teammate_sessionstart(), post)
 
+    assert json.loads(session.context.read_text(encoding="utf-8"))["started_at"] == STARTED_AT
     assert session.canonical.read_text(encoding="utf-8") == "THE LEAD'S OWN SUMMARY"
     [pending] = session.staged()
     assert json.loads(pending.read_text(encoding="utf-8"))["summary"] == post["compact_summary"]

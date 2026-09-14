@@ -1759,6 +1759,7 @@ class TestWriteContextIntegration:
             "aabb1122-0000-0000-0000-000000000000",
             "/Users/example/Sites/test-project",
             "",  # plugin_root: CLAUDE_PLUGIN_ROOT not set in this test
+            started_at=None,  # a startup records now; only a compaction keeps the value on disk
         )
 
     def test_missing_session_id_falls_back_to_unknown_and_warns(self, monkeypatch, tmp_path, capsys):
@@ -3183,6 +3184,7 @@ class TestPluginRootEnvWiring:
             "aabb1122-0000-0000-0000-000000000000",
             str(tmp_path / "proj"),
             plugin_root_value,
+            started_at=None,
         )
 
     def test_plugin_root_env_flows_to_update_session_info(
@@ -7314,8 +7316,9 @@ class TestAdoptOldSlugSessionDir:
 
 
 class TestCompactionSeats:
-    """session_init settles the compaction summaries postcompact_archive staged,
-    before either clear moves compact-summary.txt."""
+    """session_init on a compaction. The recorded start is kept, and staged
+    summaries are settled before either clear. Nothing here decides whose
+    compaction it was."""
 
     SID = "4ec31948-bbe5-4ef4-841c-631d1ef31e61"
     LEAD = "PACT:pact-orchestrator"
@@ -7354,6 +7357,27 @@ class TestCompactionSeats:
                 session_init.main()
         assert exc.value.code == 0
         return json.loads(out.getvalue())
+
+    def test_a_compaction_keeps_the_recorded_start_and_rewrites_both_files_byte_identically(self, monkeypatch, tmp_path):
+        self._run(monkeypatch, tmp_path, source="startup")
+        context_file = self._session_dir(tmp_path) / "pact-session-context.json"
+        claude_md = self._project(tmp_path) / ".claude" / "CLAUDE.md"
+        recorded = json.loads(context_file.read_text(encoding="utf-8"))
+        assert recorded["started_at"] != "2026-01-01T00:00:00+00:00"
+        context_file.write_text(json.dumps({**recorded, "started_at": "2026-01-01T00:00:00+00:00"}), encoding="utf-8")
+        text = claude_md.read_text(encoding="utf-8")
+        started = re.findall(r"^- Started: .+$", text, re.MULTILINE)
+        assert len(started) == 1
+        claude_md.write_text(text.replace(started[0], "- Started: 2026-01-01 00:00:00 UTC"), encoding="utf-8")
+        before = (context_file.read_bytes(), claude_md.read_bytes())
+
+        self._run(monkeypatch, tmp_path, source="compact")
+        assert (context_file.read_bytes(), claude_md.read_bytes()) == before
+
+        self._run(monkeypatch, tmp_path, source="startup")
+        assert json.loads(context_file.read_text(encoding="utf-8"))["started_at"] != "2026-01-01T00:00:00+00:00"
+        assert "- Started: 2026-01-01 00:00:00 UTC" not in claude_md.read_text(encoding="utf-8")
+
     def test_a_staged_lead_summary_is_promoted_before_a_resume_archives_it(self, monkeypatch, tmp_path):
         from shared import compaction_owner
 

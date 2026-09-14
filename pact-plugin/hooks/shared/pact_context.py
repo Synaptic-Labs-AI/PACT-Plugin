@@ -1538,6 +1538,7 @@ def build_context_cache(
     session_id: str,
     project_dir: str,
     plugin_root: str = "",
+    started_at: str | None = None,
 ) -> tuple[Path, dict] | None:
     """Build the session context dict + path and populate the in-process cache.
 
@@ -1567,6 +1568,8 @@ def build_context_cache(
         session_id: Session ID from stdin JSON or env var
         project_dir: CLAUDE_PROJECT_DIR value
         plugin_root: CLAUDE_PLUGIN_ROOT value (path to installed plugin directory)
+        started_at: The value to record; None records now. A compaction is not
+            a session start, so session_init passes the value already on disk.
 
     Returns:
         ``(target, context)`` on success, or ``None`` if the path is uncomputable.
@@ -1578,7 +1581,7 @@ def build_context_cache(
         "session_id": session_id,
         "project_dir": project_dir,
         "plugin_root": plugin_root,
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": started_at or datetime.now(timezone.utc).isoformat(),
     }
 
     # Use _context_path if already set (from init() or test fixture),

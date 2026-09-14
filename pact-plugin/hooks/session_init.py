@@ -604,6 +604,50 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
     return None
 
 
+# The "Started" line update_session_info writes, in its exact timestamp shape.
+_SESSION_STARTED_RE = re.compile(
+    r"^- Started: (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC)$", re.MULTILINE
+)
+
+
+def _extract_session_started(project_dir: str) -> str | None:
+    """The "Started" value in the project CLAUDE.md's Current Session block.
+
+    None when there is no CLAUDE.md, no such line, or the lock times out. Only
+    the exact shape update_session_info writes is returned, so no other text
+    from the file can reach the block it rewrites.
+    """
+    if not project_dir:
+        return None
+    try:
+        claude_md, source = resolve_project_claude_md_path(project_dir)
+        if source == "new_default":
+            return None
+        with file_lock(claude_md):
+            content = claude_md.read_text(encoding="utf-8")
+    except (OSError, TimeoutError):
+        return None
+    match = _SESSION_STARTED_RE.search(content)
+    return match.group(1) if match else None
+
+
+def _kept_started_at(session_id: str, project_dir: str) -> str | None:
+    """The started_at already in this session's context file, or None.
+
+    Reads the file build_context_cache writes. None when it is missing,
+    unreadable, or not a timezone-aware ISO-8601 time.
+    """
+    try:
+        path = (
+            build_session_path(project_slug(project_dir), str(session_id))
+            / "pact-session-context.json"
+        )
+        value = json.loads(path.read_text(encoding="utf-8")).get("started_at")
+        return value if datetime.fromisoformat(value).tzinfo else None
+    except Exception:
+        return None
+
+
 # Render-hostile characters that, present anywhere in a session_id, render
 # the id unsafe for use in single-line textual contexts like the CLAUDE.md
 # Resume line. Covers C0 controls (0x00-0x1f, includes \n 0x0a, \r 0x0d),
@@ -1757,8 +1801,16 @@ def main():
                 # build_context_cache is the sole owner of _cache; persist_context
                 # is the is_lead-gated best-effort disk side-effect. See the
                 # build_context_cache / persist_context docstrings.
+                # A compaction is not a session start, so it keeps the recorded
+                # start. That also leaves the file byte-identical when an
+                # in-process teammate's compaction, which arrives lead-shaped,
+                # rewrites it.
                 _ctx_result = build_context_cache(
                     team_name, session_id, project_dir, plugin_root,
+                    started_at=(
+                        _kept_started_at(session_id, project_dir)
+                        if source == "compact" else None
+                    ),
                 )
                 if frame_is_lead and _ctx_result is not None:
                     persist_context(*_ctx_result)
@@ -2155,7 +2207,10 @@ def main():
         # the lead's session block in the shared project file. Gate on is_lead
         # in addition to the existing sentinel guard.
         if frame_is_lead and not _is_unknown_or_missing_session(session_id):
-            session_msg = update_session_info(session_id, team_name, session_dir, plugin_root)
+            session_msg = update_session_info(
+                session_id, team_name, session_dir, plugin_root,
+                started=_extract_session_started(project_dir) if source == "compact" else None,
+            )
             if session_msg:
                 if "failed" in session_msg.lower() or "skipped" in session_msg.lower():
                     system_messages.append(session_msg)
