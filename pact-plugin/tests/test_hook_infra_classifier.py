@@ -373,6 +373,10 @@ COVERED_L2 = {
     # attribution. Its non-mocked L2 test runs the real hooks over a temporary
     # projects tree with the platform's transcript layout.
     "postcompact_archive": "test_compaction_owner_seam.py",
+    # bootstrap_gate settles staged compaction summaries before a Read or Bash
+    # that names one. The same non-mocked L2 test runs the real hook as a child
+    # process after the transcript record lands.
+    "bootstrap_gate": "test_compaction_owner_seam.py",
 }
 
 # Documented forward-only BACKLOG: seam hooks whose non-mocked L2 test is a named
@@ -380,14 +384,31 @@ COVERED_L2 = {
 # this list is the auditable record of the known gaps (promote on touch).
 #   - task_lifecycle_gate: heavy unit coverage; L3 real-session probe is the
 #     documented follow-up. Its L2 seam test is fast-follow.
-#   - bootstrap_gate / bootstrap_marker_writer: iter_team_task_jsons readers.
+#   - bootstrap_marker_writer: iter_team_task_jsons readers.
 #   - file_tracker / peer_inject: L2-only (held), watch-list per the classifier.
 # (validate_handoff promoted to COVERED_L2 when its degrade telemetry gained
-#  the real-seam composition test — the hook was touched, so the gap closed.)
+#  the real-seam composition test — the hook was touched, so the gap closed.
+#  bootstrap_gate was promoted when its settle seat gained a child-process seam
+#  test; that test does not exercise its iter_team_task_jsons reads.)
 BACKLOG_L2 = frozenset({
-    "task_lifecycle_gate", "bootstrap_gate", "bootstrap_marker_writer",
+    "task_lifecycle_gate", "bootstrap_marker_writer",
     "file_tracker", "peer_inject",
 })
+
+
+def test_bootstrap_gate_is_covered_by_a_seam_file_that_runs_it_as_a_child_process():
+    """The mapped file hands hooks/bootstrap_gate.py to a helper that starts it
+    with subprocess.run, so the settle seat is exercised in a real process."""
+    assert COVERED_L2.get("bootstrap_gate") == "test_compaction_owner_seam.py"
+    assert "bootstrap_gate" not in BACKLOG_L2
+    tree = ast.parse((TESTS_DIR / COVERED_L2["bootstrap_gate"]).read_text(encoding="utf-8"))
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    hands_over = any(call.args and isinstance(call.args[0], ast.Constant)
+                     and call.args[0].value == "bootstrap_gate.py" for call in calls)
+    spawns = any(isinstance(call.func, ast.Attribute) and call.func.attr == "run"
+                 and isinstance(call.func.value, ast.Name) and call.func.value.id == "subprocess"
+                 for call in calls)
+    assert hands_over and spawns
 
 
 class TestSeamHookL2Presence:

@@ -136,10 +136,13 @@ L3_CANDIDATE_HOOKS: frozenset[str] = frozenset({
     "file_tracker", "peer_inject",
 })  # assessed, held at L2-only
 
-# dispatch_gate + bootstrap_gate are fail-CLOSED (their decision-domain
-# uncertainty path is exit(2) DENY, and they make no get_task_list call) -> they
-# fail LOUD, never silent-inert -> L2-only, never L3. (CODE-confirmed: their
-# exit(0) paths are input-side fail-open + legitimate ALLOW, not seam-error.)
+# dispatch_gate is fail-CLOSED (its decision-domain uncertainty path is exit(2)
+# DENY, and it makes no get_task_list call) -> it fails LOUD, never silent-inert
+# -> L2-only, never L3. (CODE-confirmed: its exit(0) paths are input-side
+# fail-open + legitimate ALLOW, not seam-error.) bootstrap_gate's DECISION fails
+# loud the same way, but its compaction-summary settle seat fails SILENT: on a
+# broken seam the lead's summary is parked and nothing errors. That seat is why
+# bootstrap_gate is in L3_LIVE_PROBE_HOOKS.
 
 
 # ─── Transitive helper import closure (authoritative SSOT data) ─────────────
