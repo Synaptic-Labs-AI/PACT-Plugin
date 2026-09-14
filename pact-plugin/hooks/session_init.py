@@ -88,6 +88,7 @@ from shared import (
     project_slug,
 )
 from shared.constants import (
+    COMPACTION_TEAMMATE_CLAUSE,
     COMPACT_SUMMARY_ARCHIVE_PREFIX,
     COMPACT_SUMMARY_NAME,
     COMPACT_SUMMARY_ORPHAN_NAME,
@@ -777,7 +778,7 @@ def _build_safety_net_context(
         )
     prelude = (
         'YOUR PACT ROLE: orchestrator.\n\n'
-        + (f'{compaction_owner.COMPACTION_TEAMMATE_CLAUSE}\n\n' if source == "compact" else '')
+        + (f'{COMPACTION_TEAMMATE_CLAUSE}\n\n' if source == "compact" else '')
         + 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input. '
         'Do this before anything else. '
         'Do not evaluate whether it is needed. '
@@ -1908,7 +1909,7 @@ def main():
         # the compaction, so the clause keys on the system prompt. It tells a
         # teammate when to set aside "Do not evaluate whether it is needed."
         _compact_clause = (
-            f'{compaction_owner.COMPACTION_TEAMMATE_CLAUSE}\n\n'
+            f'{COMPACTION_TEAMMATE_CLAUSE}\n\n'
             if source == "compact" else ''
         )
         _team_directive = (

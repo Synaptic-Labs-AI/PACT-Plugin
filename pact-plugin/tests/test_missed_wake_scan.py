@@ -1078,6 +1078,34 @@ class TestCompactionClausePrefix:
         surface = self._surface(monkeypatch, frame, datetime.now(timezone.utc))
         assert surface is not None and self.CLAUSE not in surface
 
+    def test_the_clause_survives_a_broken_compaction_owner(self, tmp_path):
+        """The clause lives in shared/constants.py, so a compaction_owner that
+        cannot import leaves the scan and its compact prefix intact. The scan
+        runs in a child process, where the broken module is seen at import."""
+        import os
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        child = (
+            "import json, sys\n"
+            "sys.modules['shared.compaction_owner'] = None\n"
+            "import missed_wake_scan as mw\n"
+            "task = json.loads(sys.argv[2])\n"
+            "mw.get_task_list = lambda: [task]\n"
+            "mw.emit_forensic = lambda *args, **kwargs: None\n"
+            "print(json.dumps(mw.run_surface(json.loads(sys.argv[1]))))\n"
+        )
+        frame = {**captured_lead_sessionstart_qualified(), "source": "compact"}
+        env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
+        env.update(PYTHONPATH=str(Path(mw.__file__).resolve().parent), HOME=str(tmp_path),
+                   CLAUDE_CONFIG_DIR=str(tmp_path / ".claude"))
+        proc = subprocess.run([sys.executable, "-c", child, json.dumps(frame), json.dumps(_task())],
+                              capture_output=True, text=True, timeout=60, env=env)
+        assert proc.returncode == 0, proc.stderr
+        surface = json.loads(proc.stdout)
+        assert surface is not None and surface.startswith(f"{self.CLAUSE}\n\n")
+
     def test_a_compact_start_with_nothing_to_surface_stays_silent(self, journal, monkeypatch):
         monkeypatch.setattr(mw, "get_task_list", lambda: [])
         assert mw.run_surface({**captured_lead_sessionstart_qualified(), "source": "compact"}) is None

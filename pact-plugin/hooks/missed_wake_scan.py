@@ -79,7 +79,7 @@ if str(_hooks_dir) not in sys.path:
     sys.path.insert(0, str(_hooks_dir))
 
 import shared.pact_context as pact_context
-from shared import compaction_owner
+from shared.constants import COMPACTION_TEAMMATE_CLAUSE
 from shared.intentional_wait import validate_wait, wait_stale
 from shared.pact_context import is_lead
 from shared.session_journal import append_event, get_journal_path, make_event, read_events
@@ -683,7 +683,7 @@ def run_surface(input_data: dict, now: "datetime | None" = None) -> "str | None"
     # this point can tell it from the lead's, so the scan runs for both. The
     # clause lets a teammate that receives this surface set it aside.
     if input_data.get("hook_event_name") == "SessionStart" and input_data.get("source") == "compact":
-        surface = f"{compaction_owner.COMPACTION_TEAMMATE_CLAUSE}\n\n{surface}"
+        surface = f"{COMPACTION_TEAMMATE_CLAUSE}\n\n{surface}"
     return surface
 
 

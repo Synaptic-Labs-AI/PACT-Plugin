@@ -773,8 +773,7 @@ def test_no_sleep_is_reachable_from_stage_summary():
 
 _CONSUMER_ATTRIBUTES = {
     "postcompact_archive.py": {"settle", "stage_summary"},
-    "session_init.py": {"settle", "COMPACTION_TEAMMATE_CLAUSE"},
-    "missed_wake_scan.py": {"COMPACTION_TEAMMATE_CLAUSE"},
+    "session_init.py": {"settle"},
     "bootstrap_gate.py": {"settle", "READ_WAIT_S"},
 }
 

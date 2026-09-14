@@ -7367,9 +7367,9 @@ class TestCompactionSeats:
         return json.loads(out.getvalue())
 
     def test_the_clause_is_the_module_constant(self):
-        from shared import compaction_owner
+        from shared import constants
 
-        assert compaction_owner.COMPACTION_TEAMMATE_CLAUSE == self.CLAUSE
+        assert constants.COMPACTION_TEAMMATE_CLAUSE == self.CLAUSE
 
     def test_the_compact_directive_carries_the_clause_on_the_line_after_the_marker(self, monkeypatch, tmp_path):
         context = self._run(monkeypatch, tmp_path)["hookSpecificOutput"]["additionalContext"]

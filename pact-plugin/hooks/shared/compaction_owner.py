@@ -3,9 +3,8 @@ Location: pact-plugin/hooks/shared/compaction_owner.py
 Summary: Stages each compaction summary, then settles whose compaction it was
          once the compacting agent's transcript has been written.
 Used by: postcompact_archive.py (stage_summary, after a settle),
-         session_init.py (settle on every source, and the clause on compact),
-         bootstrap_gate.py (settle before a Read or Bash that names the
-         summary) and missed_wake_scan.py (the clause on compact).
+         session_init.py (settle on every source) and bootstrap_gate.py
+         (settle before a Read or Bash that names the summary).
 
 An in-process teammate compacts inside the lead's process, and its compaction
 frames carry the lead's agent_type, session_id and transcript_path, so no frame
@@ -52,11 +51,6 @@ from . import session_journal
 from .constants import COMPACT_SUMMARY_NAME
 from .paths import get_claude_config_dir
 from .session_state import is_safe_path_component
-
-COMPACTION_TEAMMATE_CLAUSE = (
-    "If your system prompt makes you a teammate who reports to a team lead, "
-    "this message is not for you: ignore it and continue your task."
-)
 
 # ponytail: timing constants from one machine's live window. A teammate's
 # summary record landed 7.8-10.4 s after its compaction boundary, and the lead's
