@@ -29,7 +29,7 @@ from fixtures.role_frames import (
     captured_compaction_teammate_postcompact,
     captured_compaction_teammate_sessionstart,
 )
-from shared.compaction_owner import LEAD_GUARD_S, _summary_body
+from shared.compaction_owner import LEAD_GUARD_S, _summary_bodies
 from shared.pact_context import project_slug
 
 HOOKS = Path(__file__).resolve().parents[1] / "hooks"
@@ -76,7 +76,7 @@ class Session:
                             "content": "Conversation compacted", "timestamp": stamp})
         self._append(path, {"type": "user", "isCompactSummary": True, "timestamp": stamp,
                             "message": {"role": "user", "content": "This session is being continued.\n"
-                                        + _summary_body(compact_summary)}})
+                                        + _summary_bodies(compact_summary)[0]}})
 
     def run_both(self, sessionstart, postcompact):
         env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}

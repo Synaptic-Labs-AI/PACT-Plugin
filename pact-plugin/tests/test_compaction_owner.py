@@ -175,6 +175,57 @@ def test_a_raw_body_with_a_newline_run_matches_its_rendered_record(tree):
     assert attribute(tree.frame("PostCompact", summary=summary), Clock()) == (co.TEAMMATE, co.CONTENT)
 
 
+_LONG_MENTION = "an earlier plan that was replaced before any work began. " * 5
+
+
+def _analysed(analysis, body=BODY):
+    return f"<analysis>\n{analysis}\n</analysis>\n\n<summary>\n{body}\n</summary>"
+
+
+@pytest.mark.parametrize(
+    "analysis",
+    [
+        "The reply goes in a <summary> block after these notes.",
+        f"An earlier draft read <summary>{_LONG_MENTION}</summary> and was dropped.",
+        "An earlier draft read <summary>too short to match</summary> and was dropped.",
+    ],
+    ids=["unclosed-mention", "closed-long-mention", "closed-short-mention"],
+)
+def test_a_summary_tag_mentioned_in_the_analysis_does_not_move_the_match(tree, analysis):
+    """The transcript drops the analysis block before rendering the summary, so a
+    <summary> tag that the analysis mentions never reaches the record."""
+    assert len(_LONG_MENTION.strip()) >= co.MIN_BODY_CHARS
+    tree.boundary(tree.teammate)
+    tree.summary(tree.teammate)
+    assert attribute(tree.frame("PostCompact", summary=_analysed(analysis)), Clock()) == (co.TEAMMATE, co.CONTENT)
+
+
+def test_a_summary_with_no_analysis_block_matches(tree):
+    tree.boundary(tree.teammate)
+    tree.summary(tree.teammate)
+    summary = f"<summary>\n{BODY}\n</summary>"
+    assert attribute(tree.frame("PostCompact", summary=summary), Clock()) == (co.TEAMMATE, co.CONTENT)
+
+
+def test_an_analysis_that_mentions_its_closing_tag_still_matches(tree):
+    """Where the analysis block ends is ambiguous when it quotes its own closing
+    tag, so the longest reading of the block is also tried."""
+    analysis = "The notes quote the literal </analysis> tag, then say the reply goes in a <summary> block."
+    tree.boundary(tree.teammate)
+    tree.summary(tree.teammate)
+    assert attribute(tree.frame("PostCompact", summary=_analysed(analysis)), Clock()) == (co.TEAMMATE, co.CONTENT)
+
+
+def test_a_summary_that_mentions_the_analysis_closing_tag_still_matches(tree):
+    """The longest reading of the analysis block would swallow this summary, so the
+    shortest reading must still be tried."""
+    body = BODY + "\n5. Notes: the analysis block ends at a </analysis> tag."
+    tree.boundary(tree.teammate)
+    tree.summary(tree.teammate, body=body)
+    summary = _analysed("Working notes that are not kept.", body=body)
+    assert attribute(tree.frame("PostCompact", summary=summary), Clock()) == (co.TEAMMATE, co.CONTENT)
+
+
 def test_the_match_ignores_order_and_the_summary_timestamp(tree):
     """The lead capture's shape: the boundary, then another agent's message,
     then the summary record, stamped 0.72 s BEFORE its boundary."""
@@ -355,7 +406,7 @@ def _bind(frame, tree):
 
 def test_captured_teammate_frames_over_a_teammate_layout(tree):
     tree.boundary(tree.teammate)
-    body = co._summary_body(captured_compaction_teammate_postcompact()["compact_summary"])
+    body = co._summary_bodies(captured_compaction_teammate_postcompact()["compact_summary"])[0]
     tree.summary(tree.teammate, body=body)
     assert attribute(_bind(captured_compaction_teammate_postcompact(), tree), Clock()) == (co.TEAMMATE, co.CONTENT)
     assert attribute(_bind(captured_compaction_teammate_sessionstart(), tree), Clock()) == (co.TEAMMATE, co.TIMING)
@@ -363,7 +414,7 @@ def test_captured_teammate_frames_over_a_teammate_layout(tree):
 
 def test_captured_lead_frames_over_the_lead_capture_order(tree):
     """The lead's order: its boundary, a secretary message, then the summary stamped earlier."""
-    body = co._summary_body(captured_compaction_lead_postcompact()["compact_summary"])
+    body = co._summary_bodies(captured_compaction_lead_postcompact()["compact_summary"])[0]
     tree.boundary(tree.lead, at=ENTRY)
     tree.other_message(tree.lead, at=ENTRY + timedelta(milliseconds=29))
     tree.summary(tree.lead, at=ENTRY - timedelta(milliseconds=717), body=body)

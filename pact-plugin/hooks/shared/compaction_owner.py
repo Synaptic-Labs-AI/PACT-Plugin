@@ -14,8 +14,11 @@ lead's is the frame's transcript_path, and a teammate's is
 
 PostCompact carries the summary, and the text inside its <summary> block is
 written into the compacting agent's transcript, so it is attributed by content.
-The transcript renders that text stripped, after a "Summary:" line, with runs of
-newlines collapsed to one blank line, so both sides are compared in that form.
+The transcript first drops the <analysis> block, then renders that text stripped,
+after a "Summary:" line, with runs of newlines collapsed to one blank line, so
+both sides are compared in that form. An analysis that quotes its own closing tag
+has no single end, so the body is taken under both the shortest and the longest
+reading of the block, and a record holding either one matches.
 The summary record can sit after another agent's message and be stamped before
 its boundary, so the match ignores order and the record's timestamp; freshness
 applies to boundaries only. SessionStart carries no content and is attributed
@@ -56,6 +59,11 @@ TEAMMATE, LEAD, UNKNOWN = "teammate", "lead", "unknown"
 CONTENT, TIMING, DEADLINE, NO_SIGNAL = "content", "timing", "deadline", "no_signal"
 
 _SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
+# The shortest and the longest reading of the analysis block.
+_ANALYSIS_RES = (
+    re.compile(r"<analysis>.*?</analysis>", re.DOTALL),
+    re.compile(r"<analysis>.*</analysis>", re.DOTALL),
+)
 _NEWLINE_RUN_RE = re.compile(r"\n\n+")
 
 
@@ -88,17 +96,17 @@ def attribute_compaction(
             return UNKNOWN, NO_SIGNAL
         event = frame.get("hook_event_name")
         if event == "PostCompact":
-            body = _summary_body(frame.get("compact_summary"))
+            bodies = _summary_bodies(frame.get("compact_summary"))
         elif event == "SessionStart" and frame.get("source") == "compact":
-            body = None
+            bodies = ()
         else:
             return UNKNOWN, NO_SIGNAL
         located = _locate(frame.get("transcript_path"), frame.get("session_id"))
         if located is None:
             return UNKNOWN, NO_SIGNAL
-        reader = _Reader(*located, since=now().timestamp() - BACK_S, body=body)
+        reader = _Reader(*located, since=now().timestamp() - BACK_S, bodies=bodies)
         start = monotonic()
-        if event == "PostCompact" and body is not None:
+        if event == "PostCompact" and bodies:
             return _by_content(reader, start, monotonic, sleep)
         if event == "PostCompact":
             return _by_timing(reader, start, T_POSTCOMPACT, T_POSTCOMPACT, monotonic, sleep)
@@ -118,16 +126,23 @@ def teammate_compaction(
     return attribute_compaction(frame, now=now, monotonic=monotonic, sleep=sleep)[0] == TEAMMATE
 
 
-def _summary_body(summary: Any) -> "str | None":
-    """The text inside <summary>...</summary>, or None when absent or too short to match on."""
+def _summary_bodies(summary: Any) -> "tuple[str, ...]":
+    """The text inside <summary>...</summary> once the analysis block is removed.
+
+    One body per reading of the analysis block, without duplicates or bodies too
+    short to match on; empty when there is none.
+    """
     if not isinstance(summary, str):
-        return None
-    match = _SUMMARY_RE.search(summary)
-    if match is None:
-        return None
-    body = match.group(1).strip()
-    body = _collapse_newlines(body)
-    return body if len(body) >= MIN_BODY_CHARS else None
+        return ()
+    bodies: list[str] = []
+    for analysis in _ANALYSIS_RES:
+        match = _SUMMARY_RE.search(analysis.sub("", summary))
+        if match is None:
+            continue
+        body = _collapse_newlines(match.group(1).strip())
+        if len(body) >= MIN_BODY_CHARS and body not in bodies:
+            bodies.append(body)
+    return tuple(bodies)
 
 
 def _locate(transcript: Any, session_id: Any) -> "tuple[Path, Path] | None":
@@ -175,11 +190,12 @@ def _by_timing(reader, start, guard, deadline, monotonic, sleep) -> "tuple[str, 
 class _Reader:
     """Reads the candidate transcripts forward from a seek point set at entry."""
 
-    def __init__(self, lead: Path, subagents: Path, *, since: float, body: "str | None"):
+    def __init__(self, lead: Path, subagents: Path, *, since: float, bodies: "tuple[str, ...]"):
         self._lead = lead
         self._subagents = subagents
         self._since = since
-        self._body = body
+        self._bodies = bodies
+        self._shortest = min(map(len, bodies), default=0)
         self._offset: dict[Path, int] = {lead: _seek_point(lead)}
         for path in subagents.glob("agent-*.jsonl"):
             self._offset[path] = _seek_point(path)
@@ -233,10 +249,12 @@ class _Reader:
                 and _stamp(record.get("timestamp")) >= self._since
             ):
                 self._boundary.add(path)
-        if self._body is not None and len(line) >= len(self._body) and b'"user"' in line:
+        if self._bodies and len(line) >= self._shortest and b'"user"' in line:
             record = _record(line)
-            if record.get("type") == "user" and self._body in _text(record):
-                self._has_body.add(path)
+            if record.get("type") == "user":
+                text = _text(record)
+                if any(body in text for body in self._bodies):
+                    self._has_body.add(path)
 
 
 def _seek_point(path: Path) -> int:
