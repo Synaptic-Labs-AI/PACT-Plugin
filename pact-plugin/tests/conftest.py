@@ -47,8 +47,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 # The clock-shift census; tests/ is on sys.path from the insert above.
 from clock_shift import clock_shift_census  # noqa: E402
 
-# These copy pact_context functions at first import; loading them here keeps a test patch from being copied.
+# These copy functions from other shared modules at first import; loading them here keeps a test patch from being copied.
 import shared.background_work  # noqa: E402, F401
+import shared.task_metadata_snapshot  # noqa: E402, F401
 import shared.task_utils  # noqa: E402, F401
 
 
