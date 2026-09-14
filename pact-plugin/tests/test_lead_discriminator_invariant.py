@@ -197,11 +197,29 @@ def _find_agent_id_role_uses(
     (``is_pact_agent``), explicitly deferred to the #812 follow-up per the
     plan's scope decision — NOT a lead/teammate discriminator. Listed by file
     so the exemption is auditable.
+
+    A read passed untouched as the ``agent_id`` keyword of
+    ``agent_type_names_a_member`` is EXEMPT: that value feeds an exact-shape
+    check, and a missing id falls back to the agent_type checks, so presence
+    alone never decides lead vs teammate. The match is on the read node itself
+    being that keyword's value, so a wrapped, positional or pre-assigned read
+    is still flagged.
     """
     if file_label == "validate_handoff.py":
         return []
+    member_check_ids = {
+        id(kw.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "id", getattr(node.func, "attr", None))
+        == "agent_type_names_a_member"
+        for kw in node.keywords
+        if kw.arg == "agent_id"
+    }
     offending: list[tuple[str, int]] = []
     for node in ast.walk(tree):
+        if id(node) in member_check_ids:
+            continue
         # input_data.get("agent_id", ...)
         if isinstance(node, ast.Call):
             func = node.func
@@ -607,6 +625,47 @@ class TestNegativeLegDetectorsFire:
             f"Aliased benign infra env reads were misflagged: {hits}. The "
             f"aliased-form fix must keep the benign allowlist intact."
         )
+
+
+
+class TestAgentIdDetectorExemptsOnlyTheMemberCheckKeyword:
+    """The one sanctioned agent_id read: the untouched value of the agent_id
+    keyword in a call to agent_type_names_a_member. Every other read, including
+    one wrapped or placed elsewhere in that same call, stays flagged."""
+
+    def _hits(self, *body):
+        src = "def main(input_data, t, team):\n" + "".join(f"    {line}\n" for line in body)
+        return _find_agent_id_role_uses(ast.parse(src), "some_new_gate.py")
+
+    @pytest.mark.parametrize(
+        "call",
+        [
+            'agent_type_names_a_member(t, team, agent_id=input_data.get("agent_id"))',
+            'background_work.agent_type_names_a_member(t, team, agent_id=input_data.get("agent_id"))',
+            'agent_type_names_a_member(t, team, agent_id=input_data["agent_id"])',
+        ],
+        ids=["bare-name", "attribute", "subscript-value"],
+    )
+    def test_the_member_check_keyword_is_not_flagged(self, call):
+        assert self._hits(f"return {call}") == []
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            ('aid = input_data.get("agent_id")', "return aid"),
+            ('return foo(agent_id=input_data.get("agent_id"))',),
+            ('if input_data.get("agent_id"):', "    return None"),
+            ('return input_data["agent_id"]',),
+            ('return agent_type_names_a_member(t, team, agent_id=str(input_data.get("agent_id")))',),
+            ('return agent_type_names_a_member(t, input_data.get("agent_id"))',),
+            ('aid = input_data.get("agent_id")', "return agent_type_names_a_member(t, team, agent_id=aid)"),
+            ('return agent_type_names_a_member(t, team, team_name=input_data.get("agent_id"))',),
+        ],
+        ids=["assigned", "different-callee", "if-branch", "subscript", "wrapped",
+             "positional", "assigned-then-passed", "other-keyword"],
+    )
+    def test_every_other_read_is_flagged(self, body):
+        assert self._hits(*body) == [("main", 2)]
 
 
 # ===========================================================================
