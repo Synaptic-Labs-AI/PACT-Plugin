@@ -257,7 +257,8 @@ def teammate_identity(input_data: Any, team: str) -> str:
 
     Either signal is enough: the platform's subagent metadata, which names the
     teammate whatever the frame's agent_type holds, or an agent_type that is
-    itself a member's name. An Agent-tool subagent carries neither.
+    itself a member's name. An Agent-tool subagent is refused by its agent_id
+    shape even when its agent_type matches a member's name.
     """
     if not isinstance(input_data, dict) or not _is_text(team):
         return ""

@@ -117,16 +117,18 @@ def main():
         # in-process subagent topology COLLAPSES a teammate's session_id onto
         # the LEAD's — so ungated, a teammate PostCompact writes into the
         # lead's own session directory, resurrecting the clobber #881 fixed,
-        # now inside it. Gate the write behind is_lead. is_lead is total and
-        # only reaches stdin_data here when compact_summary is truthy, which
-        # the isinstance(dict) guard above already established — so stdin_data
-        # is a dict and the .get inside is_lead cannot raise.
+        # now inside it. is_lead keeps a separate-process teammate's frame and
+        # a plain frame out; an in-process teammate's frame passes it, and
+        # compaction_owner decides below. is_lead is total and only reaches
+        # stdin_data here when compact_summary is truthy, which the
+        # isinstance(dict) guard above already established — so stdin_data is
+        # a dict and the .get inside is_lead cannot raise.
         #
         # The destination resolves via the TOTAL resolver: session-scoped when
         # the frame is identifiable, root singleton otherwise. Degradation
         # lives INSIDE that one call — no fallback branch here.
         #
-        # An in-process teammate's frame is ALSO lead-shaped: it carries the
+        # An in-process teammate's frame is lead-shaped: it carries the
         # lead's agent_type, session_id and transcript_path. compaction_owner
         # reads the transcripts to tell them apart, and only a teammate verdict
         # skips the write; lead and unknown write as before.

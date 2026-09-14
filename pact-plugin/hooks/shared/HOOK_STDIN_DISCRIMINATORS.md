@@ -74,7 +74,9 @@ should re-measure rather than cite it.
   differentiator there — but it is ABSENT on tmux-teammate and lead frames.
   Present in one topology and absent in the other, it is NOT a reliable
   cross-mode role signal: key role on `agent_type` (present in both), never
-  `agent_id`.
+  `agent_id`. The member check reads only the exact shape of `agent_id`, to
+  tell an in-process teammate from an Agent-tool subagent, and falls back to
+  `agent_type` when the id is absent; lead versus teammate never keys on it.
 - **`team_name`** — absent on most events; present on stdin only for a
   **teammate `TaskCompleted`** frame (see the table). It identifies the team,
   not the role, and it is NOT a "this is a teammate" flag you can rely on for
@@ -101,13 +103,13 @@ empty.
 
 | Hook event | Role field | Lead value | Teammate value | Plain | `team_name` in stdin? | journal-resolvable here? |
 |---|---|---|---|---|---|---|
-| SessionStart | `agent_type` (none for an in-process teammate's `source: compact`) | lead spelling | `pact-<specialist>`; an in-process teammate's `source: compact` frame carries the lead spelling | absent | no | lead: yes (persists context) · teammate: no |
+| SessionStart | `agent_type` (none for an in-process teammate's `source: compact`) | lead spelling | `pact-<specialist>`; an in-process teammate's `source: compact` frame carries the lead spelling | absent | no | lead: yes (persists context) · in-process: yes (the lead's journal) · separate-process: no |
 | UserPromptSubmit | `agent_type` | lead spelling | *(no teammate fire path — see note)* | absent | no | lead: yes |
 | PreToolUse | `agent_type` | lead spelling | `pact-<specialist>` | — | **no** | lead: yes · teammate: no |
 | PostToolUse (incl. `TaskCreate` / `TaskUpdate`) | `agent_type` | lead spelling | `pact-<specialist>` | — | **no** | lead: yes · teammate: no |
 | TaskCompleted | `agent_type` | lead spelling | `pact-<specialist>` | — | lead: **no** · teammate: **yes** (also `teammate_name`) | lead: yes · teammate: no |
 | PreCompact | none for an in-process teammate | lead spelling | in-process: lead spelling · separate-process: `pact-<specialist>` (inferred) | — | no | not read |
-| PostCompact | `agent_type` (none for an in-process teammate) | lead spelling | in-process: lead spelling · separate-process: `pact-<specialist>` (inferred) | — | no | lead: yes · teammate: no |
+| PostCompact | `agent_type` (none for an in-process teammate) | lead spelling | in-process: lead spelling · separate-process: `pact-<specialist>` (inferred) | — | no | lead: yes · in-process: yes (the lead's journal) · separate-process: no |
 
 PostCompact capture provenance: live append-only hook dump, 2026-08-26, lead
 manual `/compact` in the in-process dogfood session (PACT 4.6.44). The committed

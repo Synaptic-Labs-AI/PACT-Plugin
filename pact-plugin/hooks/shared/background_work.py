@@ -1174,7 +1174,8 @@ def teammate_launch_name(input_data: Any, team_name: str) -> str:
     cover the same population. In order:
       1. No `agent_type`, or a lead spelling: not a teammate.
       2. `agent_type` names a member: an in-process teammate, whose frame
-         carries its own name in that field. Returns that name.
+         carries its own name in that field. Returns that name (a
+         subagent-shaped `agent_id` is refused here even then).
       3. An `agent_id` is present. `name@<this team>` returns `name`. Any other
          id, such as a bare hex id, is an Agent-tool subagent, because an
          in-process teammate already matched at step 2. No captured frame has
