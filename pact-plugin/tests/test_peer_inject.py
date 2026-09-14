@@ -1478,6 +1478,53 @@ class TestPeerInjectNamesAnInProcessTeammate:
         assert _peer_list(context) == ["team-lead", "backend-coder"], context
 
 
+class TestPeerInjectReadsTheAgentIdShape:
+    """`python3 hooks/peer_inject.py` in the lead's process, where the frame's
+    `agent_id` shape decides whether its `agent_type` names a member."""
+
+    TEAM = "session-piid"
+    LEAD_SESSION = "pi-id-lead-session"
+    PROJECT = "/pi-id/project"
+
+    def _lead_process(self, tmp_path):
+        from shared.pact_context import project_slug
+
+        _write_team_config(tmp_path, self.TEAM, [
+            {"name": "team-lead", "agentType": "pact-orchestrator"},
+            {"name": "pact-backend-coder", "agentType": "pact-backend-coder"},
+            {"name": "claude", "agentType": "pact-preparer"},
+        ], leadSessionId=self.LEAD_SESSION)
+        context_dir = (tmp_path / ".claude" / "pact-sessions" / project_slug(self.PROJECT)
+                       / self.LEAD_SESSION)
+        context_dir.mkdir(parents=True)
+        (context_dir / "pact-session-context.json").write_text(json.dumps({
+            "session_id": self.LEAD_SESSION, "project_dir": self.PROJECT,
+            "team_name": self.TEAM,
+        }), encoding="utf-8")
+
+    def test_a_member_named_after_a_shipped_stem_gets_its_block(self, tmp_path):
+        """REVERT PROOF. Its teammate-shaped id admits it; without the shape
+        check the deny set refused it on its own spawn frame."""
+        self._lead_process(tmp_path)
+        frame = {"hook_event_name": "SubagentStart", "session_id": self.LEAD_SESSION,
+                 "agent_type": "pact-backend-coder",
+                 "agent_id": "apact-backend-coder-0123456789abcdef"}
+
+        out = _run_hook(tmp_path, frame, self.PROJECT)
+
+        context = out.get("hookSpecificOutput", {}).get("additionalContext", "")
+        assert context.startswith("YOUR PACT ROLE: teammate (pact-backend-coder)."), out
+        assert _peer_list(context) == ["team-lead", "claude"], context
+
+    def test_a_subagent_whose_type_names_a_member_gets_nothing(self, tmp_path):
+        """REVERT PROOF. Its subagent-shaped id refuses it; without the shape
+        check it received the member's block."""
+        self._lead_process(tmp_path)
+        frame = {"hook_event_name": "SubagentStart", "session_id": self.LEAD_SESSION,
+                 "agent_type": "claude", "agent_id": "a0123456789abcdef"}
+        assert _run_hook(tmp_path, frame, self.PROJECT) == SUPPRESS
+
+
 def test_peer_inject_gates_on_membership_before_building():
     """REVERT PROOF. main() asks agent_type_names_a_member, and the agent_name it
     passes to get_peer_context is the name bound from that answer."""

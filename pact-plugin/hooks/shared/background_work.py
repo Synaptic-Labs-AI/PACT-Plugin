@@ -60,6 +60,7 @@ the counter every tick and Layer 2 can never reach three.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -990,6 +991,9 @@ _PLATFORM_AGENT_TYPES = frozenset(
     {"general-purpose", "Explore", "Plan", "statusline-setup"}
 )
 
+# An Agent-tool subagent's `agent_id`.
+_SUBAGENT_ID = re.compile(r"a[0-9a-f]{16}")
+
 
 def _known_agent_types() -> frozenset:
     """Agent-type stems this plugin ships, DERIVED AT RUNTIME from agents/.
@@ -1006,7 +1010,9 @@ def _known_agent_types() -> frozenset:
         return frozenset()
 
 
-def agent_type_names_a_member(agent_type: Any, team_name: str) -> bool:
+def agent_type_names_a_member(
+    agent_type: Any, team_name: str, *, agent_id: Any = None
+) -> bool:
     """True iff the frame's `agent_type` is an IDENTITY rather than a TYPE.
 
     MEASURED 2026-09-11 on a live in-process Agent-Teams teammate PostToolUse
@@ -1020,18 +1026,27 @@ def agent_type_names_a_member(agent_type: Any, team_name: str) -> bool:
     a lookup in authoritative local state, not string surgery. Step 4 already
     strips this field today; this validates the value before trusting it.
 
-    RESIDUAL, STATED RATHER THAN CLAIMED AWAY. `classify_session_role` treats
-    any `agent_type` outside `LEAD_AGENT_TYPES` as a teammate, so a generic
-    Agent-tool subagent reaches this code. The deny set below reduces the
-    collision to perverse naming — a member would have to be NAMED after a
-    real agent type — but an UNKNOWN FUTURE PLATFORM TYPE colliding with a
-    member name remains possible, and that case fails toward MIS-BIND rather
+    THE FRAME'S `agent_id` SHAPE IS READ FIRST. An in-process teammate's frame
+    carries "a" + `agent_type` + "-" + 16 lowercase hex, and an Agent-tool
+    subagent's carries "a" + 16 lowercase hex. A subagent-shaped id is never a
+    member, whatever its type. A teammate-shaped id is built from `agent_type`
+    and compared whole, never parsed, and goes to membership without the deny
+    set, so a member named after an agent type is not refused on its own
+    frame. Any other id, or none, takes the type checks below.
+
+    RESIDUAL, STATED RATHER THAN CLAIMED AWAY, on a frame without a recognized
+    `agent_id`. `classify_session_role` treats any `agent_type` outside
+    `LEAD_AGENT_TYPES` as a teammate, so a generic Agent-tool subagent reaches
+    this code. The deny set below reduces the collision to perverse naming — a
+    member would have to be NAMED after a real agent type, and such a member is
+    refused on that frame — but an UNKNOWN FUTURE PLATFORM TYPE colliding with
+    a member name remains possible, and that case fails toward MIS-BIND rather
     than silence, which is the worse direction: a launch would be attributed
     to a teammate who did not make it. This is an accepted exposure, not an
     eliminated one.
 
     TMUX IS UNTESTED, NOT COVERED. Under tmux the frame reportedly carries the
-    real type, so this returns False and the caller falls through to the
+    real type and no `agent_id`, so this returns False and the caller falls through to the
     registry, which works there because the in-process self-guard does not
     fire. That rests on one captured PreToolUse frame and NO Bash PostToolUse
     frame. It was UNEXERCISED during development because the development
@@ -1041,6 +1056,11 @@ def agent_type_names_a_member(agent_type: Any, team_name: str) -> bool:
     """
     if not isinstance(agent_type, str) or not agent_type:
         return False
+    if isinstance(agent_id, str):
+        if _SUBAGENT_ID.fullmatch(agent_id):
+            return False
+        if re.fullmatch(re.escape(f"a{agent_type}-") + "[0-9a-f]{16}", agent_id):
+            return _names_a_member(agent_type, team_name)
     if agent_type in _PLATFORM_AGENT_TYPES:
         return False
     if agent_type in _known_agent_types():
@@ -1169,7 +1189,9 @@ def teammate_launch_name(input_data: Any, team_name: str) -> str:
     agent_type = input_data.get("agent_type")
     if not isinstance(agent_type, str) or not agent_type or agent_type in LEAD_AGENT_TYPES:
         return ""
-    if agent_type_names_a_member(agent_type, team_name):
+    if agent_type_names_a_member(
+        agent_type, team_name, agent_id=input_data.get("agent_id")
+    ):
         return agent_type
     agent_id = input_data.get("agent_id")
     if agent_id:
@@ -1265,7 +1287,7 @@ def bind_launcher_identity(
     # The measured in-process route: neither field above is present on a Bash
     # PostToolUse frame, and `agent_type` carries the name instead.
     named_by_membership = agent_type_names_a_member(
-        input_data.get("agent_type"), team_name
+        input_data.get("agent_type"), team_name, agent_id=input_data.get("agent_id")
     )
     registry_name = None
     # THIS EARLY RETURN IS THE COLLAPSE PROTECTION. With no name on the frame,

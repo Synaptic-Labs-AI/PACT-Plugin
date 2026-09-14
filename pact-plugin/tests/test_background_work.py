@@ -44,6 +44,7 @@ from shared.background_work import (
 )
 
 TEAM = "probe-team"
+HEX16 = "0123456789abcdef"
 T0 = datetime(2026, 9, 11, 12, 0, 0, tzinfo=timezone.utc)
 
 
@@ -735,6 +736,164 @@ class TestBindLauncherIdentity:
             )
         )
         assert agent_type_names_a_member("pact-architect", TEAM) is False
+
+
+class TestTheAgentIdShapeDecidesBeforeTheTypeChecks:
+    """`agent_type_names_a_member(..., agent_id=)` reads the frame's id shape first.
+
+    An in-process teammate's frame carries "a" + agent_type + "-" + 16 lowercase
+    hex, and an Agent-tool subagent's carries "a" + 16 lowercase hex. A
+    subagent-shaped id is never a member. A teammate-shaped id goes to
+    membership without the deny set. Any other id, or none, keeps the
+    type-based checks, which the arms above pin.
+    """
+
+    MEMBERS = ("pact-backend-coder", "general-purpose", "claude", "probe-work-coder")
+
+    @pytest.fixture(autouse=True)
+    def _team_config(self, tmp_path, monkeypatch):
+        import json
+
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+        team_dir = tmp_path / "teams" / TEAM
+        team_dir.mkdir(parents=True)
+        (team_dir / "config.json").write_text(json.dumps(
+            {"leadSessionId": "lead-sid", "members": [{"name": n} for n in self.MEMBERS]}
+        ))
+        tasks = tmp_path / "tasks" / TEAM
+        tasks.mkdir(parents=True)
+        (tasks / "13.json").write_text(
+            json.dumps({"id": "13", "status": "in_progress", "owner": "claude"})
+        )
+        self.root = tmp_path
+
+    def test_a_teammate_shaped_id_admits_a_member_named_after_a_shipped_stem(self):
+        """REVERT PROOF. Without the id the deny set refuses this member on its
+        own frame, so it never gets its peer block or its launch record."""
+        from shared.background_work import _known_agent_types
+
+        assert "pact-backend-coder" in _known_agent_types(), "the arm needs a shipped stem"
+        assert agent_type_names_a_member(
+            "pact-backend-coder", TEAM, agent_id=f"apact-backend-coder-{HEX16}"
+        ) is True
+        assert agent_type_names_a_member("pact-backend-coder", TEAM) is False
+
+    def test_a_teammate_shaped_id_admits_a_member_named_after_a_platform_type(self):
+        assert agent_type_names_a_member(
+            "general-purpose", TEAM, agent_id=f"ageneral-purpose-{HEX16}"
+        ) is True
+        assert agent_type_names_a_member("general-purpose", TEAM) is False
+
+    def test_a_subagent_shaped_id_is_never_a_member(self):
+        """REVERT PROOF. An Agent-tool subagent whose type equals a member's
+        name must not be read as that member."""
+        assert agent_type_names_a_member("claude", TEAM, agent_id=f"a{HEX16}") is False
+        assert agent_type_names_a_member("claude", TEAM) is True
+
+    @pytest.mark.parametrize(
+        "agent_type, agent_id, expected",
+        [
+            ("pact-backend-coder", f"apact-backend-coder-{HEX16[:15]}", False),
+            ("pact-backend-coder", f"apact-backend-coder-{HEX16.upper()}", False),
+            ("pact-backend-coder", f"aother-{HEX16}", False),
+            ("pact-backend-coder", f"apact-backend-coder-{HEX16}0", False),
+            ("pact-backend-coder", f"apact-backend-coder-{HEX16}\n", False),
+            ("claude", f"a{HEX16}0", True),
+            ("claude", f"a{HEX16.upper()}", True),
+            ("claude", f"a{HEX16}\n", True),
+        ],
+        ids=["teammate-15-hex", "teammate-uppercase", "teammate-name-mismatch",
+             "teammate-17-hex", "teammate-trailing-newline", "subagent-17-hex",
+             "subagent-uppercase", "subagent-trailing-newline"],
+    )
+    def test_only_the_exact_shapes_are_recognized(self, agent_type, agent_id, expected):
+        """Anything short of an exact shape falls through to the type-based checks."""
+        assert agent_type_names_a_member(agent_type, TEAM, agent_id=agent_id) is expected
+
+    def test_a_teammate_shaped_id_for_a_non_member_is_refused(self):
+        assert agent_type_names_a_member("stranger", TEAM, agent_id=f"astranger-{HEX16}") is False
+
+    def test_a_teammate_shaped_id_with_an_unsafe_team_is_refused(self):
+        """`teams/../config.json` exists and names the member, so only the
+        team-name check refuses it."""
+        import json
+        from shared.pact_context import _iter_members
+
+        (self.root / "config.json").write_text(json.dumps({"members": [{"name": "claude"}]}))
+        assert [m["name"] for m in _iter_members("..")] == ["claude"], "control: the path resolves"
+        assert agent_type_names_a_member("claude", "..", agent_id=f"aclaude-{HEX16}") is False
+
+    @pytest.mark.parametrize("agent_id", [{"id": "x"}, 12345, [f"a{HEX16}"]])
+    def test_a_non_string_id_keeps_the_type_checks(self, agent_id):
+        assert agent_type_names_a_member("claude", TEAM, agent_id=agent_id) is True
+        assert agent_type_names_a_member("pact-backend-coder", TEAM, agent_id=agent_id) is False
+
+    def test_every_caller_passes_the_frames_agent_id(self):
+        """Each call site in the hooks tree hands the predicate the frame's id."""
+        hooks = Path(__file__).resolve().parents[1] / "hooks"
+        sites = []
+        for path in sorted(hooks.rglob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = getattr(node.func, "attr", getattr(node.func, "id", None))
+                if name == "agent_type_names_a_member":
+                    passed = next((k.value for k in node.keywords if k.arg == "agent_id"), None)
+                    sites.append((path.relative_to(hooks).as_posix(),
+                                  ast.unparse(passed) if passed is not None else None))
+        assert sorted(p for p, _ in sites) == [
+            "peer_inject.py", "shared/background_work.py",
+            "shared/background_work.py", "shared/turn_end_gate.py",
+        ], sites
+        assert all(v == "input_data.get('agent_id')" for _, v in sites), sites
+
+    def test_the_launch_name_refuses_a_subagent_named_like_a_member(self):
+        """REVERT PROOF. `teammate_launch_name` step 2 took the member's name
+        from a subagent's frame, so the launch advisory and Layer 1 treated the
+        subagent as that teammate."""
+        from shared.background_work import teammate_launch_name
+
+        frame = {"session_id": "sid", "tool_name": "Bash", "agent_type": "claude"}
+        assert teammate_launch_name(dict(frame, agent_id=f"a{HEX16}"), TEAM) == ""
+        assert teammate_launch_name(dict(frame, agent_id=f"aclaude-{HEX16}"), TEAM) == "claude"
+
+    def test_the_launch_binding_refuses_a_subagent_named_like_a_member(self):
+        frame = {"session_id": "sid", "tool_name": "Bash", "agent_type": "claude",
+                 "tool_input": {"command": "sleep 5", "run_in_background": True}}
+        assert bind_launcher_identity(dict(frame, agent_id=f"a{HEX16}"), TEAM) is None
+        bound = bind_launcher_identity(dict(frame, agent_id=f"aclaude-{HEX16}"), TEAM)
+        assert bound is not None and bound[0] == "claude" and bound[2] == ["13"], bound
+
+    def test_the_turn_end_identity_refuses_a_subagent_named_like_a_member(self):
+        """REVERT PROOF. The turn-end gate read a subagent ending its turn as
+        the member its type names."""
+        from shared import turn_end_gate
+
+        frame = {"session_id": "sid", "hook_event_name": "SubagentStop", "agent_type": "claude"}
+        assert turn_end_gate.teammate_identity(dict(frame, agent_id=f"a{HEX16}"), TEAM) == ""
+        assert turn_end_gate.teammate_identity(
+            dict(frame, agent_id=f"aclaude-{HEX16}"), TEAM
+        ) == "claude"
+
+    def test_captured_frames(self):
+        """The captured teammate frame's `agent_id` is a synthetic value in
+        neither shape, so it stays True through the type checks; a copy rebuilt
+        to the measured teammate shape is True through membership. The captured
+        general-purpose subagent frame carries the subagent shape."""
+        from fixtures.role_frames import (
+            captured_posttooluse_teammate_inprocess_bash_background,
+            captured_pretooluse_teammate_inprocess_subagent,
+        )
+
+        mate = captured_posttooluse_teammate_inprocess_bash_background()
+        name = mate["agent_type"]
+        assert name == "probe-work-coder"
+        assert agent_type_names_a_member(name, TEAM, agent_id=mate["agent_id"]) is True
+        assert agent_type_names_a_member(name, TEAM, agent_id=f"a{name}-{HEX16}") is True
+        sub = captured_pretooluse_teammate_inprocess_subagent()
+        assert agent_type_names_a_member(
+            sub["agent_type"], TEAM, agent_id=sub["agent_id"]
+        ) is False
 
 
 class TestShellBackgroundedLaunchPopulation:

@@ -272,7 +272,9 @@ def teammate_identity(input_data: Any, team: str) -> str:
     ):
         return name
     agent_type = input_data.get("agent_type")
-    if background_work.agent_type_names_a_member(agent_type, team):
+    if background_work.agent_type_names_a_member(
+        agent_type, team, agent_id=input_data.get("agent_id")
+    ):
         return agent_type
     return ""
 

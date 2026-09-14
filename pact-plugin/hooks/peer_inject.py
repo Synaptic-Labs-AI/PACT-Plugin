@@ -77,7 +77,9 @@ def main():
         # Only a team member gets the block. Its frame carries the member name
         # as agent_type and no agent_name, so that name is both the role label
         # and the self-exclusion key.
-        member = agent_type if agent_type_names_a_member(agent_type, team_name) else ""
+        member = agent_type if agent_type_names_a_member(
+            agent_type, team_name, agent_id=input_data.get("agent_id")
+        ) else ""
 
         context = None
         if member:
