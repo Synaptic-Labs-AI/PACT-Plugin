@@ -263,6 +263,23 @@ def test_an_excerpt_quoted_inside_another_summary_record_does_not_match(tree):
     assert attribute(tree.frame("PostCompact", summary=summary), clock) == (co.LEAD, co.CONTENT)
 
 
+def test_a_later_summary_line_inside_another_summary_record_does_not_match(tree):
+    """A candidate counts only directly after a record's first "Summary:" line, not
+    after a later one that the summary itself quotes."""
+    summary, body = _quoting_summary()
+    tree.boundary(tree.teammate, at=ENTRY - timedelta(seconds=1))
+    quoted = BODY + "\n5. An older compaction record:\n\nSummary:\n" + _EXCERPT
+    tree.summary(tree.teammate, at=ENTRY - timedelta(seconds=1), body=quoted)
+    clock = Clock(on_sleep={2: lambda: (tree.boundary(tree.lead), tree.summary(tree.lead, body=body))})
+    assert attribute(tree.frame("PostCompact", summary=summary), clock) == (co.LEAD, co.CONTENT)
+
+
+def test_a_body_directly_after_the_first_summary_line_matches_despite_a_later_one(tree):
+    tree.boundary(tree.teammate)
+    tree.summary(tree.teammate, body=BODY + "\n5. An older compaction record:\n\nSummary:\nearlier work.")
+    assert attribute(tree.frame("PostCompact"), Clock()) == (co.TEAMMATE, co.CONTENT)
+
+
 def test_a_rendered_summary_pasted_into_an_ordinary_message_does_not_match(tree):
     """Only a record the platform marks as a compact summary can carry the body."""
     tree.boundary(tree.teammate)

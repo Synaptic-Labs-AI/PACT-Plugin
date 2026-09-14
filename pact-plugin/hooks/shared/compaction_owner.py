@@ -19,9 +19,9 @@ after a "Summary:" line, with runs of newlines collapsed to one blank line, so
 both sides are compared in that form. An analysis that quotes its own closing tag
 has no single end, so the body is taken under both the shortest and the longest
 reading of the block, and a record holding either one matches. A body counts only
-in a record marked isCompactSummary and only directly after its "Summary:" line,
-so text quoted in an ordinary message, or part-way through another summary, never
-matches.
+in a record marked isCompactSummary and only directly after its first "Summary:"
+line, so text quoted in an ordinary message, or part-way through another summary,
+never matches.
 The summary record can sit after another agent's message and be stamped before
 its boundary, so the match ignores order and the record's timestamp; freshness
 applies to boundaries only. SessionStart carries no content and is attributed
@@ -271,8 +271,8 @@ class _Reader:
         if self._bodies and len(line) >= self._shortest and b'"isCompactSummary"' in line:
             record = _record(line)
             if record.get("type") == "user" and record.get("isCompactSummary") is True:
-                text = _text(record)
-                if any("Summary:\n" + body in text for body in self._bodies):
+                _, sep, rest = _text(record).partition("Summary:\n")
+                if sep and any(rest.startswith(body) for body in self._bodies):
                     self._has_body.add(path)
 
 
