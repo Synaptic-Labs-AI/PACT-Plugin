@@ -75,7 +75,7 @@ class Session:
         self._append(path, {"type": "system", "subtype": "compact_boundary",
                             "content": "Conversation compacted", "timestamp": stamp})
         self._append(path, {"type": "user", "isCompactSummary": True, "timestamp": stamp,
-                            "message": {"role": "user", "content": "This session is being continued.\n"
+                            "message": {"role": "user", "content": "This session is being continued.\n\nSummary:\n"
                                         + _summary_bodies(compact_summary)[0]}})
 
     def run_both(self, sessionstart, postcompact):

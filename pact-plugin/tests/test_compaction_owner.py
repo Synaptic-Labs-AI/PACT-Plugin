@@ -96,7 +96,7 @@ class Tree:
     def summary(self, path, at=ENTRY, body=BODY):
         self.append(path, {"type": "user", "isCompactSummary": True, "timestamp": _iso(at),
                            "message": {"role": "user",
-                                       "content": "This session is being continued from a previous conversation.\n" + body}})
+                                       "content": "This session is being continued from a previous conversation.\n\nSummary:\n" + body}})
 
     def other_message(self, path, at=ENTRY):
         self.append(path, {"type": "user", "timestamp": _iso(at),
@@ -227,6 +227,48 @@ def test_a_summary_that_mentions_the_analysis_closing_tag_still_matches(tree):
     tree.summary(tree.teammate, body=body)
     summary = _analysed("Working notes that are not kept.", body=body)
     assert attribute(tree.frame("PostCompact", summary=summary), Clock()) == (co.TEAMMATE, co.CONTENT)
+
+
+_EXCERPT = ("An earlier compaction listed the files read, the counts sent to the team-lead "
+            "and the tasks still pending, one item per line. ") * 3
+
+
+def _quoting_summary():
+    """A lead summary that quotes an analysis closing tag and then a summary block,
+    so the longest analysis reading leaves the quoted excerpt as a second body."""
+    body = BODY + ("\n5. Notes: an earlier analysis quoted a </analysis> tag and then "
+                   f"<summary>{_EXCERPT}</summary> from a previous compaction.")
+    summary = f"<analysis>\nWorking notes that are not kept.\n</analysis>\n\n<summary>\n{body}\n</summary>"
+    return summary, body
+
+
+def test_an_excerpt_in_another_agents_ordinary_message_does_not_take_the_lead_summary(tree):
+    """A teammate compacted a second earlier and quotes the excerpt in an ordinary
+    message; the lead's own records land after two polls."""
+    summary, body = _quoting_summary()
+    assert co._summary_bodies(summary)[1:] == (_EXCERPT.strip(),), "the excerpt must be a candidate"
+    tree.boundary(tree.teammate, at=ENTRY - timedelta(seconds=1))
+    tree.append(tree.teammate, {"type": "user", "timestamp": _iso(ENTRY - timedelta(seconds=1)),
+                                "message": {"role": "user", "content": "Quoting it here: " + _EXCERPT}})
+    clock = Clock(on_sleep={2: lambda: (tree.boundary(tree.lead), tree.summary(tree.lead, body=body))})
+    assert attribute(tree.frame("PostCompact", summary=summary), clock) == (co.LEAD, co.CONTENT)
+
+
+def test_an_excerpt_quoted_inside_another_summary_record_does_not_match(tree):
+    """A candidate counts only directly after a summary record's "Summary:" line."""
+    summary, body = _quoting_summary()
+    tree.boundary(tree.teammate, at=ENTRY - timedelta(seconds=1))
+    tree.summary(tree.teammate, at=ENTRY - timedelta(seconds=1), body=BODY + "\n5. Quoted: " + _EXCERPT)
+    clock = Clock(on_sleep={2: lambda: (tree.boundary(tree.lead), tree.summary(tree.lead, body=body))})
+    assert attribute(tree.frame("PostCompact", summary=summary), clock) == (co.LEAD, co.CONTENT)
+
+
+def test_a_rendered_summary_pasted_into_an_ordinary_message_does_not_match(tree):
+    """Only a record the platform marks as a compact summary can carry the body."""
+    tree.boundary(tree.teammate)
+    tree.append(tree.teammate, {"type": "user", "timestamp": _iso(ENTRY),
+                                "message": {"role": "user", "content": "Pasting the last compaction:\n\nSummary:\n" + BODY}})
+    assert attribute(tree.frame("PostCompact"), Clock()) == (co.UNKNOWN, co.DEADLINE)
 
 
 def test_the_match_ignores_order_and_the_summary_timestamp(tree):
