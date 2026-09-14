@@ -643,7 +643,6 @@ def test_rule_6_tells_a_registered_teammate_to_ask_the_team_lead_in_a_fresh_proc
     )
     harness = (
         "import runpy, sys\n"
-        f"sys.path.insert(0, {str(plugin / 'hooks')!r})\n"
         "import shared.session_journal as journal\n"
         "def record(event, *_):\n"
         "    print('JOURNALED', event.get('decision'), event.get('rule'), file=sys.stderr)\n"
@@ -654,7 +653,7 @@ def test_rule_6_tells_a_registered_teammate_to_ask_the_team_lead_in_a_fresh_proc
     )
     env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
     env.update(HOME=str(tmp_path), CLAUDE_CONFIG_DIR=str(tmp_path / ".claude"),
-               CLAUDE_PLUGIN_ROOT=str(plugin))
+               CLAUDE_PLUGIN_ROOT=str(plugin), PYTHONPATH=str(plugin / "hooks"))
 
     proc = subprocess.run([sys.executable, "-c", harness], input=json.dumps(frame),
                           capture_output=True, text=True, timeout=60, env=env)
