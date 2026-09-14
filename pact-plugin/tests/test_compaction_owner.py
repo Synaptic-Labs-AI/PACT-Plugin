@@ -252,6 +252,47 @@ def test_an_unreadable_staged_file_is_parked_and_never_becomes_the_summary_file(
     assert "latency_s" not in event
 
 
+_PARK_CHILD = """
+import json, sys
+from shared import compaction_owner as co
+print(json.dumps(co.settle(sys.argv[1])))
+"""
+
+
+def test_a_fifo_pending_is_parked_unread_without_stalling(tree):
+    """Opening a FIFO blocks until a writer appears, so settle runs in a child
+    process that a timeout can end."""
+    os.mkfifo(tree.session / "compact-summary.pending-1000.json")
+    root = tree.project.parents[1]
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
+    env.update(PYTHONPATH=str(HOOKS), CLAUDE_CONFIG_DIR=str(root), HOME=str(root.parent))
+    try:
+        proc = subprocess.run([sys.executable, "-c", _PARK_CHILD, str(tree.session)],
+                              capture_output=True, text=True, timeout=15, env=env)
+    except subprocess.TimeoutExpired:
+        pytest.fail("settle blocked opening a FIFO pending")
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == [[co.UNKNOWN, co.EXPIRED]]
+    assert stat.S_ISFIFO(os.lstat(tree.session / "compact-summary.unattributed-1000.txt").st_mode)
+    [event] = tree.attributions()
+    assert (event["verdict"], event["basis"]) == ("unknown", "expired") and "latency_s" not in event
+
+
+def test_a_linked_pending_is_parked_without_reading_through_the_link(tree, tmp_path):
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps({"summary": "TEXT FROM OUTSIDE THE SESSION", "transcript_path": str(tree.lead),
+                                   "session_id": SID, "staged_at": STAGED.isoformat(), "offsets": {}}), encoding="utf-8")
+    before = outside.read_bytes()
+    (tree.session / "compact-summary.pending-1000.json").symlink_to(outside)
+    assert tree.settle(later(co.EXPIRE_S + 1)) == [(co.UNKNOWN, co.EXPIRED)]
+    parked = tree.session / "compact-summary.unattributed-1000.txt"
+    assert parked.is_symlink() and os.readlink(parked) == str(outside)
+    assert outside.read_bytes() == before
+    assert not tree.canonical.exists()
+    [event] = tree.attributions()
+    assert "latency_s" not in event
+
+
 def test_a_stamp_far_in_the_future_cannot_hold_the_queue(tree):
     tree.stage(at=STAGED + timedelta(days=1))
     assert tree.settle(Clock()) == [(co.UNKNOWN, co.EXPIRED)]

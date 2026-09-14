@@ -213,7 +213,9 @@ def _settle_one(folder, pending, staged_ns, wait_s, now, monotonic, sleep):
 
 
 def _resolve_claim(folder, pending, claim, staged_ns, wait_s, now, monotonic, sleep):
-    record = _load(claim)
+    # lstat sees a link itself, so only a regular file is ever opened: a FIFO
+    # would block the read, and a link would read outside the session dir.
+    record = _load(claim) if stat.S_ISREG(os.lstat(claim).st_mode) else None
     verdict = _owner(record)
     if verdict is None and record is not None and wait_s > 0 and _age(record, now) < FRESH_S:
         start = monotonic()
@@ -260,7 +262,10 @@ def _stamped(folder: Path, prefix: str, suffix: str) -> "list[tuple[int, Path]]"
 
 
 def _load(path: Path) -> "dict | None":
-    """The staged record, or None when it is unreadable or holds no summary."""
+    """The staged record, or None when it is unreadable or holds no summary.
+
+    Called only for a regular file that is not a link.
+    """
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError):
