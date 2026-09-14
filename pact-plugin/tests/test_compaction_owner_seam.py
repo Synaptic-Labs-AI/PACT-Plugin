@@ -3,9 +3,9 @@
 Runs `python3 hooks/session_init.py`, `hooks/postcompact_archive.py` and
 `hooks/bootstrap_gate.py` as child processes over a temporary config root laid
 out like the platform's: projects/<slug>/<sid>.jsonl for the lead, and
-<sid>/subagents/agent-*.jsonl for an in-process teammate. The order is the
-platform's: the compaction hooks run and return first, and only then does the
-compacting agent's summary record land in its transcript. The next Read of the
+<sid>/subagents/agent-*.jsonl for an in-process teammate. The order is the one
+every capture showed: the compaction hooks run and return, and the compacting
+agent's summary record lands in its transcript afterwards. The next Read of the
 summary file settles it through bootstrap_gate. Nothing is patched.
 
 REVERT CARDINALITY, measured on this file alone: with the settle call removed

@@ -120,8 +120,8 @@ captured live on 2026-09-14. PreCompact, SessionStart with `source: compact` and
 PostCompact all fire in the lead's process carrying the lead's `agent_type`,
 `session_id` and `transcript_path`, and no `agent_id`, `agent_name` or
 `agent_transcript_path`. No field separates them from the lead's own compaction
-frames, so `is_lead` is True for both. The transcript records that tell them
-apart are written only after the compaction hooks return, so
+frames, so `is_lead` is True for both. In every capture, the transcript records
+that tell them apart landed after the compaction hooks had returned, so
 `shared/compaction_owner.py` stages each PostCompact summary and settles whose
 it was later, from the transcripts, in `postcompact_archive`, `session_init` and
 `bootstrap_gate`. Committed shapes: `tests/fixtures/role_frames.py`

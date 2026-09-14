@@ -745,12 +745,13 @@ def _settle_before_summary_read(input_data: dict) -> None:
     """Settle staged compaction summaries before a Read or Bash that names one.
 
     postcompact_archive stages each summary instead of writing
-    compact-summary.txt, because the transcript records that say whose
-    compaction it was are written after the compaction hooks return. This hook
-    runs before the tool does, so settling here puts the lead's summary in place
-    before the read opens the file. Every other call pays one string test: the
-    import sits after that test and inside the try, so a broken module can never
-    reach this gate's decision. Never raises, and never changes the decision.
+    compact-summary.txt, because in every capture the transcript records that
+    say whose compaction it was landed after the compaction hooks had returned.
+    This hook runs before the tool does, so settling here puts the lead's
+    summary in place before the read opens the file. Every other call pays one
+    string test: the import sits after that test and inside the try, so a broken
+    module can never reach this gate's decision. Never raises, and never changes
+    the decision.
     """
     try:
         if input_data.get("tool_name") not in _SUMMARY_READ_TOOLS:

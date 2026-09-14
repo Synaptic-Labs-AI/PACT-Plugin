@@ -8,21 +8,21 @@ Used by: postcompact_archive.py (stage_summary, after a settle),
 
 An in-process teammate compacts inside the lead's process, and its compaction
 frames carry the lead's agent_type, session_id and transcript_path, so no frame
-field tells the two apart. The platform writes the compacting agent's summary
-record into that agent's own transcript only after the compaction hooks return,
-so no hook in the chain can see it. PostCompact therefore stages the summary as
-a pending file and never writes compact-summary.txt; settle() decides later,
-from a hook that runs after the record has landed.
+field tells the two apart. In every capture, the compacting agent's summary
+record landed in that agent's own transcript after the compaction hooks had
+returned, so no hook in the chain saw it. PostCompact therefore stages the
+summary as a pending file and never writes compact-summary.txt; settle() decides
+later, from a hook that runs after the record has landed.
 
 The transcript first drops the <analysis> block, then renders the text inside
 <summary> stripped, after a "Summary:" line, with runs of newlines collapsed to
 one blank line, so both sides are compared in that form. Either block may quote
 its own closing tag and then has no single end, so each is read at its shortest
-and at its longest, and a record holding any resulting body matches. A body counts only in a record marked isCompactSummary and only
-directly after its first "Summary:" line, so text quoted in an ordinary message,
-or part-way through another summary, never matches. Each transcript is read
-from its size at stage time, so a summary recorded before the compaction never
-matches.
+and at its longest, and a record holding any resulting body matches. A body
+counts only in a record marked isCompactSummary and only directly after its
+first "Summary:" line, so text quoted in an ordinary message, or part-way
+through another summary, never matches. Each transcript is read from its size
+at stage time, so a summary recorded before the compaction never matches.
 
 The lead's transcript is the staged frame's transcript_path, and a teammate's is
 <transcript dir>/<session_id>/subagents/agent-*.jsonl. A match in the lead's

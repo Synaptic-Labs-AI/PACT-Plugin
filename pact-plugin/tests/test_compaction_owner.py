@@ -1,7 +1,8 @@
 """Tests for hooks/shared/compaction_owner.py.
 
-An in-process teammate's compaction frames are lead-shaped, and the transcript
-records that tell the two apart land only after the compaction hooks return. So
+An in-process teammate's compaction frames are lead-shaped, and in every capture
+the transcript records that tell the two apart landed after the compaction hooks
+had returned. So
 PostCompact stages the summary and settle() decides later. Every arm builds a
 temporary projects/ tree under the config root the autouse fixture redirects
 to, stages through stage_summary, and drives settle() with a fake clock: `now`
