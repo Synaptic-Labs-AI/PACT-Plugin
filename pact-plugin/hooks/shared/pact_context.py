@@ -1300,8 +1300,7 @@ def is_lead(input_data: dict) -> bool:
     and PostCompact. ONE EXCEPTION, captured live: an in-process teammate's
     compaction frames (PreCompact, SessionStart with ``source: compact``, and
     PostCompact) fire in the lead's process carrying the LEAD's ``agent_type``,
-    so this predicate returns True for them. ``shared/compaction_owner.py``
-    attributes those frames from the transcripts. The signal is VALUE-MEMBERSHIP,
+    so this predicate returns True for them. The signal is VALUE-MEMBERSHIP,
     not field-presence: a lead
     stamps one of the two ``LEAD_AGENT_TYPES`` spellings, a teammate stamps its
     specialist value (e.g. ``pact-architect``), and a plain / non-PACT primary

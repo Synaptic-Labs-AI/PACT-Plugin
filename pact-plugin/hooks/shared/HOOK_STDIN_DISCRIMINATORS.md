@@ -120,8 +120,7 @@ captured live on 2026-09-14. PreCompact, SessionStart with `source: compact` and
 PostCompact all fire in the lead's process carrying the lead's `agent_type`,
 `session_id` and `transcript_path`, and no `agent_id`, `agent_name` or
 `agent_transcript_path`. No field separates them from the lead's own compaction
-frames, so `is_lead` is True for both. `shared/compaction_owner.py` attributes
-them from the transcripts instead. Committed shapes: `tests/fixtures/role_frames.py`
+frames, so `is_lead` is True for both. Committed shapes: `tests/fixtures/role_frames.py`
 `captured_compaction_teammate_*` and `captured_compaction_lead_*`.
 Separate-process (tmux) teammate compaction frames and plain PostCompact shapes
 remain matrix-inferred.

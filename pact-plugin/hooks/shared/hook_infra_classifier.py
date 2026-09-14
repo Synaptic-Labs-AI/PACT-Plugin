@@ -81,11 +81,6 @@ SEAM_DEPENDENT_HOOKS: frozenset[str] = frozenset({
     # background-work registry, and writes a told-once file and a journal
     # trace. Its block fails silent on a broken seam: see L3_LIVE_PROBE_HOOKS.
     "stop_background_gate",
-    # postcompact_archive: it reads the platform's transcripts to decide whose
-    # compaction a lead-shaped frame is, and writes the session's compact
-    # summary and a journal verdict. Its L2 test runs the real hooks over a
-    # temporary projects tree.
-    "postcompact_archive",
 })
 
 # Hooks confirmed to FAIL SILENTLY on a broken seam (a consequential effect that
@@ -110,16 +105,9 @@ SEAM_DEPENDENT_HOOKS: frozenset[str] = frozenset({
 # broken seam the role resolves to nothing and the stop is allowed with no
 # error, so the block silently never fires. validate_handoff was promoted from
 # L3_CANDIDATE_HOOKS for that reason.
-#
-# session_init and postcompact_archive joined with teammate-compaction
-# attribution. Each keeps an in-process teammate's compaction out of the lead's
-# files by reading the platform's transcripts. On a broken seam the verdict falls
-# to unknown and the hook does what it did before, so the suppression silently
-# never fires. missed_wake_scan's compaction gate fails the same way.
 L3_LIVE_PROBE_HOOKS: frozenset[str] = frozenset({
     "missed_wake_scan", "teammate_idle", "agent_handoff_emitter",
     "task_lifecycle_gate", "stop_background_gate", "validate_handoff",
-    "session_init", "postcompact_archive",
 })
 
 # Seam-dependent hooks ASSESSED in the CODE-phase fails-silent check and HELD at
@@ -168,7 +156,7 @@ L3_CANDIDATE_HOOKS: frozenset[str] = frozenset({
 # derivation).
 _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
     "missed_wake_scan": frozenset({
-        "background_launch", "background_work", "compaction_owner",
+        "background_launch", "background_work",
         "constants", "intentional_wait", "pact_context",
         "paths",
         "session_journal", "session_registry", "session_state", "state_file",
@@ -199,7 +187,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # (agent_handoff_marker, session_journal) were already here.
     "session_init": frozenset({
         "backlog_store",
-        "claude_md_manager", "compaction_owner", "constants", "dispatch_helpers", "failure_cause",
+        "claude_md_manager", "constants", "dispatch_helpers", "failure_cause",
         "failure_log", "git_helpers", "handoff_schema",
         "merge_guard_common", "pact_config", "pact_context", "paths",
         "peer_context", "pin_caps", "plugin_manifest", "project_scope",
@@ -220,11 +208,6 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "constants", "error_output", "pact_context", "paths", "session_journal",
         "session_registry", "session_state", "task_utils",
     }),
-    "postcompact_archive": frozenset({
-        "compaction_owner", "constants", "error_output", "pact_context", "paths",
-        "session_journal", "session_registry", "session_state",
-    }),  # compaction_owner reached via the compaction attribution;
-         # session_journal via the compaction_attributed verdict event.
     "dispatch_gate": frozenset({
         "background_launch", "background_work", "constants",
         "dispatch_helpers", "intentional_wait", "pact_config", "pact_context",

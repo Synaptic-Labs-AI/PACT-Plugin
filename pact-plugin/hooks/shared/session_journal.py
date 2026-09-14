@@ -101,12 +101,6 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # the load-bearing fields downstream consumers depend on; team is
     # redundant with CLAUDE.md and worktree is empty at write time.
     "session_start": {"session_id": str, "project_dir": str},
-    # hooks/postcompact_archive.py writes compaction_attributed on every run
-    # where it asks shared.compaction_owner whose compaction a lead-shaped frame
-    # is. verdict is teammate, lead or unknown; basis is content, timing,
-    # deadline or no_signal. An unknown verdict keeps the hook's lead behaviour,
-    # and this event is what makes that fallback visible.
-    "compaction_attributed": {"verdict": str, "basis": str},
     # commands/orchestrate.md writes variety_assessed with task_id (quoted
     # string) and variety (nested JSON object → dict). This is the FEATURE-level
     # variety (written once for the feature task) — distinct from the
