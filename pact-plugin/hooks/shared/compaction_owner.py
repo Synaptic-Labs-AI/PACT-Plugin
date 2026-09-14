@@ -107,7 +107,9 @@ def stage_summary(frame: Any, session_dir: str, *, now: Callable[[], datetime] =
 
     Reads only compact_summary, session_id and transcript_path. Records each
     transcript's size now, so settle() reads only what is written after the
-    compaction. Never touches compact-summary.txt. True when the file was written.
+    compaction. When the sizes cannot be read, the summary is staged without them
+    and settle() reads each transcript from its start. Never touches
+    compact-summary.txt. True when the file was written.
     """
     try:
         summary = frame.get("compact_summary")
@@ -115,8 +117,11 @@ def stage_summary(frame: Any, session_dir: str, *, now: Callable[[], datetime] =
             return False
         transcript = frame.get("transcript_path")
         session_id = frame.get("session_id")
-        located = _locate(transcript, session_id)
-        offsets = {str(path): status.st_size for path, status in _transcripts(*located)} if located else {}
+        try:
+            located = _locate(transcript, session_id)
+            offsets = {str(path): status.st_size for path, status in _transcripts(*located)} if located else {}
+        except Exception:
+            offsets = {}
         record = {
             "summary": summary,
             "transcript_path": transcript,

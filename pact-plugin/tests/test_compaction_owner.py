@@ -185,6 +185,23 @@ def test_stage_records_no_offsets_when_the_transcripts_cannot_be_located(tree):
     assert json.loads(pending.read_text(encoding="utf-8"))["offsets"] == {}
 
 
+def test_an_offset_failure_stages_the_summary_without_offsets(tree, monkeypatch):
+    """A transcript that vanishes between locating it and reading its size must
+    not cost the summary: it is staged without offsets and read from the start."""
+    real_transcripts = co._transcripts
+
+    def vanished(*args):
+        raise FileNotFoundError("the transcript went away before its size was read")
+
+    monkeypatch.setattr(co, "_transcripts", vanished)
+    pending = tree.stage()
+    record = json.loads(pending.read_text(encoding="utf-8"))
+    assert (record["summary"], record["offsets"]) == (SUMMARY, {})
+    monkeypatch.setattr(co, "_transcripts", real_transcripts)
+    tree.summary(tree.lead)
+    assert tree.settle(later(9)) == [(co.LEAD, co.CONTENT)]
+
+
 # --------------------------------------------------------------------------
 # Settle: the verdicts
 # --------------------------------------------------------------------------
