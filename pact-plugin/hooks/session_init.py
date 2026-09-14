@@ -1280,20 +1280,6 @@ def main():
             input_data = {}
             stdin_json_error = str(exc)
 
-        # An in-process teammate compacts inside the lead's process, and its
-        # SessionStart frame is lead-shaped. When the transcripts attribute the
-        # compaction to a teammate, stop before any output or write: the lead's
-        # env file, session dir, context file, journal and CLAUDE.md stay as
-        # they are. Lead and unknown verdicts continue below unchanged.
-        if (
-            isinstance(input_data, dict)
-            and input_data.get("source") == "compact"
-            and is_lead(input_data)
-            and compaction_owner.teammate_compaction(input_data)
-        ):
-            print(json.dumps({"suppressOutput": True}))
-            sys.exit(0)
-
         # Resolve-once: the env value verbatim when the platform delivers it,
         # else the absolute cwd (os.getcwd() is always absolute and physical —
         # matching the platform's own resolved CLAUDE_PROJECT_DIR). This single
@@ -1308,6 +1294,23 @@ def main():
         # exported (the structural guard).
         if os.environ.get("CLAUDE_ENV_FILE") and os.environ.get("CLAUDE_PROJECT_DIR"):
             _persist_project_dir_env(project_dir)
+
+        # An in-process teammate compacts inside the lead's process, and its
+        # SessionStart frame is lead-shaped. When the transcripts attribute the
+        # compaction to a teammate, stop before any output or other write: the
+        # lead's session dir, context file, journal and CLAUDE.md stay as they
+        # are. The env-file export above still runs, because it carries the
+        # same project dir from the same process and is deduplicated. Lead and
+        # unknown verdicts continue below unchanged.
+        if (
+            isinstance(input_data, dict)
+            and input_data.get("source") == "compact"
+            and is_lead(input_data)
+            and compaction_owner.teammate_compaction(input_data)
+        ):
+            print(json.dumps({"suppressOutput": True}))
+            sys.exit(0)
+
         context_parts = []
         system_messages = []
 

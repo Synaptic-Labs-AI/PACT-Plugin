@@ -9,7 +9,10 @@ is called, and a callback can append records on the Nth sleep.
 
 import ast
 import json
+import os
 import re
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -250,13 +253,80 @@ def test_no_usable_summary_falls_back_to_timing(tree, summary):
     tree.summary(tree.teammate, body="too short to match")
     clock = Clock()
     assert attribute(tree.frame("PostCompact", summary=summary), clock) == (co.TEAMMATE, co.TIMING)
-    assert clock.slept >= co.T_POSTCOMPACT
+    assert clock.slept >= co.LEAD_GUARD_S
+
+
+def test_a_lead_boundary_within_the_lead_guard_wins_the_postcompact_fallback(tree):
+    """With no usable summary, PostCompact falls back to the SessionStart guard, so
+    a lead boundary that lands after the content deadline still wins."""
+    tree.boundary(tree.teammate)
+    clock = Clock(on_sleep={16: lambda: tree.boundary(tree.lead)})
+    assert attribute(tree.frame("PostCompact", summary="no summary block at all"), clock) == (co.LEAD, co.TIMING)
+    assert co.T_POSTCOMPACT < clock.slept < co.LEAD_GUARD_S
 
 
 def test_postcompact_with_no_match_ends_at_its_deadline(tree):
     clock = Clock()
     assert attribute(tree.frame("PostCompact"), clock) == (co.UNKNOWN, co.DEADLINE)
     assert co.T_POSTCOMPACT <= clock.slept <= co.T_POSTCOMPACT + co.POLL_S
+
+
+def test_a_candidate_that_resolves_outside_its_folder_is_skipped(tree, tmp_path):
+    outside = tmp_path / "outside" / "planted.jsonl"
+    outside.parent.mkdir()
+    tree.boundary(outside)
+    tree.summary(outside)
+    (tree.subagents / "agent-aplanted-0123456789abcdef.jsonl").symlink_to(outside)
+    assert attribute(tree.frame("PostCompact"), Clock()) == (co.UNKNOWN, co.DEADLINE)
+
+
+def test_a_candidate_that_resolves_inside_its_folder_is_read(tree):
+    """The containment check follows a link rather than refusing every link."""
+    target = tree.subagents / "agent-atarget-0123456789abcdef.jsonl.data"
+    tree.boundary(target)
+    tree.summary(target)
+    (tree.subagents / "agent-alinked-0123456789abcdef.jsonl").symlink_to(target)
+    assert attribute(tree.frame("PostCompact"), Clock()) == (co.TEAMMATE, co.CONTENT)
+
+
+def test_a_record_nested_past_the_parser_limit_does_not_discard_a_match(tree):
+    """A line too deeply nested to decode is skipped like any other unparseable line."""
+    deep = tree.subagents / "agent-adeep-0123456789abcdef.jsonl"
+    depth = 500_000
+    deep.write_text("[" * depth + '"compact_boundary"' + "]" * depth + "\n", encoding="utf-8")
+    assert deep.stat().st_size < co.READ_BACK_BYTES
+    with pytest.raises(RecursionError):
+        json.loads(deep.read_bytes())
+    tree.boundary(tree.teammate)
+    tree.summary(tree.teammate)
+    assert attribute(tree.frame("PostCompact"), Clock()) == (co.TEAMMATE, co.CONTENT)
+
+
+_FIFO_CHILD = """
+import json, sys
+from shared import compaction_owner as co
+elapsed = [0.0]
+def sleep(seconds):
+    elapsed[0] += seconds
+verdict = co.attribute_compaction(json.loads(sys.argv[1]), monotonic=lambda: elapsed[0], sleep=sleep)
+print(json.dumps(verdict))
+"""
+
+
+def test_a_fifo_candidate_is_never_opened(tree):
+    """Opening a FIFO blocks until a writer appears, before any deadline check, so
+    the predicate runs in a child process that a timeout can end."""
+    os.mkfifo(tree.subagents / "agent-afifo-0123456789abcdef.jsonl")
+    root = tree.project.parents[1]
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
+    env.update(PYTHONPATH=str(HOOKS), CLAUDE_CONFIG_DIR=str(root), HOME=str(root.parent))
+    try:
+        proc = subprocess.run([sys.executable, "-c", _FIFO_CHILD, json.dumps(tree.frame("PostCompact"))],
+                              capture_output=True, text=True, timeout=15, env=env)
+    except subprocess.TimeoutExpired:
+        pytest.fail("the predicate blocked opening a FIFO candidate")
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == [co.UNKNOWN, co.DEADLINE]
 
 
 # --------------------------------------------------------------------------
@@ -465,16 +535,19 @@ def _first_call_lines(func, names):
     return lines
 
 
-def test_session_init_gates_before_every_write():
+def test_session_init_exports_the_env_file_then_gates_before_every_other_write():
     tree = ast.parse((HOOKS / "session_init.py").read_text(encoding="utf-8"))
     main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
-    writes = {"_persist_project_dir_env", "_adopt_old_slug_session_dir", "persist_context",
-              "append_event", "update_session_info"}
-    lines = _first_call_lines(main, writes | {"teammate_compaction"})
+    export = {"_persist_project_dir_env"}
+    writes = {"_adopt_old_slug_session_dir", "persist_context", "append_event", "update_session_info"}
+    lines = _first_call_lines(main, export | writes | {"teammate_compaction"})
     assert "teammate_compaction" in lines, "session_init.main never asks who compacted"
-    assert writes <= set(lines), sorted(writes - set(lines))
-    later = {name: line for name, line in lines.items() if name in writes and line < lines["teammate_compaction"]}
-    assert not later, f"these writes run before the teammate gate: {later}"
+    assert export | writes <= set(lines), sorted(export | writes - set(lines))
+    gate = lines["teammate_compaction"]
+    early = {name: line for name, line in lines.items() if name in writes and line < gate}
+    assert not early, f"these writes run before the teammate gate: {early}"
+    late = {name: line for name, line in lines.items() if name in export and line > gate}
+    assert not late, f"the env-file export runs after the teammate gate: {late}"
 
 
 @pytest.mark.parametrize("hook", ["postcompact_archive.py", "session_init.py", "missed_wake_scan.py"])

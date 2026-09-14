@@ -23,7 +23,8 @@ The summary record can sit after another agent's message and be stamped before
 its boundary, so the match ignores order and the record's timestamp; freshness
 applies to boundaries only. SessionStart carries no content and is attributed
 by timing: a fresh lead boundary means the lead, and a fresh subagent boundary
-with no lead boundary by LEAD_GUARD_S means a teammate.
+with no lead boundary by LEAD_GUARD_S means a teammate. A PostCompact with no
+usable body uses the same timing rule.
 
 Only a teammate verdict should change a caller's behaviour. unknown keeps
 today's behaviour, because suppressing a real lead's summary or directive is
@@ -35,6 +36,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -109,7 +111,7 @@ def attribute_compaction(
         if event == "PostCompact" and bodies:
             return _by_content(reader, start, monotonic, sleep)
         if event == "PostCompact":
-            return _by_timing(reader, start, T_POSTCOMPACT, T_POSTCOMPACT, monotonic, sleep)
+            return _by_timing(reader, start, LEAD_GUARD_S, LEAD_GUARD_S, monotonic, sleep)
         return _by_timing(reader, start, LEAD_GUARD_S, T_SESSIONSTART, monotonic, sleep)
     except Exception:
         return UNKNOWN, NO_SIGNAL
@@ -206,12 +208,26 @@ class _Reader:
     def poll(self) -> None:
         self._read(self._lead)
         for path in self._subagents.glob("agent-*.jsonl"):
-            try:
-                if os.stat(path).st_mtime < self._since:
-                    continue
-            except OSError:
+            status = self._candidate_stat(path)
+            if status is None or status.st_mtime < self._since:
                 continue
             self._read(path)
+
+    def _candidate_stat(self, path: Path) -> "os.stat_result | None":
+        """The stat of a regular file that resolves inside the subagents folder, or None.
+
+        A link out of the folder is not read, and neither is a FIFO or device,
+        which would block the open before any deadline is checked.
+        """
+        folder = str(self._subagents)
+        try:
+            real = os.path.realpath(path)
+            if real == folder or os.path.commonpath([real, folder]) != folder:
+                return None
+            status = os.stat(real)
+        except (OSError, ValueError):
+            return None
+        return status if stat.S_ISREG(status.st_mode) else None
 
     def fresh_boundary(self, side: str) -> bool:
         return any(self._side(path) == side for path in self._boundary)
@@ -267,7 +283,7 @@ def _seek_point(path: Path) -> int:
 def _record(line: bytes) -> dict:
     try:
         record = json.loads(line)
-    except ValueError:
+    except (ValueError, RecursionError):
         return {}
     return record if isinstance(record, dict) else {}
 

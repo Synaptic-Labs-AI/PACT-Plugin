@@ -7367,13 +7367,13 @@ class TestTeammateCompactionGate:
         calls = {name: spy.call_count for name, spy in spies.items()}
         return exc.value.code, out.getvalue(), calls, asked, env_file.read_text(encoding="utf-8")
 
-    def test_a_teammate_compaction_prints_suppress_output_and_writes_nothing(self, monkeypatch, tmp_path):
+    def test_a_teammate_compaction_exports_the_env_file_and_writes_nothing_else(self, monkeypatch, tmp_path):
         code, out, calls, asked, env_file = self._run(monkeypatch, tmp_path)
         assert code == 0
         assert json.loads(out) == {"suppressOutput": True}
-        assert calls == dict.fromkeys(self.WRITES, 0)
+        assert calls == {**dict.fromkeys(self.WRITES, 0), "_persist_project_dir_env": 1}
         assert len(asked) == 1
-        assert env_file == ""
+        assert "CLAUDE_PROJECT_DIR" in env_file
 
     def test_a_lead_or_unknown_verdict_runs_the_compact_path(self, monkeypatch, tmp_path):
         code, out, calls, asked, env_file = self._run(monkeypatch, tmp_path, teammate=False)
