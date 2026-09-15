@@ -391,10 +391,16 @@ def get_pact_context() -> dict:
 # candidate team's tasks/<dir>/ store mtime must be within this window of
 # "now" to count as LIVE. RESUME_CENSUS_RECENCY_SECONDS = 900 (15 minutes)
 # — minutes-scale so a resume followed by a delayed dispatch still lands
-# inside the window, while aged stores fall out. The window is a NARROWING
-# parameter only: zero or >= 2 surviving candidates always fail safe to the
-# persisted default, so a mis-tuned window can only suppress the census,
-# never mis-align.
+# inside the window, while aged stores fall out. The window NARROWS the
+# candidate set only; it is never an ownership signal. Zero or >= 2
+# CORROBORATED survivors always fail safe to the persisted default, so a
+# mis-tuned window cannot admit anything that failed the ownership proof.
+# It is no longer purely suppressive, though: since the census corroborates
+# before counting, WIDENING the window can turn a zero-survivor world into
+# a one-survivor world, and if that survivor is the same-directory sibling
+# named in _resume_census_candidate_corroborated's residual note, a wider
+# window reaches it. Retune DOWNWARD freely; retune upward only with that
+# residual in mind.
 RESUME_CENSUS_RECENCY_SECONDS = 900
 
 # Journal event types proving prior TEAM ACTIVITY for the branch-3 census
@@ -493,8 +499,9 @@ def _resume_census_candidate_corroborated(
 
     Set-uniqueness alone proves nothing (a sibling session's fresh store can
     be the unique candidate whenever this session's own team is unborn), so
-    the unique candidate must additionally corroborate as THIS session's
-    team, by mechanism:
+    EVERY candidate must corroborate as THIS session's team before the
+    census counts survivors at all (see _resume_census_unique_candidate's
+    ORDER IS LOAD-BEARING note), by mechanism:
 
       * LEAD ENTRY: the config's members[] entry whose agentId EQUALS the
         config's leadAgentId (the platform's first-class key — NOT a
@@ -523,6 +530,24 @@ def _resume_census_candidate_corroborated(
     is out of scope by construction. Residual hole: a sibling BORN between
     this session's end marker and its resume, running from the same
     directory.
+
+    REACHABILITY OF THAT RESIDUAL WIDENED when the census moved to
+    corroborate-then-count. It is the SAME hole — nothing that fails this
+    predicate is ever admitted — but it used to require the sibling to be
+    the census's ONLY candidate, and the raw-count rule was therefore
+    masking it whenever any other live team happened to exist. It no
+    longer is: a same-directory sibling that corroborates now wins while
+    other, non-corroborating candidates sit alongside it. That masking was
+    never a designed control (it is the same "environmental accident" this
+    docstring says proves nothing), so it was not load-bearing — but the
+    honest statement of the trade is that the fix bought realignment for
+    concurrent-session users at the cost of making this documented residual
+    reachable in more environments. Deliberately NOT closed by making
+    BIRTH ORDER mandatory: that gate is skipped when the journal has no end
+    marker precisely so crash-resumes still realign, and refusing them to
+    narrow this residual is the worse trade. Pinned by
+    test_f1_same_cwd_residual_is_pinned; flip that cell WITH any future
+    hardening.
 
     Never raises: any parse/compare failure corroborates nothing (False),
     which suppresses the census (fail-safe direction).
@@ -588,25 +613,50 @@ def _own_tasks_store_fresh(teams_root: Path, session_id: str) -> bool:
 
 
 def _resume_census_unique_candidate(teams_root: Path, session_id: str) -> str | None:
-    """Branch-3 census (#1507): the single LIVE re-provisioned team, if
-    unambiguous AND corroborated as this session's own.
+    """Branch-3 census (#1507): the single LIVE re-provisioned team that
+    CORROBORATES as this session's own — "unique" means unique among the
+    candidates that proved ownership, not unique on disk.
 
     Enumerates teams/*/config.json. A dir is a CANDIDATE iff its
     config.json carries a REAL string leadSessionId DIFFERENT from this
     session's id (a config missing/null on the field is malformed and
     never counts) AND its sibling tasks/<dir>/ store mtime falls within
-    RESUME_CENSUS_RECENCY_SECONDS of now (the "live team" signal). Returns
-    the dir name only when EXACTLY ONE candidate survives AND that
-    candidate corroborates as this session's team (see
-    _resume_census_candidate_corroborated — F1: uniqueness is an
-    environmental accident, never an ownership proof). None on zero, on
-    >= 2 (two simultaneous broken resumes -> stale default), on an
-    UNCORROBORATED unique candidate (pre-birth window / foreign sibling ->
-    fail-safe suppression), or on any error.
+    RESUME_CENSUS_RECENCY_SECONDS of now (the "live team" signal).
+    Corroboration is then applied to EVERY candidate (see
+    _resume_census_candidate_corroborated) and the dir name is returned
+    only when EXACTLY ONE candidate SURVIVES that proof. None on zero
+    survivors (pre-birth window / only foreign siblings -> fail-safe
+    suppression), on >= 2 survivors (genuinely ambiguous OWNERSHIP, e.g.
+    two simultaneous broken resumes -> stale default), or on any error.
+
+    ORDER IS LOAD-BEARING — corroborate, THEN count. Counting the RAW
+    candidate set first (the original #1507 shape) rejected the whole set
+    whenever a second team was merely alive, and a concurrently-live PEER
+    session's team is a candidate on exactly the same terms as this
+    session's own re-provisioned team. So the accident of how many
+    sessions happen to be running suppressed the predicate that
+    discriminates them, and no user running parallel sessions could ever
+    realign a resumed one. F1's point stands and is why the count is kept
+    at all: uniqueness is an environmental accident, never an ownership
+    proof — so it now bounds the PROOF (>= 2 candidates that each proved
+    ownership is a real ambiguity worth failing safe on) rather than the
+    accident.
+
+    For zero or one candidate this is IDENTICAL to counting first: the
+    survivor set is a subset of the candidate set, so a lone candidate
+    yields {} or {itself} on either order. The reorder is observable ONLY
+    when >= 2 candidates exist, where the old order always returned None.
+    It therefore admits nothing that fails the ownership proof; what it
+    widens is the REACHABILITY of the residual named in
+    _resume_census_candidate_corroborated's trust-boundary note (a
+    same-directory sibling can now win while other, non-corroborating
+    candidates sit alongside it, where before it had to be alone).
 
     The corroboration lives HERE, inside the get_team_name resolution path,
     so the marker-writer write-back (which calls get_team_name) can never
-    persist an uncorroborated winner.
+    persist an uncorroborated winner. Both callers inherit this: branch 3
+    AND branch 2's #1509 preemption guard (which layers its own stricter
+    conjuncts on top).
 
     Pure / FS-read-only / NEVER raises — same contract as the resolver that
     calls it. The tasks root is derived as the SIBLING of teams_root
@@ -647,15 +697,27 @@ def _resume_census_unique_candidate(teams_root: Path, session_id: str) -> str | 
                     AttributeError):
                 # Unreadable / malformed sibling — skip it, keep scanning.
                 continue
-        if len(candidates) != 1:
-            # Zero or >= 2: ambiguous -> fail-safe stale default.
+        # CORROBORATE FIRST, THEN count (#1507 follow-up). The ownership
+        # proof is applied to EVERY candidate before any count is taken,
+        # because the raw candidate count is an ENVIRONMENTAL ACCIDENT: a
+        # concurrently-live PEER session's team is a candidate on exactly the
+        # same terms as this session's own re-provisioned team, so counting
+        # first rejected BOTH on COUNT and never consulted the predicate that
+        # discriminates them. Measured: a resumed session with one peer
+        # session live returned the phantom persisted name, and PACT dispatch
+        # stayed dead for the whole session — the failure mode for anyone who
+        # runs two Claude sessions at once.
+        survivors = [
+            name for name, config in candidates
+            if _resume_census_candidate_corroborated(name, config)
+        ]
+        if len(survivors) != 1:
+            # Zero (nothing PROVED ownership: pre-birth window / only foreign
+            # siblings) or >= 2 (genuinely ambiguous OWNERSHIP, e.g. two
+            # simultaneous broken resumes): fail-safe stale default. The
+            # count now bounds the proof, not the accident.
             return None
-        winner_name, winner_config = candidates[0]
-        if not _resume_census_candidate_corroborated(winner_name, winner_config):
-            # Unique but UNBOUND to this session (pre-birth window / foreign
-            # sibling): suppress — never return a uniqueness-only winner.
-            return None
-        return winner_name
+        return survivors[0]
     except Exception:
         # Total fail-safe: the census is an upgrade path, never a new raise
         # source. Any unexpected error -> "no candidate" -> stale default.
@@ -692,17 +754,20 @@ def _resolve_aligned_team_name(
     the inline branch-2 comment) both miss, a RESUMED session
     (clean end-session reaped the old team config; a new team + task store
     was provisioned under a new id while hook frames still carry the OLD
-    session id) can still be realigned: census the teams root for the
-    single LIVE re-provisioned team (config leadSessionId != this session's
-    id, tasks store mtime within RESUME_CENSUS_RECENCY_SECONDS), and return
-    it only if it CORROBORATES as this session's team (lead member cwd
-    anchor + birth order — see _resume_census_candidate_corroborated; F1:
-    uniqueness alone is not an ownership proof). Gated by a journal
+    session id) can still be realigned: census the teams root for LIVE
+    re-provisioned teams (config leadSessionId != this session's id, tasks
+    store mtime within RESUME_CENSUS_RECENCY_SECONDS), require EVERY such
+    candidate to CORROBORATE as this session's team (lead member cwd anchor
+    + birth order — see _resume_census_candidate_corroborated; F1:
+    uniqueness alone is not an ownership proof), and return the winner only
+    when exactly ONE candidate survives that proof. Gated by a journal
     lived-session witness (prior team activity in THIS session's journal —
     kills cold-start concurrent-session cross-alignment) and by the
     fallback team's config being ABSENT (post-convergence the census goes
-    inert). UNAMBIGUOUS-only: exactly one candidate wins; zero, >= 2, or an
-    uncorroborated unique candidate fall to the fail-safe default. See the
+    inert). UNAMBIGUOUS-only, over the CORROBORATED set: zero or >= 2
+    survivors fall to the fail-safe default. Counting raw candidates first
+    (the original shape) meant any second live team — a peer session's,
+    not a rival claim to this one — suppressed the census entirely. See the
     inline branch-3 comment.
 
     FAIL-SAFE DEFAULT: on no identity match (the team dir is half-formed —
@@ -825,12 +890,23 @@ def _resolve_aligned_team_name(
         # default, never the dead dir). The census is consulted ONLY when
         # the witness holds and the own store is stale, and _resume_census_
         # unique_candidate already enforces the cycle-1 corroboration — an
-        # uncorroborated unique candidate returns None and CANNOT preempt,
-        # so the F1 hole cannot reopen through this path. In every
+        # uncorroborated candidate can never be a survivor and so CANNOT
+        # preempt, so the F1 hole cannot reopen through this path. In every
         # census-empty world (including every #989 fixture with an empty
         # teams root) this is byte-identical to the pre-guard branch-2.
         # Preemption additionally requires an END MARKER in this session's
         # journal (N1): only an ENDED substrate may be preempted.
+        #
+        # INHERITED (#1507 follow-up): the census now corroborates EVERY
+        # candidate before counting survivors, and this call site inherits
+        # that — a corroborated winner can preempt a dead-looking own
+        # substrate in worlds where a second, non-corroborating live team
+        # also exists, which the raw-count rule previously refused. The
+        # change is deliberate and not confined to branch 3: this branch was
+        # blind to exactly the same concurrent-session accident. Every
+        # branch-2-specific conjunct above is unchanged, so preemption still
+        # requires the substrate witness, a stale own store, an end marker,
+        # AND corroboration.
         census_winner: str | None = None
         if (
             is_safe_path_component(session_id)
@@ -879,8 +955,16 @@ def _resolve_aligned_team_name(
         #     cold-start concurrent-session cross-alignment: a fresh
         #     session's journal has no prior activity, so its census never
         #     fires even when another live session is the sole candidate.
-        # UNAMBIGUOUS-only: zero or >= 2 candidates -> fall through to the
-        # fail-safe default, byte-identical to today.
+        # UNAMBIGUOUS-only, over the CORROBORATED set (#1507 follow-up):
+        # every candidate is put through the ownership proof FIRST, and
+        # zero or >= 2 SURVIVORS fall through to the fail-safe default.
+        # Counting raw candidates first made a second live team — typically
+        # a peer session the user happens to be running, which claims
+        # nothing about this session — suppress the census wholesale, so a
+        # resumed session could never realign while any other session was
+        # alive. Nothing that fails the proof is admitted by the reorder;
+        # see _resume_census_unique_candidate for the order rationale and
+        # the residual-reachability trade it carries.
         if (
             fallback
             and is_safe_path_component(fallback)
