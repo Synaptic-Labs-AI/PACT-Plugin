@@ -132,14 +132,15 @@ UNFLAGGED_IDLE_THRESHOLD = 3
 # it did not start and cannot flag. The row is what marks it as someone else's.
 #
 # WHY THE ROW CARRIES NO TASK IDS. A subagent holds no task by construction, so
-# there is no anchor task to list. Every task-keyed reader of this store —
+# there is no anchor task to list. The task-keyed readers of this store —
 # matching_outstanding, any_listed_task_flagged, has_live_listed_task,
-# discharge_acknowledged_for_owner, extend_records_for_claim and
-# missed_wake_scan.find_unanchored_waits — skips a row it cannot match a task
-# to, so an empty list already keeps a subagent row out of every TEAMMATE
-# surface. This marker is what AUTHORISES that empty list past
-# _sanitize_record, and what states the role rather than leaving the next
-# reader to infer it from an empty field.
+# discharge_acknowledged_for_owner and missed_wake_scan.find_unanchored_waits —
+# skip a row they cannot match a task to, except that has_live_listed_task
+# passes any row whose anchor_completed is True, whatever its task list. So the
+# empty list keeps a subagent row out of every TEAMMATE surface as
+# record_background_launch writes it, with anchor_completed False. This marker
+# is what AUTHORISES that empty list past _sanitize_record, and what states the
+# role rather than leaving the next reader to infer it from an empty field.
 OWNER_ROLE_SUBAGENT = "subagent"
 
 WAIT_CLASS_MISSING = "missing"
@@ -314,8 +315,9 @@ def _sanitize_record(raw: Any) -> dict | None:
     # what carries the role.
     #
     # THE MARKER GRANTS NOTHING THAT WRITE ACCESS TO THIS FILE DOES NOT ALREADY
-    # GRANT. Only the exact value "subagent" survives this function; any other
-    # value is dropped and the row is read as a teammate's. Past this function
+    # GRANT. Only the exact value "subagent" survives this function. Any other
+    # value is not kept: a row carrying task ids is then read as a teammate's,
+    # and a row without them is dropped whole. Past this function
     # the marker is read only by the two readers that match on a member's name,
     # and each skips a marked row, which is what deleting the row would do.
     # Deletion is the STRONGER power, not an equal one: it also removes the row
