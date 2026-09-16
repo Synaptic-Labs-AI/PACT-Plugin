@@ -197,11 +197,15 @@ def _reclaim_stale(folder: Path, now: Callable[[], datetime]) -> None:
         if pid.isdigit() and claim_ns.isdigit() and abs(now_ns - int(claim_ns)) <= FRESH_S * 1_000_000_000:
             continue
         with contextlib.suppress(OSError):
-            os.replace(claim, _free_pending(folder, pending_name))
+            _restore_claim(folder, claim, pending_name, now)
 
 
 def _free_pending(folder: Path, pending_name: str) -> Path:
     """pending_name when it is free, else the nearest later stamp that is.
+
+    Only a first guess: the name was free when this looked, and another settler
+    can take it before the caller writes. Callers link rather than rename, so the
+    link, not this walk, decides who gets a name.
 
     A free name falls out of the walk rather than being special-cased: its own
     stamp is by definition not among the taken ones. A name carrying no number is
@@ -223,6 +227,43 @@ def _free_pending(folder: Path, pending_name: str) -> Path:
     while candidate in taken:
         candidate += 1
     return folder / f"{_PENDING_PREFIX}{candidate}.json"
+
+
+def _restore_claim(folder: Path, claim: Path, pending_name: str, now: Callable[[], datetime]) -> None:
+    """Return a claim to pending, never over another summary and never twice.
+
+    Two guards, one for each way a restore goes wrong. The claim is first renamed
+    to this settler's own fresh claim name, so only one settler can take it: a
+    second finds it gone and does nothing, and a crash here leaves an ordinary
+    claim for a later reclaim. It is then linked into place rather than renamed,
+    so it cannot land on a pending name another settler took after the walk. The
+    link alone is not enough: the claim outlives the link until it is unlinked,
+    so two settlers could each link it under a different name and it would settle
+    twice. Nothing is unlinked unless the link succeeded, so a failure leaves the
+    claim to be reclaimed rather than losing its summary.
+
+    The own name steps past any name already there, or a second restore in the
+    same instant would rename over the first one's leftover. That check is not the
+    check-then-act race the staging write rejects: the name carries this process's
+    pid, and only one live process holds a pid, so nothing else can create that
+    name between the check and the rename.
+    """
+    pid, claimed_ns = os.getpid(), _epoch_ns(now())
+    own = folder / f"{pending_name}{_CLAIM_MARK}{pid}-{claimed_ns}"
+    while own.exists():
+        claimed_ns += 1
+        own = folder / f"{pending_name}{_CLAIM_MARK}{pid}-{claimed_ns}"
+    try:
+        os.replace(claim, own)
+    except FileNotFoundError:
+        return
+    target = _free_pending(folder, pending_name)
+    stamp = target.name[len(_PENDING_PREFIX):-len(".json")]
+    if stamp.isdigit():
+        _link_new_pending(folder, own, int(stamp))
+    else:
+        os.link(own, target)
+    os.unlink(own)
 
 
 def _epoch_ns(moment: datetime) -> int:
@@ -256,7 +297,7 @@ def _settle_one(folder, pending, staged_ns, wait_s, now, monotonic, sleep):
                 # there is nothing left to remove and the error is suppressed.
                 claim.unlink()
             else:
-                os.replace(claim, _free_pending(folder, pending.name))
+                _restore_claim(folder, claim, pending.name, now)
         raise
 
 
@@ -278,7 +319,7 @@ def _resolve_claim(folder, pending, claim, staged_ns, wait_s, now, monotonic, sl
             verdict = _owner(record)
     age = _age(record, now)
     if verdict is None and age < EXPIRE_S:
-        os.replace(claim, _free_pending(folder, pending.name))
+        _restore_claim(folder, claim, pending.name, now)
         return _STOP
     basis = EXPIRED if verdict is None else CONTENT
     verdict = verdict or UNKNOWN
@@ -464,6 +505,22 @@ def _holds_summary(path: Path, size: int, offset: Any, bodies: "tuple[str, ...]"
     return False
 
 
+def _link_new_pending(folder: Path, source: Path, stamp: int) -> None:
+    """Link source under the first pending stamp from stamp on that is free.
+
+    os.link refuses a target that exists, so two writers can never both take one
+    pending name, whatever each of them saw when it looked. Exhausting STAGE_TRIES
+    raises and links nothing.
+    """
+    for offset in range(STAGE_TRIES):
+        try:
+            os.link(source, folder / f"{_PENDING_PREFIX}{stamp + offset}.json")
+            return
+        except FileExistsError:
+            pass
+    raise OSError("no free pending stamp")
+
+
 def _write_new_pending(folder: Path, text: str) -> None:
     """Write text under a pending stamp that is free, never over an existing one.
 
@@ -484,14 +541,7 @@ def _write_new_pending(folder: Path, text: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
-        stamp = time.time_ns()
-        for _ in range(STAGE_TRIES):
-            try:
-                os.link(tmp, folder / f"{_PENDING_PREFIX}{stamp}.json")
-                return
-            except FileExistsError:
-                stamp += 1
-        raise OSError("no free pending stamp")
+        _link_new_pending(folder, Path(tmp), time.time_ns())
     finally:
         with contextlib.suppress(OSError):
             os.unlink(tmp)

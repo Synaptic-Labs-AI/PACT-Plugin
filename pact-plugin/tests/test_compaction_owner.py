@@ -687,6 +687,163 @@ def test_a_raise_before_the_act_does_not_restore_over_a_reclaimed_summary(tree, 
     )
 
 
+def _second_commits_after_first_walks(monkeypatch, first, second):
+    """Run another settler's whole walk-and-commit between one settler's walk and its commit.
+
+    The walk only reports a name that was free when it looked. `first` names the
+    pending the late settler walks from; `second` is the other settler, run to
+    completion after that walk has chosen its stamp and before the late settler
+    writes there. The other settler runs as another process, as it does in use:
+    settlers are separate hook processes, so two of them never share a pid.
+    """
+    real_free = co._free_pending
+    real_pid = co.os.getpid
+    fired = []
+
+    def walk(folder, pending_name):
+        chosen = real_free(folder, pending_name)
+        if not fired and pending_name == first:
+            fired.append(True)
+            monkeypatch.setattr(co.os, "getpid", lambda: real_pid() + 1)
+            try:
+                second()
+            finally:
+                monkeypatch.setattr(co.os, "getpid", real_pid)
+        return chosen
+
+    monkeypatch.setattr(co, "_free_pending", walk)
+    return fired
+
+
+def _kept(tree, names):
+    return sorted(names.get(json.loads(path.read_text(encoding="utf-8"))["summary"], "unknown")
+                  for path in tree.session.glob("compact-summary.pending-*.json"))
+
+
+def test_a_reclaim_does_not_overwrite_a_stamp_another_settler_took_after_its_walk(tree, monkeypatch):
+    """The reclaim path commits late. The other settler puts its own claim back first."""
+    live = tree.stage()
+    n = int(staged_ns(live))
+    held = tree.stage(SUMMARY_B)
+    held = held.rename(held.with_name(f"compact-summary.pending-{n + 1}.json"))
+    other = SUMMARY.replace("read three short text files", "read a third set of files")
+    dead = tree.stage(other)
+    clock = later(9)
+    claim_b = _claim(held, STAGED + timedelta(seconds=9))
+    _claim(dead, STAGED - timedelta(seconds=co.FRESH_S + 10), base=live)
+
+    def the_other_settler_puts_its_claim_back():
+        assert co._resolve_claim(tree.session, held, claim_b, n + 1, 0.0,
+                                 clock.now, clock.monotonic, clock.sleep, []) is co._STOP
+
+    fired = _second_commits_after_first_walks(monkeypatch, live.name, the_other_settler_puts_its_claim_back)
+    co._reclaim_stale(tree.session, clock.now)
+    assert fired, "the other settler never ran, so nothing raced"
+    assert _kept(tree, {SUMMARY: "lead", SUMMARY_B: "teammate", other: "third"}) == [
+        "lead", "teammate", "third"], "a reclaim overwrote a summary on the stamp both walks chose"
+
+
+def test_a_restore_after_a_raise_does_not_overwrite_a_stamp_taken_after_its_walk(tree, monkeypatch):
+    """The restore on a raise before the act commits late. A reclaim takes its stamp first."""
+    held = tree.stage(SUMMARY_B)
+    n = int(staged_ns(held))
+    other = SUMMARY.replace("read three short text files", "read a third set of files")
+    dead = tree.stage(other)
+    _claim(dead, STAGED - timedelta(seconds=co.FRESH_S + 10), base=held)
+    clock = later(9)
+    fired = _second_commits_after_first_walks(
+        monkeypatch, held.name, lambda: co._reclaim_stale(tree.session, clock.now))
+
+    def interrupted_before_the_act(*args):
+        raise OSError("interrupted before the summary was written")
+
+    monkeypatch.setattr(co, "_resolve_claim", interrupted_before_the_act)
+    with pytest.raises(OSError):
+        co._settle_one(tree.session, held, n, 0.0, clock.now, clock.monotonic, clock.sleep)
+    assert fired, "the other settler never ran, so nothing raced"
+    assert _kept(tree, {SUMMARY_B: "teammate", other: "third"}) == [
+        "teammate", "third"], "a restore after a raise overwrote a summary on the stamp it walked to"
+
+
+def test_putting_back_an_unmatched_summary_does_not_overwrite_a_stamp_taken_after_its_walk(tree, monkeypatch):
+    """The restore of a summary not matched yet commits late. A reclaim takes its stamp first."""
+    held = tree.stage(SUMMARY_B)
+    n = int(staged_ns(held))
+    other = SUMMARY.replace("read three short text files", "read a third set of files")
+    dead = tree.stage(other)
+    clock = later(9)
+    claim_a = _claim(held, STAGED + timedelta(seconds=9))
+    _claim(dead, STAGED - timedelta(seconds=co.FRESH_S + 10), base=held)
+    fired = _second_commits_after_first_walks(
+        monkeypatch, held.name, lambda: co._reclaim_stale(tree.session, clock.now))
+
+    assert co._resolve_claim(tree.session, held, claim_a, n, 0.0,
+                             clock.now, clock.monotonic, clock.sleep, []) is co._STOP
+    assert fired, "the other settler never ran, so nothing raced"
+    assert _kept(tree, {SUMMARY_B: "teammate", other: "third"}) == [
+        "teammate", "third"], "putting a summary back overwrote one on the stamp it walked to"
+
+
+def test_two_restores_in_one_process_never_rename_over_each_other(tree, monkeypatch):
+    """A restore that cannot publish leaves its own claim behind. A second restore in
+    the same process, on the same pending name in the same instant, would choose that
+    exact claim name and rename over it, destroying the first summary.
+    """
+    live = tree.stage()
+    other = SUMMARY.replace("read three short text files", "read a third set of files")
+    later_one = tree.stage(other)
+    old = STAGED - timedelta(seconds=co.FRESH_S + 10)
+    _claim(live, old)
+    _claim(later_one, old + timedelta(microseconds=1), base=live)
+
+    real_link = co._link_new_pending
+    publishes = []
+
+    def the_first_publish_fails(folder, source, stamp):
+        publishes.append(source)
+        if len(publishes) == 1:
+            raise OSError("no free pending stamp")
+        return real_link(folder, source, stamp)
+
+    monkeypatch.setattr(co, "_link_new_pending", the_first_publish_fails)
+    co._reclaim_stale(tree.session, later(9).now)
+    assert len(publishes) == 2, "both claims must reach the publish for the names to meet"
+
+    held = sorted({SUMMARY: "lead", other: "third"}.get(
+        json.loads(path.read_text(encoding="utf-8"))["summary"], "unknown")
+        for path in tree.session.glob("compact-summary.pending-*"))
+    assert held == ["lead", "third"], "a second restore renamed over the first one's leftover claim"
+
+
+def test_two_settlers_reclaiming_one_stale_claim_settle_it_once(tree, monkeypatch):
+    """Two settlers reclaim the SAME stale claim, and it must settle exactly once.
+
+    Moving a claim by rename lets only one settler win it; the loser finds it
+    gone. Publishing it by link does not, because the claim still exists until it
+    is unlinked. Forced deterministically: the second settler's reclaim runs after
+    the first has linked and before it has unlinked.
+    """
+    pending = tree.stage()
+    tree.summary(tree.lead)
+    _claim(pending, STAGED - timedelta(seconds=co.FRESH_S + 10))
+    clock = later(9)
+    real_link = co.os.link
+    fired = []
+
+    def the_first_links_then_the_second_reclaims(src, dst, *args, **kwargs):
+        real_link(src, dst, *args, **kwargs)
+        if not fired:
+            fired.append(True)
+            co._reclaim_stale(tree.session, clock.now)
+
+    monkeypatch.setattr(co.os, "link", the_first_links_then_the_second_reclaims)
+    co._reclaim_stale(tree.session, clock.now)
+    monkeypatch.setattr(co.os, "link", real_link)
+
+    assert tree.settle(later(10)) == [(co.LEAD, co.CONTENT)]
+    assert tree.verdicts() == [("lead", "content")], "one summary was attributed more than once"
+
+
 def test_a_claim_younger_than_fresh_is_left_to_its_settler(tree):
     pending = tree.stage()
     tree.summary(tree.lead)
