@@ -14,26 +14,30 @@ for a separate-process teammate's session, because session_init writes that
 file for lead frames only; a fixture that wrote one would test a topology no
 teammate is in.
 
-REVERT CARDINALITY. Each mutant was applied in a detached worktree with every
-__pycache__ cleared first, and the failed set matched the one written down
-before the run:
-  hook file removed ................................. 18 failed (all but the job-list cap)
-  block never printed ............................... 4 failed
+REVERT CARDINALITY — MEASURED, NOT CARRIED. Each row names the behaviour one
+edit removes. That edit was applied to its own copy of the tree, proved
+applied, and run against this whole file with a fresh bytecode cache; the
+unmutated copy passes every arm:
+  hook file removed ................................. 33 failed (all but the six
+                                                      arms that call the gate
+                                                      in-process)
+  block never printed ............................... 10 failed
   told-once read ignored ............................ 3 failed
   stop_hook_active guard removed .................... 2 failed
-  cron check removed ................................ 2 failed
-  recorded teammate jobs kept for the lead .......... 1 failed
+  cron check removed ................................ 4 failed
+  lead branch returns every running job ............. 3 failed
+  lead's recorded job-id set left empty ............. 3 failed
   leadSessionId branch removed ...................... 1 failed
-  registry teammate branch removed .................. 2 failed
+  registry teammate branch removed .................. 6 failed
   unresolved frame given a session folder ........... 1 failed
-  fast path removed ................................. 1 failed here, plus the
-                                                      agreement arm in
+  fast path removed ................................. 3 failed here, none in
                                                       test_validate_handoff_turn_end.py
   job-list cap removed .............................. 1 failed
   any agent_id treated as a teammate ................ 2 failed
-  Layer 1 writer stops recording the job id ......... 2 failed, at the writer check
-  lead exclusion ignores recorded job ids ........... 2 failed
+  Layer 1 writer stops recording the job id ......... 3 failed, at the writer checks
   teammate check ignores the joined record .......... 1 failed
+Re-measure every row whenever an arm here is added or parametrized, and restate
+the table in the same commit. A parametrized arm counts once per case.
 """
 
 import json
