@@ -179,7 +179,8 @@ def _reclaim_stale(folder: Path, now: Callable[[], datetime]) -> None:
     A claim is named <pending>.claimed-<pid>-<claim_ns>. Its age is measured from
     claim_ns, never from the file's mtime, which the claiming rename keeps from
     the pending file. A live claim is held for at most READ_WAIT_S plus one capped
-    read pass, far below FRESH_S.
+    read pass, far below FRESH_S. A claim is never returned over a live pending
+    file, which would destroy that compaction's only copy of its summary.
     """
     now_ns = _epoch_ns(now())
     for claim in folder.glob(f"{_PENDING_PREFIX}*.json{_CLAIM_MARK}*"):
@@ -188,7 +189,32 @@ def _reclaim_stale(folder: Path, now: Callable[[], datetime]) -> None:
         if pid.isdigit() and claim_ns.isdigit() and abs(now_ns - int(claim_ns)) <= FRESH_S * 1_000_000_000:
             continue
         with contextlib.suppress(OSError):
-            os.replace(claim, folder / pending_name)
+            os.replace(claim, _free_pending(folder, pending_name))
+
+
+def _free_pending(folder: Path, pending_name: str) -> Path:
+    """pending_name when it is free, else the nearest later stamp that is.
+
+    A free name falls out of the walk rather than being special-cased: its own
+    stamp is by definition not among the taken ones. A name carrying no number is
+    returned unchanged, because it cannot be renumbered and _stamped passes it
+    over anyway; reading a number out of it would raise and abandon the pass.
+
+    Two summaries can hold the same stamp when the wall clock steps back, since
+    stage_summary names them from time_ns(). Taking the nearest free stamp rather
+    than restamping to now keeps the reclaimed summary where it belongs in the
+    oldest-first settle order, and keeps the stamp its settled file is named for
+    close to when the summary was really staged, so the keep-newest prune still
+    sees the two in the order they arrived.
+    """
+    stamp = pending_name[len(_PENDING_PREFIX):-len(".json")]
+    if not stamp.isdigit():
+        return folder / pending_name
+    candidate = int(stamp)
+    taken = {held for held, _ in _stamped(folder, _PENDING_PREFIX, ".json")}
+    while candidate in taken:
+        candidate += 1
+    return folder / f"{_PENDING_PREFIX}{candidate}.json"
 
 
 def _epoch_ns(moment: datetime) -> int:

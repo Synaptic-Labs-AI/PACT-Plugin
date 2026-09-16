@@ -442,10 +442,14 @@ def test_anything_raised_after_the_claim_returns_it_to_pending(tree, monkeypatch
     assert tree.canonical.read_text(encoding="utf-8") == SUMMARY
 
 
-def _claim(pending, claimed_at, pid=4242):
-    """Rename a pending the way a settler claims it, stamped at claimed_at."""
+def _claim(pending, claimed_at, pid=4242, base=None):
+    """Rename a pending the way a settler claims it, stamped at claimed_at.
+
+    base is the pending the claim resolves back to, its own unless an arm needs a
+    claim that collides with a different pending.
+    """
     claim_ns = int(claimed_at.timestamp()) * 1_000_000_000 + claimed_at.microsecond * 1_000
-    claim = pending.with_name(f"{pending.name}.claimed-{pid}-{claim_ns}")
+    claim = pending.with_name(f"{(base or pending).name}.claimed-{pid}-{claim_ns}")
     os.replace(pending, claim)
     return claim
 
@@ -468,6 +472,66 @@ def test_a_claim_whose_name_does_not_parse_counts_as_stale(tree, stamp):
     os.replace(pending, pending.with_name(f"{pending.name}.claimed-{stamp}"))
     assert tree.settle(later(9)) == [(co.LEAD, co.CONTENT)]
     assert not list(tree.session.glob("*.claimed-*"))
+
+
+def test_a_stale_claim_is_never_returned_over_the_pending_it_collides_with(tree):
+    """The reclaim renames a claim back to the name it was claimed from, and that
+    name can be live: two summaries share a stamp when the wall clock steps back.
+    Both summaries must survive the reclaim, and both must settle."""
+    live = tree.stage()
+    other = tree.stage(SUMMARY_B)
+    tree.summary(tree.lead)
+    tree.summary(tree.teammate, body=BODY_B)
+    _claim(other, STAGED + timedelta(seconds=9), base=live)
+
+    assert tree.settle(later(9 + co.FRESH_S + 1)) == [(co.LEAD, co.CONTENT), (co.TEAMMATE, co.CONTENT)]
+    assert tree.canonical.read_text(encoding="utf-8") == SUMMARY
+    kept = tree.session / f"compact-summary.teammate-{int(staged_ns(live)) + 1}.txt"
+    assert kept.read_text(encoding="utf-8") == SUMMARY_B, "the collided claim takes the next free stamp"
+    assert not list(tree.session.glob("*.claimed-*"))
+    assert not list(tree.session.glob("*.pending-*"))
+
+
+def test_a_reclaimed_claim_keeps_its_own_stamp_when_that_name_is_free(tree):
+    """The next-free stamp is only for a collision. A free name is reused exactly,
+    so the settled file stays named for when its summary was really staged."""
+    pending = tree.stage(SUMMARY_B)
+    tree.summary(tree.teammate, body=BODY_B)
+    _claim(pending, STAGED + timedelta(seconds=9))
+    assert tree.settle(later(9 + co.FRESH_S + 1)) == [(co.TEAMMATE, co.CONTENT)]
+    assert tree.kept("teammate") == [int(staged_ns(pending))]
+
+
+def test_a_collided_claim_skips_every_stamp_that_is_already_taken(tree):
+    """One collision is a clock step back; two is the same step with a third
+    summary inside it. The walk must pass every taken stamp, not just the first:
+    stopping at the first would overwrite the pending sitting on it."""
+    live = tree.stage()
+    neighbour = tree.stage(SUMMARY_B)
+    other = tree.stage(SUMMARY_B)
+    base = int(staged_ns(live))
+    neighbour.rename(neighbour.with_name(f"compact-summary.pending-{base + 1}.json"))
+    tree.summary(tree.lead)
+    tree.summary(tree.teammate, body=BODY_B)
+    _claim(other, STAGED + timedelta(seconds=9), base=live)
+
+    assert tree.settle(later(9 + co.FRESH_S + 1)) == [
+        (co.LEAD, co.CONTENT), (co.TEAMMATE, co.CONTENT), (co.TEAMMATE, co.CONTENT)]
+    assert tree.kept("teammate") == [base + 1, base + 2]
+
+
+def test_a_claim_whose_pending_name_carries_no_number_is_restored_under_it(tree):
+    """The renumbering reads a number out of the pending name, so it must not
+    choke on one that has none: a raise there abandons the whole settle pass and
+    strands the claim, which is the failure the reclaim exists to undo."""
+    pending = tree.stage()
+    tree.summary(tree.lead)
+    odd = pending.with_name("compact-summary.pending-nine.json")
+    os.replace(pending, odd)
+    _claim(odd, STAGED + timedelta(seconds=9))
+
+    assert tree.settle(later(9 + co.FRESH_S + 1)) == []
+    assert tree.names() == [odd.name], "restored under its own unreadable name"
 
 
 def test_a_claim_younger_than_fresh_is_left_to_its_settler(tree):
