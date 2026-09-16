@@ -339,9 +339,22 @@ def _candidates(input_data: dict, role: str, name: str, team: str, running: list
         return [e for e in running if e["id"] not in teammate_jobs]
     if input_data.get("hook_event_name") == "SubagentStop":
         # The lead process's whole list: only this teammate's recorded jobs count.
+        #
+        # `owner_role` EXCLUDES A NON-TEAMMATE ROW FROM THIS NAME MATCH, and the
+        # reason is semantic rather than defensive: a subagent's row is NOT a
+        # member's row, so matching it by MEMBER NAME is wrong whatever any
+        # member happens to be called. This is one of only two name-keyed reads
+        # of the store; every other reader matches on the job id or on the
+        # record's task ids, and a non-teammate row carries none.
+        #
+        # The test is truthiness, not equality with one role, so a role added
+        # later is excluded here by default. That is the safe direction: a new
+        # owner role must opt IN to being treated as a member.
         by_job = {
             r["harness_task_id"]: r for r in records
-            if r.get("agent_name") == name and r.get("harness_task_id")
+            if r.get("agent_name") == name
+            and not r.get("owner_role")
+            and r.get("harness_task_id")
         }
         running = [e for e in running if e["id"] in by_job]
     else:

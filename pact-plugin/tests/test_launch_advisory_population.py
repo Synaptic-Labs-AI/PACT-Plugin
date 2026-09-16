@@ -4,7 +4,8 @@ Location: pact-plugin/tests/test_launch_advisory_population.py
 Summary: runs the real wait_filler_gate (PreToolUse) and track_files
          (PostToolUse) hooks as subprocesses against a real config root: team
          config, session context, session registry and task store. Pins that
-         an Agent-tool subagent gets no advisory and no record, while
+         an Agent-tool subagent gets no advisory, and that its launch is
+         recorded under its OWN id rather than against a teammate, while
          in-process and separate-process teammates keep both.
 Used by: hook_infra_classifier's COVERED_L2 mapping for `wait_filler_gate`.
 
@@ -207,14 +208,29 @@ def test_a_frame_in_the_lead_session_with_no_agent_id_gets_no_advisory(seam):
 # ------------------------------------------------------------------ Layer 1
 
 
-def test_a_subagent_launch_is_not_recorded(seam):
+def test_a_subagent_launch_is_recorded_under_its_own_id_not_a_teammates(seam):
     """The registry holds an entry for the lead's session, as a registration leaves
-    when the lead's session id could not be read at register time. Without the
-    teammate predicate the subagent reaches that entry and is recorded against it."""
+    when the lead's session id could not be read at register time. The HAZARD is
+    that a subagent reaches THAT entry and is recorded against the teammate it
+    names — a launch attributed to a teammate who did not make it.
+
+    THAT HAZARD IS STILL WHAT THIS ARM GUARDS, and it is still closed. What
+    changed is the blanket refusal around it: a shell launched inside a subagent
+    IS recorded now, because unrecorded it sits in the LEAD's job list with no
+    owner and refuses the lead its own turn end over work it did not start. It
+    is recorded under the subagent's OWN `agent_id` and carries no task ids, so
+    it never reaches a teammate's task surfaces.
+    """
     _register(seam, LEAD_SESSION, IN_PROCESS_MEMBER)
-    assert _records_after(seam, _launch(_subagent(), "PostToolUse")) == [], (
+    records = _records_after(seam, _launch(_subagent(), "PostToolUse"))
+    assert len(records) == 1, "the subagent's launch was not recorded at all"
+    record = records[0]
+    assert record["agent_name"] != IN_PROCESS_MEMBER, (
         "an Agent-tool subagent's launch was recorded against a teammate"
     )
+    assert record["agent_name"] == _subagent()["agent_id"]
+    assert record["owner_role"] == "subagent"
+    assert record["task_ids"] == []
 
 
 def test_a_separate_process_teammate_launch_is_recorded_with_no_context_file(seam):

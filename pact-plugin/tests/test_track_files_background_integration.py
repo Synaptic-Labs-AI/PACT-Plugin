@@ -16,22 +16,30 @@ exactly how the feature this replaces shipped inert.
 REVERT-CARDINALITY NON-VACUITY GATE — MEASURED, not asserted. Source-revert
 the Layer 1 call in `hooks/track_files.py` (replace the guarded
 `record_background_launch(input_data)` block with `pass`) and this file
-reports **5 failed, 5 passed**. The five kills are the arms that assert a
+reports **6 failed, 6 passed**. The six kills are the arms that assert a
 record IS written: `test_a_background_launch_lands_a_real_record_on_disk`,
 `test_layer_1_records_the_harness_task_id`,
 `test_a_launch_without_a_string_harness_id_records_none`,
-`test_a_SHELL_backgrounded_launch_with_NO_FLAG_lands_a_record` and
-`test_a_LONG_RUNNING_command_IS_recorded_now`. The other five pin fail-open and
-negative behaviour and correctly survive a feature that does nothing. If a
-future edit makes that ablation report **0 failed**, this file has stopped
-measuring the seam and the number above is the tripwire.
+`test_a_SHELL_backgrounded_launch_with_NO_FLAG_lands_a_record`,
+`test_a_LONG_RUNNING_command_IS_recorded_now` and
+`test_a_SUBAGENT_launched_shell_lands_a_subagent_owned_record`. The other six
+pin fail-open and negative behaviour and correctly survive a feature that does
+nothing. If a future edit makes that ablation report **0 failed**, this file has
+stopped measuring the seam and the number above is the tripwire.
 
 A SECOND ABLATION IS ALREADY PINNED BY THE FIXTURE: omitting the
-`pact-session-context.json` write also reports 5 failed, 5 passed, on the same
-five positive-record arms, for a DIFFERENT reason: with no session context and
+`pact-session-context.json` write also reports 6 failed, 6 passed, on the same
+six positive-record arms, for a DIFFERENT reason: with no session context and
 no registry entry, the frame's team cannot be resolved. Two distinct
 single-point ablations, same cardinality, different cause; see the fixture
 docstring.
+
+BOTH NUMBERS WERE RE-MEASURED when the subagent-owned row arrived, each in an
+isolated copy of the tree with the mutation proved applied before the run. The
+pair moved 5/5 -> 6/6 TOGETHER, and the two arms added are why: one asserts a
+record IS written, so it dies with the feature, and the one beside it asserts an
+EMPTY registry, so it survives. An arm added to this file moves one of these two
+numbers — restate them in the same commit, or the tripwire stops tripping.
 
 NO module-level sys.path.insert: path setup is conftest-owned.
 """
@@ -232,6 +240,59 @@ class TestTrackFilesBackgroundSeam:
             "still be green"
         )
         assert records[0]["command"] == "nohup ./gate.sh &"
+
+    def test_a_SUBAGENT_launched_shell_lands_a_subagent_owned_record(self, seam):
+        """A shell launched INSIDE an Agent-tool subagent must be recorded.
+
+        Such a launch appears in the LEAD's background_tasks with no owner and
+        outlives the subagent that started it. The lead's candidate set is every
+        running shell minus the RECORDED launches, so with no row here the lead
+        is refused its own turn end over a job it did not start and cannot flag.
+
+        The frame carries the subagent's own `agent_id` ("a" + 16 hex) and an
+        agent_type that names no member, which is the combination the recorder
+        refused before this arm existed.
+        """
+        frame = _frame(
+            agent_type="general-purpose",
+            agent_id="ad2b1261fdd77c958",
+            tool_response={"backgroundTaskId": "bg-sub-1", "stdout": ""},
+        )
+        assert _registry(seam) == []
+        assert _run(seam, frame).returncode == 0
+        records = _registry(seam)
+        assert len(records) == 1, (
+            "a subagent's background shell was not recorded, so nothing marks "
+            "it as someone else's and the lead is charged for it"
+        )
+        assert records[0]["owner_role"] == "subagent"
+        assert records[0]["agent_name"] == "ad2b1261fdd77c958"
+        assert records[0]["task_ids"] == []
+        assert records[0]["harness_task_id"] == "bg-sub-1"
+        # `anchor_completed` MUST NOT appear on a subagent row. It is the
+        # CONSULTANT flag, and the consultant path is the nearest existing
+        # shape for a task-less owner, so it is the thing a later edit reaches
+        # for. `has_live_listed_task` returns True UNCONDITIONALLY for it, so
+        # the row would never expire on task completion, would live the full
+        # 24h TTL, could carry no wait to silence itself, and Layer 3 would
+        # then tell the lead a teammate has unflagged work, naming a subagent
+        # that no longer exists. Without the flag the row fails the liveness
+        # gate naturally and every surfacing consumer drops it — which is
+        # correct, because this row exists ONLY to be subtracted by id.
+        assert "anchor_completed" not in records[0]
+
+    def test_a_subagent_launch_without_an_explicit_agent_id_writes_nothing(self, seam):
+        """The negative that keeps the positive above honest.
+
+        An absent `agent_id` is the LEAD's own signature on its own frames, and
+        only an INFERENCE for an in-process teammate's spawn. Recording it as
+        anyone would risk charging the lead for a teammate's launch, so it
+        records nothing at all.
+        """
+        frame = _frame(agent_type="general-purpose")
+        frame.pop("agent_id")
+        assert _run(seam, frame).returncode == 0
+        assert _registry(seam) == []
 
     def test_a_NON_background_bash_writes_nothing(self, seam):
         """The negative control, so the positive above is not vacuous."""

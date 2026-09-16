@@ -395,6 +395,124 @@ def test_a_wait_older_than_a_layer_1_launch_does_not_cover_it(tmp_path):
     assert output(world.run(teammate_frame([job("bjoin1")]))) == SUPPRESS
 
 
+def subagent_shell_launch_frame(job_id: str) -> dict:
+    """A background shell launched INSIDE an Agent-tool subagent.
+
+    The frame fires in the LEAD's process and carries the subagent's own
+    `agent_id` ("a" + 16 hex), which is what separates it from the lead's own
+    frame (no agent_id) and from an in-process teammate's (whose agent_type
+    carries a member name).
+    """
+    return {
+        "hook_event_name": "PostToolUse",
+        "session_id": LEAD_SID,
+        "agent_type": "general-purpose",
+        "agent_id": "ad2b1261fdd77c958",
+        "transcript_path": "<transcript_path>",
+        "cwd": "<cwd>",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "sleep 300", "description": "sleep", "run_in_background": True,
+        },
+        "tool_response": {
+            "backgroundTaskId": job_id, "interrupted": False, "isImage": False,
+            "noOutputExpected": False, "stderr": "", "stdout": "",
+        },
+    }
+
+
+def test_a_shell_launched_inside_a_subagent_is_not_charged_to_the_lead(tmp_path):
+    """The lead must not be refused its turn end over a subagent's shell.
+
+    A shell launched inside a subagent appears in the LEAD's background_tasks
+    with no owner, and outlives the subagent that started it. The lead's
+    candidate set is every running shell MINUS the recorded launches, so unless
+    that launch is recorded, nothing marks it as someone else's: the lead is
+    refused a turn end over a job it did not start and cannot flag. Refusing an
+    honest turn end is the failure this gate must never produce.
+
+    The record is written through the PRODUCTION writer, not by hand. A
+    hand-written row would satisfy this arm whatever the writer does, which is
+    the whole thing being fixed.
+    """
+    world = World(tmp_path)
+    proc = world.run(subagent_shell_launch_frame("bsubshell1"), script=TRACK_FILES)
+    assert proc.returncode == 0, proc.stderr
+    assert [r.get("harness_task_id") for r in world.records()] == ["bsubshell1"], (
+        "the subagent's shell launch was not recorded, so nothing marks it as "
+        "someone else's and the lead is charged for it"
+    )
+
+    out = output(world.run(stop_frame(jobs=[job("bsubshell1")], agent_type=LEAD_TYPE)))
+    assert out == SUPPRESS, (
+        "the lead was refused its own turn end over a shell that a subagent "
+        f"launched: {out}"
+    )
+
+
+def test_a_subagent_row_is_not_matched_by_a_member_of_the_same_name(tmp_path, monkeypatch):
+    """SEMANTIC PIN — it proves the code does the right thing GIVEN the input,
+    NOT that the input occurs.
+
+    A subagent row is NOT a member's row, so matching it BY MEMBER NAME is
+    wrong whatever any member happens to be called. That is the property this
+    arm states. It is deliberately NOT a reachability demonstration: nothing in
+    this codebase documents that a member could be named 'a' plus 16 hex, and
+    no such collision has been shown to occur.
+
+    THE TWO NAME-KEYED READERS ARE THE WHOLE POPULATION, which is why two
+    assertions suffice. `turn_end_gate._candidates`' SubagentStop branch builds
+    `by_job` from rows whose `agent_name` equals the ending teammate's, and
+    `extend_records_for_claim` appends a newly claimed task to rows whose
+    `agent_name` equals the claiming owner. Every other reader of the store is
+    id-keyed (indifferent to owner) or task-keyed, and a subagent row carries
+    no task ids, so none of them can reach it.
+    """
+    from shared import background_work, turn_end_gate
+
+    world = World(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(world.config))
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(world.project))
+    # A member name deliberately built in the subagent id shape.
+    colliding = "a0123456789abcdef"
+    (world.config / "teams" / TEAM / "config.json").write_text(json.dumps({
+        "leadSessionId": LEAD_SID,
+        "members": [
+            {"name": "team-lead", "agentType": "pact-orchestrator"},
+            {"name": colliding, "agentType": "pact-backend-coder"},
+        ],
+    }))
+    world.add_task(7, colliding)
+    (world.config / "teams" / TEAM / "background_work.json").write_text(json.dumps({
+        "records": [{
+            "agent_name": colliding,
+            "session_id": LEAD_SID,
+            "task_ids": [],
+            "owner_role": "subagent",
+            "registered_at": _iso(5),
+            "harness_task_id": "bsub-collide",
+        }]
+    }))
+
+    candidates = turn_end_gate._candidates(
+        {"hook_event_name": "SubagentStop"},
+        turn_end_gate.ROLE_TEAMMATE,
+        colliding,
+        TEAM,
+        [job("bsub-collide")],
+    )
+    assert candidates == [], (
+        "a subagent's row was matched to a member BY NAME, so that member's "
+        "turn end counts a job the subagent started"
+    )
+
+    extended = background_work.extend_records_for_claim(colliding, "7", team_name=TEAM)
+    assert extended == 0, (
+        "a subagent's row was matched to a member BY NAME, so that member's "
+        "claimed task was appended to it"
+    )
+
+
 # --------------------------------------------------------------------------
 # Which entries count as jobs, per role. background_tasks lists live
 # teammates and subagents as running entries beside real work.

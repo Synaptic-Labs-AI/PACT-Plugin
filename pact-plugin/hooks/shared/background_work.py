@@ -1,9 +1,12 @@
 """
 Location: pact-plugin/hooks/shared/background_work.py
-Summary: Team-scoped registry of outstanding teammate background Bash
-         launches (a frame carrying the harness `run_in_background` flag, or
-         a command ending in a bare `&`), plus the unflagged-background fire
-         predicate.
+Summary: Team-scoped registry of outstanding background Bash launches (a frame
+         carrying the harness `run_in_background` flag, or a command ending in
+         a bare `&`), plus the unflagged-background fire predicate. Rows are
+         written for a TEAMMATE's launch, and for a launch made inside an
+         Agent-tool SUBAGENT — the latter marked with `owner_role` and carrying
+         no task ids, because that launch lands in the lead's own job list with
+         no owner and would otherwise be charged to the lead.
          Pure helpers and fail-open loaders — no hook I/O, no registration.
 Used by: track_files.py (Layer 1 writer), teammate_idle.py (Layer 2
          advisory), missed_wake_scan.py (Layer 3 lead surface),
@@ -91,6 +94,30 @@ LEAD_STALE_MINUTES = 10
 LEAD_UNIDLED_STALE_MINUTES = 30
 
 UNFLAGGED_IDLE_THRESHOLD = 3
+
+# The owner role a row carries when its launcher is an Agent-tool subagent
+# rather than a teammate. Written only on those rows: a row without it is a
+# teammate row, which is also what every row written before this field existed
+# is, so absence defaulting to "teammate" is correct rather than merely
+# convenient.
+#
+# WHY A SUBAGENT ROW EXISTS AT ALL. A shell launched inside a subagent appears
+# in the LEAD's background_tasks with no owner and outlives the subagent, and
+# the lead's candidate set is every running shell MINUS the recorded launches.
+# Unrecorded, it is charged to the lead, which is refused a turn end over a job
+# it did not start and cannot flag. The row is what marks it as someone else's.
+#
+# WHY THE ROW CARRIES NO TASK IDS. A subagent holds no task by construction, so
+# there is no anchor task to list. Every task-keyed reader of this store —
+# matching_outstanding, any_listed_task_flagged, has_live_listed_task,
+# discharge_acknowledged_for_owner, extend_records_for_claim and
+# missed_wake_scan.find_unanchored_waits — skips a row it cannot match a task
+# to, so an empty list already keeps a subagent row out of every TEAMMATE
+# surface. This marker is what AUTHORISES that empty list past
+# _sanitize_record, and what states the role rather than leaving the next
+# reader to infer it from an empty field.
+OWNER_ROLE_SUBAGENT = "subagent"
+
 WAIT_CLASS_MISSING = "missing"
 WAIT_CLASS_NULL = "null"
 WAIT_CLASS_MALFORMED = "malformed"
@@ -257,20 +284,27 @@ def _sanitize_record(raw: Any) -> dict | None:
     session_id = raw.get("session_id")
     task_ids = _clean_task_ids(raw.get("task_ids"))
     registered_at = raw.get("registered_at")
+    # A subagent owner holds no task, so its row is the one shape allowed to
+    # carry no task ids. See OWNER_ROLE_SUBAGENT for why that is safe against
+    # every task-keyed reader, and why the marker rather than the empty list is
+    # what carries the role.
+    subagent_owned = raw.get("owner_role") == OWNER_ROLE_SUBAGENT
     if not isinstance(agent_name, str) or not agent_name:
         return None
     if not isinstance(session_id, str) or not session_id:
         return None
-    if task_ids is None:
+    if task_ids is None and not subagent_owned:
         return None
     if parse_iso(registered_at) is None:
         return None
     out = {
         "agent_name": agent_name,
         "session_id": session_id,
-        "task_ids": task_ids,
+        "task_ids": task_ids or [],
         "registered_at": registered_at,
     }
+    if subagent_owned:
+        out["owner_role"] = OWNER_ROLE_SUBAGENT
     harness = raw.get("harness_task_id")
     if isinstance(harness, str) and harness:
         out["harness_task_id"] = harness
@@ -784,7 +818,17 @@ def extend_records_for_claim(
         out = []
         for record in records:
             listed = record_task_ids(record)
-            if record.get("agent_name") == owner and task_id not in listed:
+            # `owner_role` EXCLUDES A NON-TEAMMATE ROW, for the same semantic
+            # reason as the other name-keyed read (turn_end_gate's SubagentStop
+            # branch): a subagent's row is not a member's row, so a member's
+            # claimed task must not be appended to it — whatever that member is
+            # named. Truthiness rather than equality with one role, so a role
+            # added later is excluded by default and must opt in.
+            if (
+                record.get("agent_name") == owner
+                and not record.get("owner_role")
+                and task_id not in listed
+            ):
                 record = dict(record)
                 record["task_ids"] = listed + [task_id]
                 extended += 1
@@ -1355,21 +1399,54 @@ def bind_launcher_identity(
     return agent_name, session_id, task_ids, anchor_completed
 
 
+def subagent_launcher_id(input_data: Any) -> str:
+    """The Agent-tool subagent's own `agent_id` on this frame, or "".
+
+    A subagent's id is "a" followed by 16 lowercase hex [LIVE] — the same shape
+    `agent_type_names_a_member` refuses a membership match for.
+
+    AN ABSENT `agent_id` NAMES NO LAUNCHER HERE, AND THAT IS THE WHOLE
+    CONSERVATISM OF THIS PATH. Absence has been measured as the LEAD's own
+    signature on the lead's own frames, but it is only INFERRED for an
+    in-process teammate's spawn, which nobody has captured. Were that inference
+    wrong, reading absence as "the lead" would record a TEAMMATE's launch as
+    the lead's and refuse the lead a turn end it had every right to end — the
+    same cardinal defect this recorder exists to close, arriving from the other
+    side. So absence records NOTHING, which is an under-block and the
+    acceptable direction.
+    """
+    agent_id = input_data.get("agent_id") if isinstance(input_data, dict) else None
+    if not isinstance(agent_id, str):
+        return ""
+    return agent_id if _SUBAGENT_ID.fullmatch(agent_id) else ""
+
+
 def record_background_launch(input_data: Any, now: datetime | None = None) -> bool:
-    """Write one registry row when the frame is a recordable teammate launch.
+    """Write one registry row for a recordable teammate or subagent launch.
 
     Fail-open on every path — the host calls this for its side effect only and
     must not be disturbed by anything that happens here.
     """
     if not is_background_launch(input_data):
         return False
-    # One predicate decides who is a teammate, here and in the launch advisory,
-    # so the two cover the same population. It refuses the lead and an
-    # Agent-tool subagent. A subagent would otherwise reach the session
-    # registry on the lead's session id and be recorded against whichever
-    # member that id names.
     team_name, _name = frame_team_and_name(input_data)
-    if not team_name or not is_teammate_launch_frame(input_data, team_name):
+    if not team_name:
+        return False
+    # TWO launcher populations, resolved differently and for different reasons.
+    #
+    # A TEAMMATE is decided by one predicate shared with the launch advisory,
+    # so the two cover the same population. That predicate refuses the lead and
+    # an Agent-tool subagent: a subagent would otherwise reach the session
+    # registry on the LEAD's session id and be recorded against whichever
+    # member that id names.
+    #
+    # A SUBAGENT is admitted here on its own EXPLICIT `agent_id`, and only
+    # that. The shell it launches lands in the lead's background_tasks with no
+    # owner and outlives the subagent, so unrecorded it is charged to the lead.
+    # It is recorded UNDER THAT ID and never resolved to a member name, because
+    # a subagent is not a member and guessing one would mis-bind the launch.
+    subagent_id = subagent_launcher_id(input_data)
+    if not subagent_id and not is_teammate_launch_frame(input_data, team_name):
         return False
     command = command_from_frame(input_data)
     # NO DURABILITY FILTER HERE, DELIBERATELY. A predicate over command text
@@ -1393,10 +1470,19 @@ def record_background_launch(input_data: Any, now: datetime | None = None) -> bo
     #
     # The durability question IS answerable, just not here: `intentional_wait`
     # carries it later, when the agent says what it is waiting for.
-    bound = bind_launcher_identity(input_data, team_name)
-    if bound is None:
-        return False
-    agent_name, session_id, task_ids, anchor_completed = bound
+    if subagent_id:
+        # No identity resolution and no task lookup: a subagent is not a member
+        # and holds no task, so the id IS the identity and the row carries no
+        # task ids. OWNER_ROLE_SUBAGENT holds why that is safe at every reader.
+        session_id = input_data.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            return False
+        agent_name, task_ids, anchor_completed = subagent_id, [], False
+    else:
+        bound = bind_launcher_identity(input_data, team_name)
+        if bound is None:
+            return False
+        agent_name, session_id, task_ids, anchor_completed = bound
     # The harness's own id for this job, which lets the turn-end gate match a
     # running job to the teammate that launched it. Every tool_response key is
     # optional: a shell `&` launch carries none, and `_sanitize_record` keeps
@@ -1417,6 +1503,8 @@ def record_background_launch(input_data: Any, now: datetime | None = None) -> bo
             # this point must still expire, and only the write-time value
             # separates those two.
             "anchor_completed": anchor_completed,
+            # Present only on a subagent's row; absence is a teammate row.
+            "owner_role": OWNER_ROLE_SUBAGENT if subagent_id else None,
             "command": command,
             "harness_task_id": harness_task_id,
             # Every clock on this path takes `now`. A bare iso_now() here
