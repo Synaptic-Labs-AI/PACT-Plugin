@@ -748,8 +748,9 @@ def _second_commits_after_first_walks(monkeypatch, first, second):
     The walk only reports a name that was free when it looked. `first` names the
     pending the late settler walks from; `second` is the other settler, run to
     completion after that walk has chosen its stamp and before the late settler
-    writes there. The other settler runs as another process, as it does in use:
-    settlers are separate hook processes, so two of them never share a pid.
+    writes there. The other settler runs under a different pid, as it would in use:
+    settlers are separate hook processes, so two of them never share one. That is
+    simulated within this process by patching os.getpid; no second process runs.
     """
     real_free = co._free_pending
     real_pid = co.os.getpid

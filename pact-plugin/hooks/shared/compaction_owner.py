@@ -163,10 +163,10 @@ def settle(
     summary that is unmatched and younger than EXPIRE_S, so a newer one is never
     resolved ahead of it. wait_s bounds a poll for a summary younger than FRESH_S
     whose record has not landed yet. Keeps the newest KEEP_SETTLED teammate and
-    unattributed summaries and removes older ones. Anything raised before a summary
-    is written returns its claim to pending; anything raised after it is written
-    removes the claim instead, so a summary is settled once. An Exception is then
-    swallowed; any other BaseException, such as KeyboardInterrupt, is raised.
+    unattributed summaries and removes older ones. A raise never loses a summary;
+    _settle_one says how. An Exception is then swallowed; any other BaseException,
+    such as KeyboardInterrupt, is raised. Settling is at least once, not exactly
+    once: a summary is never lost, but it can be settled twice.
     """
     resolved: "list[tuple[str, str]]" = []
     if not session_dir:
@@ -193,13 +193,17 @@ def _reclaim_stale(folder: Path, now: Callable[[], datetime]) -> None:
     """Return to pending each claim further than FRESH_S from now, or unparseable.
 
     A claim is named <pending>.claimed-<pid>-<claim_ns>. Its age is measured from
-    claim_ns, never from the file's mtime, which the claiming rename keeps from
-    the pending file. A live claim is held for at most READ_WAIT_S plus one capped
-    read pass, far below FRESH_S. The comparison is on the absolute difference,
-    so a claim stamped more than FRESH_S in the FUTURE is reclaimed rather than
-    stranded; a clock stepped back is the likeliest way to make one. A claim is
-    never returned over a live pending file, which would destroy that
-    compaction's only copy of its summary.
+    claim_ns, never from the file's mtime, which the claiming rename keeps from the
+    pending file. A settler that does not stall holds its claim for about
+    READ_WAIT_S plus its capped reads, far below FRESH_S. A settler stalled past
+    FRESH_S, or a clock stepped forward past it, makes a live claim look stale.
+    Another settler can then reclaim and settle it, and the holder, if it had
+    already read the record, settles it again from memory, so the summary can be
+    settled twice, never lost. The comparison is on the absolute difference, so a
+    claim stamped more than FRESH_S in the FUTURE is reclaimed rather than stranded;
+    a clock stepped back is the likeliest way to make one. A claim is never returned
+    over a live pending file, which would destroy that compaction's only copy of its
+    summary.
     """
     now_ns = _epoch_ns(now())
     for claim in folder.glob(f"{_PENDING_PREFIX}*.json{_CLAIM_MARK}*"):
@@ -241,7 +245,7 @@ def _free_pending(folder: Path, pending_name: str) -> Path:
 
 
 def _restore_claim(folder: Path, claim: Path, pending_name: str, now: Callable[[], datetime]) -> None:
-    """Return a claim to pending, never over another summary and never twice.
+    """Return a claim to pending, never over another summary.
 
     Two guards, one for each way a restore goes wrong. The claim is first renamed
     to this settler's own fresh claim name, so only one settler can take it: a
@@ -253,11 +257,16 @@ def _restore_claim(folder: Path, claim: Path, pending_name: str, now: Callable[[
     twice. Nothing is unlinked unless the link succeeded, so a failure leaves the
     claim to be reclaimed rather than losing its summary.
 
+    A settler that dies between the link and the unlink, or whose unlink fails,
+    which nothing retries, leaves the summary both under a pending name and in its
+    own claim. A later reclaim returns that claim to pending too, so the summary is
+    settled twice: at least once, never lost.
+
     The own name steps past any name already there, or a second restore in the
     same instant would rename over the first one's leftover. That check is not the
     check-then-act race the staging write rejects: the name carries this process's
-    pid, and only one live process holds a pid, so nothing else can create that
-    name between the check and the rename.
+    pid, and the operating system gives a pid to one live process at a time, so no
+    other process can create that name between the check and the rename.
     """
     pid, claimed_ns = os.getpid(), _epoch_ns(now())
     own = folder / f"{pending_name}{_CLAIM_MARK}{pid}-{claimed_ns}"
@@ -285,13 +294,21 @@ def _settle_one(folder, pending, staged_ns, wait_s, now, monotonic, sleep):
     """Claim one staged summary and resolve it; None when another settler holds it.
 
     The claim renames the pending to <pending>.claimed-<pid>-<claim_ns>. Anything
-    raised BEFORE the summary is written, BaseException included, returns the claim
-    to a pending name, so the summary is never lost — its own when that is still
-    free, and the nearest later stamp when another compaction has taken it. Anything raised AFTER it is
-    written removes the claim, so the summary is never settled twice. Either way it
-    is re-raised. Entering the removal path for a raise that interrupted the act
-    would lose the summary outright, so the two are told apart by the act statement
-    having returned, never by the kind of error.
+    raised BEFORE the write is recorded in acted, BaseException included, returns
+    the claim to a pending name, at once or through a later reclaim, so the summary
+    is never lost — its own when that is still free, and the nearest later stamp
+    when another compaction has taken it. Anything raised AFTER it is recorded tries
+    to remove the claim instead of restoring it. Either way it is re-raised. Entering
+    the removal path for a raise that interrupted the act would lose the summary
+    outright, so the two are told apart by acted, set once the act statement has
+    returned, never by the kind of error.
+
+    Settling is not exactly once. A raise inside the act after its write has landed
+    returns the claim to pending. A crash, or a removal that fails, between the act
+    and removing the claim leaves it for a later reclaim. A settler stalled past
+    FRESH_S can have its claim reclaimed and settled by another, then settle it
+    again from the record it has already read. Each can settle the summary twice;
+    none loses it.
     """
     claim = pending.with_name(f"{pending.name}{_CLAIM_MARK}{os.getpid()}-{_epoch_ns(now())}")
     try:
@@ -313,10 +330,10 @@ def _settle_one(folder, pending, staged_ns, wait_s, now, monotonic, sleep):
 
 
 def _resolve_claim(folder, pending, claim, staged_ns, wait_s, now, monotonic, sleep, acted):
-    """Resolve one claimed summary, appending to acted once the summary is written.
+    """Resolve one claimed summary, appending to acted once the write has returned.
 
     acted is _settle_one's discriminator for whether a raise can still lose the
-    summary: while it is empty the summary exists only in the claim, so the claim
+    summary: while it is empty the summary may exist only in the claim, so the claim
     must go back to pending.
     """
     # lstat sees a link itself, so only a regular file is ever opened: a FIFO
