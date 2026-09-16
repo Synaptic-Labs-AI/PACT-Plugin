@@ -206,7 +206,7 @@ def _free_pending(folder: Path, pending_name: str) -> Path:
 
     Two summaries can hold the same stamp when the wall clock steps back, since
     stage_summary names them from time_ns(). Taking the nearest free stamp rather
-    than restamping to now keeps the reclaimed summary where it belongs in the
+    than restamping to now keeps the restored summary where it belongs in the
     oldest-first settle order, and keeps the stamp its settled file is named for
     close to when the summary was really staged, so the keep-newest prune still
     sees the two in the order they arrived.
@@ -230,7 +230,8 @@ def _settle_one(folder, pending, staged_ns, wait_s, now, monotonic, sleep):
 
     The claim renames the pending to <pending>.claimed-<pid>-<claim_ns>. Anything
     raised BEFORE the summary is written, BaseException included, returns the claim
-    to its pending name, so the summary is never lost. Anything raised AFTER it is
+    to a pending name, so the summary is never lost — its own when that is still
+    free, and the nearest later stamp when another compaction has taken it. Anything raised AFTER it is
     written removes the claim, so the summary is never settled twice. Either way it
     is re-raised. Entering the removal path for a raise that interrupted the act
     would lose the summary outright, so the two are told apart by the act statement
@@ -251,7 +252,7 @@ def _settle_one(folder, pending, staged_ns, wait_s, now, monotonic, sleep):
                 # there is nothing left to remove and the error is suppressed.
                 claim.unlink()
             else:
-                os.replace(claim, pending)
+                os.replace(claim, _free_pending(folder, pending.name))
         raise
 
 
@@ -273,7 +274,7 @@ def _resolve_claim(folder, pending, claim, staged_ns, wait_s, now, monotonic, sl
             verdict = _owner(record)
     age = _age(record, now)
     if verdict is None and age < EXPIRE_S:
-        os.replace(claim, pending)
+        os.replace(claim, _free_pending(folder, pending.name))
         return _STOP
     basis = EXPIRED if verdict is None else CONTENT
     verdict = verdict or UNKNOWN

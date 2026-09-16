@@ -580,6 +580,79 @@ def test_a_claim_whose_pending_name_carries_no_number_is_restored_under_it(tree)
     assert tree.names() == [odd.name], "restored under its own unreadable name"
 
 
+def test_a_reclaim_can_hand_a_summary_the_name_a_live_claim_restores_onto(tree):
+    """The reclaim walk and an unguarded restore compound.
+
+    _stamped's glob passes over .claimed- files, so a stamp held by a LIVE claim
+    is invisible to the walk and reads as free. The walk can therefore hand a
+    reclaimed summary the exact pending name a settler is about to restore its
+    own claim onto, and that restore destroys it. One settler polls while a
+    second settler's reclaim pass runs, which is the real interleaving: nothing
+    here stands in for the code under test.
+    """
+    held = tree.stage(SUMMARY_B)
+    base = int(staged_ns(held)) - 1
+    other = SUMMARY.replace("read three short text files", "read a third set of files")
+
+    def a_second_settler_reclaims():
+        fresh = tree.stage(other)
+        fresh.rename(fresh.with_name(f"compact-summary.pending-{base}.json"))
+        dead = tree.stage()
+        _claim(dead, STAGED - timedelta(seconds=co.FRESH_S + 10),
+               base=tree.session / f"compact-summary.pending-{base}.json")
+        co._reclaim_stale(tree.session, clock.now)
+
+    clock = later(2, on_sleep={1: a_second_settler_reclaims})
+    assert tree.settle(clock, wait_s=co.READ_WAIT_S) == []
+
+    # Named rather than compared whole: three summaries of ~400 characters make a
+    # failure nobody can read, and the question is only WHICH survived.
+    names = {SUMMARY: "lead", SUMMARY_B: "teammate", other: "third"}
+    kept = sorted(names.get(json.loads(path.read_text(encoding="utf-8"))["summary"], "unknown")
+                  for path in tree.session.glob("compact-summary.pending-*.json"))
+    assert kept == ["lead", "teammate", "third"], (
+        "the reclaim walk put a summary on the pending name a live claim was holding, "
+        "and that claim's restore overwrote it"
+    )
+
+
+def test_a_raise_before_the_act_does_not_restore_over_a_reclaimed_summary(tree, monkeypatch):
+    """The same compounding at the OTHER restore, reached by a raise.
+
+    Here the record matches during the poll, so the act runs and fails; acted is
+    still empty, so the claim goes back. The pending name it goes back to can have
+    been taken while this settler was working, and the summary sitting there is
+    another compaction's only copy.
+    """
+    held = tree.stage(SUMMARY_B)
+    base = int(staged_ns(held)) - 1
+    other = SUMMARY.replace("read three short text files", "read a third set of files")
+
+    def fail(path, text):
+        raise OSError("no space left on device")
+
+    def a_second_settler_reclaims_and_then_the_write_fails():
+        fresh = tree.stage(other)
+        fresh.rename(fresh.with_name(f"compact-summary.pending-{base}.json"))
+        dead = tree.stage()
+        _claim(dead, STAGED - timedelta(seconds=co.FRESH_S + 10),
+               base=tree.session / f"compact-summary.pending-{base}.json")
+        co._reclaim_stale(tree.session, clock.now)
+        # The summary lands, so the poll ends and the act runs — and then fails.
+        tree.summary(tree.teammate, body=BODY_B)
+        monkeypatch.setattr(co, "_write_atomic", fail)
+
+    clock = later(2, on_sleep={1: a_second_settler_reclaims_and_then_the_write_fails})
+    assert tree.settle(clock, wait_s=co.READ_WAIT_S) == []
+
+    names = {SUMMARY: "lead", SUMMARY_B: "teammate", other: "third"}
+    kept = sorted(names.get(json.loads(path.read_text(encoding="utf-8"))["summary"], "unknown")
+                  for path in tree.session.glob("compact-summary.pending-*.json"))
+    assert kept == ["lead", "teammate", "third"], (
+        "a raise before the act put the claim back over a summary the reclaim had just placed"
+    )
+
+
 def test_a_claim_younger_than_fresh_is_left_to_its_settler(tree):
     pending = tree.stage()
     tree.summary(tree.lead)
