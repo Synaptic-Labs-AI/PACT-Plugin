@@ -205,14 +205,15 @@ def _reclaim_stale(folder: Path, now: Callable[[], datetime]) -> None:
     claim_ns, never from the file's mtime, which the claiming rename keeps from the
     pending file. A settler that does not stall holds its claim for about
     READ_WAIT_S plus its capped reads, far below FRESH_S. A settler stalled past
-    FRESH_S, or a clock stepped forward past it, makes a live claim look stale.
-    Another settler can then reclaim and settle it, and the holder, if it had
-    already read the record, settles it again from memory, so the summary can be
-    settled twice, never lost. The comparison is on the absolute difference, so a
-    claim stamped more than FRESH_S in the FUTURE is reclaimed rather than stranded;
-    a clock stepped back is the likeliest way to make one. A claim is never returned
-    over a live pending file, which would destroy that compaction's only copy of its
-    summary.
+    FRESH_S, or a clock stepped by more than FRESH_S in either direction, makes a
+    live claim look stale. Another settler can then reclaim and settle it, and the
+    holder, if it had already read the record, settles it again from memory, so the
+    summary can be settled twice, never lost. The comparison is on the absolute
+    difference, so a claim stamped more than FRESH_S in the FUTURE is reclaimed
+    rather than stranded; a clock stepped back is the likeliest way to make one.
+    That holds for a live claim too, which is how a backward step can settle a
+    summary twice. A claim is never returned over a live pending file, which would
+    destroy that compaction's only copy of its summary.
     """
     now_ns = _epoch_ns(now())
     for claim in folder.glob(f"{_PENDING_PREFIX}*.json{_CLAIM_MARK}*"):
@@ -316,9 +317,9 @@ def _settle_one(folder, pending, staged_ns, wait_s, now, monotonic, sleep):
     Settling is not exactly once. A raise inside the act after its write has landed
     returns the claim to pending. A crash, or a removal that fails, between the act
     and removing the claim leaves it for a later reclaim. When a settler stalls past
-    FRESH_S, or the clock steps forward past it, another can reclaim and settle its
-    claim, and the holder then settles it again from the record it has already
-    read. Each can settle the summary twice; none loses it.
+    FRESH_S, or the clock steps by more than FRESH_S in either direction, another can
+    reclaim and settle its claim, and the holder then settles it again from the
+    record it has already read. Each can settle the summary twice; none loses it.
     """
     claim = pending.with_name(f"{pending.name}{_CLAIM_MARK}{os.getpid()}-{_epoch_ns(now())}")
     try:
