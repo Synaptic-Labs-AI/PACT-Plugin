@@ -517,6 +517,54 @@ def test_a_subagent_row_is_not_matched_by_a_member_of_the_same_name(tmp_path, mo
     )
 
 
+def test_a_subagent_row_the_recorder_writes_is_never_surfaced_as_outstanding(
+    tmp_path, monkeypatch
+):
+    """The lead-side reads of a row's name never see a subagent row.
+
+    missed_wake_scan reads `agent_name` for its separate-process filter, its
+    forensic event and its lead surface, and it reads only rows that
+    `outstanding_unflagged` passes. That selector's expiry gate refuses a row
+    with no task ids unless `anchor_completed` is set. The arm above rests on
+    this to say two assertions suffice.
+
+    The claim has two halves, so the row is written by the PRODUCTION recorder,
+    not by hand: the gate refuses a row with no task ids, AND the recorder never
+    sets `anchor_completed` on a subagent's row. A hand-written row would pin
+    only the first.
+
+    A team task is in progress and nothing is flagged, so a row that listed it
+    would be surfaced. The control shows that with the recorded row itself,
+    given that task id and stripped of the subagent marker.
+    """
+    from shared import background_work
+    from shared.task_utils import iter_team_task_jsons
+
+    world = World(tmp_path)
+    world.add_task(7, MATE)
+    proc = world.run(subagent_shell_launch_frame("bsubrow1"), script=TRACK_FILES)
+    assert proc.returncode == 0, proc.stderr
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(world.config))
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(world.project))
+    rows = background_work.load_records_for_discharge(TEAM)
+    assert [r.get("owner_role") for r in rows] == ["subagent"], rows
+    tasks = list(iter_team_task_jsons(TEAM))
+    assert [(t.get("id"), t.get("status")) for t in tasks] == [("7", "in_progress")], tasks
+
+    assert background_work.outstanding_unflagged(tasks, TEAM) == [], (
+        "a subagent's row was surfaced as outstanding, so the lead-side reads of "
+        f"a row's name see it: {rows}"
+    )
+
+    listed = {k: v for k, v in rows[0].items() if k != "owner_role"}
+    listed["task_ids"] = ["7"]
+    assert background_work.outstanding_unflagged(tasks, TEAM, records=[listed]) == [listed], (
+        "control: the recorded row, listing the in-progress task, was not "
+        "surfaced either, so the assertion above holds without the gate"
+    )
+
+
 # --------------------------------------------------------------------------
 # Which entries count as jobs, per role. background_tasks lists live
 # teammates and subagents as running entries beside real work.
