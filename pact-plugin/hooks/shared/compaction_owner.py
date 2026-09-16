@@ -142,9 +142,9 @@ def settle(
     """Resolve the staged summaries in session_dir, oldest first.
 
     Returns the (verdict, basis) of each summary resolved in this pass. A pass
-    first returns to pending every claim older than FRESH_S, measured from the
-    claim time in its name, and every claim whose name does not parse, so a
-    settler that was killed cannot strand a summary. It then stops at the first
+    first returns to pending every claim whose stamped time differs from now by
+    more than FRESH_S in EITHER direction, and every claim whose name does not
+    parse, so a settler that was killed cannot strand a summary. It then stops at the first
     summary that is unmatched and younger than EXPIRE_S, so a newer one is never
     resolved ahead of it. wait_s bounds a poll for a summary younger than FRESH_S
     whose record has not landed yet. Keeps the newest KEEP_SETTLED teammate and
@@ -175,13 +175,16 @@ def settle(
 
 
 def _reclaim_stale(folder: Path, now: Callable[[], datetime]) -> None:
-    """Return to pending each claim older than FRESH_S, or whose name does not parse.
+    """Return to pending each claim further than FRESH_S from now, or unparseable.
 
     A claim is named <pending>.claimed-<pid>-<claim_ns>. Its age is measured from
     claim_ns, never from the file's mtime, which the claiming rename keeps from
     the pending file. A live claim is held for at most READ_WAIT_S plus one capped
-    read pass, far below FRESH_S. A claim is never returned over a live pending
-    file, which would destroy that compaction's only copy of its summary.
+    read pass, far below FRESH_S. The comparison is on the absolute difference,
+    so a claim stamped more than FRESH_S in the FUTURE is reclaimed rather than
+    stranded; a clock stepped back is the likeliest way to make one. A claim is
+    never returned over a live pending file, which would destroy that
+    compaction's only copy of its summary.
     """
     now_ns = _epoch_ns(now())
     for claim in folder.glob(f"{_PENDING_PREFIX}*.json{_CLAIM_MARK}*"):

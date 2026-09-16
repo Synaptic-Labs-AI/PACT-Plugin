@@ -90,8 +90,10 @@ COMPACT_SUMMARY_ARCHIVE_PREFIX = "compact-summary-"
 # wanted, since an older orphan is from a session nobody came back for.
 COMPACT_SUMMARY_ORPHAN_NAME = "compact-summary.orphan.txt"
 
-# Put first in the compact directive (session_init) and in the missed-wake
-# surface on a compaction (missed_wake_scan). An in-process teammate's
+# In the compact directive (session_init) it follows the role marker line and
+# precedes the bootstrap instruction, so a teammate reads what it is before it
+# reads the instruction the clause tells it to set aside. In the missed-wake
+# surface on a compaction (missed_wake_scan) it leads. An in-process teammate's
 # compaction arrives lead-shaped and receives both, and its system prompt
 # survives the compaction, so the sentence keys on that. It lives here rather
 # than in compaction_owner so that a broken settle module cannot disable the scan.
