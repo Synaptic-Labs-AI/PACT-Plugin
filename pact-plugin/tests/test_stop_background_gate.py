@@ -19,8 +19,12 @@ edit removes. That edit was applied to its own copy of the tree, proved
 applied, and run against this whole file with a fresh bytecode cache; the
 unmutated copy passes every arm:
   hook file removed ................................. 33 failed (all but the six
-                                                      arms that call the gate
-                                                      in-process)
+                                                      arms that never run the
+                                                      Stop hook: five call gate
+                                                      functions in-process, and
+                                                      the recorded subagent row
+                                                      arm runs track_files.py
+                                                      and the registry selector)
   block never printed ............................... 10 failed
   told-once read ignored ............................ 3 failed
   stop_hook_active guard removed .................... 2 failed
