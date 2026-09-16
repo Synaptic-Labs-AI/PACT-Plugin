@@ -50,6 +50,30 @@ resolver teammate_idle and get_task_list use. The launch path resolves the
 team through `frame_team_and_name`, which also finds a separate-process
 teammate's team, since that teammate has no session context of its own.
 
+HOW READERS MATCH A ROW, AND WHY A NEW ROW SHAPE MUST BE CHECKED AGAINST ALL
+THREE. Every consumer of this registry selects rows by one of three keys: the
+job id (`harness_task_id`), the owner's name (`agent_name`), or the tasks the
+row covers (`task_ids`). An argument that a new row shape is safe for one key
+says NOTHING about the other two — a row carrying no task ids is unreachable
+by every task-keyed reader and still perfectly reachable by a name-keyed one.
+The name-keyed readers are the MINORITY and the easiest to miss, which is what
+makes the mistake worth naming here: an argument built while reading the
+task-keyed majority feels complete and is not. `turn_end_gate`'s SubagentStop
+branch and `extend_records_for_claim` are two of them.
+
+THE SAME CLAIM FROM THE READER'S SIDE, because the paragraph above instructs
+whoever adds a ROW and the person who needs it most is whoever adds a READER: a
+new name-keyed reader must EXCLUDE rows that are not a member's — both of those
+do it with `not record.get("owner_role")` — because matching a name says
+nothing about whether the row belongs to a member at all.
+
+MEASURED FROM SOURCE, NOT COPIED FROM A LIST. Which consumers exist is a
+DECISION to re-derive rather than an inventory to trust: sweep `hooks/**/*.py`
+and `scripts/**/*.py` for the three key names above and for the loaders that
+hand out rows. A roll-call written here would be correct the day it was
+written and quietly wrong the first time a reader was added, so the taxonomy is
+the durable part and the set is not.
+
 TWO team-scoped state files, and they must stay separate. The registry
 (background_work.json) holds outstanding launches. The idle counter
 (unflagged_background_idle.json) backs Layer 2's three-consecutive-idles

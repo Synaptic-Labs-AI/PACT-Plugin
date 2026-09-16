@@ -1050,6 +1050,58 @@ class TestShellBackgroundedLaunchPopulation:
         assert is_shell_backgrounded_bash(frame) is False
 
 
+# The row fields a reader can match on, named ONCE here and asserted TWICE
+# below: against the schema the module actually emits, and against the module
+# docstring that names them as the three key types. A rename reddens the schema
+# arm; fixing that moves this tuple; the docstring arm then reddens until the
+# prose follows. It pins TOKENS, not wording, so a rewrap or a rewrite of that
+# paragraph costs nothing and only the event that makes the docstring FALSE
+# fires it.
+ROW_KEY_TOKENS = ("harness_task_id", "agent_name", "task_ids")
+
+
+class TestTheRowKeyTokensAreRealAndDocumented:
+    """Structural guard: the docstring's taxonomy must name real fields.
+
+    The module docstring tells the next person adding a row shape that every
+    reader matches on one of three keys. That sentence is only useful if the
+    names in it are the names the code uses, and only SAFE if it cannot go
+    quietly stale — a docstring that is confidently wrong about a field name is
+    worse than one that says nothing, because it is read as settled.
+    """
+
+    def test_each_token_is_a_key_the_row_schema_emits(self):
+        """REGRESSION GUARD — passes before and after; it protects the claim
+        that these names are the row's own schema rather than prose."""
+        record = _sanitize_record(_record(harness_task_id="bg-1"))
+
+        assert record is not None
+        missing = [token for token in ROW_KEY_TOKENS if token not in record]
+        assert missing == [], (
+            "these names are no longer keys the row schema emits: %s. The "
+            "module docstring names them as the keys a reader matches on, so "
+            "it is now wrong; move this tuple and the docstring together."
+            % (missing,)
+        )
+
+    def test_the_module_docstring_names_each_one(self):
+        """BASE-RED when the docstring's taxonomy is absent or renames a field.
+
+        Asserts PRESENCE of each token, never any surrounding phrasing, so the
+        paragraph can be rewritten freely.
+        """
+        from shared import background_work
+
+        doc = background_work.__doc__ or ""
+        missing = [token for token in ROW_KEY_TOKENS if token not in doc]
+        assert missing == [], (
+            "the module docstring does not name these row keys: %s. It states "
+            "the taxonomy a reader uses to decide whether a new row shape is "
+            "safe, and a key it fails to name is a key the next author will "
+            "not check against." % (missing,)
+        )
+
+
 MODULE_SOURCE = Path(__file__).resolve().parents[1] / "hooks" / "shared" / "background_work.py"
 
 
