@@ -148,9 +148,10 @@ def settle(
     summary that is unmatched and younger than EXPIRE_S, so a newer one is never
     resolved ahead of it. wait_s bounds a poll for a summary younger than FRESH_S
     whose record has not landed yet. Keeps the newest KEEP_SETTLED teammate and
-    unattributed summaries and removes older ones. Anything raised after a claim,
-    BaseException included, first returns that claim to pending. An Exception is
-    then swallowed; any other BaseException, such as KeyboardInterrupt, is raised.
+    unattributed summaries and removes older ones. Anything raised before a summary
+    is written returns its claim to pending; anything raised after it is written
+    removes the claim instead, so a summary is settled once. An Exception is then
+    swallowed; any other BaseException, such as KeyboardInterrupt, is raised.
     """
     resolved: "list[tuple[str, str]]" = []
     if not session_dir:
@@ -225,23 +226,39 @@ def _settle_one(folder, pending, staged_ns, wait_s, now, monotonic, sleep):
     """Claim one staged summary and resolve it; None when another settler holds it.
 
     The claim renames the pending to <pending>.claimed-<pid>-<claim_ns>. Anything
-    raised after the claim, BaseException included, returns the claim to its
-    pending name and is re-raised.
+    raised BEFORE the summary is written, BaseException included, returns the claim
+    to its pending name, so the summary is never lost. Anything raised AFTER it is
+    written removes the claim, so the summary is never settled twice. Either way it
+    is re-raised. Entering the removal path for a raise that interrupted the act
+    would lose the summary outright, so the two are told apart by the act statement
+    having returned, never by the kind of error.
     """
     claim = pending.with_name(f"{pending.name}{_CLAIM_MARK}{os.getpid()}-{_epoch_ns(now())}")
     try:
         os.replace(pending, claim)
     except FileNotFoundError:
         return None
+    acted = []
     try:
-        return _resolve_claim(folder, pending, claim, staged_ns, wait_s, now, monotonic, sleep)
+        return _resolve_claim(folder, pending, claim, staged_ns, wait_s, now, monotonic, sleep, acted)
     except BaseException:
         with contextlib.suppress(OSError):
-            os.replace(claim, pending)
+            if acted:
+                # The record-is-None branch acted by renaming the claim itself, so
+                # there is nothing left to remove and the error is suppressed.
+                claim.unlink()
+            else:
+                os.replace(claim, pending)
         raise
 
 
-def _resolve_claim(folder, pending, claim, staged_ns, wait_s, now, monotonic, sleep):
+def _resolve_claim(folder, pending, claim, staged_ns, wait_s, now, monotonic, sleep, acted):
+    """Resolve one claimed summary, appending to acted once the summary is written.
+
+    acted is _settle_one's discriminator for whether a raise can still lose the
+    summary: while it is empty the summary exists only in the claim, so the claim
+    must go back to pending.
+    """
     # lstat sees a link itself, so only a regular file is ever opened: a FIFO
     # would block the read, and a link would read outside the session dir.
     record = _load(claim) if stat.S_ISREG(os.lstat(claim).st_mode) else None
@@ -265,6 +282,7 @@ def _resolve_claim(folder, pending, claim, staged_ns, wait_s, now, monotonic, sl
         _write_atomic(folder / COMPACT_SUMMARY_NAME, record["summary"])
     else:
         _write_atomic(folder / f"{_UNATTRIBUTED_PREFIX}{staged_ns}.txt", record["summary"])
+    acted.append(True)
     fields = {"verdict": verdict, "basis": basis}
     if math.isfinite(age):
         fields["latency_s"] = round(age, 3)

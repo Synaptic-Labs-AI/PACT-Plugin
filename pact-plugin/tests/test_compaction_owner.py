@@ -422,7 +422,7 @@ def test_a_summary_another_settler_claimed_first_is_skipped(tree, monkeypatch):
 
 @pytest.mark.parametrize("error", [OSError("no space left on device"), KeyboardInterrupt()],
                          ids=["os-error", "keyboard-interrupt"])
-def test_anything_raised_after_the_claim_returns_it_to_pending(tree, monkeypatch, error):
+def test_anything_raised_before_the_act_returns_the_claim_to_pending(tree, monkeypatch, error):
     pending = tree.stage()
     tree.summary(tree.lead)
     real_write = co._write_atomic
@@ -439,6 +439,52 @@ def test_anything_raised_after_the_claim_returns_it_to_pending(tree, monkeypatch
     assert tree.names() == [pending.name]
     monkeypatch.setattr(co, "_write_atomic", real_write)
     assert tree.settle(later(9)) == [(co.LEAD, co.CONTENT)]
+    assert tree.canonical.read_text(encoding="utf-8") == SUMMARY
+
+
+def test_a_base_exception_after_the_act_removes_the_claim_rather_than_restoring_it(tree, monkeypatch):
+    """The window between the write and the unlink. Restoring there settles the
+    same summary twice: the next pass rewrites the bytes and journals a second
+    attribution, and for a lead verdict that re-creates compact-summary.txt after
+    the secretary has archived it."""
+    tree.stage()
+    tree.summary(tree.lead)
+    real_append = co.session_journal.append_event
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt("killed between the write and the unlink")
+
+    monkeypatch.setattr(co.session_journal, "append_event", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        tree.settle(later(9))
+    assert tree.canonical.read_text(encoding="utf-8") == SUMMARY
+    assert tree.names() == ["compact-summary.txt"], "the claim is gone, not returned to pending"
+
+    monkeypatch.setattr(co.session_journal, "append_event", real_append)
+    assert tree.settle(later(10)) == [], "nothing is left to settle a second time"
+    assert tree.verdicts() == []
+
+
+def test_the_claim_stamp_and_the_staleness_read_share_one_clock(tree, monkeypatch):
+    """A killed settler leaves a claim that production named, not one the test
+    named. That stamp and the reclaim's staleness read must come off the same
+    injected clock: a stamp taken from the real clock reads as days stale against
+    the test clock, and would be reclaimed the instant it was made."""
+    tree.stage()
+    tree.summary(tree.lead)
+    real_resolve = co._resolve_claim
+
+    def abandon(folder, pending, claim, *rest):
+        return co.LEAD, co.CONTENT
+
+    monkeypatch.setattr(co, "_resolve_claim", abandon)
+    assert tree.settle(later(9)) == [(co.LEAD, co.CONTENT)]
+    monkeypatch.setattr(co, "_resolve_claim", real_resolve)
+    claim, = tree.session.glob(f"*{co._CLAIM_MARK}*")
+
+    assert tree.settle(later(9 + co.FRESH_S - 1)) == [], "still inside its settler's window"
+    assert tree.names() == [claim.name]
+    assert tree.settle(later(9 + co.FRESH_S + 1)) == [(co.LEAD, co.CONTENT)]
     assert tree.canonical.read_text(encoding="utf-8") == SUMMARY
 
 
