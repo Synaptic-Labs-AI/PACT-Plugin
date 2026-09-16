@@ -460,13 +460,17 @@ def test_a_subagent_row_is_not_matched_by_a_member_of_the_same_name(tmp_path, mo
     this codebase documents that a member could be named 'a' plus 16 hex, and
     no such collision has been shown to occur.
 
-    THE TWO NAME-KEYED READERS ARE THE WHOLE POPULATION, which is why two
-    assertions suffice. `turn_end_gate._candidates`' SubagentStop branch builds
-    `by_job` from rows whose `agent_name` equals the ending teammate's, and
+    TWO ASSERTIONS SUFFICE BECAUSE ONLY TWO READS COMPARE A ROW'S NAME WITH A
+    MEMBER'S. `turn_end_gate._candidates`' SubagentStop branch builds `by_job`
+    from rows whose `agent_name` equals the ending teammate's, and
     `extend_records_for_claim` appends a newly claimed task to rows whose
-    `agent_name` equals the claiming owner. Every other reader of the store is
-    id-keyed (indifferent to owner) or task-keyed, and a subagent row carries
-    no task ids, so none of them can reach it.
+    `agent_name` equals the claiming owner. The store's other reads of
+    `agent_name`, in missed_wake_scan, never see a subagent row, and not
+    because of how they key: they read only rows that `outstanding_unflagged`
+    passes, and its expiry gate (`has_live_listed_task`) refuses a row with no
+    task ids unless `anchor_completed` is set, which the recorder never sets on
+    a subagent row. The remaining readers match on the job id, indifferent to
+    owner, or on task ids, which a subagent row does not carry.
     """
     from shared import background_work, turn_end_gate
 

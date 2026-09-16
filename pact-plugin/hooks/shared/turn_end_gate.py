@@ -357,9 +357,13 @@ def _candidates(input_data: dict, role: str, name: str, team: str, running: list
         # `owner_role` EXCLUDES A NON-TEAMMATE ROW FROM THIS NAME MATCH, and the
         # reason is semantic rather than defensive: a subagent's row is NOT a
         # member's row, so matching it by MEMBER NAME is wrong whatever any
-        # member happens to be called. This is one of only two name-keyed reads
-        # of the store; every other reader matches on the job id or on the
-        # record's task ids, and a non-teammate row carries none.
+        # member happens to be called. This and `extend_records_for_claim` are
+        # the two reads that compare a row's name with a member's, and both
+        # exclude the row. The store's other name reads, in missed_wake_scan,
+        # are safe for a different reason: they see only rows that
+        # `outstanding_unflagged` passes, and its expiry gate refuses a row
+        # with no task ids unless `anchor_completed` is set, which the recorder
+        # never sets on a subagent's row.
         #
         # The test is truthiness, not equality with one role, so a role added
         # later is excluded here by default. That is the safe direction: a new
