@@ -348,6 +348,61 @@ def test_any_raising_transcript_lookup_parks_the_summary(tree, monkeypatch):
     assert not tree.canonical.exists()
 
 
+def _dropped(tree):
+    """The cause of each compaction_summary_dropped row that actually landed."""
+    journal = tree.session / "session-journal.jsonl"
+    if not journal.exists():
+        return []
+    events = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+    return [event["cause"] for event in events if event.get("type") == "compaction_summary_dropped"]
+
+
+def test_a_stage_that_finds_no_free_stamp_journals_the_discard(tree, monkeypatch):
+    """Every stamp the stage would try is taken, so the summary cannot be kept. It is
+    lost either way; what must not happen is losing it without a trace."""
+    stamp = 1_800_000_000_000_000_000
+    for offset in range(co.STAGE_TRIES):
+        (tree.session / f"compact-summary.pending-{stamp + offset}.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(co.time, "time_ns", lambda: stamp)
+
+    assert co.stage_summary(tree.frame(), str(tree.session), now=lambda: STAGED) is False
+    assert _dropped(tree) == ["no_free_stamp"], "the discarded summary left no journal row"
+
+
+def test_a_stage_the_filesystem_will_not_link_journals_the_discard_with_its_cause(tree, monkeypatch):
+    """A discard that is not exhaustion: the filesystem refuses hard links. The session
+    dir is still writable, so the discard can be journaled, and the cause says why."""
+    def refused(src, dst, *args, **kwargs):
+        raise PermissionError("hard links are not permitted on this filesystem")
+
+    monkeypatch.setattr(co.os, "link", refused)
+    assert co.stage_summary(tree.frame(), str(tree.session), now=lambda: STAGED) is False
+    assert _dropped(tree) == ["PermissionError"], "a discard that was not exhaustion left no journal row"
+
+
+def test_the_discard_is_journaled_under_a_registered_type_and_field():
+    """A row landing does not show its type is registered: the journal validates only
+    the types it knows and writes an unknown type unchecked. So the registration is
+    pinned from the writer's side, where removing it would otherwise go unnoticed."""
+    from shared.session_journal import _REQUIRED_FIELDS_BY_TYPE
+
+    assert _REQUIRED_FIELDS_BY_TYPE.get("compaction_summary_dropped") == {"cause": str}
+
+
+def test_a_journal_that_cannot_be_written_never_makes_the_stage_raise(tree, monkeypatch):
+    """The stage runs inside a hook, so reporting a discard must not become a new way
+    for the hook to fail."""
+    def refused(src, dst, *args, **kwargs):
+        raise PermissionError("hard links are not permitted on this filesystem")
+
+    def unwritable(*args, **kwargs):
+        raise OSError("the journal cannot be written")
+
+    monkeypatch.setattr(co.os, "link", refused)
+    monkeypatch.setattr(co.session_journal, "append_event", unwritable)
+    assert co.stage_summary(tree.frame(), str(tree.session), now=lambda: STAGED) is False
+
+
 def test_a_repeated_stamp_at_stage_time_destroys_the_earlier_record(tree, monkeypatch):
     """stage_summary names its pending from time_ns() and writes it with a helper
     that ends in os.replace, which overwrites. A repeated stamp therefore destroys

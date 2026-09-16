@@ -107,7 +107,9 @@ def stage_summary(frame: Any, session_dir: str, *, now: Callable[[], datetime] =
     transcript's size now, so settle() reads only what is written after the
     compaction. When the sizes cannot be read, the summary is staged without them
     and settle() reads each transcript from its start. Never touches
-    compact-summary.txt. True when the file was written.
+    compact-summary.txt. True when the file was written. When a summary is
+    discarded instead, the discard is journaled as compaction_summary_dropped
+    with its cause, unless there is no writable session dir to journal into.
     """
     try:
         summary = frame.get("compact_summary")
@@ -131,7 +133,16 @@ def stage_summary(frame: Any, session_dir: str, *, now: Callable[[], datetime] =
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         _write_new_pending(folder, json.dumps(record))
         return True
-    except Exception:
+    except Exception as error:
+        # One discard stays silent: one with no writable session dir, since the
+        # journal that would report it lives in that same dir.
+        if session_dir:
+            cause = "no_free_stamp" if isinstance(error, _NoFreeStamp) else type(error).__name__
+            with contextlib.suppress(Exception):
+                session_journal.append_event(
+                    session_journal.make_event("compaction_summary_dropped", cause=cause),
+                    session_dir=str(session_dir),
+                )
         return False
 
 
@@ -505,6 +516,10 @@ def _holds_summary(path: Path, size: int, offset: Any, bodies: "tuple[str, ...]"
     return False
 
 
+class _NoFreeStamp(OSError):
+    """Each of the STAGE_TRIES stamps tried, from the starting one up, was taken."""
+
+
 def _link_new_pending(folder: Path, source: Path, stamp: int) -> None:
     """Link source under the first pending stamp from stamp on that is free.
 
@@ -518,7 +533,7 @@ def _link_new_pending(folder: Path, source: Path, stamp: int) -> None:
             return
         except FileExistsError:
             pass
-    raise OSError("no free pending stamp")
+    raise _NoFreeStamp("no free pending stamp")
 
 
 def _write_new_pending(folder: Path, text: str) -> None:
@@ -534,8 +549,8 @@ def _write_new_pending(folder: Path, text: str) -> None:
 
     A repeated stamp is not hypothetical here: it is the same premise the
     free-name walk rests on, a wall clock that steps back while summaries are
-    named from time_ns(). Exhausting STAGE_TRIES raises, and stage_summary
-    reports that as False rather than losing the record silently.
+    named from time_ns(). Exhausting STAGE_TRIES raises; stage_summary then
+    returns False and journals the discard, rather than losing it silently.
     """
     fd, tmp = tempfile.mkstemp(dir=str(folder), prefix="compact-summary.tmp-")
     try:

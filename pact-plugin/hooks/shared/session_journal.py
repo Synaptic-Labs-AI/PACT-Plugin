@@ -107,6 +107,11 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # (none did in time). An unknown verdict is the alarm that attribution
     # failed for that compaction.
     "compaction_attributed": {"verdict": str, "basis": str},
+    # shared/compaction_owner.py writes compaction_summary_dropped when
+    # stage_summary discards a summary it could not stage. cause is
+    # no_free_stamp when every stamp it tried was already taken, and otherwise
+    # the class of the exception that stopped the stage.
+    "compaction_summary_dropped": {"cause": str},
     # commands/orchestrate.md writes variety_assessed with task_id (quoted
     # string) and variety (nested JSON object → dict). This is the FEATURE-level
     # variety (written once for the feature task) — distinct from the
