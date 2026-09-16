@@ -64,6 +64,10 @@ POLL_S = 0.25
 READ_CAP_BYTES = 8 * 1024 * 1024
 MIN_BODY_CHARS = 200
 KEEP_SETTLED = 10
+# A sanity bound, not a tuning knob: each retry steps past one stamp already on
+# disk, and those are few, so exhausting it means something is wrong rather than
+# busy. Staging then raises and reports False instead of looping inside a hook.
+STAGE_TRIES = 64
 
 TEAMMATE, LEAD, UNKNOWN = "teammate", "lead", "unknown"
 CONTENT, EXPIRED = "content", "expired"
@@ -125,7 +129,7 @@ def stage_summary(frame: Any, session_dir: str, *, now: Callable[[], datetime] =
         }
         folder = Path(session_dir)
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-        _write_atomic(folder / f"{_PENDING_PREFIX}{time.time_ns()}.json", json.dumps(record))
+        _write_new_pending(folder, json.dumps(record))
         return True
     except Exception:
         return False
@@ -460,8 +464,46 @@ def _holds_summary(path: Path, size: int, offset: Any, bodies: "tuple[str, ...]"
     return False
 
 
+def _write_new_pending(folder: Path, text: str) -> None:
+    """Write text under a pending stamp that is free, never over an existing one.
+
+    os.link fails when the target exists, and that is the whole point: an
+    exists() check before a write is a check-then-act race, so two stagers can
+    both see a name free and the second still destroys the first record. The
+    temporary file holds the complete record BEFORE any pending name points at
+    it, which an exclusive-create-then-write does not: that leaves a named but
+    empty pending for the length of the write, and _load reads an unparseable
+    pending as no record at all, which parks a good summary as unattributed.
+
+    A repeated stamp is not hypothetical here: it is the same premise the
+    free-name walk rests on, a wall clock that steps back while summaries are
+    named from time_ns(). Exhausting STAGE_TRIES raises, and stage_summary
+    reports that as False rather than losing the record silently.
+    """
+    fd, tmp = tempfile.mkstemp(dir=str(folder), prefix="compact-summary.tmp-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        stamp = time.time_ns()
+        for _ in range(STAGE_TRIES):
+            try:
+                os.link(tmp, folder / f"{_PENDING_PREFIX}{stamp}.json")
+                return
+            except FileExistsError:
+                stamp += 1
+        raise OSError("no free pending stamp")
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+
+
 def _write_atomic(path: Path, text: str) -> None:
-    """Write text to path through a 0600 temporary file in the same folder."""
+    """Write text to path through a 0600 temporary file in the same folder.
+
+    Replaces what is there. Its three callers name a settled destination whose
+    last write should win; the staging write does NOT use it, because a pending
+    name that already exists holds another compaction's only copy.
+    """
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix="compact-summary.tmp-")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:

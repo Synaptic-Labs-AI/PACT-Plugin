@@ -348,6 +348,40 @@ def test_any_raising_transcript_lookup_parks_the_summary(tree, monkeypatch):
     assert not tree.canonical.exists()
 
 
+def test_a_repeated_stamp_at_stage_time_destroys_the_earlier_record(tree, monkeypatch):
+    """stage_summary names its pending from time_ns() and writes it with a helper
+    that ends in os.replace, which overwrites. A repeated stamp therefore destroys
+    the earlier record at the moment the later one is staged, before any claim
+    exists, so none of the restore guards can reach it. The premise is this
+    module's own: the free-name walk is justified by two summaries holding the
+    same stamp when the wall clock steps back.
+    """
+    first = tree.stage()
+    repeated = int(staged_ns(first))
+    monkeypatch.setattr(co.time, "time_ns", lambda: repeated)
+    tree.stage(SUMMARY_B)
+
+    names = {SUMMARY: "lead", SUMMARY_B: "teammate"}
+    kept = sorted(names.get(json.loads(path.read_text(encoding="utf-8"))["summary"], "unknown")
+                  for path in tree.session.glob("compact-summary.pending-*.json"))
+    assert kept == ["lead", "teammate"], "the second stage overwrote the first record"
+
+
+def test_two_stages_on_the_real_clock_both_survive(tree):
+    """Live positive control for the arm above, in the same run: on an unpinned
+    clock two stages take different stamps and both records survive. Without it a
+    null in that arm could mean the harness never staged at all, which would read
+    as safety.
+    """
+    tree.stage()
+    tree.stage(SUMMARY_B)
+
+    names = {SUMMARY: "lead", SUMMARY_B: "teammate"}
+    kept = sorted(names.get(json.loads(path.read_text(encoding="utf-8"))["summary"], "unknown")
+                  for path in tree.session.glob("compact-summary.pending-*.json"))
+    assert kept == ["lead", "teammate"]
+
+
 # --------------------------------------------------------------------------
 # Settle: offsets, order, claims and the poll
 # --------------------------------------------------------------------------
@@ -980,7 +1014,7 @@ def test_no_sleep_is_reachable_from_stage_summary():
                 callee = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
                 called.add(callee)
                 stack.append(callee)
-    assert {"stage_summary", "_locate", "_transcripts", "_write_atomic"} <= reached
+    assert {"stage_summary", "_locate", "_transcripts", "_write_new_pending"} <= reached
     assert "sleep" not in called and "settle" not in reached
 
 
