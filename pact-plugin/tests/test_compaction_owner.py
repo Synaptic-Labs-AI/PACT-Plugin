@@ -357,6 +357,27 @@ def _dropped(tree):
     return [event["cause"] for event in events if event.get("type") == "compaction_summary_dropped"]
 
 
+@pytest.mark.parametrize("frame", [None, [], "compact_summary", 42, True],
+                         ids=["null", "list", "string", "number", "boolean"])
+def test_a_frame_that_is_not_a_dict_is_refused_without_a_drop_row(tree, frame):
+    """Each non-object shape a JSON frame can take. It holds no summary, so there is
+    nothing to discard, and a drop row would falsely record a lost one."""
+    assert co.stage_summary(frame, str(tree.session), now=lambda: STAGED) is False
+    assert _dropped(tree) == [], "a malformed frame was journaled as a discarded summary"
+    assert tree.names() == []
+
+
+def test_an_empty_session_dir_writes_nothing_into_the_working_directory(tree, tmp_path, monkeypatch):
+    """Path("") is ".", so staging into an empty session_dir would write the summary,
+    which is conversation content, into whatever directory the hook runs in: the
+    user's project, where it can be committed."""
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    assert co.stage_summary(tree.frame(), "", now=lambda: STAGED) is False
+    assert sorted(path.name for path in project.iterdir()) == []
+
+
 def test_a_stage_that_finds_no_free_stamp_journals_the_discard(tree, monkeypatch):
     """Every stamp the stage would try is taken, so the summary cannot be kept. It is
     lost either way; what must not happen is losing it without a trace."""

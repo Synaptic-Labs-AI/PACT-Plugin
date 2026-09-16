@@ -110,7 +110,13 @@ def stage_summary(frame: Any, session_dir: str, *, now: Callable[[], datetime] =
     compact-summary.txt. True when the file was written. When a summary is
     discarded instead, the discard is journaled as compaction_summary_dropped
     with its cause, unless there is no writable session dir to journal into.
+    A frame that is not a dict holds no summary, so, like a frame without one,
+    it returns False with no row.
     """
+    # Path("") is ".", so an empty session_dir would stage the summary, which is
+    # conversation content, into the process's working directory.
+    if not isinstance(frame, dict) or not session_dir:
+        return False
     try:
         summary = frame.get("compact_summary")
         if not isinstance(summary, str) or not summary:
@@ -134,15 +140,14 @@ def stage_summary(frame: Any, session_dir: str, *, now: Callable[[], datetime] =
         _write_new_pending(folder, json.dumps(record))
         return True
     except Exception as error:
-        # One discard stays silent: one with no writable session dir, since the
+        # A discard stays silent when the session dir is not writable, since the
         # journal that would report it lives in that same dir.
-        if session_dir:
-            cause = "no_free_stamp" if isinstance(error, _NoFreeStamp) else type(error).__name__
-            with contextlib.suppress(Exception):
-                session_journal.append_event(
-                    session_journal.make_event("compaction_summary_dropped", cause=cause),
-                    session_dir=str(session_dir),
-                )
+        cause = "no_free_stamp" if isinstance(error, _NoFreeStamp) else type(error).__name__
+        with contextlib.suppress(Exception):
+            session_journal.append_event(
+                session_journal.make_event("compaction_summary_dropped", cause=cause),
+                session_dir=str(session_dir),
+            )
         return False
 
 
