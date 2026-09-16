@@ -294,16 +294,27 @@ def _age(record: "dict | None", now: Callable[[], datetime]) -> float:
 
 
 def _owner(record: "dict | None") -> "str | None":
-    """lead or teammate when a transcript holds the record's summary, else None."""
+    """lead or teammate when a transcript holds the record's summary, else None.
+
+    Never raises on the transcript lookup. A summary whose transcript cannot be
+    located or listed is unattributable, so it expires and parks like any other.
+    A raise here would instead be restored by _settle_one and re-raised on the
+    next pass, and since settle stops the pass at that summary, one bad record
+    would block every newer summary for good and journal nothing.
+    """
     if record is None:
         return None
     bodies = _summary_bodies(record.get("summary"))
-    located = _locate(record.get("transcript_path"), record.get("session_id"))
-    if not bodies or located is None:
+    if not bodies:
+        return None
+    try:
+        located = _locate(record.get("transcript_path"), record.get("session_id"))
+        candidates = list(_transcripts(*located)) if located is not None else []
+    except Exception:
         return None
     offsets = record.get("offsets")
     offsets = offsets if isinstance(offsets, dict) else {}
-    for index, (path, status) in enumerate(_transcripts(*located)):
+    for index, (path, status) in enumerate(candidates):
         if _holds_summary(path, status.st_size, offsets.get(str(path)), bodies):
             return LEAD if index == 0 else TEAMMATE
     return None

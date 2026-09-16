@@ -319,6 +319,35 @@ def test_a_stamp_far_in_the_future_cannot_hold_the_queue(tree):
     assert tree.settle(Clock()) == [(co.UNKNOWN, co.EXPIRED)]
 
 
+def test_a_summary_whose_transcript_cannot_be_located_never_blocks_a_later_one(tree):
+    """A lookup that raises must make the summary unattributable, not restart the
+    pass. Restored and re-raised, one bad record holds the queue for good: the
+    raise comes before the age check, so it never expires either."""
+    poison = tree.stage(frame={**tree.frame(), "transcript_path": f"{tree.lead}\x00x"})
+    tree.stage(SUMMARY_B)
+    tree.summary(tree.lead, body=BODY_B)
+
+    assert tree.settle(later(9)) == []
+    assert not tree.canonical.exists(), "the poisoned summary must hold its place until it expires"
+
+    assert tree.settle(later(co.EXPIRE_S + 1)) == [(co.UNKNOWN, co.EXPIRED), (co.LEAD, co.CONTENT)]
+    assert tree.canonical.read_text(encoding="utf-8") == SUMMARY_B
+    parked = tree.session / f"compact-summary.unattributed-{staged_ns(poison)}.txt"
+    assert parked.read_text(encoding="utf-8") == SUMMARY
+    assert tree.verdicts() == [("unknown", "expired"), ("lead", "content")]
+
+
+def test_any_raising_transcript_lookup_parks_the_summary(tree, monkeypatch):
+    """The guard is not narrowed to the one error a NUL path happens to raise."""
+    def unreachable(*args):
+        raise OSError("the transcripts directory is unreadable")
+
+    monkeypatch.setattr(co, "_locate", unreachable)
+    tree.stage()
+    assert tree.settle(later(co.EXPIRE_S + 1)) == [(co.UNKNOWN, co.EXPIRED)]
+    assert not tree.canonical.exists()
+
+
 # --------------------------------------------------------------------------
 # Settle: offsets, order, claims and the poll
 # --------------------------------------------------------------------------
