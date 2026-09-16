@@ -114,7 +114,11 @@ def stage_summary(frame: Any, session_dir: str, *, now: Callable[[], datetime] =
     it returns False with no row.
     """
     # Path("") is ".", so an empty session_dir would stage the summary, which is
-    # conversation content, into the process's working directory.
+    # conversation content, into the process's working directory. The guard refuses
+    # only a missing or empty session_dir. A relative one is staged as given: the
+    # caller builds it under the config root, which stays relative when
+    # CLAUDE_CONFIG_DIR names a relative path, so refusing it would stop staging for
+    # that configuration.
     if not isinstance(frame, dict) or not session_dir:
         return False
     try:
@@ -270,8 +274,9 @@ def _restore_claim(folder: Path, claim: Path, pending_name: str, now: Callable[[
     The own name steps past any name already there, or a second restore in the
     same instant would rename over the first one's leftover. That check is not the
     check-then-act race the staging write rejects: the name carries this process's
-    pid, and the operating system gives a pid to one live process at a time, so no
-    other process can create that name between the check and the rename.
+    pid, and within one PID namespace the operating system gives a pid to one live
+    process at a time, so no other process in that namespace can create that name
+    between the check and the rename.
     """
     pid, claimed_ns = os.getpid(), _epoch_ns(now())
     own = folder / f"{pending_name}{_CLAIM_MARK}{pid}-{claimed_ns}"
@@ -310,10 +315,10 @@ def _settle_one(folder, pending, staged_ns, wait_s, now, monotonic, sleep):
 
     Settling is not exactly once. A raise inside the act after its write has landed
     returns the claim to pending. A crash, or a removal that fails, between the act
-    and removing the claim leaves it for a later reclaim. A settler stalled past
-    FRESH_S can have its claim reclaimed and settled by another, then settle it
-    again from the record it has already read. Each can settle the summary twice;
-    none loses it.
+    and removing the claim leaves it for a later reclaim. When a settler stalls past
+    FRESH_S, or the clock steps forward past it, another can reclaim and settle its
+    claim, and the holder then settles it again from the record it has already
+    read. Each can settle the summary twice; none loses it.
     """
     claim = pending.with_name(f"{pending.name}{_CLAIM_MARK}{os.getpid()}-{_epoch_ns(now())}")
     try:

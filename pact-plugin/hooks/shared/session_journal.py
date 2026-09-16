@@ -101,8 +101,10 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # the load-bearing fields downstream consumers depend on; team is
     # redundant with CLAUDE.md and worktree is empty at write time.
     "session_start": {"session_id": str, "project_dir": str},
-    # shared/compaction_owner.py writes compaction_attributed each time settle()
-    # resolves a staged compaction summary. verdict is teammate, lead or
+    # shared/compaction_owner.py writes compaction_attributed, best effort, once a
+    # settle's write is recorded as acted, so there is at most one row per
+    # recorded act: a raise inside the write step is never recorded, and its
+    # summary can be written twice with one row. verdict is teammate, lead or
     # unknown; basis is content (a transcript holds the summary) or expired
     # (none did in time). An unknown verdict is the alarm that attribution
     # failed for that compaction.
