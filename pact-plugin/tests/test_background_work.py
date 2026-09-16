@@ -117,6 +117,56 @@ class TestRecordSchema:
         assert record_task_ids({"task_ids": "nope"}) == []
 
 
+class TestTheOwnerMarkerOnTheReadPath:
+    """What a written `owner_role` becomes by the time a reader sees the row.
+
+    The sanitiser's comment says only the exact value "subagent" survives, and
+    that any other value is not kept: a row carrying task ids is then read as a
+    teammate's, and a row without them is dropped whole. Each case writes the
+    raw row straight to the registry file, as any writer could, and reads it
+    back through the loader the readers use, so the sanitiser runs where it
+    runs in use. `save_records` is not used to seed: it sanitises on the way
+    in, and would drop the task-less row before the read path ever saw it.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolated_team(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+        self.registry = tmp_path / "teams" / TEAM / "background_work.json"
+        self.registry.parent.mkdir(parents=True)
+
+    @pytest.mark.parametrize(
+        "owner_role, task_ids, expected",
+        [
+            pytest.param("Subagent", ["13"], [{"task_ids": ["13"]}],
+                         id="non-exact-with-task-ids-is-a-teammate-row"),
+            pytest.param("Subagent", [], [],
+                         id="non-exact-without-task-ids-is-dropped"),
+            pytest.param("subagent", ["13"],
+                         [{"task_ids": ["13"], "owner_role": "subagent"}],
+                         id="exact-with-task-ids-keeps-the-marker"),
+            pytest.param("subagent", [],
+                         [{"task_ids": [], "owner_role": "subagent"}],
+                         id="exact-without-task-ids-keeps-the-marker"),
+        ],
+    )
+    def test_a_written_owner_role_reaches_readers_only_as_the_comment_says(
+        self, owner_role, task_ids, expected
+    ):
+        import json
+
+        written = _record(owner_role=owner_role, task_ids=task_ids)
+        self.registry.write_text(json.dumps({"records": [written]}))
+
+        loaded = load_records_for_discharge(TEAM, now=T0)
+
+        base = {k: written[k] for k in ("agent_name", "session_id", "registered_at")}
+        assert loaded == [dict(base, **e) for e in expected], (
+            f"owner_role {owner_role!r} with task_ids {task_ids!r} reached the "
+            f"readers as {loaded!r}"
+        )
+
+
 class TestMatchingByList:
     def test_matches_any_listed_id(self):
         rec = _sanitize_record(_record(task_ids=["13", "14"]))
