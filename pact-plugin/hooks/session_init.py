@@ -34,6 +34,8 @@ Output: JSON with `hookSpecificOutput.additionalContext` for status
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import re
@@ -667,6 +669,25 @@ _SESSION_ID_CONTROL_CHARS_RE = SESSION_ID_CONTROL_CHARS_RE
 # context self-heal gate consumes it alongside this module's persistence and
 # CLAUDE.md-write gates. One definition, three call sites: the gates can
 # never drift.
+
+
+def _bootstrap_already_ran(session_dir: str) -> bool:
+    """True when bootstrap_gate's own marker check passes for session_dir.
+
+    The gate module is imported by name, at call time, so this is the check the
+    gate enforces, not a copy: a touched or unsigned marker does not count. If the
+    gate's own imports fail, its fail-closed branch prints a PreToolUse decision
+    and exits. So the import runs with stdout captured, and anything raised,
+    SystemExit included, reads as not set, which keeps the bootstrap directive.
+    """
+    if not session_dir:
+        return False
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            import bootstrap_gate
+        return bootstrap_gate.is_marker_set(Path(session_dir)) is True
+    except BaseException:
+        return False
 
 
 def _build_safety_net_context(
@@ -1896,32 +1917,40 @@ def main():
         # Single platform-managed directive for every session source. The
         # platform pre-creates exactly one team per session (Claude Code
         # v2.1.178+), so the team always exists by the time the orchestrator
-        # acts — the directive's only job is to name the team and block until
-        # bootstrap completes. "(provided by the platform for this session)" is
-        # correct for both fresh and resumed sessions, so no team-existence
-        # discrimination is needed. The bootstrap-blocking sentence is the
-        # universal floor: it aligns this guidance with the bootstrap_gate
-        # PreToolUse hook, which already mechanically blocks Edit/Write/Agent
-        # until the bootstrap marker is stamped regardless of session source.
+        # acts — the directive's only job is to name the team and to block until
+        # bootstrap completes, or say that it has. "(provided by the platform
+        # for this session)" is correct for both fresh and resumed sessions, so
+        # no team-existence discrimination is needed. The bootstrap-blocking
+        # sentence aligns this guidance with the bootstrap_gate PreToolUse hook,
+        # which mechanically blocks Edit/Write/Agent until the bootstrap marker
+        # is stamped. It is dropped only on a compaction whose marker is already
+        # stamped.
         # On compact, a teammate clause follows the marker line. An in-process
         # teammate's compaction arrives lead-shaped and receives this same
         # directive, and its system prompt, unlike its spawn prompt, survives
         # the compaction, so the clause keys on the system prompt. It tells a
         # teammate when to set aside "Do not evaluate whether it is needed."
+        # The compact branch swaps the invoke sentences for _ran_sentence when
+        # the bootstrap marker is already set; every other path uses this text.
         _compact_clause = (
             f'{COMPACTION_TEAMMATE_CLAUSE}\n\n'
             if source == "compact" else ''
         )
+        _role_line = f'YOUR PACT ROLE: orchestrator.\n\n{_compact_clause}'
+        _team_line = f'Your team is `{team_name}` (provided by the platform for this session). '
         _team_directive = (
-            f'YOUR PACT ROLE: orchestrator.\n\n'
-            f'{_compact_clause}'
+            f'{_role_line}'
             f'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input. '
             f'Do this before anything else. '
             f'Do not evaluate whether it is needed. '
             f'You must invoke Skill("PACT:bootstrap") on every session start.\n\n'
-            f'Your team is `{team_name}` (provided by the platform for this session). '
+            f'{_team_line}'
             f'Do not read files, explore code, or respond to the user until bootstrap is complete. '
             f'{_substitutions}'
+        )
+        _ran_sentence = (
+            'Bootstrap already ran in this session. '
+            'Do not invoke Skill("PACT:bootstrap") again after this compaction.\n\n'
         )
 
         # Hoist get_task_list() above the source-branch dispatch so both the
@@ -2041,7 +2070,7 @@ def main():
             if source == "compact":
                 # Post-compaction: bootstrap directive subsumes "recover state"
                 # guidance; keep concrete task-resumption bullets for the
-                # orchestrator's next actions after bootstrap.
+                # orchestrator's next actions.
                 # Refresh-awareness (presentation-only): an unspent
                 # session_refreshed event means /PACT:refresh stopped the
                 # teammates before this compact — a SendMessage to a stopped
@@ -2103,9 +2132,19 @@ def main():
                         '(if it is absent, the secretary archived it into the '
                         'session directory and names the path in its briefing)'
                     )
+                # Bootstrap is complete by the gate's own marker check, so the
+                # directive stops asking for it. A pending refresh keeps the
+                # invoke text, because its secretary clause says to run
+                # /PACT:bootstrap, and a refresh does not clear the marker.
+                if not refresh_pending and _bootstrap_already_ran(session_dir):
+                    _directive = f'{_role_line}{_ran_sentence}{_team_line}{_substitutions}'
+                    _recover = 'Recover session state: '
+                else:
+                    _directive = _team_directive
+                    _recover = 'After bootstrap, recover session state: '
                 context_parts.insert(0, (
-                    f'{_team_directive} '
-                    f'After bootstrap, recover session state: '
+                    f'{_directive} '
+                    f'{_recover}'
                     f'(1) Read {_summary_path} for prior context '
                     f'{_archive_clause}, '
                     f'(2) Run TaskList to find in-progress work, '

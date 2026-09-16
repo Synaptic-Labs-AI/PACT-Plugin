@@ -7395,6 +7395,109 @@ class TestCompactionSeats:
             assert context.startswith(f"{self.MARKER}{self.INVOKE}")
             assert self.CLAUSE not in context
 
+    RAN = 'Bootstrap already ran in this session. Do not invoke Skill("PACT:bootstrap") again after this compaction.'
+    INVOKE_SENTENCES = (
+        'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input. '
+        'Do this before anything else. Do not evaluate whether it is needed. '
+        'You must invoke Skill("PACT:bootstrap") on every session start.'
+    )
+    WAIT = "Do not read files, explore code, or respond to the user until bootstrap is complete. "
+
+    def _stamp_marker(self, monkeypatch, tmp_path):
+        """Write the bootstrap marker with the producer's own writer and signature."""
+        import bootstrap_marker_writer
+
+        plugin_root = Path(__file__).resolve().parents[1]
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+        session_dir = self._session_dir(tmp_path)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        version = bootstrap_marker_writer._read_plugin_version(str(plugin_root))
+        bootstrap_marker_writer._write_marker(session_dir, self.SID, str(plugin_root), version)
+        return session_dir / "bootstrap-complete"
+
+    def _context(self, monkeypatch, tmp_path, **kwargs):
+        return self._run(monkeypatch, tmp_path, **kwargs)["hookSpecificOutput"]["additionalContext"]
+
+    def test_a_signed_marker_is_what_the_gate_accepts(self, monkeypatch, tmp_path):
+        """Positive control for the arms below: the marker they stamp passes the gate."""
+        import bootstrap_gate
+
+        marker = self._stamp_marker(monkeypatch, tmp_path)
+        assert bootstrap_gate.is_marker_set(marker.parent) is True
+
+    def test_a_compaction_with_the_marker_set_says_bootstrap_already_ran(self, monkeypatch, tmp_path):
+        """The only change is the ruled one: the invoke sentences become the ran
+        sentence, the wait sentence goes, and recovery no longer waits for bootstrap.
+        Every other byte matches the marker-absent compaction."""
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(Path(__file__).resolve().parents[1]))
+        self._context(monkeypatch, tmp_path)  # the first run writes the files a later run reports on
+        before = self._context(monkeypatch, tmp_path)
+        self._stamp_marker(monkeypatch, tmp_path)
+        after = self._context(monkeypatch, tmp_path)
+
+        expected = (
+            before.replace(self.INVOKE_SENTENCES, self.RAN, 1)
+            .replace(self.WAIT, "", 1)
+            .replace("After bootstrap, recover session state: ", "Recover session state: ", 1)
+        )
+        assert expected != before
+        assert after == expected
+        assert 'Skill("PACT:bootstrap")' in self.RAN and after.count('Skill("PACT:bootstrap")') == 1
+
+    def test_the_clause_still_precedes_the_ran_sentence(self, monkeypatch, tmp_path):
+        self._stamp_marker(monkeypatch, tmp_path)
+        context = self._context(monkeypatch, tmp_path)
+        assert context.startswith(f"{self.MARKER}{self.CLAUSE}\n\n{self.RAN}\n\n")
+        assert context.count(self.CLAUSE) == 1
+
+    def test_the_directive_follows_the_marker_in_both_directions(self, monkeypatch, tmp_path):
+        """Negative control: an inverted condition fails one half or the other."""
+        absent = self._context(monkeypatch, tmp_path)
+        self._stamp_marker(monkeypatch, tmp_path)
+        present = self._context(monkeypatch, tmp_path)
+        assert (self.INVOKE in absent, self.RAN in absent) == (True, False)
+        assert (self.INVOKE in present, self.RAN in present) == (False, True)
+
+    @pytest.mark.parametrize("content", ["", '{"v": 1, "sid": "x", "sig": "y"}'], ids=["touched", "unsigned"])
+    def test_a_marker_the_gate_rejects_keeps_the_bootstrap_directive(self, monkeypatch, tmp_path, content):
+        marker = self._stamp_marker(monkeypatch, tmp_path)
+        marker.write_text(content, encoding="utf-8")
+        context = self._context(monkeypatch, tmp_path)
+        assert context.startswith(f"{self.MARKER}{self.CLAUSE}\n\n{self.INVOKE}")
+        assert self.RAN not in context and "After bootstrap, recover session state: " in context
+
+    def test_a_pending_refresh_keeps_the_bootstrap_directive_with_the_marker_set(self, monkeypatch, tmp_path):
+        self._stamp_marker(monkeypatch, tmp_path)
+        context = self._context(monkeypatch, tmp_path, patches=[
+            ("session_init.has_unspent_refresh", {"return_value": True}),
+        ])
+        assert context.startswith(f"{self.MARKER}{self.CLAUSE}\n\n{self.INVOKE}")
+        assert self.RAN not in context
+        assert "Run /PACT:bootstrap to respawn the secretary first." in context
+
+    @pytest.mark.parametrize("source", ["startup", "resume", "clear"])
+    def test_no_other_source_changes_with_the_marker_set(self, monkeypatch, tmp_path, source):
+        self._stamp_marker(monkeypatch, tmp_path)
+        context = self._context(monkeypatch, tmp_path, source=source)
+        assert context.startswith(f"{self.MARKER}{self.INVOKE}")
+        assert self.RAN not in context
+
+    def test_a_gate_that_fails_to_import_keeps_the_directive_and_one_json_output(self, monkeypatch, tmp_path, capsys):
+        """The gate's fail-closed import branch prints a PreToolUse decision and
+        exits. session_init must still print one JSON object, with today's text."""
+        import sys
+
+        self._stamp_marker(monkeypatch, tmp_path)
+        monkeypatch.delitem(sys.modules, "bootstrap_gate")
+        monkeypatch.setitem(sys.modules, "shared.marker_schema", None)
+        output = self._run(monkeypatch, tmp_path)
+        context = output["hookSpecificOutput"]["additionalContext"]
+        assert output["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+        assert context.startswith(f"{self.MARKER}{self.CLAUSE}\n\n{self.INVOKE}")
+        assert "Hook load error (bootstrap_gate / module imports)" in capsys.readouterr().err, (
+            "the gate's fail-closed branch never ran, so this arm proved nothing"
+        )
+
     def test_a_compaction_keeps_the_recorded_start_and_rewrites_both_files_byte_identically(self, monkeypatch, tmp_path):
         self._run(monkeypatch, tmp_path, source="startup")
         context_file = self._session_dir(tmp_path) / "pact-session-context.json"

@@ -203,7 +203,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
     "session_init": frozenset({
         "backlog_store",
         "claude_md_manager", "compaction_owner", "constants", "dispatch_helpers", "failure_cause",
-        "failure_log", "git_helpers", "handoff_schema",
+        "failure_log", "git_helpers", "handoff_schema", "marker_schema",
         "merge_guard_common", "pact_config", "pact_context", "paths",
         "peer_context", "pin_caps", "plugin_manifest", "project_scope",
         "session_journal", "session_registry", "session_resume",
@@ -219,6 +219,11 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # name moved to `shared.constants`. session_init takes that name from
          # there, so a SessionStart no longer loads a fail-closed PreToolUse
          # gate to read one string.
+         # marker_schema reached via the function-level bootstrap_gate import
+         # that checks the bootstrap marker on a compaction. bootstrap_gate is
+         # itself a seam hook, so it is not listed here; only its helper is.
+         # That import runs on the compact branch only, with its output
+         # captured, and a failure to load reads as no marker.
     "session_end": frozenset({
         "constants", "error_output", "pact_context", "paths", "session_journal",
         "session_registry", "session_state", "task_utils",
