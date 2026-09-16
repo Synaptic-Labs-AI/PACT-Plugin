@@ -334,7 +334,21 @@ def _candidates(input_data: dict, role: str, name: str, team: str, running: list
     records = background_work.load_records_for_discharge(team)
     if role == ROLE_LEAD:
         # background_tasks lists every job in the process with no owner; a
-        # registry record is what marks a job as a teammate's launch.
+        # registry record is what marks a job as someone else's launch — a
+        # teammate's, or a subagent's.
+        #
+        # THIS BRANCH SUBTRACTS EVERY ROW CARRYING A JOB ID AND NEVER READS
+        # `owner_role`. That is safe only because no writer produces a row the
+        # lead owns. A writer that adds one must filter those rows out here, or
+        # the lead is acquitted of its own running job.
+        #
+        # JOB-ID REUSE, AND WHICH WAY IT FAILS HERE. The match is on the job id
+        # alone, and ids are not established unique: they look random rather
+        # than like counters, but uniqueness has not been measured. If a row
+        # still inside the TTL carries an id that a job in this process's list
+        # reuses, that job is subtracted. This branch only ever removes
+        # candidates, so a reused id can only UNDER-block: it acquits the lead of
+        # that job.
         teammate_jobs = {r["harness_task_id"] for r in records if r.get("harness_task_id")}
         return [e for e in running if e["id"] not in teammate_jobs]
     if input_data.get("hook_event_name") == "SubagentStop":
@@ -356,8 +370,21 @@ def _candidates(input_data: dict, role: str, name: str, team: str, running: list
             and not r.get("owner_role")
             and r.get("harness_task_id")
         }
+        # JOB-ID REUSE HERE FAILS THE OTHER WAY. If a row of THIS teammate still
+        # inside the TTL carries an id that another agent's running job in this
+        # process's list reuses, that job enters this teammate's candidates, and
+        # unless a wait anchored no earlier than that row's launch covers it, the
+        # teammate is refused its turn end over work it did not launch — an
+        # OVER-block.
         running = [e for e in running if e["id"] in by_job]
     else:
+        # JOB-ID REUSE HERE ALSO OVER-BLOCKS, BY A DIFFERENT MECHANISM. This
+        # process lists only its own jobs, so no other agent's job can enter its
+        # candidates. Instead, a row of ANY owner still inside the TTL whose id
+        # matches one of this process's running jobs makes that job coverable
+        # only by a wait anchored no earlier than the row's launch, where with no
+        # row any valid wait covers it. A reused id can only raise that bar,
+        # never lower it.
         by_job = {r["harness_task_id"]: r for r in records if r.get("harness_task_id")}
     waiting = _tasks_with_valid_wait(team, name)
     return [e for e in running if not _covered(waiting, by_job.get(e["id"]))]

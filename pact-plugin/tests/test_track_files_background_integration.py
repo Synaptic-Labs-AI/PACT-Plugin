@@ -16,30 +16,30 @@ exactly how the feature this replaces shipped inert.
 REVERT-CARDINALITY NON-VACUITY GATE — MEASURED, not asserted. Source-revert
 the Layer 1 call in `hooks/track_files.py` (replace the guarded
 `record_background_launch(input_data)` block with `pass`) and this file
-reports **6 failed, 6 passed**. The six kills are the arms that assert a
+reports **6 failed, 8 passed**. The six kills are the arms that assert a
 record IS written: `test_a_background_launch_lands_a_real_record_on_disk`,
 `test_layer_1_records_the_harness_task_id`,
 `test_a_launch_without_a_string_harness_id_records_none`,
 `test_a_SHELL_backgrounded_launch_with_NO_FLAG_lands_a_record`,
 `test_a_LONG_RUNNING_command_IS_recorded_now` and
-`test_a_SUBAGENT_launched_shell_lands_a_subagent_owned_record`. The other six
+`test_a_SUBAGENT_launched_shell_lands_a_subagent_owned_record`. The other eight
 pin fail-open and negative behaviour and correctly survive a feature that does
 nothing. If a future edit makes that ablation report **0 failed**, this file has
 stopped measuring the seam and the number above is the tripwire.
 
 A SECOND ABLATION IS ALREADY PINNED BY THE FIXTURE: omitting the
-`pact-session-context.json` write also reports 6 failed, 6 passed, on the same
+`pact-session-context.json` write also reports 6 failed, 8 passed, on the same
 six positive-record arms, for a DIFFERENT reason: with no session context and
 no registry entry, the frame's team cannot be resolved. Two distinct
 single-point ablations, same cardinality, different cause; see the fixture
 docstring.
 
-BOTH NUMBERS WERE RE-MEASURED when the subagent-owned row arrived, each in an
-isolated copy of the tree with the mutation proved applied before the run. The
-pair moved 5/5 -> 6/6 TOGETHER, and the two arms added are why: one asserts a
-record IS written, so it dies with the feature, and the one beside it asserts an
-EMPTY registry, so it survives. An arm added to this file moves one of these two
-numbers — restate them in the same commit, or the tripwire stops tripping.
+BOTH NUMBERS ARE MEASURED, NEVER CARRIED. Each is re-run in an isolated copy of
+the tree, with the mutation proved applied before the run, whenever an arm here
+is added or parametrized. A positive-record arm adds to the failed count and a
+negative arm to the passed count, and a parametrized arm counts once for each of
+its cases. Restate both numbers in the same commit, or the tripwire stops
+tripping.
 
 NO module-level sys.path.insert: path setup is conftest-owned.
 """
@@ -53,6 +53,7 @@ from pathlib import Path
 
 import pytest
 from clock_shift.clock_shift_env import carry_clock_shift
+from shared.pact_context import LEAD_AGENT_TYPES
 
 HOOK = Path(__file__).resolve().parents[1] / "hooks" / "track_files.py"
 TEAM = "session-seamtest"
@@ -156,6 +157,20 @@ def _frame(**over):
     }
     frame.update(over)
     return frame
+
+
+# The `agent_type` of each frame sent with NO `agent_id`. The first is the
+# synthetic subagent-shaped frame. The rest are every spelling the lead can
+# carry, taken from the set the lead is recognised by rather than written out,
+# so a spelling added there is covered here with no edit, and a writer that
+# recognises only one spelling cannot slip past the others.
+NO_AGENT_ID_AGENT_TYPES = [
+    pytest.param("general-purpose", id="subagent-shaped"),
+    *(
+        pytest.param(spelling, id=f"lead:{spelling}")
+        for spelling in sorted(LEAD_AGENT_TYPES)
+    ),
+]
 
 
 class TestTrackFilesBackgroundSeam:
@@ -281,18 +296,33 @@ class TestTrackFilesBackgroundSeam:
         # correct, because this row exists ONLY to be subtracted by id.
         assert "anchor_completed" not in records[0]
 
-    def test_a_subagent_launch_without_an_explicit_agent_id_writes_nothing(self, seam):
-        """The negative that keeps the positive above honest.
+    @pytest.mark.parametrize("agent_type", NO_AGENT_ID_AGENT_TYPES)
+    def test_a_launch_without_an_explicit_agent_id_writes_nothing(self, seam, agent_type):
+        """No `agent_id` on the frame means no row, whichever shape the frame has.
 
-        An absent `agent_id` is the LEAD's own signature on its own frames, and
-        only an INFERENCE for an in-process teammate's spawn. Recording it as
-        anyone would risk charging the lead for a teammate's launch, so it
-        records nothing at all.
+        The two shapes guard different things. The SUBAGENT-SHAPED frame guards
+        an inference: an absent `agent_id` is the lead's own signature on the
+        lead's frames, and only INFERRED for an in-process teammate's spawn, so
+        recording it as anyone would risk charging the lead for a teammate's
+        launch. The LEAD-SHAPED frames — every lead spelling, in the lead's own
+        session — are the defining positive of any row the lead would own:
+        whatever a future writer uses to recognise the lead, it must write a row
+        for at least one of them, so this arm reddens the day that writer lands.
+
+        Neither shape writes a row today. With no `agent_id` there is no subagent
+        id, so the frame reaches the teammate predicate, which refuses a lead
+        spelling outright and refuses the subagent-shaped frame because it names
+        no member and runs in the lead's session.
         """
-        frame = _frame(agent_type="general-purpose")
+        frame = _frame(agent_type=agent_type)
         frame.pop("agent_id")
         assert _run(seam, frame).returncode == 0
-        assert _registry(seam) == []
+        assert _registry(seam) == [], (
+            "a launch frame with no agent_id was recorded. If this is a new row "
+            "the lead owns, note that the lead branch of turn_end_gate._candidates "
+            "subtracts every recorded job id unconditionally, so it must filter "
+            "these rows, or the lead is acquitted of its own running job."
+        )
 
     def test_a_NON_background_bash_writes_nothing(self, seam):
         """The negative control, so the positive above is not vacuous."""

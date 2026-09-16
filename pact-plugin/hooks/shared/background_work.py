@@ -312,6 +312,15 @@ def _sanitize_record(raw: Any) -> dict | None:
     # carry no task ids. See OWNER_ROLE_SUBAGENT for why that is safe against
     # every task-keyed reader, and why the marker rather than the empty list is
     # what carries the role.
+    #
+    # THE MARKER GRANTS NOTHING THAT WRITE ACCESS TO THIS FILE DOES NOT ALREADY
+    # GRANT. Only the exact value "subagent" survives this function; any other
+    # value is dropped and the row is read as a teammate's. Past this function
+    # the marker is read only by the two readers that match on a member's name,
+    # and each skips a marked row, which is what deleting the row would do.
+    # Deletion is the STRONGER power, not an equal one: it also removes the row
+    # from every reader keyed on the job id or the task ids, which still read a
+    # marked row. Anyone able to write the marker can already delete the row.
     subagent_owned = raw.get("owner_role") == OWNER_ROLE_SUBAGENT
     if not isinstance(agent_name, str) or not agent_name:
         return None
@@ -1469,6 +1478,22 @@ def record_background_launch(input_data: Any, now: datetime | None = None) -> bo
     # owner and outlives the subagent, so unrecorded it is charged to the lead.
     # It is recorded UNDER THAT ID and never resolved to a member name, because
     # a subagent is not a member and guessing one would mis-bind the launch.
+    #
+    # THE SUBAGENT CHECK RUNS FIRST, AND THAT ORDER DEPENDS ON THE ID FORMAT. It
+    # acts at two points: a frame with a subagent-shaped id never reaches the
+    # teammate predicate on the next line, and its row is built as a subagent
+    # row further down rather than bound to a member. That is safe only while
+    # the two id shapes cannot overlap. A subagent's id is "a" + 16 hex; an
+    # in-process teammate's is "a" + its name + "-" + 16 hex, and the hyphen
+    # means it can never fullmatch the subagent pattern. That format is the
+    # platform's, and nothing here checks that it holds. If a teammate's frame
+    # ever carried a bare "a" + 16 hex id, its launch would be filed as a
+    # subagent row, and that teammate's turn-end gate would skip it on two
+    # grounds at once — the row names the id rather than the member, and it
+    # carries the subagent marker — with nothing reporting the miss. That would
+    # not be a regression: before subagent rows existed, the teammate predicate
+    # already refused a subagent-shaped id, so the same frame was not recorded
+    # at all.
     subagent_id = subagent_launcher_id(input_data)
     if not subagent_id and not is_teammate_launch_frame(input_data, team_name):
         return False
@@ -1498,6 +1523,14 @@ def record_background_launch(input_data: Any, now: datetime | None = None) -> bo
         # No identity resolution and no task lookup: a subagent is not a member
         # and holds no task, so the id IS the identity and the row carries no
         # task ids. OWNER_ROLE_SUBAGENT holds why that is safe at every reader.
+        #
+        # THIS ROW LIVES UNTIL THE TTL, BY CHOICE. Only the TTL retires it: the
+        # one path that drops rows before they expire, the discharge pass,
+        # matches them through their task ids, and this row has none. Until
+        # RECORD_TTL_SECONDS have passed since it was written, its job id stays
+        # subtracted from the lead's turn-end candidates, even after the
+        # subagent and its shell are gone, so a later job reusing that id is not
+        # charged to the lead. That is lead-permissive.
         session_id = input_data.get("session_id")
         if not isinstance(session_id, str) or not session_id:
             return False

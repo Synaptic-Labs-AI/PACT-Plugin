@@ -19,6 +19,12 @@ from __future__ import annotations
 
 # The lead's process lists every teammate's and subagent's work too, with no
 # owner; only shell launches are attributable, through Layer 1's record.
+#
+# `subagent` IS DELIBERATELY ABSENT. Counting a subagent entry for the lead needs
+# a row the lead owns, and none is written. The lead's candidates are every
+# counted job MINUS the recorded ones, so counting subagent entries without such
+# a row would refuse the lead over every subagent entry it cannot attribute —
+# its own, and every teammate's.
 LEAD_JOB_TYPES = frozenset({"shell"})
 
 # A separate-process teammate's list holds only its own process's work.
