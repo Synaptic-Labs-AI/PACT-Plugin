@@ -43,9 +43,10 @@ Consequences, because code in this repo reasons on the old premise:
   `LEAD_AGENT_TYPES`, and neither a name nor a type is in that set, so a
   teammate still classifies as a teammate either way.
 - **Any code treating this field AS A TYPE is on a false premise** — including
-  `resolve_agent_name`'s Step 4, which strips a `pact-` prefix and returns the
-  remainder as a name. In-process there is no prefix to strip, so Step 4
-  returns the name verbatim and *happens* to be right. That is a coincidence
+  `resolve_agent_name`'s Step 4, which strips a `pact-` prefix (after one
+  leading `PACT:`, when `pact-` follows it) and returns the remainder as a
+  name. In-process there is no prefix to strip, so Step 4 returns the name
+  verbatim and *happens* to be right. That is a coincidence
   of the value, not a property of the step.
 - **An argument that excludes a Step-4 type-strip by observing distinct names
   across same-`agentType` members is INVALID.** Step 4 strips the FRAME's

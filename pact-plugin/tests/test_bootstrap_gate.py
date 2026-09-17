@@ -761,7 +761,8 @@ class TestCanonicalSecretarySpawnCarveOut:
     # --- subagent_type mismatch → predicate False → deny ---
 
     def test_non_secretary_agent_still_blocked(self, monkeypatch, tmp_path):
-        """subagent_type != 'pact-secretary' → predicate False → deny."""
+        """subagent_type neither 'pact-secretary' nor 'PACT:pact-secretary'
+        → predicate False → deny."""
         from bootstrap_gate import _check_tool_allowed, _DENY_REASON
 
         _setup_pact_session_with_team(
@@ -880,7 +881,8 @@ class TestCanonicalSecretarySpawnCarveOut:
 
         This is the deliberate SAFE fail direction (architect D-record): a
         witness-read error only ever PERMITS the canonical secretary spawn —
-        bindings 1/2/3 (exact Agent + pact-secretary + secretary literals)
+        bindings 1/2/3 (exact Agent, pact-secretary after an optional leading
+        "PACT:", exact secretary)
         still exclude every non-secretary tool — and it specifically avoids
         the re-deadlock that the pre-#1023 typed-except-DENY direction caused
         on the Path.home() RuntimeError seam.
@@ -1387,9 +1389,10 @@ class TestSecretaryInMembersUnit:
         degraded-DENY and re-deadlock the spawn).
 
         # COUNTER-TEST: replacing the broad `except Exception` with the caller's
-        # typed tuple (OSError, ValueError, KeyError, TypeError, AttributeError)
-        # would let a RuntimeError (the Path.home seam) PROPAGATE → this call
-        # would raise instead of returning False → RED. Pins the broad-except.
+        # typed tuple (OSError, ValueError, KeyError, TypeError, AttributeError,
+        # ImportError) would let a RuntimeError (the Path.home seam) PROPAGATE →
+        # this call would raise instead of returning False → RED. Pins the
+        # broad-except.
         """
         from bootstrap_gate import _secretary_in_members
         import shared.pact_context as ctx_module
@@ -3395,7 +3398,7 @@ class TestCanonicalSecretarySpawnAdversarial:
     These tests probe the carve-out predicate's attack surface where the
     directly-coupled tests are silent: malformed tool_input shapes,
     encoding edge cases on the canonical literals, exception envelope
-    tightness (only 5 listed exception types are caught; everything else
+    tightness (only 6 listed exception types are caught; everything else
     propagates), get_team_name edge values (empty / None / whitespace),
     and deny-reason content invariance under failure modes.
 
@@ -3464,7 +3467,8 @@ class TestCanonicalSecretarySpawnAdversarial:
         returns False → deny. (#979: team_name dropped from the binding set —
         the Agent(team_name=) arg is platform-ignored.)
 
-        `.get(missing_key)` returns None, which compares unequal to the
+        `.get(missing_key)` returns None, which the subagent_type binding
+        refuses as a non-str and the name binding compares unequal to the
         expected literal value. Mental revert: replacing
         the binding's `!=` with `not ==` would not change behavior; but
         replacing `_SECRETARY_NAME` with None (silently dropping the
@@ -3508,8 +3512,9 @@ class TestCanonicalSecretarySpawnAdversarial:
     def test_wrong_value_type_on_binding_denies(
         self, monkeypatch, tmp_path, binding, wrong_type_value,
     ):
-        """Wrong value TYPE on a binding (int/None/list/dict where str
-        is expected) → != comparison against the string constant → deny.
+        """Wrong value TYPE on a binding (int/None/list/bytes/dict where str
+        is expected) → the subagent_type binding's str check, or the name
+        binding's != comparison against the string constant → deny.
         (#979: team_name removed from the binding set — its type is no
         longer checked since the arg is platform-ignored.)
 

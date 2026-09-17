@@ -30,7 +30,7 @@ resolve_agent_name():
 16. Returns empty string when no identity info available
 17. Falls back to agent_type when team config missing
 18. Falls back to agent_type when agent_id not in members
-19. Returns agent_type as-is when it doesn't start with pact-
+19. Returns agent_type as-is when it doesn't start with pact- or PACT:pact-
 19b. Resolves "PACT:pact-<name>" like "pact-<name>"; any other "PACT:" value as-is
 20. Handles non-list members gracefully
 
@@ -610,7 +610,7 @@ class TestResolveAgentName:
         assert result == "backend-coder"
 
     def test_falls_back_to_agent_type(self):
-        """Step 3: Should strip pact- prefix from agent_type."""
+        """Step 4: Should strip pact- prefix from agent_type."""
         from shared.pact_context import resolve_agent_name
 
         result = resolve_agent_name({"agent_type": "pact-backend-coder"})
@@ -618,7 +618,7 @@ class TestResolveAgentName:
         assert result == "backend-coder"
 
     def test_returns_empty_for_no_identity(self):
-        """Step 4: Should return empty string when no identity info available."""
+        """Step 5: Should return empty string when no identity info available."""
         from shared.pact_context import resolve_agent_name
 
         result = resolve_agent_name({})
@@ -655,7 +655,8 @@ class TestResolveAgentName:
         assert result == "frontend-coder"
 
     def test_agent_type_without_pact_prefix(self):
-        """Should return agent_type as-is when it doesn't start with pact-."""
+        """Should return agent_type as-is when it doesn't start with pact- or
+        PACT:pact-."""
         from shared.pact_context import resolve_agent_name
 
         result = resolve_agent_name({"agent_type": "custom-agent"})

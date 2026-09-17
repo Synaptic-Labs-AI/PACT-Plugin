@@ -477,8 +477,9 @@ def _is_canonical_secretary_spawn(input_data: dict) -> bool:
          equality check against it would wrongly DENY the canonical secretary
          spawn once the SSOT moved to the platform's "session-<id8>" name
          (the orchestrator may still pass a stale arg the platform discards).
-         The carve-out stays tight via bindings 2/3 (exact subagent_type +
-         name literals) and binding 5 (one-shot, gated on the REAL team dir).
+         The carve-out stays tight via bindings 2/3 (subagent_type exact
+         after an optional leading "PACT:", name exact) and binding 5
+         (one-shot, gated on the REAL team dir).
       5. NOT _secretary_in_members(get_team_name()) — members[]-only JOIN
          witness (#1023). Reads the REAL session team dir (expected_team),
          which the empty-team fail-closed below guarantees is a non-empty path
@@ -518,8 +519,9 @@ def _is_canonical_secretary_spawn(input_data: dict) -> bool:
     _check_tool_allowed, so once the marker is
     written the carve-out is moot. Documented so no future reader restores a
     binding-5 one-shot and re-deadlocks Desktop. The Desktop always-fire window
-    is contained by bindings 1/2/3 (exact Agent + pact-secretary + secretary,
-    all module constants) plus the marker fast-path that closes it.
+    is contained by bindings 1/2/3 (exact Agent, pact-secretary after an
+    optional leading "PACT:", exact secretary; a literal and two module
+    constants) plus the marker fast-path that closes it.
 
     On ANY disk-read exception, returns False — caller falls through to
     the existing _BLOCKED_TOOLS deny path so the user sees the canonical
