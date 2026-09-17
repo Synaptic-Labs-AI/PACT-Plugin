@@ -502,8 +502,10 @@ Unknown keys are preserved (forward-compat).
 
 The `wait_stale` primitive in `shared.intentional_wait` considers the flag stale after 30
 minutes from `since`. The `missed_wake_scan` hook surfaces `awaiting_lead_completion` waits stale past
-this threshold to the team-lead; for all other reasons the flag is advisory
-metadata the team-lead may inspect by reading the task file. If your wait genuinely takes longer, re-SET with a fresh `since` so
+this threshold to the team-lead. It also surfaces a wait with `expected_resolver` `peer` once two or
+more owners are each past 30 minutes from `covers_since` (or from `since` when `covers_since` is absent or invalid), and a wait with no valid `covers_since` that
+covers a background launch. No hook surfaces any other stale wait; the team-lead may inspect it by
+reading the task file. If your wait genuinely takes longer, re-SET with a fresh `since` so
 later inspection reflects the real duration.
 
 **When you re-SET a wait you are still holding, give it a fresh `since` and carry `covers_since` forward unchanged in the same write.** `since` is the freshness clock and `covers_since` is the scoping anchor; they are two jobs and re-stamping must move only the first. The anchor is what decides which background launches your wait already acknowledged, so carrying it forward unchanged is what keeps a long wait from silently acquiring launches you started after raising it. Write the whole wait object in one `TaskUpdate`, `covers_since` included — a write that omits the field deletes it. If the wait already has no `covers_since`, write the value `since` held before you overwrite it. A wait you SET after a CLEAR is a new wait: write `covers_since` equal to its new `since`.
