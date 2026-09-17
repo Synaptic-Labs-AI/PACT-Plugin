@@ -727,6 +727,37 @@ class TestCanonicalSecretarySpawnCarveOut:
         result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
         assert result is None
 
+    def test_namespaced_secretary_spawn_allowed(self, monkeypatch, tmp_path):
+        """subagent_type "PACT:pact-secretary" (the plugin-namespaced
+        spelling the Agent tool lists) + all other bindings match → allow."""
+        from bootstrap_gate import _check_tool_allowed
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        result = _check_tool_allowed(_canonical_secretary_input(
+            team_name="t1", overrides={"subagent_type": "PACT:pact-secretary"},
+        ))
+        assert result is None
+
+    def test_namespaced_secretary_spawn_blocked_when_members_has_secretary(
+        self, monkeypatch, tmp_path,
+    ):
+        """The namespaced spelling satisfies binding 2 only; binding 5 still
+        closes the carve-out once secretary is in members[]."""
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1",
+            members=[{"name": "secretary", "agentType": "pact-secretary"}],
+        )
+
+        result = _check_tool_allowed(_canonical_secretary_input(
+            team_name="t1", overrides={"subagent_type": "PACT:pact-secretary"},
+        ))
+        assert result == _DENY_REASON
+
     # --- subagent_type mismatch → predicate False → deny ---
 
     def test_non_secretary_agent_still_blocked(self, monkeypatch, tmp_path):
@@ -3468,6 +3499,7 @@ class TestCanonicalSecretarySpawnAdversarial:
             ("subagent_type", 123),
             ("subagent_type", None),
             ("subagent_type", ["pact-secretary"]),
+            ("subagent_type", b"PACT:pact-secretary"),
             ("name", False),
             ("name", 0),
             ("name", {"value": "secretary"}),
@@ -3595,6 +3627,13 @@ class TestCanonicalSecretarySpawnAdversarial:
             "pact-secretary\x00",
             "PACT:secretary",
             "secretary",
+            "PACT:PACT:pact-secretary",
+            "pact:pact-secretary",
+            "OTHER:pact-secretary",
+            "xPACT:pact-secretary",
+            " PACT:pact-secretary",
+            "PACT:pact-secretary ",
+            "PACT::pact-secretary",
         ],
         ids=[
             "uppercase",
@@ -3604,13 +3643,21 @@ class TestCanonicalSecretarySpawnAdversarial:
             "embedded_null",
             "colon_separator",
             "missing_prefix",
+            "double_namespace",
+            "lowercase_namespace",
+            "other_namespace",
+            "namespace_not_leading",
+            "leading_space_namespace",
+            "namespaced_trailing_space",
+            "double_colon_namespace",
         ],
     )
     def test_subagent_type_canonical_literal_is_byte_exact(
         self, monkeypatch, tmp_path, wrong_type,
     ):
         """subagent_type binding is BYTE-EXACT equality against
-        _SECRETARY_AGENT_TYPE. Case, separator, and prefix variations
+        _SECRETARY_AGENT_TYPE after removing at most one leading, case-
+        sensitive "PACT:". Case, separator, prefix, and namespace variations
         all close the carve-out. Mirrors the name-binding tightness pin.
         """
         from bootstrap_gate import _check_tool_allowed, _DENY_REASON

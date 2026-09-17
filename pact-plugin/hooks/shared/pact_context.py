@@ -1176,7 +1176,8 @@ def resolve_agent_name(
     3.5. input_data["session_id"] → self-registration registry self-lookup,
        split "@" and return the name part (recovers a tmux teammate's name
        that is absent from hook stdin; fail-safe, falls through on miss)
-    4. input_data["agent_type"] → strip "pact-" prefix as fallback name
+    4. input_data["agent_type"] → strip "pact-" prefix as fallback name, after
+       one leading "PACT:" when "pact-" follows it
     5. "" — unknown agent (main process, non-PACT context)
 
     Args:
@@ -1221,12 +1222,15 @@ def resolve_agent_name(
         if resolved and "@" in resolved:
             return resolved.split("@")[0]
 
-    # Step 4: agent_type → strip "pact-" prefix
+    # Step 4: agent_type → strip "pact-" prefix. The namespaced spelling
+    # "PACT:pact-<name>" resolves like "pact-<name>"; a "PACT:" not followed by
+    # "pact-" is left in place, so every other value resolves as before.
     agent_type = input_data.get("agent_type")
     if agent_type:
         type_str = str(agent_type)
-        if type_str.startswith("pact-"):
-            return type_str[len("pact-"):]
+        unqualified = strip_pact_namespace(type_str)
+        if unqualified.startswith("pact-"):
+            return unqualified[len("pact-"):]
         return type_str
 
     # Step 5: unresolvable

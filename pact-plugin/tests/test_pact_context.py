@@ -31,6 +31,7 @@ resolve_agent_name():
 17. Falls back to agent_type when team config missing
 18. Falls back to agent_type when agent_id not in members
 19. Returns agent_type as-is when it doesn't start with pact-
+19b. Resolves "PACT:pact-<name>" like "pact-<name>"; any other "PACT:" value as-is
 20. Handles non-list members gracefully
 
 write_context():
@@ -660,6 +661,44 @@ class TestResolveAgentName:
         result = resolve_agent_name({"agent_type": "custom-agent"})
 
         assert result == "custom-agent"
+
+    @pytest.mark.parametrize("agent_type, expected", [
+        ("PACT:pact-backend-coder", "backend-coder"),
+        ("PACT:pact-secretary", "secretary"),
+        ("PACT:pact-", ""),
+        ("pact-backend-coder", "backend-coder"),
+        ("pact-PACT:pact-x", "PACT:pact-x"),
+        ("PACT:secretary", "PACT:secretary"),
+        ("PACT:", "PACT:"),
+        ("PACT:PACT:pact-x", "PACT:PACT:pact-x"),
+        ("pact:pact-x", "pact:pact-x"),
+        ("OTHER:pact-x", "OTHER:pact-x"),
+        (" PACT:pact-x", " PACT:pact-x"),
+    ], ids=[
+        "namespaced",
+        "namespaced_secretary",
+        "namespaced_empty_name",
+        "plain_unchanged",
+        "plain_strips_once",
+        "namespace_without_pact_prefix_kept",
+        "bare_namespace_kept",
+        "double_namespace_kept",
+        "lowercase_namespace_kept",
+        "other_namespace_kept",
+        "leading_space_kept",
+    ])
+    def test_agent_type_plugin_namespace(self, agent_type, expected):
+        """Step 4 removes one leading "PACT:" only when "pact-" follows it.
+
+        The first three ids are the only inputs the namespace handling
+        changes; every other value resolves exactly as the plain
+        "pact-" strip resolved it.
+        """
+        from shared.pact_context import resolve_agent_name
+
+        result = resolve_agent_name({"agent_type": agent_type})
+
+        assert result == expected
 
     def test_handles_non_list_members(self, tmp_path):
         """Should handle non-list members array gracefully."""

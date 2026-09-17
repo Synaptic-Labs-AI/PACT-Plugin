@@ -469,7 +469,8 @@ def _is_canonical_secretary_spawn(input_data: dict) -> bool:
     below):
 
       1. tool_name == "Agent"
-      2. tool_input.subagent_type == "pact-secretary" (_SECRETARY_AGENT_TYPE)
+      2. tool_input.subagent_type == "pact-secretary" (_SECRETARY_AGENT_TYPE),
+         spelled bare or with the one plugin namespace, "PACT:pact-secretary"
       3. tool_input.name == "secretary" (_SECRETARY_NAME, canonical literal)
       4. (DROPPED, #979) formerly tool_input.team_name == get_team_name().
          Claude Code v2.1.178+ ignores the Agent(team_name=) arg, so an
@@ -541,7 +542,13 @@ def _is_canonical_secretary_spawn(input_data: dict) -> bool:
         tool_input = input_data.get("tool_input") or {}
         if not isinstance(tool_input, dict):
             return False
-        if tool_input.get("subagent_type") != _SECRETARY_AGENT_TYPE:
+        # The Agent tool lists plugin agents under the plugin namespace, so the
+        # spawn can arrive as "PACT:pact-secretary". Exactly one leading "PACT:"
+        # is removed, case-sensitively; any other spelling still fails here.
+        subagent_type = tool_input.get("subagent_type")
+        if not isinstance(subagent_type, str):
+            return False
+        if pact_context.strip_pact_namespace(subagent_type) != _SECRETARY_AGENT_TYPE:
             return False
         if tool_input.get("name") != _SECRETARY_NAME:
             return False
