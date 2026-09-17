@@ -7611,9 +7611,16 @@ class TestCompactionSeats:
         "    os.write(2, ('\\nWRITTEN ' + json.dumps(written) + '\\n').encode())\n"
     )
 
-    def test_the_real_hook_renders_the_reread_step_with_the_plugin_path(self, tmp_path):
-        """The hook run as its own process, as the platform runs it, with every
-        state root under tmp_path and nothing written outside it."""
+    def _real_session_dir(self, tmp_path):
+        """The session dir the child resolves from the config root _run_real_hook gives it."""
+        from shared.pact_context import project_slug
+
+        return tmp_path / "home" / ".claude" / "pact-sessions" / project_slug(str(self._project(tmp_path))) / self.SID
+
+    def _run_real_hook(self, tmp_path):
+        """Run the hook as its own process, as the platform runs it, with every
+        state root under tmp_path. Asserts rc 0, one JSON object on stdout, and
+        nothing written outside tmp_path; returns the additionalContext."""
         import os
         import subprocess
         import sys
@@ -7642,8 +7649,8 @@ class TestCompactionSeats:
             cwd=str(project), timeout=60,
         )
         assert run.returncode == 0, run.stderr
+        # json.loads rejects a second object after the first, so this is one output.
         context = json.loads(run.stdout)["hookSpecificOutput"]["additionalContext"]
-        assert f"{self.TASK_FILES}{self._step_at_root()} Re-engage secretary: " in context
 
         records = [line for line in run.stderr.splitlines() if line.startswith("WRITTEN ")]
         assert len(records) == 1, run.stderr
@@ -7657,6 +7664,27 @@ class TestCompactionSeats:
         located = {os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path)) for path in written}
         outside = sorted(path for path in located if path != os.devnull and os.path.commonpath([path, root]) != root)
         assert outside == [], f"the hook wrote outside tmp_path: {outside}"
+        return context
+
+    def test_the_real_hook_renders_the_reread_step_with_the_plugin_path(self, tmp_path):
+        context = self._run_real_hook(tmp_path)
+        assert f"{self.TASK_FILES}{self._step_at_root()} Re-engage secretary: " in context
+
+    def test_the_real_hook_says_bootstrap_already_ran_when_the_marker_is_signed(self, tmp_path):
+        """Option C through a real process, where the hook imports bootstrap_gate
+        from its own directory. The marker is stamped by the producer's writer."""
+        import bootstrap_marker_writer
+
+        session_dir = self._real_session_dir(tmp_path)
+        session_dir.mkdir(parents=True)
+        version = bootstrap_marker_writer._read_plugin_version(str(self.PLUGIN_ROOT))
+        bootstrap_marker_writer._write_marker(session_dir, self.SID, str(self.PLUGIN_ROOT), version)
+
+        context = self._run_real_hook(tmp_path)
+        assert context.startswith(f"{self.MARKER}{self.CLAUSE}\n\n{self.RAN}\n\n")
+        assert self.INVOKE not in context and self.WAIT not in context
+        assert "Recover session state: (1) Read " in context
+        assert f"{self.TASK_FILES}{self._step_at_root()} Re-engage secretary: " in context
 
     def test_a_compaction_keeps_the_recorded_start_and_rewrites_both_files_byte_identically(self, monkeypatch, tmp_path):
         self._run(monkeypatch, tmp_path, source="startup")
