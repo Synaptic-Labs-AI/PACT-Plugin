@@ -60,7 +60,7 @@ Every session begins with a one-time ritual that identifies the platform-pre-cre
 The ritual is per-session and idempotent — the marker survives compaction. Re-invoke `Skill("PACT:bootstrap")` when:
 
 - The session has just resumed with `claude --resume` and the team-existence assumption needs re-verification.
-- The team config (`{config_dir}/teams/{team_name}/config.json`) is missing, or its `members[]` no longer contains a `secretary` entry. The bootstrap ritual is the only path that re-establishes the `secretary` entry (the platform re-provisions the team config itself on the next spawn).
+- The team config (`{config_dir}/teams/{team_name}/config.json`) is missing, or its `members[]` no longer contains a `secretary` entry. The bootstrap ritual is the only path that re-establishes the `secretary` entry (the platform re-provisions the team config itself on the next spawn). This holds right after a compaction too, even though the post-compaction message says not to invoke bootstrap again.
 
 Steady-state marker absences self-heal automatically: the `bootstrap_marker_writer` UserPromptSubmit hook re-creates the marker on the next prompt whenever team config + secretary are still on disk. `/clear` removes only the marker (see `session_init._clear_bootstrap_marker`); the team config persists, so `/clear` falls into the self-healing path and does NOT require manual re-invocation.
 
@@ -184,9 +184,9 @@ Reconstruct state:
 2. Read session journal (`{session_dir}/session-journal.jsonl`) — durable record of HANDOFFs, phase transitions, variety scores, and commits
 3. `TaskList` — tasks, status, owners, blockers (summaries survive compaction, but task files with full metadata may be GC'd)
 4. `TaskGet` on priority tasks for status and blocking: in-progress first, then recent completed. For METADATA not yet in the journal, `TaskGet` is blind — read the task file: `cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team_name}/{taskId}.json" | jq .metadata.<key>`
-5. Next action: blocker → imPACT; in-progress phase → invoke its command; all complete → peer-review; PR open → check status; no tasks → check `gh pr list` or await user
+5. Next action: blocker → imPACT; in-progress phase → continue that workflow (see below); all complete → peer-review; PR open → check status; no tasks → check `gh pr list` or await user
 
-Workflow commands handle recovery automatically. Your context window doesn't survive compaction — the *session journal* does.
+Do not invoke an in-progress workflow's command again: that starts the workflow over. If its re-attached copy is cut short or missing after a compaction, read `{plugin_root}/commands/<name>.md` in full with `Read` before you continue, where `PACT:<name>` is that workflow, and page through it if `Read` returns a partial view. Your context window doesn't survive compaction — the *session journal* does.
 
 **You MUST `Read(file_path="../protocols/pact-state-recovery.md")` before answering** whenever you detect a session resume, a post-compaction context (memory or recent state appears truncated), or any signal that your mental model has diverged from filesystem/task-system ground truth.
 
