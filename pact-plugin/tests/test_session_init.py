@@ -3431,8 +3431,8 @@ class TestRecoveryFrameNamesAReadableSurface:
                 r"cut short or missing, Read .+? in full before you continue it, "
                 r"where `PACT:<name>` is that workflow\. If the Read reports a "
                 r"partial view, read the remaining pages\. Do not invoke the "
-                r"workflow again: that starts it over\. The file shows "
-                r"`\$ARGUMENTS` where the task it was started for belongs; take "
+                r"workflow again: that starts it over\. If the file shows "
+                r"`\$ARGUMENTS` where the task it was started for belongs, take "
                 r"that task from its re-attached copy or from your summary\. \S"
             ),
         ),
@@ -7518,7 +7518,7 @@ class TestCompactionSeats:
             "in full before you continue it, where `PACT:<name>` is that workflow. "
             "If the Read reports a partial view, read the remaining pages. "
             "Do not invoke the workflow again: that starts it over. "
-            "The file shows `$ARGUMENTS` where the task it was started for belongs; "
+            "If the file shows `$ARGUMENTS` where the task it was started for belongs, "
             "take that task from its re-attached copy or from your summary."
         )
 

@@ -2163,7 +2163,7 @@ def main():
                     f'in full before you continue it, where `PACT:<name>` is that workflow. '
                     f'If the Read reports a partial view, read the remaining pages. '
                     f'Do not invoke the workflow again: that starts it over. '
-                    f'The file shows `$ARGUMENTS` where the task it was started for belongs; '
+                    f'If the file shows `$ARGUMENTS` where the task it was started for belongs, '
                     f'take that task from its re-attached copy or from your summary. '
                     f'{_secretary_clause}'
                 ))
