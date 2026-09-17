@@ -2142,6 +2142,15 @@ def main():
                 else:
                     _directive = _team_directive
                     _recover = 'After bootstrap, recover session state: '
+                # The platform re-attaches each invoked skill cut to 20,000
+                # characters, and drops the oldest once its budget is full, so
+                # a long-running workflow's command can come back cut short or
+                # not at all. An empty plugin_root would render a Read of
+                # /commands/<name>.md, so it names the file without the root.
+                _command_file = (
+                    f'`{plugin_root}/commands/<name>.md`' if plugin_root
+                    else "the PACT plugin's `commands/<name>.md`"
+                )
                 context_parts.insert(0, (
                     f'{_directive} '
                     f'{_recover}'
@@ -2149,6 +2158,13 @@ def main():
                     f'{_archive_clause}, '
                     f'(2) Run TaskList to find in-progress work, '
                     f'(3) read the task files of in-progress tasks for details (TaskGet does not surface metadata). '
+                    f'(4) If a PACT workflow you started is still in progress in TaskList, and its copy '
+                    f'among the re-attached skills above is cut short or missing, Read {_command_file} '
+                    f'in full before you continue it, where `PACT:<name>` is that workflow. '
+                    f'If the Read reports a partial view, read the remaining pages. '
+                    f'Do not invoke the workflow again: that starts it over. '
+                    f'The file shows `$ARGUMENTS` where the task it was started for belongs; '
+                    f'take that task from its re-attached copy or from your summary. '
                     f'{_secretary_clause}'
                 ))
                 # Secondary-layer (#444): append POST-COMPACTION CHECKPOINT block

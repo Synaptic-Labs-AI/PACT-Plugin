@@ -3425,7 +3425,15 @@ class TestRecoveryFrameNamesAReadableSurface:
                 r"\(if it is absent, .+?\), "
                 r"\(2\) Run TaskList to find in-progress work, "
                 r"\(3\) read the task files of in-progress tasks for "
-                r"details \(TaskGet does not surface metadata\)\. \S"
+                r"details \(TaskGet does not surface metadata\)\. "
+                r"\(4\) If a PACT workflow you started is still in progress in "
+                r"TaskList, and its copy among the re-attached skills above is "
+                r"cut short or missing, Read .+? in full before you continue it, "
+                r"where `PACT:<name>` is that workflow\. If the Read reports a "
+                r"partial view, read the remaining pages\. Do not invoke the "
+                r"workflow again: that starts it over\. The file shows "
+                r"`\$ARGUMENTS` where the task it was started for belongs; take "
+                r"that task from its re-attached copy or from your summary\. \S"
             ),
         ),
         (
@@ -7497,6 +7505,158 @@ class TestCompactionSeats:
         assert "Hook load error (bootstrap_gate / module imports)" in capsys.readouterr().err, (
             "the gate's fail-closed branch never ran, so this arm proved nothing"
         )
+
+    PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+    STEP_HEAD = "(4) If a PACT workflow you started is still in progress in TaskList"
+    TASK_FILES = "(3) read the task files of in-progress tasks for details (TaskGet does not surface metadata). "
+
+    @staticmethod
+    def _step(command_file):
+        return (
+            "(4) If a PACT workflow you started is still in progress in TaskList, and its copy "
+            f"among the re-attached skills above is cut short or missing, Read {command_file} "
+            "in full before you continue it, where `PACT:<name>` is that workflow. "
+            "If the Read reports a partial view, read the remaining pages. "
+            "Do not invoke the workflow again: that starts it over. "
+            "The file shows `$ARGUMENTS` where the task it was started for belongs; "
+            "take that task from its re-attached copy or from your summary."
+        )
+
+    FALLBACK_FILE = "the PACT plugin's `commands/<name>.md`"
+
+    def _step_at_root(self):
+        return self._step(f"`{self.PLUGIN_ROOT}/commands/<name>.md`")
+
+    def test_the_marker_set_compaction_carries_the_reread_step_between_steps_3_and_the_secretary(self, monkeypatch, tmp_path):
+        self._stamp_marker(monkeypatch, tmp_path)
+        context = self._context(monkeypatch, tmp_path)
+        assert self.RAN in context
+        assert f"{self.TASK_FILES}{self._step_at_root()} Re-engage secretary: " in context
+
+    def test_the_marker_absent_compaction_carries_the_reread_step(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(self.PLUGIN_ROOT))
+        context = self._context(monkeypatch, tmp_path)
+        assert self.INVOKE in context
+        assert f"{self.TASK_FILES}{self._step_at_root()} Re-engage secretary: " in context
+
+    def test_the_refresh_pending_compaction_carries_the_reread_step_before_the_refresh_clause(self, monkeypatch, tmp_path):
+        self._stamp_marker(monkeypatch, tmp_path)
+        context = self._context(monkeypatch, tmp_path, patches=[
+            ("session_init.has_unspent_refresh", {"return_value": True}),
+        ])
+        assert f"{self.TASK_FILES}{self._step_at_root()} Teammates were shut down by /PACT:refresh." in context
+
+    @pytest.mark.parametrize("source", ["startup", "resume", "clear"])
+    def test_no_other_source_carries_the_reread_step(self, monkeypatch, tmp_path, source):
+        self._stamp_marker(monkeypatch, tmp_path)
+        assert self.STEP_HEAD not in self._context(monkeypatch, tmp_path, source=source)
+
+    def test_the_safety_net_does_not_carry_the_reread_step(self, monkeypatch, tmp_path):
+        self._stamp_marker(monkeypatch, tmp_path)
+        output = self._run(monkeypatch, tmp_path, patches=[
+            ("session_init._adopt_old_slug_session_dir", {"side_effect": RuntimeError("boom")}),
+        ])
+        assert "boom" in output["systemMessage"]
+        assert self.STEP_HEAD not in output["hookSpecificOutput"]["additionalContext"]
+
+    def test_an_empty_plugin_root_names_the_command_file_without_a_broken_path(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+        context = self._context(monkeypatch, tmp_path)
+        assert f"{self.TASK_FILES}{self._step(self.FALLBACK_FILE)} Re-engage secretary: " in context
+        assert "/commands/<name>.md" not in context
+
+    def test_the_reread_step_is_in_every_compaction_and_no_other_source(self, monkeypatch, tmp_path):
+        """Negative control: a step dropped from one compaction variant, or
+        leaking into another source, changes this map."""
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(self.PLUGIN_ROOT))
+        seen = {"compact, no marker": self.STEP_HEAD in self._context(monkeypatch, tmp_path)}
+        self._stamp_marker(monkeypatch, tmp_path)
+        seen["compact, marker set"] = self.STEP_HEAD in self._context(monkeypatch, tmp_path)
+        seen["compact, refresh pending"] = self.STEP_HEAD in self._context(monkeypatch, tmp_path, patches=[
+            ("session_init.has_unspent_refresh", {"return_value": True}),
+        ])
+        for source in ("startup", "resume", "clear"):
+            seen[source] = self.STEP_HEAD in self._context(monkeypatch, tmp_path, source=source)
+        assert seen == {
+            "compact, no marker": True, "compact, marker set": True, "compact, refresh pending": True,
+            "startup": False, "resume": False, "clear": False,
+        }
+
+    # Runs the hook in a child process with a Python audit hook that records
+    # every path the child opens for writing, creates, renames or removes. The
+    # records go to stderr, which the hook's own writes never pass through.
+    _AUDITED_HOOK = (
+        "import json, os, runpy, sys\n"
+        "hook = sys.argv[1]\n"
+        "written = []\n"
+        "def _path(value):\n"
+        "    return None if isinstance(value, int) else os.path.abspath(os.fsdecode(value))\n"
+        "def audit(event, args):\n"
+        "    if event == 'open':\n"
+        "        path, mode, flags = args\n"
+        "        writes = (isinstance(mode, str) and any(c in mode for c in 'wax+')) or (\n"
+        "            isinstance(flags, int) and flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT))\n"
+        "        if writes and _path(path):\n"
+        "            written.append(_path(path))\n"
+        "    elif event in ('os.rename', 'os.replace', 'os.link', 'os.symlink'):\n"
+        "        written.append(_path(args[1]))\n"
+        "    elif event in ('os.mkdir', 'os.remove', 'os.rmdir', 'os.truncate', 'os.chmod', 'os.utime'):\n"
+        "        if _path(args[0]):\n"
+        "            written.append(_path(args[0]))\n"
+        "sys.addaudithook(audit)\n"
+        "sys.argv = [hook]\n"
+        "try:\n"
+        "    runpy.run_path(hook, run_name='__main__')\n"
+        "finally:\n"
+        "    os.write(2, ('\\nWRITTEN ' + json.dumps(written) + '\\n').encode())\n"
+    )
+
+    def test_the_real_hook_renders_the_reread_step_with_the_plugin_path(self, tmp_path):
+        """The hook run as its own process, as the platform runs it, with every
+        state root under tmp_path and nothing written outside it."""
+        import os
+        import subprocess
+        import sys
+
+        from clock_shift.clock_shift_env import carry_clock_shift
+
+        hooks = self.PLUGIN_ROOT / "hooks"
+        project = self._project(tmp_path)
+        env = {key: value for key, value in os.environ.items() if not key.startswith("CLAUDE_")}
+        env.update(
+            PYTHONPATH=str(hooks),
+            HOME=str(tmp_path / "home"),
+            TMPDIR=str(tmp_path),
+            CLAUDE_CONFIG_DIR=str(tmp_path / "home" / ".claude"),
+            CLAUDE_PROJECT_DIR=str(project),
+            CLAUDE_PLUGIN_ROOT=str(self.PLUGIN_ROOT),
+            PYTHONDONTWRITEBYTECODE="1",
+        )
+        frame = {
+            "hook_event_name": "SessionStart", "source": "compact", "session_id": self.SID,
+            "transcript_path": str(tmp_path / "absent.jsonl"), "agent_type": self.LEAD,
+        }
+        run = subprocess.run(
+            [sys.executable, "-c", self._AUDITED_HOOK, str(hooks / "session_init.py")],
+            input=json.dumps(frame), capture_output=True, text=True, env=carry_clock_shift(env),
+            cwd=str(project), timeout=60,
+        )
+        assert run.returncode == 0, run.stderr
+        context = json.loads(run.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert f"{self.TASK_FILES}{self._step_at_root()} Re-engage secretary: " in context
+
+        records = [line for line in run.stderr.splitlines() if line.startswith("WRITTEN ")]
+        assert len(records) == 1, run.stderr
+        written = json.loads(records[0][len("WRITTEN "):])
+        root = os.path.realpath(tmp_path)
+        assert any(path.endswith("pact-session-context.json") for path in written), (
+            f"the audit recorded none of the hook's own state writes, so it saw nothing: {written}"
+        )
+        # A link the hook creates points into the plugin tree, so only the
+        # directory it is written in is resolved, never the link itself.
+        located = {os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path)) for path in written}
+        outside = sorted(path for path in located if path != os.devnull and os.path.commonpath([path, root]) != root)
+        assert outside == [], f"the hook wrote outside tmp_path: {outside}"
 
     def test_a_compaction_keeps_the_recorded_start_and_rewrites_both_files_byte_identically(self, monkeypatch, tmp_path):
         self._run(monkeypatch, tmp_path, source="startup")
