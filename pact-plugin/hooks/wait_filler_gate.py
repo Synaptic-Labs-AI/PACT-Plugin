@@ -42,6 +42,7 @@ Output: deny = {"hookSpecificOutput": {...}} + exit 2;
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 
@@ -60,6 +61,129 @@ _FILLER_PATTERN = re.compile(
 _ENV_ASSIGNMENT = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*=\S*\s+")
 _WRAPPER_PREFIX = re.compile(r"\A(?:command|builtin)\s+")
 _TRAILING_COMMENT = re.compile(r"\s+#.*\Z")
+
+# --- Background-launch advisory (a SECOND, INDEPENDENT concern) -------------
+# Fired at the moment a background launch is committed, which is where the
+# association actually fails: an agent frames the moment as "the tool will
+# wake me" and ends the turn without flagging. A later idle-time reminder
+# reaches that agent only after they have already stalled.
+#
+# IT FIRES ON TEAMMATE FRAMES ONLY. The cheap stdin test runs first:
+# `agent_type` present, non-empty and not a lead spelling. A lead frame gets
+# nothing, because a lead IS re-invoked when its background job finishes and
+# holds no task wait to flag. A plain non-PACT frame carries no `agent_type`
+# and gets nothing. An Agent-tool subagent also carries a non-lead
+# `agent_type`, so for a background launch the gate then resolves the team and
+# asks `shared.background_work.teammate_launch_name`, which reads team config
+# and the session registry. A subagent gets nothing, and so does a frame whose
+# team cannot be resolved. A separate-process (tmux) teammate gets nothing
+# either: its own completion starts its next turn, and the harness already
+# tells it so, so an advisory saying nothing will wake it would contradict it.
+#
+# IT IS NOT A TERM IN THE DENY VERDICT AND MUST NEVER BECOME ONE. It rides
+# the ALLOW branch only. `_is_filler_command` and its inputs are untouched by
+# this feature. A denied command never runs, so there is no background work
+# to advise about on that branch — which is why the advisory is attached to
+# the allow output rather than the deny one, and not because the verdict
+# feeds it.
+#
+# DELIVERY: an allow-path `additionalContext` reaches the model together with
+# the tool result, after the call has run. The advisory is read once the
+# launch has happened and before the agent decides how to end the turn, which
+# is the decision it addresses. It is advice, not enforcement: nothing
+# downstream may assume the agent acted on it.
+_BACKGROUND_ADVISORY = (
+    "This Bash call runs in the background. As an in-process teammate, "
+    "NOTHING WILL WAKE YOU when it "
+    "finishes — the result waits for you to collect it. Before you end this "
+    "turn, either collect the result or SET metadata.intentional_wait on "
+    "every task the wait covers, naming what you are waiting for. "
+    "validate_wait accepts a free-form reason, so a reason describing the "
+    "background job is valid even though KNOWN_REASONS does not enumerate one."
+)
+
+
+def _load_launch_predicate():
+    """`background_launch.is_background_launch`, loaded by file path, or None.
+
+    Loaded by PATH, not imported, so a Bash call that is not a teammate's
+    background launch never runs the `shared` package's `__init__`, which
+    costs tens of milliseconds on a call that happens before every Bash. The
+    module is not registered in `sys.modules`.
+    Any failure returns None, and the caller then emits no advisory: the
+    advisory is optional, and the deny verdict never reaches this call.
+    """
+    try:
+        import importlib.util
+
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "shared",
+            "background_launch.py",
+        )
+        spec = importlib.util.spec_from_file_location("_pact_background_launch", path)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.is_background_launch
+    except Exception:
+        return None
+
+
+def is_background_launch(input_data) -> bool:
+    """True iff this frame launches background work (the flag, or a command
+    ending in a bare `&`). False when the shared predicate cannot be loaded."""
+    launched = _load_launch_predicate()
+    if launched is None:
+        return False
+    try:
+        return launched(input_data) is True
+    except Exception:
+        return False
+
+
+# The lead's `agent_type` spellings. Mirrors `shared.pact_context.LEAD_AGENT_TYPES`,
+# which is the source of truth; held locally because this hook runs before every
+# Bash call and imports only the standard library until a teammate-shaped frame
+# launches background work.
+_LEAD_AGENT_TYPES = frozenset({"PACT:pact-orchestrator", "pact-orchestrator"})
+
+
+def is_teammate_frame(input_data) -> bool:
+    """True iff stdin carries a non-empty `agent_type` that is not a lead spelling."""
+    if not isinstance(input_data, dict):
+        return False
+    agent_type = input_data.get("agent_type")
+    return (
+        isinstance(agent_type, str)
+        and bool(agent_type)
+        and agent_type not in _LEAD_AGENT_TYPES
+    )
+
+
+def launch_advisory_applies(input_data) -> bool:
+    """True iff a teammate that is not a separate-process (tmux) teammate is
+    launching background work. False on any error.
+
+    Cheapest first: the stdin `agent_type` test, then the launch predicate. Only
+    a teammate-shaped background launch imports `shared` and reads team config
+    and the session registry.
+    """
+    if not is_teammate_frame(input_data) or not is_background_launch(input_data):
+        return False
+    try:
+        from shared.background_work import (
+            frame_team_and_name,
+            teammate_is_separate_process,
+            teammate_launch_name,
+        )
+
+        team_name, _name = frame_team_and_name(input_data)
+        member = teammate_launch_name(input_data, team_name) if team_name else ""
+        return bool(member) and not teammate_is_separate_process(team_name, member)
+    except Exception:
+        return False
 
 
 def _is_filler_command(command: str) -> bool:
@@ -102,6 +226,16 @@ def main() -> None:
         tool_input = input_data.get("tool_input")
         command = tool_input.get("command") if isinstance(tool_input, dict) else None
         if not isinstance(command, str) or not _is_filler_command(command):
+            # ALLOW. The background advisory rides this branch and only this
+            # branch; it did not participate in reaching it.
+            if launch_advisory_applies(input_data):
+                print(json.dumps({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "additionalContext": _BACKGROUND_ADVISORY,
+                    }
+                }))
+                sys.exit(0)
             print(_ALLOW_OUTPUT)
             sys.exit(0)
 

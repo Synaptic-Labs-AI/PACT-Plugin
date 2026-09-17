@@ -86,20 +86,32 @@ def _direct_hook_imports(
 ) -> set[str]:
     """hooks/ module stems imported DIRECTLY by `path` — resolves top-level
     (`import X` / `from X import`), shared (`from shared.X import` /
-    `import shared.X`), AND relative (`from .X import`, level>0) edges, and
+    `import shared.X`), relative (`from .X import`, level>0), AND
+    module-in-the-alias (`from . import X` / `from shared import X`) edges, and
     descends into function/try-nested imports via ast.walk (e.g. session_init's
     function-level `from pin_staleness_gate import ...`).
+
+    The module-in-the-alias forms name the MODULE after `import`, not after
+    `from`, so reading only `node.module` misses them: `from . import X` has
+    no module at all, and `from shared import X` names only the package. An
+    alias that is a function or constant rather than a module is not in `idx`
+    and adds nothing.
 
     `shared_only` models the BUG the architect caught — a derivation that only
     follows hooks/shared/ edges and never traverses top-level helper modules."""
     out: set[str] = set()
     tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            parts = node.module.split(".")
-            cand = parts[1] if parts[0] == "shared" and len(parts) > 1 else parts[0]
-            if cand in idx:
-                out.add(cand)
+        if isinstance(node, ast.ImportFrom):
+            if node.module:
+                parts = node.module.split(".")
+                cand = parts[1] if parts[0] == "shared" and len(parts) > 1 else parts[0]
+                if cand in idx:
+                    out.add(cand)
+            if node.module is None or node.module == "shared":
+                for alias in node.names:
+                    if alias.name in idx:
+                        out.add(alias.name)
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 parts = alias.name.split(".")
@@ -169,6 +181,27 @@ class TestClosureMatchesLiveImportGraph:
     def test_seam_reading_helpers_is_the_union(self):
         union = frozenset().union(*_SEAM_HOOK_HELPER_CLOSURE.values())
         assert SEAM_READING_HELPERS == union
+
+    def test_the_oracle_sees_a_module_named_in_the_import_alias(self, tmp_path):
+        """`from . import X` and `from shared import X` are edges to module X.
+
+        Both forms put the module after `import`. An oracle reading only the
+        `from` part sees no module in the first and only the package in the
+        second, so a helper imported either way drops out of every derived
+        closure and the literal can omit it while the drift arm stays green.
+        A function or constant named the same way is not a module and adds
+        nothing.
+        """
+        idx = _module_index()
+        probe = tmp_path / "probe.py"
+        probe.write_text(
+            "from . import state_file\n"
+            "def f():\n"
+            "    from shared import pact_context, get_team_name\n",
+            encoding="utf-8",
+        )
+        assert {"state_file", "pact_context"} <= _direct_hook_imports(probe, idx)
+        assert "get_team_name" not in _direct_hook_imports(probe, idx)
 
 
 # The TOP-LEVEL helpers (hooks/*.py, NOT hooks/shared/*.py) that session_init
@@ -268,11 +301,25 @@ class TestClosureOracleIsNonVacuous:
         # pact_context -> .session_registry is a RELATIVE edge; the full-transitive
         # oracle DOES follow it, so a relative-only-blind derivation differs.
         # This pins that relative edges are part of the canonical closure.
+        #
+        # BOTH edges must be dropped, and the reason is a real graph change
+        # rather than test bookkeeping. missed_wake_scan reaches
+        # session_registry by TWO routes now: the pact_context edge this arm
+        # is named for, and background_work -> session_registry, which the
+        # Layer 3 fold introduced (background_work's Layer 1 half resolves a
+        # launcher identity, and a static closure follows that import even
+        # though Layer 3 never calls it). Dropping only the first leaves the
+        # module reachable and the ablation stops discriminating — MEASURED:
+        # one edge -> still present, both edges -> absent. Naming one edge
+        # would leave an arm that passes without measuring anything.
         idx = _module_index()
         full = derive_closure("missed_wake_scan", idx)
         perturbed = derive_closure(
             "missed_wake_scan", idx,
-            drop_edges=frozenset({("pact_context", "session_registry")}),
+            drop_edges=frozenset({
+                ("pact_context", "session_registry"),
+                ("background_work", "session_registry"),
+            }),
         )
         assert "session_registry" in full, (
             "the canonical (full-transitive) closure follows the relative "
@@ -301,11 +348,35 @@ COVERED_L2 = {
     # exit(2) (fail-LOUD), so they are L2-only / never-L3 (no live-probe).
     "merge_guard_pre": "test_merge_guard_seam_integration.py",
     "merge_guard_post": "test_merge_guard_seam_integration.py",
-    # validate_handoff's exit-0/stdout contract is seam-independent, but its
-    # degrade-path handoff_refusal_degraded telemetry is fail-open (silent on
-    # loss), so the journal seam gets a real composition test: real init ->
-    # session-dir resolution -> real append -> read_events over a tmp root.
+    # validate_handoff's degrade-path handoff_refusal_degraded telemetry is
+    # fail-open (silent on loss), so the journal seam gets a real composition
+    # test: real init -> session-dir resolution -> real append -> read_events
+    # over a tmp root. Its turn-end background block, a seam-dependent decision
+    # since it was composed in, is driven for real by
+    # test_validate_handoff_turn_end.py.
     "validate_handoff": "test_validate_handoff_integration.py",
+    # track_files joined SEAM_DEPENDENT_HOOKS with Layer 1 of the
+    # background-work registry (task-dir resolution + team config). It goes in
+    # COVERED, not BACKLOG: parking a brand-new seam dependency in the backlog
+    # would ship an untested seam, which is the inert-feature shape this
+    # classifier exists to prevent.
+    "track_files": "test_track_files_background_integration.py",
+    # wait_filler_gate joined SEAM_DEPENDENT_HOOKS when its launch advisory began
+    # reading team config and the session registry. COVERED, not BACKLOG, for
+    # the same reason as track_files above.
+    "wait_filler_gate": "test_launch_advisory_population.py",
+    # stop_background_gate joined SEAM_DEPENDENT_HOOKS with the Stop turn-end
+    # gate. Its non-mocked L2 test drives the production hook against a real
+    # team config, task store, background-work registry and session registry.
+    "stop_background_gate": "test_stop_background_gate.py",
+    # postcompact_archive joined SEAM_DEPENDENT_HOOKS with teammate-compaction
+    # attribution. Its non-mocked L2 test runs the real hooks over a temporary
+    # projects tree with the platform's transcript layout.
+    "postcompact_archive": "test_compaction_owner_seam.py",
+    # bootstrap_gate settles staged compaction summaries before a Read or Bash
+    # that names one. The same non-mocked L2 test runs the real hook as a child
+    # process after the transcript record lands.
+    "bootstrap_gate": "test_compaction_owner_seam.py",
 }
 
 # Documented forward-only BACKLOG: seam hooks whose non-mocked L2 test is a named
@@ -313,14 +384,31 @@ COVERED_L2 = {
 # this list is the auditable record of the known gaps (promote on touch).
 #   - task_lifecycle_gate: heavy unit coverage; L3 real-session probe is the
 #     documented follow-up. Its L2 seam test is fast-follow.
-#   - bootstrap_gate / bootstrap_marker_writer: iter_team_task_jsons readers.
+#   - bootstrap_marker_writer: iter_team_task_jsons readers.
 #   - file_tracker / peer_inject: L2-only (held), watch-list per the classifier.
 # (validate_handoff promoted to COVERED_L2 when its degrade telemetry gained
-#  the real-seam composition test — the hook was touched, so the gap closed.)
+#  the real-seam composition test — the hook was touched, so the gap closed.
+#  bootstrap_gate was promoted when its settle seat gained a child-process seam
+#  test; that test does not exercise its iter_team_task_jsons reads.)
 BACKLOG_L2 = frozenset({
-    "task_lifecycle_gate", "bootstrap_gate", "bootstrap_marker_writer",
+    "task_lifecycle_gate", "bootstrap_marker_writer",
     "file_tracker", "peer_inject",
 })
+
+
+def test_bootstrap_gate_is_covered_by_a_seam_file_that_runs_it_as_a_child_process():
+    """The mapped file hands hooks/bootstrap_gate.py to a helper that starts it
+    with subprocess.run, so the settle seat is exercised in a real process."""
+    assert COVERED_L2.get("bootstrap_gate") == "test_compaction_owner_seam.py"
+    assert "bootstrap_gate" not in BACKLOG_L2
+    tree = ast.parse((TESTS_DIR / COVERED_L2["bootstrap_gate"]).read_text(encoding="utf-8"))
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    hands_over = any(call.args and isinstance(call.args[0], ast.Constant)
+                     and call.args[0].value == "bootstrap_gate.py" for call in calls)
+    spawns = any(isinstance(call.func, ast.Attribute) and call.func.attr == "run"
+                 and isinstance(call.func.value, ast.Name) and call.func.value.id == "subprocess"
+                 for call in calls)
+    assert hands_over and spawns
 
 
 class TestSeamHookL2Presence:
@@ -510,18 +598,84 @@ def _scan_hook_modules(predicate) -> list[tuple[str, int, str]]:
     return hits
 
 
+# Dynamic imports the static oracle cannot follow, allowed line by line.
+# Two hooks load a shared helper BY FILE PATH so their common path never
+# imports the `shared` package: wait_filler_gate.py loads background_launch.py
+# for a Bash call that is not a teammate's background launch, and
+# stop_background_gate.py loads turn_end_jobs.py at a turn end with no counted
+# job. The oracle cannot see either edge. Each hides nothing from the closure
+# only while the loaded helper imports nothing outside the stdlib and nothing
+# from `shared`, which the arm below pins for both.
+_ALLOWED_DYNAMIC_IMPORT_LINES = frozenset({
+    ("wait_filler_gate.py", "import importlib.util"),
+    ("wait_filler_gate.py",
+     'spec = importlib.util.spec_from_file_location("_pact_background_launch", path)'),
+    ("wait_filler_gate.py", "module = importlib.util.module_from_spec(spec)"),
+    ("stop_background_gate.py", "import importlib.util"),
+    ("stop_background_gate.py",
+     'spec = importlib.util.spec_from_file_location("_turn_end_jobs", path)'),
+    ("stop_background_gate.py", "module = importlib.util.module_from_spec(spec)"),
+})
+
+
 class TestOracleStaticImportBoundBackstop:
     """Enforce the C6-A oracle's bound so a future dynamic/refresh edge fails
     HERE instead of slipping past the closure equality as a vacuous false-pass."""
 
     def test_no_dynamic_import_of_hook_modules(self):
-        hits = _scan_hook_modules(_is_dynamic_import_line)
+        hits = [hit for hit in _scan_hook_modules(_is_dynamic_import_line)
+                if (hit[0], hit[2]) not in _ALLOWED_DYNAMIC_IMPORT_LINES]
         assert not hits, (
             "a DYNAMIC import (importlib/__import__) appeared in the hooks tree — "
             "the C6-A static-AST oracle CANNOT see it, so the closure literal could "
             "silently false-pass on this edge. Either use a static import, or (if a "
             "legit non-hook dynamic import) allowlist this exact line + extend the "
             f"oracle. Offending: {hits}"
+        )
+
+    @pytest.mark.parametrize("helper", ["background_launch.py", "turn_end_jobs.py"])
+    def test_the_by_path_loaded_helper_imports_only_the_stdlib(self, helper):
+        """A helper loaded by file path (background_launch.py by
+        wait_filler_gate, turn_end_jobs.py by stop_background_gate) is an edge
+        the oracle cannot see. The edge hides nothing only while the file imports nothing
+        but the stdlib: a `shared` or relative import reaches back into the
+        hooks tree, and a third-party import is a dependency no consumer
+        session is promised.
+
+        Stdlib membership is read from where each module is found, not from
+        sys.stdlib_module_names, which Python 3.9 in the CI matrix lacks.
+        """
+        import ast
+        import importlib.util
+        import sysconfig
+
+        paths = sysconfig.get_paths()
+        site = (paths["purelib"], paths["platlib"])
+        source = (HOOKS / "shared" / helper).read_text(encoding="utf-8")
+        offending = []
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.ImportFrom) and node.level:
+                offending.append("." * node.level + (node.module or ""))
+                continue
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module]
+            else:
+                continue
+            for name in names:
+                top = name.split(".")[0]
+                spec = None if top == "shared" else importlib.util.find_spec(top)
+                origin = getattr(spec, "origin", None) or ""
+                in_stdlib = origin in ("built-in", "frozen") or (
+                    origin.startswith(paths["stdlib"]) and not origin.startswith(site)
+                )
+                if not in_stdlib:
+                    offending.append(name)
+        assert not offending, (
+            "hooks/shared/%s imports %r. A hook loads that file by path, an edge "
+            "the closure oracle cannot see, so it must import nothing outside the "
+            "stdlib and nothing from `shared`" % (helper, offending)
         )
 
     def test_no_refresh_subpackage_edge_in_hooks(self):

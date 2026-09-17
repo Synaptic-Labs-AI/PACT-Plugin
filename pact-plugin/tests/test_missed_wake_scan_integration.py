@@ -358,19 +358,18 @@ class TestSoloBranchResolver:
 #   NON-VACUITY GATE (arg-less get_task_list via the shared resolver).
 # ===========================================================================
 class TestTeammateIdleResolvesTeamTasks:
-    """teammate_idle.main() guards `if not tasks: exit` at the arg-less
-    get_task_list() call (:316). Pre-fix that returned None under Agent Teams,
-    so the whole hook no-op'd (zombie-cleanup + auto-shutdown nudge dead).
-    Post-fix the arg-less call resolves the team dir, so the guard is passed.
-    This is a SMOKE on the shared resolver as teammate_idle invokes it."""
+    """teammate_idle.main() reads the team's tasks with
+    iter_team_task_jsons(team) and guards `if not tasks: exit`. An empty read
+    would no-op the whole hook (zombie cleanup and the auto-shutdown nudge dead),
+    so this pins that the team directory resolves. This is a SMOKE on the shared
+    reader as teammate_idle invokes it."""
 
-    def test_non_vacuity_gate_teammate_idle_arg_less_resolves_team_tasks(self, live_task_env):
+    def test_non_vacuity_gate_teammate_idle_resolves_team_tasks(self, live_task_env):
         _write_task(live_task_env.dir_for(TEAM), task_id="3", owner="backend",
                     status="in_progress", with_wait=False)
-        # teammate_idle calls the shared get_task_list() arg-less (:316).
-        tasks = teammate_idle.get_task_list()
-        assert tasks is not None, (
-            "teammate_idle's arg-less get_task_list() must resolve the team dir "
-            "post-fix — None here is the 2nd inert bug (idle-cleanup never runs)"
+        tasks = list(teammate_idle.iter_team_task_jsons(TEAM))
+        assert tasks, (
+            "teammate_idle's iter_team_task_jsons(team) must resolve the team dir; "
+            "an empty read here means idle cleanup never runs"
         )
         assert {t["id"] for t in tasks} == {"3"}

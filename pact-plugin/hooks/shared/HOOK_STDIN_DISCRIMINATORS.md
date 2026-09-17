@@ -15,13 +15,53 @@ field-presence**:
 | Role | `agent_type` value |
 |------|--------------------|
 | team-lead | `PACT:pact-orchestrator` **or** `pact-orchestrator` (both spellings the harness can stamp) |
-| teammate | the specialist value, e.g. `pact-architect`, `pact-backend-coder` |
+| teammate (tmux) | the specialist value, e.g. `pact-architect`, `pact-backend-coder` |
+| teammate (in-process) | **the teammate's own `name`**, e.g. `background-work-coder` — NOT the configured `agentType`. See the mode split below. |
 | plain / non-PACT primary | **field absent** |
 
 `pact_context.is_lead()` / `classify_session_role()` are the single resolvers;
 both test exact membership of `agent_type` in `LEAD_AGENT_TYPES`. A
 `startswith("pact-")` test is WRONG — it misclassifies the unqualified lead
 spelling `pact-orchestrator` as a teammate.
+
+#### 🔴 `agent_type` IS NOT ALWAYS A TYPE — the in-process/tmux split
+
+**An earlier version of this table said the teammate value is "the specialist
+value" with no mode split. MEASURED FALSE 2026-09-11.** On a live in-process
+Agent-Teams teammate `PostToolUse` `Bash` frame, `agent_type` carried the
+teammate's **own name** (`background-work-coder`), while that member's
+`agentType` in the team config was `pact-backend-coder`. **The frame's
+`agent_type` and the config's `agentType` are different values.**
+
+Fixture: `tests/fixtures/role_frames.py` ::
+`captured_posttooluse_teammate_inprocess_bash_background` (real key set,
+synthetic values).
+
+Consequences, because code in this repo reasons on the old premise:
+
+- **Role classification is unaffected.** Both resolvers test membership in
+  `LEAD_AGENT_TYPES`, and neither a name nor a type is in that set, so a
+  teammate still classifies as a teammate either way.
+- **Any code treating this field AS A TYPE is on a false premise** — including
+  `resolve_agent_name`'s Step 4, which strips a `pact-` prefix (after one
+  leading `PACT:`, when `pact-` follows it) and returns the remainder as a
+  name. In-process there is no prefix to strip, so Step 4 returns the name
+  verbatim and *happens* to be right. That is a coincidence
+  of the value, not a property of the step.
+- **An argument that excludes a Step-4 type-strip by observing distinct names
+  across same-`agentType` members is INVALID.** Step 4 strips the FRAME's
+  field, which already differs per member in-process.
+- A caller needing identity from this field must VALIDATE it — membership in
+  the team config's `members[]` `name` list — rather than trust its shape. See
+  `shared/background_work.py` :: `agent_type_names_a_member`, including its
+  stated residual.
+
+**tmux is UNTESTED for this field on a `Bash` `PostToolUse` frame.** The tmux
+row above rests on a captured `PreToolUse` frame. No tmux team was available
+on the machine where this was measured, so the Bash path went unexercised —
+**that bounds the verification, not the behaviour.** The tmux row is
+therefore the LEAST certain row in this table, and a reader who needs it
+should re-measure rather than cite it.
 
 ### Do NOT key a role decision on these
 
@@ -35,7 +75,9 @@ spelling `pact-orchestrator` as a teammate.
   differentiator there — but it is ABSENT on tmux-teammate and lead frames.
   Present in one topology and absent in the other, it is NOT a reliable
   cross-mode role signal: key role on `agent_type` (present in both), never
-  `agent_id`.
+  `agent_id`. The member check reads only the exact shape of `agent_id`, to
+  tell an in-process teammate from an Agent-tool subagent, and falls back to
+  `agent_type` when the id is absent; lead versus teammate never keys on it.
 - **`team_name`** — absent on most events; present on stdin only for a
   **teammate `TaskCompleted`** frame (see the table). It identifies the team,
   not the role, and it is NOT a "this is a teammate" flag you can rely on for
@@ -62,22 +104,31 @@ empty.
 
 | Hook event | Role field | Lead value | Teammate value | Plain | `team_name` in stdin? | journal-resolvable here? |
 |---|---|---|---|---|---|---|
-| SessionStart | `agent_type` | lead spelling | `pact-<specialist>` | absent | no | lead: yes (persists context) · teammate: no |
+| SessionStart | `agent_type` (none for an in-process teammate's `source: compact`) | lead spelling | `pact-<specialist>`; an in-process teammate's `source: compact` frame carries the lead spelling | absent | no | lead: yes (persists context) · in-process: yes (the lead's journal) · separate-process: no |
 | UserPromptSubmit | `agent_type` | lead spelling | *(no teammate fire path — see note)* | absent | no | lead: yes |
 | PreToolUse | `agent_type` | lead spelling | `pact-<specialist>` | — | **no** | lead: yes · teammate: no |
 | PostToolUse (incl. `TaskCreate` / `TaskUpdate`) | `agent_type` | lead spelling | `pact-<specialist>` | — | **no** | lead: yes · teammate: no |
 | TaskCompleted | `agent_type` | lead spelling | `pact-<specialist>` | — | lead: **no** · teammate: **yes** (also `teammate_name`) | lead: yes · teammate: no |
-| PostCompact | `agent_type` | lead spelling | `pact-<specialist>` | — | no | lead: yes · teammate: no |
+| PreCompact | none for an in-process teammate | lead spelling | in-process: lead spelling · separate-process: `pact-<specialist>` (inferred) | — | no | not read |
+| PostCompact | `agent_type` (none for an in-process teammate) | lead spelling | in-process: lead spelling · separate-process: `pact-<specialist>` (inferred) | — | no | lead: yes · in-process: yes (the lead's journal) · separate-process: no |
 
 PostCompact capture provenance: live append-only hook dump, 2026-08-26, lead
 manual `/compact` in the in-process dogfood session (PACT 4.6.44). The committed
 verbatim shape is `tests/fixtures/role_frames.py` `postcompact_lead_manual`; its
 `session_id` presence is the premise the #1504 session-scoped writer resolves on.
-Teammate and plain PostCompact shapes remain matrix-inferred (no teammate compact
-has been captured): in-process teammates do NOT compact independently, so no
-teammate PostCompact event exists to capture in that topology; capturing a
-teammate frame requires a tmux teammate compact. The `session_id` collapse is a
-field-equality fact of the in-process topology, not the unreachability mechanism.
+In-process teammates DO compact on their own, and their compaction frames were
+captured live on 2026-09-14. PreCompact, SessionStart with `source: compact` and
+PostCompact all fire in the lead's process carrying the lead's `agent_type`,
+`session_id` and `transcript_path`, and no `agent_id`, `agent_name` or
+`agent_transcript_path`. No field separates them from the lead's own compaction
+frames, so `is_lead` is True for both. In every capture, the transcript records
+that tell them apart landed after the compaction hooks had returned, so
+`shared/compaction_owner.py` stages each PostCompact summary and settles whose
+it was later, from the transcripts, in `postcompact_archive`, `session_init` and
+`bootstrap_gate`. Committed shapes: `tests/fixtures/role_frames.py`
+`captured_compaction_teammate_*` and `captured_compaction_lead_*`.
+Separate-process (tmux) teammate compaction frames and plain PostCompact shapes
+remain matrix-inferred.
 `is_lead` is READ on PreToolUse and PostCompact (and SessionStart /
 UserPromptSubmit / PostToolUse) but is NOT read on TaskCompleted — that frame is
 captured for the #917 emit-path, which gates on `team_name` + journal
@@ -137,10 +188,3 @@ precise one.
   subagent), each carrying `_meta.capture_method` provenance.
 - `pact-plugin/hooks/shared/pact_context.py` — `is_lead` / `classify_session_role`
   (the resolvers) and `get_journal_path` resolution via the session context.
-
----
-
-*Background: the discriminator audit and the marker-poisoning failure it
-explains are tracked under #812 (audit) and #917 (the emit-path bug);
-teammate-context non-persistence under tmux is #877. These pointers are
-provenance only — the behavioral facts above stand on their own.*

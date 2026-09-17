@@ -248,6 +248,22 @@ class TestCompactReadInstructionRealSeam:
             "session-dir resolution returned empty when it should not"
         )
 
+    def test_the_archive_instruction_allows_an_unattributed_summary_without_naming_it(
+        self, tmp_path, monkeypatch
+    ):
+        """A summary no transcript attributes to this session is parked and never
+        promoted, so compact-summary.txt can be absent without an archive. The
+        lead is told to continue from its own context, and is never pointed at a
+        parked file, which may hold a teammate's summary."""
+        ctx = _run_compact_main(tmp_path, monkeypatch, "aabb1122-0000-0000-0000-000000000000")
+
+        assert f"(if it is absent, either the secretary archived it into {tmp_path}" in ctx
+        assert (
+            "or it was not attributed to this session and you continue from the "
+            "summary already in your context)" in ctx
+        )
+        assert "unattributed" not in ctx
+
     def test_missing_session_id_falls_back_instead_of_naming_an_empty_dir(
         self, tmp_path, monkeypatch
     ):

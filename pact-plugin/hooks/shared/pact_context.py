@@ -1176,7 +1176,8 @@ def resolve_agent_name(
     3.5. input_data["session_id"] → self-registration registry self-lookup,
        split "@" and return the name part (recovers a tmux teammate's name
        that is absent from hook stdin; fail-safe, falls through on miss)
-    4. input_data["agent_type"] → strip "pact-" prefix as fallback name
+    4. input_data["agent_type"] → strip "pact-" prefix as fallback name, after
+       one leading "PACT:" when "pact-" follows it
     5. "" — unknown agent (main process, non-PACT context)
 
     Args:
@@ -1221,12 +1222,15 @@ def resolve_agent_name(
         if resolved and "@" in resolved:
             return resolved.split("@")[0]
 
-    # Step 4: agent_type → strip "pact-" prefix
+    # Step 4: agent_type → strip "pact-" prefix. The namespaced spelling
+    # "PACT:pact-<name>" resolves like "pact-<name>"; a "PACT:" not followed by
+    # "pact-" is left in place, so every other value resolves as before.
     agent_type = input_data.get("agent_type")
     if agent_type:
         type_str = str(agent_type)
-        if type_str.startswith("pact-"):
-            return type_str[len("pact-"):]
+        unqualified = strip_pact_namespace(type_str)
+        if unqualified.startswith("pact-"):
+            return unqualified[len("pact-"):]
         return type_str
 
     # Step 5: unresolvable
@@ -1242,6 +1246,18 @@ def resolve_agent_name(
 # lives in agents/, so a registry-derived set would both conflate the
 # orchestrator with a specialist AND miss the qualified `PACT:` spelling.
 LEAD_AGENT_TYPES = frozenset({"PACT:pact-orchestrator", "pact-orchestrator"})
+
+# The platform spells a plugin agent `<plugin name>:<agent>`, and this plugin
+# is named PACT.
+PACT_NAMESPACE = "PACT:"
+
+
+def strip_pact_namespace(value: str) -> str:
+    """``value`` without one leading ``PACT:``. Case-sensitive; no other
+    namespace is stripped."""
+    if value.startswith(PACT_NAMESPACE):
+        return value[len(PACT_NAMESPACE):]
+    return value
 
 
 def is_lead(input_data: dict) -> bool:
@@ -1285,7 +1301,13 @@ def is_lead(input_data: dict) -> bool:
     it is the field that carries the lead/teammate signal on every hook event
     where this predicate is READ — SessionStart, UserPromptSubmit, PreToolUse,
     PostToolUse (including the ``TaskCreate`` / ``TaskUpdate``-matched frames),
-    and PostCompact. The signal is VALUE-MEMBERSHIP, not field-presence: a lead
+    and PostCompact. ONE EXCEPTION, captured live: an in-process teammate's
+    compaction frames (PreCompact, SessionStart with ``source: compact``, and
+    PostCompact) fire in the lead's process carrying the LEAD's ``agent_type``,
+    so this predicate returns True for them. ``shared/compaction_owner.py``
+    settles whose compaction it was from the transcripts, after the compaction
+    hooks have returned. The signal is VALUE-MEMBERSHIP,
+    not field-presence: a lead
     stamps one of the two ``LEAD_AGENT_TYPES`` spellings, a teammate stamps its
     specialist value (e.g. ``pact-architect``), and a plain / non-PACT primary
     frame omits the field entirely. ``agent_id`` / ``agent_name`` / ``team_name``
@@ -1296,10 +1318,10 @@ def is_lead(input_data: dict) -> bool:
     SessionStart, UserPromptSubmit, PostToolUse, and TaskCompleted — note
     TaskCompleted was captured for the #917 emit-path, NOT because is_lead is
     read there (it is not; the TaskCompleted hook gates on ``team_name`` +
-    journal writability, not this predicate). PreToolUse and PostCompact were
-    NOT separately captured: their ``agent_type`` shape is inferred from the
-    uniform harness-stamping the captured frames establish (PostCompact has only
-    a synthesized-from-matrix builder; PreToolUse has no frame). The captured
+    journal writability, not this predicate). PreToolUse was captured later
+    (Claude Code 2.1.177), and PostCompact was captured for a lead on 2026-08-26
+    and, with PreCompact and SessionStart(compact), for an in-process teammate
+    and a lead on 2026-09-14. The captured
     frames live in ``tests/fixtures/role_frames.py`` (the ``captured_*``
     accessors); the per-event truth table — which rows are captured vs inferred
     — is in ``hooks/shared/HOOK_STDIN_DISCRIMINATORS.md``.
@@ -1520,6 +1542,7 @@ def build_context_cache(
     session_id: str,
     project_dir: str,
     plugin_root: str = "",
+    started_at: str | None = None,
 ) -> tuple[Path, dict] | None:
     """Build the session context dict + path and populate the in-process cache.
 
@@ -1549,6 +1572,8 @@ def build_context_cache(
         session_id: Session ID from stdin JSON or env var
         project_dir: CLAUDE_PROJECT_DIR value
         plugin_root: CLAUDE_PLUGIN_ROOT value (path to installed plugin directory)
+        started_at: The value to record; None records now. A compaction is not
+            a session start, so session_init passes the value already on disk.
 
     Returns:
         ``(target, context)`` on success, or ``None`` if the path is uncomputable.
@@ -1560,7 +1585,7 @@ def build_context_cache(
         "session_id": session_id,
         "project_dir": project_dir,
         "plugin_root": plugin_root,
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": started_at or datetime.now(timezone.utc).isoformat(),
     }
 
     # Use _context_path if already set (from init() or test fixture),

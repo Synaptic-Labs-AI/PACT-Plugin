@@ -60,6 +60,7 @@ from helpers import make_claude_md_with_pins, make_pin_entry  # noqa: E402
 
 import archive_pin  # noqa: E402
 import pin_caps  # noqa: E402
+from shared.project_scope import same_repository  # noqa: E402
 import staleness  # noqa: E402
 
 
@@ -677,7 +678,7 @@ class TestEnvPropagation_ExplicitCwdBeatsAmbient:
             "fixture drift: the worktree must carry NO CLAUDE.md, or the "
             "fall-through this test depends on never happens"
         )
-        assert archive_pin._same_repository(worktree, main), (
+        assert same_repository(worktree, main), (
             "fixture drift: git does not consider the worktree part of the "
             "main repo, so resolve_claude_md would REFUSE rather than fall "
             "through, and this test would measure the refusal path"

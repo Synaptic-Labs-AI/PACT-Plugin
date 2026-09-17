@@ -63,6 +63,7 @@ from scripts import working_memory as wm
 from scripts.memory_api import PACTMemory
 from scripts.pact_session import ProjectScopeDisagreementError
 from shared import backlog
+from clock_shift.clock_shift_env import carry_clock_shift
 
 
 _MEMORY_CLI = (
@@ -600,14 +601,14 @@ class TestCliRefusalEnvelope:
         )
         setup = subprocess.run(
             [sys.executable, str(_MEMORY_CLI), "setup", "--db-path", str(store)],
-            capture_output=True, text=True, env=env, cwd=str(tmp_path), timeout=120,
+            capture_output=True, text=True, env=carry_clock_shift(env), cwd=str(tmp_path), timeout=120,
         )
         assert setup.returncode == 0, f"store setup failed: {setup.stderr[:400]!r}"
 
         proc = subprocess.run(
             [sys.executable, str(_MEMORY_CLI), "save", "--db-path", str(store),
              json.dumps({"context": "cross-process", "goal": "g"})],
-            capture_output=True, text=True, env=env, cwd=str(tmp_path), timeout=120,
+            capture_output=True, text=True, env=carry_clock_shift(env), cwd=str(tmp_path), timeout=120,
         )
         assert proc.returncode != 0, f"a disagreeing save exited 0: {proc.stdout!r}"
         assert "SCOPE_DISAGREEMENT" in proc.stderr, (
@@ -668,7 +669,7 @@ class TestR1UmbrellaAcceptance:
         add = subprocess.run(
             [sys.executable, str(_BACKLOG_CLI), "--backlog-dir", str(store),
              "add", "umbrella item"],
-            capture_output=True, text=True, env=env, cwd=str(umbrella.project),
+            capture_output=True, text=True, env=carry_clock_shift(env), cwd=str(umbrella.project),
         )
         assert add.returncode == 0, f"unprefixed add refused: {add.stderr!r}"
         written = store / "umbrella.json"
@@ -680,7 +681,7 @@ class TestR1UmbrellaAcceptance:
         set_ = subprocess.run(
             [sys.executable, str(_BACKLOG_CLI), "--backlog-dir", str(store),
              "set", item_id, "--status", "active"],
-            capture_output=True, text=True, env=env, cwd=str(umbrella.project),
+            capture_output=True, text=True, env=carry_clock_shift(env), cwd=str(umbrella.project),
         )
         assert set_.returncode == 0, f"unprefixed set refused: {set_.stderr!r}"
 
@@ -699,7 +700,7 @@ class TestR1UmbrellaAcceptance:
         save = subprocess.run(
             [sys.executable, str(_MEMORY_CLI), "save",
              json.dumps({"context": "R1-UMBRELLA-SAVE", "goal": "g"})],
-            capture_output=True, text=True, env=env, cwd=str(umbrella.project),
+            capture_output=True, text=True, env=carry_clock_shift(env), cwd=str(umbrella.project),
             timeout=120,
         )
         assert save.returncode == 0, f"unprefixed save failed: {save.stderr[:400]!r}"
@@ -721,7 +722,7 @@ class TestR1UmbrellaAcceptance:
         # record keeps the section intact).
         sync = subprocess.run(
             [sys.executable, str(_MEMORY_CLI), "sync"],
-            capture_output=True, text=True, env=env, cwd=str(umbrella.project),
+            capture_output=True, text=True, env=carry_clock_shift(env), cwd=str(umbrella.project),
             timeout=120,
         )
         assert sync.returncode == 0, f"unprefixed sync failed: {sync.stderr[:400]!r}"
@@ -744,7 +745,7 @@ class TestR1UmbrellaAcceptance:
              "from scripts.pact_session import get_project_dir_from_session_record as g; "
              "print(g())",
              str(_PACT_MEMORY_ROOT)],
-            capture_output=True, text=True, env=env, cwd=str(umbrella.project),
+            capture_output=True, text=True, env=carry_clock_shift(env), cwd=str(umbrella.project),
         )
         assert probe.returncode == 0, f"probe failed: {probe.stderr[:400]!r}"
         assert probe.stdout.strip() == str(umbrella.project)
@@ -791,14 +792,14 @@ class TestR2SubRepoCwd:
         )
         setup = subprocess.run(
             [sys.executable, str(_MEMORY_CLI), "setup", "--db-path", str(store)],
-            capture_output=True, text=True, env=env, cwd=str(umbrella.subrepo),
+            capture_output=True, text=True, env=carry_clock_shift(env), cwd=str(umbrella.subrepo),
             timeout=120,
         )
         assert setup.returncode == 0, f"store setup failed: {setup.stderr[:400]!r}"
         save = subprocess.run(
             [sys.executable, str(_MEMORY_CLI), "save", "--db-path", str(store),
              json.dumps({"context": "R2-SUBREPO-SAVE", "goal": "g"})],
-            capture_output=True, text=True, env=env, cwd=str(umbrella.subrepo),
+            capture_output=True, text=True, env=carry_clock_shift(env), cwd=str(umbrella.subrepo),
             timeout=120,
         )
         assert save.returncode == 0, f"save from the sub-repo failed: {save.stderr[:400]!r}"
@@ -893,14 +894,14 @@ class TestR4BimodalGit:
         env["PATH"] = f"{shim}{os.pathsep}{env['PATH']}"
         setup = subprocess.run(
             [sys.executable, str(_MEMORY_CLI), "setup", "--db-path", str(store)],
-            capture_output=True, text=True, env=env, cwd=str(umbrella.subrepo),
+            capture_output=True, text=True, env=carry_clock_shift(env), cwd=str(umbrella.subrepo),
             timeout=120,
         )
         assert setup.returncode == 0, f"store setup failed: {setup.stderr[:400]!r}"
         save = subprocess.run(
             [sys.executable, str(_MEMORY_CLI), "save", "--db-path", str(store),
              json.dumps({"context": "R4-BROKEN-GIT", "goal": "g"})],
-            capture_output=True, text=True, env=env, cwd=str(umbrella.subrepo),
+            capture_output=True, text=True, env=carry_clock_shift(env), cwd=str(umbrella.subrepo),
             timeout=120,
         )
         assert save.returncode == 0, f"child save failed: {save.stderr[:400]!r}"
@@ -920,7 +921,7 @@ class TestR4BimodalGit:
         add = subprocess.run(
             [sys.executable, str(_BACKLOG_CLI), "--backlog-dir", str(store),
              "add", "broken-git item"],
-            capture_output=True, text=True, env=env, cwd=str(umbrella.project),
+            capture_output=True, text=True, env=carry_clock_shift(env), cwd=str(umbrella.project),
         )
         assert add.returncode == 0, (
             f"backlog add refused under broken git despite the record: {add.stderr!r}"
@@ -962,7 +963,7 @@ class TestR5EnvFileSeam:
         proc = subprocess.run(
             [sys.executable, str(_SESSION_INIT)],
             input=json.dumps(frame),
-            capture_output=True, text=True, env=env, cwd=str(umbrella.project),
+            capture_output=True, text=True, env=carry_clock_shift(env), cwd=str(umbrella.project),
             timeout=180,
         )
         assert proc.returncode == 0, (
@@ -1000,7 +1001,7 @@ class TestR5EnvFileSeam:
         probe = subprocess.run(
             [sys.executable, "-c",
              "import os; v = os.environ['CLAUDE_PROJECT_DIR']; print(v)"],
-            capture_output=True, text=True, env=bash_env, cwd=str(umbrella.project),
+            capture_output=True, text=True, env=carry_clock_shift(bash_env), cwd=str(umbrella.project),
         )
         assert probe.stdout.strip() == recorded, (
             "the env-file value a spawned Bash inherits differs from the "
@@ -1009,14 +1010,14 @@ class TestR5EnvFileSeam:
         store = tmp_path / "memory.db"
         setup = subprocess.run(
             [sys.executable, str(_MEMORY_CLI), "setup", "--db-path", str(store)],
-            capture_output=True, text=True, env=bash_env, cwd=str(umbrella.project),
+            capture_output=True, text=True, env=carry_clock_shift(bash_env), cwd=str(umbrella.project),
             timeout=120,
         )
         assert setup.returncode == 0, f"store setup failed: {setup.stderr[:400]!r}"
         save = subprocess.run(
             [sys.executable, str(_MEMORY_CLI), "save", "--db-path", str(store),
              json.dumps({"context": "R5-EXPORTED", "goal": "g"})],
-            capture_output=True, text=True, env=bash_env, cwd=str(umbrella.project),
+            capture_output=True, text=True, env=carry_clock_shift(bash_env), cwd=str(umbrella.project),
             timeout=120,
         )
         assert save.returncode == 0, (
@@ -1086,12 +1087,12 @@ class TestSyncCliEnvelope:
         )
         setup = subprocess.run(
             [sys.executable, str(_MEMORY_CLI), "setup", "--db-path", str(store)],
-            capture_output=True, text=True, env=env, cwd=str(tmp_path), timeout=120,
+            capture_output=True, text=True, env=carry_clock_shift(env), cwd=str(tmp_path), timeout=120,
         )
         assert setup.returncode == 0, f"store setup failed: {setup.stderr[:400]!r}"
         proc = subprocess.run(
             [sys.executable, str(_MEMORY_CLI), "sync", "--db-path", str(store)],
-            capture_output=True, text=True, env=env, cwd=str(tmp_path), timeout=120,
+            capture_output=True, text=True, env=carry_clock_shift(env), cwd=str(tmp_path), timeout=120,
         )
         assert proc.returncode != 0, f"a disagreeing sync exited 0: {proc.stdout!r}"
         assert "SCOPE_DISAGREEMENT" in proc.stderr, (
@@ -1121,13 +1122,13 @@ class TestSyncCliEnvelope:
         del seed_env["CLAUDE_CODE_SESSION_ID"]
         setup = subprocess.run(
             [sys.executable, str(_MEMORY_CLI), "setup", "--db-path", str(store)],
-            capture_output=True, text=True, env=seed_env, cwd=str(other), timeout=120,
+            capture_output=True, text=True, env=carry_clock_shift(seed_env), cwd=str(other), timeout=120,
         )
         assert setup.returncode == 0, f"store setup failed: {setup.stderr[:400]!r}"
         save = subprocess.run(
             [sys.executable, str(_MEMORY_CLI), "save", "--db-path", str(store),
              json.dumps({"context": "WARRANT-CLI-TOKEN", "goal": "g"})],
-            capture_output=True, text=True, env=seed_env, cwd=str(other), timeout=120,
+            capture_output=True, text=True, env=carry_clock_shift(seed_env), cwd=str(other), timeout=120,
         )
         assert save.returncode == 0, f"seed save failed: {save.stderr[:400]!r}"
         write_session_context(umbrella.config_root, SID, umbrella.project)
@@ -1135,7 +1136,7 @@ class TestSyncCliEnvelope:
         proc = subprocess.run(
             [sys.executable, str(_MEMORY_CLI), "sync", "--db-path", str(store),
              "--claude-md-root", str(other)],
-            capture_output=True, text=True, env=env, cwd=str(other), timeout=120,
+            capture_output=True, text=True, env=carry_clock_shift(env), cwd=str(other), timeout=120,
         )
         assert proc.returncode == 0, (
             f"a warranted sync refused at the CLI layer: {proc.stderr[:400]!r}"
@@ -1173,13 +1174,13 @@ class TestLiberalReadsUnderDisagreement:
         )
         setup = subprocess.run(
             [sys.executable, str(_MEMORY_CLI), "setup", "--db-path", str(store)],
-            capture_output=True, text=True, env=seed_env, cwd=str(other), timeout=120,
+            capture_output=True, text=True, env=carry_clock_shift(seed_env), cwd=str(other), timeout=120,
         )
         assert setup.returncode == 0, f"store setup failed: {setup.stderr[:400]!r}"
         save = subprocess.run(
             [sys.executable, str(_MEMORY_CLI), "save", "--db-path", str(store),
              json.dumps({"context": "LIBERAL-READ-SEED", "goal": "g"})],
-            capture_output=True, text=True, env=seed_env, cwd=str(other), timeout=120,
+            capture_output=True, text=True, env=carry_clock_shift(seed_env), cwd=str(other), timeout=120,
         )
         assert save.returncode == 0, f"seed save failed: {save.stderr[:400]!r}"
         seed_id = json.loads(save.stdout)["result"]["memory_id"]
@@ -1194,7 +1195,7 @@ class TestLiberalReadsUnderDisagreement:
         )
         listed = subprocess.run(
             [sys.executable, str(_MEMORY_CLI), "list", "--db-path", str(store)],
-            capture_output=True, text=True, env=read_env, cwd=str(other), timeout=120,
+            capture_output=True, text=True, env=carry_clock_shift(read_env), cwd=str(other), timeout=120,
         )
         assert listed.returncode == 0, f"list refused a read: {listed.stderr[:400]!r}"
         assert "SCOPE_DISAGREEMENT" not in listed.stderr
@@ -1204,7 +1205,7 @@ class TestLiberalReadsUnderDisagreement:
         )
         got = subprocess.run(
             [sys.executable, str(_MEMORY_CLI), "get", "--db-path", str(store), seed_id],
-            capture_output=True, text=True, env=read_env, cwd=str(other), timeout=120,
+            capture_output=True, text=True, env=carry_clock_shift(read_env), cwd=str(other), timeout=120,
         )
         assert got.returncode == 0, f"get refused a read: {got.stderr[:400]!r}"
         assert "SCOPE_DISAGREEMENT" not in got.stderr

@@ -1,7 +1,8 @@
 # pact-plugin/tests/test_peer_inject.py
 """
-Tests for peer_inject.py — SubagentStart hook that injects peer teammate
-list into newly spawned PACT agents.
+Tests for peer_inject.py — SubagentStart hook that injects the teammate block
+into a start whose agent type names a member of the resolved team, and gives
+every other start nothing.
 
 Tests cover:
 1. Injects peer names when team has multiple members (+ teachback reminder)
@@ -9,17 +10,46 @@ Tests cover:
 3. Returns None when no team config exists
 4. Returns "only active teammate" when alone (+ teachback reminder)
 5. No-op when team_name not available
-6. main() entry point: stdin JSON parsing, exit codes, output format,
-   exception propagation from get_peer_context
+6. main() entry point: member-only injection, stdin JSON parsing, exit codes,
+   output format, exception propagation from get_peer_context
 7. Corrupted config.json returns None
 8. Teachback reminder: appended to all non-None results, content validation
 """
+import ast
 import io
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+HOOK = Path(__file__).resolve().parents[1] / "hooks" / "peer_inject.py"
+SUPPRESS = {"suppressOutput": True}
+
+
+def _write_team_config(tmp_path, team, members, **extra):
+    """Write teams/<team>/config.json under tmp_path/.claude, the config root the
+    autouse fixture points Path.home at."""
+    team_dir = tmp_path / ".claude" / "teams" / team
+    team_dir.mkdir(parents=True, exist_ok=True)
+    (team_dir / "config.json").write_text(
+        json.dumps({"members": members, **extra}), encoding="utf-8"
+    )
+
+
+def _run_hook(tmp_path, frame, project_dir):
+    """Run `python3 hooks/peer_inject.py` with tmp_path/.claude as its config root."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("CLAUDE_CONFIG_DIR", "CLAUDE_PROJECT_DIR", "CLAUDE_CODE_SESSION_ID")}
+    env.update(HOME=str(tmp_path), CLAUDE_CONFIG_DIR=str(tmp_path / ".claude"),
+               CLAUDE_PROJECT_DIR=project_dir)
+    proc = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(frame),
+                          capture_output=True, text=True, timeout=30, env=env)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout or "{}")
 
 
 class TestPeerInject:
@@ -303,22 +333,28 @@ class TestTeachbackReminder:
 class TestMainEntryPoint:
     """Tests for peer_inject.main() stdin/stdout/exit behavior."""
 
-    def test_main_exits_0_with_peer_context(self, capsys, pact_context):
+    def test_main_exits_0_with_peer_context(self, tmp_path, capsys, pact_context):
         from peer_inject import main
 
         pact_context(team_name="pact-test")
+        _write_team_config(tmp_path, "pact-test", [
+            {"name": "backend-coder", "agentType": "pact-backend-coder"},
+        ])
 
         input_data = json.dumps({
-            "agent_type": "pact-backend-coder",
+            "agent_type": "backend-coder",
         })
 
         peer_context = "Active teammates on your team: frontend-coder"
-        with patch("peer_inject.get_peer_context", return_value=peer_context), \
+        with patch("peer_inject.get_peer_context", return_value=peer_context) as built, \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
+        built.assert_called_once_with(
+            agent_type="backend-coder", team_name="pact-test", agent_name="backend-coder"
+        )
         captured = capsys.readouterr()
         output = json.loads(captured.out)
         assert "additionalContext" in output["hookSpecificOutput"]
@@ -351,37 +387,49 @@ class TestMainEntryPoint:
 
         assert exc_info.value.code == 0
 
-    def test_main_exits_0_when_no_peer_context(self, pact_context):
+    def test_main_exits_0_when_no_peer_context(self, tmp_path, capsys, pact_context):
         from peer_inject import main
 
         pact_context(team_name="pact-test")
+        _write_team_config(tmp_path, "pact-test", [
+            {"name": "backend-coder", "agentType": "pact-backend-coder"},
+        ])
 
-        input_data = json.dumps({"agent_type": "pact-backend-coder"})
+        input_data = json.dumps({"agent_type": "backend-coder"})
 
-        with patch("peer_inject.get_peer_context", return_value=None), \
+        with patch("peer_inject.get_peer_context", return_value=None) as built, \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
+        built.assert_called_once_with(
+            agent_type="backend-coder", team_name="pact-test", agent_name="backend-coder"
+        )
+        assert json.loads(capsys.readouterr().out) == SUPPRESS
 
-    def test_main_suppresses_exception_from_get_peer_context(self, capsys, pact_context):
+    def test_main_suppresses_exception_from_get_peer_context(self, tmp_path, capsys, pact_context):
         """B1 fix: outer try/except wraps the build-path so any exception
         (including unexpected ones from get_peer_context) fails open with
         suppressOutput. Mirrors the SACROSANCT fail-open contract in
-        bootstrap_gate.py and bootstrap_prompt_gate.py."""
+        bootstrap_gate.py and bootstrap_prompt_gate.py. The frame names a member,
+        so the build path is actually reached."""
         from peer_inject import main
 
         pact_context(team_name="pact-test")
+        _write_team_config(tmp_path, "pact-test", [
+            {"name": "backend-coder", "agentType": "pact-backend-coder"},
+        ])
 
-        input_data = json.dumps({"agent_type": "pact-backend-coder"})
+        input_data = json.dumps({"agent_type": "backend-coder"})
 
-        with patch("peer_inject.get_peer_context", side_effect=RuntimeError("boom")), \
+        with patch("peer_inject.get_peer_context", side_effect=RuntimeError("boom")) as built, \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
+        built.assert_called_once()
         captured = capsys.readouterr()
         assert json.loads(captured.out) == {"suppressOutput": True}
 
@@ -408,82 +456,36 @@ class TestMainEntryPoint:
         captured = capsys.readouterr()
         assert json.loads(captured.out) == {"suppressOutput": True}
 
-    def test_main_agent_id_only_falls_through_to_agent_type_fallback(
+    def test_main_a_pact_typed_frame_with_only_an_agent_id_gets_nothing(
         self, tmp_path, pact_context, capsys
     ):
-        """R4-L1: when stdin supplies only ``agent_id`` (a UUID) and no
-        ``agent_name``, the agentType-based fallback fires in
-        get_peer_context — NOT a broken self-exclusion by UUID.
-
-        The round-3 code used ``agent_name = input_data.get("agent_name", "") or
-        input_data.get("agent_id", "")`` as a fallback. That was broken by
-        construction: team members are registered under their canonical names
-        in the team config, never their UUIDs. The self-exclusion filter
-        ``m.get("name") != agent_name`` would compare a canonical name
-        against a UUID and always return True, so every team member appeared
-        in the peer list (including the spawning agent itself). Worse, the
-        intended agentType-fallback branch (which excludes ALL peers of the
-        same type) became unreachable because ``agent_name`` was non-empty.
-
-        The R4 fix removes the ``or agent_id`` fallback so agent_name stays
-        empty when absent. Empty agent_name routes through the agentType
-        else-branch at peer_inject.py L138, which excludes every member whose
-        agentType matches the spawning agent's type. This test pins both
-        the routing (agentType fallback fires) and the self-exclusion
-        outcome (the spawning agent is NOT in the peer list).
+        """REVERT PROOF. A frame carrying a PACT agent type and an agent_id, with
+        no agent_name, is an Agent-tool subagent. Its type names no member of
+        the team, so it gets nothing, even though the team resolves and members
+        of that type exist. Before member-only injection it received the teammate
+        block with an "(unknown)" role and a type-based peer filter.
         """
         from peer_inject import main
 
-        # Build a real team config with two backend-coders and a frontend-coder.
-        # With the bug, passing agent_id would fail self-exclusion and list
-        # BOTH backend-coders (including the spawner). With the fix,
-        # the agentType fallback excludes all backend-coders, leaving only
-        # the frontend-coder in the peer list. Place the config at the
-        # canonical ~/.claude/teams/{team_name}/config.json location that
-        # peer_inject.get_peer_context derives from Path.home().
-        team_dir = tmp_path / ".claude" / "teams" / "pact-test-l1"
-        team_dir.mkdir(parents=True)
-        config = {
-            "members": [
-                {"name": "backend-coder-1", "agentType": "pact-backend-coder"},
-                {"name": "backend-coder-2", "agentType": "pact-backend-coder"},
-                {"name": "frontend-coder", "agentType": "pact-frontend-coder"},
-            ]
-        }
-        (team_dir / "config.json").write_text(json.dumps(config))
-
+        _write_team_config(tmp_path, "pact-test-l1", [
+            {"name": "backend-coder-1", "agentType": "pact-backend-coder"},
+            {"name": "backend-coder-2", "agentType": "pact-backend-coder"},
+            {"name": "frontend-coder", "agentType": "pact-frontend-coder"},
+        ])
         pact_context(team_name="pact-test-l1")
 
-        # Stdin provides agent_id (UUID) but no agent_name.
-        # Pre-fix: agent_name falls back to this UUID, self-exclusion fails.
-        # Post-fix: agent_name stays empty, agentType fallback fires.
         input_data = json.dumps({
             "agent_type": "pact-backend-coder",
             "agent_id": "deadbeef-1111-2222-3333-444444444444",
         })
 
-        # Patch Path.home() as the peer_inject module imports it. The
-        # module uses a local `from pathlib import Path` at L18 and
-        # calls Path.home() at L107, so patching the class attribute via
-        # the peer_inject namespace is the correct scoping.
         with patch("peer_inject.Path.home", return_value=tmp_path), \
              patch("sys.stdin", io.StringIO(input_data)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
 
         assert exc_info.value.code == 0
-        captured = capsys.readouterr()
-        output = json.loads(captured.out)
-        additional_context = output["hookSpecificOutput"]["additionalContext"]
-
-        # The agentType-fallback branch excludes BOTH backend-coders, so
-        # neither name should appear in the peer list. If the fallback
-        # were still present, at least one backend-coder would leak
-        # through (the self-exclusion would compare a UUID, not a name).
-        assert "backend-coder-1" not in additional_context
-        assert "backend-coder-2" not in additional_context
-        # The unrelated agent type MUST still appear.
-        assert "frontend-coder" in additional_context
+        assert json.loads(capsys.readouterr().out) == SUPPRESS
 
 
 class TestBootstrapPrelude:
@@ -1153,11 +1155,11 @@ class TestCompletionAuthorityNote:
         assert result.index(_TEACHBACK_REMINDER) < result.index(_COMPLETION_AUTHORITY_NOTE)
 
 
-# Spawn-able teammate agent types — these are the surfaces that should
-# receive the completion-authority directive when a peer is injected.
-# Sourced from agents/ directory; if a new pact-* agent is added, this
-# list should grow to match. The drift-detection test below asserts the
-# list ⊇ agents/ directory listing so additions are caught at test-time.
+# The PACT agent types a team member can be spawned as. The builder must attach
+# the completion-authority directive for each of them; peer_inject builds the
+# block only for a team member, whatever its type. Sourced from agents/; if a
+# new pact-* agent is added, this list should grow to match. The drift-detection
+# test below asserts the list equals the agents/ directory listing.
 _PACT_AGENT_TYPES = [
     "pact-architect",
     "pact-backend-coder",
@@ -1175,9 +1177,9 @@ _PACT_AGENT_TYPES = [
 
 
 class TestCompletionAuthorityNoteParametrizedAgents:
-    """The completion-authority directive must reach EVERY spawnable pact-*
-    agent type. Single-shape mistake = one role gets phantom-approved
-    self-completion authority.
+    """The builder must attach the completion-authority directive for EVERY
+    pact-* agent type a team member can carry. Single-shape mistake = one role
+    gets phantom-approved self-completion authority.
     """
 
     @pytest.mark.parametrize("agent_type", _PACT_AGENT_TYPES)
@@ -1204,7 +1206,7 @@ class TestCompletionAuthorityNoteParametrizedAgents:
 
         assert _COMPLETION_AUTHORITY_NOTE in result, (
             f"Completion-authority directive missing for agent_type={agent_type}; "
-            "every spawnable pact-* role must receive it via peer_inject."
+            "the builder must attach it for every pact-* type a team member can carry."
         )
 
     @pytest.mark.parametrize("agent_type", _PACT_AGENT_TYPES)
@@ -1244,15 +1246,13 @@ class TestCompletionAuthorityNoteParametrizedAgents:
         )
 
     def test_pact_agent_types_list_matches_agents_directory(self):
-        """Drift guard: _PACT_AGENT_TYPES must equal the set of SPAWNABLE
-        pact-*.md in agents/ (i.e., agent files reachable via SubagentStart
-        through peer_inject).
+        """Drift guard: _PACT_AGENT_TYPES must equal the set of pact-*.md in
+        agents/ that a team member can be spawned as.
 
         pact-orchestrator.md is excluded: it is delivered via the
         `claude --agent PACT:pact-orchestrator` flag for the team-lead
-        session ONLY and never spawns through SubagentStart, so the
-        completion-authority directive (which is a teammate-facing rule)
-        does not apply to it.
+        session ONLY and is never a team member, so the completion-authority
+        directive (which is a teammate-facing rule) does not apply to it.
 
         Bidirectional check:
         - Catches NEW spawnable agents added to agents/ but missing from
@@ -1325,3 +1325,223 @@ class TestCompletionAuthorityLiteralPhraseRegressionGuard:
         assert "Task A" in _COMPLETION_AUTHORITY_NOTE
         assert "Task B" in _COMPLETION_AUTHORITY_NOTE
 
+
+
+class TestPeerInjectInASeparateProcess:
+    """`python3 hooks/peer_inject.py` with no pact-session-context.json.
+
+    A separate-process teammate's own process has no PACT context, so its team
+    comes from its session-registry entry, found through the SubagentStart
+    frame's `session_id`. A subagent that teammate spawns carries a subagent
+    type, not a member name, so it gets nothing.
+    """
+
+    TEAM = "session-piframe"
+
+    def _registered_teammate_process(self, tmp_path):
+        _write_team_config(tmp_path, self.TEAM, [
+            {"name": "tmux-spawner", "agentId": f"tmux-spawner@{self.TEAM}",
+             "agentType": "pact-backend-coder"},
+            {"name": "peer-frontend", "agentId": f"peer-frontend@{self.TEAM}",
+             "agentType": "pact-frontend-coder"},
+        ], leadSessionId="pi-lead-session")
+        registry = tmp_path / ".claude" / "pact-sessions" / ".teammate-registry.jsonl"
+        registry.parent.mkdir(parents=True)
+        registry.write_text(json.dumps({
+            "session_id": "pi-teammate-session", "value": f"tmux-spawner@{self.TEAM}",
+        }) + "\n", encoding="utf-8")
+
+    def test_a_separate_process_teammates_pact_subagent_gets_nothing(self, tmp_path):
+        """REVERT PROOF. The team resolves through the registry, and the frame's
+        PACT type names no member, so the output is suppressOutput. Before
+        member-only injection it listed the team's members."""
+        self._registered_teammate_process(tmp_path)
+        frame = {"hook_event_name": "SubagentStart", "session_id": "pi-teammate-session",
+                 "agent_type": "pact-architect", "agent_id": "a0123456789abcdef"}
+        assert _run_hook(tmp_path, frame, "/pi-frame/project") == SUPPRESS
+
+    def test_peer_inject_is_silent_for_an_explore_subagent_of_a_tmux_teammate(self, tmp_path):
+        """REVERT PROOF. The live shape: a tmux teammate spawns an Explore
+        subagent, whose frame has an agent_id and no agent_name. Before
+        member-only injection it received the whole teammate block."""
+        self._registered_teammate_process(tmp_path)
+        frame = {"hook_event_name": "SubagentStart", "session_id": "pi-teammate-session",
+                 "agent_type": "Explore", "agent_id": "a0123456789abcdef"}
+        assert _run_hook(tmp_path, frame, "/pi-frame/project") == SUPPRESS
+
+
+def _peer_list(context):
+    """The comma-separated names after "Active teammates on your team:"."""
+    line = context.split("Active teammates on your team:", 1)[1].split("\n", 1)[0]
+    return [name.strip() for name in line.split(",")]
+
+
+class TestMemberOnlyInjection:
+    """main() injects only when the frame's agent type names a team member, and
+    passes that member as agent_name."""
+
+    MEMBERS = [
+        {"name": "architect", "agentType": "pact-architect"},
+        {"name": "backend-coder", "agentType": "pact-backend-coder"},
+        {"name": "preparer", "agentType": "pact-preparer"},
+    ]
+
+    def _main(self, capsys, frame):
+        from peer_inject import main
+
+        with patch("sys.stdin", io.StringIO(json.dumps(frame))):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 0
+        return json.loads(capsys.readouterr().out)
+
+    def test_a_member_named_frame_gets_the_teammate_block_with_its_own_name(
+        self, tmp_path, capsys, pact_context
+    ):
+        """REVERT PROOF. An in-process teammate's frame carries its member name as
+        agent_type and no agent_name. The block names it and leaves it out of its
+        own peer list. Before member-only injection the role read "(unknown)" and
+        the member listed itself."""
+        pact_context(team_name="pact-test")
+        _write_team_config(tmp_path, "pact-test", self.MEMBERS)
+
+        out = self._main(capsys, {"agent_type": "architect",
+                                  "agent_id": "aarchitect-0123456789abcdef"})
+
+        context = out["hookSpecificOutput"]["additionalContext"]
+        assert context.startswith("YOUR PACT ROLE: teammate (architect)."), context[:80]
+        assert _peer_list(context) == ["backend-coder", "preparer"], context
+
+    @pytest.mark.parametrize(
+        "agent_type",
+        ["Explore", "general-purpose", "Plan", "pact-backend-coder", "PACT:pact-preparer"],
+    )
+    def test_a_non_member_subagent_gets_nothing(
+        self, agent_type, tmp_path, capsys, pact_context
+    ):
+        """REVERT PROOF. A subagent's frame carries its type, which names no member,
+        so it gets nothing although the team resolves. Before member-only
+        injection it received the teammate block."""
+        pact_context(team_name="pact-test")
+        _write_team_config(tmp_path, "pact-test", self.MEMBERS)
+
+        assert self._main(capsys, {"agent_type": agent_type,
+                                   "agent_id": "a0123456789abcdef"}) == SUPPRESS
+
+    def test_a_member_named_after_a_platform_type_does_not_make_a_subagent_a_teammate(
+        self, tmp_path, capsys, pact_context
+    ):
+        """GUARD. A member named "Explore" does not turn an Explore subagent into
+        that member: platform types never match a member name."""
+        pact_context(team_name="pact-test")
+        _write_team_config(tmp_path, "pact-test", [
+            {"name": "Explore", "agentType": "pact-preparer"},
+            {"name": "architect", "agentType": "pact-architect"},
+        ])
+
+        assert self._main(capsys, {"agent_type": "Explore",
+                                   "agent_id": "a0123456789abcdef"}) == SUPPRESS
+
+
+class TestPeerInjectNamesAnInProcessTeammate:
+    """`python3 hooks/peer_inject.py` in the lead's process, with its context file."""
+
+    TEAM = "session-piname"
+    LEAD_SESSION = "pi-name-lead-session"
+    PROJECT = "/pi-name/project"
+
+    def test_peer_inject_names_an_in_process_teammate(self, tmp_path):
+        """REVERT PROOF. The role line carries the member's name and the member is
+        absent from its own peer list. Before member-only injection the role read
+        "(unknown)" and the member listed itself."""
+        from shared.pact_context import project_slug
+
+        _write_team_config(tmp_path, self.TEAM, [
+            {"name": "team-lead", "agentType": "pact-orchestrator"},
+            {"name": "architect", "agentType": "pact-architect"},
+            {"name": "backend-coder", "agentType": "pact-backend-coder"},
+        ], leadSessionId=self.LEAD_SESSION)
+        context_dir = (tmp_path / ".claude" / "pact-sessions" / project_slug(self.PROJECT)
+                       / self.LEAD_SESSION)
+        context_dir.mkdir(parents=True)
+        (context_dir / "pact-session-context.json").write_text(json.dumps({
+            "session_id": self.LEAD_SESSION, "project_dir": self.PROJECT,
+            "team_name": self.TEAM,
+        }), encoding="utf-8")
+        frame = {"hook_event_name": "SubagentStart", "session_id": self.LEAD_SESSION,
+                 "agent_type": "architect", "agent_id": "aarchitect-0123456789abcdef"}
+
+        out = _run_hook(tmp_path, frame, self.PROJECT)
+
+        context = out.get("hookSpecificOutput", {}).get("additionalContext", "")
+        assert context.startswith("YOUR PACT ROLE: teammate (architect)."), out
+        assert _peer_list(context) == ["team-lead", "backend-coder"], context
+
+
+class TestPeerInjectReadsTheAgentIdShape:
+    """`python3 hooks/peer_inject.py` in the lead's process, where the frame's
+    `agent_id` shape decides whether its `agent_type` names a member."""
+
+    TEAM = "session-piid"
+    LEAD_SESSION = "pi-id-lead-session"
+    PROJECT = "/pi-id/project"
+
+    def _lead_process(self, tmp_path):
+        from shared.pact_context import project_slug
+
+        _write_team_config(tmp_path, self.TEAM, [
+            {"name": "team-lead", "agentType": "pact-orchestrator"},
+            {"name": "pact-backend-coder", "agentType": "pact-backend-coder"},
+            {"name": "claude", "agentType": "pact-preparer"},
+        ], leadSessionId=self.LEAD_SESSION)
+        context_dir = (tmp_path / ".claude" / "pact-sessions" / project_slug(self.PROJECT)
+                       / self.LEAD_SESSION)
+        context_dir.mkdir(parents=True)
+        (context_dir / "pact-session-context.json").write_text(json.dumps({
+            "session_id": self.LEAD_SESSION, "project_dir": self.PROJECT,
+            "team_name": self.TEAM,
+        }), encoding="utf-8")
+
+    def test_a_member_named_after_a_shipped_stem_gets_its_block(self, tmp_path):
+        """REVERT PROOF. Its teammate-shaped id admits it; without the shape
+        check the deny set refused it on its own spawn frame."""
+        self._lead_process(tmp_path)
+        frame = {"hook_event_name": "SubagentStart", "session_id": self.LEAD_SESSION,
+                 "agent_type": "pact-backend-coder",
+                 "agent_id": "apact-backend-coder-0123456789abcdef"}
+
+        out = _run_hook(tmp_path, frame, self.PROJECT)
+
+        context = out.get("hookSpecificOutput", {}).get("additionalContext", "")
+        assert context.startswith("YOUR PACT ROLE: teammate (pact-backend-coder)."), out
+        assert _peer_list(context) == ["team-lead", "claude"], context
+
+    def test_a_subagent_whose_type_names_a_member_gets_nothing(self, tmp_path):
+        """REVERT PROOF. Its subagent-shaped id refuses it; without the shape
+        check it received the member's block."""
+        self._lead_process(tmp_path)
+        frame = {"hook_event_name": "SubagentStart", "session_id": self.LEAD_SESSION,
+                 "agent_type": "claude", "agent_id": "a0123456789abcdef"}
+        assert _run_hook(tmp_path, frame, self.PROJECT) == SUPPRESS
+
+
+def test_peer_inject_gates_on_membership_before_building():
+    """REVERT PROOF. main() asks agent_type_names_a_member, and the agent_name it
+    passes to get_peer_context is the name bound from that answer."""
+    tree = ast.parse(HOOK.read_text(encoding="utf-8"))
+    main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+
+    def calls(node, name):
+        return [c for c in ast.walk(node) if isinstance(c, ast.Call)
+                and getattr(c.func, "id", getattr(c.func, "attr", None)) == name]
+
+    assert calls(main, "agent_type_names_a_member"), "main never checks membership"
+    gated = {
+        t.id
+        for a in ast.walk(main) if isinstance(a, ast.Assign) and calls(a.value, "agent_type_names_a_member")
+        for t in a.targets if isinstance(t, ast.Name)
+    }
+    builds = calls(main, "get_peer_context")
+    assert len(builds) == 1, len(builds)
+    agent_name = next((k.value for k in builds[0].keywords if k.arg == "agent_name"), None)
+    assert isinstance(agent_name, ast.Name) and agent_name.id in gated, ast.dump(agent_name) if agent_name else None

@@ -1759,6 +1759,7 @@ class TestWriteContextIntegration:
             "aabb1122-0000-0000-0000-000000000000",
             "/Users/example/Sites/test-project",
             "",  # plugin_root: CLAUDE_PLUGIN_ROOT not set in this test
+            started_at=None,  # a startup records now; only a compaction keeps the value on disk
         )
 
     def test_missing_session_id_falls_back_to_unknown_and_warns(self, monkeypatch, tmp_path, capsys):
@@ -3183,6 +3184,7 @@ class TestPluginRootEnvWiring:
             "aabb1122-0000-0000-0000-000000000000",
             str(tmp_path / "proj"),
             plugin_root_value,
+            started_at=None,
         )
 
     def test_plugin_root_env_flows_to_update_session_info(
@@ -3420,10 +3422,18 @@ class TestRecoveryFrameNamesAReadableSurface:
             re.compile(
                 r"\S After bootstrap, recover session state: "
                 r"\(1\) Read .+? for prior context "
-                r"\(if it is gone, .+?\), "
+                r"\(if it is absent, .+?\), "
                 r"\(2\) Run TaskList to find in-progress work, "
                 r"\(3\) read the task files of in-progress tasks for "
-                r"details \(TaskGet does not surface metadata\)\. \S"
+                r"details \(TaskGet does not surface metadata\)\. "
+                r"\(4\) If a PACT workflow you started is still in progress in "
+                r"TaskList, and its copy among the re-attached skills above is "
+                r"cut short or missing, Read .+? in full before you continue it, "
+                r"where `PACT:<name>` is that workflow\. If the Read reports a "
+                r"partial view, read the remaining pages\. Do not invoke the "
+                r"workflow again: that starts it over\. If the file shows "
+                r"`\$ARGUMENTS` where the task it was started for belongs, take "
+                r"that task from its re-attached copy or from your summary\. \S"
             ),
         ),
         (
@@ -7311,3 +7321,413 @@ class TestAdoptOldSlugSessionDir:
         assert journal.startswith('{"type":"session_start"}\n')
         assert not old.exists()
         assert not root_summary.exists()
+
+
+class TestCompactionSeats:
+    """session_init on a compaction. The directive carries the teammate clause on
+    the line after the marker, the recorded start is kept, and staged summaries
+    are settled before either clear. Nothing here decides whose compaction it was."""
+
+    SID = "4ec31948-bbe5-4ef4-841c-631d1ef31e61"
+    LEAD = "PACT:pact-orchestrator"
+    CLAUSE = (
+        "If your system prompt makes you a teammate who reports to a team lead, "
+        "this message is not for you: ignore it and continue your task."
+    )
+    MARKER = "YOUR PACT ROLE: orchestrator.\n\n"
+    INVOKE = 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input.'
+
+    def _project(self, tmp_path):
+        project = tmp_path / "cmp-lead"
+        project.mkdir(exist_ok=True)
+        return project
+
+    def _session_dir(self, tmp_path):
+        from shared.pact_context import _build_session_path, project_slug
+
+        return _build_session_path(project_slug(str(self._project(tmp_path))), self.SID)
+
+    def _run(self, monkeypatch, tmp_path, *, source="compact", patches=()):
+        from contextlib import ExitStack
+
+        import session_init
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(self._project(tmp_path)))
+        payload = {
+            "hook_event_name": "SessionStart", "source": source, "session_id": self.SID,
+            "transcript_path": str(tmp_path / "absent.jsonl"), "agent_type": self.LEAD,
+        }
+        quiet = [
+            "session_init.setup_plugin_symlinks", "session_init.ensure_project_memory_md",
+            "session_init.check_pinned_staleness", "session_init.get_task_list",
+            "session_init.restore_last_session", "session_init.check_resume_state",
+        ]
+        with ExitStack() as stack:
+            for target in quiet:
+                stack.enter_context(patch(target, return_value=None))
+            for target, kwargs in patches:
+                stack.enter_context(patch(target, **kwargs))
+            stack.enter_context(patch("sys.stdin", io.StringIO(json.dumps(payload))))
+            out = stack.enter_context(patch("sys.stdout", new_callable=io.StringIO))
+            with pytest.raises(SystemExit) as exc:
+                session_init.main()
+        assert exc.value.code == 0
+        return json.loads(out.getvalue())
+
+    def test_the_clause_is_the_module_constant(self):
+        from shared import constants
+
+        assert constants.COMPACTION_TEAMMATE_CLAUSE == self.CLAUSE
+
+    def test_the_compact_directive_carries_the_clause_on_the_line_after_the_marker(self, monkeypatch, tmp_path):
+        context = self._run(monkeypatch, tmp_path)["hookSpecificOutput"]["additionalContext"]
+        assert context.startswith(f"{self.MARKER}{self.CLAUSE}\n\n{self.INVOKE}")
+        assert context.count(self.CLAUSE) == 1
+
+    @pytest.mark.parametrize("source", ["startup", "resume", "clear"])
+    def test_no_other_source_carries_the_clause(self, monkeypatch, tmp_path, source):
+        context = self._run(monkeypatch, tmp_path, source=source)["hookSpecificOutput"]["additionalContext"]
+        assert context.startswith(f"{self.MARKER}{self.INVOKE}")
+        assert self.CLAUSE not in context
+
+    @pytest.mark.parametrize("source", ["compact", "startup"])
+    def test_the_safety_net_carries_the_clause_only_on_compact(self, monkeypatch, tmp_path, source):
+        output = self._run(monkeypatch, tmp_path, source=source, patches=[
+            ("session_init._adopt_old_slug_session_dir", {"side_effect": RuntimeError("boom")}),
+        ])
+        context = output["hookSpecificOutput"]["additionalContext"]
+        assert "boom" in output["systemMessage"]
+        if source == "compact":
+            assert context.startswith(f"{self.MARKER}{self.CLAUSE}\n\n{self.INVOKE}")
+        else:
+            assert context.startswith(f"{self.MARKER}{self.INVOKE}")
+            assert self.CLAUSE not in context
+
+    RAN = 'Bootstrap already ran in this session. Do not invoke Skill("PACT:bootstrap") again after this compaction.'
+    INVOKE_SENTENCES = (
+        'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input. '
+        'Do this before anything else. Do not evaluate whether it is needed. '
+        'You must invoke Skill("PACT:bootstrap") on every session start.'
+    )
+    WAIT = "Do not read files, explore code, or respond to the user until bootstrap is complete. "
+
+    def _stamp_marker(self, monkeypatch, tmp_path):
+        """Write the bootstrap marker with the producer's own writer and signature."""
+        import bootstrap_marker_writer
+
+        plugin_root = Path(__file__).resolve().parents[1]
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+        session_dir = self._session_dir(tmp_path)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        version = bootstrap_marker_writer._read_plugin_version(str(plugin_root))
+        bootstrap_marker_writer._write_marker(session_dir, self.SID, str(plugin_root), version)
+        return session_dir / "bootstrap-complete"
+
+    def _context(self, monkeypatch, tmp_path, **kwargs):
+        return self._run(monkeypatch, tmp_path, **kwargs)["hookSpecificOutput"]["additionalContext"]
+
+    def test_a_signed_marker_is_what_the_gate_accepts(self, monkeypatch, tmp_path):
+        """Positive control for the arms below: the marker they stamp passes the gate."""
+        import bootstrap_gate
+
+        marker = self._stamp_marker(monkeypatch, tmp_path)
+        assert bootstrap_gate.is_marker_set(marker.parent) is True
+
+    def test_a_compaction_with_the_marker_set_says_bootstrap_already_ran(self, monkeypatch, tmp_path):
+        """The only change is the ruled one: the invoke sentences become the ran
+        sentence, the wait sentence goes, and recovery no longer waits for bootstrap.
+        Every other byte matches the marker-absent compaction."""
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(Path(__file__).resolve().parents[1]))
+        self._context(monkeypatch, tmp_path)  # the first run writes the files a later run reports on
+        before = self._context(monkeypatch, tmp_path)
+        self._stamp_marker(monkeypatch, tmp_path)
+        after = self._context(monkeypatch, tmp_path)
+
+        expected = (
+            before.replace(self.INVOKE_SENTENCES, self.RAN, 1)
+            .replace(self.WAIT, "", 1)
+            .replace("After bootstrap, recover session state: ", "Recover session state: ", 1)
+        )
+        assert expected != before
+        assert after == expected
+        assert 'Skill("PACT:bootstrap")' in self.RAN and after.count('Skill("PACT:bootstrap")') == 1
+
+    def test_the_clause_still_precedes_the_ran_sentence(self, monkeypatch, tmp_path):
+        self._stamp_marker(monkeypatch, tmp_path)
+        context = self._context(monkeypatch, tmp_path)
+        assert context.startswith(f"{self.MARKER}{self.CLAUSE}\n\n{self.RAN}\n\n")
+        assert context.count(self.CLAUSE) == 1
+
+    def test_the_directive_follows_the_marker_in_both_directions(self, monkeypatch, tmp_path):
+        """Negative control: an inverted condition fails one half or the other."""
+        absent = self._context(monkeypatch, tmp_path)
+        self._stamp_marker(monkeypatch, tmp_path)
+        present = self._context(monkeypatch, tmp_path)
+        assert (self.INVOKE in absent, self.RAN in absent) == (True, False)
+        assert (self.INVOKE in present, self.RAN in present) == (False, True)
+
+    @pytest.mark.parametrize("content", ["", '{"v": 1, "sid": "x", "sig": "y"}'], ids=["touched", "unsigned"])
+    def test_a_marker_the_gate_rejects_keeps_the_bootstrap_directive(self, monkeypatch, tmp_path, content):
+        marker = self._stamp_marker(monkeypatch, tmp_path)
+        marker.write_text(content, encoding="utf-8")
+        context = self._context(monkeypatch, tmp_path)
+        assert context.startswith(f"{self.MARKER}{self.CLAUSE}\n\n{self.INVOKE}")
+        assert self.RAN not in context and "After bootstrap, recover session state: " in context
+
+    def test_a_pending_refresh_keeps_the_bootstrap_directive_with_the_marker_set(self, monkeypatch, tmp_path):
+        self._stamp_marker(monkeypatch, tmp_path)
+        context = self._context(monkeypatch, tmp_path, patches=[
+            ("session_init.has_unspent_refresh", {"return_value": True}),
+        ])
+        assert context.startswith(f"{self.MARKER}{self.CLAUSE}\n\n{self.INVOKE}")
+        assert self.RAN not in context
+        assert "Run /PACT:bootstrap to respawn the secretary first." in context
+
+    @pytest.mark.parametrize("source", ["startup", "resume", "clear"])
+    def test_no_other_source_changes_with_the_marker_set(self, monkeypatch, tmp_path, source):
+        self._stamp_marker(monkeypatch, tmp_path)
+        context = self._context(monkeypatch, tmp_path, source=source)
+        assert context.startswith(f"{self.MARKER}{self.INVOKE}")
+        assert self.RAN not in context
+
+    def test_a_gate_that_fails_to_import_keeps_the_directive_and_one_json_output(self, monkeypatch, tmp_path, capsys):
+        """The gate's fail-closed import branch prints a PreToolUse decision and
+        exits. session_init must still print one JSON object, with today's text."""
+        import sys
+
+        self._stamp_marker(monkeypatch, tmp_path)
+        monkeypatch.delitem(sys.modules, "bootstrap_gate")
+        monkeypatch.setitem(sys.modules, "shared.marker_schema", None)
+        output = self._run(monkeypatch, tmp_path)
+        context = output["hookSpecificOutput"]["additionalContext"]
+        assert output["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+        assert context.startswith(f"{self.MARKER}{self.CLAUSE}\n\n{self.INVOKE}")
+        assert "Hook load error (bootstrap_gate / module imports)" in capsys.readouterr().err, (
+            "the gate's fail-closed branch never ran, so this arm proved nothing"
+        )
+
+    PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+    STEP_HEAD = "(4) If a PACT workflow you started is still in progress in TaskList"
+    TASK_FILES = "(3) read the task files of in-progress tasks for details (TaskGet does not surface metadata). "
+
+    @staticmethod
+    def _step(command_file):
+        return (
+            "(4) If a PACT workflow you started is still in progress in TaskList, and its copy "
+            f"among the re-attached skills above is cut short or missing, Read {command_file} "
+            "in full before you continue it, where `PACT:<name>` is that workflow. "
+            "If the Read reports a partial view, read the remaining pages. "
+            "Do not invoke the workflow again: that starts it over. "
+            "If the file shows `$ARGUMENTS` where the task it was started for belongs, "
+            "take that task from its re-attached copy or from your summary."
+        )
+
+    FALLBACK_FILE = "the PACT plugin's `commands/<name>.md`"
+
+    def _step_at_root(self):
+        return self._step(f"`{self.PLUGIN_ROOT}/commands/<name>.md`")
+
+    def test_the_marker_set_compaction_carries_the_reread_step_between_steps_3_and_the_secretary(self, monkeypatch, tmp_path):
+        self._stamp_marker(monkeypatch, tmp_path)
+        context = self._context(monkeypatch, tmp_path)
+        assert self.RAN in context
+        assert f"{self.TASK_FILES}{self._step_at_root()} Re-engage secretary: " in context
+
+    def test_the_marker_absent_compaction_carries_the_reread_step(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(self.PLUGIN_ROOT))
+        context = self._context(monkeypatch, tmp_path)
+        assert self.INVOKE in context
+        assert f"{self.TASK_FILES}{self._step_at_root()} Re-engage secretary: " in context
+
+    def test_the_refresh_pending_compaction_carries_the_reread_step_before_the_refresh_clause(self, monkeypatch, tmp_path):
+        self._stamp_marker(monkeypatch, tmp_path)
+        context = self._context(monkeypatch, tmp_path, patches=[
+            ("session_init.has_unspent_refresh", {"return_value": True}),
+        ])
+        assert f"{self.TASK_FILES}{self._step_at_root()} Teammates were shut down by /PACT:refresh." in context
+
+    @pytest.mark.parametrize("source", ["startup", "resume", "clear"])
+    def test_no_other_source_carries_the_reread_step(self, monkeypatch, tmp_path, source):
+        self._stamp_marker(monkeypatch, tmp_path)
+        assert self.STEP_HEAD not in self._context(monkeypatch, tmp_path, source=source)
+
+    def test_the_safety_net_does_not_carry_the_reread_step(self, monkeypatch, tmp_path):
+        self._stamp_marker(monkeypatch, tmp_path)
+        output = self._run(monkeypatch, tmp_path, patches=[
+            ("session_init._adopt_old_slug_session_dir", {"side_effect": RuntimeError("boom")}),
+        ])
+        assert "boom" in output["systemMessage"]
+        assert self.STEP_HEAD not in output["hookSpecificOutput"]["additionalContext"]
+
+    def test_an_empty_plugin_root_names_the_command_file_without_a_broken_path(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+        context = self._context(monkeypatch, tmp_path)
+        assert f"{self.TASK_FILES}{self._step(self.FALLBACK_FILE)} Re-engage secretary: " in context
+        assert "/commands/<name>.md" not in context
+
+    def test_the_reread_step_is_in_every_compaction_and_no_other_source(self, monkeypatch, tmp_path):
+        """Negative control: a step dropped from one compaction variant, or
+        leaking into another source, changes this map."""
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(self.PLUGIN_ROOT))
+        seen = {"compact, no marker": self.STEP_HEAD in self._context(monkeypatch, tmp_path)}
+        self._stamp_marker(monkeypatch, tmp_path)
+        seen["compact, marker set"] = self.STEP_HEAD in self._context(monkeypatch, tmp_path)
+        seen["compact, refresh pending"] = self.STEP_HEAD in self._context(monkeypatch, tmp_path, patches=[
+            ("session_init.has_unspent_refresh", {"return_value": True}),
+        ])
+        for source in ("startup", "resume", "clear"):
+            seen[source] = self.STEP_HEAD in self._context(monkeypatch, tmp_path, source=source)
+        assert seen == {
+            "compact, no marker": True, "compact, marker set": True, "compact, refresh pending": True,
+            "startup": False, "resume": False, "clear": False,
+        }
+
+    # Runs the hook in a child process with a Python audit hook that records
+    # every path the child opens for writing, creates, renames or removes. The
+    # records go to stderr, which the hook's own writes never pass through.
+    _AUDITED_HOOK = (
+        "import json, os, runpy, sys\n"
+        "hook = sys.argv[1]\n"
+        "written = []\n"
+        "def _path(value):\n"
+        "    return None if isinstance(value, int) else os.path.abspath(os.fsdecode(value))\n"
+        "def audit(event, args):\n"
+        "    if event == 'open':\n"
+        "        path, mode, flags = args\n"
+        "        writes = (isinstance(mode, str) and any(c in mode for c in 'wax+')) or (\n"
+        "            isinstance(flags, int) and flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT))\n"
+        "        if writes and _path(path):\n"
+        "            written.append(_path(path))\n"
+        "    elif event in ('os.rename', 'os.replace', 'os.link', 'os.symlink'):\n"
+        "        written.append(_path(args[1]))\n"
+        "    elif event in ('os.mkdir', 'os.remove', 'os.rmdir', 'os.truncate', 'os.chmod', 'os.utime'):\n"
+        "        if _path(args[0]):\n"
+        "            written.append(_path(args[0]))\n"
+        "sys.addaudithook(audit)\n"
+        "sys.argv = [hook]\n"
+        "try:\n"
+        "    runpy.run_path(hook, run_name='__main__')\n"
+        "finally:\n"
+        "    os.write(2, ('\\nWRITTEN ' + json.dumps(written) + '\\n').encode())\n"
+    )
+
+    def _real_session_dir(self, tmp_path):
+        """The session dir the child resolves from the config root _run_real_hook gives it."""
+        from shared.pact_context import project_slug
+
+        return tmp_path / "home" / ".claude" / "pact-sessions" / project_slug(str(self._project(tmp_path))) / self.SID
+
+    def _run_real_hook(self, tmp_path):
+        """Run the hook as its own process, as the platform runs it, with every
+        state root under tmp_path. Asserts rc 0, one JSON object on stdout, and
+        nothing written outside tmp_path; returns the additionalContext."""
+        import os
+        import subprocess
+        import sys
+
+        from clock_shift.clock_shift_env import carry_clock_shift
+
+        hooks = self.PLUGIN_ROOT / "hooks"
+        project = self._project(tmp_path)
+        env = {key: value for key, value in os.environ.items() if not key.startswith("CLAUDE_")}
+        env.update(
+            PYTHONPATH=str(hooks),
+            HOME=str(tmp_path / "home"),
+            TMPDIR=str(tmp_path),
+            CLAUDE_CONFIG_DIR=str(tmp_path / "home" / ".claude"),
+            CLAUDE_PROJECT_DIR=str(project),
+            CLAUDE_PLUGIN_ROOT=str(self.PLUGIN_ROOT),
+            PYTHONDONTWRITEBYTECODE="1",
+        )
+        frame = {
+            "hook_event_name": "SessionStart", "source": "compact", "session_id": self.SID,
+            "transcript_path": str(tmp_path / "absent.jsonl"), "agent_type": self.LEAD,
+        }
+        run = subprocess.run(
+            [sys.executable, "-c", self._AUDITED_HOOK, str(hooks / "session_init.py")],
+            input=json.dumps(frame), capture_output=True, text=True, env=carry_clock_shift(env),
+            cwd=str(project), timeout=60,
+        )
+        assert run.returncode == 0, run.stderr
+        # json.loads rejects a second object after the first, so this is one output.
+        context = json.loads(run.stdout)["hookSpecificOutput"]["additionalContext"]
+
+        records = [line for line in run.stderr.splitlines() if line.startswith("WRITTEN ")]
+        assert len(records) == 1, run.stderr
+        written = json.loads(records[0][len("WRITTEN "):])
+        root = os.path.realpath(tmp_path)
+        assert any(path.endswith("pact-session-context.json") for path in written), (
+            f"the audit recorded none of the hook's own state writes, so it saw nothing: {written}"
+        )
+        # A link the hook creates points into the plugin tree, so only the
+        # directory it is written in is resolved, never the link itself.
+        located = {os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path)) for path in written}
+        outside = sorted(path for path in located if path != os.devnull and os.path.commonpath([path, root]) != root)
+        assert outside == [], f"the hook wrote outside tmp_path: {outside}"
+        return context
+
+    def test_the_real_hook_renders_the_reread_step_with_the_plugin_path(self, tmp_path):
+        context = self._run_real_hook(tmp_path)
+        assert f"{self.TASK_FILES}{self._step_at_root()} Re-engage secretary: " in context
+
+    def test_the_real_hook_says_bootstrap_already_ran_when_the_marker_is_signed(self, tmp_path):
+        """Option C through a real process, where the hook imports bootstrap_gate
+        from its own directory. The marker is stamped by the producer's writer."""
+        import bootstrap_marker_writer
+
+        session_dir = self._real_session_dir(tmp_path)
+        session_dir.mkdir(parents=True)
+        version = bootstrap_marker_writer._read_plugin_version(str(self.PLUGIN_ROOT))
+        bootstrap_marker_writer._write_marker(session_dir, self.SID, str(self.PLUGIN_ROOT), version)
+
+        context = self._run_real_hook(tmp_path)
+        assert context.startswith(f"{self.MARKER}{self.CLAUSE}\n\n{self.RAN}\n\n")
+        assert self.INVOKE not in context and self.WAIT not in context
+        assert "Recover session state: (1) Read " in context
+        assert f"{self.TASK_FILES}{self._step_at_root()} Re-engage secretary: " in context
+
+    def test_a_compaction_keeps_the_recorded_start_and_rewrites_both_files_byte_identically(self, monkeypatch, tmp_path):
+        self._run(monkeypatch, tmp_path, source="startup")
+        context_file = self._session_dir(tmp_path) / "pact-session-context.json"
+        claude_md = self._project(tmp_path) / ".claude" / "CLAUDE.md"
+        recorded = json.loads(context_file.read_text(encoding="utf-8"))
+        assert recorded["started_at"] != "2026-01-01T00:00:00+00:00"
+        context_file.write_text(json.dumps({**recorded, "started_at": "2026-01-01T00:00:00+00:00"}), encoding="utf-8")
+        text = claude_md.read_text(encoding="utf-8")
+        started = re.findall(r"^- Started: .+$", text, re.MULTILINE)
+        assert len(started) == 1
+        claude_md.write_text(text.replace(started[0], "- Started: 2026-01-01 00:00:00 UTC"), encoding="utf-8")
+        before = (context_file.read_bytes(), claude_md.read_bytes())
+
+        self._run(monkeypatch, tmp_path, source="compact")
+        assert (context_file.read_bytes(), claude_md.read_bytes()) == before
+
+        self._run(monkeypatch, tmp_path, source="startup")
+        assert json.loads(context_file.read_text(encoding="utf-8"))["started_at"] != "2026-01-01T00:00:00+00:00"
+        assert "- Started: 2026-01-01 00:00:00 UTC" not in claude_md.read_text(encoding="utf-8")
+
+    def test_a_staged_lead_summary_is_promoted_before_a_resume_archives_it(self, monkeypatch, tmp_path):
+        from shared import compaction_owner
+
+        session_dir = self._session_dir(tmp_path)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "compact-summary.txt").write_text("A STALE SUMMARY", encoding="utf-8")
+        transcripts = tmp_path / ".claude" / "projects" / "-cmp-lead"
+        transcripts.mkdir(parents=True)
+        lead = transcripts / f"{self.SID}.jsonl"
+        lead.write_text("", encoding="utf-8")
+        body = "The lead gathered three counts and sent them to the secretary. " * 5
+        summary = f"<summary>\n{body}\n</summary>"
+        frame = {"session_id": self.SID, "transcript_path": str(lead), "compact_summary": summary}
+        assert compaction_owner.stage_summary(frame, str(session_dir))
+        with open(lead, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"type": "user", "isCompactSummary": True,
+                                     "message": {"role": "user", "content": "Summary:\n" + body.strip()}}) + "\n")
+
+        context = self._run(monkeypatch, tmp_path, source="resume")["hookSpecificOutput"]["additionalContext"]
+
+        archives = sorted(session_dir.glob("compact-summary-*.txt"))
+        assert [archive.read_text(encoding="utf-8") for archive in archives] == [summary]
+        assert not (session_dir / "compact-summary.txt").exists()
+        assert not list(session_dir.glob("compact-summary.pending-*"))
+        assert str(archives[0]) in context

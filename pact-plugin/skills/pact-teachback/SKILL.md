@@ -41,7 +41,8 @@ TaskUpdate(taskId, metadata={
     "intentional_wait": {
         "reason":            "awaiting_lead_completion",
         "expected_resolver": "lead",
-        "since":             "<canonical_since() output>"
+        "since":             "<canonical_since() output>",
+        "covers_since":      "<the same value as since>"
     }
 })
 ```
@@ -163,7 +164,8 @@ SendMessage(
 TaskUpdate(taskId, metadata={"intentional_wait": {
     "reason": "awaiting_lead_completion",
     "expected_resolver": "lead",
-    "since": "<canonical_since() output: tz-aware ISO-8601 UTC>"
+    "since": "<canonical_since() output: tz-aware ISO-8601 UTC>",
+    "covers_since": "<the same value as since>"
 }})
 ```
 
@@ -212,6 +214,8 @@ Under the Task A + Task B dispatch shape, this ordering is structurally reinforc
 Idle on `awaiting_lead_completion` until the team-lead's wake-signal arrives. Do NOT speculatively begin Task B; the team-lead's status flip is the gate. When the wake-signal arrives, claim Task B FIRST — `TaskUpdate(<Task B id>, status="in_progress")` BEFORE any `Edit`/`Write`/`Bash` — then begin: Task B is pre-assigned to you (owner already set) but still `pending`, so YOU flip it to `in_progress` (the lead does not), preserving the lead's "work started" signal.
 
 If you have other claimable, unblocked tasks unrelated to this dispatch (a separate Task A from a different mission), you may claim and work them. The wait is per-task, not per-agent.
+
+**If you background work, flag the wait before you end the turn.** A `Bash` call with `run_in_background`, or a command a shell `&` sends to the background, may finish while you are idle, and when you run in-process its completion does not wake you — SET `metadata.intentional_wait` naming it, on every task the wait covers.
 
 ## Exception
 

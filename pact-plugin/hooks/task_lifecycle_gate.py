@@ -4,7 +4,9 @@ Location: pact-plugin/hooks/task_lifecycle_gate.py
 Summary: PostToolUse hook (matcher='TaskCreate|TaskUpdate') enforcing PACT
          lifecycle invariants. Cannot DENY (post-action); emits structural
          advisory via additionalContext, plus a metadata writeback for
-         self-completion violations.
+         self-completion violations. On a claim (TaskUpdate to
+         in_progress) it also adds the claimed task to its owner's live
+         background-work launch records.
 Used by: hooks.json PostToolUse matcher='TaskCreate|TaskUpdate' (per the
          unified Task-mutating-tool matcher convention shared with
          agent_handoff_emitter).
@@ -2455,6 +2457,39 @@ def _journal_lifecycle_decision(
         pass
 
 
+def _extend_launch_records_on_claim(input_data: dict) -> None:
+    """When a task is claimed, add it to its owner's live background-work records.
+
+    Best-effort: any failure leaves the registry as it was and never changes
+    this hook's output. The owner is read from the task on disk, never from
+    the frame, because no actor id rides PostToolUse; the platform's task
+    write has landed by the time this runs. The team comes from
+    `frame_team_and_name`, because a separate-process teammate claiming its own
+    task has no session context from which `get_team_name` could read it.
+    """
+    try:
+        tool_input = input_data.get("tool_input")
+        if input_data.get("tool_name") != "TaskUpdate" or not isinstance(tool_input, dict):
+            return
+        if tool_input.get("status") != "in_progress":
+            return
+        task_id = tool_input.get("taskId")
+        if not task_id:
+            return
+        from shared.background_work import extend_records_for_claim, frame_team_and_name
+
+        team_name, _name = frame_team_and_name(input_data)
+        if not team_name:
+            return
+        task = read_task_json(str(task_id), team_name)
+        owner = task.get("owner") if isinstance(task, dict) else None
+        if not isinstance(owner, str) or not owner:
+            return
+        extend_records_for_claim(owner, task_id, team_name=team_name)
+    except Exception:  # noqa: BLE001 — best-effort; the lifecycle verdict stands
+        pass
+
+
 # ─── main ────────────────────────────────────────────────────────────────────
 
 
@@ -2490,6 +2525,7 @@ def main() -> None:
         _emit_load_failure_advisory("runtime", e, input_data)
         return  # unreachable; helper exits
 
+    _extend_launch_records_on_claim(input_data)
     _journal_lifecycle_decision(input_data, advisories)
 
     if not advisories:

@@ -55,6 +55,7 @@ try:
         env_record_project_dir_disagreement,
         format_project_dir_disagreement,
         get_project_dir_from_session_record,
+        get_worktree_identity_from_session_record,
     )
 except ImportError:
     from pact_session import (
@@ -62,6 +63,7 @@ except ImportError:
         env_record_project_dir_disagreement,
         format_project_dir_disagreement,
         get_project_dir_from_session_record,
+        get_worktree_identity_from_session_record,
     )
 
 # Configure logging
@@ -1110,12 +1112,17 @@ def _get_claude_md_path() -> Optional[Path]:
     # result against the cwd before taking its parent.
     # NOTE: Twin pattern in memory_api.py (_detect_project_id) and
     #       hooks/staleness.py (get_project_claude_md_path) -- keep in sync.
+    # Function-level: the shared package is importable only after
+    # pact_session's sys.path bootstrap has run at module import.
+    from shared.project_scope import git_env_without_location
+
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--git-common-dir"],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=5,
+            env=git_env_without_location(),
         )
         if result.returncode == 0 and result.stdout.strip():
             common_dir = Path(result.stdout.strip())
@@ -1206,12 +1213,17 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
         # Worktree root: --show-toplevel returns the worktree directory when run
         # inside a worktree (and the main repo root otherwise), matching the
         # directory session_init/session_resume target for the session's CLAUDE.md.
+        # Function-level: the shared package is importable only after
+        # pact_session's sys.path bootstrap has run at module import.
+        from shared.project_scope import git_env_without_location
+
         try:
             result = subprocess.run(
                 ["git", "rev-parse", "--show-toplevel"],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=5,
+                env=git_env_without_location(),
             )
             if result.returncode == 0 and result.stdout.strip():
                 worktree_root = Path(result.stdout.strip())
@@ -1239,7 +1251,8 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
                 ["git", "rev-parse", "--git-common-dir"],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=5,
+                env=git_env_without_location(),
             )
             if result.returncode == 0 and result.stdout.strip():
                 common_dir = Path(result.stdout.strip())
@@ -2163,6 +2176,65 @@ def _refuse_ambient_sync_on_project_dir_disagreement(
     )
 
 
+def _refuse_ambient_sync_on_declared_scope_escape(
+    target: Optional[Path],
+    claude_md_root: Optional[Path],
+    resolved_root: Optional[Path],
+    claude_md_path: Optional[Path],
+) -> None:
+    """Refuse an AMBIENT sync that resolved OUTSIDE its declared scope.
+
+    THE DISCRIMINATOR IS ESCAPE, NOT ABSENCE, AND THAT DISTINCTION IS THE
+    WHOLE GUARD. A declared scope whose probe finds no CLAUDE.md falls through
+    to the git anchors. That is CORRECT when it lands back in the same project
+    -- PACT's own spawned paths declare a worktree, where CLAUDE.md is
+    gitignored and absent, and the main checkout's file is the intended
+    answer. Refusing on absence alone would break that on every such
+    invocation, which is a cardinal over-block; refusing on escape breaks
+    none of it.
+
+    WHAT IT STOPS: a declared scope resolving into a DIFFERENT project's
+    CLAUDE.md and projecting this project's memories there. Absence of a file
+    under a named scope was being read as permission to keep looking, and the
+    write landed wherever the search ended.
+
+    SCOPE mirrors the sibling ambient guards: an explicit `target` or a
+    declared `claude_md_root` names the destination, so there is no ambient
+    resolution to police.
+
+    Raises AmbientSyncRefused rather than returning, matching the siblings:
+    `save()` records `sync_status='refused'` and still returns the memory id,
+    so a refusal costs the projection and never the record -- and a quiet
+    skip would leave a deliberate refusal indistinguishable from a miss.
+    """
+    if target is not None or claude_md_root is not None:
+        return
+    if resolved_root is None or claude_md_path is None:
+        return
+    declared = os.environ.get("CLAUDE_PROJECT_DIR") or (
+        get_project_dir_from_session_record() or ""
+    )
+    if not declared:
+        return
+    # Function-level: the shared package is importable only after
+    # pact_session's sys.path bootstrap has run at module import.
+    from shared.project_scope import stays_in_declared_project
+
+    if stays_in_declared_project(
+        Path(declared),
+        Path(resolved_root),
+        Path(claude_md_path),
+        worktree_identity=get_worktree_identity_from_session_record(),
+    ):
+        return
+    raise AmbientSyncRefused(
+        f"the declared project scope ({declared}) resolved to a CLAUDE.md "
+        f"under a different project ({resolved_root}); the projection was "
+        "refused. Point CLAUDE_PROJECT_DIR at the project you mean, or pass "
+        "an explicit target= / claude_md_root= to name the destination."
+    )
+
+
 def _refuse_ambient_target_under_pytest(
     target: Optional[Path],
     claude_md_root: Optional[Path] = None,
@@ -2481,6 +2553,12 @@ def sync_to_claude_md(
         resolved_root = _project_root_of(claude_md_path)
     else:
         claude_md_path, resolved_root = _resolve_display_claude_md_with_base()
+    # Escape guard runs AFTER resolution because it needs the resolved
+    # root; the guards above run before because they need only the
+    # declaration. Same ordering in the sibling.
+    _refuse_ambient_sync_on_declared_scope_escape(
+        target, claude_md_root, resolved_root, claude_md_path
+    )
 
     # THE DECLARED ANCHOR REPLACES THE CONTAINMENT BASE. IT DOES NOT STEER
     # RESOLUTION -- the target above is found exactly as it was before.
@@ -2926,6 +3004,9 @@ def sync_retrieved_to_claude_md(
     _refuse_ambient_sync_on_project_dir_disagreement(None, claude_md_root)
 
     claude_md_path, resolved_root = _resolve_display_claude_md_with_base()
+    _refuse_ambient_sync_on_declared_scope_escape(
+        None, claude_md_root, resolved_root, claude_md_path
+    )
 
     # Declared anchor replaces the containment base; it does not steer
     # resolution. The two Nones stay in separate variables for the same reason

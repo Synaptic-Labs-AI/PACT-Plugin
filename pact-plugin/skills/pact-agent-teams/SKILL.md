@@ -212,7 +212,8 @@ If ANY precondition is unmet, KEEP WORKING. Do not write `metadata.handoff` to "
    TaskUpdate(taskId, metadata={"intentional_wait": {
        "reason": "awaiting_lead_completion",
        "expected_resolver": "lead",
-       "since": "<canonical_since() output: tz-aware ISO-8601 UTC>"
+       "since": "<canonical_since() output: tz-aware ISO-8601 UTC>",
+       "covers_since": "<the same value as since>"
    }})
    ```
 
@@ -250,7 +251,7 @@ If the team-lead rejects your teachback or HANDOFF, you wake on the inbound `Sen
 4. **Re-submit on the SAME task** (do NOT create a new task):
    - Increment `metadata.revision_number`. The team-lead writes `revision_number=1` in the rejection record. On your first revision, increment to `2`. On each subsequent revision, increment again. This count is the rejection-cycle audit trail — it feeds the imPACT META-BLOCK 3-cycle signal, not harvest routing. It does NOT gate whether your revised content is preserved: the team-lead's acceptance (the single completion) emits whatever `metadata.handoff` holds at that moment, so the revised content reaches the journal regardless of the count.
    - `SendMessage` the team-lead carrying the revised payload verbatim in the same form as the first submission: `"[{sender}→team-lead] Revised teachback/HANDOFF on Task #{id} (revision {N})."` followed by the payload block — `pact-teachback` Step 2 for a teachback, On Completion Step 2 for a HANDOFF. The team-lead accepts the revision on the message-carried payload; the disk read is their deferred audit.
-   - Re-SET `intentional_wait{reason=awaiting_lead_completion, since=<fresh canonical_since() output>}`.
+   - Re-SET `intentional_wait{reason=awaiting_lead_completion, expected_resolver=lead, since=<fresh canonical_since() output>, covers_since=<the same value as since>}`.
    - Idle.
 
 > **Revision visibility**: your revised content reaches institutional memory because of *when* the journal event is emitted, not because of `revision_number`. A rejection keeps your task `in_progress` and emits nothing. The team-lead's acceptance (their completion of your task) emits an `agent_handoff` journal event carrying whatever `metadata.handoff` holds at that moment, so a revision that lands BEFORE acceptance reaches the journal and harvest reads it there (drain-proof).
@@ -312,7 +313,7 @@ output (even zero-content) blocks the next inbox delivery.
 - **Idle-waiting for a protocol-defined resolution** (teachback, team-lead commit,
   peer reply, user decision)? Use the `intentional_wait` task metadata per
   the Intentional Waiting section below.
-- **Awaiting lead completion?** SET `intentional_wait{reason=awaiting_lead_completion, expected_resolver=lead, since=<canonical_since() output>}` after storing your HANDOFF or teachback metadata AND sending the notify `SendMessage` to the team-lead. **Ordering invariant** (audit anchor, lead-side mirror): metadata write FIRST → notify `SendMessage` SECOND → intentional_wait SET THIRD. This ordering exists because the team-lead must wait for teammate's wake-signal `SendMessage` before treating their raw `cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/.../{id}.json" | jq .metadata.{handoff,teachback_submit}` read as authoritative — see [pact-completion-authority §Read-Trigger Precondition](../../protocols/pact-completion-authority.md#read-trigger-precondition). Sending the `SendMessage` before the metadata write lands produces false-empty raw reads on the lead side; going idle before the `SendMessage` strands the lead silently. Do NOT poll `TaskList` while idle — you cannot self-wake to do so. The team-lead's wake-signal `SendMessage` is the resolver. Because your notify carries the payload, that raw read is now the lead's deferred audit, not their acceptance input.
+- **Awaiting lead completion?** SET `intentional_wait{reason=awaiting_lead_completion, expected_resolver=lead, since=<canonical_since() output>, covers_since=<the same value as since>}` after storing your HANDOFF or teachback metadata AND sending the notify `SendMessage` to the team-lead. **Ordering invariant** (audit anchor, lead-side mirror): metadata write FIRST → notify `SendMessage` SECOND → intentional_wait SET THIRD. This ordering exists because the team-lead must wait for teammate's wake-signal `SendMessage` before treating their raw `cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/.../{id}.json" | jq .metadata.{handoff,teachback_submit}` read as authoritative — see [pact-completion-authority §Read-Trigger Precondition](../../protocols/pact-completion-authority.md#read-trigger-precondition). Sending the `SendMessage` before the metadata write lands produces false-empty raw reads on the lead side; going idle before the `SendMessage` strands the lead silently. Do NOT poll `TaskList` while idle — you cannot self-wake to do so. The team-lead's wake-signal `SendMessage` is the resolver. Because your notify carries the payload, that raw read is now the lead's deferred audit, not their acceptance input.
 - **Genuinely stuck**? Follow the On Blocker section.
 
 If you have nothing to say that advances the work, say nothing.
@@ -353,8 +354,10 @@ When your task is `in_progress` but you are legitimately idle awaiting a message
 (teachback approval, inter-commit hold, peer reply, user decision, blocker
 resolution), signal it via the `intentional_wait` task metadata BEFORE going idle.
 This flag has a lead-side consumer: the `missed_wake_scan` hook re-surfaces tasks
-idling on `awaiting_lead_completion` past the staleness threshold at the
-team-lead's next user prompt or session start. The schema primitives
+idling on `awaiting_lead_completion` past the staleness threshold at the start of
+a team-lead turn opened by a user prompt, a scheduled wake or a background-task
+notification, and at session start — not on a turn opened by a teammate message.
+The schema primitives
 (`KNOWN_REASONS`, `KNOWN_RESOLVERS`, `wait_stale`) in `shared.intentional_wait`
 define the teammate-facing metadata contract for protocol-defined waits. Using the flag documents the wait intent for the team-lead's task-file
 inspection and for post-hoc session review.
@@ -373,15 +376,15 @@ a turn boundary.
 
 **Layer 2 — Never hold an unflagged dependency.** Before ending ANY turn whose
 deliverable depends on unfinished work, SET `intentional_wait{reason,
-expected_resolver, since}` per the SET subsection below — the dead-man's handle
+expected_resolver, since, covers_since}` per the SET subsection below — the dead-man's handle
 that makes a stalled watcher detectable instead of silent. This is
 unconditional: it does not depend on any wake channel.
 
 **Layer 3 — Escalate what you cannot hold.** Work that genuinely exceeds the
 timeout must not sit invisibly in a backgrounded process. Do not background it
-and end the turn expecting the completion notification to re-invoke you — a
-teammate's background-task notification is wake-on-read (it surfaces only
-inside a message-driven wake), so the team-lead's channel is the only push.
+and end the turn relying on the completion notification to re-invoke you: when
+you run in-process it surfaces only when something else starts your next turn,
+so the team-lead's channel is the only push you can count on.
 Either split the work into timeout-sized chunks run in-turn, or transfer the
 watch explicitly: stage the current state, `SendMessage` the team-lead the
 pending-work description, and flag the wait with `expected_resolver=lead`.
@@ -403,11 +406,13 @@ so if the turn has nothing to advance, end it with no tool call at all.
 
 ```python
 from datetime import datetime, timezone
+now = datetime.now(timezone.utc).isoformat(timespec="seconds")
 TaskUpdate(taskId=taskId, metadata={
     "intentional_wait": {
         "reason": "awaiting_teachback_approved",
         "expected_resolver": "lead",
-        "since": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "since": now,
+        "covers_since": now,
     }
 })
 ```
@@ -489,6 +494,7 @@ still cannot poll while idle; this rule fires ON wake, whatever woke you.
 | `reason` | yes | Non-empty string. Prefer `KNOWN_REASONS` from `shared.intentional_wait`: `awaiting_teachback_approved`, `awaiting_lead_commit`, `awaiting_amendment_review`, `awaiting_post_handoff_decision`, `awaiting_peer_response`, `awaiting_user_decision`, `awaiting_blocker_resolution`, `awaiting_lead_takeover`. Free-form permitted. |
 | `expected_resolver` | yes | Non-empty string. Prefer `KNOWN_RESOLVERS`: `lead`, `peer`, `user`, `external`. Free-form permitted. |
 | `since` | yes | tz-aware ISO-8601 UTC timestamp, seconds precision. |
+| `covers_since` | on every SET | tz-aware ISO-8601 UTC timestamp. On a SET that starts a wait (the first SET, or any SET after a CLEAR), write the same value as `since`. When you re-SET a wait you are still holding, write `covers_since` again with its existing value in the same `TaskUpdate` — the write replaces the whole wait object, so leaving the field out deletes it. If it is already missing, write the value `since` held BEFORE you overwrite it. |
 
 Unknown keys are preserved (forward-compat).
 
@@ -496,13 +502,17 @@ Unknown keys are preserved (forward-compat).
 
 The `wait_stale` primitive in `shared.intentional_wait` considers the flag stale after 30
 minutes from `since`. The `missed_wake_scan` hook surfaces `awaiting_lead_completion` waits stale past
-this threshold to the team-lead; for all other reasons the flag is advisory
-metadata the team-lead may inspect by reading the task file. If your wait genuinely takes longer, re-SET with a fresh `since` so
+this threshold to the team-lead. It also surfaces a wait with `expected_resolver` `peer` once two or
+more owners are each past 30 minutes from `covers_since` (or from `since` when `covers_since` is absent or invalid), and a wait with no valid `covers_since` that
+covers a background launch. No hook surfaces any other stale wait; the team-lead may inspect it by
+reading the task file. If your wait genuinely takes longer, re-SET with a fresh `since` so
 later inspection reflects the real duration.
+
+**When you re-SET a wait you are still holding, give it a fresh `since` and carry `covers_since` forward unchanged in the same write.** `since` is the freshness clock and `covers_since` is the scoping anchor; they are two jobs and re-stamping must move only the first. The anchor is what decides which background launches your wait already acknowledged, so carrying it forward unchanged is what keeps a long wait from silently acquiring launches you started after raising it. Write the whole wait object in one `TaskUpdate`, `covers_since` included — a write that omits the field deletes it. If the wait already has no `covers_since`, write the value `since` held before you overwrite it. A wait you SET after a CLEAR is a new wait: write `covers_since` equal to its new `since`.
 
 ### When NOT to set
 
-- **Consultant mode** (no owned `in_progress` task): the flag has no current consumer for consultants anyway.
+- **Consultant mode** (no owned `in_progress` task) with nothing outstanding. If you background work as a consultant, SET the wait on your most recently completed task.
 - **Waits < 30 seconds**: SET+CLEAR bookkeeping isn't worth it for brief waits.
 - **Completion gating**: the flag does NOT suppress the team-lead's HANDOFF acceptance check — an empty or missing `metadata.handoff` is flagged there regardless of intentional_wait state. Store your HANDOFF before you notify the team-lead.
 

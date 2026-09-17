@@ -727,10 +727,42 @@ class TestCanonicalSecretarySpawnCarveOut:
         result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
         assert result is None
 
+    def test_namespaced_secretary_spawn_allowed(self, monkeypatch, tmp_path):
+        """subagent_type "PACT:pact-secretary" (the plugin-namespaced
+        spelling the Agent tool lists) + all other bindings match → allow."""
+        from bootstrap_gate import _check_tool_allowed
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1", members=[],
+        )
+
+        result = _check_tool_allowed(_canonical_secretary_input(
+            team_name="t1", overrides={"subagent_type": "PACT:pact-secretary"},
+        ))
+        assert result is None
+
+    def test_namespaced_secretary_spawn_blocked_when_members_has_secretary(
+        self, monkeypatch, tmp_path,
+    ):
+        """The namespaced spelling satisfies binding 2 only; binding 5 still
+        closes the carve-out once secretary is in members[]."""
+        from bootstrap_gate import _check_tool_allowed, _DENY_REASON
+
+        _setup_pact_session_with_team(
+            monkeypatch, tmp_path, team_name="t1",
+            members=[{"name": "secretary", "agentType": "pact-secretary"}],
+        )
+
+        result = _check_tool_allowed(_canonical_secretary_input(
+            team_name="t1", overrides={"subagent_type": "PACT:pact-secretary"},
+        ))
+        assert result == _DENY_REASON
+
     # --- subagent_type mismatch → predicate False → deny ---
 
     def test_non_secretary_agent_still_blocked(self, monkeypatch, tmp_path):
-        """subagent_type != 'pact-secretary' → predicate False → deny."""
+        """subagent_type neither 'pact-secretary' nor 'PACT:pact-secretary'
+        → predicate False → deny."""
         from bootstrap_gate import _check_tool_allowed, _DENY_REASON
 
         _setup_pact_session_with_team(
@@ -849,7 +881,8 @@ class TestCanonicalSecretarySpawnCarveOut:
 
         This is the deliberate SAFE fail direction (architect D-record): a
         witness-read error only ever PERMITS the canonical secretary spawn —
-        bindings 1/2/3 (exact Agent + pact-secretary + secretary literals)
+        bindings 1/2/3 (exact Agent, pact-secretary after an optional leading
+        "PACT:", exact secretary)
         still exclude every non-secretary tool — and it specifically avoids
         the re-deadlock that the pre-#1023 typed-except-DENY direction caused
         on the Path.home() RuntimeError seam.
@@ -1356,9 +1389,10 @@ class TestSecretaryInMembersUnit:
         degraded-DENY and re-deadlock the spawn).
 
         # COUNTER-TEST: replacing the broad `except Exception` with the caller's
-        # typed tuple (OSError, ValueError, KeyError, TypeError, AttributeError)
-        # would let a RuntimeError (the Path.home seam) PROPAGATE → this call
-        # would raise instead of returning False → RED. Pins the broad-except.
+        # typed tuple (OSError, ValueError, KeyError, TypeError, AttributeError,
+        # ImportError) would let a RuntimeError (the Path.home seam) PROPAGATE →
+        # this call would raise instead of returning False → RED. Pins the
+        # broad-except.
         """
         from bootstrap_gate import _secretary_in_members
         import shared.pact_context as ctx_module
@@ -3364,7 +3398,7 @@ class TestCanonicalSecretarySpawnAdversarial:
     These tests probe the carve-out predicate's attack surface where the
     directly-coupled tests are silent: malformed tool_input shapes,
     encoding edge cases on the canonical literals, exception envelope
-    tightness (only 5 listed exception types are caught; everything else
+    tightness (only 6 listed exception types are caught; everything else
     propagates), get_team_name edge values (empty / None / whitespace),
     and deny-reason content invariance under failure modes.
 
@@ -3433,7 +3467,8 @@ class TestCanonicalSecretarySpawnAdversarial:
         returns False → deny. (#979: team_name dropped from the binding set —
         the Agent(team_name=) arg is platform-ignored.)
 
-        `.get(missing_key)` returns None, which compares unequal to the
+        `.get(missing_key)` returns None, which the subagent_type binding
+        refuses as a non-str and the name binding compares unequal to the
         expected literal value. Mental revert: replacing
         the binding's `!=` with `not ==` would not change behavior; but
         replacing `_SECRETARY_NAME` with None (silently dropping the
@@ -3468,6 +3503,7 @@ class TestCanonicalSecretarySpawnAdversarial:
             ("subagent_type", 123),
             ("subagent_type", None),
             ("subagent_type", ["pact-secretary"]),
+            ("subagent_type", b"PACT:pact-secretary"),
             ("name", False),
             ("name", 0),
             ("name", {"value": "secretary"}),
@@ -3476,8 +3512,9 @@ class TestCanonicalSecretarySpawnAdversarial:
     def test_wrong_value_type_on_binding_denies(
         self, monkeypatch, tmp_path, binding, wrong_type_value,
     ):
-        """Wrong value TYPE on a binding (int/None/list/dict where str
-        is expected) → != comparison against the string constant → deny.
+        """Wrong value TYPE on a binding (int/None/list/bytes/dict where str
+        is expected) → the subagent_type binding's str check, or the name
+        binding's != comparison against the string constant → deny.
         (#979: team_name removed from the binding set — its type is no
         longer checked since the arg is platform-ignored.)
 
@@ -3595,6 +3632,13 @@ class TestCanonicalSecretarySpawnAdversarial:
             "pact-secretary\x00",
             "PACT:secretary",
             "secretary",
+            "PACT:PACT:pact-secretary",
+            "pact:pact-secretary",
+            "OTHER:pact-secretary",
+            "xPACT:pact-secretary",
+            " PACT:pact-secretary",
+            "PACT:pact-secretary ",
+            "PACT::pact-secretary",
         ],
         ids=[
             "uppercase",
@@ -3604,13 +3648,21 @@ class TestCanonicalSecretarySpawnAdversarial:
             "embedded_null",
             "colon_separator",
             "missing_prefix",
+            "double_namespace",
+            "lowercase_namespace",
+            "other_namespace",
+            "namespace_not_leading",
+            "leading_space_namespace",
+            "namespaced_trailing_space",
+            "double_colon_namespace",
         ],
     )
     def test_subagent_type_canonical_literal_is_byte_exact(
         self, monkeypatch, tmp_path, wrong_type,
     ):
         """subagent_type binding is BYTE-EXACT equality against
-        _SECRETARY_AGENT_TYPE. Case, separator, and prefix variations
+        _SECRETARY_AGENT_TYPE after removing at most one leading, case-
+        sensitive "PACT:". Case, separator, prefix, and namespace variations
         all close the carve-out. Mirrors the name-binding tightness pin.
         """
         from bootstrap_gate import _check_tool_allowed, _DENY_REASON
@@ -4024,3 +4076,139 @@ class TestCanonicalSecretarySpawnAdversarial:
             assert sensitive not in result
             assert "deadbeef" not in result
             assert "/Users/" not in result
+
+
+# =============================================================================
+# The compaction-summary settle seat
+# =============================================================================
+
+
+class TestSummaryReadSettleSeat:
+    """bootstrap_gate settles staged compaction summaries before a Read or Bash
+    that names one. Every other call pays one string test: no filesystem access
+    and no import. The seat never changes the gate's decision."""
+
+    SESSION_DIR = "/sessions/proj/sid"
+
+    def _spy(self, monkeypatch):
+        import bootstrap_gate
+        from shared import compaction_owner
+
+        calls = []
+        monkeypatch.setattr(compaction_owner, "settle", lambda *a, **k: calls.append((a, k)) or [])
+        monkeypatch.setattr(bootstrap_gate.pact_context, "get_session_dir", lambda: self.SESSION_DIR)
+        return calls
+
+    @pytest.mark.parametrize("tool_name, tool_input", [
+        ("Read", {"file_path": "/sessions/proj/sid/compact-summary.txt"}),
+        ("Bash", {"command": "cat /sessions/proj/sid/compact-summary.txt"}),
+        ("Bash", {"command": "mv compact-summary.txt compact-summary-2026-09-14T01-24-47.txt"}),
+    ], ids=["read", "bash-cat", "bash-mv"])
+    def test_a_read_or_bash_naming_the_summary_settles_with_the_read_wait(self, monkeypatch, tool_name, tool_input):
+        import bootstrap_gate
+        from shared import compaction_owner
+
+        calls = self._spy(monkeypatch)
+        bootstrap_gate._settle_before_summary_read({"tool_name": tool_name, "tool_input": tool_input})
+        assert calls == [((self.SESSION_DIR,), {"wait_s": compaction_owner.READ_WAIT_S})]
+        assert compaction_owner.READ_WAIT_S == 5.0
+
+    @pytest.mark.parametrize("tool_name, tool_input", [
+        ("Read", {"file_path": "/project/README.md"}),
+        ("Edit", {"file_path": "/sessions/proj/sid/compact-summary.txt", "old_string": "a", "new_string": "b"}),
+        ("Write", {"file_path": "compact-summary.txt", "content": ""}),
+        ("Agent", {"prompt": "read compact-summary.txt"}),
+    ], ids=["read-other-file", "edit", "write", "agent"])
+    def test_any_other_call_costs_one_string_test_and_no_filesystem_or_import(self, monkeypatch, tool_name, tool_input):
+        import builtins
+        import os
+
+        import bootstrap_gate
+
+        calls = self._spy(monkeypatch)
+        touched = []
+        real_import = builtins.__import__
+
+        def recording_import(name, *args, **kwargs):
+            touched.append(("import", name))
+            return real_import(name, *args, **kwargs)
+
+        def forbidden(label):
+            def refuse(*args, **kwargs):
+                touched.append((label, args))
+                raise AssertionError(label)
+            return refuse
+
+        monkeypatch.setattr(bootstrap_gate.pact_context, "get_session_dir", forbidden("get_session_dir"))
+        for name in ("stat", "listdir", "scandir", "open"):
+            monkeypatch.setattr(os, name, forbidden(f"os.{name}"))
+        monkeypatch.setattr(builtins, "open", forbidden("open"))
+        monkeypatch.setattr(builtins, "__import__", recording_import)
+        bootstrap_gate._settle_before_summary_read({"tool_name": tool_name, "tool_input": tool_input})
+        monkeypatch.undo()
+        assert touched == []
+        assert calls == []
+
+    def test_the_gate_settles_before_it_answers_a_summary_read(self, monkeypatch, tmp_path, capsys):
+        from shared import compaction_owner
+
+        session_dir = _setup_pact_session(monkeypatch, tmp_path)
+        seen = []
+        monkeypatch.setattr(compaction_owner, "settle", lambda *a, **k: seen.append((a, k)) or [])
+        frame = {**_make_input(tool_name="Read"), "tool_input": {"file_path": str(session_dir / "compact-summary.txt")}}
+        code, output = _run_main(frame, capsys)
+        assert code == 0
+        assert "permissionDecision" not in json.dumps(output)
+        [(args, kwargs)] = seen
+        assert Path(args[0]) == session_dir
+        assert kwargs == {"wait_s": compaction_owner.READ_WAIT_S}
+
+    @pytest.mark.parametrize("tool_name, with_marker, denied", [
+        ("Read", False, False), ("Edit", False, True), ("Read", True, False),
+    ], ids=["allow-unmarked", "deny-unmarked", "allow-marked"])
+    def test_a_failing_settle_or_import_changes_no_decision(self, monkeypatch, tmp_path, capsys, tool_name, with_marker, denied):
+        import shared
+        from shared import compaction_owner
+
+        session_dir = _setup_pact_session(monkeypatch, tmp_path, with_marker=with_marker)
+        frame = {**_make_input(tool_name=tool_name), "tool_input": {"file_path": str(session_dir / "compact-summary.txt")}}
+        baseline = _run_main(frame, capsys)
+        assert ('"deny"' in json.dumps(baseline[1])) is denied
+        assert "degraded" not in json.dumps(baseline[1]).lower()
+
+        def raising(*args, **kwargs):
+            raise RuntimeError("settle failed")
+
+        monkeypatch.setattr(compaction_owner, "settle", raising)
+        assert _run_main(frame, capsys) == baseline
+        monkeypatch.delattr(shared, "compaction_owner")
+        monkeypatch.setitem(sys.modules, "shared.compaction_owner", None)
+        assert _run_main(frame, capsys) == baseline
+
+    def test_a_broken_compaction_module_never_reaches_a_fresh_gate_process(self, tmp_path):
+        """The import sits inside the seat. At module level it would fall under the
+        gate's fail-closed import stage, and a broken module would change every
+        tool call's output."""
+        import os
+        import subprocess
+
+        hooks = Path(__file__).resolve().parent.parent / "hooks"
+        gate = str(hooks / "bootstrap_gate.py")
+        child = (
+            "import runpy, sys\n"
+            "if sys.argv[1] == 'broken':\n"
+            "    sys.modules['shared.compaction_owner'] = None\n"
+            f"sys.argv = [{gate!r}]\n"
+            f"runpy.run_path({gate!r}, run_name='__main__')\n"
+        )
+        frame = json.dumps({"hook_event_name": "PreToolUse", "session_id": _SESSION_ID, "agent_type": "pact-orchestrator",
+                            "tool_name": "Read", "tool_input": {"file_path": "compact-summary.txt"}})
+        env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
+        env.update(PYTHONPATH=str(hooks), HOME=str(tmp_path), CLAUDE_CONFIG_DIR=str(tmp_path / ".claude"))
+        runs = {
+            mode: subprocess.run([sys.executable, "-c", child, mode], input=frame, capture_output=True,
+                                 text=True, timeout=30, env=env)
+            for mode in ("intact", "broken")
+        }
+        assert runs["intact"].returncode == 0, runs["intact"].stderr
+        assert (runs["broken"].returncode, runs["broken"].stdout) == (runs["intact"].returncode, runs["intact"].stdout)

@@ -101,6 +101,19 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # the load-bearing fields downstream consumers depend on; team is
     # redundant with CLAUDE.md and worktree is empty at write time.
     "session_start": {"session_id": str, "project_dir": str},
+    # shared/compaction_owner.py writes compaction_attributed, best effort, once a
+    # settle's write is recorded as acted, so there is at most one row per
+    # recorded act: a raise inside the write step is never recorded, and its
+    # summary can be written twice with one row. verdict is teammate, lead or
+    # unknown; basis is content (a transcript holds the summary) or expired
+    # (none did in time). An unknown verdict is the alarm that attribution
+    # failed for that compaction.
+    "compaction_attributed": {"verdict": str, "basis": str},
+    # shared/compaction_owner.py writes compaction_summary_dropped when
+    # stage_summary discards a summary it could not stage. cause is
+    # no_free_stamp when every stamp it tried was already taken, and otherwise
+    # the class of the exception that stopped the stage.
+    "compaction_summary_dropped": {"cause": str},
     # commands/orchestrate.md writes variety_assessed with task_id (quoted
     # string) and variety (nested JSON object → dict). This is the FEATURE-level
     # variety (written once for the feature task) — distinct from the
@@ -208,6 +221,38 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
         "task_id": str,
         "agent": str,
         "since": str,
+    },
+    # hooks/missed_wake_scan.py ALSO writes unflagged_background_wait — a
+    # SEPARATE alarm with a separate vocabulary, sharing only the process.
+    # It records a teammate holding an outstanding RECORDED background launch
+    # with no flagged wait: which agent, when the launch was registered (also
+    # the dedup discriminator), and every task the record covers. A launch is
+    # recorded only from a Bash tool event that carries the harness background
+    # flag or whose command ends in a bare `&`. Monitors, subagents, MCP tasks,
+    # workflows and scheduled wakeups never produce one of these events, and
+    # neither does a shell launch backgrounded any other way. An absence in
+    # this stream is not evidence a teammate had nothing outstanding.
+    # `task_ids` is a LIST, not a scalar `task_id`. A teammate may hold more
+    # than one in_progress task — the pact-teachback skill permits it — and a
+    # launch is recorded against all of them, so the dedup key is
+    # (agent, registered_at) rather than (task_id, since).
+    "unflagged_background_wait": {
+        "agent": str,
+        "registered_at": str,
+        "task_ids": list,
+    },
+    # hooks/stop_background_gate.py (Stop) and hooks/validate_handoff.py
+    # (SubagentStop) write background_stop_gate through turn_end_gate on every
+    # turn end whose background_tasks holds a running job, WHATEVER the
+    # verdict. `role` is lead / teammate / unresolved; `verdict` is block or
+    # one of the allow_* reasons; `running` is how many jobs were running.
+    # `ids` (the jobs reported or suppressed) and `cause` (why an allow was
+    # chosen) are optional below. A turn end with nothing running writes
+    # nothing, so an absent event there is the expected fast path.
+    "background_stop_gate": {
+        "role": str,
+        "verdict": str,
+        "running": int,
     },
     # commands/orchestrate.md writes s2_state_seeded with worktree (quoted
     # string), agents (JSON list), and boundaries (JSON object → dict).
@@ -416,6 +461,13 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # the optional loop. Symmetric with the cleanup_summary registration
     # shipped in the same PR (#412 Fix B).
     "session_end": {"warning": str},
+    # shared/compaction_owner.py adds `latency_s`, the seconds from staging a
+    # summary to resolving it, whenever the staged record's time is readable.
+    "compaction_attributed": {"latency_s": float},
+    # background_stop_gate (registered above): `ids` lists the running job
+    # ids the verdict concerns, `cause` names why an allow was chosen
+    # (e.g. session_cron, no_session_dir, or an exception class).
+    "background_stop_gate": {"ids": list, "cause": str},
     # hooks/session_end.py writes cleanup_summary after the teams/tasks
     # reaper runs (#412 Fix B). Counts-only payload; no identifying names
     # (audit surface area minimization). `teams_ran`/`tasks_ran`
@@ -482,6 +534,13 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     "missed_wake": {
         "task_subject": str,
         "reason": str,
+    },
+    # hooks/missed_wake_scan.py writes unflagged_background_wait with an
+    # optional command (the launch's command text, truncated at write).
+    # The required-fields registration above is what ACTIVATES this optional
+    # check, per the same pattern as missed_wake.
+    "unflagged_background_wait": {
+        "command": str,
     },
     # hooks/task_lifecycle_gate.py writes teachback_ack with an optional concern
     # string — the teammate's variety_acknowledgment.concern, present only when
@@ -762,11 +821,14 @@ def _validate_event_schema(event: dict[str, Any]) -> tuple[bool, str]:
     return True, "ok"
 
 
-def append_event(event: dict[str, Any]) -> bool:
+def append_event(event: dict[str, Any], session_dir: str | None = None) -> bool:
     """
     Append a single event to the current session's journal.
 
-    Path is derived implicitly via pact_context.get_session_dir().
+    Path is derived implicitly via pact_context.get_session_dir(), unless
+    `session_dir` names the directory explicitly. Pass it from a frame that
+    has no session context file of its own (a separate-process teammate),
+    where the implicit derivation returns nothing.
     Creates the session directory if it doesn't exist (mkdir -p, 0o700).
     Serializes event to JSON, appends newline, writes atomically via
     O_WRONLY | O_APPEND | O_CREAT with 0o600 permissions.
@@ -796,7 +858,7 @@ def append_event(event: dict[str, Any]) -> bool:
             )
 
         # Derive path from session context (implicit — current session)
-        journal = _journal_path()
+        journal = _journal_path_from(session_dir) if session_dir else _journal_path()
         if journal is None:
             # AdvF2 Approach 4: warn (but do not fail) when the implicit API
             # is invoked before pact_context.init(). The return value still
@@ -896,7 +958,9 @@ def _bounded_printable(text: str) -> str:
     return text + "...[truncated]" if truncated else text
 
 
-def append_event_checked(event: dict, what: str, task_id: str = "") -> bool:
+def append_event_checked(
+    event: dict, what: str, task_id: str = "", session_dir: str | None = None
+) -> bool:
     """``append_event`` with its silent-rejection path closed. Returns the
     write outcome; never raises.
 
@@ -946,9 +1010,17 @@ def append_event_checked(event: dict, what: str, task_id: str = "") -> bool:
               A caller-supplied literal, never derived from input.
         task_id: optional; recorded when the skipped write concerned a task.
                  Bounded and stripped of non-printables — it is stdin-derived.
+        session_dir: optional; the journal's directory, for a frame with no
+                 session context file. Both the event and its skip record go
+                 there. Passed on only when set, so a caller's stand-in for
+                 ``append_event`` that takes the event alone keeps working.
     """
     try:
-        written = append_event(event)
+        written = (
+            append_event(event)
+            if session_dir is None
+            else append_event(event, session_dir=session_dir)
+        )
         cause = SKIP_CAUSE_RETURNED_FALSE
         detail = "append_event returned False"
     except Exception as exc:
@@ -972,7 +1044,11 @@ def append_event_checked(event: dict, what: str, task_id: str = "") -> bool:
         fields = {"skipped_type": what, "cause": cause}
         if safe_task_id:
             fields["task_id"] = safe_task_id
-        append_event(make_event("journal_emit_skipped", **fields))
+        skip = make_event("journal_emit_skipped", **fields)
+        if session_dir is None:
+            append_event(skip)
+        else:
+            append_event(skip, session_dir=session_dir)
     except BaseException:  # noqa: BLE001 — a failed skip record terminates here
         pass
 

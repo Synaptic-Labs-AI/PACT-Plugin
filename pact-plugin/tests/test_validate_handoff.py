@@ -20,6 +20,7 @@ Tests cover:
 import io
 import json
 from unittest.mock import patch
+from pathlib import Path
 
 import pytest
 
@@ -123,6 +124,46 @@ class TestIsPactAgent:
         from validate_handoff import is_pact_agent
 
         assert is_pact_agent(None) is False
+
+
+class TestPactNamespacedAgent:
+    """is_pact_agent() accepts exactly the platform's `PACT:` spelling."""
+
+    def test_a_pact_namespaced_agent_is_a_pact_agent(self):
+        from validate_handoff import is_pact_agent
+
+        assert is_pact_agent("PACT:pact-preparer") is True
+
+    def test_only_one_pact_namespace_is_stripped(self):
+        from validate_handoff import is_pact_agent
+
+        assert is_pact_agent("PACT:PACT:pact-x") is False
+
+    def test_the_namespace_is_case_sensitive(self):
+        from validate_handoff import is_pact_agent
+
+        assert is_pact_agent("pact:pact-x") is False
+
+    def test_another_plugins_namespace_is_not_stripped(self):
+        from validate_handoff import is_pact_agent
+
+        assert is_pact_agent("Other:pact-x") is False
+
+    def test_a_namespaced_non_pact_agent_is_not(self):
+        from validate_handoff import is_pact_agent
+
+        assert is_pact_agent("PACT:custom-agent") is False
+
+    def test_the_bare_namespace_is_not(self):
+        from validate_handoff import is_pact_agent
+
+        assert is_pact_agent("PACT:") is False
+
+    def test_the_namespace_matches_the_plugin_name(self):
+        from shared.pact_context import PACT_NAMESPACE
+
+        manifest = Path(__file__).resolve().parent.parent / ".claude-plugin" / "plugin.json"
+        assert PACT_NAMESPACE == json.loads(manifest.read_text(encoding="utf-8"))["name"] + ":"
 
 
 # =============================================================================

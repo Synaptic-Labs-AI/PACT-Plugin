@@ -24,16 +24,18 @@ Output: JSON with systemMessage (shutdown suggestion / stop advisory)
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Annotation-only. This file has `from __future__ import annotations`, so
+    # the type below is a string at runtime and this import never executes --
+    # which is what keeps a per-session hook from paying for a type.
+    from datetime import datetime
+
 import json
 import sys
 from collections.abc import Callable
 from pathlib import Path
-
-try:
-    import fcntl
-    HAS_FLOCK = True
-except ImportError:
-    HAS_FLOCK = False
 
 # Add hooks directory to path for shared package imports
 _hooks_dir = Path(__file__).parent
@@ -42,9 +44,10 @@ if str(_hooks_dir) not in sys.path:
 
 from shared.error_output import hook_error_json
 import shared.pact_context as pact_context
-from shared.pact_context import get_team_name
+from shared.background_work import frame_team_and_name
 from shared.paths import get_claude_config_dir
-from shared.task_utils import get_task_list
+from shared.task_utils import iter_team_task_jsons
+from shared import state_file
 
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
@@ -67,7 +70,7 @@ def find_teammate_task(
     in_progress task if one exists, otherwise the most recently completed one.
 
     Args:
-        tasks: List of all tasks from get_task_list()
+        tasks: The team's tasks, as main() reads them
         teammate_name: Name of the idle teammate
 
     Returns:
@@ -100,107 +103,91 @@ def find_teammate_task(
     return in_progress or completed
 
 
-def read_idle_counts(idle_counts_path: str) -> dict:
+def _state_root(path: Path, root: Path | None) -> Path:
+    """The directory an idle-count file must stay under.
+
+    None is for callers that own their path (tests); production entry points
+    pass the config root, so containment applies to the path main() builds.
+    """
+    return root if root is not None else path.parent
+
+
+def read_idle_counts(idle_counts_path: str, root: Path | None = None) -> dict:
     """
     Read the idle counts tracking file.
 
     Args:
         idle_counts_path: Path to the idle_counts.json file
+        root: Directory the file must stay under (see `_state_root`)
 
     Returns:
         Dict mapping teammate_name to consecutive idle count
     """
     path = Path(idle_counts_path)
-    if not path.exists():
-        return {}
-
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, IOError):
+        return json.loads(state_file.read_text(path, _state_root(path, root)))
+    except (json.JSONDecodeError, OSError):
         return {}
 
 
-def write_idle_counts(idle_counts_path: str, counts: dict) -> None:
+def write_idle_counts(
+    idle_counts_path: str, counts: dict, root: Path | None = None
+) -> None:
     """
-    Write the idle counts tracking file with file locking.
+    Replace the idle counts tracking file under its state-file lock.
 
     Args:
         idle_counts_path: Path to the idle_counts.json file
         counts: Dict mapping teammate_name to consecutive idle count
+        root: Directory the file must stay under (see `_state_root`)
     """
     path = Path(idle_counts_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    if HAS_FLOCK:
-        # Open for append to avoid truncation before lock is acquired,
-        # then lock, truncate, and write atomically
-        with open(path, "a+") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            try:
-                f.seek(0)
-                f.truncate()
-                f.write(json.dumps(counts))
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
-    else:
-        path.write_text(json.dumps(counts), encoding="utf-8")
+    state_file.write_text(path, json.dumps(counts), _state_root(path, root))
 
 
 def _atomic_update_idle_counts(
     idle_counts_path: str,
     mutator: Callable[[dict], dict],
+    root: Path | None = None,
 ) -> dict:
     """
     Atomically read, mutate, and write the idle counts file under a single lock.
 
     This prevents TOCTOU races where two concurrent TeammateIdle events both
-    read stale state before either writes, causing one update to be lost.
+    read stale state before either writes, causing one update to be lost. The
+    new content is written to a temp file and swapped in, so a failure part-way
+    leaves the previous file intact.
 
-    On platforms without flock (Windows), falls back to non-atomic read+write
-    which is acceptable since concurrent hook invocations are unlikely there.
+    The mutator may run twice (once on empty input when the file is absent), so
+    it must derive its result from the counts it is given.
 
     Args:
         idle_counts_path: Path to the idle_counts.json file
         mutator: Callable that receives the current counts dict and returns
                  the updated counts dict to write back
+        root: Directory the file must stay under (see `_state_root`)
 
     Returns:
         The updated counts dict after mutation
     """
     path = Path(idle_counts_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
 
-    if HAS_FLOCK:
-        with open(path, "a+") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            try:
-                f.seek(0)
-                content = f.read()
-                try:
-                    counts = json.loads(content) if content.strip() else {}
-                except json.JSONDecodeError:
-                    counts = {}
-
-                counts = mutator(counts)
-
-                f.seek(0)
-                f.truncate()
-                f.write(json.dumps(counts))
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
-    else:
-        # Fallback: non-atomic read+write (no flock available)
-        counts = read_idle_counts(idle_counts_path)
+    def _apply(content: str):
+        try:
+            counts = json.loads(content) if content.strip() else {}
+        except json.JSONDecodeError:
+            counts = {}
         counts = mutator(counts)
-        path.write_text(json.dumps(counts), encoding="utf-8")
+        return json.dumps(counts), True, counts
 
-    return counts
+    return state_file.locked_update(path, _apply, _state_root(path, root))
 
 
 def check_idle_cleanup(
     tasks: list[dict],
     teammate_name: str,
     idle_counts_path: str,
+    root: Path | None = None,
 ) -> tuple[str | None, bool]:
     """
     Track idle counts for completed agents and determine cleanup action.
@@ -216,6 +203,7 @@ def check_idle_cleanup(
         tasks: List of all tasks
         teammate_name: Name of the idle teammate
         idle_counts_path: Path to the idle_counts.json file
+        root: Directory the file must stay under (see `_state_root`)
 
     Returns:
         Tuple of (message, should_force_shutdown):
@@ -231,7 +219,7 @@ def check_idle_cleanup(
         def _remove(counts: dict) -> dict:
             counts.pop(teammate_name, None)
             return counts
-        _atomic_update_idle_counts(idle_counts_path, _remove)
+        _atomic_update_idle_counts(idle_counts_path, _remove, root=root)
         return None, False
 
     # Don't count stalled agents for idle cleanup — they need triage
@@ -266,7 +254,7 @@ def check_idle_cleanup(
         result["count"] = entry["count"]
         return counts
 
-    _atomic_update_idle_counts(idle_counts_path, _increment)
+    _atomic_update_idle_counts(idle_counts_path, _increment, root=root)
     current = result["count"]
 
     if current >= IDLE_FORCE_THRESHOLD:
@@ -284,18 +272,167 @@ def check_idle_cleanup(
     return None, False
 
 
-def reset_idle_count(teammate_name: str, idle_counts_path: str) -> None:
+UNFLAGGED_ADVISORY = (
+    "You launched background work and have no flagged wait; it may already "
+    "have finished. Either collect "
+    "the result now, or SET metadata.intentional_wait on the task, naming what "
+    "you are waiting for. validate_wait accepts a free-form reason."
+)
+
+
+def _clear_unflagged_idle(teammate_name: str, team_name: str) -> None:
+    from shared.background_work import update_unflagged_idle_counts
+
+    def _drop(counts: dict) -> dict:
+        counts.pop(teammate_name, None)
+        return counts
+
+    update_unflagged_idle_counts(_drop, team_name)
+
+
+def check_unflagged_background(
+    tasks: list, teammate_name: str, team_name: str, now: datetime | None = None
+) -> str | None:
+    """Layer 2 — advise once at three consecutive unflagged idles.
+
+    Uses `unflagged_background_idle.json`, NOT `idle_counts.json`. That file's
+    writer pops the teammate key on every tick where the task is not
+    `completed`, and this counter's entire population is a teammate idling on
+    an `in_progress` task — the exact branch that pops. Sharing the file would
+    reset the counter every tick and this could never reach three.
+    """
+    from shared.background_work import (
+        UNFLAGGED_IDLE_THRESHOLD,
+        discharge_acknowledged_for_owner,
+        stamp_idled_at,
+        teammate_is_separate_process,
+        unflagged_fire,
+        update_unflagged_idle_counts,
+    )
+
+    # DISCHARGE BEFORE TESTING, AND BEFORE THE STATUS GATE. A teammate that
+    # flagged a wait covering its launch has demonstrably associated the two,
+    # so the record has done its job and must not outlive the acknowledgment.
+    #
+    # It covers EVERY task this teammate owns, whatever its status, in ONE
+    # registry update. A teammate owning no in_progress task still has records
+    # (anchored on its most recently completed task) and still idles, so a
+    # discharge placed behind the status gate below would never retire them.
+    # And a record lists the tasks held at LAUNCH, which need not include the
+    # task resolved here: a teammate holding two tasks may flag the other one,
+    # and a consultant may have completed a newer task since. A record is
+    # dropped only when a task it lists is owned here and that task's wait
+    # covers its launch, so a teammate with no covering wait drops nothing.
+    #
+    # WHAT THIS BUYS, STATED AT ITS ACTUAL SIZE: an ACCURATE CITATION, not the
+    # removal of a false alarm. Without it, a teammate that flagged, collected
+    # the result and cleared the wait keeps a live record, and a LATER
+    # unflagged idle draws an advisory naming a job that finished hours ago.
+    # The advice is still correct at that moment — the counter below only
+    # reaches its threshold on three CONSECUTIVE idles with no valid wait, so
+    # the teammate really is idling unflagged — but the reason given is stale.
+    # An agent that checks, finds the job long done, and concludes the alarm
+    # is unreliable is the cost this prevents.
+    #
+    # DO NOT RESTATE THIS AS "the alarm would otherwise fire at teammates who
+    # behaved correctly". That is FALSE and was checked: the counter is
+    # cleared on every tick where the fire predicate is false, so a teammate
+    # that flags never accumulates toward the threshold, and one that keeps
+    # working does not tick at all.
+    discharge_acknowledged_for_owner(tasks, teammate_name, team_name=team_name, now=now)
+
+    # A separate-process (tmux) teammate is woken by its own background
+    # completion and collects the result on that turn, so the record outlives
+    # the job and an idle-count advisory would name work it already has. The
+    # discharge above still runs for it; only the advisory is skipped.
+    if teammate_is_separate_process(team_name, teammate_name):
+        _clear_unflagged_idle(teammate_name, team_name)
+        return None
+
+    task = find_teammate_task(tasks, teammate_name)
+    if not task or task.get("status") != "in_progress":
+        _clear_unflagged_idle(teammate_name, team_name)
+        return None
+
+    fire, _wait_class, record = unflagged_fire(
+        task, team_name=team_name, tasks=tasks, now=now
+    )
+    if not fire or record is None:
+        _clear_unflagged_idle(teammate_name, team_name)
+        return None
+
+    task_id = str(task.get("id") or "")
+    if task_id:
+        stamp_idled_at(task_id, team_name=team_name, now=now)
+
+    result = {"emit": False}
+
+    def _bump(counts: dict) -> dict:
+        entry = counts.get(teammate_name, {})
+        if isinstance(entry, int):
+            entry = {"count": entry, "task_id": ""}
+        if not isinstance(entry, dict):
+            entry = {}
+        last_task_id = entry.get("task_id", "")
+        if last_task_id and last_task_id != task_id:
+            entry = {"count": 0, "task_id": task_id}
+        # TOTAL COERCION. A hand-edited or corrupted counter file can carry a
+        # non-numeric `count`, and a bare int() raises ValueError from inside
+        # the atomic update. Treating an unreadable count as 0 restarts the
+        # threshold rather than crashing the tick — the advisory fires later
+        # than it might have, which is the safe direction for an alarm.
+        try:
+            current = int(entry.get("count", 0) or 0)
+        except (TypeError, ValueError):
+            current = 0
+        # Emit once at N == threshold; later same-task ticks must not re-emit.
+        if last_task_id == task_id and current >= UNFLAGGED_IDLE_THRESHOLD:
+            return counts
+        entry["count"] = current + 1
+        entry["task_id"] = task_id
+        counts[teammate_name] = entry
+        result["emit"] = entry["count"] == UNFLAGGED_IDLE_THRESHOLD
+        return counts
+
+    update_unflagged_idle_counts(_bump, team_name)
+    return UNFLAGGED_ADVISORY if result["emit"] else None
+
+
+def reset_idle_count(
+    teammate_name: str, idle_counts_path: str, root: Path | None = None
+) -> None:
     """
     Reset a teammate's idle count (e.g., when they receive new work).
 
     Args:
         teammate_name: Name of the teammate
         idle_counts_path: Path to the idle_counts.json file
+        root: Directory the file must stay under (see `_state_root`)
     """
     def _remove(counts: dict) -> dict:
         counts.pop(teammate_name, None)
         return counts
-    _atomic_update_idle_counts(idle_counts_path, _remove)
+    _atomic_update_idle_counts(idle_counts_path, _remove, root=root)
+
+
+def _in_teammate_process(input_data: dict, team_name: str) -> bool:
+    """True iff this call runs in a separate-process teammate's own process.
+
+    All three must hold: no PACT context (only the lead's session gets one), a
+    frame `session_id`, and a team-config `leadSessionId` that differs from it.
+    A lead whose context file is missing still matches its own session, so it
+    keeps the idle cleanup, and any value that cannot be read keeps it too.
+    """
+    if pact_context.get_team_name():
+        return False
+    session_id = input_data.get("session_id")
+    lead_session_id = pact_context._read_lead_session_id(team_name)
+    return (
+        isinstance(session_id, str)
+        and bool(session_id)
+        and bool(lead_session_id)
+        and session_id != lead_session_id
+    )
 
 
 def main():
@@ -307,7 +444,7 @@ def main():
             sys.exit(0)
 
         pact_context.init(input_data)
-        team_name = get_team_name()
+        team_name, _name = frame_team_and_name(input_data)
         if not team_name:
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
@@ -317,21 +454,42 @@ def main():
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
-        tasks = get_task_list()
+        tasks = list(iter_team_task_jsons(team_name))
         if not tasks:
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
 
-        idle_counts_path = str(
-            get_claude_config_dir() / "teams" / team_name / "idle_counts.json"
-        )
+        teams_root = get_claude_config_dir() / "teams"
+        idle_counts_path = str(teams_root / team_name / "idle_counts.json")
 
         messages = []
-        cleanup_msg, should_shutdown = check_idle_cleanup(
-            tasks, teammate_name, idle_counts_path
-        )
+        cleanup_msg, should_shutdown = None, False
+        # Idle cleanup addresses the lead ("Consider shutting down", TaskStop).
+        # In a separate-process teammate's own process this hook's output
+        # reaches the teammate itself, so only the teammate-facing Layer 2
+        # check below runs there.
+        if not _in_teammate_process(input_data, team_name):
+            cleanup_msg, should_shutdown = check_idle_cleanup(
+                tasks, teammate_name, idle_counts_path, root=teams_root
+            )
         if cleanup_msg:
             messages.append(cleanup_msg)
+
+        # APPENDED, NOT `elif`. The cleanup message and this advisory come
+        # from predicates that are mutually exclusive TODAY — cleanup fires on
+        # `completed` tasks, the advisory requires `in_progress` — so an
+        # `elif` would be equivalent now and silently lossy the moment either
+        # predicate widens. Appending costs nothing and does not depend on
+        # that coincidence holding.
+        # Own try/except: an advisory must never cost the zombie cleanup.
+        try:
+            unflagged_msg = check_unflagged_background(
+                tasks, teammate_name, team_name
+            )
+            if unflagged_msg:
+                messages.append(unflagged_msg)
+        except Exception:
+            pass
 
         if messages:
             if should_shutdown:

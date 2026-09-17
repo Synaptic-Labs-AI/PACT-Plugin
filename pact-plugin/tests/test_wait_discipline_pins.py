@@ -15,6 +15,10 @@ Pins the amendment surfaces:
       watcher-liveness provision (a dead watcher is presumed on any
       post-timeout turn without a result — check once and re-arm; a
       user-reported wait carries a user-visible deadline).
+    - the terminating condition is the awaited event; the launch flag that
+      re-invokes the lead and the shell `&` that does not; a fired
+      watcher is spent; a replacement is live before the incumbent is
+      killed; the push notification; the recurring scheduled fallback.
   §12 Intentional Waiting:
     - the bidirectional silence rule (neither "stalled" nor "still working"
       is licensed by silence);
@@ -161,6 +165,23 @@ SECTION_PHRASE_PINS = [
     # The named crossed-wake-confirm boundary: nudge-first does not collide
     # with the anti-acceleration rule.
     (INTENTIONAL_WAITING, "never accelerate nudging in response to idle ticks"),
+    # --- §5: the terminating condition is the awaited event itself ---
+    (WAIT_IN_SILENCE, "That terminating condition must BE the awaited event, never a correlate of it."),
+    (WAIT_IN_SILENCE, "If the awaited event cannot be tested directly, poll until it can be"),
+    # --- §5: what makes a watcher's exit re-invoke the lead ---
+    (WAIT_IN_SILENCE, "Launch it with `run_in_background: true` — that flag is what makes its exit re-invoke you."),
+    (WAIT_IN_SILENCE, "Never background it with a shell `&` inside a foreground call instead"),
+    # --- §5: a watcher that fires is spent; retiring one ---
+    (WAIT_IN_SILENCE, "A watcher that FIRES is spent, and firing does not re-arm it."),
+    (WAIT_IN_SILENCE, "Confirm the replacement is LIVE before you kill the incumbent, never after."),
+    # --- §5: reaching a human who is not reading ---
+    (WAIT_IN_SILENCE, "send a `PushNotification` in the same turn"),
+    (WAIT_IN_SILENCE, "Never describe its mobile leg as delivered"),
+    # --- §5: the scheduled fallback ---
+    (WAIT_IN_SILENCE, "schedule a recurring `CronCreate` alongside it"),
+    (WAIT_IN_SILENCE, "Key the cron on the DELIVERABLE, never on whether anyone reported"),
+    (WAIT_IN_SILENCE, "Delete it once when the wait resolves."),
+    (WAIT_IN_SILENCE, "It does not cover a dead session."),
 ]
 
 

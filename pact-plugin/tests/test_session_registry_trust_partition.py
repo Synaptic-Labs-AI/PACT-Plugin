@@ -78,6 +78,31 @@ _FORBIDDEN_AUTHORITY_CALLS = ("_registry_resolve", "resolve_agent_name")
 #     user already has full TaskUpdate/FS access and the only mutation is a
 #     benign pending→in_progress flip — the gate crosses no privilege boundary.
 #     A miss → advisory, never a typed guess.
+#   * shared/background_work.py — bind_launcher_identity Step 3.5, the tmux
+#     fallback for attributing a background launch. A LABELING use, never
+#     authority. The resolved name becomes the `agent_name` on a registry
+#     record, and the only thing that record can cause is an advisory — a
+#     teammate-facing nudge at three unflagged idles, and a lead-facing line
+#     naming who has unflagged background work. Nothing is granted, denied,
+#     merged or deleted on it.
+#     THE RESIDUAL, STATED RATHER THAN CLAIMED AWAY: the registry is forgeable
+#     and last-wins-collapsed, so a forged or collided entry MIS-ATTRIBUTES an
+#     advisory to a teammate who did not launch the work. That is a wrong
+#     label on a message, not an escalation: the same OS user already has full
+#     write access to the team-scoped registry the record lands in, so no
+#     privilege boundary is crossed. Forging an entry requires local write
+#     access, and anyone holding that can already edit the hooks, the task
+#     store or the source directly — the forgery buys strictly less than the
+#     access it requires.
+#     SCOPE, STATED PRECISELY BECAUSE THE OBVIOUS SENTENCE IS WRONG: the
+#     branch is UNREACHABLE in-process (MEASURED — Steps 1/2 and the validated
+#     agent_type route resolve first, and the in-process self-guard leaves the
+#     registry empty), and REACHABLE under tmux. It is UNEXERCISED here
+#     because this machine has no tmux teams — which bounds OUR VERIFICATION,
+#     not the exposure. This plugin ships to consumers who may run tmux teams,
+#     so "no teams exist" is a fact about the test bench and must never be
+#     read as a fact about how often the path is taken. The labeling
+#     classification holds in both topologies regardless.
 # Paths are POSIX-relative to HOOKS_DIR. session_registry.py itself is NOT here:
 # the module does not import itself, so the detector does not flag it.
 _ALLOWED_REGISTRY_IMPORTERS = frozenset({
@@ -85,6 +110,7 @@ _ALLOWED_REGISTRY_IMPORTERS = frozenset({
     "session_init.py",
     "session_end.py",
     "task_claim_gate.py",
+    "shared/background_work.py",
 })
 
 

@@ -156,3 +156,48 @@ def test_run_git_passes_empty_args():
     assert result is mock_result
     argv = mock_run.call_args[0][0]
     assert argv == ["git"]
+
+
+def test_run_git_env_is_inherited_when_omitted_and_replaced_when_given(
+    tmp_path, monkeypatch
+):
+    """`env` is additive: omitted, git receives this process's environment as it
+    always did; given, git receives that mapping and nothing else.
+
+    REAL GIT, BOTH DIRECTIONS, ONE INPUT. GIT_DIR names a repository while `-C`
+    names a plain directory, so `rev-parse` succeeds only if GIT_DIR reached
+    the child. A mock cannot see this: the property is what the child process
+    receives, not what the call looks like.
+
+    MUTANTS that redden this arm: drop `env=env` from the subprocess call (the
+    second assertion fails), or give `env` any default other than None (the
+    first fails).
+    """
+    import os
+
+    from shared.git_helpers import run_git
+
+    repo = tmp_path / "repo"
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    subprocess.run(
+        ["git", "init", "-q", str(repo)], check=True, capture_output=True, timeout=30
+    )
+    monkeypatch.setenv("GIT_DIR", str(repo / ".git"))
+    probe = ["-C", str(plain), "rev-parse", "--git-dir"]
+
+    inherited = run_git(probe)
+    assert inherited is not None and inherited.returncode == 0, (
+        "with env omitted, git did not see the inherited GIT_DIR, so the "
+        "default changed the environment every existing caller's git receives"
+    )
+
+    given = {key: value for key, value in os.environ.items() if key != "GIT_DIR"}
+    # The ceiling stops discovery at tmp_path, so a basetemp that happens to sit
+    # inside some checkout cannot turn the expected failure into a success.
+    given["GIT_CEILING_DIRECTORIES"] = str(tmp_path)
+    replaced = run_git(probe, env=given)
+    assert replaced is not None and replaced.returncode != 0, (
+        "with env given, git still saw GIT_DIR, so the mapping did not replace "
+        "the inherited environment"
+    )

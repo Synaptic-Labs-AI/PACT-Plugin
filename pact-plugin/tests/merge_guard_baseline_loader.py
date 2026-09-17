@@ -335,3 +335,81 @@ def load_baseline_5017d1f2():
 
     _cached_baseline_5017d1f2 = module
     return module
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Vendored certification bases. One table-driven loader for the baked-SHA
+# certification files, which read these blobs with `git show` and skipped
+# wherever the commit was unreachable. Each fixture holds the exact bytes of
+# hooks/shared/merge_guard_common.py at that commit, pinned by git blob id: the
+# value `git show` printed and `git hash-object` recomputes. This loader adds no
+# discriminator rows; each consuming cert keeps its own rows asserting that its
+# base still exhibits the bug it certifies.
+# ─────────────────────────────────────────────────────────────────────────────
+_VENDORED_DIR = Path(__file__).parent / "fixtures" / "merge_guard_baseline"
+
+# commit sha8 -> (fixture file name, git blob id of the fixture's bytes)
+_VENDORED = {
+    "c5e9b324": ("merge_guard_common_c5e9b324.py", "57eee4410e0a6ef2dae3e9021bdbb32bb7ce7d69"),
+    "38f76965": ("merge_guard_common_38f76965.py", "745cbfe8adb4c303e83402fa5e2093fd51d718ed"),
+    "023ee2c3": ("merge_guard_common_023ee2c3.py", "9f7f155bdac0012858701bd24e8f638d06bdadbb"),
+    "6f404f2e": ("merge_guard_common_6f404f2e.py", "4c39097504d008ebe4d4ec61bc2e0d843afbaff4"),
+    "51e6c5a5": ("merge_guard_common_51e6c5a5.py", "9a351309358c3f196995a106f1216b437bd151f1"),
+    "72bacaf8": ("merge_guard_common_72bacaf8.py", "86f3d93d6f20757ed781bba519d781869a2246fb"),
+    "b313ecaa": ("merge_guard_common_b313ecaa.py", "93e6f56d905b6b0326940ccabe5eaac775691d98"),
+    "f6e3639a": ("merge_guard_common_f6e3639a.py", "cb24d0b883f092126e2714865c1b1d8ce89e9572"),
+    "2d7fcd07": ("merge_guard_common_2d7fcd07.py", "b07f06c0c57ad9c966d637e4ac50e8beed7609ca"),
+    "b6418727": ("merge_guard_common_b6418727.py", "f080051af6f9c6e9427d4dbaad886203b1276a5c"),
+    "3972bb5f": ("merge_guard_common_3972bb5f.py", "2c29f088ff5fc03626a7ad5e31c976cc15d8012a"),
+    "bf7c8786": ("merge_guard_common_bf7c8786.py", "66e1a48e33604ff98903d1624914af3cace24f7a"),
+    "a62703f1": ("merge_guard_common_a62703f1.py", "8f67b82deb254e2ceff9532ab639f5012fadcf9f"),
+    "a542e21b": ("merge_guard_common_a542e21b.py", "0d4be274af969a69f7053d343b8a81813115920a"),
+    "89061755": ("merge_guard_common_89061755.py", "c0ea2ed08980ce3bde81c160bf94d7023b7e5b71"),
+}
+
+_cached_vendored = {}
+
+
+def _git_blob_id(data):
+    """The id git gives these bytes as a blob: sha1 over a `blob <len>\\0` header."""
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def load_vendored(commit_sha8):
+    """Load the vendored merge_guard_common.py at `commit_sha8` (cached per SHA).
+
+    Fails loudly and never skips. An unknown SHA, a missing fixture, or bytes
+    whose git blob id differs from the pin is a pytest.fail, so a certification
+    file cannot pass without running its differential. Imported under the
+    `shared` package so the module's relative `from .paths import ...` resolves
+    against the live package, exactly as load_baseline() does.
+    """
+    if commit_sha8 in _cached_vendored:
+        return _cached_vendored[commit_sha8]
+    entry = _VENDORED.get(commit_sha8)
+    if entry is None:
+        pytest.fail(
+            "no vendored merge_guard_common.py for commit %s: add its fixture and "
+            "its _VENDORED row" % commit_sha8
+        )
+    name, blob_id = entry
+    path = _VENDORED_DIR / name
+    if not path.is_file():
+        pytest.fail("vendored fixture missing (%s): the cert cannot run" % path)
+    got = _git_blob_id(path.read_bytes())
+    if got != blob_id:
+        pytest.fail(
+            "vendored fixture %s git blob id mismatch: got %s, pinned %s. The "
+            "bytes drifted; re-vendor with `git show %s:pact-plugin/hooks/shared/"
+            "merge_guard_common.py`" % (name, got, blob_id, commit_sha8)
+        )
+    spec = importlib.util.spec_from_file_location(
+        "shared._merge_guard_baseline_%s" % commit_sha8, path
+    )
+    if spec is None or spec.loader is None:
+        pytest.fail("vendored fixture spec unloadable: %s" % path)
+    module = importlib.util.module_from_spec(spec)
+    module.__package__ = "shared"
+    spec.loader.exec_module(module)
+    _cached_vendored[commit_sha8] = module
+    return module

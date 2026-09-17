@@ -469,15 +469,17 @@ def _is_canonical_secretary_spawn(input_data: dict) -> bool:
     below):
 
       1. tool_name == "Agent"
-      2. tool_input.subagent_type == "pact-secretary" (_SECRETARY_AGENT_TYPE)
+      2. tool_input.subagent_type == "pact-secretary" (_SECRETARY_AGENT_TYPE),
+         spelled bare or with the one plugin namespace, "PACT:pact-secretary"
       3. tool_input.name == "secretary" (_SECRETARY_NAME, canonical literal)
       4. (DROPPED, #979) formerly tool_input.team_name == get_team_name().
          Claude Code v2.1.178+ ignores the Agent(team_name=) arg, so an
          equality check against it would wrongly DENY the canonical secretary
          spawn once the SSOT moved to the platform's "session-<id8>" name
          (the orchestrator may still pass a stale arg the platform discards).
-         The carve-out stays tight via bindings 2/3 (exact subagent_type +
-         name literals) and binding 5 (one-shot, gated on the REAL team dir).
+         The carve-out stays tight via bindings 2/3 (subagent_type exact
+         after an optional leading "PACT:", name exact) and binding 5
+         (one-shot, gated on the REAL team dir).
       5. NOT _secretary_in_members(get_team_name()) — members[]-only JOIN
          witness (#1023). Reads the REAL session team dir (expected_team),
          which the empty-team fail-closed below guarantees is a non-empty path
@@ -517,8 +519,9 @@ def _is_canonical_secretary_spawn(input_data: dict) -> bool:
     _check_tool_allowed, so once the marker is
     written the carve-out is moot. Documented so no future reader restores a
     binding-5 one-shot and re-deadlocks Desktop. The Desktop always-fire window
-    is contained by bindings 1/2/3 (exact Agent + pact-secretary + secretary,
-    all module constants) plus the marker fast-path that closes it.
+    is contained by bindings 1/2/3 (exact Agent, pact-secretary after an
+    optional leading "PACT:", exact secretary; a literal and two module
+    constants) plus the marker fast-path that closes it.
 
     On ANY disk-read exception, returns False — caller falls through to
     the existing _BLOCKED_TOOLS deny path so the user sees the canonical
@@ -541,7 +544,13 @@ def _is_canonical_secretary_spawn(input_data: dict) -> bool:
         tool_input = input_data.get("tool_input") or {}
         if not isinstance(tool_input, dict):
             return False
-        if tool_input.get("subagent_type") != _SECRETARY_AGENT_TYPE:
+        # The Agent tool lists plugin agents under the plugin namespace, so the
+        # spawn can arrive as "PACT:pact-secretary". Exactly one leading "PACT:"
+        # is removed, case-sensitively; any other spelling still fails here.
+        subagent_type = tool_input.get("subagent_type")
+        if not isinstance(subagent_type, str):
+            return False
+        if pact_context.strip_pact_namespace(subagent_type) != _SECRETARY_AGENT_TYPE:
             return False
         if tool_input.get("name") != _SECRETARY_NAME:
             return False
@@ -736,6 +745,37 @@ def _check_tool_allowed(input_data: dict) -> str | None:
     return None
 
 
+# The tools a read of the compaction summary arrives as: the lead's recovery
+# Read, and the secretary's Read or Bash.
+_SUMMARY_READ_TOOLS = frozenset({"Read", "Bash"})
+
+
+def _settle_before_summary_read(input_data: dict) -> None:
+    """Settle staged compaction summaries before a Read or Bash that names one.
+
+    postcompact_archive stages each summary instead of writing
+    compact-summary.txt, because in every capture the transcript records that
+    say whose compaction it was landed after the compaction hooks had returned.
+    This hook runs before the tool does, so settling here puts the lead's
+    summary in place before the read opens the file. Every other call pays one
+    string test: the import sits after that test and inside the try, so a broken
+    module can never reach this gate's decision. Never raises, and never changes
+    the decision.
+    """
+    try:
+        if input_data.get("tool_name") not in _SUMMARY_READ_TOOLS:
+            return
+        if "compact-summary" not in json.dumps(input_data.get("tool_input")):
+            return
+        from shared import compaction_owner
+
+        session_dir = pact_context.get_session_dir()
+        if session_dir:
+            compaction_owner.settle(session_dir, wait_s=compaction_owner.READ_WAIT_S)
+    except Exception:
+        pass
+
+
 def main():
     try:
         input_data = json.loads(sys.stdin.read(_STDIN_READ_MAX))
@@ -761,6 +801,8 @@ def main():
         _degraded_decision(
             "runtime", e, _tool if isinstance(_tool, str) and _tool else None
         )
+
+    _settle_before_summary_read(input_data)
 
     if deny_reason:
         # hookEventName is required by the harness; missing it silently fails open

@@ -323,7 +323,7 @@ def wait_stale(
     whose clock skewed forward as stale. The threshold still re-triggers
     once wall-clock catches up.
 
-    _now is for deterministic unit tests; production callers omit it.
+    Callers carrying an injected clock pass it as _now.
     """
     if not validate_wait(wait_metadata):
         return True

@@ -61,7 +61,7 @@ Summary: COMPREHENSIVE BIDIRECTIONAL certification for #1129 R3 — scoping the 
              MORE correct than base, not an over-block.
 
 NON-VACUITY (permanent, in-suite): the base(51e6c5a5), R3HEAD(72bacaf8) AND FIX1(b313ecaa)
-classifiers are loaded via `git show` + exec and asserted IN-TEST, so the cert can never be
+classifiers are loaded from vendored fixtures and asserted IN-TEST, so the cert can never be
 vacuously green — a FIX row's base=True proves the vector existed; a REGRESSION-FIX row's
 R3HEAD=False proves the arm-B under-block was real and the anchor-restore is load-bearing; a
 FIX-blank row's FIX1=False (on non-space blanks) proves fix2's whitespace widening is
@@ -77,15 +77,13 @@ so a reader needs no external design doc. Destructive verbs are assembled at run
 (PF/BD/M9/SH) so this file carries no raw force-push/force-delete/merge literal and stays
 inert to the live guard; probe forms are never run as shell.
 """
-import subprocess
-import types
-from pathlib import Path
 
 import pytest  # noqa: E402
 
 import shared.merge_guard_common as mgc  # noqa: E402
+from merge_guard_baseline_loader import load_vendored  # noqa: E402
 
-# --- Baked classifiers loaded from git ONCE for permanent in-test non-vacuity.
+# --- Baked classifiers loaded from vendored fixtures ONCE for permanent in-test non-vacuity.
 #     BASE = pre-R3 (flags over raw command); R3HEAD = R3 shipped (space-mask view,
 #     carries the arm-B under-block == 'security-fix reverted' for output-side procsub);
 #     FIX1 = R3-fix1 (arm-B anchor restored for a SPACE separator ONLY == 'fix2-reverted'),
@@ -95,64 +93,13 @@ _R3_SHA = "72bacaf8"     # R3 shipped (arm-B regression present)
 _FIX1_SHA = "b313ecaa"   # R3-fix1: space-only anchor restore (fix2-reverted state)
 
 
-_WHY = {}  # sha -> what actually failed, for the skip reason
-
-
-def _why_for(*shas):
-    """Recorded failures for exactly `shas`, in the order given.
-
-    Reads only the shas its caller's skipif gates on, so a later load recording
-    into `_WHY` cannot appear in an earlier guard's reason. The whole-dict form
-    this replaces was correct only while every later load sat below the guard.
-    """
-    return "; ".join("%s: %s" % (sha, _WHY[sha]) for sha in shas if sha in _WHY)
-
-
-def _load_classifier(sha):
-    """Load merge_guard_common as it existed at `sha`, or None if unavailable
-    (git missing, or the commit not present in this checkout) so collection SUCCEEDS and the
-    base/R3HEAD non-vacuity rows self-SKIP (@requires_history) instead of aborting the
-    file. Mirrors test_merge_guard_1129_r2_cert._load_classifier."""
-    wt = Path(__file__).resolve().parents[2]  # worktree root (tests/../../)
-    try:
-        src = subprocess.check_output(
-            ["git", "-C", str(wt), "show",
-             sha + ":pact-plugin/hooks/shared/merge_guard_common.py"],
-            stderr=subprocess.PIPE,
-        ).decode()
-    except subprocess.CalledProcessError as exc:
-        _WHY[sha] = "git show failed: " + (exc.stderr or b"").decode().strip()
-        return None
-    except (FileNotFoundError, OSError) as exc:
-        _WHY[sha] = "git not runnable: %r" % (exc,)
-        return None
-    mod = types.ModuleType("merge_guard_common_1129r3_" + sha)
-    mod.__file__ = str(wt / "pact-plugin/hooks/shared/merge_guard_common.py")
-    mod.__package__ = "shared"  # so its `from shared.x import ...` resolve on sys.path
-    try:
-        exec(compile(src, mod.__file__, "exec"), mod.__dict__)
-    except Exception as exc:
-        _WHY[sha] = "source loaded (%d bytes) but exec failed: %r" % (len(src), exc)
-        return None
-    return mod
-
-
-_BASE = _load_classifier(_BASE_SHA)
-_R3 = _load_classifier(_R3_SHA)
-_FIX1 = _load_classifier(_FIX1_SHA)
-# None-safe: a bare `_BASE.is_dangerous_command` would AttributeError at import when the
-# baked source is unavailable (unreachable base commit), re-aborting collection. D_BASE/D_R3/D_FIX1
-# are only ever called by the @requires_history-guarded columns.
-D_BASE = _BASE.is_dangerous_command if _BASE is not None else None
-D_R3 = _R3.is_dangerous_command if _R3 is not None else None
-D_FIX1 = _FIX1.is_dangerous_command if _FIX1 is not None else None
+_BASE = load_vendored(_BASE_SHA)
+_R3 = load_vendored(_R3_SHA)
+_FIX1 = load_vendored(_FIX1_SHA)
+D_BASE = _BASE.is_dangerous_command
+D_R3 = _R3.is_dangerous_command
+D_FIX1 = _FIX1.is_dangerous_command
 D = mgc.is_dangerous_command
-
-requires_history = pytest.mark.skipif(
-    _BASE is None or _R3 is None or _FIX1 is None,
-    reason="base/R3HEAD/FIX1 non-vacuity differential did not run: %s"
-           % (_why_for(_BASE_SHA, _R3_SHA, _FIX1_SHA) or "no failure recorded"),
-)
 
 # Destructive literals assembled at runtime — this file carries no raw literal.
 PF = "git " + "push " + "--force origin main"    # force-push
@@ -177,7 +124,6 @@ class TestR3FixQuotedWriterRegression:
         ("R-3 dq writer \"dd\"", 'echo "%s" | "dd" >(bash)' % PF),
         ("R-4 dq writer \"cat\"", 'echo "%s" | "cat" >(bash)' % PF),
     ])
-    @requires_history
     def test_quoted_writer_regression_recaught(self, label, cmd):
         assert D_BASE(cmd) is True, \
             "%s: base must CATCH the executing quoted-writer procsub (else vacuous): %r" % (label, cmd)
@@ -221,14 +167,12 @@ class TestR3Fix2BlankSeparatorFix:
 
     @pytest.mark.parametrize("wl,w", _WRITERS)
     @pytest.mark.parametrize("sl,s", _FIX_BLANKS)
-    @requires_history
     def test_blank_separated_was_a_genuine_base_vector(self, wl, w, sl, s):
         assert D_BASE(_procsub(w, s)) is True, \
             "%s / %s: base must catch the executing fanout (else vacuous): %r" % (wl, sl, _procsub(w, s))
 
     @pytest.mark.parametrize("wl,w", _WRITERS)
     @pytest.mark.parametrize("sl,s", _NONSPACE_BLANKS)
-    @requires_history
     def test_nonspace_blank_underblocked_at_fix1_recaught_at_patch(self, wl, w, sl, s):
         # THE fix2 non-vacuity discriminator: a non-space bash blank (tab / a multi-blank run
         # whose char adjacent to >( is a tab) was UNDER-BLOCKED at FIX1 (space-only anchor
@@ -258,7 +202,6 @@ class TestR3Fix2NonExecutingDifferential:
 
     @pytest.mark.parametrize("wl,w", _WRITERS)
     @pytest.mark.parametrize("sl,s", _NONEXEC_WS)
-    @requires_history
     def test_nonexecuting_whitespace_is_a_base_overmatch(self, wl, w, sl, s):
         # Documents WHY these are differential: base=True is an arm-B \s+ OVER-match on a
         # non-executing form (regex matched; the shell would not fan out).
@@ -278,7 +221,6 @@ class TestR3Fix2ZeroSepPreExistingGap:
             "%s: zero-sep adjacency is a pre-existing arm-B gap, must stay False: %r" % (wl, _procsub(w, ""))
 
     @pytest.mark.parametrize("wl,w", _WRITERS)
-    @requires_history
     def test_zero_sep_never_caught_by_base(self, wl, w):
         assert D_BASE(_procsub(w, "")) is False, \
             "%s: base never caught zero-sep (pre-existing gap, NOT an R3 regression): %r" % (wl, _procsub(w, ""))
@@ -297,7 +239,6 @@ class TestR3FixPreserves:
         cmd = 'gh issue create --body "%s >(bash)"' % PF
         assert D(cmd) is False, "P-1: R3-fix must NOT re-over-block B3 data-resident procsub: %r" % cmd
 
-    @requires_history
     def test_b3_was_a_genuine_base_over_block(self):
         cmd = 'gh issue create --body "%s >(bash)"' % PF
         assert D_BASE(cmd) is True, "P-1: base must over-block B3 (else the survival row is vacuous)"
@@ -311,7 +252,6 @@ class TestR3FixPreserves:
         cmd = 'echo "%s" | tee >("ba"sh)' % PF
         assert D(cmd) is True, "P-2: incidental >(\"ba\"sh) win must NOT regress: %r" % cmd
 
-    @requires_history
     def test_incidental_win_was_a_base_under_block(self):
         cmd = 'echo "%s" | tee >("ba"sh)' % PF
         assert D_BASE(cmd) is False, "P-2: base under-blocked (else 'incidental win' is vacuous)"
@@ -325,7 +265,6 @@ class TestR3FixPreserves:
 # ===========================================================================
 class TestR3FixBonusClosure:
 
-    @requires_history
     def test_quoted_writer_and_quoted_shell_bonus_closed(self):
         cmd = 'echo "%s" | "tee" >("ba"sh)' % PF
         assert D_BASE(cmd) is False, "bonus: base under-blocked this executing form"
@@ -354,7 +293,6 @@ class TestR3FixDifferential:
         ("D-1a stderr 2> benign", 'echo hi 2> >(bash)'),
         ("D-2a #1146 | \"sh\"", 'echo "%s" | "%s"' % (PF, SH)),
     ])
-    @requires_history
     def test_differential_unchanged_across_all_three(self, label, cmd):
         assert D_BASE(cmd) is False and D_R3(cmd) is False and D(cmd) is False, \
             "%s: must be False==False==False (differential, not implicating R3): %r" % (label, cmd)
@@ -379,7 +317,6 @@ class TestHonestProcsubPreserved:
         ("H-2 arm-A > >(bash)", 'echo "%s" > >(bash)' % PF),
         ("H-4 input-side bash <(..)", 'bash <(echo "%s")' % PF),
     ])
-    @requires_history
     def test_honest_procsub_true_on_base(self, label, cmd):
         assert D_BASE(cmd) is True, "%s: honest procsub must be a genuine base catch: %r" % (label, cmd)
 
@@ -416,7 +353,6 @@ class TestR3BoundaryAndResidual:
         ("unbalanced quote near routing token", 'echo "%s | %s' % (PF, SH)),
         ("E4 ANSI-C backslash-quote desync", "gh pr comment 1 --body $'%s\\' | %s'" % (PF, SH)),
     ])
-    @requires_history
     def test_boundary_residual_unchanged_across_all_three(self, label, cmd):
         assert D_BASE(cmd) is True and D_R3(cmd) is True and D(cmd) is True, \
             "%s: R3 must neither introduce nor remove this residual (True==True==True): %r" % (label, cmd)
@@ -437,7 +373,6 @@ class TestR3BoundaryAndResidual:
         assert D(cmd) is False, \
             "%s: the comment-excision closure regressed (residual re-opened): %r" % (label, cmd)
 
-    @requires_history
     def test_e3_closure_transition_across_all_three(self):
         label, cmd = self._E3
         assert D_BASE(cmd) is True and D_R3(cmd) is True, \
@@ -477,7 +412,6 @@ class TestR3PreserveExecuting:
         ("C17 shell-fed heredoc body | sh", 'bash <<EOF\n%s | %s\nEOF' % (PF, SH)),
         ("C18 carrier value + | bash tail", 'gh pr create --title "%s" | bash' % PF),
     ])
-    @requires_history
     def test_executing_routing_true_on_base_and_r3(self, label, cmd):
         assert D_BASE(cmd) is True and D_R3(cmd) is True, \
             "%s: executing routing must be caught on base AND R3HEAD (R3 narrows no detection): %r" % (label, cmd)
@@ -521,7 +455,6 @@ class TestR3FixCarrierDataOverBlock:
         ("E6 ANSI-C $'..| sh' body", "gh pr comment 1 --body $'%s | %s'" % (PF, SH)),
         ("E7 concat \"..\"'| sh' body", "gh pr comment 1 --body \"%s\"'| %s'" % (PF, SH)),
     ])
-    @requires_history
     def test_over_block_was_a_genuine_base_vector(self, label, cmd):
         assert D_BASE(cmd) is True, \
             "%s: base must OVER-BLOCK (else the closure row is vacuous): %r" % (label, cmd)
@@ -551,7 +484,6 @@ class TestR3Differential:
         ("E2 quoted shell name | \"sh\"", 'echo "%s" | "%s"' % (PF, SH)),
         ("A6 | sudo sh in body", 'gh pr edit 123 --body "%s | sudo %s"' % (PF, SH)),
     ])
-    @requires_history
     def test_differential_false_across_all_three(self, label, cmd):
         assert D_BASE(cmd) is False and D_R3(cmd) is False and D(cmd) is False, \
             "%s: differential must be False==False==False (not implicating R3): %r" % (label, cmd)
@@ -583,7 +515,6 @@ class TestR3HardeningHeredocVariants:
             "%s: shell-fed heredoc body executes, must stay caught at PATCH: %r" % (label, cmd)
 
     @pytest.mark.parametrize("label,cmd", _SHELL_FED)
-    @requires_history
     def test_shell_fed_heredoc_true_on_base_and_r3(self, label, cmd):
         assert D_BASE(cmd) is True and D_R3(cmd) is True, \
             "%s: shell-fed heredoc must be caught on base AND R3HEAD (preserved, not excised): %r" % (label, cmd)
@@ -602,7 +533,6 @@ class TestR3HardeningHeredocVariants:
             "%s: naked heredoc-marker variant body must be excised/closed at PATCH: %r" % (label, cmd)
 
     @pytest.mark.parametrize("label,cmd", _NAKED_MARKER_VARIANTS)
-    @requires_history
     def test_heredoc_marker_variant_was_a_genuine_base_vector(self, label, cmd):
         assert D_BASE(cmd) is True, \
             "%s: base must OVER-BLOCK the raw naked body (else the closure row is vacuous): %r" % (label, cmd)

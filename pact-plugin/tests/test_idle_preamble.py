@@ -66,9 +66,9 @@ class TestPreambleInMainOutput:
             }
         ]
 
-        with patch("teammate_idle.get_team_name", return_value=team_name), \
+        with patch("teammate_idle.frame_team_and_name", return_value=(team_name, "")), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch("teammate_idle.get_task_list", return_value=mock_tasks):
+             patch("teammate_idle.iter_team_task_jsons", return_value=mock_tasks):
             # main() calls sys.exit(0) at the end
             import io as io_module
             captured_stdout = io_module.StringIO()
@@ -122,9 +122,9 @@ class TestPreambleInMainOutput:
         else:
             idle_path = Path("/nonexistent/path/idle_counts.json")
 
-        with patch("teammate_idle.get_team_name", return_value=team_name), \
+        with patch("teammate_idle.frame_team_and_name", return_value=(team_name, "")), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch("teammate_idle.get_task_list", return_value=mock_tasks), \
+             patch("teammate_idle.iter_team_task_jsons", return_value=mock_tasks), \
              patch("pathlib.Path.home", return_value=tmp_path if tmp_path else Path("/tmp")):
             import io as io_module
             captured_stdout = io_module.StringIO()
@@ -156,9 +156,9 @@ class TestPreambleInMainOutput:
         })
 
         # Mock: no tasks at all = no stall, no cleanup
-        with patch("teammate_idle.get_team_name", return_value="pact-test"), \
+        with patch("teammate_idle.frame_team_and_name", return_value=("pact-test", "")), \
              patch("sys.stdin", io.StringIO(input_data)), \
-             patch("teammate_idle.get_task_list", return_value=[]):
+             patch("teammate_idle.iter_team_task_jsons", return_value=[]):
             import io as io_module
             captured_stdout = io_module.StringIO()
             with patch("sys.stdout", captured_stdout):

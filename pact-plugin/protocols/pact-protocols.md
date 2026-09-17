@@ -2413,7 +2413,7 @@ SendMessage(
 1. Lead writes rejection metadata + sends wake-signal.
 2. Teammate wakes on the message, CLEARs `intentional_wait`, reads the rejection payload the message carries (the disk copy is confirmation).
 3. Teammate revises (`metadata.teachback_submit` for A, or revises deliverable + `metadata.handoff` for B).
-4. Teammate increments `metadata.revision_number`, sends the notify `SendMessage` carrying the revised payload verbatim, re-SETs `intentional_wait` with fresh `since`.
+4. Teammate increments `metadata.revision_number`, sends the notify `SendMessage` carrying the revised payload verbatim, re-SETs `intentional_wait` with a fresh `since` and a `covers_since` equal to it.
 5. Lead reviews; either accepts (per [Completion Authority](#completion-authority)) or rejects again (revision_number = N+1).
 
 > **Cycle limit**: 3+ rejection cycles on the same task is an imPACT META-BLOCK signal. See [imPACT.md](../commands/imPACT.md).
@@ -2475,7 +2475,7 @@ The `pact-memory` skill carries the full rule.
 | Trigger | What Runs | Entry Point |
 |---------|-----------|-------------|
 | **Session start** | Restore previous session context + detect paused or refreshed work | `session_init.py` → `restore_last_session()`, `check_resume_state()` |
-| **Post-compaction** | Orchestrator rebuilds current session state | CLAUDE.md State Recovery steps + workflow command auto-recovery |
+| **Post-compaction** | Orchestrator rebuilds current session state | The orchestrator persona's State Recovery steps + Re-reading Cut Workflow Commands (below) |
 | **Manual** | User or orchestrator reads journal directly | CLI: `python3 session_journal.py read --session-dir {session_dir}` |
 
 > **Read output format**: the `read` subcommand prints a SINGLE JSON array — parse with `events = json.loads(output)` and iterate the list; never parse line-by-line, and never pipe through `2>/dev/null` / `|| echo` / `head` (they mask a parse crash as emptiness, which can be misread as genuine absence).
@@ -2548,19 +2548,9 @@ The journal survives crashes because:
 
 The wrap-up command harvests journal events to pact-memory before session close. The journal persists in the sessions directory for 30 days (TTL cleanup), providing a recovery window even if harvest fails. Paused sessions are exempt from TTL cleanup.
 
-### Content Durability Across Compaction
+### Re-reading Cut Workflow Commands
 
-Claude Code compaction has three durability mechanisms for orchestrator content:
-
-| Mechanism | What Survives | Durability |
-|-----------|---------------|------------|
-| **Explicit `Read` calls** | Files loaded via `Read` tool at bootstrap | **Lossless** — Read tracker auto-re-issues tracked Reads after compaction; `Skills restored` event independently re-processes references above the truncation cut. Two independent restoration paths. |
-| **Inline skill body text** | Content written directly in the skill `.md` file | **Partial** — truncated at a cut boundary (~halfway for large files). Late sections silently dropped. |
-| **CLAUDE.md / additionalContext** | Routing block, session info, pinned context | **Structural** — re-injected on every turn; highest durability. |
-
-
-
-**Verification**: After compaction, all 9 Read targets should appear in `Skills restored` system-reminder events. If any file is missing, the orchestrator still has the SACROSANCT fail-safe summary inline in bootstrap.md.
+After a compaction, if a PACT workflow you started is still in progress in `TaskList`, and its re-attached copy is cut short or missing, read `{plugin_root}/commands/<name>.md` in full with `Read` before you continue it, where `PACT:<name>` is that workflow. If `Read` reports a partial view, read the remaining pages. Do not invoke the workflow again: that starts it over. If the file shows `$ARGUMENTS` where the task it was started for belongs, take that task from its re-attached copy or from your compact summary.
 
 ### Malformed-Stdin Failure Log
 

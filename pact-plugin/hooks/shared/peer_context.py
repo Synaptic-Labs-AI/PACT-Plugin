@@ -2,13 +2,15 @@
 """
 Location: pact-plugin/hooks/shared/peer_context.py
 Summary: Shared builder for the peer-context additionalContext block injected
-         into newly active PACT teammates (peer list + charter cross-ref +
-         teachback reminder + completion-authority note), plus the role-marker
-         prelude templates and agent-name sanitizer.
-Used by: peer_inject.py (SubagentStart, in-process teammates — re-exports these
-         names) AND session_init.py (SessionStart teammate-branch, separate-
-         process/tmux teammates). One SSOT builder so the two call-sites cannot
-         drift apart.
+         into team members (peer list + charter cross-ref + teachback reminder
+         + completion-authority note), plus the role-marker prelude templates
+         and agent-name sanitizer.
+Used by: peer_inject.py (SubagentStart: it runs at every subagent start,
+         including an in-process teammate's turn starts, and builds the block
+         only when the frame's agent type names a team member — re-exports
+         these names) AND session_init.py (SessionStart teammate-branch,
+         separate-process/tmux teammates). One SSOT builder so the two
+         call-sites cannot drift apart.
 
 The single `include_role_marker` switch is what lets ONE builder serve both
 surfaces: SubagentStart wants the full prelude (role marker + charter);

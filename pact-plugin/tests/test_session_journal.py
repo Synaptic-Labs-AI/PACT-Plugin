@@ -3545,6 +3545,8 @@ class TestValidateEventSchemaPerType:
             "session_id": "test-session-id",
             "project_dir": "/tmp/proj",
         },
+        "compaction_attributed": {"verdict": "teammate", "basis": "content"},
+        "compaction_summary_dropped": {"cause": "no_free_stamp"},
         "variety_assessed": {
             "task_id": "42",
             "variety": {"novelty": 1, "scope": 1, "uncertainty": 1, "risk": 1, "total": 4},
@@ -3604,6 +3606,21 @@ class TestValidateEventSchemaPerType:
             "agent": "devops",
             "task_id": "1",
             "since": "2026-01-01T00:00:00+00:00",
+        },
+        "unflagged_background_wait": {
+            "agent": "devops",
+            "registered_at": "2026-01-01T00:00:00+00:00",
+            # A LIST, not a scalar — a launch is recorded against every
+            # in_progress task its launcher holds.
+            "task_ids": ["1", "2"],
+        },
+        # Required fields only — `ids` and `cause` are optional (see
+        # TestValidateOptionalFieldTypes), and this harness treats every
+        # sample key as required.
+        "background_stop_gate": {
+            "role": "lead",
+            "verdict": "block",
+            "running": 1,
         },
         "s2_state_seeded": {
             "worktree": "/tmp/wt",
@@ -4126,6 +4143,51 @@ class TestValidateOptionalFieldTypes:
         from shared.session_journal import _OPTIONAL_FIELDS_BY_TYPE
 
         assert _OPTIONAL_FIELDS_BY_TYPE.get("session_start") == {"source": str}
+
+    def test_compaction_attributed_latency_declared_optional(self):
+        """compaction_attributed has `latency_s: float`, the seconds from staging
+        a compaction summary to resolving it; present, it must be a float."""
+        from shared.session_journal import (
+            _OPTIONAL_FIELDS_BY_TYPE,
+            _validate_event_schema,
+            make_event,
+        )
+
+        assert _OPTIONAL_FIELDS_BY_TYPE.get("compaction_attributed") == {"latency_s": float}
+        assert _validate_event_schema(make_event(
+            "compaction_attributed", verdict="lead", basis="content", latency_s=8.5))[0]
+        assert not _validate_event_schema(make_event(
+            "compaction_attributed", verdict="lead", basis="content", latency_s="8.5"))[0]
+
+    def test_background_stop_gate_optional_fields_are_typed(self):
+        """background_stop_gate's `ids` must be a list and `cause` a string.
+
+        The turn-end gate writes the trace on every verdict; a wrong-typed
+        optional field is rejected rather than landing on disk.
+        """
+        from shared.session_journal import (
+            _OPTIONAL_FIELDS_BY_TYPE,
+            _validate_event_schema,
+            make_event,
+        )
+
+        assert _OPTIONAL_FIELDS_BY_TYPE.get("background_stop_gate") == {
+            "ids": list,
+            "cause": str,
+        }
+        base = {"role": "teammate", "verdict": "allow_flagged", "running": 2}
+        ok, _ = _validate_event_schema(
+            make_event("background_stop_gate", ids=["b1"], cause="session_cron", **base)
+        )
+        assert ok
+        bad_ids, _ = _validate_event_schema(
+            make_event("background_stop_gate", ids="b1", **base)
+        )
+        assert not bad_ids
+        bad_cause, _ = _validate_event_schema(
+            make_event("background_stop_gate", cause=3, **base)
+        )
+        assert not bad_cause
 
     def test_variety_assessed_scope_declared_optional(self):
         """variety_assessed has `scope: str` in _OPTIONAL_FIELDS_BY_TYPE.

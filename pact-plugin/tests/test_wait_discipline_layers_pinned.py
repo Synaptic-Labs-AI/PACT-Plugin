@@ -71,9 +71,10 @@ LAYER_2_PINS = [
 LAYER_3_PINS = [
     "Layer 3 — Escalate what you cannot hold",
     "must not sit invisibly in a backgrounded process",
-    # The deviation-justification clause — the minimal wake-on-read rationale
-    # that stops a teammate reasoning its way back to background-and-end-turn.
-    "a teammate's background-task notification is wake-on-read (it surfaces only inside a message-driven wake), so the team-lead's channel is the only push",
+    # The deviation-justification clause — the minimal in-process not-woken
+    # rationale that stops a teammate reasoning its way back to
+    # background-and-end-turn.
+    "when you run in-process it surfaces only when something else starts your next turn, so the team-lead's channel is the only push you can count on",
     "Either split the work into timeout-sized chunks run in-turn, or transfer the watch explicitly",
     "flag the wait with expected_resolver=lead",
 ]

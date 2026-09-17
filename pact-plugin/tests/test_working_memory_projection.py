@@ -8,7 +8,7 @@ Summary: Verification tests for rebuilding the Working Memory section of
 
          Every write in this file goes to a file under `tmp_path`. The
          child-process arms resolve ambiently on purpose, inside a declared
-         tmp project, to reach the two ambient guards.
+         tmp project, to reach the ambient guards.
 Used by: pytest.
 """
 import json
@@ -32,6 +32,7 @@ from scripts.working_memory import (  # noqa: E402
     _record_timestamp,
     project_memories_to_claude_md,
 )
+from clock_shift.clock_shift_env import carry_clock_shift
 
 _SCAFFOLD = (
     "# Probe\n\n"
@@ -261,7 +262,7 @@ _CLI = (
 def _run_cli(env: dict, cwd: Path, *args: str) -> dict:
     proc = subprocess.run(
         [sys.executable, str(_CLI), *args],
-        env=env, cwd=str(cwd), capture_output=True, text=True, timeout=180,
+        env=carry_clock_shift(env), cwd=str(cwd), capture_output=True, text=True, timeout=180,
     )
     assert proc.returncode == 0, f"rc={proc.returncode}\n{proc.stderr[:600]}"
     payload = json.loads(proc.stdout)
@@ -270,9 +271,10 @@ def _run_cli(env: dict, cwd: Path, *args: str) -> dict:
 
 
 class TestSyncVerbReachesTheGuards:
-    """`cli.py sync` in a CHILD, so the two ambient refusals can fire.
+    """`cli.py sync` in a CHILD, so the ambient refusals can fire.
 
-    In-process, `pytest` in `sys.modules` exempts both guards, so only a
+    In-process, `pytest` in `sys.modules` exempts the PYTEST_CURRENT_TEST
+    refusal and the redirected-store refusal, so only a
     child can show that the replace arm runs through them. The store is
     redirected with `--db-path` in every arm, and it holds one record.
     """
@@ -334,7 +336,8 @@ class TestSyncVerbReachesTheGuards:
         THE RECORD IS SAVED UNDER THE SAME DECLARED DIRECTORY. The project id
         derives from it, and `sync` projects only this project's records; a
         record saved under another id leaves nothing to project, and the
-        `empty` return precedes both guards. That is correct, and it would
+        `empty` return precedes the PYTEST_CURRENT_TEST refusal and the
+        redirected-store refusal. That is correct, and it would
         make this arm pass without reaching the guard, so the store is
         stocked under the escaping id and the envelope is pinned to `refused`.
         """
@@ -410,3 +413,227 @@ class TestSyncRefusesAProjectWithNoId:
         assert target.read_bytes() == before
         assert projected == []
         assert memory.last_sync_status == "empty"
+
+
+# ---------------------------------------------------------------------------
+# Every production caller of a CLAUDE.md resolver calls the escape guard
+# ---------------------------------------------------------------------------
+
+_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+_DISPLAY_RESOLVER = "_resolve_display_claude_md_with_base"
+_DISPLAY_GUARD = "_refuse_ambient_sync_on_declared_scope_escape"
+
+# (scope, resolver, guard, exempt). A function in scope that calls `resolver`
+# must call `guard` on a later line. The display resolver is searched in every
+# production file, so a new caller anywhere joins the population. archive_pin's
+# resolver is the hooks' shared read resolver, which read-only callers use
+# freely, so only archive_pin itself, which acts on what it resolves, is held
+# to it.
+_GUARDED_RESOLVERS = (
+    (
+        "production",
+        _DISPLAY_RESOLVER,
+        _DISPLAY_GUARD,
+        # The path-only wrapper returns no base, so no write can be
+        # containment-checked through it.
+        frozenset({"_resolve_display_claude_md_path"}),
+    ),
+    (
+        "scripts/archive_pin.py",
+        "get_project_claude_md_path",
+        "_stays_in_declared_project",
+        frozenset(),
+    ),
+)
+
+_KNOWN_GUARDED_CALLERS = {
+    "sync_to_claude_md",
+    "sync_retrieved_to_claude_md",
+    "resolve_claude_md",
+}
+
+
+def _production_files():
+    for path in sorted(_PLUGIN_ROOT.rglob("*.py")):
+        rel = path.relative_to(_PLUGIN_ROOT)
+        if "tests" in rel.parts or path.name.startswith("test_") or path.name == "conftest.py":
+            continue
+        yield path
+
+
+def _unguarded_callers(source, resolver, guard, exempt=frozenset()):
+    """Return (callers, unguarded): the functions that call `resolver`, and those
+    among them with no `guard` call on a line after their first `resolver` call."""
+    import ast
+
+    callers, unguarded = [], []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name in exempt:
+            continue
+        lines = {resolver: [], guard: []}
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call):
+                continue
+            func = call.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if name in lines:
+                lines[name].append(call.lineno)
+        if not lines[resolver]:
+            continue
+        callers.append(node.name)
+        if not any(line > min(lines[resolver]) for line in lines[guard]):
+            unguarded.append(node.name)
+    return callers, unguarded
+
+
+class TestEveryResolverCallerCallsTheEscapeGuard:
+    """The escape guard sits at the CALLERS, not inside the resolver, because it
+    needs `target` and `claude_md_root`, which the resolver does not take. So a
+    new caller would not inherit it. This pins that every caller does call it.
+    """
+
+    def test_every_production_caller_of_a_resolver_calls_the_escape_guard(self):
+        """MUTANT that reddens this arm: delete the guard call from
+        `sync_to_claude_md` or `sync_retrieved_to_claude_md`, or the
+        `_stays_in_declared_project` call from `archive_pin.resolve_claude_md`.
+        The failure names the unguarded caller."""
+        members, unguarded = [], []
+        for scope, resolver, guard, exempt in _GUARDED_RESOLVERS:
+            files = (
+                list(_production_files()) if scope == "production"
+                else [_PLUGIN_ROOT / scope]
+            )
+            for path in files:
+                callers, missing = _unguarded_callers(
+                    path.read_text(encoding="utf-8"), resolver, guard, exempt
+                )
+                rel = path.relative_to(_PLUGIN_ROOT)
+                members += [f"{rel}::{name}" for name in callers]
+                unguarded += [f"{rel}::{name}" for name in missing]
+
+        found = {member.split("::")[1] for member in members}
+        assert _KNOWN_GUARDED_CALLERS <= found and len(members) >= len(_KNOWN_GUARDED_CALLERS), (
+            f"the scan found {members}; it must reach every known caller, "
+            "or it is not reading the files it claims to"
+        )
+        assert unguarded == [], (
+            f"these callers resolve a CLAUDE.md without the escape guard after "
+            f"it: {unguarded}"
+        )
+
+    def test_the_scan_catches_an_unguarded_and_a_misordered_caller(self):
+        """The live control: the scan above can report a caller at all."""
+        import textwrap
+
+        source = textwrap.dedent(f"""
+            def unguarded():
+                path, base = {_DISPLAY_RESOLVER}()
+
+            def misordered():
+                {_DISPLAY_GUARD}(None, None, None, None)
+                path, base = {_DISPLAY_RESOLVER}()
+
+            def guarded():
+                path, base = {_DISPLAY_RESOLVER}()
+                {_DISPLAY_GUARD}(None, None, base, path)
+        """)
+        callers, unguarded = _unguarded_callers(source, _DISPLAY_RESOLVER, _DISPLAY_GUARD)
+        assert callers == ["unguarded", "misordered", "guarded"]
+        assert unguarded == ["unguarded", "misordered"]
+
+
+# ---------------------------------------------------------------------------
+# Every production call of the scope predicate passes the worktree record
+# ---------------------------------------------------------------------------
+
+_SCOPE_PREDICATE = "stays_in_declared_project"
+_KNOWN_PREDICATE_CALLERS = {
+    "_refuse_ambient_sync_on_declared_scope_escape",
+    "resolve_claude_md",
+}
+
+
+def _predicate_calls_without_record(source):
+    """Return (callers, missing): the functions that call the scope predicate,
+    under its own name, an imported alias or a module attribute, and those among
+    them with a call that passes no worktree record."""
+    import ast
+
+    tree = ast.parse(source)
+    names = {_SCOPE_PREDICATE}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            names |= {a.asname or a.name for a in node.names if a.name == _SCOPE_PREDICATE}
+    callers, missing = [], []
+    for function in ast.walk(tree):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        calls = [
+            call for call in ast.walk(function)
+            if isinstance(call, ast.Call) and (
+                (isinstance(call.func, ast.Name) and call.func.id in names)
+                or (isinstance(call.func, ast.Attribute) and call.func.attr == _SCOPE_PREDICATE)
+            )
+        ]
+        if not calls:
+            continue
+        callers.append(function.name)
+        if any(
+            len(call.args) < 4 and not any(k.arg == "worktree_identity" for k in call.keywords)
+            for call in calls
+        ):
+            missing.append(function.name)
+    return callers, missing
+
+
+class TestEveryScopePredicateCallPassesTheRecord:
+    """The worktree record decides a removed declaration only where a caller
+    passes it, so a caller that omits it judges that layout differently from
+    the others."""
+
+    def test_every_production_call_of_the_scope_predicate_passes_the_worktree_record(self):
+        """MUTANT that reddens this arm: drop `worktree_identity=` from the call
+        in `_refuse_ambient_sync_on_declared_scope_escape` or in
+        `archive_pin.resolve_claude_md`. The failure names that caller."""
+        members, missing = [], []
+        for path in _production_files():
+            callers, lacking = _predicate_calls_without_record(path.read_text(encoding="utf-8"))
+            rel = path.relative_to(_PLUGIN_ROOT)
+            members += [f"{rel}::{name}" for name in callers]
+            missing += [f"{rel}::{name}" for name in lacking]
+
+        found = {member.split("::")[1] for member in members}
+        assert _KNOWN_PREDICATE_CALLERS <= found, (
+            f"the scan found {members}; it must reach every known caller, "
+            "or it is not reading the files it claims to"
+        )
+        assert missing == [], (
+            f"these callers judge project scope without the worktree record: {missing}"
+        )
+
+    def test_the_scan_catches_a_call_without_the_record_under_any_name(self):
+        """The live control: the scan above finds an aliased and an attribute
+        call, and tells a call that passes the record from one that does not."""
+        import textwrap
+
+        source = textwrap.dedent(f"""
+            from shared.project_scope import {_SCOPE_PREDICATE} as _renamed
+            import shared.project_scope as scope
+
+            def aliased():
+                _renamed(a, b, c)
+
+            def attribute():
+                scope.{_SCOPE_PREDICATE}(a, b, c)
+
+            def by_keyword():
+                _renamed(a, b, c, worktree_identity=record)
+
+            def by_position():
+                scope.{_SCOPE_PREDICATE}(a, b, c, record)
+        """)
+        callers, missing = _predicate_calls_without_record(source)
+        assert callers == ["aliased", "attribute", "by_keyword", "by_position"]
+        assert missing == ["aliased", "attribute"]

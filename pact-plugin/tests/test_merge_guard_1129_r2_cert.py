@@ -44,7 +44,7 @@ Summary: COMPREHENSIVE BIDIRECTIONAL certification for #1129 R2 — the carrier-
              (release/gist/git-tag), not just carrier-7.
 
 NON-VACUITY (base-vs-HEAD, and pre-fix-vs-fixed for F1): the read-side rows load the BASE
-classifier (023ee2c3) AND the PRE-FIX R2 classifier (6f404f2e) via `git show` + exec and
+classifier (023ee2c3) AND the PRE-FIX R2 classifier (6f404f2e) from vendored fixtures and
 assert the discrimination IN-TEST, so the cert is permanently non-vacuous — a future strip
 regression flips a HEAD column back and reds the row, and the base/pre-fix column proves
 each form was genuinely a vector (never a vacuous green).
@@ -56,9 +56,6 @@ stays inert to the live guard.
 """
 import io
 import json
-import subprocess
-import types
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest  # noqa: E402
@@ -68,8 +65,9 @@ import merge_guard_pre  # noqa: E402
 import shared.merge_guard_common as mgc  # noqa: E402
 from merge_guard_post import main as post_main  # noqa: E402
 from merge_guard_pre import main as pre_main  # noqa: E402
+from merge_guard_baseline_loader import load_vendored  # noqa: E402
 
-# --- Baked classifiers loaded from git ONCE for in-test base-vs-HEAD non-vacuity:
+# --- Baked classifiers loaded from vendored fixtures ONCE for in-test base-vs-HEAD non-vacuity:
 #     BASE (pre-R2) for the OB-closure rows; PRE-FIX R2 (the buggy whole-command
 #     carrier-7d) for the F1 leg-merge regression guard. The F1 discriminator is
 #     pre-fix=False -> fixed=True; BASE has no 7d carrier so it does NOT flip on F1.
@@ -77,72 +75,12 @@ _BASE_SHA = "023ee2c3"    # pre-R2
 _PREFIX_SHA = "6f404f2e"  # R2 pre-F1-fix (whole-command 7d — the HALT #64 regression)
 
 
-_WHY = {}  # sha -> what actually failed, for the skip reason
-
-
-def _why_for(*shas):
-    """Recorded failures for exactly `shas`, in the order given.
-
-    Reads only the shas its caller's skipif gates on, so a later load recording
-    into `_WHY` cannot appear in an earlier guard's reason. The whole-dict form
-    this replaces was correct only while every later load sat below the guard.
-    """
-    return "; ".join("%s: %s" % (sha, _WHY[sha]) for sha in shas if sha in _WHY)
-
-
-def _load_classifier(sha):
-    """Load merge_guard_common as it existed at `sha`, or None if unavailable.
-
-    Returns None on any git/exec failure — git missing, or the commit not present in this checkout — so collection SUCCEEDS and the
-    base-vs-HEAD / pre-fix-vs-fixed differential rows self-SKIP (@requires_history)
-    instead of aborting the whole file. Mirrors test_merge_guard_1118_recert._load_module_at.
-    """
-    wt = Path(__file__).resolve().parents[2]  # worktree root (tests/../../)
-    try:
-        src = subprocess.check_output(
-            ["git", "-C", str(wt), "show",
-             sha + ":pact-plugin/hooks/shared/merge_guard_common.py"],
-            stderr=subprocess.PIPE,
-        ).decode()
-    except subprocess.CalledProcessError as exc:
-        _WHY[sha] = "git show failed: " + (exc.stderr or b"").decode().strip()
-        return None
-    except (FileNotFoundError, OSError) as exc:
-        _WHY[sha] = "git not runnable: %r" % (exc,)
-        return None
-    mod = types.ModuleType("merge_guard_common_1129r2_" + sha)
-    mod.__file__ = str(wt / "pact-plugin/hooks/shared/merge_guard_common.py")
-    mod.__package__ = "shared"  # so its `from shared.x import ...` resolve on sys.path
-    try:
-        exec(compile(src, mod.__file__, "exec"), mod.__dict__)
-    except Exception as exc:
-        _WHY[sha] = "source loaded (%d bytes) but exec failed: %r" % (len(src), exc)
-        return None
-    return mod
-
-
-_BASE = _load_classifier(_BASE_SHA)
-_PREFIX = _load_classifier(_PREFIX_SHA)
-# None-safe: guarding _load_classifier alone is NOT enough — a bare
-# `_BASE.is_dangerous_command` would AttributeError at import when the base/pre-fix
-# source is unavailable (unreachable base commit), re-aborting collection. D_BASE/D_PREFIX are
-# only ever called by the @requires_history-guarded differential rows.
-D_BASE = _BASE.is_dangerous_command if _BASE is not None else None
-D_PREFIX = _PREFIX.is_dangerous_command if _PREFIX is not None else None
+_BASE = load_vendored(_BASE_SHA)
+_PREFIX = load_vendored(_PREFIX_SHA)
+D_BASE = _BASE.is_dangerous_command
+D_PREFIX = _PREFIX.is_dangerous_command
 D = mgc.is_dangerous_command
 STRIP = mgc._strip_non_executable_content
-
-# Skip the base-vs-HEAD / pre-fix-vs-fixed differential (non-vacuity) rows when the
-# baked history is unavailable; the HEAD-side + absolute rows still run. fetch-depth
-# sets DEPTH, not REFSPEC, and cannot fetch a commit no ref reaches: _BASE_SHA is an
-# ancestor of main and is always present, but _PREFIX_SHA is a squash-merged branch tip
-# reachable from nothing, so it is absent in CI and these differentials SKIP there. They
-# run locally only while that object survives uncollected.
-requires_history = pytest.mark.skipif(
-    _BASE is None or _PREFIX is None,
-    reason="base-vs-HEAD / pre-fix differential did not run: %s"
-           % (_why_for(_BASE_SHA, _PREFIX_SHA) or "no failure recorded"),
-)
 
 # Destructive verbs assembled at runtime — this file carries no raw literal.
 BD = "git " + "branch " + "-D main"           # destructive branch-delete literal
@@ -205,7 +143,6 @@ class TestOverBlockClosure:
         ("OB6 adjacent-concat", 'gh pr create --title "Fix "\'%s\'' % M5),
         ("OB8 gh release create --title", 'gh release create v1 --title "%s"' % BD),
     ])
-    @requires_history
     def test_over_block_closed_base_true_head_false(self, label, cmd):
         assert D_BASE(cmd) is True, "%s: expected a BASE over-block vector (else vacuous)" % label
         assert D(cmd) is False, "%s: HEAD must CLOSE the faithful-click over-block" % label
@@ -224,7 +161,6 @@ class TestMustNotRegress:
         ("UB3b leg-tail && branch-delete", 'gh pr create --body "x" && %s' % BD),
         ("UB3c leg-tail ; force-push", 'gh pr create --body "x" ; %s' % PF),
     ])
-    @requires_history
     def test_stays_gated_base_and_head(self, label, cmd):
         assert D_BASE(cmd) is True, "%s: must be gated on base" % label
         assert D(cmd) is True, "%s: R2 must NOT narrow detection here" % label
@@ -274,7 +210,6 @@ class TestSubcommandDeleteAcceptedResidualPin:
         ("gh gist delete", 'gh gist delete abc123'),
         ("git tag -d", 'git tag -d oldtag'),
     ])
-    @requires_history
     def test_still_undetected_unchanged(self, label, cmd):
         assert D_BASE(cmd) is False and D(cmd) is False, \
             "%s: accepted-residual PIN — must stay undetected in R2 (hardening tracked in #1137)" % label
@@ -300,7 +235,6 @@ class TestLaunderClosureRoundTrip:
         assert _mint(carrier, tmp_path) == [], "HEAD must mint NO launder token"
         assert _execute(M5 + " --delete-branch", tmp_path) == DENY, "the base-usable laundered exec must DENY at HEAD"
 
-    @requires_history
     def test_gist_base_mint_witness_is_a_usable_launder(self):
         # MINOR-2 (baked base-mint non-vacuity): the BASE (023ee2c3) classifier both GATES
         # the gist carrier AND extracts a USABLE {merge, pr 5, --delete-branch} context from
@@ -350,7 +284,6 @@ class TestF1LegMergeRegression:
     @pytest.mark.parametrize("sep", [";", "&&", "|"])
     @pytest.mark.parametrize("head_label,head", _HEADS)
     @pytest.mark.parametrize("msg_label,tag", _MSGS)
-    @requires_history
     def test_nospace_destructive_head_leg_merge_closed(self, sep, head_label, head, msg_label, tag):
         # `git tag -m <msg><SEP-no-space><destructive-head>` — the F1 eaten-head auth-bypass,
         # across the {gh, curl, wget} head family × {;,&&,|} × {quoted, unquoted} message.
@@ -368,13 +301,11 @@ class TestF1LegMergeRegression:
         assert D(cmd) is True, "mixed-quote message must not leg-merge the tail: %r" % cmd
 
     @pytest.mark.parametrize("sep", [";", "&&", "|"])
-    @requires_history
     def test_safe_control_spaced_separator_no_flip(self, sep):
         # A SPACE before gh keeps the head intact on the pre-fix strip -> no leg-merge.
         cmd = "%s %s %s --delete-branch" % (self._TAG, sep, M5)
         assert D_BASE(cmd) is True and D_PREFIX(cmd) is True and D(cmd) is True
 
-    @requires_history
     def test_safe_control_git_headed_tail_no_flip(self):
         # No-space but git-HEADED tail survives via the permissive _GIT_PREFIX (not eaten).
         cmd = self._TAG + ";" + PF
@@ -384,7 +315,6 @@ class TestF1LegMergeRegression:
         'gh release create v1 --notes "Release v1.0"',
         'gh gist create f.txt --desc "note"',
     ])
-    @requires_history
     def test_other_new_carriers_never_leg_merged(self, carrier):
         # release/gist were already span-scoped (7/7b/7c): the F1-class trigger never
         # leg-merged them (NO second under-block). True on base AND pre-fix AND fixed.
@@ -398,7 +328,6 @@ class TestOverAnchoring:
     -m value. The pre-fix whole-command 7d DID (it matched the trailing `git tag` and
     stripped `git commit`'s -m, leg-merging the gh leg). base=True / pre-fix=False / fixed=True."""
 
-    @requires_history
     def test_over_anchoring_witness_closed(self):
         cmd = 'git commit -m "x";gh pr merge 5;git tag v1'
         assert D_BASE(cmd) is True
@@ -420,7 +349,6 @@ class TestNewCarrierAxisCoverage:
     ]
 
     @pytest.mark.parametrize("label,prefix,suffix", _CARRIERS)
-    @requires_history
     def test_cmdsub_preserved_stays_gated(self, label, prefix, suffix):
         # $()/backtick in the value EXECUTES -> must stay gated (base AND HEAD).
         for val in ['"$(%s)"' % PF, '"`%s`"' % PF]:

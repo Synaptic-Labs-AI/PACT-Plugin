@@ -11,7 +11,7 @@ Summary: Durable BIDIRECTIONAL companion cert for the F2 over-block closure (com
          branch (`-oL` = short value-flag `-o` + glued value `L`, never bundled bools).
 
          Certifies against the REAL is_dangerous_command, base(89061755)-vs-HEAD(6730f908). Baked
-         baseline via git show (crash-atomic; the code is committed, so code-then-tests ordering
+         baseline from a vendored fixture (crash-atomic; the code is committed, so code-then-tests ordering
          is satisfied). The 184-row test_merge_guard_1178_cert.py already covers c21eae19->#1178;
          this is its F2 companion. Destructive verbs assembled at runtime (BD/PF) — file stays
          inert to the live guard.
@@ -34,56 +34,24 @@ Summary: Durable BIDIRECTIONAL companion cert for the F2 over-block closure (com
          FAILS wholesale against base 89061755 (>=1 row proof, mandated). Plus a mutant-of-live-
          source proof that busybox RECURSE membership is load-bearing for the retention.
 """
-import subprocess
 import types
 from pathlib import Path
 
 import pytest  # noqa: E402
 
 import shared.merge_guard_common as mgc  # noqa: E402
+from merge_guard_baseline_loader import load_vendored  # noqa: E402
 
 D = mgc.is_dangerous_command          # PATCH = live worktree HEAD (6730f908, F2 fix)
 
 _BASE_SHA = "89061755"  # pre-F2 (busybox/stdbuf COARSE; hush/lash/msh unrecognized) = 6730f908^
 
 
-_WHY = {}  # sha -> what actually failed, for the skip reason
 
 
-def _load_classifier(sha):
-    """Load merge_guard_common as it existed at `sha`, or None if unavailable (unreachable base commit)."""
-    wt = Path(__file__).resolve().parents[2]
-    try:
-        src = subprocess.check_output(
-            ["git", "-C", str(wt), "show",
-             sha + ":pact-plugin/hooks/shared/merge_guard_common.py"],
-            stderr=subprocess.PIPE,
-        ).decode()
-    except subprocess.CalledProcessError as exc:
-        _WHY[sha] = "git show failed: " + (exc.stderr or b"").decode().strip()
-        return None
-    except (FileNotFoundError, OSError) as exc:
-        _WHY[sha] = "git not runnable: %r" % (exc,)
-        return None
-    mod = types.ModuleType("merge_guard_common_f2_" + sha)
-    mod.__file__ = str(wt / "pact-plugin/hooks/shared/merge_guard_common.py")
-    mod.__package__ = "shared"
-    try:
-        exec(compile(src, mod.__file__, "exec"), mod.__dict__)
-    except Exception as exc:
-        _WHY[sha] = "source loaded (%d bytes) but exec failed: %r" % (len(src), exc)
-        return None
-    return mod
+_BASE = load_vendored(_BASE_SHA)
+D_BASE = _BASE.is_dangerous_command
 
-
-_BASE = _load_classifier(_BASE_SHA)
-D_BASE = _BASE.is_dangerous_command if _BASE is not None else None
-
-requires_history = pytest.mark.skipif(
-    _BASE is None,
-    reason="base(89061755)-vs-HEAD differential did not run: %s"
-           % _WHY.get(_BASE_SHA, "no failure recorded"),
-)
 
 BD = "git " + "branch " + "-D victim"           # danger inside the quoted arg
 PF = "git " + "push " + "--force origin main"
@@ -111,7 +79,6 @@ def _standalone_underblock_fix(cmd):
 # inert click behind busybox/stdbuf/attached-short-value-walker frees. Danger INSIDE the arg.
 # =========================================================================================
 class TestF2Closures:
-    @requires_history
     @pytest.mark.parametrize("label,cmd", [
         ("busybox mycmd",           'busybox mycmd "%s"' % BD),
         ("stdbuf -oL mycmd",        'stdbuf -oL mycmd "%s"' % BD),
@@ -142,7 +109,6 @@ class TestF2Closures:
 # so they are the LOAD-BEARING guard against a fix-introduced under-block. Danger INSIDE the arg.
 # =========================================================================================
 class TestF2Retentions:
-    @requires_history
     @pytest.mark.parametrize("label,cmd", [
         # busybox applet retentions (the applet name is token[1]; each must be a recognized exec).
         ("busybox sh -c",   'busybox sh -c "%s"' % BD),
@@ -178,7 +144,6 @@ class TestF2Retentions:
     def test_retention(self, label, cmd):
         _retention(cmd)
 
-    @requires_history
     @pytest.mark.parametrize("label,cmd", [
         # ADVERSARIAL / patch-shifts-the-edge: a value-flag consuming the executor as its VALUE
         # leaves an unrecognized nested head -> FAIL-SAFE preserve -> CAUGHT (never freed).
@@ -196,7 +161,6 @@ class TestF2Retentions:
     def test_adversarial_retention(self, label, cmd):
         _retention(cmd)
 
-    @requires_history
     @pytest.mark.parametrize("label,cmd", [
         # SANITY: direct executors / bare-token danger unchanged by F2 (True on both).
         ("bash -c",           'bash -c "%s"' % BD),
@@ -215,7 +179,6 @@ class TestF2Retentions:
 # are pinned EXPLICITLY (not swept by monotonicity) — they are a fix, not a new over-block.
 # =========================================================================================
 class TestF2StandaloneShellUnderBlockFix:
-    @requires_history
     @pytest.mark.parametrize("label,cmd", [
         # `hush -c STR` genuinely EXECUTES STR -> catching the danger is CORRECT (under-block fix).
         ("hush -c danger", 'hush -c "%s"' % BD),
@@ -232,7 +195,6 @@ class TestF2StandaloneShellUnderBlockFix:
     def test_standalone_shell_now_caught(self, label, cmd):
         _standalone_underblock_fix(cmd)
 
-    @requires_history
     @pytest.mark.parametrize("label,cmd", [
         # The matching-in-kind REFERENCE class: a recognized shell with a bare arg is True==both.
         # hush/lash/msh "danger" (above) now behave exactly like these — not new-in-kind.
@@ -250,7 +212,6 @@ class TestF2StandaloneShellUnderBlockFix:
 # C), which are INTENDED base-False->HEAD-True under-block fixes, not over-blocks.
 # =========================================================================================
 class TestF2MonotonicityFaithfulInert:
-    @requires_history
     @pytest.mark.parametrize("label,cmd", [
         ("busybox mycmd safe",   'busybox mycmd "hello world"'),
         ("stdbuf -oL ls",        'stdbuf -oL ls -la'),

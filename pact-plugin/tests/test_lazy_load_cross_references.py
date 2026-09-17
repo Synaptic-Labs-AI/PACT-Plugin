@@ -1,24 +1,22 @@
 """
-Cross-reference link validity across all 13 agent bodies (12 teammates + orchestrator).
+Cross-reference link validity across every agent body under agents/ (the teammates and the orchestrator).
 
-Under v4.0.0 lazy-load via markdown cross-references (Option F), every
+Agents load protocol and skill guidance lazily through markdown cross-references, so every
 plugin-relative link to ../protocols/*.md or ../skills/*/SKILL.md in any
 agent body MUST resolve to a real file. A dangling cross-reference would
 fail the lazy-load contract: the agent reads the link, the file is absent,
 and the directive collapses silently.
 
-Two phrasing conventions exist (architect Q3):
+Two phrasing conventions exist:
   - IMPERATIVE: `Read [name](../protocols/name.md) immediately on detecting <trigger>.`
   - SOFT:      `For full detail, see [name](../protocols/name.md).`
 
 These tests check link RESOLUTION; phrasing-convention enforcement is a
 separate concern (and a separate test).
 
-Marker discipline: tests whose passing depends on C1-C9 production landing
-(orchestrator agent file present, 13-entry plugin.json) are xfail-strict
-and flip in C10. Tests that enforce invariants holding pre- AND post-v4.0.0
-(no dangling links, no @-refs) are NOT xfail-strict — they are normal CI
-guards from day one.
+No test here carries an xfail or skip marker; every one is an ordinary guard.
+test_every_expected_agent_file_is_present pins the agent file set by name, and
+the others check the cross-references and @-refs in whichever agent bodies exist.
 """
 import re
 from pathlib import Path
@@ -56,8 +54,8 @@ def _resolve(agent_path: Path, href: str) -> Path:
     return (agent_path.parent / href).resolve()
 
 
-def test_all_13_agent_files_present():
-    """All 13 agent files (12 teammates + orchestrator) must exist."""
+def test_every_expected_agent_file_is_present():
+    """Every file in EXPECTED_AGENT_FILES exists, and no other agent file does."""
     actual = {p.name for p in AGENTS_DIR.glob("*.md")}
     missing = EXPECTED_AGENT_FILES - actual
     extra = actual - EXPECTED_AGENT_FILES
@@ -68,7 +66,7 @@ def test_all_13_agent_files_present():
 def test_protocol_cross_references_resolve():
     """Every ../protocols/*.md link in every agent body must resolve.
 
-    Invariant guard — must hold at every commit, pre- and post-v4.0.0.
+    Invariant guard — must hold at every commit.
     """
     failures = []
     for agent_path in sorted(AGENTS_DIR.glob("*.md")):
@@ -86,7 +84,7 @@ def test_protocol_cross_references_resolve():
 def test_skill_cross_references_resolve():
     """Every ../skills/*/SKILL.md link in every agent body must resolve.
 
-    Invariant guard — must hold at every commit, pre- and post-v4.0.0.
+    Invariant guard — must hold at every commit.
     """
     failures = []
     for agent_path in sorted(AGENTS_DIR.glob("*.md")):
@@ -126,7 +124,7 @@ def test_no_at_ref_in_agent_bodies_for_protocol_or_skill_paths():
     """`@`-refs were empirically falsified for hook additionalContext channel.
     Agent bodies must use plugin-relative markdown links, not `@`-refs.
 
-    Invariant guard — must hold at every commit, pre- and post-v4.0.0.
+    Invariant guard — must hold at every commit.
     """
     at_ref_pattern = re.compile(r"@(?:~/.claude/plugins|\.\./protocols|\.\./skills)\S*\.md")
     failures = []

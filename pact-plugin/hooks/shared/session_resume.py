@@ -104,6 +104,7 @@ def update_session_info(
     team_name: str,
     session_dir: str | None = None,
     plugin_root: str | None = None,
+    started: str | None = None,
 ) -> str | None:
     """
     Write the Current Session section to the project's CLAUDE.md.
@@ -122,6 +123,8 @@ def update_session_info(
         plugin_root: Absolute path to the installed plugin directory (optional).
             When provided, written as "- Plugin root:" line so the orchestrator
             can locate hook scripts without symlink traversal.
+        started: The "Started" value to write; None writes now. A compaction is
+            not a session start, so session_init passes the value already there.
 
     Returns:
         Status message or None if no action taken.
@@ -142,7 +145,7 @@ def update_session_info(
     SESSION_START = SESSION_START_MARKER
     SESSION_END = SESSION_END_MARKER
 
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    timestamp = started or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     # Build session dir line. MUST be written as an absolute path — command
     # files read this value via bash single-quoted expansion which does NOT

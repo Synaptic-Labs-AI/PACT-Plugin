@@ -34,6 +34,8 @@ Output: JSON with `hookSpecificOutput.additionalContext` for status
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import re
@@ -50,6 +52,7 @@ if str(_hooks_dir) not in sys.path:
     sys.path.insert(0, str(_hooks_dir))
 
 # Import shared Task utilities (DRY - used by multiple hooks)
+from shared import compaction_owner
 from shared.task_utils import (
     get_task_list,
     find_feature_task,
@@ -87,6 +90,7 @@ from shared import (
     project_slug,
 )
 from shared.constants import (
+    COMPACTION_TEAMMATE_CLAUSE,
     COMPACT_SUMMARY_ARCHIVE_PREFIX,
     COMPACT_SUMMARY_NAME,
     COMPACT_SUMMARY_ORPHAN_NAME,
@@ -102,6 +106,7 @@ from shared.pact_context import (
     get_session_id,
     is_lead,
     persist_context,
+    strip_pact_namespace,
 )
 from shared.dispatch_helpers import is_registered_pact_specialist
 from shared.session_journal import append_event, make_event
@@ -111,6 +116,8 @@ from shared.pact_config import llm_options
 from shared.peer_context import get_peer_context
 from shared.session_registry import resolve as _registry_resolve
 from shared.paths import get_claude_config_dir
+from shared import state_file
+from shared.project_scope import WORKTREE_IDENTITY_FILE, _rev_parse_path
 from shared import backlog_store
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
@@ -135,16 +142,26 @@ from shared.session_resume import (
 )
 
 
-# #864 Phase 1: one-time startup notice recommending tmux for unattended runs
-# when the effective teammateMode is not positively "tmux". Emitted via
-# system_messages (user-facing) by main() step 0b. Lives HERE (presentation
-# layer) rather than in shared/teammate_mode.py (resolution layer) per SRP.
+# One-time startup notice about unattended-run stalls, emitted when the
+# effective teammateMode is not positively "tmux". Emitted via system_messages
+# (user-facing) by main() step 0b. Lives HERE (presentation layer) rather than
+# in shared/teammate_mode.py (resolution layer) per SRP.
 # Pure literal (no interpolation) so tests can pin the exact substring.
+#
+# THE tmux CLAIM IS SCOPED ON PURPOSE AND MUST STAY SCOPED. An unattended run
+# stalls on two independent channels: a teammate wake not being delivered, and
+# a background job finishing with nobody listening. Switching teammate mode
+# addresses the FIRST ONLY — the second never uses the message path. An earlier
+# version of this notice recommended tmux without that bound, so a reader could
+# follow it, switch modes, and still stall on the failure the notice appears to
+# warn about. Do not restore an unqualified "relaunch with tmux for hands-off
+# runs": that sentence is the defect, not a simplification of it.
 _INPROCESS_MODE_NOTICE = (
     "PACT: unattended runs may stall in in-process teammate mode "
     "(the lead can sit idle awaiting a wake that needs a manual nudge). "
-    "For hands-off runs, relaunch with `--teammate-mode tmux` for reliable "
-    "native delivery, or keep a heartbeat — see reference/unattended-runs.md."
+    "`--teammate-mode tmux` makes teammate wake delivery reliable; it does "
+    "NOT cover a background job that finishes with nobody watching "
+    "— see reference/unattended-runs.md."
 )
 
 # Unknown-role startup warning. The lead-only writes below are gated
@@ -239,7 +256,7 @@ def _should_warn_unknown_role(input_data: dict) -> bool:
         # Present-but-non-string (unhashable/odd) agent_type: not lead, not a
         # resolvable specialist spelling → treat as unrecognized → fire.
         return True
-    stripped = agent_type.removeprefix("PACT:")
+    stripped = strip_pact_namespace(agent_type)
     plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
     return not is_registered_pact_specialist(stripped, plugin_root=plugin_root)
 
@@ -590,6 +607,50 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
     return None
 
 
+# The "Started" line update_session_info writes, in its exact timestamp shape.
+_SESSION_STARTED_RE = re.compile(
+    r"^- Started: (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC)$", re.MULTILINE
+)
+
+
+def _extract_session_started(project_dir: str) -> str | None:
+    """The "Started" value in the project CLAUDE.md's Current Session block.
+
+    None when there is no CLAUDE.md, no such line, or the lock times out. Only
+    the exact shape update_session_info writes is returned, so no other text
+    from the file can reach the block it rewrites.
+    """
+    if not project_dir:
+        return None
+    try:
+        claude_md, source = resolve_project_claude_md_path(project_dir)
+        if source == "new_default":
+            return None
+        with file_lock(claude_md):
+            content = claude_md.read_text(encoding="utf-8")
+    except (OSError, TimeoutError):
+        return None
+    match = _SESSION_STARTED_RE.search(content)
+    return match.group(1) if match else None
+
+
+def _kept_started_at(session_id: str, project_dir: str) -> str | None:
+    """The started_at already in this session's context file, or None.
+
+    Reads the file build_context_cache writes. None when it is missing,
+    unreadable, or not a timezone-aware ISO-8601 time.
+    """
+    try:
+        path = (
+            build_session_path(project_slug(project_dir), str(session_id))
+            / "pact-session-context.json"
+        )
+        value = json.loads(path.read_text(encoding="utf-8")).get("started_at")
+        return value if datetime.fromisoformat(value).tzinfo else None
+    except Exception:
+        return None
+
+
 # Render-hostile characters that, present anywhere in a session_id, render
 # the id unsafe for use in single-line textual contexts like the CLAUDE.md
 # Resume line. Covers C0 controls (0x00-0x1f, includes \n 0x0a, \r 0x0d),
@@ -610,8 +671,27 @@ _SESSION_ID_CONTROL_CHARS_RE = SESSION_ID_CONTROL_CHARS_RE
 # never drift.
 
 
+def _bootstrap_already_ran(session_dir: str) -> bool:
+    """True when bootstrap_gate's own marker check passes for session_dir.
+
+    The gate module is imported by name, at call time, so this is the check the
+    gate enforces, not a copy: a touched or unsigned marker does not count. If the
+    gate's own imports fail, its fail-closed branch prints a PreToolUse decision
+    and exits. So the import runs with stdout captured, and anything raised,
+    SystemExit included, reads as not set, which keeps the bootstrap directive.
+    """
+    if not session_dir:
+        return False
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            import bootstrap_gate
+        return bootstrap_gate.is_marker_set(Path(session_dir)) is True
+    except BaseException:
+        return False
+
+
 def _build_safety_net_context(
-    team_name: str | None, frame_role: str | None = None
+    team_name: str | None, frame_role: str | None = None, source: str | None = None
 ) -> str:
     """
     Build a minimal governance-delivery additionalContext string for the
@@ -697,6 +777,9 @@ def _build_safety_net_context(
                     and carries no bootstrap directive, and every other value
                     ("lead" and "unknown" today) selects the orchestrator
                     marker, with "unknown" also receiving the operator notice.
+        source: The SessionStart source captured before the exception, or None.
+                On "compact" the orchestrator prelude carries the teammate
+                clause, as the normal compact directive does.
 
     Returns:
         Minimal additionalContext string suitable for the except-block
@@ -716,7 +799,8 @@ def _build_safety_net_context(
         )
     prelude = (
         'YOUR PACT ROLE: orchestrator.\n\n'
-        'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input. '
+        + (f'{COMPACTION_TEAMMATE_CLAUSE}\n\n' if source == "compact" else '')
+        + 'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input. '
         'Do this before anything else. '
         'Do not evaluate whether it is needed. '
         'You must invoke Skill("PACT:bootstrap") on every session start.'
@@ -892,6 +976,22 @@ def _archive_stale_compact_summary(session_id: str, project_dir: str) -> None:
         summary.replace(destination)
     except OSError:
         pass  # Fail-open: keep the bytes; never block session init for cleanup
+
+
+def _settle_staged_summaries(session_id: str, project_dir: str) -> None:
+    """Settle the compaction summaries postcompact_archive staged for this session.
+
+    Runs before either clear below, so a lead summary still waiting to be
+    promoted is promoted first and then cleared with the rest. Never raises.
+    """
+    if not (session_id and project_dir):
+        return
+    try:
+        compaction_owner.settle(
+            str(build_session_path(project_slug(project_dir), str(session_id)))
+        )
+    except Exception:
+        pass
 
 
 def _archive_own_dir_stale_summary(session_id: str, project_dir: str) -> None:
@@ -1172,6 +1272,45 @@ def _persist_project_dir_env(project_dir: str) -> None:
         pass
 
 
+def _record_worktree_identity(session_id: str, project_dir: str) -> None:
+    """Record which repository this session's linked worktree belongs to.
+
+    Writes `<session_dir>/worktree-identity.json` when `project_dir` lies inside
+    a linked worktree (its git dir and common dir differ), including a
+    subdirectory of one. The working-memory write guard reads it back once that
+    worktree is removed and git can no longer say which repository the declared
+    directory was in. Runs for every role, so a separate-process teammate
+    records its own session.
+
+    Fail-open: any error leaves no record.
+    """
+    try:
+        directory = Path(project_dir)
+        if not directory.is_dir():
+            return
+        git_dir = _rev_parse_path(directory, "--git-dir")
+        common_dir = _rev_parse_path(directory, "--git-common-dir")
+        if git_dir is None or common_dir is None or git_dir == common_dir:
+            return
+        worktree = _rev_parse_path(directory, "--show-toplevel")
+        if worktree is None:
+            return
+        record = {
+            "session_id": session_id,
+            "declared": os.path.realpath(project_dir),
+            "worktree": str(worktree),
+            "common_dir": str(common_dir),
+        }
+        state_file.write_text(
+            build_session_path(project_slug(project_dir), session_id)
+            / WORKTREE_IDENTITY_FILE,
+            json.dumps(record),
+            root=get_claude_config_dir() / "pact-sessions",
+        )
+    except Exception:
+        return
+
+
 def main():
     """
     Main entry point for the SessionStart hook.
@@ -1213,6 +1352,8 @@ def main():
     # no-regression default (a teammate failing before the capture is mis-marked
     # orchestrator), not a misroute introduced by this change.
     frame_role = None
+    # The SessionStart source, captured with frame_role for the safety net.
+    source = None
     # Track whether stdin JSON parsing failed, so the R3 malformed-stdin
     # gate below can distinguish "stdin was malformed JSON" from "stdin
     # parsed but session_id was missing/blank". Both paths fall through
@@ -1296,6 +1437,8 @@ def main():
         # Adopt a session dir written under the unresolved project basename
         # BEFORE any writer below can create the resolved-slug dir.
         _adopt_old_slug_session_dir(input_data.get("session_id", ""), project_dir)
+
+        _settle_staged_summaries(input_data.get("session_id", ""), project_dir)
 
         if source != "compact":
             _archive_stale_compact_summary(
@@ -1667,6 +1810,9 @@ def main():
         if not session_id_was_missing:
             team_name = _resolve_aligned_team_name(session_id, default=team_name)
 
+        if not session_id_was_missing:
+            _record_worktree_identity(session_id, project_dir)
+
         # Lead-role gate (#877). is_lead is total (never raises) and reads only
         # the harness-set agent_type. Computed once and reused for both Class-A
         # writes below so the disk-write split and the journal-anchor gate share
@@ -1683,8 +1829,16 @@ def main():
                 # build_context_cache is the sole owner of _cache; persist_context
                 # is the is_lead-gated best-effort disk side-effect. See the
                 # build_context_cache / persist_context docstrings.
+                # A compaction is not a session start, so it keeps the recorded
+                # start. That also leaves the file byte-identical when an
+                # in-process teammate's compaction, which arrives lead-shaped,
+                # rewrites it.
                 _ctx_result = build_context_cache(
                     team_name, session_id, project_dir, plugin_root,
+                    started_at=(
+                        _kept_started_at(session_id, project_dir)
+                        if source == "compact" else None
+                    ),
                 )
                 if frame_is_lead and _ctx_result is not None:
                     persist_context(*_ctx_result)
@@ -1763,22 +1917,40 @@ def main():
         # Single platform-managed directive for every session source. The
         # platform pre-creates exactly one team per session (Claude Code
         # v2.1.178+), so the team always exists by the time the orchestrator
-        # acts — the directive's only job is to name the team and block until
-        # bootstrap completes. "(provided by the platform for this session)" is
-        # correct for both fresh and resumed sessions, so no team-existence
-        # discrimination is needed. The bootstrap-blocking sentence is the
-        # universal floor: it aligns this guidance with the bootstrap_gate
-        # PreToolUse hook, which already mechanically blocks Edit/Write/Agent
-        # until the bootstrap marker is stamped regardless of session source.
+        # acts — the directive's only job is to name the team and to block until
+        # bootstrap completes, or say that it has. "(provided by the platform
+        # for this session)" is correct for both fresh and resumed sessions, so
+        # no team-existence discrimination is needed. The bootstrap-blocking
+        # sentence aligns this guidance with the bootstrap_gate PreToolUse hook,
+        # which mechanically blocks Edit/Write/Agent until the bootstrap marker
+        # is stamped. It is dropped only on a compaction whose marker is already
+        # stamped.
+        # On compact, a teammate clause follows the marker line. An in-process
+        # teammate's compaction arrives lead-shaped and receives this same
+        # directive, and its system prompt, unlike its spawn prompt, survives
+        # the compaction, so the clause keys on the system prompt. It tells a
+        # teammate when to set aside "Do not evaluate whether it is needed."
+        # The compact branch swaps the invoke sentences for _ran_sentence when
+        # the bootstrap marker is already set; every other path uses this text.
+        _compact_clause = (
+            f'{COMPACTION_TEAMMATE_CLAUSE}\n\n'
+            if source == "compact" else ''
+        )
+        _role_line = f'YOUR PACT ROLE: orchestrator.\n\n{_compact_clause}'
+        _team_line = f'Your team is `{team_name}` (provided by the platform for this session). '
         _team_directive = (
-            f'YOUR PACT ROLE: orchestrator.\n\n'
+            f'{_role_line}'
             f'Invoke Skill("PACT:bootstrap") immediately, without waiting for user input. '
             f'Do this before anything else. '
             f'Do not evaluate whether it is needed. '
             f'You must invoke Skill("PACT:bootstrap") on every session start.\n\n'
-            f'Your team is `{team_name}` (provided by the platform for this session). '
+            f'{_team_line}'
             f'Do not read files, explore code, or respond to the user until bootstrap is complete. '
             f'{_substitutions}'
+        )
+        _ran_sentence = (
+            'Bootstrap already ran in this session. '
+            'Do not invoke Skill("PACT:bootstrap") again after this compaction.\n\n'
         )
 
         # Hoist get_task_list() above the source-branch dispatch so both the
@@ -1898,7 +2070,7 @@ def main():
             if source == "compact":
                 # Post-compaction: bootstrap directive subsumes "recover state"
                 # guidance; keep concrete task-resumption bullets for the
-                # orchestrator's next actions after bootstrap.
+                # orchestrator's next actions.
                 # Refresh-awareness (presentation-only): an unspent
                 # session_refreshed event means /PACT:refresh stopped the
                 # teammates before this compact — a SendMessage to a stopped
@@ -1939,25 +2111,60 @@ def main():
                 # the top of this function). Interpolating it blind would emit an
                 # instruction naming an empty directory — no error, just a
                 # confidently wrong sentence — so fall back to the briefing.
+                #
+                # A session-scoped summary that no transcript attributes to this
+                # session is parked and never written to that path, so the file
+                # can also be absent without an archive. The lead then continues
+                # from the summary in its own context. The instruction never
+                # names a parked file: it may hold a teammate's summary. The root
+                # singleton is written directly, so only an archive empties it.
                 if session_dir:
                     _summary_path = Path(session_dir) / COMPACT_SUMMARY_NAME
                     _archive_clause = (
-                        f'(if it is gone, the secretary archived it into '
-                        f'{session_dir} as compact-summary-<timestamp>.txt)'
+                        f'(if it is absent, either the secretary archived it into '
+                        f'{session_dir} as compact-summary-<timestamp>.txt, or it was '
+                        f'not attributed to this session and you continue from the '
+                        f'summary already in your context)'
                     )
                 else:
                     _summary_path = get_compact_summary_path()
                     _archive_clause = (
-                        '(if it is gone, the secretary archived it into the '
+                        '(if it is absent, the secretary archived it into the '
                         'session directory and names the path in its briefing)'
                     )
+                # Bootstrap is complete by the gate's own marker check, so the
+                # directive stops asking for it. A pending refresh keeps the
+                # invoke text, because its secretary clause says to run
+                # /PACT:bootstrap, and a refresh does not clear the marker.
+                if not refresh_pending and _bootstrap_already_ran(session_dir):
+                    _directive = f'{_role_line}{_ran_sentence}{_team_line}{_substitutions}'
+                    _recover = 'Recover session state: '
+                else:
+                    _directive = _team_directive
+                    _recover = 'After bootstrap, recover session state: '
+                # The platform re-attaches each invoked skill cut to 20,000
+                # characters, and drops the oldest once its budget is full, so
+                # a long-running workflow's command can come back cut short or
+                # not at all. An empty plugin_root would render a Read of
+                # /commands/<name>.md, so it names the file without the root.
+                _command_file = (
+                    f'`{plugin_root}/commands/<name>.md`' if plugin_root
+                    else "the PACT plugin's `commands/<name>.md`"
+                )
                 context_parts.insert(0, (
-                    f'{_team_directive} '
-                    f'After bootstrap, recover session state: '
+                    f'{_directive} '
+                    f'{_recover}'
                     f'(1) Read {_summary_path} for prior context '
                     f'{_archive_clause}, '
                     f'(2) Run TaskList to find in-progress work, '
                     f'(3) read the task files of in-progress tasks for details (TaskGet does not surface metadata). '
+                    f'(4) If a PACT workflow you started is still in progress in TaskList, and its copy '
+                    f'among the re-attached skills above is cut short or missing, Read {_command_file} '
+                    f'in full before you continue it, where `PACT:<name>` is that workflow. '
+                    f'If the Read reports a partial view, read the remaining pages. '
+                    f'Do not invoke the workflow again: that starts it over. '
+                    f'If the file shows `$ARGUMENTS` where the task it was started for belongs, '
+                    f'take that task from its re-attached copy or from your summary. '
                     f'{_secretary_clause}'
                 ))
                 # Secondary-layer (#444): append POST-COMPACTION CHECKPOINT block
@@ -2081,7 +2288,10 @@ def main():
         # the lead's session block in the shared project file. Gate on is_lead
         # in addition to the existing sentinel guard.
         if frame_is_lead and not _is_unknown_or_missing_session(session_id):
-            session_msg = update_session_info(session_id, team_name, session_dir, plugin_root)
+            session_msg = update_session_info(
+                session_id, team_name, session_dir, plugin_root,
+                started=_extract_session_started(project_dir) if source == "compact" else None,
+            )
             if session_msg:
                 if "failed" in session_msg.lower() or "skipped" in session_msg.lower():
                     system_messages.append(session_msg)
@@ -2322,7 +2532,7 @@ def main():
         # additionalContext, alongside the error in systemMessage. Claude
         # Code's hook-output schema supports both fields in the same JSON.
         print(f"Hook warning (session_init): {str(e)[:200]}", file=sys.stderr)
-        safety_net_context = _build_safety_net_context(team_name, frame_role)
+        safety_net_context = _build_safety_net_context(team_name, frame_role, source)
         # hookEventName is required by the harness; missing it silently fails open
         output = {
             "hookSpecificOutput": {

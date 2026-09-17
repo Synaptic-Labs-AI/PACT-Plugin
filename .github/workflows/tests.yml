@@ -171,9 +171,9 @@
 #   than none, because the heading vouches for it.
 #   Remaining skips include intentional carve-outs (live-tmux-only probes,
 #   orchestrator carve-out, pin-caps test-design, fuzz-strategy edges),
-#   version-conditional cases, and the baked-SHA differentials: a file skips
-#   when any SHA in its required set is unreachable here, and runs locally only
-#   where those objects survive uncollected.
+#   version-conditional cases, and baked-SHA differentials in files that still
+#   read git history: such a file skips a differential when a SHA it needs is
+#   unreachable from origin's refs.
 #   Green-with-skips is the accepted CI outcome; skipped is not failed.
 
 name: tests
@@ -234,18 +234,18 @@ jobs:
       # deprecated by GitHub — forced off by 2026-06-16, so re-pinned forward).
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
-          # Full history so the baked-base cert files can `git show <base-sha>`
-          # (their base-vs-HEAD non-vacuity differentials). The default shallow
-          # clone (fetch-depth: 1) lacks those commits -> `git show` fails ->
-          # those files abort collection (0 tests run).
-          # This does NOT make every differential run. `fetch-depth` sets DEPTH,
-          # not REFSPEC, and cannot fetch a commit no ref reaches. A file skips
-          # when ANY SHA in its required set is unreachable — for most files a
-          # pre-fix or HEAD-side SHA reached only by a local fix/* or fork/*
-          # branch, and in one file the base itself. The guards then skip, which
-          # is correct behaviour, not a fallback. Those commits survive on a
-          # developer's machine only as unreferenced objects not yet
-          # garbage-collected, which is the whole local-versus-CI difference.
+          # Full history, because two certification files still load a base
+          # commit's merge_guard_common.py with `git show <sha>` for their
+          # base-vs-HEAD differentials: test_merge_guard_1178_cert.py and
+          # test_merge_guard_1136_canonical_join_ssot.py, whose bases are on
+          # main. In a shallow clone (fetch-depth: 1) those commits are absent,
+          # `git show` fails, and those differential rows skip. fetch-depth sets
+          # DEPTH, not REFSPEC: it cannot fetch a commit no ref on origin
+          # reaches, so a history-reading file also skips a differential whose
+          # SHA only a deleted branch or a fork reaches. Certification files
+          # whose bases are vendored under
+          # pact-plugin/tests/fixtures/merge_guard_baseline/ read no history
+          # and fail, never skip, when a base is missing.
           fetch-depth: 0
 
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6

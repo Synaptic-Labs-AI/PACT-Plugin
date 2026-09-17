@@ -35,9 +35,10 @@ chain. Three real multi-hop cases this catches:
   - task_lifecycle_gate -> teachback_schema -> variety_scorer   (shared 2-hop)
   - session_init -> staleness -> pin_caps                       (top-level 2-hop)
   - <every pact_context importer> -> pact_context -(relative)-> session_registry
-    (session_registry is the identity-resolution seam — reached by 11 hooks via
-    pact_context's `from .session_registry import`; a regex deriver that skips
-    relative edges under-attributes it to just the 2 direct importers)
+    (session_registry is the identity-resolution seam — reached by every
+    pact_context importer via pact_context's `from .session_registry import`;
+    a regex deriver that skips relative edges under-attributes it to its direct
+    importers only)
 A direct-only, shared-only, OR absolute-only map would MISS these — recreating a
 miniature inert-ship false-negative at the classifier layer. The asymmetry
 favors closure: a false positive costs one L2 test; a false negative is the
@@ -66,7 +67,26 @@ SEAM_DEPENDENT_HOOKS: frozenset[str] = frozenset({
     # (fail-LOUD) -> L2-only, never L3 (no mode-divergent signal -> no both-modes
     # matrix). KD-10.
     "merge_guard_pre", "merge_guard_post",
-})  # 14
+    # track_files JOINS with Layer 1 of the background-work registry: it now
+    # reads the team task store and writes
+    # ~/.claude/teams/<team>/background_work.json — task-dir resolution AND
+    # team config, so it meets the criterion above outright.
+    "track_files",
+    # wait_filler_gate: the background-launch advisory reads team config and the
+    # session registry to tell a teammate from an Agent-tool subagent. That path
+    # never denies and fails open, so it is L2-only.
+    "wait_filler_gate",
+    # stop_background_gate: the Stop turn-end gate resolves the team from the
+    # session context or the session registry, reads the task store and the
+    # background-work registry, and writes a told-once file and a journal
+    # trace. Its block fails silent on a broken seam: see L3_LIVE_PROBE_HOOKS.
+    "stop_background_gate",
+    # postcompact_archive: it stages the session's compaction summary and
+    # settles earlier ones, reading the platform's transcripts to decide whose
+    # compaction each was and journaling the verdict. Its L2 test runs the real
+    # hooks over a temporary projects tree.
+    "postcompact_archive",
+})
 
 # Hooks confirmed to FAIL SILENTLY on a broken seam (a consequential effect that
 # should fire simply does not, with no error) -> they additionally require an L3
@@ -82,10 +102,25 @@ SEAM_DEPENDENT_HOOKS: frozenset[str] = frozenset({
 # broken team_name/task-read seam, read_task_json returns None -> the gate
 # returns False -> that emit silently no-ops. The b2 emit is teammateMode/
 # timing-sensitive, the residual gap an L2 test cannot close.
+#
+# stop_background_gate and validate_handoff joined with the turn-end gate. Each
+# prints a block refusing a turn end over unacknowledged background work, and
+# decides it by resolving the team, the task store and the background-work
+# registry (validate_handoff also reads the platform's subagent metadata). On a
+# broken seam the role resolves to nothing and the stop is allowed with no
+# error, so the block silently never fires. validate_handoff was promoted from
+# L3_CANDIDATE_HOOKS for that reason.
+#
+# session_init, postcompact_archive and bootstrap_gate settle staged compaction
+# summaries by reading the platform's transcripts. On a broken seam, such as a
+# changed transcript layout, every staged summary expires unmatched: it is
+# journaled as {unknown, expired}, but the lead's own summary is then parked as
+# unattributed and never becomes compact-summary.txt.
 L3_LIVE_PROBE_HOOKS: frozenset[str] = frozenset({
     "missed_wake_scan", "teammate_idle", "agent_handoff_emitter",
-    "task_lifecycle_gate",
-})  # 4
+    "task_lifecycle_gate", "stop_background_gate", "validate_handoff",
+    "session_init", "postcompact_archive", "bootstrap_gate",
+})
 
 # Seam-dependent hooks ASSESSED in the CODE-phase fails-silent check and HELD at
 # L2-only (no consequential silent no-op meeting the L3 bar). Retained as a
@@ -95,18 +130,19 @@ L3_LIVE_PROBE_HOOKS: frozenset[str] = frozenset({
 #   - peer_inject:     a silent peer-context injection failure is consequential
 #                      but more VISIBLE (the spawned subagent misbehaves), so it
 #                      does not meet the silent-inert bar; watch-candidate.
-#   - validate_handoff: its exit-0/stdout contract never depends on a seam —
-#                      the degrade path's journal append (handoff_refusal_degraded)
-#                      is fail-open telemetry, so it cannot go inert the
-#                      inert-ship way; held at L2.
+# (validate_handoff was held here until its turn-end background block made it
+#  fail silently on a broken seam; it is now in L3_LIVE_PROBE_HOOKS.)
 L3_CANDIDATE_HOOKS: frozenset[str] = frozenset({
-    "file_tracker", "peer_inject", "validate_handoff",
-})  # 3 — assessed, held at L2-only
+    "file_tracker", "peer_inject",
+})  # assessed, held at L2-only
 
-# dispatch_gate + bootstrap_gate are fail-CLOSED (their decision-domain
-# uncertainty path is exit(2) DENY, and they make no get_task_list call) -> they
-# fail LOUD, never silent-inert -> L2-only, never L3. (CODE-confirmed: their
-# exit(0) paths are input-side fail-open + legitimate ALLOW, not seam-error.)
+# dispatch_gate is fail-CLOSED (its decision-domain uncertainty path is exit(2)
+# DENY, and it makes no get_task_list call) -> it fails LOUD, never silent-inert
+# -> L2-only, never L3. (CODE-confirmed: its exit(0) paths are input-side
+# fail-open + legitimate ALLOW, not seam-error.) bootstrap_gate's DECISION fails
+# loud the same way, but its compaction-summary settle seat fails SILENT: on a
+# broken seam the lead's summary is parked and nothing errors. That seat is why
+# bootstrap_gate is in L3_LIVE_PROBE_HOOKS.
 
 
 # ─── Transitive helper import closure (authoritative SSOT data) ─────────────
@@ -117,7 +153,8 @@ L3_CANDIDATE_HOOKS: frozenset[str] = frozenset({
 # via AST following ABSOLUTE + RELATIVE (`from .X`) + function-level imports
 # (NOT regex — regex silently skips relative edges, e.g. pact_context's
 # `from .session_registry import resolve`, which under-attributes session_registry
-# to its 2 direct importers among the seam hooks instead of every pact_context importer). The
+# to its direct importers among the seam hooks instead of every pact_context
+# importer). The
 # meta-test re-derives the same way (AST, relative-following) and asserts
 # equality so this literal cannot drift. An edit to any helper in a hook's
 # closure can change that hook's behavior -> the edit is SECONDARY.
@@ -134,13 +171,27 @@ L3_CANDIDATE_HOOKS: frozenset[str] = frozenset({
 # derivation).
 _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
     "missed_wake_scan": frozenset({
-        "constants", "intentional_wait", "pact_context", "paths",
-        "session_journal", "session_registry", "session_state", "task_utils",
-    }),
+        "background_launch", "background_work",
+        "constants", "intentional_wait", "pact_context",
+        "paths",
+        "session_journal", "session_registry", "session_state", "state_file",
+        "task_utils",
+    }),  # state_file reached via background_work's state-file reads and writes.
     "teammate_idle": frozenset({
-        "constants", "error_output", "pact_context", "paths", "session_journal",
-        "session_registry", "session_state", "task_utils",
+        "background_launch", "background_work",
+        "constants", "error_output", "intentional_wait",
+        "pact_context", "paths", "session_journal",
+        "session_registry", "session_state", "state_file", "task_utils",
     }),
+    "track_files": frozenset({
+        "background_launch", "background_work",
+        "claude_md_manager", "constants", "error_output",
+        "failure_cause", "git_helpers", "intentional_wait", "pact_context", "paths",
+        "pin_caps", "project_scope", "session_journal", "session_registry", "session_state",
+        "staleness", "state_file", "task_utils",
+    }),  # regenerated from the live derivation, not hand-listed: the Layer 1
+         # fold adds background_work + intentional_wait, and the rest were
+         # already reached through the pin-staleness clear this hook carries.
     "agent_handoff_emitter": frozenset({
         "agent_handoff_marker", "canonical_json", "constants",
         "pact_context", "paths",
@@ -150,13 +201,16 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # seam (emit_task_metadata_snapshot); its own transitive edges
          # (agent_handoff_marker, session_journal) were already here.
     "session_init": frozenset({
-        "claude_md_manager", "constants", "dispatch_helpers", "failure_cause",
-        "failure_log", "handoff_schema",
+        "backlog_store",
+        "claude_md_manager", "compaction_owner", "constants", "dispatch_helpers", "failure_cause",
+        "failure_log", "git_helpers", "handoff_schema", "marker_schema",
         "merge_guard_common", "pact_config", "pact_context", "paths",
-        "peer_context", "pin_caps", "plugin_manifest",
+        "peer_context", "pin_caps", "plugin_manifest", "project_scope",
         "session_journal", "session_registry", "session_resume",
-        "session_state", "staleness", "symlinks", "task_utils", "teammate_mode",
-    }),  # pact_config reached via the SessionStart runtime-config injection
+        "session_state", "staleness", "state_file", "symlinks", "task_utils", "teammate_mode",
+    }),  # backlog_store reached via `from shared import backlog_store`, an edge
+         # the oracle resolves since it reads modules named in the import alias.
+         # pact_config reached via the SessionStart runtime-config injection
          # (session_init -> shared.pact_config.llm_options); stdlib-only, so it
          # adds no further transitive shared edges.
          # top-level helpers (pin_caps, staleness) reached here:
@@ -165,14 +219,25 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # name moved to `shared.constants`. session_init takes that name from
          # there, so a SessionStart no longer loads a fail-closed PreToolUse
          # gate to read one string.
+         # marker_schema reached via the function-level bootstrap_gate import
+         # that checks the bootstrap marker on a compaction. bootstrap_gate is
+         # itself a seam hook, so it is not listed here; only its helper is.
+         # That import runs on the compact branch only, with its output
+         # captured, and a failure to load reads as no marker.
     "session_end": frozenset({
         "constants", "error_output", "pact_context", "paths", "session_journal",
         "session_registry", "session_state", "task_utils",
     }),
-    "dispatch_gate": frozenset({
-        "constants", "dispatch_helpers", "pact_config", "pact_context", "paths",
+    "postcompact_archive": frozenset({
+        "compaction_owner", "constants", "error_output", "pact_context", "paths",
         "session_journal", "session_registry", "session_state",
-        "stale_session", "task_utils",
+    }),  # compaction_owner reached via staging and settling the summary;
+         # session_journal via compaction_owner's compaction_attributed event.
+    "dispatch_gate": frozenset({
+        "background_launch", "background_work", "constants",
+        "dispatch_helpers", "intentional_wait", "pact_config", "pact_context",
+        "paths", "session_journal", "session_registry", "session_state",
+        "stale_session", "state_file", "task_utils",
     }),  # pact_config reached here via the *_MODE resolver edge
          # (dispatch_gate -> shared.pact_config.get_enum for
          # PACT_DISPATCH_INLINE_MISSION_MODE); pact_config is stdlib-only, so it
@@ -180,12 +245,17 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # stale_session reached here via the deny-message self-diagnosis
          # (dispatch_gate -> shared.stale_session.detect_stale_session_block);
          # its own transitive pact_context edge was already in this closure.
+         # background_work reached via rule ⑥'s registered-teammate check
+         # (dispatch_gate -> shared.background_work.frame_team_and_name, imported
+         # inside a function); background_launch, intentional_wait and
+         # state_file are its transitive edges.
     "task_lifecycle_gate": frozenset({
         "agent_handoff_marker", "canonical_json", "constants",
         "dispatch_helpers", "handoff_schema",
         "intentional_wait", "pact_context", "paths", "session_journal",
         "session_registry", "session_state", "task_metadata_snapshot",
         "task_utils", "teachback_schema", "tool_response", "variety_scorer",
+        "background_launch", "background_work", "state_file",
     }),  # task_metadata_snapshot reached via the lead-completion +
          # post-completion-backstop snapshot seams; its transitive edges
          # were already in this closure.
@@ -193,10 +263,12 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # + completion-time); it is a pure stdlib-free leaf, so it adds no
          # further transitive edges.
     "bootstrap_gate": frozenset({
-        "constants", "marker_schema", "pact_context",
+        "compaction_owner", "constants", "marker_schema", "pact_context",
         "paths", "session_journal", "session_registry",
         "session_state",
-    }),  # #1023 SHRANK this closure: the carve-out's binding 5 no longer
+    }),  # compaction_owner reached via the function-level import that settles
+         # staged compaction summaries before a Read or Bash names one.
+         # #1023 SHRANK this closure: the carve-out's binding 5 no longer
          # imports bootstrap_marker_writer (it reads the gate-local
          # _secretary_in_members JOIN witness via the already-top-level
          # pact_context._iter_members), so bootstrap_gate no longer reaches
@@ -208,9 +280,9 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # staleness -> pin_caps) and are now gone from this closure.
          # bootstrap_marker_writer's OWN closure (below) is unchanged.
     "bootstrap_marker_writer": frozenset({
-        "claude_md_manager", "constants", "failure_cause", "handoff_schema",
+        "compaction_owner", "claude_md_manager", "constants", "failure_cause", "git_helpers", "handoff_schema",
         "marker_schema",
-        "pact_context", "paths", "pin_caps", "session_journal",
+        "pact_context", "paths", "pin_caps", "project_scope", "session_journal",
         "session_registry", "session_resume", "session_state", "staleness",
     }),  # handoff_schema reached TRANSITIVELY, via session_resume's
          # resolve_handoff_field on the resume-brief decision summary — this
@@ -224,17 +296,30 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # is the SOURCE edge that also grows bootstrap_gate's closure (which
          # imports bootstrap_marker_writer).
     "file_tracker": frozenset({
-        "constants", "pact_context", "paths", "session_journal",
-        "session_registry", "session_state",
+        "background_launch", "background_work", "constants", "intentional_wait",
+        "pact_context", "paths", "session_journal", "session_registry",
+        "session_state", "state_file", "task_utils",
     }),
     "peer_inject": frozenset({
-        "constants", "pact_context", "paths", "peer_context", "plugin_manifest",
-        "session_journal", "session_registry", "session_state",
+        "background_launch", "background_work", "constants", "intentional_wait",
+        "pact_context", "paths", "peer_context", "plugin_manifest",
+        "session_journal", "session_registry", "session_state", "state_file",
+        "task_utils",
     }),
     "validate_handoff": frozenset({
-        "constants", "error_output", "pact_context", "paths",
-        "session_journal", "session_registry", "session_state",
-    }),
+        "background_launch", "background_work", "constants", "error_output",
+        "intentional_wait", "pact_context", "paths", "session_journal",
+        "session_registry", "session_state", "state_file", "task_utils",
+        "turn_end_gate", "turn_end_jobs",
+    }),  # regenerated from the live derivation: the SubagentStop background
+         # check imports turn_end_gate, which reaches background_work and
+         # state_file and their helpers.
+    "stop_background_gate": frozenset({
+        "background_launch", "background_work", "constants", "intentional_wait",
+        "pact_context", "paths", "session_journal", "session_registry",
+        "session_state", "state_file", "task_utils", "turn_end_gate",
+        "turn_end_jobs",
+    }),  # regenerated from the live derivation.
     "merge_guard_pre": frozenset({
         "constants", "merge_guard_common", "pact_context", "paths",
         "session_journal", "session_registry", "session_state",
@@ -247,6 +332,11 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "tool_response",
     }),  # post additionally reaches error_output (fail-loud alert) and
          # tool_response (the canonical-envelope extractor).
+    "wait_filler_gate": frozenset({
+        "background_launch", "background_work", "constants", "intentional_wait",
+        "pact_context", "paths", "session_journal", "session_registry",
+        "session_state", "state_file", "task_utils"
+    }),
 }
 
 # Every helper module (top-level OR shared) transitively reachable from at least
@@ -257,14 +347,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
 # waiver path.
 SEAM_READING_HELPERS: frozenset[str] = frozenset().union(
     *_SEAM_HOOK_HELPER_CLOSURE.values()
-)  # 30 = 28 modules under hooks/shared/ (including paths, the config-dir
-# SSOT) + 2 top-level hooks (pin_caps, staleness). COUNTING RULE, stated
-# because the number is not checkable without it: the union of the closure
-# values above, split by the directory each module file lives in. DERIVE this,
-# do not recall it. This comment read "28 (25 shared + 3 top-level)" while the
-# union was 29 and the top-level members were 2, so all three of its terms
-# were incorrect at once, and a repair of the total alone would have carried
-# the other two forward.
+)
 
 
 # ─── Path predicates ────────────────────────────────────────────────────────

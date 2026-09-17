@@ -597,7 +597,20 @@ class TestTeachbackMicroSkillExtraction:
     # (e.g., if a future PR removes the transitional permissiveness
     # paragraph), reduce MAX_SKILL_CHARS to keep this budget a
     # meaningful ceiling and not a ratchet.
-    MAX_SKILL_CHARS = 18347
+    #
+    # RAISED 18347 -> 18600 for the background-wait line in Post-store
+    # behavior. JUSTIFICATION, since this budget is a ceiling and not a
+    # ratchet: the line is a one-sentence instruction placed in the file
+    # teammates demonstrably load, addressing a failure mode where an agent
+    # backgrounds work and ends the turn unflagged because it expects the
+    # tool to wake it. The old ceiling had FOUR chars of headroom, so any
+    # addition at all would have tripped it — the raise is not evidence the
+    # addition was large. It was written twice: the first version cost 286
+    # chars, was cut to 221, and the ceiling is set to the resulting size
+    # plus 36 rather than to a round number, so the next addition is
+    # deliberate rather than absorbed.
+    # RAISED 18600 -> 18800 for the covers_since field the wait templates now carry (18722 then).
+    MAX_SKILL_CHARS = 18800
 
     # Key protocol elements that must be in the extracted skill.
     # Presence-only checks are deliberately strict — any drop indicates

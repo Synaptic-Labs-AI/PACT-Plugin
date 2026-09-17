@@ -172,8 +172,9 @@ from pathlib import Path
 # rationale to check_pin_caps.py: `sys.path.insert(0, hooks_dir)` would
 # PREPEND, so a future hooks/types.py or hooks/json.py would shadow the
 # stdlib. Spec-loading binds by path, not by name resolution; hooks_dir is
-# APPENDED (not prepended) only so staleness's `from shared.claude_md_manager`
-# resolves, with the stdlib retaining priority on any name collision.
+# APPENDED (not prepended) so the `shared` package resolves -- staleness's
+# `from shared.claude_md_manager` and this module's `shared.project_scope` --
+# with the stdlib retaining priority on any name collision.
 _HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
 if str(_HOOKS_DIR) not in sys.path:
     sys.path.append(str(_HOOKS_DIR))
@@ -493,43 +494,18 @@ def extract_pin_block(pinned_content: str, index: int, pins) -> str:
     return pinned_content[block_start:block_end]
 
 
-def _same_repository(env_dir: Path, base: Path) -> bool:
-    """True when `base` is the main repo of the git checkout at `env_dir`.
-
-    The discriminator between a LEGITIMATE fall-through and a wrong-project
-    one. PACT's own primary workflow sets CLAUDE_PROJECT_DIR to a WORKTREE,
-    where CLAUDE.md is gitignored and therefore absent; the resolver's
-    git-common-dir step then finds the MAIN repo's file, which is the correct
-    and intended answer. A blanket "env dir has no CLAUDE.md -> refuse" rule
-    would break that flow on every invocation -- a cardinal over-block.
-    Measured: this worktree has no CLAUDE.md and the main checkout does.
-
-    So the question is not "did we fall through" but "did we fall through to
-    somewhere that is still the same project". `--git-common-dir` answers it:
-    every worktree of a repo shares one common dir, so its parent is the main
-    root for both the worktree and the main checkout.
-
-    Fail-safe: any git error, timeout, or non-repo directory returns False,
-    which routes to a REFUSAL. On a destructive path declining to guess is the
-    safe direction -- refusing costs a recoverable UNEVALUABLE, while guessing
-    wrong archives and evicts from a project nobody named.
-    """
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(env_dir), "rev-parse", "--git-common-dir"],
-            capture_output=True, text=True, timeout=5,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return False
-    if result.returncode != 0 or not result.stdout.strip():
-        return False
-    common_dir = Path(result.stdout.strip())
-    if not common_dir.is_absolute():
-        common_dir = Path(env_dir) / common_dir
-    try:
-        return common_dir.resolve().parent == Path(base).resolve()
-    except OSError:
-        return False
+# The project-identity predicate, and the reader for the session's worktree
+# record it takes, live in hooks/shared/project_scope.py, where the
+# working-memory projection uses the same ones, so the two refusals cannot
+# drift apart. Imported through the `shared` PACKAGE, which the hooks directory
+# appended to sys.path above makes importable, so this module and every other
+# importer hold ONE module object -- and skills/ stays reached by subprocess
+# only. Re-exported, never wrapped: a wrapper could acquire behaviour and
+# become a second definition.
+from shared.project_scope import (  # noqa: E402
+    get_worktree_identity_from_session_record as _get_worktree_identity_from_session_record,
+    stays_in_declared_project as _stays_in_declared_project,
+)
 
 
 def resolve_claude_md():
@@ -571,7 +547,10 @@ def resolve_claude_md():
     if env_dir:
         env_path = Path(env_dir)
         if (_find_existing_claude_md(env_path) is None
-                and not _same_repository(env_path, base)):
+                and not _stays_in_declared_project(
+                    env_path, base, path,
+                    worktree_identity=_get_worktree_identity_from_session_record(),
+                )):
             raise _Unevaluable(
                 f"CLAUDE_PROJECT_DIR={env_dir} contains no CLAUDE.md, and "
                 f"resolution fell through to {path} in a different project. "

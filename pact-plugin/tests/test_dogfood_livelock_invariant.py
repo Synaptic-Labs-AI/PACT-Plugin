@@ -1,8 +1,9 @@
 """
 Dogfood regression harness for #538 — categorical nag-hook-class removal.
 
-Closure criterion per plan AC #3: assert no livelock-capable hook is
-registered under TeammateIdle / TaskCompleted / Stop in hooks.json, and
+Closure criterion per plan AC #3: assert every hook registered under
+TeammateIdle / TaskCompleted / Stop in hooks.json is livelock-safe — no
+emission sink, or an attested bound — and
 prove the harness itself is discriminative by exercising counter-tests
 that re-add a known-bad shape and show the corresponding layer fails.
 
@@ -11,7 +12,8 @@ Four layers, each catching a different failure-mode class:
     Layer 1a — AST sink-scan (static)
         Parses every Python hook registered under the three event classes
         and walks its AST for emission sinks (sys.stderr.write,
-        print({"systemMessage": ...}), sys.exit(2)). A hook passes if it
+        print({"systemMessage": ...}), print({"decision": "block"}),
+        sys.exit(2)). A hook passes if it
         has ZERO sinks OR carries a `# livelock-safe:` docstring marker.
         This catches "a future refactor added a new emission path the
         runtime harness fixtures don't cover." Drift guard.
@@ -23,7 +25,7 @@ Four layers, each catching a different failure-mode class:
         today but fire on unexpected stdin shapes tomorrow.
 
     Layer 3 — hooks.json invariants
-        Asserts Stop event key absent entirely, every removed hook in
+        Asserts Stop binds only stop_background_gate.py, every removed hook in
         _REMOVED_HOOK_BASENAMES (handoff_gate, teammate_completion_gate,
         stop_audit.sh, memory_adhoc_reminder, phase_completion,
         wake_inbox_drain, teardown_request_emitter, wake_lifecycle_emitter)
@@ -139,6 +141,9 @@ def _scan_ast_for_emission_sinks(source: str) -> list[str]:
         print() call whose argument references "systemMessage" literal
       - Any print() call whose argument is a dict literal containing the
         key "systemMessage"
+      - Any print() call whose argument carries a "decision" key and a
+        "block" value — a refusal that makes the agent take another turn,
+        which is exactly what a livelock repeats
       - sys.exit(2) — blocking exit codes
 
     Empty list ⇒ no sinks (pure journal-writer / pure validator).
@@ -168,6 +173,11 @@ def _scan_ast_for_emission_sinks(source: str) -> list[str]:
                     if "systemMessage" in dump:
                         sinks.append(
                             f"print(systemMessage) at line {node.lineno}"
+                        )
+                        break
+                    if "value='decision'" in dump and "value='block'" in dump:
+                        sinks.append(
+                            f"print(decision: block) at line {node.lineno}"
                         )
                         break
 
@@ -272,6 +282,23 @@ class TestLayer1a_ASTSinkScan:
             "teammate_idle.py must carry the `# livelock-safe:` docstring "
             "marker per plan L107 — bounded threshold-escalation emission "
             "is attested by reviewer, not structurally invisible."
+        )
+
+    def test_stop_background_gate_opts_out_via_docstring_marker(self):
+        """stop_background_gate is the lone Stop hook. It prints a blocking
+        decision, so the scan MUST see a sink in it, and it MUST carry the
+        `# livelock-safe:` marker stating its bound. The first assertion is
+        what keeps the decision-sink rule tied to the hook it exists for."""
+        source = (_HOOKS_DIR / "stop_background_gate.py").read_text(encoding="utf-8")
+        assert _scan_ast_for_emission_sinks(source), (
+            "stop_background_gate.py prints a blocking decision, but the sink "
+            "scan found no sink in it — the decision-sink rule is not seeing "
+            "the hook it exists for."
+        )
+        assert _has_livelock_safe_marker(source), (
+            "stop_background_gate.py must carry the `# livelock-safe:` marker "
+            "stating its bound: at most one block per job id, and none while "
+            "stop_hook_active is set."
         )
 
 
@@ -425,8 +452,12 @@ class TestLayer3_HooksJsonInvariants:
     MUST bind to agent_handoff_emitter.py, TeammateIdle MUST bind only
     to teammate_idle.py."""
 
-    def test_stop_event_key_absent(self):
-        """The record-only Stop carrier was dropped: no Stop key may be bound.
+    def test_stop_binds_only_stop_background_gate(self):
+        """Stop binds exactly one hook: the background-work turn-end gate.
+
+        The record-only Stop carrier stays dropped. The one hook allowed here
+        is livelock-safe by its attested bound (see the Layer 1a marker arm);
+        any other Stop hook needs explicit design review.
 
         IT HOLDS ONE ASSERTION AND THAT IS THE POINT OF ITS OWN NAME. This
         assertion used to sit inside the UserPromptSubmit arm below. A
@@ -437,10 +468,13 @@ class TestLayer3_HooksJsonInvariants:
         arm depends on that.
         """
         hooks_config = _load_hooks_json()
-        assert "Stop" not in hooks_config.get("hooks", {}), (
-            "Stop must NOT be registered — the #903 record-only Stop carrier was "
-            "dropped in the B1 surfacing remediation; UserPromptSubmit + "
-            "SessionStart now carry the surfacer."
+        basenames = [
+            p.name for p in _hook_script_paths_for_event(hooks_config, "Stop")
+        ]
+        assert basenames == ["stop_background_gate.py"], (
+            "Stop must bind only stop_background_gate.py — the #903 record-only "
+            "Stop carrier was dropped in the B1 surfacing remediation, and any "
+            f"other Stop hook needs design review; actual: {basenames}"
         )
 
     def test_userpromptsubmit_binds_missed_wake_scan(self):
@@ -451,7 +485,7 @@ class TestLayer3_HooksJsonInvariants:
         surfaced). missed_wake_scan.py MUST be among the UserPromptSubmit hooks.
 
         THE STOP-ABSENCE HALF LEFT THIS BODY and now runs as
-        `test_stop_event_key_absent` above. This arm asserts the UserPromptSubmit
+        `test_stop_binds_only_stop_background_gate` above. This arm asserts the UserPromptSubmit
         binding and nothing else.
         """
         hooks_config = _load_hooks_json()
@@ -527,7 +561,7 @@ def _scan_for_removed_hook(raw: str) -> list[str]:
     return [h for h in _REMOVED_HOOK_BASENAMES if h in raw]
 
 
-_STOP_ASSERTION_FRAGMENT = "Stop must NOT be registered"
+_STOP_ASSERTION_FRAGMENT = "Stop must bind only stop_background_gate.py"
 
 
 def _assert_target_fails_on(target, fragment):
@@ -596,10 +630,10 @@ class TestLayer4_CounterTestByRevert:
             "counter-test is NOT discriminative. Test is phantom-green."
         )
 
-    def test_reverting_stop_key_flips_layer3_stop_key_test(self, monkeypatch):
-        """Target: TestLayer3_HooksJsonInvariants::test_stop_event_key_absent.
+    def test_reverting_stop_binding_flips_layer3_stop_binding_test(self, monkeypatch):
+        """Target: TestLayer3_HooksJsonInvariants::test_stop_binds_only_stop_background_gate.
 
-        Revert shape: re-add `Stop` key with all 3 Tier-2 hooks (mirrors
+        Revert shape: bind Stop to all 3 removed Tier-2 hooks (mirrors
         pre-C2b hooks.json shape).
 
         🔴 IT RUNS THE TARGET. THE EARLIER SHAPE RESTATED ITS OWN SETUP. That
@@ -611,7 +645,7 @@ class TestLayer4_CounterTestByRevert:
 
         THE TWO LEGS TOGETHER ARE THE EVIDENCE, AND ONE LEG ALONE IS NOT.
           CONTROL: the target passes against the config the repository ships.
-          REVERT : the same target RAISES with the Stop key put back.
+          REVERT : the same target RAISES with the removed hooks bound to Stop.
         Without the control a raise is ambiguous, because a target that fails
         for every input raises here too and reads as a discriminative result.
 
@@ -627,7 +661,7 @@ class TestLayer4_CounterTestByRevert:
         RED, and the leg then certifies the target against a document nobody
         ships. THE PASS WOULD BE TRUE AND ABOUT THE WRONG POPULATION.
         """
-        target = TestLayer3_HooksJsonInvariants().test_stop_event_key_absent
+        target = TestLayer3_HooksJsonInvariants().test_stop_binds_only_stop_background_gate
 
         # CONTROL LEG, and it runs FIRST so the revert cannot mask a broken
         # target: against the shipped config the target must pass.
@@ -635,7 +669,7 @@ class TestLayer4_CounterTestByRevert:
 
         raw = _HOOKS_JSON.read_text(encoding="utf-8")
         config = json.loads(raw)
-        # In-memory revert: re-inject Stop block with the 3 removed hooks.
+        # In-memory revert: bind Stop to the 3 removed hooks.
         config["hooks"]["Stop"] = [
             {
                 "hooks": [
@@ -648,8 +682,10 @@ class TestLayer4_CounterTestByRevert:
                 ],
             }
         ]
-        assert "Stop" in config.get("hooks", {}), (
-            "counter-test setup failed — Stop key not re-injected"
+        reverted = [p.name for p in _hook_script_paths_for_event(config, "Stop")]
+        assert "phase_completion.py" in reverted, (
+            f"counter-test setup failed — the removed hooks are not bound to "
+            f"Stop in the reverted config; got {reverted}"
         )
 
         # Put the reverted config where the target reads its input from. The
@@ -756,6 +792,41 @@ class TestLayer4_CounterTestByRevert:
             "counter-test setup failed — phantom source must not carry the "
             "livelock-safe marker"
         )
+
+    def test_an_unattested_blocking_stop_hook_turns_layer1a_red(
+        self, tmp_path, monkeypatch
+    ):
+        """Target: TestLayer1a_ASTSinkScan::test_every_registered_hook_passes_sink_or_marker_gate.
+
+        Revert shape: bind Stop to a hook that prints a blocking decision and
+        carries no `# livelock-safe:` marker. Before the decision sink existed
+        the scan saw nothing in such a hook, so it passed with no attestation.
+
+        CONTROL: the same hook WITH the marker passes the target, so the raise
+        is about the missing attestation and not about a broken fixture. The
+        match binds the raise to the decision sink.
+        """
+        hooks_dir = tmp_path / "hooks"
+        hooks_dir.mkdir()
+        script = hooks_dir / "phantom_stop_gate.py"
+        body = (
+            "import json\n"
+            "def main():\n"
+            '    print(json.dumps({"decision": "block", "reason": "again"}))\n'
+        )
+        config = {"hooks": {"Stop": [{"hooks": [{
+            "type": "command",
+            "command": 'python3 "${CLAUDE_PLUGIN_ROOT}/hooks/phantom_stop_gate.py"',
+        }]}]}}
+        monkeypatch.setattr(f"{__name__}._PLUGIN_ROOT", tmp_path)
+        monkeypatch.setattr(f"{__name__}._load_hooks_json", lambda: config)
+        target = TestLayer1a_ASTSinkScan().test_every_registered_hook_passes_sink_or_marker_gate
+
+        script.write_text('"""# livelock-safe: bounded."""\n' + body, encoding="utf-8")
+        target()
+
+        script.write_text(body, encoding="utf-8")
+        _assert_target_fails_on(target, r"print\(decision: block\)")
 
     def test_reverting_emitter_status_gate_flips_runtime_in_progress_test(
         self, tmp_path, monkeypatch

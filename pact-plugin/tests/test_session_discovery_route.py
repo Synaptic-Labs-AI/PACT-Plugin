@@ -231,7 +231,8 @@ class TestCacheDoesNotOutliveTheGuards:
     """A cached answer must never be returned to a caller the guards refuse.
 
     The cache used to sit ABOVE _discover_session_id, so once populated it
-    short-circuited both guards for the life of the process: a caller kept
+    short-circuited the PYTEST_CURRENT_TEST and CLAUDE_CODE_SESSION_ID guards
+    for the life of the process: a caller kept
     receiving the real session id after PYTEST_CURRENT_TEST was set, and after
     CLAUDE_CODE_SESSION_ID was removed.
     """

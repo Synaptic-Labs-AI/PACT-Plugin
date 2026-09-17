@@ -48,6 +48,7 @@ from pathlib import Path
 import pytest
 
 import archive_pin  # noqa: E402
+from shared.project_scope import same_repository  # noqa: E402
 
 
 PINNED = (
@@ -215,7 +216,7 @@ class TestSameRepositoryFallthroughIsAllowed:
                        capture_output=True, timeout=30)
         sub = repo / "nested"
         sub.mkdir()
-        assert archive_pin._same_repository(sub, repo) is True
+        assert same_repository(sub, repo) is True
 
     def test_same_repository_predicate_is_false_across_repos(self, isolated):
         one = isolated / "one"; one.mkdir()
@@ -224,13 +225,13 @@ class TestSameRepositoryFallthroughIsAllowed:
                        capture_output=True, timeout=30)
         subprocess.run(["git", "init", "-q", str(two)],
                        capture_output=True, timeout=30)
-        assert archive_pin._same_repository(one, two) is False
+        assert same_repository(one, two) is False
 
     def test_same_repository_predicate_fails_safe_outside_git(self, isolated):
         """A non-repo directory returns False, routing to a refusal. On a
         destructive path, declining to guess is the safe direction."""
         plain = isolated / "plain"; plain.mkdir()
-        assert archive_pin._same_repository(plain, plain) is False
+        assert same_repository(plain, plain) is False
 
 
 class TestSymlinkedClaudeMdAttribution:
@@ -706,3 +707,43 @@ class TestDeliberateDeleteStringOmissions:
         )
         assert verdict["heading"] == "NV PIN"
         assert verdict["claude_md_path"] is not None
+
+
+class TestTheSharedPredicateIsOneObject:
+    """archive_pin holds the shared predicate itself, loaded as a package member.
+
+    MUTANT that reddens this arm: load project_scope by putting hooks/shared on
+    sys.path and importing it by its bare name. The process then holds a
+    top-level `project_scope` beside `shared.project_scope`, so archive_pin's
+    predicate is a different object from the working-memory guard's, and a
+    patch applied to one misses the other.
+    """
+
+    def test_archive_pin_re_exports_the_shared_predicate_object(self):
+        import sys
+
+        from shared import project_scope
+
+        assert archive_pin._stays_in_declared_project is project_scope.stays_in_declared_project, (
+            "archive_pin's predicate is not the shared.project_scope object"
+        )
+        assert "project_scope" not in sys.modules, (
+            "project_scope is registered as a TOP-LEVEL module, so the process "
+            "holds two copies of it"
+        )
+
+    def test_archive_pin_and_pact_session_hold_the_shared_record_reader(self):
+        """MUTANT that reddens this arm: give pact_session its own copy of the
+        reader instead of re-exporting the shared one, or load it into
+        archive_pin from skills/ by file path. The two callers of the scope
+        check then read the record through different objects."""
+        from scripts import pact_session
+        from shared import project_scope
+
+        reader = project_scope.get_worktree_identity_from_session_record
+        assert archive_pin._get_worktree_identity_from_session_record is reader, (
+            "archive_pin's record reader is not the shared.project_scope object"
+        )
+        assert pact_session.get_worktree_identity_from_session_record is reader, (
+            "pact_session's record reader is not the shared.project_scope object"
+        )

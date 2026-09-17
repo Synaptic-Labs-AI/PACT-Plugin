@@ -286,7 +286,7 @@ SendMessage(
 1. Lead writes rejection metadata + sends wake-signal.
 2. Teammate wakes on the message, CLEARs `intentional_wait`, reads the rejection payload the message carries (the disk copy is confirmation).
 3. Teammate revises (`metadata.teachback_submit` for A, or revises deliverable + `metadata.handoff` for B).
-4. Teammate increments `metadata.revision_number`, sends the notify `SendMessage` carrying the revised payload verbatim, re-SETs `intentional_wait` with fresh `since`.
+4. Teammate increments `metadata.revision_number`, sends the notify `SendMessage` carrying the revised payload verbatim, re-SETs `intentional_wait` with a fresh `since` and a `covers_since` equal to it.
 5. Lead reviews; either accepts (per [Completion Authority](#completion-authority)) or rejects again (revision_number = N+1).
 
 > **Cycle limit**: 3+ rejection cycles on the same task is an imPACT META-BLOCK signal. See [imPACT.md](../commands/imPACT.md).

@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/peer_inject.py
-Summary: SubagentStart hook that injects peer teammate list into newly
-         spawned PACT agents via additionalContext.
-Used by: hooks.json SubagentStart hook (matcher: pact-* agent types)
+Summary: SubagentStart hook that injects the teammate block (role marker,
+         peer list, teachback and completion-authority notes) into a team
+         member's context, via additionalContext.
+Used by: hooks.json SubagentStart hook. It runs at every subagent start,
+         including an in-process teammate's turn starts, and injects only
+         when the frame's agent type names a member of the resolved team.
+         Any other start, such as Explore, general-purpose, Plan or a
+         PACT-typed Agent-tool subagent, gets nothing.
+
+The platform delivers this output into context once per context window: at
+spawn, and after each compaction. A member the check misses at spawn gets no
+block until it next compacts; its role and team are still in its spawn prompt.
 
 Replaces the manual pattern of listing peer names in task descriptions.
 Agents automatically know who else is on the team.
@@ -13,7 +22,7 @@ defaults to passthrough (exit 0 with suppressOutput). A hook bug must
 never block a SubagentStart event. Mirrors the fail-open contract
 documented in bootstrap_gate.py and bootstrap_prompt_gate.py.
 
-Input: JSON from stdin with agent_id, agent_type
+Input: JSON from stdin with agent_type and session_id
 Output: JSON with hookSpecificOutput.additionalContext
 """
 
@@ -24,7 +33,6 @@ import sys
 from pathlib import Path  # noqa: F401  # re-export: corpus patches peer_inject.Path.home
 
 import shared.pact_context as pact_context
-from shared.pact_context import get_team_name
 from shared.plugin_manifest import (  # noqa: F401  # re-export: static-import guard + corpus introspection
     format_plugin_banner,
 )
@@ -60,21 +68,26 @@ def main():
         # fail-open pattern in bootstrap_gate.py and bootstrap_prompt_gate.py.
         pact_context.init(input_data)
         agent_type = input_data.get("agent_type", "")
-        # Only accept agent_name here. agent_id is a UUID and team members are
-        # registered in the team config under their canonical names, not UUIDs —
-        # falling back to agent_id would make the self-exclusion filter in
-        # get_peer_context() fail to match anything, and the intended agentType
-        # fallback (which excludes ALL peers of the same type) would become
-        # unreachable. Leave agent_name empty when absent so get_peer_context's
-        # agentType fallback fires as originally designed.
-        agent_name = input_data.get("agent_name", "")
-        team_name = get_team_name()
+        # A separate-process teammate's own process has no PACT context, so its
+        # team comes from its session-registry entry; imported here so a
+        # failure stays inside this fail-open block.
+        from shared.background_work import agent_type_names_a_member, frame_team_and_name
 
-        context = get_peer_context(
-            agent_type=agent_type,
-            team_name=team_name,
-            agent_name=agent_name,
-        )
+        team_name, _ = frame_team_and_name(input_data)
+        # Only a team member gets the block. Its frame carries the member name
+        # as agent_type and no agent_name, so that name is both the role label
+        # and the self-exclusion key.
+        member = agent_type if agent_type_names_a_member(
+            agent_type, team_name, agent_id=input_data.get("agent_id")
+        ) else ""
+
+        context = None
+        if member:
+            context = get_peer_context(
+                agent_type=agent_type,
+                team_name=team_name,
+                agent_name=member,
+            )
     except Exception:
         # Any exception in the build path → fail-open with suppressOutput.
         print(_SUPPRESS_OUTPUT)

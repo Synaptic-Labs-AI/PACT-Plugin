@@ -73,13 +73,14 @@ would need a real authz boundary. PACT is same-OS-user-only; this note marks the
 assumption EXPLICITLY so a future multi-user deployment re-evaluates it rather
 than inheriting it silently.
 
-ADVISORY-CHANNEL CAVEAT (known, unresolved platform uncertainty): whether
-PreToolUse additionalContext reliably reaches the model is an open question in
-this repo. The advisory-only paths (in-process / identity-unconfident / multi-
-candidate) inherit that uncertainty; they are the SOFTER backstop, with the
-Cycle-1 prose layer as the load-bearing universal fix. M2's auto-heal escapes
-the uncertainty entirely on the path that matters most (tmux): it mutates the
-task JSON directly, so the flip lands whether or not the advisory surfaces.
+ADVISORY-CHANNEL BOUND: an allow-path PreToolUse additionalContext reaches the
+model together with the tool result, after the call has run. The advisory-only
+paths (in-process / identity-unconfident / multi-candidate) therefore nudge
+AFTER the first Edit/Write/Bash has already happened, never before it; they
+are the SOFTER backstop, with the prose layer as the load-bearing universal
+fix. M2's auto-heal does not depend on the channel on the path that matters
+most (tmux): it mutates the task JSON directly, so the flip lands whether or
+not the advisory is acted on.
 
 Input: JSON from stdin with tool_name, tool_input, agent_type, session_id, etc.
 Output: JSON with hookSpecificOutput.additionalContext (advisory case) or

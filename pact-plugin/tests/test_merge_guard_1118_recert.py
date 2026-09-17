@@ -20,101 +20,32 @@ Summary: Bidirectional base-vs-HEAD-vs-PATCH re-cert matrix for the #1118 QUOTE-
          HEAD  = 38f76965 (buggy space-only)     — the regressed behavior the PATCH fixes
          PATCH = 6d71a816 (quote-safe re-model)  — the live/shipped module (current HEAD)
 
-         The base/HEAD modules load via the __package__='shared' git-show harness (they are
-         permanent merged commits). When the base commit is unreachable, the DIFFERENTIAL
-         rows self-SKIP; the absolute PATCH assertions (held battery, cmd-sub, over-match anchor,
-         leg-count, structural guards, graphql residual) always run.
+         The base/HEAD modules load from vendored fixtures (tests/fixtures/merge_guard_baseline/)
+         through load_vendored, under __package__='shared', pinned by git blob id. A missing or
+         drifted fixture fails the file; no row skips.
 Used by: pytest (merge-guard suite).
 
 Dangerous substrings are assembled at runtime (M / GR / PR_MERGE) so this file carries no raw
 `gh pr merge` / `git/refs` literal — mirrors the coder + cert files' probe-harness convention.
 """
-import subprocess
-import importlib.util
-from pathlib import Path
 from typing import Any
 
 import pytest  # noqa: E402
 
 import shared.merge_guard_common as PATCH  # noqa: E402  (live module == current HEAD == the PATCH)
+from merge_guard_baseline_loader import load_vendored  # noqa: E402
 
 # Dangerous substrings assembled at runtime — never a raw literal in the source.
 M = "mer" + "ge"                 # merge
 GR = "git" + "/refs"             # git/refs
 PR_MERGE = f"gh pr {M} 5"        # a real destructive verb, for the cmd-sub carve-out edge
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]  # tests -> pact-plugin -> worktree root
-_MGC_PATH = "pact-plugin/hooks/shared/merge_guard_common.py"
 _BASE_SHA = "c5e9b324"   # pre-carrier-9 baseline (permanent merged commit)
 _HEAD_SHA = "38f76965"   # buggy space-only original carrier 9 (permanent merged commit)
 
-
-_WHY = {}  # sha -> what actually failed, for the skip reason
-
-
-def _why_for(*shas):
-    """Recorded failures for exactly `shas`, in the order given.
-
-    Reads only the shas its caller's skipif gates on, so a later load recording
-    into `_WHY` cannot appear in an earlier guard's reason. The whole-dict form
-    this replaces was correct only while every later load sat below the guard.
-    """
-    return "; ".join("%s: %s" % (sha, _WHY[sha]) for sha in shas if sha in _WHY)
-
-
-def _load_module_at(sha):
-    """Load the merge_guard_common module as it existed at `sha`, or None if unavailable.
-
-    Execs the historical single-file source with __package__='shared' so its sole relative
-    import (`from .paths import get_claude_config_dir`) resolves against the LIVE, unchanged
-    shared.paths (only merge_guard_common.py changed across these revisions). NON-DISRUPTIVE:
-    reads via `git show`, never checks out — HEAD is untouched. Returns None when `git show`
-    fails (git missing, or the commit unreachable) and when the source fails to exec, so the
-    differential rows self-skip; a source that will not decode as UTF-8 RAISES instead, because
-    that means real corruption of a git-stored file and it should be loud rather than a skip.
-    """
-    try:
-        src = subprocess.check_output(
-            ["git", "show", f"{sha}:{_MGC_PATH}"],
-            cwd=str(_REPO_ROOT), text=True, stderr=subprocess.PIPE,
-        )
-    except subprocess.CalledProcessError as exc:
-        _WHY[sha] = "git show failed: " + (exc.stderr or "").strip()
-        return None
-    except (FileNotFoundError, OSError) as exc:
-        _WHY[sha] = "git not runnable: %r" % (exc,)
-        return None
-    spec = importlib.util.spec_from_loader(f"shared._mgc_{sha}", loader=None)
-    mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]  # spec is never None here
-    mod.__package__ = "shared"
-    try:
-        exec(compile(src, f"<{_MGC_PATH}@{sha}>", "exec"), mod.__dict__)
-    except Exception as exc:
-        _WHY[sha] = "source loaded (%d bytes) but exec failed: %r" % (len(src), exc)
-        return None
-    return mod
-
-
-# Annotated Any: dynamically exec'd modules have no static type; the attribute accesses
-# below (is_dangerous_command / detect_command_operation_type / _split_into_legs) are
-# guarded at runtime by _HISTORY_OK (the @requires_history skip), so silence the editor-only
-# reportOptionalMemberAccess without a runtime assert.
-_BASE: Any = _load_module_at(_BASE_SHA)
-_HEAD: Any = _load_module_at(_HEAD_SHA)
-_HISTORY_OK = _BASE is not None and _HEAD is not None
-
-# Skip the base-vs-HEAD differential rows when history is unavailable; the absolute PATCH
-# assertions still run. The differential IS the non-vacuity proof (each cure row measures a
-# real base->PATCH behavior change), so it runs wherever _HEAD_SHA survives — a developer's
-# clone where that object is not yet collected, never CI, which no ref reaches it from.
-requires_history = pytest.mark.skipif(
-    not _HISTORY_OK,
-    reason=f"NON-VACUITY DIFFERENTIAL SKIPPED — base ({_BASE_SHA}) / HEAD ({_HEAD_SHA}) source "
-           "did not load: "
-           + (_why_for(_BASE_SHA, _HEAD_SHA) or "no failure recorded")
-           + ". Every regression SHAPE is still guarded by an always-run absolute PATCH "
-           "assertion; only the base->PATCH behavior-change PROOF did not run this session.",
-)
+# Annotated Any: a loaded module has no static type.
+_BASE: Any = load_vendored(_BASE_SHA)
+_HEAD: Any = load_vendored(_HEAD_SHA)
 
 
 def _isd_triple(cmd):
@@ -145,7 +76,6 @@ class TestSEC1OverBlockCured:
         # committed PATCH. Fails if the leg-merge over-block ever returns, regardless of git history.
         assert PATCH.is_dangerous_command(cmd) is False
 
-    @requires_history
     @pytest.mark.parametrize("cmd", SEC1.values(), ids=list(SEC1.keys()))
     def test_sec1_differential(self, cmd):
         # NON-VACUITY layer: base ALLOWED the faithful compound; the leg-merge NEWLY BLOCKED it at
@@ -170,7 +100,6 @@ class TestSEC2UnderBlockClosed:
         # PATCH. Fails if the leg-merge under-block (a mutation escaping to allow) ever returns.
         assert PATCH.is_dangerous_command(cmd) is True
 
-    @requires_history
     @pytest.mark.parametrize("cmd", SEC2.values(), ids=list(SEC2.keys()))
     def test_sec2_differential(self, cmd):
         # NON-VACUITY layer: the mutation ESCAPED at HEAD (the merged leg leaked leg-2's -X GET
@@ -189,7 +118,6 @@ class TestCarrier8TwinFixed:
         # closed — the mutation is HELD at the committed PATCH.
         assert PATCH.is_dangerous_command(self.CMD) is True
 
-    @requires_history
     def test_carrier8_body_flag_quote_unsafe_fixed(self):
         # NON-VACUITY layer: carrier 8's body-flag arm had the SAME non-quote-aware matcher -> a
         # real mutation escaped at BOTH base and HEAD; the shared quote-safe _VALUE_TOKEN closes it
@@ -217,7 +145,6 @@ class TestRED1AttachmentFormsCured:
         # is no longer over-blocked.
         assert PATCH.is_dangerous_command(cmd) is False
 
-    @requires_history
     @pytest.mark.parametrize("cmd", FORMS.values(), ids=list(FORMS.keys()))
     def test_attached_form_differential(self, cmd):
         # base AND HEAD both over-blocked the attached spelling (the space-only cure missed it);
@@ -244,7 +171,6 @@ class TestMintDivergenceRestored:
         # returns — the mint path shares the strip pipeline, so this is a distinct regression axis.
         assert PATCH.detect_command_operation_type(self.CMD) is None
 
-    @requires_history
     def test_sec1_compound_op_classification(self):
         # NON-VACUITY layer: the SEC-1 leg-merge mis-bound the compound to op='merge' at HEAD (a
         # mint mis-bind). base=None, HEAD='merge', PATCH=None.
@@ -315,7 +241,6 @@ class TestLegCountRegressionGuard:
         # quote-safe strip never merges them). This is the mechanism the regression corrupted.
         assert len(PATCH._split_into_legs(self.SEC1)) == 2
 
-    @requires_history
     def test_leg_count_differential(self):
         # The regression signature: base=2 legs (correct), HEAD=1 leg (merged — the bug), PATCH=2
         # (restored). Pins that the mechanism cannot silently regress to the merged state.
@@ -336,7 +261,6 @@ class TestUnbalancedTokenBaseEquivalence:
         # fails-toward-unmasked at the same offset). Non-faithful; never a new over/under-block.
         assert PATCH.is_dangerous_command(self.UNBAL) is False
 
-    @requires_history
     def test_unbalanced_token_differential_is_inert(self):
         assert _BASE.is_dangerous_command(self.UNBAL) == PATCH.is_dangerous_command(self.UNBAL)
 
@@ -385,7 +309,6 @@ class TestGraphqlMutationResidualDocumented:
         cmd = f"gh api graphql -f query='mutation{{ {M}PullRequest(input:{{}}) {{ number }} }}'"
         assert PATCH.is_dangerous_command(cmd) is False
 
-    @requires_history
     def test_graphql_mutation_residual_is_preexisting(self):
         # Unchanged across base and PATCH — confirms #1118 neither introduced nor closed it.
         cmd = f"gh api graphql -f query='mutation{{ {M}PullRequest(input:{{}}) {{ number }} }}'"

@@ -54,6 +54,7 @@ from shared.pin_markers import (
     marker_line_present,
     plan_insertion,
 )
+from clock_shift.clock_shift_env import carry_clock_shift
 
 HOOKS_DIR = Path(__file__).parent.parent / "hooks"
 HOOK_SCRIPT = HOOKS_DIR / "pin_marker_writer.py"
@@ -1147,7 +1148,7 @@ def run_hook(frame, tmp_path, timeout=30):
         capture_output=True,
         text=True,
         cwd=str(tmp_path),
-        env=env,
+        env=carry_clock_shift(env),
         timeout=timeout,
     )
     return proc.returncode, proc.stdout, proc.stderr

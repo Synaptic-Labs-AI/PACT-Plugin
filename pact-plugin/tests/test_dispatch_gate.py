@@ -10,6 +10,8 @@ Rule coverage:
     length/NFKC/regex/reserved-token violations → DENY
   - specialist_not_registered — subagent_type not in agent registry → DENY
   - team_name_unavailable — SSOT session team empty (fail-closed) → DENY.
+    A registered teammate's frame gets the ask-the-team-lead text instead of
+    the bootstrap text, with no context or stale-session suffix.
     (#979: team_name_required + team_name_mismatch were DROPPED — the
     Agent(team_name=) arg is platform-ignored, so the session team is
     resolved solely from the SSOT, never matched against the spawn arg.)
@@ -51,6 +53,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+from fixtures.role_frames import captured_pretooluse_teammate_tmux
 
 
 _SUPPRESS_EXPECTED = {"suppressOutput": True}
@@ -522,6 +526,145 @@ def test_deny_when_session_team_unavailable(tmp_path, monkeypatch, capsys):
     assert "session team_name is unavailable" in reason
 
 
+_TEAMMATE_REFUSAL = (
+    "PACT dispatch_gate: PACT specialists are spawned by the team-lead. This "
+    "session is not the team-lead's, so this spawn is refused; ask the "
+    "team-lead to spawn it."
+)
+
+
+def _deny_with_no_context(monkeypatch, tmp_path, capsys, frame, registered_as=""):
+    """Run the gate with no context file and the plugin root from the env, so
+    rule ⑥ fires. ``registered_as`` is the member name the frame's session is
+    registered under, or "" for no registry entry. Returns the deny reason."""
+    import shared.pact_context as ctx_module
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    plugin_root = tmp_path / "plugin"
+    _seed_plugin(plugin_root)
+    monkeypatch.setattr(ctx_module, "_context_path", tmp_path / "pact-session-context.json")
+    monkeypatch.setattr(ctx_module, "_cache", None)
+    monkeypatch.setattr(ctx_module, "init", lambda input_data: None)
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+    members = (registered_as,) if registered_as else ()
+    _seed_team(tmp_path, members=members, tasks=((_NAME, "pending"),))
+    if registered_as:
+        registry = tmp_path / ".claude" / "pact-sessions" / ".teammate-registry.jsonl"
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        line = {"session_id": frame["session_id"], "value": f"{registered_as}@{_TEAM}"}
+        registry.write_text(json.dumps(line) + "\n", encoding="utf-8")
+
+    code, out = _run_main(frame, capsys)
+    assert code == 2
+    return out["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_rule_6_tells_a_lead_to_rerun_bootstrap(tmp_path, monkeypatch, capsys):
+    frame = {**_make_input(), "agent_type": "PACT:pact-orchestrator"}
+
+    reason = _deny_with_no_context(monkeypatch, tmp_path, capsys, frame)
+    assert "session team_name is unavailable" in reason
+    assert "Re-run /PACT:bootstrap" in reason
+
+
+def test_rule_6_tells_a_teammate_to_ask_the_team_lead(tmp_path, monkeypatch, capsys):
+    captured = _capture_journal(monkeypatch)
+    frame = captured_pretooluse_teammate_tmux()
+    frame.update(tool_name="Agent", tool_input=_make_input()["tool_input"])
+
+    reason = _deny_with_no_context(
+        monkeypatch, tmp_path, capsys, frame, registered_as="tmux-subject"
+    )
+    assert reason == _TEAMMATE_REFUSAL
+    rows = [e for e in captured if e.get("type") == "dispatch_decision"]
+    assert [(row["decision"], row["rule"]) for row in rows] == [("DENY", "team_name_unavailable")]
+
+
+def test_rule_6_keeps_the_bootstrap_text_for_a_solo_specialist(tmp_path, monkeypatch, capsys):
+    """A specialist's own main session has a teammate role but no registered team."""
+    frame = {**_make_input(), "agent_type": "pact-backend-coder"}
+
+    reason = _deny_with_no_context(monkeypatch, tmp_path, capsys, frame)
+    assert "Re-run /PACT:bootstrap" in reason
+    assert str(tmp_path / "pact-session-context.json") in reason
+
+
+def test_rule_6_keeps_the_bootstrap_text_when_team_resolution_raises(
+    tmp_path, monkeypatch, capsys
+):
+    import shared.background_work as background_work
+
+    def _raise(_input_data):
+        raise RuntimeError("team resolution failed")
+
+    monkeypatch.setattr(background_work, "frame_team_and_name", _raise)
+    frame = captured_pretooluse_teammate_tmux()
+    frame.update(tool_name="Agent", tool_input=_make_input()["tool_input"])
+
+    reason = _deny_with_no_context(
+        monkeypatch, tmp_path, capsys, frame, registered_as="tmux-subject"
+    )
+    assert "Re-run /PACT:bootstrap" in reason
+
+
+def test_rule_6_keeps_the_bootstrap_text_for_a_frame_with_no_role(tmp_path, monkeypatch, capsys):
+    reason = _deny_with_no_context(monkeypatch, tmp_path, capsys, _make_input())
+    assert "Re-run /PACT:bootstrap" in reason
+    assert str(tmp_path / "pact-session-context.json") in reason
+
+
+def test_rule_6_tells_a_registered_teammate_to_ask_the_team_lead_in_a_fresh_process(tmp_path):
+    """A fresh interpreter runs hooks/dispatch_gate.py as __main__ for a registered
+    separate-process teammate with no context file.
+
+    Rule ⑥ imports background_work inside a function and treats any failure
+    there as "not registered", so a broken import silently swaps in the bootstrap
+    text while the verdict stays DENY. The arms above run after conftest has
+    already imported background_work, so they cannot see that break. The gate's
+    journal needs a session directory this process does not have, so the harness
+    records the journaled decision itself.
+    """
+    import os
+    import subprocess
+    import sys
+
+    plugin = Path(__file__).resolve().parents[1]
+    hook = plugin / "hooks" / "dispatch_gate.py"
+    _seed_team(tmp_path, members=("tmux-subject",), tasks=((_NAME, "pending"),))
+    frame = captured_pretooluse_teammate_tmux()
+    frame.update(tool_name="Agent", tool_input=_make_input()["tool_input"])
+    registry = tmp_path / ".claude" / "pact-sessions" / ".teammate-registry.jsonl"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(
+        json.dumps({"session_id": frame["session_id"], "value": f"tmux-subject@{_TEAM}"}) + "\n",
+        encoding="utf-8",
+    )
+    harness = (
+        "import runpy, sys\n"
+        "import shared.session_journal as journal\n"
+        "def record(event, *_):\n"
+        "    print('JOURNALED', event.get('decision'), event.get('rule'), file=sys.stderr)\n"
+        "    return True\n"
+        "journal.append_event_checked = record\n"
+        "print('COLD', 'shared.background_work' not in sys.modules, file=sys.stderr)\n"
+        f"runpy.run_path({str(hook)!r}, run_name='__main__')\n"
+    )
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
+    env.update(HOME=str(tmp_path), CLAUDE_CONFIG_DIR=str(tmp_path / ".claude"),
+               CLAUDE_PLUGIN_ROOT=str(plugin), PYTHONPATH=str(plugin / "hooks"))
+
+    proc = subprocess.run([sys.executable, "-c", harness], input=json.dumps(frame),
+                          capture_output=True, text=True, timeout=60, env=env)
+
+    assert "COLD True" in proc.stderr, proc.stderr
+    assert proc.returncode == 2, proc.stderr
+    reason = json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+    assert reason == _TEAMMATE_REFUSAL
+    assert "JOURNALED DENY team_name_unavailable" in proc.stderr, proc.stderr
+
+
 # =============================================================================
 # no_task_assigned — spawn before TaskCreate
 # =============================================================================
@@ -745,6 +888,55 @@ def test_non_pact_subagent_type_passes_through(tmp_path, monkeypatch, capsys):
     )
     assert code == 0
     assert out == _SUPPRESS_EXPECTED
+
+
+# =============================================================================
+# The PACT: namespace — a namespaced spawn gets its bare spelling's verdict
+# =============================================================================
+
+_NAMESPACE_CASES = {
+    "no-name": ({"subagent_type": "pact-architect", "name": ""}, ("DENY", "name_required")),
+    "registered": ({"subagent_type": "pact-architect"}, ("ALLOW", None)),
+    "unregistered": ({"subagent_type": "pact-nonexistent"}, ("DENY", "specialist_not_registered")),
+    "not-pact": ({"subagent_type": "custom-agent"}, ("ALLOW", None)),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_NAMESPACE_CASES))
+def test_a_namespaced_spawn_gets_the_bare_spellings_verdict(case, tmp_path, monkeypatch):
+    from dispatch_gate import evaluate_dispatch
+
+    fields, expected = _NAMESPACE_CASES[case]
+    _full_setup(monkeypatch, tmp_path)
+    bare = _make_input(**fields)["tool_input"]
+    namespaced = {**bare, "subagent_type": "PACT:" + bare["subagent_type"]}
+
+    verdicts = [evaluate_dispatch(spawn) for spawn in (bare, namespaced)]
+    assert [(decision, rule) for decision, _reason, rule in verdicts] == [expected, expected]
+
+
+def test_a_namespaced_spawns_journal_row_names_the_rule(tmp_path, monkeypatch, capsys):
+    captured = _capture_journal(monkeypatch)
+    _full_setup(monkeypatch, tmp_path)
+    _run_main(_make_input(subagent_type="PACT:pact-architect", name=""), capsys)
+
+    rows = [e for e in captured if e.get("type") == "dispatch_decision"]
+    assert [(row["decision"], row["rule"]) for row in rows] == [("DENY", "name_required")]
+
+
+def test_the_journal_keeps_the_spelling_the_caller_used(tmp_path, monkeypatch, capsys):
+    captured = _capture_journal(monkeypatch)
+    _full_setup(monkeypatch, tmp_path)
+    _run_main(_make_input(subagent_type="PACT:pact-architect"), capsys)
+
+    rows = [e for e in captured if e.get("type") == "dispatch_decision"]
+    assert [row["subagent_type"] for row in rows] == ["PACT:pact-architect"]
+
+
+def test_a_non_string_subagent_type_still_falls_through():
+    from dispatch_gate import evaluate_dispatch
+
+    assert evaluate_dispatch({"subagent_type": 123, "name": ""}) == ("ALLOW", None, None)
 
 
 # =============================================================================
