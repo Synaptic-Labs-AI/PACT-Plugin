@@ -89,7 +89,27 @@ class EmbeddingService:
 
         try:
             from model2vec import StaticModel
-            self._model = StaticModel.from_pretrained(MODEL_NAME)
+            # force_download=False OVERRIDES model2vec's DEFAULT OF TRUE.
+            #
+            # WHAT THE DEFAULT COSTS, measured rather than assumed: it does NOT
+            # re-transfer the model. With a warm cache, not one blob changes
+            # mtime or size and the fetch reports ten files in under 0.01s. What
+            # it does cost is TEN METADATA ROUND-TRIPS, one per file, to
+            # revalidate a copy already on disk -- about 1.4s against 0.3s here.
+            #
+            # WHY THAT MATTERS MORE THAN THE TIME: each round-trip is a network
+            # call on the common path, and the call below can block in a raw SSL
+            # read. The handler around this load degrades gracefully when the
+            # model cannot load -- but a HANG IS NOT AN EXCEPTION, so that
+            # handler never runs and the save waits indefinitely. Ten
+            # round-trips per embedding-generating process is ten chances to
+            # meet that. A cached model needs none of them.
+            #
+            # A genuine first run still downloads: this suppresses
+            # revalidation, not acquisition.
+            self._model = StaticModel.from_pretrained(
+                MODEL_NAME, force_download=False
+            )
             self._available = True
             logger.info(f"Loaded model2vec model: {MODEL_NAME}")
             return True
