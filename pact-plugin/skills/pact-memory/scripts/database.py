@@ -612,13 +612,24 @@ def _reject_unknown_columns(
     allowed-field set (for discoverability). This is the primary public
     contract for bug 2 — callers rely on the message shape in the JSON
     error envelope rendered by cli.py::cmd_update.
+
+    The prose list is DERIVED from `allowed` by subtracting the server-owned
+    fields, which is the same expression that defines CALLER_FACING_*. It is
+    derived rather than passed so that it CANNOT drift from the machine-
+    readable `allowed_fields` array cli.py puts in the same envelope: those
+    two previously disagreed, the sentence naming server-owned fields the
+    array omitted, so one error object gave two different answers about the
+    same call depending on which half a caller read.
     """
     # The allowed_fields list is intentionally exposed in error envelopes —
     # it is the primary public contract for bug-2 discoverability.
     unknown = sorted(set(updates) - allowed)
     if not unknown:
         return
-    allowed_list = ", ".join(sorted(allowed))
+    # Validation above uses the FULL `allowed` set (create legitimately
+    # tolerates id/created_at); only the human-facing list is narrowed, so
+    # what is accepted is unchanged and only what is advertised is corrected.
+    allowed_list = ", ".join(sorted(allowed - _STRIPPED_ON_INGRESS))
     unknown_list = ", ".join(repr(k) for k in unknown)
     target = f" (memory {memory_id})" if memory_id else ""
     raise ValueError(
