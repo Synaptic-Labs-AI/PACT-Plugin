@@ -28,11 +28,13 @@ no store and no CLAUDE.md is reachable from here. ``main_repo_root`` is patched
 rather than invoked, so no git subprocess runs and the result does not depend on
 where the suite is executed from.
 """
+import logging
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from scripts import memory_api
 from scripts.memory_api import PACTMemory
 
 
@@ -155,3 +157,95 @@ def test_a_none_repo_root_is_cached_and_not_retried():
         f"resolved {m.call_count} times — a None result is being treated as "
         "'not yet resolved', so every save re-runs git"
     )
+
+
+# --- the guard is WIRED INTO save(), not merely correct in isolation --------
+
+
+class TestTheWarningIsReachedByARealSave:
+    """THE GAP EVERY ARM ABOVE LEAVES OPEN, and it is structural.
+
+    Every arm above calls ``_location_divergence_warning`` DIRECTLY — this
+    file's own module docstring says so. So all of them exercise the helper and
+    none exercises the gate it sits behind. MEASURED: deleting the
+    ``logger.warning`` emission from ``save()`` left the ENTIRE suite green —
+    16,923 passed, zero failures. The helper was proven and its wiring was not.
+
+    ONLY A POSITIVE RESULT THROUGH THE GATE CAN SEE THIS. An unwired gate fails
+    closed and is indistinguishable from correct silence, so no negative arm —
+    however many — can detect it. That is why the pair below drives a REAL
+    ``save()`` and asserts on what the logger actually received.
+
+    SCOPED TO THE SUCCESS PATH DELIBERATELY. The warning is emitted BEFORE the
+    store write and the scope disclosure is assigned AFTER the verified write,
+    so they describe an ATTEMPT and a COMPLETED FILING and are REQUIRED to
+    disagree on a failing save. These arms therefore drive saves that succeed,
+    and assert nothing about the two agreeing in general.
+
+    ``sync_to_claude=False`` throughout: no CLAUDE.md is reachable from here.
+    """
+
+    @staticmethod
+    def _save_from(mem, repo_root, caplog, filed_as=None):
+        """Run a REAL save() with the cwd repo pinned; return (id, log text)."""
+        payload = {"context": "wiring probe"}
+        if filed_as is not None:
+            payload["project_id"] = filed_as
+        with caplog.at_level(logging.WARNING):
+            with patch.object(memory_api, "_ensure_ready", lambda: None), \
+                 patch.object(PACTMemory, "_store_embedding", return_value=None), \
+                 patch.object(memory_api, "main_repo_root", return_value=repo_root):
+                mem._cwd_repo_root = False  # clear the per-instance cache
+                memory_id = mem.save(payload, sync_to_claude=False)
+        return memory_id, caplog.text
+
+    def test_a_real_save_from_a_different_repository_emits_the_warning(
+        self, tmp_path, caplog
+    ):
+        """THE WIRE. A save issued from inside another repo must warn.
+
+        MUTANT that reddens this arm: delete the ``logger.warning("%s",
+        divergence_warning)`` emission from ``save()``. That mutant survived
+        the whole suite before this arm existed.
+        """
+        mem = PACTMemory(
+            project_id="PACT-prompt", session_id="s", db_path=tmp_path / "wired.db"
+        )
+        memory_id, text = self._save_from(
+            mem, Path("/Users/mj/Sites/scratchpad/viable"), caplog
+        )
+
+        assert memory_id, "the save did not complete, so the success path was not driven"
+        assert mem.last_project_scope is not None, (
+            "no disclosure was recorded, so this save did not reach the end of "
+            "the success path and the arm is measuring a failure instead"
+        )
+        assert "location divergence" in text, (
+            "a real save filed under 'PACT-prompt' from inside repository "
+            f"'viable' logged no divergence warning. Captured: {text!r}"
+        )
+        assert "PACT-prompt" in text and "viable" in text, (
+            f"the warning fired but does not name both projects: {text!r}"
+        )
+
+    def test_a_real_save_from_the_matching_repository_stays_silent(
+        self, tmp_path, caplog
+    ):
+        """THE MATCHED NEGATIVE, and it is what stops the arm above passing
+        for a guard that fires unconditionally.
+
+        Without it, ``logger.warning`` moved outside its ``if`` would satisfy
+        the positive arm forever.
+        """
+        mem = PACTMemory(
+            project_id="PACT-prompt", session_id="s", db_path=tmp_path / "quiet.db"
+        )
+        memory_id, text = self._save_from(
+            mem, Path("/Users/mj/Sites/collab/PACT-prompt"), caplog
+        )
+
+        assert memory_id, "the save did not complete"
+        assert "location divergence" not in text, (
+            "an ordinary save from its own repository emitted a divergence "
+            f"warning; this fires on every correct save. Captured: {text!r}"
+        )
