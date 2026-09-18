@@ -554,12 +554,23 @@ def cmd_save(args, db_path=None):
     #
     # `sync_status` JOINS IT HERE, AND THE TWO FIELDS DO NOT READ ALIKE.
     # `embedding_status` is PARTIAL: it reports a problem and is absent when the
-    # embedding succeeded. `sync_status` is TOTAL: save() sets it on every
-    # branch, `wrote` included, so it is absent only when no save ran. Do NOT
-    # read an absent `sync_status` as a successful sync. That inference is the
-    # defect the field exists to remove -- across this process boundary a
-    # refused sync and a suppressed one both used to reach the parent as
-    # nothing at all, which is indistinguishable from a sync that worked.
+    # embedding succeeded. `sync_status` is set on every branch that REACHES the
+    # sync gate, `wrote` and `refused` included -- so Do NOT read an absent
+    # `sync_status` as a successful sync. That inference is the defect the field
+    # exists to remove: across this process boundary a refused sync and a
+    # suppressed one both used to reach the parent as nothing at all, which is
+    # indistinguishable from a sync that worked.
+    #
+    # IT IS NOT TOTAL, AND THIS COMMENT USED TO SAY IT WAS. The old wording read
+    # "absent only when no save ran", which is false: `save()` clears the field
+    # at entry and THEN calls `_ensure_ready()`, which installs dependencies and
+    # runs embedding migration and can raise. A save that dies there leaves the
+    # field absent with a save having run. The env/record refusal above it does
+    # set `refused` before raising, so that path is covered -- but covering one
+    # early exit is not totality, and naming the field total invited exactly the
+    # "absent means nothing happened" inference the rest of this comment forbids.
+    # Only the CLAIM is corrected here; making the field total would be a
+    # behaviour change and is not in scope.
     result = {"memory_id": memory_id}
     embedding_status = memory.last_embedding_status
     if embedding_status is not None:
