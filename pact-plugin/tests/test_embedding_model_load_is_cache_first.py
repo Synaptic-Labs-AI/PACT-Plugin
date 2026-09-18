@@ -87,6 +87,86 @@ def test_the_upstream_default_is_still_true():
     )
 
 
+def _accepts_force_download(func) -> bool:
+    """Whether `func` accepts a `force_download` KEYWORD argument.
+
+    Split out from the arm below so its discrimination can be pinned by
+    `test_the_detector_rejects_a_signature_without_the_parameter`. A detector
+    nothing tests is the same instrument defect this file exists to prevent,
+    one level up.
+    """
+    import inspect
+
+    params = inspect.signature(func).parameters
+    found = params.get("force_download")
+    if found is not None:
+        return found.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+    # A `**kwargs` passthrough accepts the name at call time even though it
+    # does not appear in the signature. Reporting False there would be a
+    # false alarm, not a stricter check.
+    return any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+
+
+def test_the_real_library_still_accepts_force_download():
+    """THE ARGUMENT MUST BE ACCEPTED BY THE LIBRARY, not merely passed by us.
+
+    Every other arm above inspects a MagicMock, which accepts ANY keyword. So
+    they pin that our call site passes the argument and can say nothing about
+    whether model2vec still takes it. If a future version drops or renames the
+    parameter, the production call raises TypeError, `_ensure_initialized`
+    catches it under `except Exception`, sets `_available = False`, and every
+    save from then on silently stores no vector -- with the mock-based arms
+    above still green and CI still passing.
+
+    This is the same shape as the defect one file over: a harness that SUPPLIES
+    what production must OBTAIN cannot measure whether production can obtain
+    it. The fix is to ask the real library.
+
+    Distinct from `test_the_upstream_default_is_still_true`, which asserts the
+    DEFAULT VALUE. A parameter could be present with a changed default (that
+    arm fires), or absent entirely (this one fires), or present but
+    positional-only (only this one fires).
+    """
+    model2vec = pytest.importorskip("model2vec")
+    assert _accepts_force_download(model2vec.StaticModel.from_pretrained), (
+        "model2vec.StaticModel.from_pretrained no longer accepts a "
+        "`force_download` keyword. The production call in embeddings.py will "
+        "raise TypeError, be swallowed by its `except Exception`, and disable "
+        "embeddings for the rest of every process -- silently."
+    )
+
+
+def test_the_detector_rejects_a_signature_without_the_parameter():
+    """COUNTER-TEST for the arm above, and it is committed rather than run once.
+
+    The library cannot be mutated, so the demonstration that the check
+    discriminates has to be made against its INPUT instead. Pinning it here
+    keeps that demonstration permanent: an edit that made
+    `_accepts_force_download` return True unconditionally would pass the arm
+    above forever, and fails here.
+    """
+    def without(name):
+        return name
+
+    def with_kwargs(name, **kwargs):
+        return name
+
+    def positional_only(name, force_download, /):
+        return name
+
+    assert _accepts_force_download(without) is False, "accepted a signature without it"
+    assert _accepts_force_download(with_kwargs) is True, "**kwargs does accept it"
+    assert _accepts_force_download(positional_only) is False, (
+        "a positional-only parameter cannot be passed by keyword, which is how "
+        "embeddings.py passes it"
+    )
+
+
 def test_the_model_name_is_still_the_one_we_pin():
     """Non-vacuity guard for the call inspection above.
 
@@ -106,10 +186,15 @@ def test_the_model_name_is_still_the_one_we_pin():
 
 _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 _PRODUCTION_CALL_SITE = "skills/pact-memory/scripts/embeddings.py"
+_FIXTURE_CALL_SITE = "tests/test_memory_layer_composition.py"
+
+# BOTH known members, not one. A single pinned member cannot see a narrowing
+# that drops the OTHER one -- see `test_the_scan_reaches_real_code`.
+_KNOWN_CALL_SITES = (_PRODUCTION_CALL_SITE, _FIXTURE_CALL_SITE)
 
 
-def _real_call_sites():
-    """Every place the repo actually CALLS `.from_pretrained(...)`.
+def _scan():
+    """Walk the tree once; return (call_sites, unparseable_paths).
 
     Matches `ast.Call` nodes whose callee attribute is `from_pretrained`, which
     is a PROPERTY OF THE CALL rather than a filename rule. That distinction
@@ -119,15 +204,25 @@ def _real_call_sites():
     of where they live. A filename exclusion would also have hidden a genuine
     call added to this file later.
 
-    Returns a list of (relative_path, lineno, force_download_source_or_None).
+    THE SECOND RETURN VALUE IS NOT BOOKKEEPING. A file this walk cannot parse
+    contributes NOTHING to the census, so a non-compliant call site inside one
+    is invisible to the invariant below -- measured: a planted call site in an
+    unparseable file survived, while the identical site in a parseable file was
+    caught. Every skip is therefore surfaced rather than swallowed, and
+    `test_no_file_is_silently_skipped` is what makes the swallow impossible.
+
+    call_sites: list of (relative_path, lineno, force_download_source_or_None).
+    unparseable_paths: list of (relative_path, exception_class_name).
     """
     found = []
+    skipped = []
     for path in sorted(_PLUGIN_ROOT.rglob("*.py")):
         if "__pycache__" in path.parts:
             continue
         try:
             tree = ast.parse(path.read_text())
-        except (SyntaxError, UnicodeDecodeError):
+        except (SyntaxError, UnicodeDecodeError, OSError) as exc:
+            skipped.append((str(path.relative_to(_PLUGIN_ROOT)), type(exc).__name__))
             continue
         for node in ast.walk(tree):
             if (
@@ -143,7 +238,12 @@ def _real_call_sites():
                         kwargs.get("force_download"),
                     )
                 )
-    return found
+    return found, skipped
+
+
+def _real_call_sites():
+    """Every place the repo actually CALLS `.from_pretrained(...)`."""
+    return _scan()[0]
 
 
 def test_the_scan_reaches_real_code():
@@ -152,15 +252,51 @@ def test_the_scan_reaches_real_code():
     A repo scan that matches nothing passes every "all of them are correct"
     assertion trivially -- the failure mode is a test that cannot fail, and it
     is exactly the instrument defect that produced a dead probe elsewhere in
-    this work. Pinning a KNOWN-PRESENT member proves the scanner reaches
-    production code, so a zero result fails here rather than passing silently
-    two tests down.
+    this work.
+
+    EVERY known member is pinned, not one, and the difference is measurable
+    rather than stylistic. Pinning one member catches a change to the scan
+    ROOT -- the pinned paths are relative to it, so moving the root moves the
+    path and breaks the match. It does NOT catch a FILTER: adding
+    `if "tests" in path.parts: continue` leaves the production path spelled
+    identically, so a single-member guard stays green while HALF the population
+    silently leaves the census, and a real regression at the dropped site then
+    goes undetected. One stamp behind a two-member population cannot see a
+    one-of-N failure.
+
+    This is a REACH check, not a completeness claim: it proves the scanner
+    still arrives at the sites we know about. Removing a call site legitimately
+    means editing `_KNOWN_CALL_SITES` deliberately, which is the point -- the
+    edit is visible in review rather than absorbed by a threshold.
     """
     sites = _real_call_sites()
     assert sites, "the scan found NO call sites at all -- the instrument is broken"
-    assert any(path == _PRODUCTION_CALL_SITE for path, _, _ in sites), (
-        f"the scan did not reach {_PRODUCTION_CALL_SITE}, which is known to "
-        f"contain a call. Found instead: {[p for p, _, _ in sites]}"
+    reached = {path for path, _, _ in sites}
+    missing = [known for known in _KNOWN_CALL_SITES if known not in reached]
+    assert not missing, (
+        f"the scan did not reach {missing}, known to contain calls. The census "
+        f"has been narrowed -- by a changed root, or by a filter that drops "
+        f"them while leaving the others spelled the same. Found: {sorted(reached)}"
+    )
+
+
+def test_no_file_is_silently_skipped():
+    """The parse-failure branch must never hide a member of the population.
+
+    `_scan` skips any file it cannot parse. A skip is indistinguishable from
+    "this file contains no call site", so a non-compliant call in an
+    unparseable file is invisible to the invariant below -- measured, it
+    survived, while the identical call in a parseable file was caught.
+
+    Asserting ZERO skips rather than logging them is deliberate: a count that
+    is merely reported is a count nobody reads, and the whole defect class here
+    is a signal that exists and is never looked at.
+    """
+    _, skipped = _scan()
+    assert not skipped, (
+        f"files were skipped by the parser and are therefore absent from the "
+        f"call-site census: {skipped}. Any `.from_pretrained(` call inside one "
+        "is invisible to test_every_real_call_site_overrides_force_download."
     )
 
 
