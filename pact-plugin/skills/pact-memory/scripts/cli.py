@@ -554,12 +554,23 @@ def cmd_save(args, db_path=None):
     #
     # `sync_status` JOINS IT HERE, AND THE TWO FIELDS DO NOT READ ALIKE.
     # `embedding_status` is PARTIAL: it reports a problem and is absent when the
-    # embedding succeeded. `sync_status` is TOTAL: save() sets it on every
-    # branch, `wrote` included, so it is absent only when no save ran. Do NOT
-    # read an absent `sync_status` as a successful sync. That inference is the
-    # defect the field exists to remove -- across this process boundary a
-    # refused sync and a suppressed one both used to reach the parent as
-    # nothing at all, which is indistinguishable from a sync that worked.
+    # embedding succeeded. `sync_status` is set on every branch that REACHES the
+    # sync gate, `wrote` and `refused` included -- so Do NOT read an absent
+    # `sync_status` as a successful sync. That inference is the defect the field
+    # exists to remove: across this process boundary a refused sync and a
+    # suppressed one both used to reach the parent as nothing at all, which is
+    # indistinguishable from a sync that worked.
+    #
+    # IT IS NOT TOTAL, AND THIS COMMENT USED TO SAY IT WAS. The old wording read
+    # "absent only when no save ran", which is false: `save()` clears the field
+    # at entry and THEN calls `_ensure_ready()`, which installs dependencies and
+    # runs embedding migration and can raise. A save that dies there leaves the
+    # field absent with a save having run. The env/record refusal above it does
+    # set `refused` before raising, so that path is covered -- but covering one
+    # early exit is not totality, and naming the field total invited exactly the
+    # "absent means nothing happened" inference the rest of this comment forbids.
+    # Only the CLAIM is corrected here; making the field total would be a
+    # behaviour change and is not in scope.
     result = {"memory_id": memory_id}
     embedding_status = memory.last_embedding_status
     if embedding_status is not None:
@@ -567,6 +578,36 @@ def cmd_save(args, db_path=None):
     sync_status = memory.last_sync_status
     if sync_status is not None:
         result["sync_status"] = sync_status
+    # `project_scope` IS PRESENT ON EVERY SUCCESS ENVELOPE, and that is the
+    # whole of what this surface can say about it. `save()` assigns it only
+    # after the store write is read back and verified, and this block is
+    # reached only when `save()` RETURNED -- a save that refused or failed left
+    # through the error envelope above and never arrives here. So on THIS
+    # surface the key is always emitted, and its presence means the record was
+    # filed. The `is not None` guard below is defensive, not a branch a
+    # successful save can take.
+    #
+    # THE ABSENCE CASE IS REAL BUT IT IS NOT VISIBLE FROM HERE. In the Python
+    # API absence means only "this process did not confirm a filing" -- no save
+    # ran, or a save ran and exited before its write was verified -- and it
+    # does NOT mean nothing was written, because the exit can land after
+    # `create_memory` returned. A CLI caller never meets that: a save that
+    # refused or failed leaves through the error envelope above, carrying no
+    # `project_scope` key at all. Do not carry the API's weaker absence into a
+    # reading of this envelope, and do not carry this envelope's simplicity
+    # back into the API. `last_project_scope`'s own docstring is the contract
+    # for that frame.
+    #
+    # What it NEVER means, in any frame, is "the scope was fine". It reports
+    # and does not judge, so it has no false-positive rate by construction.
+    #
+    # Its `location_divergence` key IS NOT A MISFILE FLAG: it compares the
+    # process's working directory against what the record was filed under, so
+    # False means only that those two agree. A record ABOUT another project,
+    # written from the correct directory, shows False and is still misfiled.
+    project_scope = memory.last_project_scope
+    if project_scope is not None:
+        result["project_scope"] = project_scope
     _success(result)
 
 

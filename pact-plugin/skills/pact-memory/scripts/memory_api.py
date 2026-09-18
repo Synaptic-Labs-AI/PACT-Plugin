@@ -266,9 +266,27 @@ class PACTMemory:
             session_id: Session identifier. Auto-detected from context file if not provided.
             db_path: Custom database path. Uses default if not provided.
         """
-        self._project_id = project_id or self._detect_project_id()
+        if project_id:
+            # A caller-supplied project_id short-circuits detection entirely —
+            # measured end to end, not inferred. It is also invisible to the
+            # env/record scope guard, which takes no arguments and never sees
+            # a payload, so "supplied" is the least-checked source of the five
+            # and is exactly the one worth naming in the disclosure.
+            self._project_id: Optional[str] = project_id
+            self._project_id_source = "supplied"
+        else:
+            self._project_id, self._project_id_source = (
+                self._detect_project_id_with_source()
+            )
         self._session_id = session_id or self._detect_session_id()
         self._db_path = db_path
+
+        # Cache for the cwd's main repo root, resolved lazily by
+        # _project_scope_warning. One git subprocess per instance rather than
+        # per save: the working directory does not move under a live instance,
+        # and the CLI builds a fresh instance per invocation anyway. `False`
+        # means "not yet resolved" — None is a real answer (not in a repo).
+        self._cwd_repo_root: Any = False
 
         # Session file tracking (populated by hooks)
         self._session_files: List[str] = []
@@ -284,6 +302,38 @@ class PACTMemory:
         # EVERY save, success included -- see `last_sync_status` for why the
         # two neighbours differ.
         self._last_sync_status: Optional[str] = None
+
+        # Scope disclosure for the most recent COMPLETED save. It is NOT total
+        # and does not belong beside `last_sync_status`, which is: that one is
+        # set on every branch, refusal included, so its absence has one
+        # meaning. This one is assigned only AFTER the store write verifies, so
+        # its ABSENCE MEANS THIS PROCESS DID NOT CONFIRM A FILING — no save ran
+        # on this instance, or a save ran and exited before its write was
+        # verified.
+        #
+        # ABSENT IS NOT "NOT FILED", AND THE DIFFERENCE IS OBSERVED RATHER THAN
+        # THEORETICAL. A save can raise AFTER `create_memory` returned an id
+        # and before the read-back succeeds; the row is then IN THE STORE with
+        # this field absent. The store write completing and the call still
+        # failing is the ordinary shape here, not a corner case — a live hang
+        # downstream of the write, in the embedding step, leaves a complete
+        # record behind a call that never returned. So absence licenses "I did
+        # not confirm a filing" and NOTHING STRONGER. Do not read it as a
+        # filing, and do not read it as the absence of one.
+        #
+        # THE ASYMMETRY IS DELIBERATE AND IT IS THE POINT. Assigning it early
+        # would make absence single-valued, at the price of making PRESENCE
+        # two-valued: a save that raised at the store write would leave a
+        # populated dict byte-identical to a successful one, and a reader could
+        # not tell a completed filing from one that never landed. Between a
+        # wide honest absence and a narrow lying presence, this field takes the
+        # absence — absence sends a reader to look, a false presence answers
+        # them.
+        #
+        # What absence NEVER means, in either state, is "the scope was fine".
+        # It reports rather than judges, so it has no false-positive rate by
+        # construction.
+        self._last_project_scope: Optional[Dict[str, Any]] = None
 
         logger.debug(
             f"PACTMemory initialized: project={self._project_id}, session={self._session_id}"
@@ -379,8 +429,23 @@ class PACTMemory:
 
     @staticmethod
     def _detect_project_id() -> Optional[str]:
+        """Project id only — the long-standing signature, kept verbatim.
+
+        Callers outside this module (and the precedence pins in
+        test_project_dir_resolution.py) expect a bare string, so the richer
+        variant is added BESIDE this rather than by changing this return type.
         """
-        Detect project ID with multiple fallback strategies.
+        return PACTMemory._detect_project_id_with_source()[0]
+
+    @staticmethod
+    def _detect_project_id_with_source() -> "tuple[Optional[str], str]":
+        """
+        Detect project ID with multiple fallback strategies, naming the winner.
+
+        Returns (project_id, source) where source is the strategy that decided
+        it. The source exists so a save can DISCLOSE how its project was
+        resolved: the resolution is otherwise invisible, and an invisible
+        resolution is what makes a mis-scope unrecoverable after the fact.
 
         Detection order:
         1. CLAUDE_PROJECT_DIR environment variable (original behavior)
@@ -403,14 +468,21 @@ class PACTMemory:
         # Strategy 1: Environment variable (original behavior)
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
         if project_dir:
-            return PACTMemory._project_name_for_declared_dir(project_dir, "CLAUDE_PROJECT_DIR")
+            # Kept on ONE LINE deliberately: test_project_id.py's
+            # source-equivalence pin matches the literal substring
+            # `_project_name_for_declared_dir(project_dir,`. Wrapping this call
+            # breaks that marker without changing behaviour, which is a silent
+            # way to disarm a working pin.
+            name = PACTMemory._project_name_for_declared_dir(project_dir, "CLAUDE_PROJECT_DIR")
+            return name, "CLAUDE_PROJECT_DIR"
 
         # Strategy 1.5: session record (inert under pytest — the discovery
         # refuses test processes — so the replica in test_project_id.py needs
         # no record leg to stay equivalent here).
         record_dir = get_project_dir_from_session_record()
         if record_dir:
-            return PACTMemory._project_name_for_declared_dir(record_dir, "session record")
+            name = PACTMemory._project_name_for_declared_dir(record_dir, "session record")
+            return name, "session record"
 
         # Strategy 2: Git repository root (worktree-safe)
         # main_repo_root() carries the --git-common-dir resolution and the
@@ -428,7 +500,7 @@ class PACTMemory:
         if repo_root is not None:
             project_name = repo_root.name
             logger.debug("project_id detected from git root: %s", project_name)
-            return project_name
+            return project_name, "git root"
         # git not installed, not a repo, or command timed out
         logger.debug("Git detection failed, falling back to cwd")
 
@@ -457,11 +529,11 @@ class PACTMemory:
                         cwd_name,
                     )
                 logger.debug("project_id detected from cwd: %s", cwd_name)
-                return cwd_name
+                return cwd_name, "cwd"
         except OSError:
             logger.debug("Failed to detect project_id from cwd")
 
-        return None
+        return None, "unresolved"
 
     @staticmethod
     def _detect_session_id() -> Optional[str]:
@@ -486,6 +558,51 @@ class PACTMemory:
         caller may surface: `degraded:<search_mode>` or `fault`.
         """
         return self._last_embedding_status
+
+    @property
+    def last_project_scope(self) -> Optional[Dict[str, Any]]:
+        """How the most recent save resolved its project, and from where.
+
+        Keys: `project_id` (what it was filed under), `source` (which of
+        supplied / CLAUDE_PROJECT_DIR / session record / git root / cwd /
+        unresolved decided it), `cwd_repo` (the main repo root of the working
+        directory, or None when not in one) and `location_divergence` (True
+        when those last two name different projects).
+
+        `location_divergence` IS NOT A MISFILE FLAG. It compares where the
+        PROCESS was against what the record was filed under. It cannot see
+        what the record is ABOUT, so False does not mean correctly filed.
+
+        PRESENCE IS SINGLE-VALUED: this is assigned only after the store write
+        is read back and verified, so a populated dict always describes a
+        record that was actually filed.
+
+        NONE MEANS THIS PROCESS DID NOT CONFIRM A FILING: no save has run on
+        this instance, OR a save ran and exited before its write was verified —
+        a refusal, a store failure, or a failed read-back.
+
+        NONE DOES NOT MEAN NOTHING WAS WRITTEN. The read-back can fail after
+        `create_memory` has already returned an id, and a failure downstream of
+        the write (the embedding step can hang) leaves a complete row in the
+        store behind a call that never returned. So a record may exist while
+        this field is None. Absence licenses "not confirmed filed" and nothing
+        stronger: do not read it as a filing, do not read it as the absence of
+        one, and do not read it as approval. No state of this field ever means
+        "the scope was fine".
+
+        An in-line caller never meets the ambiguity, because control flow
+        settles it: a normal return from save() implies a populated dict.
+        It is the reader holding neither a return value nor an exception —
+        reading across calls, from another instance, or in a `finally` — for
+        whom absence is two-valued.
+
+        NOT PERSISTED. This lives on the instance and in the save envelope; it
+        is not a column and no store holds it, so it is gone when the process
+        exits. It makes a save's project resolution visible AT THE TIME and
+        afterwards only in whatever output the caller kept. Do not build an
+        after-the-fact audit on it.
+        """
+        return self._last_project_scope
 
     @property
     def last_sync_status(self) -> Optional[str]:
@@ -536,6 +653,53 @@ class PACTMemory:
         """Clear the list of tracked files."""
         self._session_files.clear()
 
+    def _location_divergence_warning(self, project_id: Optional[str]) -> Optional[str]:
+        """Warning text when the filed project disagrees with the repo we sit in.
+
+        THE ASYMMETRY THIS CLOSES. _detect_project_id warns loudly when
+        resolution lands on HOME, because that is a known mis-scope vector, and
+        says NOTHING when a perfectly valid project key is stamped on a record
+        about somewhere else. Only the silent case has actually occurred.
+
+        WHY HERE AND NOT IN _detect_project_id, which is where the HOME warning
+        lives: detection runs ONLY when the payload omits project_id
+        (`project_id or self._detect_project_id()`), so a supplied project_id
+        never reaches it. Checking at the point of FILING covers both routes —
+        supplied and detected — with one comparison.
+
+        WHAT IT COMPARES, AND WHAT IT THEREFORE CANNOT SEE. It compares the
+        filed project against the main repo root of the process's working
+        directory. That is the process LOCATION, which is a PROXY for the
+        record's subject and not the subject itself. It catches a save issued
+        from inside a different repository. It CANNOT catch a record about
+        another project written from the correct directory — there every
+        strategy agrees and every one of them is right about the location and
+        silent about the subject. Do not read a silent save as evidence the
+        record is correctly filed.
+
+        Silent when the working directory is not in a repository at all: an
+        absent lower answer is no evidence of disagreement, and treating
+        absence as divergence is what would make this fire on ordinary saves
+        from a temp directory and get it ignored within a day.
+        """
+        if not project_id:
+            return None
+        if self._cwd_repo_root is False:
+            self._cwd_repo_root = main_repo_root()
+        root = self._cwd_repo_root
+        if root is None or root.name == project_id:
+            return None
+        return (
+            f"location divergence: this memory is being filed under "
+            f"{project_id!r}, but the working directory is inside repository "
+            f"{root.name!r} ({root}). If the record is about {root.name!r}, "
+            f"pass project_id explicitly or save from that project. "
+            f"THIS IS NOT A MISFILE DETECTOR: it compares the process LOCATION "
+            f"against the filed project, so it cannot see what the record is "
+            f"ABOUT. A record concerning another project, written from the "
+            f"correct directory, produces no warning and is still misfiled."
+        )
+
     @_with_store_scope
     def save(
         self,
@@ -579,6 +743,45 @@ class PACTMemory:
         # silent way this channel exists to remove.
         self._last_sync_status = None
 
+        # Clear the scope disclosure for the same reason, and CLEAR ONLY --
+        # this field is deliberately NOT populated on the refusal path the way
+        # `last_sync_status` is twelve lines above. THE TWO HAVE DIFFERENT
+        # DOMAINS, which is the whole of why they differ: `last_sync_status` is
+        # an OUTCOME channel and REFUSED is a member of its value set, so
+        # setting it on a refusal uses that domain. `last_project_scope`
+        # DESCRIBES A COMPLETED FILING -- which project, decided by which of
+        # the five sources, against which repo -- and no member of THAT domain
+        # means "no filing occurred" except absence. A refusal forced into it
+        # would have to emit `location_divergence: False`, which reads as "these
+        # agree" when the truth is "nothing was compared": a false negative in
+        # the one field whose purpose is removing ambiguous silence. Putting a
+        # refusal into `source` instead would overload a key whose documented
+        # domain is the five resolution strategies.
+        #
+        # AT ENTRY RATHER THAN BESIDE EACH EARLY EXIT, because the set of early
+        # exits is NOT RELIABLY ENUMERABLE. Grepping `raise` between here and
+        # the assignment finds ONE site; there are NINE CALLABLES in that range
+        # and every one of them can propagate. A clear at entry is correct
+        # without knowing the set. Populating at each known exit is correct only
+        # for the exits someone remembered, and the obvious instrument for
+        # remembering them under-counts by eight.
+        self._last_project_scope = None
+
+        # And the embedding status, for the same reason and against a WIDER
+        # window than either sibling -- it is not assigned until after the
+        # store write, ~150 lines below, so every exit above it could leave a
+        # previous call's `degraded:<mode>` or `fault` readable as this one's.
+        #
+        # ITS PARTIALITY IS NOT A LICENCE TO SKIP THIS, and that is the step a
+        # reader is most likely to get wrong here. `last_embedding_status` is
+        # PARTIAL -- absent means "nothing to report" rather than "no call ran"
+        # -- so the temptation is to conclude a gap is expected and staleness
+        # tolerable. PARTIAL GOVERNS WHAT ABSENCE MEANS, NOT WHETHER A STALE
+        # VALUE IS WRONG. The docstring promises a code from "the most recent
+        # save() or update()", and a value surviving from an earlier call is
+        # not from the most recent one, whatever absence would have meant.
+        self._last_embedding_status = None
+
         # FAIL CLOSED on an env/record disagreement, BEFORE any store work: the
         # row would land under the env-derived project while the session's other
         # readers follow the record — the silent mis-scope this refusal exists
@@ -596,11 +799,35 @@ class PACTMemory:
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
 
-        # Add project/session context if not provided
+        # Add project/session context if not provided.
+        #
+        # Capture whether THIS PAYLOAD carried its own project BEFORE the
+        # defaulting overwrites the distinction. The disclosure below must
+        # describe how THIS RECORD's project was decided, not how the instance
+        # resolved its default: the CLI passes a payload project_id inside the
+        # memory dict rather than as a constructor argument, so reporting
+        # `self._project_id_source` here would label a payload-supplied
+        # project with whatever strategy the instance happened to detect --
+        # wrong on precisely the least-checked of the five routes.
+        payload_supplied_project = memory.get("project_id") is not None
         if "project_id" not in memory or memory["project_id"] is None:
             memory["project_id"] = self._project_id
         if "session_id" not in memory or memory["session_id"] is None:
             memory["session_id"] = self._session_id
+
+        # WARNING (secondary): the narrow, name-what-it-detects signal. It
+        # WARNS and does not refuse — filing under another project is
+        # legitimate and the caller may mean it, so the decision stays theirs
+        # and only the silence goes.
+        # Reads the payload directly rather than borrowing the disclosure
+        # block's local, so the two are independently revertible: the warning
+        # is the optional half and must be droppable without touching the
+        # disclosure, which is the deliverable.
+        divergence_warning = self._location_divergence_warning(
+            memory.get("project_id")
+        )
+        if divergence_warning:
+            logger.warning("%s", divergence_warning)
 
         with db_connection() as conn:
             ensure_initialized(conn)
@@ -638,6 +865,95 @@ class PACTMemory:
             raise RuntimeError(
                 f"Save verification failed — memory_id {memory_id} not found after save"
             )
+
+        # DISCLOSURE (primary): report, IN THIS CALL'S RETURN VALUE, how this
+        # save decided its project. It judges nothing.
+        #
+        # IT IS NOT PERSISTED, AND THE COMMENT HERE USED TO IMPLY OTHERWISE.
+        # The old wording read "today's misfile was undetectable after the fact
+        # by any means; with this recorded it is one field away". The second
+        # half is false: `project_scope` is not a column, appears nowhere in
+        # database.py or models.py, and is written to no store. It lives on the
+        # instance and in the save envelope, and it is gone when the process
+        # exits. Nothing about it is one field away after the fact.
+        #
+        # WHAT IT ACTUALLY BUYS, stated at its real size. The misfile was
+        # undetectable because NOTHING WAS EMITTED. Something is emitted now,
+        # so the resolution is visible AT THE TIME OF THE SAVE, and afterwards
+        # only for as long as whoever called it kept their output. That is a
+        # genuine move from "never knowable" to "knowable then, and later only
+        # if someone kept the receipt" -- worth having, and strictly weaker
+        # than the promise the old sentence made. Do not plan a later audit
+        # around this field; plan it around the caller's captured output.
+        #
+        # BELOW THE VERIFIED WRITE, NOT ABOVE IT, AND THAT PLACEMENT IS THE
+        # WHOLE CONTRACT. Assigned before the write, this field was TWO-VALUED
+        # in the present direction: a save raising at `create_memory` left a
+        # populated dict BYTE-IDENTICAL to a successful one, so a reader could
+        # not tell a completed filing from one that never landed. Measured, not
+        # reasoned -- the failing arm returned the same four keys and the same
+        # four values as the succeeding arm.
+        #
+        # WHY THE IN-LINE CALLER NEVER SAW IT, and why that is not a defence.
+        # Control flow settles it for them: `save()` assigns on the single path
+        # to its one return, so a normal return implies present and present
+        # implies filed. The ambiguous reader was the one holding NEITHER a
+        # return value NOR an exception -- reading the field across calls, from
+        # another instance, or in a `finally`. That reader is rarer than the
+        # in-line one and is not hypothetical, which is why presence was worth
+        # collapsing even though the common path never showed the defect.
+        #
+        # AND NOT THE AFTER-THE-FACT READER, WHO CANNOT REACH THIS FIELD AT
+        # ALL. An earlier version of this comment rested the argument on the
+        # sentence above about after-the-fact detection. That sentence was
+        # false -- nothing persists this field -- so an after-the-fact reader
+        # never gets here to be confused. The fix stands on the narrower and
+        # true ground: within a single process, presence must not lie.
+        #
+        # THE RESIDUAL, STATED BECAUSE IT IS REAL AND IT GOT WIDER. Absence
+        # now means only "this process did not confirm a filing": no save ran,
+        # or a save ran and exited between the clear at entry and this line --
+        # a window that now spans the whole store write and the read-back
+        # rather than stopping short of them. BECAUSE THE WINDOW NOW CONTAINS
+        # THE WRITE, AN ABSENT FIELD NO LONGER IMPLIES AN ABSENT ROW: exit
+        # after `create_memory` returns and the record is in the store with
+        # this field None. That is the honest cost of moving the assignment
+        # down and it must be stated, not implied. That is the
+        # correct trade and not a regression: a WIDE HONEST ABSENCE beats a
+        # NARROW LYING PRESENCE, because absence sends a reader to look while a
+        # false presence answers them. The surfaces that describe absence must
+        # therefore describe two states, and they do.
+        #
+        # AFTER THE READ-BACK AND NOT MERELY AFTER `create_memory`. The
+        # verification above exists because a `create_memory` that returns is
+        # not proof the row persisted -- its own comment says so. Landing this
+        # assignment above that check would leave PRESENT meaning "a row we
+        # could not read back", which is presence lying in a NARROWER window.
+        # That is worse than the wide absence, not better: nobody goes looking
+        # inside a narrow window.
+        #
+        # THIS NOW DISAGREES WITH THE DIVERGENCE WARNING ABOVE, DELIBERATELY,
+        # AND IT WILL READ AS A BUG. That warning fires before the store write
+        # and describes an ATTEMPT; this describes a COMPLETED FILING. They are
+        # two different events, so a save that warns and then fails emits a
+        # warning with NO disclosure beside it. That pairing is correct. Any
+        # test asserting the warning and `location_divergence` agree must be
+        # scoped to the SUCCESS path, because on the failure path they are
+        # required to disagree.
+        filed_under = memory.get("project_id")
+        if self._cwd_repo_root is False:
+            self._cwd_repo_root = main_repo_root()
+        cwd_repo = self._cwd_repo_root
+        self._last_project_scope = {
+            "project_id": filed_under,
+            "source": (
+                "supplied" if payload_supplied_project else self._project_id_source
+            ),
+            "cwd_repo": cwd_repo.name if cwd_repo is not None else None,
+            "location_divergence": bool(
+                filed_under and cwd_repo is not None and cwd_repo.name != filed_under
+            ),
+        }
 
         # Sync to CLAUDE.md working memory (outside db connection context)
         # This is non-critical - failures are logged but don't fail the save.
@@ -1044,6 +1360,13 @@ class PACTMemory:
                 record name different project directories (fail-closed write
                 refusal; reads follow env).
         """
+        # Clear the embedding status FIRST, for the reason given at save()'s
+        # entry: it is assigned only after the store write, so any exit above
+        # that point would otherwise leave a previous call's reason code
+        # readable as this one's. update() shares the field with save(), so a
+        # failed update could surface the last SAVE's code.
+        self._last_embedding_status = None
+
         # Same fail-closed rule as save()/sync(), evaluated at CALL time — the
         # constructor-bound project_id may predate a mid-process disagreement.
         # update() has no sync-status channel, so there is no REFUSED line to

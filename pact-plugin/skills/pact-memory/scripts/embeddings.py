@@ -89,19 +89,55 @@ class EmbeddingService:
 
         try:
             from model2vec import StaticModel
-            self._model = StaticModel.from_pretrained(MODEL_NAME)
+            # force_download=False OVERRIDES model2vec's DEFAULT OF TRUE.
+            #
+            # WHAT THE DEFAULT COSTS, measured rather than assumed: it does NOT
+            # re-transfer the model. With a warm cache, not one blob changes
+            # mtime or size and the fetch reports ten files in under 0.01s. What
+            # it does cost is TEN METADATA ROUND-TRIPS, one per file, to
+            # revalidate a copy already on disk -- about 1.4s against 0.3s here.
+            #
+            # WHY THAT MATTERS MORE THAN THE TIME: each round-trip is a network
+            # call on the common path, and the call below can block in a raw SSL
+            # read. The handler around this load degrades gracefully when the
+            # model cannot load -- but a HANG IS NOT AN EXCEPTION, so that
+            # handler never runs and the save waits indefinitely. Ten
+            # round-trips per embedding-generating process is ten chances to
+            # meet that. A cached model needs none of them.
+            #
+            # A genuine first run still downloads: this suppresses
+            # revalidation, not acquisition.
+            self._model = StaticModel.from_pretrained(
+                MODEL_NAME, force_download=False
+            )
             self._available = True
             logger.info(f"Loaded model2vec model: {MODEL_NAME}")
             return True
+        # DEBUG, NOT WARNING, ON BOTH HANDLERS, AND THE REASON IS THE CHANNEL
+        # RATHER THAN THE SEVERITY. A failed model load is worth telling someone
+        # about, so WARNING is the obvious level and it is the wrong one here:
+        # `cli.py` configures no logging, so `logging.lastResort` emits WARNING
+        # and above to STDERR -- and the CLI's stderr carries its structured
+        # JSON error envelope, which callers parse. One free-text line corrupts
+        # that parse. The outcome is NOT being swallowed: it reaches the caller
+        # as `embedding_status: "degraded:<mode>"` on stdout, which is the
+        # channel a caller can act on. `memory_api._store_embedding` made the
+        # same trade at its own handler and its comment carries the same
+        # reasoning; these are siblings and should not disagree.
+        #
+        # THIS STOPPED BEING THEORETICAL when the test child envs gained
+        # `HF_HUB_OFFLINE=1`: an empty cache now RAISES here instead of hanging,
+        # so the second handler fires on every cold-cache run rather than
+        # almost never.
         except ImportError:
-            logger.warning(
+            logger.debug(
                 "model2vec not installed. "
                 "Install for semantic search: pip install model2vec"
             )
             self._available = False
             return False
         except Exception as e:
-            logger.warning(f"Failed to load model2vec: {e}")
+            logger.debug(f"Failed to load model2vec: {e}")
             self._available = False
             return False
 
@@ -130,7 +166,23 @@ class EmbeddingService:
             embeddings = self._model.encode([text], max_length=EMBEDDING_MAX_TOKENS)
             return embeddings[0].tolist()
         except Exception as e:
-            logger.warning(f"Embedding generation failed: {e}")
+            # DEBUG for the reason given at `_ensure_initialized`'s handlers,
+            # and it applies here for the same structural reason rather than by
+            # analogy: this method returns `Optional[List[float]]` and hands the
+            # caller `None` on failure, so the outcome already reaches a channel
+            # the caller can act on and the level change loses no signal.
+            #
+            # LEAVING THIS ONE AS WARNING WOULD NOT HAVE BEEN NEUTRAL. With its
+            # two neighbours converted, a reader would reasonably infer this one
+            # was considered and deliberately kept — a false signal planted in
+            # the code, which is worse than the stderr line itself.
+            #
+            # `logging.lastResort` is a stderr handler at WARNING, so `debug`
+            # and `info` are both dropped by it; the `logger.info` on the
+            # successful-load path is therefore already harmless and needs
+            # nothing. With this line converted the module has no remaining
+            # call at WARNING or above.
+            logger.debug(f"Embedding generation failed: {e}")
             return None
 
     def is_available(self) -> bool:

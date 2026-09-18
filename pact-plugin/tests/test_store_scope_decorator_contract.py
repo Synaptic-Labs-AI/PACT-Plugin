@@ -68,6 +68,7 @@ EXEMPT = {
     "session_id": "a read of instance state bound at construction",
     "last_embedding_status": "a read of the status left by the last save",
     "last_sync_status": "a read of the status left by the last save",
+    "last_project_scope": "a read of the scope disclosure left by the last save",
     "track_file": "records a path on the instance, and opens no store",
     "get_tracked_files": "reads the paths recorded on the instance",
     "clear_tracked_files": "clears the paths recorded on the instance",

@@ -48,6 +48,7 @@ from scripts.working_memory import (  # noqa: E402
     _target_is_inside_the_declared_project_dir,
 )
 from clock_shift.clock_shift_env import carry_clock_shift
+from fixtures.hf_cache import hf_cache_env
 
 _CLI = (
     Path(__file__).resolve().parent.parent
@@ -86,10 +87,31 @@ def _base_env(tmp_path: Path) -> dict:
     is what an arm does to DECLARE a root, and declaring one is now an exemption,
     so a base that set it would silently exempt every arm built on it. Each arm
     below states its own choice.
+
+    THE MODEL CACHE IS PASSED THROUGH, AND IT IS THE ONE EXCEPTION TO "FROM
+    NOTHING". Redirecting HOME also relocates the HuggingFace cache, which the
+    child derives from HOME at import time. A child with no cache cannot take
+    model2vec's cached-model early return, so every save below performed a
+    GENUINE FIRST-RUN DOWNLOAD of the embedding model -- an unbounded network
+    read that hung this suite. The cache is not part of what this helper
+    isolates: the isolation exists to keep `PYTEST_CURRENT_TEST` and
+    `CLAUDE_PROJECT_DIR` out of the child, and passing the model cache through
+    leaves both of those untouched. Network access is incidental to every
+    assertion in this file.
+
+    THE CACHE VARIABLES COME FROM `hf_cache_env()` RATHER THAN BEING SPELLED
+    HERE. Computing them locally is what went wrong before: the local spelling
+    used `Path.home()`, which the autouse config-root fixture monkeypatches to
+    `tmp_path`, so the "passed through" cache was the per-test temp directory
+    and the download happened anyway. The helper carries the reason, the mirror
+    of huggingface_hub's own resolution, and the offline guard. Its docstring
+    is where that argument lives; do not restate it here and do not re-derive
+    the path.
     """
     return {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": str(tmp_path / "home"),
+        **hf_cache_env(),
     }
 
 
@@ -118,7 +140,15 @@ def _run_cli(env: dict, cwd: Path, *args: str) -> subprocess.CompletedProcess:
         cwd=str(cwd),
         capture_output=True,
         text=True,
-        timeout=180,
+        # 30s, NOT the 180s this carried while the child could download the
+        # embedding model. That budget existed to absorb a first-run fetch;
+        # `hf_cache_env()` removes the fetch, so the only thing a long timeout
+        # buys now is a slow failure. MEASURED BASIS: the slowest child observed
+        # here is 0.44s (warm cache, embedding generated), and a COLD cache
+        # under the offline guard returns in 0.31s reporting `degraded:keyword`.
+        # 30s is roughly 60x the slowest measured call, which leaves room for a
+        # loaded CI box without waiting three minutes to learn a child hung.
+        timeout=30,
     )
 
 
@@ -1179,4 +1209,93 @@ class TestEverySiteJudgesProjectScopeAlike:
         assert document.read_bytes() == before, (
             f"{site} wrote under a relative declaration that disagrees with the "
             "session record"
+        )
+
+
+class TestTheChildGetsTheOperatorModelCache:
+    """The two properties that keep a built child env off the network.
+
+    NEITHER ARM SUPPLIES THE TERM IT MEASURES, and that is the whole design.
+    The defect these replace was found only after a probe passed `HF_HOME` as a
+    literal: two arms separated cleanly, proving the MECHANISM, while the
+    SHIPPED EXPRESSION that derives the value went untested and was inert. So
+    each arm below reads what `_base_env` actually produces. A term the arm
+    hands in is a term the arm cannot see break.
+    """
+
+    def test_the_cache_path_is_not_the_per_test_home(self, tmp_path):
+        """HF_HOME must name the operator's cache, never the redirected home.
+
+        KILLING MUTANT: spell the value `str(Path.home() / ".cache" /
+        "huggingface")` in `hf_cache_env`. `Path.home()` is monkeypatched to
+        `tmp_path` by the autouse config-root fixture, so the child is handed an
+        empty cache and downloads the model on every run.
+        """
+        # NON-VACUITY GUARD. The arm can only separate the defect from the fix
+        # while the autouse redirect is actually in effect. Without this, a
+        # fixture that stopped patching would make the assertion below pass for
+        # the wrong reason and the pin would rot into a no-op.
+        assert Path.home() != Path(os.environ["HOME"]), (
+            "the autouse Path.home() redirect is not active, so this arm cannot "
+            "distinguish the defect from the fix"
+        )
+
+        resolved = Path(_base_env(tmp_path)["HF_HOME"]).resolve()
+
+        # The message carries BOTH the value observed and the value a healthy
+        # resolution produces. A failure that printed only "this is wrong"
+        # cannot distinguish a detected defect from a harness that never ran
+        # the code — the two produce the same exit status and differ only in
+        # what they can show you.
+        assert not resolved.is_relative_to(Path.home().resolve()), (
+            f"HF_HOME resolved to {resolved} — under the per-test home "
+            f"{Path.home()}, so the child sees an EMPTY cache and performs a "
+            f"genuine first-run model download. The operator cache it should "
+            f"have named is "
+            f"{os.environ.get('XDG_CACHE_HOME', os.environ['HOME'] + '/.cache')}"
+            f"/huggingface."
+        )
+
+    def test_an_empty_cache_degrades_instead_of_downloading(
+        self, tmp_path, memory_store
+    ):
+        """A child whose cache is EMPTY must fail fast, not fetch 59M.
+
+        This is the guard HF_HOME does not provide: HF_HOME corrects WHICH
+        cache the child is handed, and this bounds what happens when that cache
+        is nonetheless empty — which is every CI run before a warm cache exists.
+
+        KILLING MUTANT: drop `HF_HUB_OFFLINE` from `hf_cache_env`. The child
+        then reaches the network, downloads the model, and embeds successfully,
+        so `embedding_status` is absent and this arm fails.
+
+        BEHAVIOURAL, NOT A SPELLING PIN. It never asserts the variable is
+        present in the dict; it drives a real save and reads the outcome, so a
+        rename that preserved the behaviour would keep it green.
+        """
+        env = _base_env(tmp_path)
+        # Override ONLY the cache location, so the OFFLINE value under test is
+        # still the shipped one. Supplying it here would blind the arm to the
+        # helper dropping it.
+        env["HF_HOME"] = str(tmp_path / "cold-cache")
+
+        db = memory_store("degrade.db")
+        # cwd is tmp_path and the save carries --no-sync: store isolation and
+        # sync isolation are two different controls and this arm needs both.
+        result = _run_cli(env, tmp_path, "save", _save_payload("cold cache"),
+                          "--no-sync", "--db-path", str(db))
+
+        status = _envelope(result).get("embedding_status")
+        # BOTH VALUES IN THE MESSAGE, for the reason given on the arm above:
+        # the HF_HOME actually handed to the child proves this arm pointed at
+        # the cold cache rather than passing because it accidentally reached a
+        # warm one, and naming the healthy value distinguishes a real kill from
+        # an arm that never executed.
+        assert status is not None and status.startswith("degraded:"), (
+            f"a save against an EMPTY model cache reported "
+            f"embedding_status={status!r}; the healthy value is a "
+            f"'degraded:<mode>' code (measured: 'degraded:keyword'). Absent "
+            f"means the embedding SUCCEEDED, which means the child reached the "
+            f"network and downloaded the model rather than degrading. The cache "
+            f"handed to it was {env['HF_HOME']!r}."
         )
