@@ -266,9 +266,27 @@ class PACTMemory:
             session_id: Session identifier. Auto-detected from context file if not provided.
             db_path: Custom database path. Uses default if not provided.
         """
-        self._project_id = project_id or self._detect_project_id()
+        if project_id:
+            # A caller-supplied project_id short-circuits detection entirely —
+            # measured end to end, not inferred. It is also invisible to the
+            # env/record scope guard, which takes no arguments and never sees
+            # a payload, so "supplied" is the least-checked source of the five
+            # and is exactly the one worth naming in the disclosure.
+            self._project_id: Optional[str] = project_id
+            self._project_id_source = "supplied"
+        else:
+            self._project_id, self._project_id_source = (
+                self._detect_project_id_with_source()
+            )
         self._session_id = session_id or self._detect_session_id()
         self._db_path = db_path
+
+        # Cache for the cwd's main repo root, resolved lazily by
+        # _project_scope_warning. One git subprocess per instance rather than
+        # per save: the working directory does not move under a live instance,
+        # and the CLI builds a fresh instance per invocation anyway. `False`
+        # means "not yet resolved" — None is a real answer (not in a repo).
+        self._cwd_repo_root: Any = False
 
         # Session file tracking (populated by hooks)
         self._session_files: List[str] = []
@@ -284,6 +302,14 @@ class PACTMemory:
         # EVERY save, success included -- see `last_sync_status` for why the
         # two neighbours differ.
         self._last_sync_status: Optional[str] = None
+
+        # Scope disclosure for the most recent save. TOTAL, like
+        # `last_sync_status` and unlike `last_embedding_status`: save() sets it
+        # on every branch, so an ABSENT value means no save ran on this
+        # instance and never means "the scope was fine". That totality is the
+        # whole point — it has no false-positive rate by construction, because
+        # it reports rather than judges.
+        self._last_project_scope: Optional[Dict[str, Any]] = None
 
         logger.debug(
             f"PACTMemory initialized: project={self._project_id}, session={self._session_id}"
@@ -379,8 +405,23 @@ class PACTMemory:
 
     @staticmethod
     def _detect_project_id() -> Optional[str]:
+        """Project id only — the long-standing signature, kept verbatim.
+
+        Callers outside this module (and the precedence pins in
+        test_project_dir_resolution.py) expect a bare string, so the richer
+        variant is added BESIDE this rather than by changing this return type.
         """
-        Detect project ID with multiple fallback strategies.
+        return PACTMemory._detect_project_id_with_source()[0]
+
+    @staticmethod
+    def _detect_project_id_with_source() -> "tuple[Optional[str], str]":
+        """
+        Detect project ID with multiple fallback strategies, naming the winner.
+
+        Returns (project_id, source) where source is the strategy that decided
+        it. The source exists so a save can DISCLOSE how its project was
+        resolved: the resolution is otherwise invisible, and an invisible
+        resolution is what makes a mis-scope unrecoverable after the fact.
 
         Detection order:
         1. CLAUDE_PROJECT_DIR environment variable (original behavior)
@@ -403,14 +444,21 @@ class PACTMemory:
         # Strategy 1: Environment variable (original behavior)
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
         if project_dir:
-            return PACTMemory._project_name_for_declared_dir(project_dir, "CLAUDE_PROJECT_DIR")
+            # Kept on ONE LINE deliberately: test_project_id.py's
+            # source-equivalence pin matches the literal substring
+            # `_project_name_for_declared_dir(project_dir,`. Wrapping this call
+            # breaks that marker without changing behaviour, which is a silent
+            # way to disarm a working pin.
+            name = PACTMemory._project_name_for_declared_dir(project_dir, "CLAUDE_PROJECT_DIR")
+            return name, "CLAUDE_PROJECT_DIR"
 
         # Strategy 1.5: session record (inert under pytest — the discovery
         # refuses test processes — so the replica in test_project_id.py needs
         # no record leg to stay equivalent here).
         record_dir = get_project_dir_from_session_record()
         if record_dir:
-            return PACTMemory._project_name_for_declared_dir(record_dir, "session record")
+            name = PACTMemory._project_name_for_declared_dir(record_dir, "session record")
+            return name, "session record"
 
         # Strategy 2: Git repository root (worktree-safe)
         # main_repo_root() carries the --git-common-dir resolution and the
@@ -428,7 +476,7 @@ class PACTMemory:
         if repo_root is not None:
             project_name = repo_root.name
             logger.debug("project_id detected from git root: %s", project_name)
-            return project_name
+            return project_name, "git root"
         # git not installed, not a repo, or command timed out
         logger.debug("Git detection failed, falling back to cwd")
 
@@ -457,11 +505,11 @@ class PACTMemory:
                         cwd_name,
                     )
                 logger.debug("project_id detected from cwd: %s", cwd_name)
-                return cwd_name
+                return cwd_name, "cwd"
         except OSError:
             logger.debug("Failed to detect project_id from cwd")
 
-        return None
+        return None, "unresolved"
 
     @staticmethod
     def _detect_session_id() -> Optional[str]:
@@ -486,6 +534,23 @@ class PACTMemory:
         caller may surface: `degraded:<search_mode>` or `fault`.
         """
         return self._last_embedding_status
+
+    @property
+    def last_project_scope(self) -> Optional[Dict[str, Any]]:
+        """How the most recent save resolved its project, and from where.
+
+        Keys: `project_id` (what it was filed under), `source` (which of
+        supplied / CLAUDE_PROJECT_DIR / session record / git root / cwd /
+        unresolved decided it), `cwd_repo` (the main repo root of the working
+        directory, or None when not in one) and `location_divergence` (True
+        when those last two name different projects).
+
+        `location_divergence` IS NOT A MISFILE FLAG. It compares where the
+        PROCESS was against what the record was filed under. It cannot see
+        what the record is ABOUT, so False does not mean correctly filed.
+        None means no save has run on this instance.
+        """
+        return self._last_project_scope
 
     @property
     def last_sync_status(self) -> Optional[str]:
@@ -596,11 +661,39 @@ class PACTMemory:
         # Ensure memory system is ready (lazy initialization)
         _ensure_ready()
 
-        # Add project/session context if not provided
+        # Add project/session context if not provided.
+        #
+        # Capture whether THIS PAYLOAD carried its own project BEFORE the
+        # defaulting overwrites the distinction. The disclosure below must
+        # describe how THIS RECORD's project was decided, not how the instance
+        # resolved its default: the CLI passes a payload project_id inside the
+        # memory dict rather than as a constructor argument, so reporting
+        # `self._project_id_source` here would label a payload-supplied
+        # project with whatever strategy the instance happened to detect --
+        # wrong on precisely the least-checked of the five routes.
+        payload_supplied_project = memory.get("project_id") is not None
         if "project_id" not in memory or memory["project_id"] is None:
             memory["project_id"] = self._project_id
         if "session_id" not in memory or memory["session_id"] is None:
             memory["session_id"] = self._session_id
+
+        # DISCLOSURE (primary): report how this record's project was decided,
+        # on EVERY save, judging nothing. Today's misfile was undetectable
+        # after the fact by any means; with this recorded it is one field away.
+        filed_under = memory.get("project_id")
+        if self._cwd_repo_root is False:
+            self._cwd_repo_root = main_repo_root()
+        cwd_repo = self._cwd_repo_root
+        self._last_project_scope = {
+            "project_id": filed_under,
+            "source": (
+                "supplied" if payload_supplied_project else self._project_id_source
+            ),
+            "cwd_repo": cwd_repo.name if cwd_repo is not None else None,
+            "location_divergence": bool(
+                filed_under and cwd_repo is not None and cwd_repo.name != filed_under
+            ),
+        }
 
         with db_connection() as conn:
             ensure_initialized(conn)

@@ -567,6 +567,18 @@ def cmd_save(args, db_path=None):
     sync_status = memory.last_sync_status
     if sync_status is not None:
         result["sync_status"] = sync_status
+    # `project_scope` JOINS THE TOTAL FAMILY, alongside `sync_status` and
+    # unlike `embedding_status`. save() sets it on every branch, so an absent
+    # value means no save ran -- it NEVER means the scope was fine. It reports
+    # and does not judge, so it has no false-positive rate by construction.
+    #
+    # Its `location_divergence` key IS NOT A MISFILE FLAG: it compares the
+    # process's working directory against what the record was filed under, so
+    # False means only that those two agree. A record ABOUT another project,
+    # written from the correct directory, shows False and is still misfiled.
+    project_scope = memory.last_project_scope
+    if project_scope is not None:
+        result["project_scope"] = project_scope
     _success(result)
 
 

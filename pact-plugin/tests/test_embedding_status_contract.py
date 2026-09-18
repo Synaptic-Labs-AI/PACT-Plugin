@@ -199,6 +199,17 @@ class TestStaleVectorIsRemoved:
         assert mem._drop_existing_vector(conn, "mem-42") is False
 
 
+# The scope disclosure a real save attaches. `project_scope` is TOTAL like
+# `sync_status` -- save() sets it on every branch -- so a clean save carries it
+# and the exact-equality assertion below must include it.
+_SCOPE = {
+    "project_id": "proj",
+    "source": "supplied",
+    "cwd_repo": "proj",
+    "location_divergence": False,
+}
+
+
 class TestCliSuccessEnvelopeCarriesTheStatus:
     """The CLI is the only consumer most callers have.
 
@@ -221,6 +232,11 @@ class TestCliSuccessEnvelopeCarriesTheStatus:
         # would fail for a reason that has nothing to do with either status.
         # `wrote` is the honest default because a real save always reports one.
         fake.last_sync_status = sync_status
+        # Same reason as `last_sync_status` above, and the same trap: an unset
+        # MagicMock attribute is a child mock, never None, so the envelope would
+        # carry a mock OBJECT and the exact-equality assertion would compare
+        # mock identities instead of a shape. A real dict pins the shape.
+        fake.last_project_scope = _SCOPE
 
         captured = {}
         with patch.object(cli, "PACTMemory", return_value=fake), \
@@ -253,7 +269,11 @@ class TestCliSuccessEnvelopeCarriesTheStatus:
         be a silent failure for the other.
         """
         result = self._run_cmd_save(None)
-        assert result == {"memory_id": "mem-1", "sync_status": "wrote"}
+        assert result == {
+            "memory_id": "mem-1",
+            "sync_status": "wrote",
+            "project_scope": _SCOPE,
+        }
         assert "embedding_status" not in result
 
 
