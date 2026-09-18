@@ -601,6 +601,53 @@ class PACTMemory:
         """Clear the list of tracked files."""
         self._session_files.clear()
 
+    def _location_divergence_warning(self, project_id: Optional[str]) -> Optional[str]:
+        """Warning text when the filed project disagrees with the repo we sit in.
+
+        THE ASYMMETRY THIS CLOSES. _detect_project_id warns loudly when
+        resolution lands on HOME, because that is a known mis-scope vector, and
+        says NOTHING when a perfectly valid project key is stamped on a record
+        about somewhere else. Only the silent case has actually occurred.
+
+        WHY HERE AND NOT IN _detect_project_id, which is where the HOME warning
+        lives: detection runs ONLY when the payload omits project_id
+        (`project_id or self._detect_project_id()`), so a supplied project_id
+        never reaches it. Checking at the point of FILING covers both routes —
+        supplied and detected — with one comparison.
+
+        WHAT IT COMPARES, AND WHAT IT THEREFORE CANNOT SEE. It compares the
+        filed project against the main repo root of the process's working
+        directory. That is the process LOCATION, which is a PROXY for the
+        record's subject and not the subject itself. It catches a save issued
+        from inside a different repository. It CANNOT catch a record about
+        another project written from the correct directory — there every
+        strategy agrees and every one of them is right about the location and
+        silent about the subject. Do not read a silent save as evidence the
+        record is correctly filed.
+
+        Silent when the working directory is not in a repository at all: an
+        absent lower answer is no evidence of disagreement, and treating
+        absence as divergence is what would make this fire on ordinary saves
+        from a temp directory and get it ignored within a day.
+        """
+        if not project_id:
+            return None
+        if self._cwd_repo_root is False:
+            self._cwd_repo_root = main_repo_root()
+        root = self._cwd_repo_root
+        if root is None or root.name == project_id:
+            return None
+        return (
+            f"location divergence: this memory is being filed under "
+            f"{project_id!r}, but the working directory is inside repository "
+            f"{root.name!r} ({root}). If the record is about {root.name!r}, "
+            f"pass project_id explicitly or save from that project. "
+            f"THIS IS NOT A MISFILE DETECTOR: it compares the process LOCATION "
+            f"against the filed project, so it cannot see what the record is "
+            f"ABOUT. A record concerning another project, written from the "
+            f"correct directory, produces no warning and is still misfiled."
+        )
+
     @_with_store_scope
     def save(
         self,
@@ -694,6 +741,20 @@ class PACTMemory:
                 filed_under and cwd_repo is not None and cwd_repo.name != filed_under
             ),
         }
+
+        # WARNING (secondary): the narrow, name-what-it-detects signal. It
+        # WARNS and does not refuse — filing under another project is
+        # legitimate and the caller may mean it, so the decision stays theirs
+        # and only the silence goes.
+        # Reads the payload directly rather than borrowing the disclosure
+        # block's local, so the two are independently revertible: the warning
+        # is the optional half and must be droppable without touching the
+        # disclosure, which is the deliverable.
+        divergence_warning = self._location_divergence_warning(
+            memory.get("project_id")
+        )
+        if divergence_warning:
+            logger.warning("%s", divergence_warning)
 
         with db_connection() as conn:
             ensure_initialized(conn)
