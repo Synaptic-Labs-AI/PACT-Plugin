@@ -691,6 +691,45 @@ class PACTMemory:
         # silent way this channel exists to remove.
         self._last_sync_status = None
 
+        # Clear the scope disclosure for the same reason, and CLEAR ONLY --
+        # this field is deliberately NOT populated on the refusal path the way
+        # `last_sync_status` is twelve lines above. THE TWO HAVE DIFFERENT
+        # DOMAINS, which is the whole of why they differ: `last_sync_status` is
+        # an OUTCOME channel and REFUSED is a member of its value set, so
+        # setting it on a refusal uses that domain. `last_project_scope`
+        # DESCRIBES A COMPLETED FILING -- which project, decided by which of
+        # the five sources, against which repo -- and no member of THAT domain
+        # means "no filing occurred" except absence. A refusal forced into it
+        # would have to emit `location_divergence: False`, which reads as "these
+        # agree" when the truth is "nothing was compared": a false negative in
+        # the one field whose purpose is removing ambiguous silence. Putting a
+        # refusal into `source` instead would overload a key whose documented
+        # domain is the five resolution strategies.
+        #
+        # AT ENTRY RATHER THAN BESIDE EACH EARLY EXIT, because the set of early
+        # exits is NOT RELIABLY ENUMERABLE. Grepping `raise` between here and
+        # the assignment finds ONE site; there are NINE CALLABLES in that range
+        # and every one of them can propagate. A clear at entry is correct
+        # without knowing the set. Populating at each known exit is correct only
+        # for the exits someone remembered, and the obvious instrument for
+        # remembering them under-counts by eight.
+        self._last_project_scope = None
+
+        # And the embedding status, for the same reason and against a WIDER
+        # window than either sibling -- it is not assigned until after the
+        # store write, ~150 lines below, so every exit above it could leave a
+        # previous call's `degraded:<mode>` or `fault` readable as this one's.
+        #
+        # ITS PARTIALITY IS NOT A LICENCE TO SKIP THIS, and that is the step a
+        # reader is most likely to get wrong here. `last_embedding_status` is
+        # PARTIAL -- absent means "nothing to report" rather than "no call ran"
+        # -- so the temptation is to conclude a gap is expected and staleness
+        # tolerable. PARTIAL GOVERNS WHAT ABSENCE MEANS, NOT WHETHER A STALE
+        # VALUE IS WRONG. The docstring promises a code from "the most recent
+        # save() or update()", and a value surviving from an earlier call is
+        # not from the most recent one, whatever absence would have meant.
+        self._last_embedding_status = None
+
         # FAIL CLOSED on an env/record disagreement, BEFORE any store work: the
         # row would land under the env-derived project while the session's other
         # readers follow the record — the silent mis-scope this refusal exists
@@ -1198,6 +1237,13 @@ class PACTMemory:
                 record name different project directories (fail-closed write
                 refusal; reads follow env).
         """
+        # Clear the embedding status FIRST, for the reason given at save()'s
+        # entry: it is assigned only after the store write, so any exit above
+        # that point would otherwise leave a previous call's reason code
+        # readable as this one's. update() shares the field with save(), so a
+        # failed update could surface the last SAVE's code.
+        self._last_embedding_status = None
+
         # Same fail-closed rule as save()/sync(), evaluated at CALL time — the
         # constructor-bound project_id may predate a mid-process disagreement.
         # update() has no sync-status channel, so there is no REFUSED line to

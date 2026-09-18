@@ -207,3 +207,82 @@ def test_every_documented_key_is_present(mem, key):
     documented key the code does not emit is the same defect one level over.
     """
     assert key in _save(mem, Path("/repos/PACT-prompt"))
+
+
+# --- staleness: the failure path must not inherit the previous save ---------
+
+def test_a_refused_save_does_not_leave_the_previous_disclosure_readable(mem):
+    """THE GAP THAT REACHED REVIEW. Every other arm here saves SUCCESSFULLY and
+    then reads the field, so all of them pass whether or not save() clears it at
+    entry -- totality was pinned on the success path only.
+
+    This one saves, then fails on the SAME LIVE INSTANCE, and asserts the
+    disclosure does not still describe the first save. A stale value is worse
+    than an absent one: absence means no save ran, while a stale value names a
+    real project, plausibly, and wrongly -- reinstating in the confident
+    direction the ambiguity that totality exists to remove.
+    """
+    first = _save(mem, Path("/repos/PACT-prompt"))
+    assert first is not None and first["project_id"] == "PACT-prompt", (
+        "setup failed: the first save disclosed nothing to go stale"
+    )
+
+    # Refuse the second save the way production does, at the env/record guard,
+    # which fires BEFORE the project is resolved and before the disclosure.
+    with patch.object(
+        memory_api, "env_record_project_dir_disagreement",
+        return_value=("/env/elsewhere", "/record/here"),
+    ):
+        with pytest.raises(memory_api.ProjectScopeDisagreementError):
+            mem.save({"context": "refused"}, sync_to_claude=False)
+
+    assert mem.last_project_scope is None, (
+        "the refused save left the PREVIOUS save's disclosure readable: "
+        f"{mem.last_project_scope!r}. A caller reads another record's filing "
+        "as this attempt's."
+    )
+
+
+def test_a_save_raising_before_the_disclosure_does_not_leave_a_stale_value(mem):
+    """Sibling of the arm above, for a NON-refusal early exit.
+
+    The refusal is one named exit; `_ensure_ready()` and seven other callables
+    between entry and the disclosure can propagate too, and the set is not
+    reliably enumerable. This arm proves the clear covers an exit that is NOT
+    the one the reviewer named, which is what makes it a root-cause fix rather
+    than a patch on the reported path.
+    """
+    first = _save(mem, Path("/repos/PACT-prompt"))
+    assert first is not None, "setup failed: nothing to go stale"
+
+    boom = RuntimeError("initialization exploded")
+    with patch.object(memory_api, "_ensure_ready", side_effect=boom):
+        with pytest.raises(RuntimeError):
+            mem.save({"context": "never lands"}, sync_to_claude=False)
+
+    assert mem.last_project_scope is None, (
+        "a save that raised in _ensure_ready left the previous disclosure "
+        f"readable: {mem.last_project_scope!r}"
+    )
+
+
+def test_the_sync_status_sibling_still_reports_the_refusal(mem):
+    """The asymmetry is deliberate, and this arm pins BOTH halves of it.
+
+    Clearing the scope disclosure must not quietly change the sibling: on the
+    same refusal, `last_sync_status` still reports REFUSED, because REFUSED is
+    a member of ITS domain. If someone later "restores symmetry" by populating
+    the scope on refusal, or by dropping the sync status's refusal value, one
+    of these two assertions fails and the domain argument gets re-read.
+    """
+    with patch.object(
+        memory_api, "env_record_project_dir_disagreement",
+        return_value=("/env/elsewhere", "/record/here"),
+    ):
+        with pytest.raises(memory_api.ProjectScopeDisagreementError):
+            mem.save({"context": "refused"}, sync_to_claude=False)
+
+    assert mem.last_project_scope is None, "scope should be cleared, not populated"
+    assert mem.last_sync_status == "refused", (
+        f"the sibling stopped reporting the refusal: {mem.last_sync_status!r}"
+    )
