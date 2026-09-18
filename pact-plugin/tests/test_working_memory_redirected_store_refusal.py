@@ -86,10 +86,22 @@ def _base_env(tmp_path: Path) -> dict:
     is what an arm does to DECLARE a root, and declaring one is now an exemption,
     so a base that set it would silently exempt every arm built on it. Each arm
     below states its own choice.
+
+    HF_HOME IS PASSED THROUGH, AND IT IS THE ONE EXCEPTION TO "FROM NOTHING".
+    Redirecting HOME also relocates the HuggingFace cache, which lives under
+    `$HOME/.cache/huggingface`. A child with no cache cannot take model2vec's
+    cached-model early return, so every save below performed a GENUINE FIRST-RUN
+    DOWNLOAD of the embedding model -- an unbounded network read that hung this
+    suite. The cache is not part of what this helper isolates: the isolation
+    exists to keep `PYTEST_CURRENT_TEST` and `CLAUDE_PROJECT_DIR` out of the
+    child, and passing the model cache through leaves both of those untouched.
+    Network access is incidental to every assertion in this file.
     """
     return {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": str(tmp_path / "home"),
+        "HF_HOME": os.environ.get("HF_HOME")
+        or str(Path.home() / ".cache" / "huggingface"),
     }
 
 
