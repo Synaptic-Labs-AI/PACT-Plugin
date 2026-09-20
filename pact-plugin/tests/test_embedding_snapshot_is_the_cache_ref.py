@@ -144,8 +144,8 @@ def test_the_ref_wins_when_the_newest_directory_is_a_different_one(cache_root):
 # The happy path above is one lookup. Every way this can get WORSE than the
 # behaviour it replaces is here: a failure that raises, or that returns a
 # directory the loader cannot use, would turn a working degraded path into a
-# broken one. All six must return None so the caller passes the bare model id
-# and gets exactly today's behaviour.
+# broken one. Every one of them must return None so the caller passes the bare
+# model id and gets exactly today's behaviour.
 
 
 def test_an_absent_repo_directory_falls_back(cache_root):
@@ -202,7 +202,7 @@ def test_a_malformed_ref_falls_back(cache_root, ref_value):
 
 
 def test_the_fallback_arms_are_not_all_passing_for_the_same_reason(cache_root):
-    """Non-vacuity control for the six arms above.
+    """Non-vacuity control for the fallback arms above.
 
     Every one of them asserts ``is None``, which is also what a resolver that
     returned None unconditionally would produce -- including one broken by a
@@ -214,7 +214,7 @@ def test_the_fallback_arms_are_not_all_passing_for_the_same_reason(cache_root):
     snap = _snapshot(cache_root, sha)
     _write_ref(cache_root, sha)
     assert _cache_snapshot_for(MODEL_NAME) == str(snap), (
-        "the resolver returned None on a well-formed cache, so the six "
+        "the resolver returned None on a well-formed cache, so the "
         "fallback arms above prove nothing about the fallback"
     )
 
