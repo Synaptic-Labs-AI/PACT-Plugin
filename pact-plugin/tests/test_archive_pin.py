@@ -62,6 +62,26 @@ import archive_pin  # noqa: E402
 import pin_caps  # noqa: E402
 from shared.project_scope import same_repository  # noqa: E402
 import staleness  # noqa: E402
+from fixtures.hf_cache import hf_cache_env
+
+
+@pytest.fixture(autouse=True)
+def _pin_the_model_cache(monkeypatch):
+    """Point this module's children at the operator cache, and refuse network.
+
+    MODULE-SCOPED AND NOT GLOBAL, deliberately. A conftest-wide autouse would
+    also force offline on IN-PROCESS loads elsewhere in the suite (the
+    `encoder()` fixture loads a real model), which is a different decision with
+    a different blast radius.
+
+    SET ON THE PARENT PROCESS RATHER THAN ON A CHILD env DICT, because the
+    children here are spawned by PRODUCTION code (`archive_pin._run_memory_cli`)
+    or by sites that pass no `env=` at all, so they inherit this process's
+    environment. There is no child dict to bind.
+    """
+    for _k, _v in hf_cache_env().items():
+        monkeypatch.setenv(_k, _v)
+
 
 
 # Formats a curator can plausibly hand-write. B, D and E are the ones a

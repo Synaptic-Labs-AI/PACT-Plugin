@@ -261,6 +261,23 @@ _CLI = (
 
 
 def _run_cli(env: dict, cwd: Path, *args: str) -> dict:
+    # THE CACHE ENV IS APPLIED HERE, AT THE CHOKE POINT, RATHER THAN AT EACH
+    # CALLER. Applying it per-site is what failed: one caller below got it and
+    # another, built with `dict(os.environ)`, did not — and the one that missed
+    # out was a real `save`. Every child this file spawns routes through this
+    # function, so binding it here is the only placement that cannot be missed
+    # by the next site somebody adds.
+    #
+    # THE POPULATION IS NOT "CHILDREN THAT SAVE", WHICH IS THE ASSUMPTION THAT
+    # PRODUCED THE GAP. `_ensure_ready()` runs on EVERY verb and calls the
+    # embedding catch-up, which loads the model whenever the store holds an
+    # unembedded row. So a `sync` or `status` child reading a store that a
+    # degraded save left pending can reach the model load too, and `save` is
+    # merely the most obvious member.
+    #
+    # The helper wins over the caller's env deliberately: this is an isolation
+    # guarantee rather than a preference, and no caller here sets either key.
+    env = {**env, **hf_cache_env()}
     proc = subprocess.run(
         [sys.executable, str(_CLI), *args],
         # 30s rather than 180s: the long budget absorbed a first-run model
@@ -348,16 +365,15 @@ class TestSyncVerbReachesTheGuards:
         """
         escaped = tmp_path / "declared-but-empty"
         escaped.mkdir()
-        # `hf_cache_env()` because this child runs a real `save`, and a save
-        # generates an embedding. HOME is redirected below, which relocates the
-        # HuggingFace cache with it, so without these the child downloads the
-        # embedding model over the network on every run. See the helper's
-        # docstring for why the path is mirrored rather than imported.
+        # No cache env here: `_run_cli` binds it for every child. Spelling it
+        # at this one site is what made the gap look closed while a sibling
+        # built with `dict(os.environ)` went without — and a per-site spread
+        # would now also imply the protection is per-site, which is the
+        # inference that produced the miss.
         env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": str(tmp_path / "home"),
             "CLAUDE_PROJECT_DIR": str(escaped),
-            **hf_cache_env(),
         }
         assert "PYTEST_CURRENT_TEST" not in env
         db = memory_store("escaped.db")

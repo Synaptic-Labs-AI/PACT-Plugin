@@ -31,6 +31,28 @@ from scripts.working_memory import (  # noqa: E402
     _atomic_write_text,
     sync_to_claude_md,
 )
+from fixtures.hf_cache import hf_cache_env
+
+
+@pytest.fixture(autouse=True)
+def _pin_the_model_cache(monkeypatch):
+    """Point this module's children at the operator cache, and refuse network.
+
+    SET ON THE PARENT PROCESS RATHER THAN ON A CHILD `env` DICT, because the
+    children here are spawned by PRODUCTION code — `archive_pin._run_memory_cli`
+    — which inherits this process's environment. There is no child dict to bind,
+    and putting test-cache variables into production would be the wrong fix.
+
+    MODULE-SCOPED AND NOT GLOBAL, deliberately. A conftest-wide autouse would
+    also force offline on IN-PROCESS loads elsewhere in the suite, where a
+    fixture loads a real model on purpose. That is a different decision with a
+    different blast radius and it is not this one.
+
+    Measured: this module's children attempted 2 model loads without it.
+    """
+    for _k, _v in hf_cache_env().items():
+        monkeypatch.setenv(_k, _v)
+
 
 _REPO = Path(__file__).resolve().parent.parent
 _ARCHIVE_PIN = _REPO / "scripts" / "archive_pin.py"
