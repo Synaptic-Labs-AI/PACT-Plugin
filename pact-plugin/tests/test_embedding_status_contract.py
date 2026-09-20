@@ -58,7 +58,10 @@ class TestCapabilityExits:
                    return_value={"search_mode": "keyword"}):
             result = mem._store_embedding(conn, "mem-1", _memory())
 
-        assert result == "degraded:keyword"
+        assert result == "degraded:keyword:no-vector-store", (
+            "the no-extension exit must name its own cause; a code shared with "
+            f"the no-model exit tells a caller nothing actionable. Got {result!r}"
+        )
 
     def test_embedding_generation_unavailable_reports_degraded(self, mem, conn):
         with patch("scripts.memory_api.SQLITE_EXTENSIONS_ENABLED", True), \
@@ -68,7 +71,10 @@ class TestCapabilityExits:
                    return_value={"search_mode": "keyword"}):
             result = mem._store_embedding(conn, "mem-1", _memory())
 
-        assert result == "degraded:keyword"
+        assert result == "degraded:keyword:no-model", (
+            "the model-unavailable exit must be distinguishable from the "
+            f"vector-store exits; they want different responses. Got {result!r}"
+        )
 
     def test_reason_code_carries_the_search_paths_own_mode(self, mem, conn):
         """The code must come from get_search_capabilities, not a second predicate.
@@ -82,7 +88,7 @@ class TestCapabilityExits:
                    return_value={"search_mode": "sentinel-mode"}):
             result = mem._store_embedding(conn, "mem-1", _memory())
 
-        assert result == "degraded:sentinel-mode"
+        assert result == "degraded:sentinel-mode:no-vector-store"
 
 
 class TestInputExit:
@@ -390,9 +396,11 @@ class TestSqliteVecAbsenceIsReportedAsKeyword:
              patch("scripts.memory_api.generate_embedding", return_value=[0.1] * 256):
             result = mem._store_embedding(conn, "mem-1", _memory())
 
-        assert result == "degraded:keyword", (
+        assert result == "degraded:keyword:no-vector-store", (
             "with sqlite-vec absent no vector can be stored and none can be "
-            f"searched, so the capability must not claim semantic; got {result!r}"
+            f"searched, so the capability must not claim semantic; got {result!r}. "
+            "It shares the no-extension exit's cause DELIBERATELY: both mean the "
+            "vector table is unreachable, which is one fault with two spellings."
         )
 
 

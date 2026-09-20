@@ -34,10 +34,23 @@ from unittest.mock import patch
 import pytest
 
 from scripts.embeddings import get_embedding_service, reset_embedding_service
-from scripts.memory_api import SQLITE_EXTENSIONS_ENABLED, PACTMemory
+from scripts.memory_api import PACTMemory
 
 _TOKEN = "zarquon"  # a term no other fixture in this suite writes
 _CONTEXT = f"the {_TOKEN} deployment rollback procedure"
+
+
+def _cause(status):
+    """The cause segment of `degraded:<mode>:<cause>`, or the whole string.
+
+    These arms pin the CAUSE only. The mode segment is already pinned in
+    test_embedding_status_contract.py, and asserting it here would also make
+    each arm depend on WHEN capabilities are sampled -- measured: read outside
+    the model-unavailable context it reports `semantic`, inside it `keyword`,
+    so a whole-string assertion fails for a reason that is not the subject.
+    """
+    parts = (status or "").split(":")
+    return parts[2] if len(parts) > 2 else status
 
 
 @contextmanager
@@ -138,31 +151,53 @@ def test_that_search_discriminates_rather_than_returning_everything(mem):
     )
 
 
-@pytest.mark.skipif(
-    not SQLITE_EXTENSIONS_ENABLED,
-    reason="`degraded:` is also the code for missing SQLite extensions, so "
-           "without them this arm would pass on the OTHER cause and prove "
-           "nothing about the model",
-)
-def test_the_degraded_reason_code_is_surfaced(mem):
-    """The caller must be TOLD search is running without vectors.
+def test_the_no_model_cause_is_named_on_its_own(mem):
+    """The caller must be TOLD search is running without vectors, AND WHY.
 
-    Silence here is the same defect as a silent mis-scope one file over: the
-    caller cannot distinguish "indexed" from "not indexed" and has no reason
-    to re-embed later.
+    UNCONDITIONAL NOW, AND THE SKIP IT REPLACES IS THE POINT. This arm used to
+    be `skipif`-guarded on ``SQLITE_EXTENSIONS_ENABLED``, because
+    ``_store_embedding`` returned ONE code for BOTH the no-extension exit and
+    the no-model exit -- so on a machine without pysqlite3 the arm went green
+    for a cause that has nothing to do with the model. A wrong-reason pass.
 
-    SKIPPED rather than asserted when extensions are absent, because
-    `_store_embedding` returns the same `degraded:` code for the
-    no-extensions exit as for the no-model one. On a machine without
-    pysqlite3/sqlite-vec this arm would be green for a cause that has nothing
-    to do with the model -- a wrong-reason pass, which is worth less than an
-    honest skip.
+    The codes now carry their cause, so the assertion below can name which
+    mechanism fired instead of accepting either. That is the whole value of
+    the change: one symbol for two faults meant the test had to be skipped
+    rather than sharpened.
+
+    ``SQLITE_EXTENSIONS_ENABLED`` IS PATCHED TRUE RATHER THAN ASSUMED. The
+    no-extension exit sits ABOVE the model exit, so on a machine without
+    extensions it fires first and this arm would measure the other mechanism.
+    Forcing it closed is what makes the arm environment-independent rather
+    than merely environment-tolerant -- the distinction the skip was papering
+    over.
     """
-    with _model_unavailable():
+    with patch("scripts.memory_api.SQLITE_EXTENSIONS_ENABLED", True):
+        with _model_unavailable():
+            mem.save({"context": _CONTEXT}, sync_to_claude=False)
+            status = mem.last_embedding_status
+
+    assert _cause(status) == "no-model", (
+        f"last_embedding_status was {status!r}. With the model unreachable and "
+        "the vector store available, the save must name `no-model` -- naming "
+        "`no-vector-store` here would send a reader to install a library that "
+        "is already present."
+    )
+
+
+def test_the_no_vector_store_cause_is_named_on_its_own(mem):
+    """THE MATCHED OPPOSITE, and it is what makes the arm above mean something.
+
+    Without it, `no-model` could be a constant: a code that named `no-model`
+    on every degraded exit would satisfy the arm above forever. This drives
+    the OTHER mechanism and requires the other name.
+    """
+    with patch("scripts.memory_api.SQLITE_EXTENSIONS_ENABLED", False):
         mem.save({"context": _CONTEXT}, sync_to_claude=False)
         status = mem.last_embedding_status
 
-    assert status is not None and status.startswith("degraded:"), (
-        f"last_embedding_status was {status!r} on a save with no model; the "
-        "documented channel reports `degraded:<search_mode>` here"
+    assert _cause(status) == "no-vector-store", (
+        f"last_embedding_status was {status!r}. With no extension support no "
+        "vector table is reachable at all, which is a different fault from a "
+        "model that would not load and wants a different response."
     )

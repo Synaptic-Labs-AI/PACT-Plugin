@@ -555,7 +555,7 @@ class PACTMemory:
         """Reason code from the most recent save() or update().
 
         None means there was nothing to report. A string is a reason code the
-        caller may surface: `degraded:<search_mode>` or `fault`.
+        caller may surface: `degraded:<search_mode>:<cause>` or `fault`.
         """
         return self._last_embedding_status
 
@@ -1031,7 +1031,10 @@ class PACTMemory:
             None when there is nothing for the caller to report - either the
             vector was stored, or storing none was correct for this input.
             Otherwise a reason code the caller may surface:
-            `degraded:<search_mode>` when this process cannot embed at all, or
+            `degraded:<search_mode>:<cause>` when this process cannot embed
+            at all -- cause is `no-vector-store` (no extension support, or
+            sqlite-vec absent) or `no-model` (the embedding model would not
+            load) -- or
             `fault` when storing raised.
         """
         # Check if SQLite extension loading is available
@@ -1043,7 +1046,7 @@ class PACTMemory:
             # No extension means the vector table cannot be reached at all, so
             # an existing vector cannot be removed here. It stays stale until a
             # process that can embed rewrites or removes it.
-            return self._degraded_reason()
+            return self._degraded_reason(self.DEGRADED_NO_VECTOR_STORE)
 
         # Generate text for embedding
         text = generate_embedding_text(memory)
@@ -1058,7 +1061,7 @@ class PACTMemory:
         if embedding is None:
             logger.debug("Embedding generation unavailable, skipping")
             self._drop_existing_vector(conn, memory_id)
-            return self._degraded_reason()
+            return self._degraded_reason(self.DEGRADED_NO_MODEL)
 
         try:
             # Enable extension loading (safe because SQLITE_EXTENSIONS_ENABLED is True)
@@ -1070,7 +1073,7 @@ class PACTMemory:
                 logger.debug("sqlite-vec not installed, skipping embedding storage")
                 # Same as the no-extension exit: the vector table is
                 # unreachable, so an existing vector cannot be removed here.
-                return self._degraded_reason()
+                return self._degraded_reason(self.DEGRADED_NO_VECTOR_STORE)
 
             # Convert to blob
             embedding_blob = struct.pack(f'{len(embedding)}f', *embedding)
@@ -1126,18 +1129,31 @@ class PACTMemory:
             logger.debug(f"Failed to store embedding for {memory_id}: {e}")
             return "fault"
 
+    # The two mechanisms that leave a save without a vector. They are DIFFERENT
+    # FAULTS WANTING DIFFERENT RESPONSES -- one is a missing library on this
+    # machine, the other is a model this process could not load -- and a single
+    # symbol for both is the defect this names away.
+    DEGRADED_NO_VECTOR_STORE = "no-vector-store"
+    DEGRADED_NO_MODEL = "no-model"
+
     @staticmethod
-    def _degraded_reason() -> str:
-        """Report this process's search capability as a reason code.
+    def _degraded_reason(cause: str) -> str:
+        """Report this process's search capability AND why it degraded.
 
         Reads the same capability the search path reports, so a caller is never
-        told one thing by `status` and another by a save.
+        told one thing by `status` and another by a save. `cause` is appended
+        as a THIRD segment rather than replacing the mode, because the two
+        answer different questions and collapsing them is what this fixes:
+        the mode says what search will do now, the cause says why.
+
+        Shape: `degraded:<search_mode>:<cause>`.
         """
         try:
             capabilities = get_search_capabilities()
-            return f"degraded:{capabilities.get('search_mode', 'unknown')}"
+            mode = capabilities.get("search_mode", "unknown")
         except Exception:
-            return "degraded:unknown"
+            mode = "unknown"
+        return f"degraded:{mode}:{cause}"
 
     @staticmethod
     def _drop_existing_vector(
