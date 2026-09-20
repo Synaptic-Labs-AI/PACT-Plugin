@@ -595,6 +595,16 @@ _STRIPPED_ON_INGRESS = frozenset({"id", "created_at", "updated_at"})
 # Caller-facing view of the allowlists: what a user may legitimately put in a
 # save/update payload. Stripped fields are tolerated but excluded here so
 # error envelopes (cli.py) don't list server-owned fields as valid options.
+# THESE TWO ARE CURRENTLY EQUAL AND MUST NOT BE COLLAPSED INTO ONE CONSTANT.
+# Measured: their symmetric difference is EMPTY, both holding 11 fields. That
+# is arithmetic, not duplication -- `ALLOWED_CREATE_COLUMNS` exceeds
+# `ALLOWED_UPDATE_COLUMNS` by exactly `{id, created_at}`, and both of those are
+# in `_STRIPPED_ON_INGRESS`, so subtracting it removes precisely the difference.
+#
+# They are DERIVED INDEPENDENTLY from two different allowlists and coincide only
+# while the create/update difference stays a subset of the stripped set. Add one
+# create-only field that is NOT stripped on ingress and they diverge the same
+# day. Collapsing them now would be invisible until then, and then wrong.
 CALLER_FACING_CREATE_FIELDS = ALLOWED_CREATE_COLUMNS - _STRIPPED_ON_INGRESS
 CALLER_FACING_UPDATE_FIELDS = ALLOWED_UPDATE_COLUMNS - _STRIPPED_ON_INGRESS
 
@@ -614,10 +624,22 @@ def _reject_unknown_columns(
     error envelope rendered by cli.py::cmd_update.
 
     The prose list is DERIVED from `allowed` by subtracting the server-owned
-    fields, which is the same expression that defines CALLER_FACING_*. It is
-    derived rather than passed so that it CANNOT drift from the machine-
-    readable `allowed_fields` array cli.py puts in the same envelope: those
-    two previously disagreed, the sentence naming server-owned fields the
+    fields, and THE SAME DERIVED LIST IS ATTACHED TO THE RAISED EXCEPTION as
+    `allowed_fields`, so cli.py renders its machine-readable array from this
+    object rather than from a constant of its own choosing.
+
+    THAT ATTACHMENT IS WHAT MAKES THE NO-DRIFT CLAIM STRUCTURAL. Deriving the
+    prose here is not on its own enough: cli.py used to pick between
+    CALLER_FACING_CREATE_FIELDS and CALLER_FACING_UPDATE_FIELDS by hand, so
+    the two halves of one error object agreed only while every call site
+    passed the `allowed` set matching the constant cli.py chose for that
+    operation. That is a CONVENTION ACROSS TWO FILES, enforced by nothing -- a
+    third operation, or the two constants transposed, would have reopened the
+    exact split this closed, silently, while this docstring still promised
+    they could not drift. Now both halves read one computation on one object,
+    so a mismatch is not expressible rather than merely unlikely.
+
+    The two previously disagreed: the sentence named server-owned fields the
     array omitted, so one error object gave two different answers about the
     same call depending on which half a caller read.
     """
@@ -629,13 +651,21 @@ def _reject_unknown_columns(
     # Validation above uses the FULL `allowed` set (create legitimately
     # tolerates id/created_at); only the human-facing list is narrowed, so
     # what is accepted is unchanged and only what is advertised is corrected.
-    allowed_list = ", ".join(sorted(allowed - _STRIPPED_ON_INGRESS))
+    caller_facing = sorted(allowed - _STRIPPED_ON_INGRESS)
+    allowed_list = ", ".join(caller_facing)
     unknown_list = ", ".join(repr(k) for k in unknown)
     target = f" (memory {memory_id})" if memory_id else ""
-    raise ValueError(
+    error = ValueError(
         f"Unknown memory field(s) for {operation}{target}: {unknown_list}. "
         f"Allowed fields: {allowed_list}"
     )
+    # ONE list, rendered twice: the sentence above and the array cli.py
+    # attaches are now the same object's `caller_facing`, so they cannot
+    # disagree about a given call. Carried as an attribute rather than a new
+    # exception type because every existing `except ValueError` must keep
+    # catching this unchanged.
+    error.allowed_fields = caller_facing
+    raise error
 
 
 # =============================================================================

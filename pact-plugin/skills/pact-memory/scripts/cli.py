@@ -540,7 +540,11 @@ def cmd_save(args, db_path=None):
             f"{_scrub(str(exc))} (Note: 'id' and 'created_at' are accepted "
             f"on save and stripped before validation.)",
             exit_code=2,
-            allowed_fields=sorted(CALLER_FACING_CREATE_FIELDS),
+            # Prefer the list the error itself carries, so this array and
+            # the message's sentence are one computation. The constant is a
+            # fallback for ValueErrors raised elsewhere on this path, which
+            # carry no field list and whose envelope shape is unchanged.
+            allowed_fields=getattr(exc, "allowed_fields", sorted(CALLER_FACING_CREATE_FIELDS)),
         )
     # Carry the embedding outcome to the command-line caller. Without this the
     # CLI reports a bare memory_id, so a save that stored no vector is
@@ -761,7 +765,11 @@ def cmd_update(args, db_path=None):
             f"{_scrub(str(exc))} (Note: 'id' and 'created_at' are stripped "
             f"before update validation.)",
             exit_code=2,
-            allowed_fields=sorted(CALLER_FACING_UPDATE_FIELDS),
+            # Prefer the list the error itself carries, so this array and
+            # the message's sentence are one computation. The constant is a
+            # fallback for ValueErrors raised elsewhere on this path, which
+            # carry no field list and whose envelope shape is unchanged.
+            allowed_fields=getattr(exc, "allowed_fields", sorted(CALLER_FACING_UPDATE_FIELDS)),
         )
     if resolved_id is None:
         _error("NOT_FOUND", f"Memory '{args.memory_id}' not found")

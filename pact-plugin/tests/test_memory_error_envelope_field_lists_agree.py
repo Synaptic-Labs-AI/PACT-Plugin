@@ -125,3 +125,99 @@ def test_stripped_fields_are_still_accepted():
     )
     for field in sorted(expected):
         _reject_unknown_columns({field: "x"}, ALLOWED_CREATE_COLUMNS, operation="save")
+
+
+# --- the guarantee is STRUCTURAL, not call-site-dependent --------------------
+
+def _envelope_from_a_real_rejection(argv):
+    """Drive a REAL rejection through the CLI and return its parsed envelope.
+
+    NOT A MOCK, and that is the whole point of this arm. Every existing
+    envelope test injects a bare ``ValueError`` from a stubbed PACTMemory,
+    which carries no field list -- so all of them exercise cli.py's FALLBACK
+    and none of them can see whether the two halves of a real error object
+    agree. This drives `_reject_unknown_columns` for real.
+    """
+    import json
+    import io
+    import contextlib
+    from scripts.cli import build_parser, cmd_save, cmd_update
+
+    args = build_parser().parse_args(argv)
+    handler = cmd_save if argv[0] == "save" else cmd_update
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        try:
+            handler(args)
+        except SystemExit:
+            pass
+    return json.loads(err.getvalue())
+
+
+def _a_real_memory_id():
+    """Save a record and return its id, for the update arm.
+
+    The update path checks EXISTENCE BEFORE FIELDS -- measured: a bogus id
+    returns a NOT_FOUND envelope and never reaches `_reject_unknown_columns`,
+    so an arm built on a fabricated id tests the wrong branch and reports a
+    parse failure that looks like a product defect. It needs a real record.
+    """
+    import json
+    import io
+    import contextlib
+    from scripts.cli import build_parser, cmd_save
+
+    args = build_parser().parse_args(["save", '{"context": "envelope probe"}'])
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        try:
+            cmd_save(args)
+        except SystemExit:
+            pass
+    return json.loads(out.getvalue())["result"]["memory_id"]
+
+
+@pytest.mark.parametrize("operation", ["save", "update"], ids=["save", "update"])
+def test_the_envelopes_two_halves_agree_on_a_real_rejection(operation):
+    """THE SENTENCE AND THE ARRAY, in one envelope, from one call.
+
+    The sibling arms above compare the prose against the CALLER_FACING_*
+    constant. That pins the derivation, and it CANNOT see the defect this
+    arm exists for: cli.py chose between two constants by hand, so the two
+    halves agreed only while every call site passed the `allowed` set
+    matching the constant cli.py picked for that operation. A third
+    operation, or the two constants transposed, would have split them again
+    while every assertion above still passed.
+
+    This reads both halves off the SAME envelope, so it is indifferent to
+    which constant cli.py would have chosen and fails if they ever describe
+    different sets.
+    """
+    if operation == "save":
+        argv = ["save", '{"context": "x", "bogus_field": 1}']
+    else:
+        argv = ["update", _a_real_memory_id(), '{"bogus_field": 1}']
+    envelope = _envelope_from_a_real_rejection(argv)
+
+    assert envelope["ok"] is False, f"expected a rejection, got {envelope}"
+    # cli.py APPENDS a parenthetical note to the message it renders -- e.g.
+    # "(Note: 'id' and 'created_at' are accepted on save ...)". `_ALLOWED_RE`
+    # runs to the first period, and that note has none until its own end, so
+    # an unstripped parse swallows it and reports a field named after half a
+    # sentence. The sibling arms never meet this because they read the RAW
+    # exception message, which carries no note. Cut it first.
+    message = envelope["message"].split(" (Note:")[0]
+    match = _ALLOWED_RE.search(message)
+    assert match, (
+        f"no 'Allowed fields:' clause in the envelope's own message, so this "
+        f"arm has nothing to compare: {envelope}"
+    )
+    from_sentence = {f.strip() for f in match.group(1).split(",") if f.strip()}
+    from_array = set(envelope["allowed_fields"])
+
+    assert from_sentence, "the sentence named no fields -- the parse is empty"
+    assert from_sentence == from_array, (
+        "the two halves of ONE error envelope describe different field sets.\n"
+        f"  in the sentence only: {sorted(from_sentence - from_array)}\n"
+        f"  in the array only:    {sorted(from_array - from_sentence)}"
+    )
