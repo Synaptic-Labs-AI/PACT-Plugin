@@ -354,11 +354,47 @@ class TestTheGuardDisposesOfCapturedBytes:
     discard on failure is what keeps the error envelope alone on the stream.
     The replay on success is what stops a 30-second first-run model download
     looking like a hang. Delete either and one of those regresses silently.
+
+    ⚠️ THE GUARD DECIDES `replay` ON TWO BRANCHES, AND THESE ARMS DELIBERATELY
+    EXERCISE ONLY ONE. `replay = True` after the yield is reached by falling out
+    of the block; `replay = exc.code in (0, None)` is reached by raising. Every
+    command takes the SECOND, because `_success` ends in `sys.exit(0)` and
+    `_error` in `sys.exit(<non-zero>)`, so both arms here raise.
+
+    NO ARM COVERS THE FALL-THROUGH BRANCH, and that is a decision rather than a
+    gap. No handler registered in `_COMMANDS` can leave that block without
+    raising -- checked by walking each one's exit paths -- so nothing in the
+    shipped CLI reaches it. An arm over it would be circular: a test whose only
+    justification is a branch whose only exerciser is that test.
+
+    THE BRANCH STAYS ANYWAY, and the reason is the strength of the evidence
+    against it. "Unreachable" here rests on an ENUMERATION of the registered
+    handlers, and an enumeration is exactly the instrument that licensed the
+    wrong count this comment block used to carry. A census that misses an entry
+    costs a wrong number; a census that licenses deleting a fallback costs the
+    fallback, silently, when entry N+1 is added by someone who never read this.
+    So it is kept as a defensive branch and recorded here rather than removed.
     """
 
     @staticmethod
-    def _bytes_reaching_stderr(fail: bool) -> bytes:
+    def _bytes_reaching_stderr(exit_code: int) -> bytes:
         """Run one guard window writing the payload, return what reached real stderr.
+
+        THE WINDOW ALWAYS EXITS BY RAISING, AND THE CODE IS THE PARAMETER,
+        because that is the route production takes and naming it is what keeps
+        this arm pointed at it. `_success` ends in `sys.exit(0)` and `_error` in
+        `sys.exit(<non-zero>)`, so EVERY command leaves this window through the
+        `except SystemExit` clause, and the replay decision for a real run is
+        made there -- `replay = exc.code in (0, None)`.
+
+        AN EARLIER VERSION TOOK A `fail: bool` AND SIMPLY FELL OUT OF THE
+        BLOCK WHEN IT WAS FALSE. That reached the OTHER branch, `replay = True`
+        after the yield, which no command can reach. The arm was green, the
+        mutants were red, and none of it touched the line production depends
+        on: deleting the `except SystemExit` clause left it all passing. The
+        defect was an OMISSION -- a missing raise -- so the repair is a
+        parameter that has to be supplied rather than a flag that defaults to
+        a route by saying nothing.
 
         NON-VACUITY CONTROL, and the arms below are unsound without it. The
         guard FAILS OPEN: when `os.dup(2)` raises it yields `None` and does not
@@ -382,8 +418,7 @@ class TestTheGuardDisposesOfCapturedBytes:
                         "below would be measuring an unguarded write"
                     )
                     os.write(2, _WINDOW_PAYLOAD)
-                    if fail:
-                        raise SystemExit(1)
+                    raise SystemExit(exit_code)
             except SystemExit:
                 pass
         finally:
@@ -410,7 +445,7 @@ class TestTheGuardDisposesOfCapturedBytes:
         capture larger than 65536 bytes would, at the cost of an unreadable
         failure message.
         """
-        landed = self._bytes_reaching_stderr(fail=False)
+        landed = self._bytes_reaching_stderr(exit_code=0)
         assert landed != b"", (
             "NOTHING reached stderr on a successful exit, so the replay did "
             "not run. Every diagnostic emitted during a successful command is "
@@ -433,7 +468,7 @@ class TestTheGuardDisposesOfCapturedBytes:
         puts bytes in front of the error envelope. Emptiness is the property
         the envelope's purity actually depends on.
         """
-        landed = self._bytes_reaching_stderr(fail=True)
+        landed = self._bytes_reaching_stderr(exit_code=1)
         assert landed == b"", (
             "bytes reached stderr on a FAILED exit, so they sit in front of "
             "the error envelope and every caller parsing stderr breaks. The "
