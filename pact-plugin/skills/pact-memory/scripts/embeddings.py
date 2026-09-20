@@ -107,9 +107,45 @@ class EmbeddingService:
             #
             # A genuine first run still downloads: this suppresses
             # revalidation, not acquisition.
-            self._model = StaticModel.from_pretrained(
-                MODEL_NAME, force_download=False
-            )
+            try:
+                self._model = StaticModel.from_pretrained(
+                    MODEL_NAME, force_download=False
+                )
+            except Exception as cached_copy_unusable:
+                # REPAIR ONCE, BECAUSE A CACHE-FIRST LOAD CAN PICK A BROKEN
+                # COPY AND THEN NEVER STOP PICKING IT.
+                #
+                # model2vec's cache probe selects a snapshot directory by
+                # max(mtime) and does NOT check that the snapshot is complete.
+                # An interrupted transfer therefore leaves a directory that
+                # LOOKS newest and cannot load, and `force_download=False`
+                # re-selects that same directory on every subsequent run -- so
+                # without this the degradation is PERMANENT rather than
+                # transient, and no later save repairs it.
+                #
+                # MEASURED, not inferred: a snapshot copied complete loads; the
+                # same snapshot with `model.safetensors` removed returns
+                # no-model. That is the end state of an interrupted fetch, and
+                # it is the mechanism behind a 12-of-14-file cache that
+                # reported no-model while the files sat on disk.
+                #
+                # `force_download=True` BYPASSES the cache probe, which is the
+                # point -- it is the only way back past a poisoned selection.
+                # It costs a re-fetch, and it runs ONLY when the cached copy
+                # already failed, which is exactly when a re-fetch is what the
+                # caller wants.
+                #
+                # THIS DOES NOT WEAKEN THE OFFLINE GUARANTEE. Under
+                # `HF_HUB_OFFLINE=1` the retry raises immediately instead of
+                # reaching the network, so an offline caller still degrades
+                # rather than hanging -- the outer handler below catches it.
+                logger.debug(
+                    "cached model2vec copy did not load (%s); re-fetching once",
+                    cached_copy_unusable,
+                )
+                self._model = StaticModel.from_pretrained(
+                    MODEL_NAME, force_download=True
+                )
             self._available = True
             logger.info(f"Loaded model2vec model: {MODEL_NAME}")
             return True

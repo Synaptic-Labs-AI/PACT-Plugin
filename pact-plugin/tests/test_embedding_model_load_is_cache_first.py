@@ -211,7 +211,15 @@ def _scan():
     caught. Every skip is therefore surfaced rather than swallowed, and
     `test_no_file_is_silently_skipped` is what makes the swallow impossible.
 
-    call_sites: list of (relative_path, lineno, force_download_source_or_None).
+    THE FOURTH TUPLE FIELD IS THE REPAIR-PATH DISCRIMINATOR. A call inside an
+    `except` handler runs only AFTER a load has already failed, and there a
+    re-fetch is what the caller wants -- so `force_download=True` is correct
+    there and wrong everywhere else. Keyed on the ENCLOSING `except` block
+    rather than on a path or line allowlist, which would rot the moment the
+    repair moved.
+
+    call_sites: list of (relative_path, lineno, force_download_source_or_None,
+                         inside_except_handler).
     unparseable_paths: list of (relative_path, exception_class_name).
     """
     found = []
@@ -224,6 +232,10 @@ def _scan():
         except (SyntaxError, UnicodeDecodeError, OSError) as exc:
             skipped.append((str(path.relative_to(_PLUGIN_ROOT)), type(exc).__name__))
             continue
+        handled = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ExceptHandler):
+                handled.update(id(sub) for sub in ast.walk(node))
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.Call)
@@ -236,6 +248,7 @@ def _scan():
                         str(path.relative_to(_PLUGIN_ROOT)),
                         node.lineno,
                         kwargs.get("force_download"),
+                        id(node) in handled,
                     )
                 )
     return found, skipped
@@ -271,7 +284,7 @@ def test_the_scan_reaches_real_code():
     """
     sites = _real_call_sites()
     assert sites, "the scan found NO call sites at all -- the instrument is broken"
-    reached = {path for path, _, _ in sites}
+    reached = {path for path, _, _, _ in sites}
     missing = [known for known in _KNOWN_CALL_SITES if known not in reached]
     assert not missing, (
         f"the scan did not reach {missing}, known to contain calls. The census "
@@ -301,22 +314,85 @@ def test_no_file_is_silently_skipped():
 
 
 def test_every_real_call_site_overrides_force_download():
-    """THE CLASS, not the instance.
+    """THE CLASS, not the instance -- and the property is EXPLICITNESS.
 
     A census fixes today's members and expires the moment someone adds a call
-    site. This asserts the property of EVERY call site instead, so a third one
+    site. This asserts the property of EVERY call site instead, so a new one
     cannot be introduced silently with model2vec's default of True still in
-    force. Both known sites were found by hand -- the production loader, then a
-    test fixture that hung an entire suite -- and the second was missed on the
-    first pass precisely because a census was run once rather than encoded.
+    force. Both original sites were found by hand -- the production loader,
+    then a test fixture that hung an entire suite -- and the second was missed
+    on the first pass precisely because a census was run once rather than
+    encoded.
+
+    TWO RULES, AND THE FIRST IS THE ONE THAT MATTERS:
+
+      1. EVERY site must pass `force_download` EXPLICITLY. Taking model2vec's
+         default is the defect, wherever the call sits.
+      2. Outside an `except` handler it must be `False`.
+
+    WHY `except` IS THE DISCRIMINATOR AND NOT AN ALLOWLIST. A repair retry runs
+    only AFTER a cache-first load has already failed, and there a re-fetch is
+    exactly what the caller wants -- the original rationale for this pin, that
+    a True site "revalidates over the network on every load", does not reach a
+    site that runs on no ordinary load at all. An allowlist by path or line
+    would rot the moment that code moved; the enclosing-handler rule travels
+    with it.
+
+    Rule 1 is what stops the exception widening into a hole: a repair site may
+    override in the OTHER direction, deliberately and visibly, but it may not
+    omit the argument and inherit the default.
     """
-    offenders = [
-        (path, lineno, value)
-        for path, lineno, value in _real_call_sites()
-        if value != "False"
+    sites = _real_call_sites()
+
+    silent = [(p, n) for p, n, value, _ in sites if value is None]
+    assert not silent, (
+        "these call sites pass NO `force_download`, so they take model2vec's "
+        f"default of True: {silent}. An `except` handler does not excuse this "
+        "-- a repair path must override deliberately, not inherit."
+    )
+
+    wrong_direction = [
+        (p, n, value) for p, n, value, in_except in sites
+        if not in_except and value != "False"
     ]
-    assert not offenders, (
-        "these call sites do not pass force_download=False, so they take "
-        "model2vec's default of True and revalidate over the network on every "
-        f"load: {offenders}"
+    assert not wrong_direction, (
+        "these call sites are NOT inside an `except` handler and do not pass "
+        "force_download=False, so they revalidate over the network on every "
+        f"ordinary load: {wrong_direction}"
+    )
+
+
+def test_the_except_discriminator_tells_the_two_positions_apart():
+    """COUNTER-TEST for the rule above, committed rather than run once.
+
+    The exemption is only as good as the discriminator, and a discriminator
+    that answered True everywhere would make rule 2 vacuous while every arm
+    above still passed. Pins it against synthetic source holding both
+    positions, so the scanner's answer is measured rather than assumed.
+    """
+    source = (
+        "def outside():\n"
+        "    M.from_pretrained(N, force_download=True)\n"
+        "def repair():\n"
+        "    try:\n"
+        "        M.from_pretrained(N, force_download=False)\n"
+        "    except Exception:\n"
+        "        M.from_pretrained(N, force_download=True)\n"
+    )
+    tree = ast.parse(source)
+    handled = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ExceptHandler):
+            handled.update(id(sub) for sub in ast.walk(node))
+    verdicts = [
+        (node.lineno, id(node) in handled)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "from_pretrained"
+    ]
+    assert sorted(verdicts) == [(2, False), (5, False), (7, True)], (
+        f"the enclosing-handler discriminator mis-classified: {sorted(verdicts)}. "
+        "Line 2 is bare, line 5 is inside the `try` (NOT the handler), and only "
+        "line 7 is inside the `except`."
     )
