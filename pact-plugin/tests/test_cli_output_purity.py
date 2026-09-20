@@ -43,6 +43,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -88,6 +89,26 @@ print("pact-memory: dependency drift detected", file=sys.stderr)
 '''
 
 _EMISSION_MARKER = "dependency drift detected"
+
+# Written INSIDE a guard window by the disposal arms at the foot of this file.
+# Bytes, not text: they go to file descriptor 2 directly, which is the only
+# writer the guard's own docstring says a `sys.stderr` rebind would miss.
+#
+# EVERY PART OF THIS PAYLOAD IS LOAD-BEARING -- do not simplify it to a plain
+# string. The success arm asserts the replayed bytes are IDENTICAL to these, so
+# each element is chosen to make a specific corruption visible:
+#   CRLF          a line-ending rewrite collapses it to LF
+#   UTF-8 bytes   a decode/re-encode round trip through the wrong codec alters
+#                 them, and a lone 0xc2 would be mangled by latin-1
+#   NUL + control anything treating the buffer as a C string truncates here
+#   no final \n   a "helpfully terminate the line" normalisation appends one
+# The whole is also distinctive enough that a coincidental match is not
+# credible, which is what makes identity evidence of PROVENANCE.
+_WINDOW_PAYLOAD = (
+    b"REPLAY-PROVENANCE\r\n"
+    b"\xc2\xa7 \xe2\x94\x80 caf\xc3\xa9\n"
+    b"\x00\x01\x02 trailing-no-newline"
+)
 
 
 def _make_hook_dir(tmp_path, name, emit_to_stderr=False):
@@ -234,8 +255,21 @@ class TestCliOutputPurity:
     ):
         """
         The success path carries the same exposure: stdout is the envelope, and
-        stderr must stay EMPTY so a caller can treat any stderr content as a
-        real diagnostic rather than noise.
+        stderr stays empty for a command that emits nothing.
+
+        ⚠️ THAT IS A CLAIM ABOUT THIS COMMAND, NOT ABOUT THE SUCCESS PATH, and
+        the wider claim would be false. `_own_stderr_for_envelope` REPLAYS to
+        stderr anything written inside the handler window when the command
+        succeeds -- measured, and pinned by TestTheGuardDisposesOfCapturedBytes
+        below. A successful run whose handler emits (a divergence warning, a
+        model-download progress bar) therefore exits 0 with stderr NON-EMPTY and
+        is behaving correctly. `list` emits nothing, so there is nothing to
+        replay, which is the whole reason this arm is green.
+
+        DO NOT GENERALISE IT BACK. An earlier wording here said stderr "must
+        stay EMPTY" on the success path, which contradicts the replay the guard
+        performs by design, and would send the next reader of a failure here
+        hunting a defect that is not one.
         """
         hook_dir = _make_hook_dir(tmp_path, "block")
         result = _run_cli(
@@ -247,8 +281,11 @@ class TestCliOutputPurity:
         payload = _parse_or_fail(result.stdout, "stdout")
         assert payload["ok"] is True
         assert result.stderr == "", (
-            "the CLI wrote to stderr on a SUCCESSFUL run, so stderr no longer "
-            f"distinguishes failure from noise: {result.stderr!r}"
+            "a `list` wrote to stderr. `list` emits nothing inside the handler "
+            "window, so the guard has nothing to replay and this should be "
+            "empty. Check for a NEW emitter on the import path or in the list "
+            "handler -- do NOT read this as the replay misbehaving, and do not "
+            f"relax the assertion to accommodate one: {result.stderr!r}"
         )
 
 
@@ -291,4 +328,114 @@ class TestThisGuardCanFire:
             "the mutated run should be the clean envelope with the emission "
             "prepended; it differs in some other way, so the comparison does "
             "not isolate the emission"
+        )
+
+
+class TestTheGuardDisposesOfCapturedBytes:
+    """What `_own_stderr_for_envelope` does with what it captures.
+
+    WHY THIS ARM EXISTS. Every other arm in this file asserts stderr is pure
+    JSON or empty, and every one of them would stay green if the guard's REPLAY
+    were deleted outright -- they drive commands that write nothing inside the
+    handler window, so there is nothing to replay and its absence is invisible.
+    That left the disposal rule itself unpinned while three arms depended on
+    understanding it, and left the success-path arm above one emitting command
+    away from a failure nobody could diagnose from its message.
+
+    WHY IN-PROCESS, AGAINST THE IDIOM OF THIS FILE. The rest of the module runs
+    the CLI as a subprocess, which is right for a contract about streams a
+    caller parses. This is a contract about a CONTEXT MANAGER, and reaching it
+    through a subprocess would need a command that emits inside the window --
+    which today means a save, whose sync path writes the operator's real
+    CLAUDE.md. Driving the guard directly tests the same rule and touches no
+    store and no file.
+
+    BOTH DIRECTIONS ARE ASSERTED BECAUSE EACH PROTECTS A DIFFERENT THING. The
+    discard on failure is what keeps the error envelope alone on the stream.
+    The replay on success is what stops a 30-second first-run model download
+    looking like a hang. Delete either and one of those regresses silently.
+    """
+
+    @staticmethod
+    def _bytes_reaching_stderr(fail: bool) -> bytes:
+        """Run one guard window writing the payload, return what reached real stderr.
+
+        NON-VACUITY CONTROL, and the arms below are unsound without it. The
+        guard FAILS OPEN: when `os.dup(2)` raises it yields `None` and does not
+        guard at all. In that state the payload still reaches this sink --
+        directly, because nothing captured it -- and the success arm would go
+        GREEN while meaning the opposite of what it asserts, namely that the
+        guard is inert. Asserting the yielded capture is not None is what makes
+        a pass mean the replay ran rather than the mechanism being absent.
+        """
+        from scripts.cli import _own_stderr_for_envelope
+
+        sink = tempfile.TemporaryFile()
+        saved = os.dup(2)
+        try:
+            os.dup2(sink.fileno(), 2)
+            try:
+                with _own_stderr_for_envelope() as capture:
+                    assert capture is not None, (
+                        "the guard failed open (os.dup(2) raised), so this "
+                        "window was never guarded and the disposal assertions "
+                        "below would be measuring an unguarded write"
+                    )
+                    os.write(2, _WINDOW_PAYLOAD)
+                    if fail:
+                        raise SystemExit(1)
+            except SystemExit:
+                pass
+        finally:
+            os.dup2(saved, 2)
+            os.close(saved)
+        sink.seek(0)
+        return sink.read()
+
+    def test_a_successful_window_replays_what_it_captured(self):
+        """Two assertions, deliberately, because IDENTITY FAILS TWO WAYS.
+
+        Nothing arrived means the replay did not run -- the serious case, and
+        the one that makes every diagnostic on a successful command vanish.
+        The wrong thing arrived means it ran and wrote something that is not
+        the capture -- narrower, and a different repair. One assertion for
+        each, so the message names which world you are in rather than leaving
+        the next reader to work it out from a bytes diff.
+
+        A separate presence ARM would be redundant: identity ENTAILS presence,
+        so such an arm could only fail where this one already failed.
+
+        STATED BOUND: the payload is a single `os.read` chunk, so this does not
+        cover a defect in the replay loop's CONTINUATION across chunks. A
+        capture larger than 65536 bytes would, at the cost of an unreadable
+        failure message.
+        """
+        landed = self._bytes_reaching_stderr(fail=False)
+        assert landed != b"", (
+            "NOTHING reached stderr on a successful exit, so the replay did "
+            "not run. Every diagnostic emitted during a successful command is "
+            "now silently discarded -- a first-run model download reads as a "
+            "hang with no output to explain the wait."
+        )
+        assert landed == _WINDOW_PAYLOAD, (
+            "bytes reached stderr but they are NOT the captured bytes, so the "
+            "replay is no longer copying the capture verbatim -- check for a "
+            "text layer, a line-ending rewrite, or a truncated read.\n"
+            f"  expected: {_WINDOW_PAYLOAD!r}\n"
+            f"  landed:   {landed!r}"
+        )
+
+    def test_a_failed_window_discards_what_it_captured(self):
+        """Asserts stderr is EMPTY, not merely that the payload is absent.
+
+        Absence of the payload is satisfied by a replay that ran and wrote
+        something else, which is still a replay on the failure path and still
+        puts bytes in front of the error envelope. Emptiness is the property
+        the envelope's purity actually depends on.
+        """
+        landed = self._bytes_reaching_stderr(fail=True)
+        assert landed == b"", (
+            "bytes reached stderr on a FAILED exit, so they sit in front of "
+            "the error envelope and every caller parsing stderr breaks. The "
+            f"capture must be discarded on this path. Landed: {landed!r}"
         )
