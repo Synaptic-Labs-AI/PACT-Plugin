@@ -36,11 +36,42 @@ from scripts.embeddings import EmbeddingService
 
 
 def _load_with_fake_model2vec():
-    """Run the real _ensure_initialized against a fake StaticModel, return the call."""
+    """Run the real _ensure_initialized against a fake StaticModel, return the call.
+
+    THE SNAPSHOT RESOLUTION IS PINNED TO None, AND THAT IS WHAT KEEPS THESE
+    ARMS CACHE-INDEPENDENT. `_ensure_initialized` resolves the revision the
+    cache calls `main` and passes that DIRECTORY positionally when it can,
+    falling back to the bare model id when it cannot. So the positional
+    argument would otherwise depend on whether the machine running the suite
+    happens to have a populated HuggingFace cache -- green on a cold checkout,
+    red on a warm one, for a call that is correct in both. That is precisely
+    the dependence this file's header rules out, so the ambient answer is
+    replaced with a fixed one rather than the assertion below being loosened to
+    admit both shapes.
+
+    🔴 THE PATCH TARGETS THE FUNCTION'S OWN `__globals__`, NOT THE MODULE NAME,
+    AND THE DIFFERENCE IS NOT STYLE. `tests/test_embedding_catchup.py` evicts
+    `scripts.embeddings` from `sys.modules` and re-imports it, so from that
+    point on TWO module objects for this file are live: the one this file
+    imported `EmbeddingService` from, and the newer one occupying the name.
+    `patch("scripts.embeddings._cache_snapshot_for")` writes into the NEWER
+    one; the method body reads its own `__globals__`, which is still the older
+    one. MEASURED: after the eviction, `__globals__ is sys.modules[...].__dict__`
+    is False, and a patch applied by name is invisible to the call.
+
+    That made this pin pass when the file ran alone and fail in a full suite,
+    on the same machine with the same cache -- alphabetical order puts the
+    catchup file first. A function's `__globals__` IS the namespace its body
+    resolves through, by construction rather than by lookup, so it cannot
+    drift from the code under test no matter what `sys.modules` is holding.
+    """
     fake_cls = MagicMock()
     fake_module = MagicMock(StaticModel=fake_cls)
     service = EmbeddingService()
-    with patch.dict("sys.modules", {"model2vec": fake_module}):
+    with patch.dict("sys.modules", {"model2vec": fake_module}), patch.dict(
+        EmbeddingService._ensure_initialized.__globals__,
+        {"_cache_snapshot_for": lambda _name: None},
+    ):
         assert service._ensure_initialized() is True, (
             "the load reported failure against a fake model -- the probe is "
             "measuring an error path, not the call"
@@ -168,11 +199,27 @@ def test_the_detector_rejects_a_signature_without_the_parameter():
 
 
 def test_the_model_name_is_still_the_one_we_pin():
-    """Non-vacuity guard for the call inspection above.
+    """Non-vacuity guard for the call inspection above, ON THE FALLBACK BRANCH.
 
     Both arms read `call_args`. If the load ever stopped passing a model name
     positionally, `kwargs` could be inspected on a call that no longer resembles
     the one under test. Pinning the positional argument keeps the shape honest.
+
+    WHAT THIS CHECKS IS NARROWER THAN IT ONCE WAS, and the sentence is corrected
+    rather than the assertion widened. The load now passes
+    `snapshot or MODEL_NAME` positionally, and the helper pins the snapshot
+    resolution to None so these arms stay cache-independent -- so what this sees
+    is the FALLBACK branch, never the resolved-directory one.
+
+    IT STILL DOES ITS JOB. Both arms run under the same pin and inspect the same
+    call, so a load that stopped passing a model name positionally still fails
+    here before its sibling reads `kwargs` off a call it no longer recognises.
+    That is the whole of what this guard was for, and it is unaffected.
+
+    THE RESOLVED BRANCH IS PINNED ELSEWHERE, by arms written for it:
+    `test_embedding_snapshot_is_the_cache_ref.py` asserts the resolved directory
+    reaches the first load positionally, and that the retry is handed the bare
+    id instead. This arm not reaching that branch is correct, not a gap.
     """
     from scripts.embeddings import MODEL_NAME
 

@@ -14,6 +14,7 @@ Used by:
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import Any, Dict, List, Optional
 
@@ -63,6 +64,52 @@ EMBEDDING_MAX_TOKENS = 2048
 MIN_CATCHUP_RAM_MB = 75.0
 
 
+def _cache_snapshot_for(model_name: str) -> Optional[str]:
+    """Return the snapshot directory the CACHE ITSELF calls `main`, or None.
+
+    WHY THIS EXISTS. model2vec resolves a bare model id through its own cache
+    probe, which picks a snapshot directory by `max(mtime)` and does not check
+    that the directory is the revision anyone asked for. With several snapshots
+    cached, the one that loads is whichever was touched last -- an incidental
+    property of download order, not a statement about which revision this is.
+    So the vectors that enter the index are chosen by a filesystem timestamp.
+
+    WHAT REPLACES IT. `refs/main` is a pointer huggingface_hub maintains, so
+    "which revision is main" is the CACHE'S answer rather than a policy we
+    choose here. `try_to_load_from_cache` performs exactly that resolution and
+    is documented never to raise, so this asks the library the question instead
+    of reimplementing its cache layout.
+
+    RETURNS None RATHER THAN RAISING, AND THAT IS THE WHOLE INTERFACE. Every
+    way this can fail degrades to the caller's existing behaviour:
+
+      * no repo directory, no `refs/` directory, or no `refs/main`   -> None
+      * a ref naming a snapshot directory that is not present        -> None
+      * a snapshot present but missing `model.safetensors`           -> None
+      * the file recorded as known-to-not-exist (`_CACHED_NO_EXIST`) -> None
+      * anything unexpected from the library at all                  -> None
+
+    A ref with stray whitespace also lands in the first group, because
+    huggingface_hub reads the ref file WITHOUT stripping and a padded value
+    then matches no snapshot directory. That is a quiet fallback rather than an
+    error, which is the correct direction here but does mean this is
+    best-effort determinism: when it cannot answer, the previous arbitrary
+    selection is what runs.
+    """
+    try:
+        from huggingface_hub import try_to_load_from_cache
+
+        cached = try_to_load_from_cache(model_name, "model.safetensors")
+    except Exception:
+        return None
+    # `isinstance(str)` is the library's own documented test: it rejects both
+    # None (not cached) and the `_CACHED_NO_EXIST` sentinel in one check.
+    if not isinstance(cached, str):
+        return None
+    snapshot = os.path.dirname(cached)
+    return snapshot if os.path.isdir(snapshot) else None
+
+
 class EmbeddingService:
     """
     Embedding service using Model2Vec.
@@ -107,9 +154,14 @@ class EmbeddingService:
             #
             # A genuine first run still downloads: this suppresses
             # revalidation, not acquisition.
+            # RESOLVE THE SNAPSHOT BEFORE LOADING, so the revision is the
+            # one the cache calls `main` rather than whichever directory was
+            # touched last. Falls back to the bare id -- and therefore to the
+            # previous behaviour -- whenever the cache cannot answer.
+            snapshot = _cache_snapshot_for(MODEL_NAME)
             try:
                 self._model = StaticModel.from_pretrained(
-                    MODEL_NAME, force_download=False
+                    snapshot or MODEL_NAME, force_download=False
                 )
             except Exception as cached_copy_unusable:
                 # REPAIR ONCE, BECAUSE A CACHE-FIRST LOAD CAN PICK A BROKEN
@@ -134,6 +186,20 @@ class EmbeddingService:
                 # It costs a re-fetch, and it runs ONLY when the cached copy
                 # already failed, which is exactly when a re-fetch is what the
                 # caller wants.
+                #
+                # THIS RETRY PASSES `MODEL_NAME`, NOT THE RESOLVED SNAPSHOT,
+                # AND THAT IS LOAD-BEARING RATHER THAN AN OVERSIGHT. model2vec
+                # resolves its argument with `_resolve_folder`, whose FIRST
+                # action is `if folder_or_repo_path.exists(): return it` --
+                # before `force_download` is read at all. Hand it an existing
+                # directory and `force_download=True` cannot reach the network:
+                # the retry would re-select the same unusable snapshot, fail
+                # identically, and restore the permanent degradation this
+                # handler exists to break. MEASURED, not inferred: an existing
+                # path with `force_download=True` comes back unchanged, while a
+                # non-existent one falls through. The tidy-up that hoists one
+                # `target` variable for both calls is exactly what must not
+                # happen, which is why there is a test pinning it.
                 #
                 # THIS DOES NOT WEAKEN THE OFFLINE GUARANTEE. Under
                 # `HF_HUB_OFFLINE=1` the retry raises immediately instead of
