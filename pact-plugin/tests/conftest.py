@@ -601,7 +601,26 @@ def _refuse_claude_md_writes_outside_tmp(request, monkeypatch):
         # decorator shape as what it exists to catch, and it caught this one.
         @functools.wraps(real)
         def guarded(target, content, project_root, *args, **kwargs):
-            resolved = Path(target).resolve()
+            try:
+                resolved = Path(target).resolve()
+            except (OSError, RuntimeError):
+                # THIS GUARD ADDS A SECOND, USERSPACE RESOLVER IN FRONT OF A
+                # WRITER WHOSE OWN CONTAINMENT CHECK USES ONLY THE KERNEL, AND
+                # THAT IS THE ONE THING THE WRITER WAS BUILT NOT TO HAVE.
+                # `Path.resolve()` disagrees with itself across versions on a
+                # symlink loop: 3.9 raises RuntimeError even when non-strict,
+                # later versions do not raise at all. Uncaught, that turns a
+                # containment REFUSAL into an interpreter-dependent crash --
+                # measured, as a 3.9-only CI failure on the two loop arms of
+                # test_containment_certification.py, which pass everywhere else.
+                #
+                # BOTH EXCEPTION TYPES ARE CAUGHT SO THE BEHAVIOUR DOES NOT
+                # DEPEND ON WHICH INTERPRETER IS RUNNING, and the handler
+                # DELEGATES rather than deciding: a guard that cannot resolve a
+                # path cannot prove containment either way, and the real writer
+                # refuses this input on its own. Refusing here instead would
+                # answer a question this guard did not resolve.
+                return real(target, content, project_root, *args, **kwargs)
             if not (resolved == tmp_root or tmp_root in resolved.parents):
                 # RECORD BEFORE RAISING, BECAUSE THE RAISE IS SWALLOWED.
                 # `memory_api`'s sync is wrapped in `except Exception`, which
