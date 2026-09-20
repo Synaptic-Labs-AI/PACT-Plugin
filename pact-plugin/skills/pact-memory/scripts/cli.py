@@ -1200,7 +1200,11 @@ def main(argv=None):
     # a change that looks unrelated to it. An assertion in the test suite pins
     # this order.
     #
-    # ONE SCOPE COVERS ALL EIGHT HANDLERS. That is what repairs the three legs
+    # ONE SCOPE COVERS EVERY HANDLER IN `_COMMANDS`, whatever that set holds --
+    # the count is deliberately not written here, because the sentence's claim
+    # is that the scope is universal over them and a figure beside it only adds
+    # something that can go stale. It already had: it read EIGHT while
+    # `_COMMANDS` held nine. That is what repairs the three legs
     # of `setup` together: the leg that CREATES the directory and the leg that
     # REPORTS it both reach `get_memory_dir()` with no argument, so neither one
     # could honour `--db-path` while only the schema leg took a parameter.
