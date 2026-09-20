@@ -254,6 +254,50 @@ jobs:
           # It is not event input, so it carries no injection surface.
           python-version: ${{ matrix.python-version }}
 
+      # HuggingFace model cache. THE ONE PATH THE IN-TEST REMEDIES CANNOT REACH.
+      #
+      # The suite's child processes now pin the model cache and refuse network
+      # (see `tests/fixtures/hf_cache.py`), which stops a cold download in every
+      # test that can tolerate one. `tests/test_embedding_status_contract.py`
+      # CANNOT: its forced fault sits strictly downstream of the no-model return,
+      # so it needs `generate_embedding` to SUCCEED and therefore the model to
+      # LOAD. `HF_HUB_OFFLINE` breaks that test and an `HF_HOME` binding is a
+      # no-op for it, because its children inherit this job's environment
+      # already. On a genuinely cold runner that child MUST fetch: measured at
+      # 85s to over 120s against its own 120s subprocess budget, which is a
+      # failure rather than a slow pass. Raising the budget would convert a
+      # two-minute red into a two-minute green and leave the 59M transfer in
+      # place — so the remedy belongs here, in the environment, not in the test.
+      #
+      # PATH: `~/.cache/huggingface` — the PARENT, not `hub/`. huggingface_hub
+      # derives `HF_HOME` as `${XDG_CACHE_HOME:-~/.cache}/huggingface` and
+      # `HF_HUB_CACHE` as `$HF_HOME/hub`; the parent also carries `xet/`, which
+      # the CAS transfer layer writes and which `hub/` alone would miss. No
+      # `HF_HOME` or `XDG_CACHE_HOME` is set anywhere in this workflow, so the
+      # default applies.
+      #
+      # KEY: includes the matrix interpreter because the cells resolve DIFFERENT
+      # model2vec majors (0.7.0 on 3.9 against 0.9.0 elsewhere, per the note
+      # above), and a cache written by one is not warranted for another. It
+      # hashes `embeddings.py` because `MODEL_NAME` lives there, so changing the
+      # model invalidates the entry rather than silently reusing the old blob.
+      # RESTORE-ONLY, WITH THE SAVE GATED BELOW. A plain `actions/cache` saves
+      # unconditionally at post-job, and that is unsafe here for a reason we
+      # measured: an INTERRUPTED transfer leaves a cache that looks warm and
+      # cannot load. Two cold runs of the same test file produced 12 files with
+      # a `no-model` result and 14 files with a 120s timeout — so a partial
+      # model is a state this repository actually reaches, and an unconditional
+      # save would store one under a key claiming completeness. Every later run
+      # would then hit that cache and fail to load, while the cache step
+      # reported a hit. NO RESTORE-KEYS for the same reason: a fallback entry
+      # from another commit's key could be the partial one.
+      - name: Restore the embedding model cache
+        id: hf_cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('pact-plugin/skills/pact-memory/scripts/embeddings.py') }}
+
       - name: Install test dependencies
         # See the "DEPENDENCY SET" header note for why each lib is required.
         # pytest-asyncio is REQUIRED, not optional: the suite has a large
@@ -263,6 +307,52 @@ jobs:
         # it to "shorten" the line — the async cohort simply stops passing, and
         # it is a large fraction of the suite.
         run: python -m pip install --upgrade pip pytest hypothesis httpx pytest-asyncio pyyaml pysqlite3 sqlite-vec model2vec ruff
+
+      # WARM THE MODEL ONCE, HERE, WHERE NOTHING IS TIMING IT.
+      #
+      # This does more than populate the cache: it MOVES THE DOWNLOAD OUT OF A
+      # TIMED TEST CHILD. `tests/test_embedding_status_contract.py` needs a
+      # working model (its forced fault sits strictly downstream of the
+      # no-model return), and its child carries a 120s subprocess budget. A
+      # cold transfer measured 85s to over 120s against that budget, so the
+      # test was racing the network. Fetching here removes the race regardless
+      # of whether the cache hits.
+      #
+      # IT ALSO LOADS THE MODEL, NOT JUST FETCHES IT. A completed fetch and a
+      # loadable model are different claims, and the gap between them is the
+      # partial-cache state described above. `from_pretrained` failing here
+      # fails the job loudly rather than leaving a broken cache for the suite
+      # to trip over quietly.
+      #
+      # MODEL_NAME IS READ FROM THE SOURCE, never retyped: a literal here would
+      # be a second copy free to drift from the one the code loads, and the
+      # cache key already hashes that same file.
+      - name: Warm and verify the embedding model
+        working-directory: pact-plugin
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, "skills/pact-memory")
+          from scripts.embeddings import MODEL_NAME
+          from model2vec import StaticModel
+          print(f"loading {MODEL_NAME}")
+          m = StaticModel.from_pretrained(MODEL_NAME, force_download=False)
+          v = m.encode(["warm the cache"])
+          assert v.shape[0] == 1, v.shape
+          print(f"model loaded and encoded, dim={v.shape[1]}")
+          PY
+
+      # SAVE ONLY AFTER THE MODEL DEMONSTRABLY LOADED. The gate is the previous
+      # step: if it failed the job stops, and `if: always()` is deliberately NOT
+      # used — a cache saved from a failed warm is the exact partial-model
+      # artifact this split exists to prevent. Skipped on a hit, because
+      # re-saving an identical key is a no-op that only logs a warning.
+      - name: Save the embedding model cache
+        if: steps.hf_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/huggingface
+          key: ${{ steps.hf_cache.outputs.cache-primary-key }}
 
       # Import-hygiene lint, two legs. Leg 1: unused imports (F401) + undefined
       # names (F821) over all of pact-plugin/ — hooks, scripts, telegram,

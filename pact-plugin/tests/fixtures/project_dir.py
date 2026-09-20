@@ -20,6 +20,8 @@ from typing import Optional
 
 from shared.pact_context import project_slug
 
+from fixtures.hf_cache import hf_cache_env
+
 # Sentinel for child_env's project_dir argument: leave the variable ABSENT in
 # the child (distinct from setting it to "").
 DELETE = object()
@@ -160,6 +162,16 @@ def child_env(
         "HOME": str(home),
         "CLAUDE_CONFIG_DIR": str(config_root),
     }
+    # HOME above relocates the HuggingFace cache with it, because the child
+    # derives that cache root from HOME at import time. Without this a child
+    # running the memory CLI sees an EMPTY cache and downloads the embedding
+    # model — measured at ~81s for one test spawning three such children,
+    # against its own 120s budget, which is the margin that finally lost.
+    #
+    # BOUND HERE RATHER THAN AT EACH SPAWN because this is the single
+    # constructor for every child this fixture serves; a per-site spelling is
+    # what let a sibling go without last time.
+    env.update(hf_cache_env())
     if session_id is not None:
         env["CLAUDE_CODE_SESSION_ID"] = session_id
     if project_dir is not DELETE:

@@ -45,6 +45,27 @@ from helpers import make_claude_md_with_pins, make_pin_entry  # noqa: E402
 
 import archive_pin  # noqa: E402
 import staleness  # noqa: E402
+import os
+from fixtures.hf_cache import hf_cache_env
+
+
+@pytest.fixture(autouse=True)
+def _pin_the_model_cache(monkeypatch):
+    """Point this module's children at the operator cache, and refuse network.
+
+    THE `_cli_get` BINDING BELOW IS NECESSARY AND NOT SUFFICIENT, which a
+    forced-cold-cache run proved: with only that binding this module still
+    pulled 14 files. `_cli_get` is one of TWO routes to a child here. The other
+    is PRODUCTION code — `archive_pin._run_memory_cli` — which inherits this
+    process's environment and has no `env` dict to bind. Fixing only the route
+    visible in this file left the production route unprotected.
+
+    MODULE-SCOPED rather than conftest-wide: a global autouse would also force
+    offline on in-process loads elsewhere, where a fixture loads a real model on
+    purpose.
+    """
+    for _k, _v in hf_cache_env().items():
+        monkeypatch.setenv(_k, _v)
 
 
 @pytest.fixture
@@ -652,9 +673,15 @@ def _cli_get(memory_id, db_path):
         Path(archive_pin.__file__).resolve().parent.parent
         / "skills" / "pact-memory" / "scripts" / "cli.py"
     )
+    # THIS CHILD RUNS `get`, NOT `save`, AND IT STILL LOADS THE MODEL —
+    # measured at 8 attempts from this one helper. `_ensure_ready()` runs on
+    # every verb and calls the embedding catch-up, which loads the model
+    # whenever the store holds an unembedded row. So "only saves download" is
+    # false, and binding the cache env here is not belt-and-braces.
     proc = subprocess.run(
         [sys.executable, str(cli), "get", memory_id, "--db-path", db_path],
         capture_output=True, text=True, timeout=120,
+        env={**os.environ, **hf_cache_env()},
     )
     assert proc.returncode == 0, f"get failed: {proc.stderr[:400]}"
     return json.loads(proc.stdout)["result"]

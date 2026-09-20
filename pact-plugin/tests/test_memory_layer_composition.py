@@ -138,7 +138,14 @@ def encoder():
     only that the test passed its own argument to itself.
     """
     from model2vec import StaticModel
-    return StaticModel.from_pretrained(MODEL_NAME)
+
+    # force_download=False for the reason given at the production call site in
+    # embeddings.py: model2vec's default of True makes ten metadata round-trips
+    # to revalidate a model already on disk, and each is a network call that can
+    # block in an unbounded SSL read. This fixture hung a full suite doing
+    # exactly that. It still loads the REAL encoder -- which is the whole point
+    # of the docstring above -- it simply stops revalidating first.
+    return StaticModel.from_pretrained(MODEL_NAME, force_download=False)
 
 
 @pytest.fixture

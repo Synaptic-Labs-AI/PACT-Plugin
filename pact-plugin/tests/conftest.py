@@ -12,6 +12,7 @@ symbols); pytest-fixture-injected symbols would need a conftest
 re-export to be discoverable, but none are currently defined there.
 """
 
+import functools
 import json
 import os
 import subprocess
@@ -512,6 +513,144 @@ def _isolate_config_root_to_tmp(tmp_path, monkeypatch):
         os.environ.pop("CLAUDE_CONFIG_DIR", None)
     else:
         os.environ["CLAUDE_CONFIG_DIR"] = original_cfg
+
+
+# (module, test) pairs whose bodies INSPECT the writer's identity and therefore
+# need it unwrapped. Measured, not censused: see the fixture below.
+_UNWRAPPED_WRITER_TESTS = frozenset({
+    (
+        "test_lock_identity_certification",
+        "test_getsourcefile_is_not_a_usable_fallback",
+    ),
+})
+
+
+@pytest.fixture(autouse=True)
+def _refuse_claude_md_writes_outside_tmp(request, monkeypatch):
+    """Refuse any CLAUDE.md write whose target lands outside the tmp tree.
+
+    THE SIBLING OF ``_isolate_memory_store_to_tmp`` BELOW, AND THE HALF THAT
+    WAS MISSING. A save has TWO destinations and they resolve INDEPENDENTLY:
+    the store, which that fixture redirects, and the CLAUDE.md projection,
+    which nothing bounded. So a test could write real Working Memory blocks
+    naming records that only ever existed in a temp database.
+
+    CONTAINMENT, NOT REDIRECTION, and the distinction is what keeps the
+    resolution tests working. This does not choose where a write goes; it
+    refuses one that has already resolved somewhere it must not be. A test
+    that legitimately exercises resolution still resolves, and passes
+    untouched so long as its target is under the tmp tree.
+
+    PATCHED BY RUNTIME DISCOVERY RATHER THAN BY AN IMPORT LIST. The writer is
+    defined twice (the memory skill and the hooks layer) and imported BY VALUE
+    elsewhere, so a module that did ``from ... import _atomic_write_text`` at
+    import time holds its own reference that patching the source module would
+    not reach. Walking the loaded modules finds every binding without anyone
+    having to keep a list correct.
+
+    IT CANNOT SEE A CHILD PROCESS. ``monkeypatch`` does not cross the process
+    boundary, so a spawned child writes unguarded. That gap is covered from
+    the other direction: a checksum of the real file across a full run catches
+    any writer, in-process or not.
+    """
+    # THE EXCLUSION IS KEYED PER TEST, NOT PER FILE, AND THE DIFFERENCE IS THE
+    # WHOLE POINT OF ITS PRESENT SHAPE.
+    #
+    # `test_lock_identity_certification.py` certifies the IDENTITY of the two
+    # writer twins -- it asserts `__module__` and `inspect.getsourcefile` report
+    # the defining module for each. Any wrapper perturbs both, so a guard that
+    # wraps them makes that file measure the guard instead of its subject.
+    # `functools.wraps` restores `__module__` but cannot restore
+    # `getsourcefile`, which resolves through `__code__.co_filename`.
+    #
+    # THIS WAS FIRST WRITTEN AS A MODULE-WIDE KEY, AND THAT WAS TOO WIDE. It
+    # switched the guard off for every collected item in that file, including
+    # the two that CALL the writer. Its justification was a census of where
+    # those calls land today -- true, and no protection at all against a test
+    # added tomorrow that writes to a real path, in the file nobody thinks to
+    # check because its name is about lock identity rather than about writes.
+    # The declared population was wider than the condition it was written for.
+    #
+    # THE POPULATION BELOW WAS MEASURED, NOT REASONED. Disarming the exclusion
+    # entirely and running the file gives `1 failed, 38 passed` out of 39
+    # collected: one test needs the unwrapped writer and thirty-eight do not.
+    # Reading the file suggested the same answer, but a census by reading is the
+    # instrument that produced the over-wide key in the first place, so the list
+    # is the red set rather than the inspection.
+    #
+    # Re-measure the same way if this ever needs revisiting; do not add a name
+    # because it looks like it belongs.
+    _module = getattr(request.module, "__name__", "").rsplit(".", 1)[-1]
+    # `__name__` is DOTTED under this suite's import mode ("tests.<module>"), so
+    # an equality check on the full value silently never matches and the
+    # exclusion reads as present while being inert. `originalname` is the
+    # parametrisation-stable spelling: `name` carries the `[id]` suffix and
+    # would miss a parametrised case.
+    _test = getattr(request.node, "originalname", None) or request.node.name
+    if (_module, _test) in _UNWRAPPED_WRITER_TESTS:
+        return
+
+    tmp_root = Path(tempfile.gettempdir()).resolve()
+
+    def _wrap(real):
+        # `functools.wraps` IS LOAD-BEARING, NOT TIDINESS. The two writers are
+        # twins in different modules and a provenance guard elsewhere tells them
+        # apart by `__module__`; a bare closure reports `tests.conftest` for
+        # both, collapsing that discriminator and turning every provenance
+        # assertion built on it into a tautology. That guard names this exact
+        # decorator shape as what it exists to catch, and it caught this one.
+        @functools.wraps(real)
+        def guarded(target, content, project_root, *args, **kwargs):
+            try:
+                resolved = Path(target).resolve()
+            except (OSError, RuntimeError):
+                # THIS GUARD ADDS A SECOND, USERSPACE RESOLVER IN FRONT OF A
+                # WRITER WHOSE OWN CONTAINMENT CHECK USES ONLY THE KERNEL, AND
+                # THAT IS THE ONE THING THE WRITER WAS BUILT NOT TO HAVE.
+                # `Path.resolve()` disagrees with itself across versions on a
+                # symlink loop: 3.9 raises RuntimeError even when non-strict,
+                # later versions do not raise at all. Uncaught, that turns a
+                # containment REFUSAL into an interpreter-dependent crash --
+                # measured, as a 3.9-only CI failure on the two loop arms of
+                # test_containment_certification.py, which pass everywhere else.
+                #
+                # BOTH EXCEPTION TYPES ARE CAUGHT SO THE BEHAVIOUR DOES NOT
+                # DEPEND ON WHICH INTERPRETER IS RUNNING, and the handler
+                # DELEGATES rather than deciding: a guard that cannot resolve a
+                # path cannot prove containment either way, and the real writer
+                # refuses this input on its own. Refusing here instead would
+                # answer a question this guard did not resolve.
+                return real(target, content, project_root, *args, **kwargs)
+            if not (resolved == tmp_root or tmp_root in resolved.parents):
+                # RECORD BEFORE RAISING, BECAUSE THE RAISE IS SWALLOWED.
+                # `memory_api`'s sync is wrapped in `except Exception`, which
+                # catches this refusal, sets `sync_status = failed` and logs it.
+                # So a guard that only raises fires INVISIBLY, and "no refusals
+                # in the log" cannot be told apart from "the guard is inert" --
+                # the same ambiguous null this guard exists to resolve. The
+                # side-channel makes firing observable; set PACT_TEST_CLAUDE_MD_
+                # REFUSALS to a path to collect them.
+                sink = os.environ.get("PACT_TEST_CLAUDE_MD_REFUSALS")
+                if sink:
+                    with open(sink, "a", encoding="utf-8") as handle:
+                        handle.write(f"{request.node.nodeid}\t{resolved}\n")
+                raise AssertionError(
+                    "REFUSED a CLAUDE.md write outside the tmp tree: "
+                    f"{resolved}. A test resolved a real document and would "
+                    "have written to it. Bind the destination (pass a tmp "
+                    "root, or set CLAUDE_PROJECT_DIR to one) rather than "
+                    "relaxing this guard."
+                )
+            return real(target, content, project_root, *args, **kwargs)
+        return guarded
+
+    for module in list(sys.modules.values()):
+        writer = getattr(module, "_atomic_write_text", None)
+        if not callable(writer):
+            continue
+        origin = getattr(writer, "__module__", "") or ""
+        if origin.endswith(("working_memory", "claude_md_manager")):
+            monkeypatch.setattr(module, "_atomic_write_text", _wrap(writer))
 
 
 @pytest.fixture(autouse=True)

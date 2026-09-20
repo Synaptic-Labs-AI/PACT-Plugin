@@ -33,6 +33,7 @@ from scripts.working_memory import (  # noqa: E402
     project_memories_to_claude_md,
 )
 from clock_shift.clock_shift_env import carry_clock_shift
+from fixtures.hf_cache import hf_cache_env
 
 _SCAFFOLD = (
     "# Probe\n\n"
@@ -260,9 +261,30 @@ _CLI = (
 
 
 def _run_cli(env: dict, cwd: Path, *args: str) -> dict:
+    # THE CACHE ENV IS APPLIED HERE, AT THE CHOKE POINT, RATHER THAN AT EACH
+    # CALLER. Applying it per-site is what failed: one caller below got it and
+    # another, built with `dict(os.environ)`, did not — and the one that missed
+    # out was a real `save`. Every child this file spawns routes through this
+    # function, so binding it here is the only placement that cannot be missed
+    # by the next site somebody adds.
+    #
+    # THE POPULATION IS NOT "CHILDREN THAT SAVE", WHICH IS THE ASSUMPTION THAT
+    # PRODUCED THE GAP. `_ensure_ready()` runs on EVERY verb and calls the
+    # embedding catch-up, which loads the model whenever the store holds an
+    # unembedded row. So a `sync` or `status` child reading a store that a
+    # degraded save left pending can reach the model load too, and `save` is
+    # merely the most obvious member.
+    #
+    # The helper wins over the caller's env deliberately: this is an isolation
+    # guarantee rather than a preference, and no caller here sets either key.
+    env = {**env, **hf_cache_env()}
     proc = subprocess.run(
         [sys.executable, str(_CLI), *args],
-        env=carry_clock_shift(env), cwd=str(cwd), capture_output=True, text=True, timeout=180,
+        # 30s rather than 180s: the long budget absorbed a first-run model
+        # download, and `hf_cache_env()` removes the download. Measured basis in
+        # the sibling refusal suite — slowest child 0.44s, cold-cache offline
+        # degrade 0.31s.
+        env=carry_clock_shift(env), cwd=str(cwd), capture_output=True, text=True, timeout=30,
     )
     assert proc.returncode == 0, f"rc={proc.returncode}\n{proc.stderr[:600]}"
     payload = json.loads(proc.stdout)
@@ -343,6 +365,11 @@ class TestSyncVerbReachesTheGuards:
         """
         escaped = tmp_path / "declared-but-empty"
         escaped.mkdir()
+        # No cache env here: `_run_cli` binds it for every child. Spelling it
+        # at this one site is what made the gap look closed while a sibling
+        # built with `dict(os.environ)` went without — and a per-site spread
+        # would now also imply the protection is per-site, which is the
+        # inference that produced the miss.
         env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": str(tmp_path / "home"),

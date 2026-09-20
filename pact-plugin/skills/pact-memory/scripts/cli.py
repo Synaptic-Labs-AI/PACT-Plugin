@@ -201,6 +201,20 @@ def _own_stderr_for_envelope():
     FAILS OPEN. If the descriptor cannot be duplicated, this yields without
     guarding, so the command behaves as it did before rather than failing for
     a reason the caller cannot act on.
+
+    ⚠️ WHAT FAILING OPEN COSTS, STATED SO THAT NOBODY CLOSES IT. On that path
+    every emitter in the process reaches stderr directly, so free text CAN
+    precede the envelope and a caller parsing the stream can fail. That is the
+    ONLY live path on which it can: inside the guard the descriptor is held,
+    and no module in the import closure writes to stderr before `main()`
+    reaches this window.
+
+    DO NOT TURN THIS INTO A REFUSAL. A caller whose process cannot dup a
+    descriptor still needs the envelope and the exit code, which are what
+    carry the error. Refusing the command instead would convert a degraded
+    report into a failed operation, and it would do so for a condition the
+    caller cannot diagnose or repair from the message. A corrupt parse is
+    recoverable; a command that refuses to run is not.
     """
     global _ENVELOPE_STREAM
 
@@ -540,7 +554,11 @@ def cmd_save(args, db_path=None):
             f"{_scrub(str(exc))} (Note: 'id' and 'created_at' are accepted "
             f"on save and stripped before validation.)",
             exit_code=2,
-            allowed_fields=sorted(CALLER_FACING_CREATE_FIELDS),
+            # Prefer the list the error itself carries, so this array and
+            # the message's sentence are one computation. The constant is a
+            # fallback for ValueErrors raised elsewhere on this path, which
+            # carry no field list and whose envelope shape is unchanged.
+            allowed_fields=getattr(exc, "allowed_fields", sorted(CALLER_FACING_CREATE_FIELDS)),
         )
     # Carry the embedding outcome to the command-line caller. Without this the
     # CLI reports a bare memory_id, so a save that stored no vector is
@@ -554,12 +572,23 @@ def cmd_save(args, db_path=None):
     #
     # `sync_status` JOINS IT HERE, AND THE TWO FIELDS DO NOT READ ALIKE.
     # `embedding_status` is PARTIAL: it reports a problem and is absent when the
-    # embedding succeeded. `sync_status` is TOTAL: save() sets it on every
-    # branch, `wrote` included, so it is absent only when no save ran. Do NOT
-    # read an absent `sync_status` as a successful sync. That inference is the
-    # defect the field exists to remove -- across this process boundary a
-    # refused sync and a suppressed one both used to reach the parent as
-    # nothing at all, which is indistinguishable from a sync that worked.
+    # embedding succeeded. `sync_status` is set on every branch that REACHES the
+    # sync gate, `wrote` and `refused` included -- so Do NOT read an absent
+    # `sync_status` as a successful sync. That inference is the defect the field
+    # exists to remove: across this process boundary a refused sync and a
+    # suppressed one both used to reach the parent as nothing at all, which is
+    # indistinguishable from a sync that worked.
+    #
+    # IT IS NOT TOTAL, AND THIS COMMENT USED TO SAY IT WAS. The old wording read
+    # "absent only when no save ran", which is false: `save()` clears the field
+    # at entry and THEN calls `_ensure_ready()`, which installs dependencies and
+    # runs embedding migration and can raise. A save that dies there leaves the
+    # field absent with a save having run. The env/record refusal above it does
+    # set `refused` before raising, so that path is covered -- but covering one
+    # early exit is not totality, and naming the field total invited exactly the
+    # "absent means nothing happened" inference the rest of this comment forbids.
+    # Only the CLAIM is corrected here; making the field total would be a
+    # behaviour change and is not in scope.
     result = {"memory_id": memory_id}
     embedding_status = memory.last_embedding_status
     if embedding_status is not None:
@@ -567,6 +596,36 @@ def cmd_save(args, db_path=None):
     sync_status = memory.last_sync_status
     if sync_status is not None:
         result["sync_status"] = sync_status
+    # `project_scope` IS PRESENT ON EVERY SUCCESS ENVELOPE, and that is the
+    # whole of what this surface can say about it. `save()` assigns it only
+    # after the store write is read back and verified, and this block is
+    # reached only when `save()` RETURNED -- a save that refused or failed left
+    # through the error envelope above and never arrives here. So on THIS
+    # surface the key is always emitted, and its presence means the record was
+    # filed. The `is not None` guard below is defensive, not a branch a
+    # successful save can take.
+    #
+    # THE ABSENCE CASE IS REAL BUT IT IS NOT VISIBLE FROM HERE. In the Python
+    # API absence means only "this process did not confirm a filing" -- no save
+    # ran, or a save ran and exited before its write was verified -- and it
+    # does NOT mean nothing was written, because the exit can land after
+    # `create_memory` returned. A CLI caller never meets that: a save that
+    # refused or failed leaves through the error envelope above, carrying no
+    # `project_scope` key at all. Do not carry the API's weaker absence into a
+    # reading of this envelope, and do not carry this envelope's simplicity
+    # back into the API. `last_project_scope`'s own docstring is the contract
+    # for that frame.
+    #
+    # What it NEVER means, in any frame, is "the scope was fine". It reports
+    # and does not judge, so it has no false-positive rate by construction.
+    #
+    # Its `location_divergence` key IS NOT A MISFILE FLAG: it compares the
+    # process's working directory against what the record was filed under, so
+    # False means only that those two agree. A record ABOUT another project,
+    # written from the correct directory, shows False and is still misfiled.
+    project_scope = memory.last_project_scope
+    if project_scope is not None:
+        result["project_scope"] = project_scope
     _success(result)
 
 
@@ -720,7 +779,11 @@ def cmd_update(args, db_path=None):
             f"{_scrub(str(exc))} (Note: 'id' and 'created_at' are stripped "
             f"before update validation.)",
             exit_code=2,
-            allowed_fields=sorted(CALLER_FACING_UPDATE_FIELDS),
+            # Prefer the list the error itself carries, so this array and
+            # the message's sentence are one computation. The constant is a
+            # fallback for ValueErrors raised elsewhere on this path, which
+            # carry no field list and whose envelope shape is unchanged.
+            allowed_fields=getattr(exc, "allowed_fields", sorted(CALLER_FACING_UPDATE_FIELDS)),
         )
     if resolved_id is None:
         _error("NOT_FOUND", f"Memory '{args.memory_id}' not found")
@@ -1137,7 +1200,11 @@ def main(argv=None):
     # a change that looks unrelated to it. An assertion in the test suite pins
     # this order.
     #
-    # ONE SCOPE COVERS ALL EIGHT HANDLERS. That is what repairs the three legs
+    # ONE SCOPE COVERS EVERY HANDLER IN `_COMMANDS`, whatever that set holds --
+    # the count is deliberately not written here, because the sentence's claim
+    # is that the scope is universal over them and a figure beside it only adds
+    # something that can go stale. It already had: it read EIGHT while
+    # `_COMMANDS` held nine. That is what repairs the three legs
     # of `setup` together: the leg that CREATES the directory and the leg that
     # REPORTS it both reach `get_memory_dir()` with no argument, so neither one
     # could honour `--db-path` while only the schema leg took a parameter.

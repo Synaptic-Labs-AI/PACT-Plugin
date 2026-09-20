@@ -27,6 +27,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from fixtures.hf_cache import hf_cache_env
+
 from helpers import create_test_schema, make_cli_memory_dict
 
 # Reused rather than re-implemented: the canonical minimal-CLAUDE.md seeder.
@@ -125,6 +127,14 @@ def _isolate_claude_md_target(tmp_path, monkeypatch):
     """
     _seed_claude_md(tmp_path)
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    # THE MODEL CACHE RIDES THE SAME INHERITANCE. Because the sites here pass
+    # no `env=`, the only way to reach their children is this process's
+    # environment — so the cache pin belongs beside the project-dir pin rather
+    # than at 60 call sites. Measured without it: 59 model-load attempts from
+    # children plus 1 in this process, each a cold-cache download wherever no
+    # warm cache exists (i.e. CI).
+    for _k, _v in hf_cache_env().items():
+        monkeypatch.setenv(_k, _v)
 
 
 class TestSubprocessClaudeMdIsolation:

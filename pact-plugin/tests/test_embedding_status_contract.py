@@ -58,7 +58,10 @@ class TestCapabilityExits:
                    return_value={"search_mode": "keyword"}):
             result = mem._store_embedding(conn, "mem-1", _memory())
 
-        assert result == "degraded:keyword"
+        assert result == "degraded:keyword:no-vector-store", (
+            "the no-extension exit must name its own cause; a code shared with "
+            f"the no-model exit tells a caller nothing actionable. Got {result!r}"
+        )
 
     def test_embedding_generation_unavailable_reports_degraded(self, mem, conn):
         with patch("scripts.memory_api.SQLITE_EXTENSIONS_ENABLED", True), \
@@ -68,7 +71,10 @@ class TestCapabilityExits:
                    return_value={"search_mode": "keyword"}):
             result = mem._store_embedding(conn, "mem-1", _memory())
 
-        assert result == "degraded:keyword"
+        assert result == "degraded:keyword:no-model", (
+            "the model-unavailable exit must be distinguishable from the "
+            f"vector-store exits; they want different responses. Got {result!r}"
+        )
 
     def test_reason_code_carries_the_search_paths_own_mode(self, mem, conn):
         """The code must come from get_search_capabilities, not a second predicate.
@@ -82,7 +88,7 @@ class TestCapabilityExits:
                    return_value={"search_mode": "sentinel-mode"}):
             result = mem._store_embedding(conn, "mem-1", _memory())
 
-        assert result == "degraded:sentinel-mode"
+        assert result == "degraded:sentinel-mode:no-vector-store"
 
 
 class TestInputExit:
@@ -199,6 +205,17 @@ class TestStaleVectorIsRemoved:
         assert mem._drop_existing_vector(conn, "mem-42") is False
 
 
+# The scope disclosure a real save attaches. `project_scope` is TOTAL like
+# `sync_status` -- save() sets it on every branch -- so a clean save carries it
+# and the exact-equality assertion below must include it.
+_SCOPE = {
+    "project_id": "proj",
+    "source": "supplied",
+    "cwd_repo": "proj",
+    "location_divergence": False,
+}
+
+
 class TestCliSuccessEnvelopeCarriesTheStatus:
     """The CLI is the only consumer most callers have.
 
@@ -221,6 +238,11 @@ class TestCliSuccessEnvelopeCarriesTheStatus:
         # would fail for a reason that has nothing to do with either status.
         # `wrote` is the honest default because a real save always reports one.
         fake.last_sync_status = sync_status
+        # Same reason as `last_sync_status` above, and the same trap: an unset
+        # MagicMock attribute is a child mock, never None, so the envelope would
+        # carry a mock OBJECT and the exact-equality assertion would compare
+        # mock identities instead of a shape. A real dict pins the shape.
+        fake.last_project_scope = _SCOPE
 
         captured = {}
         with patch.object(cli, "PACTMemory", return_value=fake), \
@@ -253,7 +275,11 @@ class TestCliSuccessEnvelopeCarriesTheStatus:
         be a silent failure for the other.
         """
         result = self._run_cmd_save(None)
-        assert result == {"memory_id": "mem-1", "sync_status": "wrote"}
+        assert result == {
+            "memory_id": "mem-1",
+            "sync_status": "wrote",
+            "project_scope": _SCOPE,
+        }
         assert "embedding_status" not in result
 
 
@@ -370,9 +396,11 @@ class TestSqliteVecAbsenceIsReportedAsKeyword:
              patch("scripts.memory_api.generate_embedding", return_value=[0.1] * 256):
             result = mem._store_embedding(conn, "mem-1", _memory())
 
-        assert result == "degraded:keyword", (
+        assert result == "degraded:keyword:no-vector-store", (
             "with sqlite-vec absent no vector can be stored and none can be "
-            f"searched, so the capability must not claim semantic; got {result!r}"
+            f"searched, so the capability must not claim semantic; got {result!r}. "
+            "It shares the no-extension exit's cause DELIBERATELY: both mean the "
+            "vector table is unreachable, which is one fault with two spellings."
         )
 
 

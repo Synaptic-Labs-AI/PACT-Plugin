@@ -152,8 +152,9 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" save '{
     {"name": "TokenManager", "type": "class"}
   ]
 }'
-# See Memory Structure table below for all available fields
-# including agreements_reached and disagreements_resolved
+# See the Memory Structure table below for every field a save payload accepts
+# (including agreements_reached and disagreements_resolved). Fields marked
+# "never" in that table are read-only and are rejected if you send them.
 
 # Search memories
 python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" search "rate limiting tokens"
@@ -191,22 +192,41 @@ echo '{"context": "...", "goal": "..."}' | python3 "${CLAUDE_SKILL_DIR}/scripts/
 
 ## Memory Structure
 
-Each memory can contain:
+A memory record has more fields than a `save`/`update` payload accepts. The
+**On save** column is the one that governs what you may put in the JSON you
+pass to the CLI — a payload key outside that set is REJECTED with exit 2 and
+the memory is NOT written.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `context` | string | Current working context description |
-| `goal` | string | What you're trying to achieve |
-| `active_tasks` | list | Tasks with status and priority |
-| `lessons_learned` | list | What worked or didn't work |
-| `decisions` | list | Decisions with rationale and alternatives |
-| `entities` | list | Referenced components, services, modules |
-| `reasoning_chains` | list | How key decisions connect — "X because Y, which required Z" |
-| `agreements_reached` | list | What was verified via teachback or agreement check |
-| `disagreements_resolved` | list | Where agents disagreed and how it was settled |
-| `files` | list | Associated file paths (auto-linked) |
-| `project_id` | string | Auto-detected from environment |
-| `session_id` | string | Auto-detected from environment |
+| Field | Type | On save | Description |
+|-------|------|---------|-------------|
+| `context` | string | you supply | Current working context description |
+| `goal` | string | you supply | What you're trying to achieve |
+| `active_tasks` | list | you supply | Tasks with status and priority |
+| `lessons_learned` | list | you supply | What worked or didn't work |
+| `decisions` | list | you supply | Decisions with rationale and alternatives |
+| `entities` | list | you supply | Referenced components, services, modules |
+| `reasoning_chains` | list | you supply | How key decisions connect — "X because Y, which required Z" |
+| `agreements_reached` | list | you supply | What was verified via teachback or agreement check |
+| `disagreements_resolved` | list | you supply | Where agents disagreed and how it was settled |
+| `project_id` | string | optional | Accepted in the payload; auto-detected from the environment when you omit it |
+| `session_id` | string | optional | Accepted in the payload; auto-detected from the environment when you omit it |
+| `files` | list | **never** | Read-only. Returned by `get`/`search`/`list`; REJECTED as a payload key — see below |
+
+### `files` is read-only — do not put it in a save payload
+
+`files` is part of a memory RECORD, not of a save PAYLOAD. It is stored in a
+separate link table and re-attached when a memory is read back, so you will
+see it in `get` / `search` / `list` output. Passing it to `save` or `update`
+fails with exit 2 and writes nothing.
+
+The CLI has no way to set it: there is no `--files` flag, and the automatic
+session-file linking runs off in-process state that a fresh CLI invocation
+never has. **For a CLI-created memory, `files` is always empty.** Only a
+long-lived in-process caller of the Python API can populate it, via the
+separate `files=` parameter of `MemoryAPI.save()` — never a payload key.
+
+To record which files a memory concerns, name them in an entity's `notes`
+field instead.
 
 ### Task Format
 ```python
@@ -498,6 +518,38 @@ Memory ID when the record was saved without one, or when the identifier could
 not be written safely. What survives provides structured context that
 complements auto-memory's general learnings, and the full history stays
 searchable via the `search` command.
+
+## Saving without network access
+
+A save generates an embedding, and generating one loads a model that is fetched
+from the HuggingFace Hub the first time it is needed. Once that model is in the
+local cache no save contacts the network. Record content is never sent: the
+request fetches the model, it does not upload anything.
+
+To guarantee that a save never contacts the network, set `HF_HUB_OFFLINE=1` in
+the environment **before starting the process**:
+
+```bash
+HF_HUB_OFFLINE=1 python3 scripts/cli.py save '{"context": "...", "goal": "..."}'
+```
+
+Set it in the environment rather than from inside a running program — the value
+is read once, when the library is first imported, so assigning it later in the
+same process has no effect.
+
+With the variable set:
+
+- If the model is already cached, the save embeds normally.
+- If it is not cached, the save still succeeds and stores the record, and
+  reports `embedding_status` beginning with `degraded:`. The record is kept and
+  remains findable by keyword search; only semantic search cannot see it until
+  an embedding exists.
+
+Leave the variable unset for normal use. A cached copy that cannot be loaded is
+re-fetched once automatically, so a corrupted or half-downloaded cache repairs
+itself on the next save rather than degrading permanently — that re-fetch is
+skipped when `HF_HUB_OFFLINE=1` is set, which is what keeps the guarantee above
+true.
 
 ## Integration with PACT
 

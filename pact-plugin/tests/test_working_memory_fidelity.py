@@ -33,6 +33,7 @@ from scripts.working_memory import (  # noqa: E402
 )
 from helpers import create_test_schema  # noqa: E402
 from test_memory_cli import _backdate  # noqa: E402
+from fixtures.hf_cache import hf_cache_env
 
 _PLUGIN = Path(__file__).resolve().parent.parent
 _CLI = _PLUGIN / "skills" / "pact-memory" / "scripts" / "cli.py"
@@ -49,6 +50,12 @@ _ID_LINE = re.compile(r"^\*\*Memory ID\*\*: [0-9a-f]{32}$", re.MULTILINE)
 
 
 def _run(env, cwd, *args):
+    # Bound at the choke point: every child this module spawns comes through
+    # here, so one binding covers all of them and no later call site can be
+    # added without it. Measured: this module's children attempted 57 model
+    # loads without it, each one a cold-cache download on a machine with no
+    # warm cache (i.e. CI).
+    env = {**env, **hf_cache_env()}
     proc = subprocess.run(
         [sys.executable, str(_CLI), *args],
         env=env, cwd=str(cwd), capture_output=True, text=True, timeout=180,
