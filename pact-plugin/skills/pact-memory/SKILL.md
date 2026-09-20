@@ -519,6 +519,38 @@ not be written safely. What survives provides structured context that
 complements auto-memory's general learnings, and the full history stays
 searchable via the `search` command.
 
+## Saving without network access
+
+A save generates an embedding, and generating one loads a model that is fetched
+from the HuggingFace Hub the first time it is needed. Once that model is in the
+local cache no save contacts the network. Record content is never sent: the
+request fetches the model, it does not upload anything.
+
+To guarantee that a save never contacts the network, set `HF_HUB_OFFLINE=1` in
+the environment **before starting the process**:
+
+```bash
+HF_HUB_OFFLINE=1 python3 scripts/cli.py save '{"context": "...", "goal": "..."}'
+```
+
+Set it in the environment rather than from inside a running program — the value
+is read once, when the library is first imported, so assigning it later in the
+same process has no effect.
+
+With the variable set:
+
+- If the model is already cached, the save embeds normally.
+- If it is not cached, the save still succeeds and stores the record, and
+  reports `embedding_status` beginning with `degraded:`. The record is kept and
+  remains findable by keyword search; only semantic search cannot see it until
+  an embedding exists.
+
+Leave the variable unset for normal use. A cached copy that cannot be loaded is
+re-fetched once automatically, so a corrupted or half-downloaded cache repairs
+itself on the next save rather than degrading permanently — that re-fetch is
+skipped when `HF_HUB_OFFLINE=1` is set, which is what keeps the guarantee above
+true.
+
 ## Integration with PACT
 
 The memory skill integrates with PACT phases:
