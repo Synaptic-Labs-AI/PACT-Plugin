@@ -1635,6 +1635,29 @@ def quick_save(
 
     Returns:
         The ID of the created memory.
+
+    ROUTED THROUGH ``PACTMemory.save`` RATHER THAN STRAIGHT TO ``create_memory``.
+    This is the only other public way to land a memory row, and going direct
+    bypassed EVERY scope mechanism the save path provides: project detection,
+    the per-save scope disclosure, the location-divergence warning, and the
+    fail-closed env/record refusal. A caller passing no ``project_id`` landed a
+    row with a NULL project and nothing recorded about how that happened --
+    which is the unscoped case, worse than the mis-scoped one the disclosure
+    exists to make visible.
+
+    Nothing in this repository calls this function today (its only other
+    references are its import and its name in ``__all__``), so the bypass was
+    latent rather than active. It is public, though, so "no caller reaches it"
+    is a fact about this repository and not a property of the function.
+
+    ``sync_to_claude=False`` PRESERVES THE EXISTING BEHAVIOUR and is not a
+    detail: ``save`` projects into CLAUDE.md by default, this function never
+    did, and silently acquiring an ambient document write would be a worse
+    defect than the one being fixed.
+
+    Imported inside the function because ``memory_api`` imports this module at
+    module level; a top-level import here would be a cycle. Same idiom as the
+    ``embeddings`` and ``models`` imports elsewhere in this file.
     """
     memory = {
         "context": context,
@@ -1648,5 +1671,6 @@ def quick_save(
         "session_id": session_id
     }
 
-    with db_connection() as conn:
-        return create_memory(conn, memory)
+    from .memory_api import PACTMemory
+
+    return PACTMemory().save(memory, sync_to_claude=False)

@@ -394,3 +394,72 @@ def test_a_save_that_fails_AT_THE_STORE_WRITE_discloses_nothing(mem, caplog):
         "an attempt, not a filing, so it must survive a save the disclosure "
         f"correctly abandons. Captured: {caplog.text!r}"
     )
+
+
+# --- the OTHER public write path must not bypass any of this ----------------
+
+def _quick_save(repo_root, **kwargs):
+    """Drive the REAL `quick_save` with the cwd repo pinned."""
+    from scripts.database import quick_save
+
+    with patch.object(memory_api, "_ensure_ready", lambda: None), \
+         patch.object(PACTMemory, "_store_embedding", return_value=None), \
+         patch.object(memory_api, "main_repo_root", return_value=repo_root):
+        return quick_save(**kwargs)
+
+
+def test_quick_save_resolves_a_project_instead_of_landing_an_unscoped_row():
+    """``database.quick_save`` is the only other public way to land a row.
+
+    IT USED TO GO STRAIGHT TO ``create_memory``, bypassing project detection,
+    this disclosure, the divergence warning and the fail-closed env/record
+    refusal all at once. A caller passing no ``project_id`` landed a row with a
+    NULL project and nothing recorded about how -- the UNSCOPED case, which is
+    worse than the mis-scoped one this file exists to surface.
+
+    Nothing in this repository calls it (its only other references are its
+    import and its name in ``__all__``), so the bypass was latent. It is
+    PUBLIC, though, so "no caller reaches it" was a fact about this repository
+    rather than a property of the function, and the guarantee this PR makes
+    held for only one of the two write paths.
+
+    Asserts the OBSERVABLE consequence -- the row acquires a project -- rather
+    than that it calls ``save``, which would pin the implementation and pass on
+    a stub that does nothing.
+    """
+    from scripts.database import get_memory
+
+    memory_id = _quick_save(Path("/repos/PACT-prompt"),
+                            context="quick_save scope probe")
+    assert memory_id, "quick_save returned no id, so nothing was saved"
+
+    with memory_api.db_connection() as conn:
+        row = get_memory(conn, memory_id)
+    assert row is not None, f"the row {memory_id} is not retrievable"
+    assert row["project_id"], (
+        "quick_save landed a row with NO project_id. Detection did not run, so "
+        "this path still bypasses the resolution every other save discloses."
+    )
+
+
+def test_quick_save_warns_when_it_files_under_a_different_repository(caplog):
+    """The divergence warning must reach this path too, not only `save`.
+
+    SUPPLIES A PROJECT THAT DIFFERS FROM THE PINNED REPO ON PURPOSE. An earlier
+    draft let detection choose the project while patching `main_repo_root`, and
+    the two then AGREED -- correctly producing no warning, and an arm that
+    failed for a reason that was not the subject. Divergence has to be
+    constructed, not hoped for.
+    """
+    with caplog.at_level(logging.WARNING):
+        memory_id = _quick_save(
+            Path("/Users/mj/Sites/scratchpad/viable"),
+            context="quick_save divergence probe",
+            project_id="PACT-prompt",
+        )
+
+    assert memory_id, "quick_save returned no id"
+    assert "location divergence" in caplog.text, (
+        "quick_save filed under 'PACT-prompt' from inside repository 'viable' "
+        f"and emitted no divergence warning. Captured: {caplog.text!r}"
+    )
