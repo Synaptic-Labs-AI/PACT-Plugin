@@ -184,23 +184,92 @@ def _pytest_args(command):
     return words[words.index("pytest") + 1:]
 
 
+def _step_blocks(workflow_text):
+    """The workflow's step blocks, one per `- ` list item, as stripped lines.
+
+    Line-oriented on purpose, matching `_pytest_run_commands` above: this
+    module parses the workflow as lines rather than as YAML, and two parsers
+    that disagree about what a line is would be worse than one. Comments are
+    dropped FIRST for the reason that helper documents — the workflow discusses
+    these very keys in prose, at length.
+
+    OVER-SPLITTING IS SAFE IN THE DIRECTION THAT MATTERS, and that is why a
+    crude `- ` boundary is enough. Any `- ` starts a new block, so a nested
+    list item inside a step would end that step's block early. The consequence
+    is a SMALLER block, which can only make the assertion below harder to
+    satisfy — a missing `working-directory` still reddens. It cannot fail open.
+    Step keys precede any nested list a step carries, so the real case does not
+    arise today.
+    """
+    blocks, current = [], None
+    for raw in workflow_text.splitlines():
+        stripped = raw.strip()
+        if stripped.startswith("#"):
+            continue
+        if stripped.startswith("- "):
+            if current is not None:
+                blocks.append(current)
+            current = []
+        if current is not None:
+            current.append(stripped)
+    if current is not None:
+        blocks.append(current)
+    return blocks
+
+
 def _assert_ci_runs_from_plugin_root(workflow_text):
-    """The pytest step must declare `working-directory: pact-plugin`.
+    """The PYTEST STEP must declare `working-directory: pact-plugin`.
 
     The parity comparison runs both arms from that directory, so if CI ever
     stops doing the same, the comparison stops describing CI — it would still
     pass, over an invocation nobody runs. Pinned rather than assumed.
+
+    THIS KEYS ON THE STEP THAT RUNS PYTEST. It used to assert that the whole
+    FILE contained exactly one `working-directory:` line, which was sound only
+    while the workflow had exactly one such step. It no longer does — a
+    model-cache warm step legitimately declares the same directory — and the
+    count form became UNSOUND rather than merely noisy at that moment:
+
+      remove `working-directory` from the PYTEST step, leave the warm step's,
+      and the count is STILL EXACTLY ONE, so the old assertion PASSES while
+      CI runs pytest from the repository root.
+
+    That is verbatim the disaster the paragraph above describes, reported
+    green. A count cannot distinguish WHICH step declares the directory, and
+    once two steps can declare it the count stops carrying the claim at all.
+
+    The file already knows this. `test_ci_invocation_and_full_corpus_collect_the_same_tests`
+    compares SETS rather than counts, and says why: a pinned total goes red on
+    every legitimate addition, which teaches its readers to bump the number
+    instead of investigating, so the guard is relaxed exactly before the run
+    where it was right. The principle was applied to the parity check and not
+    to this precondition; it is applied here now.
     """
-    declared = [
-        line.strip() for line in workflow_text.splitlines()
-        if line.strip().startswith("working-directory:") and not line.strip().startswith("#")
+    owning = [
+        block for block in _step_blocks(workflow_text)
+        if any(
+            line.startswith("run:")
+            and re.search(r"\bpytest\b", line)
+            and "pip install" not in line
+            for line in block
+        )
     ]
-    assert declared == ["working-directory: pact-plugin"], (
-        f"PARSE FAILURE or a CI RELOCATION: expected exactly one "
-        f"`working-directory: pact-plugin` declaration, found {declared}. The "
+    assert len(owning) == 1, (
+        f"PARSE FAILURE, not a CI relocation: expected exactly one step whose "
+        f"`run:` invokes pytest, found {len(owning)}. This assertion is itself "
+        f"executing under pytest in that workflow, so one exists — the parser "
+        f"is wrong, not the workflow. RE-POINT IT rather than relaxing the "
+        f"check below, which would otherwise pass over an empty read."
+    )
+    assert "working-directory: pact-plugin" in owning[0], (
+        f"CI RELOCATION: the step that runs pytest does not declare "
+        f"`working-directory: pact-plugin`. Its lines are {owning[0]}. The "
         f"parity check below runs both arms from pact-plugin/ on the strength "
-        f"of that line — if CI now runs from somewhere else, this test is "
-        f"comparing two invocations that CI does not perform. Re-point it."
+        f"of that declaration — without it, this test compares two invocations "
+        f"that CI does not perform. Re-point it, or restore the declaration.\n"
+        f"NOTE: a file-wide COUNT of `working-directory:` lines cannot catch "
+        f"this once more than one step declares one, which is why this keys on "
+        f"the pytest step itself."
     )
 
 
