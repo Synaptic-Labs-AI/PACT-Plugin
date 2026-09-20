@@ -1,11 +1,29 @@
 """Pin that ``embeddings.py`` emits nothing at WARNING or above.
 
-THE PROPERTY. The CLI puts its JSON error envelope on stderr, so any free-text
-line on that stream corrupts a caller's parse. The package configures NO logging
-handler anywhere, so ``logging.lastResort`` handles every record -- and
-lastResort is a stderr handler at WARNING. A ``logger.warning`` in a module the
-CLI imports therefore reaches stderr with no further wiring. ``debug`` and
-``info`` sit below that threshold and reach nothing.
+THE PROPERTY. The CLI puts its JSON error envelope on stderr. The package
+configures NO logging handler anywhere, so ``logging.lastResort`` handles every
+record -- and lastResort is a stderr handler at WARNING. A ``logger.warning`` in
+a module the CLI imports therefore reaches stderr with no further wiring.
+``debug`` and ``info`` sit below that threshold and reach nothing.
+
+WHAT THAT DOES AND DOES NOT ENDANGER, because the obvious reading overstates it.
+``cli.py::_own_stderr_for_envelope`` holds FILE DESCRIPTOR 2 for the length of a
+command handler and writes the envelope through a private dup of the original
+descriptor. It captures anything that reaches fd 2 -- this package's logging, a
+bare ``print``, and a compiled dependency writing to the descriptor directly --
+discarding the capture on failure so the envelope travels alone. So a
+``logger.warning`` here does NOT corrupt an envelope parse at the CLI boundary,
+and the honest statement of the danger is narrower than "free text corrupts the
+parse".
+
+WHY THE LEVEL STILL MATTERS WITH THAT GUARD IN PLACE, three reasons and none of
+them redundant with it. On SUCCESS the guard REPLAYS the captured bytes to
+stderr, so a warning still reaches the operator -- three of them per degraded
+save, on a path where nothing was wrong. The guard FAILS OPEN when the
+descriptor cannot be duplicated, and on that path the free text does precede the
+envelope. And an in-process caller of ``PACTMemory`` never enters the guard at
+all, because it wraps the CLI's handler window and not the API. The two
+mechanisms are defence in depth, not duplicates.
 
 WHY A STATIC GUARD WHEN A BEHAVIOURAL ONE ALREADY EXISTS, which is the first
 objection a reader should raise. ``test_cli_output_purity.py`` drives the real
@@ -20,23 +38,37 @@ this is what stands between the fix and a silent regression.
 
 WHAT THIS DOES NOT PIN, stated because the gap is wide and easy to miss. This
 covers ONE module. Seven modules in this package contain WARNING-or-above calls
--- database (6), memory_api (5), working_memory (4), models (2), memory_init
-(2), setup_memory (1), search (1) -- and every one of them reaches stderr by the
+-- database (6), memory_api (5), working_memory (4), models (1), memory_init
+(1), setup_memory (1), search (1) -- and every one of them reaches stderr by the
 SAME lastResort path, because there is no handler anywhere to distinguish them.
-Those 21 sites are not swept in here: they are longstanding, several are
+Those 19 sites are not swept in here: they are longstanding, several are
 deliberate operator-facing signals, and a guard that reddened on correct code
 would be disabled within a week and would then protect nothing. MEASURED, so
 that the exclusion is not mistaken for those modules being safe: a real CLI save
 whose filed project differs from the working directory's repository emits
-``memory_api``'s divergence warning as free text on stderr. The stderr-purity
-property is therefore NOT established package-wide by this file, and nobody
-should read a green here as meaning it is.
+``memory_api``'s divergence warning as free text on stderr -- on the SUCCESS
+path, where the guard above replays it and there is no error envelope for it to
+sit in front of. Package-wide stderr purity is not established BY THIS FILE, and
+a green here says nothing about those modules; what keeps them off the envelope
+is the fd-2 guard, not this test and not a difference between them.
+
+THE COUNT WAS 21 AND IT WAS NEVER RIGHT, corrected here with its cause because
+the cause is the more useful half. ``models.py`` and ``memory_init.py`` were
+recorded as 2 apiece and hold 1 apiece; they held 1 at the commit that added
+this file, so the figure was wrong when written rather than gone stale. Both
+extras are COMMENT lines that contain the phrase -- ``models.py:42`` and
+``memory_init.py:126`` -- which is the exact miscount the next paragraph gives
+as its reason for parsing the AST. THE FILE FIXED ITS INSTRUMENT AND KEPT THE
+NUMBER THE BROKEN INSTRUMENT PRODUCED. A corrected digit teaches nothing; that
+sentence is the finding, and it applies to every count in this tree taken by
+searching source text for a call.
 
 AST RATHER THAN GREP, deliberately. The count that motivated this guard was
 taken with ``grep -cE 'logger\\.(warning|error|critical|exception)'``, which
 also matches the phrase inside a COMMENT -- and this module's comments discuss
 lastResort and log levels at length, so a future comment could turn the guard
-green or red for no behavioural reason. Parsing calls avoids that. The tradeoff
+green or red for no behavioural reason. It is not hypothetical: that is exactly
+how the 21 corrected above was produced. Parsing calls avoids that. The tradeoff
 is that an aliased logger (``log = logger``) or a ``getattr`` call escapes this;
 both would be unusual here and neither is worth the complexity today.
 """

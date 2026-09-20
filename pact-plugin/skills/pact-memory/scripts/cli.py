@@ -201,6 +201,20 @@ def _own_stderr_for_envelope():
     FAILS OPEN. If the descriptor cannot be duplicated, this yields without
     guarding, so the command behaves as it did before rather than failing for
     a reason the caller cannot act on.
+
+    ⚠️ WHAT FAILING OPEN COSTS, STATED SO THAT NOBODY CLOSES IT. On that path
+    every emitter in the process reaches stderr directly, so free text CAN
+    precede the envelope and a caller parsing the stream can fail. That is the
+    ONLY live path on which it can: inside the guard the descriptor is held,
+    and no module in the import closure writes to stderr before `main()`
+    reaches this window.
+
+    DO NOT TURN THIS INTO A REFUSAL. A caller whose process cannot dup a
+    descriptor still needs the envelope and the exit code, which are what
+    carry the error. Refusing the command instead would convert a degraded
+    report into a failed operation, and it would do so for a condition the
+    caller cannot diagnose or repair from the message. A corrupt parse is
+    recoverable; a command that refuses to run is not.
     """
     global _ENVELOPE_STREAM
 
