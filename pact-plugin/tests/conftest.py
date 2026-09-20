@@ -515,6 +515,16 @@ def _isolate_config_root_to_tmp(tmp_path, monkeypatch):
         os.environ["CLAUDE_CONFIG_DIR"] = original_cfg
 
 
+# (module, test) pairs whose bodies INSPECT the writer's identity and therefore
+# need it unwrapped. Measured, not censused: see the fixture below.
+_UNWRAPPED_WRITER_TESTS = frozenset({
+    (
+        "test_lock_identity_certification",
+        "test_getsourcefile_is_not_a_usable_fallback",
+    ),
+})
+
+
 @pytest.fixture(autouse=True)
 def _refuse_claude_md_writes_outside_tmp(request, monkeypatch):
     """Refuse any CLAUDE.md write whose target lands outside the tmp tree.
@@ -543,29 +553,41 @@ def _refuse_claude_md_writes_outside_tmp(request, monkeypatch):
     the other direction: a checksum of the real file across a full run catches
     any writer, in-process or not.
     """
-    # THE ONE EXCLUSION, AND IT IS NOT THE CATEGORY ANYONE EXPECTED.
+    # THE EXCLUSION IS KEYED PER TEST, NOT PER FILE, AND THE DIFFERENCE IS THE
+    # WHOLE POINT OF ITS PRESENT SHAPE.
     #
-    # `test_lock_identity_certification.py` certifies the IDENTITY of these two
+    # `test_lock_identity_certification.py` certifies the IDENTITY of the two
     # writer twins -- it asserts `__module__` and `inspect.getsourcefile` report
-    # the defining module for each. ANY wrapper perturbs both, so a guard that
+    # the defining module for each. Any wrapper perturbs both, so a guard that
     # wraps them makes that file measure the guard instead of its subject.
     # `functools.wraps` restores `__module__` but cannot restore
-    # `getsourcefile`, which reads the code object.
+    # `getsourcefile`, which resolves through `__code__.co_filename`.
     #
-    # EXCLUDING IT OPENS NO HOLE, checked rather than assumed: both of its calls
-    # to the writer target a `tmp_path` topology, and one of them already treats
-    # a refusal as a legitimate outcome. So the file writes nothing this guard
-    # would have stopped.
+    # THIS WAS FIRST WRITTEN AS A MODULE-WIDE KEY, AND THAT WAS TOO WIDE. It
+    # switched the guard off for every collected item in that file, including
+    # the two that CALL the writer. Its justification was a census of where
+    # those calls land today -- true, and no protection at all against a test
+    # added tomorrow that writes to a real path, in the file nobody thinks to
+    # check because its name is about lock identity rather than about writes.
+    # The declared population was wider than the condition it was written for.
     #
-    # The expected exclusion was "tests that verify redirection". Containment
-    # does not need those excluded -- they resolve, they land in tmp, they pass.
-    # The category that actually needed it is "tests that introspect the writer".
-    # `__name__` is DOTTED under this suite's import mode ("tests.<module>"),
-    # so an equality check on the bare name silently never matches and the
-    # exclusion reads as present while being inert.
-    if getattr(request.module, "__name__", "").rsplit(".", 1)[-1] == (
-        "test_lock_identity_certification"
-    ):
+    # THE POPULATION BELOW WAS MEASURED, NOT REASONED. Disarming the exclusion
+    # entirely and running the file gives `1 failed, 38 passed` out of 39
+    # collected: one test needs the unwrapped writer and thirty-eight do not.
+    # Reading the file suggested the same answer, but a census by reading is the
+    # instrument that produced the over-wide key in the first place, so the list
+    # is the red set rather than the inspection.
+    #
+    # Re-measure the same way if this ever needs revisiting; do not add a name
+    # because it looks like it belongs.
+    _module = getattr(request.module, "__name__", "").rsplit(".", 1)[-1]
+    # `__name__` is DOTTED under this suite's import mode ("tests.<module>"), so
+    # an equality check on the full value silently never matches and the
+    # exclusion reads as present while being inert. `originalname` is the
+    # parametrisation-stable spelling: `name` carries the `[id]` suffix and
+    # would miss a parametrised case.
+    _test = getattr(request.node, "originalname", None) or request.node.name
+    if (_module, _test) in _UNWRAPPED_WRITER_TESTS:
         return
 
     tmp_root = Path(tempfile.gettempdir()).resolve()
