@@ -151,6 +151,41 @@ def test_the_violation_set_is_exactly_the_five_raising_verdicts():
     assert "NEW_TARGET_ABSENT" not in guard._VIOLATIONS
 
 
+def test_a_sample_that_is_both_present_and_erred_keeps_the_census_honest():
+    """THE CENSUS BUCKETS MUST BE COUNTED DISJOINTLY, NOT DERIVED BY SUBTRACTION.
+
+    `exists` and `error` are not mutually exclusive: `_sample_one` sets
+    `exists=True` from a successful `stat()` and only then reads, so a read
+    failure leaves BOTH set. Counting `present` and `errors` over those
+    overlapping populations and subtracting for `absent` printed a NEGATIVE
+    count -- `1 present, -1 absent, 1 instrument error(s)` on one watched path.
+
+    Fed the OVERLAP deliberately, because that is the only input that separates
+    the two arithmetics; a sample that is present-or-erred but not both passes
+    under either. The sibling below pins that this shape is REACHABLE at all.
+    """
+    both = dict(_present(), digest=None, error="read failed: IsADirectoryError")
+    report = guard._format_report(guard._compare({KEY: both}, {KEY: both}))
+    census = report.splitlines()[1]
+    assert "-" not in census, f"negative count in the census line: {census}"
+    assert census.endswith("0 present, 0 absent, 1 instrument error(s)")
+
+
+def test_the_present_and_erred_overlap_is_reachable_from_a_real_file(tmp_path):
+    """Pins that the arm above tests a shape the sampler can actually produce.
+
+    A DIRECTORY at a watched path is the deterministic route: `stat()` succeeds,
+    so `exists` is set, and `read_bytes()` then raises `IsADirectoryError`,
+    which is an `OSError`. No race is needed. Without this arm the sibling
+    above could be pinning an input that only a test can construct.
+    """
+    target = tmp_path / "CLAUDE.md"
+    target.mkdir()
+    sample = guard._sample_one(target)
+    assert sample["exists"] is True
+    assert sample["error"] and "IsADirectoryError" in sample["error"]
+
+
 def test_the_report_is_silent_on_a_clean_comparison():
     """Silence on a clean run is deliberate -- liveness is this file's job,
     not a line printed on every session."""
@@ -274,16 +309,44 @@ def test_no_conftest_rebinds_a_pytest_hook_name_over_itself():
     )
 
 
-def test_the_root_conftest_registers_the_guards_two_hooks():
-    """Registration liveness: deleting the re-export reddens here.
+def test_the_root_conftest_source_re_exports_the_guards_two_hooks():
+    """The re-export is PRESENT IN THE SOURCE of the root conftest.
 
-    Without this arm the guard could be removed from the conftest and every
-    other test in this file would still pass, because they all exercise the
-    module directly rather than through pytest's hook discovery.
+    WHAT THIS DOES NOT ESTABLISH, and the earlier name for it claimed
+    otherwise: it does not show that pytest registered either hook, and it
+    does not show that either one ran. It is an AST assertion over source
+    text, so it would pass unchanged against a conftest whose hooks pytest
+    never discovered. Its sibling below is the arm that watches them run.
+    Together they cover the route and the execution; neither does both, and
+    a name promising liveness from this one alone was the over-claim.
     """
     bindings = _module_level_bindings(PLUGIN_ROOT / "conftest.py")
     assert bindings.get("pytest_configure") == 1
     assert bindings.get("pytest_unconfigure") == 1
+
+
+def test_the_guard_hook_actually_ran_in_this_session(pytestconfig):
+    """RUNTIME liveness: pytest discovered the hook AND invoked it, here, now.
+
+    `pytest_configure` stashes the before-sample on the `Config`, so a
+    populated stash is proof the hook executed in THIS session rather than
+    merely being spelled correctly in a file. Deleting the re-export empties
+    it and reddens this arm; so does a hook that registers but never runs.
+
+    WHAT THIS DOES NOT ESTABLISH: the ROUTE. Loading the module directly with
+    `-p claude_md_guard` populates the same stash, so this cannot tell a
+    conftest re-export from a direct plugin load. The sibling above is what
+    pins the re-export itself.
+
+    Reading the stash by its own key is deliberate -- nothing else writes it,
+    so this cannot pass on some other plugin's state.
+    """
+    before = pytestconfig.stash.get(guard._BEFORE, None)
+    assert before is not None, (
+        "the guard's pytest_configure did not run in this session: the root "
+        "conftest's re-export is the registration route"
+    )
+    assert before, "the hook ran but named no paths to watch"
 
 
 def test_the_guard_module_exposes_both_hooks():

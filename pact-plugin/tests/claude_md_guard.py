@@ -27,6 +27,27 @@ run in these modes, which are NOT equally serious:
   2. A mistyped CLI flag, and a nonexistent path argument. No test code runs in
      either, so there is nothing to have missed. Benign.
 
+AN INSTRUMENT ERROR COSTS THAT PATH ITS EXIT CODE, NOT ITS REPORT. If a
+sample carries `error` -- a failed stat or a failed read -- that path is
+judged INSTRUMENT_ERROR before any content comparison, so a real change to it
+in the same run does NOT raise and the process exits 0. The report still
+prints and names the failure, under a "REPORT (no violation)" header, so this
+is not a silent miss: of the two signals named below, one fires and one does
+not. MEASURED by constructing that pair of samples directly and comparing
+them; no run has been observed failing a read on a real CLAUDE.md.
+
+COVERAGE SHRINKS SILENTLY WHERE THE DISPLAY RESOLVER FINDS NOTHING. The
+watched set is built from three evaluations, and the first is skipped entirely
+when the pact-memory resolver returns no path. MEASURED in THIS tree, by
+stubbing that resolver to its no-CLAUDE.md return: the set falls from 2 paths
+to 1, the survivor absent with no error, and the liveness test passes exactly
+as it does with 2, because it asserts a non-empty set and no errors and
+deliberately not that any file exists. So coverage halves with nothing
+reporting it. NOT INERT there -- the rootdir-derived path is still watched, so
+a creation at it still raises. That CI is such an environment is INFERRED from
+the repo's CLAUDE.md being gitignored, not measured: no run of this guard in
+CI has been observed.
+
 UNMEASURED, AND LEFT OPEN. `resolve_project_claude_md_path` is total: handed
 any project_dir it names a CLAUDE.md, existing or not, and its non-test callers
 are the hooks that CREATE that file. A child handed a project_dir this run never
@@ -345,11 +366,30 @@ def _format_report(verdicts):
         return ""
 
     violated = [v for v in notable if v["verdict"] in _VIOLATIONS]
+
+    # THE THREE CENSUS BUCKETS ARE COUNTED DISJOINTLY, AND DERIVING ANY ONE OF
+    # THEM BY SUBTRACTION IS THE BUG THIS SHAPE REPLACES. `exists` and `error`
+    # are NOT mutually exclusive: `_sample_one` sets `exists=True` from a
+    # successful `stat()` and only then reads, so an `OSError` from the read
+    # leaves both set. Counting `present` and `errors` over those overlapping
+    # populations and subtracting for `absent` printed `-1 absent` on a single
+    # watched path. Reachable deterministically, with no race: a DIRECTORY at
+    # the watched path stats cleanly and raises `IsADirectoryError` on read.
     errors = sum(1 for v in verdicts if v["verdict"] == "INSTRUMENT_ERROR")
     present = sum(
-        1 for v in verdicts if v["after"] is not None and v["after"]["exists"]
+        1
+        for v in verdicts
+        if v["verdict"] != "INSTRUMENT_ERROR"
+        and v["after"] is not None
+        and v["after"]["exists"]
     )
-    absent = len(verdicts) - present - errors
+    absent = sum(
+        1
+        for v in verdicts
+        if v["verdict"] != "INSTRUMENT_ERROR"
+        and v["after"] is not None
+        and not v["after"]["exists"]
+    )
 
     header = "VIOLATION" if violated else "REPORT (no violation)"
     lines = [
