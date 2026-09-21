@@ -95,12 +95,6 @@ class ClaudeMdGuardViolation(AssertionError):
 # session and the inner run's before-sample would overwrite it.
 _BEFORE: "pytest.StashKey[dict]" = pytest.StashKey()
 
-# The comparison is exactly these four. `mtime_ns` is SAMPLED and deliberately
-# NOT compared: it moves without content or identity moving (a touch, a
-# metadata sync) and adds no detection power beyond `digest` and `st_ino`,
-# which already catch both write routes. Including it buys false positives.
-_COMPARED_FIELDS = ("exists", "digest", "st_dev", "st_ino")
-
 # Verdicts that make the session a failure. Instrument failure is NOT here, by
 # ruling: a resolver that cannot import on an unmeasured CI interpreter would
 # otherwise fail every run there. Liveness is asserted in a test instead, which
@@ -261,7 +255,18 @@ def _sample_union(rootpath, before):
 
 
 def _verdict_for(path_text, before, after):
-    """The verdict for one key. Pure; total over every before/after pair."""
+    """The verdict for one key. Pure; total over every before/after pair.
+
+    THE COMPARED FIELDS ARE EXACTLY `exists`, `digest`, `st_dev` and `st_ino`,
+    and they are compared BELOW rather than declared in a constant, because a
+    list of field names that nothing reads is a claim about this function that
+    this function does not have to honour -- add a field to the comparison and
+    the list is silently false. `mtime_ns` is SAMPLED and deliberately NOT
+    compared: it moves without content or identity moving (a touch, a metadata
+    sync) and adds no detection power beyond `digest` and `st_ino`, which
+    already catch both write routes, so including it would buy false positives
+    only. `test_mtime_alone_never_moves_the_verdict` is what holds that.
+    """
     if after is None:
         return {
             "path": path_text,
