@@ -32,6 +32,20 @@ _plugin_root = str(Path(__file__).parent)
 if _plugin_root not in sys.path:
     sys.path.insert(0, _plugin_root)
 
+# The hooks dir, for the CLAUDE.md guard's `shared.claude_md_manager` import.
+# It must resolve under THAT name -- the one every test uses -- because
+# hooks/__init__.py exists, so a `hooks.shared.…` import would bind one file
+# under a second module identity, which is exactly what the layer-4
+# import-identity guard exists to catch. tests/conftest.py adds the same entry,
+# but it runs AFTER this conftest's pytest_configure, so without this the
+# before-phase could not resolve what the after-phase could, and every run
+# would report a spurious new target. No new sanctioned root: test_path_setup_
+# pin.py already lists hooks/, so the end state is today's and only the timing
+# moves earlier.
+_hooks_dir = str(Path(__file__).parent / "hooks")
+if _hooks_dir not in sys.path:
+    sys.path.insert(0, _hooks_dir)
+
 # Import-identity harness registration (layer 4 guard). tests/ is inserted so
 # the harness module resolves at conftest load; the insert is a guarded no-op
 # once tests/conftest.py has run. The harness is stdlib-only, so this import
@@ -46,4 +60,13 @@ from import_identity_map import (  # noqa: E402
     pytest_collection_modifyitems,  # noqa: F401 — hook-registration re-export; pytest's name-based discovery is the consumer, the linter can't see it
     pytest_sessionfinish,  # noqa: F401 — hook-registration re-export
     pytest_sessionstart,  # noqa: F401 — hook-registration re-export
+)
+
+# CLAUDE.md session tripwire (the child-process half). Same re-export idiom:
+# the logic lives in tests/claude_md_guard.py, which keeps this file thin per
+# the no-import charter above and keeps the guard testable on its own. Both of
+# its resolver imports happen inside its hook bodies, not here.
+from claude_md_guard import (  # noqa: E402
+    pytest_configure,  # noqa: F401 — hook-registration re-export
+    pytest_unconfigure,  # noqa: F401 — hook-registration re-export
 )

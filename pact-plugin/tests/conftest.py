@@ -549,9 +549,16 @@ def _refuse_claude_md_writes_outside_tmp(request, monkeypatch):
     having to keep a list correct.
 
     IT CANNOT SEE A CHILD PROCESS. ``monkeypatch`` does not cross the process
-    boundary, so a spawned child writes unguarded. That gap is covered from
-    the other direction: a checksum of the real file across a full run catches
-    any writer, in-process or not.
+    boundary, so a spawned child writes unguarded. That route is WATCHED, NOT
+    BLOCKED, and from the other end of the run: ``pytest_configure`` and
+    ``pytest_unconfigure``, registered by ``pact-plugin/conftest.py`` from
+    ``tests/claude_md_guard.py``, sample the CLAUDE.md paths this run's
+    resolvers name -- for the pytest rootdir and for the project base the
+    pact-memory resolver returns -- and compare the two samples, so a child's
+    write is REPORTED after the fact rather than refused as it happens. That
+    comparison runs only when the pytest process exits through Python; a hard
+    kill bypasses it. A CLAUDE.md a CHILD creates under a project directory
+    this run never resolves is outside what this half watches.
     """
     # THE EXCLUSION IS KEYED PER TEST, NOT PER FILE, AND THE DIFFERENCE IS THE
     # WHOLE POINT OF ITS PRESENT SHAPE.
