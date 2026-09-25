@@ -1,4 +1,4 @@
-"""Session tripwire: report any CLAUDE.md this test run changed.
+"""Session tripwire: report any real CLAUDE.md this test run changed.
 
 Location: pact-plugin/tests/claude_md_guard.py
 
@@ -9,58 +9,92 @@ process boundary, so a child's write cannot be refused, only OBSERVED. This
 module samples before the session and compares after it, and reports what
 changed. It prevents nothing.
 
-WHAT IT WATCHES. The paths this run's resolvers name: the pact-memory
-resolver's own output, and `resolve_project_claude_md_path` evaluated for the
-pytest rootdir and for that resolver's base. Asked at run time, never rebuilt
--- a path built from rootdir watches the worktree root, which is gitignored and
-holds no CLAUDE.md, so it would stay green forever.
+WHAT IT WATCHES, AND WHY IT DOES NOT ASK THE RESOLVERS. A writer resolves its
+target in the environment it runs in -- a test body, a child that inherits
+that body's environment, or a child given a literal one -- and none of those
+is the environment this hook runs in: the suite deletes CLAUDE_PROJECT_DIR,
+CLAUDE_CONFIG_DIR and the session id for each test and patches `Path.home()`
+in-process only. A resolver asked here answers for this hook, not for a
+writer. So `pytest_configure` reads this process's inputs ONCE and fixes the
+watched set from them:
 
-WHEN IT RUNS, AND WHEN IT DOES NOT. The comparison happens WHENEVER THE PYTEST
-PROCESS EXITS THROUGH PYTHON. Measured on CPython 3.14.6 / pytest 9.1.1, one
+  * both project locations, `.claude/CLAUDE.md` and `CLAUDE.md`, under
+    CLAUDE_PROJECT_DIR, the working directory, and the working directory's
+    git worktree root and main-repository root;
+  * `CLAUDE.md` under every config root a writer can reach: CLAUDE_CONFIG_DIR,
+    `$HOME/.claude`, and the password database's home `.claude`, which is what
+    a child started without HOME resolves.
+
+`pytest_unconfigure` samples exactly those paths again. Nothing is resolved
+twice, so the two samples cannot disagree about which files they describe,
+and both locations are watched whether or not they exist, so a creation is
+CREATED rather than a path that joins the set unseen. The coverage group in
+test_claude_md_guard.py holds this set to the resolvers: it runs each CLAUDE.md
+resolver a writer uses, under a test's environment and a child's, records
+every directory it probes, and fails if one is not watched.
+
+WHAT IT DOES NOT WATCH. A child that a test deliberately aims at a real path
+these inputs do not name -- through the child's CLAUDE_PROJECT_DIR,
+CLAUDE_CONFIG_DIR or HOME, or a `cwd=` outside this checkout -- writes outside
+the watched set. The in-process half still refuses the same write made
+in-process, because it refuses any target outside the tmp tree instead of
+checking a list, so the two halves cover different populations. Also outside
+it: a writer running outside every test (at collection or in a pytest hook)
+in a session that exports a session id without CLAUDE_PROJECT_DIR, where the
+pact-memory resolver's session-record rung can name another directory -- no
+writer runs there today; a resolver rung that probes without the shared
+helper, or a file name other than the two above; and a relative
+CLAUDE_CONFIG_DIR, which each writer resolves against its own working
+directory.
+
+WHEN IT RUNS, AND WHEN IT DOES NOT. The comparison runs whenever the pytest
+process exits through Python. MEASURED on CPython 3.14.6 / pytest 9.1.1, one
 binary: it runs on a clean pass, on failures, under -x, under a real SIGINT, on
-a collection error where no test ran, and under --collect-only. It does NOT
-run in these modes, which are NOT equally serious:
+a collection error where no test ran, under --collect-only, and with a
+nonexistent path argument (exit 4). It does NOT run in these modes, which are
+not equally serious:
 
-  1. A HARD KILL -- SIGKILL, os._exit, a segfault. THE ONE REAL GAP: tests were
-     mid-execution, so a writer may already have fired and nothing reports it.
-     Closing it needs a check outside this process, and none ships here.
-  2. A mistyped CLI flag, and a nonexistent path argument. No test code runs in
-     either, so there is nothing to have missed. Benign.
+  1. SIGTERM -- the default `kill`, a CI cancellation or timeout, `docker
+     stop`. pytest installs no handler for it, so the process dies without
+     comparing. MEASURED: exit 143, so CI still fails the job.
+  2. A hard kill -- SIGKILL, a segfault, or os._exit from the pytest process.
+     Tests were mid-execution, so a writer may already have fired. SIGKILL and
+     a segfault never exit zero. os._exit(0) DOES: it is the silent case,
+     exit 0 and no comparison. SIGKILL and os._exit(0) MEASURED; the segfault
+     INFERRED from the same mechanism.
+  3. A mistyped CLI flag. No test code runs, so there is nothing to miss.
+  4. A --confcutdir that excludes pact-plugin/conftest.py, for example
+     `--confcutdir=tests`. The guard is never registered and the run is green
+     and inert. MEASURED. The summary line below is missing from such a run,
+     and that absence is how to tell.
 
-AN INSTRUMENT ERROR COSTS THAT PATH ITS EXIT CODE, NOT ITS REPORT. If a
-sample carries `error` -- a failed stat or a failed read -- that path is
-judged INSTRUMENT_ERROR before any content comparison, so a real change to it
-in the same run does NOT raise and the process exits 0. The report still
-prints and names the failure, under a "REPORT (no violation)" header, so this
-is not a silent miss: of the two signals named below, one fires and one does
-not. MEASURED by constructing that pair of samples directly and comparing
-them; no run has been observed failing a read on a real CLAUDE.md.
+WHAT IT PRINTS. A clean run prints one line on stderr naming every watched
+path and which of them exist, so a log shows what was watched rather than a
+silence that reads the same as "not installed". Anything else prints a report
+headed VIOLATION or REPORT (no violation).
 
-COVERAGE SHRINKS SILENTLY WHERE THE DISPLAY RESOLVER FINDS NOTHING. The
-watched set is built from three evaluations, and the first is skipped entirely
-when the pact-memory resolver returns no path. MEASURED in THIS tree, by
-stubbing that resolver to its no-CLAUDE.md return: the set falls from 2 paths
-to 1, the survivor absent with no error, and the liveness test passes exactly
-as it does with 2, because it asserts a non-empty set and no errors and
-deliberately not that any file exists. So coverage halves with nothing
-reporting it. NOT INERT there -- the rootdir-derived path is still watched, so
-a creation at it still raises. That CI is such an environment is INFERRED from
-the repo's CLAUDE.md being gitignored, not measured: no run of this guard in
-CI has been observed.
+A VIOLATION IS NOT IN THE SUMMARY LINE. On violation this writes the report
+and raises, which exits non-zero (measured, rc=1). pytest's own summary still
+reads "N passed", so a reader or a CI step keying on that line sees green on a
+failed run. The report and the exit code are the signals. The unconfigure hook
+is marked trylast, so no other plugin's unconfigure hook is skipped by the
+raise unless that plugin also marks its hook trylast.
 
-UNMEASURED, AND LEFT OPEN. `resolve_project_claude_md_path` is total: handed
-any project_dir it names a CLAUDE.md, existing or not, and its non-test callers
-are the hooks that CREATE that file. A child handed a project_dir this run never
-resolves can create a CLAUDE.md outside the watched set. The consequence was not
-measured. Do not read this guard as closing it.
+INSTRUMENT ERRORS. A path that sampled WITHOUT ERROR before the session -- an
+absent file counts -- and cannot be sampled after it is a violation,
+NOW_UNREADABLE: something replaced it with a directory, locked it, or removed
+access to it during the run. A path that could not be sampled before the
+session is reported and not raised: there is no baseline to compare. An input
+this hook could not read at configure -- the working directory, git, the
+password database, or the `shared` helpers -- is reported and not raised, and
+the paths it would have named are not watched.
 
-A VIOLATION IS NOT IN THE SUMMARY LINE. On violation this writes a report to
-stderr and raises, which exits non-zero (measured, rc=1). pytest's own summary
-still reads "N passed", so a reader or a CI step keying on that line sees green
-on a failed run. The report and the exit code are the signals.
-
-CI's other two interpreters are UNMEASURED, not passing: they carried no pytest
-when these modes were measured.
+CI. CI exports no CLAUDE_* variable and its checkout carries no CLAUDE.md, which
+is gitignored, so every watched path is expected ABSENT there and the guard can
+catch a creation only. MEASURED-ON-A-PROXY: macOS, CPython 3.14.6, a checkout
+with no CLAUDE.md and no CLAUDE_* variable. Not measured in CI; the summary
+line each CI run prints settles it. CI's other two interpreters are UNMEASURED
+for the exit modes above.
 
 Used by: pact-plugin/conftest.py, which re-exports `pytest_configure` and
 `pytest_unconfigure` by name so pytest's hook discovery registers them
@@ -73,13 +107,15 @@ without any test-only disable seam.
 # THIS FILE MUST NEVER MUTATE THE MODULE SEARCH PATH, IN ANY FORM. It sits in
 # tests/**/*.py, which is test_path_setup_pin.py's population, and that pin
 # fails on a mutation at module level, inside a function, or embedded in a
-# string constant. The hooks/ entry this module's resolver import needs is
+# string constant. The hooks/ entry this module's `shared` imports need is
 # added by pact-plugin/conftest.py, which the pin exempts as the sanctioned
 # mechanism. Note for whoever edits the prose above: the pin's string arm
 # matches the parenthesised call forms and the augmented-assignment spellings,
 # so naming the attribute in prose is safe and quoting a call is not.
 
 import hashlib
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -90,20 +126,137 @@ class ClaudeMdGuardViolation(AssertionError):
     """Raised from `pytest_unconfigure` when a watched CLAUDE.md changed."""
 
 
-# Config-scoped rather than a module global: a nested in-process pytester run
+# Config-scoped rather than module globals: a nested in-process pytester run
 # gets its own Config, where a module global would be shared with the outer
 # session and the inner run's before-sample would overwrite it.
 _BEFORE: "pytest.StashKey[dict]" = pytest.StashKey()
+_INPUTS: "pytest.StashKey[dict]" = pytest.StashKey()
 
-# Verdicts that make the session a failure. Instrument failure is NOT here, by
-# ruling: a resolver that cannot import on an unmeasured CI interpreter would
-# otherwise fail every run there. Liveness is asserted in a test instead, which
-# fails in the environment that actually has the problem.
+# Verdicts that fail the session. NOW_UNREADABLE is here and INSTRUMENT_ERROR
+# is not, and the before-sample draws the line: a path that sampled without
+# error before the session and cannot be sampled after it lost something
+# during the run, while a path that already failed before has no baseline to
+# compare. An input this hook could not read at configure is not a verdict; it
+# is reported, and the paths it would have named are not watched.
 _VIOLATIONS = frozenset(
-    {"CREATED", "DELETED", "MODIFIED", "REWRITTEN", "NEW_TARGET_PRESENT"}
+    {"CREATED", "DELETED", "MODIFIED", "REWRITTEN", "NOW_UNREADABLE"}
 )
 
 _OK_VERDICTS = frozenset({"OK_ABSENT", "OK_UNCHANGED"})
+
+_PROJECT_SHAPES = (Path(".claude") / "CLAUDE.md", Path("CLAUDE.md"))
+
+_SUMMARY_PREFIX = "[PACT CLAUDE.md guard] clean:"
+
+
+def _passwd_home():
+    """The password database's home for this user: where a child started
+    without HOME resolves `~`. A function so a test can replace it."""
+    import pwd
+
+    return pwd.getpwuid(os.getuid()).pw_dir
+
+
+def _git_path(cwd, flag, env):
+    """`git -C <cwd> rev-parse <flag>` as a path, or None when the cwd is not
+    a repository. Raises when git itself cannot run; the caller records it."""
+    result = subprocess.run(
+        ["git", "-C", cwd, "rev-parse", flag],
+        env=env,
+        timeout=5,
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    return Path(result.stdout.strip())
+
+
+def _pin_inputs():
+    """Read this process's inputs ONCE. Returns `(inputs, errors)`.
+
+    NEVER RAISES. An input it cannot read becomes a `(label, message)` entry
+    in `errors`, and the candidates that input would have named are absent.
+    """
+    errors = []
+
+    def unavailable(label, exc):
+        errors.append((label, f"{type(exc).__name__}: {exc}"))
+
+    inputs = {
+        "project_dir": os.environ.get("CLAUDE_PROJECT_DIR") or None,
+        "cwd": None,
+        "git_toplevel": None,
+        "git_common_parent": None,
+        "config_roots": [],
+    }
+
+    try:
+        inputs["cwd"] = os.getcwd()
+    except OSError as exc:
+        unavailable("working directory", exc)
+
+    if inputs["cwd"] is not None:
+        try:
+            from shared.project_scope import git_env_without_location
+
+            env = git_env_without_location()
+            inputs["git_toplevel"] = _git_path(inputs["cwd"], "--show-toplevel", env)
+            common = _git_path(inputs["cwd"], "--git-common-dir", env)
+            if common is not None:
+                if not common.is_absolute():
+                    common = Path(inputs["cwd"]) / common
+                # realpath, as the resolvers use for the same rung.
+                inputs["git_common_parent"] = Path(os.path.realpath(common)).parent
+        except Exception as exc:  # noqa: BLE001 — report, never raise from a hook
+            unavailable("git", exc)
+
+    homes = []
+    if os.environ.get("HOME"):
+        homes.append(os.environ["HOME"])
+    try:
+        homes.append(_passwd_home())
+    except Exception as exc:  # noqa: BLE001 — no `pwd` module, or no entry
+        unavailable("password database home", exc)
+
+    try:
+        from shared.paths import get_claude_config_dir
+
+        declared = os.environ.get("CLAUDE_CONFIG_DIR")
+        roots = []
+        for home in homes:
+            roots.append(get_claude_config_dir(env={}, home=Path(home)))
+            if declared:
+                roots.append(
+                    get_claude_config_dir(
+                        env={"CLAUDE_CONFIG_DIR": declared}, home=Path(home)
+                    )
+                )
+        if not homes and declared and Path(declared).is_absolute():
+            roots.append(Path(declared))
+        inputs["config_roots"] = roots
+    except Exception as exc:  # noqa: BLE001 — report, never raise from a hook
+        unavailable("shared.paths", exc)
+
+    return inputs, errors
+
+
+def _candidates(inputs):
+    """PURE. Every CLAUDE.md path a writer can reach from these inputs, whether
+    or not it exists. See the module docstring for the list and for what it
+    leaves out."""
+    project_dirs = [
+        inputs.get(name)
+        for name in ("project_dir", "cwd", "git_toplevel", "git_common_parent")
+    ]
+    paths = [
+        Path(directory) / shape
+        for directory in project_dirs
+        if directory is not None
+        for shape in _PROJECT_SHAPES
+    ]
+    paths.extend(Path(root) / "CLAUDE.md" for root in inputs.get("config_roots", ()))
+    return paths
 
 
 def _empty_sample(path_text):
@@ -127,8 +280,7 @@ def _sample_one(path):
 
     The `path` field is the RESOLVED path as a string, and it is produced here
     rather than by the caller so that both phases stringify the same file the
-    same way. An inconsistent key between the phases would not error; it would
-    read as a new target appearing, or hide one that did.
+    same way.
     """
     try:
         resolved = Path(path).resolve()
@@ -161,133 +313,45 @@ def _sample_one(path):
     return sample
 
 
-def _watched_paths(rootpath):
-    """The CLAUDE.md paths this run's resolvers name, plus any resolver failure.
-
-    Returns `(paths, failures)`, where `failures` is a list of
-    `(label, message)`. Three evaluations, deduped downstream by resolved path:
-
-      1. the pact-memory display resolver's own output -- the symbol on the
-         write path, which both writers reach;
-      2. `resolve_project_claude_md_path` for the pytest rootdir;
-      3. the same, for the base the display resolver reports.
-
-    BOTH IMPORTS HAPPEN HERE, INSIDE THE BODY, each in its own `except
-    Exception` recording a failure rather than raising. That is the root
-    conftest's NO-IMPORT CHARTER: a missing optional dependency at conftest
-    scope becomes a total suite collection failure, and `working_memory` lives
-    under a skill's scripts dir. It is also why a sample carries an `error`
-    field at all -- that field is the charter surfacing in the data model.
-
-    A resolver that finds nothing is SKIPPED AT THE SOURCE, not carried as a
-    None. The display resolver returns `(None, None)` when no CLAUDE.md
-    exists -- the LIKELY case in CI, where the repo's own copy is gitignored --
-    and a None reaching the sample map would key an entry on a non-path. The
-    watched set legitimately shrinks instead, and the union sampling in
-    `_sample_union` is what makes a path appearing later report as a new
-    target rather than joining the set silently.
-    """
-    paths = []
-    failures = []
-    base = None
-
-    try:
-        import working_memory
-
-        found, found_base = working_memory._resolve_display_claude_md_with_base()
-        if found is not None:
-            paths.append(Path(found))
-        if found_base is not None:
-            base = Path(found_base)
-    except Exception as exc:  # noqa: BLE001 — report, never raise from a hook
-        failures.append(
-            ("pact-memory display resolver", f"{type(exc).__name__}: {exc}")
-        )
-
-    try:
-        from shared.claude_md_manager import resolve_project_claude_md_path
-
-        paths.append(Path(resolve_project_claude_md_path(rootpath)[0]))
-        if base is not None:
-            paths.append(Path(resolve_project_claude_md_path(base)[0]))
-    except Exception as exc:  # noqa: BLE001 — report, never raise from a hook
-        failures.append(
-            ("claude_md_manager project resolver", f"{type(exc).__name__}: {exc}")
-        )
-
-    return paths, failures
-
-
-def _sample(rootpath):
-    """Map resolved-path-string -> sample, for every path the resolvers name.
-
-    A resolver failure becomes its own entry under a bracketed pseudo-key, so
-    an instrument that could not run is visible in the same structure as a
-    file that could not be read, rather than as a silently shorter map.
-    """
-    samples = {}
-    paths, failures = _watched_paths(rootpath)
-    for path in paths:
+def _take_before(config):
+    """Fix the watched set from this process's inputs and sample it."""
+    inputs, errors = _pin_inputs()
+    config.stash[_INPUTS] = {"inputs": inputs, "errors": errors}
+    before = {}
+    for path in _candidates(inputs):
         sample = _sample_one(path)
-        samples.setdefault(sample["path"], sample)
-    for label, message in failures:
-        key = f"<unresolved: {label}>"
-        sample = _empty_sample(key)
-        sample["error"] = message
-        samples.setdefault(key, sample)
-    return samples
+        before.setdefault(sample["path"], sample)
+    config.stash[_BEFORE] = before
 
 
-def _sample_union(rootpath, before):
-    """Sample the paths resolving NOW, plus every path sampled THEN.
-
-    `resolve_project_claude_md_path` is existence-dependent, so a child that
-    creates `.claude/CLAUDE.md` where only `./CLAUDE.md` existed makes the
-    after-phase resolve a path the before-phase never saw. Carrying the before
-    keys forward makes every key comparable and leaves the appearance of a new
-    key as its own signal.
-    """
-    after = _sample(rootpath)
-    for path_text in before:
-        if path_text not in after:
-            after[path_text] = _sample_one(path_text)
-    return after
+def _take_after(before):
+    """Sample EXACTLY the keys configure fixed, and re-derive nothing. Keyed by
+    the before key even when the sample's own `path` differs, because a
+    symlink appeared at it during the run."""
+    return {key: _sample_one(key) for key in before}
 
 
 def _verdict_for(path_text, before, after):
-    """The verdict for one key. Pure; total over every before/after pair.
+    """The verdict for one key. Pure; both samples are present by construction.
 
-    THE COMPARED FIELDS ARE EXACTLY `exists`, `digest`, `st_dev` and `st_ino`,
-    and they are compared BELOW rather than declared in a constant, because a
-    list of field names that nothing reads is a claim about this function that
-    this function does not have to honour -- add a field to the comparison and
-    the list is silently false. `mtime_ns` is SAMPLED and deliberately NOT
-    compared: it moves without content or identity moving (a touch, a metadata
-    sync) and adds no detection power beyond `digest` and `st_ino`, which
-    already catch both write routes, so including it would buy false positives
-    only. `test_mtime_alone_never_moves_the_verdict` is what holds that.
+    The verdict reads `error` first -- an error before the session is
+    INSTRUMENT_ERROR, an error after a clean one is NOW_UNREADABLE -- and then
+    compares exactly `exists`, `digest`, `st_dev` and `st_ino`.
+    `test_the_verdict_reads_exactly_the_fields_its_docstring_names` flips each
+    sampled field in turn and fails if a field outside that list moves the
+    verdict or one inside it does not. `mtime_ns` and `size` are SAMPLED and
+    deliberately NOT compared: `mtime_ns` moves without content or identity
+    moving (a touch, a metadata sync) and adds no detection power beyond
+    `digest` and `st_ino`, which already catch both write routes, so including
+    it would buy false positives only; size cannot change without digest
+    changing.
     """
-    if after is None:
-        return {
-            "path": path_text,
-            "verdict": "INSTRUMENT_ERROR",
-            "before": before,
-            "after": None,
-            "detail": "no after-sample for a path sampled before the session",
-        }
-    if (before is not None and before.get("error")) or after.get("error"):
-        detail = (before or {}).get("error") or after.get("error")
-        return {
-            "path": path_text,
-            "verdict": "INSTRUMENT_ERROR",
-            "before": before,
-            "after": after,
-            "detail": detail,
-        }
-
-    verdict = None
-    if before is None:
-        verdict = "NEW_TARGET_PRESENT" if after["exists"] else "NEW_TARGET_ABSENT"
+    detail = None
+    if before["error"]:
+        verdict, detail = "INSTRUMENT_ERROR", before["error"]
+    elif after["error"]:
+        verdict = "NOW_UNREADABLE"
+        detail = f"sampled cleanly before the session; after it: {after['error']}"
     elif not before["exists"] and not after["exists"]:
         verdict = "OK_ABSENT"
     elif not before["exists"]:
@@ -304,22 +368,18 @@ def _verdict_for(path_text, before, after):
         verdict = "REWRITTEN"
     else:
         verdict = "OK_UNCHANGED"
-
     return {
         "path": path_text,
         "verdict": verdict,
         "before": before,
         "after": after,
-        "detail": None,
+        "detail": detail,
     }
 
 
 def _compare(before, after):
-    """PURE function of two path->sample maps. No filesystem access."""
-    return [
-        _verdict_for(key, before.get(key), after.get(key))
-        for key in sorted(set(before) | set(after))
-    ]
+    """PURE function of two path->sample maps with the same keys."""
+    return [_verdict_for(key, before[key], after[key]) for key in sorted(before)]
 
 
 def _short(digest):
@@ -330,9 +390,9 @@ def _describe(verdict):
     """The indented detail lines for one non-OK verdict."""
     before, after = verdict["before"], verdict["after"]
     name = verdict["verdict"]
-    if name == "INSTRUMENT_ERROR":
+    if name in ("INSTRUMENT_ERROR", "NOW_UNREADABLE"):
         return [f"      {verdict['detail']}"]
-    if name in ("CREATED", "NEW_TARGET_PRESENT"):
+    if name == "CREATED":
         return [
             f"      absent before; present after, {after['size']} B, "
             f"sha256 {_short(after['digest'])}"
@@ -342,8 +402,6 @@ def _describe(verdict):
             f"      present before, {before['size']} B, "
             f"sha256 {_short(before['digest'])}; absent after"
         ]
-    if name == "NEW_TARGET_ABSENT":
-        return ["      a resolver named this path only after the session; absent"]
     if name == "REWRITTEN":
         return [
             f"      bytes identical (sha256 {_short(after['digest'])}), "
@@ -358,16 +416,39 @@ def _describe(verdict):
     ]
 
 
-def _format_report(verdicts):
-    """The stderr report, or "" when every verdict is OK.
+_VIOLATION_CAUSES = """\
+A watched CLAUDE.md changed while this test session ran. Rule out the causes
+outside the suite FIRST -- each produces exactly this report:
+  * you or an editor changed the file during the run;
+  * a Claude Code session in this project started, resumed or compacted, or
+    ran a PACT command that writes it (a memory save, a pin, bootstrap):
+    PACT rewrites the managed block of the project CLAUDE.md, often with
+    identical bytes, which reports as REWRITTEN;
+  * another Claude Code session wrote it.
+If none of these happened during the run, a test or a process it spawned
+wrote the file: find the writer before re-running, and do not merge.
+pytest's summary line still says "passed" -- this report and the non-zero
+exit code are the signals."""
 
-    Silent on a clean run by design: liveness is a test's job, not a line
-    printed on every session. The header distinguishes a violation from a
-    report-only outcome, because an instrument failure is explicitly not a
-    violation and must not be announced as one.
+_NOW_UNREADABLE_CAUSES = """\
+A watched path that sampled cleanly before the run could not be sampled after
+it. Rule out the causes outside the suite first: its permissions or a parent
+directory's changed, it was replaced by a directory, or its volume went away.
+If none of these happened during the run, a test or a process it spawned did
+it: find it before re-running, and do not merge."""
+
+
+def _format_report(verdicts, input_errors):
+    """The stderr report, or "" when every verdict is OK and every input was
+    read.
+
+    Returns "" on a clean run; the caller prints the one-line summary instead.
+    The header distinguishes a violation from a report-only outcome, because
+    an instrument failure is explicitly not a violation and must not be
+    announced as one.
     """
     notable = [v for v in verdicts if v["verdict"] not in _OK_VERDICTS]
-    if not notable:
+    if not notable and not input_errors:
         return ""
 
     violated = [v for v in notable if v["verdict"] in _VIOLATIONS]
@@ -380,45 +461,57 @@ def _format_report(verdicts):
     # populations and subtracting for `absent` printed `-1 absent` on a single
     # watched path. Reachable deterministically, with no race: a DIRECTORY at
     # the watched path stats cleanly and raises `IsADirectoryError` on read.
-    errors = sum(1 for v in verdicts if v["verdict"] == "INSTRUMENT_ERROR")
+    erred = ("INSTRUMENT_ERROR", "NOW_UNREADABLE")
+    errors = sum(1 for v in verdicts if v["verdict"] in erred)
     present = sum(
-        1
-        for v in verdicts
-        if v["verdict"] != "INSTRUMENT_ERROR"
-        and v["after"] is not None
-        and v["after"]["exists"]
+        1 for v in verdicts if v["verdict"] not in erred and v["after"]["exists"]
     )
     absent = sum(
-        1
-        for v in verdicts
-        if v["verdict"] != "INSTRUMENT_ERROR"
-        and v["after"] is not None
-        and not v["after"]["exists"]
+        1 for v in verdicts if v["verdict"] not in erred and not v["after"]["exists"]
     )
 
     header = "VIOLATION" if violated else "REPORT (no violation)"
-    lines = [
-        f"=== PACT CLAUDE.md GUARD — {header} ===",
+    census = (
         f"watched {len(verdicts)} path(s): {present} present, {absent} absent, "
-        f"{errors} instrument error(s)",
-    ]
+        f"{errors} instrument error(s)"
+    )
+    if input_errors:
+        census += f"; {len(input_errors)} input(s) unavailable"
+    lines = [f"=== PACT CLAUDE.md GUARD — {header} ===", census]
     for verdict in notable:
         lines.append(f"  {verdict['verdict']:<19}{verdict['path']}")
         lines.extend(_describe(verdict))
-    if violated:
+    for label, message in input_errors:
         lines.append(
-            'A test session reached a real CLAUDE.md. Treat as HALT: do not merge, and\n'
-            'find the writer before re-running. pytest\'s own summary line still says\n'
-            '"passed" — this report and the non-zero exit code are the only signals.'
+            f"  INPUT UNAVAILABLE  {label}: {message} -- the paths it names are "
+            "not watched"
         )
+    if violated:
+        lines.append(_VIOLATION_CAUSES)
+    if any(v["verdict"] == "NOW_UNREADABLE" for v in verdicts):
+        lines.append(_NOW_UNREADABLE_CAUSES)
     return "\n".join(lines)
+
+
+def _format_summary(verdicts):
+    """The one line a clean run prints: every watched path, and which exist."""
+    named = ", ".join(
+        f"{v['path']} (present)" if v["after"]["exists"] else v["path"]
+        for v in sorted(verdicts, key=lambda v: v["path"])
+    )
+    present = sum(1 for v in verdicts if v["after"]["exists"])
+    return (
+        f"{_SUMMARY_PREFIX} watched {len(verdicts)} path(s), {present} present: "
+        f"{named}"
+    )
 
 
 def pytest_configure(config):
     """Take the before-sample. First thing the root conftest registers."""
-    config.stash[_BEFORE] = _sample(config.rootpath)
+    _take_before(config)
 
 
+@pytest.hookimpl(trylast=True)
 def pytest_unconfigure(config):
     """Re-sample, report, and raise on any violation.
 
@@ -426,20 +519,21 @@ def pytest_unconfigure(config):
     future pytest does with the exception, and the raise is what makes the
     process exit non-zero -- `pytest_unconfigure` receives only `config`, runs
     after the exit status is computed, and cannot change it any other way.
+    TRYLAST, so the raise skips no other plugin's unconfigure hook.
     """
     before = config.stash.get(_BEFORE, None)
     if before is None:
         return  # configure never ran; there is nothing to compare against
 
-    verdicts = _compare(before, _sample_union(config.rootpath, before))
-    report = _format_report(verdicts)
-    if report:
-        print(report, file=sys.stderr)
+    verdicts = _compare(before, _take_after(before))
+    input_errors = config.stash.get(_INPUTS, {}).get("errors", [])
+    report = _format_report(verdicts, input_errors)
+    print(report or _format_summary(verdicts), file=sys.stderr)
 
     violated = [v["path"] for v in verdicts if v["verdict"] in _VIOLATIONS]
     if violated:
         raise ClaudeMdGuardViolation(
-            "this test session changed a real CLAUDE.md: "
+            "a watched CLAUDE.md changed during this test session: "
             + ", ".join(violated)
-            + " (see the guard report on stderr)"
+            + " (the guard report on stderr lists the causes to rule out first)"
         )
