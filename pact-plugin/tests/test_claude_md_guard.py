@@ -39,7 +39,7 @@ PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 # Group 1 -- the comparator table
 # --------------------------------------------------------------------------
 
-def _present(digest="aa", dev=1, ino=10, size=5):
+def _present(digest="aa", dev=1, ino=10, size=5, leaf_dev=1, leaf_ino=10):
     return {
         "path": "/watched/CLAUDE.md",
         "exists": True,
@@ -48,6 +48,8 @@ def _present(digest="aa", dev=1, ino=10, size=5):
         "st_dev": dev,
         "st_ino": ino,
         "mtime_ns": 123,
+        "leaf_dev": leaf_dev,
+        "leaf_ino": leaf_ino,
         "error": None,
     }
 
@@ -61,6 +63,8 @@ def _absent():
         "st_dev": None,
         "st_ino": None,
         "mtime_ns": None,
+        "leaf_dev": None,
+        "leaf_ino": None,
         "error": None,
     }
 
@@ -116,6 +120,67 @@ def test_a_moved_device_alone_is_rewritten():
     before = {KEY: _present(dev=1)}
     after = {KEY: _present(dev=2)}
     assert _only(before, after) == "REWRITTEN"
+
+
+def test_a_replaced_path_alone_is_rewritten():
+    """The path's own identity moved while the file it names did not: a
+    symlink replaced by a rename, whose target is untouched."""
+    before = {KEY: _present(leaf_ino=20)}
+    after = {KEY: _present(leaf_ino=21)}
+    assert _only(before, after) == "REWRITTEN"
+
+
+def test_a_writer_replacing_a_symlinked_claude_md_is_seen(tmp_path):
+    """From real samples: the path is a symlink to a file elsewhere, and a
+    rename puts a regular file with the SAME bytes in its place. The file it
+    pointed at is untouched, so only the path's own identity moves. Keyed by
+    the resolved target, this read as unchanged."""
+    target = tmp_path / "dotfiles" / "CLAUDE.md"
+    target.parent.mkdir()
+    target.write_text("same bytes\n")
+    path = tmp_path / "CLAUDE.md"
+    path.symlink_to(target)
+    before = guard._sample_one(path)
+    replacement = tmp_path / "replacement"
+    replacement.write_text("same bytes\n")
+    os.replace(replacement, path)
+    after = guard._sample_one(path)
+
+    assert before["path"] == after["path"] == str(path)
+    assert _only({before["path"]: before}, {after["path"]: after}) == "REWRITTEN"
+    assert target.read_text() == "same bytes\n"
+
+
+def test_a_dangling_symlink_created_at_an_absent_path_is_created(tmp_path):
+    """Neither sample reaches a file, but the path itself changed: a symlink
+    to a missing file appeared where nothing was. That is a creation."""
+    path = tmp_path / "CLAUDE.md"
+    before = guard._sample_one(path)
+    path.symlink_to(tmp_path / "missing.md")
+    after = guard._sample_one(path)
+
+    assert not before["exists"] and not after["exists"]
+    verdict = _only({before["path"]: before}, {after["path"]: after})
+    assert verdict == "CREATED" and verdict in guard._VIOLATIONS
+
+
+def test_a_key_through_a_symlink_and_dotdot_names_the_file_the_kernel_reaches(
+    tmp_path,
+):
+    """`link/..` goes to the link TARGET's parent, not the link's own parent.
+    The key keeps the path as written, and the sample describes the file the
+    kernel reaches; collapsing `..` lexically would watch a different file."""
+    (tmp_path / "deep" / "dir").mkdir(parents=True)
+    (tmp_path / "deep" / "CLAUDE.md").write_text("deep\n")
+    (tmp_path / "CLAUDE.md").write_text("top\n")
+    (tmp_path / "link").symlink_to(tmp_path / "deep" / "dir")
+    path = tmp_path / "link" / ".." / "CLAUDE.md"
+
+    sample = guard._sample_one(path)
+
+    assert sample["path"] == str(path)
+    assert sample["digest"] == guard._sample_one(tmp_path / "deep" / "CLAUDE.md")["digest"]
+    assert sample["digest"] != guard._sample_one(tmp_path / "CLAUDE.md")["digest"]
 
 
 def test_mtime_alone_never_moves_the_verdict():
@@ -184,7 +249,7 @@ def test_the_verdict_reads_exactly_the_fields_its_docstring_names():
         after = dict(base, **{field: flipped})
         if _only({KEY: base}, {KEY: after}) != "OK_UNCHANGED":
             moved.add(field)
-    assert moved == {"error", "exists", "digest", "st_dev", "st_ino"}
+    assert moved == {"error", "exists", "digest", "st_dev", "st_ino", "leaf_dev", "leaf_ino"}
 
 
 def test_the_violation_set_is_exactly_the_five_raising_verdicts():
@@ -363,11 +428,12 @@ def test_the_inputs_read_cleanly_on_this_machine():
     )
 
 
-def test_a_sample_key_is_its_own_resolved_path():
-    """Both phases must stringify the same file the same way."""
+def test_a_sample_key_is_its_own_absolute_path():
+    """Both phases must stringify the same path the same way: absolute, as
+    written, never resolved through a symlink."""
     for path in guard._candidates(guard._pin_inputs()[0]):
         sample = guard._sample_one(path)
-        assert sample["path"] == str(Path(sample["path"]).resolve())
+        assert sample["path"] == str(Path(path).absolute())
 
 
 _NEEDS_GIT = pytest.mark.skipif(

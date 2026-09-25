@@ -28,7 +28,16 @@ watched set from them:
 `pytest_unconfigure` samples exactly those paths again. Nothing is resolved
 twice, so the two samples cannot disagree about which files they describe,
 and both locations are watched whether or not they exist, so a creation is
-CREATED rather than a path that joins the set unseen. The coverage group in
+CREATED rather than a path that joins the set unseen.
+
+EACH PATH IS KEYED AS WRITTEN, NOT AS RESOLVED. A PACT writer replaces a
+CLAUDE.md by renaming a new file over it, so a CLAUDE.md that is a symlink --
+a dotfiles-managed one, say -- becomes a regular file while the file it
+pointed at is untouched. Keyed by the resolved target, that replacement read
+as clean. So each sample records the path's own identity (`os.lstat`) beside
+the identity and bytes of what it points at, and a change to either is
+reported. The cost: two paths that are aliases of one file through a symlink
+are two watched keys, not one. The coverage group in
 test_claude_md_guard.py holds this set to the resolvers: it runs each CLAUDE.md
 resolver a writer uses, under a test's environment and a child's, records
 every directory it probes, and fails if one is not watched.
@@ -43,9 +52,11 @@ it: a writer running outside every test (at collection or in a pytest hook)
 in a session that exports a session id without CLAUDE_PROJECT_DIR, where the
 pact-memory resolver's session-record rung can name another directory -- no
 writer runs there today; a resolver rung that probes without the shared
-helper, or a file name other than the two above; and a relative
+helper, or a file name other than the two above; a relative
 CLAUDE_CONFIG_DIR, which each writer resolves against its own working
-directory.
+directory; and a writer that replaces a DIFFERENT symlink to a watched file,
+by a path none of these inputs names -- the watched path still points at the
+untouched file.
 
 WHEN IT RUNS, AND WHEN IT DOES NOT. The comparison runs whenever the pytest
 process exits through Python. MEASURED on CPython 3.14.6 / pytest 9.1.1, one
@@ -271,6 +282,8 @@ def _empty_sample(path_text):
         "st_dev": None,
         "st_ino": None,
         "mtime_ns": None,
+        "leaf_dev": None,
+        "leaf_ino": None,
         "error": None,
     }
 
@@ -278,21 +291,29 @@ def _empty_sample(path_text):
 def _sample_one(path):
     """Sample one path. NEVER RAISES -- a failure lands in `error` instead.
 
-    The `path` field is the RESOLVED path as a string, and it is produced here
-    rather than by the caller so that both phases stringify the same file the
-    same way.
+    The `path` field is the ABSOLUTE path as written, not resolved, and it is
+    produced here rather than by the caller so that both phases stringify the
+    same path the same way. `Path.absolute()`, never `os.path.abspath`: the
+    latter collapses `link/..` lexically, where the kernel follows the link
+    first, so it could name a different file. `leaf_dev`/`leaf_ino` are the
+    path's own identity (`os.lstat`, which does not follow a symlink); the
+    other fields describe what it points at, re-followed at every sample.
     """
+    key = str(Path(path).absolute())
+    sample = _empty_sample(key)
     try:
-        resolved = Path(path).resolve()
+        leaf = os.lstat(key)
+        sample["leaf_dev"], sample["leaf_ino"] = leaf.st_dev, leaf.st_ino
+    except OSError:
+        pass
+    try:
+        resolved = Path(key).resolve()
     except (OSError, RuntimeError) as exc:
         # `Path.resolve()` disagrees with itself across versions on a symlink
         # loop, so both types are caught and the guard reports rather than
         # deciding a containment question it could not answer.
-        sample = _empty_sample(str(path))
         sample["error"] = f"resolve failed: {type(exc).__name__}: {exc}"
         return sample
-
-    sample = _empty_sample(str(resolved))
     try:
         stat = resolved.stat()
     except FileNotFoundError:
@@ -320,6 +341,9 @@ def _take_before(config):
     before = {}
     for path in _candidates(inputs):
         sample = _sample_one(path)
+        # Exact lexical key only, never realpath: with CLAUDE_CONFIG_DIR at
+        # ~/dotfiles/.claude and $HOME/.claude linked to it, both paths stay
+        # watched, because a writer can replace either one's leaf.
         before.setdefault(sample["path"], sample)
     config.stash[_BEFORE] = before
 
@@ -336,7 +360,8 @@ def _verdict_for(path_text, before, after):
 
     The verdict reads `error` first -- an error before the session is
     INSTRUMENT_ERROR, an error after a clean one is NOW_UNREADABLE -- and then
-    compares exactly `exists`, `digest`, `st_dev` and `st_ino`.
+    compares exactly `exists`, `digest`, `st_dev`, `st_ino`, `leaf_dev` and
+    `leaf_ino`.
     `test_the_verdict_reads_exactly_the_fields_its_docstring_names` flips each
     sampled field in turn and fails if a field outside that list moves the
     verdict or one inside it does not. `mtime_ns` and `size` are SAMPLED and
@@ -353,18 +378,30 @@ def _verdict_for(path_text, before, after):
         verdict = "NOW_UNREADABLE"
         detail = f"sampled cleanly before the session; after it: {after['error']}"
     elif not before["exists"] and not after["exists"]:
-        verdict = "OK_ABSENT"
+        # Neither sample reaches a file, but the path itself can still have
+        # changed: a dangling symlink appearing, vanishing or being replaced.
+        leaf_before = (before["leaf_dev"], before["leaf_ino"])
+        leaf_after = (after["leaf_dev"], after["leaf_ino"])
+        if leaf_before == leaf_after:
+            verdict = "OK_ABSENT"
+        elif before["leaf_ino"] is None:
+            verdict = "CREATED"
+        elif after["leaf_ino"] is None:
+            verdict = "DELETED"
+        else:
+            verdict = "REWRITTEN"
     elif not before["exists"]:
         verdict = "CREATED"
     elif not after["exists"]:
         verdict = "DELETED"
     elif before["digest"] != after["digest"]:
         verdict = "MODIFIED"
-    elif (before["st_dev"], before["st_ino"]) != (after["st_dev"], after["st_ino"]):
-        # Identical bytes, moved inode. `_atomic_write_text` renames a temp
-        # file into place, so a write need not change the bytes -- but a child
-        # that rewrote the operator's file still reached it, and the next
-        # write may not be identical.
+    elif _identity(before) != _identity(after):
+        # Identical bytes, moved inode -- of the file, or of the path itself
+        # when it was a symlink. `_atomic_write_text` renames a temp file into
+        # place, so a write need not change the bytes -- but a child that
+        # rewrote the operator's file still reached it, and the next write may
+        # not be identical.
         verdict = "REWRITTEN"
     else:
         verdict = "OK_UNCHANGED"
@@ -375,6 +412,11 @@ def _verdict_for(path_text, before, after):
         "after": after,
         "detail": detail,
     }
+
+
+def _identity(sample):
+    """What a rename over the path moves: the file's and the path's own."""
+    return (sample["st_dev"], sample["st_ino"], sample["leaf_dev"], sample["leaf_ino"])
 
 
 def _compare(before, after):
@@ -392,11 +434,15 @@ def _describe(verdict):
     name = verdict["verdict"]
     if name in ("INSTRUMENT_ERROR", "NOW_UNREADABLE"):
         return [f"      {verdict['detail']}"]
+    if name == "CREATED" and not after["exists"]:
+        return ["      absent before; a symlink to a missing file after"]
     if name == "CREATED":
         return [
             f"      absent before; present after, {after['size']} B, "
             f"sha256 {_short(after['digest'])}"
         ]
+    if name == "DELETED" and not before["exists"]:
+        return ["      a symlink to a missing file before; absent after"]
     if name == "DELETED":
         return [
             f"      present before, {before['size']} B, "
@@ -408,6 +454,8 @@ def _describe(verdict):
             "file identity changed",
             f"      st_dev/st_ino  {before['st_dev']}/{before['st_ino']} -> "
             f"{after['st_dev']}/{after['st_ino']}",
+            f"      path itself    {before['leaf_dev']}/{before['leaf_ino']} -> "
+            f"{after['leaf_dev']}/{after['leaf_ino']}",
         ]
     return [
         f"      sha256   {_short(before['digest'])} -> {_short(after['digest'])}",

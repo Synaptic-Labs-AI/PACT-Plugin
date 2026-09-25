@@ -92,7 +92,18 @@ def test_inner(pytestconfig):
         encoding="utf-8",
     )
     target = os.environ.get("GUARD_E2E_MODIFY")
-    if target:
+    action = os.environ.get("GUARD_E2E_ACTION")
+    if action == "atomic":
+        from shared.claude_md_manager import _atomic_write_text
+
+        _atomic_write_text(
+            Path(target), "changed by a writer", Path(os.environ["GUARD_E2E_ROOT"])
+        )
+    elif action == "strip":
+        from shared.claude_md_manager import strip_orphan_kernel_block
+
+        strip_orphan_kernel_block()
+    elif target:
         Path(target).write_text("modified by the inner test", encoding="utf-8")
 '''
 
@@ -124,7 +135,7 @@ _NEEDS_GIT = pytest.mark.skipif(
 
 def _run_nested(
     tmp_path, *, modify_target=None, argv_extra=(), cwd=None, project_dir=None,
-    via_conftest=False,
+    via_conftest=False, action=None, setup=None, home=None, config_dir=True,
 ):
     """Launch a real nested pytest under `tmp_path`; return (completed, dump).
 
@@ -133,7 +144,11 @@ def _run_nested(
     <tmp>/proj, its working directory is `cwd` or <tmp>/proj, and its
     CLAUDE_CONFIG_DIR is <tmp>/cfg. With `via_conftest` the guard is
     registered the way the root conftest registers it, by re-export, instead
-    of with `-p`.
+    of with `-p`. `action` swaps the plain write for a real PACT writer:
+    "atomic" replaces `modify_target` the way `_atomic_write_text` does, and
+    "strip" runs the global kernel-block strip. `setup(tmp_path)` runs after
+    the default layout is built; `home` sets the child's HOME, and
+    `config_dir=False` leaves its CLAUDE_CONFIG_DIR unset.
     """
     proj = tmp_path / "proj"
     (proj / ".claude").mkdir(parents=True, exist_ok=True)
@@ -144,6 +159,8 @@ def _run_nested(
         (proj / "conftest.py").write_text(_REEXPORTING_CONFTEST, encoding="utf-8")
     load_guard = () if via_conftest else ("-p", "claude_md_guard")
     (tmp_path / "cfg").mkdir(exist_ok=True)
+    if setup is not None:
+        setup(tmp_path)
     dump = tmp_path / "dump.json"
 
     roots = [
@@ -157,6 +174,14 @@ def _run_nested(
     env["PYTHONPATH"] = os.pathsep.join(roots + ([inherited] if inherited else []))
     env["CLAUDE_PROJECT_DIR"] = str(project_dir or proj)
     env["CLAUDE_CONFIG_DIR"] = str(tmp_path / "cfg")
+    if not config_dir:
+        env.pop("CLAUDE_CONFIG_DIR")
+    if home is not None:
+        env["HOME"] = str(home)
+    env["GUARD_E2E_ROOT"] = str(proj)
+    env.pop("GUARD_E2E_ACTION", None)
+    if action is not None:
+        env["GUARD_E2E_ACTION"] = action
     env["GUARD_E2E_DUMP"] = str(dump)
     env["GUARD_E2E_OBSERVER"] = str(tmp_path / "observer.ran")
     env.pop("GUARD_E2E_MODIFY", None)
@@ -175,22 +200,31 @@ def _run_nested(
     return completed, json.loads(dump.read_text(encoding="utf-8"))
 
 
-def _home_files():
+def _key(path):
+    """A path as the guard keys it: absolute, as written, not resolved."""
+    return str(Path(path).absolute())
+
+
+def _home_files(home=None):
     """The two home config files every child watches, computed here, not by
-    the guard: $HOME's and the password database home's `.claude/CLAUDE.md`."""
-    homes = [os.environ.get("HOME"), pwd.getpwuid(os.getuid()).pw_dir]
-    return {str((Path(h) / ".claude" / "CLAUDE.md").resolve()) for h in homes if h}
+    the guard: $HOME's (the child's, when an arm sets one) and the password
+    database home's `.claude/CLAUDE.md`, each as the absolute path written --
+    the guard keys a path as written, not as resolved."""
+    homes = [home or os.environ.get("HOME"), pwd.getpwuid(os.getuid()).pw_dir]
+    return {_key(Path(h) / ".claude" / "CLAUDE.md") for h in homes if h}
 
 
-def _default_tmp_set(tmp_path):
-    return {
-        str((tmp_path / "proj" / ".claude" / "CLAUDE.md").resolve()),
-        str((tmp_path / "proj" / "CLAUDE.md").resolve()),
-        str((tmp_path / "cfg" / "CLAUDE.md").resolve()),
+def _default_tmp_set(tmp_path, config_dir=True):
+    paths = {
+        _key(tmp_path / "proj" / ".claude" / "CLAUDE.md"),
+        _key(tmp_path / "proj" / "CLAUDE.md"),
     }
+    if config_dir:
+        paths.add(_key(tmp_path / "cfg" / "CLAUDE.md"))
+    return paths
 
 
-def _assert_confined(dump, tmp_expected):
+def _assert_confined(dump, tmp_expected, home=None):
     """The hook ran, and the child watched exactly the temp paths the arm
     built plus the two home config files.
 
@@ -203,7 +237,7 @@ def _assert_confined(dump, tmp_expected):
         "the guard's pytest_configure did not run in the child: the arm is "
         "measuring nothing"
     )
-    expected = set(tmp_expected) | _home_files()
+    expected = set(tmp_expected) | _home_files(home)
     assert set(dump["watched"]) == expected, (
         "the child's watched set is not the temp paths plus the home config "
         f"files: {sorted(dump['watched'])}"
@@ -223,7 +257,7 @@ def test_a_child_process_write_is_caught_end_to_end(tmp_path):
     assert "PACT CLAUDE.md GUARD" in completed.stderr
     assert "VIOLATION" in completed.stderr
     assert "MODIFIED" in completed.stderr
-    assert str(target.resolve()) in completed.stderr
+    assert _key(target) in completed.stderr
 
 
 def test_the_violating_runs_summary_line_still_reads_passed(tmp_path):
@@ -272,7 +306,7 @@ def test_a_config_root_the_child_creates_is_caught(tmp_path):
 
     assert completed.returncode != 0, completed.stderr
     assert "CREATED" in completed.stderr
-    assert str(target.resolve()) in completed.stderr
+    assert _key(target) in completed.stderr
 
 
 @_NEEDS_GIT
@@ -310,16 +344,17 @@ def test_a_main_checkout_write_under_an_umbrella_declaration_is_caught(tmp_path)
     completed, dump = _run_nested(
         tmp_path, modify_target=main_md, cwd=wt, project_dir=umbrella
     )
+    # git names the worktree and the main checkout by their real paths.
     tmp_set = {
-        str((d / shape).resolve())
+        os.path.join(os.path.realpath(d), shape)
         for d in (umbrella, wt, main)
-        for shape in (Path(".claude") / "CLAUDE.md", Path("CLAUDE.md"))
-    } | {str((tmp_path / "cfg" / "CLAUDE.md").resolve())}
+        for shape in (os.path.join(".claude", "CLAUDE.md"), "CLAUDE.md")
+    } | {_key(tmp_path / "cfg" / "CLAUDE.md")}
     _assert_confined(dump, tmp_set)
 
     assert completed.returncode != 0, completed.stderr
     assert "MODIFIED" in completed.stderr
-    assert str(main_md.resolve()) in completed.stderr
+    assert os.path.realpath(main_md) in completed.stderr
 
 
 def test_a_plugin_registered_before_the_guard_still_runs_its_unconfigure(tmp_path):
@@ -362,3 +397,68 @@ def test_a_skills_only_run_reads_every_input(tmp_path):
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert _SUMMARY_PREFIX in completed.stderr, completed.stderr
     assert "INPUT UNAVAILABLE" not in completed.stderr
+
+
+def _link_project_claude_md(tmp_path):
+    """Make proj/.claude/CLAUDE.md a symlink to a file outside the project."""
+    real = tmp_path / "real" / "CLAUDE.md"
+    real.parent.mkdir()
+    real.write_text("original\n", encoding="utf-8")
+    link = tmp_path / "proj" / ".claude" / "CLAUDE.md"
+    link.unlink()
+    link.symlink_to(real)
+
+
+def test_a_writer_replacing_a_symlinked_project_claude_md_is_caught(tmp_path):
+    """The project CLAUDE.md is a symlink, and a child replaces it the way
+    every PACT writer does, by renaming a new file over the path. The link
+    becomes a regular file and the file it pointed at is untouched, so a guard
+    keyed by the resolved target saw nothing; this one keys the path."""
+    link = tmp_path / "proj" / ".claude" / "CLAUDE.md"
+    completed, dump = _run_nested(
+        tmp_path, modify_target=link, action="atomic", setup=_link_project_claude_md
+    )
+    _assert_confined(dump, _default_tmp_set(tmp_path))
+
+    assert not link.is_symlink(), "the writer did not replace the link"
+    assert (tmp_path / "real" / "CLAUDE.md").read_text() == "original\n"
+    assert completed.returncode != 0, completed.stderr
+    assert "MODIFIED" in completed.stderr
+    assert _key(link) in completed.stderr
+
+
+def test_a_writer_replacing_a_symlinked_global_claude_md_is_caught(tmp_path):
+    """The same replacement at the global file: $HOME/.claude/CLAUDE.md is a
+    dotfiles symlink, and the real kernel-block strip rewrites it."""
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    dotfile = tmp_path / "dotfiles" / "CLAUDE.md"
+    dotfile.parent.mkdir()
+    kernel = "<!-- PACT_START:v1 -->\nkernel\n<!-- PACT_END -->\nuser content\n"
+    dotfile.write_text(kernel, encoding="utf-8")
+    link = home / ".claude" / "CLAUDE.md"
+    link.symlink_to(dotfile)
+
+    completed, dump = _run_nested(
+        tmp_path, action="strip", home=home, config_dir=False
+    )
+    _assert_confined(dump, _default_tmp_set(tmp_path, config_dir=False), home=home)
+
+    assert not link.is_symlink(), "the strip did not replace the link"
+    assert dotfile.read_text() == kernel
+    assert completed.returncode != 0, completed.stderr
+    assert "MODIFIED" in completed.stderr
+    assert _key(link) in completed.stderr
+
+
+def test_a_symlinked_claude_md_left_alone_is_clean(tmp_path):
+    """The control: the same symlinked project file, not written. The run is
+    clean and its summary names the link as written, and as present."""
+    link = tmp_path / "proj" / ".claude" / "CLAUDE.md"
+    completed, dump = _run_nested(tmp_path, setup=_link_project_claude_md)
+    _assert_confined(dump, _default_tmp_set(tmp_path))
+
+    assert completed.returncode == 0, completed.stderr
+    summary = [l for l in completed.stderr.splitlines() if l.startswith(_SUMMARY_PREFIX)]
+    assert len(summary) == 1, completed.stderr
+    assert f"{_key(link)} (present)" in summary[0]
