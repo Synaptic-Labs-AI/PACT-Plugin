@@ -59,8 +59,9 @@ by a path none of these inputs names -- the watched path still points at the
 untouched file.
 
 WHEN IT RUNS, AND WHEN IT DOES NOT. The comparison runs whenever the pytest
-process exits through Python. MEASURED on CPython 3.14.6 / pytest 9.1.1, one
-binary: it runs on a clean pass, on failures, under -x, under a real SIGINT, on
+process exits through Python. MEASURED on macOS with CPython 3.14.6 / pytest
+9.1.1, 3.13.7 / pytest 8.3.0 and 3.9.6 / pytest 8.3.5, each mode alike on all
+three: it runs on a clean pass, on failures, under -x, under a real SIGINT, on
 a collection error where no test ran, under --collect-only, and with a
 nonexistent path argument (exit 4). It does NOT run in these modes, which are
 not equally serious:
@@ -71,8 +72,8 @@ not equally serious:
   2. A hard kill -- SIGKILL, a segfault, or os._exit from the pytest process.
      Tests were mid-execution, so a writer may already have fired. SIGKILL and
      a segfault never exit zero. os._exit(0) DOES: it is the silent case,
-     exit 0 and no comparison. SIGKILL and os._exit(0) MEASURED; the segfault
-     INFERRED from the same mechanism.
+     exit 0 and no comparison. MEASURED: SIGKILL exit 137, a segfault exit
+     139, os._exit(0) exit 0.
   3. A mistyped CLI flag. No test code runs, so there is nothing to miss.
   4. A --confcutdir that excludes pact-plugin/conftest.py, for example
      `--confcutdir=tests`. The guard is never registered and the run is green
@@ -101,11 +102,11 @@ password database, or the `shared` helpers -- is reported and not raised, and
 the paths it would have named are not watched.
 
 CI. CI exports no CLAUDE_* variable and its checkout carries no CLAUDE.md, which
-is gitignored, so every watched path is expected ABSENT there and the guard can
-catch a creation only. MEASURED-ON-A-PROXY: macOS, CPython 3.14.6, a checkout
-with no CLAUDE.md and no CLAUDE_* variable. Not measured in CI; the summary
-line each CI run prints settles it. CI's other two interpreters are UNMEASURED
-for the exit modes above.
+is gitignored, so every watched path is ABSENT there and the guard can catch a
+creation only. MEASURED in CI (ubuntu, CPython 3.9, 3.13 and 3.14): each cell's
+summary line names 5 paths, 0 present -- both locations under the checkout and
+under its pact-plugin/, and the runner's ~/.claude/CLAUDE.md. The exit modes
+above are UNMEASURED in CI itself, on any interpreter.
 
 Used by: pact-plugin/conftest.py, which re-exports `pytest_configure` and
 `pytest_unconfigure` by name so pytest's hook discovery registers them
