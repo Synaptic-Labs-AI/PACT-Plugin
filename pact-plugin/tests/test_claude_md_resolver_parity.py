@@ -715,6 +715,82 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
         stale, _ = staleness._resolve_project_claude_md_with_base()
         assert _same(stale, main_md), stale
 
+    @staticmethod
+    def _main_checkout_with_a_worktree(tmp_path):
+        """main/ is a repository whose own `.claude/CLAUDE.md` exists, with a
+        CLAUDE.md in main/sub and a linked worktree holding one in wt/sub.
+        Returns (main, main_sub, wt_sub)."""
+        main = tmp_path / "main"
+        _init_repo_with_claude_md(main)
+        (main / "sub").mkdir()
+        (main / "sub" / "CLAUDE.md").write_text("main-sub\n")
+        wt = tmp_path / "wt"
+        _pgit(main, "worktree", "add", str(wt), "-b", "feature")
+        (wt / "sub").mkdir()
+        (wt / "sub" / "CLAUDE.md").write_text("wt-sub\n")
+        return main, main / "sub", wt / "sub"
+
+    @_NEEDS_GIT
+    @_NEEDS_NON_ROOT
+    def test_an_unexaminable_main_checkout_ends_resolution_at_the_git_rung(
+        self, tmp_path, lock, monkeypatch
+    ):
+        """The main checkout's `.claude/` cannot be searched and the cwd holds
+        a readable CLAUDE.md below it. The git rung that names the main
+        checkout examines it, cannot, and ends resolution: no resolver hands
+        over to the cwd's file.
+
+        Against a resolver whose git-rung handler also covers the probe --
+        the shape before the fix -- each returns the cwd's file and this goes
+        red. The display resolver runs from the worktree, so its first git
+        rung names the worktree root, which holds no CLAUDE.md, and the stop
+        comes at the main-checkout rung.
+        """
+        import staleness
+        from scripts.working_memory import (
+            _get_claude_md_path,
+            _resolve_display_claude_md_with_base,
+        )
+
+        main, main_sub, wt_sub = self._main_checkout_with_a_worktree(tmp_path)
+        lock(main / ".claude")
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        locked_md = os.path.join(os.path.realpath(main), ".claude", "CLAUDE.md")
+
+        monkeypatch.chdir(main_sub)
+        errs = []
+        assert staleness._resolve_project_claude_md_with_base(errors=errs) == (None, None)
+        assert any("PermissionError" in e and locked_md in e for e in errs), errs
+        assert _get_claude_md_path() is None
+
+        monkeypatch.chdir(wt_sub)
+        errs = []
+        assert _resolve_display_claude_md_with_base(errors=errs) == (None, None)
+        assert any("PermissionError" in e and locked_md in e for e in errs), errs
+
+    @_NEEDS_GIT
+    def test_a_readable_main_checkout_is_the_git_rungs_answer(
+        self, tmp_path, monkeypatch
+    ):
+        """The matched control: the same layout with `.claude/` readable, and
+        every resolver returns the main checkout's file, not the cwd's."""
+        import staleness
+        from scripts.working_memory import (
+            _get_claude_md_path,
+            _resolve_display_claude_md_with_base,
+        )
+
+        main, main_sub, wt_sub = self._main_checkout_with_a_worktree(tmp_path)
+        main_md = main / ".claude" / "CLAUDE.md"
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+
+        monkeypatch.chdir(main_sub)
+        assert _same(staleness._resolve_project_claude_md_with_base()[0], main_md)
+        assert _same(_get_claude_md_path(), main_md)
+
+        monkeypatch.chdir(wt_sub)
+        assert _same(_resolve_display_claude_md_with_base()[0], main_md)
+
     @_NEEDS_NON_ROOT
     def test_the_scope_escape_refusal_holds_for_an_unsearchable_declaration(
         self, tmp_path, lock, monkeypatch
