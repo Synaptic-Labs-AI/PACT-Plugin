@@ -408,7 +408,7 @@ class TestRedirectedStoreDoesNotProjectIntoAnAmbientDocument:
         monkeypatch.setattr(
             wm,
             "_resolve_display_claude_md_with_base",
-            lambda: (target, target.parent.parent),
+            lambda **_: (target, target.parent.parent),
         )
 
         retrieved = [{"id": "0" * 32, "context": "retrieved-context-arm"}]

@@ -55,6 +55,9 @@ LITERAL_REASONS = (
     "unresolved",
     "missing",
     "failed",
+    "empty",
+    "no_window",
+    "resolve_error",
 )
 
 LITERAL_NON_WRITE_REASONS = tuple(r for r in LITERAL_REASONS if r != "wrote")
@@ -86,13 +89,16 @@ class TestReasonsStayDistinguishable:
             SyncResult.UNRESOLVED,
             SyncResult.MISSING,
             SyncResult.FAILED,
+            SyncResult.EMPTY,
+            SyncResult.NO_WINDOW,
+            SyncResult.RESOLVE_ERROR,
         )
         assert actual == LITERAL_REASONS, (
             f"the reason constants no longer match the alphabet these pins "
             f"sweep: {actual} != {LITERAL_REASONS}"
         )
 
-    def test_the_reason_constants_are_six_distinct_strings(self):
+    def test_no_two_reason_constants_share_a_value(self):
         """The cheapest way to break pin 1 is a copy-paste in the constants."""
         actual = (
             SyncResult.WROTE,
@@ -101,9 +107,28 @@ class TestReasonsStayDistinguishable:
             SyncResult.UNRESOLVED,
             SyncResult.MISSING,
             SyncResult.FAILED,
+            SyncResult.EMPTY,
+            SyncResult.NO_WINDOW,
+            SyncResult.RESOLVE_ERROR,
         )
         assert len(set(actual)) == len(actual), (
             f"two reason constants share a value: {actual}"
+        )
+
+    def test_every_reason_constant_is_in_the_declared_alphabet(self):
+        """The two tuples above list constants by hand, so a constant added to
+        the class and not to them is swept by nothing -- EMPTY and NO_WINDOW
+        were missing from both. This reads the class's upper-case string
+        attributes, so a new reason fails here until the alphabet names it."""
+        declared = {
+            value
+            for name, value in vars(SyncResult).items()
+            if name.isupper() and isinstance(value, str)
+        }
+        assert declared == set(LITERAL_REASONS), (
+            f"reasons on the class but not in the alphabet: "
+            f"{sorted(declared - set(LITERAL_REASONS))}; in the alphabet but not "
+            f"on the class: {sorted(set(LITERAL_REASONS) - declared)}"
         )
 
     @pytest.mark.parametrize("left", LITERAL_REASONS)
@@ -367,3 +392,53 @@ class TestTheReasonSurvivesTheProcessBoundary:
         assert {suppressed["sync_status"], refused["sync_status"]} == {
             "suppressed", "refused"
         }
+
+
+class TestAResolveErrorIsNotAnUnresolvedTarget:
+    """Resolution that found nothing because it could not LOOK reports
+    RESOLVE_ERROR; resolution that looked and found nothing reports UNRESOLVED.
+    Before the reason existed the two were one `(None, None)`.
+
+    Both arms pass `claude_md_root`, which is the only route past the
+    ambient-target refusal under pytest; it declares the containment anchor
+    and does not steer resolution. The cwd is an empty non-repository
+    directory, so the declared project is the only rung that can answer.
+    """
+
+    @pytest.mark.skipif(
+        os.geteuid() == 0,
+        reason="root searches a mode-0 directory, so no EACCES can be built",
+    )
+    def test_an_unsearchable_project_dir_is_a_resolve_error(
+        self, tmp_path, monkeypatch
+    ):
+        from scripts.working_memory import sync_to_claude_md
+
+        locked = tmp_path / "locked"
+        (locked / "proj").mkdir(parents=True)
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        monkeypatch.chdir(empty)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(locked / "proj"))
+        locked.chmod(0o000)
+        try:
+            result = sync_to_claude_md({"context": "c"}, None, "id", claude_md_root=tmp_path)
+        finally:
+            locked.chmod(0o700)
+
+        assert result.reason == SyncResult.RESOLVE_ERROR, result
+
+    def test_a_readable_empty_project_dir_is_unresolved(self, tmp_path, monkeypatch):
+        """The control: the same call, the project directory readable and
+        empty, is UNRESOLVED."""
+        from scripts.working_memory import sync_to_claude_md
+
+        (tmp_path / "proj").mkdir()
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        monkeypatch.chdir(empty)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "proj"))
+
+        result = sync_to_claude_md({"context": "c"}, None, "id", claude_md_root=tmp_path)
+
+        assert result.reason == SyncResult.UNRESOLVED, result

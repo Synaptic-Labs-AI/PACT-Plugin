@@ -29,6 +29,7 @@ from shared.claude_md_manager import (
     PACT_BOUNDARY_PREFIXES,
     PINNED_END_MARKER,
     SESSION_BOUNDARY_PREFIX,
+    _stat_if_present,
     extract_managed_region,
 )
 from shared.failure_cause import failure_cause
@@ -215,17 +216,22 @@ def _find_existing_claude_md(base: Path) -> Optional[Path]:
     Look for an existing project CLAUDE.md under `base`, honoring both
     supported locations: `.claude/CLAUDE.md` (preferred) then `CLAUDE.md`
     (legacy). Returns the first match or None.
+
+    A LOCATION THAT CANNOT BE EXAMINED RAISES, ON EVERY INTERPRETER.
+    `_stat_if_present` decides what is absent, so this agrees with the project
+    CLAUDE.md writers, and lets any other OSError propagate. The legacy file is
+    never tried past a preferred one that could not be examined, which may
+    exist behind the error.
     """
-    dot_claude = base / ".claude" / "CLAUDE.md"
-    if dot_claude.exists():
-        return dot_claude
-    legacy = base / "CLAUDE.md"
-    if legacy.exists():
-        return legacy
+    for candidate in (base / ".claude" / "CLAUDE.md", base / "CLAUDE.md"):
+        if _stat_if_present(candidate) is not None:
+            return candidate
     return None
 
 
-def _resolve_project_claude_md_with_base() -> Tuple[Optional[Path], Optional[Path]]:
+def _resolve_project_claude_md_with_base(
+    errors: Optional[list] = None,
+) -> Tuple[Optional[Path], Optional[Path]]:
     """
     Resolve the project-level CLAUDE.md AND the trusted base directory it was
     found under, so a write caller can containment-check the target against the
@@ -248,50 +254,84 @@ def _resolve_project_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
     now a thin wrapper returning `[0]`, so read-only callers and the
     resolver-parity lint are unaffected.
 
+    A LOCATION THAT CANNOT BE EXAMINED ENDS RESOLUTION, AT ANY RUNG. When a
+    probe raises (see _find_existing_claude_md), this returns (None, None)
+    instead of trying a lower-priority file or the next rung. The file behind
+    the error may be the one this project uses, and past the declared rung the
+    next one could be a DIFFERENT project; nothing downstream of this resolver
+    refuses a write there. A location that is merely ABSENT still falls
+    through. A git call that fails before anything is examined moves on.
+
+    Args:
+        errors: Optional list that receives a message for every location that
+            could not be examined and every git call that failed. No caller
+            passes one today. A failure outside the probes -- a deleted
+            working directory -- still raises.
+
     Returns:
         (path, base) where path is an existing project CLAUDE.md and base is
         the directory it was found under; (None, None) if none exists.
     """
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-    if project_dir:
-        base = Path(project_dir)
-        found = _find_existing_claude_md(base)
-        if found is not None:
-            return found, base
-
-    # Fallback: detect git root (worktree-safe)
-    # Uses --git-common-dir instead of --show-toplevel because the latter
-    # returns the worktree path when run inside a worktree, which may not
-    # contain CLAUDE.md. --git-common-dir always points to the shared .git
-    # directory; its parent is the main repo root where CLAUDE.md lives.
-    # git returns this path relative to the invoking directory when run at a
-    # repo root (the bare ".git") and absolute elsewhere, so resolve a relative
-    # result against the cwd before taking its parent.
-    # NOTE: Twin pattern in skills/pact-memory/scripts/memory_api.py
-    #       (_detect_project_id) and working_memory.py (_get_claude_md_path)
-    #       -- keep in sync.
+    errors = [] if errors is None else errors
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--git-common-dir"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            env=git_env_without_location(),
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            common_dir = Path(result.stdout.strip())
-            if not common_dir.is_absolute():
-                common_dir = Path.cwd() / common_dir
-            repo_root = common_dir.resolve().parent
+        project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+        if project_dir:
+            base = Path(project_dir)
+            found = _find_existing_claude_md(base)
+            if found is not None:
+                return found, base
+
+        # Fallback: detect git root (worktree-safe)
+        # Uses --git-common-dir instead of --show-toplevel because the latter
+        # returns the worktree path when run inside a worktree, which may not
+        # contain CLAUDE.md. --git-common-dir always points to the shared .git
+        # directory; its parent is the main repo root where CLAUDE.md lives.
+        # git returns this path relative to the invoking directory when run at
+        # a repo root (the bare ".git") and absolute elsewhere, so resolve a
+        # relative result against the cwd before taking its parent.
+        # NOTE: Twin pattern in skills/pact-memory/scripts/memory_api.py
+        #       (_detect_project_id) and working_memory.py (_get_claude_md_path)
+        #       -- keep in sync.
+        #
+        # The inner try covers git's own work only. The probe sits outside it,
+        # so a location git names that cannot be examined ends resolution
+        # instead of reading as a failed rung.
+        repo_root = None
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--git-common-dir"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                env=git_env_without_location(),
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                common_dir = Path(result.stdout.strip())
+                if not common_dir.is_absolute():
+                    common_dir = Path.cwd() / common_dir
+                # os.path.realpath, not Path.resolve(): on 3.9 resolve() raises
+                # RuntimeError on a symlink loop, while 3.13 and 3.14 return the
+                # path with the looping component unresolved. realpath does that
+                # on every interpreter, as in memory_api.main_repo_root.
+                repo_root = Path(os.path.realpath(common_dir)).parent
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            errors.append(f"git rung: {type(exc).__name__}: {exc}")
+        if repo_root is not None:
             found = _find_existing_claude_md(repo_root)
             if found is not None:
                 return found, repo_root
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        pass
+    except OSError as exc:
+        errors.append(f"{type(exc).__name__}: {exc}")
+        return None, None
 
-    # Last resort: current working directory
+    # Last resort: current working directory. `Path.cwd()` stays outside the
+    # handlers, so a deleted working directory still raises.
     cwd = Path.cwd()
-    found = _find_existing_claude_md(cwd)
+    try:
+        found = _find_existing_claude_md(cwd)
+    except OSError as exc:
+        errors.append(f"{type(exc).__name__}: {exc}")
+        return None, None
     return (found, cwd) if found is not None else (None, None)
 
 

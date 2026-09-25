@@ -1602,7 +1602,7 @@ class TestNonDenialOverTheEnvironment:
         """Reaches a DIFFERENT path from the two arms around it, and the
         difference is stated so nobody reads this as a third read-failure case.
 
-        `_find_existing_claude_md` probes with `.exists()`, which FOLLOWS the
+        `_find_existing_claude_md` probes with `os.stat()`, which FOLLOWS the
         link, so a broken link resolves to nothing and the outcome is
         `noop_no_file` -- the read is never attempted. It is still a distinct
         environment input the hook must survive, which is why it is here.

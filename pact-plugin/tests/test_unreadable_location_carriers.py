@@ -3,7 +3,9 @@ Location: pact-plugin/tests/test_unreadable_location_carriers.py
 Summary: Holds every existence probe in the project CLAUDE.md writers, the
          stale-session reader, the global kernel-block strip, the project-id
          walk and the worktree guard to ONE behaviour on every supported
-         interpreter.
+         interpreter. The pact-memory and staleness CLAUDE.md resolvers join
+         the probe table here; their own arms are in
+         test_claude_md_resolver_parity.py.
 Used by: the full pytest suite, on each CI interpreter.
 
 THE SPLIT THESE ARMS CLOSE. `Path.exists()` and `Path.is_dir()` re-raise a
@@ -85,6 +87,8 @@ _PROBE_OWNERS = (
     "shared.stale_session",
     "scripts.memory_api",
     "worktree_guard",
+    "scripts.working_memory",
+    "staleness",
 )
 
 
@@ -99,9 +103,10 @@ def _outcome(probe, path):
 def test_every_copy_of_the_probe_counts_the_same_errors_as_absent(tmp_path, lock):
     """Four modules carry their own copy of the probe: worktree_guard imports
     only the stdlib, stale_session does not import claude_md_manager at
-    runtime, and memory_api sits outside hooks/. This arm holds the four to
-    one table, so an edit to one copy reddens here instead of drifting
-    silently.
+    runtime, and memory_api and working_memory sit outside hooks/. staleness
+    imports the canonical one, which its CLAUDE.md resolver decides existence
+    with. This arm holds all six to one table, so an edit to one copy reddens
+    here instead of drifting silently.
 
     The table is 3.9-3.13 pathlib's own rule, made explicit so 3.14 follows it:
     a path that is not there (ENOENT, ENOTDIR, ELOOP, an unencodable path) is

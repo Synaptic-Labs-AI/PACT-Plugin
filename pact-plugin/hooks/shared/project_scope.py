@@ -92,8 +92,12 @@ def _rev_parse_path(directory: Path, flag: str) -> Optional[Path]:
     path = Path(output)
     if not path.is_absolute():
         path = Path(directory) / path
+    # os.path.realpath, not Path.resolve(): on 3.9 resolve() raises
+    # RuntimeError on a symlink loop, while 3.13 and later return the path
+    # with the looping component unresolved. realpath does that on every
+    # interpreter, so every caller compares the same path.
     try:
-        return path.resolve()
+        return Path(os.path.realpath(path))
     except OSError:
         return None
 
@@ -129,7 +133,10 @@ def same_repository(env_dir: Path, base: Path) -> bool:
         return False
     try:
         return common_dir.parent == Path(base).resolve()
-    except OSError:
+    except (OSError, RuntimeError):
+        # RuntimeError: Path.resolve() on a symlink loop under 3.9. That is
+        # False here; on later versions the unresolved loop is not the main
+        # repository's root either, so the answer is False on every one.
         return False
 
 
@@ -234,9 +241,14 @@ def stays_in_declared_project(
     FAIL-SAFE IS FALSE, WHICH MEANS REFUSE.
     """
     declared = Path(declared)
+    # os.path.realpath, not Path.resolve(), on both sides here and in the
+    # worktree membership check below: on 3.9 resolve() raises RuntimeError on
+    # a symlink loop, while 3.13 and later return the path with the looping
+    # component unresolved. realpath does that on every interpreter, so a
+    # looped declaration gets the same verdict everywhere.
     try:
-        resolved = Path(resolved_root).resolve()
-        if declared.resolve() == resolved:
+        resolved = Path(os.path.realpath(resolved_root))
+        if Path(os.path.realpath(declared)) == resolved:
             return True
     except OSError:
         return False
@@ -245,7 +257,7 @@ def stays_in_declared_project(
         return False
     if anchor != declared:
         try:
-            if declared.resolve() in _listed_worktrees(resolved):
+            if Path(os.path.realpath(declared)) in _listed_worktrees(resolved):
                 return True
             recorded_common_dir = _recorded_common_dir(worktree_identity, declared)
             if recorded_common_dir is not None:

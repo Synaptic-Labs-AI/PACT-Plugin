@@ -223,7 +223,7 @@ class TestProjectionRunsThroughTheSameWriteSite:
         before = target.read_bytes()
         monkeypatch.setattr(
             wm, "_resolve_display_claude_md_with_base",
-            lambda: (target, elsewhere),
+            lambda **_: (target, elsewhere),
         )
 
         result = project_memories_to_claude_md([_record("2026-01-01 00:00:00", "a")])
