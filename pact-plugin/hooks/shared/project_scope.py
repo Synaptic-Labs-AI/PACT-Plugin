@@ -92,8 +92,12 @@ def _rev_parse_path(directory: Path, flag: str) -> Optional[Path]:
     path = Path(output)
     if not path.is_absolute():
         path = Path(directory) / path
+    # os.path.realpath, not Path.resolve(): on 3.9 resolve() raises
+    # RuntimeError on a symlink loop, while 3.13 and later return the path
+    # with the looping component unresolved. realpath does that on every
+    # interpreter, so every caller compares the same path.
     try:
-        return path.resolve()
+        return Path(os.path.realpath(path))
     except OSError:
         return None
 
@@ -129,7 +133,10 @@ def same_repository(env_dir: Path, base: Path) -> bool:
         return False
     try:
         return common_dir.parent == Path(base).resolve()
-    except OSError:
+    except (OSError, RuntimeError):
+        # RuntimeError: Path.resolve() on a symlink loop under 3.9. That is
+        # False here; on later versions the unresolved loop is not the main
+        # repository's root either, so the answer is False on every one.
         return False
 
 
@@ -155,8 +162,11 @@ def _listed_worktrees(checkout: Path) -> Set[Path]:
     listed: Set[Path] = set()
     for line in (output or "").splitlines():
         if line.startswith("worktree "):
+            # os.path.realpath, as for the declaration it is compared with: a
+            # worktree whose directory became a symlink loop gets the same
+            # path on every interpreter instead of a 3.9-only RuntimeError.
             try:
-                listed.add(Path(line[len("worktree "):]).resolve())
+                listed.add(Path(os.path.realpath(line[len("worktree "):])))
             except OSError:
                 continue
     return listed
@@ -234,9 +244,14 @@ def stays_in_declared_project(
     FAIL-SAFE IS FALSE, WHICH MEANS REFUSE.
     """
     declared = Path(declared)
+    # os.path.realpath, not Path.resolve(), for every path this function
+    # compares, here and in the block below: on 3.9 resolve() raises
+    # RuntimeError on a symlink loop, while 3.13 and later return the path
+    # with the looping component unresolved. realpath does that on every
+    # interpreter, so a looped path gets the same verdict everywhere.
     try:
-        resolved = Path(resolved_root).resolve()
-        if declared.resolve() == resolved:
+        resolved = Path(os.path.realpath(resolved_root))
+        if Path(os.path.realpath(declared)) == resolved:
             return True
     except OSError:
         return False
@@ -245,7 +260,7 @@ def stays_in_declared_project(
         return False
     if anchor != declared:
         try:
-            if declared.resolve() in _listed_worktrees(resolved):
+            if Path(os.path.realpath(declared)) in _listed_worktrees(resolved):
                 return True
             recorded_common_dir = _recorded_common_dir(worktree_identity, declared)
             if recorded_common_dir is not None:
@@ -253,13 +268,16 @@ def stays_in_declared_project(
                     _rev_parse_path(resolved, "--git-common-dir")
                     == Path(recorded_common_dir)
                 )
-            if resolved == Path.home().resolve():
+            if resolved == Path(os.path.realpath(Path.home())):
                 return False
-            config_claude_md = (get_claude_config_dir() / "CLAUDE.md").resolve()
-            if Path(claude_md).resolve() == config_claude_md:
+            config_claude_md = Path(
+                os.path.realpath(get_claude_config_dir() / "CLAUDE.md")
+            )
+            if Path(os.path.realpath(claude_md)) == config_claude_md:
                 return False
         except (OSError, RuntimeError):
-            # RuntimeError: Path.home() when no home directory can be found.
+            # RuntimeError: Path.home() when no home directory can be found;
+            # get_claude_config_dir() calls it too.
             return False
     if same_repository(anchor, resolved):
         return True

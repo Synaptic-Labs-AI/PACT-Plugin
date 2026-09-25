@@ -12,6 +12,7 @@ symbols); pytest-fixture-injected symbols would need a conftest
 re-export to be discoverable, but none are currently defined there.
 """
 
+import contextlib
 import functools
 import json
 import os
@@ -316,10 +317,41 @@ def _resync_staleness_resolver_bindings():
     _resync()
 
 
+@contextlib.contextmanager
+def _scrubbed(monkeypatch, name):
+    """Delete `name` for one test, THROUGH THE TEST'S OWN `monkeypatch`.
+
+    ONE `monkeypatch` INSTANCE UNDOES IN REVERSE ORDER, AND THAT IS THE FIX.
+    Deleting through it means a test's own `monkeypatch.setenv(name, ...)` is
+    undone first and this deletion second, so the ambient value comes back.
+    A direct `os.environ.pop` restored by this fixture's own teardown ran in
+    the wrong order: pytest tears these fixtures down BEFORE `monkeypatch`
+    (requested by `_isolate_config_root_to_tmp`, so set up earlier), and the
+    test's undo -- which had recorded the variable as absent -- then deleted
+    the restored value for the rest of the run. Every real full run reached
+    `pytest_unconfigure` without all four variables this helper scrubs.
+
+    THE ENVIRONMENT OBJECT IS CAPTURED AT SETUP. A test may replace
+    `os.environ` with a plain dict for its body, and this teardown runs while
+    that replacement is still in place.
+
+    THE TEARDOWN POP COVERS WHAT `monkeypatch` CANNOT: a variable ABSENT
+    before the test that the test assigned DIRECTLY (`os.environ[name] = ...`).
+    `monkeypatch` holds no record of it, so without the pop it would leak into
+    the next test's setup.
+    """
+    environ = os.environ
+    was_set = name in environ
+    monkeypatch.delenv(name, raising=False)
+    yield
+    if not was_set:
+        environ.pop(name, None)
+
+
 @pytest.fixture(autouse=True)
-def _scrub_claude_project_dir_env():
-    """Pop + restore ``os.environ['CLAUDE_PROJECT_DIR']`` around every test.
-    Runs for EVERY test (autouse).
+def _scrub_claude_project_dir_env(monkeypatch):
+    """Delete ``CLAUDE_PROJECT_DIR`` for every test through ``_scrubbed``,
+    which restores it afterwards. Runs for EVERY test (autouse).
 
     Two hazards, one variable:
 
@@ -329,7 +361,7 @@ def _scrub_claude_project_dir_env():
        and LEAKS into later tests — an order-dependent pollution vector that
        redirects ``CLAUDE_PROJECT_DIR``-keyed resolvers (e.g.
        ``staleness.get_project_claude_md_path``) away from the test's intended
-       root. The setup-time POP makes every test start from a
+       root. The setup-time deletion makes every test start from a
        guaranteed-unset baseline regardless of what an earlier test left
        behind — strictly stronger than the snapshot/restore-only posture this
        fixture used before (a leaked value could survive into the next test's
@@ -349,9 +381,8 @@ def _scrub_claude_project_dir_env():
        test_bootstrap_prompt_gate no-session tests (init() re-derives a
        path the test's ``_context_path = None`` patch cannot prevent, and
        the heal path can then WRITE a context file through the live root).
-       Same posture as the sibling ``_scrub_claude_plugin_root_env`` /
-       ``_scrub_claude_env_file_env``: POP at setup, restore the original
-       ambient value at teardown. Tests that exercise the var set it
+       Same posture as the siblings: deleted at setup and restored at
+       teardown, through ``_scrubbed``. Tests that exercise the var set it
        explicitly via ``monkeypatch.setenv`` (which overrides the scrub for
        that test); the direct-assignment concurrency tests are unaffected
        (they set it after setup, inside the test body).
@@ -360,18 +391,13 @@ def _scrub_claude_project_dir_env():
     (``_reset_pact_context_state`` / ``_reset_specialist_registry_cache`` /
     ``_resync_staleness_resolver_bindings``).
     """
-    _UNSET = object()
-    original = os.environ.pop("CLAUDE_PROJECT_DIR", _UNSET)
-    yield
-    if original is _UNSET:
-        os.environ.pop("CLAUDE_PROJECT_DIR", None)
-    else:
-        os.environ["CLAUDE_PROJECT_DIR"] = original
+    with _scrubbed(monkeypatch, "CLAUDE_PROJECT_DIR"):
+        yield
 
 
 @pytest.fixture(autouse=True)
-def _scrub_claude_plugin_root_env():
-    """Pop + restore ``os.environ['CLAUDE_PLUGIN_ROOT']`` around every test.
+def _scrub_claude_plugin_root_env(monkeypatch):
+    """Delete ``CLAUDE_PLUGIN_ROOT`` for every test through ``_scrubbed``.
     Runs for EVERY test (autouse).
 
     ``shared.pact_context.get_plugin_root()`` falls back to the
@@ -385,25 +411,17 @@ def _scrub_claude_plugin_root_env():
     ``test_rejects_when_plugin_root_missing``) from deterministic to
     environment-sensitive.
 
-    Unlike the CLAUDE_PROJECT_DIR sibling above (snapshot/restore only —
-    guarding cross-test LEAKS), this fixture POPS the var at setup so every
-    test starts from a guaranteed-unset baseline, then restores the original
-    value at teardown. Tests that exercise the fallback set the var
-    explicitly via monkeypatch.setenv. This is the generalization the
-    sibling fixture's closing comment anticipated for CLAUDE_PLUGIN_ROOT.
+    Deleted at setup and restored at teardown through ``_scrubbed``, like its
+    siblings. Tests that exercise the fallback set the var explicitly via
+    ``monkeypatch.setenv``.
     """
-    _UNSET = object()
-    original = os.environ.pop("CLAUDE_PLUGIN_ROOT", _UNSET)
-    yield
-    if original is _UNSET:
-        os.environ.pop("CLAUDE_PLUGIN_ROOT", None)
-    else:
-        os.environ["CLAUDE_PLUGIN_ROOT"] = original
+    with _scrubbed(monkeypatch, "CLAUDE_PLUGIN_ROOT"):
+        yield
 
 
 @pytest.fixture(autouse=True)
-def _scrub_claude_env_file_env():
-    """Pop + restore ``os.environ['CLAUDE_ENV_FILE']`` around every test.
+def _scrub_claude_env_file_env(monkeypatch):
+    """Delete ``CLAUDE_ENV_FILE`` for every test through ``_scrubbed``.
     Runs for EVERY test (autouse).
 
     session_init.main() reads ``CLAUDE_ENV_FILE`` and APPENDS an
@@ -413,18 +431,13 @@ def _scrub_claude_env_file_env():
     session env file in the environment, and every main()-driving test that
     sets ``CLAUDE_PROJECT_DIR`` would append a bogus export line to that live
     file — the same ambient-env hazard class ``_scrub_claude_plugin_root_env``
-    closes. Same posture: POP at setup so every test starts from a
-    guaranteed-unset baseline, restore the original at teardown. Tests that
-    exercise the env-file channel set the variable explicitly via
-    ``monkeypatch.setenv`` (which overrides the scrub for that test).
+    closes. Same posture, through ``_scrubbed``: deleted at setup, restored
+    at teardown. Tests that exercise the env-file channel set the variable
+    explicitly via ``monkeypatch.setenv`` (which overrides the scrub for that
+    test).
     """
-    _UNSET = object()
-    original = os.environ.pop("CLAUDE_ENV_FILE", _UNSET)
-    yield
-    if original is _UNSET:
-        os.environ.pop("CLAUDE_ENV_FILE", None)
-    else:
-        os.environ["CLAUDE_ENV_FILE"] = original
+    with _scrubbed(monkeypatch, "CLAUDE_ENV_FILE"):
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -440,11 +453,11 @@ def _isolate_config_root_to_tmp(tmp_path, monkeypatch):
     the var is unset. The two mechanisms make the redirect DETERMINISTIC
     regardless of contributor env:
 
-    1. SCRUB CLAUDE_CONFIG_DIR at setup (POP any inherited value; restore the
-       original at teardown) — same posture as the sibling
-       ``_scrub_claude_plugin_root_env``. This makes the HOME fallthrough the
-       LIVE resolution path. A contributor who exports CLAUDE_CONFIG_DIR (their
-       real config) must NOT leak through — exactly the "forgetting is the
+    1. SCRUB CLAUDE_CONFIG_DIR through ``_scrubbed`` -- deleted for the test,
+       restored after it -- the same posture as the ``_scrub_*`` siblings.
+       This makes the HOME fallthrough the LIVE resolution path. A
+       contributor who exports CLAUDE_CONFIG_DIR (their real config) must NOT
+       leak through — exactly the "forgetting is the
        default" gap #1186 exists to close.
     2. REDIRECT ``Path.home()`` -> tmp_path (``monkeypatch.setattr``, matching
        the suite's own isolation convention — e.g. test_artifact_paths_durability
@@ -505,14 +518,9 @@ def _isolate_config_root_to_tmp(tmp_path, monkeypatch):
     resolve tmp set the env var themselves in-body (see "WHY NOT ALSO SET HOME"
     above).
     """
-    _UNSET = object()
-    original_cfg = os.environ.pop("CLAUDE_CONFIG_DIR", _UNSET)
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    yield
-    if original_cfg is _UNSET:
-        os.environ.pop("CLAUDE_CONFIG_DIR", None)
-    else:
-        os.environ["CLAUDE_CONFIG_DIR"] = original_cfg
+    with _scrubbed(monkeypatch, "CLAUDE_CONFIG_DIR"):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        yield
 
 
 # (module, test) pairs whose bodies INSPECT the writer's identity and therefore
@@ -549,9 +557,20 @@ def _refuse_claude_md_writes_outside_tmp(request, monkeypatch):
     having to keep a list correct.
 
     IT CANNOT SEE A CHILD PROCESS. ``monkeypatch`` does not cross the process
-    boundary, so a spawned child writes unguarded. That gap is covered from
-    the other direction: a checksum of the real file across a full run catches
-    any writer, in-process or not.
+    boundary, so a spawned child writes unguarded. That route is WATCHED, NOT
+    BLOCKED, from the other end of the run: ``tests/claude_md_guard.py``,
+    registered by ``pact-plugin/conftest.py``, fixes at ``pytest_configure``
+    every CLAUDE.md a writer can reach from the run's inputs -- both locations
+    under CLAUDE_PROJECT_DIR, the working directory and its git roots, and
+    ``CLAUDE.md`` under each config root -- and compares them at
+    ``pytest_unconfigure``, so a child's write is REPORTED after the fact
+    rather than refused as it happens.
+
+    THE TWO HALVES COVER DIFFERENT POPULATIONS. This one refuses ANY target
+    outside the tmp tree, wherever a test aimed it. The guard watches only
+    paths the run's own inputs name, so a CHILD that a test deliberately points
+    at another real path is caught by neither. The comparison runs only when
+    the pytest process exits through Python.
     """
     # THE EXCLUSION IS KEYED PER TEST, NOT PER FILE, AND THE DIFFERENCE IS THE
     # WHOLE POINT OF ITS PRESENT SHAPE.

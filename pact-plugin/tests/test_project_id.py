@@ -20,6 +20,7 @@ Python's import system, then validate equivalence via a source-check test.
 
 import os
 import re
+import stat
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -29,6 +30,7 @@ import pytest
 # The real detector, for the arms that need a real filesystem: a symlink cannot
 # be expressed through the replica-plus-mock style below. conftest.py puts
 # skills/pact-memory on sys.path.
+from scripts import memory_api
 from scripts.memory_api import PACTMemory
 
 
@@ -54,20 +56,16 @@ def _isolate_walkup_to(monkeypatch, tmp_path):
     correctly returns the leaked marker, but the test loses isolation
     against ambient state.
 
-    This helper monkeypatches Path.exists and Path.is_dir to return False
-    for any path that is NOT inside `tmp_path`. Within tmp_path, the
-    original behavior is preserved. Effect: walk-up across ancestors above
-    tmp_path always sees "no markers" regardless of ambient state.
-
-    Caveat: patches `Path.exists` and `Path.is_dir` at the CLASS level via
-    monkeypatch — affects ALL Path operations in the test's scope, not just
-    `_find_project_root_under_test` walks. Bounded by monkeypatch teardown.
-    Future test authors extending tests that rely on Path methods for
-    non-walk purposes should be aware.
+    This helper patches the walk's ONE probe, `memory_api._stat_if_present`,
+    to report "absent" for any path that is NOT inside `tmp_path`. Within
+    tmp_path, the original behavior is preserved. Effect: walk-up across
+    ancestors above tmp_path always sees "no markers" regardless of ambient
+    state. The replica and the real `_find_project_root` both reach the probe
+    through the module, so the patch covers both; a walk that stops calling it
+    escapes the isolation.
     """
     tmp_resolved = tmp_path.resolve()
-    original_exists = Path.exists
-    original_is_dir = Path.is_dir
+    original_probe = memory_api._stat_if_present
 
     def _is_inside(p):
         try:
@@ -76,18 +74,12 @@ def _isolate_walkup_to(monkeypatch, tmp_path):
             return False
         return resolved == tmp_resolved or tmp_resolved in resolved.parents
 
-    def _patched_exists(self):
-        if _is_inside(self):
-            return original_exists(self)
-        return False
+    def _confined_probe(path):
+        if _is_inside(Path(path)):
+            return original_probe(path)
+        return None
 
-    def _patched_is_dir(self):
-        if _is_inside(self):
-            return original_is_dir(self)
-        return False
-
-    monkeypatch.setattr(Path, "exists", _patched_exists)
-    monkeypatch.setattr(Path, "is_dir", _patched_is_dir)
+    monkeypatch.setattr(memory_api, "_stat_if_present", _confined_probe)
 
 
 # Path to the actual source file for equivalence checking
@@ -101,20 +93,22 @@ def _find_project_root_under_test(start: Path) -> Path:
     Replica of PACTMemory._find_project_root() for isolated testing.
 
     Walks UP from `start` looking for project markers; returns first match
-    or `start` unchanged if none found.
+    or `start` unchanged if none found. Probes through the real module's
+    `_stat_if_present`, so `_isolate_walkup_to` reaches this walk too.
     """
     try:
         current = start.resolve()
     except (OSError, RuntimeError):
         return start
     for parent in [current] + list(current.parents):
-        if (parent / ".git").exists():
+        if memory_api._stat_if_present(parent / ".git") is not None:
             return parent
-        if (parent / ".claude").is_dir():
+        dot_claude = memory_api._stat_if_present(parent / ".claude")
+        if dot_claude is not None and stat.S_ISDIR(dot_claude.st_mode):
             return parent
-        if (parent / "CLAUDE.md").exists():
+        if memory_api._stat_if_present(parent / "CLAUDE.md") is not None:
             return parent
-        if (parent / ".claude" / "CLAUDE.md").exists():
+        if memory_api._stat_if_present(parent / ".claude" / "CLAUDE.md") is not None:
             return parent
     return start  # fallback: use original
 
@@ -596,6 +590,26 @@ class TestFindProjectRoot:
         result = _find_project_root_under_test(nested)
         # Walk-up found nothing → falls back to start
         assert result == nested
+
+    @pytest.mark.parametrize(
+        "walk",
+        [_find_project_root_under_test, PACTMemory._find_project_root],
+        ids=["replica", "real"],
+    )
+    @pytest.mark.parametrize("isolated", [True, False], ids=["isolated", "open"])
+    def test_the_isolation_reaches_the_walk(self, walk, isolated, tmp_path, monkeypatch):
+        """_isolate_walkup_to must hide a marker ABOVE the confined tree from
+        both walks. The open run is the matched control: the same marker is
+        found, so a hidden marker in the isolated run is the patch working,
+        not an empty tree."""
+        (tmp_path / ".claude").mkdir()
+        confined = tmp_path / "confined"
+        nested = confined / "a"
+        nested.mkdir(parents=True)
+        if isolated:
+            _isolate_walkup_to(monkeypatch, confined)
+        expected = nested if isolated else tmp_path
+        assert walk(nested).resolve() == expected.resolve()
 
     def test_finds_git_ancestor(self, tmp_path):
         """Walk-up finds a .git marker on an ancestor."""

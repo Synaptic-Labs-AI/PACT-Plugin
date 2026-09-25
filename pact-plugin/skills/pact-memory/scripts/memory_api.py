@@ -19,10 +19,12 @@ eliminating startup cost for non-memory users.
 
 from __future__ import annotations
 
+import errno
 import functools
 import json
 import logging
 import os
+import stat
 import struct
 import subprocess
 import threading
@@ -117,6 +119,31 @@ def _content_fields_changed(
            json.dumps(after.get(k), sort_keys=True, default=str):
             return True
     return False
+
+
+# The errors that mean a path is NOT THERE. Every other OSError means the path
+# could not be examined, and _stat_if_present raises it.
+_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
+
+
+def _stat_if_present(path) -> Optional[os.stat_result]:
+    """Return `os.stat(path)`, or None when the path is not there.
+
+    A copy of hooks/shared/claude_md_manager._stat_if_present, which this
+    module does not import; tests/test_unreadable_location_carriers.py holds
+    the copies to one table. `Path.exists()` and `Path.is_dir()` re-raise a
+    PermissionError on 3.9-3.13 and return False on 3.14; this applies the
+    3.9-3.13 rule on every interpreter: an errno in _ABSENT_ERRNOS, or an
+    unencodable path, is absent, and any other OSError propagates.
+    """
+    try:
+        return os.stat(path)
+    except OSError as exc:
+        if exc.errno in _ABSENT_ERRNOS:
+            return None
+        raise
+    except ValueError:
+        return None
 
 
 def _ensure_ready() -> None:
@@ -217,7 +244,11 @@ def main_repo_root(start: Optional[str] = None) -> Optional[Path]:
             # checkout, not the worktree.
             base = Path(start) if start is not None else Path.cwd()
             common_dir = base / common_dir
-        return common_dir.resolve().parent
+        # os.path.realpath, not Path.resolve: on 3.9 resolve() raises
+        # RuntimeError on a symlink loop, while on 3.13 and 3.14 it returns
+        # what this call returns on all three, the path with the looping
+        # component left unresolved.
+        return Path(os.path.realpath(common_dir)).parent
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         # git not installed, not a repo, command timed out, or the path could
         # not be resolved.
@@ -359,19 +390,27 @@ class PACTMemory:
         Returns:
             First ancestor (inclusive of `start`) containing a project marker,
             or `start` if none found.
+
+        Raises:
+            OSError: At a level whose markers cannot be examined (EACCES,
+                EPERM). THE WALK STOPS THERE AND DOES NOT CLIMB PAST IT: the
+                first marker defines the project, so skipping a level it could
+                not read would name a parent's project for this one. The
+                caller reports the project as unresolved.
         """
         try:
             current = start.resolve()
         except (OSError, RuntimeError):
             return start
         for parent in [current] + list(current.parents):
-            if (parent / ".git").exists():
+            if _stat_if_present(parent / ".git") is not None:
                 return parent
-            if (parent / ".claude").is_dir():
+            dot_claude = _stat_if_present(parent / ".claude")
+            if dot_claude is not None and stat.S_ISDIR(dot_claude.st_mode):
                 return parent
-            if (parent / "CLAUDE.md").exists():
+            if _stat_if_present(parent / "CLAUDE.md") is not None:
                 return parent
-            if (parent / ".claude" / "CLAUDE.md").exists():
+            if _stat_if_present(parent / ".claude" / "CLAUDE.md") is not None:
                 return parent
         return start  # fallback: use original
 
