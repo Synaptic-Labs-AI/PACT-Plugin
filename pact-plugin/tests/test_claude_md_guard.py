@@ -428,12 +428,22 @@ def test_the_inputs_read_cleanly_on_this_machine():
     )
 
 
-def test_a_sample_key_is_its_own_absolute_path():
+def test_a_sample_key_is_its_own_absolute_path(tmp_path, monkeypatch):
     """Both phases must stringify the same path the same way: absolute, as
-    written, never resolved through a symlink."""
+    written, never resolved through a symlink. The real candidates alone
+    cannot show either half on a machine whose inputs cross no symlink and are
+    all absolute, so a relative path and a path through a symlinked directory
+    are added."""
     for path in guard._candidates(guard._pin_inputs()[0]):
         sample = guard._sample_one(path)
         assert sample["path"] == str(Path(path).absolute())
+
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    monkeypatch.chdir(tmp_path)
+    assert guard._sample_one(Path("CLAUDE.md"))["path"] == str(tmp_path / "CLAUDE.md")
+    through = tmp_path / "link" / "CLAUDE.md"
+    assert guard._sample_one(through)["path"] == str(through)
 
 
 _NEEDS_GIT = pytest.mark.skipif(
