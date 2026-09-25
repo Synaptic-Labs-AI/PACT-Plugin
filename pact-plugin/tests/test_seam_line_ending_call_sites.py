@@ -134,7 +134,7 @@ class TestWorkingMemoryTwinCallSites:
     def test_sync_to_claude_md_keeps_the_crlf_of_the_target(
         self, tmp_path, monkeypatch
     ):
-        """SITE working_memory.py:1613, in `sync_to_claude_md`.
+        """SITE `skills/pact-memory/scripts/working_memory.py::sync_to_claude_md`.
 
         THE PAYLOAD CARRIES A CARRIAGE RETURN ON PURPOSE. The document
         contributes none, because the read translates. A payload field is
@@ -151,15 +151,15 @@ class TestWorkingMemoryTwinCallSites:
 
         sync_to_claude_md(
             {"context": "one\r\ntwo", "goal": "carry a carriage return"},
-            memory_id="site-1613",
+            memory_id="seam-site",
         )
 
-        _assert_crlf_survived(target, "working_memory.py:1613", before)
+        _assert_crlf_survived(target, "skills/pact-memory/scripts/working_memory.py::sync_to_claude_md", before)
 
     def test_sync_retrieved_to_claude_md_keeps_the_crlf_of_the_target(
         self, tmp_path, monkeypatch
     ):
-        """SITE working_memory.py:1901, in `sync_retrieved_to_claude_md`."""
+        """SITE `skills/pact-memory/scripts/working_memory.py::sync_retrieved_to_claude_md`."""
         from scripts.working_memory import sync_retrieved_to_claude_md
 
         project = tmp_path / "project"
@@ -173,7 +173,9 @@ class TestWorkingMemoryTwinCallSites:
             "a query",
         )
 
-        _assert_crlf_survived(target, "working_memory.py:1901", before)
+        _assert_crlf_survived(
+            target, "skills/pact-memory/scripts/working_memory.py::sync_retrieved_to_claude_md", before
+        )
 
 
 class TestCanonicalTwinCallSites:
@@ -182,7 +184,7 @@ class TestCanonicalTwinCallSites:
     def test_migrate_to_managed_structure_keeps_the_crlf_of_the_target(
         self, tmp_path, monkeypatch
     ):
-        """SITE claude_md_manager.py:1254, in `migrate_to_managed_structure`.
+        """SITE `hooks/shared/claude_md_manager.py::migrate_to_managed_structure`.
 
         The migration reads an UNMANAGED document and rewrites it wrapped in
         the managed boundary. It rewrites the whole file, so a flattening
@@ -201,14 +203,16 @@ class TestCanonicalTwinCallSites:
         assert result and "failed" not in result.lower(), (
             f"the migration did not run, so this arm measured nothing: {result!r}"
         )
-        _assert_crlf_survived(target, "claude_md_manager.py:1254", before)
+        _assert_crlf_survived(
+            target, "hooks/shared/claude_md_manager.py::migrate_to_managed_structure", before
+        )
 
 
 class TestStalenessCallSite:
     """hooks/staleness.py, 1 of the 10 sites."""
 
     def test_check_pinned_staleness_keeps_the_crlf_of_the_target(self, tmp_path):
-        """SITE staleness.py:1069, in `check_pinned_staleness`.
+        """SITE `hooks/staleness.py::check_pinned_staleness`.
 
         This is the site the seam repair REMOVED a call-site restore from. It
         is the one site the design records as already armed end to end, and it
@@ -230,7 +234,7 @@ class TestStalenessCallSite:
 
         check_pinned_staleness(claude_md_path=target)
 
-        _assert_crlf_survived(target, "staleness.py:1069", before)
+        _assert_crlf_survived(target, "hooks/staleness.py::check_pinned_staleness", before)
 
 
 class TestTheCoverageReportNamesItsMisses:
@@ -286,9 +290,11 @@ class TestTheCoverageReportNamesItsMisses:
         ],
     }
 
-    # site -> the reason it carries no end-to-end CRLF arm in this file.
+    # site -> the reason it carries no end-to-end CRLF arm in this file. Keyed
+    # like DRIVEN, so the keys are UNDRIVEN_COUNTS' keys and a rename reddens
+    # the comparison below instead of leaving a stale label.
     UNDRIVEN = {
-        "claude_md_manager.py:1171 ensure_project_memory_md": (
+        "hooks/shared/claude_md_manager.py::ensure_project_memory_md": (
             "CREATE-ONLY, so the behaviour is not constructible. The function "
             "returns None when the target is available, so it writes only "
             "when no file is present. `_detect_line_ending` reports LF for a "
@@ -296,19 +302,19 @@ class TestTheCoverageReportNamesItsMisses:
             "arm here would assert LF output and would stay green under every "
             "mutation of the restore."
         ),
-        "claude_md_manager.py:960 strip_orphan_kernel_block": (
+        "hooks/shared/claude_md_manager.py::strip_orphan_kernel_block": (
             "Targets the GLOBAL ~/.claude/CLAUDE.md rather than a project "
             "file, so driving it needs a redirected home. NOT ATTEMPTED here "
             "to keep this file free of a home-redirect fixture. The behaviour "
             "is the same seam call, and the gap is real rather than argued "
             "away."
         ),
-        "pin_marker_writer.py:311 _plan_and_write": (
+        "hooks/pin_marker_writer.py::_plan_and_write": (
             "A private entry point that reads its plan from the hook "
             "invocation rather than from arguments, so an end-to-end drive "
             "needs the hook input harness. NOT ATTEMPTED here."
         ),
-        "session_resume.py:198 / :220 / :272 update_session_info": (
+        "hooks/shared/session_resume.py::update_session_info": (
             "THREE sites in ONE function, reached by three different document "
             "shapes: a rewrite of an existing session block, an insertion "
             "before a marker, and an append at the end. Driving all three "
@@ -451,12 +457,18 @@ class TestTheCoverageReportNamesItsMisses:
         UNDRIVEN carries the prose and UNDRIVEN_COUNTS carries the cardinality.
         A site added to one and not the other gives a coverage report whose
         reasons and whose numbers disagree, and the comparison above would then
-        pass while the prose says something else.
+        pass while the prose says something else. The two are compared as SETS
+        of keys, not by length: a length check passes when one site is swapped
+        for another.
         """
-        assert len(self.UNDRIVEN) == len(self.UNDRIVEN_COUNTS), (
-            f"UNDRIVEN records {len(self.UNDRIVEN)} sites and UNDRIVEN_COUNTS "
-            f"records {len(self.UNDRIVEN_COUNTS)}. The two tables describe the "
-            f"same sites and must gain and lose entries together"
+        assert set(self.UNDRIVEN) == set(self.UNDRIVEN_COUNTS), (
+            f"UNDRIVEN and UNDRIVEN_COUNTS describe different sites.\n"
+            f"  a reason with no count: "
+            f"{sorted(set(self.UNDRIVEN) - set(self.UNDRIVEN_COUNTS))}\n"
+            f"  a count with no reason: "
+            f"{sorted(set(self.UNDRIVEN_COUNTS) - set(self.UNDRIVEN))}\n"
+            f"The two tables describe the same sites and must gain and lose "
+            f"entries together"
         )
 
     def test_each_driven_site_has_an_arm_collected_in_this_module(self):
