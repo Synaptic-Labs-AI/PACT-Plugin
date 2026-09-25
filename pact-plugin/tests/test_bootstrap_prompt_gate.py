@@ -712,6 +712,39 @@ class TestStalenessDetection:
                 f"to read for layout={layout}"
             )
 
+    @pytest.mark.skipif(
+        os.geteuid() == 0,
+        reason="root searches a mode-0 directory, so no EACCES can be built",
+    )
+    def test_precedence_parity_when_the_preferred_file_is_unreadable(
+        self, monkeypatch, tmp_path
+    ):
+        """The parity pin for the layout the table above cannot build: the
+        preferred .claude/CLAUDE.md is present but unreadable (its directory
+        at mode 0), beside a readable legacy file. The resolver REFUSES that
+        layout, so the reader must not advise from the legacy file either.
+        RED BEFORE THE FIX ON 3.14, where the reader skipped the unreadable
+        file and warned from the legacy one."""
+        from bootstrap_prompt_gate import _detect_stale_session_block
+        from shared.claude_md_manager import resolve_project_claude_md_path
+
+        project = self._project_with_claude_md(
+            tmp_path, "aaaa1111-aaaa-1111-aaaa-111111111111", location=".claude")
+        self._project_with_claude_md(
+            tmp_path, "bbbb2222-bbbb-2222-bbbb-222222222222", location="legacy")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+        (project / ".claude").chmod(0o000)
+        try:
+            result = _detect_stale_session_block({"session_id": self._ACTUAL})
+            with pytest.raises(PermissionError):
+                resolve_project_claude_md_path(str(project))
+        finally:
+            (project / ".claude").chmod(0o700)
+
+        assert result is None, (
+            "the reader advised from a CLAUDE.md the resolver refuses"
+        )
+
 
 # Test-local mirror of the production regex, used ONLY to extract the
 # resolver-chosen file's recorded id in the parity test above.

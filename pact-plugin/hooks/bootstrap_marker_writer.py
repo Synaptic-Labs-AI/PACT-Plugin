@@ -168,7 +168,10 @@ try:
     import shared.pact_context as pact_context
     from bootstrap_gate import is_marker_set
     from shared import BOOTSTRAP_MARKER_NAME
-    from shared.claude_md_manager import resolve_project_claude_md_path
+    from shared.claude_md_manager import (
+        _stat_if_present,
+        resolve_project_claude_md_path,
+    )
     from shared.marker_schema import (
         MARKER_MAX_BYTES,
         MARKER_SCHEMA_VERSION,
@@ -444,8 +447,11 @@ def _write_back_aligned_team_name() -> None:
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
         if not project_dir:
             return
+        # Both calls RAISE for a location they cannot examine, the same on
+        # every interpreter; the handler below absorbs it and CLAUDE.md is
+        # left untouched.
         target_file, _source = resolve_project_claude_md_path(project_dir)
-        if not target_file.exists():
+        if _stat_if_present(target_file) is None:
             # Absent (e.g. gitignored worktree CLAUDE.md): SKIP the CLAUDE.md
             # write. The context-file write-back above already happened; the
             # human-readable line just stays absent, which is correct here.

@@ -22,9 +22,11 @@ default path so creators land at the preferred location.
 
 from __future__ import annotations
 
+import errno
 import fcntl  # Unix-only; PACT supports macOS/Linux. No Windows compat shim.
 import os
 import re
+import stat
 import sys
 import time
 import uuid
@@ -38,6 +40,36 @@ from .paths import get_claude_config_dir
 # but Claude Code also accepts ./CLAUDE.md for backwards compatibility.
 _DOT_CLAUDE_RELATIVE = Path(".claude") / "CLAUDE.md"
 _LEGACY_RELATIVE = Path("CLAUDE.md")
+
+# The errors that mean a path is NOT THERE. Every other OSError means the path
+# could not be examined, and _stat_if_present raises it.
+_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
+
+
+def _stat_if_present(path) -> os.stat_result | None:
+    """Return `os.stat(path)`, or None when the path is not there.
+
+    `Path.exists()` and `Path.is_dir()` cannot be used for this: they re-raise
+    a PermissionError on 3.9-3.13 and return False on 3.14, so one unsearchable
+    directory aborted a caller on two interpreters and read as absent on the
+    third. This probe applies the 3.9-3.13 rule on every interpreter: an errno
+    in _ABSENT_ERRNOS, or an unencodable path, is absent; any other OSError,
+    EACCES and EPERM included, propagates.
+
+    Copies live in skills/pact-memory/scripts/memory_api.py,
+    hooks/worktree_guard.py and hooks/shared/stale_session.py, which do not
+    import this module. tests/test_unreadable_location_carriers.py holds the
+    four to one table.
+    """
+    try:
+        return os.stat(path)
+    except OSError as exc:
+        if exc.errno in _ABSENT_ERRNOS:
+            return None
+        raise
+    except ValueError:
+        return None
+
 
 # Concurrency guard: callers performing read-mutate-write on managed
 # CLAUDE.md files (ensure_project_memory_md, migrate_to_managed_structure,
@@ -945,7 +977,10 @@ def strip_orphan_kernel_block() -> str | None:
         routes these to systemMessages via the "failed"/"skipped" check).
     """
     target_file = get_claude_config_dir() / "CLAUDE.md"
-    if not target_file.exists():
+    # os.path.exists, not Path.exists, which raises on 3.9-3.13 where 3.14
+    # returns False. A file this process cannot reach cannot be stripped, so
+    # it counts as absent on every interpreter.
+    if not os.path.exists(target_file):
         return None
 
     # Concurrency guard: serialize read-mutate-write so two concurrent
@@ -1130,14 +1165,21 @@ def resolve_project_claude_md_path(
           - "legacy": existing ./CLAUDE.md
           - "new_default": neither exists; path points to .claude/CLAUDE.md
             so a creator can write to the preferred location.
+
+    Raises:
+        OSError: When a location cannot be examined (EACCES, EPERM). An
+            unreadable .claude/CLAUDE.md may exist, so NEVER fall back to the
+            legacy file past it: a writer would rewrite the lower-priority
+            file and leave the project with two diverging memory files.
+            Callers report the error through their failed/skipped status.
     """
     base = Path(project_dir)
     dot_claude = base / _DOT_CLAUDE_RELATIVE
     legacy = base / _LEGACY_RELATIVE
 
-    if dot_claude.exists():
+    if _stat_if_present(dot_claude) is not None:
         return dot_claude, "dot_claude"
-    if legacy.exists():
+    if _stat_if_present(legacy) is not None:
         return legacy, "legacy"
     return dot_claude, "new_default"
 
@@ -1165,15 +1207,17 @@ def ensure_dot_claude_parent(path: Path) -> None:
         path: The target CLAUDE.md path (e.g. /proj/.claude/CLAUDE.md).
 
     Raises:
-        OSError: When `path.parent` exists but is not a directory. The
-            caller (ensure_project_memory_md) catches OSError and
-            returns a user-facing failure status string.
+        OSError: When `path.parent` exists but is not a directory, or cannot
+            be examined (EACCES, EPERM). Both callers (ensure_project_memory_md,
+            update_session_info) catch OSError and return a user-facing
+            failure status string.
     """
     parent = path.parent
-    if parent.exists() and not parent.is_dir():
-        raise OSError(f"{parent} exists but is not a directory")
-    if not parent.exists():
+    parent_stat = _stat_if_present(parent)
+    if parent_stat is None:
         parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    elif not stat.S_ISDIR(parent_stat.st_mode):
+        raise OSError(f"{parent} exists but is not a directory")
 
 
 def ensure_project_memory_md() -> str | None:
@@ -1200,7 +1244,10 @@ def ensure_project_memory_md() -> str | None:
     if not project_dir:
         return None
 
-    target_file, source = resolve_project_claude_md_path(project_dir)
+    try:
+        target_file, source = resolve_project_claude_md_path(project_dir)
+    except OSError as e:
+        return f"Project CLAUDE.md failed: {failure_cause(e)}"
 
     # Don't overwrite existing project CLAUDE.md (either location)
     if source != "new_default":
@@ -1245,7 +1292,7 @@ def ensure_project_memory_md() -> str | None:
             # WRITE follow the leaf. It does NOT dominate
             # is_symlink: it safely ALLOWS a benign in-project leaf redirect
             # (os.replace leaf-swap, no write-through) the old guard refused.
-            if target_file.exists():
+            if _stat_if_present(target_file) is not None:
                 return None
             try:
                 _atomic_write_text(
@@ -1265,8 +1312,9 @@ def ensure_project_memory_md() -> str | None:
             "Project CLAUDE.md creation skipped; will retry on next session start."
         )
     except OSError as e:
-        # Lock-acquisition failure. Same routing token, same closed
-        # vocabulary as the inner arm above.
+        # Parent creation, lock acquisition, or the existence probe inside
+        # the lock. Same routing token, same closed vocabulary as the inner
+        # arm above.
         return f"Project CLAUDE.md failed: {failure_cause(e)}"
 
 
@@ -1311,7 +1359,10 @@ def migrate_to_managed_structure() -> str | None:
     if not project_dir:
         return None
 
-    target_file, source = resolve_project_claude_md_path(project_dir)
+    try:
+        target_file, source = resolve_project_claude_md_path(project_dir)
+    except OSError as e:
+        return f"Migration failed: {failure_cause(e)}"
 
     if source == "new_default":
         return None  # File doesn't exist; ensure_project_memory_md() handles creation

@@ -22,11 +22,36 @@ for bootstrap_prompt_gate, the deny message for dispatch_gate).
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 from pathlib import Path
 
 import shared.pact_context as pact_context
+
+# The errors that mean a path is NOT THERE. Every other OSError means the path
+# could not be examined, and _stat_if_present raises it.
+_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
+
+
+def _stat_if_present(path) -> os.stat_result | None:
+    """Return `os.stat(path)`, or None when the path is not there.
+
+    A copy of shared.claude_md_manager._stat_if_present: this module does not
+    import claude_md_manager at runtime. tests/test_unreadable_location_carriers.py
+    holds the copies to one table. `Path.exists()` re-raises a PermissionError
+    on 3.9-3.13 and returns False on 3.14; this applies the 3.9-3.13 rule on
+    every interpreter: an errno in _ABSENT_ERRNOS, or an unencodable path, is
+    absent, and any other OSError propagates.
+    """
+    try:
+        return os.stat(path)
+    except OSError as exc:
+        if exc.errno in _ABSENT_ERRNOS:
+            return None
+        raise
+    except ValueError:
+        return None
 
 # Mirrors the Resume-line fallback regex in session_init's
 # _extract_prev_session_dir — the established defensive parse for the
@@ -70,8 +95,9 @@ def detect_stale_session_block(input_data: dict) -> str | None:
          trustworthy to compare, and an unvalidated stdin id must never be
          interpolated into the warning text
       2. CLAUDE_PROJECT_DIR is unset (cannot locate CLAUDE.md)
-      3. neither CLAUDE.md location exists, or reading raises OSError or
-         UnicodeDecodeError (worktrees: CLAUDE.md is gitignored/absent →
+      3. neither CLAUDE.md location exists, a location cannot be examined
+         (EACCES, EPERM: the resolver refuses that layout too), or reading
+         raises OSError or UnicodeDecodeError (worktrees: CLAUDE.md is gitignored/absent →
          silent skip; a non-UTF-8/corrupted CLAUDE.md → silent skip — this
          helper is ADVISORY, so its failure budget is "no warning", never
          "no bootstrap instruction": an uncaught raise here would propagate
@@ -105,7 +131,10 @@ def detect_stale_session_block(input_data: dict) -> str | None:
             Path(project_dir) / ".claude" / "CLAUDE.md",
             Path(project_dir) / "CLAUDE.md",
         ):
-            if candidate.exists():
+            # An unreadable preferred file RAISES here, into the handler
+            # below: the resolver refuses that layout, so this reader must
+            # not fall through and advise from the legacy file.
+            if _stat_if_present(candidate) is not None:
                 content = candidate.read_text(encoding="utf-8")
                 break
         if content is None:

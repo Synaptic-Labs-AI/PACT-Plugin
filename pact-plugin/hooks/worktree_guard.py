@@ -14,13 +14,39 @@ Output: JSON with hookSpecificOutput.permissionDecision if blocking
 
 from __future__ import annotations
 
+import errno
 import json
+import stat
 import sys
 import os
 from pathlib import Path
 from typing import NoReturn
 
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+
+# The errors that mean a path is NOT THERE. Every other OSError means the path
+# could not be examined, and _stat_if_present raises it.
+_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
+
+
+def _stat_if_present(path) -> os.stat_result | None:
+    """Return `os.stat(path)`, or None when the path is not there.
+
+    A copy of hooks/shared/claude_md_manager._stat_if_present: this module
+    imports only the stdlib. tests/test_unreadable_location_carriers.py holds
+    the copies to one table. `Path.exists()` and `Path.is_dir()` re-raise a
+    PermissionError on 3.9-3.13 and return False on 3.14; this applies the
+    3.9-3.13 rule on every interpreter: an errno in _ABSENT_ERRNOS, or an
+    unencodable path, is absent, and any other OSError propagates.
+    """
+    try:
+        return os.stat(path)
+    except OSError as exc:
+        if exc.errno in _ABSENT_ERRNOS:
+            return None
+        raise
+    except ValueError:
+        return None
 
 
 def _emit_load_failure_deny(stage: str, error: BaseException) -> NoReturn:
@@ -115,11 +141,17 @@ def _find_project_root(worktree_path: str) -> str | None:
 
     Returns:
         Project root path, or None if not found
+
+    Raises:
+        OSError: At a level it cannot examine (EACCES, EPERM). The walk stops
+            there rather than climbing to a parent's `.worktrees`, which would
+            suggest a path in the wrong tree; the caller then offers no
+            suggestion.
     """
     worktree_p = Path(worktree_path)
     for parent in worktree_p.parents:
-        worktrees_dir = parent / ".worktrees"
-        if worktrees_dir.is_dir():
+        worktrees_dir = _stat_if_present(parent / ".worktrees")
+        if worktrees_dir is not None and stat.S_ISDIR(worktrees_dir.st_mode):
             return str(parent)
     return None
 
@@ -176,11 +208,9 @@ def _suggest_worktree_path(file_path: str, worktree_path: str) -> str | None:
             # Validate: common ancestor looks like a project directory.
             # Accepts CLAUDE.md at either supported location (.claude/ is the
             # new default, ./CLAUDE.md is legacy).
-            is_project_dir = (
-                (common_ancestor / ".git").exists()
-                or (common_ancestor / ".worktrees").exists()
-                or (common_ancestor / "CLAUDE.md").exists()
-                or (common_ancestor / ".claude" / "CLAUDE.md").exists()
+            is_project_dir = any(
+                _stat_if_present(common_ancestor / marker) is not None
+                for marker in (".git", ".worktrees", "CLAUDE.md", ".claude/CLAUDE.md")
             )
             if is_project_dir:
                 relative = str(Path(*file_parts[common_len:]))
@@ -215,7 +245,10 @@ def check_worktree_boundary(file_path: str, worktree_path: str) -> str | None:
         resolved_worktree = str(Path(worktree_path).resolve())
         if resolved_file.startswith(resolved_worktree):
             return None  # Inside worktree, OK
-    except (ValueError, OSError):
+    # RuntimeError is 3.9's resolve() on a symlink loop; 3.13 and 3.14 return
+    # a path there. Without it 3.9 alone escaped this handler into main()'s
+    # fail-closed deny, so do not narrow the tuple.
+    except (ValueError, OSError, RuntimeError):
         return None  # Can't resolve, allow by default
 
     # Outside worktree — only block if it's application code
