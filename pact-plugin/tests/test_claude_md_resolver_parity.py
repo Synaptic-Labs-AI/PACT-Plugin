@@ -871,6 +871,63 @@ class TestASymlinkLoopGetsOneVerdictOnEveryInterpreter:
         repo, looped = self._repo_with_a_looped_dir(tmp_path)
         assert same_repository(repo, looped) is False
 
+    @_NEEDS_GIT
+    def test_a_worktree_record_whose_directory_became_a_loop_admits_it(self, tmp_path):
+        """git still lists a worktree whose directory was replaced by a
+        symlink loop. The declaration names that worktree, so its record
+        proves identity: ADMIT, on every interpreter."""
+        from shared.project_scope import stays_in_declared_project
+
+        repo = tmp_path / "repo"
+        _init_repo_with_claude_md(repo)
+        wt = tmp_path / "wt"
+        _pgit(repo, "worktree", "add", str(wt), "-b", "feature")
+        shutil.rmtree(wt)
+        _symlink_loop(wt)
+
+        assert stays_in_declared_project(
+            wt, repo, repo / ".claude" / "CLAUDE.md"
+        ) is True
+
+    @_NEEDS_GIT
+    def test_a_looped_home_does_not_refuse_a_removed_declaration(
+        self, tmp_path, monkeypatch
+    ):
+        """A removed subdirectory of the repository is declared, so its
+        nearest ancestor decides, and resolution landed in that repository:
+        ADMIT. The home-directory and config-root checks it passes on the way
+        read `Path.home()`, which here is a symlink loop."""
+        from shared.project_scope import stays_in_declared_project
+
+        repo = tmp_path / "repo"
+        claude_md = _init_repo_with_claude_md(repo)
+        looped_home = _symlink_loop(tmp_path / "home")
+        monkeypatch.setattr(Path, "home", lambda: looped_home)
+
+        assert stays_in_declared_project(repo / "removed", repo, claude_md) is True
+
+    def test_same_repository_holds_the_only_resolve_call(self):
+        """Every other path project_scope compares goes through
+        os.path.realpath. same_repository keeps `Path.resolve()` under its own
+        catch, which answers False on every interpreter; any other `.resolve()`
+        call would bring back a 3.9-only verdict, so this counts them."""
+        import ast
+        import shared.project_scope as project_scope
+
+        tree = ast.parse(Path(project_scope.__file__).read_text(encoding="utf-8"))
+        owners = []
+        for func in ast.walk(tree):
+            if not isinstance(func, ast.FunctionDef):
+                continue
+            for node in ast.walk(func):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "resolve"
+                ):
+                    owners.append(func.name)
+        assert owners == ["same_repository"], owners
+
     def test_a_looped_git_answer_is_the_unresolved_path(self, tmp_path, monkeypatch):
         """git names a symlink loop; the answer is that path with the loop
         left unresolved, on every interpreter."""

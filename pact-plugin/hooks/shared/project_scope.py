@@ -162,8 +162,11 @@ def _listed_worktrees(checkout: Path) -> Set[Path]:
     listed: Set[Path] = set()
     for line in (output or "").splitlines():
         if line.startswith("worktree "):
+            # os.path.realpath, as for the declaration it is compared with: a
+            # worktree whose directory became a symlink loop gets the same
+            # path on every interpreter instead of a 3.9-only RuntimeError.
             try:
-                listed.add(Path(line[len("worktree "):]).resolve())
+                listed.add(Path(os.path.realpath(line[len("worktree "):])))
             except OSError:
                 continue
     return listed
@@ -241,11 +244,11 @@ def stays_in_declared_project(
     FAIL-SAFE IS FALSE, WHICH MEANS REFUSE.
     """
     declared = Path(declared)
-    # os.path.realpath, not Path.resolve(), on both sides here and in the
-    # worktree membership check below: on 3.9 resolve() raises RuntimeError on
-    # a symlink loop, while 3.13 and later return the path with the looping
-    # component unresolved. realpath does that on every interpreter, so a
-    # looped declaration gets the same verdict everywhere.
+    # os.path.realpath, not Path.resolve(), for every path this function
+    # compares, here and in the block below: on 3.9 resolve() raises
+    # RuntimeError on a symlink loop, while 3.13 and later return the path
+    # with the looping component unresolved. realpath does that on every
+    # interpreter, so a looped path gets the same verdict everywhere.
     try:
         resolved = Path(os.path.realpath(resolved_root))
         if Path(os.path.realpath(declared)) == resolved:
@@ -265,13 +268,16 @@ def stays_in_declared_project(
                     _rev_parse_path(resolved, "--git-common-dir")
                     == Path(recorded_common_dir)
                 )
-            if resolved == Path.home().resolve():
+            if resolved == Path(os.path.realpath(Path.home())):
                 return False
-            config_claude_md = (get_claude_config_dir() / "CLAUDE.md").resolve()
-            if Path(claude_md).resolve() == config_claude_md:
+            config_claude_md = Path(
+                os.path.realpath(get_claude_config_dir() / "CLAUDE.md")
+            )
+            if Path(os.path.realpath(claude_md)) == config_claude_md:
                 return False
         except (OSError, RuntimeError):
-            # RuntimeError: Path.home() when no home directory can be found.
+            # RuntimeError: Path.home() when no home directory can be found;
+            # get_claude_config_dir() calls it too.
             return False
     if same_repository(anchor, resolved):
         return True
