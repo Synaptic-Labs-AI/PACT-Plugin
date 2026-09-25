@@ -187,3 +187,126 @@ class TestAutouseProjectDirScrubPinned:
             )
         finally:
             ctx.reset_for_tests()
+
+
+# The four variables tests/conftest.py deletes for every test. Each must come
+# back after the test, whatever the test did to it.
+_SCRUBBED = (
+    "CLAUDE_PROJECT_DIR",
+    "CLAUDE_CONFIG_DIR",
+    "CLAUDE_PLUGIN_ROOT",
+    "CLAUDE_ENV_FILE",
+)
+
+
+def _held_outside_every_test(values):
+    """Put the four variables in the state `values` names -- a string sets one,
+    None removes it -- and check that the same state is back once the class's
+    last test has been torn down.
+
+    CLASS-SCOPED ON PURPOSE, through the two fixtures below. A class fixture is
+    set up before and torn down after every function-scoped fixture of the tests
+    inside it, so its teardown sees the environment the NEXT test, or
+    `pytest_unconfigure`, would see. A function-scoped check would run inside
+    the window the scrubs restore and could not see what they left behind.
+    """
+    saved = {name: os.environ.get(name) for name in _SCRUBBED}
+    for name, value in values.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+    yield
+    left = {name: os.environ.get(name) for name in _SCRUBBED}
+    for name, value in saved.items():  # restore before asserting
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+    assert left == values, (
+        f"the test changed a scrubbed variable for the rest of the run: {left}, "
+        f"expected {values}. Every later test, and the CLAUDE.md guard's "
+        "unconfigure, sees the changed value."
+    )
+
+
+@pytest.fixture(scope="class")
+def _exported_outside_every_test():
+    """A shell that exports all four variables."""
+    yield from _held_outside_every_test(
+        {name: f"/ambient/{name.lower()}" for name in _SCRUBBED}
+    )
+
+
+@pytest.fixture(scope="class")
+def _absent_outside_every_test():
+    """A shell that exports none of the four variables -- CI's case."""
+    yield from _held_outside_every_test({name: None for name in _SCRUBBED})
+
+
+@pytest.mark.usefixtures("_exported_outside_every_test")
+class TestAScrubbedVariableSurvivesATestThatSetsIt:
+    """A test's own `monkeypatch.setenv` of a scrubbed variable must not delete
+    the ambient value for the rest of the run.
+
+    It did. A scrub restored the value in its own teardown, and the test's
+    `monkeypatch` -- which had recorded the variable as ABSENT, because the
+    scrub had already removed it -- was torn down later and deleted it again.
+    A failure here reports as an ERROR at teardown of the test below.
+    """
+
+    def test_setting_each_scrubbed_variable(self, monkeypatch):
+        for name in _SCRUBBED:
+            assert name not in os.environ, f"the scrub did not remove {name}"
+        for name in _SCRUBBED:
+            monkeypatch.setenv(name, "set-by-the-test")
+
+
+@pytest.mark.usefixtures("_exported_outside_every_test")
+class TestAScrubbedVariableSurvivesATestThatSwapsEnviron:
+    """A test that replaces `os.environ` with a plain dict for its body must
+    not cost the run the ambient values either.
+
+    The scrubs' teardown runs while that replacement is still in place, so a
+    restore written through `os.environ` lands in the dict and is thrown away
+    when the real environment comes back.
+    """
+
+    def test_swapping_environ_for_a_dict(self, monkeypatch):
+        for name in _SCRUBBED:
+            assert name not in os.environ, f"the scrub did not remove {name}"
+        monkeypatch.setattr(os, "environ", {"PATH": os.environ.get("PATH", "")})
+
+
+@pytest.mark.usefixtures("_absent_outside_every_test")
+class TestADirectlyAssignedScrubbedVariableDoesNotLeak:
+    """A variable ABSENT before the test and assigned directly in its body
+    (`os.environ[name] = ...`, as the concurrency tests do) must not reach the
+    next test.
+
+    `monkeypatch` holds no record of a direct assignment, so only the scrub's
+    own teardown pop removes it. Delete that pop and this class ERRORs.
+    """
+
+    def test_assigning_each_scrubbed_variable_directly(self):
+        for name in _SCRUBBED:
+            os.environ[name] = "assigned-directly"
+
+
+@pytest.mark.usefixtures("_absent_outside_every_test")
+class TestADirectAssignmentBeforeAnEnvironSwapDoesNotLeak:
+    """The same direct assignment, followed by a swap of `os.environ` for a
+    dict, must not leak either.
+
+    THE ORDER IS THE TEST. The assignment lands in the REAL environment and
+    the swap is still in place when the scrubs' teardown runs, so a pop that
+    reads `os.environ` at teardown empties the dict and leaves the real value
+    behind. Only a pop through the environment captured at setup removes it.
+    Swapping first would put the assignment in the dict, and nothing could
+    leak.
+    """
+
+    def test_assigning_directly_then_swapping_environ(self, monkeypatch):
+        for name in _SCRUBBED:
+            os.environ[name] = "assigned-directly"
+        monkeypatch.setattr(os, "environ", {"PATH": os.environ.get("PATH", "")})
