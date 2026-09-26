@@ -1165,7 +1165,12 @@ class TestBranch3ResumeCensus:
 
     def test_two_candidates_fail_safe(self, ctx, monkeypatch, tmp_path):
         """Two live re-provisioned candidates (two simultaneous broken
-        resumes) -> AMBIGUOUS -> stale default, never a coin flip."""
+        resumes) -> AMBIGUOUS -> stale default, never a coin flip. NOTE both
+        candidates carry the default NON-matching lead cwd, so post-
+        corroborate-then-count this cell exercises the ZERO-survivor arm;
+        the >= 2-SURVIVOR arm (the one the count rule actually exists for)
+        is pinned separately by test_two_corroborating_candidates_fail_safe
+        below."""
         ctx_module, teams_root = ctx
         _seed_census_candidate(teams_root, dir_name=NEW_UUID_DIR)
         _seed_census_candidate(
@@ -1179,6 +1184,82 @@ class TestBranch3ResumeCensus:
             LEAD_SID, teams_dir=str(teams_root), default=STALE_TEAM
         )
         assert resolved == STALE_TEAM
+
+    def test_concurrent_peer_session_does_not_suppress_realign(
+        self, ctx, monkeypatch, tmp_path
+    ):
+        """REGRESSION (#1507 follow-up) — THE CONCURRENT-SESSION DEFECT. Two
+        LIVE candidates inside the recency window: this session's own
+        re-provisioned team (lead cwd == the persisted project_dir) and a
+        PEER session's team running from a DIFFERENT project directory. The
+        peer claims nothing about this session; the subject anchor
+        discriminates them perfectly. Counting the RAW candidate set first
+        rejected BOTH on COUNT and never consulted the predicate, so the
+        resolver returned the phantom stale default and PACT dispatch stayed
+        dead for the whole resumed session — the observed failure for anyone
+        running two Claude sessions at once. The census must corroborate
+        EVERY candidate first and return the single survivor.
+
+        RED against corroborate-after-count (resolves to STALE_TEAM); GREEN
+        against corroborate-then-count. The peer is seeded with the helper's
+        DEFAULT foreign lead cwd, which is exactly what fails the anchor."""
+        ctx_module, teams_root = ctx
+        # This session's real re-provisioned team: corroborates on cwd.
+        _seed_census_candidate(teams_root, dir_name=NEW_UUID_DIR,
+                               lead_cwd=str(tmp_path / "project"))
+        # The concurrent PEER session, live in the same window, working in
+        # another project — corroborates nothing.
+        _seed_census_candidate(
+            teams_root, dir_name="session-7c6ea94d",
+            lead_session_id="7c6ea94d-1111-4222-8333-444455556666",
+            lead_cwd="/other/project/a-peer-session-lives-here",
+        )
+        _write_context_file(monkeypatch, ctx_module, tmp_path,
+                            team_name=STALE_TEAM, session_id=LEAD_SID)
+        # The clean-end-then-resume journal shape: an end marker (so BIRTH
+        # ORDER is active, not skipped) plus prior team activity.
+        _seed_session_journal(ctx_module,
+                              ["session_end", "task_metadata_snapshot"])
+        resolved = ctx_module._resolve_aligned_team_name(
+            LEAD_SID, teams_dir=str(teams_root), default=STALE_TEAM
+        )
+        assert resolved == NEW_UUID_DIR, (
+            "a concurrently-live peer session must not suppress the census — "
+            f"resolved {resolved!r}"
+        )
+
+    def test_two_corroborating_candidates_fail_safe(self, ctx, monkeypatch,
+                                                    tmp_path):
+        """THE SAFETY PROPERTY the count rule exists for, restated over the
+        CORROBORATED set: two candidates that BOTH pass the full ownership
+        proof (both leads' cwd == this session's project_dir, both joined
+        after the end marker) are a genuine OWNERSHIP ambiguity -> stale
+        default, never a coin flip and never the sorted-first name.
+
+        This is the cell that must survive the reorder: it is green on both
+        orders (before, on the raw count; after, on the survivor count), so
+        it does NOT discriminate the fix — it is the guard-rail proving the
+        fix did not degrade >= 2 into a pick-one. Deleting the survivor
+        count reddens it; that is its job."""
+        ctx_module, teams_root = ctx
+        _seed_census_candidate(teams_root, dir_name=NEW_UUID_DIR,
+                               lead_cwd=str(tmp_path / "project"))
+        _seed_census_candidate(
+            teams_root, dir_name="session-beefbeef",
+            lead_session_id="beefbeef-1111-4222-8333-444455556666",
+            lead_cwd=str(tmp_path / "project"),
+        )
+        _write_context_file(monkeypatch, ctx_module, tmp_path,
+                            team_name=STALE_TEAM, session_id=LEAD_SID)
+        _seed_session_journal(ctx_module,
+                              ["session_end", "task_metadata_snapshot"])
+        resolved = ctx_module._resolve_aligned_team_name(
+            LEAD_SID, teams_dir=str(teams_root), default=STALE_TEAM
+        )
+        assert resolved == STALE_TEAM, (
+            "two CORROBORATED candidates are a real ambiguity and must fail "
+            f"safe — resolved {resolved!r}"
+        )
 
     def test_stale_tasks_mtime_not_a_candidate(self, ctx, monkeypatch,
                                                tmp_path):

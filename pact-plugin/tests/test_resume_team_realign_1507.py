@@ -400,11 +400,31 @@ def test_ii_two_candidates_stale_default_and_new_remedy(tmp_path, monkeypatch,
     naming the MEASURED recovery (edit pact-session-context.json); none of the
     falsified inert 'bootstrap ritual' phrases may appear (this leg has no
     CLAUDE.md, so the stale block is silent and the enumeration is the sole
-    appended diagnosis)."""
+    appended diagnosis).
+
+    FIXTURE REPAIRED (#1507 follow-up, corroborate-then-count): the AMBIG
+    candidate was seeded member-less, so it never corroborated and this
+    cell's TWO candidates were only ever ONE ownership claim. Once the
+    census corroborates before counting, that world resolves to the LIVE
+    team and this cell kept passing on its DENY alone — the empty task
+    store denies either way, so the assertion no longer observed the
+    ambiguity it names. Both candidates now carry the full binding fields
+    with THIS session's project_dir as the lead cwd, which is what makes
+    them a genuine ownership ambiguity and restores the cell's premise."""
     _seed_census_world(monkeypatch, tmp_path, live_team=NEW_TEAM_ID8,
                        live_lead_sid=NEW_SID, tasks=())  # stale store: no task
     _seed_team_store(tmp_path / ".claude", team_name=AMBIG_TEAM,
-                     lead_session_id=AMBIG_SID, members=(), tasks=())
+                     lead_session_id=AMBIG_SID, members=(), tasks=(),
+                     corroborate=True, lead_cwd=str(tmp_path / "project"))
+    import shared.pact_context as ctx_module
+    # Observe the RESOLUTION directly, not just the deny: an empty task
+    # store denies under EITHER resolution, so the deny alone cannot
+    # distinguish "failed safe" from "realigned to a candidate that happened
+    # to have no work". This is the assertion whose absence let the cell
+    # survive its own fixture going stale.
+    assert ctx_module.get_team_name() == OLD_TEAM, (
+        "two corroborated candidates must leave the stale default standing"
+    )
     code, out = _run_dispatch(_make_spawn(), capsys)
     assert code == 2, "ambiguous census must fail safe to a deny"
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
@@ -414,6 +434,48 @@ def test_ii_two_candidates_stale_default_and_new_remedy(tmp_path, monkeypatch,
     # ...and no inert bootstrap-ritual claim survives anywhere in the deny.
     for phrase in _FORBIDDEN_INERT_PHRASES:
         assert phrase not in reason, f"inert remedy phrase leaked: {phrase!r}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# (ii-b) CONCURRENT PEER SESSION — a live peer must not suppress the realign
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def test_ii_b_concurrent_peer_session_still_realigns(tmp_path, monkeypatch,
+                                                     capsys):
+    """CELL ii-b (#1507 follow-up) — the OTHER two-candidate world, and the
+    one that actually happens: this session's own re-provisioned team plus a
+    PEER session live in the same recency window from a DIFFERENT project
+    directory. Unlike cell ii these are not two ownership claims — the peer
+    fails the subject anchor — so the census must realign, not fail safe.
+
+    Counting the RAW candidate set first rejected both on COUNT before the
+    predicate ran, so every resumed session belonging to a user with a
+    second session open kept the phantom persisted team and the gate DENIED
+    every spawn. RED against corroborate-after-count, GREEN after.
+
+    NON-VACUITY (this file's convention): the owner's task is seeded ONLY
+    under the live team, so the ALLOW is reachable solely by resolving
+    there — a stale-default resolution reads an absent store and DENIES."""
+    _seed_census_world(monkeypatch, tmp_path, live_team=NEW_TEAM_ID8,
+                       live_lead_sid=NEW_SID,
+                       journal_events=["session_end", "task_metadata_snapshot"])
+    # The peer: live store inside the window, fully-formed binding fields,
+    # but its lead works in another project — corroborates nothing here.
+    _seed_team_store(tmp_path / ".claude", team_name=FOREIGN_TEAM,
+                     lead_session_id=FOREIGN_SID, members=(), tasks=(),
+                     corroborate=True,
+                     lead_cwd="/other/project/a-peer-session-lives-here")
+    import shared.pact_context as ctx_module
+    assert ctx_module.get_team_name() == NEW_TEAM_ID8, (
+        "a live peer session in another directory must not suppress the "
+        "census — this is the #1507 follow-up defect"
+    )
+    code, out = _run_dispatch(_make_spawn(team_name_arg="wrong-team"), capsys)
+    assert code == 0
+    assert out == _SUPPRESS_EXPECTED
+    assert (tmp_path / ".claude" / "tasks" / NEW_TEAM_ID8).exists()
+    assert not (tmp_path / ".claude" / "tasks" / OLD_TEAM).exists()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -732,8 +794,15 @@ def test_xi_stale_block_and_working_recovery_coexist_scoped(tmp_path,
     was designed to fire) on top of the ambiguous-census stale world."""
     _seed_census_world(monkeypatch, tmp_path, live_team=NEW_TEAM_ID8,
                        live_lead_sid=NEW_SID, tasks=())
+    # Both candidates carry the full binding fields anchored on THIS
+    # session's project_dir, so the census sees a genuine OWNERSHIP
+    # ambiguity and falls to the stale default (see cell ii's FIXTURE
+    # REPAIRED note — a member-less AMBIG candidate stopped producing the
+    # ambiguous-census deny this cell composes its message from once the
+    # census began corroborating before counting).
     _seed_team_store(tmp_path / ".claude", team_name=AMBIG_TEAM,
-                     lead_session_id=AMBIG_SID, members=(), tasks=())
+                     lead_session_id=AMBIG_SID, members=(), tasks=(),
+                     corroborate=True, lead_cwd=str(tmp_path / "project"))
     # The stale-block trigger: project CLAUDE.md whose Resume line records a
     # PREVIOUS session id, with the acting frame carrying a different one.
     project_dir = tmp_path / "project"
