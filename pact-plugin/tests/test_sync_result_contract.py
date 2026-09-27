@@ -445,7 +445,7 @@ class TestAResolveErrorIsNotAnUnresolvedTarget:
 
 
     @staticmethod
-    def _sync_with_git(tmp_path, monkeypatch, run=None):
+    def _sync_with_git(tmp_path, monkeypatch, run=None, path=None):
         """Sync with no CLAUDE.md anywhere and git either absent (run=None:
         PATH holds no git) or replaced by `run`. Returns the reason and the
         WARNING records the working-memory logger emitted."""
@@ -461,7 +461,7 @@ class TestAResolveErrorIsNotAnUnresolvedTarget:
         monkeypatch.chdir(empty)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "proj"))
         if run is None:
-            monkeypatch.setenv("PATH", str(no_git))
+            monkeypatch.setenv("PATH", path or str(no_git))
         else:
             monkeypatch.setattr(subprocess, "run", run)
         warnings = []
@@ -485,6 +485,43 @@ class TestAResolveErrorIsNotAnUnresolvedTarget:
         search that found nothing, not an error: UNRESOLVED, and nothing is
         logged at WARNING."""
         reason, warnings = self._sync_with_git(tmp_path, monkeypatch)
+
+        assert reason == SyncResult.UNRESOLVED
+        assert warnings == [], warnings
+
+    @pytest.mark.parametrize(
+        "path_shape",
+        [
+            pytest.param(
+                "unsearchable-dir",
+                marks=pytest.mark.skipif(
+                    os.geteuid() == 0,
+                    reason="root searches a mode-0 directory, so no EACCES can be built",
+                ),
+            ),
+            "entry-through-a-file",
+        ],
+    )
+    def test_git_absent_behind_an_awkward_path_is_unresolved(
+        self, tmp_path, monkeypatch, path_shape
+    ):
+        """git is not installed and PATH holds an unsearchable directory, or an
+        entry through a regular file, so running git would raise
+        PermissionError or NotADirectoryError. git is still absent: UNRESOLVED,
+        and nothing is logged at WARNING."""
+        if path_shape == "unsearchable-dir":
+            locked = tmp_path / "locked"
+            locked.mkdir()
+            locked.chmod(0o000)
+            path = f"{locked}{os.pathsep}{tmp_path / 'no-git'}"
+        else:
+            (tmp_path / "a-file").write_text("x")
+            path = f"{tmp_path / 'no-git'}{os.pathsep}{tmp_path / 'a-file' / 'bin'}"
+        try:
+            reason, warnings = self._sync_with_git(tmp_path, monkeypatch, path=path)
+        finally:
+            if path_shape == "unsearchable-dir":
+                locked.chmod(0o700)
 
         assert reason == SyncResult.UNRESOLVED
         assert warnings == [], warnings

@@ -20,6 +20,7 @@ import fcntl
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -1101,6 +1102,19 @@ def _find_existing_claude_md(base: Path) -> Optional[Path]:
     return None
 
 
+def _git_is_on_path(env: dict) -> bool:
+    """Whether a file named git is on the PATH `env` gives subprocess.
+
+    A twin of the one in hooks/staleness.py, which this module does not
+    import. git's absence is decided here, not from the error running it
+    raises: with git absent, an unsearchable PATH directory or an entry through
+    a regular file makes the call raise PermissionError or NotADirectoryError,
+    not FileNotFoundError. F_OK, not X_OK, so a git that is present but cannot
+    run is still run, and its failure stops resolution.
+    """
+    return shutil.which("git", mode=os.F_OK, path=env.get("PATH", os.defpath)) is not None
+
+
 def _resolve_display_claude_md_with_base(
     errors: Optional[list] = None,
 ) -> Tuple[Optional[Path], Optional[Path]]:
@@ -1159,11 +1173,12 @@ def _resolve_display_claude_md_with_base(
     git exists, but the location it would have named is unknown rather than
     absent, so the next branch could write a different file. That covers a
     timeout, any OSError other than FileNotFoundError, and output git produced
-    that cannot be decoded. git that is not installed (FileNotFoundError) is
-    not an error: it gives the same answer on every run, so resolution moves
-    on and records nothing. A git call that EXITS NONZERO also moves on and
-    records nothing, because it reads the same as "not a repository": that
-    includes a repository whose metadata cannot be read, such as a main
+    that cannot be decoded. git that is not on PATH is not an error: it is
+    decided before git runs (see _git_is_on_path), it gives the same answer on
+    every run, and resolution moves on and records nothing; so does a
+    FileNotFoundError from the call. A git call that EXITS NONZERO also moves
+    on and records nothing, because it reads the same as "not a repository":
+    that includes a repository whose metadata cannot be read, such as a main
     checkout whose `.git` is unsearchable, which therefore can still land on a
     later branch.
 
@@ -1211,22 +1226,25 @@ def _resolve_display_claude_md_with_base(
         # pact_session's sys.path bootstrap has run at module import.
         from shared.project_scope import git_env_without_location
 
+        git_env = git_env_without_location()
+        git_on_path = _git_is_on_path(git_env)
         worktree_root = None
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                env=git_env_without_location(),
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                worktree_root = Path(result.stdout.strip())
-        except FileNotFoundError:
-            pass  # git is not installed: nothing to record, move on
-        except (subprocess.TimeoutExpired, OSError, UnicodeDecodeError) as exc:
-            errors.append(f"git rung: {type(exc).__name__}: {exc}")
-            return None, None
+        if git_on_path:
+            try:
+                result = subprocess.run(
+                    ["git", "rev-parse", "--show-toplevel"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    env=git_env,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    worktree_root = Path(result.stdout.strip())
+            except FileNotFoundError:
+                pass  # git vanished or cannot start: the same answer every run
+            except (subprocess.TimeoutExpired, OSError, UnicodeDecodeError) as exc:
+                errors.append(f"git rung: {type(exc).__name__}: {exc}")
+                return None, None
         if worktree_root is not None:
             found = _find_existing_claude_md(worktree_root)
             if found is not None:
@@ -1246,28 +1264,30 @@ def _resolve_display_claude_md_with_base(
         # a cwd-relative lock sidecar (the exact divergence D2 just closed).
         # The same derivation as the staleness resolver's git rung.
         repo_root = None
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--git-common-dir"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                env=git_env_without_location(),
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                common_dir = Path(result.stdout.strip())
-                if not common_dir.is_absolute():
-                    common_dir = Path.cwd() / common_dir
-                # os.path.realpath, not Path.resolve(): on 3.9 resolve() raises
-                # RuntimeError on a symlink loop, while 3.13 and 3.14 return the
-                # path with the looping component unresolved. realpath does that
-                # on every interpreter, as in memory_api.main_repo_root.
-                repo_root = Path(os.path.realpath(common_dir)).parent
-        except FileNotFoundError:
-            pass  # git is not installed: nothing to record, move on
-        except (subprocess.TimeoutExpired, OSError, UnicodeDecodeError) as exc:
-            errors.append(f"git rung: {type(exc).__name__}: {exc}")
-            return None, None
+        if git_on_path:
+            try:
+                result = subprocess.run(
+                    ["git", "rev-parse", "--git-common-dir"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    env=git_env,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    common_dir = Path(result.stdout.strip())
+                    if not common_dir.is_absolute():
+                        common_dir = Path.cwd() / common_dir
+                    # os.path.realpath, not Path.resolve(): on 3.9 resolve()
+                    # raises RuntimeError on a symlink loop, while 3.13 and 3.14
+                    # return the path with the looping component unresolved.
+                    # realpath does that on every interpreter, as in
+                    # memory_api.main_repo_root.
+                    repo_root = Path(os.path.realpath(common_dir)).parent
+            except FileNotFoundError:
+                pass  # git vanished or cannot start: the same answer every run
+            except (subprocess.TimeoutExpired, OSError, UnicodeDecodeError) as exc:
+                errors.append(f"git rung: {type(exc).__name__}: {exc}")
+                return None, None
         if repo_root is not None:
             found = _find_existing_claude_md(repo_root)
             if found is not None:

@@ -594,6 +594,58 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
         assert staleness.unreadable_cause(errs2) is None, errs2
 
     @pytest.mark.parametrize(
+        "path_shape",
+        [pytest.param("unsearchable-dir", marks=_NEEDS_NON_ROOT), "entry-through-a-file"],
+    )
+    def test_git_absent_behind_an_awkward_path_moves_on_to_the_cwd(
+        self, tmp_path, lock, monkeypatch, path_shape
+    ):
+        """git is not installed, but PATH holds a directory that cannot be
+        searched, or an entry that runs through a regular file. Running git
+        then raises PermissionError or NotADirectoryError, not
+        FileNotFoundError. git is still absent: nothing is recorded and
+        resolution moves on to the cwd's file."""
+        hit = _cwd_hit(tmp_path, monkeypatch)
+        no_git = tmp_path / "no-git"
+        no_git.mkdir()
+        if path_shape == "unsearchable-dir":
+            locked = tmp_path / "locked"
+            locked.mkdir()
+            lock(locked)
+            path = f"{locked}{os.pathsep}{no_git}"
+        else:
+            a_file = tmp_path / "a-file"
+            a_file.write_text("x")
+            path = f"{no_git}{os.pathsep}{a_file / 'bin'}"
+        monkeypatch.setenv("PATH", path)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        errs, errs2 = [], []
+
+        assert all(_same(p, hit) for p in _both(errs, errs2))
+        assert errs == errs2 == []
+
+    def test_a_git_that_is_present_but_cannot_run_ends_resolution(
+        self, tmp_path, monkeypatch
+    ):
+        """The control for the arm above: a file named git on PATH without
+        the execute bit. git is present, so the call's PermissionError is git
+        not answering: each resolver records it and stops."""
+        _cwd_hit(tmp_path, monkeypatch)
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        (bindir / "git").write_text("#!/bin/sh\nexit 0\n")
+        (bindir / "git").chmod(0o644)
+        monkeypatch.setenv("PATH", str(bindir))
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        errs, errs2 = [], []
+
+        assert _both(errs, errs2) == (None, None)
+        for recorded in (errs, errs2):
+            assert len(recorded) == 1 and recorded[0].startswith(
+                "git rung: PermissionError"
+            ), recorded
+
+    @pytest.mark.parametrize(
         "failure",
         [
             subprocess.TimeoutExpired(["git", "rev-parse"], 5),
