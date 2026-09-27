@@ -263,12 +263,14 @@ def test_a_claude_file_replaced_by_a_directory_holding_claude_md_is_created(tmp_
     assert _only({key: before}, guard._take_after({key: before})) == "CREATED"
 
 
-def test_the_absent_errnos_are_the_writers_probes():
-    """The guard holds its own copy of the set, because it must not import a
-    writer; it must match the one the writers' probe uses."""
-    from shared.claude_md_manager import _ABSENT_ERRNOS
+def test_the_sample_reads_the_writers_absent_set(tmp_path, monkeypatch):
+    """The guard keeps no copy of the absent set: with the writers' set
+    emptied, a missing file is no longer absent but a stat error."""
+    import shared.claude_md_manager as manager
 
-    assert guard._ABSENT_ERRNOS == _ABSENT_ERRNOS
+    monkeypatch.setattr(manager, "_ABSENT_ERRNOS", frozenset())
+    sample = guard._sample_one(tmp_path / "CLAUDE.md")
+    assert sample["error"] is not None and "FileNotFoundError" in sample["error"], sample
 
 
 def test_the_verdict_reads_exactly_the_fields_its_docstring_names():

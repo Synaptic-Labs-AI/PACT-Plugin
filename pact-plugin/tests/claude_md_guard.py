@@ -142,7 +142,6 @@ without any test-only disable seam.
 # matches the parenthesised call forms and the augmented-assignment spellings,
 # so naming the attribute in prose is safe and quoting a call is not.
 
-import errno
 import hashlib
 import os
 import subprocess
@@ -175,10 +174,6 @@ _VIOLATIONS = frozenset(
 _OK_VERDICTS = frozenset({"OK_ABSENT", "OK_UNCHANGED"})
 
 _PROJECT_SHAPES = (Path(".claude") / "CLAUDE.md", Path("CLAUDE.md"))
-
-# The writers' probe's absent set, copied because this module must not import
-# a writer. test_claude_md_guard.py holds the two equal.
-_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
 
 _SUMMARY_PREFIX = "[PACT CLAUDE.md guard] clean:"
 
@@ -354,7 +349,7 @@ def _sample_one(path):
         sample["leaf_dev"], sample["leaf_ino"] = leaf.st_dev, leaf.st_ino
     except (OSError, ValueError):
         pass
-    # Absent means what the writers' probe means: the same errnos, and
+    # Absent means what the writers' probe means: its own errno set, and
     # ValueError. `os.path.realpath`, not `Path.resolve()`, which raises on a
     # symlink loop on 3.9 only.
     try:
@@ -363,7 +358,13 @@ def _sample_one(path):
     except ValueError:
         return sample
     except OSError as exc:
-        if exc.errno in _ABSENT_ERRNOS:
+        try:
+            from shared.claude_md_manager import _ABSENT_ERRNOS
+
+            absent = exc.errno in _ABSENT_ERRNOS
+        except Exception:  # noqa: BLE001 — never raise; the stat error is reported
+            absent = False
+        if absent:
             return sample
         sample["error"] = f"stat failed: {type(exc).__name__}: {exc}"
         return sample
