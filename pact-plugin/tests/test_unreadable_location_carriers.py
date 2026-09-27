@@ -99,6 +99,8 @@ _PROBE_OWNERS = (
     "shared.project_scope",
     "shared.backlog_store",
     "shared.backlog",
+    "shared.session_resume",
+    "bootstrap_marker_writer",
 )
 
 # The errors every copy counts as "not there". EBADF cannot be produced by a
@@ -116,12 +118,13 @@ def _outcome(probe, path):
 
 @_NEEDS_NON_ROOT
 def test_every_copy_of_the_probe_counts_the_same_errors_as_absent(tmp_path, lock):
-    """Five modules define the probe, the canonical one in claude_md_manager
-    and four copies: worktree_guard imports only the stdlib, stale_session
-    does not import claude_md_manager at runtime, and memory_api and
-    working_memory sit outside hooks/. staleness, project_scope, backlog_store
-    and backlog import the canonical one. This PIN holds all nine to one
-    table, so an edit to one copy reddens here instead of drifting silently.
+    """claude_md_manager defines the probe, and four modules keep a copy:
+    worktree_guard imports only the stdlib, stale_session does not import
+    claude_md_manager at runtime, and memory_api and working_memory sit
+    outside hooks/. Every other module that probes imports the canonical one.
+    This PIN holds every one of them to one table, so an edit to one copy
+    reddens here instead of drifting silently; the census below keeps the
+    table complete.
 
     The table is 3.9-3.13 pathlib's own rule, made explicit so 3.14 follows it:
     a path that is not there (ENOENT, ENOTDIR, ELOOP, an unencodable path) is
@@ -161,38 +164,45 @@ def test_every_copy_reads_exactly_the_same_absent_set():
         assert probe.__globals__["_ABSENT_ERRNOS"] == _ABSENT_ERRNOS, owner
 
 
-def _probe_definitions(source):
+def _probe_sites(source):
+    """Lines that define the probe or import it by name."""
     return [
         node.lineno
         for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.FunctionDef) and node.name == "_stat_if_present"
+        if (isinstance(node, ast.FunctionDef) and node.name == "_stat_if_present")
+        or (
+            isinstance(node, ast.ImportFrom)
+            and any(alias.name == "_stat_if_present" for alias in node.names)
+        )
     ]
 
 
-def test_every_definition_of_the_probe_is_in_the_table():
-    """A census of `def _stat_if_present` across pact-plugin/, tests included.
-    A new copy the table does not list reddens here, so it cannot escape the
-    two arms above."""
+def test_every_module_that_defines_or_imports_the_probe_is_in_the_table():
+    """A census of `def _stat_if_present` and of `import ... _stat_if_present`
+    across pact-plugin/, tests included. A new copy, or a new module probing
+    through the canonical one, reddens here until the table lists it, so
+    neither can escape the two arms above."""
     plugin_root = Path(__file__).resolve().parent.parent
-    defined = {
+    sites = {
         path.relative_to(plugin_root).as_posix()
         for path in plugin_root.rglob("*.py")
         if "__pycache__" not in path.parts
-        and _probe_definitions(path.read_text(encoding="utf-8"))
+        and _probe_sites(path.read_text(encoding="utf-8"))
     }
     listed = {
         Path(importlib.import_module(owner).__file__).resolve().relative_to(plugin_root).as_posix()
         for owner in _PROBE_OWNERS
     }
-    assert "hooks/shared/claude_md_manager.py" in defined, (
-        f"the census found no canonical definition, so it is not reading the tree: {defined}"
+    assert "hooks/shared/claude_md_manager.py" in sites, (
+        f"the census found no canonical definition, so it is not reading the tree: {sites}"
     )
-    assert defined <= listed, f"definitions the table does not list: {sorted(defined - listed)}"
+    assert sites <= listed, f"probe sites the table does not list: {sorted(sites - listed)}"
 
 
-def test_the_census_finds_a_definition():
-    """The control for the census: its parser finds a definition when one is there."""
-    assert _probe_definitions("x = 1\n\ndef _stat_if_present(path):\n    return None\n") == [3]
+def test_the_census_finds_a_definition_and_an_import():
+    """The control for the census: its parser finds both kinds of site."""
+    assert _probe_sites("x = 1\n\ndef _stat_if_present(path):\n    return None\n") == [3]
+    assert _probe_sites("from .claude_md_manager import (\n    _stat_if_present,\n)\n") == [1]
 
 
 _PROBED_FUNCTIONS = {

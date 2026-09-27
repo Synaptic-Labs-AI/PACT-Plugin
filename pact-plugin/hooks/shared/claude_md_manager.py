@@ -42,7 +42,8 @@ _DOT_CLAUDE_RELATIVE = Path(".claude") / "CLAUDE.md"
 _LEGACY_RELATIVE = Path("CLAUDE.md")
 
 # The errors that mean a path is NOT THERE. Every other OSError means the path
-# could not be examined, and _stat_if_present raises it.
+# could not be examined, and _stat_if_present raises it. tests/claude_md_guard.py
+# reads this set by name, so renaming it breaks the guard's sampling.
 _ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
 
 
@@ -56,10 +57,12 @@ def _stat_if_present(path) -> os.stat_result | None:
     in _ABSENT_ERRNOS, or an unencodable path, is absent; any other OSError,
     EACCES and EPERM included, propagates.
 
-    Copies live in skills/pact-memory/scripts/memory_api.py,
-    hooks/worktree_guard.py and hooks/shared/stale_session.py, which do not
-    import this module. tests/test_unreadable_location_carriers.py holds the
-    four to one table.
+    Four modules keep a copy rather than import this one: hooks/worktree_guard.py
+    (stdlib only), hooks/shared/stale_session.py (no runtime import of this
+    module), and skills/pact-memory/scripts/memory_api.py and working_memory.py.
+    Every other module that probes imports this one.
+    tests/test_unreadable_location_carriers.py holds every copy and every
+    importer to one table, and fails on a copy or importer it does not list.
     """
     try:
         return os.stat(path)
