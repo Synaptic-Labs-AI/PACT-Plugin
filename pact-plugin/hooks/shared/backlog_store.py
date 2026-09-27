@@ -20,15 +20,42 @@ NOTHING HERE MAY IMPORT pact-memory, subprocess, or any network client.
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
-from .claude_md_manager import _stat_if_present
 from .failure_cause import failure_cause
 from .paths import get_backlog_dir
+
+# The errors that mean a path is NOT THERE. Every other OSError means the path
+# could not be examined, and _stat_if_present raises it.
+_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
+
+
+def _stat_if_present(path) -> Optional[os.stat_result]:
+    """Return `os.stat(path)`, or None when the path is not there.
+
+    A copy of shared.claude_md_manager._stat_if_present, which this module
+    must not import: on Linux under 3.9 that module's `uuid` import pulls in
+    `platform` and with it `subprocess`, which the read path may not load.
+    tests/test_unreadable_location_carriers.py holds the copies to one table.
+    `Path.exists()` re-raises a PermissionError on 3.9-3.13 and returns False
+    on 3.14; this applies the 3.9-3.13 rule on every interpreter: an errno in
+    _ABSENT_ERRNOS, or an unencodable path, is absent, and any other OSError
+    propagates.
+    """
+    try:
+        return os.stat(path)
+    except OSError as exc:
+        if exc.errno in _ABSENT_ERRNOS:
+            return None
+        raise
+    except ValueError:
+        return None
 
 # Schema constants, shared with the write side so a writer cannot emit what a
 # reader rejects.

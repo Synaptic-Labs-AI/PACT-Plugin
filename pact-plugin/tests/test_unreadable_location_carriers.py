@@ -118,10 +118,12 @@ def _outcome(probe, path):
 
 @_NEEDS_NON_ROOT
 def test_every_copy_of_the_probe_counts_the_same_errors_as_absent(tmp_path, lock):
-    """claude_md_manager defines the probe, and four modules keep a copy:
+    """claude_md_manager defines the probe, and five modules keep a copy:
     worktree_guard imports only the stdlib, stale_session does not import
-    claude_md_manager at runtime, and memory_api and working_memory sit
-    outside hooks/. Every other module that probes imports the canonical one.
+    claude_md_manager at runtime, backlog_store's read path may not load the
+    subprocess that module pulls in on Linux under 3.9, and memory_api and
+    working_memory sit outside hooks/. Every other module that probes imports
+    the canonical one.
     This PIN holds every one of them to one table, so an edit to one copy
     reddens here instead of drifting silently; the census below keeps the
     table complete.

@@ -57,9 +57,11 @@ def _stat_if_present(path) -> os.stat_result | None:
     in _ABSENT_ERRNOS, or an unencodable path, is absent; any other OSError,
     EACCES and EPERM included, propagates.
 
-    Four modules keep a copy rather than import this one: hooks/worktree_guard.py
+    Five modules keep a copy rather than import this one: hooks/worktree_guard.py
     (stdlib only), hooks/shared/stale_session.py (no runtime import of this
-    module), and skills/pact-memory/scripts/memory_api.py and working_memory.py.
+    module), hooks/shared/backlog_store.py (on Linux under 3.9 this module's
+    `uuid` import pulls in `subprocess`, which the backlog's read path may not
+    load), and skills/pact-memory/scripts/memory_api.py and working_memory.py.
     Every other module that probes imports this one.
     tests/test_unreadable_location_carriers.py holds every copy and every
     importer to one table, and fails on a copy or importer it does not list.
