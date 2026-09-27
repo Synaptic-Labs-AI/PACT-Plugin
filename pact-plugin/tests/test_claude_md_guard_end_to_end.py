@@ -28,10 +28,14 @@ password database's home comes from the password database, not the
 environment, so `<that home>/.claude/CLAUDE.md` -- the operator's global
 CLAUDE.md on a developer machine -- is watched by every child, and so is
 `$HOME/.claude/CLAUDE.md`. Neither is written: the inner test writes only the
-path an arm names. Watching them adds no exposure, because the OUTER run
-watches the same files over a window that contains every child's; a write to
-either during the suite reddens the outer run regardless, and a child adds a
-second report on whichever arm was running.
+path an arm names. Watching them risks nothing the outer run does not: the
+OUTER run watches the same files over a window that contains every child's,
+so a write to either during the suite reddens the outer run regardless. It
+does cost a diagnosis. An arm that requires a clean child FAILS if that write
+lands while its child runs, a failed test beside the outer VIOLATION, so read
+such a failure with the outer report before suspecting the arm. The
+skills-only arm also watches this checkout's CLAUDE.md, because it runs in
+the real tree.
 
 `_assert_confined` therefore pins the set EXACTLY: the temp paths an arm built,
 plus the two home config files computed here independently of the guard. A
@@ -40,8 +44,8 @@ the case where tmp_path sits inside a git repository.
 
 WHAT THESE ARMS DO NOT ASSERT, AND WHY. They do not check that the real
 CLAUDE.md is byte-unchanged across the child run. The guard itself is that
-assertion, running over the whole session; a second copy of it here would add
-nothing but a second way to redden when the operator's own session
+assertion, running over the whole session; a second copy of it here would
+redden every arm, not only the clean ones, when the operator's own session
 legitimately rewrites that file mid-suite. The confinement assertion is the
 structural substitute and it is the stronger claim -- it constrains what the
 child CAN reach, rather than observing what it happened not to touch.
@@ -350,7 +354,8 @@ def test_the_violating_runs_summary_line_still_reads_passed(tmp_path):
 
 def test_a_clean_nested_run_prints_its_watched_set_and_exits_zero(tmp_path):
     """The other direction: the guard loaded, watched, and printed the one
-    line a clean run prints, naming every watched path."""
+    line a clean run prints, naming every watched path. Needs a clean child,
+    so a real write to a home config file during it fails it."""
     completed, dump = _run_nested(tmp_path)
     tmp_set = _default_tmp_set(tmp_path)
     _assert_confined(dump, tmp_set)
@@ -441,7 +446,8 @@ def test_a_write_to_the_guards_own_checkout_is_caught_from_outside_it(tmp_path, 
 @_NEEDS_GIT
 def test_the_guards_own_checkout_is_watched_from_outside_it_and_left_alone(tmp_path):
     """The control: the same layout, nothing written. The run is clean, and
-    its summary names both checkouts' CLAUDE.md as present."""
+    its summary names both checkouts' CLAUDE.md as present. Needs a clean
+    child, so a real write to a home config file during it fails it."""
     main, wt, guard_dir = _guard_in_a_worktree(tmp_path)
     completed, dump = _run_nested(tmp_path, guard_dir=guard_dir)
     _assert_confined(dump, _default_tmp_set(tmp_path) | _project_set(main, wt))
@@ -477,7 +483,9 @@ def test_a_skills_only_run_reads_every_input(tmp_path):
     """A run whose only path argument lies outside tests/, so tests/conftest.py
     is not an initial conftest. The root conftest's hooks/ entry is then the
     only thing that makes the guard's `shared` imports resolve at configure.
-    Read-only: a collect-only run in the real tree."""
+    Read-only: a collect-only run in the real tree, so it watches this
+    checkout's CLAUDE.md and the home config files, and a real write to one of
+    them during it fails it."""
     candidates = sorted(PLUGIN_ROOT.glob("skills/*/test_*.py"))
     if not candidates:
         pytest.skip("no skills-adjacent test file exists to collect")
@@ -551,7 +559,8 @@ def test_a_writer_replacing_a_symlinked_global_claude_md_is_caught(tmp_path):
 
 def test_a_symlinked_claude_md_left_alone_is_clean(tmp_path):
     """The control: the same symlinked project file, not written. The run is
-    clean and its summary names the link as written, and as present."""
+    clean and its summary names the link as written, and as present. Needs a
+    clean child, so a real write to a home config file during it fails it."""
     link = tmp_path / "proj" / ".claude" / "CLAUDE.md"
     completed, dump = _run_nested(tmp_path, setup=_link_project_claude_md)
     _assert_confined(dump, _default_tmp_set(tmp_path))
@@ -564,7 +573,8 @@ def test_a_symlinked_claude_md_left_alone_is_clean(tmp_path):
 
 def test_an_inherited_pytest_addopts_does_not_reach_the_child(tmp_path, monkeypatch):
     """The outer run's PYTEST_ADDOPTS -- here a flag the child cannot parse --
-    is not the child's: the clean arm stays clean."""
+    is not the child's: the clean arm stays clean. Needs a clean child, so a
+    real write to a home config file during it fails it."""
     monkeypatch.setenv("PYTEST_ADDOPTS", "--no-such-flag")
     completed, dump = _run_nested(tmp_path)
     _assert_confined(dump, _default_tmp_set(tmp_path))
