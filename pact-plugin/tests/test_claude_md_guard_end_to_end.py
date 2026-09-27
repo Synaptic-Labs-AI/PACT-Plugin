@@ -15,10 +15,13 @@ pure-function cases.
 
 WHAT CONFINES THE CHILD. The guard fixes its watched set at configure from the
 child's own inputs: CLAUDE_PROJECT_DIR, the working directory and its git
-roots, and the config roots under CLAUDE_CONFIG_DIR, $HOME and the password
-database's home. `_run_nested` points the first three, and CLAUDE_CONFIG_DIR,
-into tmp_path, so every project location the child watches is a temp path by
-construction. The suite's per-test scrubs take no part in it.
+roots, the git roots of the checkout the guard's own file lives in, and the
+config roots under CLAUDE_CONFIG_DIR, $HOME and the password database's home.
+`_run_nested` points CLAUDE_PROJECT_DIR, the working directory and
+CLAUDE_CONFIG_DIR into tmp_path, and has the child load a copy of the guard
+from tmp_path rather than this file, so every project location the child
+watches is a temp path by construction. The suite's per-test scrubs take no
+part in it.
 
 ONE REAL PATH STAYS IN THE CHILD'S SET, AND NOTHING HERE CAN REMOVE IT. The
 password database's home comes from the password database, not the
@@ -87,6 +90,7 @@ def test_inner(pytestconfig):
             {
                 "stash_is_none": before is None,
                 "watched": sorted(before) if before else [],
+                "guard_file": guard.__file__,
             }
         ),
         encoding="utf-8",
@@ -136,6 +140,7 @@ _NEEDS_GIT = pytest.mark.skipif(
 def _run_nested(
     tmp_path, *, modify_target=None, argv_extra=(), cwd=None, project_dir=None,
     via_conftest=False, action=None, setup=None, home=None, config_dir=True,
+    guard_dir=None,
 ):
     """Launch a real nested pytest under `tmp_path`; return (completed, dump).
 
@@ -149,6 +154,13 @@ def _run_nested(
     "strip" runs the global kernel-block strip. `setup(tmp_path)` runs after
     the default layout is built; `home` sets the child's HOME, and
     `config_dir=False` leaves its CLAUDE_CONFIG_DIR unset.
+
+    The child loads a byte-identical copy of the guard from `guard_dir`, or
+    <tmp>/proj, and never the file in this checkout: the guard watches the
+    checkout its own file lives in, so a child loading this one would watch
+    this checkout's real CLAUDE.md. The copy is the only guard on the child's
+    import path, and the dump names the file the child loaded, which must be
+    the copy.
     """
     proj = tmp_path / "proj"
     (proj / ".claude").mkdir(parents=True, exist_ok=True)
@@ -158,17 +170,21 @@ def _run_nested(
     if via_conftest:
         (proj / "conftest.py").write_text(_REEXPORTING_CONFTEST, encoding="utf-8")
     load_guard = () if via_conftest else ("-p", "claude_md_guard")
+    guard_dir = guard_dir or proj
+    guard_dir.mkdir(parents=True, exist_ok=True)
+    guard_copy = guard_dir / "claude_md_guard.py"
+    shutil.copyfile(PLUGIN_ROOT / "tests" / "claude_md_guard.py", guard_copy)
     (tmp_path / "cfg").mkdir(exist_ok=True)
     if setup is not None:
         setup(tmp_path)
     dump = tmp_path / "dump.json"
 
-    roots = [
+    roots = list(dict.fromkeys([
+        str(guard_dir),
         str(proj),
-        str(PLUGIN_ROOT / "tests"),
         str(PLUGIN_ROOT / "hooks"),
         str(PLUGIN_ROOT / "skills" / "pact-memory" / "scripts"),
-    ]
+    ]))
     env = dict(os.environ)
     inherited = env.get("PYTHONPATH")
     env["PYTHONPATH"] = os.pathsep.join(roots + ([inherited] if inherited else []))
@@ -197,7 +213,11 @@ def _run_nested(
         text=True,
         check=False,
     )
-    return completed, json.loads(dump.read_text(encoding="utf-8"))
+    result = json.loads(dump.read_text(encoding="utf-8"))
+    assert os.path.samefile(result["guard_file"], guard_copy), (
+        f"the child loaded {result['guard_file']}, not the guard copy {guard_copy}"
+    )
+    return completed, result
 
 
 def _key(path):
@@ -222,6 +242,38 @@ def _default_tmp_set(tmp_path, config_dir=True):
     if config_dir:
         paths.add(_key(tmp_path / "cfg" / "CLAUDE.md"))
     return paths
+
+
+def _repository_with_worktree(main):
+    """`main` becomes a repository with one commit and a linked worktree at
+    main/.worktrees/wt, which is returned."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+
+    def git(*args):
+        subprocess.run(
+            ["git", "-c", "user.email=t@e", "-c", "user.name=T",
+             "-c", "init.defaultBranch=main", *args],
+            cwd=str(main), env=env, capture_output=True, check=True, timeout=30,
+        )
+
+    main.mkdir(parents=True)
+    git("init")
+    (main / "README").write_text("seed")
+    git("add", "README")
+    git("commit", "-m", "seed")
+    git("worktree", "add", ".worktrees/wt")
+    return main / ".worktrees" / "wt"
+
+
+def _project_set(*directories):
+    """Both CLAUDE.md shapes under each directory, by its real path: git names
+    a worktree and a main checkout that way."""
+    return {
+        os.path.join(os.path.realpath(d), shape)
+        for d in directories
+        for shape in (os.path.join(".claude", "CLAUDE.md"), "CLAUDE.md")
+    }
 
 
 def _assert_confined(dump, tmp_expected, home=None):
@@ -318,25 +370,9 @@ def test_a_main_checkout_write_under_an_umbrella_declaration_is_caught(tmp_path)
     are watched whatever the declaration says. The umbrella's own file is what
     made a guard that asked the resolvers watch the umbrella and not the main
     checkout, and exit zero on this write."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
-
-    def git(*args, cwd):
-        subprocess.run(
-            ["git", "-c", "user.email=t@e", "-c", "user.name=T",
-             "-c", "init.defaultBranch=main", *args],
-            cwd=str(cwd), env=env, capture_output=True, check=True, timeout=30,
-        )
-
     umbrella = tmp_path / "umbrella"
     main = umbrella / "main"
-    main.mkdir(parents=True)
-    git("init", cwd=main)
-    (main / "README").write_text("seed")
-    git("add", "README", cwd=main)
-    git("commit", "-m", "seed", cwd=main)
-    git("worktree", "add", ".worktrees/wt", cwd=main)
-    wt = main / ".worktrees" / "wt"
+    wt = _repository_with_worktree(main)
     (umbrella / "CLAUDE.md").write_text("umbrella\n")
     main_md = main / "CLAUDE.md"
     main_md.write_text("main\n")
@@ -344,17 +380,59 @@ def test_a_main_checkout_write_under_an_umbrella_declaration_is_caught(tmp_path)
     completed, dump = _run_nested(
         tmp_path, modify_target=main_md, cwd=wt, project_dir=umbrella
     )
-    # git names the worktree and the main checkout by their real paths.
-    tmp_set = {
-        os.path.join(os.path.realpath(d), shape)
-        for d in (umbrella, wt, main)
-        for shape in (os.path.join(".claude", "CLAUDE.md"), "CLAUDE.md")
-    } | {_key(tmp_path / "cfg" / "CLAUDE.md")}
+    tmp_set = _project_set(umbrella, wt, main) | {_key(tmp_path / "cfg" / "CLAUDE.md")}
     _assert_confined(dump, tmp_set)
 
     assert completed.returncode != 0, completed.stderr
     assert "MODIFIED" in completed.stderr
     assert os.path.realpath(main_md) in completed.stderr
+
+
+def _guard_in_a_worktree(tmp_path):
+    """The guard's file lives in a linked worktree of <tmp>/checkout, as this
+    one does in the real tree; both checkouts hold a CLAUDE.md. The run
+    starts in <tmp>/proj, outside every repository, as a run started from an
+    umbrella directory or from ~ does. Returns (main, wt, guard_dir)."""
+    main = tmp_path / "checkout"
+    wt = _repository_with_worktree(main)
+    (main / "CLAUDE.md").write_text("main\n")
+    (wt / "CLAUDE.md").write_text("wt\n")
+    return main, wt, wt / "pact-plugin" / "tests"
+
+
+@_NEEDS_GIT
+@pytest.mark.parametrize("which", ["worktree", "main checkout"])
+def test_a_write_to_the_guards_own_checkout_is_caught_from_outside_it(tmp_path, which):
+    """A test's child aimed at the repository root with `cwd=` writes the
+    checkout's CLAUDE.md. Neither the working directory nor CLAUDE_PROJECT_DIR
+    names that checkout, so only the guard's own location can put it in the
+    watched set; without it this run exits zero."""
+    main, wt, guard_dir = _guard_in_a_worktree(tmp_path)
+    target = (wt if which == "worktree" else main) / "CLAUDE.md"
+    completed, dump = _run_nested(tmp_path, modify_target=target, guard_dir=guard_dir)
+
+    assert completed.returncode != 0, (
+        "a run started outside the guard's checkout modified that checkout's "
+        "CLAUDE.md and exited zero; stderr:\n" + completed.stderr
+    )
+    assert "MODIFIED" in completed.stderr
+    assert os.path.realpath(target) in completed.stderr
+    _assert_confined(dump, _default_tmp_set(tmp_path) | _project_set(main, wt))
+
+
+@_NEEDS_GIT
+def test_the_guards_own_checkout_is_watched_from_outside_it_and_left_alone(tmp_path):
+    """The control: the same layout, nothing written. The run is clean, and
+    its summary names both checkouts' CLAUDE.md as present."""
+    main, wt, guard_dir = _guard_in_a_worktree(tmp_path)
+    completed, dump = _run_nested(tmp_path, guard_dir=guard_dir)
+    _assert_confined(dump, _default_tmp_set(tmp_path) | _project_set(main, wt))
+
+    assert completed.returncode == 0, completed.stderr
+    summary = [l for l in completed.stderr.splitlines() if l.startswith(_SUMMARY_PREFIX)]
+    assert len(summary) == 1, completed.stderr
+    for directory in (main, wt):
+        assert f"{os.path.join(os.path.realpath(directory), 'CLAUDE.md')} (present)" in summary[0]
 
 
 def test_a_plugin_registered_before_the_guard_still_runs_its_unconfigure(tmp_path):

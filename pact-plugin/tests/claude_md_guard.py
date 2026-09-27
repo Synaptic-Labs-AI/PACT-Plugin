@@ -19,8 +19,10 @@ writer. So `pytest_configure` reads this process's inputs ONCE and fixes the
 watched set from them:
 
   * both project locations, `.claude/CLAUDE.md` and `CLAUDE.md`, under
-    CLAUDE_PROJECT_DIR, the working directory, and the working directory's
-    git worktree root and main-repository root;
+    CLAUDE_PROJECT_DIR, the working directory, the working directory's git
+    worktree root and main-repository root, and the same two roots for the
+    checkout this file lives in, so a run started outside that checkout still
+    watches it;
   * `CLAUDE.md` under every config root a writer can reach: CLAUDE_CONFIG_DIR,
     `$HOME/.claude`, and the password database's home `.claude`, which is what
     a child started without HOME resolves.
@@ -43,9 +45,15 @@ resolver a writer uses, under a test's environment and a child's, records
 every directory it probes, and fails if one is not watched.
 
 WHAT IT DOES NOT WATCH. A child that a test deliberately aims at a real path
-these inputs do not name -- through the child's CLAUDE_PROJECT_DIR,
-CLAUDE_CONFIG_DIR or HOME, or a `cwd=` outside this checkout -- writes outside
-the watched set. The in-process half still refuses the same write made
+none of these inputs names writes outside the watched set: through the
+child's CLAUDE_PROJECT_DIR, CLAUDE_CONFIG_DIR or HOME; through a `cwd=`
+outside this checkout; or through a `cwd=` elsewhere inside it -- neither a
+checkout root nor the directory pytest started in -- which a resolver's last
+rung, the working directory, takes when no earlier rung finds a file. When
+this file sits outside any git repository -- a `git archive` snapshot, an
+installed copy -- neither git rung names anything, and the tree's own root is
+watched only if CLAUDE_PROJECT_DIR or the working directory names it. The
+in-process half still refuses the same write made
 in-process, because it refuses any target outside the tmp tree instead of
 checking a list, so the two halves cover different populations. Also outside
 it: a writer running outside every test (at collection or in a pytest hook)
@@ -184,6 +192,23 @@ def _git_path(cwd, flag, env):
     return Path(result.stdout.strip())
 
 
+def _git_roots(directory):
+    """`(worktree root, main-checkout root)` for `directory`, each None
+    outside a repository. Raises when git itself cannot run; the caller
+    records it."""
+    from shared.project_scope import git_env_without_location
+
+    env = git_env_without_location()
+    toplevel = _git_path(directory, "--show-toplevel", env)
+    common = _git_path(directory, "--git-common-dir", env)
+    if common is None:
+        return toplevel, None
+    if not common.is_absolute():
+        common = Path(directory) / common
+    # realpath, as the resolvers use for the same rung.
+    return toplevel, Path(os.path.realpath(common)).parent
+
+
 def _pin_inputs():
     """Read this process's inputs ONCE. Returns `(inputs, errors)`.
 
@@ -200,6 +225,8 @@ def _pin_inputs():
         "cwd": None,
         "git_toplevel": None,
         "git_common_parent": None,
+        "guard_git_toplevel": None,
+        "guard_git_common_parent": None,
         "config_roots": [],
     }
 
@@ -210,18 +237,21 @@ def _pin_inputs():
 
     if inputs["cwd"] is not None:
         try:
-            from shared.project_scope import git_env_without_location
-
-            env = git_env_without_location()
-            inputs["git_toplevel"] = _git_path(inputs["cwd"], "--show-toplevel", env)
-            common = _git_path(inputs["cwd"], "--git-common-dir", env)
-            if common is not None:
-                if not common.is_absolute():
-                    common = Path(inputs["cwd"]) / common
-                # realpath, as the resolvers use for the same rung.
-                inputs["git_common_parent"] = Path(os.path.realpath(common)).parent
+            inputs["git_toplevel"], inputs["git_common_parent"] = _git_roots(
+                inputs["cwd"]
+            )
         except Exception as exc:  # noqa: BLE001 — report, never raise from a hook
             unavailable("git", exc)
+
+    # The checkout this file lives in, whatever the working directory: a run
+    # started outside it still watches the CLAUDE.md that a test's child,
+    # aimed at the repository root with `cwd=`, writes.
+    try:
+        inputs["guard_git_toplevel"], inputs["guard_git_common_parent"] = _git_roots(
+            os.path.dirname(os.path.realpath(__file__))
+        )
+    except Exception as exc:  # noqa: BLE001 — report, never raise from a hook
+        unavailable("git, for this file's checkout", exc)
 
     homes = []
     if os.environ.get("HOME"):
@@ -259,7 +289,10 @@ def _candidates(inputs):
     leaves out."""
     project_dirs = [
         inputs.get(name)
-        for name in ("project_dir", "cwd", "git_toplevel", "git_common_parent")
+        for name in (
+            "project_dir", "cwd", "git_toplevel", "git_common_parent",
+            "guard_git_toplevel", "guard_git_common_parent",
+        )
     ]
     paths = [
         Path(directory) / shape
