@@ -255,12 +255,9 @@ def _record_unexaminable_claude_md(
     be examined, for an Edit or Write to a file named CLAUDE.md: the gate cannot
     tell whether that file is the one it guards, so it lets the tool through.
     Any other file would pass this gate anyway, so it records nothing, and
-    neither does a CLAUDE.md that is merely absent."""
+    neither does a CLAUDE.md that is merely absent: the resolver records only
+    what stopped it."""
     if not errors or Path(file_path_str).name != "CLAUDE.md":
-        return
-    from staleness import unreadable_cause  # loaded by the resolver already
-
-    if unreadable_cause(errors) is None:
         return
     append_failure(
         classification=_FAIL_RESOLVE,

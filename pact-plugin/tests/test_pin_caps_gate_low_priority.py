@@ -450,9 +450,9 @@ class TestUnexaminableClaudeMdBypassIsRecorded:
 
     def test_git_being_absent_records_nothing(self, tmp_path, monkeypatch, pact_context):
         """The project holds no CLAUDE.md and git is not installed, so the
-        resolver records git's absence and moves on without being stopped.
-        An Edit to a CLAUDE.md is allowed and records nothing: a missing file
-        is not a bypass."""
+        resolver moves on without being stopped and records nothing. An Edit
+        to a CLAUDE.md is allowed and records nothing: a missing file is not a
+        bypass."""
         proj = tmp_path / "proj"
         proj.mkdir()
         no_git = tmp_path / "no-git"

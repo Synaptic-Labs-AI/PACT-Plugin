@@ -444,6 +444,67 @@ class TestAResolveErrorIsNotAnUnresolvedTarget:
         assert result.reason == SyncResult.UNRESOLVED, result
 
 
+    @staticmethod
+    def _sync_with_git(tmp_path, monkeypatch, run=None):
+        """Sync with no CLAUDE.md anywhere and git either absent (run=None:
+        PATH holds no git) or replaced by `run`. Returns the reason and the
+        WARNING records the working-memory logger emitted."""
+        import logging
+
+        from scripts.working_memory import sync_to_claude_md
+
+        (tmp_path / "proj").mkdir()
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        no_git = tmp_path / "no-git"
+        no_git.mkdir()
+        monkeypatch.chdir(empty)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "proj"))
+        if run is None:
+            monkeypatch.setenv("PATH", str(no_git))
+        else:
+            monkeypatch.setattr(subprocess, "run", run)
+        warnings = []
+
+        class _Collect(logging.Handler):
+            def emit(self, record):
+                if record.levelno >= logging.WARNING:
+                    warnings.append(record.getMessage())
+
+        wm_logger = logging.getLogger("scripts.working_memory")
+        handler = _Collect()
+        wm_logger.addHandler(handler)
+        try:
+            result = sync_to_claude_md({"context": "c"}, None, "id", claude_md_root=tmp_path)
+        finally:
+            wm_logger.removeHandler(handler)
+        return result.reason, warnings
+
+    def test_git_being_absent_with_no_claude_md_is_unresolved(self, tmp_path, monkeypatch):
+        """git is not installed and no CLAUDE.md exists anywhere. That is a
+        search that found nothing, not an error: UNRESOLVED, and nothing is
+        logged at WARNING."""
+        reason, warnings = self._sync_with_git(tmp_path, monkeypatch)
+
+        assert reason == SyncResult.UNRESOLVED
+        assert warnings == [], warnings
+
+    def test_a_git_call_that_timed_out_is_a_resolve_error_and_warns(
+        self, tmp_path, monkeypatch
+    ):
+        """The control: the same layout with git timing out. That stops
+        resolution, so the reason is RESOLVE_ERROR and the collector sees the
+        WARNING, which shows it could see one above."""
+
+        def timed_out(*args, **kwargs):
+            raise subprocess.TimeoutExpired(["git"], 5)
+
+        reason, warnings = self._sync_with_git(tmp_path, monkeypatch, run=timed_out)
+
+        assert reason == SyncResult.RESOLVE_ERROR
+        assert len(warnings) == 1 and "TimeoutExpired" in warnings[0], warnings
+
+
 class TestAnUnreadableTargetBelowResolutionIsAResolveError:
     """The existence check that runs AFTER resolution, in both syncs, reports a
     target it cannot examine as RESOLVE_ERROR on every interpreter, and one that

@@ -403,7 +403,7 @@ class TestDisplayResolverParityInvariant:
 # EXAMINED ends resolution, at whatever rung it is met, with no fallback to a
 # legacy file or a later rung, and is recorded. So does a git call that did not
 # answer (a timeout, or any OSError other than FileNotFoundError); git that is
-# not installed is recorded and moves on to the next rung.
+# not installed is not an error, records nothing and moves on to the next rung.
 
 import errno  # noqa: E402
 import shutil  # noqa: E402
@@ -576,10 +576,9 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
         assert errs == errs2 == []
 
     def test_a_git_call_that_fails_moves_on_to_the_cwd(self, tmp_path, monkeypatch):
-        """git cannot be run at all. Nothing was examined at the git rungs, so
-        each failure is recorded and resolution moves on to the cwd's file:
-        the other half of the rule, a failed RUNG continues while a failed
-        PROBE stops."""
+        """git is not installed. That is not an error: nothing was examined at
+        the git rungs, nothing is recorded, and resolution moves on to the
+        cwd's file, the same answer on every run."""
         hit = _cwd_hit(tmp_path, monkeypatch)
         no_git = tmp_path / "no-git"
         no_git.mkdir()
@@ -588,8 +587,7 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
         errs, errs2 = [], []
 
         assert all(_same(p, hit) for p in _both(errs, errs2))
-        assert errs and all(e.startswith("git rung: FileNotFoundError") for e in errs), errs
-        assert errs2 and all(e.startswith("git rung: FileNotFoundError") for e in errs2), errs2
+        assert errs == errs2 == []
 
         import staleness
 

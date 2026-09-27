@@ -265,22 +265,23 @@ def _resolve_project_claude_md_with_base(
     A GIT CALL THAT DID NOT ANSWER ALSO ENDS RESOLUTION: git exists, but the
     root it would have named is unknown rather than absent, so the cwd rung
     could pick a different file. That covers a timeout and any OSError other
-    than FileNotFoundError. git that is not installed (FileNotFoundError) gives
-    the same answer on every run, so it is recorded and resolution moves on. A
-    git call that EXITS NONZERO also moves on, and records nothing, because it
-    reads the same as "not a repository": that includes a repository whose
-    metadata cannot be read, such as a main checkout whose `.git` is
-    unsearchable, which therefore can still land on the cwd rung.
+    than FileNotFoundError. git that is not installed (FileNotFoundError) is
+    not an error: it gives the same answer on every run, so resolution moves on
+    and records nothing. A git call that EXITS NONZERO also moves on and
+    records nothing, because it reads the same as "not a repository": that
+    includes a repository whose metadata cannot be read, such as a main
+    checkout whose `.git` is unsearchable, which therefore can still land on
+    the cwd rung.
 
     Args:
         errors: Optional list that receives a message for every location that
-            could not be examined and every git call that failed. Each entry
-            leads with the failure_cause token -- after `git rung: ` for a git
-            call -- and carries the exception text, path included, after it;
-            `unreadable_cause` reads it back. check_pin_caps and
-            archive_pin pass one so an unreadable CLAUDE.md is not reported
-            as missing. A failure outside the probes -- a deleted working
-            directory -- still raises.
+            could not be examined and every git call that did not answer; each
+            one ended resolution. Each entry leads with the failure_cause
+            token -- after `git rung: ` for a git call -- and carries the
+            exception text, path included, after it; `unreadable_cause` reads
+            it back. check_pin_caps, archive_pin and the pin cap gate pass one
+            so an unreadable CLAUDE.md is not reported as missing. A failure
+            outside the probes -- a deleted working directory -- still raises.
 
     Returns:
         (path, base) where path is an existing project CLAUDE.md and base is
@@ -328,8 +329,8 @@ def _resolve_project_claude_md_with_base(
                 # path with the looping component unresolved. realpath does that
                 # on every interpreter, as in memory_api.main_repo_root.
                 repo_root = Path(os.path.realpath(common_dir)).parent
-        except FileNotFoundError as exc:
-            errors.append(f"git rung: {failure_cause(exc)}: {exc}")
+        except FileNotFoundError:
+            pass  # git is not installed: nothing to record, move on
         except (subprocess.TimeoutExpired, OSError) as exc:
             errors.append(f"git rung: {failure_cause(exc)}: {exc}")
             return None, None
@@ -399,20 +400,18 @@ def unreadable_cause(errors: list) -> Optional[str]:
     A location that could not be examined gives "could not be read: <token>";
     a git call that did not answer gives "could not be located: git <token>",
     so an operator looks at git rather than at CLAUDE.md's permissions. None
-    means resolution was not stopped: nothing was recorded, or only git being
-    absent, which is recorded and moves on. Every other entry ends resolution
-    the moment it is recorded, so the first one is the cause. The token is
-    closed-vocabulary and never carries a path.
+    means nothing was recorded, so resolution was not stopped. Every entry ends
+    resolution the moment it is recorded, so the first one is the cause. The
+    token is closed-vocabulary and never carries a path.
     """
-    for entry in errors:
-        at_git_rung = entry.startswith(_GIT_RUNG)
-        body = entry[len(_GIT_RUNG):] if at_git_rung else entry
-        cause = body.split(": ", 1)[0]
-        if not at_git_rung:
-            return f"could not be read: {cause}"
-        if not cause.startswith("FileNotFoundError"):
-            return f"could not be located: git {cause}"
-    return None
+    if not errors:
+        return None
+    entry = errors[0]
+    at_git_rung = entry.startswith(_GIT_RUNG)
+    cause = (entry[len(_GIT_RUNG):] if at_git_rung else entry).split(": ", 1)[0]
+    if at_git_rung:
+        return f"could not be located: git {cause}"
+    return f"could not be read: {cause}"
 
 
 # Backward-compatible alias (tests and session_init patch the underscore name)

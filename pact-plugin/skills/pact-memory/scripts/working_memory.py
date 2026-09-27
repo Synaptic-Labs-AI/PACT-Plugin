@@ -1159,20 +1159,20 @@ def _resolve_display_claude_md_with_base(
     git exists, but the location it would have named is unknown rather than
     absent, so the next branch could write a different file. That covers a
     timeout and any OSError other than FileNotFoundError. git that is not
-    installed (FileNotFoundError) gives the same answer on every run, so it is
-    recorded and resolution moves on. A git call that EXITS NONZERO also moves
-    on, and records nothing, because it reads the same as "not a repository":
-    that includes a repository whose metadata cannot be read, such as a main
-    checkout whose `.git` is unsearchable, which therefore can still land on a
-    later branch.
+    installed (FileNotFoundError) is not an error: it gives the same answer on
+    every run, so resolution moves on and records nothing. A git call that
+    EXITS NONZERO also moves on and records nothing, because it reads the same
+    as "not a repository": that includes a repository whose metadata cannot be
+    read, such as a main checkout whose `.git` is unsearchable, which therefore
+    can still land on a later branch.
 
     This never CREATES a CLAUDE.md (the orchestrator manages the file's
     lifecycle); it only probes for an existing one.
 
     Args:
         errors: Optional list. Pass one to receive a message for every
-            location that could not be examined, every git branch that
-            failed, and every failure that ended resolution, so "nothing
+            location that could not be examined, every git call that did not
+            answer, and every failure that ended resolution, so "nothing
             found" and "failed to look" stay distinguishable.
 
     Returns:
@@ -1222,8 +1222,8 @@ def _resolve_display_claude_md_with_base(
             )
             if result.returncode == 0 and result.stdout.strip():
                 worktree_root = Path(result.stdout.strip())
-        except FileNotFoundError as exc:
-            errors.append(f"git rung: {type(exc).__name__}: {exc}")
+        except FileNotFoundError:
+            pass  # git is not installed: nothing to record, move on
         except (subprocess.TimeoutExpired, OSError) as exc:
             errors.append(f"git rung: {type(exc).__name__}: {exc}")
             return None, None
@@ -1263,8 +1263,8 @@ def _resolve_display_claude_md_with_base(
                 # path with the looping component unresolved. realpath does that
                 # on every interpreter, as in memory_api.main_repo_root.
                 repo_root = Path(os.path.realpath(common_dir)).parent
-        except FileNotFoundError as exc:
-            errors.append(f"git rung: {type(exc).__name__}: {exc}")
+        except FileNotFoundError:
+            pass  # git is not installed: nothing to record, move on
         except (subprocess.TimeoutExpired, OSError) as exc:
             errors.append(f"git rung: {type(exc).__name__}: {exc}")
             return None, None
@@ -2129,14 +2129,14 @@ class SyncResult:
     # A NEW REASON RATHER THAN `UNRESOLVED`, FOR THE SAME REASON AS NO_WINDOW:
     # THE CAUSE IS THE SIGNAL. The sync did not write because looking for its
     # CLAUDE.md met an error, so "there is no file" and "the file could not be
-    # looked for" stop reading alike. It covers EVERY error the display
-    # resolver records when it finds nothing: a location it could not read, a
-    # git call that timed out or failed to run, AND git that is not installed,
-    # which is recorded and moves on -- so a machine without git and without a
-    # CLAUDE.md reports this, not UNRESOLVED. It also covers a resolved or
-    # explicit target that could not be examined at the existence check. It
-    # arrives by a RETURN, on the same route as UNRESOLVED, and the errors are
-    # logged at WARNING where it is produced.
+    # looked for" stop reading alike. It covers every error the display
+    # resolver records when it finds nothing -- a location it could not read, a
+    # git call that timed out or failed to run, and any other failure that
+    # ended resolution, such as a deleted working directory or a decode error
+    # in git's output -- and a resolved or explicit target that could not be
+    # examined at the existence check. It arrives by a RETURN, on the same
+    # route as UNRESOLVED, and the errors are logged at WARNING where it is
+    # produced.
     RESOLVE_ERROR = "resolve_error"
 
     def __init__(self, reason: str) -> None:
