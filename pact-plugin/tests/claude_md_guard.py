@@ -27,10 +27,10 @@ watched set from them:
     `$HOME/.claude`, and the password database's home `.claude`, which is what
     a child started without HOME resolves.
 
-`pytest_unconfigure` samples exactly those paths again. Nothing is resolved
-twice, so the two samples cannot disagree about which files they describe,
-and both locations are watched whether or not they exist, so a creation is
-CREATED rather than a path that joins the set unseen.
+`pytest_unconfigure` samples exactly those paths again. Nothing is
+re-derived, so both samples cover exactly the same paths, and both locations
+are watched whether or not they exist, so a creation is CREATED rather than a
+path that joins the set unseen.
 
 EACH PATH IS KEYED AS WRITTEN, NOT AS RESOLVED. A PACT writer replaces a
 CLAUDE.md by renaming a new file over it, so a CLAUDE.md that is a symlink --
@@ -74,19 +74,23 @@ a collection error where no test ran, under --collect-only, and with a
 nonexistent path argument (exit 4). It does NOT run in these modes, which are
 not equally serious:
 
-  1. SIGTERM -- the default `kill`, a CI cancellation or timeout, `docker
-     stop`. pytest installs no handler for it, so the process dies without
-     comparing. MEASURED: exit 143, so CI still fails the job.
+  1. SIGTERM, or any other terminating signal pytest does not handle -- the
+     default `kill`, a CI cancellation or timeout, `docker stop`, a closed
+     terminal (SIGHUP), SIGQUIT. The process dies without comparing, and
+     never with exit 0, so CI still fails the job. MEASURED: SIGTERM exit
+     143; SIGHUP exit 129 and SIGQUIT exit 131, on 3.14.6 only.
   2. A hard kill -- SIGKILL, a segfault, or os._exit from the pytest process.
      Tests were mid-execution, so a writer may already have fired. SIGKILL and
      a segfault never exit zero. os._exit(0) DOES: it is the silent case,
      exit 0 and no comparison. MEASURED: SIGKILL exit 137, a segfault exit
      139, os._exit(0) exit 0.
-  3. A mistyped CLI flag. No test code runs, so there is nothing to miss.
+  3. A mistyped CLI flag. pytest imports both conftests and stops with a
+     usage error, exit 4, before configuring, so no test code runs. MEASURED.
   4. A --confcutdir that excludes pact-plugin/conftest.py, for example
-     `--confcutdir=tests`. The guard is never registered and the run is green
-     and inert. MEASURED. The summary line below is missing from such a run,
-     and that absence is how to tell.
+     `--confcutdir=tests`, or --noconftest, which loads no conftest at all and
+     so also switches off the in-process half. The guard is never registered
+     and the run is green and inert. MEASURED, both. The summary line below
+     is missing from such a run, and that absence is how to tell.
 
 WHAT IT PRINTS. A clean run prints one line on stderr naming every watched
 path and which of them exist, so a log shows what was watched rather than a
@@ -388,9 +392,7 @@ def _take_before(config):
 
 
 def _take_after(before):
-    """Sample EXACTLY the keys configure fixed, and re-derive nothing. Keyed by
-    the before key even when the sample's own `path` differs, because a
-    symlink appeared at it during the run."""
+    """Sample EXACTLY the keys configure fixed, and re-derive nothing."""
     return {key: _sample_one(key) for key in before}
 
 
