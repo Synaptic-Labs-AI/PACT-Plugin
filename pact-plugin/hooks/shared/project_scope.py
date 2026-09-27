@@ -31,9 +31,11 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from pathlib import Path
 from typing import Optional, Set
 
+from .claude_md_manager import _stat_if_present
 from .git_helpers import run_git
 from .pact_context import _UNSAFE_SLUG_CHARS_RE
 from .paths import get_claude_config_dir
@@ -141,13 +143,20 @@ def same_repository(env_dir: Path, base: Path) -> bool:
 
 
 def _nearest_existing_directory(path: Path) -> Optional[Path]:
-    """Return `path` if it is a directory, else its closest ancestor that is."""
+    """Return `path` if it is a directory, else its closest ancestor that is.
+
+    None at a level that cannot be examined (EACCES, EPERM): the walk stops
+    there, as the project-id walk does, rather than climbing to an ancestor
+    the declaration may not belong to. `Path.is_dir()` cannot decide this: it
+    raised on 3.9-3.13 and returned False on 3.14, which climbed.
+    """
     for candidate in (path, *path.parents):
         try:
-            if candidate.is_dir():
-                return candidate
+            found = _stat_if_present(candidate)
         except OSError:
             return None
+        if found is not None and stat.S_ISDIR(found.st_mode):
+            return candidate
     return None
 
 

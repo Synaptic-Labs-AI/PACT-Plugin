@@ -43,6 +43,7 @@ import worktree_guard
 from scripts import memory_api
 from scripts.memory_api import PACTMemory
 from shared import claude_md_manager as cmm
+from shared import project_scope
 from shared import session_resume
 
 _NEEDS_NON_ROOT = pytest.mark.skipif(
@@ -502,6 +503,33 @@ class TestProjectIdWalk:
         monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
 
         assert memory_api.main_repo_root() == Path(os.path.realpath(tmp_path)) / "loop" / "a"
+
+
+class TestNearestExistingDirectory:
+    """project_scope's ancestor walk for a declaration that no longer exists.
+    It stops at a level it cannot examine, like the project-id walk."""
+
+    @_NEEDS_NON_ROOT
+    def test_an_unreadable_level_stops_the_walk(self, tmp_path, lock):
+        """RED BEFORE THE FIX ON 3.14, which skipped the unreadable levels and
+        returned the locked ancestor. 3.9 and 3.13 already stopped."""
+        locked = tmp_path / "locked"
+        (locked / "project").mkdir(parents=True)
+        lock(locked)
+        assert project_scope._nearest_existing_directory(locked / "project" / "gone") is None
+
+    def test_a_removed_directory_maps_to_its_nearest_existing_ancestor(self, tmp_path):
+        """The matched control: the same walk with nothing locked."""
+        (tmp_path / "project").mkdir()
+        gone = tmp_path / "project" / "gone" / "deeper"
+        assert project_scope._nearest_existing_directory(gone) == tmp_path / "project"
+
+    def test_a_file_is_passed_over_for_the_directory_above_it(self, tmp_path):
+        """Only a directory answers. A regular file on the path is climbed past."""
+        (tmp_path / "project").mkdir()
+        a_file = tmp_path / "project" / "notes.txt"
+        a_file.write_text("x")
+        assert project_scope._nearest_existing_directory(a_file / "child") == tmp_path / "project"
 
 
 # --- Carrier 4: the worktree guard --------------------------------------------
