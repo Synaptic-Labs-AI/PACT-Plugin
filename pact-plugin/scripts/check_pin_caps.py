@@ -254,13 +254,13 @@ def _resolve_pins():
         # closed-vocabulary token; the path stays in `errors`.
         cause = unreadable_cause(errors)
         if cause is not None:
-            return [], f"claude.md {cause}"
-        return [], "claude.md not found"
+            return [], f"CLAUDE.md {cause}"
+        return [], "CLAUDE.md not found"
 
     try:
         content = claude_md.read_text(encoding="utf-8")
     except (IOError, OSError, UnicodeDecodeError):
-        return [], "claude.md unreadable"
+        return [], "CLAUDE.md unreadable"
 
     parsed = _parse_pinned_section(content)
     if parsed is None:

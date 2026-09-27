@@ -158,7 +158,7 @@ class TestCheckPinCaps_Advisory_FailOpen:
         assert rc == 0
         assert payload["allowed"] is True
         assert "unknown" in payload["slot_status"]
-        assert "claude.md not found" in payload["slot_status"]
+        assert "CLAUDE.md not found" in payload["slot_status"]
 
     def test_unreadable_file_fails_open(self, patched_claude_md, monkeypatch):
         patched_claude_md(_make_pinned_content(3))
@@ -171,6 +171,7 @@ class TestCheckPinCaps_Advisory_FailOpen:
         assert rc == 0
         assert payload["allowed"] is True
         assert "unknown" in payload["slot_status"]
+        assert "CLAUDE.md unreadable" in payload["slot_status"], payload["slot_status"]
 
     def test_no_pinned_section_fails_open(self, patched_claude_md):
         """CLAUDE.md exists but has no ## Pinned Context."""
@@ -215,7 +216,7 @@ class TestCheckPinCaps_UnreadableIsNotMissing:
 
         status = payload["slot_status"]
         assert rc == 0 and payload["allowed"] is True
-        assert "claude.md could not be read: PermissionError (EACCES)" in status, status
+        assert "CLAUDE.md could not be read: PermissionError (EACCES)" in status, status
         assert "not found" not in status and "/" not in status, status
 
     def test_a_git_call_that_did_not_answer_is_reported_as_git(self, tmp_path, monkeypatch):
@@ -239,7 +240,7 @@ class TestCheckPinCaps_UnreadableIsNotMissing:
 
         status = payload["slot_status"]
         assert rc == 0
-        assert "claude.md could not be located: git PermissionError (EACCES)" in status, status
+        assert "CLAUDE.md could not be located: git PermissionError (EACCES)" in status, status
         assert "could not be read" not in status and "/" not in status, status
 
     def test_a_project_with_no_claude_md_is_still_not_found(self, tmp_path, monkeypatch):
@@ -254,7 +255,7 @@ class TestCheckPinCaps_UnreadableIsNotMissing:
         rc, payload = _run_cli(["--status"])
 
         assert rc == 0
-        assert "claude.md not found" in payload["slot_status"], payload["slot_status"]
+        assert "CLAUDE.md not found" in payload["slot_status"], payload["slot_status"]
 
 
 class TestCheckPinCaps_Advisory_EvictablePins:
