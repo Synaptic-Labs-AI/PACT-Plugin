@@ -52,6 +52,7 @@ never loaded. The clean arm requires the one-line summary the guard prints on a
 clean run, and the stash check stays as a second witness.
 """
 
+import ast
 import json
 import os
 import pwd
@@ -136,6 +137,16 @@ _NEEDS_GIT = pytest.mark.skipif(
     shutil.which("git") is None, reason="this arm builds a real git repository"
 )
 
+# A child that hangs would hang the suite with it.
+_CHILD_TIMEOUT = 180
+
+
+def _child_env():
+    """This process's environment without PYTEST_*. The outer run's
+    PYTEST_ADDOPTS or PYTEST_PLUGINS would change the child's command line
+    and plugins, and PYTEST_CURRENT_TEST names the outer test."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+
 
 def _run_nested(
     tmp_path, *, modify_target=None, argv_extra=(), cwd=None, project_dir=None,
@@ -185,7 +196,7 @@ def _run_nested(
         str(PLUGIN_ROOT / "hooks"),
         str(PLUGIN_ROOT / "skills" / "pact-memory" / "scripts"),
     ]))
-    env = dict(os.environ)
+    env = _child_env()
     inherited = env.get("PYTHONPATH")
     env["PYTHONPATH"] = os.pathsep.join(roots + ([inherited] if inherited else []))
     env["CLAUDE_PROJECT_DIR"] = str(project_dir or proj)
@@ -212,7 +223,14 @@ def _run_nested(
         capture_output=True,
         text=True,
         check=False,
+        timeout=_CHILD_TIMEOUT,
     )
+    if not dump.exists():
+        pytest.fail(
+            f"the child wrote no dump, so its test never ran (exit "
+            f"{completed.returncode}); stdout:\n{completed.stdout}\n"
+            f"stderr:\n{completed.stderr}"
+        )
     result = json.loads(dump.read_text(encoding="utf-8"))
     assert os.path.samefile(result["guard_file"], guard_copy), (
         f"the child loaded {result['guard_file']}, not the guard copy {guard_copy}"
@@ -467,9 +485,11 @@ def test_a_skills_only_run_reads_every_input(tmp_path):
         [sys.executable, "-m", "pytest", "--collect-only", "-q",
          "-p", "no:cacheprovider", str(candidates[0])],
         cwd=str(PLUGIN_ROOT),
+        env=_child_env(),
         capture_output=True,
         text=True,
         check=False,
+        timeout=_CHILD_TIMEOUT,
     )
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
@@ -540,3 +560,34 @@ def test_a_symlinked_claude_md_left_alone_is_clean(tmp_path):
     summary = [l for l in completed.stderr.splitlines() if l.startswith(_SUMMARY_PREFIX)]
     assert len(summary) == 1, completed.stderr
     assert f"{_key(link)} (present)" in summary[0]
+
+
+def test_an_inherited_pytest_addopts_does_not_reach_the_child(tmp_path, monkeypatch):
+    """The outer run's PYTEST_ADDOPTS -- here a flag the child cannot parse --
+    is not the child's: the clean arm stays clean."""
+    monkeypatch.setenv("PYTEST_ADDOPTS", "--no-such-flag")
+    completed, dump = _run_nested(tmp_path)
+    _assert_confined(dump, _default_tmp_set(tmp_path))
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_a_child_that_writes_no_dump_fails_with_its_own_output(tmp_path):
+    """A child that never ran its test leaves no dump. The arm fails with the
+    child's own exit code and output, not a bare missing-file error."""
+    with pytest.raises(pytest.fail.Exception, match="unrecognized arguments"):
+        _run_nested(tmp_path, argv_extra=("--no-such-flag",))
+
+
+def test_every_nested_spawn_has_a_timeout():
+    """Every `subprocess.run` in this file passes `timeout`."""
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    spawns = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and ast.unparse(node.func) == "subprocess.run"
+    ]
+    assert spawns, "no subprocess.run found: the census is measuring nothing"
+    missing = [
+        node.lineno for node in spawns
+        if "timeout" not in {kw.arg for kw in node.keywords}
+    ]
+    assert missing == [], f"subprocess.run without a timeout at lines {missing}"
