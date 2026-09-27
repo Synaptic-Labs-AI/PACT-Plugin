@@ -398,9 +398,14 @@ class PACTMemory:
                 not read would name a parent's project for this one. The
                 caller reports the project as unresolved.
         """
+        # os.path.realpath, not Path.resolve: on 3.9 resolve() raises
+        # RuntimeError on a symlink loop, which returned `start` unwalked,
+        # while 3.13 and 3.14 leave the loop unresolved and walk on. realpath
+        # does the latter everywhere: a loop is not there (ELOOP is absent to
+        # the probe), so the walk goes on to the nearest real ancestor.
         try:
-            current = start.resolve()
-        except (OSError, RuntimeError):
+            current = Path(os.path.realpath(start))
+        except OSError:
             return start
         for parent in [current] + list(current.parents):
             if _stat_if_present(parent / ".git") is not None:
@@ -440,9 +445,10 @@ class PACTMemory:
             declared_dir: The directory value (env var or session record).
             source: Label for the debug log naming where the value came from.
         """
+        # realpath for the reason _find_project_root gives.
         try:
-            declared_root = Path(declared_dir).resolve()
-        except (OSError, RuntimeError):
+            declared_root = Path(os.path.realpath(declared_dir))
+        except OSError:
             declared_root = None
         # The local name is declared_main_root, NOT main_repo_root: rebinding
         # the module-level helper's own name would make it local for the whole
@@ -556,8 +562,10 @@ class PACTMemory:
                 # .claude marker there) scopes every save to the USER, and
                 # searches under a project then silently miss. Warn so the
                 # mis-scope is visible.
+                # realpath for the reason _find_project_root gives. The
+                # RuntimeError is Path.home()'s own, when no home can be found.
                 try:
-                    home = Path.home().resolve()
+                    home = Path(os.path.realpath(Path.home()))
                 except (OSError, RuntimeError):
                     home = None
                 if home is not None and os.path.normcase(str(cwd_root)) == os.path.normcase(str(home)):

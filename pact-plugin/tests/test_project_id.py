@@ -97,8 +97,8 @@ def _find_project_root_under_test(start: Path) -> Path:
     `_stat_if_present`, so `_isolate_walkup_to` reaches this walk too.
     """
     try:
-        current = start.resolve()
-    except (OSError, RuntimeError):
+        current = Path(os.path.realpath(start))
+    except OSError:
         return start
     for parent in [current] + list(current.parents):
         if memory_api._stat_if_present(parent / ".git") is not None:
@@ -610,6 +610,25 @@ class TestFindProjectRoot:
             _isolate_walkup_to(monkeypatch, confined)
         expected = nested if isolated else tmp_path
         assert walk(nested).resolve() == expected.resolve()
+
+    @pytest.mark.parametrize(
+        "walk",
+        [_find_project_root_under_test, PACTMemory._find_project_root],
+        ids=["replica", "real"],
+    )
+    def test_a_looped_start_walks_on_to_the_nearest_real_marker(self, walk, tmp_path):
+        """A symlink loop is not there, so the walk continues past it to the
+        nearest real ancestor's marker, on every interpreter. RED BEFORE THE
+        FIX ON 3.9, where Path.resolve() raised RuntimeError on the loop and
+        the walk returned the looped start unwalked; 3.13 and 3.14 already
+        walked on."""
+        project = tmp_path / "project"
+        (project / ".git").mkdir(parents=True)
+        looped = project / "loopdir"
+        os.symlink("loopdir_partner", looped)
+        os.symlink("loopdir", project / "loopdir_partner")
+
+        assert walk(looped) == Path(os.path.realpath(project))
 
     def test_finds_git_ancestor(self, tmp_path):
         """Walk-up finds a .git marker on an ancestor."""
