@@ -101,7 +101,9 @@ is marked trylast, so no other plugin's unconfigure hook is skipped by the
 raise unless that plugin also marks its hook trylast.
 
 INSTRUMENT ERRORS. A path that sampled WITHOUT ERROR before the session -- an
-absent file counts -- and cannot be sampled after it is a violation,
+absent file counts, and absent means what the writers' probe means, so a
+CLAUDE.md under a `.claude` that is a file or a symlink loop is absent, not an
+error -- and cannot be sampled after it is a violation,
 NOW_UNREADABLE: something replaced it with a directory, locked it, or removed
 access to it during the run. A path that could not be sampled before the
 session is reported and not raised: there is no baseline to compare. An input
@@ -133,6 +135,7 @@ without any test-only disable seam.
 # matches the parenthesised call forms and the augmented-assignment spellings,
 # so naming the attribute in prose is safe and quoting a call is not.
 
+import errno
 import hashlib
 import os
 import subprocess
@@ -165,6 +168,10 @@ _VIOLATIONS = frozenset(
 _OK_VERDICTS = frozenset({"OK_ABSENT", "OK_UNCHANGED"})
 
 _PROJECT_SHAPES = (Path(".claude") / "CLAUDE.md", Path("CLAUDE.md"))
+
+# The writers' probe's absent set, copied because this module must not import
+# a writer. test_claude_md_guard.py holds the two equal.
+_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
 
 _SUMMARY_PREFIX = "[PACT CLAUDE.md guard] clean:"
 
@@ -338,21 +345,19 @@ def _sample_one(path):
     try:
         leaf = os.lstat(key)
         sample["leaf_dev"], sample["leaf_ino"] = leaf.st_dev, leaf.st_ino
-    except OSError:
+    except (OSError, ValueError):
         pass
+    # Absent means what the writers' probe means: the same errnos, and
+    # ValueError. `os.path.realpath`, not `Path.resolve()`, which raises on a
+    # symlink loop on 3.9 only.
     try:
-        resolved = Path(key).resolve()
-    except (OSError, RuntimeError) as exc:
-        # `Path.resolve()` disagrees with itself across versions on a symlink
-        # loop, so both types are caught and the guard reports rather than
-        # deciding a containment question it could not answer.
-        sample["error"] = f"resolve failed: {type(exc).__name__}: {exc}"
-        return sample
-    try:
+        resolved = Path(os.path.realpath(key))
         stat = resolved.stat()
-    except FileNotFoundError:
+    except ValueError:
         return sample
     except OSError as exc:
+        if exc.errno in _ABSENT_ERRNOS:
+            return sample
         sample["error"] = f"stat failed: {type(exc).__name__}: {exc}"
         return sample
 

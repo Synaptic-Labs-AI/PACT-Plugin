@@ -230,6 +230,47 @@ def test_a_directory_created_at_a_watched_absent_path_fails_closed(tmp_path):
     assert _only({key: before}, {key: after}) == "NOW_UNREADABLE"
 
 
+def _not_a_directory(claude, shape):
+    """Make `claude` a regular file, or a symlink to itself."""
+    if shape == "file":
+        claude.write_text("not a directory")
+    else:
+        claude.symlink_to(claude)
+
+
+@pytest.mark.parametrize("shape", ["file", "loop"])
+def test_a_claude_md_under_a_claude_that_is_not_a_directory_is_absent(tmp_path, shape):
+    """`.claude` a regular file (ENOTDIR) or a symlink loop (ELOOP): the
+    writers' shared probe calls the CLAUDE.md under it absent, and so must the
+    sample, on every interpreter, or a clean run prints a REPORT."""
+    claude = tmp_path / ".claude"
+    _not_a_directory(claude, shape)
+    sample = guard._sample_one(claude / "CLAUDE.md")
+    assert (sample["exists"], sample["error"]) == (False, None), sample
+
+
+def test_a_claude_file_replaced_by_a_directory_holding_claude_md_is_created(tmp_path):
+    """Before the session `.claude` is a file; during it, a directory holding
+    CLAUDE.md replaces it. An absent baseline makes that CREATED. An erred
+    baseline made it INSTRUMENT_ERROR, which is reported and not failed."""
+    claude = tmp_path / ".claude"
+    _not_a_directory(claude, "file")
+    before = guard._sample_one(claude / "CLAUDE.md")
+    claude.unlink()
+    claude.mkdir()
+    (claude / "CLAUDE.md").write_text("created during the run")
+    key = before["path"]
+    assert _only({key: before}, guard._take_after({key: before})) == "CREATED"
+
+
+def test_the_absent_errnos_are_the_writers_probes():
+    """The guard holds its own copy of the set, because it must not import a
+    writer; it must match the one the writers' probe uses."""
+    from shared.claude_md_manager import _ABSENT_ERRNOS
+
+    assert guard._ABSENT_ERRNOS == _ABSENT_ERRNOS
+
+
 def test_the_verdict_reads_exactly_the_fields_its_docstring_names():
     """Flip each sampled field of an unchanged present sample, one at a time,
     and collect the fields whose flip moves the verdict. That set is what
