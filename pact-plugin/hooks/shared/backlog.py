@@ -55,6 +55,7 @@ from shared.backlog_store import (  # noqa: E402  # follows the sys.path bootstr
     _archived,
     _enclosing_checkout,
     _resolved,
+    _unexamined,
     as_datetime,
     file_local_flags,
     read_json,
@@ -273,10 +274,10 @@ def _umbrella_refusal(project_dir: str, source: str) -> Optional[str]:
         if _enclosing_checkout(_resolved(Path(project_dir))) is None:
             return None
     except OSError as exc:
-        level = exc.filename or project_dir
         return (
-            f"{level} could not be examined ({exc.strerror or type(exc).__name__}), "
-            f"which leaves open whether a repository encloses {source}={project_dir!r}"
+            f"{_unexamined(exc, Path(project_dir))} could not be examined "
+            f"({exc.strerror or type(exc).__name__}), which leaves open whether "
+            f"a repository encloses {source}={project_dir!r}"
         )
     return f"{source}={project_dir!r} sits inside a repository git could not read"
 

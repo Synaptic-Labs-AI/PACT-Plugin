@@ -70,8 +70,8 @@ def lock():
     """
     locked = []
 
-    def _lock(path):
-        path.chmod(0o000)
+    def _lock(path, mode=0o000):
+        path.chmod(mode)
         locked.append(path)
 
     yield _lock
@@ -624,14 +624,28 @@ def _project_below_an_outer_checkout(tmp_path):
     return outer, sub
 
 
+# Two ways to make the project's level unexaminable: its parent cannot be
+# searched, so even a stat of the project fails; or the project itself cannot
+# be searched, so a stat of it works and the probe of its `.git` fails.
+_UNEXAMINABLE_LAYOUTS = ["locked-parent", "unsearchable-project"]
+
+
+def _make_unexaminable(layout, sub, lock):
+    if layout == "locked-parent":
+        lock(sub.parent)
+    else:
+        lock(sub, 0o600)
+
+
 class TestBacklogProjectLookup:
     """The enclosing-checkout walk stops at a level it cannot examine. The read
     path then declines the enclosing rung and says so; the write path refuses
     and names the level. Neither ever climbs to the outer checkout."""
 
     @_NEEDS_NON_ROOT
+    @pytest.mark.parametrize("layout", _UNEXAMINABLE_LAYOUTS)
     def test_the_read_path_declines_loudly_rather_than_claim_the_outer_backlog(
-        self, tmp_path, lock
+        self, layout, tmp_path, lock
     ):
         """RED BEFORE THE FIX: 3.14 climbed past the unreadable level and
         rendered the OUTER checkout's backlog as this project's; 3.9 and 3.13
@@ -640,7 +654,7 @@ class TestBacklogProjectLookup:
         outer, sub = _project_below_an_outer_checkout(tmp_path)
         store = tmp_path / "store"
         _backlog_file(store, outer, "OUTER ITEM")
-        lock(outer / "inner")
+        _make_unexaminable(layout, sub, lock)
 
         notice = backlog_store.session_block(str(sub), backlog_dir=store)
 
@@ -674,20 +688,24 @@ class TestBacklogProjectLookup:
         assert "OWN ITEM" in notice.context, notice
 
     @_NEEDS_NON_ROOT
+    @pytest.mark.parametrize("layout", _UNEXAMINABLE_LAYOUTS)
     def test_the_write_path_refuses_and_names_the_level(
-        self, tmp_path, lock, monkeypatch
+        self, layout, tmp_path, lock, monkeypatch
     ):
         """RED BEFORE THE FIX: 3.9 and 3.13 raised PermissionError out of
         project_root; 3.14 refused with the wrong reason ('does not name an
-        existing directory')."""
+        existing directory'). The unsearchable-project layout reaches the
+        walk's own probe, and its refusal named `<dir>/.git` where the read
+        path names `<dir>`; both now name the directory."""
         _outer, sub = _project_below_an_outer_checkout(tmp_path)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(sub))
-        lock(sub.parent)
+        _make_unexaminable(layout, sub, lock)
 
         with pytest.raises(backlog.BacklogWriteError) as refused:
             backlog.project_root()
 
         assert f"{sub} could not be examined" in str(refused.value), refused.value
+        assert ".git could not be examined" not in str(refused.value), refused.value
 
     def test_a_looped_worktree_is_recorded_on_every_interpreter(
         self, tmp_path, monkeypatch

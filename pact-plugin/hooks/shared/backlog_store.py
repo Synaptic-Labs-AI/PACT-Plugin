@@ -975,12 +975,22 @@ def _unexamined_level(project_dir: str) -> str:
     try:
         _enclosing_checkout(_resolved(Path(project_dir)))
     except OSError as exc:
-        level = Path(exc.filename).parent if exc.filename else Path(project_dir)
         return (
-            f" {level} could not be examined ({failure_cause(exc)}), so no "
-            f"checkout enclosing this project could be looked for."
+            f" {_unexamined(exc, Path(project_dir))} could not be examined "
+            f"({failure_cause(exc)}), so no checkout enclosing this project "
+            f"could be looked for."
         )
     return ""
+
+
+def _unexamined(exc: OSError, fallback: Path) -> Path:
+    """The directory `exc` could not examine: a failed `<dir>/.git` names
+    `<dir>`, any other failed path names itself. The read path's decline and
+    the write path's refusal both name the level through this, so they agree."""
+    if not exc.filename:
+        return fallback
+    failed = Path(exc.filename)
+    return failed.parent if failed.name == ".git" else failed
 
 
 def _safe_detail(exc: BaseException) -> str:
