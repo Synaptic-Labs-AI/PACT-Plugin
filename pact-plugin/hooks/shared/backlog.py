@@ -26,6 +26,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import subprocess
 import sys
 import tempfile
@@ -54,11 +55,13 @@ from shared.backlog_store import (  # noqa: E402  # follows the sys.path bootstr
     _archived,
     _enclosing_checkout,
     _resolved,
+    _unexamined,
     as_datetime,
     file_local_flags,
     read_json,
     validate,
 )
+from shared.claude_md_manager import _stat_if_present  # noqa: E402  # follows the bootstrap
 from shared.paths import get_backlog_dir  # noqa: E402  # follows the bootstrap
 
 # Exit codes.
@@ -191,8 +194,10 @@ def project_root() -> Path:
        a workspace umbrella — a directory whose children are separate
        repositories, itself under no `.git` — and it is a stable project key
        in its own right.
-    3. Otherwise refuse: the variable is unset, names no directory, or names
-       a directory inside a repository git could not read. Writing under a
+    3. Otherwise refuse: the variable is unset, names no directory, names a
+       directory inside a repository git could not read, or names one whose
+       path cannot be examined, so that whether a repository encloses it
+       cannot be told (the refusal names the level). Writing under a
        checkout git failed to resolve would key a second backlog on a
        subdirectory or worktree that every git-present session keys on the
        main root; a default would write a backlog nobody can find.
@@ -237,18 +242,13 @@ def project_root() -> Path:
     root = memory_api.main_repo_root(project_dir)
     if root is not None:
         return root
-    if project_dir and Path(project_dir).is_dir():
-        # _resolved never raises: an unresolvable directory falls back to its
-        # unresolved path, the same fallback the detector takes for the name.
-        resolved = _resolved(Path(project_dir))
-        if _enclosing_checkout(resolved) is None:
-            return resolved
-        why = (
-            f"{source}={project_dir!r} sits inside a repository git "
-            f"could not read"
-        )
-    elif project_dir:
-        why = f"{source}={project_dir!r} does not name an existing directory"
+    if project_dir:
+        why = _umbrella_refusal(project_dir, source)
+        if why is None:
+            # _resolved never raises: an unresolvable directory falls back to
+            # its unresolved path, the same fallback the detector takes for
+            # the name.
+            return _resolved(Path(project_dir))
     else:
         why = "CLAUDE_PROJECT_DIR is unset"
     raise BacklogWriteError(
@@ -257,6 +257,29 @@ def project_root() -> Path:
         f"to the project directory; a directory with no repository of its own "
         f"or above it is accepted."
     )
+
+
+def _umbrella_refusal(project_dir: str, source: str) -> Optional[str]:
+    """Why `project_dir` cannot key a backlog as an umbrella, or None when it can.
+
+    It can when it is an existing directory with no `.git` at or above it. A
+    level that cannot be examined (EACCES, EPERM) is a refusal naming that
+    level, never a pass: whether a repository encloses the directory cannot be
+    told, and guessing "none" would key a second backlog on a subdirectory.
+    """
+    try:
+        found = _stat_if_present(project_dir)
+        if found is None or not stat.S_ISDIR(found.st_mode):
+            return f"{source}={project_dir!r} does not name an existing directory"
+        if _enclosing_checkout(_resolved(Path(project_dir))) is None:
+            return None
+    except OSError as exc:
+        return (
+            f"{_unexamined(exc, Path(project_dir))} could not be examined "
+            f"({exc.strerror or type(exc).__name__}), which leaves open whether "
+            f"a repository encloses {source}={project_dir!r}"
+        )
+    return f"{source}={project_dir!r} sits inside a repository git could not read"
 
 
 def checkout_roots() -> List[str]:
@@ -280,8 +303,11 @@ def checkout_roots() -> List[str]:
     porcelain = _run_capture(
         ["git", "-C", str(project_root()), "worktree", "list", "--porcelain"]
     )
+    # os.path.realpath, not Path.resolve: on 3.9 resolve() raises RuntimeError
+    # for a worktree whose directory became a symlink loop, while realpath
+    # keeps the looping component unresolved, as resolve() does on 3.13+.
     roots = [
-        str(Path(line[len("worktree "):]).resolve())
+        os.path.realpath(line[len("worktree "):])
         for line in (porcelain or "").splitlines()
         if line.startswith("worktree ")
     ]

@@ -15,10 +15,12 @@ Used by:
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -1041,6 +1043,29 @@ def _narrow_to_memory_region(
     return tail[:end_span[0]], region_start + inner_start
 
 
+# The errnos that mean "not there" rather than "cannot be examined".
+_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
+
+
+def _stat_if_present(path) -> Optional[os.stat_result]:
+    """Return `os.stat(path)`, or None when the path is not there.
+
+    A copy of `_stat_if_present` in hooks/shared/claude_md_manager.py, which
+    this module does not import (see the twin notes above).
+    tests/test_unreadable_location_carriers.py holds every copy to one table:
+    an errno in _ABSENT_ERRNOS, or an unencodable path, is absent; any other
+    OSError, EACCES and EPERM included, propagates.
+    """
+    try:
+        return os.stat(path)
+    except OSError as exc:
+        if exc.errno in _ABSENT_ERRNOS:
+            return None
+        raise
+    except ValueError:
+        return None
+
+
 def _find_existing_claude_md(base: Path) -> Optional[Path]:
     """
     Return the first existing CLAUDE.md under `base`, checking both
@@ -1051,95 +1076,48 @@ def _find_existing_claude_md(base: Path) -> Optional[Path]:
     first, then falls back to `./CLAUDE.md`, returning the first match or
     None if neither exists.
 
+    A LOCATION THAT CANNOT BE EXAMINED RAISES, ON EVERY INTERPRETER.
+    `Path.exists()` re-raises a PermissionError on 3.9 and 3.13 and returns
+    False on 3.14, so the same unsearchable directory aborted resolution on two
+    CI interpreters and fell through on the third. `_stat_if_present` decides
+    what is absent, the same way as the project CLAUDE.md writers, and lets any
+    other OSError propagate. So the legacy file is never tried past a preferred
+    one that could not be examined: the preferred file may exist behind the
+    error, and writing the legacy file beside it would leave the project with
+    two diverging memory files. Every resolver in this module ends resolution
+    on the error.
+
     Args:
         base: Directory to probe for CLAUDE.md.
 
     Returns:
         Path to the existing CLAUDE.md, or None if neither location exists.
+
+    Raises:
+        OSError: a location could not be examined.
     """
-    dot_claude = base / ".claude" / "CLAUDE.md"
-    if dot_claude.exists():
-        return dot_claude
-    legacy = base / "CLAUDE.md"
-    if legacy.exists():
-        return legacy
+    for candidate in (base / ".claude" / "CLAUDE.md", base / "CLAUDE.md"):
+        if _stat_if_present(candidate) is not None:
+            return candidate
     return None
 
 
-def _get_claude_md_path() -> Optional[Path]:
+def _git_is_on_path(env: dict) -> bool:
+    """Whether a file named git is on the PATH `env` gives subprocess.
+
+    A twin of the one in hooks/staleness.py, which this module does not
+    import. git's absence is decided here, not from the error running it
+    raises: with git absent, an unsearchable PATH directory or an entry through
+    a regular file makes the call raise PermissionError or NotADirectoryError,
+    not FileNotFoundError. F_OK, not X_OK, so a git that is present but cannot
+    run is still run, and its failure stops resolution.
     """
-    Get the path to CLAUDE.md in the project root.
-
-    Uses CLAUDE_PROJECT_DIR environment variable if set, then the session
-    record's project_dir, then git worktree/repo root detection, then the
-    current working directory. At each level, checks both `.claude/CLAUDE.md`
-    (new default) and `./CLAUDE.md` (legacy) in priority order.
-
-    Note: This mirrors the resolution strategy in hooks/staleness.py
-    (get_project_claude_md_path). Kept as a local copy: importing staleness
-    would require the sys.path bootstrap pact_session.py in this directory
-    carries, and the drift-noted twin remains the chosen mechanism here.
-
-    Returns:
-        Path to CLAUDE.md if it exists, None otherwise.
-    """
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-    if project_dir:
-        found = _find_existing_claude_md(Path(project_dir))
-        if found is not None:
-            return found
-
-    # Session-record rung: the directory session_init recorded at SessionStart,
-    # discovered via the CLAUDE_CODE_SESSION_ID glob in pact_session. Below env
-    # (a present declaration wins), ABOVE the git/cwd derivations — in a
-    # multi-repo workspace the cwd's git root can be the WRONG scope. The
-    # existence coupling is preserved: the record supplies the base to PROBE,
-    # and a miss falls through exactly like an env miss (this resolver never
-    # creates CLAUDE.md).
-    record_dir = get_project_dir_from_session_record()
-    if record_dir:
-        found = _find_existing_claude_md(Path(record_dir))
-        if found is not None:
-            return found
-
-    # Fallback: detect git root (worktree-safe)
-    # Uses --git-common-dir instead of --show-toplevel because the latter
-    # returns the worktree path when run inside a worktree, which may not
-    # contain CLAUDE.md. --git-common-dir always points to the shared .git
-    # directory; its parent is the main repo root where CLAUDE.md lives.
-    # git returns this path relative to the invoking directory when run at a
-    # repo root (the bare ".git") and absolute elsewhere, so resolve a relative
-    # result against the cwd before taking its parent.
-    # NOTE: Twin pattern in memory_api.py (_detect_project_id) and
-    #       hooks/staleness.py (get_project_claude_md_path) -- keep in sync.
-    # Function-level: the shared package is importable only after
-    # pact_session's sys.path bootstrap has run at module import.
-    from shared.project_scope import git_env_without_location
-
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--git-common-dir"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            env=git_env_without_location(),
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            common_dir = Path(result.stdout.strip())
-            if not common_dir.is_absolute():
-                common_dir = Path.cwd() / common_dir
-            repo_root = common_dir.resolve().parent
-            found = _find_existing_claude_md(repo_root)
-            if found is not None:
-                return found
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        pass
-
-    # Last resort: current working directory
-    return _find_existing_claude_md(Path.cwd())
+    return shutil.which("git", mode=os.F_OK, path=env.get("PATH", os.defpath)) is not None
 
 
-def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Path]]:
+def _resolve_display_claude_md_with_base(
+    errors: Optional[list] = None,
+) -> Tuple[Optional[Path], Optional[Path]]:
     """
     Resolve the display CLAUDE.md AND the trusted base directory it was found
     under, so a write caller can containment-check the target against the base
@@ -1169,12 +1147,12 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
       4. Current working directory -> the same probe.
 
     Branch 2 anchors the WORKTREE root (--show-toplevel) so a worktree that IS
-    a session root updates its OWN display file; branch 3 falls back to
-    _get_claude_md_path's MAIN-repo anchor (--git-common-dir) for the common
-    case where it is not. Because branch 2 precedes branch 3, the two resolvers
-    now differ ONLY in that worktree-root branch: in a non-worktree checkout
-    both branches resolve the same directory, so the [0] of this result is
-    identical to _get_claude_md_path's.
+    a session root updates its OWN display file; branch 3 falls back to the
+    MAIN-repo anchor (--git-common-dir) of hooks/staleness.py's resolver for
+    the common case where it is not. Because branch 2 precedes branch 3, the
+    two resolvers differ ONLY in that worktree-root branch and in the session
+    record rung, which staleness does not have: in a non-worktree checkout
+    both git branches resolve the same directory.
 
     The returned `base` is the branch's directory captured BEFORE descending
     into `.claude` (the arg passed to `_find_existing_claude_md`), NOT the
@@ -1183,16 +1161,49 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
     symlinked-parent `.claude` perturbs the target's resolve() but not the
     base's, so containment catches the escape.
 
+    A LOCATION THAT CANNOT BE EXAMINED ENDS RESOLUTION, AT ANY BRANCH. When a
+    probe raises (see _find_existing_claude_md), this returns (None, None) and
+    records why, instead of trying a lower-priority file or the next branch.
+    The file behind the error may be the one this session displays; writing
+    another one would leave two diverging memory files, and past a declared
+    branch it could write into a different project. A location that is merely
+    ABSENT still falls through, which is what keeps PACT's own worktree
+    declarations (where CLAUDE.md is gitignored) landing on the main checkout.
+    A GIT CALL THAT DID NOT ANSWER ALSO ENDS RESOLUTION, for the same reason:
+    git exists, but the location it would have named is unknown rather than
+    absent, so the next branch could write a different file. That covers a
+    timeout and any OSError other than FileNotFoundError. git's answer is
+    decoded as a filesystem path, so it names the path the filesystem spells
+    under any locale; an answer that is not valid UTF-8 is still that exact
+    path, and the probe decides. git that is not on PATH is not an error: it is
+    decided before git runs (see _git_is_on_path), it gives the same answer on
+    every run, and resolution moves on and records nothing; so does a
+    FileNotFoundError from the call. A git call that EXITS NONZERO also moves
+    on and records nothing, because it reads the same as "not a repository":
+    that includes a repository whose metadata cannot be read, such as a main
+    checkout whose `.git` is unsearchable, which therefore can still land on a
+    later branch.
+
     This never CREATES a CLAUDE.md (the orchestrator manages the file's
     lifecycle); it only probes for an existing one.
+
+    Args:
+        errors: Optional list. Pass one to receive a message for every
+            location that could not be examined, every git call that did not
+            answer, and every failure that ended resolution, so "nothing
+            found" and "failed to look" stay distinguishable.
 
     Returns:
         (path, base) where path is the existing display CLAUDE.md and base is
         the directory it was found under; (None, None) if none exists.
     """
-    # Resolution must never raise into the sync path; on any failure (a bad
-    # CLAUDE_PROJECT_DIR value, an inaccessible probe target, or a deleted cwd)
-    # return (None, None) so the caller skips the sync and the save still succeeds.
+    # Resolution must never raise into the sync path. A probe that cannot
+    # examine a location raises, and so does a deleted working directory; the
+    # outer handler records each one and returns (None, None), so the caller
+    # skips the sync and the save still succeeds. The git branches' inner
+    # handlers cover git's own work only: git that is not installed moves on,
+    # and git that did not answer ends resolution, as a failed probe does.
+    errors = [] if errors is None else errors
     try:
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
         if project_dir:
@@ -1217,53 +1228,76 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
         # pact_session's sys.path bootstrap has run at module import.
         from shared.project_scope import git_env_without_location
 
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                env=git_env_without_location(),
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                worktree_root = Path(result.stdout.strip())
-                found = _find_existing_claude_md(worktree_root)
-                if found is not None:
-                    return found, worktree_root
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            pass
+        git_env = git_env_without_location()
+        git_on_path = _git_is_on_path(git_env)
+        worktree_root = None
+        if git_on_path:
+            try:
+                result = subprocess.run(
+                    ["git", "rev-parse", "--show-toplevel"],
+                    capture_output=True,
+                    timeout=5,
+                    env=git_env,
+                )
+                # os.fsdecode, not text=True: git names a path, so decode it the
+                # way the filesystem spells paths, under any locale. text=True
+                # used the locale encoding, and under ISO8859-1 a UTF-8 path
+                # decoded without error into a path that does not exist.
+                answer = os.fsdecode(result.stdout).strip()
+                if result.returncode == 0 and answer:
+                    worktree_root = Path(answer)
+            except FileNotFoundError:
+                pass  # git vanished or cannot start: the same answer every run
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                errors.append(f"git rung: {type(exc).__name__}: {exc}")
+                return None, None
+        if worktree_root is not None:
+            found = _find_existing_claude_md(worktree_root)
+            if found is not None:
+                return found, worktree_root
 
         # Main-repo root via --git-common-dir. Under the PACT `.worktrees/`
         # convention no session is ever rooted in the worktree, so branch 2
         # found nothing and the file the session actually reads is the MAIN
         # repo's. --git-common-dir points at the shared .git dir whether run
         # from the main repo or a linked worktree, so its parent is the main
-        # repo root in both. This is _get_claude_md_path's exact anchor.
+        # repo root in both. This is the staleness resolver's exact anchor.
         #
         # The is_absolute() guard is load-bearing, not decoration: git returns
         # a RELATIVE path (".git", "../.git") when run at a repo root or subdir,
         # and _find_existing_claude_md does a bare `base / "CLAUDE.md"` with no
         # normalisation, so a relative base would yield a cwd-relative Path and
         # a cwd-relative lock sidecar (the exact divergence D2 just closed).
-        # Reused verbatim from _get_claude_md_path.
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--git-common-dir"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                env=git_env_without_location(),
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                common_dir = Path(result.stdout.strip())
-                if not common_dir.is_absolute():
-                    common_dir = Path.cwd() / common_dir
-                repo_root = common_dir.resolve().parent
-                found = _find_existing_claude_md(repo_root)
-                if found is not None:
-                    return found, repo_root
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            pass
+        # The same derivation as the staleness resolver's git rung.
+        repo_root = None
+        if git_on_path:
+            try:
+                result = subprocess.run(
+                    ["git", "rev-parse", "--git-common-dir"],
+                    capture_output=True,
+                    timeout=5,
+                    env=git_env,
+                )
+                answer = os.fsdecode(result.stdout).strip()  # as in branch 2
+                if result.returncode == 0 and answer:
+                    common_dir = Path(answer)
+                    if not common_dir.is_absolute():
+                        common_dir = Path.cwd() / common_dir
+                    # os.path.realpath, not Path.resolve(): on 3.9 resolve()
+                    # raises RuntimeError on a symlink loop, while 3.13 and 3.14
+                    # return the path with the looping component unresolved.
+                    # realpath does that on every interpreter, as in
+                    # memory_api.main_repo_root.
+                    repo_root = Path(os.path.realpath(common_dir)).parent
+            except FileNotFoundError:
+                pass  # git vanished or cannot start: the same answer every run
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                errors.append(f"git rung: {type(exc).__name__}: {exc}")
+                return None, None
+        if repo_root is not None:
+            found = _find_existing_claude_md(repo_root)
+            if found is not None:
+                return found, repo_root
 
         # Last resort: current working directory
         cwd = Path.cwd()
@@ -1271,6 +1305,7 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
         return (found, cwd) if found is not None else (None, None)
     except Exception as e:
         logger.debug("display CLAUDE.md resolution failed, skipping sync: %s", e)
+        errors.append(f"{type(e).__name__}: {e}")
         return None, None
 
 
@@ -2117,6 +2152,17 @@ class SyncResult:
     # this one alone. Do not read the first sentence as covering the two
     # writers together.
     NO_WINDOW = "no_window"      # no write window resolved; see _resolve_write_window
+    # A NEW REASON RATHER THAN `UNRESOLVED`, FOR THE SAME REASON AS NO_WINDOW:
+    # THE CAUSE IS THE SIGNAL. The sync did not write because looking for its
+    # CLAUDE.md met an error, so "there is no file" and "the file could not be
+    # looked for" stop reading alike. It covers every error the display
+    # resolver records when it finds nothing -- a location it could not read, a
+    # git call that timed out or failed to run, and any other failure that
+    # ended resolution, such as a deleted working directory -- and a resolved
+    # or explicit target that could not be examined at the existence check. It
+    # arrives by a RETURN, on the same route as UNRESOLVED, and the errors are
+    # logged at WARNING where it is produced.
+    RESOLVE_ERROR = "resolve_error"
 
     def __init__(self, reason: str) -> None:
         self.reason = reason
@@ -2135,6 +2181,22 @@ class SyncResult:
 
     def __hash__(self) -> int:
         return hash(self.reason)
+
+
+def _log_resolve_errors(errors: List[str]) -> None:
+    """Log what the display resolver could not read, at WARNING."""
+    if errors:
+        logger.warning(
+            "CLAUDE.md resolution met %d error(s): %s", len(errors), "; ".join(errors)
+        )
+
+
+def _unresolved_reason(claude_md_path: Optional[Path], errors: List[str]) -> str:
+    """RESOLVE_ERROR when nothing was found and resolution met an error,
+    UNRESOLVED otherwise."""
+    if claude_md_path is None and errors:
+        return SyncResult.RESOLVE_ERROR
+    return SyncResult.UNRESOLVED
 
 
 class AmbientSyncRefused(RuntimeError):
@@ -2320,8 +2382,14 @@ def _target_is_inside_the_declared_project_dir(resolved_target: Path) -> bool:
     declared = os.environ.get("CLAUDE_PROJECT_DIR")
     if not declared:
         return False
+    # os.path.realpath, not Path.resolve(): on 3.9 resolve() raises
+    # RuntimeError on a symlink loop, while 3.13 and later return the path
+    # with the looping component unresolved. realpath does that on every
+    # interpreter, so a looped declaration gets the same answer everywhere.
     try:
-        Path(resolved_target).resolve().relative_to(Path(declared).resolve())
+        Path(os.path.realpath(resolved_target)).relative_to(
+            Path(os.path.realpath(declared))
+        )
     except (ValueError, OSError):
         return False
     return True
@@ -2548,11 +2616,15 @@ def sync_to_claude_md(
     _refuse_ambient_target_under_pytest(target, claude_md_root)
     _refuse_ambient_sync_on_project_dir_disagreement(target, claude_md_root)
 
+    resolve_errors: List[str] = []
     if target is not None:
         claude_md_path = Path(target)
         resolved_root = _project_root_of(claude_md_path)
     else:
-        claude_md_path, resolved_root = _resolve_display_claude_md_with_base()
+        claude_md_path, resolved_root = _resolve_display_claude_md_with_base(
+            errors=resolve_errors
+        )
+        _log_resolve_errors(resolve_errors)
     # Escape guard runs AFTER resolution because it needs the resolved
     # root; the guards above run before because they need only the
     # declaration. Same ordering in the sibling.
@@ -2593,7 +2665,7 @@ def sync_to_claude_md(
     # both halves here costs one condition and depends on nobody's promise.
     if claude_md_path is None or project_root is None:
         logger.debug("CLAUDE.md not found, skipping working memory sync")
-        return SyncResult(SyncResult.UNRESOLVED)
+        return SyncResult(_unresolved_reason(claude_md_path, resolve_errors))
 
     # EXISTENCE GUARD, BELOW THE JOIN SO IT COVERS BOTH BRANCHES.
     #
@@ -2630,7 +2702,18 @@ def sync_to_claude_md(
     # at this", the text must not say "this is a bug."
     #
     # NEITHER ARM CREATES. That is the contract: an absent target is a skip.
-    if not claude_md_path.exists():
+    #
+    # A TARGET THAT CANNOT BE EXAMINED IS A RESOLVE_ERROR, NOT A MISSING FILE.
+    # `_stat_if_present` decides, as in the resolvers: `Path.exists()` raised
+    # out of this function on 3.9 and 3.13 and returned False on 3.14. An
+    # explicit target reaches this with a static layout; the ambient route
+    # reaches it when the file becomes unreadable after the resolver found it.
+    try:
+        target_stat = _stat_if_present(claude_md_path)
+    except OSError as exc:
+        _log_resolve_errors([f"{type(exc).__name__}: {exc}"])
+        return SyncResult(SyncResult.RESOLVE_ERROR)
+    if target_stat is None:
         if target is not None:
             logger.debug(
                 "explicit sync target %s does not exist, skipping working "
@@ -3003,7 +3086,11 @@ def sync_retrieved_to_claude_md(
     # in production today; it protects the path's future re-enablement).
     _refuse_ambient_sync_on_project_dir_disagreement(None, claude_md_root)
 
-    claude_md_path, resolved_root = _resolve_display_claude_md_with_base()
+    resolve_errors: List[str] = []
+    claude_md_path, resolved_root = _resolve_display_claude_md_with_base(
+        errors=resolve_errors
+    )
+    _log_resolve_errors(resolve_errors)
     _refuse_ambient_sync_on_declared_scope_escape(
         None, claude_md_root, resolved_root, claude_md_path
     )
@@ -3017,7 +3104,7 @@ def sync_retrieved_to_claude_md(
 
     if claude_md_path is None or project_root is None:
         logger.debug("CLAUDE.md not found, skipping retrieved context sync")
-        return SyncResult(SyncResult.UNRESOLVED)
+        return SyncResult(_unresolved_reason(claude_md_path, resolve_errors))
 
     # EXISTENCE GUARD. The `is None` check above is not sufficient: it covers a
     # resolver that finds NOTHING, not a resolver that returns a path to a file
@@ -3040,7 +3127,15 @@ def sync_retrieved_to_claude_md(
     # NAMES BOTH CAUSES, ASSERTS NEITHER: a file removed after it resolved is
     # indistinguishable here from a resolver that stopped being partial, and
     # the first is not a defect at all.
-    if not claude_md_path.exists():
+    #
+    # A FILE THAT BECAME UNREADABLE AFTER IT RESOLVED IS A RESOLVE_ERROR, on
+    # every interpreter, as in the sibling.
+    try:
+        target_stat = _stat_if_present(claude_md_path)
+    except OSError as exc:
+        _log_resolve_errors([f"{type(exc).__name__}: {exc}"])
+        return SyncResult(SyncResult.RESOLVE_ERROR)
+    if target_stat is None:
         logger.warning(
             "resolved display CLAUDE.md %s does not exist, skipping retrieved "
             "context sync (this never creates CLAUDE.md). Either the display "

@@ -101,7 +101,7 @@ class TestLockReleaseOnException:
         # (b) lock released → re-acquirable fast (NOT the 5s timeout). Shrink
         # the timeout so a leak would surface as a quick TimeoutError, not a
         # 5s hang.
-        target = wm._get_claude_md_path()
+        target = wm._resolve_display_claude_md_path()
         assert target is not None
         monkeypatch.setattr(wm, "_LOCK_TIMEOUT_SECONDS", 0.3)
         monkeypatch.setattr(wm, "_LOCK_POLL_INTERVAL", 0.05)
@@ -246,17 +246,17 @@ class TestProjectDirDivergenceResidual:
     """
 
     def _resolve_under_root(self, wm, root: Path, monkeypatch):
-        """Drive working_memory._get_claude_md_path so it resolves under
-        ``root`` via the cwd fallback: env unset + git-root detection forced to
-        fail. The session-record rung between them is inert here (the discovery
-        refuses test processes, and no CLAUDE_CODE_SESSION_ID is set), so the
-        resolver falls through env -> record(absent) -> git -> cwd, landing on
-        root."""
+        """Drive working_memory._resolve_display_claude_md_path so it resolves
+        under ``root`` via the cwd fallback: env unset + both git anchors forced
+        to fail. The session-record rung between them is inert here (the
+        discovery refuses test processes, and no CLAUDE_CODE_SESSION_ID is set),
+        so the resolver falls through env -> record(absent) -> git -> cwd,
+        landing on root."""
         # env unset → skip the env-var branch
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
 
         # Force the git-root fallback to "not a repo" so resolution falls
-        # through to cwd. (returncode != 0 makes _get_claude_md_path skip it.)
+        # through to cwd. (returncode != 0 makes the resolver skip both git anchors.)
         class _FakeProc:
             returncode = 1
             stdout = ""
@@ -264,7 +264,7 @@ class TestProjectDirDivergenceResidual:
         monkeypatch.setattr(wm.subprocess, "run", lambda *a, **k: _FakeProc())
         # cwd fallback lands on root.
         monkeypatch.setattr(wm.Path, "cwd", staticmethod(lambda: root))
-        return wm._get_claude_md_path()
+        return wm._resolve_display_claude_md_path()
 
     def test_unset_env_with_divergent_roots_resolves_different_sidecars(
         self, tmp_path, monkeypatch

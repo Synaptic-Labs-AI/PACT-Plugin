@@ -19,10 +19,12 @@ eliminating startup cost for non-memory users.
 
 from __future__ import annotations
 
+import errno
 import functools
 import json
 import logging
 import os
+import stat
 import struct
 import subprocess
 import threading
@@ -117,6 +119,31 @@ def _content_fields_changed(
            json.dumps(after.get(k), sort_keys=True, default=str):
             return True
     return False
+
+
+# The errors that mean a path is NOT THERE. Every other OSError means the path
+# could not be examined, and _stat_if_present raises it.
+_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
+
+
+def _stat_if_present(path) -> Optional[os.stat_result]:
+    """Return `os.stat(path)`, or None when the path is not there.
+
+    A copy of hooks/shared/claude_md_manager._stat_if_present, which this
+    module does not import; tests/test_unreadable_location_carriers.py holds
+    the copies to one table. `Path.exists()` and `Path.is_dir()` re-raise a
+    PermissionError on 3.9-3.13 and return False on 3.14; this applies the
+    3.9-3.13 rule on every interpreter: an errno in _ABSENT_ERRNOS, or an
+    unencodable path, is absent, and any other OSError propagates.
+    """
+    try:
+        return os.stat(path)
+    except OSError as exc:
+        if exc.errno in _ABSENT_ERRNOS:
+            return None
+        raise
+    except ValueError:
+        return None
 
 
 def _ensure_ready() -> None:
@@ -217,7 +244,11 @@ def main_repo_root(start: Optional[str] = None) -> Optional[Path]:
             # checkout, not the worktree.
             base = Path(start) if start is not None else Path.cwd()
             common_dir = base / common_dir
-        return common_dir.resolve().parent
+        # os.path.realpath, not Path.resolve: on 3.9 resolve() raises
+        # RuntimeError on a symlink loop, while on 3.13 and 3.14 it returns
+        # what this call returns on all three, the path with the looping
+        # component left unresolved.
+        return Path(os.path.realpath(common_dir)).parent
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         # git not installed, not a repo, command timed out, or the path could
         # not be resolved.
@@ -359,19 +390,32 @@ class PACTMemory:
         Returns:
             First ancestor (inclusive of `start`) containing a project marker,
             or `start` if none found.
+
+        Raises:
+            OSError: At a level whose markers cannot be examined (EACCES,
+                EPERM). THE WALK STOPS THERE AND DOES NOT CLIMB PAST IT: the
+                first marker defines the project, so skipping a level it could
+                not read would name a parent's project for this one. The
+                caller reports the project as unresolved.
         """
+        # os.path.realpath, not Path.resolve: on 3.9 resolve() raises
+        # RuntimeError on a symlink loop, which returned `start` unwalked,
+        # while 3.13 and 3.14 leave the loop unresolved and walk on. realpath
+        # does the latter everywhere: a loop is not there (ELOOP is absent to
+        # the probe), so the walk goes on to the nearest real ancestor.
         try:
-            current = start.resolve()
-        except (OSError, RuntimeError):
+            current = Path(os.path.realpath(start))
+        except OSError:
             return start
         for parent in [current] + list(current.parents):
-            if (parent / ".git").exists():
+            if _stat_if_present(parent / ".git") is not None:
                 return parent
-            if (parent / ".claude").is_dir():
+            dot_claude = _stat_if_present(parent / ".claude")
+            if dot_claude is not None and stat.S_ISDIR(dot_claude.st_mode):
                 return parent
-            if (parent / "CLAUDE.md").exists():
+            if _stat_if_present(parent / "CLAUDE.md") is not None:
                 return parent
-            if (parent / ".claude" / "CLAUDE.md").exists():
+            if _stat_if_present(parent / ".claude" / "CLAUDE.md") is not None:
                 return parent
         return start  # fallback: use original
 
@@ -401,9 +445,10 @@ class PACTMemory:
             declared_dir: The directory value (env var or session record).
             source: Label for the debug log naming where the value came from.
         """
+        # realpath for the reason _find_project_root gives.
         try:
-            declared_root = Path(declared_dir).resolve()
-        except (OSError, RuntimeError):
+            declared_root = Path(os.path.realpath(declared_dir))
+        except OSError:
             declared_root = None
         # The local name is declared_main_root, NOT main_repo_root: rebinding
         # the module-level helper's own name would make it local for the whole
@@ -490,7 +535,8 @@ class PACTMemory:
         # two share one derivation of the path exactly as they already share
         # one derivation of the name. Passing no `start` runs git in the cwd,
         # which is this strategy's base.
-        # NOTE: Twin pattern in working_memory.py (_get_claude_md_path) and
+        # NOTE: Twin pattern in working_memory.py
+        #       (_resolve_display_claude_md_with_base, branch 3) and
         #       hooks/staleness.py (get_project_claude_md_path) -- keep in sync.
         #       Those two couple the resolution to a CLAUDE.md existence check
         #       and return the root only when one is found there, so they need
@@ -516,8 +562,10 @@ class PACTMemory:
                 # .claude marker there) scopes every save to the USER, and
                 # searches under a project then silently miss. Warn so the
                 # mis-scope is visible.
+                # realpath for the reason _find_project_root gives. The
+                # RuntimeError is Path.home()'s own, when no home can be found.
                 try:
-                    home = Path.home().resolve()
+                    home = Path(os.path.realpath(Path.home()))
                 except (OSError, RuntimeError):
                     home = None
                 if home is not None and os.path.normcase(str(cwd_root)) == os.path.normcase(str(home)):
@@ -609,8 +657,9 @@ class PACTMemory:
         """Outcome of the most recent save() or sync() CLAUDE.md write.
 
         One of `SyncResult`'s reasons: `wrote`, `refused`, `suppressed`,
-        `unresolved`, `missing`, `failed` or `no_window`, plus `empty` on the
-        sync() path (this project has no records; the file was not touched).
+        `unresolved`, `resolve_error`, `missing`, `failed` or `no_window`,
+        plus `empty` on the sync() path (this project has no records; the
+        file was not touched).
         None means neither has run yet on this instance.
 
         THIS LIST IS THE REACHABLE SET AND NOT THE FULL ENUM. `empty` never

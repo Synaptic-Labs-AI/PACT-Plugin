@@ -112,7 +112,7 @@ def claude_md(tmp_path, monkeypatch):
         path = tmp_path / "CLAUDE.md"
         path.write_text(content, encoding="utf-8")
         monkeypatch.setattr(
-            archive_pin, "get_project_claude_md_path", lambda: path
+            archive_pin, "get_project_claude_md_path", lambda errors=None: path
         )
         return path
     return _write
@@ -686,7 +686,7 @@ class TestEnvPropagation_ExplicitCwdBeatsAmbient:
         claude_md_path = main / "CLAUDE.md"
         claude_md_path.write_text(_two_pin_file(), encoding="utf-8")
         monkeypatch.setattr(
-            archive_pin, "get_project_claude_md_path", lambda: claude_md_path
+            archive_pin, "get_project_claude_md_path", lambda errors=None: claude_md_path
         )
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
 
@@ -2051,7 +2051,7 @@ class TestArchivePin_Unevaluable:
 
     def test_missing_claude_md(self, monkeypatch):
         monkeypatch.setattr(
-            archive_pin, "get_project_claude_md_path", lambda: None
+            archive_pin, "get_project_claude_md_path", lambda errors=None: None
         )
         verdict = archive_pin.build_verdict(0, db_path=None)
         assert verdict["outcome"] == "UNEVALUABLE"
@@ -2243,7 +2243,9 @@ class TestArchivePin_CliContract:
 # alphabet. A rename fails loudly over there, in
 # `test_constants_match_the_declared_alphabet`, rather than silently shrinking
 # this sweep. Do not "tidy" these into imports.
-_NON_SUPPRESSED_STATUSES = ("wrote", "refused", "failed", "unresolved", "missing")
+_NON_SUPPRESSED_STATUSES = (
+    "wrote", "refused", "failed", "unresolved", "resolve_error", "missing", "no_window",
+)
 
 # The two halves of the scope-presence rule, SPELLED for the same reason the
 # alphabet above is: a set read off `archive_pin._WRITE_ATTEMPTED_STATUSES`

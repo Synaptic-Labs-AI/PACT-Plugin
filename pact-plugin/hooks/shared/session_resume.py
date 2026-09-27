@@ -35,6 +35,7 @@ from shared.claude_md_manager import (
     WORKING_MEMORY_COMMENT,
     ContainmentError,
     _atomic_write_text,
+    _stat_if_present,
     ensure_dot_claude_parent,
     file_lock,
     resolve_project_claude_md_path,
@@ -137,7 +138,28 @@ def update_session_info(
     # Existing files take precedence (.claude/CLAUDE.md > legacy ./CLAUDE.md);
     # if neither exists, the resolver returns the new default
     # ($project_dir/.claude/CLAUDE.md) so we create at the preferred path.
-    target_file, _source = resolve_project_claude_md_path(project_dir)
+    #
+    # Create the `.claude/` parent directory (with 0o700) BEFORE acquiring
+    # the file lock. `file_lock` internally creates the target's parent
+    # directory as a side effect of opening the sidecar lock file, but it
+    # uses `mkdir(parents=True, exist_ok=True)` with no explicit mode —
+    # which defaults to 0o755 under umask. Running `ensure_dot_claude_parent`
+    # first guarantees the parent gets the intended 0o700 mode. The call is
+    # idempotent, so concurrent callers are safe: whichever thread creates
+    # the directory wins with 0o700, others find it present and no-op.
+    #
+    # Both calls raise OSError for a location they cannot examine, and an
+    # unreadable .claude/CLAUDE.md is never skipped for the legacy file. The
+    # error is REPORTED here, in the routed status: raised, it would escape
+    # into session_init and skip every later session-start step.
+    try:
+        target_file, _source = resolve_project_claude_md_path(project_dir)
+        ensure_dot_claude_parent(target_file)
+    except OSError as e:
+        return (
+            f"Session info failed: {failure_cause(e)}. "
+            "The Current Session block in CLAUDE.md is now stale."
+        )
 
     # From the canonical pair in claude_md_manager, NOT re-spelled here. The
     # scan terminator that stops a section body at these markers is DERIVED
@@ -200,16 +222,6 @@ def update_session_info(
         f"{SESSION_END}"
     )
 
-    # Create the `.claude/` parent directory (with 0o700) BEFORE acquiring
-    # the file lock. `file_lock` internally creates the target's parent
-    # directory as a side effect of opening the sidecar lock file, but it
-    # uses `mkdir(parents=True, exist_ok=True)` with no explicit mode —
-    # which defaults to 0o755 under umask. Running `ensure_dot_claude_parent`
-    # first guarantees the parent gets the intended 0o700 mode. The call is
-    # idempotent, so concurrent callers are safe: whichever thread creates
-    # the directory wins with 0o700, others see `parent.exists()` and no-op.
-    ensure_dot_claude_parent(target_file)
-
     # Concurrency guard: serialize read-mutate-write so two concurrent
     # session_init hooks on the same project CLAUDE.md cannot interleave
     # update_session_info writes and clobber each other's managed blocks.
@@ -232,7 +244,7 @@ def update_session_info(
                 # H1 ("# PACT Framework and Managed Project Memory"), session
                 # block, PACT_MEMORY with three default section headings, all
                 # wrapped by the PACT_MANAGED outer boundary.
-                if not target_file.exists():
+                if _stat_if_present(target_file) is None:
                     new_content = (
                         f"{MANAGED_START_MARKER}\n"
                         f"{MANAGED_TITLE}\n"
@@ -379,7 +391,7 @@ def update_session_info(
                 #
                 # IT IS NOT DEAD COVER. WHAT REMAINS UNDER IT IS THE FILE
                 # LAYER, on the read path and the write path inside the lock:
-                # `Path.exists` and `read_text` (OSError, and
+                # `_stat_if_present` and `read_text` (OSError, and
                 # UnicodeDecodeError for a CLAUDE.md that is not valid UTF-8),
                 # and `_atomic_write_text` (OSError, UnicodeEncodeError).
                 # `ContainmentError` is handled above and does not reach here,

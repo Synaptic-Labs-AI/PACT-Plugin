@@ -55,6 +55,9 @@ LITERAL_REASONS = (
     "unresolved",
     "missing",
     "failed",
+    "empty",
+    "no_window",
+    "resolve_error",
 )
 
 LITERAL_NON_WRITE_REASONS = tuple(r for r in LITERAL_REASONS if r != "wrote")
@@ -86,13 +89,16 @@ class TestReasonsStayDistinguishable:
             SyncResult.UNRESOLVED,
             SyncResult.MISSING,
             SyncResult.FAILED,
+            SyncResult.EMPTY,
+            SyncResult.NO_WINDOW,
+            SyncResult.RESOLVE_ERROR,
         )
         assert actual == LITERAL_REASONS, (
             f"the reason constants no longer match the alphabet these pins "
             f"sweep: {actual} != {LITERAL_REASONS}"
         )
 
-    def test_the_reason_constants_are_six_distinct_strings(self):
+    def test_no_two_reason_constants_share_a_value(self):
         """The cheapest way to break pin 1 is a copy-paste in the constants."""
         actual = (
             SyncResult.WROTE,
@@ -101,9 +107,28 @@ class TestReasonsStayDistinguishable:
             SyncResult.UNRESOLVED,
             SyncResult.MISSING,
             SyncResult.FAILED,
+            SyncResult.EMPTY,
+            SyncResult.NO_WINDOW,
+            SyncResult.RESOLVE_ERROR,
         )
         assert len(set(actual)) == len(actual), (
             f"two reason constants share a value: {actual}"
+        )
+
+    def test_every_reason_constant_is_in_the_declared_alphabet(self):
+        """The two tuples above list constants by hand, so a constant added to
+        the class and not to them is swept by nothing -- EMPTY and NO_WINDOW
+        were missing from both. This reads the class's upper-case string
+        attributes, so a new reason fails here until the alphabet names it."""
+        declared = {
+            value
+            for name, value in vars(SyncResult).items()
+            if name.isupper() and isinstance(value, str)
+        }
+        assert declared == set(LITERAL_REASONS), (
+            f"reasons on the class but not in the alphabet: "
+            f"{sorted(declared - set(LITERAL_REASONS))}; in the alphabet but not "
+            f"on the class: {sorted(set(LITERAL_REASONS) - declared)}"
         )
 
     @pytest.mark.parametrize("left", LITERAL_REASONS)
@@ -367,3 +392,237 @@ class TestTheReasonSurvivesTheProcessBoundary:
         assert {suppressed["sync_status"], refused["sync_status"]} == {
             "suppressed", "refused"
         }
+
+
+class TestAResolveErrorIsNotAnUnresolvedTarget:
+    """Resolution that found nothing because it could not LOOK reports
+    RESOLVE_ERROR; resolution that looked and found nothing reports UNRESOLVED.
+    Before the reason existed the two were one `(None, None)`.
+
+    Both arms pass `claude_md_root`, which is the only route past the
+    ambient-target refusal under pytest; it declares the containment anchor
+    and does not steer resolution. The cwd is an empty non-repository
+    directory, so the declared project is the only rung that can answer.
+    """
+
+    @pytest.mark.skipif(
+        os.geteuid() == 0,
+        reason="root searches a mode-0 directory, so no EACCES can be built",
+    )
+    def test_an_unsearchable_project_dir_is_a_resolve_error(
+        self, tmp_path, monkeypatch
+    ):
+        from scripts.working_memory import sync_to_claude_md
+
+        locked = tmp_path / "locked"
+        (locked / "proj").mkdir(parents=True)
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        monkeypatch.chdir(empty)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(locked / "proj"))
+        locked.chmod(0o000)
+        try:
+            result = sync_to_claude_md({"context": "c"}, None, "id", claude_md_root=tmp_path)
+        finally:
+            locked.chmod(0o700)
+
+        assert result.reason == SyncResult.RESOLVE_ERROR, result
+
+    def test_a_readable_empty_project_dir_is_unresolved(self, tmp_path, monkeypatch):
+        """The control: the same call, the project directory readable and
+        empty, is UNRESOLVED."""
+        from scripts.working_memory import sync_to_claude_md
+
+        (tmp_path / "proj").mkdir()
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        monkeypatch.chdir(empty)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "proj"))
+
+        result = sync_to_claude_md({"context": "c"}, None, "id", claude_md_root=tmp_path)
+
+        assert result.reason == SyncResult.UNRESOLVED, result
+
+
+    @staticmethod
+    def _sync_with_git(tmp_path, monkeypatch, run=None, path=None):
+        """Sync with no CLAUDE.md anywhere and git either absent (run=None:
+        PATH holds no git) or replaced by `run`. Returns the reason and the
+        WARNING records the working-memory logger emitted."""
+        import logging
+
+        from scripts.working_memory import sync_to_claude_md
+
+        (tmp_path / "proj").mkdir()
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        no_git = tmp_path / "no-git"
+        no_git.mkdir()
+        monkeypatch.chdir(empty)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "proj"))
+        if run is None:
+            monkeypatch.setenv("PATH", path or str(no_git))
+        else:
+            monkeypatch.setattr(subprocess, "run", run)
+        warnings = []
+
+        class _Collect(logging.Handler):
+            def emit(self, record):
+                if record.levelno >= logging.WARNING:
+                    warnings.append(record.getMessage())
+
+        wm_logger = logging.getLogger("scripts.working_memory")
+        handler = _Collect()
+        wm_logger.addHandler(handler)
+        try:
+            result = sync_to_claude_md({"context": "c"}, None, "id", claude_md_root=tmp_path)
+        finally:
+            wm_logger.removeHandler(handler)
+        return result.reason, warnings
+
+    def test_git_being_absent_with_no_claude_md_is_unresolved(self, tmp_path, monkeypatch):
+        """git is not installed and no CLAUDE.md exists anywhere. That is a
+        search that found nothing, not an error: UNRESOLVED, and nothing is
+        logged at WARNING."""
+        reason, warnings = self._sync_with_git(tmp_path, monkeypatch)
+
+        assert reason == SyncResult.UNRESOLVED
+        assert warnings == [], warnings
+
+    @pytest.mark.parametrize(
+        "path_shape",
+        [
+            pytest.param(
+                "unsearchable-dir",
+                marks=pytest.mark.skipif(
+                    os.geteuid() == 0,
+                    reason="root searches a mode-0 directory, so no EACCES can be built",
+                ),
+            ),
+            "entry-through-a-file",
+        ],
+    )
+    def test_git_absent_behind_an_awkward_path_is_unresolved(
+        self, tmp_path, monkeypatch, path_shape
+    ):
+        """git is not installed and PATH holds an unsearchable directory, or an
+        entry through a regular file, so running git would raise
+        PermissionError or NotADirectoryError. git is still absent: UNRESOLVED,
+        and nothing is logged at WARNING."""
+        if path_shape == "unsearchable-dir":
+            locked = tmp_path / "locked"
+            locked.mkdir()
+            locked.chmod(0o000)
+            path = f"{locked}{os.pathsep}{tmp_path / 'no-git'}"
+        else:
+            (tmp_path / "a-file").write_text("x")
+            path = f"{tmp_path / 'no-git'}{os.pathsep}{tmp_path / 'a-file' / 'bin'}"
+        try:
+            reason, warnings = self._sync_with_git(tmp_path, monkeypatch, path=path)
+        finally:
+            if path_shape == "unsearchable-dir":
+                locked.chmod(0o700)
+
+        assert reason == SyncResult.UNRESOLVED
+        assert warnings == [], warnings
+
+    def test_a_git_call_that_timed_out_is_a_resolve_error_and_warns(
+        self, tmp_path, monkeypatch
+    ):
+        """The control: the same layout with git timing out. That stops
+        resolution, so the reason is RESOLVE_ERROR and the collector sees the
+        WARNING, which shows it could see one above."""
+
+        def timed_out(*args, **kwargs):
+            raise subprocess.TimeoutExpired(["git"], 5)
+
+        reason, warnings = self._sync_with_git(tmp_path, monkeypatch, run=timed_out)
+
+        assert reason == SyncResult.RESOLVE_ERROR
+        assert len(warnings) == 1 and "TimeoutExpired" in warnings[0], warnings
+
+
+class TestAnUnreadableTargetBelowResolutionIsAResolveError:
+    """The existence check that runs AFTER resolution, in both syncs, reports a
+    target it cannot examine as RESOLVE_ERROR on every interpreter, and one that
+    is not there as MISSING.
+
+    `Path.exists()` there raised PermissionError out of the function on 3.9 and
+    3.13 and returned False on 3.14, which reported MISSING. The explicit
+    target reaches that check with a static layout; the ambient route reaches
+    it only when the file becomes unreadable after the resolver found it.
+    """
+
+    @staticmethod
+    def _project(tmp_path):
+        dot_claude = tmp_path / "proj" / ".claude"
+        dot_claude.mkdir(parents=True)
+        target = dot_claude / "CLAUDE.md"
+        target.write_text("# p\n\n## Working Memory\n\n## Retrieved Context\n")
+        return dot_claude, target
+
+    @pytest.mark.skipif(
+        os.geteuid() == 0,
+        reason="root searches a mode-0 directory, so no EACCES can be built",
+    )
+    def test_an_unreadable_explicit_target_is_a_resolve_error(self, tmp_path):
+        from scripts.working_memory import sync_to_claude_md
+
+        dot_claude, target = self._project(tmp_path)
+        before = target.read_bytes()
+        dot_claude.chmod(0o000)
+        try:
+            result = sync_to_claude_md({"context": "c"}, None, "id", target=target)
+        finally:
+            dot_claude.chmod(0o700)
+
+        assert result.reason == SyncResult.RESOLVE_ERROR, result
+        assert target.read_bytes() == before
+
+    def test_an_absent_explicit_target_is_missing(self, tmp_path):
+        """The control: the same call, the directory readable and the file
+        absent, is MISSING."""
+        from scripts.working_memory import sync_to_claude_md
+
+        _dot_claude, target = self._project(tmp_path)
+        target.unlink()
+
+        result = sync_to_claude_md({"context": "c"}, None, "id", target=target)
+
+        assert result.reason == SyncResult.MISSING, result
+        assert not target.exists()
+
+    @pytest.mark.skipif(
+        os.geteuid() == 0,
+        reason="root searches a mode-0 directory, so no EACCES can be built",
+    )
+    def test_a_retrieved_target_that_turns_unreadable_is_a_resolve_error(
+        self, tmp_path, monkeypatch
+    ):
+        """HARNESS: the resolver is replaced by one that returns the file and
+        then locks its directory, which is the race the ambient route can meet.
+        This sync takes no explicit target, so no static layout reaches the
+        check."""
+        import scripts.working_memory as working_memory
+
+        dot_claude, target = self._project(tmp_path)
+        before = target.read_bytes()
+
+        def resolved_then_locked(errors=None):
+            dot_claude.chmod(0o000)
+            return target, dot_claude.parent
+
+        monkeypatch.setattr(
+            working_memory, "_resolve_display_claude_md_with_base", resolved_then_locked
+        )
+        try:
+            result = working_memory.sync_retrieved_to_claude_md(
+                [{"id": "m1", "context": "c", "goal": "g"}],
+                "q",
+                claude_md_root=dot_claude.parent,
+            )
+        finally:
+            dot_claude.chmod(0o700)
+
+        assert result.reason == SyncResult.RESOLVE_ERROR, result
+        assert target.read_bytes() == before

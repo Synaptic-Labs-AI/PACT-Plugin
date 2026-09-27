@@ -75,7 +75,7 @@ def claude_md(tmp_path, monkeypatch):
         path = tmp_path / "CLAUDE.md"
         path.write_text(content, encoding="utf-8")
         monkeypatch.setattr(
-            archive_pin, "get_project_claude_md_path", lambda: path
+            archive_pin, "get_project_claude_md_path", lambda errors=None: path
         )
         return path
     return _write

@@ -499,7 +499,6 @@ class TestWorkingMemoryRecordRung:
         elsewhere.mkdir()
         monkeypatch.chdir(elsewhere)
 
-        assert wm._get_claude_md_path() == claude_md
         path, base = wm._resolve_display_claude_md_with_base()
         assert path == claude_md
         assert base == umbrella.project, (
@@ -519,7 +518,7 @@ class TestWorkingMemoryRecordRung:
         git_file = _seed_claude_md(repo)
         monkeypatch.chdir(repo)
 
-        assert wm._get_claude_md_path() == git_file
+        assert wm._resolve_display_claude_md_path() == git_file
 
 
 class TestWorkingMemoryDisagreementGuard:
@@ -780,7 +779,7 @@ class TestR2SubRepoCwd:
         _arm_record(monkeypatch, tmp_path, umbrella.project)
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         monkeypatch.chdir(umbrella.subrepo)
-        assert wm._get_claude_md_path() == umbrella_md
+        assert wm._resolve_display_claude_md_path() == umbrella_md
 
     def test_r2_subprocess_save_from_the_subrepo_scopes_the_umbrella(self, tmp_path):
         umbrella = make_umbrella(tmp_path)

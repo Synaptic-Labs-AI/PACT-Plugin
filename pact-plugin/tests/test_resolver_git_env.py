@@ -71,19 +71,6 @@ def _same(a, b) -> bool:
     return a is not None and Path(a).resolve() == Path(b).resolve()
 
 
-def test_get_claude_md_path_ignores_an_inherited_GIT_DIR(tmp_path, monkeypatch, unrelated):
-    repo = _repo(tmp_path / "R")
-    monkeypatch.chdir(repo)
-    _inherit_git_dir(monkeypatch, unrelated)
-
-    found = wm._get_claude_md_path()
-
-    assert _same(found, repo / ".claude" / "CLAUDE.md"), (
-        f"_get_claude_md_path answered {found} from the inherited GIT_DIR, "
-        "not the repository the process runs in"
-    )
-
-
 def test_resolve_display_claude_md_with_base_ignores_an_inherited_GIT_DIR(
     tmp_path, monkeypatch, unrelated
 ):
@@ -151,7 +138,6 @@ def test_main_repo_root_ignores_an_inherited_GIT_DIR(tmp_path, monkeypatch, unre
 # (file, function) -> the number of git subprocess calls it holds. A scan that
 # finds fewer is not reading the function it names.
 _RESOLVER_GIT_CALLS = {
-    ("skills/pact-memory/scripts/working_memory.py", "_get_claude_md_path"): 1,
     ("skills/pact-memory/scripts/working_memory.py", "_resolve_display_claude_md_with_base"): 2,
     ("hooks/staleness.py", "_resolve_project_claude_md_with_base"): 1,
     ("skills/pact-memory/scripts/memory_api.py", "main_repo_root"): 1,
@@ -162,7 +148,9 @@ def _git_calls(function: ast.FunctionDef):
     """Yield (call, passes_location_free_env) for each `subprocess.run` git call.
 
     The argv counts as git when it is a list literal starting with "git", or a
-    name the function assigned a list literal starting with "git".
+    name the function assigned a list literal starting with "git". The env
+    passes when it is a call to git_env_without_location(), or a name the
+    function assigned from one.
     """
     git_names = {
         target.id
@@ -170,6 +158,19 @@ def _git_calls(function: ast.FunctionDef):
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.List)
         and node.value.elts and isinstance(node.value.elts[0], ast.Constant)
         and node.value.elts[0].value == "git"
+        for target in node.targets if isinstance(target, ast.Name)
+    }
+
+    def _is_env_call(value):
+        return (
+            isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+            and value.func.id == "git_env_without_location"
+        )
+
+    env_names = {
+        target.id
+        for node in ast.walk(function)
+        if isinstance(node, ast.Assign) and _is_env_call(node.value)
         for target in node.targets if isinstance(target, ast.Name)
     }
     for node in ast.walk(function):
@@ -185,9 +186,10 @@ def _git_calls(function: ast.FunctionDef):
         if not is_git:
             continue
         passes = any(
-            kw.arg == "env" and isinstance(kw.value, ast.Call)
-            and isinstance(kw.value.func, ast.Name)
-            and kw.value.func.id == "git_env_without_location"
+            kw.arg == "env" and (
+                _is_env_call(kw.value)
+                or (isinstance(kw.value, ast.Name) and kw.value.id in env_names)
+            )
             for kw in node.keywords
         )
         yield node, passes
@@ -222,6 +224,10 @@ def test_the_scan_sees_both_argv_forms_and_a_missing_env():
             command += ["rev-parse"]
             subprocess.run(command)
             subprocess.run(["ls"])
+            env = git_env_without_location()
+            subprocess.run(["git", "status"], env=env)
+            other = dict(os.environ)
+            subprocess.run(["git", "log"], env=other)
     """)
     calls = list(_git_calls(_function(source, "resolver")))
-    assert [passes for _call, passes in calls] == [True, False]
+    assert [passes for _call, passes in calls] == [True, False, True, False]

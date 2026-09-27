@@ -540,7 +540,7 @@ def dominance_gate_env(tmp_path, monkeypatch, pact_context):
         project_dir=str(tmp_path),
     )
     import staleness
-    monkeypatch.setattr(staleness, "get_project_claude_md_path", lambda: claude_md)
+    monkeypatch.setattr(staleness, "get_project_claude_md_path", lambda errors=None: claude_md)
     return claude_md
 
 

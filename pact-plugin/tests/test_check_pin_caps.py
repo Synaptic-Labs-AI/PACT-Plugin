@@ -33,6 +33,11 @@ from unittest.mock import patch
 import pytest
 
 from helpers import make_claude_md_with_pins, make_pin_entry  # noqa: E402
+from tests.test_unreadable_location_carriers import (  # noqa: E402
+    _NEEDS_NON_ROOT,
+    _preferred_unsearchable,
+    lock,  # noqa: F401 -- a fixture, requested by name below
+)
 
 
 @pytest.fixture
@@ -43,7 +48,7 @@ def patched_claude_md(tmp_path, monkeypatch):
         claude_md.write_text(content, encoding="utf-8")
         import check_pin_caps
         monkeypatch.setattr(
-            check_pin_caps, "get_project_claude_md_path", lambda: claude_md
+            check_pin_caps, "get_project_claude_md_path", lambda errors=None: claude_md
         )
         return claude_md
     return _write
@@ -144,16 +149,16 @@ class TestCheckPinCaps_Advisory_FailOpen:
         import staleness
         import check_pin_caps
         monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: None
+            staleness, "get_project_claude_md_path", lambda errors=None: None
         )
         monkeypatch.setattr(
-            check_pin_caps, "get_project_claude_md_path", lambda: None
+            check_pin_caps, "get_project_claude_md_path", lambda errors=None: None
         )
         rc, payload = _run_cli(["--status"])
         assert rc == 0
         assert payload["allowed"] is True
         assert "unknown" in payload["slot_status"]
-        assert "claude.md not found" in payload["slot_status"]
+        assert "CLAUDE.md not found" in payload["slot_status"]
 
     def test_unreadable_file_fails_open(self, patched_claude_md, monkeypatch):
         patched_claude_md(_make_pinned_content(3))
@@ -166,6 +171,7 @@ class TestCheckPinCaps_Advisory_FailOpen:
         assert rc == 0
         assert payload["allowed"] is True
         assert "unknown" in payload["slot_status"]
+        assert "CLAUDE.md unreadable" in payload["slot_status"], payload["slot_status"]
 
     def test_no_pinned_section_fails_open(self, patched_claude_md):
         """CLAUDE.md exists but has no ## Pinned Context."""
@@ -187,6 +193,78 @@ class TestCheckPinCaps_Advisory_FailOpen:
         assert rc == 0
         assert payload["allowed"] is True
         assert "parse error" in payload["slot_status"]
+
+
+class TestCheckPinCaps_UnreadableIsNotMissing:
+    """The resolver runs for real here: CLAUDE_PROJECT_DIR names a project
+    whose `.claude/` cannot be searched, beside a readable legacy CLAUDE.md,
+    and the cwd is an empty directory outside any repository. Resolution stops
+    at the declared project, and the slot status says the file could not be
+    read, names the cause, and carries no path."""
+
+    @_NEEDS_NON_ROOT
+    def test_an_unsearchable_claude_dir_is_reported_unreadable(
+        self, tmp_path, lock, monkeypatch
+    ):
+        proj, _legacy = _preferred_unsearchable(tmp_path, lock)
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        monkeypatch.chdir(empty)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(proj))
+
+        rc, payload = _run_cli(["--status"])
+
+        status = payload["slot_status"]
+        assert rc == 0 and payload["allowed"] is True
+        assert "CLAUDE.md could not be read: PermissionError (EACCES)" in status, status
+        assert "not found" not in status and "/" not in status, status
+
+    @pytest.mark.parametrize(
+        "failure, cause",
+        [
+            (PermissionError(13, "Permission denied", "git"), "PermissionError (EACCES)"),
+        ],
+        ids=["oserror"],
+    )
+    def test_a_git_call_that_did_not_answer_is_reported_as_git(
+        self, tmp_path, monkeypatch, failure, cause
+    ):
+        """The declared project holds no CLAUDE.md, so resolution reaches the
+        git rung, and git fails to run. The status names git, not CLAUDE.md's
+        permissions."""
+        import subprocess
+
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        monkeypatch.chdir(empty)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(proj))
+
+        def git_failed(*args, **kwargs):
+            raise failure
+
+        monkeypatch.setattr(subprocess, "run", git_failed)
+        rc, payload = _run_cli(["--status"])
+
+        status = payload["slot_status"]
+        assert rc == 0
+        assert f"CLAUDE.md could not be located: git {cause}" in status, status
+        assert "could not be read" not in status and "/" not in status, status
+
+    def test_a_project_with_no_claude_md_is_still_not_found(self, tmp_path, monkeypatch):
+        """The control: the same call with a readable, empty project."""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        monkeypatch.chdir(empty)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(proj))
+
+        rc, payload = _run_cli(["--status"])
+
+        assert rc == 0
+        assert "CLAUDE.md not found" in payload["slot_status"], payload["slot_status"]
 
 
 class TestCheckPinCaps_Advisory_EvictablePins:
@@ -480,10 +558,10 @@ class TestCheckPinCaps_Advisory_NeverExit2:
         import staleness
         import check_pin_caps
         monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: None
+            staleness, "get_project_claude_md_path", lambda errors=None: None
         )
         monkeypatch.setattr(
-            check_pin_caps, "get_project_claude_md_path", lambda: None
+            check_pin_caps, "get_project_claude_md_path", lambda errors=None: None
         )
         rc, _ = _run_cli(["--status"])
         assert rc != 2

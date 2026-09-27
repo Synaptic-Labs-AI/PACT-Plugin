@@ -75,7 +75,8 @@ why they share one outcome NAME rather than forking into a fifth:
                    is EXISTENCE-INDEPENDENT: it says where a copy must be IF
                    one exists, never that one does, which is why `failed` may
                    carry it. The statuses that never reach the write --
-                   `refused`, `unresolved`, `missing` -- omit it because the
+                   `refused`, `unresolved`, `resolve_error`, `missing`,
+                   `no_window` -- omit it because the
                    bound there is true but VACUOUS, not because it is false,
                    and because the key's ABSENCE is itself the signal that no
                    write was attempted. See `_WRITE_ATTEMPTED_STATUSES` for
@@ -301,15 +302,16 @@ _SYNC_CAPABLE_SUBCOMMANDS = frozenset({"save"})
 # so a durable write can still report `failed`. Excluding it would drop the
 # scope from the status where a stray copy is MOST plausible.
 #
-# `refused`, `unresolved` and `missing` are absent because all three return or
-# raise BEFORE the write is attempted, so there is no projection from this save
-# to bound. Their bound would be TRUE but VACUOUS -- they are excluded for
-# vacuity, never because the scope would be false.
+# `refused`, `unresolved`, `resolve_error`, `missing` and `no_window` are
+# absent because all five return or raise BEFORE the write is attempted, so
+# there is no projection from this save to bound. Their bound would be TRUE
+# but VACUOUS -- they are excluded for vacuity, never because the scope would
+# be false.
 #
 # ⚠️ AND THE VACUITY ARGUMENT ALONE DOES NOT DEFEND THIS SET. THIS IS THE
 # CANONICAL STATEMENT OF WHY; the other sites point here.
 #
-# Vacuity says the key would be POINTLESS on those three. It gives no ground
+# Vacuity says the key would be POINTLESS on those five. It gives no ground
 # to refuse the edit this set actually has to survive -- adding the key
 # everywhere "for schema uniformity", which is not pointless, it is TIDY. A
 # maintainer can accept every word above and still make that change.
@@ -361,6 +363,7 @@ parse_pins = _pin_caps.parse_pins
 _PIN_HEADING_RE = _pin_caps._PIN_HEADING_RE
 _parse_pinned_section = _staleness._parse_pinned_section
 get_project_claude_md_path = _staleness.get_project_claude_md_path
+_unreadable_cause = _staleness.unreadable_cause
 # The (path, base) form. `base` is the directory the resolver ACTUALLY found
 # the file under, captured before descending into `.claude` -- a trusted
 # pre-resolve anchor rather than a re-derivation from the returned path.
@@ -539,8 +542,15 @@ def resolve_claude_md():
     # resolution seam for the whole codebase instead of introducing a second
     # that fixtures would have to know about separately.
     env_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-    path = get_project_claude_md_path()
+    errors: list = []
+    path = get_project_claude_md_path(errors=errors)
     if path is None:
+        # A CLAUDE.md that cannot be examined is not a missing one. The cause
+        # says whether a location or a git call stopped resolution, with a
+        # closed-vocabulary token; the path stays in `errors`.
+        cause = _unreadable_cause(errors)
+        if cause is not None:
+            raise _Unevaluable(f"CLAUDE.md {cause}")
         raise _Unevaluable("CLAUDE.md not found")
     base = _lexical_base_of(path)
 
@@ -843,11 +853,11 @@ def _suppression_breach_reason(
                    still holds, so name it. This is the status where a stray
                    copy is MOST plausible and the bound is SOUNDEST.
 
-      refused      NO WRITE WAS EVER ATTEMPTED -- all three exit before the
-      unresolved   `try` block opens. The bound is TRUE here but VACUOUS, and
-      missing      a scope that is unconditionally true names nothing worth
-                   searching. Omitted for that reason, NOT because it would
-                   be false.
+      refused      NO WRITE WAS EVER ATTEMPTED -- all five exit before the
+      unresolved   write. The bound is TRUE here but VACUOUS, and a scope
+      resolve_error  that is unconditionally true names nothing worth
+      missing      searching. Omitted for that reason, NOT because it would
+      no_window    be false.
 
     THIS SITE GOVERNS THE SENTENCE, NOT THE KEY, and the reason is deliberately
     vacuity ALONE. The `sync_scope` KEY carries a second argument -- that its
@@ -917,10 +927,10 @@ def _suppression_breach_reason(
             f"neither that a copy exists nor that none does. {common}{bound}"
             f"{archived}"
         )
-    # refused / unresolved / missing. NO `bound` HERE, AND THE REASON IS
-    # VACUITY RATHER THAN FALSEHOOD: these three exit before the write is
-    # attempted, so there is no projection from this save to bound and a scope
-    # would name nothing worth searching.
+    # refused / unresolved / resolve_error / missing / no_window. NO `bound`
+    # HERE, AND THE REASON IS VACUITY RATHER THAN FALSEHOOD: these five exit
+    # before the write is attempted, so there is no projection from this save
+    # to bound and a scope would name nothing worth searching.
     #
     # VACUITY IS THE WHOLE REASON AT THIS SITE, unlike the `sync_scope` KEY,
     # which also rests on its absence being machine-readable signal. That

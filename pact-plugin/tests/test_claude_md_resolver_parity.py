@@ -11,7 +11,7 @@ is updated, its siblings must stay in sync.
 Resolvers under test:
 1. shared.claude_md_manager.resolve_project_claude_md_path  -- canonical
 2. staleness.get_project_claude_md_path                      -- hooks/
-3. working_memory._get_claude_md_path                        -- skills/
+3. working_memory._resolve_display_claude_md_path            -- skills/
 4. memory_api.PACTMemory._find_project_root                  -- skills/ (walks UP)
 5. worktree_guard inline probe                                -- hooks/ (inline)
 """
@@ -69,11 +69,12 @@ def resolver_staleness(tmp: Path, monkeypatch) -> str:
 
 
 def resolver_working_memory(tmp: Path, monkeypatch) -> str:
-    """Mirror of staleness; same env-var-driven resolution strategy."""
-    from scripts.working_memory import _get_claude_md_path
+    """The display resolver every sync writes through; the env-var branch
+    answers first, as in staleness."""
+    from scripts.working_memory import _resolve_display_claude_md_path
 
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp))
-    return _classify_path(_get_claude_md_path(), tmp)
+    return _classify_path(_resolve_display_claude_md_path(), tmp)
 
 
 def resolver_memory_api(tmp: Path, monkeypatch) -> str:
@@ -223,17 +224,15 @@ class TestClaudeMdResolverParity:
 # --- Display-resolver parity invariant ---------------------------------------
 #
 # The lint above drives every resolver through the CLAUDE_PROJECT_DIR branch,
-# so it never exercises the git-topology branches -- and it covers
-# _get_claude_md_path, which has NO production callers, while omitting
-# _resolve_display_claude_md_path, which determines every real sync write
-# target. This class pins the specific invariant _resolve_display_claude_md_path's
-# docstring asserts: it and _get_claude_md_path differ ONLY in the
-# worktree-root branch, so in a non-worktree checkout they resolve identically.
+# so it never exercises the git-topology branches. This class pins the specific
+# invariant _resolve_display_claude_md_path's docstring asserts: it and the
+# staleness resolver, which anchors only on the main repository
+# (--git-common-dir), differ ONLY in the worktree-root branch, so in a
+# non-worktree checkout they resolve identically.
 #
 # It must run with CLAUDE_PROJECT_DIR UNSET -- the env branch short-circuits
 # before the git branches and would make the equivalence hold trivially,
-# testing nothing. Re-pointing the 5-way lint at the live resolver and deleting
-# the dead sibling is a separate follow-up, not this pin.
+# testing nothing.
 
 
 def _pgit(cwd: Path, *args: str) -> None:
@@ -275,8 +274,8 @@ class TestDisplayResolverParityInvariant:
 
     _resolve_display_claude_md_path anchors branch 2 on the WORKTREE root
     (--show-toplevel) and falls back on the MAIN repo root (--git-common-dir)
-    in branch 3; _get_claude_md_path uses only the main-repo anchor. The claim:
-    they differ ONLY in that worktree-root branch.
+    in branch 3; staleness.get_project_claude_md_path uses only the main-repo
+    anchor. The claim: they differ ONLY in that worktree-root branch.
 
     Three cases together demonstrate the "only". Two of them predate Option C
     and pin the CONTEXT that gives "only" its meaning; one is the actual
@@ -303,10 +302,8 @@ class TestDisplayResolverParityInvariant:
     def test_non_worktree_checkout_resolvers_coincide(self, tmp_path, monkeypatch):
         """In a plain (non-worktree) checkout the two resolvers return the SAME
         existing path -- the equivalence the docstring promises."""
-        from scripts.working_memory import (
-            _get_claude_md_path,
-            _resolve_display_claude_md_path,
-        )
+        import staleness
+        from scripts.working_memory import _resolve_display_claude_md_path
 
         repo = tmp_path / "plainrepo"
         expected = _init_repo_with_claude_md(repo)
@@ -315,7 +312,7 @@ class TestDisplayResolverParityInvariant:
         monkeypatch.chdir(repo)
 
         display = _resolve_display_claude_md_path()
-        main = _get_claude_md_path()
+        main = staleness.get_project_claude_md_path()
 
         # Both must resolve to the real file (a shared None would be vacuously
         # "equal" while proving nothing), and to the SAME file.
@@ -331,10 +328,8 @@ class TestDisplayResolverParityInvariant:
         CLAUDE.md resolves the display path to its OWN file (branch 2) while the
         main-repo resolver still points at the main file -- so the coincidence
         above is a real property of the non-worktree case, not a constant."""
-        from scripts.working_memory import (
-            _get_claude_md_path,
-            _resolve_display_claude_md_path,
-        )
+        import staleness
+        from scripts.working_memory import _resolve_display_claude_md_path
 
         repo = tmp_path / "mainrepo"
         main_file = _init_repo_with_claude_md(repo)
@@ -349,7 +344,7 @@ class TestDisplayResolverParityInvariant:
         monkeypatch.chdir(worktree)
 
         display = _resolve_display_claude_md_path()
-        main = _get_claude_md_path()
+        main = staleness.get_project_claude_md_path()
 
         assert display is not None and main is not None
         # Display follows the worktree's OWN file (branch 2, --show-toplevel);
@@ -364,7 +359,7 @@ class TestDisplayResolverParityInvariant:
 
         A PACT-convention worktree has no CLAUDE.md of its own, so branch 2
         (--show-toplevel) finds nothing. BEFORE Option C the display resolver
-        then fell through to cwd and returned None, while _get_claude_md_path
+        then fell through to cwd and returned None, while the staleness resolver
         returned the main-repo file -- they DIVERGED. Option C's branch 3
         (--git-common-dir) now sends the display resolver to that same main file,
         so the two AGREE. Delete branch 3 and this assertion fails (display -> None
@@ -376,10 +371,8 @@ class TestDisplayResolverParityInvariant:
         test_working_memory_worktree_sync.py; this asserts only that the two
         resolvers converge, which is the invariant this parity file exists for.
         """
-        from scripts.working_memory import (
-            _get_claude_md_path,
-            _resolve_display_claude_md_path,
-        )
+        import staleness
+        from scripts.working_memory import _resolve_display_claude_md_path
 
         repo = tmp_path / "mainrepo"
         main_file = _init_repo_with_claude_md(repo)
@@ -391,10 +384,762 @@ class TestDisplayResolverParityInvariant:
         monkeypatch.chdir(worktree)
 
         display = _resolve_display_claude_md_path()
-        main = _get_claude_md_path()
+        main = staleness.get_project_claude_md_path()
 
         assert display is not None and main is not None
         assert os.path.realpath(display) == os.path.realpath(main)
         # ...and specifically at the MAIN repo file, so a future change that made
         # both resolvers agree on the WRONG file would still be caught.
         assert os.path.realpath(display) == os.path.realpath(main_file)
+
+
+# --- A location that cannot be examined --------------------------------------
+#
+# `Path.exists()` re-raised a PermissionError on 3.9 and 3.13 and returned
+# False on 3.14, so the same unsearchable directory aborted these resolvers on
+# two CI interpreters and fell through on the third. The rule every arm below
+# holds, on every interpreter: an ABSENT location (ENOENT, ENOTDIR, EBADF,
+# ELOOP, an unencodable path) is skipped silently; a location that cannot be
+# EXAMINED ends resolution, at whatever rung it is met, with no fallback to a
+# legacy file or a later rung, and is recorded. So does a git call that did not
+# answer (a timeout, or any OSError other than FileNotFoundError); git that is
+# not installed is not an error, records nothing and moves on to the next rung.
+
+import errno  # noqa: E402
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+from datetime import datetime, timedelta  # noqa: E402
+
+from shared.failure_cause import failure_cause  # noqa: E402
+
+from tests.test_unreadable_location_carriers import (  # noqa: E402
+    _NEEDS_NON_ROOT,
+    _ancestor_unsearchable,
+    _LEGACY_TEXT,
+    _preferred_unsearchable,
+    _symlink_loop,
+    lock,  # noqa: F401 -- a fixture, requested by name below
+)
+
+_NEEDS_GIT = pytest.mark.skipif(
+    shutil.which("git") is None,
+    reason="these arms build a real git repository and need git",
+)
+
+
+def _both(errors_display, errors_staleness):
+    """Run the display resolver and the staleness resolver in the current
+    environment. Returns the two paths (None for none)."""
+    import staleness
+    from scripts.working_memory import _resolve_display_claude_md_with_base
+
+    display, _ = _resolve_display_claude_md_with_base(errors=errors_display)
+    stale, _ = staleness._resolve_project_claude_md_with_base(errors=errors_staleness)
+    return display, stale
+
+
+def _cwd_hit(tmp_path, monkeypatch):
+    """A readable non-repository cwd holding .claude/CLAUDE.md; chdir into it."""
+    cwdhit = tmp_path / "cwdhit"
+    (cwdhit / ".claude").mkdir(parents=True)
+    (cwdhit / ".claude" / "CLAUDE.md").write_text("cwd\n")
+    monkeypatch.chdir(cwdhit)
+    return cwdhit / ".claude" / "CLAUDE.md"
+
+
+def _same(path, expected):
+    return path is not None and os.path.realpath(path) == os.path.realpath(expected)
+
+
+class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
+    @_NEEDS_NON_ROOT
+    def test_an_unsearchable_declared_base_ends_resolution(
+        self, tmp_path, lock, monkeypatch
+    ):
+        """The declared project sits under a directory the process cannot
+        search. Every resolver stops there instead of carrying on to the cwd's
+        file, and says why.
+
+        RED BEFORE THE FIX: 3.9 and 3.13 aborted (display swallowed to None,
+        staleness raised); 3.14 returned the cwd's file. Continuing past the
+        declared base, instead of stopping, returns the cwd's file everywhere.
+        """
+        proj, _ = _ancestor_unsearchable(tmp_path, lock)
+        _cwd_hit(tmp_path, monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(proj))
+        errs, errs2 = [], []
+
+        assert _both(errs, errs2) == (None, None)
+        for recorded in (errs, errs2):
+            assert len(recorded) == 1, recorded
+            assert "PermissionError" in recorded[0] and str(proj) in recorded[0]
+
+        import staleness
+
+        assert staleness.unreadable_cause(errs2) == (
+            "could not be read: PermissionError (EACCES)"
+        ), errs2
+
+    def test_the_cwd_file_is_reachable_without_the_declaration(
+        self, tmp_path, monkeypatch
+    ):
+        """The control for the arm above: with no declaration each resolver
+        finds the cwd's file, so the None above is the stop and not a miss."""
+        hit = _cwd_hit(tmp_path, monkeypatch)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        errs, errs2 = [], []
+
+        assert all(_same(p, hit) for p in _both(errs, errs2))
+        assert errs == errs2 == []
+
+    @_NEEDS_NON_ROOT
+    def test_an_unexaminable_preferred_file_never_hands_over_to_legacy(
+        self, tmp_path, lock, monkeypatch
+    ):
+        """`.claude/` cannot be searched, the preferred file is behind it, and
+        a readable legacy ./CLAUDE.md sits beside it. No resolver returns the
+        legacy file, the sync writes nothing and reports RESOLVE_ERROR, and
+        the legacy bytes are untouched.
+
+        RED BEFORE THE FIX ON 3.14, which returned the legacy file; and against
+        a helper that skips an unexaminable location and tries the next shape,
+        on every interpreter.
+        """
+        from scripts.working_memory import SyncResult, sync_to_claude_md
+
+        proj, legacy = _preferred_unsearchable(tmp_path, lock)
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        monkeypatch.chdir(empty)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(proj))
+        errs, errs2 = [], []
+
+        assert _both(errs, errs2) == (None, None)
+        preferred = str(proj / ".claude" / "CLAUDE.md")
+        for recorded in (errs, errs2):
+            assert any(
+                preferred in e and "PermissionError" in e for e in recorded
+            ), recorded
+
+        result = sync_to_claude_md({"context": "c"}, None, "id", claude_md_root=tmp_path)
+
+        assert result.reason == SyncResult.RESOLVE_ERROR, result
+        assert legacy.read_text() == _LEGACY_TEXT, "the legacy file was written"
+
+    def test_the_preferred_file_readable_is_returned(self, tmp_path, monkeypatch):
+        """The matched control: the same layout with `.claude/` readable."""
+        proj = tmp_path / "proj"
+        (proj / ".claude").mkdir(parents=True)
+        (proj / ".claude" / "CLAUDE.md").write_text("preferred\n")
+        (proj / "CLAUDE.md").write_text(_LEGACY_TEXT)
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        monkeypatch.chdir(empty)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(proj))
+        errs, errs2 = [], []
+
+        paths = _both(errs, errs2)
+
+        assert all(_same(p, proj / ".claude" / "CLAUDE.md") for p in paths), paths
+        assert errs == errs2 == []
+
+    def test_a_looped_git_common_dir_falls_through_to_the_cwd(
+        self, tmp_path, monkeypatch
+    ):
+        """git names a common dir that is a symlink loop. Every resolver falls
+        through to the cwd's file and records nothing, on every interpreter.
+
+        RED BEFORE THE FIX ON 3.9, where `Path.resolve()` raised RuntimeError
+        past the git rung's handler: display aborted to None and staleness
+        raised.
+        """
+        hit = _cwd_hit(tmp_path, monkeypatch)
+        loop = tmp_path / "loop"
+        loop.mkdir()
+        looped = _symlink_loop(loop / "a")
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        git = bindir / "git"
+        git.write_text(
+            "#!/bin/sh\n"
+            'case "$*" in\n'
+            f'  *--git-common-dir*) echo "{looped / ".git"}" ;;\n'
+            "  *) exit 128 ;;\n"
+            "esac\n"
+        )
+        git.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        errs, errs2 = [], []
+
+        assert all(_same(p, hit) for p in _both(errs, errs2))
+        assert errs == errs2 == []
+
+    def test_a_git_call_that_fails_moves_on_to_the_cwd(self, tmp_path, monkeypatch):
+        """git is not installed. That is not an error: nothing was examined at
+        the git rungs, nothing is recorded, and resolution moves on to the
+        cwd's file, the same answer on every run."""
+        hit = _cwd_hit(tmp_path, monkeypatch)
+        no_git = tmp_path / "no-git"
+        no_git.mkdir()
+        monkeypatch.setenv("PATH", str(no_git))
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        errs, errs2 = [], []
+
+        assert all(_same(p, hit) for p in _both(errs, errs2))
+        assert errs == errs2 == []
+
+        import staleness
+
+        assert staleness.unreadable_cause(errs2) is None, errs2
+
+    def test_an_undecodable_git_answer_is_a_path_not_a_failure(
+        self, tmp_path, monkeypatch
+    ):
+        """A real git on PATH that answers with bytes that are not valid UTF-8.
+        The answer is decoded as a filesystem path, so it is that exact path:
+        nothing crashes and nothing is recorded, the probe finds no CLAUDE.md
+        there, and resolution moves on to the cwd's file."""
+        hit = _cwd_hit(tmp_path, monkeypatch)
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        git = bindir / "git"
+        git.write_text("#!/bin/sh\nprintf '/tmp/\\377\\376/.git\\n'\n")
+        git.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        errs, errs2 = [], []
+
+        assert all(_same(p, hit) for p in _both(errs, errs2))
+        assert errs == errs2 == []
+
+    @_NEEDS_GIT
+    def test_a_non_ascii_checkout_resolves_alike_under_a_single_byte_locale(
+        self, tmp_path, monkeypatch
+    ):
+        """A linked worktree W\u00e9 of M\u00e9, whose root has no CLAUDE.md, and a
+        cwd W\u00e9/sub holding its own. Under a UTF-8 locale both resolvers find
+        M\u00e9's file through git. A text-mode git call under ISO8859-1 decoded
+        git's UTF-8 path into one that does not exist, and resolution fell to
+        the cwd's lower-priority file. The locale's decoding of a text-mode
+        call is reproduced by decoding its output as latin-1, so the arm does
+        not depend on that locale being installed."""
+        main_md = _init_repo_with_claude_md(tmp_path / "M\u00e9")
+        worktree = tmp_path / "W\u00e9"
+        _pgit(tmp_path / "M\u00e9", "worktree", "add", str(worktree), "-b", "w")
+        sub_dot = worktree / "sub" / ".claude"
+        sub_dot.mkdir(parents=True)
+        (sub_dot / "CLAUDE.md").write_text("sub\n")
+        monkeypatch.chdir(worktree / "sub")
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+
+        utf8_answer = _both([], [])
+        assert all(_same(p, main_md) for p in utf8_answer), utf8_answer
+
+        real_run = subprocess.run
+
+        def under_iso8859_1(args, *rest, **kwargs):
+            if not kwargs.pop("text", False):
+                return real_run(args, *rest, **kwargs)
+            done = real_run(args, *rest, **kwargs)
+            return subprocess.CompletedProcess(
+                done.args, done.returncode, (done.stdout or b"").decode("latin-1"), ""
+            )
+
+        monkeypatch.setattr(subprocess, "run", under_iso8859_1)
+        errs, errs2 = [], []
+
+        assert all(_same(p, main_md) for p in _both(errs, errs2))
+        assert errs == errs2 == []
+
+    @pytest.mark.parametrize(
+        "path_shape",
+        [pytest.param("unsearchable-dir", marks=_NEEDS_NON_ROOT), "entry-through-a-file"],
+    )
+    def test_git_absent_behind_an_awkward_path_moves_on_to_the_cwd(
+        self, tmp_path, lock, monkeypatch, path_shape
+    ):
+        """git is not installed, but PATH holds a directory that cannot be
+        searched, or an entry that runs through a regular file. Running git
+        then raises PermissionError or NotADirectoryError, not
+        FileNotFoundError. git is still absent: nothing is recorded and
+        resolution moves on to the cwd's file."""
+        hit = _cwd_hit(tmp_path, monkeypatch)
+        no_git = tmp_path / "no-git"
+        no_git.mkdir()
+        if path_shape == "unsearchable-dir":
+            locked = tmp_path / "locked"
+            locked.mkdir()
+            lock(locked)
+            path = f"{locked}{os.pathsep}{no_git}"
+        else:
+            a_file = tmp_path / "a-file"
+            a_file.write_text("x")
+            path = f"{no_git}{os.pathsep}{a_file / 'bin'}"
+        monkeypatch.setenv("PATH", path)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        errs, errs2 = [], []
+
+        assert all(_same(p, hit) for p in _both(errs, errs2))
+        assert errs == errs2 == []
+
+    def test_a_git_that_is_present_but_cannot_run_ends_resolution(
+        self, tmp_path, monkeypatch
+    ):
+        """The control for the arm above: a file named git on PATH without
+        the execute bit. git is present, so the call's PermissionError is git
+        not answering: each resolver records it and stops."""
+        _cwd_hit(tmp_path, monkeypatch)
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        (bindir / "git").write_text("#!/bin/sh\nexit 0\n")
+        (bindir / "git").chmod(0o644)
+        monkeypatch.setenv("PATH", str(bindir))
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        errs, errs2 = [], []
+
+        assert _both(errs, errs2) == (None, None)
+        for recorded in (errs, errs2):
+            assert len(recorded) == 1 and recorded[0].startswith(
+                "git rung: PermissionError"
+            ), recorded
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            subprocess.TimeoutExpired(["git", "rev-parse"], 5),
+            PermissionError(errno.EACCES, "Permission denied", "git"),
+        ],
+        ids=["timeout", "oserror"],
+    )
+    def test_a_git_call_that_did_not_answer_ends_resolution(
+        self, tmp_path, monkeypatch, failure
+    ):
+        """git exists but did not answer, so the location its rung would have
+        named is unknown rather than absent. Each resolver records the failure
+        and stops instead of moving on to the cwd's file, which the arm above
+        shows they return when git is merely absent.
+
+        RED BEFORE THE FIX on every interpreter: both resolvers returned the
+        cwd's file."""
+        _cwd_hit(tmp_path, monkeypatch)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+
+        def did_not_answer(*args, **kwargs):
+            raise failure
+
+        monkeypatch.setattr(subprocess, "run", did_not_answer)
+        errs, errs2 = [], []
+
+        assert _both(errs, errs2) == (None, None)
+        prefix = f"git rung: {type(failure).__name__}"
+        for recorded in (errs, errs2):
+            assert len(recorded) == 1 and recorded[0].startswith(prefix), recorded
+
+        import staleness
+
+        assert staleness.unreadable_cause(errs2) == (
+            f"could not be located: git {failure_cause(failure)}"
+        ), errs2
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            subprocess.TimeoutExpired(["git", "rev-parse"], 5),
+            PermissionError(errno.EACCES, "Permission denied", "git"),
+        ],
+        ids=["timeout", "oserror"],
+    )
+    def test_a_main_checkout_rung_that_did_not_answer_ends_display_resolution(
+        self, tmp_path, monkeypatch, failure
+    ):
+        """The display resolver's second git rung on its own. --show-toplevel
+        answers with a directory holding no CLAUDE.md, so resolution reaches
+        --git-common-dir, which does not answer. The resolver stops there and
+        records it instead of moving on to the cwd's file. The arm above
+        cannot see this rung: with every git call failing, the display
+        resolver already stops at --show-toplevel."""
+        _cwd_hit(tmp_path, monkeypatch)
+        top = tmp_path / "top"
+        top.mkdir()
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+
+        def only_show_toplevel_answers(args, *rest, **kwargs):
+            if "--show-toplevel" in args:
+                return subprocess.CompletedProcess(args, 0, stdout=f"{top}\n", stderr="")
+            raise failure
+
+        monkeypatch.setattr(subprocess, "run", only_show_toplevel_answers)
+        from scripts.working_memory import _resolve_display_claude_md_with_base
+
+        errs = []
+        assert _resolve_display_claude_md_with_base(errors=errs) == (None, None)
+        prefix = f"git rung: {type(failure).__name__}"
+        assert len(errs) == 1 and errs[0].startswith(prefix), errs
+
+    @_NEEDS_GIT
+    @_NEEDS_NON_ROOT
+    def test_the_staleness_writer_never_marks_another_projects_file(
+        self, tmp_path, lock, monkeypatch
+    ):
+        """The declared project's `.claude/` cannot be searched and the cwd is
+        a DIFFERENT repository whose CLAUDE.md carries a stale pin. Nothing
+        downstream of the staleness resolver refuses a write there, so the
+        declared-base stop is the only thing between the two projects.
+
+        RED BEFORE THE FIX ON 3.14, which resolved the other repository and
+        marked its pin; and against a resolver that continues past the
+        declared base, on every interpreter.
+        """
+        import staleness
+        from staleness import PINNED_STALENESS_DAYS
+
+        proj, _legacy = _preferred_unsearchable(tmp_path, lock)
+        other = tmp_path / "other"
+        other.mkdir()
+        _pgit(other, "init")
+        old = (datetime.now() - timedelta(days=PINNED_STALENESS_DAYS + 10)).strftime("%Y-%m-%d")
+        other_md = other / "CLAUDE.md"
+        other_md.write_text(
+            "# Project Memory\n\n## Pinned Context\n\n"
+            f"### Old Feature (PR #50, merged {old})\n- details\n\n"
+        )
+        before = (other_md.read_bytes(), other_md.stat().st_ino)
+        monkeypatch.chdir(other)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(proj))
+
+        assert staleness._resolve_project_claude_md_with_base() == (None, None)
+        staleness.check_pinned_staleness()
+
+        assert (other_md.read_bytes(), other_md.stat().st_ino) == before
+
+    @_NEEDS_GIT
+    def test_the_other_projects_file_is_reachable_without_the_declaration(
+        self, tmp_path, monkeypatch
+    ):
+        """The control for the arm above: undeclared, the staleness resolver
+        reaches the other repository's file, so the arm above is the stop."""
+        import staleness
+
+        other = tmp_path / "other"
+        other.mkdir()
+        _pgit(other, "init")
+        other_md = other / "CLAUDE.md"
+        other_md.write_text("# Project Memory\n")
+        monkeypatch.chdir(other)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+
+        found, _ = staleness._resolve_project_claude_md_with_base()
+
+        assert _same(found, other_md)
+
+    @staticmethod
+    def _worktree_with_its_own_claude_md(tmp_path):
+        """main/ is a repository with its CLAUDE.md; main/.worktrees/wt is a
+        linked worktree whose own .claude/CLAUDE.md exists."""
+        main = tmp_path / "main"
+        main_md = _init_repo_with_claude_md(main)
+        wt = main / ".worktrees" / "wt"
+        _pgit(main, "worktree", "add", str(wt), "-b", "feature")
+        (wt / ".claude").mkdir()
+        (wt / ".claude" / "CLAUDE.md").write_text("worktree\n")
+        return main_md, wt
+
+    @_NEEDS_GIT
+    @_NEEDS_NON_ROOT
+    def test_an_unexaminable_worktree_file_ends_resolution_undeclared(
+        self, tmp_path, lock, monkeypatch
+    ):
+        """No declaration; the cwd is a worktree whose `.claude/` cannot be
+        searched, and the main checkout has a readable CLAUDE.md. The display
+        resolver, which probes the worktree root, stops there instead of
+        writing the main checkout's file past the worktree's own, and records
+        the worktree's file.
+
+        The staleness resolver never probes the worktree root -- its rungs are
+        the declaration, the git common-dir parent, then the cwd -- so it
+        reaches the main checkout's file before it could examine the worktree,
+        in this layout and in the readable one alike.
+
+        Against a display resolver that carries on past a location it could
+        not examine, it returns the main checkout's file and this goes red.
+        """
+        import staleness
+        from scripts.working_memory import _resolve_display_claude_md_with_base
+
+        main_md, wt = self._worktree_with_its_own_claude_md(tmp_path)
+        lock(wt / ".claude")
+        monkeypatch.chdir(wt)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        errs = []
+
+        assert _resolve_display_claude_md_with_base(errors=errs) == (None, None)
+        # git names the worktree by its real path, so compare real paths.
+        wt_real = os.path.realpath(wt)
+        wt_md = os.path.join(wt_real, ".claude", "CLAUDE.md")
+        assert any(
+            "PermissionError" in e and wt_md in e.replace(str(wt), wt_real) for e in errs
+        ), errs
+        # Staleness is unchanged by the lock: it never examines wt/.claude.
+        stale, _ = staleness._resolve_project_claude_md_with_base()
+        assert _same(stale, main_md), stale
+
+    @_NEEDS_GIT
+    def test_a_readable_worktree_file_is_the_display_answer(self, tmp_path, monkeypatch):
+        """The matched control: `.claude/` readable, the display resolver
+        returns the worktree's own file, so the stop above is the lock."""
+        import staleness
+        from scripts.working_memory import _resolve_display_claude_md_with_base
+
+        main_md, wt = self._worktree_with_its_own_claude_md(tmp_path)
+        monkeypatch.chdir(wt)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+
+        display, _ = _resolve_display_claude_md_with_base()
+
+        assert _same(display, wt / ".claude" / "CLAUDE.md"), display
+        # Staleness never examines wt/.claude, so it answers main here too.
+        stale, _ = staleness._resolve_project_claude_md_with_base()
+        assert _same(stale, main_md), stale
+
+    @staticmethod
+    def _main_checkout_with_a_worktree(tmp_path):
+        """main/ is a repository whose own `.claude/CLAUDE.md` exists, with a
+        CLAUDE.md in main/sub and a linked worktree holding one in wt/sub.
+        Returns (main, main_sub, wt_sub)."""
+        main = tmp_path / "main"
+        _init_repo_with_claude_md(main)
+        (main / "sub").mkdir()
+        (main / "sub" / "CLAUDE.md").write_text("main-sub\n")
+        wt = tmp_path / "wt"
+        _pgit(main, "worktree", "add", str(wt), "-b", "feature")
+        (wt / "sub").mkdir()
+        (wt / "sub" / "CLAUDE.md").write_text("wt-sub\n")
+        return main, main / "sub", wt / "sub"
+
+    @_NEEDS_GIT
+    @_NEEDS_NON_ROOT
+    def test_an_unexaminable_main_checkout_ends_resolution_at_the_git_rung(
+        self, tmp_path, lock, monkeypatch
+    ):
+        """The main checkout's `.claude/` cannot be searched and the cwd holds
+        a readable CLAUDE.md below it. The git rung that names the main
+        checkout examines it, cannot, and ends resolution: no resolver hands
+        over to the cwd's file.
+
+        Against a resolver whose git-rung handler also covers the probe --
+        the shape before the fix -- each returns the cwd's file and this goes
+        red. The display resolver runs from the worktree, so its first git
+        rung names the worktree root, which holds no CLAUDE.md, and the stop
+        comes at the main-checkout rung.
+        """
+        import staleness
+        from scripts.working_memory import _resolve_display_claude_md_with_base
+
+        main, main_sub, wt_sub = self._main_checkout_with_a_worktree(tmp_path)
+        lock(main / ".claude")
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        locked_md = os.path.join(os.path.realpath(main), ".claude", "CLAUDE.md")
+
+        monkeypatch.chdir(main_sub)
+        errs = []
+        assert staleness._resolve_project_claude_md_with_base(errors=errs) == (None, None)
+        assert any("PermissionError" in e and locked_md in e for e in errs), errs
+
+        monkeypatch.chdir(wt_sub)
+        errs = []
+        assert _resolve_display_claude_md_with_base(errors=errs) == (None, None)
+        assert any("PermissionError" in e and locked_md in e for e in errs), errs
+
+    @_NEEDS_GIT
+    def test_a_readable_main_checkout_is_the_git_rungs_answer(
+        self, tmp_path, monkeypatch
+    ):
+        """The matched control: the same layout with `.claude/` readable, and
+        every resolver returns the main checkout's file, not the cwd's."""
+        import staleness
+        from scripts.working_memory import _resolve_display_claude_md_with_base
+
+        main, main_sub, wt_sub = self._main_checkout_with_a_worktree(tmp_path)
+        main_md = main / ".claude" / "CLAUDE.md"
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+
+        monkeypatch.chdir(main_sub)
+        assert _same(staleness._resolve_project_claude_md_with_base()[0], main_md)
+
+        monkeypatch.chdir(wt_sub)
+        assert _same(_resolve_display_claude_md_with_base()[0], main_md)
+
+    @_NEEDS_NON_ROOT
+    def test_the_scope_escape_refusal_holds_for_an_unsearchable_declaration(
+        self, tmp_path, lock, monkeypatch
+    ):
+        """The display writer's own guard against landing in another project,
+        driven directly with a declaration that cannot be examined. It must
+        refuse on every interpreter, whichever way each one reads the
+        unsearchable directory."""
+        from scripts.working_memory import (
+            AmbientSyncRefused,
+            _refuse_ambient_sync_on_declared_scope_escape,
+        )
+
+        proj, _ = _ancestor_unsearchable(tmp_path, lock)
+        hit = _cwd_hit(tmp_path, monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(proj))
+
+        with pytest.raises(AmbientSyncRefused):
+            _refuse_ambient_sync_on_declared_scope_escape(
+                None, None, resolved_root=hit.parent.parent, claude_md_path=hit
+            )
+
+    def test_the_scope_escape_refusal_admits_the_declaration_itself(
+        self, tmp_path, monkeypatch
+    ):
+        """The control: the same call, with the declaration naming the
+        directory resolution landed in, admits. So the refusal above is a
+        verdict and not a guard that refuses everything."""
+        from scripts.working_memory import _refuse_ambient_sync_on_declared_scope_escape
+
+        hit = _cwd_hit(tmp_path, monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(hit.parent.parent))
+
+        _refuse_ambient_sync_on_declared_scope_escape(
+            None, None, resolved_root=hit.parent.parent, claude_md_path=hit
+        )
+
+
+class TestASymlinkLoopGetsOneVerdictOnEveryInterpreter:
+    """The project-scope checks the display writer runs after resolution.
+    Each compares resolved paths, and on 3.9 `Path.resolve()` raised
+    RuntimeError on a symlink loop where 3.13 and 3.14 return the path with the
+    looping component unresolved. `os.path.realpath` does the latter on every
+    interpreter, so a loop gets one verdict everywhere.
+
+    RED BEFORE THE FIX ON 3.9 ONLY, where each of these crashed.
+    """
+
+    @staticmethod
+    def _repo_with_a_looped_dir(tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _pgit(repo, "init")
+        (repo / "CLAUDE.md").write_text("x\n")
+        return repo, _symlink_loop(repo / "loopdir")
+
+    @_NEEDS_GIT
+    def test_a_looped_declaration_inside_the_repository_is_admitted(self, tmp_path):
+        """The declaration is a looped directory inside the repository that
+        resolution landed in, so it is the same project: ADMIT."""
+        from shared.project_scope import stays_in_declared_project
+
+        repo, looped = self._repo_with_a_looped_dir(tmp_path)
+        assert stays_in_declared_project(looped, repo, repo / "CLAUDE.md") is True
+
+    @_NEEDS_GIT
+    def test_the_repository_itself_is_admitted(self, tmp_path):
+        """The control: declared == resolved, ADMIT on every interpreter."""
+        from shared.project_scope import stays_in_declared_project
+
+        repo, _looped = self._repo_with_a_looped_dir(tmp_path)
+        assert stays_in_declared_project(repo, repo, repo / "CLAUDE.md") is True
+
+    @_NEEDS_GIT
+    def test_a_looped_base_is_not_the_main_repository(self, tmp_path):
+        from shared.project_scope import same_repository
+
+        repo, looped = self._repo_with_a_looped_dir(tmp_path)
+        assert same_repository(repo, looped) is False
+
+    @_NEEDS_GIT
+    def test_a_worktree_record_whose_directory_became_a_loop_admits_it(self, tmp_path):
+        """git still lists a worktree whose directory was replaced by a
+        symlink loop. The declaration names that worktree, so its record
+        proves identity: ADMIT, on every interpreter."""
+        from shared.project_scope import stays_in_declared_project
+
+        repo = tmp_path / "repo"
+        _init_repo_with_claude_md(repo)
+        wt = tmp_path / "wt"
+        _pgit(repo, "worktree", "add", str(wt), "-b", "feature")
+        shutil.rmtree(wt)
+        _symlink_loop(wt)
+
+        assert stays_in_declared_project(
+            wt, repo, repo / ".claude" / "CLAUDE.md"
+        ) is True
+
+    @_NEEDS_GIT
+    def test_a_looped_home_does_not_refuse_a_removed_declaration(
+        self, tmp_path, monkeypatch
+    ):
+        """A removed subdirectory of the repository is declared, so its
+        nearest ancestor decides, and resolution landed in that repository:
+        ADMIT. The home-directory and config-root checks it passes on the way
+        read `Path.home()`, which here is a symlink loop."""
+        from shared.project_scope import stays_in_declared_project
+
+        repo = tmp_path / "repo"
+        claude_md = _init_repo_with_claude_md(repo)
+        looped_home = _symlink_loop(tmp_path / "home")
+        monkeypatch.setattr(Path, "home", lambda: looped_home)
+
+        assert stays_in_declared_project(repo / "removed", repo, claude_md) is True
+
+    def test_same_repository_holds_the_only_resolve_call(self):
+        """Every other path project_scope compares goes through
+        os.path.realpath. same_repository keeps `Path.resolve()` under its own
+        catch, which answers False on every interpreter; any other `.resolve()`
+        call would bring back a 3.9-only verdict, so this counts them."""
+        import ast
+        import shared.project_scope as project_scope
+
+        tree = ast.parse(Path(project_scope.__file__).read_text(encoding="utf-8"))
+        owners = []
+        for func in ast.walk(tree):
+            if not isinstance(func, ast.FunctionDef):
+                continue
+            for node in ast.walk(func):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "resolve"
+                ):
+                    owners.append(func.name)
+        assert owners == ["same_repository"], owners
+
+    def test_a_looped_git_answer_is_the_unresolved_path(self, tmp_path, monkeypatch):
+        """git names a symlink loop; the answer is that path with the loop
+        left unresolved, on every interpreter."""
+        from shared.project_scope import _rev_parse_path
+
+        _symlink_loop(tmp_path / "loop")
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        git = bindir / "git"
+        git.write_text(f'#!/bin/sh\necho "{tmp_path / "loop"}"\n')
+        git.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+        answer = _rev_parse_path(tmp_path, "--git-common-dir")
+
+        assert answer == Path(os.path.realpath(tmp_path)) / "loop"
+
+    def test_a_target_under_a_looped_project_dir_is_inside_it(
+        self, tmp_path, monkeypatch
+    ):
+        from scripts.working_memory import _target_is_inside_the_declared_project_dir
+
+        looped = _symlink_loop(tmp_path / "declared")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(looped))
+        assert _target_is_inside_the_declared_project_dir(looped / "CLAUDE.md") is True
+
+    def test_a_target_elsewhere_is_not_inside_a_looped_project_dir(
+        self, tmp_path, monkeypatch
+    ):
+        """The control: a target outside the looped declaration is outside."""
+        from scripts.working_memory import _target_is_inside_the_declared_project_dir
+
+        looped = _symlink_loop(tmp_path / "declared")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(looped))
+        target = tmp_path / "other" / "CLAUDE.md"
+        assert _target_is_inside_the_declared_project_dir(target) is False

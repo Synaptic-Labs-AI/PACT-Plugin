@@ -52,7 +52,7 @@ def gate_env(tmp_path, monkeypatch, pact_context):
     # our tmp CLAUDE.md.
     import staleness
     monkeypatch.setattr(
-        staleness, "get_project_claude_md_path", lambda: claude_md
+        staleness, "get_project_claude_md_path", lambda errors=None: claude_md
     )
 
     def _setup(*, marker_present=True):
@@ -362,7 +362,7 @@ class TestPinStalenessGate_FailOpen:
         env = gate_env(marker_present=True)
         import staleness
         monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: None
+            staleness, "get_project_claude_md_path", lambda errors=None: None
         )
         result = _call_gate({
             "tool_name": "Edit",

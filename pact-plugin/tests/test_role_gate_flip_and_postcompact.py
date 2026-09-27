@@ -243,7 +243,7 @@ class TestClassBGateBypassFlip:
 
         monkeypatch.setattr(g.pact_context, "init", lambda _d: None)
         reached = {"hit": False}
-        def _sentinel(_path):
+        def _sentinel(_path, errors=None):
             reached["hit"] = True
             return None  # no claude_md match → gate ultimately returns None
         monkeypatch.setattr(g, "match_project_claude_md", _sentinel)

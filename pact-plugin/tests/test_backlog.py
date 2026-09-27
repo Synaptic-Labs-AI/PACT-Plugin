@@ -847,16 +847,20 @@ print(json.dumps(sorted(sys.modules)))
 _FORBIDDEN = ("subprocess", "socket", "http", "urllib.request")
 
 
-def _closure_of(target):
+def _closure_of(target, platform=None, shared_dir=SHARED_DIR):
     """Modules present after loading `target` in a CLEAN interpreter.
 
     A fresh process is required rather than a `sys.modules` delta taken in
     this one. Under pytest `subprocess` is ALREADY imported, so a delta never
     contains it — including for a module that imports it directly. The
     counter-test in this file demonstrates exactly that.
+
+    `platform` overrides `sys.platform` in that interpreter before anything
+    loads, so a stdlib branch keyed on the platform takes the other side.
     """
+    prefix = "" if platform is None else f"import sys\nsys.platform = {platform!r}\n"
     result = subprocess.run(
-        [sys.executable, "-c", _PROBE, str(SHARED_DIR), str(target)],
+        [sys.executable, "-c", prefix + _PROBE, str(shared_dir), str(target)],
         capture_output=True,
         text=True,
         timeout=60,
@@ -880,6 +884,36 @@ def test_backlog_store_import_closure_excludes_subprocess_and_network():
     assert present == [], f"read path pulled {present}"
     # The stub resolved the REAL paths module rather than a namespace shim.
     assert "shared.paths" in closure
+
+
+def test_backlog_store_import_closure_excludes_subprocess_on_linux_too():
+    """The same closure, loaded as if on Linux.
+
+    On 3.9, `uuid` imports `platform` only when `sys.platform` is neither
+    win32 nor darwin, and 3.9's `platform` imports `subprocess` at module
+    level. So a closure that reaches `uuid` is clean on macOS and dirty on a
+    Linux runner, and the arm above cannot see the difference from a macOS
+    run. Forcing the platform takes the Linux branch here. From 3.10 on,
+    `platform` imports no subprocess, so only a 3.9 run can redden.
+    """
+    closure = _closure_of(SHARED_DIR / "backlog_store.py", platform="linux")
+    present = [name for name in _FORBIDDEN if name in closure]
+    assert present == [], f"read path pulled {present}"
+    assert "shared.paths" in closure
+
+
+def test_the_forced_platform_takes_the_linux_branch(tmp_path):
+    """The control for the arm above: forcing the platform really does send
+    3.9's `uuid` down its Linux branch, so the arm is not green only because
+    the override did nothing. Only 3.9 imports `platform` there eagerly."""
+    import pytest as _pytest
+
+    if sys.version_info >= (3, 10):
+        _pytest.skip("uuid imports platform at module level only on 3.9")
+    mutant = tmp_path / "mutant.py"
+    mutant.write_text("import uuid\n", encoding="utf-8")
+
+    assert "subprocess" in _closure_of(mutant, platform="linux", shared_dir=tmp_path)
 
 
 def test_the_import_closure_probe_detects_a_forbidden_import(tmp_path):

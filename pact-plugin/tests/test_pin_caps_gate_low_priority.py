@@ -5,7 +5,8 @@ HANDOFF items and auditor-2's residual sweep.
 Items covered:
   1. failure_log classification assertions for all 4 gate error paths
      (_FAIL_BASELINE_READ, _FAIL_BASELINE_PARSE, _FAIL_SIMULATE,
-     _FAIL_UNEXPECTED).
+     _FAIL_UNEXPECTED), plus _FAIL_RESOLVE, the bypass taken when the
+     project CLAUDE.md could not be examined.
   2. file_lock adversarial concurrent access — two near-simultaneous
      hook invocations must serialize correctly without corruption or
      deadlock.
@@ -21,6 +22,12 @@ import json
 import threading
 
 import pytest
+
+from tests.test_unreadable_location_carriers import (  # noqa: E402
+    _NEEDS_NON_ROOT,
+    _preferred_unsearchable,
+    lock,  # noqa: F401 -- a fixture, requested by name below
+)
 
 from helpers import make_claude_md_with_pins, make_pin_entry  # noqa: E402
 
@@ -48,7 +55,7 @@ def gate_with_captured_failures(tmp_path, monkeypatch, pact_context):
 
     import staleness
     monkeypatch.setattr(
-        staleness, "get_project_claude_md_path", lambda: claude_md
+        staleness, "get_project_claude_md_path", lambda errors=None: claude_md
     )
 
     failures = []
@@ -379,6 +386,102 @@ class TestFailureLogClassification:
 # ---------------------------------------------------------------------------
 
 
+class TestUnexaminableClaudeMdBypassIsRecorded:
+    """The resolver runs for real: the project's `.claude/` cannot be
+    searched, beside a readable legacy CLAUDE.md. The gate cannot tell whether
+    an Edit to that legacy file targets the CLAUDE.md it guards, so it lets
+    the tool through and records the bypass with the resolver's error. An
+    Edit to any other file records nothing: the gate would pass it anyway."""
+
+    @staticmethod
+    def _gate_on_unsearchable_project(tmp_path, lock, monkeypatch, pact_context, target):
+        proj, legacy = _preferred_unsearchable(tmp_path, lock)
+        pact_context(
+            team_name="test-team", session_id="session-resolve", project_dir=str(proj)
+        )
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        monkeypatch.chdir(empty)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(proj))
+        failures = []
+
+        def _capture(classification, error=None, cwd=None, source=None):
+            failures.append({"classification": classification, "error": error, "source": source})
+
+        import pin_caps_gate
+
+        monkeypatch.setattr(pin_caps_gate, "append_failure", _capture)
+        file_path = legacy if target == "legacy" else proj / "notes.md"
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {"file_path": str(file_path), "old_string": "a", "new_string": "b"},
+        })
+        return result, failures
+
+    @_NEEDS_NON_ROOT
+    def test_an_edit_to_the_claude_md_it_cannot_resolve_is_recorded(
+        self, tmp_path, lock, monkeypatch, pact_context
+    ):
+        import pin_caps_gate
+
+        result, failures = self._gate_on_unsearchable_project(
+            tmp_path, lock, monkeypatch, pact_context, "legacy"
+        )
+
+        assert result is None
+        assert len(failures) == 1, failures
+        assert failures[0]["classification"] == pin_caps_gate._FAIL_RESOLVE
+        assert failures[0]["error"].startswith("PermissionError (EACCES): "), failures
+        assert failures[0]["source"] == "Edit"
+
+    @_NEEDS_NON_ROOT
+    def test_an_edit_to_another_file_records_nothing(
+        self, tmp_path, lock, monkeypatch, pact_context
+    ):
+        """The control: the same layout, an Edit to a file that is not named
+        CLAUDE.md."""
+        result, failures = self._gate_on_unsearchable_project(
+            tmp_path, lock, monkeypatch, pact_context, "other"
+        )
+
+        assert result is None
+        assert failures == []
+
+
+    def test_git_being_absent_records_nothing(self, tmp_path, monkeypatch, pact_context):
+        """The project holds no CLAUDE.md and git is not installed, so the
+        resolver moves on without being stopped and records nothing. An Edit
+        to a CLAUDE.md is allowed and records nothing: a missing file is not a
+        bypass."""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        no_git = tmp_path / "no-git"
+        no_git.mkdir()
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        pact_context(
+            team_name="test-team", session_id="session-no-git", project_dir=str(proj)
+        )
+        monkeypatch.chdir(empty)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(proj))
+        monkeypatch.setenv("PATH", str(no_git))
+        failures = []
+
+        def _capture(classification, error=None, cwd=None, source=None):
+            failures.append({"classification": classification, "error": error})
+
+        import pin_caps_gate
+
+        monkeypatch.setattr(pin_caps_gate, "append_failure", _capture)
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {"file_path": str(proj / "CLAUDE.md"), "old_string": "a", "new_string": "b"},
+        })
+
+        assert result is None
+        assert failures == []
+
+
 class TestFileLockContention:
     """file_lock serializes the baseline-read section. Two near-
     simultaneous hook invocations must complete without corruption
@@ -413,7 +516,7 @@ class TestFileLockContention:
 
         import staleness
         monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: claude_md
+            staleness, "get_project_claude_md_path", lambda errors=None: claude_md
         )
 
         N_THREADS = 4
@@ -474,7 +577,7 @@ class TestFileLockContention:
 
         import staleness
         monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: claude_md
+            staleness, "get_project_claude_md_path", lambda errors=None: claude_md
         )
 
         N_THREADS = 4

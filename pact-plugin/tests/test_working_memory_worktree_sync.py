@@ -199,7 +199,7 @@ class TestAmbientBranchAbsentTarget:
         import scripts.working_memory as wm
         monkeypatch.setattr(
             wm, "_resolve_display_claude_md_with_base",
-            lambda: (path, path.parent),
+            lambda **_: (path, path.parent),
         )
 
     def test_ambient_absent_destination_is_a_skip_and_touches_nothing(
@@ -334,7 +334,7 @@ class TestRetrievedSyncAbsentTarget:
         import scripts.working_memory as wm
         monkeypatch.setattr(
             wm, "_resolve_display_claude_md_with_base",
-            lambda: (path, path.parent),
+            lambda **_: (path, path.parent),
         )
 
     def test_absent_destination_is_a_skip_and_touches_nothing(
@@ -505,7 +505,7 @@ class TestBothWriteCallersAgreeOnAbsentDestinations:
                      else root / "a" / "b" / "c" / "CLAUDE.md")
             clean_env.setattr(
                 wm, "_resolve_display_claude_md_with_base",
-                lambda g=ghost: (g, g.parent),
+                lambda g=ghost, **_: (g, g.parent),
             )
             returned = drive()
             # tuple, not list: these are compared as a set below to detect
@@ -551,7 +551,7 @@ class TestBothWriteCallersAgreeOnAbsentDestinations:
         """
         import scripts.working_memory as wm
         clean_env.setattr(
-            wm, "_resolve_display_claude_md_with_base", lambda: (None, None)
+            wm, "_resolve_display_claude_md_with_base", lambda **_: (None, None)
         )
         for name, drive in self._drivers():
             # Truthiness, for the same reason the sibling arm normalises: the

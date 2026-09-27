@@ -1,0 +1,647 @@
+"""End-to-end arms for the CLAUDE.md session tripwire: a REAL nested pytest
+process, a REAL write, the REAL hook firing.
+
+Location: pact-plugin/tests/test_claude_md_guard_end_to_end.py
+Sibling of: pact-plugin/tests/test_claude_md_guard.py
+
+WHY A SEPARATE FILE. Every arm in the sibling imports `claude_md_guard`
+directly and asserts against handmade dicts or the live tree -- none of them
+crosses a process boundary. That is the whole gap these arms close: the
+in-process half of the protection is a `monkeypatch` fixture, `monkeypatch`
+does not cross a process boundary, and so the child-process route can only be
+OBSERVED by the before/after comparison. Observing it for real costs a
+subprocess per arm, which is why it sits here rather than beside a table of
+pure-function cases.
+
+WHAT CONFINES THE CHILD. The guard fixes its watched set at configure from the
+child's own inputs: CLAUDE_PROJECT_DIR, the working directory and its git
+roots, the git roots of the checkout the guard's own file lives in, and the
+config roots under CLAUDE_CONFIG_DIR, $HOME and the password database's home.
+`_run_nested` points CLAUDE_PROJECT_DIR, the working directory and
+CLAUDE_CONFIG_DIR into tmp_path, and has the child load a copy of the guard
+from tmp_path rather than this file, so every project location the child
+watches is a temp path by construction. The suite's per-test scrubs take no
+part in it.
+
+ONE REAL PATH STAYS IN THE CHILD'S SET, AND NOTHING HERE CAN REMOVE IT. The
+password database's home comes from the password database, not the
+environment, so `<that home>/.claude/CLAUDE.md` -- the operator's global
+CLAUDE.md on a developer machine -- is watched by every child, and so is
+`$HOME/.claude/CLAUDE.md`. Neither is written: the inner test writes only the
+path an arm names. Watching them risks nothing the outer run does not: the
+OUTER run watches the same files over a window that contains every child's,
+so a write to either during the suite reddens the outer run regardless. It
+does cost a diagnosis. An arm that requires a clean child FAILS if that write
+lands while its child runs, a failed test beside the outer VIOLATION, so read
+such a failure with the outer report before suspecting the arm. The
+skills-only arm also watches this checkout's CLAUDE.md, because it runs in
+the real tree, and from a linked worktree that includes the main checkout's
+CLAUDE.md, the file a PACT session rewrites.
+
+`_assert_confined` therefore pins the set EXACTLY: the temp paths an arm built,
+plus the two home config files computed here independently of the guard. A
+real project CLAUDE.md entering the set fails it and names the set -- including
+the case where tmp_path sits inside a git repository.
+
+WHAT THESE ARMS DO NOT ASSERT, AND WHY. They do not check that the real
+CLAUDE.md is byte-unchanged across the child run. The guard itself is that
+assertion, running over the whole session; a second copy of it here would
+redden every arm, not only the clean ones, when the operator's own session
+legitimately rewrites that file mid-suite. The confinement assertion is the
+structural substitute and it is the stronger claim -- it constrains what the
+child CAN reach, rather than observing what it happened not to touch.
+
+THE CLEAN ARM'S LIVENESS CHECK IS NOT DECORATION. "exit 0 and no report" is
+satisfied identically by a guard that ran and found nothing and by one that
+never loaded. The clean arm requires the one-line summary the guard prints on a
+clean run, and the stash check stays as a second witness.
+"""
+
+import ast
+import json
+import os
+import pwd
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+
+_SUMMARY_PREFIX = "[PACT CLAUDE.md guard] clean:"
+
+# The child's test module. It writes its observations to a FILE rather than
+# printing them: pytest's capture swallows output from some phases, and a
+# marker that can be swallowed cannot distinguish "did not run" from "ran and
+# was captured".
+#
+# NOTE FOR ANY EDITOR: this string, and the observer's below, are scanned by
+# the module-search-path pin, which reads string constants under tests/ as
+# well as real code. The child's import roots are supplied through PYTHONPATH
+# in `_run_nested` for exactly that reason. Do not add a path mutation here.
+_INNER_TEST = '''
+import json
+import os
+from pathlib import Path
+
+import claude_md_guard as guard
+
+
+def test_inner(pytestconfig):
+    before = pytestconfig.stash.get(guard._BEFORE, None)
+    Path(os.environ["GUARD_E2E_DUMP"]).write_text(
+        json.dumps(
+            {
+                "stash_is_none": before is None,
+                "watched": sorted(before) if before else [],
+                "guard_file": guard.__file__,
+            }
+        ),
+        encoding="utf-8",
+    )
+    target = os.environ.get("GUARD_E2E_MODIFY")
+    action = os.environ.get("GUARD_E2E_ACTION")
+    if action == "atomic":
+        from shared.claude_md_manager import _atomic_write_text
+
+        _atomic_write_text(
+            Path(target), "changed by a writer", Path(os.environ["GUARD_E2E_ROOT"])
+        )
+    elif action == "strip":
+        from shared.claude_md_manager import strip_orphan_kernel_block
+
+        strip_orphan_kernel_block()
+    elif target:
+        Path(target).write_text("modified by the inner test", encoding="utf-8")
+'''
+
+# A plugin whose unconfigure hook leaves a file behind. Registered BEFORE the
+# guard, so without the guard's trylast the guard's hook runs first and its
+# raise skips this one.
+_OBSERVER = '''
+import os
+from pathlib import Path
+
+
+def pytest_unconfigure(config):
+    Path(os.environ["GUARD_E2E_OBSERVER"]).write_text("ran", encoding="utf-8")
+'''
+
+# The root conftest's registration route, reproduced in the child: the guard's
+# hooks re-exported by name from a conftest rather than loaded with `-p`.
+_REEXPORTING_CONFTEST = '''
+from claude_md_guard import (  # noqa: F401 -- hook-registration re-export
+    pytest_configure,
+    pytest_unconfigure,
+)
+'''
+
+_NEEDS_GIT = pytest.mark.skipif(
+    shutil.which("git") is None, reason="this arm builds a real git repository"
+)
+
+# A child that hangs would hang the suite with it.
+_CHILD_TIMEOUT = 180
+
+
+def _child_env():
+    """This process's environment without PYTEST_*. The outer run's
+    PYTEST_ADDOPTS or PYTEST_PLUGINS would change the child's command line
+    and plugins, and PYTEST_CURRENT_TEST names the outer test."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+
+
+def _run_nested(
+    tmp_path, *, modify_target=None, argv_extra=(), cwd=None, project_dir=None,
+    via_conftest=False, action=None, setup=None, home=None, config_dir=True,
+    guard_dir=None,
+):
+    """Launch a real nested pytest under `tmp_path`; return (completed, dump).
+
+    `modify_target`, when given, is the one path the inner test writes (and
+    creates if absent). The child's CLAUDE_PROJECT_DIR is `project_dir` or
+    <tmp>/proj, its working directory is `cwd` or <tmp>/proj, and its
+    CLAUDE_CONFIG_DIR is <tmp>/cfg. With `via_conftest` the guard is
+    registered the way the root conftest registers it, by re-export, instead
+    of with `-p`. `action` swaps the plain write for a real PACT writer:
+    "atomic" replaces `modify_target` the way `_atomic_write_text` does, and
+    "strip" runs the global kernel-block strip. `setup(tmp_path)` runs after
+    the default layout is built; `home` sets the child's HOME, and
+    `config_dir=False` leaves its CLAUDE_CONFIG_DIR unset.
+
+    The child loads a byte-identical copy of the guard from `guard_dir`, or
+    <tmp>/proj, and never the file in this checkout: the guard watches the
+    checkout its own file lives in, so a child loading this one would watch
+    this checkout's real CLAUDE.md. The copy is the only guard on the child's
+    import path, and the dump names the file the child loaded, which must be
+    the copy.
+    """
+    proj = tmp_path / "proj"
+    (proj / ".claude").mkdir(parents=True, exist_ok=True)
+    (proj / ".claude" / "CLAUDE.md").write_text("original", encoding="utf-8")
+    (proj / "test_inner.py").write_text(_INNER_TEST, encoding="utf-8")
+    (proj / "observer_plugin.py").write_text(_OBSERVER, encoding="utf-8")
+    if via_conftest:
+        (proj / "conftest.py").write_text(_REEXPORTING_CONFTEST, encoding="utf-8")
+    load_guard = () if via_conftest else ("-p", "claude_md_guard")
+    guard_dir = guard_dir or proj
+    guard_dir.mkdir(parents=True, exist_ok=True)
+    guard_copy = guard_dir / "claude_md_guard.py"
+    shutil.copyfile(PLUGIN_ROOT / "tests" / "claude_md_guard.py", guard_copy)
+    (tmp_path / "cfg").mkdir(exist_ok=True)
+    if setup is not None:
+        setup(tmp_path)
+    dump = tmp_path / "dump.json"
+
+    roots = list(dict.fromkeys([
+        str(guard_dir),
+        str(proj),
+        str(PLUGIN_ROOT / "hooks"),
+        str(PLUGIN_ROOT / "skills" / "pact-memory" / "scripts"),
+    ]))
+    env = _child_env()
+    inherited = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = os.pathsep.join(roots + ([inherited] if inherited else []))
+    env["CLAUDE_PROJECT_DIR"] = str(project_dir or proj)
+    env["CLAUDE_CONFIG_DIR"] = str(tmp_path / "cfg")
+    if not config_dir:
+        env.pop("CLAUDE_CONFIG_DIR")
+    if home is not None:
+        env["HOME"] = str(home)
+    env["GUARD_E2E_ROOT"] = str(proj)
+    env.pop("GUARD_E2E_ACTION", None)
+    if action is not None:
+        env["GUARD_E2E_ACTION"] = action
+    env["GUARD_E2E_DUMP"] = str(dump)
+    env["GUARD_E2E_OBSERVER"] = str(tmp_path / "observer.ran")
+    env.pop("GUARD_E2E_MODIFY", None)
+    if modify_target is not None:
+        env["GUARD_E2E_MODIFY"] = str(modify_target)
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         *argv_extra, *load_guard, str(proj / "test_inner.py")],
+        cwd=str(cwd or proj),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=_CHILD_TIMEOUT,
+    )
+    if not dump.exists():
+        pytest.fail(
+            f"the child wrote no dump, so its test never ran (exit "
+            f"{completed.returncode}); stdout:\n{completed.stdout}\n"
+            f"stderr:\n{completed.stderr}"
+        )
+    result = json.loads(dump.read_text(encoding="utf-8"))
+    assert os.path.samefile(result["guard_file"], guard_copy), (
+        f"the child loaded {result['guard_file']}, not the guard copy {guard_copy}"
+    )
+    return completed, result
+
+
+def _key(path):
+    """A path as the guard keys it: absolute, as written, not resolved."""
+    return str(Path(path).absolute())
+
+
+def _home_files(home=None):
+    """The two home config files every child watches, computed here, not by
+    the guard: $HOME's (the child's, when an arm sets one) and the password
+    database home's `.claude/CLAUDE.md`, each as the absolute path written --
+    the guard keys a path as written, not as resolved."""
+    homes = [home or os.environ.get("HOME"), pwd.getpwuid(os.getuid()).pw_dir]
+    return {_key(Path(h) / ".claude" / "CLAUDE.md") for h in homes if h}
+
+
+def _default_tmp_set(tmp_path, config_dir=True):
+    paths = {
+        _key(tmp_path / "proj" / ".claude" / "CLAUDE.md"),
+        _key(tmp_path / "proj" / "CLAUDE.md"),
+    }
+    if config_dir:
+        paths.add(_key(tmp_path / "cfg" / "CLAUDE.md"))
+    return paths
+
+
+def _repository_with_worktree(main):
+    """`main` becomes a repository with one commit and a linked worktree at
+    main/.worktrees/wt, which is returned."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+
+    def git(*args):
+        subprocess.run(
+            ["git", "-c", "user.email=t@e", "-c", "user.name=T",
+             "-c", "init.defaultBranch=main", *args],
+            cwd=str(main), env=env, capture_output=True, check=True, timeout=30,
+        )
+
+    main.mkdir(parents=True)
+    git("init")
+    (main / "README").write_text("seed")
+    git("add", "README")
+    git("commit", "-m", "seed")
+    git("worktree", "add", ".worktrees/wt")
+    return main / ".worktrees" / "wt"
+
+
+def _project_set(*directories):
+    """Both CLAUDE.md shapes under each directory, by its real path: git names
+    a worktree and a main checkout that way."""
+    return {
+        os.path.join(os.path.realpath(d), shape)
+        for d in directories
+        for shape in (os.path.join(".claude", "CLAUDE.md"), "CLAUDE.md")
+    }
+
+
+def _assert_confined(dump, tmp_expected, home=None):
+    """The hook ran, and the child watched exactly the temp paths the arm
+    built plus the two home config files.
+
+    * the stash check catches a guard that never loaded;
+    * the set equality catches a lost confinement -- a real project CLAUDE.md
+      joining the set, including through a tmp_path that sits inside a git
+      repository.
+    """
+    assert dump["stash_is_none"] is False, (
+        "the guard's pytest_configure did not run in the child: the arm is "
+        "measuring nothing"
+    )
+    expected = set(tmp_expected) | _home_files(home)
+    assert set(dump["watched"]) == expected, (
+        "the child's watched set is not the temp paths plus the home config "
+        f"files: {sorted(dump['watched'])}"
+    )
+
+
+def test_a_child_process_write_is_caught_end_to_end(tmp_path):
+    """A write inside a nested pytest run is reported and exits non-zero."""
+    target = tmp_path / "proj" / ".claude" / "CLAUDE.md"
+    completed, dump = _run_nested(tmp_path, modify_target=target)
+    _assert_confined(dump, _default_tmp_set(tmp_path))
+
+    assert completed.returncode != 0, (
+        "a nested run that modified a watched CLAUDE.md exited zero; stderr:\n"
+        + completed.stderr
+    )
+    assert "PACT CLAUDE.md GUARD" in completed.stderr
+    assert "VIOLATION" in completed.stderr
+    assert "MODIFIED" in completed.stderr
+    assert _key(target) in completed.stderr
+
+
+def test_the_violating_runs_summary_line_still_reads_passed(tmp_path):
+    """The exit code and pytest's summary DISAGREE on a violating run.
+
+    Pinned end to end rather than left in prose, because it is the one thing
+    a CI step is most likely to get wrong: the guard raises from a teardown
+    hook, after the summary has been composed, so the run reports its tests
+    as passed AND exits non-zero. Anything gating on this guard must read the
+    exit code.
+    """
+    target = tmp_path / "proj" / ".claude" / "CLAUDE.md"
+    completed, dump = _run_nested(tmp_path, modify_target=target)
+    _assert_confined(dump, _default_tmp_set(tmp_path))
+
+    assert completed.returncode != 0
+    assert "passed" in completed.stdout
+    assert "failed" not in completed.stdout
+
+
+def test_a_clean_nested_run_prints_its_watched_set_and_exits_zero(tmp_path):
+    """The other direction: the guard loaded, watched, and printed the one
+    line a clean run prints, naming every watched path. Needs a clean child,
+    so a real write to a home config file during it fails it."""
+    completed, dump = _run_nested(tmp_path)
+    tmp_set = _default_tmp_set(tmp_path)
+    _assert_confined(dump, tmp_set)
+
+    assert completed.returncode == 0, (
+        "a nested run that changed nothing exited non-zero; stderr:\n"
+        + completed.stderr
+    )
+    summary = [l for l in completed.stderr.splitlines() if l.startswith(_SUMMARY_PREFIX)]
+    assert len(summary) == 1, completed.stderr
+    for path in tmp_set:
+        assert path in summary[0]
+    assert "PACT CLAUDE.md GUARD" not in completed.stderr
+    assert "VIOLATION" not in completed.stderr and "REPORT" not in completed.stderr
+
+
+def test_a_config_root_the_child_creates_is_caught(tmp_path):
+    """A CLAUDE.md created under the child's CLAUDE_CONFIG_DIR, absent before
+    the run, reports as CREATED: the config roots are watched."""
+    target = tmp_path / "cfg" / "CLAUDE.md"
+    completed, dump = _run_nested(tmp_path, modify_target=target)
+    _assert_confined(dump, _default_tmp_set(tmp_path))
+
+    assert completed.returncode != 0, completed.stderr
+    assert "CREATED" in completed.stderr
+    assert _key(target) in completed.stderr
+
+
+@_NEEDS_GIT
+def test_a_main_checkout_write_under_an_umbrella_declaration_is_caught(tmp_path):
+    """CLAUDE_PROJECT_DIR names an umbrella directory above the repository,
+    holding a CLAUDE.md of its own, and the child runs inside a linked
+    worktree. A write to the main checkout's CLAUDE.md -- which a writer whose
+    declaration was deleted reaches through git -- is reported: the git roots
+    are watched whatever the declaration says. The umbrella's own file is what
+    made a guard that asked the resolvers watch the umbrella and not the main
+    checkout, and exit zero on this write."""
+    umbrella = tmp_path / "umbrella"
+    main = umbrella / "main"
+    wt = _repository_with_worktree(main)
+    (umbrella / "CLAUDE.md").write_text("umbrella\n")
+    main_md = main / "CLAUDE.md"
+    main_md.write_text("main\n")
+
+    completed, dump = _run_nested(
+        tmp_path, modify_target=main_md, cwd=wt, project_dir=umbrella
+    )
+    tmp_set = _project_set(umbrella, wt, main) | {_key(tmp_path / "cfg" / "CLAUDE.md")}
+    _assert_confined(dump, tmp_set)
+
+    assert completed.returncode != 0, completed.stderr
+    assert "MODIFIED" in completed.stderr
+    assert os.path.realpath(main_md) in completed.stderr
+
+
+def _guard_in_a_worktree(tmp_path):
+    """The guard's file lives in a linked worktree of <tmp>/checkout, as this
+    one does in the real tree; both checkouts hold a CLAUDE.md. The run
+    starts in <tmp>/proj, outside every repository, as a run started from an
+    umbrella directory or from ~ does. Returns (main, wt, guard_dir)."""
+    main = tmp_path / "checkout"
+    wt = _repository_with_worktree(main)
+    (main / "CLAUDE.md").write_text("main\n")
+    (wt / "CLAUDE.md").write_text("wt\n")
+    return main, wt, wt / "pact-plugin" / "tests"
+
+
+@_NEEDS_GIT
+@pytest.mark.parametrize("which", ["worktree", "main checkout"])
+def test_a_write_to_the_guards_own_checkout_is_caught_from_outside_it(tmp_path, which):
+    """A test's child aimed at the repository root with `cwd=` writes the
+    checkout's CLAUDE.md. Neither the working directory nor CLAUDE_PROJECT_DIR
+    names that checkout, so only the guard's own location can put it in the
+    watched set; without it this run exits zero."""
+    main, wt, guard_dir = _guard_in_a_worktree(tmp_path)
+    target = (wt if which == "worktree" else main) / "CLAUDE.md"
+    completed, dump = _run_nested(tmp_path, modify_target=target, guard_dir=guard_dir)
+
+    assert completed.returncode != 0, (
+        "a run started outside the guard's checkout modified that checkout's "
+        "CLAUDE.md and exited zero; stderr:\n" + completed.stderr
+    )
+    assert "MODIFIED" in completed.stderr
+    assert os.path.realpath(target) in completed.stderr
+    _assert_confined(dump, _default_tmp_set(tmp_path) | _project_set(main, wt))
+
+
+@_NEEDS_GIT
+def test_the_guards_own_checkout_is_watched_from_outside_it_and_left_alone(tmp_path):
+    """The control: the same layout, nothing written. The run is clean, and
+    its summary names both checkouts' CLAUDE.md as present. Needs a clean
+    child, so a real write to a home config file during it fails it."""
+    main, wt, guard_dir = _guard_in_a_worktree(tmp_path)
+    completed, dump = _run_nested(tmp_path, guard_dir=guard_dir)
+    _assert_confined(dump, _default_tmp_set(tmp_path) | _project_set(main, wt))
+
+    assert completed.returncode == 0, completed.stderr
+    summary = [l for l in completed.stderr.splitlines() if l.startswith(_SUMMARY_PREFIX)]
+    assert len(summary) == 1, completed.stderr
+    for directory in (main, wt):
+        assert f"{os.path.join(os.path.realpath(directory), 'CLAUDE.md')} (present)" in summary[0]
+
+
+def test_a_plugin_registered_before_the_guard_still_runs_its_unconfigure(tmp_path):
+    """The guard's unconfigure hook is trylast, so its raise on a violation
+    skips no other plugin's unconfigure hook. The guard is registered the way
+    the root conftest registers it, by re-export, and the observer with `-p`,
+    which registers it FIRST: without trylast the guard's hook would run
+    before it and its raise would skip it."""
+    target = tmp_path / "proj" / ".claude" / "CLAUDE.md"
+    completed, dump = _run_nested(
+        tmp_path, modify_target=target, argv_extra=("-p", "observer_plugin"),
+        via_conftest=True,
+    )
+    _assert_confined(dump, _default_tmp_set(tmp_path))
+
+    assert completed.returncode != 0, completed.stderr
+    assert (tmp_path / "observer.ran").exists(), (
+        "the observer's unconfigure hook did not run after the guard raised; "
+        "stderr:\n" + completed.stderr
+    )
+
+
+def test_a_skills_only_run_reads_every_input(tmp_path):
+    """A run whose only path argument lies outside tests/, so tests/conftest.py
+    is not an initial conftest. The root conftest's hooks/ entry is then the
+    only thing that makes the guard's `shared` imports resolve at configure.
+    Read-only: a collect-only run in the real tree, so it watches this
+    checkout's CLAUDE.md -- from a linked worktree, the main checkout's too,
+    which a PACT session rewrites -- and the home config files, and a real
+    write to one of them during it fails it."""
+    candidates = sorted(PLUGIN_ROOT.glob("skills/*/test_*.py"))
+    if not candidates:
+        pytest.skip("no skills-adjacent test file exists to collect")
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q",
+         "-p", "no:cacheprovider", str(candidates[0])],
+        cwd=str(PLUGIN_ROOT),
+        env=_child_env(),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=_CHILD_TIMEOUT,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert _SUMMARY_PREFIX in completed.stderr, completed.stderr
+    assert "INPUT UNAVAILABLE" not in completed.stderr
+
+
+def _link_project_claude_md(tmp_path):
+    """Make proj/.claude/CLAUDE.md a symlink to a file outside the project."""
+    real = tmp_path / "real" / "CLAUDE.md"
+    real.parent.mkdir()
+    real.write_text("original\n", encoding="utf-8")
+    link = tmp_path / "proj" / ".claude" / "CLAUDE.md"
+    link.unlink()
+    link.symlink_to(real)
+
+
+def test_a_writer_replacing_a_symlinked_project_claude_md_is_caught(tmp_path):
+    """The project CLAUDE.md is a symlink, and a child replaces it the way
+    every PACT writer does, by renaming a new file over the path. The link
+    becomes a regular file and the file it pointed at is untouched, so a guard
+    keyed by the resolved target saw nothing; this one keys the path."""
+    link = tmp_path / "proj" / ".claude" / "CLAUDE.md"
+    completed, dump = _run_nested(
+        tmp_path, modify_target=link, action="atomic", setup=_link_project_claude_md
+    )
+    _assert_confined(dump, _default_tmp_set(tmp_path))
+
+    assert not link.is_symlink(), "the writer did not replace the link"
+    assert (tmp_path / "real" / "CLAUDE.md").read_text() == "original\n"
+    assert completed.returncode != 0, completed.stderr
+    assert "MODIFIED" in completed.stderr
+    assert _key(link) in completed.stderr
+
+
+def test_a_writer_replacing_a_symlinked_global_claude_md_is_caught(tmp_path):
+    """The same replacement at the global file: $HOME/.claude/CLAUDE.md is a
+    dotfiles symlink, and the real kernel-block strip rewrites it."""
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    dotfile = tmp_path / "dotfiles" / "CLAUDE.md"
+    dotfile.parent.mkdir()
+    kernel = "<!-- PACT_START:v1 -->\nkernel\n<!-- PACT_END -->\nuser content\n"
+    dotfile.write_text(kernel, encoding="utf-8")
+    link = home / ".claude" / "CLAUDE.md"
+    link.symlink_to(dotfile)
+
+    completed, dump = _run_nested(
+        tmp_path, action="strip", home=home, config_dir=False
+    )
+    _assert_confined(dump, _default_tmp_set(tmp_path, config_dir=False), home=home)
+
+    assert not link.is_symlink(), "the strip did not replace the link"
+    assert dotfile.read_text() == kernel
+    assert completed.returncode != 0, completed.stderr
+    assert "MODIFIED" in completed.stderr
+    assert _key(link) in completed.stderr
+
+
+def test_a_symlinked_claude_md_left_alone_is_clean(tmp_path):
+    """The control: the same symlinked project file, not written. The run is
+    clean and its summary names the link as written, and as present. Needs a
+    clean child, so a real write to a home config file during it fails it."""
+    link = tmp_path / "proj" / ".claude" / "CLAUDE.md"
+    completed, dump = _run_nested(tmp_path, setup=_link_project_claude_md)
+    _assert_confined(dump, _default_tmp_set(tmp_path))
+
+    assert completed.returncode == 0, completed.stderr
+    summary = [l for l in completed.stderr.splitlines() if l.startswith(_SUMMARY_PREFIX)]
+    assert len(summary) == 1, completed.stderr
+    assert f"{_key(link)} (present)" in summary[0]
+
+
+@pytest.mark.parametrize(
+    "name, value",
+    [
+        ("PYTEST_ADDOPTS", "--no-such-flag"),
+        ("PYTEST_PLUGINS", "no_such_plugin_for_the_guard_child"),
+    ],
+    ids=["addopts", "plugins"],
+)
+def test_an_inherited_pytest_setting_does_not_reach_the_child(
+    tmp_path, monkeypatch, name, value
+):
+    """The outer run's PYTEST_* settings -- here a flag the child cannot parse,
+    or a plugin it cannot import -- are not the child's: the clean arm stays
+    clean. Needs a clean child, so a real write to a home config file during
+    it fails it."""
+    monkeypatch.setenv(name, value)
+    completed, dump = _run_nested(tmp_path)
+    _assert_confined(dump, _default_tmp_set(tmp_path))
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_a_child_that_writes_no_dump_fails_with_its_own_output(tmp_path):
+    """A child that never ran its test leaves no dump. The arm fails with the
+    child's own exit code and output, not a bare missing-file error."""
+    with pytest.raises(pytest.fail.Exception, match="unrecognized arguments"):
+        _run_nested(tmp_path, argv_extra=("--no-such-flag",))
+
+
+def test_a_child_that_loads_another_guard_is_caught(tmp_path, monkeypatch):
+    """The witness in `_run_nested` is what makes every arm measure the copy.
+    A byte-different guard in the child's working directory, which
+    `python -m` puts ahead of PYTHONPATH, is the one the child loads, and the
+    harness refuses the run instead of measuring it."""
+    monkeypatch.delenv("PYTHONSAFEPATH", raising=False)
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    source = (PLUGIN_ROOT / "tests" / "claude_md_guard.py").read_text(encoding="utf-8")
+    (decoy / "claude_md_guard.py").write_text(
+        source + "\n# A different file from the copy.\n", encoding="utf-8"
+    )
+    with pytest.raises(AssertionError, match="not the guard copy"):
+        _run_nested(tmp_path, cwd=decoy)
+
+
+def test_every_nested_spawn_has_a_positive_timeout():
+    """Every `subprocess.run` in this file passes a timeout that is a positive
+    number -- `_CHILD_TIMEOUT`, itself one, or a positive literal. A timeout
+    of None waits forever, the same as passing none."""
+    assert isinstance(_CHILD_TIMEOUT, (int, float)), _CHILD_TIMEOUT
+    assert not isinstance(_CHILD_TIMEOUT, bool) and _CHILD_TIMEOUT > 0, _CHILD_TIMEOUT
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    spawns = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and ast.unparse(node.func) == "subprocess.run"
+    ]
+    assert spawns, "no subprocess.run found: the census is measuring nothing"
+
+    def positive(timeout):
+        if isinstance(timeout, ast.Name):
+            return timeout.id == "_CHILD_TIMEOUT"
+        return (
+            isinstance(timeout, ast.Constant)
+            and isinstance(timeout.value, (int, float))
+            and not isinstance(timeout.value, bool)
+            and timeout.value > 0
+        )
+
+    bad = [
+        node.lineno for node in spawns
+        if not positive({kw.arg: kw.value for kw in node.keywords}.get("timeout"))
+    ]
+    assert bad == [], f"subprocess.run without a positive timeout at lines {bad}"

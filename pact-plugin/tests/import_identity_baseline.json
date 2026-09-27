@@ -54,6 +54,8 @@
     },
     "tests/test_archive_pin.py": {
       "archive_pin": "scripts/archive_pin.py",
+      "fixtures.hf_cache": "tests/fixtures/hf_cache.py",
+      "fixtures.hf_cache.hf_cache_env": null,
       "helpers": "tests/helpers.py",
       "helpers.make_claude_md_with_pins": null,
       "helpers.make_pin_entry": null,
@@ -70,6 +72,8 @@
     },
     "tests/test_archive_pin_emit.py": {
       "archive_pin": "scripts/archive_pin.py",
+      "fixtures.hf_cache": "tests/fixtures/hf_cache.py",
+      "fixtures.hf_cache.hf_cache_env": null,
       "helpers": "tests/helpers.py",
       "helpers.make_claude_md_with_pins": null,
       "helpers.make_pin_entry": null,
@@ -86,7 +90,11 @@
       "scripts.pact_session": "skills/pact-memory/scripts/pact_session.py",
       "shared": "hooks/shared/__init__.py",
       "shared.project_scope": "hooks/shared/project_scope.py",
-      "shared.project_scope.same_repository": null
+      "shared.project_scope.same_repository": null,
+      "tests.test_unreadable_location_carriers": "tests/test_unreadable_location_carriers.py",
+      "tests.test_unreadable_location_carriers._NEEDS_NON_ROOT": null,
+      "tests.test_unreadable_location_carriers._preferred_unsearchable": null,
+      "tests.test_unreadable_location_carriers.lock": null
     },
     "tests/test_artifact_paths_durability.py": {
       "__future__.annotations": null,
@@ -309,6 +317,10 @@
       "pathlib.Path": null,
       "pin_caps": "hooks/pin_caps.py",
       "staleness": "hooks/staleness.py",
+      "tests.test_unreadable_location_carriers": "tests/test_unreadable_location_carriers.py",
+      "tests.test_unreadable_location_carriers._NEEDS_NON_ROOT": null,
+      "tests.test_unreadable_location_carriers._preferred_unsearchable": null,
+      "tests.test_unreadable_location_carriers.lock": null,
       "unittest.mock.patch": null
     },
     "tests/test_check_unused_imports.py": {
@@ -336,6 +348,18 @@
       "teammate_idle": "hooks/teammate_idle.py",
       "unittest.mock.patch": null
     },
+    "tests/test_claude_md_guard.py": {
+      "claude_md_guard": "tests/claude_md_guard.py",
+      "pathlib.Path": null,
+      "scripts.working_memory": "skills/pact-memory/scripts/working_memory.py",
+      "shared.claude_md_manager": "hooks/shared/claude_md_manager.py",
+      "shared.paths": "hooks/shared/paths.py",
+      "shared.paths.get_claude_config_dir": null,
+      "staleness": "hooks/staleness.py"
+    },
+    "tests/test_claude_md_guard_end_to_end.py": {
+      "pathlib.Path": null
+    },
     "tests/test_claude_md_manager.py": {
       "__future__.annotations": null,
       "contextlib.contextmanager": null,
@@ -359,23 +383,46 @@
       "unittest.mock.patch": null
     },
     "tests/test_claude_md_resolver_parity.py": {
+      "datetime.datetime": null,
+      "datetime.timedelta": null,
       "pathlib.Path": null,
       "scripts.memory_api": "skills/pact-memory/scripts/memory_api.py",
       "scripts.memory_api.PACTMemory": null,
       "scripts.working_memory": "skills/pact-memory/scripts/working_memory.py",
-      "scripts.working_memory._get_claude_md_path": null,
+      "scripts.working_memory.AmbientSyncRefused": null,
+      "scripts.working_memory.SyncResult": null,
+      "scripts.working_memory._refuse_ambient_sync_on_declared_scope_escape": null,
       "scripts.working_memory._resolve_display_claude_md_path": null,
+      "scripts.working_memory._resolve_display_claude_md_with_base": null,
+      "scripts.working_memory._target_is_inside_the_declared_project_dir": null,
+      "scripts.working_memory.sync_to_claude_md": null,
       "shared.claude_md_manager": "hooks/shared/claude_md_manager.py",
       "shared.claude_md_manager.resolve_project_claude_md_path": null,
+      "shared.failure_cause": "hooks/shared/failure_cause.py",
+      "shared.failure_cause.failure_cause": null,
+      "shared.project_scope": "hooks/shared/project_scope.py",
+      "shared.project_scope._rev_parse_path": null,
+      "shared.project_scope.same_repository": null,
+      "shared.project_scope.stays_in_declared_project": null,
       "staleness": "hooks/staleness.py",
+      "staleness.PINNED_STALENESS_DAYS": null,
       "staleness.get_project_claude_md_path": null,
+      "tests.test_unreadable_location_carriers": "tests/test_unreadable_location_carriers.py",
+      "tests.test_unreadable_location_carriers._LEGACY_TEXT": null,
+      "tests.test_unreadable_location_carriers._NEEDS_NON_ROOT": null,
+      "tests.test_unreadable_location_carriers._ancestor_unsearchable": null,
+      "tests.test_unreadable_location_carriers._preferred_unsearchable": null,
+      "tests.test_unreadable_location_carriers._symlink_loop": null,
+      "tests.test_unreadable_location_carriers.lock": null,
       "typing.Optional": null
     },
     "tests/test_claudemd_write_prohibition_guard.py": {
       "pathlib.Path": null
     },
     "tests/test_cli_output_purity.py": {
-      "pathlib.Path": null
+      "pathlib.Path": null,
+      "scripts.cli": "skills/pact-memory/scripts/cli.py",
+      "scripts.cli._own_stderr_for_envelope": null
     },
     "tests/test_clock_shift_env.py": {
       "clock_shift.clock_shift_env": "tests/clock_shift/clock_shift_env.py",
@@ -595,6 +642,8 @@
       "shared.variety_scorer.LEARNING_II_MIN_MATCHES": null
     },
     "tests/test_declared_anchor_contract.py": {
+      "fixtures.hf_cache": "tests/fixtures/hf_cache.py",
+      "fixtures.hf_cache.hf_cache_env": null,
       "pathlib.Path": null,
       "scripts": "skills/pact-memory/scripts/__init__.py",
       "scripts.cli": "skills/pact-memory/scripts/cli.py",
@@ -718,6 +767,24 @@
       "unittest.mock.MagicMock": null,
       "unittest.mock.patch": null
     },
+    "tests/test_embedding_model_load_is_cache_first.py": {
+      "pathlib.Path": null,
+      "scripts.embeddings": "skills/pact-memory/scripts/embeddings.py",
+      "scripts.embeddings.EmbeddingService": null,
+      "scripts.embeddings.MODEL_NAME": null,
+      "unittest.mock.MagicMock": null,
+      "unittest.mock.patch": null
+    },
+    "tests/test_embedding_snapshot_is_the_cache_ref.py": {
+      "huggingface_hub.file_download.repo_folder_name": null,
+      "pathlib.Path": null,
+      "scripts.embeddings": "skills/pact-memory/scripts/embeddings.py",
+      "scripts.embeddings.EmbeddingService": null,
+      "scripts.embeddings.MODEL_NAME": null,
+      "scripts.embeddings._cache_snapshot_for": null,
+      "unittest.mock.MagicMock": null,
+      "unittest.mock.patch": null
+    },
     "tests/test_embedding_status_contract.py": {
       "__future__.annotations": null,
       "pathlib.Path": null,
@@ -730,10 +797,25 @@
       "unittest.mock.call": null,
       "unittest.mock.patch": null
     },
+    "tests/test_embedding_status_staleness.py": {
+      "scripts": "skills/pact-memory/scripts/__init__.py",
+      "scripts.memory_api": "skills/pact-memory/scripts/memory_api.py",
+      "scripts.memory_api.PACTMemory": null,
+      "unittest.mock.patch": null
+    },
     "tests/test_embedding_status_wiring.py": {
       "__future__.annotations": null,
       "pathlib.Path": null,
       "scripts": "skills/pact-memory/scripts/__init__.py",
+      "scripts.memory_api": "skills/pact-memory/scripts/memory_api.py",
+      "scripts.memory_api.PACTMemory": null,
+      "unittest.mock.patch": null
+    },
+    "tests/test_embedding_unavailable_still_saves_and_searches.py": {
+      "contextlib.contextmanager": null,
+      "scripts.embeddings": "skills/pact-memory/scripts/embeddings.py",
+      "scripts.embeddings.get_embedding_service": null,
+      "scripts.embeddings.reset_embedding_service": null,
       "scripts.memory_api": "skills/pact-memory/scripts/memory_api.py",
       "scripts.memory_api.PACTMemory": null,
       "unittest.mock.patch": null
@@ -745,6 +827,9 @@
       "scripts.embeddings.EMBEDDING_MAX_TOKENS": null,
       "scripts.embeddings.EmbeddingService": null,
       "scripts.embeddings.MEASURED_MEDIAN_TOKENS": null
+    },
+    "tests/test_embeddings_stderr_purity.py": {
+      "pathlib.Path": null
     },
     "tests/test_emit_skip_accounting.py": {
       "shared.session_journal": "hooks/shared/session_journal.py",
@@ -1271,6 +1356,8 @@
       "pathlib.Path": null
     },
     "tests/test_memory_cli.py": {
+      "fixtures.hf_cache": "tests/fixtures/hf_cache.py",
+      "fixtures.hf_cache.hf_cache_env": null,
       "helpers": "tests/helpers.py",
       "helpers.create_test_schema": null,
       "helpers.make_cli_memory_dict": null,
@@ -1376,6 +1463,19 @@
       "shared.claude_md_manager.MEMORY_START_MARKER": null,
       "staleness": "hooks/staleness.py"
     },
+    "tests/test_memory_error_envelope_field_lists_agree.py": {
+      "scripts.cli": "skills/pact-memory/scripts/cli.py",
+      "scripts.cli.build_parser": null,
+      "scripts.cli.cmd_save": null,
+      "scripts.cli.cmd_update": null,
+      "scripts.database": "skills/pact-memory/scripts/database.py",
+      "scripts.database.ALLOWED_CREATE_COLUMNS": null,
+      "scripts.database.ALLOWED_UPDATE_COLUMNS": null,
+      "scripts.database.CALLER_FACING_CREATE_FIELDS": null,
+      "scripts.database.CALLER_FACING_UPDATE_FIELDS": null,
+      "scripts.database._STRIPPED_ON_INGRESS": null,
+      "scripts.database._reject_unknown_columns": null
+    },
     "tests/test_memory_graph.py": {
       "helpers": "tests/helpers.py",
       "helpers.create_test_schema": null,
@@ -1453,9 +1553,31 @@
       "__future__.annotations": null,
       "pathlib.Path": null
     },
+    "tests/test_memory_project_scope_disclosure.py": {
+      "pathlib.Path": null,
+      "scripts": "skills/pact-memory/scripts/__init__.py",
+      "scripts.database": "skills/pact-memory/scripts/database.py",
+      "scripts.database.get_memory": null,
+      "scripts.database.quick_save": null,
+      "scripts.memory_api": "skills/pact-memory/scripts/memory_api.py",
+      "scripts.memory_api.PACTMemory": null,
+      "unittest.mock.patch": null
+    },
+    "tests/test_memory_project_scope_warning.py": {
+      "pathlib.Path": null,
+      "scripts": "skills/pact-memory/scripts/__init__.py",
+      "scripts.memory_api": "skills/pact-memory/scripts/memory_api.py",
+      "scripts.memory_api.PACTMemory": null,
+      "unittest.mock.patch": null
+    },
     "tests/test_memory_reachability.py": {
       "memory_reachability": "scripts/memory_reachability.py",
       "pathlib.Path": null
+    },
+    "tests/test_memory_skill_save_fields_match_schema.py": {
+      "pathlib.Path": null,
+      "scripts.database": "skills/pact-memory/scripts/database.py",
+      "scripts.database.CALLER_FACING_CREATE_FIELDS": null
     },
     "tests/test_memory_store_isolation.py": {
       "__future__.annotations": null,
@@ -2097,7 +2219,11 @@
       "helpers.make_pin_entry": null,
       "pin_caps_gate": "hooks/pin_caps_gate.py",
       "pin_caps_gate._check_tool_allowed": null,
-      "staleness": "hooks/staleness.py"
+      "staleness": "hooks/staleness.py",
+      "tests.test_unreadable_location_carriers": "tests/test_unreadable_location_carriers.py",
+      "tests.test_unreadable_location_carriers._NEEDS_NON_ROOT": null,
+      "tests.test_unreadable_location_carriers._preferred_unsearchable": null,
+      "tests.test_unreadable_location_carriers.lock": null
     },
     "tests/test_pin_caps_gate_matrix.py": {
       "helpers": "tests/helpers.py",
@@ -2364,6 +2490,7 @@
     },
     "tests/test_project_id.py": {
       "pathlib.Path": null,
+      "scripts": "skills/pact-memory/scripts/__init__.py",
       "scripts.memory_api": "skills/pact-memory/scripts/memory_api.py",
       "scripts.memory_api.PACTMemory": null,
       "unittest.mock.MagicMock": null,
@@ -3055,7 +3182,8 @@
     "tests/test_sync_result_contract.py": {
       "pathlib.Path": null,
       "scripts.working_memory": "skills/pact-memory/scripts/working_memory.py",
-      "scripts.working_memory.SyncResult": null
+      "scripts.working_memory.SyncResult": null,
+      "scripts.working_memory.sync_to_claude_md": null
     },
     "tests/test_task_claim_gate.py": {
       "clock_shift.clock_shift_env": "tests/clock_shift/clock_shift_env.py",
@@ -3416,11 +3544,12 @@
       "scripts.working_memory._find_existing_claude_md": null,
       "scripts.working_memory._format_memory_entry": null,
       "scripts.working_memory._format_retrieved_entry": null,
-      "scripts.working_memory._get_claude_md_path": null,
       "scripts.working_memory._parse_retrieved_context_section": null,
       "scripts.working_memory._parse_working_memory_section": null,
       "scripts.working_memory.sync_retrieved_to_claude_md": null,
       "scripts.working_memory.sync_to_claude_md": null,
+      "staleness": "hooks/staleness.py",
+      "staleness.get_project_claude_md_path": null,
       "unittest.mock.MagicMock": null,
       "unittest.mock.patch": null
     },
@@ -3476,6 +3605,24 @@
       "pathlib.Path": null,
       "shared": "hooks/shared/__init__.py",
       "shared.turn_end_jobs": "hooks/shared/turn_end_jobs.py"
+    },
+    "tests/test_unreadable_location_carriers.py": {
+      "bootstrap_marker_writer": "hooks/bootstrap_marker_writer.py",
+      "pathlib.Path": null,
+      "scripts": "skills/pact-memory/scripts/__init__.py",
+      "scripts.memory_api": "skills/pact-memory/scripts/memory_api.py",
+      "scripts.memory_api.PACTMemory": null,
+      "session_init": "hooks/session_init.py",
+      "session_init.main": null,
+      "shared": "hooks/shared/__init__.py",
+      "shared.backlog": "hooks/shared/backlog.py",
+      "shared.backlog_store": "hooks/shared/backlog_store.py",
+      "shared.claude_md_manager": "hooks/shared/claude_md_manager.py",
+      "shared.pact_context": "hooks/shared/pact_context.py",
+      "shared.project_scope": "hooks/shared/project_scope.py",
+      "shared.session_resume": "hooks/shared/session_resume.py",
+      "unittest.mock.patch": null,
+      "worktree_guard": "hooks/worktree_guard.py"
     },
     "tests/test_validate_handoff.py": {
       "pathlib.Path": null,
@@ -3680,6 +3827,8 @@
       "test_staleness.TestFileLockTwinCopyDrift": null
     },
     "tests/test_working_memory_fidelity.py": {
+      "fixtures.hf_cache": "tests/fixtures/hf_cache.py",
+      "fixtures.hf_cache.hf_cache_env": null,
       "helpers": "tests/helpers.py",
       "helpers.create_test_schema": null,
       "pathlib.Path": null,
@@ -3714,6 +3863,8 @@
       "datetime.datetime": null,
       "datetime.timedelta": null,
       "datetime.timezone": null,
+      "fixtures.hf_cache": "tests/fixtures/hf_cache.py",
+      "fixtures.hf_cache.hf_cache_env": null,
       "pathlib.Path": null,
       "scripts.memory_api": "skills/pact-memory/scripts/memory_api.py",
       "scripts.memory_api.PACTMemory": null,
@@ -3730,6 +3881,8 @@
       "archive_pin": "scripts/archive_pin.py",
       "clock_shift.clock_shift_env": "tests/clock_shift/clock_shift_env.py",
       "clock_shift.clock_shift_env.carry_clock_shift": null,
+      "fixtures.hf_cache": "tests/fixtures/hf_cache.py",
+      "fixtures.hf_cache.hf_cache_env": null,
       "fixtures.project_dir": "tests/fixtures/project_dir.py",
       "fixtures.project_dir.enable_record_discovery": null,
       "fixtures.project_dir.write_session_context": null,
@@ -3777,6 +3930,7 @@
     "tests/test_worktree_guard.py": {
       "unittest.mock.patch": null,
       "worktree_guard": "hooks/worktree_guard.py",
+      "worktree_guard._find_project_root": null,
       "worktree_guard._suggest_worktree_path": null,
       "worktree_guard.check_worktree_boundary": null,
       "worktree_guard.is_allowed_path": null,
@@ -3788,9 +3942,9 @@
     }
   },
   "path_drift_since_sessionstart": [
-    "/Users/mj/Sites/collab/PACT-prompt/.worktrees/feat/background-wait-enforcement/pact-plugin/hooks/shared",
-    "/Users/mj/Sites/collab/PACT-prompt/.worktrees/feat/background-wait-enforcement/pact-plugin/tests/fixtures",
-    "/Users/mj/Sites/collab/PACT-prompt/.worktrees/feat/background-wait-enforcement/pact-plugin/skills/pact-handoff-harvest",
-    "/Users/mj/Sites/collab/PACT-prompt/.worktrees/feat/background-wait-enforcement/pact-plugin/skills/pact-agent-teams"
+    "/Users/mj/Sites/collab/PACT-prompt/.worktrees/fix/claude-md-session-checksum-guard/pact-plugin/hooks/shared",
+    "/Users/mj/Sites/collab/PACT-prompt/.worktrees/fix/claude-md-session-checksum-guard/pact-plugin/tests/fixtures",
+    "/Users/mj/Sites/collab/PACT-prompt/.worktrees/fix/claude-md-session-checksum-guard/pact-plugin/skills/pact-handoff-harvest",
+    "/Users/mj/Sites/collab/PACT-prompt/.worktrees/fix/claude-md-session-checksum-guard/pact-plugin/skills/pact-agent-teams"
   ]
 }

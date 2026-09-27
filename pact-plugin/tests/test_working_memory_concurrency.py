@@ -71,7 +71,7 @@ def _sync_worker(args):
     home, writer_id, barrier = args
     if _SCRIPTS_DIR not in sys.path:
         sys.path.insert(0, _SCRIPTS_DIR)
-    # _get_claude_md_path checks CLAUDE_PROJECT_DIR first, so all writers
+    # The display resolver checks CLAUDE_PROJECT_DIR first, so all writers
     # resolve the same tmp .claude/CLAUDE.md (and thus the same sidecar).
     os.environ["CLAUDE_PROJECT_DIR"] = home
     from scripts import working_memory as wm
