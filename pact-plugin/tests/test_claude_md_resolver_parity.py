@@ -614,6 +614,41 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
         for recorded in (errs, errs2):
             assert len(recorded) == 1 and recorded[0].startswith(prefix), recorded
 
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            subprocess.TimeoutExpired(["git", "rev-parse"], 5),
+            PermissionError(errno.EACCES, "Permission denied", "git"),
+        ],
+        ids=["timeout", "oserror"],
+    )
+    def test_a_main_checkout_rung_that_did_not_answer_ends_display_resolution(
+        self, tmp_path, monkeypatch, failure
+    ):
+        """The display resolver's second git rung on its own. --show-toplevel
+        answers with a directory holding no CLAUDE.md, so resolution reaches
+        --git-common-dir, which does not answer. The resolver stops there and
+        records it instead of moving on to the cwd's file. The arm above
+        cannot see this rung: with every git call failing, the display
+        resolver already stops at --show-toplevel."""
+        _cwd_hit(tmp_path, monkeypatch)
+        top = tmp_path / "top"
+        top.mkdir()
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+
+        def only_show_toplevel_answers(args, *rest, **kwargs):
+            if "--show-toplevel" in args:
+                return subprocess.CompletedProcess(args, 0, stdout=f"{top}\n", stderr="")
+            raise failure
+
+        monkeypatch.setattr(subprocess, "run", only_show_toplevel_answers)
+        from scripts.working_memory import _resolve_display_claude_md_with_base
+
+        errs = []
+        assert _resolve_display_claude_md_with_base(errors=errs) == (None, None)
+        prefix = f"git rung: {type(failure).__name__}"
+        assert len(errs) == 1 and errs[0].startswith(prefix), errs
+
     @_NEEDS_GIT
     @_NEEDS_NON_ROOT
     def test_the_staleness_writer_never_marks_another_projects_file(
