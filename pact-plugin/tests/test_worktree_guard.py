@@ -464,3 +464,37 @@ class TestSuggestWorktreePathEdgeCases:
         )
         # Should return something (the file is inside worktree, so suggestion = same location)
         assert result is not None
+
+
+class TestWorktreesMarkerIsADirectory:
+    """_find_project_root takes a `.worktrees` DIRECTORY as the project marker,
+    and never a `.worktrees` FILE. A file there says nothing about where the
+    worktrees live, so treating it as the marker would suggest paths in a tree
+    the worktree does not belong to."""
+
+    def _layout(self, tmp_path):
+        project = tmp_path / "project"
+        worktree = project / "checkouts" / "feat"
+        worktree.mkdir(parents=True)
+        return project, worktree
+
+    def test_a_worktrees_file_is_not_the_marker(self, tmp_path):
+        """The only `.worktrees` above the worktree is a regular file. The
+        assertion is `!= project` rather than `is None`, so a stray
+        `.worktrees` directory above tmp_path cannot make it fail."""
+        from worktree_guard import _find_project_root
+
+        project, worktree = self._layout(tmp_path)
+        (project / ".worktrees").write_text("not a directory\n")
+
+        assert (project / ".worktrees").is_file()
+        assert _find_project_root(str(worktree)) != str(project)
+
+    def test_a_worktrees_directory_is_the_marker(self, tmp_path):
+        """The matched control: the same layout with a directory there."""
+        from worktree_guard import _find_project_root
+
+        project, worktree = self._layout(tmp_path)
+        (project / ".worktrees").mkdir()
+
+        assert _find_project_root(str(worktree)) == str(project)
