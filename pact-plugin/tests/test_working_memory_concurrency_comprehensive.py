@@ -74,7 +74,7 @@ def _bootstrap(home):
     """Per-child setup: sys.path + CLAUDE_PROJECT_DIR (neither crosses spawn)."""
     if _SCRIPTS_DIR not in sys.path:
         sys.path.insert(0, _SCRIPTS_DIR)
-    # _get_claude_md_path checks CLAUDE_PROJECT_DIR first, so every writer
+    # The display resolver checks CLAUDE_PROJECT_DIR first, so every writer
     # resolves the same tmp .claude/CLAUDE.md (and thus the same sidecar inode).
     os.environ["CLAUDE_PROJECT_DIR"] = home
 

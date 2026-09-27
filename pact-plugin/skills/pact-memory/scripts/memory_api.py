@@ -529,7 +529,8 @@ class PACTMemory:
         # two share one derivation of the path exactly as they already share
         # one derivation of the name. Passing no `start` runs git in the cwd,
         # which is this strategy's base.
-        # NOTE: Twin pattern in working_memory.py (_get_claude_md_path) and
+        # NOTE: Twin pattern in working_memory.py
+        #       (_resolve_display_claude_md_with_base, branch 3) and
         #       hooks/staleness.py (get_project_claude_md_path) -- keep in sync.
         #       Those two couple the resolution to a CLAUDE.md existence check
         #       and return the root only when one is found there, so they need

@@ -290,8 +290,8 @@ def _resolve_project_claude_md_with_base(
         # a repo root (the bare ".git") and absolute elsewhere, so resolve a
         # relative result against the cwd before taking its parent.
         # NOTE: Twin pattern in skills/pact-memory/scripts/memory_api.py
-        #       (_detect_project_id) and working_memory.py (_get_claude_md_path)
-        #       -- keep in sync.
+        #       (_detect_project_id) and working_memory.py
+        #       (_resolve_display_claude_md_with_base, branch 3) -- keep in sync.
         #
         # The inner try covers git's own work only. The probe sits outside it,
         # so a location git names that cannot be examined ends resolution

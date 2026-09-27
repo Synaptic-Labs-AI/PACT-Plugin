@@ -187,8 +187,8 @@ def _detect_project_id_under_test():
     # git returns this path relative to the invoking directory when run at a
     # repo root (the bare ".git") and absolute elsewhere, so resolve a relative
     # result against the cwd before taking its parent.
-    # NOTE: Twin pattern in working_memory.py (_get_claude_md_path) and
-    #       hooks/staleness.py (get_project_claude_md_path) -- keep in sync.
+    # NOTE: Twin pattern in working_memory.py (_resolve_display_claude_md_with_base)
+    #       and hooks/staleness.py (get_project_claude_md_path) -- keep in sync.
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--git-common-dir"],

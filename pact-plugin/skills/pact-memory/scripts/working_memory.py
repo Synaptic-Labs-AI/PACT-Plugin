@@ -1101,100 +1101,6 @@ def _find_existing_claude_md(base: Path) -> Optional[Path]:
     return None
 
 
-def _get_claude_md_path() -> Optional[Path]:
-    """
-    Get the path to CLAUDE.md in the project root.
-
-    Uses CLAUDE_PROJECT_DIR environment variable if set, then the session
-    record's project_dir, then git worktree/repo root detection, then the
-    current working directory. At each level, checks both `.claude/CLAUDE.md`
-    (new default) and `./CLAUDE.md` (legacy) in priority order.
-
-    Note: This mirrors the resolution strategy in hooks/staleness.py
-    (get_project_claude_md_path). Kept as a local copy: importing staleness
-    would require the sys.path bootstrap pact_session.py in this directory
-    carries, and the drift-noted twin remains the chosen mechanism here.
-
-    A location that cannot be examined, at any level, ends resolution with
-    None, as in _resolve_display_claude_md_with_base; a failure of git itself
-    moves on to the next level.
-
-    Returns:
-        Path to CLAUDE.md if it exists, None otherwise.
-    """
-    try:
-        project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-        if project_dir:
-            found = _find_existing_claude_md(Path(project_dir))
-            if found is not None:
-                return found
-
-        # Session-record rung: the directory session_init recorded at
-        # SessionStart, discovered via the CLAUDE_CODE_SESSION_ID glob in
-        # pact_session. Below env (a present declaration wins), ABOVE the
-        # git/cwd derivations — in a multi-repo workspace the cwd's git root
-        # can be the WRONG scope. The existence coupling is preserved: the
-        # record supplies the base to PROBE, and a miss falls through exactly
-        # like an env miss (this resolver never creates CLAUDE.md).
-        record_dir = get_project_dir_from_session_record()
-        if record_dir:
-            found = _find_existing_claude_md(Path(record_dir))
-            if found is not None:
-                return found
-
-        # Fallback: detect git root (worktree-safe)
-        # Uses --git-common-dir instead of --show-toplevel because the latter
-        # returns the worktree path when run inside a worktree, which may not
-        # contain CLAUDE.md. --git-common-dir always points to the shared .git
-        # directory; its parent is the main repo root where CLAUDE.md lives.
-        # git returns this path relative to the invoking directory when run at a
-        # repo root (the bare ".git") and absolute elsewhere, so resolve a
-        # relative result against the cwd before taking its parent.
-        # NOTE: Twin pattern in memory_api.py (_detect_project_id) and
-        #       hooks/staleness.py (get_project_claude_md_path) -- keep in sync.
-        # Function-level: the shared package is importable only after
-        # pact_session's sys.path bootstrap has run at module import.
-        from shared.project_scope import git_env_without_location
-
-        # The inner try covers git's own work only. The probe sits outside it,
-        # so a location git names that cannot be examined ends resolution
-        # instead of reading as a failed rung.
-        repo_root = None
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--git-common-dir"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                env=git_env_without_location(),
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                common_dir = Path(result.stdout.strip())
-                if not common_dir.is_absolute():
-                    common_dir = Path.cwd() / common_dir
-                # os.path.realpath, not Path.resolve(): on 3.9 resolve() raises
-                # RuntimeError on a symlink loop, while 3.13 and 3.14 return the
-                # path with the looping component unresolved. realpath does that
-                # on every interpreter, as in memory_api.main_repo_root.
-                repo_root = Path(os.path.realpath(common_dir)).parent
-        except (subprocess.TimeoutExpired, OSError):
-            pass
-        if repo_root is not None:
-            found = _find_existing_claude_md(repo_root)
-            if found is not None:
-                return found
-    except OSError:
-        return None
-
-    # Last resort: current working directory. `Path.cwd()` stays outside the
-    # handlers, so a deleted working directory still raises, as in staleness.
-    cwd = Path.cwd()
-    try:
-        return _find_existing_claude_md(cwd)
-    except OSError:
-        return None
-
-
 def _resolve_display_claude_md_with_base(
     errors: Optional[list] = None,
 ) -> Tuple[Optional[Path], Optional[Path]]:
@@ -1227,12 +1133,12 @@ def _resolve_display_claude_md_with_base(
       4. Current working directory -> the same probe.
 
     Branch 2 anchors the WORKTREE root (--show-toplevel) so a worktree that IS
-    a session root updates its OWN display file; branch 3 falls back to
-    _get_claude_md_path's MAIN-repo anchor (--git-common-dir) for the common
-    case where it is not. Because branch 2 precedes branch 3, the two resolvers
-    now differ ONLY in that worktree-root branch: in a non-worktree checkout
-    both branches resolve the same directory, so the [0] of this result is
-    identical to _get_claude_md_path's.
+    a session root updates its OWN display file; branch 3 falls back to the
+    MAIN-repo anchor (--git-common-dir) of hooks/staleness.py's resolver for
+    the common case where it is not. Because branch 2 precedes branch 3, the
+    two resolvers differ ONLY in that worktree-root branch and in the session
+    record rung, which staleness does not have: in a non-worktree checkout
+    both git branches resolve the same directory.
 
     The returned `base` is the branch's directory captured BEFORE descending
     into `.claude` (the arg passed to `_find_existing_claude_md`), NOT the
@@ -1319,14 +1225,14 @@ def _resolve_display_claude_md_with_base(
         # found nothing and the file the session actually reads is the MAIN
         # repo's. --git-common-dir points at the shared .git dir whether run
         # from the main repo or a linked worktree, so its parent is the main
-        # repo root in both. This is _get_claude_md_path's exact anchor.
+        # repo root in both. This is the staleness resolver's exact anchor.
         #
         # The is_absolute() guard is load-bearing, not decoration: git returns
         # a RELATIVE path (".git", "../.git") when run at a repo root or subdir,
         # and _find_existing_claude_md does a bare `base / "CLAUDE.md"` with no
         # normalisation, so a relative base would yield a cwd-relative Path and
         # a cwd-relative lock sidecar (the exact divergence D2 just closed).
-        # Reused verbatim from _get_claude_md_path.
+        # The same derivation as the staleness resolver's git rung.
         repo_root = None
         try:
             result = subprocess.run(

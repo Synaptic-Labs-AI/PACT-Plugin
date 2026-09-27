@@ -11,7 +11,7 @@ is updated, its siblings must stay in sync.
 Resolvers under test:
 1. shared.claude_md_manager.resolve_project_claude_md_path  -- canonical
 2. staleness.get_project_claude_md_path                      -- hooks/
-3. working_memory._get_claude_md_path                        -- skills/
+3. working_memory._resolve_display_claude_md_path            -- skills/
 4. memory_api.PACTMemory._find_project_root                  -- skills/ (walks UP)
 5. worktree_guard inline probe                                -- hooks/ (inline)
 """
@@ -69,11 +69,12 @@ def resolver_staleness(tmp: Path, monkeypatch) -> str:
 
 
 def resolver_working_memory(tmp: Path, monkeypatch) -> str:
-    """Mirror of staleness; same env-var-driven resolution strategy."""
-    from scripts.working_memory import _get_claude_md_path
+    """The display resolver every sync writes through; the env-var branch
+    answers first, as in staleness."""
+    from scripts.working_memory import _resolve_display_claude_md_path
 
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp))
-    return _classify_path(_get_claude_md_path(), tmp)
+    return _classify_path(_resolve_display_claude_md_path(), tmp)
 
 
 def resolver_memory_api(tmp: Path, monkeypatch) -> str:
@@ -223,17 +224,15 @@ class TestClaudeMdResolverParity:
 # --- Display-resolver parity invariant ---------------------------------------
 #
 # The lint above drives every resolver through the CLAUDE_PROJECT_DIR branch,
-# so it never exercises the git-topology branches -- and it covers
-# _get_claude_md_path, which has NO production callers, while omitting
-# _resolve_display_claude_md_path, which determines every real sync write
-# target. This class pins the specific invariant _resolve_display_claude_md_path's
-# docstring asserts: it and _get_claude_md_path differ ONLY in the
-# worktree-root branch, so in a non-worktree checkout they resolve identically.
+# so it never exercises the git-topology branches. This class pins the specific
+# invariant _resolve_display_claude_md_path's docstring asserts: it and the
+# staleness resolver, which anchors only on the main repository
+# (--git-common-dir), differ ONLY in the worktree-root branch, so in a
+# non-worktree checkout they resolve identically.
 #
 # It must run with CLAUDE_PROJECT_DIR UNSET -- the env branch short-circuits
 # before the git branches and would make the equivalence hold trivially,
-# testing nothing. Re-pointing the 5-way lint at the live resolver and deleting
-# the dead sibling is a separate follow-up, not this pin.
+# testing nothing.
 
 
 def _pgit(cwd: Path, *args: str) -> None:
@@ -275,8 +274,8 @@ class TestDisplayResolverParityInvariant:
 
     _resolve_display_claude_md_path anchors branch 2 on the WORKTREE root
     (--show-toplevel) and falls back on the MAIN repo root (--git-common-dir)
-    in branch 3; _get_claude_md_path uses only the main-repo anchor. The claim:
-    they differ ONLY in that worktree-root branch.
+    in branch 3; staleness.get_project_claude_md_path uses only the main-repo
+    anchor. The claim: they differ ONLY in that worktree-root branch.
 
     Three cases together demonstrate the "only". Two of them predate Option C
     and pin the CONTEXT that gives "only" its meaning; one is the actual
@@ -303,10 +302,8 @@ class TestDisplayResolverParityInvariant:
     def test_non_worktree_checkout_resolvers_coincide(self, tmp_path, monkeypatch):
         """In a plain (non-worktree) checkout the two resolvers return the SAME
         existing path -- the equivalence the docstring promises."""
-        from scripts.working_memory import (
-            _get_claude_md_path,
-            _resolve_display_claude_md_path,
-        )
+        import staleness
+        from scripts.working_memory import _resolve_display_claude_md_path
 
         repo = tmp_path / "plainrepo"
         expected = _init_repo_with_claude_md(repo)
@@ -315,7 +312,7 @@ class TestDisplayResolverParityInvariant:
         monkeypatch.chdir(repo)
 
         display = _resolve_display_claude_md_path()
-        main = _get_claude_md_path()
+        main = staleness.get_project_claude_md_path()
 
         # Both must resolve to the real file (a shared None would be vacuously
         # "equal" while proving nothing), and to the SAME file.
@@ -331,10 +328,8 @@ class TestDisplayResolverParityInvariant:
         CLAUDE.md resolves the display path to its OWN file (branch 2) while the
         main-repo resolver still points at the main file -- so the coincidence
         above is a real property of the non-worktree case, not a constant."""
-        from scripts.working_memory import (
-            _get_claude_md_path,
-            _resolve_display_claude_md_path,
-        )
+        import staleness
+        from scripts.working_memory import _resolve_display_claude_md_path
 
         repo = tmp_path / "mainrepo"
         main_file = _init_repo_with_claude_md(repo)
@@ -349,7 +344,7 @@ class TestDisplayResolverParityInvariant:
         monkeypatch.chdir(worktree)
 
         display = _resolve_display_claude_md_path()
-        main = _get_claude_md_path()
+        main = staleness.get_project_claude_md_path()
 
         assert display is not None and main is not None
         # Display follows the worktree's OWN file (branch 2, --show-toplevel);
@@ -364,7 +359,7 @@ class TestDisplayResolverParityInvariant:
 
         A PACT-convention worktree has no CLAUDE.md of its own, so branch 2
         (--show-toplevel) finds nothing. BEFORE Option C the display resolver
-        then fell through to cwd and returned None, while _get_claude_md_path
+        then fell through to cwd and returned None, while the staleness resolver
         returned the main-repo file -- they DIVERGED. Option C's branch 3
         (--git-common-dir) now sends the display resolver to that same main file,
         so the two AGREE. Delete branch 3 and this assertion fails (display -> None
@@ -376,10 +371,8 @@ class TestDisplayResolverParityInvariant:
         test_working_memory_worktree_sync.py; this asserts only that the two
         resolvers converge, which is the invariant this parity file exists for.
         """
-        from scripts.working_memory import (
-            _get_claude_md_path,
-            _resolve_display_claude_md_path,
-        )
+        import staleness
+        from scripts.working_memory import _resolve_display_claude_md_path
 
         repo = tmp_path / "mainrepo"
         main_file = _init_repo_with_claude_md(repo)
@@ -391,7 +384,7 @@ class TestDisplayResolverParityInvariant:
         monkeypatch.chdir(worktree)
 
         display = _resolve_display_claude_md_path()
-        main = _get_claude_md_path()
+        main = staleness.get_project_claude_md_path()
 
         assert display is not None and main is not None
         assert os.path.realpath(display) == os.path.realpath(main)
@@ -429,18 +422,15 @@ _NEEDS_GIT = pytest.mark.skipif(
 )
 
 
-def _all_three(errors_display, errors_staleness):
-    """Run the display resolver, the staleness twin and _get_claude_md_path
-    in the current environment. Returns the three paths (None for none)."""
+def _both(errors_display, errors_staleness):
+    """Run the display resolver and the staleness resolver in the current
+    environment. Returns the two paths (None for none)."""
     import staleness
-    from scripts.working_memory import (
-        _get_claude_md_path,
-        _resolve_display_claude_md_with_base,
-    )
+    from scripts.working_memory import _resolve_display_claude_md_with_base
 
     display, _ = _resolve_display_claude_md_with_base(errors=errors_display)
     stale, _ = staleness._resolve_project_claude_md_with_base(errors=errors_staleness)
-    return display, stale, _get_claude_md_path()
+    return display, stale
 
 
 def _cwd_hit(tmp_path, monkeypatch):
@@ -474,7 +464,7 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(proj))
         errs, errs2 = [], []
 
-        assert _all_three(errs, errs2) == (None, None, None)
+        assert _both(errs, errs2) == (None, None)
         for recorded in (errs, errs2):
             assert len(recorded) == 1, recorded
             assert "PermissionError" in recorded[0] and str(proj) in recorded[0]
@@ -488,7 +478,7 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         errs, errs2 = [], []
 
-        assert all(_same(p, hit) for p in _all_three(errs, errs2))
+        assert all(_same(p, hit) for p in _both(errs, errs2))
         assert errs == errs2 == []
 
     @_NEEDS_NON_ROOT
@@ -513,7 +503,7 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(proj))
         errs, errs2 = [], []
 
-        assert _all_three(errs, errs2) == (None, None, None)
+        assert _both(errs, errs2) == (None, None)
         preferred = str(proj / ".claude" / "CLAUDE.md")
         for recorded in (errs, errs2):
             assert any(
@@ -537,7 +527,7 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(proj))
         errs, errs2 = [], []
 
-        paths = _all_three(errs, errs2)
+        paths = _both(errs, errs2)
 
         assert all(_same(p, proj / ".claude" / "CLAUDE.md") for p in paths), paths
         assert errs == errs2 == []
@@ -571,7 +561,7 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         errs, errs2 = [], []
 
-        assert all(_same(p, hit) for p in _all_three(errs, errs2))
+        assert all(_same(p, hit) for p in _both(errs, errs2))
         assert errs == errs2 == []
 
     def test_a_git_call_that_fails_moves_on_to_the_cwd(self, tmp_path, monkeypatch):
@@ -586,7 +576,7 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         errs, errs2 = [], []
 
-        assert all(_same(p, hit) for p in _all_three(errs, errs2))
+        assert all(_same(p, hit) for p in _both(errs, errs2))
         assert errs and all(e.startswith("git rung: FileNotFoundError") for e in errs), errs
         assert errs2 and all(e.startswith("git rung: FileNotFoundError") for e in errs2), errs2
 
@@ -747,10 +737,7 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
         comes at the main-checkout rung.
         """
         import staleness
-        from scripts.working_memory import (
-            _get_claude_md_path,
-            _resolve_display_claude_md_with_base,
-        )
+        from scripts.working_memory import _resolve_display_claude_md_with_base
 
         main, main_sub, wt_sub = self._main_checkout_with_a_worktree(tmp_path)
         lock(main / ".claude")
@@ -761,7 +748,6 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
         errs = []
         assert staleness._resolve_project_claude_md_with_base(errors=errs) == (None, None)
         assert any("PermissionError" in e and locked_md in e for e in errs), errs
-        assert _get_claude_md_path() is None
 
         monkeypatch.chdir(wt_sub)
         errs = []
@@ -775,10 +761,7 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
         """The matched control: the same layout with `.claude/` readable, and
         every resolver returns the main checkout's file, not the cwd's."""
         import staleness
-        from scripts.working_memory import (
-            _get_claude_md_path,
-            _resolve_display_claude_md_with_base,
-        )
+        from scripts.working_memory import _resolve_display_claude_md_with_base
 
         main, main_sub, wt_sub = self._main_checkout_with_a_worktree(tmp_path)
         main_md = main / ".claude" / "CLAUDE.md"
@@ -786,7 +769,6 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
 
         monkeypatch.chdir(main_sub)
         assert _same(staleness._resolve_project_claude_md_with_base()[0], main_md)
-        assert _same(_get_claude_md_path(), main_md)
 
         monkeypatch.chdir(wt_sub)
         assert _same(_resolve_display_claude_md_with_base()[0], main_md)

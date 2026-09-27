@@ -804,7 +804,8 @@ class TestParseRetrievedContextSection:
 
 
 # =============================================================================
-# Dual-location CLAUDE.md resolution tests for _get_claude_md_path()
+# Dual-location CLAUDE.md resolution tests for the resolvers' shared helper
+# and the staleness resolver's three strategies
 # =============================================================================
 
 class TestFindExistingClaudeMd:
@@ -852,8 +853,9 @@ class TestFindExistingClaudeMd:
         assert result == new_default, ".claude/CLAUDE.md should take priority"
 
 
-class TestGetClaudeMdPathDualLocation:
-    """Dual-location support tests for _get_claude_md_path() across all 3 fallbacks.
+class TestStalenessResolverDualLocation:
+    """Dual-location support tests for staleness.get_project_claude_md_path()
+    across all 3 fallbacks.
 
     Verifies that each resolution strategy (env var, git root, cwd) checks
     .claude/CLAUDE.md before ./CLAUDE.md.
@@ -863,30 +865,30 @@ class TestGetClaudeMdPathDualLocation:
 
     def test_env_var_finds_legacy_claude_md(self, tmp_path):
         """Env var strategy finds legacy ./CLAUDE.md."""
-        from scripts.working_memory import _get_claude_md_path
+        from staleness import get_project_claude_md_path
 
         legacy = tmp_path / "CLAUDE.md"
         legacy.write_text("# legacy\n")
 
         with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(tmp_path)}):
-            result = _get_claude_md_path()
+            result = get_project_claude_md_path()
         assert result == legacy
 
     def test_env_var_finds_new_default_claude_md(self, tmp_path):
         """Env var strategy finds .claude/CLAUDE.md (new default)."""
-        from scripts.working_memory import _get_claude_md_path
+        from staleness import get_project_claude_md_path
 
         (tmp_path / ".claude").mkdir()
         new_default = tmp_path / ".claude" / "CLAUDE.md"
         new_default.write_text("# new default\n")
 
         with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(tmp_path)}):
-            result = _get_claude_md_path()
+            result = get_project_claude_md_path()
         assert result == new_default
 
     def test_env_var_prefers_new_default_over_legacy(self, tmp_path):
         """Env var strategy: .claude/CLAUDE.md wins over ./CLAUDE.md."""
-        from scripts.working_memory import _get_claude_md_path
+        from staleness import get_project_claude_md_path
 
         (tmp_path / ".claude").mkdir()
         new_default = tmp_path / ".claude" / "CLAUDE.md"
@@ -895,21 +897,21 @@ class TestGetClaudeMdPathDualLocation:
         legacy.write_text("# legacy\n")
 
         with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(tmp_path)}):
-            result = _get_claude_md_path()
+            result = get_project_claude_md_path()
         assert result == new_default
 
     def test_env_var_without_claude_md_falls_through(self, tmp_path):
         """Env var set but no CLAUDE.md at either location -> fall through to
         next strategy (which will either find git root or fall back to cwd).
         """
-        from scripts.working_memory import _get_claude_md_path
+        from staleness import get_project_claude_md_path
 
         # Neither location exists under tmp_path -> env var strategy returns None
         # -> falls through to git/cwd strategies.
         with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(tmp_path)}), \
              patch("subprocess.run", side_effect=FileNotFoundError()), \
              patch("pathlib.Path.cwd", return_value=tmp_path):
-            result = _get_claude_md_path()
+            result = get_project_claude_md_path()
         # Nothing found anywhere -> None
         assert result is None
 
@@ -917,7 +919,7 @@ class TestGetClaudeMdPathDualLocation:
 
     def test_git_root_finds_new_default_claude_md(self, tmp_path):
         """Git root strategy finds .claude/CLAUDE.md (new default)."""
-        from scripts.working_memory import _get_claude_md_path
+        from staleness import get_project_claude_md_path
 
         repo_root = tmp_path / "myrepo"
         (repo_root / ".claude").mkdir(parents=True)
@@ -933,12 +935,12 @@ class TestGetClaudeMdPathDualLocation:
         env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
         with patch.dict(os.environ, env, clear=True), \
              patch("subprocess.run", return_value=mock_result):
-            result = _get_claude_md_path()
+            result = get_project_claude_md_path()
         assert result == new_default
 
     def test_git_root_finds_legacy_claude_md(self, tmp_path):
         """Git root strategy finds legacy ./CLAUDE.md."""
-        from scripts.working_memory import _get_claude_md_path
+        from staleness import get_project_claude_md_path
 
         repo_root = tmp_path / "myrepo"
         repo_root.mkdir()
@@ -954,12 +956,12 @@ class TestGetClaudeMdPathDualLocation:
         env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
         with patch.dict(os.environ, env, clear=True), \
              patch("subprocess.run", return_value=mock_result):
-            result = _get_claude_md_path()
+            result = get_project_claude_md_path()
         assert result == legacy
 
     def test_git_root_prefers_new_default_over_legacy(self, tmp_path):
         """Git root strategy: .claude/CLAUDE.md wins over ./CLAUDE.md."""
-        from scripts.working_memory import _get_claude_md_path
+        from staleness import get_project_claude_md_path
 
         repo_root = tmp_path / "myrepo"
         (repo_root / ".claude").mkdir(parents=True)
@@ -977,14 +979,14 @@ class TestGetClaudeMdPathDualLocation:
         env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
         with patch.dict(os.environ, env, clear=True), \
              patch("subprocess.run", return_value=mock_result):
-            result = _get_claude_md_path()
+            result = get_project_claude_md_path()
         assert result == new_default
 
     # --- Strategy 3: cwd ---
 
     def test_cwd_finds_legacy_claude_md(self, tmp_path):
         """CWD strategy finds legacy ./CLAUDE.md."""
-        from scripts.working_memory import _get_claude_md_path
+        from staleness import get_project_claude_md_path
 
         legacy = tmp_path / "CLAUDE.md"
         legacy.write_text("# legacy\n")
@@ -993,12 +995,12 @@ class TestGetClaudeMdPathDualLocation:
         with patch.dict(os.environ, env, clear=True), \
              patch("subprocess.run", side_effect=FileNotFoundError()), \
              patch("pathlib.Path.cwd", return_value=tmp_path):
-            result = _get_claude_md_path()
+            result = get_project_claude_md_path()
         assert result == legacy
 
     def test_cwd_finds_new_default_claude_md(self, tmp_path):
         """CWD strategy finds .claude/CLAUDE.md (new default)."""
-        from scripts.working_memory import _get_claude_md_path
+        from staleness import get_project_claude_md_path
 
         (tmp_path / ".claude").mkdir()
         new_default = tmp_path / ".claude" / "CLAUDE.md"
@@ -1008,12 +1010,12 @@ class TestGetClaudeMdPathDualLocation:
         with patch.dict(os.environ, env, clear=True), \
              patch("subprocess.run", side_effect=FileNotFoundError()), \
              patch("pathlib.Path.cwd", return_value=tmp_path):
-            result = _get_claude_md_path()
+            result = get_project_claude_md_path()
         assert result == new_default
 
     def test_cwd_prefers_new_default_over_legacy(self, tmp_path):
         """CWD strategy: .claude/CLAUDE.md wins over ./CLAUDE.md."""
-        from scripts.working_memory import _get_claude_md_path
+        from staleness import get_project_claude_md_path
 
         (tmp_path / ".claude").mkdir()
         new_default = tmp_path / ".claude" / "CLAUDE.md"
@@ -1025,17 +1027,17 @@ class TestGetClaudeMdPathDualLocation:
         with patch.dict(os.environ, env, clear=True), \
              patch("subprocess.run", side_effect=FileNotFoundError()), \
              patch("pathlib.Path.cwd", return_value=tmp_path):
-            result = _get_claude_md_path()
+            result = get_project_claude_md_path()
         assert result == new_default
 
     def test_cwd_returns_none_when_nothing_found(self, tmp_path):
         """All strategies fail -> returns None."""
-        from scripts.working_memory import _get_claude_md_path
+        from staleness import get_project_claude_md_path
 
         # tmp_path is empty -- no CLAUDE.md at either location
         env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
         with patch.dict(os.environ, env, clear=True), \
              patch("subprocess.run", side_effect=FileNotFoundError()), \
              patch("pathlib.Path.cwd", return_value=tmp_path):
-            result = _get_claude_md_path()
+            result = get_project_claude_md_path()
         assert result is None
