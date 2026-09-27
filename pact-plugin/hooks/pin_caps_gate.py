@@ -127,6 +127,7 @@ _FAIL_BASELINE_READ = "pin_caps_gate_baseline_read"
 _FAIL_BASELINE_PARSE = "pin_caps_gate_baseline_parse"
 _FAIL_SIMULATE = "pin_caps_gate_simulate"
 _FAIL_UNEXPECTED = "pin_caps_gate_unexpected"
+_FAIL_RESOLVE = "pin_caps_gate_resolve"
 
 _WRITE_BASELINE_DENY_REASON = (
     "Refusing Write: could not read or parse the current CLAUDE.md to "
@@ -247,6 +248,27 @@ def _read_baseline(claude_md_path: Path) -> tuple[Optional[str], Optional[str]]:
         return None, _FAIL_BASELINE_READ
 
 
+def _record_unexaminable_claude_md(
+    file_path_str: str, errors: list, input_data: dict
+) -> None:
+    """Record the fail-open bypass taken when the project CLAUDE.md could not
+    be examined, for an Edit or Write to a file named CLAUDE.md: the gate cannot
+    tell whether that file is the one it guards, so it lets the tool through.
+    Any other file would pass this gate anyway, so it records nothing, and
+    neither does a CLAUDE.md that is merely absent."""
+    if not errors or Path(file_path_str).name != "CLAUDE.md":
+        return
+    from staleness import unreadable_cause  # loaded by the resolver already
+
+    if unreadable_cause(errors) is None:
+        return
+    append_failure(
+        classification=_FAIL_RESOLVE,
+        error="; ".join(errors),
+        source=str(input_data.get("tool_name", "")),
+    )
+
+
 def _check_tool_allowed(input_data: dict) -> Optional[str]:
     """Determine whether the tool call should be denied.
 
@@ -281,8 +303,10 @@ def _check_tool_allowed(input_data: dict) -> Optional[str]:
         return None
 
     file_path_str = tool_input.get("file_path", "")
-    claude_md_path = match_project_claude_md(file_path_str)
+    resolve_errors: list = []
+    claude_md_path = match_project_claude_md(file_path_str, errors=resolve_errors)
     if claude_md_path is None:
+        _record_unexaminable_claude_md(file_path_str, resolve_errors, input_data)
         return None
 
     # Override validation on the candidate — done before cap eval so an

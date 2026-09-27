@@ -149,7 +149,7 @@ class TestCheckPinCaps_Advisory_FailOpen:
         import staleness
         import check_pin_caps
         monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: None
+            staleness, "get_project_claude_md_path", lambda errors=None: None
         )
         monkeypatch.setattr(
             check_pin_caps, "get_project_claude_md_path", lambda errors=None: None
@@ -524,7 +524,7 @@ class TestCheckPinCaps_Advisory_NeverExit2:
         import staleness
         import check_pin_caps
         monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: None
+            staleness, "get_project_claude_md_path", lambda errors=None: None
         )
         monkeypatch.setattr(
             check_pin_caps, "get_project_claude_md_path", lambda errors=None: None

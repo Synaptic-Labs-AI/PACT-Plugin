@@ -43,7 +43,7 @@ class TestPinCapsAdversarial_PathResolution:
         import shared.pact_context as ctx_module
         monkeypatch.setattr(ctx_module, "get_session_dir", lambda: str(session_dir))
         import staleness
-        monkeypatch.setattr(staleness, "get_project_claude_md_path", lambda: claude_md)
+        monkeypatch.setattr(staleness, "get_project_claude_md_path", lambda errors=None: claude_md)
         # CWD is worktree root; "CLAUDE.md" there is NOT the tmp path.
         result = _check_tool_allowed({
             "tool_name": "Write",
@@ -70,7 +70,7 @@ class TestPinCapsAdversarial_PathResolution:
         import shared.pact_context as ctx_module
         monkeypatch.setattr(ctx_module, "get_session_dir", lambda: str(session_dir))
         import staleness
-        monkeypatch.setattr(staleness, "get_project_claude_md_path", lambda: claude_md)
+        monkeypatch.setattr(staleness, "get_project_claude_md_path", lambda errors=None: claude_md)
         result = _check_tool_allowed({
             "tool_name": "Write",
             "tool_input": {"file_path": str(sibling), "content": "x"},
@@ -101,7 +101,7 @@ class TestPinCapsAdversarial_PathResolution:
         import shared.pact_context as ctx_module
         monkeypatch.setattr(ctx_module, "get_session_dir", lambda: str(session_dir))
         import staleness
-        monkeypatch.setattr(staleness, "get_project_claude_md_path", lambda: claude_md)
+        monkeypatch.setattr(staleness, "get_project_claude_md_path", lambda errors=None: claude_md)
         # ADD-shape Write: new content has 1 pin comment; current file has 0.
         # #878: lead frame (agent_type) so the is_lead-gated DENY path fires.
         result = _check_tool_allowed({

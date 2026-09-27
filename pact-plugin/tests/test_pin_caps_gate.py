@@ -45,7 +45,7 @@ def caps_gate_env(tmp_path, monkeypatch, pact_context):
     # shared/claude_md_manager.match_project_claude_md).
     import staleness
     monkeypatch.setattr(
-        staleness, "get_project_claude_md_path", lambda: claude_md
+        staleness, "get_project_claude_md_path", lambda errors=None: claude_md
     )
 
     def _setup(pin_count: int = 1):
@@ -422,7 +422,7 @@ class TestPinCapsGate_WriteBaselineFailClosed:
 
         import staleness
         monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: claude_md
+            staleness, "get_project_claude_md_path", lambda errors=None: claude_md
         )
 
         entries = [
@@ -449,7 +449,7 @@ class TestPinCapsGate_WriteBaselineFailClosed:
 
         import staleness
         monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: claude_md
+            staleness, "get_project_claude_md_path", lambda errors=None: claude_md
         )
 
         entries = [
@@ -474,7 +474,7 @@ class TestPinCapsGate_WriteBaselineFailClosed:
 
         import staleness
         monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: claude_md
+            staleness, "get_project_claude_md_path", lambda errors=None: claude_md
         )
 
         result = _call_gate({

@@ -59,7 +59,7 @@ def curator_env(tmp_path, monkeypatch, pact_context):
     import check_pin_caps  # triggers _load_hook_module side effects first
     import staleness
     monkeypatch.setattr(
-        staleness, "get_project_claude_md_path", lambda: claude_md
+        staleness, "get_project_claude_md_path", lambda errors=None: claude_md
     )
     monkeypatch.setattr(
         check_pin_caps, "get_project_claude_md_path", lambda errors=None: claude_md

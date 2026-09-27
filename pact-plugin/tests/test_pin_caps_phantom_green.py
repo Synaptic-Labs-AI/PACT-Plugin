@@ -36,7 +36,7 @@ def loaded_gate_env(tmp_path, monkeypatch, pact_context):
 
     import staleness
     monkeypatch.setattr(
-        staleness, "get_project_claude_md_path", lambda: claude_md
+        staleness, "get_project_claude_md_path", lambda errors=None: claude_md
     )
 
     entries = [make_pin_entry(title=f"Pin{i}", body_chars=4) for i in range(3)]

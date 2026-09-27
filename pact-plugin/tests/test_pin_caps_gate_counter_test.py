@@ -41,7 +41,7 @@ def gate_env(tmp_path, monkeypatch, pact_context):
 
     import staleness
     monkeypatch.setattr(
-        staleness, "get_project_claude_md_path", lambda: claude_md
+        staleness, "get_project_claude_md_path", lambda errors=None: claude_md
     )
 
     def _setup(pin_count=3, body_chars=4):
@@ -507,7 +507,7 @@ class TestCounterRevert_WriteBaselineFailClosed:
 
         import staleness
         monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: claude_md
+            staleness, "get_project_claude_md_path", lambda errors=None: claude_md
         )
 
         result = _call_gate({
@@ -546,7 +546,7 @@ class TestCounterRevert_WriteBaselineFailClosed:
 
         import staleness
         monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: claude_md
+            staleness, "get_project_claude_md_path", lambda errors=None: claude_md
         )
 
         result = _call_gate({

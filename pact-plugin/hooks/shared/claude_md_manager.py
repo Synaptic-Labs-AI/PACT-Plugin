@@ -1650,7 +1650,9 @@ def _build_migrated_content(content: str) -> str:
     return "".join(parts)
 
 
-def match_project_claude_md(file_path_str: str) -> Path | None:
+def match_project_claude_md(
+    file_path_str: str, errors: list | None = None
+) -> Path | None:
     """Match a tool-input file_path against the canonical project CLAUDE.md.
 
     Returns the canonical resolved path if `file_path_str` points at the
@@ -1671,6 +1673,10 @@ def match_project_claude_md(file_path_str: str) -> Path | None:
 
     Fail-safe: any OSError / RuntimeError while resolving returns None.
     Callers treat None as "not our target; let the tool through."
+
+    `errors` is handed to the resolver. A caller that passes a list can tell
+    a CLAUDE.md that could not be examined from a missing one
+    (`staleness.unreadable_cause`), and record the bypass.
     """
     if not file_path_str:
         return None
@@ -1680,7 +1686,7 @@ def match_project_claude_md(file_path_str: str) -> Path | None:
     except ImportError:
         return None
 
-    project_md = get_project_claude_md_path()
+    project_md = get_project_claude_md_path(errors=errors)
     if project_md is None:
         return None
 
