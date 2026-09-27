@@ -81,7 +81,7 @@ not equally serious:
      default `kill`, a CI cancellation or timeout, `docker stop`, a closed
      terminal (SIGHUP), SIGQUIT. The process dies without comparing, and
      never with exit 0, so CI still fails the job. MEASURED: SIGTERM exit
-     143; SIGHUP exit 129 and SIGQUIT exit 131, on 3.14.6 only.
+     143, SIGHUP exit 129, SIGQUIT exit 131.
   2. A hard kill -- SIGKILL, a segfault, or os._exit from the pytest process.
      Tests were mid-execution, so a writer may already have fired. SIGKILL and
      a segfault never exit zero. os._exit(0) DOES: it is the silent case,
