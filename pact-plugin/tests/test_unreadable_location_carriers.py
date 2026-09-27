@@ -2,17 +2,18 @@
 Location: pact-plugin/tests/test_unreadable_location_carriers.py
 Summary: Holds every existence probe in the project CLAUDE.md writers, the
          stale-session reader, the global kernel-block strip, the project-id
-         walk and the worktree guard to ONE behaviour on every supported
-         interpreter. The pact-memory and staleness CLAUDE.md resolvers join
-         the probe table here; their own arms are in
-         test_claude_md_resolver_parity.py.
+         walk, project_scope's ancestor walk, the backlog's project lookup and
+         the worktree guard to ONE behaviour on every supported interpreter.
+         The pact-memory and staleness CLAUDE.md resolvers join the probe
+         table here; their own arms are in test_claude_md_resolver_parity.py.
 Used by: the full pytest suite, on each CI interpreter.
 
 THE SPLIT THESE ARMS CLOSE. `Path.exists()` and `Path.is_dir()` re-raise a
 PermissionError on 3.9-3.13 and return False on 3.14, so a directory the
 process cannot search aborted a caller on two CI interpreters and was skipped
-as absent on the third. Every arm below failed against the pre-fix code on at
-least one CI interpreter, and its docstring names which one.
+as absent on the third. Every arm below that is about a split failed against
+the pre-fix code on at least one CI interpreter, and its docstring names
+which one. The rest are matched controls and pins, and say so.
 
 WHAT "UNREADABLE" MEANS HERE DEPENDS ON THE CALLER, AND THE ARMS SAY WHICH:
 - a project CLAUDE.md writer REPORTS it as a failed status and writes nothing,
@@ -20,7 +21,9 @@ WHAT "UNREADABLE" MEANS HERE DEPENDS ON THE CALLER, AND THE ARMS SAY WHICH:
   reader, which follows the same precedence, stays silent;
 - the global kernel-block strip treats it as ABSENT, since it cannot strip a
   file it cannot read;
-- an upward walk STOPS at it, rather than climbing to a parent's marker.
+- an upward walk STOPS at it, rather than climbing to a parent's marker, and
+  its caller says so: the project id is unresolved, the backlog read declines
+  loudly naming the level, and the backlog write refuses naming it.
 
 EACCES NEEDS A NON-ROOT PROCESS. Root searches a mode-0 directory, so those
 arms SKIP under root with that reason; they never pass without the trigger.
@@ -84,7 +87,7 @@ def _symlink_loop(path):
     return path
 
 
-# --- The probe, copied into three modules ------------------------------------
+# --- The probe, in every module that defines or imports it --------------------
 
 _PROBE_OWNERS = (
     "shared.claude_md_manager",
@@ -117,7 +120,7 @@ def test_every_copy_of_the_probe_counts_the_same_errors_as_absent(tmp_path, lock
     and four copies: worktree_guard imports only the stdlib, stale_session
     does not import claude_md_manager at runtime, and memory_api and
     working_memory sit outside hooks/. staleness, project_scope, backlog_store
-    and backlog import the canonical one. This arm holds all nine to one
+    and backlog import the canonical one. This PIN holds all nine to one
     table, so an edit to one copy reddens here instead of drifting silently.
 
     The table is 3.9-3.13 pathlib's own rule, made explicit so 3.14 follows it:
@@ -583,7 +586,8 @@ class TestNearestExistingDirectory:
         assert project_scope._nearest_existing_directory(gone) == tmp_path / "project"
 
     def test_a_file_is_passed_over_for_the_directory_above_it(self, tmp_path):
-        """Only a directory answers. A regular file on the path is climbed past."""
+        """A PIN on the directory test: only a directory answers, and a
+        regular file on the path is climbed past."""
         (tmp_path / "project").mkdir()
         a_file = tmp_path / "project" / "notes.txt"
         a_file.write_text("x")
