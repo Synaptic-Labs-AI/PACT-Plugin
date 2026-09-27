@@ -212,6 +212,17 @@ _PROBED_FUNCTIONS = {
         "check_worktree_boundary",
     },
     "skills/pact-memory/scripts/memory_api.py": {"_find_project_root", "main_repo_root"},
+    "skills/pact-memory/scripts/working_memory.py": {
+        "_find_existing_claude_md",
+        "_resolve_display_claude_md_with_base",
+        "sync_to_claude_md",
+        "sync_retrieved_to_claude_md",
+    },
+    "hooks/staleness.py": {
+        "_find_existing_claude_md",
+        "_resolve_project_claude_md_with_base",
+    },
+    "hooks/shared/project_scope.py": {"_nearest_existing_directory"},
     "hooks/shared/backlog_store.py": {"_enclosing_checkout"},
     "hooks/shared/backlog.py": {"_umbrella_refusal"},
 }
