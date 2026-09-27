@@ -1158,13 +1158,14 @@ def _resolve_display_claude_md_with_base(
     A GIT CALL THAT DID NOT ANSWER ALSO ENDS RESOLUTION, for the same reason:
     git exists, but the location it would have named is unknown rather than
     absent, so the next branch could write a different file. That covers a
-    timeout and any OSError other than FileNotFoundError. git that is not
-    installed (FileNotFoundError) is not an error: it gives the same answer on
-    every run, so resolution moves on and records nothing. A git call that
-    EXITS NONZERO also moves on and records nothing, because it reads the same
-    as "not a repository": that includes a repository whose metadata cannot be
-    read, such as a main checkout whose `.git` is unsearchable, which therefore
-    can still land on a later branch.
+    timeout, any OSError other than FileNotFoundError, and output git produced
+    that cannot be decoded. git that is not installed (FileNotFoundError) is
+    not an error: it gives the same answer on every run, so resolution moves
+    on and records nothing. A git call that EXITS NONZERO also moves on and
+    records nothing, because it reads the same as "not a repository": that
+    includes a repository whose metadata cannot be read, such as a main
+    checkout whose `.git` is unsearchable, which therefore can still land on a
+    later branch.
 
     This never CREATES a CLAUDE.md (the orchestrator manages the file's
     lifecycle); it only probes for an existing one.
@@ -1180,12 +1181,11 @@ def _resolve_display_claude_md_with_base(
         the directory it was found under; (None, None) if none exists.
     """
     # Resolution must never raise into the sync path. A probe that cannot
-    # examine a location raises, and so does a deleted working directory or a
-    # decode error in git's output; the outer handler records each one and
-    # returns (None, None), so the caller skips the sync and the save still
-    # succeeds. The git branches' inner handlers cover git's own work only:
-    # git that is not installed moves on, and git that did not answer ends
-    # resolution, as a failed probe does.
+    # examine a location raises, and so does a deleted working directory; the
+    # outer handler records each one and returns (None, None), so the caller
+    # skips the sync and the save still succeeds. The git branches' inner
+    # handlers cover git's own work only: git that is not installed moves on,
+    # and git that did not answer ends resolution, as a failed probe does.
     errors = [] if errors is None else errors
     try:
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
@@ -1224,7 +1224,7 @@ def _resolve_display_claude_md_with_base(
                 worktree_root = Path(result.stdout.strip())
         except FileNotFoundError:
             pass  # git is not installed: nothing to record, move on
-        except (subprocess.TimeoutExpired, OSError) as exc:
+        except (subprocess.TimeoutExpired, OSError, UnicodeDecodeError) as exc:
             errors.append(f"git rung: {type(exc).__name__}: {exc}")
             return None, None
         if worktree_root is not None:
@@ -1265,7 +1265,7 @@ def _resolve_display_claude_md_with_base(
                 repo_root = Path(os.path.realpath(common_dir)).parent
         except FileNotFoundError:
             pass  # git is not installed: nothing to record, move on
-        except (subprocess.TimeoutExpired, OSError) as exc:
+        except (subprocess.TimeoutExpired, OSError, UnicodeDecodeError) as exc:
             errors.append(f"git rung: {type(exc).__name__}: {exc}")
             return None, None
         if repo_root is not None:
@@ -2131,9 +2131,9 @@ class SyncResult:
     # CLAUDE.md met an error, so "there is no file" and "the file could not be
     # looked for" stop reading alike. It covers every error the display
     # resolver records when it finds nothing -- a location it could not read, a
-    # git call that timed out or failed to run, and any other failure that
-    # ended resolution, such as a deleted working directory or a decode error
-    # in git's output -- and a resolved or explicit target that could not be
+    # git call that timed out, failed to run or produced output that cannot be
+    # decoded, and any other failure that ended resolution, such as a deleted
+    # working directory -- and a resolved or explicit target that could not be
     # examined at the existence check. It arrives by a RETURN, on the same
     # route as UNRESOLVED, and the errors are logged at WARNING where it is
     # produced.

@@ -147,26 +147,33 @@ class TestResolutionIsDriven:
         ), exc.value.reason
 
 
+    @pytest.mark.parametrize(
+        "failure, cause",
+        [
+            (PermissionError(13, "Permission denied", "git"), "PermissionError (EACCES)"),
+            (UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"), "UnicodeDecodeError"),
+        ],
+        ids=["oserror", "undecodable"],
+    )
     def test_a_git_call_that_did_not_answer_is_unevaluable_as_git(
-        self, isolated, monkeypatch
+        self, isolated, monkeypatch, failure, cause
     ):
         """The declared project holds no CLAUDE.md, so resolution reaches the
-        git rung, and git fails to run. The verdict names git, not CLAUDE.md's
-        permissions, and carries no path."""
+        git rung, and git fails to run or answers with output that cannot be
+        decoded. The verdict names git, not CLAUDE.md's permissions, and
+        carries no path."""
         empty = _make_project(isolated / "empty", None)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(empty))
         monkeypatch.chdir(empty)
 
-        def git_denied(*args, **kwargs):
-            raise PermissionError(13, "Permission denied", "git")
+        def git_failed(*args, **kwargs):
+            raise failure
 
-        monkeypatch.setattr(subprocess, "run", git_denied)
+        monkeypatch.setattr(subprocess, "run", git_failed)
         with pytest.raises(archive_pin._Unevaluable) as exc:
             archive_pin.resolve_claude_md()
 
-        assert exc.value.reason == (
-            "CLAUDE.md could not be located: git PermissionError (EACCES)"
-        ), exc.value.reason
+        assert exc.value.reason == f"CLAUDE.md could not be located: git {cause}", exc.value.reason
 
 
 class TestCrossProjectFallthroughIsRefused:

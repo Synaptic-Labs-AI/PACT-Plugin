@@ -264,14 +264,14 @@ def _resolve_project_claude_md_with_base(
 
     A GIT CALL THAT DID NOT ANSWER ALSO ENDS RESOLUTION: git exists, but the
     root it would have named is unknown rather than absent, so the cwd rung
-    could pick a different file. That covers a timeout and any OSError other
-    than FileNotFoundError. git that is not installed (FileNotFoundError) is
-    not an error: it gives the same answer on every run, so resolution moves on
-    and records nothing. A git call that EXITS NONZERO also moves on and
-    records nothing, because it reads the same as "not a repository": that
-    includes a repository whose metadata cannot be read, such as a main
-    checkout whose `.git` is unsearchable, which therefore can still land on
-    the cwd rung.
+    could pick a different file. That covers a timeout, any OSError other than
+    FileNotFoundError, and output git produced that cannot be decoded. git
+    that is not installed (FileNotFoundError) is not an error: it gives the
+    same answer on every run, so resolution moves on and records nothing. A
+    git call that EXITS NONZERO also moves on and records nothing, because it
+    reads the same as "not a repository": that includes a repository whose
+    metadata cannot be read, such as a main checkout whose `.git` is
+    unsearchable, which therefore can still land on the cwd rung.
 
     Args:
         errors: Optional list that receives a message for every location that
@@ -331,7 +331,7 @@ def _resolve_project_claude_md_with_base(
                 repo_root = Path(os.path.realpath(common_dir)).parent
         except FileNotFoundError:
             pass  # git is not installed: nothing to record, move on
-        except (subprocess.TimeoutExpired, OSError) as exc:
+        except (subprocess.TimeoutExpired, OSError, UnicodeDecodeError) as exc:
             errors.append(f"git rung: {failure_cause(exc)}: {exc}")
             return None, None
         if repo_root is not None:

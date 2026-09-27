@@ -219,10 +219,20 @@ class TestCheckPinCaps_UnreadableIsNotMissing:
         assert "CLAUDE.md could not be read: PermissionError (EACCES)" in status, status
         assert "not found" not in status and "/" not in status, status
 
-    def test_a_git_call_that_did_not_answer_is_reported_as_git(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize(
+        "failure, cause",
+        [
+            (PermissionError(13, "Permission denied", "git"), "PermissionError (EACCES)"),
+            (UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"), "UnicodeDecodeError"),
+        ],
+        ids=["oserror", "undecodable"],
+    )
+    def test_a_git_call_that_did_not_answer_is_reported_as_git(
+        self, tmp_path, monkeypatch, failure, cause
+    ):
         """The declared project holds no CLAUDE.md, so resolution reaches the
-        git rung, and git fails to run. The status names git, not CLAUDE.md's
-        permissions."""
+        git rung, and git fails to run or answers with output that cannot be
+        decoded. The status names git, not CLAUDE.md's permissions."""
         import subprocess
 
         proj = tmp_path / "proj"
@@ -232,15 +242,15 @@ class TestCheckPinCaps_UnreadableIsNotMissing:
         monkeypatch.chdir(empty)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(proj))
 
-        def git_denied(*args, **kwargs):
-            raise PermissionError(13, "Permission denied", "git")
+        def git_failed(*args, **kwargs):
+            raise failure
 
-        monkeypatch.setattr(subprocess, "run", git_denied)
+        monkeypatch.setattr(subprocess, "run", git_failed)
         rc, payload = _run_cli(["--status"])
 
         status = payload["slot_status"]
         assert rc == 0
-        assert "CLAUDE.md could not be located: git PermissionError (EACCES)" in status, status
+        assert f"CLAUDE.md could not be located: git {cause}" in status, status
         assert "could not be read" not in status and "/" not in status, status
 
     def test_a_project_with_no_claude_md_is_still_not_found(self, tmp_path, monkeypatch):

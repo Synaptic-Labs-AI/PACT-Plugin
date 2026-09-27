@@ -598,8 +598,9 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
         [
             subprocess.TimeoutExpired(["git", "rev-parse"], 5),
             PermissionError(errno.EACCES, "Permission denied", "git"),
+            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
         ],
-        ids=["timeout", "oserror"],
+        ids=["timeout", "oserror", "undecodable"],
     )
     def test_a_git_call_that_did_not_answer_ends_resolution(
         self, tmp_path, monkeypatch, failure
@@ -636,8 +637,9 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
         [
             subprocess.TimeoutExpired(["git", "rev-parse"], 5),
             PermissionError(errno.EACCES, "Permission denied", "git"),
+            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
         ],
-        ids=["timeout", "oserror"],
+        ids=["timeout", "oserror", "undecodable"],
     )
     def test_a_main_checkout_rung_that_did_not_answer_ends_display_resolution(
         self, tmp_path, monkeypatch, failure
