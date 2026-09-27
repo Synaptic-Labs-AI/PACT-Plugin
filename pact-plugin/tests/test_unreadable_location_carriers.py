@@ -27,6 +27,7 @@ arms SKIP under root with that reason; they never pass without the trigger.
 """
 
 import ast
+import errno
 import importlib
 import io
 import json
@@ -92,7 +93,15 @@ _PROBE_OWNERS = (
     "worktree_guard",
     "scripts.working_memory",
     "staleness",
+    "shared.project_scope",
+    "shared.backlog_store",
+    "shared.backlog",
 )
+
+# The errors every copy counts as "not there". EBADF cannot be produced by a
+# stat of a path, so no behavioural row can hold it; this set is asserted
+# directly instead.
+_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP})
 
 
 def _outcome(probe, path):
@@ -104,16 +113,17 @@ def _outcome(probe, path):
 
 @_NEEDS_NON_ROOT
 def test_every_copy_of_the_probe_counts_the_same_errors_as_absent(tmp_path, lock):
-    """Four modules carry their own copy of the probe: worktree_guard imports
-    only the stdlib, stale_session does not import claude_md_manager at
-    runtime, and memory_api and working_memory sit outside hooks/. staleness
-    imports the canonical one, which its CLAUDE.md resolver decides existence
-    with. This arm holds all six to one table, so an edit to one copy reddens
-    here instead of drifting silently.
+    """Five modules define the probe, the canonical one in claude_md_manager
+    and four copies: worktree_guard imports only the stdlib, stale_session
+    does not import claude_md_manager at runtime, and memory_api and
+    working_memory sit outside hooks/. staleness, project_scope, backlog_store
+    and backlog import the canonical one. This arm holds all nine to one
+    table, so an edit to one copy reddens here instead of drifting silently.
 
     The table is 3.9-3.13 pathlib's own rule, made explicit so 3.14 follows it:
     a path that is not there (ENOENT, ENOTDIR, ELOOP, an unencodable path) is
-    absent; a path the process may not search raises.
+    absent; any other error raises, whether the process may not search the
+    path or the name is too long.
     """
     present = tmp_path / "present.txt"
     present.write_text("x")
@@ -130,12 +140,56 @@ def test_every_copy_of_the_probe_counts_the_same_errors_as_absent(tmp_path, lock
         "NUL byte": (str(tmp_path / "nul\0byte"), "absent"),
         "EACCES under a mode-0 dir": (locked / "target", "PermissionError"),
         "EACCES through a marker symlink": (marker, "PermissionError"),
+        "ENAMETOOLONG": (tmp_path / ("x" * 300), "OSError"),
     }
     expected = {name: want for name, (_path, want) in cases.items()}
     for owner in _PROBE_OWNERS:
         probe = getattr(importlib.import_module(owner), "_stat_if_present")
         observed = {name: _outcome(probe, path) for name, (path, _want) in cases.items()}
         assert observed == expected, f"{owner} disagrees with the shared table"
+
+
+def test_every_copy_reads_exactly_the_same_absent_set():
+    """The set each probe consults, read from the probe's own globals, so an
+    importer is checked against the definition it actually runs. Dropping
+    EBADF, which no row can build, or adding any errno reddens here."""
+    for owner in _PROBE_OWNERS:
+        probe = getattr(importlib.import_module(owner), "_stat_if_present")
+        assert probe.__globals__["_ABSENT_ERRNOS"] == _ABSENT_ERRNOS, owner
+
+
+def _probe_definitions(source):
+    return [
+        node.lineno
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef) and node.name == "_stat_if_present"
+    ]
+
+
+def test_every_definition_of_the_probe_is_in_the_table():
+    """A census of `def _stat_if_present` across pact-plugin/, tests included.
+    A new copy the table does not list reddens here, so it cannot escape the
+    two arms above."""
+    plugin_root = Path(__file__).resolve().parent.parent
+    defined = {
+        path.relative_to(plugin_root).as_posix()
+        for path in plugin_root.rglob("*.py")
+        if "__pycache__" not in path.parts
+        and _probe_definitions(path.read_text(encoding="utf-8"))
+    }
+    listed = {
+        Path(importlib.import_module(owner).__file__).resolve().relative_to(plugin_root).as_posix()
+        for owner in _PROBE_OWNERS
+    }
+    assert "hooks/shared/claude_md_manager.py" in defined, (
+        f"the census found no canonical definition, so it is not reading the tree: {defined}"
+    )
+    assert defined <= listed, f"definitions the table does not list: {sorted(defined - listed)}"
+
+
+def test_the_census_finds_a_definition():
+    """The control for the census: its parser finds a definition when one is there."""
+    assert _probe_definitions("x = 1\n\ndef _stat_if_present(path):\n    return None\n") == [3]
 
 
 _PROBED_FUNCTIONS = {
