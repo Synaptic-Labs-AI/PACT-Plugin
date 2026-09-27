@@ -573,11 +573,22 @@ def test_a_symlinked_claude_md_left_alone_is_clean(tmp_path):
     assert f"{_key(link)} (present)" in summary[0]
 
 
-def test_an_inherited_pytest_addopts_does_not_reach_the_child(tmp_path, monkeypatch):
-    """The outer run's PYTEST_ADDOPTS -- here a flag the child cannot parse --
-    is not the child's: the clean arm stays clean. Needs a clean child, so a
-    real write to a home config file during it fails it."""
-    monkeypatch.setenv("PYTEST_ADDOPTS", "--no-such-flag")
+@pytest.mark.parametrize(
+    "name, value",
+    [
+        ("PYTEST_ADDOPTS", "--no-such-flag"),
+        ("PYTEST_PLUGINS", "no_such_plugin_for_the_guard_child"),
+    ],
+    ids=["addopts", "plugins"],
+)
+def test_an_inherited_pytest_setting_does_not_reach_the_child(
+    tmp_path, monkeypatch, name, value
+):
+    """The outer run's PYTEST_* settings -- here a flag the child cannot parse,
+    or a plugin it cannot import -- are not the child's: the clean arm stays
+    clean. Needs a clean child, so a real write to a home config file during
+    it fails it."""
+    monkeypatch.setenv(name, value)
     completed, dump = _run_nested(tmp_path)
     _assert_confined(dump, _default_tmp_set(tmp_path))
     assert completed.returncode == 0, completed.stderr
@@ -590,16 +601,47 @@ def test_a_child_that_writes_no_dump_fails_with_its_own_output(tmp_path):
         _run_nested(tmp_path, argv_extra=("--no-such-flag",))
 
 
-def test_every_nested_spawn_has_a_timeout():
-    """Every `subprocess.run` in this file passes `timeout`."""
+def test_a_child_that_loads_another_guard_is_caught(tmp_path, monkeypatch):
+    """The witness in `_run_nested` is what makes every arm measure the copy.
+    A byte-different guard in the child's working directory, which
+    `python -m` puts ahead of PYTHONPATH, is the one the child loads, and the
+    harness refuses the run instead of measuring it."""
+    monkeypatch.delenv("PYTHONSAFEPATH", raising=False)
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    source = (PLUGIN_ROOT / "tests" / "claude_md_guard.py").read_text(encoding="utf-8")
+    (decoy / "claude_md_guard.py").write_text(
+        source + "\n# A different file from the copy.\n", encoding="utf-8"
+    )
+    with pytest.raises(AssertionError, match="not the guard copy"):
+        _run_nested(tmp_path, cwd=decoy)
+
+
+def test_every_nested_spawn_has_a_positive_timeout():
+    """Every `subprocess.run` in this file passes a timeout that is a positive
+    number -- `_CHILD_TIMEOUT`, itself one, or a positive literal. A timeout
+    of None waits forever, the same as passing none."""
+    assert isinstance(_CHILD_TIMEOUT, (int, float)), _CHILD_TIMEOUT
+    assert not isinstance(_CHILD_TIMEOUT, bool) and _CHILD_TIMEOUT > 0, _CHILD_TIMEOUT
     tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
     spawns = [
         node for node in ast.walk(tree)
         if isinstance(node, ast.Call) and ast.unparse(node.func) == "subprocess.run"
     ]
     assert spawns, "no subprocess.run found: the census is measuring nothing"
-    missing = [
+
+    def positive(timeout):
+        if isinstance(timeout, ast.Name):
+            return timeout.id == "_CHILD_TIMEOUT"
+        return (
+            isinstance(timeout, ast.Constant)
+            and isinstance(timeout.value, (int, float))
+            and not isinstance(timeout.value, bool)
+            and timeout.value > 0
+        )
+
+    bad = [
         node.lineno for node in spawns
-        if "timeout" not in {kw.arg for kw in node.keywords}
+        if not positive({kw.arg: kw.value for kw in node.keywords}.get("timeout"))
     ]
-    assert missing == [], f"subprocess.run without a timeout at lines {missing}"
+    assert bad == [], f"subprocess.run without a positive timeout at lines {bad}"

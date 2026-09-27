@@ -273,6 +273,25 @@ def test_the_sample_reads_the_writers_absent_set(tmp_path, monkeypatch):
     assert sample["error"] is not None and "FileNotFoundError" in sample["error"], sample
 
 
+def test_an_unimportable_absent_set_is_reported_not_counted_absent(tmp_path, monkeypatch):
+    """When the writers' absent set cannot be imported, the guard cannot tell
+    absent from unreadable, so a missing file is reported as a stat error
+    rather than passed as absent."""
+    import shared.claude_md_manager as manager
+
+    monkeypatch.delattr(manager, "_ABSENT_ERRNOS")
+    sample = guard._sample_one(tmp_path / "CLAUDE.md")
+    assert sample["error"] is not None, sample
+
+
+def test_a_path_the_os_rejects_samples_as_absent(tmp_path):
+    """A path holding a NUL raises ValueError from every stat, which the
+    writers' probe counts as absent; so does the sample, at both the path's
+    own lstat and the stat of its target."""
+    sample = guard._sample_one(str(tmp_path) + "/nul\x00dir/CLAUDE.md")
+    assert (sample["exists"], sample["error"]) == (False, None), sample
+
+
 def test_the_verdict_reads_exactly_the_fields_its_docstring_names():
     """Flip each sampled field of an unchanged present sample, one at a time,
     and collect the fields whose flip moves the verdict. That set is what
@@ -468,6 +487,53 @@ def test_the_inputs_read_cleanly_on_this_machine():
     imported = _guard_imports()
     assert not {n for n in imported if n.split(".")[-1] in ("working_memory", "pact_session")}, (
         imported
+    )
+
+
+def _pin_with_one_git_rung_failing(monkeypatch, tmp_path, failing):
+    """Pin the inputs with `_git_roots` replaced so that only one rung raises:
+    "own", the rung for the directory this guard file lives in, or "cwd".
+    The working directory moves off that directory so the two are told
+    apart. Returns (inputs, error labels)."""
+    monkeypatch.chdir(tmp_path)
+    own = os.path.dirname(os.path.realpath(guard.__file__))
+
+    def roots(directory):
+        is_own = directory == own
+        if is_own == (failing == "own"):
+            raise OSError(f"the {failing} rung's git failed")
+        return (Path("/own-top"), Path("/own-main")) if is_own else (
+            Path("/cwd-top"), Path("/cwd-main")
+        )
+
+    monkeypatch.setattr(guard, "_git_roots", roots)
+    inputs, errors = guard._pin_inputs()
+    return inputs, [label for label, _ in errors]
+
+
+def test_a_failing_own_checkout_rung_leaves_the_working_directory_rung(
+    monkeypatch, tmp_path
+):
+    """Each git rung reports under its own label and fails alone: when git
+    fails for the guard file's checkout, the working directory's roots are
+    still watched."""
+    inputs, labels = _pin_with_one_git_rung_failing(monkeypatch, tmp_path, "own")
+    assert labels == ["git, for this file's checkout"], labels
+    assert (inputs["git_toplevel"], inputs["git_common_parent"]) == (
+        Path("/cwd-top"), Path("/cwd-main")
+    )
+    assert (inputs["guard_git_toplevel"], inputs["guard_git_common_parent"]) == (None, None)
+
+
+def test_a_failing_working_directory_rung_leaves_the_own_checkout_rung(
+    monkeypatch, tmp_path
+):
+    """The mirror: when git fails for the working directory, the guard file's
+    own checkout is still watched."""
+    inputs, labels = _pin_with_one_git_rung_failing(monkeypatch, tmp_path, "cwd")
+    assert labels == ["git"], labels
+    assert (inputs["guard_git_toplevel"], inputs["guard_git_common_parent"]) == (
+        Path("/own-top"), Path("/own-main")
     )
 
 
