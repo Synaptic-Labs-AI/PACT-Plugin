@@ -147,6 +147,28 @@ class TestResolutionIsDriven:
         ), exc.value.reason
 
 
+    def test_a_git_call_that_did_not_answer_is_unevaluable_as_git(
+        self, isolated, monkeypatch
+    ):
+        """The declared project holds no CLAUDE.md, so resolution reaches the
+        git rung, and git fails to run. The verdict names git, not CLAUDE.md's
+        permissions, and carries no path."""
+        empty = _make_project(isolated / "empty", None)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(empty))
+        monkeypatch.chdir(empty)
+
+        def git_denied(*args, **kwargs):
+            raise PermissionError(13, "Permission denied", "git")
+
+        monkeypatch.setattr(subprocess, "run", git_denied)
+        with pytest.raises(archive_pin._Unevaluable) as exc:
+            archive_pin.resolve_claude_md()
+
+        assert exc.value.reason == (
+            "CLAUDE.md could not be located: git PermissionError (EACCES)"
+        ), exc.value.reason
+
+
 class TestCrossProjectFallthroughIsRefused:
     """THE F-B GUARD. Fails on the pre-fix code, which returned project_a's
     file for an invocation that named project_b."""

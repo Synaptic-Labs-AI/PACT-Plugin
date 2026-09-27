@@ -448,6 +448,40 @@ class TestUnexaminableClaudeMdBypassIsRecorded:
         assert failures == []
 
 
+    def test_git_being_absent_records_nothing(self, tmp_path, monkeypatch, pact_context):
+        """The project holds no CLAUDE.md and git is not installed, so the
+        resolver records git's absence and moves on without being stopped.
+        An Edit to a CLAUDE.md is allowed and records nothing: a missing file
+        is not a bypass."""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        no_git = tmp_path / "no-git"
+        no_git.mkdir()
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        pact_context(
+            team_name="test-team", session_id="session-no-git", project_dir=str(proj)
+        )
+        monkeypatch.chdir(empty)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(proj))
+        monkeypatch.setenv("PATH", str(no_git))
+        failures = []
+
+        def _capture(classification, error=None, cwd=None, source=None):
+            failures.append({"classification": classification, "error": error})
+
+        import pin_caps_gate
+
+        monkeypatch.setattr(pin_caps_gate, "append_failure", _capture)
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {"file_path": str(proj / "CLAUDE.md"), "old_string": "a", "new_string": "b"},
+        })
+
+        assert result is None
+        assert failures == []
+
+
 class TestFileLockContention:
     """file_lock serializes the baseline-read section. Two near-
     simultaneous hook invocations must complete without corruption

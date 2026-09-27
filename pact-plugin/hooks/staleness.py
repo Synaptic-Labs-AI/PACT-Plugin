@@ -277,7 +277,7 @@ def _resolve_project_claude_md_with_base(
             could not be examined and every git call that failed. Each entry
             leads with the failure_cause token -- after `git rung: ` for a git
             call -- and carries the exception text, path included, after it;
-            `unreadable_cause` reads the token back. check_pin_caps and
+            `unreadable_cause` reads it back. check_pin_caps and
             archive_pin pass one so an unreadable CLAUDE.md is not reported
             as missing. A failure outside the probes -- a deleted working
             directory -- still raises.
@@ -393,20 +393,25 @@ _GIT_RUNG = "git rung: "
 
 
 def unreadable_cause(errors: list) -> Optional[str]:
-    """The failure_cause token of the error that ended resolution, or None.
+    """Why resolution stopped, as a phrase a caller appends to "CLAUDE.md ",
+    or None.
 
-    None means resolution was not stopped: nothing was recorded, or only git
-    being absent, which is recorded and moves on. Every other entry ends
-    resolution the moment it is recorded, so the first one is the cause. The
-    token is closed-vocabulary and never carries a path, so a caller can show
-    it where it would not show the entry.
+    A location that could not be examined gives "could not be read: <token>";
+    a git call that did not answer gives "could not be located: git <token>",
+    so an operator looks at git rather than at CLAUDE.md's permissions. None
+    means resolution was not stopped: nothing was recorded, or only git being
+    absent, which is recorded and moves on. Every other entry ends resolution
+    the moment it is recorded, so the first one is the cause. The token is
+    closed-vocabulary and never carries a path.
     """
     for entry in errors:
-        body = entry[len(_GIT_RUNG):] if entry.startswith(_GIT_RUNG) else entry
+        at_git_rung = entry.startswith(_GIT_RUNG)
+        body = entry[len(_GIT_RUNG):] if at_git_rung else entry
         cause = body.split(": ", 1)[0]
-        if entry.startswith(_GIT_RUNG) and cause.startswith("FileNotFoundError"):
-            continue
-        return cause
+        if not at_git_rung:
+            return f"could not be read: {cause}"
+        if not cause.startswith("FileNotFoundError"):
+            return f"could not be located: git {cause}"
     return None
 
 

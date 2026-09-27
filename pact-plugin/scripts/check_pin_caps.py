@@ -250,10 +250,11 @@ def _resolve_pins():
     claude_md = get_project_claude_md_path(errors=errors)
     if claude_md is None:
         # A CLAUDE.md that cannot be examined is not a missing one. The cause
-        # is a closed-vocabulary token; the path stays in `errors`.
+        # says whether a location or a git call stopped resolution, with a
+        # closed-vocabulary token; the path stays in `errors`.
         cause = unreadable_cause(errors)
         if cause is not None:
-            return [], f"claude.md could not be read: {cause}"
+            return [], f"claude.md {cause}"
         return [], "claude.md not found"
 
     try:

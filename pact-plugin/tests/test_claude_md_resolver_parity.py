@@ -475,7 +475,9 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
 
         import staleness
 
-        assert staleness.unreadable_cause(errs2) == "PermissionError (EACCES)", errs2
+        assert staleness.unreadable_cause(errs2) == (
+            "could not be read: PermissionError (EACCES)"
+        ), errs2
 
     def test_the_cwd_file_is_reachable_without_the_declaration(
         self, tmp_path, monkeypatch
@@ -626,7 +628,9 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
 
         import staleness
 
-        assert staleness.unreadable_cause(errs2) == failure_cause(failure), errs2
+        assert staleness.unreadable_cause(errs2) == (
+            f"could not be located: git {failure_cause(failure)}"
+        ), errs2
 
     @pytest.mark.parametrize(
         "failure",

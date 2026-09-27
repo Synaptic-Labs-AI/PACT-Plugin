@@ -544,10 +544,11 @@ def resolve_claude_md():
     path = get_project_claude_md_path(errors=errors)
     if path is None:
         # A CLAUDE.md that cannot be examined is not a missing one. The cause
-        # is a closed-vocabulary token; the path stays in `errors`.
+        # says whether a location or a git call stopped resolution, with a
+        # closed-vocabulary token; the path stays in `errors`.
         cause = _unreadable_cause(errors)
         if cause is not None:
-            raise _Unevaluable(f"CLAUDE.md could not be read: {cause}")
+            raise _Unevaluable(f"CLAUDE.md {cause}")
         raise _Unevaluable("CLAUDE.md not found")
     base = _lexical_base_of(path)
 

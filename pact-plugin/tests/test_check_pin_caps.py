@@ -218,6 +218,30 @@ class TestCheckPinCaps_UnreadableIsNotMissing:
         assert "claude.md could not be read: PermissionError (EACCES)" in status, status
         assert "not found" not in status and "/" not in status, status
 
+    def test_a_git_call_that_did_not_answer_is_reported_as_git(self, tmp_path, monkeypatch):
+        """The declared project holds no CLAUDE.md, so resolution reaches the
+        git rung, and git fails to run. The status names git, not CLAUDE.md's
+        permissions."""
+        import subprocess
+
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        monkeypatch.chdir(empty)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(proj))
+
+        def git_denied(*args, **kwargs):
+            raise PermissionError(13, "Permission denied", "git")
+
+        monkeypatch.setattr(subprocess, "run", git_denied)
+        rc, payload = _run_cli(["--status"])
+
+        status = payload["slot_status"]
+        assert rc == 0
+        assert "claude.md could not be located: git PermissionError (EACCES)" in status, status
+        assert "could not be read" not in status and "/" not in status, status
+
     def test_a_project_with_no_claude_md_is_still_not_found(self, tmp_path, monkeypatch):
         """The control: the same call with a readable, empty project."""
         proj = tmp_path / "proj"
