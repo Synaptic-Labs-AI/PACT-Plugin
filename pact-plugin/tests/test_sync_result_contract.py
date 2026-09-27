@@ -442,3 +442,89 @@ class TestAResolveErrorIsNotAnUnresolvedTarget:
         result = sync_to_claude_md({"context": "c"}, None, "id", claude_md_root=tmp_path)
 
         assert result.reason == SyncResult.UNRESOLVED, result
+
+
+class TestAnUnreadableTargetBelowResolutionIsAResolveError:
+    """The existence check that runs AFTER resolution, in both syncs, reports a
+    target it cannot examine as RESOLVE_ERROR on every interpreter, and one that
+    is not there as MISSING.
+
+    `Path.exists()` there raised PermissionError out of the function on 3.9 and
+    3.13 and returned False on 3.14, which reported MISSING. The explicit
+    target reaches that check with a static layout; the ambient route reaches
+    it only when the file becomes unreadable after the resolver found it.
+    """
+
+    @staticmethod
+    def _project(tmp_path):
+        dot_claude = tmp_path / "proj" / ".claude"
+        dot_claude.mkdir(parents=True)
+        target = dot_claude / "CLAUDE.md"
+        target.write_text("# p\n\n## Working Memory\n\n## Retrieved Context\n")
+        return dot_claude, target
+
+    @pytest.mark.skipif(
+        os.geteuid() == 0,
+        reason="root searches a mode-0 directory, so no EACCES can be built",
+    )
+    def test_an_unreadable_explicit_target_is_a_resolve_error(self, tmp_path):
+        from scripts.working_memory import sync_to_claude_md
+
+        dot_claude, target = self._project(tmp_path)
+        before = target.read_bytes()
+        dot_claude.chmod(0o000)
+        try:
+            result = sync_to_claude_md({"context": "c"}, None, "id", target=target)
+        finally:
+            dot_claude.chmod(0o700)
+
+        assert result.reason == SyncResult.RESOLVE_ERROR, result
+        assert target.read_bytes() == before
+
+    def test_an_absent_explicit_target_is_missing(self, tmp_path):
+        """The control: the same call, the directory readable and the file
+        absent, is MISSING."""
+        from scripts.working_memory import sync_to_claude_md
+
+        _dot_claude, target = self._project(tmp_path)
+        target.unlink()
+
+        result = sync_to_claude_md({"context": "c"}, None, "id", target=target)
+
+        assert result.reason == SyncResult.MISSING, result
+        assert not target.exists()
+
+    @pytest.mark.skipif(
+        os.geteuid() == 0,
+        reason="root searches a mode-0 directory, so no EACCES can be built",
+    )
+    def test_a_retrieved_target_that_turns_unreadable_is_a_resolve_error(
+        self, tmp_path, monkeypatch
+    ):
+        """HARNESS: the resolver is replaced by one that returns the file and
+        then locks its directory, which is the race the ambient route can meet.
+        This sync takes no explicit target, so no static layout reaches the
+        check."""
+        import scripts.working_memory as working_memory
+
+        dot_claude, target = self._project(tmp_path)
+        before = target.read_bytes()
+
+        def resolved_then_locked(errors=None):
+            dot_claude.chmod(0o000)
+            return target, dot_claude.parent
+
+        monkeypatch.setattr(
+            working_memory, "_resolve_display_claude_md_with_base", resolved_then_locked
+        )
+        try:
+            result = working_memory.sync_retrieved_to_claude_md(
+                [{"id": "m1", "context": "c", "goal": "g"}],
+                "q",
+                claude_md_root=dot_claude.parent,
+            )
+        finally:
+            dot_claude.chmod(0o700)
+
+        assert result.reason == SyncResult.RESOLVE_ERROR, result
+        assert target.read_bytes() == before

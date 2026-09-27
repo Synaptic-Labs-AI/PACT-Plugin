@@ -2751,7 +2751,18 @@ def sync_to_claude_md(
     # at this", the text must not say "this is a bug."
     #
     # NEITHER ARM CREATES. That is the contract: an absent target is a skip.
-    if not claude_md_path.exists():
+    #
+    # A TARGET THAT CANNOT BE EXAMINED IS A RESOLVE_ERROR, NOT A MISSING FILE.
+    # `_stat_if_present` decides, as in the resolvers: `Path.exists()` raised
+    # out of this function on 3.9 and 3.13 and returned False on 3.14. An
+    # explicit target reaches this with a static layout; the ambient route
+    # reaches it when the file becomes unreadable after the resolver found it.
+    try:
+        target_stat = _stat_if_present(claude_md_path)
+    except OSError as exc:
+        _log_resolve_errors([f"{type(exc).__name__}: {exc}"])
+        return SyncResult(SyncResult.RESOLVE_ERROR)
+    if target_stat is None:
         if target is not None:
             logger.debug(
                 "explicit sync target %s does not exist, skipping working "
@@ -3165,7 +3176,15 @@ def sync_retrieved_to_claude_md(
     # NAMES BOTH CAUSES, ASSERTS NEITHER: a file removed after it resolved is
     # indistinguishable here from a resolver that stopped being partial, and
     # the first is not a defect at all.
-    if not claude_md_path.exists():
+    #
+    # A FILE THAT BECAME UNREADABLE AFTER IT RESOLVED IS A RESOLVE_ERROR, on
+    # every interpreter, as in the sibling.
+    try:
+        target_stat = _stat_if_present(claude_md_path)
+    except OSError as exc:
+        _log_resolve_errors([f"{type(exc).__name__}: {exc}"])
+        return SyncResult(SyncResult.RESOLVE_ERROR)
+    if target_stat is None:
         logger.warning(
             "resolved display CLAUDE.md %s does not exist, skipping retrieved "
             "context sync (this never creates CLAUDE.md). Either the display "
