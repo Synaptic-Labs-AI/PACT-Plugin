@@ -404,7 +404,9 @@ class TestDisplayResolverParityInvariant:
 # legacy file or a later rung, and is recorded; a git call that fails before
 # anything is examined moves on to the next rung.
 
+import errno  # noqa: E402
 import shutil  # noqa: E402
+import subprocess  # noqa: E402
 from datetime import datetime, timedelta  # noqa: E402
 
 from tests.test_unreadable_location_carriers import (  # noqa: E402
@@ -579,6 +581,38 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
         assert all(_same(p, hit) for p in _both(errs, errs2))
         assert errs and all(e.startswith("git rung: FileNotFoundError") for e in errs), errs
         assert errs2 and all(e.startswith("git rung: FileNotFoundError") for e in errs2), errs2
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            subprocess.TimeoutExpired(["git", "rev-parse"], 5),
+            PermissionError(errno.EACCES, "Permission denied", "git"),
+        ],
+        ids=["timeout", "oserror"],
+    )
+    def test_a_git_call_that_did_not_answer_ends_resolution(
+        self, tmp_path, monkeypatch, failure
+    ):
+        """git exists but did not answer, so the location its rung would have
+        named is unknown rather than absent. Each resolver records the failure
+        and stops instead of moving on to the cwd's file, which the arm above
+        shows they return when git is merely absent.
+
+        RED BEFORE THE FIX on every interpreter: both resolvers returned the
+        cwd's file."""
+        _cwd_hit(tmp_path, monkeypatch)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+
+        def did_not_answer(*args, **kwargs):
+            raise failure
+
+        monkeypatch.setattr(subprocess, "run", did_not_answer)
+        errs, errs2 = [], []
+
+        assert _both(errs, errs2) == (None, None)
+        prefix = f"git rung: {type(failure).__name__}"
+        for recorded in (errs, errs2):
+            assert len(recorded) == 1 and recorded[0].startswith(prefix), recorded
 
     @_NEEDS_GIT
     @_NEEDS_NON_ROOT

@@ -1155,8 +1155,16 @@ def _resolve_display_claude_md_with_base(
     branch it could write into a different project. A location that is merely
     ABSENT still falls through, which is what keeps PACT's own worktree
     declarations (where CLAUDE.md is gitignored) landing on the main checkout.
-    A branch that fails before examining anything -- git missing or timing
-    out -- is recorded, and resolution moves on.
+    A GIT CALL THAT DID NOT ANSWER ALSO ENDS RESOLUTION, for the same reason:
+    git exists, but the location it would have named is unknown rather than
+    absent, so the next branch could write a different file. That covers a
+    timeout and any OSError other than FileNotFoundError. git that is not
+    installed (FileNotFoundError) gives the same answer on every run, so it is
+    recorded and resolution moves on. A git call that EXITS NONZERO also moves
+    on, and records nothing, because it reads the same as "not a repository":
+    that includes a repository whose metadata cannot be read, such as a main
+    checkout whose `.git` is unsearchable, which therefore can still land on a
+    later branch.
 
     This never CREATES a CLAUDE.md (the orchestrator manages the file's
     lifecycle); it only probes for an existing one.
@@ -1175,8 +1183,9 @@ def _resolve_display_claude_md_with_base(
     # examine a location raises, and so does a deleted working directory or a
     # decode error in git's output; the outer handler records each one and
     # returns (None, None), so the caller skips the sync and the save still
-    # succeeds. The git branches' inner handlers cover git's own work only, so
-    # a failed git call moves on while a failed probe ends resolution.
+    # succeeds. The git branches' inner handlers cover git's own work only:
+    # git that is not installed moves on, and git that did not answer ends
+    # resolution, as a failed probe does.
     errors = [] if errors is None else errors
     try:
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
@@ -1213,8 +1222,11 @@ def _resolve_display_claude_md_with_base(
             )
             if result.returncode == 0 and result.stdout.strip():
                 worktree_root = Path(result.stdout.strip())
+        except FileNotFoundError as exc:
+            errors.append(f"git rung: {type(exc).__name__}: {exc}")
         except (subprocess.TimeoutExpired, OSError) as exc:
             errors.append(f"git rung: {type(exc).__name__}: {exc}")
+            return None, None
         if worktree_root is not None:
             found = _find_existing_claude_md(worktree_root)
             if found is not None:
@@ -1251,8 +1263,11 @@ def _resolve_display_claude_md_with_base(
                 # path with the looping component unresolved. realpath does that
                 # on every interpreter, as in memory_api.main_repo_root.
                 repo_root = Path(os.path.realpath(common_dir)).parent
+        except FileNotFoundError as exc:
+            errors.append(f"git rung: {type(exc).__name__}: {exc}")
         except (subprocess.TimeoutExpired, OSError) as exc:
             errors.append(f"git rung: {type(exc).__name__}: {exc}")
+            return None, None
         if repo_root is not None:
             found = _find_existing_claude_md(repo_root)
             if found is not None:

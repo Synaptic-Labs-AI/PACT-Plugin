@@ -260,7 +260,17 @@ def _resolve_project_claude_md_with_base(
     the error may be the one this project uses, and past the declared rung the
     next one could be a DIFFERENT project; nothing downstream of this resolver
     refuses a write there. A location that is merely ABSENT still falls
-    through. A git call that fails before anything is examined moves on.
+    through.
+
+    A GIT CALL THAT DID NOT ANSWER ALSO ENDS RESOLUTION: git exists, but the
+    root it would have named is unknown rather than absent, so the cwd rung
+    could pick a different file. That covers a timeout and any OSError other
+    than FileNotFoundError. git that is not installed (FileNotFoundError) gives
+    the same answer on every run, so it is recorded and resolution moves on. A
+    git call that EXITS NONZERO also moves on, and records nothing, because it
+    reads the same as "not a repository": that includes a repository whose
+    metadata cannot be read, such as a main checkout whose `.git` is
+    unsearchable, which therefore can still land on the cwd rung.
 
     Args:
         errors: Optional list that receives a message for every location that
@@ -314,8 +324,11 @@ def _resolve_project_claude_md_with_base(
                 # path with the looping component unresolved. realpath does that
                 # on every interpreter, as in memory_api.main_repo_root.
                 repo_root = Path(os.path.realpath(common_dir)).parent
+        except FileNotFoundError as exc:
+            errors.append(f"git rung: {type(exc).__name__}: {exc}")
         except (subprocess.TimeoutExpired, OSError) as exc:
             errors.append(f"git rung: {type(exc).__name__}: {exc}")
+            return None, None
         if repo_root is not None:
             found = _find_existing_claude_md(repo_root)
             if found is not None:
