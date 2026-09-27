@@ -570,9 +570,12 @@ def _refuse_claude_md_writes_outside_tmp(request, monkeypatch):
     ``pytest_unconfigure``, so a child's write is REPORTED after the fact
     rather than refused as it happens.
 
-    THE TWO HALVES COVER DIFFERENT POPULATIONS. This one refuses ANY target
-    outside the tmp tree, wherever a test aimed it, through the writers it
-    wrapped. The guard watches only
+    THE TWO HALVES COVER DIFFERENT POPULATIONS. For a test under tests/, this
+    one refuses ANY target outside the tmp tree, wherever the test aimed it,
+    through the writers it wrapped. A fixture here reaches only this
+    directory's tests: a test beside the artifact it pins, skills/*/test_*.py,
+    gets neither this refusal nor this file's environment scrubs, and the
+    guard's watched set is all that covers it. The guard watches only
     paths the run's own inputs name, so a CHILD that a test deliberately points
     at another real path is caught by neither. The comparison runs only when
     the pytest process exits through Python.

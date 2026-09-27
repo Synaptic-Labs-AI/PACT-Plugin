@@ -35,7 +35,8 @@ does cost a diagnosis. An arm that requires a clean child FAILS if that write
 lands while its child runs, a failed test beside the outer VIOLATION, so read
 such a failure with the outer report before suspecting the arm. The
 skills-only arm also watches this checkout's CLAUDE.md, because it runs in
-the real tree.
+the real tree, and from a linked worktree that includes the main checkout's
+CLAUDE.md, the file a PACT session rewrites.
 
 `_assert_confined` therefore pins the set EXACTLY: the temp paths an arm built,
 plus the two home config files computed here independently of the guard. A
@@ -484,8 +485,9 @@ def test_a_skills_only_run_reads_every_input(tmp_path):
     is not an initial conftest. The root conftest's hooks/ entry is then the
     only thing that makes the guard's `shared` imports resolve at configure.
     Read-only: a collect-only run in the real tree, so it watches this
-    checkout's CLAUDE.md and the home config files, and a real write to one of
-    them during it fails it."""
+    checkout's CLAUDE.md -- from a linked worktree, the main checkout's too,
+    which a PACT session rewrites -- and the home config files, and a real
+    write to one of them during it fails it."""
     candidates = sorted(PLUGIN_ROOT.glob("skills/*/test_*.py"))
     if not candidates:
         pytest.skip("no skills-adjacent test file exists to collect")

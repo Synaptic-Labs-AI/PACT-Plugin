@@ -7,8 +7,11 @@ every skills/*/scripts dir, the plugin root, hooks/ and tests/ -- and registers
 two session-wide harnesses by re-export. Pin test files living beside skill
 artifacts (skills/<skill>/test_*.py) sit outside tests/conftest.py's subtree,
 so this conftest guarantees every skills/*/scripts dir is importable for them.
-tests/conftest.py owns the full path block for tests/; the membership guard
-keeps the overlap a no-op when both conftests load in one run.
+Being outside that subtree, they also get none of tests/conftest.py's
+fixtures: not its refusal of a CLAUDE.md write outside the tmp tree, not its
+environment scrubs. The CLAUDE.md guard registered below is all that covers
+them. tests/conftest.py owns the full path block for tests/; the membership
+guard keeps the overlap a no-op when both conftests load in one run.
 
 Used by: pytest (loaded for every run rooted at or below pact-plugin/).
 The plugin root itself is inserted explicitly below (lead-ruled: deliberate
