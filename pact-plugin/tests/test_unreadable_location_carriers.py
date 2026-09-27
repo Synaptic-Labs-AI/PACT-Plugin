@@ -561,8 +561,8 @@ class TestWorktreeGuard:
         assert "Did you mean" not in message, message
 
     def test_a_looped_path_inside_the_worktree_is_allowed(self, tmp_path):
-        """RED BEFORE THE FIX ON 3.9, where Path.resolve() raised RuntimeError
-        past the "can't resolve, allow" handler and main() denied."""
+        """A looped path inside the worktree is inside it. Once red on 3.9,
+        where Path.resolve() raised RuntimeError on the loop."""
         _proj, worktree = _worktree_under_marked_parent(tmp_path)
         looped = _symlink_loop(worktree / "loopdir")
         assert worktree_guard.check_worktree_boundary(
@@ -571,18 +571,24 @@ class TestWorktreeGuard:
 
     @pytest.mark.parametrize(
         "where, expected_rc",
-        [("looped-inside", 0), ("outside", 2)],
+        [("looped-inside", 0), ("looped-outside", 2), ("outside", 2)],
     )
     def test_the_hook_decision(self, where, expected_rc, tmp_path):
         """The decision as the platform sees it: the hook's exit code.
 
-        The looped path ALLOWS (rc 0) on every interpreter; RED BEFORE THE FIX
-        ON 3.9, which denied it. The outside path is the matched DENY (rc 2),
-        so an allow here can never be a hook that allows everything.
+        A looped path is decided by where it sits, like any other path: inside
+        the worktree it ALLOWS (rc 0), outside it DENIES (rc 2), on every
+        interpreter. The looped-inside row was red on 3.9 when its resolve()
+        raised past the "can't resolve, allow" handler into main()'s deny. The
+        looped-outside row was red on 3.9 when that handler caught the raise
+        and allowed. The plain outside path is the matched DENY, so an allow
+        here can never be a hook that allows everything.
         """
         proj, worktree = _worktree_under_marked_parent(tmp_path)
         if where == "looped-inside":
             file_path = _symlink_loop(worktree / "loopdir") / "app.py"
+        elif where == "looped-outside":
+            file_path = _symlink_loop(proj / "loopdir") / "app.py"
         else:
             file_path = proj / "src" / "app.py"
         env = {**os.environ, "PACT_WORKTREE_PATH": str(worktree)}

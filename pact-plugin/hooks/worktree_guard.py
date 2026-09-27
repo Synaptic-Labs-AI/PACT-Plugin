@@ -172,8 +172,9 @@ def _suggest_worktree_path(file_path: str, worktree_path: str) -> str | None:
         Suggested corrected path, or None if unable to compute
     """
     try:
-        resolved_file = str(Path(file_path).resolve())
-        resolved_worktree = str(Path(worktree_path).resolve())
+        # realpath for the reason check_worktree_boundary gives.
+        resolved_file = os.path.realpath(file_path)
+        resolved_worktree = os.path.realpath(worktree_path)
 
         # Find project root from worktree path
         project_root = _find_project_root(resolved_worktree)
@@ -240,15 +241,16 @@ def check_worktree_boundary(file_path: str, worktree_path: str) -> str | None:
         return None
 
     # Check if inside worktree
+    # os.path.realpath, not Path.resolve: on 3.9 resolve() raises RuntimeError
+    # on a symlink loop, while realpath returns the path with the loop left
+    # unresolved, as resolve() does on 3.13 and 3.14. A looped path is then
+    # judged by where it sits, like any other, on every interpreter.
     try:
-        resolved_file = str(Path(file_path).resolve())
-        resolved_worktree = str(Path(worktree_path).resolve())
+        resolved_file = os.path.realpath(file_path)
+        resolved_worktree = os.path.realpath(worktree_path)
         if resolved_file.startswith(resolved_worktree):
             return None  # Inside worktree, OK
-    # RuntimeError is 3.9's resolve() on a symlink loop; 3.13 and 3.14 return
-    # a path there. Without it 3.9 alone escaped this handler into main()'s
-    # fail-closed deny, so do not narrow the tuple.
-    except (ValueError, OSError, RuntimeError):
+    except (ValueError, OSError):
         return None  # Can't resolve, allow by default
 
     # Outside worktree — only block if it's application code
