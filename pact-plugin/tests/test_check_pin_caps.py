@@ -223,16 +223,15 @@ class TestCheckPinCaps_UnreadableIsNotMissing:
         "failure, cause",
         [
             (PermissionError(13, "Permission denied", "git"), "PermissionError (EACCES)"),
-            (UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"), "UnicodeDecodeError"),
         ],
-        ids=["oserror", "undecodable"],
+        ids=["oserror"],
     )
     def test_a_git_call_that_did_not_answer_is_reported_as_git(
         self, tmp_path, monkeypatch, failure, cause
     ):
         """The declared project holds no CLAUDE.md, so resolution reaches the
-        git rung, and git fails to run or answers with output that cannot be
-        decoded. The status names git, not CLAUDE.md's permissions."""
+        git rung, and git fails to run. The status names git, not CLAUDE.md's
+        permissions."""
         import subprocess
 
         proj = tmp_path / "proj"

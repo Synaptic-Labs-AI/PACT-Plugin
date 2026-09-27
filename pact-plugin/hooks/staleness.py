@@ -277,8 +277,10 @@ def _resolve_project_claude_md_with_base(
 
     A GIT CALL THAT DID NOT ANSWER ALSO ENDS RESOLUTION: git exists, but the
     root it would have named is unknown rather than absent, so the cwd rung
-    could pick a different file. That covers a timeout, any OSError other than
-    FileNotFoundError, and output git produced that cannot be decoded. git
+    could pick a different file. That covers a timeout and any OSError other
+    than FileNotFoundError. git's answer is decoded as a filesystem path, so it
+    names the path the filesystem spells under any locale; an answer that is
+    not valid UTF-8 is still that exact path, and the probe decides. git
     that is not on PATH is not an error: it is decided before git runs (see
     _git_is_on_path), it gives the same answer on every run, and resolution
     moves on and records nothing; so does a FileNotFoundError from the call. A
@@ -332,12 +334,16 @@ def _resolve_project_claude_md_with_base(
                 result = subprocess.run(
                     ["git", "rev-parse", "--git-common-dir"],
                     capture_output=True,
-                    text=True,
                     timeout=5,
                     env=git_env,
                 )
-                if result.returncode == 0 and result.stdout.strip():
-                    common_dir = Path(result.stdout.strip())
+                # os.fsdecode, not text=True: git names a path, so decode it the
+                # way the filesystem spells paths, under any locale. text=True
+                # used the locale encoding, and under ISO8859-1 a UTF-8 path
+                # decoded without error into a path that does not exist.
+                answer = os.fsdecode(result.stdout).strip()
+                if result.returncode == 0 and answer:
+                    common_dir = Path(answer)
                     if not common_dir.is_absolute():
                         common_dir = Path.cwd() / common_dir
                     # os.path.realpath, not Path.resolve(): on 3.9 resolve()
@@ -348,7 +354,7 @@ def _resolve_project_claude_md_with_base(
                     repo_root = Path(os.path.realpath(common_dir)).parent
             except FileNotFoundError:
                 pass  # git vanished or cannot start: the same answer every run
-            except (subprocess.TimeoutExpired, OSError, UnicodeDecodeError) as exc:
+            except (subprocess.TimeoutExpired, OSError) as exc:
                 errors.append(f"git rung: {failure_cause(exc)}: {exc}")
                 return None, None
         if repo_root is not None:

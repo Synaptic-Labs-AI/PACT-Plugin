@@ -1172,8 +1172,10 @@ def _resolve_display_claude_md_with_base(
     A GIT CALL THAT DID NOT ANSWER ALSO ENDS RESOLUTION, for the same reason:
     git exists, but the location it would have named is unknown rather than
     absent, so the next branch could write a different file. That covers a
-    timeout, any OSError other than FileNotFoundError, and output git produced
-    that cannot be decoded. git that is not on PATH is not an error: it is
+    timeout and any OSError other than FileNotFoundError. git's answer is
+    decoded as a filesystem path, so it names the path the filesystem spells
+    under any locale; an answer that is not valid UTF-8 is still that exact
+    path, and the probe decides. git that is not on PATH is not an error: it is
     decided before git runs (see _git_is_on_path), it gives the same answer on
     every run, and resolution moves on and records nothing; so does a
     FileNotFoundError from the call. A git call that EXITS NONZERO also moves
@@ -1234,15 +1236,19 @@ def _resolve_display_claude_md_with_base(
                 result = subprocess.run(
                     ["git", "rev-parse", "--show-toplevel"],
                     capture_output=True,
-                    text=True,
                     timeout=5,
                     env=git_env,
                 )
-                if result.returncode == 0 and result.stdout.strip():
-                    worktree_root = Path(result.stdout.strip())
+                # os.fsdecode, not text=True: git names a path, so decode it the
+                # way the filesystem spells paths, under any locale. text=True
+                # used the locale encoding, and under ISO8859-1 a UTF-8 path
+                # decoded without error into a path that does not exist.
+                answer = os.fsdecode(result.stdout).strip()
+                if result.returncode == 0 and answer:
+                    worktree_root = Path(answer)
             except FileNotFoundError:
                 pass  # git vanished or cannot start: the same answer every run
-            except (subprocess.TimeoutExpired, OSError, UnicodeDecodeError) as exc:
+            except (subprocess.TimeoutExpired, OSError) as exc:
                 errors.append(f"git rung: {type(exc).__name__}: {exc}")
                 return None, None
         if worktree_root is not None:
@@ -1269,12 +1275,12 @@ def _resolve_display_claude_md_with_base(
                 result = subprocess.run(
                     ["git", "rev-parse", "--git-common-dir"],
                     capture_output=True,
-                    text=True,
                     timeout=5,
                     env=git_env,
                 )
-                if result.returncode == 0 and result.stdout.strip():
-                    common_dir = Path(result.stdout.strip())
+                answer = os.fsdecode(result.stdout).strip()  # as in branch 2
+                if result.returncode == 0 and answer:
+                    common_dir = Path(answer)
                     if not common_dir.is_absolute():
                         common_dir = Path.cwd() / common_dir
                     # os.path.realpath, not Path.resolve(): on 3.9 resolve()
@@ -1285,7 +1291,7 @@ def _resolve_display_claude_md_with_base(
                     repo_root = Path(os.path.realpath(common_dir)).parent
             except FileNotFoundError:
                 pass  # git vanished or cannot start: the same answer every run
-            except (subprocess.TimeoutExpired, OSError, UnicodeDecodeError) as exc:
+            except (subprocess.TimeoutExpired, OSError) as exc:
                 errors.append(f"git rung: {type(exc).__name__}: {exc}")
                 return None, None
         if repo_root is not None:
@@ -2151,12 +2157,11 @@ class SyncResult:
     # CLAUDE.md met an error, so "there is no file" and "the file could not be
     # looked for" stop reading alike. It covers every error the display
     # resolver records when it finds nothing -- a location it could not read, a
-    # git call that timed out, failed to run or produced output that cannot be
-    # decoded, and any other failure that ended resolution, such as a deleted
-    # working directory -- and a resolved or explicit target that could not be
-    # examined at the existence check. It arrives by a RETURN, on the same
-    # route as UNRESOLVED, and the errors are logged at WARNING where it is
-    # produced.
+    # git call that timed out or failed to run, and any other failure that
+    # ended resolution, such as a deleted working directory -- and a resolved
+    # or explicit target that could not be examined at the existence check. It
+    # arrives by a RETURN, on the same route as UNRESOLVED, and the errors are
+    # logged at WARNING where it is produced.
     RESOLVE_ERROR = "resolve_error"
 
     def __init__(self, reason: str) -> None:

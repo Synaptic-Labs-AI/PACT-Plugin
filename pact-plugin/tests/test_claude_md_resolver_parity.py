@@ -593,6 +593,65 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
 
         assert staleness.unreadable_cause(errs2) is None, errs2
 
+    def test_an_undecodable_git_answer_is_a_path_not_a_failure(
+        self, tmp_path, monkeypatch
+    ):
+        """A real git on PATH that answers with bytes that are not valid UTF-8.
+        The answer is decoded as a filesystem path, so it is that exact path:
+        nothing crashes and nothing is recorded, the probe finds no CLAUDE.md
+        there, and resolution moves on to the cwd's file."""
+        hit = _cwd_hit(tmp_path, monkeypatch)
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        git = bindir / "git"
+        git.write_text("#!/bin/sh\nprintf '/tmp/\\377\\376/.git\\n'\n")
+        git.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        errs, errs2 = [], []
+
+        assert all(_same(p, hit) for p in _both(errs, errs2))
+        assert errs == errs2 == []
+
+    @_NEEDS_GIT
+    def test_a_non_ascii_checkout_resolves_alike_under_a_single_byte_locale(
+        self, tmp_path, monkeypatch
+    ):
+        """A linked worktree W\u00e9 of M\u00e9, whose root has no CLAUDE.md, and a
+        cwd W\u00e9/sub holding its own. Under a UTF-8 locale both resolvers find
+        M\u00e9's file through git. A text-mode git call under ISO8859-1 decoded
+        git's UTF-8 path into one that does not exist, and resolution fell to
+        the cwd's lower-priority file. The locale's decoding of a text-mode
+        call is reproduced by decoding its output as latin-1, so the arm does
+        not depend on that locale being installed."""
+        main_md = _init_repo_with_claude_md(tmp_path / "M\u00e9")
+        worktree = tmp_path / "W\u00e9"
+        _pgit(tmp_path / "M\u00e9", "worktree", "add", str(worktree), "-b", "w")
+        sub_dot = worktree / "sub" / ".claude"
+        sub_dot.mkdir(parents=True)
+        (sub_dot / "CLAUDE.md").write_text("sub\n")
+        monkeypatch.chdir(worktree / "sub")
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+
+        utf8_answer = _both([], [])
+        assert all(_same(p, main_md) for p in utf8_answer), utf8_answer
+
+        real_run = subprocess.run
+
+        def under_iso8859_1(args, *rest, **kwargs):
+            if not kwargs.pop("text", False):
+                return real_run(args, *rest, **kwargs)
+            done = real_run(args, *rest, **kwargs)
+            return subprocess.CompletedProcess(
+                done.args, done.returncode, (done.stdout or b"").decode("latin-1"), ""
+            )
+
+        monkeypatch.setattr(subprocess, "run", under_iso8859_1)
+        errs, errs2 = [], []
+
+        assert all(_same(p, main_md) for p in _both(errs, errs2))
+        assert errs == errs2 == []
+
     @pytest.mark.parametrize(
         "path_shape",
         [pytest.param("unsearchable-dir", marks=_NEEDS_NON_ROOT), "entry-through-a-file"],
@@ -650,9 +709,8 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
         [
             subprocess.TimeoutExpired(["git", "rev-parse"], 5),
             PermissionError(errno.EACCES, "Permission denied", "git"),
-            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
         ],
-        ids=["timeout", "oserror", "undecodable"],
+        ids=["timeout", "oserror"],
     )
     def test_a_git_call_that_did_not_answer_ends_resolution(
         self, tmp_path, monkeypatch, failure
@@ -689,9 +747,8 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
         [
             subprocess.TimeoutExpired(["git", "rev-parse"], 5),
             PermissionError(errno.EACCES, "Permission denied", "git"),
-            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
         ],
-        ids=["timeout", "oserror", "undecodable"],
+        ids=["timeout", "oserror"],
     )
     def test_a_main_checkout_rung_that_did_not_answer_ends_display_resolution(
         self, tmp_path, monkeypatch, failure
