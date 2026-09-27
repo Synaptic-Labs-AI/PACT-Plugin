@@ -42,6 +42,8 @@ import bootstrap_marker_writer as bmw
 import worktree_guard
 from scripts import memory_api
 from scripts.memory_api import PACTMemory
+from shared import backlog
+from shared import backlog_store
 from shared import claude_md_manager as cmm
 from shared import project_scope
 from shared import session_resume
@@ -153,6 +155,8 @@ _PROBED_FUNCTIONS = {
         "check_worktree_boundary",
     },
     "skills/pact-memory/scripts/memory_api.py": {"_find_project_root", "main_repo_root"},
+    "hooks/shared/backlog_store.py": {"_enclosing_checkout"},
+    "hooks/shared/backlog.py": {"_umbrella_refusal"},
 }
 
 _SPLIT_PREDICATES = {"exists", "is_dir", "is_file", "is_symlink"}
@@ -530,6 +534,120 @@ class TestNearestExistingDirectory:
         a_file = tmp_path / "project" / "notes.txt"
         a_file.write_text("x")
         assert project_scope._nearest_existing_directory(a_file / "child") == tmp_path / "project"
+
+
+# --- The backlog's project lookup ---------------------------------------------
+
+
+def _backlog_file(store, root, title):
+    """The smallest conforming backlog file, recording `root` as its checkout."""
+    store.mkdir(exist_ok=True)
+    (store / f"{root.name}.json").write_text(json.dumps({
+        "version": 1,
+        "project": root.name,
+        "project_path": str(root),
+        "roots": [str(root)],
+        "updated": "2026-09-01T00:00:00Z",
+        "items": [{
+            "id": "a1b2", "title": title, "status": "planned", "rank": 1,
+            "blocked_by": [], "batch_with": [], "ref": None, "plan": None,
+            "memory": [], "note": "", "added": "2026-09-01", "touched": "2026-09-01",
+        }],
+    }))
+
+
+def _project_below_an_outer_checkout(tmp_path):
+    """outer/.git is a checkout; the project is outer/inner/sub, and the caller
+    may lock `inner`, the level between them."""
+    outer = tmp_path / "outer"
+    (outer / ".git").mkdir(parents=True)
+    sub = outer / "inner" / "sub"
+    sub.mkdir(parents=True)
+    return outer, sub
+
+
+class TestBacklogProjectLookup:
+    """The enclosing-checkout walk stops at a level it cannot examine. The read
+    path then declines the enclosing rung and says so; the write path refuses
+    and names the level. Neither ever climbs to the outer checkout."""
+
+    @_NEEDS_NON_ROOT
+    def test_the_read_path_declines_loudly_rather_than_claim_the_outer_backlog(
+        self, tmp_path, lock
+    ):
+        """RED BEFORE THE FIX: 3.14 climbed past the unreadable level and
+        rendered the OUTER checkout's backlog as this project's; 3.9 and 3.13
+        raised into session_block's catch-all instead of reporting a
+        resolution failure."""
+        outer, sub = _project_below_an_outer_checkout(tmp_path)
+        store = tmp_path / "store"
+        _backlog_file(store, outer, "OUTER ITEM")
+        lock(outer / "inner")
+
+        notice = backlog_store.session_block(str(sub), backlog_dir=store)
+
+        assert "OUTER ITEM" not in notice.context
+        assert "resolution failure" in notice.alert, notice.alert
+        assert f"{sub} could not be examined" in notice.alert, notice.alert
+
+    def test_the_same_layout_readable_reaches_the_outer_backlog(self, tmp_path):
+        """The matched control: nothing locked, the enclosing rung matches."""
+        outer, sub = _project_below_an_outer_checkout(tmp_path)
+        store = tmp_path / "store"
+        _backlog_file(store, outer, "OUTER ITEM")
+
+        notice = backlog_store.session_block(str(sub), backlog_dir=store)
+
+        assert "OUTER ITEM" in notice.context, notice
+
+    @_NEEDS_NON_ROOT
+    def test_an_exact_root_still_matches_when_the_walk_cannot_tell(
+        self, tmp_path, lock
+    ):
+        """Exact membership needs no walk, so the decline leaves it alone.
+        RED BEFORE THE FIX ON 3.9 AND 3.13, which raised before comparing."""
+        outer, sub = _project_below_an_outer_checkout(tmp_path)
+        store = tmp_path / "store"
+        _backlog_file(store, sub, "OWN ITEM")
+        lock(outer / "inner")
+
+        notice = backlog_store.session_block(str(sub), backlog_dir=store)
+
+        assert "OWN ITEM" in notice.context, notice
+
+    @_NEEDS_NON_ROOT
+    def test_the_write_path_refuses_and_names_the_level(
+        self, tmp_path, lock, monkeypatch
+    ):
+        """RED BEFORE THE FIX: 3.9 and 3.13 raised PermissionError out of
+        project_root; 3.14 refused with the wrong reason ('does not name an
+        existing directory')."""
+        _outer, sub = _project_below_an_outer_checkout(tmp_path)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(sub))
+        lock(sub.parent)
+
+        with pytest.raises(backlog.BacklogWriteError) as refused:
+            backlog.project_root()
+
+        assert f"{sub} could not be examined" in str(refused.value), refused.value
+
+    def test_a_looped_worktree_is_recorded_on_every_interpreter(
+        self, tmp_path, monkeypatch
+    ):
+        """RED BEFORE THE FIX ON 3.9, where Path.resolve() raised RuntimeError
+        on the loop and the write failed."""
+        main = tmp_path / "main"
+        main.mkdir()
+        looped = _symlink_loop(tmp_path / "wt")
+        monkeypatch.setattr(backlog, "project_root", lambda: main)
+        monkeypatch.setattr(
+            backlog, "_run_capture",
+            lambda command: f"worktree {main}\nHEAD 1\n\nworktree {looped}\nHEAD 2\n",
+        )
+
+        assert backlog.checkout_roots() == [
+            os.path.realpath(main), os.path.realpath(looped)
+        ]
 
 
 # --- Carrier 4: the worktree guard --------------------------------------------

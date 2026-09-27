@@ -26,6 +26,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
+from .claude_md_manager import _stat_if_present
+from .failure_cause import failure_cause
 from .paths import get_backlog_dir
 
 # Schema constants, shared with the write side so a writer cannot emit what a
@@ -437,7 +439,13 @@ def _scan(
     target = _resolved(Path(project_dir))
     # Computed ONCE. It depends only on `target`, so re-walking it per file was
     # one filesystem walk per backlog in the store for an unchanging answer.
-    enclosing = _enclosing_checkout(target)
+    # A walk that could not tell (an unreadable level) DECLINES the enclosing
+    # rung: exact membership still matches, and no match reaches the loud
+    # resolution-failure branch in session_block, which names the level.
+    try:
+        enclosing = _enclosing_checkout(target)
+    except OSError:
+        enclosing = None
     found = []
     unreadable: List[Path] = []
 
@@ -511,11 +519,15 @@ def _enclosing_checkout(path: Path) -> Optional[Path]:
     sessions, and the loud state could not self-heal, because the porcelain
     that refreshes `roots` never emits a subdirectory.
 
-    `.exists()` on an unreadable path returns False rather than raising, so
-    this adds no raise site and the totality boundary does not move.
+    RAISES OSError at a level it cannot examine (EACCES, EPERM), and does not
+    climb past it: skipping that level would claim a checkout further up that
+    this path may not belong to. `Path.exists()` cannot decide this, because it
+    raised on 3.9-3.13 and returned False on 3.14, which climbed. Both callers
+    catch the raise: `_scan` declines the enclosing rung and
+    `backlog.project_root` refuses the write.
     """
     for directory in [path, *path.parents]:
-        if (directory / ".git").exists():
+        if _stat_if_present(directory / ".git") is not None:
             return directory
     return None
 
@@ -889,6 +901,7 @@ def session_block(
                 f"project as having no backlog. Either a checkout created since "
                 f"the last write is not yet recorded, or this project has never "
                 f"held a backlog; /PACT:next writes, which records it."
+                + _unexamined_level(project_dir)
             )
 
         # NON-CONFORMANCE IS NOT CORRUPTION. Corruption is "I cannot understand
@@ -953,6 +966,21 @@ def session_block(
             f"PACT backlog: could not be read "
             f"({type(exc).__name__}: {_safe_detail(exc)}). Nothing was modified."
         )
+
+
+def _unexamined_level(project_dir: str) -> str:
+    """One clause naming the level the enclosing-checkout walk could not
+    examine, or "" when the walk could. Only the no-match branch asks, so the
+    extra walk runs only when the message is already being built."""
+    try:
+        _enclosing_checkout(_resolved(Path(project_dir)))
+    except OSError as exc:
+        level = Path(exc.filename).parent if exc.filename else Path(project_dir)
+        return (
+            f" {level} could not be examined ({failure_cause(exc)}), so no "
+            f"checkout enclosing this project could be looked for."
+        )
+    return ""
 
 
 def _safe_detail(exc: BaseException) -> str:
