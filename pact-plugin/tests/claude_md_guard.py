@@ -53,10 +53,13 @@ rung, the working directory, takes when no earlier rung finds a file. When
 this file sits outside any git repository -- a `git archive` snapshot, an
 installed copy -- neither git rung names anything, and the tree's own root is
 watched only if CLAUDE_PROJECT_DIR or the working directory names it. The
-in-process half still refuses the same write made
-in-process, because it refuses any target outside the tmp tree instead of
-checking a list, so the two halves cover different populations. Also outside
-it: a writer running outside every test (at collection or in a pytest hook)
+in-process half still refuses the same write made in-process, because it
+refuses any target outside the tmp tree instead of checking a list, so the
+two halves cover different populations. It refuses only through the writer
+bindings loaded when each test starts: a writer module imported under a new
+name, or reloaded, inside a test body is not refused, and its write is caught
+only if it lands on a watched path. Also outside the watched set: a writer
+running outside every test (at collection or in a pytest hook)
 in a session that exports a session id without CLAUDE_PROJECT_DIR, where the
 pact-memory resolver's session-record rung can name another directory -- no
 writer runs there today; a resolver rung that probes without the shared

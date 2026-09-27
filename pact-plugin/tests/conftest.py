@@ -554,20 +554,25 @@ def _refuse_claude_md_writes_outside_tmp(request, monkeypatch):
     elsewhere, so a module that did ``from ... import _atomic_write_text`` at
     import time holds its own reference that patching the source module would
     not reach. Walking the loaded modules finds every binding without anyone
-    having to keep a list correct.
+    having to keep a list correct. The walk runs as each test starts, so it
+    wraps the bindings loaded then: a writer module imported under a new
+    name, or reloaded, inside a test body holds an unwrapped writer, and its
+    write is not refused.
 
     IT CANNOT SEE A CHILD PROCESS. ``monkeypatch`` does not cross the process
     boundary, so a spawned child writes unguarded. That route is WATCHED, NOT
     BLOCKED, from the other end of the run: ``tests/claude_md_guard.py``,
     registered by ``pact-plugin/conftest.py``, fixes at ``pytest_configure``
     every CLAUDE.md a writer can reach from the run's inputs -- both locations
-    under CLAUDE_PROJECT_DIR, the working directory and its git roots, and
-    ``CLAUDE.md`` under each config root -- and compares them at
+    under CLAUDE_PROJECT_DIR, the working directory and its git roots, and the
+    git roots of the checkout the guard lives in, and ``CLAUDE.md`` under each
+    config root -- and compares them at
     ``pytest_unconfigure``, so a child's write is REPORTED after the fact
     rather than refused as it happens.
 
     THE TWO HALVES COVER DIFFERENT POPULATIONS. This one refuses ANY target
-    outside the tmp tree, wherever a test aimed it. The guard watches only
+    outside the tmp tree, wherever a test aimed it, through the writers it
+    wrapped. The guard watches only
     paths the run's own inputs name, so a CHILD that a test deliberately points
     at another real path is caught by neither. The comparison runs only when
     the pytest process exits through Python.
