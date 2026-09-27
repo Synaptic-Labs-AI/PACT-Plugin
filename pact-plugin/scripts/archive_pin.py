@@ -361,6 +361,7 @@ parse_pins = _pin_caps.parse_pins
 _PIN_HEADING_RE = _pin_caps._PIN_HEADING_RE
 _parse_pinned_section = _staleness._parse_pinned_section
 get_project_claude_md_path = _staleness.get_project_claude_md_path
+_unreadable_cause = _staleness.unreadable_cause
 # The (path, base) form. `base` is the directory the resolver ACTUALLY found
 # the file under, captured before descending into `.claude` -- a trusted
 # pre-resolve anchor rather than a re-derivation from the returned path.
@@ -539,8 +540,14 @@ def resolve_claude_md():
     # resolution seam for the whole codebase instead of introducing a second
     # that fixtures would have to know about separately.
     env_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-    path = get_project_claude_md_path()
+    errors: list = []
+    path = get_project_claude_md_path(errors=errors)
     if path is None:
+        # A CLAUDE.md that cannot be examined is not a missing one. The cause
+        # is a closed-vocabulary token; the path stays in `errors`.
+        cause = _unreadable_cause(errors)
+        if cause is not None:
+            raise _Unevaluable(f"CLAUDE.md could not be read: {cause}")
         raise _Unevaluable("CLAUDE.md not found")
     base = _lexical_base_of(path)
 

@@ -49,6 +49,11 @@ import pytest
 
 import archive_pin  # noqa: E402
 from shared.project_scope import same_repository  # noqa: E402
+from tests.test_unreadable_location_carriers import (  # noqa: E402
+    _NEEDS_NON_ROOT,
+    _preferred_unsearchable,
+    lock,  # noqa: F401 -- a fixture, requested by name below
+)
 
 
 PINNED = (
@@ -121,6 +126,25 @@ class TestResolutionIsDriven:
         with pytest.raises(archive_pin._Unevaluable) as exc:
             archive_pin.resolve_claude_md()
         assert "not found" in exc.value.reason
+
+    @_NEEDS_NON_ROOT
+    def test_an_unreadable_claude_md_is_unevaluable_as_unreadable(
+        self, isolated, lock, monkeypatch
+    ):
+        """The declared project's `.claude/` cannot be searched. The verdict
+        says the file could not be read and names the cause, not that it is
+        missing, and carries no path; the arm above is its control."""
+        proj, _legacy = _preferred_unsearchable(isolated, lock)
+        empty = _make_project(isolated / "empty", None)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(proj))
+        monkeypatch.chdir(empty)
+
+        with pytest.raises(archive_pin._Unevaluable) as exc:
+            archive_pin.resolve_claude_md()
+
+        assert exc.value.reason == (
+            "CLAUDE.md could not be read: PermissionError (EACCES)"
+        ), exc.value.reason
 
 
 class TestCrossProjectFallthroughIsRefused:

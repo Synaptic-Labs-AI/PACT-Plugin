@@ -33,6 +33,11 @@ from unittest.mock import patch
 import pytest
 
 from helpers import make_claude_md_with_pins, make_pin_entry  # noqa: E402
+from tests.test_unreadable_location_carriers import (  # noqa: E402
+    _NEEDS_NON_ROOT,
+    _preferred_unsearchable,
+    lock,  # noqa: F401 -- a fixture, requested by name below
+)
 
 
 @pytest.fixture
@@ -43,7 +48,7 @@ def patched_claude_md(tmp_path, monkeypatch):
         claude_md.write_text(content, encoding="utf-8")
         import check_pin_caps
         monkeypatch.setattr(
-            check_pin_caps, "get_project_claude_md_path", lambda: claude_md
+            check_pin_caps, "get_project_claude_md_path", lambda errors=None: claude_md
         )
         return claude_md
     return _write
@@ -147,7 +152,7 @@ class TestCheckPinCaps_Advisory_FailOpen:
             staleness, "get_project_claude_md_path", lambda: None
         )
         monkeypatch.setattr(
-            check_pin_caps, "get_project_claude_md_path", lambda: None
+            check_pin_caps, "get_project_claude_md_path", lambda errors=None: None
         )
         rc, payload = _run_cli(["--status"])
         assert rc == 0
@@ -187,6 +192,45 @@ class TestCheckPinCaps_Advisory_FailOpen:
         assert rc == 0
         assert payload["allowed"] is True
         assert "parse error" in payload["slot_status"]
+
+
+class TestCheckPinCaps_UnreadableIsNotMissing:
+    """The resolver runs for real here: CLAUDE_PROJECT_DIR names a project
+    whose `.claude/` cannot be searched, beside a readable legacy CLAUDE.md,
+    and the cwd is an empty directory outside any repository. Resolution stops
+    at the declared project, and the slot status says the file could not be
+    read, names the cause, and carries no path."""
+
+    @_NEEDS_NON_ROOT
+    def test_an_unsearchable_claude_dir_is_reported_unreadable(
+        self, tmp_path, lock, monkeypatch
+    ):
+        proj, _legacy = _preferred_unsearchable(tmp_path, lock)
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        monkeypatch.chdir(empty)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(proj))
+
+        rc, payload = _run_cli(["--status"])
+
+        status = payload["slot_status"]
+        assert rc == 0 and payload["allowed"] is True
+        assert "claude.md could not be read: PermissionError (EACCES)" in status, status
+        assert "not found" not in status and "/" not in status, status
+
+    def test_a_project_with_no_claude_md_is_still_not_found(self, tmp_path, monkeypatch):
+        """The control: the same call with a readable, empty project."""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        monkeypatch.chdir(empty)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(proj))
+
+        rc, payload = _run_cli(["--status"])
+
+        assert rc == 0
+        assert "claude.md not found" in payload["slot_status"], payload["slot_status"]
 
 
 class TestCheckPinCaps_Advisory_EvictablePins:
@@ -483,7 +527,7 @@ class TestCheckPinCaps_Advisory_NeverExit2:
             staleness, "get_project_claude_md_path", lambda: None
         )
         monkeypatch.setattr(
-            check_pin_caps, "get_project_claude_md_path", lambda: None
+            check_pin_caps, "get_project_claude_md_path", lambda errors=None: None
         )
         rc, _ = _run_cli(["--status"])
         assert rc != 2

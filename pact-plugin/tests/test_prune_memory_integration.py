@@ -62,7 +62,7 @@ def curator_env(tmp_path, monkeypatch, pact_context):
         staleness, "get_project_claude_md_path", lambda: claude_md
     )
     monkeypatch.setattr(
-        check_pin_caps, "get_project_claude_md_path", lambda: claude_md
+        check_pin_caps, "get_project_claude_md_path", lambda errors=None: claude_md
     )
 
     def _reset_state(n_pins, body_chars=4):

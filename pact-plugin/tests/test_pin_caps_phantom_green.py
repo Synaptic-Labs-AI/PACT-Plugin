@@ -158,7 +158,7 @@ class TestPhantomGreen_CliBypass:
         ]
         claude_md.write_text(make_claude_md_with_pins(entries), encoding="utf-8")
         monkeypatch.setattr(
-            check_pin_caps, "get_project_claude_md_path", lambda: claude_md
+            check_pin_caps, "get_project_claude_md_path", lambda errors=None: claude_md
         )
 
         buf = io.StringIO()
@@ -204,7 +204,7 @@ class TestPhantomGreen_CliBypass:
         entries = [make_pin_entry(title=f"Pin{i}", body_chars=4) for i in range(3)]
         claude_md.write_text(make_claude_md_with_pins(entries), encoding="utf-8")
         monkeypatch.setattr(
-            check_pin_caps, "get_project_claude_md_path", lambda: claude_md
+            check_pin_caps, "get_project_claude_md_path", lambda errors=None: claude_md
         )
 
         buf_with = io.StringIO()

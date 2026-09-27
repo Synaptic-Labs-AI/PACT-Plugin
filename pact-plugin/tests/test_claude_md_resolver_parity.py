@@ -409,6 +409,8 @@ import shutil  # noqa: E402
 import subprocess  # noqa: E402
 from datetime import datetime, timedelta  # noqa: E402
 
+from shared.failure_cause import failure_cause  # noqa: E402
+
 from tests.test_unreadable_location_carriers import (  # noqa: E402
     _NEEDS_NON_ROOT,
     _ancestor_unsearchable,
@@ -470,6 +472,10 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
         for recorded in (errs, errs2):
             assert len(recorded) == 1, recorded
             assert "PermissionError" in recorded[0] and str(proj) in recorded[0]
+
+        import staleness
+
+        assert staleness.unreadable_cause(errs2) == "PermissionError (EACCES)", errs2
 
     def test_the_cwd_file_is_reachable_without_the_declaration(
         self, tmp_path, monkeypatch
@@ -582,6 +588,10 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
         assert errs and all(e.startswith("git rung: FileNotFoundError") for e in errs), errs
         assert errs2 and all(e.startswith("git rung: FileNotFoundError") for e in errs2), errs2
 
+        import staleness
+
+        assert staleness.unreadable_cause(errs2) is None, errs2
+
     @pytest.mark.parametrize(
         "failure",
         [
@@ -613,6 +623,10 @@ class TestALocationThatCannotBeExaminedResolvesAlikeOnEveryInterpreter:
         prefix = f"git rung: {type(failure).__name__}"
         for recorded in (errs, errs2):
             assert len(recorded) == 1 and recorded[0].startswith(prefix), recorded
+
+        import staleness
+
+        assert staleness.unreadable_cause(errs2) == failure_cause(failure), errs2
 
     @pytest.mark.parametrize(
         "failure",

@@ -124,6 +124,7 @@ format_slot_status = _pin_caps.format_slot_status
 parse_pins = _pin_caps.parse_pins
 _parse_pinned_section = _staleness._parse_pinned_section
 get_project_claude_md_path = _staleness.get_project_claude_md_path
+unreadable_cause = _staleness.unreadable_cause
 
 # Age-threshold source. staleness.py owns PINNED_STALENESS_DAYS; this module
 # reads it rather than declaring its own, so "overdue" and the SessionStart
@@ -245,8 +246,14 @@ def _resolve_pins():
     list and a short reason string. Callers surface the reason in
     slot_status so the user sees "unknown (...)" instead of a fake "0/12".
     """
-    claude_md = get_project_claude_md_path()
+    errors: list = []
+    claude_md = get_project_claude_md_path(errors=errors)
     if claude_md is None:
+        # A CLAUDE.md that cannot be examined is not a missing one. The cause
+        # is a closed-vocabulary token; the path stays in `errors`.
+        cause = unreadable_cause(errors)
+        if cause is not None:
+            return [], f"claude.md could not be read: {cause}"
         return [], "claude.md not found"
 
     try:

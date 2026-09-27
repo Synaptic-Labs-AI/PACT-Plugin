@@ -274,9 +274,13 @@ def _resolve_project_claude_md_with_base(
 
     Args:
         errors: Optional list that receives a message for every location that
-            could not be examined and every git call that failed. No caller
-            passes one today. A failure outside the probes -- a deleted
-            working directory -- still raises.
+            could not be examined and every git call that failed. Each entry
+            leads with the failure_cause token -- after `git rung: ` for a git
+            call -- and carries the exception text, path included, after it;
+            `unreadable_cause` reads the token back. check_pin_caps and
+            archive_pin pass one so an unreadable CLAUDE.md is not reported
+            as missing. A failure outside the probes -- a deleted working
+            directory -- still raises.
 
     Returns:
         (path, base) where path is an existing project CLAUDE.md and base is
@@ -325,16 +329,16 @@ def _resolve_project_claude_md_with_base(
                 # on every interpreter, as in memory_api.main_repo_root.
                 repo_root = Path(os.path.realpath(common_dir)).parent
         except FileNotFoundError as exc:
-            errors.append(f"git rung: {type(exc).__name__}: {exc}")
+            errors.append(f"git rung: {failure_cause(exc)}: {exc}")
         except (subprocess.TimeoutExpired, OSError) as exc:
-            errors.append(f"git rung: {type(exc).__name__}: {exc}")
+            errors.append(f"git rung: {failure_cause(exc)}: {exc}")
             return None, None
         if repo_root is not None:
             found = _find_existing_claude_md(repo_root)
             if found is not None:
                 return found, repo_root
     except OSError as exc:
-        errors.append(f"{type(exc).__name__}: {exc}")
+        errors.append(f"{failure_cause(exc)}: {exc}")
         return None, None
 
     # Last resort: current working directory. `Path.cwd()` stays outside the
@@ -343,7 +347,7 @@ def _resolve_project_claude_md_with_base(
     try:
         found = _find_existing_claude_md(cwd)
     except OSError as exc:
-        errors.append(f"{type(exc).__name__}: {exc}")
+        errors.append(f"{failure_cause(exc)}: {exc}")
         return None, None
     return (found, cwd) if found is not None else (None, None)
 
@@ -369,19 +373,41 @@ def _lexical_base_of(claude_md_path: Path) -> Path:
     return claude_md_path.parent
 
 
-def get_project_claude_md_path() -> Optional[Path]:
+def get_project_claude_md_path(errors: Optional[list] = None) -> Optional[Path]:
     """
     Get the path to the project-level CLAUDE.md (path only).
 
     Thin wrapper over `_resolve_project_claude_md_with_base` (added for #1247);
     read-only callers, session_init, and the resolver-parity lint use this
     Path-only name, while the write caller (check_pinned_staleness) uses the
-    with-base variant to get the containment anchor.
+    with-base variant to get the containment anchor. `errors` is passed
+    through; see that function.
 
     Returns:
         Path to an existing project CLAUDE.md if found, None otherwise.
     """
-    return _resolve_project_claude_md_with_base()[0]
+    return _resolve_project_claude_md_with_base(errors=errors)[0]
+
+
+_GIT_RUNG = "git rung: "
+
+
+def unreadable_cause(errors: list) -> Optional[str]:
+    """The failure_cause token of the error that ended resolution, or None.
+
+    None means resolution was not stopped: nothing was recorded, or only git
+    being absent, which is recorded and moves on. Every other entry ends
+    resolution the moment it is recorded, so the first one is the cause. The
+    token is closed-vocabulary and never carries a path, so a caller can show
+    it where it would not show the entry.
+    """
+    for entry in errors:
+        body = entry[len(_GIT_RUNG):] if entry.startswith(_GIT_RUNG) else entry
+        cause = body.split(": ", 1)[0]
+        if entry.startswith(_GIT_RUNG) and cause.startswith("FileNotFoundError"):
+            continue
+        return cause
+    return None
 
 
 # Backward-compatible alias (tests and session_init patch the underscore name)
