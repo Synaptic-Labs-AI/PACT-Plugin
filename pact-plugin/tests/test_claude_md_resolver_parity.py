@@ -401,8 +401,9 @@ class TestDisplayResolverParityInvariant:
 # holds, on every interpreter: an ABSENT location (ENOENT, ENOTDIR, EBADF,
 # ELOOP, an unencodable path) is skipped silently; a location that cannot be
 # EXAMINED ends resolution, at whatever rung it is met, with no fallback to a
-# legacy file or a later rung, and is recorded; a git call that fails before
-# anything is examined moves on to the next rung.
+# legacy file or a later rung, and is recorded. So does a git call that did not
+# answer (a timeout, or any OSError other than FileNotFoundError); git that is
+# not installed is recorded and moves on to the next rung.
 
 import errno  # noqa: E402
 import shutil  # noqa: E402

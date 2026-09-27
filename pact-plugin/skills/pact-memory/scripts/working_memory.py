@@ -2127,11 +2127,16 @@ class SyncResult:
     # writers together.
     NO_WINDOW = "no_window"      # no write window resolved; see _resolve_write_window
     # A NEW REASON RATHER THAN `UNRESOLVED`, FOR THE SAME REASON AS NO_WINDOW:
-    # THE CAUSE IS THE SIGNAL. Resolution found no CLAUDE.md AND hit an error
-    # looking -- a location it could not read, or a failure that ended it -- so
-    # "there is no file" and "the file could not be looked for" stop reading
-    # alike. It arrives by a RETURN, on the same route as UNRESOLVED, and the
-    # errors are logged at WARNING where it is produced.
+    # THE CAUSE IS THE SIGNAL. The sync did not write because looking for its
+    # CLAUDE.md met an error, so "there is no file" and "the file could not be
+    # looked for" stop reading alike. It covers EVERY error the display
+    # resolver records when it finds nothing: a location it could not read, a
+    # git call that timed out or failed to run, AND git that is not installed,
+    # which is recorded and moves on -- so a machine without git and without a
+    # CLAUDE.md reports this, not UNRESOLVED. It also covers a resolved or
+    # explicit target that could not be examined at the existence check. It
+    # arrives by a RETURN, on the same route as UNRESOLVED, and the errors are
+    # logged at WARNING where it is produced.
     RESOLVE_ERROR = "resolve_error"
 
     def __init__(self, reason: str) -> None:

@@ -649,8 +649,9 @@ class PACTMemory:
         """Outcome of the most recent save() or sync() CLAUDE.md write.
 
         One of `SyncResult`'s reasons: `wrote`, `refused`, `suppressed`,
-        `unresolved`, `missing`, `failed` or `no_window`, plus `empty` on the
-        sync() path (this project has no records; the file was not touched).
+        `unresolved`, `resolve_error`, `missing`, `failed` or `no_window`,
+        plus `empty` on the sync() path (this project has no records; the
+        file was not touched).
         None means neither has run yet on this instance.
 
         THIS LIST IS THE REACHABLE SET AND NOT THE FULL ENUM. `empty` never

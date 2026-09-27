@@ -2243,7 +2243,9 @@ class TestArchivePin_CliContract:
 # alphabet. A rename fails loudly over there, in
 # `test_constants_match_the_declared_alphabet`, rather than silently shrinking
 # this sweep. Do not "tidy" these into imports.
-_NON_SUPPRESSED_STATUSES = ("wrote", "refused", "failed", "unresolved", "missing")
+_NON_SUPPRESSED_STATUSES = (
+    "wrote", "refused", "failed", "unresolved", "resolve_error", "missing", "no_window",
+)
 
 # The two halves of the scope-presence rule, SPELLED for the same reason the
 # alphabet above is: a set read off `archive_pin._WRITE_ATTEMPTED_STATUSES`
