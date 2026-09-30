@@ -194,6 +194,15 @@ _UNKNOWN_FRAME_CONTEXT = (
     "workflows that spawn specialists will not work here."
 )
 
+# Appended after the ladder for a frame whose role was never resolved (None):
+# its population includes real leads, so it keeps the ladder, and this cue
+# tells a non-lead reader to ignore it.
+_UNRESOLVED_ROLE_CUE = (
+    "Note: session_init failed before the session role was resolved, so this "
+    "frame was not classified. If you are not driving PACT as the "
+    "orchestrator, ignore the instructions above."
+)
+
 
 # Caveat appended to the symlink refresh status when the refresh MOVED
 # something. It names the subject of the repair and the one thing the repair
@@ -755,14 +764,7 @@ def _build_safety_net_context(
     )
     # None means the classifier did not run, so the frame may be a real lead:
     # it keeps the ladder, and the cue tells a non-lead reader to ignore it.
-    if frame_role is None:
-        cue = (
-            '\n\nNote: session_init failed before the session role was '
-            'resolved, so this frame was not classified. If you are not '
-            'driving PACT as the orchestrator, ignore the instructions above.'
-        )
-    else:
-        cue = ''
+    cue = f'\n\n{_UNRESOLVED_ROLE_CUE}' if frame_role is None else ''
     if team_name:
         return (
             f'{prelude}\n\n'
@@ -777,15 +779,14 @@ def _build_safety_net_context(
     )
 
 
-def _unknown_frame_output(source: str, stdin_json_error: str | None) -> dict:
+def _unknown_frame_output(source: str) -> dict:
     """Build the whole SessionStart output for a frame with no PACT role.
 
     An explicit allowlist: an emission or write reaches an unknown frame only
     if it is listed here. Kept are the notice, the machine-wide upkeep
     (symlink refresh, kernel-block strip, orphan-token cleanup), the faults a
     user can act on (a failed symlink refresh, a failed or skipped kernel
-    strip, a malformed settings.json), and the malformed-stdin failure-log
-    entry. Nothing is written into the project.
+    strip, a malformed settings.json). Nothing is written into the project.
     """
     system_messages = []
     if source in ("startup", "resume"):
@@ -805,16 +806,6 @@ def _unknown_frame_output(source: str, stdin_json_error: str | None) -> dict:
     settings_warn = check_settings_well_formed()
     if settings_warn:
         system_messages.append(settings_warn)
-    if stdin_json_error is not None:
-        try:
-            append_failure(
-                classification="malformed_json",
-                error=stdin_json_error,
-                cwd=os.getcwd(),
-                source=source,
-            )
-        except Exception:
-            pass
     output = {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
@@ -1418,7 +1409,10 @@ def main():
         # If the exception fires before this point, frame_role stays None and
         # the safety net emits the orchestrator marker — identical to prior
         # behavior, a KNOWN no-regression default, not a misroute.
-        frame_role = classify_session_role(input_data)
+        # Stdin that did not parse leaves input_data empty, so the classifier
+        # would run on no evidence: that frame stays None too (ladder + cue).
+        if stdin_json_error is None:
+            frame_role = classify_session_role(input_data)
 
         # Clear a stale compact-summary — BY MOVING IT, in BOTH of its homes.
         # Only "compact" source keeps either in place (postcompact_archive just
@@ -1447,7 +1441,7 @@ def main():
         # No recognized role: emit the notice, keep machine-wide upkeep and
         # fault reports, write nothing into the project.
         if frame_role == "unknown":
-            print(json.dumps(_unknown_frame_output(source, stdin_json_error)))
+            print(json.dumps(_unknown_frame_output(source)))
             sys.exit(0)
 
         _settle_staged_summaries(input_data.get("session_id", ""), project_dir)
@@ -1535,7 +1529,7 @@ def main():
         # other carrier.
         if (
             source in ("startup", "resume")
-            and frame_role != "lead"
+            and frame_role == "teammate"
             and _should_warn_unknown_role(input_data)
         ):
             system_messages.append(_UNKNOWN_ROLE_NOTICE)
@@ -2053,7 +2047,8 @@ def main():
             except Exception:
                 pass  # fail-open: no injection; never the orchestrator safety-net
         else:
-            # Only a lead reaches this branch.
+            # Only a lead, or a frame whose role was never resolved (stdin that
+            # did not parse), reaches this branch.
             #
             # The team always exists (the platform pre-creates it), so the
             # directive is source-agnostic; the per-source branches differ only
@@ -2235,6 +2230,8 @@ def main():
                     f'Note: unrecognized session source "{source}". '
                     f'Run TaskList to check current state.'
                 ))
+            if frame_role is None:
+                context_parts.insert(1, _UNRESOLVED_ROLE_CUE)
 
         # 5a. Capture the PREVIOUS session's dir from project CLAUDE.md
         # before step 5b overwrites the Current Session block with THIS

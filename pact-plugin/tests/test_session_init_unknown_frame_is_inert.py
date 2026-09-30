@@ -1,10 +1,12 @@
 """A frame with no PACT role gets one notice and writes nothing into its project.
 
 ``classify_session_role`` returns "unknown" when ``agent_type`` is ABSENT: plain
-``claude``, ``claude -p``, every ``claude plugin eval`` run, and a SessionStart
-whose stdin was not valid JSON. session_init gives that frame exactly
-``_UNKNOWN_FRAME_CONTEXT`` and returns before any project write. The lead,
-teammate and unclassified (None) frames are unchanged.
+``claude``, ``claude -p``, every ``claude plugin eval`` run. session_init gives
+that frame exactly ``_UNKNOWN_FRAME_CONTEXT`` and returns before any project
+write, unless its own session folder holds a lead's context file (a lead
+resumed without ``--agent``). The lead, teammate and unclassified (None)
+frames are unchanged; a SessionStart whose stdin was not valid JSON is
+unclassified.
 
 The arms below pin the whole output by EXACT EQUALITY, so an emission added to
 main() later that reaches an unknown frame fails them. The no-write arms each
@@ -14,6 +16,7 @@ layout never reached the writer.
 import io
 import json
 import os
+import re
 import shlex
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -26,6 +29,7 @@ import session_init  # noqa: E402
 from session_init import (  # noqa: E402
     _UNKNOWN_FRAME_CONTEXT,
     _UNKNOWN_ROLE_NOTICE,
+    _UNRESOLVED_ROLE_CUE,
     _build_safety_net_context,
     _unknown_frame_output,
 )
@@ -339,7 +343,7 @@ class TestUnknownFrameKeepsFaultReports:
              patch("session_init.check_settings_well_formed",
                    return_value="PACT: settings.json is not valid JSON"), \
              patch("session_init._cleanup_orphan_tokens"):
-            output = _unknown_frame_output("startup", None)
+            output = _unknown_frame_output("startup")
         assert output["systemMessage"] == " | ".join([
             _UNKNOWN_ROLE_NOTICE,
             "PACT: 2 agents failed",
@@ -355,7 +359,7 @@ class TestUnknownFrameKeepsFaultReports:
                    return_value="Stripped obsolete PACT kernel block"), \
              patch("session_init.check_settings_well_formed", return_value=None), \
              patch("session_init._cleanup_orphan_tokens"):
-            output = _unknown_frame_output("compact", None)
+            output = _unknown_frame_output("compact")
         assert output == {
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
@@ -395,18 +399,32 @@ class TestUnknownFrameKeepsFaultReports:
 
 
 class TestMalformedStdin:
-    """Non-JSON stdin classifies "unknown". It is the one route by which a real
-    lead could arrive here, so it stays observable in the failure log."""
+    """Stdin that does not parse leaves nothing to classify, so the frame is
+    unresolved (None), like the safety net's None case: its population includes
+    real leads, so it keeps the ladder plus the unresolved-role cue, with no
+    no-role notice and no lead writes. It stays observable in the failure log."""
 
-    def test_non_json_stdin_is_inert_and_logged_once(self, monkeypatch, tmp_path):
+    @pytest.mark.parametrize("stdin_data", ["not json{", ""], ids=["garbage", "empty"])
+    def test_non_json_stdin_gets_the_ladder_and_the_cue_and_is_logged_once(
+        self, stdin_data, monkeypatch, tmp_path
+    ):
         plain = tmp_path / "plain"
         plain.mkdir()
         recorder = MagicMock()
         with patch("session_init.append_failure", recorder):
-            output = _run_real(monkeypatch, plain, "not json{")
-        assert output["hookSpecificOutput"]["additionalContext"] == _UNKNOWN_FRAME_CONTEXT
+            output = _run_real(monkeypatch, plain, stdin_data)
+        parts = output["hookSpecificOutput"]["additionalContext"].split(" | ")
+        assert parts[0].startswith(LADDER) and BOOTSTRAP in parts[0], parts[0][:200]
+        assert parts[1] == _UNRESOLVED_ROLE_CUE, parts[1][:200]
+        assert _UNKNOWN_ROLE_NOTICE not in json.dumps(output)
+        assert "partially failed" not in json.dumps(output), (
+            "the malformed-stdin path raised into the safety net"
+        )
         assert recorder.call_count == 1, recorder.call_args_list
         assert recorder.call_args.kwargs["classification"] == "malformed_json"
+        assert sorted(p.name for p in plain.rglob("*")) == [], (
+            "the unresolved frame wrote into its project"
+        )
 
     @pytest.mark.parametrize("stdin_data", [
         _frame(),
@@ -541,6 +559,13 @@ class TestResumedLeadIsRecognised:
             )
             (folder / BOOTSTRAP_MARKER_NAME).write_text("")
             (folder / COMPACT_SUMMARY_NAME).write_text("the lead's own summary")
+            # Backdate the recorded start, so whether the session block is
+            # rewritten cannot depend on both runs landing in the same second.
+            claude_md = project / ".claude" / "CLAUDE.md"
+            claude_md.write_text(re.sub(
+                r"- Started: [^\n]*", "- Started: 2000-01-01 00:00:00 UTC",
+                claude_md.read_text(),
+            ))
             output = _run_real(
                 monkeypatch, project, _frame(source=source, session_id=session_id, **extra)
             )
