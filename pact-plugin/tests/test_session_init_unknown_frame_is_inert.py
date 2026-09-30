@@ -35,6 +35,7 @@ from session_init import (  # noqa: E402
 )
 from shared import BOOTSTRAP_MARKER_NAME, compaction_owner  # noqa: E402
 import shared.pact_context as pact_context  # noqa: E402
+import shared.session_resume as session_resume  # noqa: E402
 from shared.constants import COMPACT_SUMMARY_NAME, get_compact_summary_path  # noqa: E402
 from shared.pact_context import _build_session_path, project_slug  # noqa: E402
 from shared.paths import get_claude_config_dir  # noqa: E402
@@ -532,6 +533,15 @@ def _normalise(output, root, session_id):
     )
 
 
+class _PinnedDatetime(datetime):
+    """datetime with a fixed now(), so both arms stamp the same second."""
+
+    @classmethod
+    def now(cls, tz=None):
+        pinned = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+        return pinned.astimezone(tz) if tz else pinned.replace(tzinfo=None)
+
+
 class TestResumedLeadIsRecognised:
     """A lead resumed without `--agent` carries no agent_type at SessionStart
     only. Its own session folder holds pact-session-context.json, which only a
@@ -543,6 +553,10 @@ class TestResumedLeadIsRecognised:
     def test_it_gets_the_same_output_as_a_lead_with_the_flag(
         self, source, monkeypatch, tmp_path
     ):
+        # The output names second-resolution stamps (the archived summary, the
+        # session block's start); pin the clocks that write them.
+        monkeypatch.setattr(session_init, "datetime", _PinnedDatetime)
+        monkeypatch.setattr(session_resume, "datetime", _PinnedDatetime)
         runs = {}
         for arm, session_id, extra in (
             ("flag", "aaaa1111-0000-0000-0000-000000000001", LEAD),
@@ -559,8 +573,8 @@ class TestResumedLeadIsRecognised:
             )
             (folder / BOOTSTRAP_MARKER_NAME).write_text("")
             (folder / COMPACT_SUMMARY_NAME).write_text("the lead's own summary")
-            # Backdate the recorded start, so whether the session block is
-            # rewritten cannot depend on both runs landing in the same second.
+            # Backdate the recorded start, so the resume rewrites the session
+            # block and reports it in both arms.
             claude_md = project / ".claude" / "CLAUDE.md"
             claude_md.write_text(re.sub(
                 r"- Started: [^\n]*", "- Started: 2000-01-01 00:00:00 UTC",
@@ -582,6 +596,10 @@ class TestResumedLeadIsRecognised:
         additional = noflag[2]["hookSpecificOutput"]["additionalContext"]
         assert additional.startswith(LADDER), additional[:200]
         assert _UNKNOWN_ROLE_NOTICE not in json.dumps(noflag[2])
+        if source != "compact":
+            assert "Session info updated in project CLAUDE.md" in additional, (
+                "the recovered lead did not rewrite its session block"
+            )
         assert noflag[0] == flag[0], "the recovered lead's output differs from the flagged lead's"
         assert noflag[1] == flag[1], "the recovered lead left a different session folder"
         assert noflag[3] == flag[3], (
