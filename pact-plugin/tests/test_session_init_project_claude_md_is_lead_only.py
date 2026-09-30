@@ -92,8 +92,8 @@ class TestTeammateWritesNothing:
 
         project = _project(tmp_path, "teammate")
         context, system_message = _run(monkeypatch, project, agent_type)
-        assert not (project / ".claude" / "CLAUDE.md").exists(), (
-            f"agent_type={agent_type!r} created the project CLAUDE.md"
+        assert sorted(p.name for p in project.rglob("*")) == [], (
+            f"agent_type={agent_type!r} wrote into the project"
         )
         assert CREATED not in context and CREATED not in system_message
 
