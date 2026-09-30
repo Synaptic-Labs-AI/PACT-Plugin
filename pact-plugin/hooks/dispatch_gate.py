@@ -302,13 +302,23 @@ _TEAMMATE_SPAWN_REFUSAL = (
     "the team-lead to spawn it."
 )
 
+# Rule ⑥'s refusal for any other non-lead frame. The context-failure suffix and
+# the stale-session hint are withheld for the same reason: both repair a lead's
+# state.
+_NON_LEAD_SPAWN_REFUSAL = (
+    "PACT dispatch_gate: PACT specialists are spawned only by a PACT "
+    "team-lead, and this session is not one. If this session is a PACT "
+    "teammate, ask the team-lead to spawn it. To drive PACT, start a "
+    "session with `--agent PACT:pact-orchestrator`."
+)
+
 
 def _resolves_a_registered_team(input_data: dict) -> bool:
     """True iff the frame's own session resolves a team membership.
 
     A teammate in its own process is registered in its team; a solo specialist
     session is not. The import lives here so a failure to import or resolve
-    counts as not registered, and rule ⑥ keeps its bootstrap text.
+    counts as not registered, and rule ⑥ gives the non-lead refusal.
     """
     try:
         from shared.background_work import frame_team_and_name
@@ -449,10 +459,12 @@ def evaluate_dispatch(
     # depend on session_team being a non-empty path segment.
     session_team = pact_context.get_team_name()
     if not session_team:
-        if (isinstance(input_data, dict)
-                and pact_context.classify_session_role(input_data) == "teammate"
-                and _resolves_a_registered_team(input_data)):
-            return ("DENY", _TEAMMATE_SPAWN_REFUSAL, "team_name_unavailable")
+        if isinstance(input_data, dict):
+            role = pact_context.classify_session_role(input_data)
+            if role == "teammate" and _resolves_a_registered_team(input_data):
+                return ("DENY", _TEAMMATE_SPAWN_REFUSAL, "team_name_unavailable")
+            if role != "lead":
+                return ("DENY", _NON_LEAD_SPAWN_REFUSAL, "team_name_unavailable")
         message = ("PACT dispatch_gate: session team_name is unavailable "
                    "(pact-session-context.json missing or unreadable). "
                    "Re-run /PACT:bootstrap to restore session context.")
@@ -562,9 +574,9 @@ def _journal_decision(decision: str, reason: str | None, rule: str | None,
 # ``team_name_unavailable`` (rule ⑥) and ``no_task_assigned`` (rule ⑧) — that
 # never name the real cause. Other deny rules (name validation, plugin-install,
 # registry) are NOT restart-symptoms, so they are deliberately excluded: a
-# stale-session note on them would misdirect recovery. Rule ⑥'s refusal in a
-# teammate's own process is not a restart symptom either, so the composer
-# returns ``_TEAMMATE_SPAWN_REFUSAL`` verbatim.
+# stale-session note on them would misdirect recovery. Rule ⑥'s refusals for a
+# non-lead frame are not restart symptoms either, so the composer returns both
+# verbatim.
 _STALE_DIAGNOSABLE_RULES = frozenset({"team_name_unavailable", "no_task_assigned"})
 
 # Actionable re-align guidance appended after the shared detector's stale-block
@@ -772,8 +784,8 @@ _MISSING_DENY_REASON = (
 def _compose_deny_diagnosis(
     rule: str | None, message: str | None, input_data: dict,
 ) -> str:
-    """Return the user-facing deny text: ``_TEAMMATE_SPAWN_REFUSAL`` verbatim,
-    ELSE the incumbent stale-team diagnosis if it fired, ELSE the cause
+    """Return the user-facing deny text: either rule-⑥ non-lead refusal
+    verbatim, ELSE the incumbent stale-team diagnosis if it fired, ELSE the cause
     enumeration on rule ⑧, ELSE ``message`` unchanged.
 
     A-xor-B BY CONSTRUCTION — the two blocks are mutually exclusive, and the
@@ -833,7 +845,7 @@ def _compose_deny_diagnosis(
     """
     if not isinstance(message, str):
         return _MISSING_DENY_REASON
-    if message == _TEAMMATE_SPAWN_REFUSAL:
+    if message in (_TEAMMATE_SPAWN_REFUSAL, _NON_LEAD_SPAWN_REFUSAL):
         return message
 
     augmented = _augment_deny_with_stale_diagnosis(rule, message, input_data)

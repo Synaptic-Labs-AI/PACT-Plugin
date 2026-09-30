@@ -319,7 +319,8 @@ def test_empty_ssot_team_fails_closed_both_modes(tmp_path, monkeypatch, capsys):
             tmp_path, team_name=LEAD_TEAM, lead_session_id=LEAD_SID,
             members=(), tasks=((_NAME, "pending"),),
         )
-        code, out = _run_dispatch(_make_spawn(team_name_arg=LEAD_TEAM), capsys)
+        spawn = {**_make_spawn(team_name_arg=LEAD_TEAM), "agent_type": "PACT:pact-orchestrator"}
+        code, out = _run_dispatch(spawn, capsys)
         assert code == 2, f"empty SSOT must fail-closed (frame_sid={frame_sid})"
         reason = out["hookSpecificOutput"]["permissionDecisionReason"]
         assert "session team_name is unavailable" in reason

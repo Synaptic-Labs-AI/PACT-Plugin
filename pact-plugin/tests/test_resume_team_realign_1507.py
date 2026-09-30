@@ -445,6 +445,7 @@ def test_iii_empty_ssot_fails_closed_with_census_inputs(tmp_path, monkeypatch,
     assert ctx_module.get_team_name() == ""
     spawn = _make_spawn()
     spawn["session_id"] = frame_sid
+    spawn["agent_type"] = "PACT:pact-orchestrator"
     code, out = _run_dispatch(spawn, capsys)
     assert code == 2, f"empty SSOT must fail-closed (frame_sid={frame_sid})"
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
