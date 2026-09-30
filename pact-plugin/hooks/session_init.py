@@ -592,9 +592,12 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
             )
 
         # Fallback: derive from Resume line session_id + project root basename.
-        # Resume line format: "- Resume: `claude --resume <session_id>`"
+        # Resume line format: "- Resume: `claude --agent <lead> --resume <id>`".
+        # A block written before the flag was added has no `--agent` segment;
+        # both forms are read.
         resume_match = re.search(
-            r'- Resume:\s*`claude --resume\s+([0-9a-f-]+)`', content
+            r'- Resume:\s*`claude (?:--agent\s+\S+\s+)?--resume\s+([0-9a-f-]+)`',
+            content,
         )
         if resume_match:
             session_id = resume_match.group(1)

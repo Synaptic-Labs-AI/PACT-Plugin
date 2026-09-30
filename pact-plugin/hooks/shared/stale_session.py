@@ -33,7 +33,9 @@ import shared.pact_context as pact_context
 # session_resume.update_session_info managed block. Parity with
 # claude_md_manager.resolve_project_claude_md_path's existing-file
 # precedence is pinned by test.
-_RESUME_LINE_RE = re.compile(r"- Resume:\s*`claude --resume\s+([0-9a-f-]+)`")
+_RESUME_LINE_RE = re.compile(
+    r"- Resume:\s*`claude (?:--agent\s+\S+\s+)?--resume\s+([0-9a-f-]+)`"
+)
 
 _STALENESS_WARNING_TEMPLATE = (
     "\n\nWARNING — stale session block: the project CLAUDE.md 'Current "

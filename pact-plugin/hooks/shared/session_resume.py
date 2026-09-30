@@ -192,7 +192,7 @@ def update_session_info(
         f"{SESSION_START}\n"
         f"## Current Session\n"
         f"<!-- Auto-managed by session_init hook. Overwritten each session. -->\n"
-        f"- Resume: `claude --resume {cleaned_session_id}`\n"
+        f"- Resume: `claude --agent PACT:pact-orchestrator --resume {cleaned_session_id}`\n"
         f"- Team: `{cleaned_team_name}`\n"
         f"{session_dir_line}"
         f"{plugin_root_line}"

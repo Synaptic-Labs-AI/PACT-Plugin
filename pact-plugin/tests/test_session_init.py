@@ -607,8 +607,11 @@ class TestMainPrevSessionDirOrdering:
         # --- Assert: update_session_info DID in fact rewrite the block to the current session ---
         # (confirms the ordering fix didn't accidentally skip the write)
         rewritten = claude_md.read_text(encoding="utf-8")
-        assert f"claude --resume {current_session_id}" in rewritten
-        assert f"claude --resume {prior_session_id}" not in rewritten
+        assert (
+            f"claude --agent PACT:pact-orchestrator --resume {current_session_id}"
+            in rewritten
+        )
+        assert f"--resume {prior_session_id}" not in rewritten
 
 
 class TestRefreshSurfacingMatrix:
@@ -2640,8 +2643,12 @@ class TestExtractPrevSessionDirDualLocation:
         )
         assert result == expected
 
+    @pytest.mark.parametrize("launch", [
+        "claude --resume",
+        "claude --agent PACT:pact-orchestrator --resume",
+    ], ids=["without-agent-flag", "with-agent-flag"])
     def test_regex_miss_on_existing_claude_md_logs_warning(
-        self, tmp_path, monkeypatch, capsys,
+        self, launch, tmp_path, monkeypatch, capsys,
     ):
         """A1: log a stderr warning when CLAUDE.md exists but the primary regex misses.
 
@@ -2675,7 +2682,7 @@ class TestExtractPrevSessionDirDualLocation:
             "# Project\n"
             "<!-- SESSION_START -->\n"
             "## Current Session\n"
-            f"- Resume: `claude --resume {session_id}`\n"
+            f"- Resume: `{launch} {session_id}`\n"
             "- Team: `pact-abcdef01`\n"
             "<!-- SESSION_END -->\n",
             encoding="utf-8",

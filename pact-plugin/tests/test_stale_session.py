@@ -212,8 +212,10 @@ def test_legacy_claude_md_used_when_preferred_absent(tmp_path, monkeypatch):
         ("- Resume:   `claude --resume deadbeef`", "deadbeef"),  # extra spaces
         ("- Resume: `claude --resume 11111111-2222-4000-8000-000000000000`",
          "11111111-2222-4000-8000-000000000000"),
+        ("- Resume: `claude --agent PACT:pact-orchestrator --resume abc123-def`",
+         "abc123-def"),
     ],
-    ids=["hex_dash", "extra_spaces", "full_uuid"],
+    ids=["hex_dash", "extra_spaces", "full_uuid", "with_agent_flag"],
 )
 def test_resume_line_regex_extracts_hex_id(line, expected):
     m = _RESUME_LINE_RE.search(line)
@@ -233,3 +235,20 @@ def test_resume_line_regex_extracts_hex_id(line, expected):
 )
 def test_resume_line_regex_rejects_malformed(line):
     assert _RESUME_LINE_RE.search(line) is None
+
+
+def test_the_written_resume_line_carries_the_lead_flag_and_parses(
+    tmp_path, monkeypatch
+):
+    """The Resume line update_session_info writes relaunches the orchestrator,
+    and this regex still reads its id."""
+    from shared.session_resume import update_session_info
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+    update_session_info(_LIVE_ID, "session-11111111")
+    written = "".join(p.read_text() for p in project.rglob("CLAUDE.md"))
+    assert f"`claude --agent PACT:pact-orchestrator --resume {_LIVE_ID}`" in written
+    m = _RESUME_LINE_RE.search(written)
+    assert m is not None and m.group(1) == _LIVE_ID
