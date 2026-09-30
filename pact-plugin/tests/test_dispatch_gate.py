@@ -641,32 +641,19 @@ def test_rule_6_refuses_a_non_lead_frame_with_no_role(tmp_path, monkeypatch, cap
     _assert_non_lead_refusal(reason, journal)
 
 
-def test_rule_6_tells_a_registered_teammate_to_ask_the_team_lead_in_a_fresh_process(tmp_path):
-    """A fresh interpreter runs hooks/dispatch_gate.py as __main__ for a registered
-    separate-process teammate with no context file.
-
-    Rule ⑥ imports background_work inside a function and treats any failure
-    there as "not registered", so a broken import silently swaps in the non-lead
-    refusal while the verdict stays DENY. The arms above run after conftest has
-    already imported background_work, so they cannot see that break. The gate's
-    journal needs a session directory this process does not have, so the harness
-    records the journaled decision itself.
-    """
+def _run_gate_in_fresh_process(tmp_path, frame):
+    """Run hooks/dispatch_gate.py as __main__ in a fresh interpreter over
+    ``frame``, with HOME and the config dir under ``tmp_path`` and no context
+    file. The team lookup and context resolution run for real. The gate's
+    journal needs a session directory this process does not have, so the
+    harness replaces only the journal sink, with a recorder that prints the
+    journaled decision on stderr. Returns the completed process."""
     import os
     import subprocess
     import sys
 
     plugin = Path(__file__).resolve().parents[1]
     hook = plugin / "hooks" / "dispatch_gate.py"
-    _seed_team(tmp_path, members=("tmux-subject",), tasks=((_NAME, "pending"),))
-    frame = captured_pretooluse_teammate_tmux()
-    frame.update(tool_name="Agent", tool_input=_make_input()["tool_input"])
-    registry = tmp_path / ".claude" / "pact-sessions" / ".teammate-registry.jsonl"
-    registry.parent.mkdir(parents=True)
-    registry.write_text(
-        json.dumps({"session_id": frame["session_id"], "value": f"tmux-subject@{_TEAM}"}) + "\n",
-        encoding="utf-8",
-    )
     harness = (
         "import runpy, sys\n"
         "import shared.session_journal as journal\n"
@@ -681,13 +668,55 @@ def test_rule_6_tells_a_registered_teammate_to_ask_the_team_lead_in_a_fresh_proc
     env.update(HOME=str(tmp_path), CLAUDE_CONFIG_DIR=str(tmp_path / ".claude"),
                CLAUDE_PLUGIN_ROOT=str(plugin), PYTHONPATH=str(plugin / "hooks"))
 
-    proc = subprocess.run([sys.executable, "-c", harness], input=json.dumps(frame),
-                          capture_output=True, text=True, timeout=60, env=env)
+    return subprocess.run([sys.executable, "-c", harness], input=json.dumps(frame),
+                          capture_output=True, text=True, timeout=60, env=env,
+                          cwd=str(tmp_path))
+
+
+def test_rule_6_tells_a_registered_teammate_to_ask_the_team_lead_in_a_fresh_process(tmp_path):
+    """A fresh interpreter runs hooks/dispatch_gate.py as __main__ for a registered
+    separate-process teammate with no context file.
+
+    Rule ⑥ imports background_work inside a function and treats any failure
+    there as "not registered", so a broken import silently swaps in the non-lead
+    refusal while the verdict stays DENY. The arms above run after conftest has
+    already imported background_work, so they cannot see that break.
+    """
+    _seed_team(tmp_path, members=("tmux-subject",), tasks=((_NAME, "pending"),))
+    frame = captured_pretooluse_teammate_tmux()
+    frame.update(tool_name="Agent", tool_input=_make_input()["tool_input"])
+    registry = tmp_path / ".claude" / "pact-sessions" / ".teammate-registry.jsonl"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(
+        json.dumps({"session_id": frame["session_id"], "value": f"tmux-subject@{_TEAM}"}) + "\n",
+        encoding="utf-8",
+    )
+
+    proc = _run_gate_in_fresh_process(tmp_path, frame)
 
     assert "COLD True" in proc.stderr, proc.stderr
     assert proc.returncode == 2, proc.stderr
     reason = json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
     assert reason == _TEAMMATE_REFUSAL
+    assert "JOURNALED DENY team_name_unavailable" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize(
+    "agent_type", [None, "pact-backend-coder", _LEAD_AGENT_TYPE],
+    ids=["no-role", "solo-specialist", "lead-control"],
+)
+def test_rule_6_refuses_a_non_lead_frame_in_a_fresh_process(tmp_path, agent_type):
+    """The non-lead refusal through the real team lookup: no context file and
+    nothing in pact_context stubbed. The lead control on the same setup gets the
+    bootstrap text, so the refusal comes from the role, not from the setup."""
+    proc = _run_gate_in_fresh_process(tmp_path, _make_input(agent_type=agent_type))
+
+    assert proc.returncode == 2, proc.stderr
+    reason = json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+    if agent_type == _LEAD_AGENT_TYPE:
+        assert "Re-run /PACT:bootstrap" in reason, reason
+    else:
+        assert reason == _NON_LEAD_REFUSAL
     assert "JOURNALED DENY team_name_unavailable" in proc.stderr, proc.stderr
 
 
