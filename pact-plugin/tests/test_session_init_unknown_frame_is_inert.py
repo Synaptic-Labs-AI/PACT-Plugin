@@ -14,7 +14,9 @@ layout never reached the writer.
 import io
 import json
 import os
+import shlex
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -27,7 +29,8 @@ from session_init import (  # noqa: E402
     _build_safety_net_context,
     _unknown_frame_output,
 )
-from shared.constants import get_compact_summary_path  # noqa: E402
+from shared import BOOTSTRAP_MARKER_NAME, compaction_owner  # noqa: E402
+from shared.constants import COMPACT_SUMMARY_NAME, get_compact_summary_path  # noqa: E402
 from shared.pact_context import _build_session_path, project_slug  # noqa: E402
 from shared.paths import get_claude_config_dir  # noqa: E402
 
@@ -401,3 +404,100 @@ class TestMalformedStdin:
         assert output["hookSpecificOutput"]["additionalContext"] == _UNKNOWN_FRAME_CONTEXT
         assert recorder.call_count == 1, recorder.call_args_list
         assert recorder.call_args.kwargs["classification"] == "malformed_json"
+
+    @pytest.mark.parametrize("stdin_data", [
+        _frame(),
+        json.dumps({"source": "startup"}),
+    ], ids=["with-session-id", "without-session-id"])
+    def test_valid_json_is_not_logged(self, stdin_data, monkeypatch, tmp_path):
+        """Only malformed stdin is logged for an unknown frame. The lead control
+        sends the same stdin without a session id and IS logged, so the layout
+        reaches the failure log."""
+        control = tmp_path / "control"
+        control.mkdir()
+        recorder = MagicMock()
+        with patch("session_init.append_failure", recorder):
+            _run_real(monkeypatch, control, json.dumps({"source": "startup", **LEAD}))
+        assert recorder.call_count == 1, (
+            "control: a lead frame without a session id wrote no failure-log "
+            "entry, so this layout never reaches the log"
+        )
+
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        recorder = MagicMock()
+        with patch("session_init.append_failure", recorder):
+            _run_real(monkeypatch, plain, stdin_data)
+        assert recorder.call_count == 0, recorder.call_args_list
+
+
+class TestUnknownFrameKeepsTheEnvFileExport:
+    """The CLAUDE_ENV_FILE export runs before the role is classified, so an
+    unknown frame still gets it: skill-spawned CLIs in any session read it."""
+
+    def test_the_export_lands(self, monkeypatch, tmp_path):
+        env_file = tmp_path / "session-env.sh"
+        monkeypatch.setenv("CLAUDE_ENV_FILE", str(env_file))
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        _run_real(monkeypatch, plain, _frame())
+        assert env_file.read_text(encoding="utf-8") == (
+            f"export CLAUDE_PROJECT_DIR={shlex.quote(str(plain))}\n"
+        )
+
+
+def _seed_lead_session_dir(project_dir):
+    """A lead's session folder as a compaction and a /clear leave it: the
+    bootstrap marker, the session's own compact summary, and one staged summary
+    old enough that a settle pass resolves it."""
+    folder = _session_dir(project_dir)
+    folder.mkdir(parents=True)
+    (folder / BOOTSTRAP_MARKER_NAME).write_text("")
+    (folder / COMPACT_SUMMARY_NAME).write_text("the lead's own summary")
+    staged_at = datetime.now(timezone.utc) - timedelta(
+        seconds=compaction_owner.EXPIRE_S * 5
+    )
+    assert compaction_owner.stage_summary(
+        {"compact_summary": "s" * 300, "session_id": _SESSION_ID},
+        str(folder),
+        now=lambda: staged_at,
+    ), "the staged summary was not written"
+    return folder
+
+
+def _snapshot(folder):
+    return {p.name: p.read_bytes() for p in sorted(folder.iterdir())}
+
+
+class TestUnknownFrameLeavesALeadSessionDirAlone:
+    """A lead session resumed without `--agent` arrives as an unknown frame
+    carrying the lead's session id. Its session folder must stay as the lead
+    left it. The lead control, on the same seed, must clear the marker, archive
+    the own-dir summary and settle the staged one, so each writer is reachable
+    from this layout."""
+
+    @pytest.mark.parametrize("source", ["resume", "clear"])
+    def test_the_folder_is_byte_identical(self, source, monkeypatch, tmp_path):
+        control = tmp_path / "control"
+        control.mkdir()
+        folder = _seed_lead_session_dir(control)
+        _run_real(monkeypatch, control, _frame(source="clear", **LEAD))
+        names = {p.name for p in folder.iterdir()}
+        assert BOOTSTRAP_MARKER_NAME not in names, (
+            "control: a lead /clear kept the bootstrap marker"
+        )
+        assert COMPACT_SUMMARY_NAME not in names, (
+            "control: a lead /clear did not archive the own-dir summary"
+        )
+        assert not any(n.startswith("compact-summary.pending-") for n in names), (
+            "control: a lead start did not settle the staged summary"
+        )
+
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        folder = _seed_lead_session_dir(plain)
+        before = _snapshot(folder)
+        _run_real(monkeypatch, plain, _frame(source=source))
+        assert _snapshot(folder) == before, (
+            f"an unknown frame (source={source!r}) changed the lead's session folder"
+        )

@@ -954,7 +954,13 @@ class TestSessionInitSuppressOutput:
         """Normal session init with no messages outputs suppressOutput."""
         from session_init import main
 
-        input_data = json.dumps({"source": "startup", "session_id": "test123"})
+        # A lead frame: a frame with no agent_type returns before the team and
+        # task collaborators stubbed below.
+        input_data = json.dumps({
+            "source": "startup",
+            "session_id": "test123",
+            "agent_type": "PACT:pact-orchestrator",
+        })
         with patch("sys.stdin", io.StringIO(input_data)), \
              patch("session_init.check_additional_directories", return_value=None), \
              patch("session_init.setup_plugin_symlinks", return_value=None), \
