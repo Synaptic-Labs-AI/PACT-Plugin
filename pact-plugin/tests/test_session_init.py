@@ -77,13 +77,6 @@ def _with_lead_role(payload: dict) -> dict:
 # a change lands in one place.
 _TEST_SESSION_ID = "aabb1122-0000-0000-0000-000000000000"
 
-# The unknown-role notice literal. classify_session_role returns "unknown" when
-# agent_type is absent, and the role gate emits this BESIDE the orchestrator
-# ladder, never in place of it. Kept as a fragment rather than the full
-# sentence so a re-wrap of the source literal does not redden every arm that
-# reads it.
-_UNKNOWN_ROLE_FRAGMENT = "relaunch with `--agent PACT:pact-orchestrator`"
-
 
 def _stdin_payload(
     source=None,
@@ -118,23 +111,16 @@ def _assert_unknown_frame_body(additional: str) -> None:
     accidentally providing. Both properties stay asserted, so neither the lead
     contract nor the unknown branch loses its witness.
 
-    AN UNKNOWN FRAME IS A PRIMARY FRAME AND KEEPS THE LADDER. "unknown" means
-    agent_type was ABSENT, which is a no-`--agent` primary frame: an ordinary
-    user running plain `claude`. Withholding the ladder leaves the bootstrap
-    marker unstamped, and bootstrap_gate then denies Edit, Write and Agent on
-    every call. The notice rides BESIDE the ladder, never in place of it.
-
-    BOTH ASSERTIONS ARE PRESENCES, which is what makes this helper non-vacuous
-    in a fail-open hook: a build path that died emits no bytes and fails the
-    first assertion, so neither half can pass by accident.
+    An unknown frame has no PACT role (plain `claude`, `claude -p`, an eval
+    run), so it receives exactly _UNKNOWN_FRAME_CONTEXT: the notice, and no
+    orchestrator ladder or other PACT directive. EXACT EQUALITY is the pin: any
+    emission added later that reaches an unknown frame fails it.
     """
-    assert "YOUR PACT ROLE: orchestrator." in additional, (
-        "an unknown frame is a no-`--agent` PRIMARY frame and must receive the "
-        f"orchestrator instructions. got: {additional[:120]!r}"
-    )
-    assert _UNKNOWN_ROLE_FRAGMENT in additional, (
-        "an unknown frame must also receive the unknown-role notice. got: "
-        f"{additional[:120]!r}"
+    from session_init import _UNKNOWN_FRAME_CONTEXT
+
+    assert additional == _UNKNOWN_FRAME_CONTEXT, (
+        "an unknown frame must receive exactly _UNKNOWN_FRAME_CONTEXT. got: "
+        f"{additional[:200]!r}"
     )
 
 
@@ -302,7 +288,9 @@ class TestMainPausedStateIntegration:
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
 
-        stdin_data = json.dumps({"session_id": "aabb1122-0000-0000-0000-000000000000"})
+        stdin_data = json.dumps(_with_lead_role(
+            {"session_id": "aabb1122-0000-0000-0000-000000000000"}
+        ))
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -756,13 +744,11 @@ class TestRefreshSurfacingMatrix:
         additional = output["hookSpecificOutput"]["additionalContext"]
         assert "Refreshed workstream detected" not in additional
         assert "refresh_ts=" not in additional
-        # frame_is_lead conjunct pin on the PRESENTATION seam: the unknown-role
-        # frame is the ONE non-lead shape that reaches the compact branch
-        # (teammate frames divert to peer-injection before the directive
-        # renders), so the wording pin is scoped there — on the teammate rows
-        # the directive never renders and the assertion would be
-        # vacuous-by-unreachability. Dropping frame_is_lead from the
-        # refresh_pending conjunction must turn this row RED.
+        # An unknown-role frame returns before the compact branch, so the
+        # refresh wording never renders for it. Teammate frames divert to
+        # peer-injection first, so the frame_is_lead conjunct in
+        # refresh_pending is now reached only by a lead, and no main()-driven
+        # row can turn it red.
         if agent_type is None:
             assert "Teammates were shut down by /PACT:refresh" not in additional
 
@@ -924,7 +910,7 @@ class TestCompactSummaryCleanup:
         stdin_payload = {"source": source}
         if session_id is not None:
             stdin_payload["session_id"] = session_id
-        stdin_data = json.dumps(stdin_payload)
+        stdin_data = json.dumps(_with_lead_role(stdin_payload))
 
         with patch("session_init.get_compact_summary_path", lambda: patched_path), \
              patch("session_init.setup_plugin_symlinks", return_value=None), \
@@ -1043,7 +1029,7 @@ class TestCompactSummaryCleanup:
         foreign = foreign_dir / "compact-summary.txt"
         foreign.write_text("FOREIGN SESSION BYTES", encoding="utf-8")
 
-        stdin_data = json.dumps({"source": "startup", "session_id": own_sid})
+        stdin_data = json.dumps(_with_lead_role({"source": "startup", "session_id": own_sid}))
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
              patch("session_init.check_pinned_staleness", return_value=None), \
@@ -1328,7 +1314,7 @@ class TestCheckAdditionalDirectoriesMainIntegration:
             encoding="utf-8",
         )
 
-        stdin_data = json.dumps({"session_id": "aabb1122-0000-0000-0000-000000000000"})
+        stdin_data = json.dumps(_with_lead_role({"session_id": "aabb1122-0000-0000-0000-000000000000"}))
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -1366,7 +1352,7 @@ class TestCheckAdditionalDirectoriesMainIntegration:
             encoding="utf-8",
         )
 
-        stdin_data = json.dumps({"session_id": "aabb1122-0000-0000-0000-000000000000"})
+        stdin_data = json.dumps(_with_lead_role({"session_id": "aabb1122-0000-0000-0000-000000000000"}))
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -1407,10 +1393,10 @@ class TestCheckAdditionalDirectoriesMainIntegration:
         team_dir.mkdir(parents=True)
         (team_dir / "config.json").write_text('{"members": []}')
 
-        stdin_data = json.dumps({
+        stdin_data = json.dumps(_with_lead_role({
             "session_id": "aabb1122-0000-0000-0000-000000000000",
             "source": source,
-        })
+        }))
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -1505,7 +1491,7 @@ class TestInprocessModeNoticeIntegration:
         payload = {"session_id": "aabb1122-0000-0000-0000-000000000000"}
         if source is not self._OMIT_SOURCE:
             payload["source"] = source
-        stdin_data = json.dumps(payload)
+        stdin_data = json.dumps(_with_lead_role(payload))
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -1782,7 +1768,7 @@ class TestWriteContextIntegration:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        stdin_data = json.dumps({})  # No session_id in stdin
+        stdin_data = json.dumps(_with_lead_role({}))  # No session_id in stdin
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -1849,7 +1835,7 @@ class TestWriteContextIntegration:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        stdin_data = json.dumps({})  # No session_id in stdin
+        stdin_data = json.dumps(_with_lead_role({}))  # No session_id in stdin
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -1896,7 +1882,7 @@ class TestWriteContextIntegration:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        stdin_data = json.dumps({})  # No session_id in stdin
+        stdin_data = json.dumps(_with_lead_role({}))  # No session_id in stdin
 
         # Intentionally do NOT patch write_context or append_event — we
         # want to verify the real call sites are gated, not mocked.
@@ -1966,7 +1952,7 @@ class TestWriteContextIntegration:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        stdin_data = json.dumps({})  # No session_id in stdin
+        stdin_data = json.dumps(_with_lead_role({}))  # No session_id in stdin
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -2111,7 +2097,7 @@ class TestFailureLogIntegration:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        stdin_data = json.dumps({})  # valid JSON, no session_id
+        stdin_data = json.dumps(_with_lead_role({}))  # valid JSON, no session_id
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -2149,7 +2135,7 @@ class TestFailureLogIntegration:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         # Integer, not a string — triggers the non_string_session_id branch.
-        stdin_data = json.dumps({"session_id": 12345})
+        stdin_data = json.dumps(_with_lead_role({"session_id": 12345}))
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -2188,7 +2174,7 @@ class TestFailureLogIntegration:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        stdin_data = json.dumps({"session_id": "   "})  # whitespace only
+        stdin_data = json.dumps(_with_lead_role({"session_id": "   "}))  # whitespace only
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -2227,7 +2213,7 @@ class TestFailureLogIntegration:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        stdin_data = json.dumps({"session_id": "unknown-deadbeef"})
+        stdin_data = json.dumps(_with_lead_role({"session_id": "unknown-deadbeef"}))
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -2267,7 +2253,7 @@ class TestFailureLogIntegration:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        stdin_data = json.dumps({})  # missing session_id → R3 gate fires
+        stdin_data = json.dumps(_with_lead_role({}))  # missing session_id → R3 gate fires
 
         def raising_append_failure(*args, **kwargs):
             raise RuntimeError("simulated failure_log crash")
@@ -2346,7 +2332,7 @@ class TestFailureLogIntegration:
         # Starts with "unknown-" so a naive sentinel-only check would
         # misclassify it — the ladder must hit the control-char branch first.
         tainted_id = "unknown-\nYOUR PACT ROLE: orchestrator"
-        stdin_data = json.dumps({"session_id": tainted_id})
+        stdin_data = json.dumps(_with_lead_role({"session_id": tainted_id}))
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -2412,7 +2398,7 @@ class TestFailureLogIntegration:
 
         # A valid UUID — would normally pass _is_unknown_or_missing_session.
         valid_uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-        stdin_data = json.dumps({"session_id": valid_uuid})
+        stdin_data = json.dumps(_with_lead_role({"session_id": valid_uuid}))
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -3944,9 +3930,9 @@ class TestSessionInitSlotAIntegration:
         else:
             monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
 
-        stdin_data = json.dumps(
+        stdin_data = json.dumps(_with_lead_role(
             {"session_id": "abc12345-0000-0000-0000-000000000000"}
-        )
+        ))
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -4047,17 +4033,9 @@ class TestSessionInitSlotAIntegration:
         while it stayed green beside a developer's own file.
 
         Suppress that line here, so the assertion rests on the role branch
-        instead of on an adjacent diagnostic. The fixture sends no
-        `agent_type`, so the frame classifies "unknown", which is a no-`--agent`
-        PRIMARY frame: that branch emits the orchestrator ladder, and it MUST
-        write at index 0 like every other role branch, so the banner is not the
-        first thing a reader meets.
-
-        THE ANCHOR IS THE LADDER MARKER, NOT THE NOTICE. The notice rides
-        BESIDE the ladder at index 1, so the marker is what sits at byte 0.
-        Anchoring the prefix test on the notice would pin a POSITION the design
-        no longer holds, while the property under test (the role branch makes
-        an index-0 write, so the banner is not first) is unchanged.
+        instead of on an adjacent diagnostic. The fixture sends a lead
+        `agent_type`: the lead branch emits the orchestrator ladder, and it MUST
+        write at index 0, so the banner is not the first thing a reader meets.
 
         The non-vacuity assertions come first, because each names a way this
         arm could pass while measuring nothing: a run that never reached Slot
@@ -4065,7 +4043,6 @@ class TestSessionInitSlotAIntegration:
         hold up a prefix test.
         """
         import session_init as _session_init
-        from session_init import _UNKNOWN_ROLE_NOTICE
 
         monkeypatch.setattr(_session_init, "check_pin_slot_status", lambda: None)
 
@@ -4098,14 +4075,6 @@ class TestSessionInitSlotAIntegration:
             "(context_parts.insert(0, ...)), not append it — an appended role "
             "message leaves the banner first for a frame with no other "
             "pre-banner diagnostic"
-        )
-        assert _UNKNOWN_ROLE_FRAGMENT in _UNKNOWN_ROLE_NOTICE, (
-            "non-vacuity: the notice literal no longer carries this module's "
-            "own fragment, so the delivery assertion below measures nothing"
-        )
-        assert _UNKNOWN_ROLE_NOTICE in additional, (
-            "the unknown-role notice must still be DELIVERED, beside the "
-            "ladder rather than in place of it"
         )
         assert not additional.startswith(banner), (
             "banner (Slot 4c) is the first element of additionalContext: the "
@@ -4142,9 +4111,9 @@ class TestCounterTestBySlotARevert:
         monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
         (tmp_path / "home").mkdir(exist_ok=True)
 
-        stdin_data = json.dumps(
+        stdin_data = json.dumps(_with_lead_role(
             {"session_id": "abc12345-0000-0000-0000-000000000000"}
-        )
+        ))
 
         with patch("session_init.setup_plugin_symlinks", return_value=None), \
              patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -4226,8 +4195,7 @@ class TestTeamResumeDetection:
         )
 
         _assert_unknown_frame_body(additional)
-        # The team directive rides the ladder, so a primary frame gets it too.
-        assert "provided by the platform for this session" in additional
+        assert "provided by the platform for this session" not in additional
 
     def test_fresh_session_emits_team_create(self, monkeypatch, tmp_path):
         """When no team config exists on disk, should emit unified platform directive."""
@@ -4374,8 +4342,7 @@ class TestSourceAwareness:
         )
 
         _assert_unknown_frame_body(additional)
-        # The team directive rides the ladder, so a primary frame gets it too.
-        assert "provided by the platform for this session" in additional
+        assert "provided by the platform for this session" not in additional
 
     def test_startup_no_team_creates_team(self, monkeypatch, tmp_path):
         """startup + NO on-disk team: emit unified platform directive (bare — no recovery text).
@@ -5187,8 +5154,8 @@ class TestResumeOwnSummaryPointer:
              patch("session_init.get_task_list", return_value=None), \
              patch("session_init.restore_last_session", return_value=None), \
              patch("session_init.check_resume_state", return_value=None), \
-             patch("sys.stdin", io.StringIO(json.dumps(
-                 {"session_id": _TEST_SESSION_ID, "source": "resume"}))), \
+             patch("sys.stdin", io.StringIO(json.dumps(_with_lead_role(
+                 {"session_id": _TEST_SESSION_ID, "source": "resume"})))), \
              patch("sys.stdout", new_callable=io.StringIO):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -5254,8 +5221,7 @@ class TestTeamCreateStringFreshSession:
         )
 
         _assert_unknown_frame_body(additional)
-        # The team directive rides the ladder, so a primary frame gets it too.
-        assert "provided by the platform for this session" in additional
+        assert "provided by the platform for this session" not in additional
 
     def test_does_not_contain_old_conditional_directive(self, monkeypatch, tmp_path):
         """The #444 unconditional directive must fully replace the old conditional.
@@ -5299,8 +5265,7 @@ class TestTeamReuseStringResumedSession:
         )
 
         _assert_unknown_frame_body(additional)
-        # The team directive rides the ladder, so a primary frame gets it too.
-        assert "provided by the platform for this session" in additional
+        assert "provided by the platform for this session" not in additional
 
     def test_does_not_contain_old_conditional_directive(self, monkeypatch, tmp_path):
         """The #444 unconditional directive must fully replace the old conditional form."""
@@ -5478,26 +5443,22 @@ class TestBuildSafetyNetContext:
             "(line-anchored for routing block consumer check)."
         )
 
-    def test_unknown_role_gets_the_marker_the_bootstrap_and_the_notice(self):
-        """frame_role='unknown' means agent_type was ABSENT, which is a
-        no-`--agent` PRIMARY frame: an ordinary user running plain `claude`. It
-        gets the role marker at byte 0, the bootstrap directive, AND the
-        operator notice beside them.
+    @pytest.mark.parametrize("source", [None, "startup", "compact"])
+    @pytest.mark.parametrize("team_name", [None, "session-aabb1122"])
+    def test_unknown_role_gets_only_the_inert_context(self, team_name, source):
+        """frame_role='unknown' means agent_type was ABSENT: a session with no
+        PACT role (plain `claude`, `claude -p`, an eval run). It gets exactly
+        _UNKNOWN_FRAME_CONTEXT, with no role marker and no bootstrap directive,
+        whichever team-name arm the safety net takes.
 
-        PAIRS WITH test_lead_role_starts_with_pact_role_marker. The two roles
-        emit the same ladder and are separated by the notice, which only the
-        unknown frame receives, so a merge of the two cannot stay green.
-
-        WITHOUT THE BOOTSTRAP DIRECTIVE no marker is ever stamped, and
-        bootstrap_gate then denies Edit, Write and Agent on every tool call.
+        PAIRS WITH test_lead_role_starts_with_pact_role_marker, so a merge of
+        the two roles cannot stay green.
         """
-        from session_init import _build_safety_net_context
+        from session_init import _UNKNOWN_FRAME_CONTEXT, _build_safety_net_context
 
-        result = _build_safety_net_context(None, "unknown")
+        result = _build_safety_net_context(team_name, "unknown", source)
 
-        assert result.startswith("YOUR PACT ROLE: orchestrator.")
-        assert 'Skill("PACT:bootstrap")' in result
-        assert "relaunch with `--agent PACT:pact-orchestrator`" in result
+        assert result == _UNKNOWN_FRAME_CONTEXT
 
     def test_none_role_says_the_role_was_never_resolved(self):
         """frame_role=None means the classifier DID NOT RUN, so nothing is known
@@ -5990,9 +5951,10 @@ class TestMainExceptionSafetyNet:
         can lose half its repair silently, so the unknown half is asserted here
         beside the lead half below.
 
-        The raise fires BEFORE generate_team_name, the same point the lead arm
-        uses, so the only difference between the two arms is the FRAME. That is
-        what makes this a role assertion rather than a second failure test.
+        The raise is the same patched symlink refresh the lead arm uses (for
+        this frame it fires inside the unknown-frame helper), so the only
+        difference between the two arms is the FRAME. That is what makes this
+        a role assertion rather than a second failure test.
         """
         from session_init import main
 
@@ -6015,9 +5977,6 @@ class TestMainExceptionSafetyNet:
         additional = output["hookSpecificOutput"]["additionalContext"]
 
         _assert_unknown_frame_body(additional)
-        # The raise fires before generate_team_name, so team_name is None and
-        # the no-team wording is the correct half of the ladder to emit here.
-        assert "NOT GENERATED" in additional
         # systemMessage must still carry the original error: the role gate
         # changes WHO is addressed, not WHETHER the failure is reported.
         assert "simulated early failure" in json.dumps(output)
@@ -6529,20 +6488,14 @@ class TestSessionInitCompactBranchExceptions:
     def test_unknown_frame_safety_net_gets_the_notice_not_the_directive(
         self, monkeypatch, tmp_path, pact_context
     ):
-        """PAIRED UNKNOWN ARM, and it covers the path the defect was MEASURED on.
+        """PAIRED UNKNOWN ARM for the safety net on the compact source.
 
-        The compact SessionStart is where the misroute was observed: teammate
-        frames fired a compact SessionStart and received the orchestrator
-        ladder. This arm drives the SAME raise as the lead arm above, on the
-        SAME branch, with an UNKNOWN frame, so the safety-net site is witnessed
-        on the branch that carries the measurement rather than only on the lead
-        path.
-
-        It reaches _build_safety_net_context with frame_role "unknown", which is
-        the SECOND of the two gate sites. The lead arm above reaches the same
-        helper with frame_role "lead". The two of them together separate the two
-        roles at the site, so a re-merge of the roles cannot stay green at
-        either end.
+        An unknown frame returns before get_task_list, so the lead arm's raise
+        cannot reach it. The raise here fires inside the unknown-frame helper
+        instead (the symlink refresh), which is the one place an unknown frame
+        can fail, so _build_safety_net_context is reached with frame_role
+        "unknown" on the compact source. It must give the same inert context
+        as the normal path, with no bootstrap directive.
         """
         from session_init import main
 
@@ -6550,23 +6503,13 @@ class TestSessionInitCompactBranchExceptions:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        team_dir = tmp_path / ".claude" / "teams" / "session-aabb1122"
-        team_dir.mkdir(parents=True, exist_ok=True)
-        (team_dir / "config.json").write_text('{"members": []}')
-
         stdin_data = _stdin_payload(source="compact", agent_type=None)
 
-        def raising_get_task_list():
-            raise RuntimeError("simulated task_utils failure")
+        def raising_symlinks():
+            raise RuntimeError("simulated symlink failure")
 
         stdout = io.StringIO()
-        with patch("session_init.setup_plugin_symlinks", return_value=None), \
-             patch("session_init.ensure_project_memory_md", return_value=None), \
-             patch("session_init.check_pinned_staleness", return_value=None), \
-             patch("session_init.update_session_info", return_value=None), \
-             patch("session_init.get_task_list", side_effect=raising_get_task_list), \
-             patch("session_init.restore_last_session", return_value=None), \
-             patch("session_init.check_resume_state", return_value=None), \
+        with patch("session_init.setup_plugin_symlinks", side_effect=raising_symlinks), \
              patch("sys.stdin", io.StringIO(stdin_data)), \
              patch("sys.stdout", stdout):
             with pytest.raises(SystemExit) as exc_info:
@@ -6578,9 +6521,8 @@ class TestSessionInitCompactBranchExceptions:
         additional = output["hookSpecificOutput"]["additionalContext"]
 
         _assert_unknown_frame_body(additional)
-        # The bootstrap directive is the whole point of restoring the ladder:
-        # without it no marker is stamped and bootstrap_gate denies every tool.
-        assert 'Invoke Skill("PACT:bootstrap") immediately' in additional
+        assert 'Invoke Skill("PACT:bootstrap") immediately' not in additional
+        assert "simulated symlink failure" in output.get("systemMessage", "")
 
     def test_main_with_invalid_json_input_never_raises(
         self, tmp_path, monkeypatch
@@ -6801,9 +6743,7 @@ class TestSessionInitDirectiveAcrossAllSources:
         additional = self._run(monkeypatch, tmp_path, source, agent_type=None)
 
         _assert_unknown_frame_body(additional)
-        # The bootstrap directive is the whole point of restoring the ladder:
-        # without it no marker is stamped and bootstrap_gate denies every tool.
-        assert 'Invoke Skill("PACT:bootstrap") immediately' in additional
+        assert 'Invoke Skill("PACT:bootstrap") immediately' not in additional
 
     def test_compact_source_contains_all_four_directive_sentences(
         self, monkeypatch, tmp_path
@@ -7024,10 +6964,10 @@ class TestSymlinkRefreshRouting:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        stdin_data = json.dumps({
+        stdin_data = json.dumps(_with_lead_role({
             "session_id": "aabb1122-0000-0000-0000-000000000000",
             "source": source,
-        })
+        }))
 
         with patch("session_init.setup_plugin_symlinks", return_value=symlink_result), \
              patch("session_init.ensure_project_memory_md", return_value=None), \

@@ -1,28 +1,12 @@
 """The session-start role gate must route each classifier value correctly.
 
 `classify_session_role` returns "lead", "teammate" or "unknown". THE ROUTING
-THESE ARMS PIN: "teammate" gets the teammate body, and "lead" AND "unknown"
-BOTH get the orchestrator ladder, with "unknown" also receiving the operator
-notice beside it.
-
-AN EARLIER FORM OF THIS FILE ASSERTED THE OPPOSITE FOR "unknown", ON A CENSUS
-THAT DID NOT MEASURE THAT POPULATION. It read: 155 files matching
-`subagents/*.jsonl` for one team session, 13 of which fired a compact
-SessionStart and received the orchestrator instructions, concluded to be
-"unknown" frames. RE-MEASURED, with the parameter beside the count: of 166
-such files, 13 carry a SessionStart record, holding 70 records between them,
-and ALL 70 have `type == "attachment"` and carry the LEAD session id. The set
-of distinct session ids across the 70 has exactly ONE member. They are the
-LEAD's own hook output, attached by the platform into the transcripts of the
-live sidechains. Those frames classify "lead", so a gate keyed on "unknown"
-cannot change one byte of them, and 150 of the 166 files carry no SessionStart
-record at all. NO SUBAGENT FRAME REACHES THIS HOOK.
-
-WHY "unknown" MUST KEEP THE LADDER: it means agent_type was ABSENT, which is a
-no-`--agent` PRIMARY frame, an ordinary user running plain `claude`. The fuller
-coverage of that case lives in
-`test_session_init_primary_frame_keeps_the_ladder.py`, which drives all four
-lifecycle sources. The arms here pin the ROUTING of the three values.
+THESE ARMS PIN: "lead" gets the orchestrator ladder, "teammate" gets the
+teammate body, and "unknown" (agent_type ABSENT: plain `claude`, `claude -p`,
+an eval run) gets exactly `_UNKNOWN_FRAME_CONTEXT`, with no ladder. The fuller
+coverage of the unknown case lives in
+`test_session_init_unknown_frame_is_inert.py`. The arms here pin the ROUTING of
+the three values.
 
 WHY A LEAD KEEPS ITS LADDER, and it is measured rather than argued: `is_lead`
 returned true for this session, proven by the session context file, which no
@@ -47,7 +31,11 @@ import pytest
 _HOOKS = Path(__file__).parent.parent / "hooks"
 
 import session_init  # noqa: E402
-from session_init import _build_safety_net_context, _UNKNOWN_ROLE_NOTICE  # noqa: E402
+from session_init import (  # noqa: E402
+    _UNKNOWN_FRAME_CONTEXT,
+    _UNKNOWN_ROLE_NOTICE,
+    _build_safety_net_context,
+)
 
 LADDER = "YOUR PACT ROLE: orchestrator."
 TEAMMATE_MARKER = "YOUR PACT ROLE: teammate."
@@ -109,28 +97,13 @@ class TestMainSiteThreeWay:
             "is_lead on its own evidence, which is what makes this safe."
         )
 
-    def test_unknown_frame_gets_the_ladder_and_the_note(self, monkeypatch, tmp_path):
-        """AN UNKNOWN FRAME IS A PRIMARY FRAME AND KEEPS THE LADDER.
-
-        SEPARATION: the emitted block must be non-empty first, so a dead build
-        path fails there rather than on the ladder. The note is asserted
-        BESIDE the ladder, which is what makes the notice additive rather than
-        a replacement."""
+    def test_unknown_frame_gets_only_the_inert_context(self, monkeypatch, tmp_path):
+        """An unknown frame has no PACT role, so it gets the notice context and
+        no ladder. Exact equality: a dead build path emits "" and fails it."""
         out = _run_main({}, monkeypatch, tmp_path)
-        assert out, (
-            "an unknown frame emitted NO additionalContext at all, so this arm "
-            "cannot tell a correct emission from a dead build path."
-        )
-        assert LADDER in out, (
-            "an UNKNOWN frame lost the orchestrator instructions. 'unknown' "
-            "means agent_type was ABSENT, which is a no-`--agent` PRIMARY "
-            "frame: an ordinary user running plain `claude`. Withholding the "
-            "ladder leaves the bootstrap marker unstamped, and bootstrap_gate "
-            "then denies Edit, Write and Agent on every call."
-        )
-        assert _UNKNOWN_ROLE_NOTICE in out, (
-            "the unknown branch emitted no note, so an operator who meant to "
-            "pass `--agent` loses the cue that rides beside the ladder."
+        assert out == _UNKNOWN_FRAME_CONTEXT, (
+            f"an unknown frame must receive exactly _UNKNOWN_FRAME_CONTEXT. "
+            f"got: {out[:200]!r}"
         )
 
     def test_teammate_frame_gets_neither_the_ladder_nor_the_note(
@@ -166,32 +139,21 @@ class TestSafetyNetThreeWay:
         assert TEAMMATE_MARKER in out, "the teammate safety-net marker is gone"
         assert LADDER not in out, "a teammate frame received the lead ladder"
 
-    def test_unknown_gets_the_note_and_the_ladder(self):
+    def test_unknown_gets_only_the_inert_context(self):
         out = _build_safety_net_context("session-x", "unknown")
-        assert out, "the safety net returned an empty string for an unknown frame"
-        assert LADDER in out, (
-            "the safety-net unknown branch withholds the orchestrator marker. "
-            "A primary frame that reaches the exception window is the same "
-            "user as on the normal path and must not be denied."
-        )
-        assert _UNKNOWN_ROLE_NOTICE in out, (
-            "the unknown safety-net branch emitted no note, so the operator "
-            "cue is gone"
-        )
-        assert TEAMMATE_MARKER not in out, (
-            "an unknown frame was labelled a teammate, which claims a role the "
-            "classifier did not find"
+        assert out == _UNKNOWN_FRAME_CONTEXT, (
+            "the safety-net unknown branch must give the same text as the "
+            "normal path, with no orchestrator marker"
         )
 
     def test_none_is_ruled_separately_from_unknown(self):
         """None and 'unknown' are DIFFERENT facts and get DIFFERENT text.
 
-        THE TWO SHARE THE LADDER AND DIFFER IN THE CUE. An unresolved frame
-        keeps the orchestrator instructions, because the classifier not
-        running says nothing about the reader, and that frame is mostly a
-        primary user. What separates it is its own sentence, which a reader
-        who debugs the early window needs to tell an unresolved frame from a
-        resolved-empty one.
+        An unresolved frame keeps the orchestrator instructions, because the
+        classifier not running says nothing about the reader, and its
+        population includes real leads. It also carries its own sentence,
+        which a reader who debugs the early window needs to tell an
+        unresolved frame from a resolved-empty one.
         """
         out = _build_safety_net_context("session-x", None)
         assert out, "the safety net returned an empty string for an unresolved frame"
@@ -200,9 +162,8 @@ class TestSafetyNetThreeWay:
             "can no longer be told apart from the resolved-empty case"
         )
         assert LADDER in out, (
-            "an unresolved frame lost the lead ladder. Withholding it denies "
-            "an ordinary user every tool, and the reactive route that was "
-            "supposed to cover that cost did not work in the field."
+            "an unresolved frame lost the lead ladder, and its population "
+            "includes real leads"
         )
         assert _build_safety_net_context("session-x", None) != \
             _build_safety_net_context("session-x", "unknown"), (

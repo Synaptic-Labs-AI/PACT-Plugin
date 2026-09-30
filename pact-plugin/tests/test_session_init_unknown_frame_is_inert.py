@@ -1,0 +1,403 @@
+"""A frame with no PACT role gets one notice and writes nothing into its project.
+
+``classify_session_role`` returns "unknown" when ``agent_type`` is ABSENT: plain
+``claude``, ``claude -p``, every ``claude plugin eval`` run, and a SessionStart
+whose stdin was not valid JSON. session_init gives that frame exactly
+``_UNKNOWN_FRAME_CONTEXT`` and returns before any project write. The lead,
+teammate and unclassified (None) frames are unchanged.
+
+The arms below pin the whole output by EXACT EQUALITY, so an emission added to
+main() later that reaches an unknown frame fails them. The no-write arms each
+run a lead control on the same layout, so an absence cannot pass because the
+layout never reached the writer.
+"""
+import io
+import json
+import os
+import subprocess
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+import session_init  # noqa: E402
+from session_init import (  # noqa: E402
+    _UNKNOWN_FRAME_CONTEXT,
+    _UNKNOWN_ROLE_NOTICE,
+    _build_safety_net_context,
+    _unknown_frame_output,
+)
+from shared.constants import get_compact_summary_path  # noqa: E402
+from shared.pact_context import _build_session_path, project_slug  # noqa: E402
+from shared.paths import get_claude_config_dir  # noqa: E402
+
+LADDER = "YOUR PACT ROLE: orchestrator."
+BOOTSTRAP = 'Skill("PACT:bootstrap")'
+TEAMMATE_MARKER = "YOUR PACT ROLE: teammate."
+LEAD = {"agent_type": "PACT:pact-orchestrator"}
+_SESSION_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+_PROJECT_DIR = "/tmp/pact-unknown-frame-inert"
+USER_MD = "# My project\n\nBuild with make.\n"
+
+# The four lifecycle sources plus one the source ladder does not recognize.
+SOURCES = ("startup", "resume", "compact", "clear", "a-source-nobody-has-added-yet")
+
+
+def _run_main(frame, source, monkeypatch, tmp_path):
+    """Drive ``session_init.main()`` with its heavy collaborators stubbed and
+    return the additionalContext. THE ROLE GATE IS NOT STUBBED."""
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", _PROJECT_DIR)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    stdin_data = json.dumps({"session_id": _SESSION_ID, "source": source, **frame})
+    with patch("session_init.setup_plugin_symlinks", return_value=None), \
+         patch("session_init.ensure_project_memory_md", return_value=None), \
+         patch("session_init.check_pinned_staleness", return_value=None), \
+         patch("session_init.get_task_list", return_value=None), \
+         patch("session_init.restore_last_session", return_value=None), \
+         patch("session_init.build_context_cache",
+               return_value=(Path("/tmp/ctx.json"), {})), \
+         patch("session_init.persist_context", return_value=None), \
+         patch("session_init.append_event"), \
+         patch("session_init.update_session_info", return_value=None), \
+         patch("session_init.check_resume_state", return_value=None), \
+         patch("session_init._registry_resolve", return_value=None), \
+         patch("session_init.get_peer_context", return_value=None), \
+         patch("sys.stdin", io.StringIO(stdin_data)), \
+         patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        with pytest.raises(SystemExit) as exc:
+            session_init.main()
+    assert exc.value.code == 0
+    raw = mock_stdout.getvalue().strip()
+    if not raw:
+        return ""
+    return json.loads(raw).get("hookSpecificOutput", {}).get("additionalContext", "")
+
+
+def _run_real(monkeypatch, project_dir, stdin_data):
+    """Drive ``session_init.main()`` with NOTHING stubbed and return the output.
+
+    The conftest autouse fixtures already point the config root at tmp_path and
+    scrub CLAUDE_PLUGIN_ROOT, so every write lands under tmp_path.
+    """
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+    monkeypatch.chdir(project_dir)
+    with patch("sys.stdin", io.StringIO(stdin_data)), \
+         patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        with pytest.raises(SystemExit) as exc:
+            session_init.main()
+    assert exc.value.code == 0
+    return json.loads(mock_stdout.getvalue())
+
+
+def _frame(source="startup", session_id=_SESSION_ID, **extra):
+    return json.dumps({"session_id": session_id, "source": source, **extra})
+
+
+def _session_dir(project_dir, session_id=_SESSION_ID):
+    return _build_session_path(project_slug(str(project_dir)), session_id)
+
+
+class TestUnknownFrameIsInert:
+    """The live emission path, driven through ``main()``."""
+
+    @pytest.mark.parametrize("source", SOURCES)
+    def test_unknown_frame_gets_only_the_inert_context(
+        self, source, monkeypatch, tmp_path
+    ):
+        out = _run_main({}, source, monkeypatch, tmp_path)
+        assert out == _UNKNOWN_FRAME_CONTEXT, (
+            f"an unknown frame (source={source!r}) must receive exactly "
+            f"_UNKNOWN_FRAME_CONTEXT, with no orchestrator ladder. got: {out[:200]!r}"
+        )
+
+    def test_lead_frame_is_unchanged(self, monkeypatch, tmp_path):
+        """THE ARM THAT BOUNDS THE FIX. A lead frame must not move."""
+        out = _run_main(LEAD, "startup", monkeypatch, tmp_path)
+        assert out, "a lead frame emitted NO additionalContext at all"
+        assert LADDER in out, "a LEAD frame lost its orchestrator instructions"
+        assert _UNKNOWN_ROLE_NOTICE not in out, (
+            "a lead frame received the unknown-role notice, so the lead branch "
+            "now falls through to the unknown-frame branch"
+        )
+
+    def test_teammate_frame_is_unchanged(self, monkeypatch, tmp_path):
+        """THE OTHER BOUND. A teammate must gain neither the ladder nor the
+        notice."""
+        out = _run_main(
+            {"agent_type": "some-teammate-name"}, "startup", monkeypatch, tmp_path
+        )
+        assert LADDER not in out, (
+            "a teammate frame received the orchestrator instructions"
+        )
+        assert _UNKNOWN_ROLE_NOTICE not in out, (
+            "a teammate frame received the unknown-role notice, so the teammate "
+            "branch now falls through to the unknown-frame branch"
+        )
+
+
+class TestSafetyNetUnknownFrame:
+    """The exception path. ``_build_safety_net_context`` is pure, so each case
+    is driven directly."""
+
+    def test_unknown_gets_only_the_inert_context(self):
+        out = _build_safety_net_context("session-x", "unknown")
+        assert out == _UNKNOWN_FRAME_CONTEXT, (
+            "the safety-net unknown branch must give the same text as the "
+            "normal path, with no orchestrator marker or bootstrap directive"
+        )
+
+    def test_unresolved_role_keeps_the_ladder_and_its_own_diagnostic(self):
+        """A frame that never classified STILL gets the ladder.
+
+        `frame_role is None` means the classifier DID NOT RUN, because the
+        raise fired above the capture. Its population includes real leads, so
+        it keeps the ladder, plus a sentence that keeps it separable from a
+        resolved-empty frame for a reader who debugs the early window.
+        """
+        out = _build_safety_net_context("session-x", None)
+        assert out, "the safety net returned an empty string for an unresolved frame"
+        assert LADDER in out, "an unresolved frame lost the orchestrator marker"
+        assert BOOTSTRAP in out, (
+            "an unresolved frame kept the marker and lost the bootstrap directive"
+        )
+        assert "before the session role was resolved" in out, (
+            "the unresolved-frame case lost its distinguishing sentence, so a "
+            "reader can no longer tell it from the resolved-empty case"
+        )
+
+    def test_unresolved_does_not_claim_the_unknown_role_fact(self):
+        """None and 'unknown' stay DIFFERENT. The unknown-role notice asserts
+        that no `--agent` flag was recognized, a classifier result that was
+        never computed for an unresolved frame."""
+        out = _build_safety_net_context("session-x", None)
+        assert LADDER in out, (
+            "the ladder is missing, so this arm cannot show what rides beside it"
+        )
+        assert _UNKNOWN_ROLE_NOTICE not in out, (
+            "an unresolved frame received the unknown-role notice, which "
+            "asserts a classifier result that was never computed"
+        )
+        assert _build_safety_net_context("session-x", None) != \
+            _build_safety_net_context("session-x", "unknown"), (
+            "the None case and the 'unknown' case now emit identical text, so "
+            "the two have been collapsed into one"
+        )
+
+    def test_lead_is_unchanged(self):
+        out = _build_safety_net_context("session-x", "lead")
+        assert out, "the safety net returned an empty string for a lead frame"
+        assert LADDER in out, "the safety net stopped delivering the lead ladder"
+        assert _UNKNOWN_ROLE_NOTICE not in out, (
+            "a lead frame received the unknown-role notice from the safety net"
+        )
+
+    def test_teammate_is_unchanged(self):
+        out = _build_safety_net_context("session-x", "teammate")
+        assert TEAMMATE_MARKER in out, "the teammate safety-net marker is gone"
+        assert LADDER not in out, "a teammate frame received the lead ladder"
+        assert _UNKNOWN_ROLE_NOTICE not in out, (
+            "a teammate frame received the unknown-role notice"
+        )
+
+
+class TestUnknownFrameOutputIsExact:
+    """The WHOLE output, in a clean sandbox with nothing stubbed. Exact
+    equality on both channels is what makes the helper's allowlist a pin."""
+
+    @pytest.mark.parametrize("source", SOURCES)
+    def test_both_channels_are_exact(self, source, monkeypatch, tmp_path):
+        project = tmp_path / "plain"
+        project.mkdir()
+        output = _run_real(monkeypatch, project, _frame(source))
+        assert output["hookSpecificOutput"] == {
+            "hookEventName": "SessionStart",
+            "additionalContext": _UNKNOWN_FRAME_CONTEXT,
+        }
+        if source in ("startup", "resume"):
+            assert output.get("systemMessage") == _UNKNOWN_ROLE_NOTICE
+        else:
+            assert "systemMessage" not in output, output.get("systemMessage")
+
+
+class TestUnknownFrameWritesNothing:
+    """No PACT write lands in a plain session's project or session dir. Each
+    arm runs a lead control on an identical layout first, so the absence is
+    measured on a layout that provably reaches the writer."""
+
+    def test_no_project_claude_md_is_created(self, monkeypatch, tmp_path):
+        control = tmp_path / "control"
+        control.mkdir()
+        _run_real(monkeypatch, control, _frame(**LEAD))
+        assert (control / ".claude" / "CLAUDE.md").exists(), (
+            "control: a lead start did not create the project CLAUDE.md, so "
+            "this layout never reaches the writer"
+        )
+
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        _run_real(monkeypatch, plain, _frame())
+        assert sorted(p.name for p in plain.rglob("*")) == [], (
+            "an unknown frame wrote into its project"
+        )
+        assert not _session_dir(plain).exists(), (
+            "an unknown frame created a pact-sessions dir for itself"
+        )
+
+    def test_a_user_claude_md_is_left_byte_identical(self, monkeypatch, tmp_path):
+        control = tmp_path / "control"
+        control.mkdir()
+        (control / "CLAUDE.md").write_text(USER_MD)
+        _run_real(monkeypatch, control, _frame(**LEAD))
+        assert (control / "CLAUDE.md").read_text() != USER_MD, (
+            "control: a lead start did not migrate a marker-less CLAUDE.md, so "
+            "this layout never reaches the migration"
+        )
+
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        (plain / "CLAUDE.md").write_text(USER_MD)
+        _run_real(monkeypatch, plain, _frame())
+        assert (plain / "CLAUDE.md").read_text() == USER_MD, (
+            "an unknown frame rewrote the user's own CLAUDE.md"
+        )
+        assert sorted(p.name for p in plain.rglob("*")) == ["CLAUDE.md"]
+
+    def test_a_root_compact_summary_stays_in_place(self, monkeypatch, tmp_path):
+        root_summary = get_compact_summary_path()
+        root_summary.parent.mkdir(parents=True, exist_ok=True)
+
+        control = tmp_path / "control"
+        control.mkdir()
+        root_summary.write_text("stale summary")
+        _run_real(monkeypatch, control, _frame(**LEAD))
+        assert not root_summary.exists(), (
+            "control: a lead start did not drain the root compact summary, so "
+            "this layout never reaches the drain"
+        )
+
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        root_summary.write_text("stale summary")
+        _run_real(monkeypatch, plain, _frame())
+        assert root_summary.read_text() == "stale summary", (
+            "an unknown frame moved another session's compact summary"
+        )
+        assert not _session_dir(plain).exists(), (
+            "an unknown frame created a pact-sessions dir to drain a summary into"
+        )
+
+    def test_a_linked_worktree_gets_no_identity_record(self, monkeypatch, tmp_path):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+
+        def git(*args, cwd):
+            subprocess.run(
+                ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+                 "-c", "init.defaultBranch=main", *args],
+                cwd=str(cwd), env=env, capture_output=True, text=True,
+                timeout=30, check=True,
+            )
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        git("init", "-q", ".", cwd=repo)
+        (repo / "README").write_text("seed\n")
+        git("add", "README", cwd=repo)
+        git("commit", "-qm", "seed", cwd=repo)
+        control = tmp_path / "control-wt"
+        plain = tmp_path / "plain-wt"
+        git("worktree", "add", "-q", str(control), "-b", "control", cwd=repo)
+        git("worktree", "add", "-q", str(plain), "-b", "plain", cwd=repo)
+
+        _run_real(monkeypatch, control, _frame(**LEAD))
+        assert (_session_dir(control) / "worktree-identity.json").exists(), (
+            "control: a lead start inside a linked worktree wrote no identity "
+            "record, so this layout never reaches the writer"
+        )
+
+        _run_real(monkeypatch, plain, _frame())
+        assert not _session_dir(plain).exists(), (
+            "an unknown frame inside a linked worktree created a pact-sessions dir"
+        )
+
+
+class TestUnknownFrameKeepsFaultReports:
+    """The helper copies three routing predicates from main(). Each kept fault
+    report must still reach systemMessage, and each success line must not."""
+
+    def test_each_fault_reaches_system_message(self):
+        with patch("session_init.setup_plugin_symlinks",
+                   return_value="PACT: 2 agents failed"), \
+             patch("session_init.strip_orphan_kernel_block",
+                   return_value="Migration skipped: orphan PACT_START"), \
+             patch("session_init.check_settings_well_formed",
+                   return_value="PACT: settings.json is not valid JSON"), \
+             patch("session_init._cleanup_orphan_tokens"):
+            output = _unknown_frame_output("startup", None)
+        assert output["systemMessage"] == " | ".join([
+            _UNKNOWN_ROLE_NOTICE,
+            "PACT: 2 agents failed",
+            "Migration skipped: orphan PACT_START",
+            "PACT: settings.json is not valid JSON",
+        ])
+        assert output["hookSpecificOutput"]["additionalContext"] == _UNKNOWN_FRAME_CONTEXT
+
+    def test_success_lines_do_not_reach_either_channel(self):
+        with patch("session_init.setup_plugin_symlinks",
+                   return_value="PACT: agents linked"), \
+             patch("session_init.strip_orphan_kernel_block",
+                   return_value="Stripped obsolete PACT kernel block"), \
+             patch("session_init.check_settings_well_formed", return_value=None), \
+             patch("session_init._cleanup_orphan_tokens"):
+            output = _unknown_frame_output("compact", None)
+        assert output == {
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": _UNKNOWN_FRAME_CONTEXT,
+            }
+        }
+
+    def test_real_malformed_settings_and_kernel_markers_are_reported(
+        self, monkeypatch, tmp_path
+    ):
+        config = get_claude_config_dir()
+        config.mkdir(parents=True, exist_ok=True)
+        (config / "settings.json").write_text("{not json")
+        (config / "CLAUDE.md").write_text("<!-- PACT_START: v3 -->\norphan\n")
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        output = _run_real(monkeypatch, plain, _frame())
+        message = output.get("systemMessage", "")
+        assert message.startswith(_UNKNOWN_ROLE_NOTICE)
+        assert "Migration skipped" in message
+        assert "is not valid JSON" in message
+
+    def test_a_kernel_block_is_stripped(self, monkeypatch, tmp_path):
+        config = get_claude_config_dir()
+        config.mkdir(parents=True, exist_ok=True)
+        home_md = config / "CLAUDE.md"
+        home_md.write_text(
+            "keep above\n<!-- PACT_START: v3 -->\norchestrator persona\n"
+            "<!-- PACT_END -->\nkeep below\n"
+        )
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        _run_real(monkeypatch, plain, _frame())
+        text = home_md.read_text()
+        assert "PACT_START" not in text and "orchestrator persona" not in text
+        assert "keep above" in text and "keep below" in text
+
+
+class TestMalformedStdin:
+    """Non-JSON stdin classifies "unknown". It is the one route by which a real
+    lead could arrive here, so it stays observable in the failure log."""
+
+    def test_non_json_stdin_is_inert_and_logged_once(self, monkeypatch, tmp_path):
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        recorder = MagicMock()
+        with patch("session_init.append_failure", recorder):
+            output = _run_real(monkeypatch, plain, "not json{")
+        assert output["hookSpecificOutput"]["additionalContext"] == _UNKNOWN_FRAME_CONTEXT
+        assert recorder.call_count == 1, recorder.call_args_list
+        assert recorder.call_args.kwargs["classification"] == "malformed_json"

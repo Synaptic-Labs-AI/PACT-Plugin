@@ -8,8 +8,9 @@ agent_type present and not-lead; unknown := agent_type absent). It NEVER reads
 ``session_id``. So the gate keys on the ROLE axis, not the session-topology
 (``session_id`` vs ``leadSessionId``) axis. This file pins BOTH facts:
 
-- MECHANISM (TestRoleGate): a lead / unknown frame RECEIVES the block; a teammate
-  frame does NOT -- asserted through real main() emission (the
+- MECHANISM (TestRoleGate): a lead frame RECEIVES the block; a teammate frame
+  and an unknown frame (which returns before the block) do NOT -- asserted
+  through real main() emission (the
   os.environ -> llm_options -> format_pact_runtime_config -> additionalContext
   seam is left REAL, only injection-orthogonal heavy collaborators are stubbed).
 
@@ -103,12 +104,18 @@ class TestRoleGate:
     @pytest.mark.parametrize("frame_factory", [
         captured_lead_sessionstart_qualified,
         captured_lead_sessionstart_unqualified,
-        captured_plain_sessionstart,   # unknown role (agent_type absent) -> still injected
-    ], ids=["lead-qualified", "lead-unqualified", "plain-unknown"])
-    def test_lead_or_unknown_frame_receives_block(self, frame_factory, monkeypatch, tmp_path):
+    ], ids=["lead-qualified", "lead-unqualified"])
+    def test_lead_frame_receives_block(self, frame_factory, monkeypatch, tmp_path):
         ctx = _emit(frame_factory(), monkeypatch, tmp_path)
         assert _HEADING in ctx
         assert "PR greedy-fix: ON (PACT_PR_GREEDY_FIX)" in ctx
+
+    def test_plain_unknown_frame_omits_block(self, monkeypatch, tmp_path):
+        # Real captured plain SessionStart (agent_type absent) -> classify
+        # "unknown" -> returns at the unknown-frame branch, before the block.
+        ctx = _emit(captured_plain_sessionstart(), monkeypatch, tmp_path)
+        assert "relaunch with `--agent PACT:pact-orchestrator`" in ctx
+        assert "PACT Runtime Config" not in ctx
 
     def test_teammate_frame_omits_block(self, monkeypatch, tmp_path):
         # Real captured teammate SessionStart (--agent pact-preparer): a recognized

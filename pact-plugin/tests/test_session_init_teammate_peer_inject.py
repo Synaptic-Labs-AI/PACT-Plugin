@@ -5,16 +5,17 @@ peer-context injection on a separate-process teammate's OWN SessionStart
 
 Coverage (per the ratified architect spec):
   * both-modes matrix — classify=="teammate" injects the marker-free peer
-    body AND suppresses the orchestrator block; "lead" and "unknown"/plain
-    frames keep the existing orchestrator-directive ladder UNCHANGED; the
-    in-process SubagentStart builder still emits the role-marker prelude.
+    body AND suppresses the orchestrator block; a "lead" frame keeps the
+    orchestrator-directive ladder UNCHANGED; an "unknown"/plain frame gets
+    neither the ladder nor a peer body; the in-process SubagentStart builder
+    still emits the role-marker prelude.
   * structural invariant — the relocated branch gates on the
     classify_session_role SSOT and calls the builder with
     include_role_marker=False (the negative-AST "never re-key on
     agent_id/Subagent/environ" invariant is owned by
     test_lead_discriminator_invariant.py, which already covers session_init).
-  * fail-safe — unknown/empty agent_type does NOT inject (falls to the
-    orchestrator else-branch); a teammate frame with no peer body (None)
+  * fail-safe — unknown/empty agent_type does NOT inject (it returns at the
+    unknown-frame branch); a teammate frame with no peer body (None)
     raises nothing and injects nothing (no orchestrator block either).
   * idempotency — the peer body is inserted at most once per lifecycle.
 
@@ -179,37 +180,19 @@ class TestLeadKeepsOrchestratorBlockAndUnknownGetsNeither:
         assert _PEER_SENTINEL not in additional
         assert not mock_gpc.called, "lead frame must not call the peer-context builder"
 
-    def test_plain_unknown_frame_gets_the_orchestrator_block_but_no_peer_body(
+    def test_plain_unknown_frame_gets_neither_the_block_nor_a_peer_body(
         self, monkeypatch, tmp_path
     ):
-        """THE PLAIN FRAME KEEPS THE ORCHESTRATOR BLOCK, and the arm has now
-        held that expectation twice with one interlude.
+        """A plain frame has no PACT role: it gets exactly the unknown-frame
+        context, no orchestrator block, no peer body, and no call to the
+        peer-context builder."""
+        from session_init import _UNKNOWN_FRAME_CONTEXT
 
-        Its ORIGINAL message stated it word for word: "unknown/plain frame
-        behavior is UNCHANGED (minimal scope) - it still receives the
-        orchestrator block as before this fix". A later change read that as a
-        spent DEFERRAL and flipped the arm to assert suppression. THAT READING
-        WAS WRONG, and the census behind it measured a population that never
-        reaches this hook. A plain frame is a no-`--agent` PRIMARY frame: an
-        ordinary user running plain `claude`. Suppressing its block leaves the
-        bootstrap marker unstamped and bootstrap_gate then denies every tool.
-
-        The two legs this arm was BUILT for are unchanged throughout: no peer
-        body, and no call to the peer-context builder. The notice is asserted
-        beside the block, so the plain frame stays separable from a lead frame.
-        """
         additional, mock_gpc = _run_main_capture(
             _stdin_for(plain_frame()), monkeypatch, tmp_path
         )
-        assert _ORCH_MARKER in additional, (
-            "an unknown/plain frame is a no-`--agent` PRIMARY frame and must "
-            "keep the orchestrator block: without it no bootstrap marker is "
-            "stamped and bootstrap_gate denies Edit, Write and Agent"
-        )
-        assert "relaunch with `--agent PACT:pact-orchestrator`" in additional, (
-            "the unknown frame must also receive the unknown-role notice, "
-            "which is what separates it from a genuine lead frame"
-        )
+        assert additional == _UNKNOWN_FRAME_CONTEXT
+        assert _ORCH_MARKER not in additional
         assert _PEER_SENTINEL not in additional
         assert not mock_gpc.called
 

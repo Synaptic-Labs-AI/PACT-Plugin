@@ -20,7 +20,7 @@ from unittest.mock import patch
 
 import pytest
 
-from fixtures.role_frames import plain_frame, teammate_frame
+from fixtures.role_frames import lead_frame_qualified, teammate_frame
 
 import session_init
 from session_init import format_pact_runtime_config
@@ -104,9 +104,9 @@ class TestEmissionWiring:
     def test_greedy_on_vs_off_changes_emitted_context(self, monkeypatch, tmp_path):
         monkeypatch.delenv(_GREEDY, raising=False)
         monkeypatch.delenv(_AUTO, raising=False)
-        off = _run_main(plain_frame(), monkeypatch, tmp_path)
+        off = _run_main(lead_frame_qualified(), monkeypatch, tmp_path)
         monkeypatch.setenv(_GREEDY, "1")
-        on = _run_main(plain_frame(), monkeypatch, tmp_path)
+        on = _run_main(lead_frame_qualified(), monkeypatch, tmp_path)
         assert "PR greedy-fix: OFF (PACT_PR_GREEDY_FIX)" in off
         assert "PR greedy-fix: ON (PACT_PR_GREEDY_FIX)" in on
         # A composed-but-unwired block (built but never appended) would make

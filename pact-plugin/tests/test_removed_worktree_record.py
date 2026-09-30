@@ -1,10 +1,11 @@
 """
 Location: pact-plugin/tests/test_removed_worktree_record.py
 Summary: Arms for the worktree identity record. session_init writes
-         `worktree-identity.json` into the session's own folder, for every role,
-         when the session starts inside a linked worktree; the working-memory
-         write guard reads it back, and `stays_in_declared_project` lets it
-         decide a declaration that no longer exists.
+         `worktree-identity.json` into the session's own folder, for lead and
+         teammate frames, when the session starts inside a linked worktree; the
+         working-memory write guard reads it back, and
+         `stays_in_declared_project` lets it decide a declaration that no longer
+         exists.
 Used by/with:
 - hooks/session_init.py: `_record_worktree_identity`, reached through `main()`.
 - skills/pact-memory/scripts/pact_session.py:

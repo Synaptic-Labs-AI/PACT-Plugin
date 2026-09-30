@@ -46,7 +46,14 @@ def _run_main(monkeypatch, tmp_path, frame=None):
         return (Path("/tmp/ctx.json"), {})
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    stdin_data = json.dumps({"source": "startup", "session_id": "33334444-0000-0000-0000-000000000000", **(frame or {})})
+    # A lead agent_type, so the run reaches build_context_cache: a frame with
+    # no agent_type returns before it.
+    stdin_data = json.dumps({
+        "source": "startup",
+        "session_id": "33334444-0000-0000-0000-000000000000",
+        "agent_type": "PACT:pact-orchestrator",
+        **(frame or {}),
+    })
     with patch("session_init.setup_plugin_symlinks", return_value=None), \
          patch("session_init.ensure_project_memory_md", return_value=None), \
          patch("session_init.check_pinned_staleness", return_value=None), \

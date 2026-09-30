@@ -1501,16 +1501,19 @@ def test_no_bin_executable_was_added():
 # --------------------------------------------------------------------------
 # the live seam: session_init, driven for real
 # --------------------------------------------------------------------------
-def _drive_session_init(monkeypatch, home, project_dir, source):
+def _drive_session_init(monkeypatch, home, project_dir, source,
+                        agent_type="pact-backend-coder"):
     """Run the real `session_init.main()` and return (context, system_message).
 
     Only the heavy collaborators unrelated to this feature are stubbed. The
     resolution path — home-pinned directory, then exact membership in the
     stored roots — runs unstubbed, because that path IS what these tests
     exist to check and replacing it with a stub would leave the one thing that
-    can break untested. The frame carries no `agent_type`, making it a NON-LEAD
-    frame: the block sits outside the lead-only branch, so a call site scoped
-    one level in emits nothing here while every lead-framed test still passes.
+    can break untested. The frame defaults to a teammate `agent_type`, a
+    NON-LEAD frame that still reaches the block (a frame with no `agent_type`
+    returns before it): the block sits outside the lead-only branch, so a call
+    site scoped one level in emits nothing here while every lead-framed test
+    still passes.
     """
     import io
     from unittest.mock import patch
@@ -1519,7 +1522,7 @@ def _drive_session_init(monkeypatch, home, project_dir, source):
 
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
     monkeypatch.setattr(Path, "home", lambda: home)
-    stdin_data = json.dumps({"source": source})
+    stdin_data = json.dumps({"source": source, "agent_type": agent_type})
 
     with patch("session_init.setup_plugin_symlinks", return_value=None), \
          patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -1572,7 +1575,13 @@ def test_session_init_emits_the_block_for_a_worktree_session(monkeypatch, tmp_pa
     assert "SEEDED BACKLOG ITEM" in context, (
         "the backlog block did not reach a worktree session's context"
     )
-    assert context.startswith("YOUR PACT ROLE:"), (
+    lead_context, _ = _drive_session_init(
+        monkeypatch, tmp_path, worktree, "startup", agent_type="PACT:pact-orchestrator"
+    )
+    assert "SEEDED BACKLOG ITEM" in lead_context, (
+        "the backlog block did not reach a lead worktree session's context"
+    )
+    assert lead_context.startswith("YOUR PACT ROLE:"), (
         "the block displaced the byte-0 role marker"
     )
 

@@ -167,9 +167,10 @@ class TestLeadRowsAllWritesRun:
 class TestNonLeadRowsAllWritesSuppressed:
     """For a teammate or plain frame, all 4 Class-A writes are suppressed.
 
-    build_context_cache is still CALLED (the cache must be populated — see
-    TestWriteContextSplit) but persist_context (the disk write) is NOT called;
-    the other 3 writes are not called at all.
+    For a teammate, build_context_cache is still CALLED (the cache must be
+    populated — see TestWriteContextSplit) but persist_context (the disk write)
+    is NOT called. A plain frame returns before the cache is built, since
+    nothing in its branch reads it. The other 3 writes are not called at all.
     """
 
     @pytest.mark.parametrize("frame_builder, role", [
@@ -181,10 +182,13 @@ class TestNonLeadRowsAllWritesSuppressed:
     ):
         mocks = _run_main_with(_stdin_for(frame_builder()), monkeypatch, tmp_path)
 
-        # #878 SHAPE-2: build_context_cache IS called (cache population is
-        # unconditional) but persist_context (the disk write) is NOT — the disk
-        # side-effect is gated on is_lead.
-        mocks["build_context_cache"].assert_called_once()
+        # #878 SHAPE-2: for a teammate build_context_cache IS called but
+        # persist_context (the disk write) is NOT — the disk side-effect is
+        # gated on is_lead. A plain frame returns before either.
+        if role == "plain":
+            mocks["build_context_cache"].assert_not_called()
+        else:
+            mocks["build_context_cache"].assert_called_once()
         mocks["persist_context"].assert_not_called()
         # The other 3 lead-only writes are NOT called at all.
         assert _session_start_calls(mocks["append_event"]) == [], (

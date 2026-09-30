@@ -309,8 +309,8 @@ _WORKTREE_IDENTITY_PATHS = ("declared", "worktree", "common_dir")
 def get_worktree_identity_from_session_record() -> dict:
     """Return the worktree identity session_init recorded for this session, or {}.
 
-    session_init writes it into the session's own folder, for every role, when
-    the session starts inside a linked worktree. The working-memory write guard
+    session_init writes it into the session's own folder, for lead and teammate
+    frames, when the session starts inside a linked worktree. The working-memory write guard
     and archive_pin pass it to `stays_in_declared_project`, which reads it only
     when the declared directory no longer exists. Both hold this one object:
     pact_session re-exports it, and archive_pin imports it from here.
