@@ -167,16 +167,19 @@ _INPROCESS_MODE_NOTICE = (
 # Unknown-role notice. A session started without a PACT role (plain `claude`,
 # `claude -p`, a `claude plugin eval` run, or a forgotten `--agent`) carries no
 # agent_type, so classify_session_role() returns "unknown". session_init gives
-# that frame _UNKNOWN_FRAME_CONTEXT and writes nothing into its project. The
-# notice rides TWO CHANNELS, AND EACH CHANNEL HAS ITS OWN POPULATION, BECAUSE
-# THE GATES USE DIFFERENT PREDICATES. Do not state one population for the pair.
-#   systemMessage: on a launch event (`startup` or `resume`) when
-#     _should_warn_unknown_role passes. That predicate is the WIDER of the
-#     two: it passes for a frame with no recognized role, and ALSO for an
-#     agent_type that is present but is not the lead and is not a registered
-#     specialist. So a typo such as `--agent pact-architct` classifies as a
-#     teammate and reaches this channel ON A LAUNCH, and on a compact or a
-#     clear it reaches no channel at all.
+# that frame _UNKNOWN_FRAME_CONTEXT and writes nothing into its project. A lead
+# resumed without `--agent` also arrives with no agent_type at SessionStart;
+# its own session dir holds the context file only a lead writes, so
+# session_init recovers it as the lead (_lead_context_persisted) and it gets
+# neither channel. The notice rides TWO CHANNELS, AND EACH CHANNEL HAS ITS OWN
+# POPULATION, BECAUSE THE GATES USE DIFFERENT PREDICATES. Do not state one
+# population for the pair.
+#   systemMessage: on a launch event (`startup` or `resume`), for an unknown
+#     frame, and for an agent_type that is present but is not the lead and is
+#     not a registered specialist (_should_warn_unknown_role). So a typo such
+#     as `--agent pact-architct` classifies as a teammate and reaches this
+#     channel ON A LAUNCH, and on a compact or a clear it reaches no channel
+#     at all.
 #   additionalContext: inside _UNKNOWN_FRAME_CONTEXT, for `frame_role ==
 #     "unknown"` only (an ABSENT agent_type), both at the early branch in
 #     main() and in the exception safety net. A typo does NOT reach it.
@@ -397,9 +400,12 @@ def check_pin_stale_block_directive() -> Optional[str]:
     # the user to `/PACT:prune-memory` for removal. THIS IS THE PRIMARY
     # enforcement surface for the stale-pin condition. It reaches only a lead
     # frame: a teammate is gated at the call site, and an unknown frame
-    # returns from main() before the call. `pin_staleness_gate` backstops
-    # that lead frame. The gate carried the same incorrect name and the two
-    # were corrected together.
+    # returns from main() before the call. Nothing refuses a wrong command
+    # later: `pin_staleness_gate` reads a marker this function writes under
+    # get_session_dir(), which is still empty at step 4b (build_context_cache
+    # runs later), so the marker is never written and the gate never arms.
+    # The gate carried the same incorrect name and the two were corrected
+    # together.
     # BEFORE YOU EDIT THIS STRING, OPEN THE COMMAND FILE AND CONFIRM THE
     # COMMAND ARCHIVES. This text is not evidence about its own subject.
     return (
@@ -785,11 +791,14 @@ def _build_safety_net_context(
 def _unknown_frame_output(source: str) -> dict:
     """Build the whole SessionStart output for a frame with no PACT role.
 
-    An explicit allowlist: an emission or write reaches an unknown frame only
-    if it is listed here. Kept are the notice, the machine-wide upkeep
-    (symlink refresh, kernel-block strip, orphan-token cleanup), the faults a
-    user can act on (a failed symlink refresh, a failed or skipped kernel
-    strip, a malformed settings.json). Nothing is written into the project.
+    An explicit allowlist: apart from the prelude main() runs for every frame
+    before the branch (the CLAUDE_ENV_FILE export in _persist_project_dir_env
+    and the old-slug session-dir adoption), an emission or write reaches an
+    unknown frame only if it is listed here. Kept are the notice, the
+    machine-wide upkeep (symlink refresh, kernel-block strip, orphan-token
+    cleanup), and the faults a user can act on (a failed symlink refresh, a
+    failed or skipped kernel strip, a malformed settings.json). Nothing is
+    written into the project.
     """
     system_messages = []
     if source in ("startup", "resume"):
@@ -1513,23 +1522,22 @@ def main():
             except Exception:  # noqa: BLE001 — fail-safe → emit; never block init
                 system_messages.append(_INPROCESS_MODE_NOTICE)
 
-        # 0c. Unknown-role startup warning. The lead-only writes in
-        # steps 5a/5b/8 are gated behind is_lead below; a frame with NO
-        # recognized role (no `--agent` flag, OR a present-but-unrecognized /
-        # typo'd agent_type) silently performs none of them. Surface that so a
-        # mis-launched orchestrator is observable. Conditional emission mirroring
-        # the 0b notice shape (NOT a new numbered init step — keeps clear of the
-        # module/main() docstring-parity convention). Launch events only
-        # (startup/resume): a mid-launch compact/clear context-reset must not
-        # re-fire it. The unknown-role decision (incl. the is_lead-first ordering,
-        # the live specialist-registry check against env plugin_root, and the
-        # PACT:-strip) lives in _should_warn_unknown_role — total (never raises),
-        # so no try/except is needed at the call site.
+        # 0c. Unrecognized-role startup warning. The project CLAUDE.md steps
+        # (3/3b, 4) and the Class-A writes (5a/5b/8) are gated on
+        # frame_is_lead, so a frame whose agent_type is present but
+        # unrecognized (a typo'd `--agent`) silently performs none of them.
+        # Surface that so a mis-launched orchestrator is observable.
+        # Conditional emission mirroring the 0b notice shape (NOT a new
+        # numbered init step — keeps clear of the module/main() docstring-parity
+        # convention). Launch events only (startup/resume): a mid-launch
+        # compact/clear context-reset must not re-fire it. The decision (incl.
+        # the is_lead-first ordering, the live specialist-registry check against
+        # env plugin_root, and the PACT:-strip) lives in _should_warn_unknown_role
+        # — total (never raises), so no try/except is needed at the call site.
         #
-        # An unknown frame returned above, so on this path the notice fires
-        # only for a present-but-unrecognized agent_type (a typo'd `--agent`),
-        # which classifies teammate. _UNKNOWN_FRAME_CONTEXT is the literal's
-        # other carrier.
+        # Only a teammate-classified frame is checked: an unknown frame returned
+        # above, a recovered lead is "lead", and a frame whose stdin did not
+        # parse is None. _UNKNOWN_FRAME_CONTEXT is the literal's other carrier.
         if (
             source in ("startup", "resume")
             and frame_role == "teammate"
@@ -1845,8 +1853,8 @@ def main():
                 # in-process context so get_session_dir() and append_event's
                 # path-resolution behave identically), then persist to disk
                 # ONLY for a lead frame so a teammate frame never clobbers the
-                # lead's on-disk
-                # session-context file (or creates a phantom session dir).
+                # lead's on-disk session-context file (or creates a phantom
+                # session dir).
                 # build_context_cache is the sole owner of _cache; persist_context
                 # is the is_lead-gated best-effort disk side-effect. See the
                 # build_context_cache / persist_context docstrings.

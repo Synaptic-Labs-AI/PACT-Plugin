@@ -1138,7 +1138,8 @@ def _is_unknown_or_missing_session(raw_id: object) -> bool:
       and was written into CLAUDE.md anyway via a different code path.
     * A session_id containing C0 control characters (newline, CR, NUL,
       etc.) passed all existing non-empty/non-sentinel checks but, when
-      interpolated into ``f"- Resume: `claude --resume {session_id}`"``
+      interpolated into the ``- Resume:`` line
+      (``claude --agent PACT:pact-orchestrator --resume {session_id}``)
       by update_session_info, could inject a fake CLAUDE.md line via
       embedded newlines. The unified helper strips C0 controls to close
       this injection path at the session_id entry point.
