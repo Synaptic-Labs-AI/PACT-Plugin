@@ -596,15 +596,15 @@ The loop closes when the recount is done literally — re-run the count, re-list
 
 HANDOFFs that assert cardinality matrices, set-membership tallies, or fidelity counts about the author's own work are at elevated risk. The shape "I verified N of M cases" — especially when N and M are small integers — is the highest-yield surface for a cross-stream recount.
 
-### count_active_tasks fixture-completeness audit
+### Registered-owner count fixture-completeness audit
 
-Any test asserting on `count_active_tasks` boundary conditions (`count == 0` vs `count == 1` vs `count == N`) MUST either register all task-owners in the fixture's `team_config.members[]` so the count reflects the intended suppression mechanism, or explicitly assert on the unknown-owner-exclusion path with a docstring comment naming the exclusion as the load-bearing mechanism being tested.
+Any test asserting a boundary condition (`count == 0` vs `count == 1` vs `count == N`) on a count that filters tasks by registered owner MUST either register all task-owners in the fixture's `team_config.members[]` so the count reflects the intended suppression mechanism, or explicitly assert on the unknown-owner-exclusion path with a docstring comment naming the exclusion as the load-bearing mechanism being tested.
 
-`count_active_tasks` filters by two conjoined conditions: `status == in_progress` AND `owner` is a registered teammate. Tasks with `owner=null` or `owner=<unregistered name>` are **silently excluded** from the count. An under-registered fixture passes a `count == 0` assertion for the wrong reason — the **wrong-reason green** is that the count reads 0 because no owners matched, not because the suppression-or-aggregation mechanism the test intended to exercise actually fired.
+A registered-owner count conjoins a status filter with an owner filter: a task counts only if its `status` passes (for example, `pending` or `in_progress`) AND its `owner` is a registered teammate. Some such counts also exclude tasks the lead owns. Tasks with `owner=null` or `owner=<unregistered name>` are **silently excluded** from the count. An under-registered fixture passes a `count == 0` assertion for the wrong reason — the **wrong-reason green** is that the count reads 0 because no owners matched, not because the suppression-or-aggregation mechanism the test intended to exercise actually fired.
 
 #### Worked example — fixture mis-registration
 
-An SSOT-fidelity test passed because of unknown-owner exclusion rather than umbrella-suppression: the fixture's `team_config.members[]` under-registered the task-owners the test exercised, so the `count == 0` assertion held on the exclusion path while the umbrella-suppression mechanism the test was supposed to falsify remained un-exercised. A separate fixture under-registered task-owners in a way that masked which suppression mechanism was load-bearing in the assertion — the test stayed green through a change that should have produced a cardinality shift.
+An SSOT-fidelity test passed because of unknown-owner exclusion rather than the suppression mechanism it targeted: the fixture's `team_config.members[]` under-registered the task-owners the test exercised, so the `count == 0` assertion held on the exclusion path while the suppression mechanism the test was supposed to falsify remained un-exercised. A separate fixture under-registered task-owners in a way that masked which suppression mechanism was load-bearing in the assertion — the test stayed green through a change that should have produced a cardinality shift.
 
 #### Canonical mitigation
 
@@ -612,25 +612,25 @@ An SSOT-fidelity test passed because of unknown-owner exclusion rather than umbr
 
 #### Detection signature
 
-Tests asserting on `count_active_tasks` boundary conditions (`count == 0`, `count == 1`, `count == N`) where the fixture's `team_config.members[]` lists only a subset of the task-owners the test exercises are at elevated risk. The shape "count assertion + sparsely-constructed `members[]`" is the highest-yield surface for a fixture-completeness audit.
+Tests asserting boundary conditions (`count == 0`, `count == 1`, `count == N`) on a registered-owner count where the fixture's `team_config.members[]` lists only a subset of the task-owners the test exercises are at elevated risk. The shape "count assertion + sparsely-constructed `members[]`" is the highest-yield surface for a fixture-completeness audit.
 
 ### Sibling-file convention for parametrized noise-budget regression
 
-Parametrized noise-budget regression tests are N×M matrices that count events across simulated scenarios. Each one MUST live in a sibling test file. That sibling file MUST cross-reference the primary file in its docstring. Do not pack such a test into a primary phase-specific test file.
+Parametrized noise-budget regression tests are N×M matrices that count events across simulated scenarios. Each one MUST live in a sibling test file. That sibling file MUST cross-reference the primary file in its docstring. Do not pack such a test into the primary test file.
 
-Primary phase-specific test files count specific event types and require clean fire-counts to assert on Tier-N cardinality. Mixing them with parametrized N×M matrix tests reduces **signal-to-noise** on the cardinality assertions. The reason is that the setup and teardown noise of the parametrized matrix masks the tight fire-count assertions of the primary file. **Fire-count cleanliness** is the property that lets `assert events.count == N` in a primary test file localize a regression reliably. Once a parametrized matrix sits beside it, the same assertion must defend against matrix-induced cross-contamination.
+A primary test file counts specific event types and requires clean fire-counts for its cardinality assertions. Mixing it with parametrized N×M matrix tests reduces **signal-to-noise** on the cardinality assertions. The reason is that the setup and teardown noise of the parametrized matrix masks the tight fire-count assertions of the primary file. **Fire-count cleanliness** is the property that lets `assert events.count == N` in a primary test file localize a regression reliably. Once a parametrized matrix sits beside it, the same assertion must defend against matrix-induced cross-contamination.
 
 #### Worked example — sibling-file split
 
-The sibling test file `pact-plugin/tests/test_pin_marker_writer_adversarial.py` sits in the same directory as `pact-plugin/tests/test_pin_marker_writer.py`. Its docstring names the primary file and records the cause of the split. The assertions of the primary file are tight fire-counts. A large parametrized matrix in the same file costs signal on those counts.
+A noise-budget regression counted a hook's teardown emissions across a matrix of simulated sessions: one to three phases by one to three specialists per phase, nine cells, each asserting zero emissions. Before the fix, the three-by-three cell emitted nine. The matrix went into a sibling file whose docstring named the primary file and recorded two causes for the split. The noise budget is a cross-cutting concern, not one more variant of the primary file's cases. And the primary file was already near 800 lines, so the matrix would have pushed it past 1000.
 
 #### Canonical mitigation
 
-**Sibling-file split** is the default discipline. If you add a parametrized noise-budget regression test for a phase-specific test family, create a sibling file. Do not append the test to the primary file. Cross-reference the primary phase-specific file in the docstring of the sibling, so a later reader can find the family. If three or more HANDOFF-cardinality-matrix patterns cluster in one review cycle, the cluster is a signal of a HANDOFF-shape risk factor. That factor is specific to phase-lull tests with N-cell parametrized cardinality matrices. Pair those tests with cross-stream-verifier review at elevated priority. See Author-blindness above.
+**Sibling-file split** is the default discipline. If you add a parametrized noise-budget regression test for a test family whose primary file counts the same events, create a sibling file. Do not append the test to the primary file. Cross-reference the primary file in the docstring of the sibling, so a later reader can find the family. If three or more HANDOFF-cardinality-matrix patterns cluster in one review cycle, the cluster is a signal of a HANDOFF-shape risk factor. That factor is specific to tests with N-cell parametrized cardinality matrices. Pair those tests with cross-stream-verifier review at elevated priority. See Author-blindness above.
 
 #### Detection signature
 
-Phase-specific test files that already count specific event types AND gain a parametrized N×M matrix test for the same event-type are at elevated risk. The shape "tight fire-count assertion in the same file as a parametrized matrix" is the highest-yield surface for the sibling-file split.
+Test files that already count specific event types AND gain a parametrized N×M matrix test for the same event-type are at elevated risk. The shape "tight fire-count assertion in the same file as a parametrized matrix" is the highest-yield surface for the sibling-file split.
 
 ---
 
