@@ -1620,19 +1620,18 @@ def main():
         except Exception:
             pass  # Fail-open: never block session init for disk hygiene.
 
-        # 4. Check for stale pinned context. The informational surfacing is a
-        # lead-oriented pin advisory (m2): suppress it for a teammate frame
-        # (which has no pin-management authority — pins live in CLAUDE.md, a
-        # lead/orchestrator memory surface), but keep the failed/skipped
-        # DIAGNOSTICS on system_messages for every frame. The check CALL and its
-        # marker side-effect are unchanged — m2 gates advisory SURFACINGS, not
-        # writes (#877 owns write-gating).
-        staleness_msg = check_pinned_staleness()
-        if staleness_msg:
-            if "failed" in staleness_msg.lower() or "skipped" in staleness_msg.lower():
-                system_messages.append(staleness_msg)
-            elif frame_role != "teammate":
-                context_parts.append(staleness_msg)
+        # 4. Check for stale pinned context. The check rewrites the project
+        # CLAUDE.md (it inserts STALE markers), so like steps 3/3b only a lead
+        # runs it: a teammate in a worktree would otherwise mark a tracked
+        # CLAUDE.md. Failed/skipped diagnostics go to system_messages, the
+        # advisory to context.
+        if frame_is_lead:
+            staleness_msg = check_pinned_staleness()
+            if staleness_msg:
+                if "failed" in staleness_msg.lower() or "skipped" in staleness_msg.lower():
+                    system_messages.append(staleness_msg)
+                else:
+                    context_parts.append(staleness_msg)
 
         # 4a. Surface pin slot count (#492). Tier-0 additionalContext —
         # architecturally binding, survives compaction. Fail-open: None

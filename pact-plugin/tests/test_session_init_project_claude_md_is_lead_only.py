@@ -29,7 +29,13 @@ from session_init import _UNKNOWN_ROLE_NOTICE, _should_warn_unknown_role  # noqa
 _PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 _SESSION_ID = "cccccccc-dddd-eeee-ffff-000000000000"
 LEAD = "PACT:pact-orchestrator"
-USER_MD = "# My project\n\nBuild with make.\n"
+# A marker-less user CLAUDE.md holding a pin dated years ago, so both the
+# migration and the pinned-staleness writer have something to rewrite.
+USER_MD = (
+    "# My project\n\nBuild with make.\n\n"
+    "## Pinned Context\n\n### An outdated pin 2020-01-05\n\nbody text\n"
+)
+STALE = "<!-- STALE"
 CREATED = "Created project CLAUDE.md"
 MIGRATED = "Migrated project CLAUDE.md"
 
@@ -106,6 +112,10 @@ class TestTeammateWritesNothing:
         assert (control / "CLAUDE.md").read_text() != USER_MD and MIGRATED in context, (
             "control: a lead start did not migrate a marker-less CLAUDE.md, so "
             "this layout never reaches the migration"
+        )
+        assert STALE in (control / "CLAUDE.md").read_text(), (
+            "control: a lead start marked no stale pin, so this layout never "
+            "reaches the staleness writer"
         )
 
         project = _project(tmp_path, "teammate", user_md=True)
@@ -191,6 +201,10 @@ class TestWorktreeTeammateWritesNothing:
         assert " M CLAUDE.md" in git("status", "--porcelain", cwd=control), (
             "control: a lead start inside a worktree did not migrate the tracked "
             "CLAUDE.md, so this layout never reaches the migration"
+        )
+        assert STALE in (control / "CLAUDE.md").read_text(), (
+            "control: a lead start inside a worktree marked no stale pin, so this "
+            "layout never reaches the staleness writer"
         )
 
         for agent_type in SPECIALIST:
