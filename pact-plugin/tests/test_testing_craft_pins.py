@@ -166,19 +166,26 @@ def test_m2_at_least_one_exempt_marker_pins_pact_memory_convention():
 
 # ─── M3: `see X above` cross-link anchor-resistance ───────────────────────
 
-_SEE_X_ABOVE = re.compile(r"see (?P<anchor>[A-Z][\w-]*(?:\s+[\w-]+){0,3})\s+above")
+# `[Ss]ee`: a cross-link that opens a sentence is capitalised ("See X above."),
+# and a lowercase-only pattern matches none of them.
+_SEE_X_ABOVE = re.compile(r"\b[Ss]ee (?P<anchor>[A-Z][\w-]*(?:\s+[\w-]+){0,3})\s+above")
 
 
 def test_m3_see_x_above_prose_links_resolve_to_earlier_headings():
     """Any `see X above` prose cross-link inside the §9 cluster MUST point
     at an earlier `###` / `####` heading whose text contains X (case-
     sensitive substring). Catches future PR renaming §9.1's heading or
-    reordering §9.x sub-sections without updating the cross-link."""
+    reordering §9.x sub-sections without updating the cross-link.
+
+    The cluster carries at least one such cross-link, so zero matches means
+    the pattern or the prose drifted and the resolution check ran on nothing."""
     lines = _cluster_lines()
     findings: list[str] = []
+    matched = 0
 
     for idx, line in enumerate(lines):
         for m in _SEE_X_ABOVE.finditer(line):
+            matched += 1
             anchor = m.group("anchor")
             # Search BEFORE this line for any heading containing the anchor.
             resolved = False
@@ -197,6 +204,12 @@ def test_m3_see_x_above_prose_links_resolve_to_earlier_headings():
                     f"heading in §9 cluster contains substring `{anchor}`"
                 )
 
+    if not matched:
+        pytest.fail(
+            "No `see X above` cross-link matched in the §9 cluster, so M3 "
+            "resolved nothing. Fix `_SEE_X_ABOVE` to match the cluster's "
+            "cross-link, or restore the cross-link."
+        )
     if findings:
         pytest.fail(
             "§9 cluster cross-link anchor resolution failed:\n  "
