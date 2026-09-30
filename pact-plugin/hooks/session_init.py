@@ -1505,9 +1505,8 @@ def main():
         # An unknown frame returned above, so on this path the notice fires
         # only for a present-but-unrecognized agent_type (a typo'd `--agent`),
         # which classifies teammate. _UNKNOWN_FRAME_CONTEXT is the literal's
-        # other carrier. The verdict is computed once and also gates steps 3/3b.
-        unrecognized_role = _should_warn_unknown_role(input_data)
-        if source in ("startup", "resume") and unrecognized_role:
+        # other carrier.
+        if source in ("startup", "resume") and _should_warn_unknown_role(input_data):
             system_messages.append(_UNKNOWN_ROLE_NOTICE)
 
         # 1. Refresh the plugin symlinks (enables @~/.claude/protocols/pact-plugin/
@@ -1535,11 +1534,17 @@ def main():
             # A LINK MOVED. Report it on each source, with the caveat beside it.
             context_parts.append(f"{symlink_result}. {_SYMLINK_REPOINT_NOTICE}")
 
-        # Steps 3/3b write PACT structure into the project CLAUDE.md, so they
-        # are skipped for a frame whose agent_type is neither a lead spelling
-        # nor a registered PACT specialist (a typo'd `--agent`, or a user's own
-        # non-PACT agent): that session is not using PACT in this project.
-        if not unrecognized_role:
+        # Lead-role gate (#877). is_lead is total (never raises) and reads only
+        # the harness-set agent_type. Computed once and reused for steps 3/3b
+        # and the Class-A writes below, so they share one verdict.
+        frame_is_lead = is_lead(input_data)
+
+        # Steps 3/3b create and migrate the project CLAUDE.md, and only a lead
+        # does. A teammate whose project dir is a worktree would otherwise plant
+        # a template there that diverts every CLAUDE.md resolver away from the
+        # main repo's file, or rewrite a tracked CLAUDE.md in the worktree; in
+        # the lead's own dir the lead has already written it.
+        if frame_is_lead:
             # 3. Ensure project has CLAUDE.md with memory sections
             project_md_msg = ensure_project_memory_md()
             if project_md_msg:
@@ -1805,11 +1810,6 @@ def main():
         if not session_id_was_missing:
             _record_worktree_identity(session_id, project_dir)
 
-        # Lead-role gate (#877). is_lead is total (never raises) and reads only
-        # the harness-set agent_type. Computed once and reused for both Class-A
-        # writes below so the disk-write split and the journal-anchor gate share
-        # one verdict.
-        frame_is_lead = is_lead(input_data)
         if not session_id_was_missing:
             try:
                 # SEAM (#877): compose the two halves directly. ALWAYS build +
