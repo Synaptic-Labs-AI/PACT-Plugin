@@ -846,6 +846,24 @@ def _clear_bootstrap_marker(session_path: Path) -> None:
         pass  # Fail-open: don't block session init for marker cleanup
 
 
+def _lead_context_persisted(session_id, project_dir: str) -> bool:
+    """True when this session id already has a pact-session-context.json.
+
+    Only a lead frame writes that file (session_init persists it under
+    frame_is_lead, and the context heal is is_lead-gated), so its presence
+    under this session's own id means a lead ran here. A lead resumed without
+    `--agent` carries no agent_type at SessionStart only; this is how it is
+    recognised. Fail-closed: any error reads as absent.
+    """
+    if _is_unknown_or_missing_session(session_id) or not project_dir:
+        return False
+    try:
+        session_path = build_session_path(project_slug(project_dir), str(session_id))
+        return (session_path / "pact-session-context.json").is_file()
+    except Exception:
+        return False
+
+
 def _adopt_old_slug_session_dir(session_id: str, project_dir: str) -> bool:
     """Move a session dir keyed under the UNRESOLVED project basename to the
     slug every session path now derives, so a session launched through a
@@ -1417,6 +1435,15 @@ def main():
         # BEFORE any writer below can create the resolved-slug dir.
         _adopt_old_slug_session_dir(input_data.get("session_id", ""), project_dir)
 
+        # A lead resumed without `--agent` has no agent_type at SessionStart
+        # only. Its own session dir holds the context file only a lead writes,
+        # so recover the role from that. Adoption above has already moved a dir
+        # written under the unresolved slug.
+        if frame_role == "unknown" and _lead_context_persisted(
+            input_data.get("session_id"), project_dir
+        ):
+            frame_role = "lead"
+
         # No recognized role: emit the notice, keep machine-wide upkeep and
         # fault reports, write nothing into the project.
         if frame_role == "unknown":
@@ -1506,7 +1533,11 @@ def main():
         # only for a present-but-unrecognized agent_type (a typo'd `--agent`),
         # which classifies teammate. _UNKNOWN_FRAME_CONTEXT is the literal's
         # other carrier.
-        if source in ("startup", "resume") and _should_warn_unknown_role(input_data):
+        if (
+            source in ("startup", "resume")
+            and frame_role != "lead"
+            and _should_warn_unknown_role(input_data)
+        ):
             system_messages.append(_UNKNOWN_ROLE_NOTICE)
 
         # 1. Refresh the plugin symlinks (enables @~/.claude/protocols/pact-plugin/
@@ -1534,10 +1565,11 @@ def main():
             # A LINK MOVED. Report it on each source, with the caveat beside it.
             context_parts.append(f"{symlink_result}. {_SYMLINK_REPOINT_NOTICE}")
 
-        # Lead-role gate (#877). is_lead is total (never raises) and reads only
-        # the harness-set agent_type. Computed once and reused for steps 3/3b
-        # and the Class-A writes below, so they share one verdict.
-        frame_is_lead = is_lead(input_data)
+        # Lead-role gate (#877). Taken from frame_role, which is is_lead's
+        # verdict on agent_type plus the resumed-lead recovery above. Computed
+        # once and reused for steps 3/3b and the Class-A writes below, so they
+        # share one verdict.
+        frame_is_lead = frame_role == "lead"
 
         # Steps 3/3b create and migrate the project CLAUDE.md, and only a lead
         # does. A teammate whose project dir is a worktree would otherwise plant

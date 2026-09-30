@@ -30,6 +30,7 @@ from session_init import (  # noqa: E402
     _unknown_frame_output,
 )
 from shared import BOOTSTRAP_MARKER_NAME, compaction_owner  # noqa: E402
+import shared.pact_context as pact_context  # noqa: E402
 from shared.constants import COMPACT_SUMMARY_NAME, get_compact_summary_path  # noqa: E402
 from shared.pact_context import _build_session_path, project_slug  # noqa: E402
 from shared.paths import get_claude_config_dir  # noqa: E402
@@ -80,8 +81,10 @@ def _run_real(monkeypatch, project_dir, stdin_data):
     """Drive ``session_init.main()`` with NOTHING stubbed and return the output.
 
     The conftest autouse fixtures already point the config root at tmp_path and
-    scrub CLAUDE_PLUGIN_ROOT, so every write lands under tmp_path.
+    scrub CLAUDE_PLUGIN_ROOT, so every write lands under tmp_path. Each call
+    starts from a clean pact_context cache, as a fresh hook process does.
     """
+    pact_context.reset_for_tests()
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
     monkeypatch.chdir(project_dir)
     with patch("sys.stdin", io.StringIO(stdin_data)), \
@@ -470,11 +473,12 @@ def _snapshot(folder):
 
 
 class TestUnknownFrameLeavesALeadSessionDirAlone:
-    """A lead session resumed without `--agent` arrives as an unknown frame
-    carrying the lead's session id. Its session folder must stay as the lead
-    left it. The lead control, on the same seed, must clear the marker, archive
-    the own-dir summary and settle the staged one, so each writer is reachable
-    from this layout."""
+    """A session folder under this session id that holds no lead context file
+    does not make the frame a lead: it stays unknown and the folder stays as it
+    was. The lead control, on the same seed, must clear the marker, archive the
+    own-dir summary and settle the staged one, so each writer is reachable from
+    this layout. TestResumedLeadIsRecognised covers the folder that does hold
+    the context file."""
 
     @pytest.mark.parametrize("source", ["resume", "clear"])
     def test_the_folder_is_byte_identical(self, source, monkeypatch, tmp_path):
@@ -501,3 +505,79 @@ class TestUnknownFrameLeavesALeadSessionDirAlone:
         assert _snapshot(folder) == before, (
             f"an unknown frame (source={source!r}) changed the lead's session folder"
         )
+
+
+def _normalise(output, root, session_id):
+    text = json.dumps(output, sort_keys=True)
+    return text.replace(str(root), "<R>").replace(session_id, "<S>").replace(
+        session_id[:8], "<S8>"
+    )
+
+
+class TestResumedLeadIsRecognised:
+    """A lead resumed without `--agent` carries no agent_type at SessionStart
+    only. Its own session folder holds pact-session-context.json, which only a
+    lead writes, so session_init treats it as the lead. The control repeats the
+    same history with the lead's agent_type on the resume frame: the two must
+    emit the same output and leave the same folder."""
+
+    @pytest.mark.parametrize("source", ["resume", "clear", "compact"])
+    def test_it_gets_the_same_output_as_a_lead_with_the_flag(
+        self, source, monkeypatch, tmp_path
+    ):
+        runs = {}
+        for arm, session_id, extra in (
+            ("flag", "aaaa1111-0000-0000-0000-000000000001", LEAD),
+            ("noflag", "bbbb2222-0000-0000-0000-000000000002", {}),
+        ):
+            root = tmp_path / arm
+            monkeypatch.setattr(Path, "home", lambda root=root: root / "home")
+            project = root / "proj"
+            project.mkdir(parents=True)
+            _run_real(monkeypatch, project, _frame(session_id=session_id, **LEAD))
+            folder = _session_dir(project, session_id)
+            assert (folder / "pact-session-context.json").is_file(), (
+                "the lead start persisted no context file"
+            )
+            (folder / BOOTSTRAP_MARKER_NAME).write_text("")
+            (folder / COMPACT_SUMMARY_NAME).write_text("the lead's own summary")
+            output = _run_real(
+                monkeypatch, project, _frame(source=source, session_id=session_id, **extra)
+            )
+            journal = folder / "session-journal.jsonl"
+            events = [json.loads(line).get("type") for line in journal.read_text().splitlines()]
+            runs[arm] = (
+                _normalise(output, root, session_id),
+                sorted(p.name.split("-2")[0] for p in folder.iterdir()),
+                output,
+                events,
+            )
+
+        flag, noflag = runs["flag"], runs["noflag"]
+        additional = noflag[2]["hookSpecificOutput"]["additionalContext"]
+        assert additional.startswith(LADDER), additional[:200]
+        assert _UNKNOWN_ROLE_NOTICE not in json.dumps(noflag[2])
+        assert noflag[0] == flag[0], "the recovered lead's output differs from the flagged lead's"
+        assert noflag[1] == flag[1], "the recovered lead left a different session folder"
+        assert noflag[3] == flag[3], (
+            "the recovered lead's lead-only writes differ from the flagged lead's "
+            f"(journal events {noflag[3]} vs {flag[3]})"
+        )
+
+    def test_a_resumed_session_without_the_context_file_stays_inert(
+        self, monkeypatch, tmp_path
+    ):
+        control = tmp_path / "control"
+        control.mkdir()
+        _run_real(monkeypatch, control, _frame(**LEAD))
+        assert (_session_dir(control) / "pact-session-context.json").is_file()
+        output = _run_real(monkeypatch, control, _frame(source="resume"))
+        assert output["hookSpecificOutput"]["additionalContext"].startswith(LADDER), (
+            "control: the context file did not make the resumed frame a lead"
+        )
+
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        _session_dir(plain).mkdir(parents=True)
+        output = _run_real(monkeypatch, plain, _frame(source="resume"))
+        assert output["hookSpecificOutput"]["additionalContext"] == _UNKNOWN_FRAME_CONTEXT
