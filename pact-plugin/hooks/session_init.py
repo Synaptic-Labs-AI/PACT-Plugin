@@ -1505,8 +1505,9 @@ def main():
         # An unknown frame returned above, so on this path the notice fires
         # only for a present-but-unrecognized agent_type (a typo'd `--agent`),
         # which classifies teammate. _UNKNOWN_FRAME_CONTEXT is the literal's
-        # other carrier.
-        if source in ("startup", "resume") and _should_warn_unknown_role(input_data):
+        # other carrier. The verdict is computed once and also gates steps 3/3b.
+        unrecognized_role = _should_warn_unknown_role(input_data)
+        if source in ("startup", "resume") and unrecognized_role:
             system_messages.append(_UNKNOWN_ROLE_NOTICE)
 
         # 1. Refresh the plugin symlinks (enables @~/.claude/protocols/pact-plugin/
@@ -1534,26 +1535,31 @@ def main():
             # A LINK MOVED. Report it on each source, with the caveat beside it.
             context_parts.append(f"{symlink_result}. {_SYMLINK_REPOINT_NOTICE}")
 
-        # 3. Ensure project has CLAUDE.md with memory sections
-        project_md_msg = ensure_project_memory_md()
-        if project_md_msg:
-            if "failed" in project_md_msg.lower() or "skipped" in project_md_msg.lower():
-                system_messages.append(project_md_msg)
-            else:
-                context_parts.append(project_md_msg)
+        # Steps 3/3b write PACT structure into the project CLAUDE.md, so they
+        # are skipped for a frame whose agent_type is neither a lead spelling
+        # nor a registered PACT specialist (a typo'd `--agent`, or a user's own
+        # non-PACT agent): that session is not using PACT in this project.
+        if not unrecognized_role:
+            # 3. Ensure project has CLAUDE.md with memory sections
+            project_md_msg = ensure_project_memory_md()
+            if project_md_msg:
+                if "failed" in project_md_msg.lower() or "skipped" in project_md_msg.lower():
+                    system_messages.append(project_md_msg)
+                else:
+                    context_parts.append(project_md_msg)
 
-        # 3b. One-time migration: wrap existing project CLAUDE.md in
-        # PACT_MANAGED boundary and add PACT_MEMORY markers (#404).
-        # Runs after ensure_project_memory_md() so newly created files
-        # already have the new structure, and before staleness checks
-        # so the staleness parser sees the migrated layout.
-        # Idempotent no-op when PACT_MANAGED_START marker is already present.
-        migration_msg = migrate_to_managed_structure()
-        if migration_msg:
-            if "failed" in migration_msg.lower() or "skipped" in migration_msg.lower():
-                system_messages.append(migration_msg)
-            else:
-                context_parts.append(migration_msg)
+            # 3b. One-time migration: wrap existing project CLAUDE.md in
+            # PACT_MANAGED boundary and add PACT_MEMORY markers (#404).
+            # Runs after ensure_project_memory_md() so newly created files
+            # already have the new structure, and before staleness checks
+            # so the staleness parser sees the migrated layout.
+            # Idempotent no-op when PACT_MANAGED_START marker is already present.
+            migration_msg = migrate_to_managed_structure()
+            if migration_msg:
+                if "failed" in migration_msg.lower() or "skipped" in migration_msg.lower():
+                    system_messages.append(migration_msg)
+                else:
+                    context_parts.append(migration_msg)
 
         # Step 3c retired in v4.2.15 — orphan-stripper sunset; see git log for context.
 
