@@ -181,8 +181,9 @@ _INPROCESS_MODE_NOTICE = (
 #     channel ON A LAUNCH, and on a compact or a clear it reaches no channel
 #     at all.
 #   additionalContext: inside _UNKNOWN_FRAME_CONTEXT, for `frame_role ==
-#     "unknown"` only (an ABSENT agent_type), both at the early branch in
-#     main() and in the exception safety net. A typo does NOT reach it.
+#     "unknown"` only (an absent agent_type on stdin that parsed, with no lead
+#     context file for this session), both at the early branch in main() and
+#     in the exception safety net. A typo does NOT reach it.
 # Pure literal so tests can pin the exact substring.
 _UNKNOWN_ROLE_NOTICE = (
     "PACT: this session has no recognized agent role (no `--agent` flag, or an "
@@ -335,10 +336,12 @@ def check_pin_stale_block_directive() -> Optional[str]:
     directive is architecturally binding via Tier-0 additionalContext
     (survives compaction per plan row 5 / compaction durability model).
 
-    Side effect (Phase F): writes a session-scoped pin-staleness-pending
-    marker so pin_staleness_gate.py (PreToolUse) can block later Edit/Write
-    on CLAUDE.md Pinned Context. Clears the marker when detection is
-    negative so resolved state does not leave the gate armed.
+    Intended side effect (Phase F): write a session-scoped
+    pin-staleness-pending marker so pin_staleness_gate.py (PreToolUse) can
+    block later Edit/Write on CLAUDE.md Pinned Context, and clear it when
+    detection is negative. It never happens today: session_init calls this at
+    step 4b, before build_context_cache, when get_session_dir() is still
+    empty, so no marker is written and the gate never arms.
     """
     # Defense-in-depth (Back-M1): _staleness_block_check is fail-open by
     # its own contract, but session_init is on the SessionStart hot path —
@@ -398,14 +401,14 @@ def check_pin_stale_block_directive() -> Optional[str]:
     # 🔴 NAME THE COMMAND THAT ARCHIVES. This directive named
     # `/PACT:pin-memory`, which does NOT archive: it ADDS a pin and it sends
     # the user to `/PACT:prune-memory` for removal. THIS IS THE PRIMARY
-    # enforcement surface for the stale-pin condition. It reaches only a lead
-    # frame: a teammate is gated at the call site, and an unknown frame
-    # returns from main() before the call. Nothing refuses a wrong command
-    # later: `pin_staleness_gate` reads a marker this function writes under
-    # get_session_dir(), which is still empty at step 4b (build_context_cache
-    # runs later), so the marker is never written and the gate never arms.
-    # The gate carried the same incorrect name and the two were corrected
-    # together.
+    # enforcement surface for the stale-pin condition. It reaches a lead frame
+    # or a frame whose stdin did not parse (None): a teammate is gated at the
+    # call site, and an unknown frame returns from main() before the call.
+    # Nothing refuses a wrong command later: `pin_staleness_gate` reads a
+    # marker this function writes under get_session_dir(), which is still
+    # empty at step 4b (build_context_cache runs later), so the marker is
+    # never written and the gate never arms. The gate carried the same
+    # incorrect name and the two were corrected together.
     # BEFORE YOU EDIT THIS STRING, OPEN THE COMMAND FILE AND CONFIRM THE
     # COMMAND ARCHIVES. This text is not evidence about its own subject.
     return (
@@ -741,7 +744,8 @@ def _build_safety_net_context(
                    exception fired before generate_team_name() ran.
         frame_role: Session role ("lead" / "teammate" / "unknown") captured
                     before the exception, or None if the exception fired before
-                    the capture. See the four cases above.
+                    the capture or the stdin did not parse. See the four cases
+                    above.
         source: The SessionStart source captured before the exception, or None.
                 On "compact" the orchestrator prelude carries the teammate
                 clause, as the normal compact directive does.
@@ -1411,12 +1415,19 @@ def main():
         # non-dict would have raised at raw_source and bubbled to the outer
         # safety net). classify_session_role does input_data.get(...) so it is
         # total only on a dict — capturing here, NEVER in the except, preserves
-        # the safety net's never-raise contract. One capture serves four sites:
-        #   - the unknown-frame early branch just below, which returns before
-        #     any project write;
-        #   - the lead-only advisory gates below (steps 4/4a/4b): a teammate
-        #     frame must not receive lead pin advisories (m2);
+        # the safety net's never-raise contract. Every later role decision reads
+        # this one capture:
+        #   - the resumed-lead recovery, which may turn "unknown" into "lead";
+        #   - the unknown-frame early branch, which returns before any project
+        #     write;
+        #   - step 0c's notice (`== "teammate"`);
+        #   - frame_is_lead, which gates steps 3/3b and 4 and the Class-A
+        #     writes (5a/5b/8);
+        #   - the advisory gates at 4a/4b and the 4d/4e config block
+        #     (`!= "teammate"`): a teammate frame must not receive lead pin
+        #     advisories (m2);
         #   - the teammate peer-context branch (the `== "teammate"` gate, m3);
+        #   - the unresolved-role cue on the ladder (`is None`);
         #   - the role-aware exception safety net (_build_safety_net_context).
         # If the exception fires before this point, frame_role stays None and
         # the safety net emits the orchestrator marker — identical to prior
@@ -1674,10 +1685,10 @@ def main():
         # `frame_role != "teammate"` idiom (matching the 4a/4b advisory gates):
         # the consumers (peer-review, orchestrate/pact-scope-detection) are all
         # lead/orchestrator flows. An unknown frame returned earlier, so on
-        # this path the idiom admits only a lead. Not enumerated as a numbered
-        # step in the docstring — like 4a/4b/4c, it is a context surfacing
-        # within the pin/config region, so the module<->main() docstring
-        # parity is untouched.
+        # this path the idiom admits a lead and a frame whose stdin did not
+        # parse (None). Not enumerated as a numbered step in the docstring —
+        # like 4a/4b/4c, it is a context surfacing within the pin/config
+        # region, so the module<->main() docstring parity is untouched.
         if frame_role != "teammate":
             # 4d. Warn if settings.json is malformed — Claude Code drops it
             # WHOLESALE in headless mode, silently taking the `env` block (and
@@ -1702,8 +1713,9 @@ def main():
 
         # 5a. Build the session context FIRST so get_session_dir() works for
         # subsequent journal writes. build_context_cache() populates the _cache
-        # immediately (for every frame), enabling append_event() to derive the
-        # journal path; persist_context() then writes the file (lead frames only).
+        # immediately (for every frame that reaches it with a usable session
+        # id), enabling append_event() to derive the journal path;
+        # persist_context() then writes the file (frame_is_lead only).
         # Defensive substitution: the RA1+RG2 schema validator (commit 2d6448c)
         # rejects empty strings for str-typed required fields, so an empty
         # session_id would cause append_event() to silently drop the
@@ -1856,7 +1868,7 @@ def main():
                 # lead's on-disk session-context file (or creates a phantom
                 # session dir).
                 # build_context_cache is the sole owner of _cache; persist_context
-                # is the is_lead-gated best-effort disk side-effect. See the
+                # is the frame_is_lead-gated best-effort disk side-effect. See the
                 # build_context_cache / persist_context docstrings.
                 # A compaction is not a session start, so it keeps the recorded
                 # start. That also leaves the file byte-identical when an
@@ -2012,9 +2024,10 @@ def main():
         # are mode-exclusive (one teammate fires exactly one), so injecting the
         # peer-context body here causes no double-injection. classify_session_role
         # is the fail-safe gate: only a genuine "teammate" frame takes this branch;
-        # only a lead reaches the else-branch: an unknown frame returned after
-        # the old-slug adoption. Emitting the
-        # marker-free body (include_role_marker=False) ALSO suppresses the
+        # a lead (including a recovered resumed lead) or a frame whose stdin
+        # did not parse (None) reaches the else-branch: an unknown frame
+        # returned after the old-slug adoption. Emitting the marker-free body
+        # (include_role_marker=False) ALSO suppresses the
         # "YOUR PACT ROLE: orchestrator" block for teammate frames — that
         # unconditional orchestrator block was the mis-roling bug (a teammate
         # self-identifying as orchestrator); the role marker is omitted because
@@ -2265,8 +2278,8 @@ def main():
         # directory would accumulate indefinitely.
         # Lead-only (#877): the CLAUDE.md "## Current Session" block is the true
         # CROSS-PROCESS CLOBBER — a teammate/plain frame writing it overwrites
-        # the lead's session block in the shared project file. Gate on is_lead
-        # in addition to the existing sentinel guard.
+        # the lead's session block in the shared project file. Gate on
+        # frame_is_lead in addition to the existing sentinel guard.
         if frame_is_lead and not _is_unknown_or_missing_session(session_id):
             session_msg = update_session_info(
                 session_id, team_name, session_dir, plugin_root,
@@ -2435,12 +2448,12 @@ def main():
                     )
 
         # Cross-session backlog. Deliberately OUTSIDE the frame_is_lead block:
-        # every frame that reaches this point (lead and teammate) gets the
-        # block; an unknown frame returned earlier. The INDENTATION IS THE
-        # WHOLE GATE — one level in would scope it to lead frames that also
-        # carry a resume prompt, which reads as correct at the call site and
-        # silently emits nothing for everyone else. Column 8, level with
-        # `# Build output`.
+        # every frame that reaches this point (lead, teammate, and a frame whose
+        # stdin did not parse) gets the block; an unknown frame returned
+        # earlier. The INDENTATION IS THE WHOLE GATE — one level in would
+        # scope it to lead frames that also carry a resume prompt, which reads
+        # as correct at the call site and silently emits nothing for everyone
+        # else. Column 8, level with `# Build output`.
         #
         # session_block is TOTAL and is the outermost call: it converts every
         # failure into a return value, so nothing here can raise. That is

@@ -8,9 +8,12 @@ Used by: hooks.json PreToolUse with matcher \"Edit|Write\"
 
 Phase F defense-in-depth backstop for #492. The SessionStart
 additionalContext directive (session_init.py step 4b) is the primary
-enforcement; this hook is the secondary guard that fires at the moment
-of the Edit/Write call rather than relying on the orchestrator honoring
-the directive.
+enforcement; this hook is meant to be the secondary guard that fires at the
+moment of the Edit/Write call rather than relying on the orchestrator honoring
+the directive. TODAY IT NEVER ARMS: the marker's only writer
+(session_init.check_pin_stale_block_directive) runs before the session dir is
+resolved, so the marker is never written and this gate never denies (issue
+#1651).
 
 Gate triggers only when ALL hold:
   1. Tool is Edit or Write (enforced by hooks.json matcher)
