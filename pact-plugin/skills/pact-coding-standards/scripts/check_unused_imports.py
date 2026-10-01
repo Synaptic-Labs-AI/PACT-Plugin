@@ -25,10 +25,13 @@ supplies one.
 
 Suppression and carve-outs:
     * `# noqa` / `# noqa: F401` on the import statement's FIRST physical
-      line suppresses findings for that whole statement. The same marker on
-      the physical line where one imported name appears, inside a
-      parenthesized or backslash-continued import, suppresses only the
-      names on that line, as ruff does. Codes are matched as exact
+      line suppresses findings for that whole statement. Inside a
+      parenthesized import, the same marker on the physical line where one
+      imported name appears suppresses only the names on that line. Lines
+      joined by backslashes count as one line, whose marker sits on the last
+      of them (a comment cannot precede a backslash), so in a
+      backslash-continued import a marker on its last line suppresses the
+      whole statement. All of this matches ruff. Codes are matched as exact
       word-bounded tokens: a noqa listing only other codes does not
       suppress, `F401x`/`F4011` are different codes, and a code list with no
       recognizable code suppresses nothing — only a truly bare `# noqa`
@@ -137,6 +140,33 @@ def _alias_lines(source: str, node: ast.stmt) -> list[int]:
     return starts if len(starts) == len(node.names) else fallback
 
 
+def _backslash_join_ends(source: str) -> dict[int, int]:
+    """Map each physical line a backslash continues to the last line of its
+    joined run, the line a noqa for any of them must sit on.
+
+    Read from the token stream: two consecutive tokens on different rows
+    with no NL, NEWLINE or COMMENT between them are joined by a backslash. A
+    line break inside parentheses always emits NL, so it joins nothing.
+    """
+    continues: set[int] = set()
+    prev = None
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+            if (
+                prev is not None
+                and tok.start[0] > prev.end[0]
+                and prev.type not in (tokenize.NL, tokenize.NEWLINE, tokenize.COMMENT)
+            ):
+                continues.update(range(prev.end[0], tok.start[0]))
+            prev = tok
+    except (tokenize.TokenError, SyntaxError):
+        return {}
+    ends: dict[int, int] = {}
+    for row in sorted(continues, reverse=True):
+        ends[row] = ends.get(row + 1, row + 1)
+    return ends
+
+
 def _is_type_checking_test(test: ast.expr) -> bool:
     """True for `if TYPE_CHECKING:` / `if typing.TYPE_CHECKING:` tests.
 
@@ -237,6 +267,17 @@ def find_unused_imports(source: str, *, try_scope: str) -> list[Finding]:
 
     tree = ast.parse(source)
     lines = source.splitlines()
+    join_ends: dict[int, int] | None = None
+
+    def noqa_line(row: int) -> int:
+        """The physical line a noqa for `row` must sit on: `row` itself, or,
+        when a backslash continues `row`, the last line of that joined run."""
+        nonlocal join_ends
+        if not lines[row - 1].rstrip().endswith("\\"):
+            return row
+        if join_ends is None:
+            join_ends = _backslash_join_ends(source)
+        return join_ends.get(row, row)
 
     collector = _ScopedImportCollector()
     collector.visit(tree)
@@ -251,7 +292,7 @@ def find_unused_imports(source: str, *, try_scope: str) -> list[Finding]:
             continue  # carve-out: optional-dependency probes, consumer tier
         if isinstance(node, ast.ImportFrom) and node.module == "__future__":
             continue  # carve-out: compiler directive, never "used"
-        if _line_has_noqa_f401(lines[node.lineno - 1]):
+        if _line_has_noqa_f401(lines[noqa_line(node.lineno) - 1]):
             continue  # suppression: first physical line of the statement
         name_lines = (
             _alias_lines(source, node)
@@ -261,7 +302,7 @@ def find_unused_imports(source: str, *, try_scope: str) -> list[Finding]:
         for alias, name_line in zip(node.names, name_lines):
             if alias.name == "*":
                 continue  # carve-out: star imports are not tracked
-            if _line_has_noqa_f401(lines[name_line - 1]):
+            if _line_has_noqa_f401(lines[noqa_line(name_line) - 1]):
                 continue  # suppression: the name's own physical line
             if isinstance(node, ast.Import):
                 bound = (alias.asname or alias.name).split(".")[0]
