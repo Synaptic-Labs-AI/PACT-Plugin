@@ -4,11 +4,12 @@
 ``claude``, ``claude -p``, every ``claude plugin eval`` run. session_init gives
 that frame exactly ``_UNKNOWN_FRAME_CONTEXT`` and returns before any project
 write, unless its own session folder holds a lead's context file (a lead
-resumed without ``--agent``). Against main, this branch leaves the lead
-frame's SessionStart output unchanged (its CLAUDE.md Resume line now carries
-``--agent``), stops the teammate frame from creating, migrating or
-stale-marking the project CLAUDE.md (pinned in
-test_session_init_project_claude_md_is_lead_only.py), and treats a
+resumed, not forked, without ``--agent``). Against main, this branch leaves the
+lead frame's SessionStart output unchanged for startup, resume, compact and
+clear (its CLAUDE.md Resume line now carries ``--agent``), and a lead fork now
+takes the resume branch where it got the unrecognised-source note. It stops the
+teammate frame from creating, migrating or stale-marking the project CLAUDE.md
+(pinned in test_session_init_project_claude_md_is_lead_only.py), and treats a
 SessionStart whose stdin was not valid JSON as unclassified (None): it keeps
 the ladder and gets the unresolved-role cue instead of the no-role notice
 (TestMalformedStdin).
@@ -553,11 +554,11 @@ class _PinnedDatetime(datetime):
 
 
 class TestResumedLeadIsRecognised:
-    """A lead resumed without `--agent` carries no agent_type at SessionStart
-    only. Its own session folder holds pact-session-context.json, which only a
-    lead writes, so session_init treats it as the lead. The control repeats the
-    same history with the lead's agent_type on the resume frame: the two must
-    emit the same output and leave the same folder."""
+    """A lead resumed (not forked) without `--agent` carries no agent_type at
+    SessionStart only. Its own session folder holds pact-session-context.json,
+    which only a lead writes, so session_init treats it as the lead. The
+    control repeats the same history with the lead's agent_type on the resume
+    frame: the two must emit the same output and leave the same folder."""
 
     @pytest.mark.parametrize("source", ["resume", "clear", "compact"])
     def test_it_gets_the_same_output_as_a_lead_with_the_flag(

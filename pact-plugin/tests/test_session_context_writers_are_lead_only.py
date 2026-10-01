@@ -1,9 +1,10 @@
 """Only a lead writes pact-session-context.json.
 
 session_init treats that file's presence in a session's own directory as proof
-that a lead ran there: a lead resumed without `--agent` is recovered from it. So
-a writer that runs for a teammate or a no-role session would let that session be
-treated as the lead. Two pins keep every writer lead-gated:
+that a lead ran there: a lead resumed (not forked) without `--agent` is
+recovered from it. So a writer that runs for a teammate or a no-role session
+would let that session be treated as the lead. Two pins keep every writer
+lead-gated:
 
 - CENSUS, over the shipped Python under hooks/, skills/, scripts/, bin/ and
   telegram/ (plus a text scan of their non-Python, non-markdown files), each

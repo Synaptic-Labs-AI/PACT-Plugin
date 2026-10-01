@@ -168,12 +168,14 @@ _INPROCESS_MODE_NOTICE = (
 # `claude -p`, a `claude plugin eval` run, or a forgotten `--agent`) carries no
 # agent_type, so classify_session_role() returns "unknown". session_init gives
 # that frame _UNKNOWN_FRAME_CONTEXT and writes nothing into its project. A lead
-# resumed without `--agent` also arrives with no agent_type at SessionStart;
-# its own session dir holds the context file only a lead writes, so
-# session_init recovers it as the lead (_lead_context_persisted) and it gets
-# neither channel. The notice rides TWO CHANNELS, AND EACH CHANNEL HAS ITS OWN
-# POPULATION, BECAUSE THE GATES USE DIFFERENT PREDICATES. Do not state one
-# population for the pair.
+# resumed (not forked) without `--agent` also arrives with no agent_type at
+# SessionStart; its own session dir holds the context file only a lead writes,
+# so session_init recovers it as the lead (_lead_context_persisted) and it gets
+# neither channel. A lead forked without `--agent` has a new session id that
+# holds no such file, so it stays unknown here and gets both channels;
+# bootstrap_prompt_gate corrects it at its first prompt. The notice rides TWO
+# CHANNELS, AND EACH CHANNEL HAS ITS OWN POPULATION, BECAUSE THE GATES USE
+# DIFFERENT PREDICATES. Do not state one population for the pair.
 #   systemMessage: on a launch event (_LAUNCH_SOURCES), for an unknown
 #     frame, and for an agent_type that is present but is not the lead and is
 #     not a registered specialist (_should_warn_unknown_role). So a typo such
@@ -863,9 +865,10 @@ def _lead_context_persisted(session_id, project_dir: str) -> bool:
 
     Only a lead frame writes that file (session_init persists it under
     frame_is_lead, and the context heal is is_lead-gated), so its presence
-    under this session's own id means a lead ran here. A lead resumed without
-    `--agent` carries no agent_type at SessionStart only; this is how it is
-    recognised. Fail-closed: any error reads as absent.
+    under this session's own id means a lead ran here. A lead resumed (not
+    forked) without `--agent` carries no agent_type at SessionStart only; this
+    is how it is recognised. A fork has a new session id, so it is not.
+    Fail-closed: any error reads as absent.
     """
     if _is_unknown_or_missing_session(session_id) or not project_dir:
         return False
@@ -1457,10 +1460,11 @@ def main():
         # BEFORE any writer below can create the resolved-slug dir.
         _adopt_old_slug_session_dir(input_data.get("session_id", ""), project_dir)
 
-        # A lead resumed without `--agent` has no agent_type at SessionStart
-        # only. Its own session dir holds the context file only a lead writes,
-        # so recover the role from that. Adoption above has already moved a dir
-        # written under the unresolved slug.
+        # A lead resumed (not forked) without `--agent` has no agent_type at
+        # SessionStart only. Its own session dir holds the context file only a
+        # lead writes, so recover the role from that; a fork's new session id
+        # holds no such file. Adoption above has already moved a dir written
+        # under the unresolved slug.
         if frame_role == "unknown" and _lead_context_persisted(
             input_data.get("session_id"), project_dir
         ):
