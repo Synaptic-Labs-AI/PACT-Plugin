@@ -214,6 +214,47 @@ class TestNothingToDo:
         assert (project / "CLAUDE.md").read_bytes() == before
 
 
+class TestKernelMarkers:
+    """The kernel strip gives a bad global file its valid twin's result: the
+    malformed-marker notice when the markers are malformed, and the UTF-8 skip
+    only for a well-formed pair the strip would have removed."""
+
+    def _twins(self, tmp_path, monkeypatch, text):
+        from shared.claude_md_manager import strip_orphan_kernel_block
+
+        config = tmp_path / ".claude"
+        config.mkdir()
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+        md = config / "CLAUDE.md"
+        md.write_text(text, encoding="utf-8")
+        valid = strip_orphan_kernel_block(), md.read_text(encoding="utf-8")
+        before = text.encode("utf-8") + BAD
+        md.write_bytes(before)
+        bad = strip_orphan_kernel_block()
+        assert md.read_bytes() == before
+        return valid, bad
+
+    @pytest.mark.parametrize("text", [
+        "# global\n\n<!-- PACT_START: old kernel -->\nold\n",
+        "# global\n\nold\n<!-- PACT_END -->\n",
+        "# global\n\n<!-- PACT_END -->\nold\n<!-- PACT_START: old kernel -->\n",
+    ], ids=["start_only", "end_only", "end_before_start"])
+    def test_malformed_markers_give_the_valid_twins_notice(
+        self, tmp_path, monkeypatch, text
+    ):
+        (notice, after), bad = self._twins(tmp_path, monkeypatch, text)
+        assert after == text, "control: the valid twin wrote"
+        assert notice and "Migration skipped" in notice, notice
+        assert bad == notice
+
+    def test_a_well_formed_pair_still_reports_the_skip(self, tmp_path, monkeypatch):
+        text = "# global\n\n<!-- PACT_START: old kernel -->\nold\n<!-- PACT_END -->\n"
+        (notice, after), bad = self._twins(tmp_path, monkeypatch, text)
+        assert notice.startswith("Removed obsolete PACT kernel block"), notice
+        assert "PACT_START" not in after
+        assert bad.startswith("Kernel block strip skipped") and NOT_UTF8 in bad
+
+
 class TestFirstPrompt:
 
     def test_an_unrecorded_lead_leaves_the_block_and_reports_the_skip(self, tmp_path):
