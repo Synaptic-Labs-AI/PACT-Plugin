@@ -13,7 +13,8 @@ lead-gated:
   through an import alias too); references to build_context_cache and to
   _get_context_file_path, each of which returns a path a writer could use
   without naming the file; code strings naming the file; uses of the context
-  module's path global; and relocation or link calls (os.symlink, os.link,
+  module's path global, as an attribute outside that module and as a bare name
+  inside it; and relocation or link calls (os.symlink, os.link,
   Path.symlink_to, Path.hardlink_to: the recovery check's is_file() follows a
   link), through a module alias or a from-import too, in functions that derive
   a session path. Each scan has a seeded positive control, and every directory
@@ -86,6 +87,19 @@ KNOWN_PATH_BUILDER_CALLS = frozenset({
 # which returns the same path once init() has run.
 KNOWN_PATH_ACCESSOR_REFS = frozenset({
     ("hooks/shared/pact_context.py", "get_pact_context"),  # reads the file
+})
+
+# (file, enclosing function) of every bare-name use of _context_path inside the
+# context module, read or assigned. Each sets, clears, returns or reads it.
+KNOWN_MODULE_PATH_USES = frozenset({
+    ("hooks/shared/pact_context.py", "<module>"),
+    ("hooks/shared/pact_context.py", "_get_context_file_path"),
+    ("hooks/shared/pact_context.py", "build_context_cache"),
+    ("hooks/shared/pact_context.py", "describe_context_failure"),
+    ("hooks/shared/pact_context.py", "heal_context_if_missing"),
+    ("hooks/shared/pact_context.py", "init"),
+    ("hooks/shared/pact_context.py", "is_initialized"),
+    ("hooks/shared/pact_context.py", "reset_for_tests"),
 })
 
 # (file, enclosing function) of every code string naming the file. Each one
@@ -163,6 +177,7 @@ class _Census(ast.NodeVisitor):
         self.api_refs = set()
         self.name_sites = set()
         self.path_refs = set()
+        self.module_path_uses = set()
         self.relocations = set()
         # `from ... import persist_context as _persist` binds a second name,
         # and `import shutil as sh` or `from os import rename` binds a
@@ -232,6 +247,8 @@ class _Census(ast.NodeVisitor):
     def visit_Name(self, node):
         if isinstance(node.ctx, ast.Load) and node.id in self.aliases:
             self.api_refs.add((self.rel, self._where(), self.aliases[node.id]))
+        if node.id == "_context_path" and self.rel == _CONTEXT_MODULE:
+            self.module_path_uses.add((self.rel, self._where()))
 
     def visit_Constant(self, node):
         if (
@@ -265,7 +282,8 @@ def _python_census(plugin):
     found = {
         "scanned": {root: 0 for root in _ROOTS}, "write_calls": set(),
         "path_builder_calls": set(), "path_accessor_refs": set(),
-        "name_sites": set(), "path_refs": set(), "relocations": set(),
+        "name_sites": set(), "path_refs": set(), "module_path_uses": set(),
+        "relocations": set(),
     }
     for root in _ROOTS:
         for path in _shipped(plugin / root, "*.py"):
@@ -281,6 +299,7 @@ def _python_census(plugin):
                     found["path_accessor_refs"].add((rel, where))
             found["name_sites"] |= census.name_sites
             found["path_refs"] |= census.path_refs
+            found["module_path_uses"] |= census.module_path_uses
             found["relocations"] |= census.relocations
             found["scanned"][root] += 1
     return found
@@ -392,6 +411,37 @@ class TestCensus:
             ("hooks/seeded.py", "path_hard_linked", "Path.hardlink_to"),
         }
 
+    def test_the_python_census_finds_bare_path_global_uses_in_the_context_module(
+        self, tmp_path
+    ):
+        """Positive control for the bare-name scan, with a seeded module standing
+        in as the context module, and the same name elsewhere left out."""
+        shared = tmp_path / "hooks" / "shared"
+        shared.mkdir(parents=True)
+        (shared / "pact_context.py").write_text(
+            "_context_path = None\n\n"
+            "def init(path):\n"
+            "    global _context_path\n"
+            "    _context_path = path\n\n"
+            "def via_bare_name():\n"
+            "    _context_path.write_text('{}')\n\n"
+            "def via_alias():\n"
+            "    path = _context_path\n"
+            "    path.write_text('{}')\n"
+        )
+        (tmp_path / "hooks" / "elsewhere.py").write_text(
+            "def own_global():\n"
+            "    _context_path.write_text('{}')\n"
+        )
+        found = _python_census(tmp_path)
+        assert found["scanned"]["hooks"] == 2
+        assert found["module_path_uses"] == {
+            (_CONTEXT_MODULE, "<module>"),
+            (_CONTEXT_MODULE, "init"),
+            (_CONTEXT_MODULE, "via_bare_name"),
+            (_CONTEXT_MODULE, "via_alias"),
+        }
+
     def test_a_str_replace_is_not_a_relocation(self, tmp_path):
         """Path.replace takes one argument; str.replace takes two."""
         hooks = tmp_path / "hooks"
@@ -449,6 +499,13 @@ class TestCensus:
     def test_nothing_outside_the_context_module_reaches_its_path_global(self):
         path_refs = _python_census(_PLUGIN)["path_refs"]
         assert path_refs == set(), f"{sorted(path_refs)}. {_INSTRUCTION}"
+
+    def test_every_bare_path_global_use_in_the_context_module_is_known(self):
+        uses = _python_census(_PLUGIN)["module_path_uses"]
+        assert uses == KNOWN_MODULE_PATH_USES, (
+            f"new: {sorted(uses - KNOWN_MODULE_PATH_USES)}; "
+            f"gone: {sorted(KNOWN_MODULE_PATH_USES - uses)}. {_INSTRUCTION}"
+        )
 
     def test_every_session_path_relocation_is_known(self):
         relocations = _python_census(_PLUGIN)["relocations"]
