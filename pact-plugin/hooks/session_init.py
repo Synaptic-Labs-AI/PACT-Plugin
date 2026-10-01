@@ -244,17 +244,16 @@ _SYMLINK_REPOINT_NOTICE = (
 
 
 def _should_warn_unknown_role(input_data: dict) -> bool:
-    """Decide whether the unknown-role startup notice should fire.
+    """Decide whether a teammate-classified frame's agent_type is unrecognized,
+    so the unknown-role startup notice should fire.
 
-    Fires when the frame has NO recognized PACT role:
-      classify_session_role == "unknown"  (agent_type absent)
-        OR
-      agent_type is present AND NOT is_lead AND NOT a recognized specialist.
-
-    The "present-but-unrecognized" arm catches a mis-launched / typo'd
-    agent_type (e.g. ``--agent pact-architct``) that the absent-only check
-    misses. Recognized = the live ``agents/pact-*.md`` registry (SSOT), tested
-    via ``is_registered_pact_specialist``.
+    main() calls this only for a frame classify_session_role() puts in the
+    teammate bucket (agent_type present, not a lead spelling); a frame with no
+    agent_type gets the notice from _unknown_frame_output instead. It fires when
+    agent_type is NOT is_lead AND NOT a recognized specialist, which catches a
+    mis-launched / typo'd agent_type (e.g. ``--agent pact-architct``).
+    Recognized = the live ``agents/pact-*.md`` registry (SSOT), tested via
+    ``is_registered_pact_specialist``.
 
     ORDERING IS LOAD-BEARING — do NOT reorder (security-engineer ruling):
     ``is_lead`` is checked BEFORE the registry. ``pact-orchestrator.md`` IS in
@@ -278,8 +277,6 @@ def _should_warn_unknown_role(input_data: dict) -> bool:
     correct — an install with no resolvable plugin_root is broken, and a
     spurious advisory notice is harmless (the notice never DENIES).
     """
-    if classify_session_role(input_data) == "unknown":
-        return True
     if is_lead(input_data):
         return False
     agent_type = input_data.get("agent_type")
@@ -1296,26 +1293,17 @@ def main():
         if stdin_json_error is None:
             frame_role = classify_session_role(input_data)
 
-        # Clear a stale compact-summary — BY MOVING IT, in BOTH of its homes.
-        # Only "compact" source keeps either in place (postcompact_archive just
-        # wrote it, and this session is about to read it).
-        #
-        # The ROOT singleton is the degradation + legacy drain; the session's
-        # OWN DIR holds the writer's scoped file (#1504). Two move-not-delete
-        # objects, no once-flag: the filesystem is the state, and the MOVE is
-        # what empties it. This used to unlink. The path still has to be
-        # cleared, for the same reason as before, but the previous code cleared
-        # it BY DESTROYING the bytes, and those are the only copy. See
-        # _archive_stale_compact_summary and _archive_own_dir_stale_summary.
         # Adopt a session dir written under the unresolved project basename
         # BEFORE any writer below can create the resolved-slug dir.
         _adopt_old_slug_session_dir(input_data.get("session_id", ""), project_dir)
 
         # A lead resumed (not forked) without `--agent` has no agent_type at
-        # SessionStart only. Its own session dir holds the context file only a
-        # lead writes, so recover the role from that; a fork's new session id
-        # holds no such file. Adoption above has already moved a dir written
-        # under the unresolved slug.
+        # SessionStart only. While its own session dir still holds the context
+        # file only a lead writes, recover the role from that. A fork's new
+        # session id holds no such file, and a reaped dir or a moved project
+        # has lost it; bootstrap_prompt_gate records those at their first
+        # prompt. Adoption above has already moved a dir written under the
+        # unresolved slug.
         if frame_role == "unknown" and _lead_context_persisted(
             input_data.get("session_id"), project_dir
         ):
@@ -1329,6 +1317,17 @@ def main():
 
         _settle_staged_summaries(input_data.get("session_id", ""), project_dir)
 
+        # Clear a stale compact-summary — BY MOVING IT, in BOTH of its homes.
+        # Only "compact" source keeps either in place (postcompact_archive just
+        # wrote it, and this session is about to read it).
+        #
+        # The ROOT singleton is the degradation + legacy drain; the session's
+        # OWN DIR holds the writer's scoped file (#1504). Two move-not-delete
+        # objects, no once-flag: the filesystem is the state, and the MOVE is
+        # what empties it. This used to unlink. The path still has to be
+        # cleared, for the same reason as before, but the previous code cleared
+        # it BY DESTROYING the bytes, and those are the only copy. See
+        # _archive_stale_compact_summary and _archive_own_dir_stale_summary.
         if source != "compact":
             _archive_stale_compact_summary(
                 input_data.get("session_id", ""), project_dir
@@ -2074,9 +2073,10 @@ def main():
                 # id, so it takes this limb: the bootstrap directive is above,
                 # and resume_summary_clause is "" because that probe runs for
                 # source == "resume" only (a fork's own dir is new). Step 5a
-                # reads the project CLAUDE.md block, which still names the
-                # PARENT session, so prev_session_dir and the resume and
-                # paused-state surfacing point at the parent. That is right
+                # reads the project CLAUDE.md block, which names the last lead
+                # recorded in this project (the parent, unless another lead
+                # started here since), so prev_session_dir and the resume and
+                # paused-state surfacing point at that session. That is right
                 # for a continuation; do not "fix" it to the fork's own id.
                 #
                 # Normal resume: model retains context, team exists. A compact

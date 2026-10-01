@@ -547,7 +547,7 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
             # SESSION_START block surfaces during testing instead of silently
             # degrading to the fallback.
             print(
-                "session_init: _extract_prev_session_dir regex failed on "
+                "session_resume: _extract_prev_session_dir regex failed on "
                 "existing CLAUDE.md, falling back to Resume-line; file may "
                 "have unexpected format",
                 file=sys.stderr,
