@@ -10,17 +10,18 @@ lead-gated:
   telegram/ (plus a text scan of their non-Python, non-markdown files), each
   compared with a known set, so a new site fails with instructions:
   references to the write APIs (a call, a functools.partial or an assignment,
-  through an import alias too); references to build_context_cache, whose
-  returned path a writer could use without naming the file; code strings
-  naming the file; uses of the context module's path global; and relocation
-  or link calls (os.symlink, os.link, Path.symlink_to, Path.hardlink_to: the
-  recovery check's is_file() follows a link), through a module alias or a
-  from-import too, in functions that derive a session path. Each scan has a
-  seeded positive control, and every directory of shipped code must be a scan
-  root. Not covered: markdown instruction files (all of them only read the
-  file today); a relocation whose path reaches the function under a name that
-  does not mark it as a session path; and a filename split across string
-  parts, which only deliberate construction produces.
+  through an import alias too); references to build_context_cache and to
+  _get_context_file_path, each of which returns a path a writer could use
+  without naming the file; code strings naming the file; uses of the context
+  module's path global; and relocation or link calls (os.symlink, os.link,
+  Path.symlink_to, Path.hardlink_to: the recovery check's is_file() follows a
+  link), through a module alias or a from-import too, in functions that derive
+  a session path. Each scan has a seeded positive control, and every directory
+  of shipped code must be a scan root. Not covered: markdown instruction files
+  (all of them only read the file today); a relocation whose path reaches the
+  function under a name that does not mark it as a session path; and a
+  filename split across string parts, which only deliberate construction
+  produces.
 - BEHAVIOUR: each known writer, driven for a non-lead frame, writes nothing,
   while a lead control on the same setup writes the file.
 """
@@ -43,7 +44,8 @@ _ROOTS = ("hooks", "skills", "scripts", "bin", "telegram")
 FILENAME = "pact-session-context.json"
 _WRITE_APIS = frozenset({"persist_context", "write_context"})
 _PATH_BUILDER = "build_context_cache"
-_TRACKED_APIS = _WRITE_APIS | {_PATH_BUILDER}
+_PATH_ACCESSOR = "_get_context_file_path"
+_TRACKED_APIS = _WRITE_APIS | {_PATH_BUILDER, _PATH_ACCESSOR}
 _CONTEXT_MODULE = "hooks/shared/pact_context.py"
 
 # Relocation and link calls: module functions, Path's link methods, Path.rename,
@@ -78,6 +80,12 @@ KNOWN_WRITE_CALLS = frozenset({
 KNOWN_PATH_BUILDER_CALLS = frozenset({
     ("hooks/session_init.py", "main"),
     ("hooks/shared/pact_context.py", "write_context"),
+})
+
+# (file, enclosing function) of every reference to _get_context_file_path,
+# which returns the same path once init() has run.
+KNOWN_PATH_ACCESSOR_REFS = frozenset({
+    ("hooks/shared/pact_context.py", "get_pact_context"),  # reads the file
 })
 
 # (file, enclosing function) of every code string naming the file. Each one
@@ -256,8 +264,8 @@ def _python_census(plugin):
     """Return a dict of the scan's results over ``plugin``'s scan roots."""
     found = {
         "scanned": {root: 0 for root in _ROOTS}, "write_calls": set(),
-        "path_builder_calls": set(), "name_sites": set(), "path_refs": set(),
-        "relocations": set(),
+        "path_builder_calls": set(), "path_accessor_refs": set(),
+        "name_sites": set(), "path_refs": set(), "relocations": set(),
     }
     for root in _ROOTS:
         for path in _shipped(plugin / root, "*.py"):
@@ -267,8 +275,10 @@ def _python_census(plugin):
             for rel, where, api in census.api_refs:
                 if api in _WRITE_APIS:
                     found["write_calls"].add((rel, where, api))
-                else:
+                elif api == _PATH_BUILDER:
                     found["path_builder_calls"].add((rel, where))
+                else:
+                    found["path_accessor_refs"].add((rel, where))
             found["name_sites"] |= census.name_sites
             found["path_refs"] |= census.path_refs
             found["relocations"] |= census.relocations
@@ -334,6 +344,8 @@ class TestCensus:
             "def via_builder():\n"
             "    target, context = pact_context.build_context_cache('t', 's', 'p', 'r')\n"
             "    target.write_text(str(context))\n\n"
+            "def via_accessor():\n"
+            "    pact_context._get_context_file_path().write_text('{}')\n\n"
             "def direct(session_dir):\n"
             "    (Path(session_dir) / f'pact-session-context.json').write_text('{}')\n\n"
             "def via_global():\n"
@@ -364,6 +376,9 @@ class TestCensus:
             ("hooks/seeded.py", "via_assignment", "persist_context"),
         }
         assert found["path_builder_calls"] == {("hooks/seeded.py", "via_builder")}
+        assert found["path_accessor_refs"] == {
+            ("hooks/seeded.py", "via_accessor"),
+        }
         assert found["name_sites"] == {("hooks/seeded.py", "direct")}
         assert found["path_refs"] == {("hooks/seeded.py", "via_global")}
         assert found["relocations"] == {
@@ -415,6 +430,13 @@ class TestCensus:
         assert calls == KNOWN_PATH_BUILDER_CALLS, (
             f"new: {sorted(calls - KNOWN_PATH_BUILDER_CALLS)}; "
             f"gone: {sorted(KNOWN_PATH_BUILDER_CALLS - calls)}. {_INSTRUCTION}"
+        )
+
+    def test_every_reference_to_the_path_accessor_is_known(self):
+        refs = _python_census(_PLUGIN)["path_accessor_refs"]
+        assert refs == KNOWN_PATH_ACCESSOR_REFS, (
+            f"new: {sorted(refs - KNOWN_PATH_ACCESSOR_REFS)}; "
+            f"gone: {sorted(KNOWN_PATH_ACCESSOR_REFS - refs)}. {_INSTRUCTION}"
         )
 
     def test_every_code_string_naming_the_file_is_known(self):
