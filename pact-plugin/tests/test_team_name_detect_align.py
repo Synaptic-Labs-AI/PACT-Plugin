@@ -739,6 +739,14 @@ class TestWriteBackTwoFileConsistency:
             lambda project_dir: (present_md, "test"),
         )
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "project"))
+        # A session_init-recorded lead: with no session_start the CLAUDE.md
+        # write is left to bootstrap_prompt_gate.
+        from shared.session_journal import append_event, make_event
+        assert append_event(
+            make_event("session_start", session_id=LEAD_SID,
+                       project_dir=str(tmp_path / "project"), source="startup"),
+            session_dir=str(tmp_path / "sess"),
+        )
 
         bmw._write_back_aligned_team_name()
 

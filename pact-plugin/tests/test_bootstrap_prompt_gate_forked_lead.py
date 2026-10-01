@@ -37,6 +37,7 @@ _NOTE = (
     "in this session, does not apply.\n\n"
 )
 _NO_ROLE_MARK = "PACT cannot dispatch specialist agents in this session"
+_SESSION_VALUES_MARK = "These replace any session values earlier in this conversation."
 _SUPPRESS = {
     "suppressOutput": True,
     "hookSpecificOutput": {"hookEventName": "UserPromptSubmit"},
@@ -101,12 +102,18 @@ def test_note_is_prepended_only_while_the_journal_has_no_session_start(tmp_path,
     assert context_file.exists(), "the heal must restore the missing context file"
 
     # Control: the same lead in the same session once SessionStart treated it
-    # as the lead. Only the note differs, byte for byte.
+    # as the lead. The unrecorded prompt differs only by the note before the
+    # instruction and the session values after it.
     _append_session_start(home, sid)
     with_anchor = _gate_context(sid, lead, home, env)
     assert with_anchor.startswith("REQUIRED: Before responding to this message")
     assert _NOTE.strip() not in with_anchor
-    assert without_anchor == _NOTE + with_anchor
+    assert _SESSION_VALUES_MARK not in with_anchor
+    assert without_anchor.startswith(_NOTE + with_anchor + "\n\n")
+    values = without_anchor[len(_NOTE + with_anchor + "\n\n"):]
+    assert values.startswith("Session placeholder variables")
+    assert f"`session-{sid[:8]}`" in values
+    assert values.endswith(_SESSION_VALUES_MARK)
 
 
 def test_note_does_not_depend_on_which_hook_healed_the_context(tmp_path):

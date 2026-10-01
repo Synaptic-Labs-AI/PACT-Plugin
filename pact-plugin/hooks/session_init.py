@@ -132,6 +132,7 @@ from shared.merge_guard_common import (
     cleanup_orphan_tokens as _cleanup_orphan_tokens,
 )
 from shared.session_resume import (
+    RESUMPTION_MARKER_MISSING_DIRECTIVE,
     _extract_prev_session_dir,
     _validate_under_pact_sessions,  # noqa: F401  # re-export: tests import it from session_init
     format_session_substitutions,
@@ -170,11 +171,13 @@ _INPROCESS_MODE_NOTICE = (
 # agent_type, so classify_session_role() returns "unknown". session_init gives
 # that frame _UNKNOWN_FRAME_CONTEXT and writes nothing into its project. A lead
 # resumed (not forked) without `--agent` also arrives with no agent_type at
-# SessionStart; its own session dir holds the context file only a lead writes,
-# so session_init recovers it as the lead (_lead_context_persisted) and it gets
-# neither channel. A lead forked without `--agent` has a new session id that
-# holds no such file, so it stays unknown here and gets both channels;
-# bootstrap_prompt_gate corrects it at its first prompt. The notice rides TWO
+# SessionStart; while its own session dir still holds the context file only a
+# lead writes, session_init recovers it as the lead (_lead_context_persisted)
+# and it gets neither channel. A lead forked without `--agent` has a new
+# session id that holds no such file, and a resumed lead whose dir was reaped
+# or whose project moved has lost it, so each stays unknown here and gets both
+# channels; bootstrap_prompt_gate recognises and records it as the lead at its
+# first prompt. The notice rides TWO
 # CHANNELS, AND EACH CHANNEL HAS ITS OWN POPULATION, BECAUSE THE GATES USE
 # DIFFERENT PREDICATES. Do not state one population for the pair.
 #   systemMessage: on a launch event (_LAUNCH_SOURCES), for an unknown
@@ -193,6 +196,12 @@ _UNKNOWN_ROLE_NOTICE = (
     "unrecognized agent_type), so lead-only session setup was skipped. If you "
     "meant to drive PACT as the orchestrator, relaunch with "
     "`--agent PACT:pact-orchestrator`."
+)
+
+# Follows the notice on a fork, which a forked lead also receives.
+_FORK_RECOGNISED_LATER = (
+    "A fork of a PACT lead session is recognised as the lead at its first "
+    "prompt; no relaunch is needed."
 )
 
 _UNKNOWN_FRAME_CONTEXT = (
@@ -668,7 +677,12 @@ def _unknown_frame_output(source: str) -> dict:
     written into the project.
     """
     system_messages = []
-    if source in _LAUNCH_SOURCES:
+    if source == "fork":
+        # A forked lead looks like a plain fork here, so the notice stays
+        # conditional; its first prompt carries the lead agent_type, and
+        # bootstrap_prompt_gate records it as the lead then.
+        system_messages.append(f"{_UNKNOWN_ROLE_NOTICE} {_FORK_RECOGNISED_LATER}")
+    elif source in _LAUNCH_SOURCES:
         system_messages.append(_UNKNOWN_ROLE_NOTICE)
     symlink_result = setup_plugin_symlinks()
     if symlink_result and "failed" in symlink_result.lower():
@@ -723,8 +737,10 @@ def _lead_context_persisted(session_id, project_dir: str) -> bool:
     frame_is_lead, and the context heal is is_lead-gated), so its presence
     under this session's own id means a lead ran here. A lead resumed (not
     forked) without `--agent` carries no agent_type at SessionStart only; this
-    is how it is recognised. A fork has a new session id, so it is not.
-    Fail-closed: any error reads as absent.
+    is how it is recognised, while its own session dir still holds the file.
+    A fork has a new session id, and a reaped dir or a moved project has lost
+    the file, so neither is recognised here; bootstrap_prompt_gate records
+    both at their first prompt. Fail-closed: any error reads as absent.
     """
     if _is_unknown_or_missing_session(session_id) or not project_dir:
         return False
@@ -2268,15 +2284,7 @@ def main():
                         "read conclusions reached during the arc they are "
                         "resuming."
                     )
-                    context_parts.append(
-                        "RESUMPTION MARKER MISSING: this session resumes an "
-                        "interrupted workstream, but the marker the secretary "
-                        "reads at spawn was not recorded. Tell the secretary "
-                        "NOT to rebuild the Working Memory block, in its spawn "
-                        "dispatch. Without that the block is rebuilt from the "
-                        "store, and agents spawned to judge this arc read the "
-                        "arc's own conclusions."
-                    )
+                    context_parts.append(RESUMPTION_MARKER_MISSING_DIRECTIVE)
 
         # Cross-session backlog. Deliberately OUTSIDE the frame_is_lead block:
         # every frame that reaches this point (lead, teammate, and a frame whose

@@ -34,6 +34,7 @@ import pytest
 
 import session_init  # noqa: E402
 from session_init import (  # noqa: E402
+    _FORK_RECOGNISED_LATER,
     _UNKNOWN_FRAME_CONTEXT,
     _UNKNOWN_ROLE_NOTICE,
     _UNRESOLVED_ROLE_CUE,
@@ -251,7 +252,11 @@ class TestUnknownFrameOutputIsExact:
             "hookEventName": "SessionStart",
             "additionalContext": _UNKNOWN_FRAME_CONTEXT,
         }
-        if source in ("startup", "resume", "fork"):
+        if source == "fork":
+            assert output.get("systemMessage") == (
+                f"{_UNKNOWN_ROLE_NOTICE} {_FORK_RECOGNISED_LATER}"
+            )
+        elif source in ("startup", "resume"):
             assert output.get("systemMessage") == _UNKNOWN_ROLE_NOTICE
         else:
             assert "systemMessage" not in output, output.get("systemMessage")

@@ -1077,6 +1077,21 @@ def _interpret_paused_event(event: dict) -> str | None:
     )
 
 
+# Added to the lead's context when a resumption claim surfaced but the
+# session_resumption_surfaced journal write failed. Both sites that surface a
+# claim use it: session_init step 8, and bootstrap_prompt_gate when it records
+# a lead session_init did not.
+RESUMPTION_MARKER_MISSING_DIRECTIVE = (
+    "RESUMPTION MARKER MISSING: this session resumes an "
+    "interrupted workstream, but the marker the secretary "
+    "reads at spawn was not recorded. Tell the secretary "
+    "NOT to rebuild the Working Memory block, in its spawn "
+    "dispatch. Without that the block is rebuilt from the "
+    "store, and agents spawned to judge this arc read the "
+    "arc's own conclusions."
+)
+
+
 def check_resume_state(
     prev_session_dir: str | None = None,
 ) -> str | None:

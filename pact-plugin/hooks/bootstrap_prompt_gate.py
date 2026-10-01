@@ -8,8 +8,10 @@ Used by: hooks.json UserPromptSubmit hook (no matcher — fires on every prompt)
 Layer 2 of the four-layer bootstrap gate enforcement (#401). On each user
 message, checks for the session-scoped bootstrap-complete marker file:
   - Marker exists → suppressOutput (zero tokens, sub-ms)
-  - No marker + PACT team-lead session (is_lead) → inject additionalContext instructing bootstrap,
-    prefixed with a lead note when the session journal has no session_start event
+  - No marker + PACT team-lead session (is_lead) → inject additionalContext instructing bootstrap.
+    When the session journal has no session_start event (session_init did not
+    record this lead), the instruction is prefixed with a lead note, and the
+    lead is recorded here instead: see _record_unrecorded_lead
   - Non-PACT session (no context file) → no-op passthrough
   - Non-lead / plain primary frame (not is_lead) → no-op passthrough
     (NOT a teammate: teammates have no UserPromptSubmit-fire path)
@@ -128,13 +130,15 @@ _SESSION_DIR_HINT = (
 
 # Prepended for a lead whose session journal has no session_start event.
 # session_init writes that event only for a frame it treats as the lead, so a
-# lead without one either was not recognised at SessionStart (a fork without
-# `--agent`, which got the no-role notice) or did not reach the journal write
-# (session_init raised, no session id, or input that did not parse; each got the
-# ladder). The note is true in every case: its second sentence speaks only of a
-# notice, so it is vacuous where none was given. Keyed on the journal, not on the
-# heal's return: the marker writer heals the same file in parallel and can win
-# that race.
+# lead without one either was not recognised at SessionStart or did not reach
+# the journal write. Not recognised: a fork without `--agent`, or a lead resumed
+# without `--agent` whose own session dir no longer holds its context file
+# (reaped after the TTL, or the project moved); each got the no-role notice.
+# Did not reach the write: session_init raised, had no session id, or got input
+# that did not parse; each got the ladder. The note is true in every case: its
+# second sentence speaks only of a notice, so it is vacuous where none was
+# given. Keyed on the journal, not on the heal's return: the marker writer heals
+# the same file in parallel and can win that race.
 _NOT_TREATED_AS_LEAD_NOTE = (
     "This session is the PACT team-lead. Any startup notice saying it has no "
     "recognized agent role, or that PACT cannot dispatch specialist agents "
@@ -194,16 +198,126 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
         return None
 
     # Lead session, no marker → inject bootstrap instruction with session
-    # dir, composed with the staleness advisory (or "") by concatenation.
-    # Staleness runs ONLY here (lead + no-marker): the marker-set fast path
-    # above keeps its zero-tokens/sub-ms contract (no per-prompt file read),
-    # and a marker-set session has by definition completed bootstrap.
+    # dir. Both branches run ONLY here (lead + no-marker): the marker-set fast
+    # path above keeps its zero-tokens/sub-ms contract (no per-prompt file
+    # read), and a marker-set session has by definition completed bootstrap.
     instruction = _BOOTSTRAP_INSTRUCTION_TEMPLATE.format(
         session_dir_hint=_SESSION_DIR_HINT.format(session_dir=session_dir)
-    ) + (_detect_stale_session_block(input_data) or "")
-    if read_last_event_from(session_dir, "session_start") is None:
-        instruction = _NOT_TREATED_AS_LEAD_NOTE + instruction
-    return instruction
+    )
+    if read_last_event_from(session_dir, "session_start") is not None:
+        # Recorded by session_init (or by an earlier prompt here): append the
+        # staleness advisory (or "").
+        return instruction + (_detect_stale_session_block(input_data) or "")
+    # Not recorded: session_init's block, journal anchor, worktree record and
+    # session values are missing or name another session, so record them now.
+    # No staleness advisory: the block is replaced below.
+    return (
+        _NOT_TREATED_AS_LEAD_NOTE
+        + instruction
+        + _record_unrecorded_lead(input_data, session_dir)
+    )
+
+
+def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
+    """Record a lead session_init did not record; return what follows the
+    instruction.
+
+    Reached on a lead prompt with no bootstrap marker and no session_start in
+    the journal. The session_start written here closes that branch, so this
+    runs once per session. In order:
+
+    1. If the project CLAUDE.md holds a Current Session block (both markers),
+       read it. When the block names another session, read that session's
+       pause or refresh claim. Then replace the block with this session's
+       values (every field can be stale: the session id, the team, or the
+       Session dir of a project that moved). A file with no block, and a
+       missing file, are left alone: this never creates or migrates CLAUDE.md.
+    2. Record the worktree identity, as session_init does for a lead.
+    3. Append session_start (source "prompt") and, when a claim was read,
+       session_resumption_surfaced. Both follow every read above.
+       bootstrap_marker_writer leaves this lead's block alone until it sees a
+       session_start, so whichever hook runs first, the old block is read
+       before anything replaces it.
+
+    Returns the session-value sentence, followed by the claim. A fork's
+    transcript carries its parent's session values, so the sentence says that
+    these replace them. Never raises: on any error it returns "", and the note
+    and instruction still go out.
+    """
+    if pact_context._is_unknown_or_missing_session(input_data.get("session_id")):
+        return ""
+    try:
+        # Imported here: this branch runs once per session, and the modules
+        # below are not needed on any other prompt.
+        import os
+
+        from shared.claude_md_manager import (
+            SESSION_END_MARKER,
+            SESSION_START_MARKER,
+            resolve_project_claude_md_path,
+        )
+        from shared.project_scope import _record_worktree_identity
+        from shared.session_journal import append_event, make_event
+        from shared.session_resume import (
+            RESUMPTION_MARKER_MISSING_DIRECTIVE,
+            _extract_prev_session_dir,
+            check_resume_state,
+            format_session_substitutions,
+            update_session_info,
+        )
+        from shared.stale_session import _RESUME_LINE_RE
+
+        session_id = str(input_data["session_id"])
+        team = pact_context.get_team_name()
+        plugin_root = pact_context.get_plugin_root()
+        # update_session_info writes the file CLAUDE_PROJECT_DIR names, so the
+        # block is looked for there, through the same resolver.
+        env_project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+        project_dir = env_project_dir or os.getcwd()
+
+        claim = None
+        if env_project_dir:
+            claude_md, source = resolve_project_claude_md_path(env_project_dir)
+            content = (
+                "" if source == "new_default"
+                else claude_md.read_text(encoding="utf-8")
+            )
+            if SESSION_START_MARKER in content and SESSION_END_MARKER in content:
+                recorded = _RESUME_LINE_RE.search(content)
+                if recorded is None or recorded.group(1) != session_id:
+                    claim = check_resume_state(
+                        _extract_prev_session_dir(env_project_dir)
+                    )
+                update_session_info(session_id, team, session_dir, plugin_root)
+        _record_worktree_identity(session_id, project_dir)
+        append_event(
+            make_event(
+                "session_start",
+                team=team,
+                session_id=session_id,
+                project_dir=project_dir,
+                worktree="",
+                source="prompt",
+            ),
+            session_dir=session_dir,
+        )
+        parts = [
+            format_session_substitutions(team, session_dir, plugin_root)
+            + " These replace any session values earlier in this conversation."
+        ]
+        if claim:
+            parts.append(claim)
+            if not append_event(
+                make_event("session_resumption_surfaced"), session_dir=session_dir
+            ):
+                parts.append(RESUMPTION_MARKER_MISSING_DIRECTIVE)
+        return "\n\n" + "\n\n".join(parts)
+    except Exception as e:  # noqa: BLE001 — never block the instruction
+        print(
+            f"bootstrap_prompt_gate: could not record this lead session: {e}",
+            file=sys.stderr,
+        )
+        return ""
 
 
 def main():
