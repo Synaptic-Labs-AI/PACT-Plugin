@@ -5,16 +5,24 @@ that a lead ran there: a lead resumed without `--agent` is recovered from it. So
 a writer that runs for a teammate or a no-role session would let that session be
 treated as the lead. Two pins keep every writer lead-gated:
 
-- CENSUS: every shipped site that calls a context write API, names the file in
-  code, or reaches the context module's path global, compared with a known set.
-  A new site fails with instructions. Each scan has a positive control that
-  seeds a writer it must find.
+- CENSUS, over the shipped Python under hooks/, skills/, scripts/, bin/ and
+  telegram/ (plus a text scan of their non-Python, non-markdown files), each
+  compared with a known set, so a new site fails with instructions:
+  calls to the write APIs (through an import alias too); callers of
+  build_context_cache, whose returned path a writer could use without naming
+  the file; code strings naming the file; uses of the context module's path
+  global; and relocation calls in functions that derive a session path. Each
+  scan has a seeded positive control, and every directory of shipped code must
+  be a scan root. Not covered: markdown instruction files (all of them only
+  read the file today), and a relocation whose path reaches the function
+  under a name that does not mark it as a session path.
 - BEHAVIOUR: each known writer, driven for a non-lead frame, writes nothing,
   while a lead control on the same setup writes the file.
 """
 import ast
 import io
 import json
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -29,7 +37,23 @@ _PLUGIN = Path(__file__).resolve().parent.parent
 _ROOTS = ("hooks", "skills", "scripts", "bin", "telegram")
 FILENAME = "pact-session-context.json"
 _WRITE_APIS = frozenset({"persist_context", "write_context"})
+_PATH_BUILDER = "build_context_cache"
+_TRACKED_APIS = _WRITE_APIS | {_PATH_BUILDER}
 _CONTEXT_MODULE = "hooks/shared/pact_context.py"
+
+# Relocation calls: module functions, Path.rename, and Path.replace, which takes
+# one argument where str.replace takes two.
+_MODULE_RELOCATIONS = frozenset({
+    ("os", "rename"), ("os", "replace"), ("os", "renames"),
+    ("shutil", "move"), ("shutil", "copytree"), ("shutil", "copy"),
+    ("shutil", "copy2"), ("shutil", "copyfile"),
+})
+# What marks a function as deriving a session path.
+_SESSION_PATH_CALLS = frozenset({
+    "build_session_path", "_build_session_path", "project_slug",
+    "get_session_dir", "reconstruct_session_dir",
+})
+_SESSION_PATH_NAMES = ("session_dir", "session_path", "session_folder")
 
 # (file, enclosing function, write API called). The three lead-gated writers,
 # plus write_context itself, which is persist_context behind a path builder.
@@ -38,6 +62,13 @@ KNOWN_WRITE_CALLS = frozenset({
     ("hooks/shared/pact_context.py", "heal_context_if_missing", "write_context"),
     ("hooks/bootstrap_marker_writer.py", "_write_back_aligned_team_name", "write_context"),
     ("hooks/shared/pact_context.py", "write_context", "persist_context"),
+})
+
+# (file, enclosing function) of every caller of build_context_cache, which
+# returns the context file's path. Both pass it straight to persist_context.
+KNOWN_PATH_BUILDER_CALLS = frozenset({
+    ("hooks/session_init.py", "main"),
+    ("hooks/shared/pact_context.py", "write_context"),
 })
 
 # (file, enclosing function) of every code string naming the file. Each one
@@ -55,26 +86,87 @@ KNOWN_NAME_SITES = frozenset({
     ("skills/pact-memory/scripts/pact_session.py", "_context_record_on_disk"),  # read
 })
 
+# (file, function, call) of every relocation in a function that derives a
+# session path. None can put a context file under a session id that lacks one.
+KNOWN_SESSION_RELOCATIONS = frozenset({
+    # Moves a session's whole dir from the old slug to the resolved one. It
+    # keeps the session id, so it carries only a file already written under it.
+    ("hooks/session_init.py", "_adopt_old_slug_session_dir", "os.rename"),
+    # Moves the compact summary to an archive name inside the session's own dir.
+    ("hooks/session_init.py", "_archive_own_dir_stale_summary", "Path.replace"),
+    # The bootstrap marker's atomic temp-file write.
+    ("hooks/bootstrap_marker_writer.py", "_write_marker", "os.replace"),
+    # The teammate registry's atomic rewrite under pact-sessions/.
+    ("hooks/session_end.py", "_prune_registry_dead_teams", "os.replace"),
+})
+
 _INSTRUCTION = (
     "session_init treats pact-session-context.json in a session's own dir as "
-    "proof that a lead ran there. If the new site WRITES the file, gate it on "
-    "the lead (frame_is_lead / pact_context.is_lead) and add a behaviour arm "
-    "below, then add the site to the known set. If it only reads or names the "
-    "file, add it to the known set with a comment saying so."
+    "proof that a lead ran there. If the new site WRITES or MOVES the file, gate "
+    "it on the lead (frame_is_lead / pact_context.is_lead) and add a behaviour "
+    "arm below, then add the site to the known set. If it only reads, names or "
+    "moves something else, add it to the known set with a comment saying so."
 )
 
 
-class _Census(ast.NodeVisitor):
-    """Collect write-API calls, code strings naming the file, and uses of the
-    context module's path global, keyed by (file, enclosing function)."""
+def _relocation(call):
+    func = call.func
+    if not isinstance(func, ast.Attribute):
+        return None
+    if isinstance(func.value, ast.Name) and (func.value.id, func.attr) in _MODULE_RELOCATIONS:
+        return f"{func.value.id}.{func.attr}"
+    if func.attr == "rename" and len(call.args) == 1:
+        return "Path.rename"
+    if func.attr == "replace" and len(call.args) == 1 and not call.keywords:
+        return "Path.replace"
+    return None
 
-    def __init__(self, rel):
+
+def _own_nodes(function):
+    """The nodes of ``function`` itself, not of functions or classes nested in it."""
+    pending = list(ast.iter_child_nodes(function))
+    while pending:
+        node = pending.pop()
+        yield node
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            pending.extend(ast.iter_child_nodes(node))
+
+
+def _derives_a_session_path(function):
+    names = [a.arg for a in function.args.args + function.args.kwonlyargs]
+    for node in _own_nodes(function):
+        if isinstance(node, ast.Call):
+            func = node.func
+            called = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if called in _SESSION_PATH_CALLS:
+                return True
+        elif isinstance(node, ast.Name):
+            names.append(node.id)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and "pact-sessions" in node.value:
+            return True
+    return any(marker in name for name in names for marker in _SESSION_PATH_NAMES)
+
+
+class _Census(ast.NodeVisitor):
+    """Collect tracked-API calls, code strings naming the file, uses of the
+    context module's path global, and session-path relocations, keyed by
+    (file, enclosing function)."""
+
+    def __init__(self, rel, tree):
         self.rel = rel
         self.stack = []
         self.docstrings = set()
-        self.write_calls = set()
+        self.api_calls = set()
         self.name_sites = set()
         self.path_refs = set()
+        self.relocations = set()
+        # `from ... import persist_context as _persist` binds a second name.
+        self.aliases = {api: api for api in _TRACKED_APIS}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    if alias.name in _TRACKED_APIS:
+                        self.aliases[alias.asname or alias.name] = alias.name
 
     def _where(self):
         return ".".join(self.stack) or "<module>"
@@ -91,6 +183,10 @@ class _Census(ast.NodeVisitor):
     def _visit_scope(self, node):
         self._note_docstring(node)
         self.stack.append(node.name)
+        if not isinstance(node, ast.ClassDef) and _derives_a_session_path(node):
+            for inner in _own_nodes(node):
+                if isinstance(inner, ast.Call) and _relocation(inner):
+                    self.relocations.add((self.rel, self._where(), _relocation(inner)))
         self.generic_visit(node)
         self.stack.pop()
 
@@ -102,8 +198,8 @@ class _Census(ast.NodeVisitor):
             func.id if isinstance(func, ast.Name)
             else func.attr if isinstance(func, ast.Attribute) else None
         )
-        if name in _WRITE_APIS:
-            self.write_calls.add((self.rel, self._where(), name))
+        if name in self.aliases:
+            self.api_calls.add((self.rel, self._where(), self.aliases[name]))
         self.generic_visit(node)
 
     def visit_Constant(self, node):
@@ -132,23 +228,32 @@ def _shipped(root, pattern):
 
 
 def _python_census(plugin):
-    """Return (files scanned, write calls, name sites, path-global refs)."""
-    census_sets = (set(), set(), set())
-    scanned = 0
+    """Return a dict of the scan's results over ``plugin``'s scan roots."""
+    found = {
+        "scanned": {root: 0 for root in _ROOTS}, "write_calls": set(),
+        "path_builder_calls": set(), "name_sites": set(), "path_refs": set(),
+        "relocations": set(),
+    }
     for root in _ROOTS:
         for path in _shipped(plugin / root, "*.py"):
-            census = _Census(path.relative_to(plugin).as_posix())
-            census.visit(ast.parse(path.read_text(encoding="utf-8")))
-            census_sets[0].update(census.write_calls)
-            census_sets[1].update(census.name_sites)
-            census_sets[2].update(census.path_refs)
-            scanned += 1
-    return (scanned, *census_sets)
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            census = _Census(path.relative_to(plugin).as_posix(), tree)
+            census.visit(tree)
+            for rel, where, api in census.api_calls:
+                if api in _WRITE_APIS:
+                    found["write_calls"].add((rel, where, api))
+                else:
+                    found["path_builder_calls"].add((rel, where))
+            found["name_sites"] |= census.name_sites
+            found["path_refs"] |= census.path_refs
+            found["relocations"] |= census.relocations
+            found["scanned"][root] += 1
+    return found
 
 
 def _text_census(plugin):
-    """Return (files scanned, non-Python, non-markdown files naming the file)."""
-    hits, scanned = set(), 0
+    """Return ({root: files scanned}, non-Python, non-markdown files naming the file)."""
+    hits, scanned = set(), {root: 0 for root in _ROOTS}
     for root in _ROOTS:
         for path in _shipped(plugin / root, "*"):
             if path.suffix in (".py", ".md", ".pyc"):
@@ -157,55 +262,119 @@ def _text_census(plugin):
                 text = path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 continue
-            scanned += 1
+            scanned[root] += 1
             if FILENAME in text:
                 hits.add(path.relative_to(plugin).as_posix())
     return scanned, hits
 
 
+def _code_bearing_dirs(plugin):
+    """Top-level plugin dirs, other than tests/, holding Python or an executable."""
+    dirs = set()
+    for child in plugin.iterdir():
+        if not child.is_dir() or child.name in ("tests", "__pycache__") or child.name.startswith("."):
+            continue
+        for path in child.rglob("*"):
+            if path.is_file() and "__pycache__" not in path.parts and (
+                path.suffix == ".py" or os.access(path, os.X_OK)
+            ):
+                dirs.add(child.name)
+                break
+    return dirs
+
+
 class TestCensus:
-    def test_the_python_census_finds_a_seeded_writer(self, tmp_path):
-        """Positive control: both a write-API writer and a writer that builds the
-        path itself, in a seeded hook module, are found."""
+    def test_the_python_census_finds_every_seeded_writer_shape(self, tmp_path):
+        """Positive control: one seeded hook module per writer shape, each found."""
         hooks = tmp_path / "hooks"
         hooks.mkdir()
         (hooks / "seeded.py").write_text(
+            "import os\n"
             "from pathlib import Path\n"
-            "import shared.pact_context as pact_context\n\n"
+            "import shared.pact_context as pact_context\n"
+            "from shared.pact_context import persist_context as _persist\n\n"
             "def via_api():\n"
             "    pact_context.write_context('t', 's', 'p', 'r')\n\n"
+            "def via_alias(target, context):\n"
+            "    _persist(target, context)\n\n"
+            "def via_builder():\n"
+            "    target, context = pact_context.build_context_cache('t', 's', 'p', 'r')\n"
+            "    target.write_text(str(context))\n\n"
             "def direct(session_dir):\n"
-            "    (Path(session_dir) / f'pact-session-context.json').write_text('{}')\n"
+            "    (Path(session_dir) / f'pact-session-context.json').write_text('{}')\n\n"
+            "def via_global():\n"
+            "    pact_context._context_path.write_text('{}')\n\n"
+            "def relocated(old_session_dir, new_session_dir):\n"
+            "    os.rename(old_session_dir, new_session_dir)\n"
         )
-        scanned, write_calls, name_sites, _ = _python_census(tmp_path)
-        assert scanned == 1
-        assert write_calls == {("hooks/seeded.py", "via_api", "write_context")}
-        assert name_sites == {("hooks/seeded.py", "direct")}
+        found = _python_census(tmp_path)
+        assert found["scanned"]["hooks"] == 1
+        assert found["write_calls"] == {
+            ("hooks/seeded.py", "via_api", "write_context"),
+            ("hooks/seeded.py", "via_alias", "persist_context"),
+        }
+        assert found["path_builder_calls"] == {("hooks/seeded.py", "via_builder")}
+        assert found["name_sites"] == {("hooks/seeded.py", "direct")}
+        assert found["path_refs"] == {("hooks/seeded.py", "via_global")}
+        assert found["relocations"] == {("hooks/seeded.py", "relocated", "os.rename")}
+
+    def test_a_str_replace_is_not_a_relocation(self, tmp_path):
+        """Path.replace takes one argument; str.replace takes two."""
+        hooks = tmp_path / "hooks"
+        hooks.mkdir()
+        (hooks / "seeded.py").write_text(
+            "def f(session_dir):\n"
+            "    return str(session_dir).replace('a', 'b')\n"
+        )
+        assert _python_census(tmp_path)["relocations"] == set()
 
     def test_the_known_writers_are_found_in_the_shipped_tree(self):
-        scanned, write_calls, _, _ = _python_census(_PLUGIN)
-        assert scanned > 50, f"the census scanned only {scanned} files"
-        assert ("hooks/session_init.py", "main", "persist_context") in write_calls, (
+        found = _python_census(_PLUGIN)
+        assert sum(found["scanned"].values()) > 50, found["scanned"]
+        assert ("hooks/session_init.py", "main", "persist_context") in found["write_calls"], (
             "the census cannot see session_init's writer, so it cannot see a new one"
         )
 
+    def test_every_directory_of_shipped_code_is_scanned(self):
+        """A scan root that is dropped or misspelled would blind the census."""
+        python_scanned = _python_census(_PLUGIN)["scanned"]
+        text_scanned, _ = _text_census(_PLUGIN)
+        for root in _ROOTS:
+            assert python_scanned[root] + text_scanned[root] > 0, f"{root}/ scanned no files"
+        missing = _code_bearing_dirs(_PLUGIN) - set(_ROOTS)
+        assert not missing, f"shipped code outside the scan roots: {sorted(missing)}"
+
     def test_every_write_api_call_is_a_known_lead_gated_writer(self):
-        _, write_calls, _, _ = _python_census(_PLUGIN)
+        write_calls = _python_census(_PLUGIN)["write_calls"]
         assert write_calls == KNOWN_WRITE_CALLS, (
             f"new: {sorted(write_calls - KNOWN_WRITE_CALLS)}; "
             f"gone: {sorted(KNOWN_WRITE_CALLS - write_calls)}. {_INSTRUCTION}"
         )
 
+    def test_every_caller_of_the_path_builder_is_known(self):
+        calls = _python_census(_PLUGIN)["path_builder_calls"]
+        assert calls == KNOWN_PATH_BUILDER_CALLS, (
+            f"new: {sorted(calls - KNOWN_PATH_BUILDER_CALLS)}; "
+            f"gone: {sorted(KNOWN_PATH_BUILDER_CALLS - calls)}. {_INSTRUCTION}"
+        )
+
     def test_every_code_string_naming_the_file_is_known(self):
-        _, _, name_sites, _ = _python_census(_PLUGIN)
+        name_sites = _python_census(_PLUGIN)["name_sites"]
         assert name_sites == KNOWN_NAME_SITES, (
             f"new: {sorted(name_sites - KNOWN_NAME_SITES)}; "
             f"gone: {sorted(KNOWN_NAME_SITES - name_sites)}. {_INSTRUCTION}"
         )
 
     def test_nothing_outside_the_context_module_reaches_its_path_global(self):
-        _, _, _, path_refs = _python_census(_PLUGIN)
+        path_refs = _python_census(_PLUGIN)["path_refs"]
         assert path_refs == set(), f"{sorted(path_refs)}. {_INSTRUCTION}"
+
+    def test_every_session_path_relocation_is_known(self):
+        relocations = _python_census(_PLUGIN)["relocations"]
+        assert relocations == KNOWN_SESSION_RELOCATIONS, (
+            f"new: {sorted(relocations - KNOWN_SESSION_RELOCATIONS)}; "
+            f"gone: {sorted(KNOWN_SESSION_RELOCATIONS - relocations)}. {_INSTRUCTION}"
+        )
 
     def test_the_text_census_finds_a_seeded_shell_writer(self, tmp_path):
         """Positive control for the non-Python scan."""
@@ -214,11 +383,12 @@ class TestCensus:
         (bin_dir / "seeded.sh").write_text(
             'echo "{}" > "$SESSION_DIR/pact-session-context.json"\n'
         )
-        assert _text_census(tmp_path) == (1, {"bin/seeded.sh"})
+        scanned, hits = _text_census(tmp_path)
+        assert scanned["bin"] == 1 and hits == {"bin/seeded.sh"}
 
     def test_no_shipped_non_python_file_names_the_file(self):
         scanned, hits = _text_census(_PLUGIN)
-        assert scanned > 0, "the text census scanned no files"
+        assert sum(scanned.values()) > 0, "the text census scanned no files"
         assert hits == set(), f"{sorted(hits)}. {_INSTRUCTION}"
 
 
