@@ -9,7 +9,7 @@ Layer 2 of the four-layer bootstrap gate enforcement (#401). On each user
 message, checks for the session-scoped bootstrap-complete marker file:
   - Marker exists → suppressOutput (zero tokens, sub-ms)
   - No marker + PACT team-lead session (is_lead) → inject additionalContext instructing bootstrap,
-    prefixed with a lead note when SessionStart did not treat the session as the lead
+    prefixed with a lead note when the session journal has no session_start event
   - Non-PACT session (no context file) → no-op passthrough
   - Non-lead / plain primary frame (not is_lead) → no-op passthrough
     (NOT a teammate: teammates have no UserPromptSubmit-fire path)
@@ -128,9 +128,13 @@ _SESSION_DIR_HINT = (
 
 # Prepended for a lead whose session journal has no session_start event.
 # session_init writes that event only for a frame it treats as the lead, so a
-# lead without one was given the no-role startup notice (a lead forked without
-# `--agent` is one). Keyed on the journal, not on the heal's return: the marker
-# writer heals the same file in parallel and can win that race.
+# lead without one either was not recognised at SessionStart (a fork without
+# `--agent`, which got the no-role notice) or did not reach the journal write
+# (session_init raised, no session id, or input that did not parse; each got the
+# ladder). The note is true in every case: its second sentence speaks only of a
+# notice, so it is vacuous where none was given. Keyed on the journal, not on the
+# heal's return: the marker writer heals the same file in parallel and can win
+# that race.
 _NOT_TREATED_AS_LEAD_NOTE = (
     "This session is the PACT team-lead. Any startup notice saying it has no "
     "recognized agent role, or that PACT cannot dispatch specialist agents "

@@ -1,14 +1,17 @@
 """
 Location: pact-plugin/tests/test_bootstrap_prompt_gate_forked_lead.py
-Summary: The lead note bootstrap_prompt_gate prepends when SessionStart did not
-         treat a lead as one (a lead forked without `--agent`).
+Summary: The lead note bootstrap_prompt_gate prepends when a lead's session
+         journal has no session_start event, driven here through a lead forked
+         without `--agent`.
 Used by: pytest.
 
 A lead forked with `--resume <id> --fork-session` and no `--agent` starts with
 no agent_type, so session_init gives it the no-role notice and writes no
 session_start event. Its first prompt carries the lead agent_type. The gate
 then tells it that the startup notice does not apply, keyed on the journal
-having no session_start event.
+having no session_start event. A lead whose session_init raised, had no session
+id, or got input that did not parse also lacks the event; those routes are not
+exercised here.
 
 Every test drives the real hooks in a fresh interpreter under tmp_path, with
 nothing stubbed on the heal path. HOME is the sandbox and every CLAUDE_* var
