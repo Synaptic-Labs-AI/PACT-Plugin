@@ -108,13 +108,13 @@ empty.
 
 | Hook event | Role field | Lead value | Teammate value | Plain | `team_name` in stdin? | journal-resolvable here? |
 |---|---|---|---|---|---|---|
-| SessionStart | `agent_type` (none for an in-process teammate's `source: compact`, and none for a lead resumed or forked without `--agent`) | lead spelling; absent for a lead resumed or forked without `--agent` | `pact-<specialist>`; an in-process teammate's `source: compact` frame carries the lead spelling | absent | no | lead: yes (persists context) · in-process: yes (the lead's journal) · separate-process: no |
+| SessionStart | `agent_type` (an in-process teammate's `source: compact` frame carries the lead's value, so no field marks it as a teammate; absent for a lead resumed or forked without `--agent`) | lead spelling; absent for a lead resumed or forked without `--agent` | `pact-<specialist>`; an in-process teammate's `source: compact` frame carries the lead spelling | absent | no | lead: yes (persists context) · in-process: yes (the lead's journal) · separate-process: no |
 | UserPromptSubmit | `agent_type` | lead spelling | *(no teammate fire path — see note)* | absent | no | lead: yes |
 | PreToolUse | `agent_type` | lead spelling | `pact-<specialist>` | — | **no** | lead: yes · teammate: no |
 | PostToolUse (incl. `TaskCreate` / `TaskUpdate`) | `agent_type` | lead spelling | `pact-<specialist>` | — | **no** | lead: yes · teammate: no |
 | TaskCompleted | `agent_type` | lead spelling | `pact-<specialist>` | — | lead: **no** · teammate: **yes** (also `teammate_name`) | lead: yes · teammate: no |
-| PreCompact | none for an in-process teammate | lead spelling | in-process: lead spelling · separate-process: `pact-<specialist>` (inferred) | — | no | not read |
-| PostCompact | `agent_type` (none for an in-process teammate) | lead spelling | in-process: lead spelling · separate-process: `pact-<specialist>` (inferred) | — | no | lead: yes · in-process: yes (the lead's journal) · separate-process: no |
+| PreCompact | `agent_type` (an in-process teammate's frame carries the lead's value, so no field marks it as a teammate) | lead spelling | in-process: lead spelling · separate-process: `pact-<specialist>` (inferred) | — | no | not read |
+| PostCompact | `agent_type` (an in-process teammate's frame carries the lead's value, so no field marks it as a teammate) | lead spelling | in-process: lead spelling · separate-process: `pact-<specialist>` (inferred) | — | no | lead: yes · in-process: yes (the lead's journal) · separate-process: no |
 
 PostCompact capture provenance: live append-only hook dump, 2026-08-26, lead
 manual `/compact` in the in-process dogfood session (PACT 4.6.44). The committed
