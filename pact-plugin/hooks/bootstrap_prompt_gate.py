@@ -103,7 +103,7 @@ try:
     from shared.stale_session import (
         detect_stale_session_block as _detect_stale_session_block,
     )
-    from shared.session_journal import read_events_from
+    from shared.session_journal import read_last_event_from
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_advisory("module imports", _module_load_error)
 
@@ -201,7 +201,7 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
     instruction = _BOOTSTRAP_INSTRUCTION_TEMPLATE.format(
         session_dir_hint=_SESSION_DIR_HINT.format(session_dir=session_dir)
     ) + (_detect_stale_session_block(input_data) or "")
-    if not read_events_from(session_dir, event_type="session_start"):
+    if read_last_event_from(session_dir, "session_start") is None:
         instruction = _NOT_TREATED_AS_LEAD_NOTE + instruction
     return instruction
 
