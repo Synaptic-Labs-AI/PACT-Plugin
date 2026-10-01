@@ -713,12 +713,10 @@ class TestStalenessDetection:
             )
 
 
-# Test-local mirror of the production regex, used ONLY to extract the
-# resolver-chosen file's recorded id in the parity test above.
-import re as _re_for_parity  # noqa: E402
-_RE_RESUME_TEST = _re_for_parity.compile(
-    r"- Resume:\s*`claude --resume\s+([0-9a-f-]+)`"
-)
+# The production Resume-line regex, used ONLY to extract the resolver-chosen
+# file's recorded id in the parity test above. Imported rather than mirrored,
+# so it reads both Resume-line forms the production parser reads.
+from shared.stale_session import _RESUME_LINE_RE as _RE_RESUME_TEST  # noqa: E402
 
 
 class TestStalenessComposition:
