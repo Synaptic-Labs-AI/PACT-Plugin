@@ -159,10 +159,10 @@ def test_no_claude_md_anywhere_returns_none(tmp_path, monkeypatch):
 
 
 def test_non_utf8_claude_md_returns_none(tmp_path, monkeypatch):
-    """A corrupted/non-UTF-8 CLAUDE.md (the partial-write this detector exists
-    to flag) raises UnicodeDecodeError on read_text → swallowed → None. The
-    helper is advisory; its failure budget is 'no warning', never a raise that
-    would suppress a consumer's whole injection."""
+    """A non-UTF-8 byte inside the recorded id itself: the read decodes it to
+    U+FFFD instead of raising, so no Resume line matches and the result is
+    None. The helper is advisory; its failure budget is 'no warning', never a
+    raise that would suppress a consumer's whole injection."""
     target = tmp_path / ".claude" / "CLAUDE.md"
     target.parent.mkdir(parents=True, exist_ok=True)
     # 0x80 is an invalid UTF-8 start byte → read_text(encoding='utf-8') raises.

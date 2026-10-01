@@ -830,9 +830,10 @@ class TestStalenessErrorPaths:
 
         assert result is None
 
-    def test_read_text_unicode_decode_error_returns_none(self, tmp_path):
-        """UnicodeDecodeError on read_text() should return None gracefully."""
-        from staleness import check_pinned_staleness
+    def test_read_text_unicode_decode_error_reports_the_skip(self, tmp_path):
+        """UnicodeDecodeError on read_text() skips the pass and says so: the
+        pass rewrites the file, so it never decodes with replacement."""
+        from staleness import _UNDECODABLE_SKIP, check_pinned_staleness
 
         claude_md = self._create_claude_md(tmp_path, "# Project\n")
 
@@ -840,7 +841,8 @@ class TestStalenessErrorPaths:
         with patch.object(type(claude_md), "read_text", side_effect=error):
             result = check_pinned_staleness(claude_md_path=claude_md)
 
-        assert result is None
+        assert result == _UNDECODABLE_SKIP
+        assert "skipped" in result.lower()
 
     def test_write_text_ioerror_returns_error_message(self, tmp_path):
         """IOError on write_text() (line 218) should return an error message string."""

@@ -654,7 +654,8 @@ class TestUpdateSessionInfoFailureSignal:
         result = update_session_info("sess-123", "pact-sess123")
 
         assert result is not None
-        assert "UnicodeDecodeError" in result
+        assert "not valid UTF-8" in result and "left unchanged" in result
+        assert target.read_bytes() == b"\xff\xfe bad bytes"
         assert "codec" not in result
         assert "0xff" not in result
         assert "/" not in result

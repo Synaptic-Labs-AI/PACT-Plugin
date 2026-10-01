@@ -232,6 +232,8 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
        values (every field can be stale: the session id, the team, or the
        Session dir of a project that moved). A file with no block, and a
        missing file, are left alone: this never creates or migrates CLAUDE.md.
+       A file that is not valid UTF-8 is left alone too, and the skip is
+       reported after the session values.
     2. Record the worktree identity, as session_init does for a lead.
     3. Append session_start (source "prompt") and, when a claim was read,
        session_resumption_surfaced. Both follow every read above.
@@ -276,11 +278,15 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
         project_dir = env_project_dir or os.getcwd()
 
         claim = None
+        block_status = None
         if env_project_dir:
             claude_md, source = resolve_project_claude_md_path(env_project_dir)
+            # Read-only here (markers and the Resume line are ASCII); the
+            # rewrite below decodes strictly and skips a file that is not
+            # UTF-8, reporting it in its status.
             content = (
                 "" if source == "new_default"
-                else claude_md.read_text(encoding="utf-8")
+                else claude_md.read_text(encoding="utf-8", errors="replace")
             )
             if SESSION_START_MARKER in content and SESSION_END_MARKER in content:
                 recorded = _RESUME_LINE_RE.search(content)
@@ -288,7 +294,9 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
                     claim = check_resume_state(
                         _extract_prev_session_dir(env_project_dir)
                     )
-                update_session_info(session_id, team, session_dir, plugin_root)
+                block_status = update_session_info(
+                    session_id, team, session_dir, plugin_root
+                )
         _record_worktree_identity(session_id, project_dir)
         append_event(
             make_event(
@@ -311,6 +319,10 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
                 make_event("session_resumption_surfaced"), session_dir=session_dir
             ):
                 parts.append(RESUMPTION_MARKER_MISSING_DIRECTIVE)
+        if block_status and (
+            "skipped" in block_status.lower() or "failed" in block_status.lower()
+        ):
+            parts.append(block_status)
         return "\n\n" + "\n\n".join(parts)
     except Exception as e:  # noqa: BLE001 — never block the instruction
         print(

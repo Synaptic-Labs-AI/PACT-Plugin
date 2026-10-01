@@ -314,6 +314,10 @@ def _plan_and_write() -> str:
         return "skipped_containment"
     except TimeoutError:
         return "skipped_lock"
+    except UnicodeDecodeError:
+        # The file is rewritten here, so it is decoded strictly and left
+        # untouched rather than written back with replacement characters.
+        return "skipped_not_utf8"
     except OSError as error:
         return f"error_os: {str(error)[:50]}"
     except BaseException as error:  # noqa: BLE001 -- fail open, always

@@ -658,8 +658,9 @@ def _is_add_shaped_edit(
         # COMPARISON runs, because there is one comparison. See
         # `_simulate_post_edit_document`.
         try:
-            current = claude_md_path.read_text(encoding="utf-8")
-        except (IOError, OSError, UnicodeDecodeError):
+            # Read-only: a byte that is not UTF-8 decodes to U+FFFD.
+            current = claude_md_path.read_text(encoding="utf-8", errors="replace")
+        except (IOError, OSError):
             # Cannot read the pre-state, so there is nothing to compare
             # against. Fail-open.
             return False

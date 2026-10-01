@@ -371,6 +371,14 @@ def update_session_info(
             except ContainmentError:
                 # Opaque skip, matching the removed is_symlink guard's message.
                 return "Session info skipped: path precondition not met."
+            except UnicodeDecodeError:
+                # The file is rewritten here, so it is decoded strictly and
+                # left untouched, never rewritten with replacement characters.
+                return (
+                    "Session info skipped: the project CLAUDE.md is not valid "
+                    "UTF-8, so it was left unchanged. The Current Session block "
+                    "in CLAUDE.md is now stale."
+                )
             except Exception as e:
                 # WHAT THIS HANDLER COVERS, WRITTEN DOWN BECAUSE ONE OF ITS
                 # CAUSES WAS REMOVED AND A HANDLER THAT LOOKS THE SAME AFTER
@@ -521,8 +529,9 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
         # sees the old file or the new one and never a torn one. Taking the
         # sidecar lock would only create a `.CLAUDE.md.lock` beside the file
         # for frames that never write it (a teammate, or input that did not
-        # parse).
-        content = claude_md.read_text(encoding="utf-8")
+        # parse). Read-only, so a byte that is not UTF-8 decodes to U+FFFD;
+        # the returned path is validated below.
+        content = claude_md.read_text(encoding="utf-8", errors="replace")
 
         # Primary: match "- Session dir: `<path>`" in the Current Session block.
         match = re.search(r'- Session dir:\s*`([^`]+)`', content)

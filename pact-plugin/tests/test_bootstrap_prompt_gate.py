@@ -659,13 +659,12 @@ class TestStalenessDetection:
         assert _detect_stale_session_block(
             {"session_id": self._ACTUAL}) is None
 
-    def test_non_utf8_claude_md_returns_none(self, monkeypatch, tmp_path):
+    def test_non_utf8_byte_elsewhere_still_warns(self, monkeypatch, tmp_path):
         """Non-UTF-8 CLAUDE.md (e.g. a latin-1 byte from a wrong-editor
-        save, or a partial/corrupted session_init write — the very failure
-        neighborhood this detector exists to flag) → silent skip, NOT a
-        raise. UnicodeDecodeError is a ValueError, not an OSError; an
-        OSError-only catch lets it escape (RED on reverting the widened
-        catch tuple)."""
+        save) → no raise, and the stale Resume line is still read: the
+        detector only reads, so it decodes with replacement. A strict read
+        raised UnicodeDecodeError (a ValueError, not an OSError), and an
+        escape would have suppressed the consumer's whole injection."""
         from bootstrap_prompt_gate import _detect_stale_session_block
 
         project = tmp_path / "proj"
@@ -679,8 +678,8 @@ class TestStalenessDetection:
         )
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
 
-        assert _detect_stale_session_block(
-            {"session_id": self._ACTUAL}) is None
+        warning = _detect_stale_session_block({"session_id": self._ACTUAL})
+        assert warning is not None and self._STALE in warning
 
     @pytest.mark.parametrize("layout", ["both", "preferred_only",
                                         "legacy_only", "neither"])

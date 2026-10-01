@@ -970,6 +970,13 @@ def strip_orphan_kernel_block() -> str | None:
                 content = target_file.read_text(encoding="utf-8")
             except OSError:
                 return None
+            except UnicodeDecodeError:
+                # This pass rewrites the file, so it is decoded strictly and
+                # left untouched rather than written back with U+FFFD.
+                return (
+                    f"Kernel block strip skipped: {target_file} is not valid "
+                    "UTF-8, so it was left unchanged."
+                )
 
             START_MARKER = "<!-- PACT_START:"
             END_MARKER = "<!-- PACT_END -->"
@@ -1327,6 +1334,13 @@ def migrate_to_managed_structure() -> str | None:
                 content = target_file.read_text(encoding="utf-8")
             except OSError:
                 return None
+            except UnicodeDecodeError:
+                # This pass rewrites the file, so it is decoded strictly and
+                # left untouched rather than written back with U+FFFD.
+                return (
+                    f"Migration skipped: {target_file} is not valid UTF-8, so "
+                    "it was left unchanged."
+                )
 
             # Idempotent guard: already migrated
             if MANAGED_START_MARKER in content:

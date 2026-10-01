@@ -389,8 +389,8 @@ def clear_pin_staleness_marker_if_resolved(
         if claude_md_path is None:
             return
         try:
-            claude_md_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+            claude_md_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
             return
         if check_pinned_block_signal(claude_md_path=claude_md_path) is not None:
             return

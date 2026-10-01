@@ -1063,6 +1063,16 @@ def apply_staleness_markings(
     return new_content, total_stale, modified, budget_warning
 
 
+# Returned when the project CLAUDE.md is not valid UTF-8. The staleness pass
+# rewrites the file, so it decodes strictly and leaves the file untouched
+# rather than write replacement characters over the user's bytes. "skipped"
+# routes it to session_init's systemMessage.
+_UNDECODABLE_SKIP = (
+    "Pinned staleness skipped: the project CLAUDE.md is not valid UTF-8, "
+    "so it was left unchanged."
+)
+
+
 def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[str]:
     """
     Detect stale pinned context entries in the project CLAUDE.md.
@@ -1105,8 +1115,12 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
 
     try:
         content = claude_md_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    except OSError:
         return None
+    except UnicodeDecodeError:
+        # This read feeds a rewrite of the file, so it is not decoded with
+        # replacement: that would write U+FFFD over the user's bytes. Skip.
+        return _UNDECODABLE_SKIP
 
     parsed = _parse_pinned_section(content)
     if parsed is None:
@@ -1234,6 +1248,9 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
                 _atomic_write_text(claude_md_path, new_content, project_root)
         except ContainmentError:
             return "Pinned staleness skipped: path precondition not met."
+        except UnicodeDecodeError:
+            # The file changed under the lock into bytes that are not UTF-8.
+            return _UNDECODABLE_SKIP
         except TimeoutError:
             return "Pinned staleness update skipped: lock contention."
         except OSError as e:
@@ -1287,8 +1304,10 @@ def check_pinned_block_signal(
         return None
 
     try:
-        content = claude_md_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+        # Read-only: a byte that is not UTF-8 decodes to U+FFFD and the rest
+        # of the file still counts.
+        content = claude_md_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
         return None
 
     parsed = _parse_pinned_section(content)

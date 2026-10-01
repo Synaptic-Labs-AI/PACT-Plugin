@@ -321,8 +321,10 @@ def check_pin_slot_status() -> Optional[str]:
             return None
 
         try:
-            content = path.read_text(encoding="utf-8")
-        except (IOError, OSError, UnicodeDecodeError):
+            # Read-only: a byte that is not UTF-8 decodes to U+FFFD and the
+            # rest of the file still counts.
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except (IOError, OSError):
             return None
 
         parsed = _parse_pinned_section(content)
@@ -511,7 +513,9 @@ def _extract_session_started(project_dir: str) -> str | None:
         claude_md, source = resolve_project_claude_md_path(project_dir)
         if source == "new_default":
             return None
-        content = claude_md.read_text(encoding="utf-8")
+        # Read-only, and the pattern takes ASCII digits only, so a replaced
+        # byte cannot reach the block.
+        content = claude_md.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
     match = _SESSION_STARTED_RE.search(content)

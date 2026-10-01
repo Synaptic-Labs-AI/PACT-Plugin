@@ -250,8 +250,9 @@ def _resolve_pins():
         return [], "claude.md not found"
 
     try:
-        content = claude_md.read_text(encoding="utf-8")
-    except (IOError, OSError, UnicodeDecodeError):
+        # Read-only: a byte that is not UTF-8 decodes to U+FFFD.
+        content = claude_md.read_text(encoding="utf-8", errors="replace")
+    except (IOError, OSError):
         return [], "claude.md unreadable"
 
     parsed = _parse_pinned_section(content)
