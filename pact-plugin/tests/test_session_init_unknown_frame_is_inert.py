@@ -17,7 +17,8 @@ the ladder and gets the unresolved-role cue instead of the no-role notice
 The arms below pin the whole output by EXACT EQUALITY, so an emission added to
 main() later that reaches an unknown frame fails them. The no-write arms each
 run a lead control on the same layout, so an absence cannot pass because the
-layout never reached the writer.
+layout never reached the writer, and each compares the whole sandbox (project,
+session dirs and config root) before and after the unknown start.
 """
 import io
 import json
@@ -112,6 +113,27 @@ def _frame(source="startup", session_id=_SESSION_ID, **extra):
 
 def _session_dir(project_dir, session_id=_SESSION_ID):
     return _build_session_path(project_slug(str(project_dir)), session_id)
+
+
+def _sandbox_state(root):
+    """Every path under ``root``, with a file's bytes (None for a directory).
+
+    The conftest sandbox puts the config root under tmp_path too, so comparing
+    this before and after an unknown-frame start catches a write anywhere it
+    could land: a new file, or changed bytes in another session's file.
+    """
+    return {
+        str(path.relative_to(root)): path.read_bytes() if path.is_file() else None
+        for path in sorted(root.rglob("*"))
+    }
+
+
+def _changed(before, after):
+    """The paths added, removed or rewritten between two sandbox states."""
+    return sorted(
+        key for key in before.keys() | after.keys()
+        if key not in before or key not in after or before[key] != after[key]
+    )
 
 
 class TestUnknownFrameIsInert:
@@ -237,11 +259,14 @@ class TestUnknownFrameOutputIsExact:
 
 
 class TestUnknownFrameWritesNothing:
-    """No PACT write lands in a plain session's project or session dir. Each
-    arm runs a lead control on an identical layout first, so the absence is
-    measured on a layout that provably reaches the writer."""
+    """No PACT write lands anywhere in the sandbox, which holds the plain
+    session's project, its session dir and the config root. Each arm runs a
+    lead control on an identical layout first, so the absence is measured on a
+    layout that provably reaches the writer, and the control's own session
+    files are there for a stray write to change."""
 
-    def test_no_project_claude_md_is_created(self, monkeypatch, tmp_path):
+    @pytest.mark.parametrize("source", SOURCES)
+    def test_no_project_claude_md_is_created(self, source, monkeypatch, tmp_path):
         control = tmp_path / "control"
         control.mkdir()
         _run_real(monkeypatch, control, _frame(**LEAD))
@@ -252,12 +277,16 @@ class TestUnknownFrameWritesNothing:
 
         plain = tmp_path / "plain"
         plain.mkdir()
-        _run_real(monkeypatch, plain, _frame())
+        before = _sandbox_state(tmp_path)
+        _run_real(monkeypatch, plain, _frame(source=source))
         assert sorted(p.name for p in plain.rglob("*")) == [], (
             "an unknown frame wrote into its project"
         )
         assert not _session_dir(plain).exists(), (
             "an unknown frame created a pact-sessions dir for itself"
+        )
+        assert _changed(before, _sandbox_state(tmp_path)) == [], (
+            "an unknown frame wrote into the sandbox"
         )
 
     def test_a_user_claude_md_is_left_byte_identical(self, monkeypatch, tmp_path):
@@ -273,11 +302,15 @@ class TestUnknownFrameWritesNothing:
         plain = tmp_path / "plain"
         plain.mkdir()
         (plain / "CLAUDE.md").write_text(USER_MD)
+        before = _sandbox_state(tmp_path)
         _run_real(monkeypatch, plain, _frame())
         assert (plain / "CLAUDE.md").read_text() == USER_MD, (
             "an unknown frame rewrote the user's own CLAUDE.md"
         )
         assert sorted(p.name for p in plain.rglob("*")) == ["CLAUDE.md"]
+        assert _changed(before, _sandbox_state(tmp_path)) == [], (
+            "an unknown frame wrote into the sandbox"
+        )
 
     def test_a_root_compact_summary_stays_in_place(self, monkeypatch, tmp_path):
         root_summary = get_compact_summary_path()
@@ -295,12 +328,16 @@ class TestUnknownFrameWritesNothing:
         plain = tmp_path / "plain"
         plain.mkdir()
         root_summary.write_text("stale summary")
+        before = _sandbox_state(tmp_path)
         _run_real(monkeypatch, plain, _frame())
         assert root_summary.read_text() == "stale summary", (
             "an unknown frame moved another session's compact summary"
         )
         assert not _session_dir(plain).exists(), (
             "an unknown frame created a pact-sessions dir to drain a summary into"
+        )
+        assert _changed(before, _sandbox_state(tmp_path)) == [], (
+            "an unknown frame wrote into the sandbox"
         )
 
     def test_a_linked_worktree_gets_no_identity_record(self, monkeypatch, tmp_path):
@@ -332,9 +369,13 @@ class TestUnknownFrameWritesNothing:
             "record, so this layout never reaches the writer"
         )
 
+        before = _sandbox_state(tmp_path)
         _run_real(monkeypatch, plain, _frame())
         assert not _session_dir(plain).exists(), (
             "an unknown frame inside a linked worktree created a pact-sessions dir"
+        )
+        assert _changed(before, _sandbox_state(tmp_path)) == [], (
+            "an unknown frame inside a linked worktree wrote into the sandbox"
         )
 
 
@@ -530,10 +571,14 @@ class TestUnknownFrameLeavesAFolderWithoutAContextFileAlone:
         plain.mkdir()
         folder = _seed_session_dir_without_context(plain)
         before = _snapshot(folder)
+        sandbox = _sandbox_state(tmp_path)
         _run_real(monkeypatch, plain, _frame(source=source))
         assert _snapshot(folder) == before, (
             f"an unknown frame (source={source!r}) changed a session folder that "
             f"holds no lead context file"
+        )
+        assert _changed(sandbox, _sandbox_state(tmp_path)) == [], (
+            f"an unknown frame (source={source!r}) wrote into the sandbox"
         )
 
 
@@ -659,5 +704,9 @@ class TestResumedLeadIsRecognised:
         plain = tmp_path / "plain"
         plain.mkdir()
         _session_dir(plain).mkdir(parents=True)
+        before = _sandbox_state(tmp_path)
         output = _run_real(monkeypatch, plain, _frame(source="resume"))
         assert output["hookSpecificOutput"]["additionalContext"] == _UNKNOWN_FRAME_CONTEXT
+        assert _changed(before, _sandbox_state(tmp_path)) == [], (
+            "an unknown resumed frame wrote into the sandbox"
+        )

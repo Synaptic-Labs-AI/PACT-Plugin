@@ -10,7 +10,8 @@ record), so a leak of one of them into ``_unknown_frame_output`` passes there.
 The arm below pins the same exact output in a sandbox seeded to trigger each of
 them, and lead controls on identical copies prove every seed fires: one with a
 session id for the team-scoped seeds, and one with none, whose resumption reads
-the CLAUDE_CODE_TASK_LIST_ID store the unknown frame would read.
+the CLAUDE_CODE_TASK_LIST_ID store the unknown frame would read. The same arm
+checks that the unknown start writes nothing anywhere in that seeded sandbox.
 
 It also pins the one kept upkeep item that module leaves unobserved: orphan
 merge-authorization tokens are reaped for an unknown frame too.
@@ -30,6 +31,7 @@ from session_init import _UNKNOWN_FRAME_CONTEXT, _UNKNOWN_ROLE_NOTICE  # noqa: E
 from shared import pact_context  # noqa: E402
 from shared.merge_guard_common import ORPHAN_TOKEN_MAX_AGE_SECONDS, TOKEN_PREFIX  # noqa: E402
 from shared.paths import get_claude_config_dir  # noqa: E402
+from test_session_init_unknown_frame_is_inert import _changed, _sandbox_state  # noqa: E402
 
 LEAD = {"agent_type": "PACT:pact-orchestrator"}
 # Distinct ids: a lead's persisted context under the same project and session
@@ -182,7 +184,11 @@ class TestUnknownFrameOutputIsExactInAPactProject:
             "task-list store, so that seed proves nothing"
         )
 
+        before = _sandbox_state(tmp_path)
         output = _run(monkeypatch, plain, _PLAIN_SID, source)
+        assert _changed(before, _sandbox_state(tmp_path)) == [], (
+            "an unknown frame wrote into a PACT project's sandbox"
+        )
         assert output["hookSpecificOutput"] == {
             "hookEventName": "SessionStart",
             "additionalContext": _UNKNOWN_FRAME_CONTEXT,
