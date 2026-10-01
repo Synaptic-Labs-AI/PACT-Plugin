@@ -207,8 +207,11 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "merge_guard_common", "pact_config", "pact_context", "paths",
         "peer_context", "pin_caps", "plugin_manifest", "project_scope",
         "session_journal", "session_registry", "session_resume",
-        "session_state", "staleness", "state_file", "symlinks", "task_utils", "teammate_mode",
-    }),  # backlog_store reached via `from shared import backlog_store`, an edge
+        "session_state", "stale_session", "staleness", "state_file", "symlinks",
+        "task_utils", "teammate_mode",
+    }),  # stale_session reached via session_resume's Current Session reader,
+         # which takes the Resume-line pattern from it.
+         # backlog_store reached via `from shared import backlog_store`, an edge
          # the oracle resolves since it reads modules named in the import alias.
          # pact_config reached via the SessionStart runtime-config injection
          # (session_init -> shared.pact_config.llm_options); stdlib-only, so it
@@ -283,8 +286,12 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "compaction_owner", "claude_md_manager", "constants", "failure_cause", "git_helpers", "handoff_schema",
         "marker_schema",
         "pact_context", "paths", "pin_caps", "project_scope", "session_journal",
-        "session_registry", "session_resume", "session_state", "staleness",
-    }),  # handoff_schema reached TRANSITIVELY, via session_resume's
+        "session_registry", "session_resume", "session_state", "stale_session",
+        "staleness", "state_file",
+    }),  # stale_session reached via session_resume, whose Current Session
+         # reader takes the Resume-line pattern from it; state_file via
+         # project_scope, which writes the worktree identity record.
+         # handoff_schema reached TRANSITIVELY, via session_resume's
          # resolve_handoff_field on the resume-brief decision summary — this
          # hook does not import it directly. It is a pure stdlib-free leaf, so
          # it adds no further transitive edges.  # failure_cause reached through claude_md_manager / session_resume /

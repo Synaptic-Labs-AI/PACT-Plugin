@@ -144,7 +144,7 @@ def _build_session_path(slug: str, session_id: str) -> Path:
     Path traversal guard: resolves the constructed path and verifies it
     stays under ~/.claude/pact-sessions/ using Path.parents containment
     (immune to sibling-prefix collisions by design — matches
-    session_init._validate_under_pact_sessions). A malicious session_id
+    session_resume._validate_under_pact_sessions). A malicious session_id
     like "../../etc" would resolve outside the expected tree — fall back
     to a sanitized basename. Fail-closed: if the validation itself
     raises, return a slug-only path (no session_id component). The

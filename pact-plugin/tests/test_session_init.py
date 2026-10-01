@@ -3035,7 +3035,7 @@ class TestExtractPrevSessionDirReadSideLock:
         # Track ordering events via the patched file_lock.
         events = []
         from contextlib import contextmanager
-        import session_init as si_module
+        import shared.session_resume as si_module
 
         @contextmanager
         def tracking_lock(target):
@@ -3085,7 +3085,7 @@ class TestExtractPrevSessionDirReadSideLock:
         )
 
         from contextlib import contextmanager
-        import session_init as si_module
+        import shared.session_resume as si_module
 
         @contextmanager
         def timeout_lock(target):

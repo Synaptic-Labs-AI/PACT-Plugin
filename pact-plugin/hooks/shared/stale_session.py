@@ -28,9 +28,9 @@ from pathlib import Path
 
 import shared.pact_context as pact_context
 
-# Mirrors the Resume-line fallback regex in session_init's
-# _extract_prev_session_dir — the established defensive parse for the
-# session_resume.update_session_info managed block. Parity with
+# The one Resume-line pattern for the session_resume.update_session_info
+# managed block; session_resume._extract_prev_session_dir's fallback reads the
+# line with it too. Parity with
 # claude_md_manager.resolve_project_claude_md_path's existing-file
 # precedence is pinned by test.
 _RESUME_LINE_RE = re.compile(

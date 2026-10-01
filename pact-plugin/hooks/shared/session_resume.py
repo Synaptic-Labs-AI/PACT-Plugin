@@ -12,6 +12,9 @@ Manages:
 4. Detecting paused state from session journal
 5. Unified resume-claim resolution over paused/refreshed checkpoints
    (check_resume_state — the single seam session_init step 8 calls)
+6. Reading the previous session's dir back from the Current Session block
+   (_extract_prev_session_dir), and the session-placeholder substitution
+   sentence (format_session_substitutions)
 """
 
 from __future__ import annotations
@@ -41,6 +44,9 @@ from shared.claude_md_manager import (
 )
 from shared.failure_cause import failure_cause
 from shared.handoff_schema import resolve_handoff_field
+from shared.pact_context import _build_session_path, project_slug
+from shared.paths import get_claude_config_dir
+from shared.stale_session import _RESUME_LINE_RE
 from shared.session_journal import (
     _parse_ts,
     _ts_supersedes,
@@ -429,6 +435,173 @@ def update_session_info(
             "Could not acquire lock on project CLAUDE.md "
             "(path precondition not met); session info update skipped."
         )
+
+
+def _validate_under_pact_sessions(path: str) -> str | None:
+    """Reject extracted session paths that escape the pact-sessions root.
+
+    Defense-in-depth against tampered CLAUDE.md content. The Session dir / Resume
+    lines are user-editable text, so a malicious or accidentally corrupted file
+    could point _extract_prev_session_dir at any filesystem location (e.g.
+    /etc, /var, a sibling project's secrets). Callers consume the returned path
+    to read journal events; an attacker who controlled the path could exfiltrate
+    or trigger reads outside the PACT sessions tree.
+
+    The check calls ``Path.resolve(strict=False)`` on both the candidate AND the
+    sessions root so ``..`` segments are collapsed and symlinks followed before
+    the containment check. A naive string-prefix comparison against
+    ``str(Path(path))`` is NOT sufficient: ``Path()`` normalizes redundant
+    slashes but leaves ``..`` segments intact, so ``~/.claude/pact-sessions/../../etc/passwd``
+    would textually start with the prefix yet resolve outside the tree once the
+    filesystem is asked to dereference it. ``resolve(strict=False)`` does the
+    canonicalization explicitly and does NOT require the path to exist.
+
+    The containment check uses ``Path`` comparison semantics
+    (``candidate == sessions_root or sessions_root in candidate.parents``)
+    instead of string prefix + ``os.sep``. This eliminates the sibling-prefix
+    collision class (``pact-sessions-evil`` vs ``pact-sessions``) by design,
+    rather than relying on an explicit separator guard.
+
+    Returns the original string on success and None on rejection (silent
+    fail-closed — callers already treat None as "no previous session").
+    """
+    try:
+        sessions_root = (get_claude_config_dir() / "pact-sessions").resolve()
+        candidate = Path(path).resolve(strict=False)
+        if candidate == sessions_root or sessions_root in candidate.parents:
+            return path
+    except (TypeError, ValueError, OSError):
+        pass
+    return None
+
+
+def _extract_prev_session_dir(project_dir: str) -> str | None:
+    """
+    Extract the previous session's directory path from the project CLAUDE.md.
+
+    Reads the "## Current Session" block written by update_session_info()
+    and extracts the session dir from lines like
+    "- Session dir: `~/.claude/pact-sessions/PACT-Plugin/abc12345-...`".
+
+    Honors both supported project CLAUDE.md locations
+    ($project_dir/.claude/CLAUDE.md preferred, $project_dir/CLAUDE.md legacy).
+
+    Falls back to deriving the path from the Resume line's session_id +
+    the resolved project slug if the Session dir line is absent (backward
+    compat with sessions that wrote team name but not session dir) or names
+    a directory that is no longer there (the line was written before the
+    directory moved to the resolved slug).
+
+    Both extracted paths (primary and fallback) are validated against the
+    canonical pact-sessions prefix via _validate_under_pact_sessions before
+    being returned. Defense-in-depth against tampered CLAUDE.md content.
+
+    This is used to locate the previous session's journal for resume context
+    and pause state detection. Returns None if neither CLAUDE.md exists, the
+    session dir can't be extracted, or the extracted path is outside the
+    pact-sessions tree.
+
+    Args:
+        project_dir: CLAUDE_PROJECT_DIR path
+
+    Returns:
+        Previous session directory path string, or None if not found
+    """
+    if not project_dir:
+        return None
+
+    try:
+        claude_md, source = resolve_project_claude_md_path(project_dir)
+        # source == "new_default" means neither location exists -- nothing to read
+        if source == "new_default":
+            return None
+
+        # Acquire the same sidecar file_lock that update_session_info
+        # uses for its read-mutate-write pass. A concurrent write (e.g.,
+        # from another session_init invocation racing the WRITE step at
+        # L1148) could otherwise produce a torn read here, surfacing as
+        # either a corrupted Session-dir match or a fallback-regex hit
+        # on a half-written SESSION_START block. The lock serializes
+        # against the writer. Re-entrancy is safe: this read at step 5a
+        # runs BEFORE update_session_info (step 5b) acquires its own
+        # lock. No nesting; fail-open on TimeoutError per file_lock
+        # contract.
+        try:
+            with file_lock(claude_md):
+                content = claude_md.read_text(encoding="utf-8")
+        except TimeoutError:
+            return None
+
+        # Primary: match "- Session dir: `<path>`" in the Current Session block.
+        match = re.search(r'- Session dir:\s*`([^`]+)`', content)
+        if match:
+            raw = match.group(1)
+            # Expand ~ to actual home directory
+            if raw.startswith("~/"):
+                expanded = str(Path.home() / raw[2:])
+            else:
+                expanded = raw
+            validated = _validate_under_pact_sessions(expanded)
+            # A validated line naming a directory that is gone falls through
+            # to the derivation below; a rejected line still returns None.
+            if validated is None or Path(validated).is_dir():
+                return validated
+        else:
+            # The primary regex missed even though CLAUDE.md is on disk. This
+            # is usually benign (older sessions wrote only the Resume line,
+            # not the Session dir line — handled by the fallback just below),
+            # but it is also how a silent format regression would present.
+            # Log a one-line stderr warning so future drift in the
+            # SESSION_START block surfaces during testing instead of silently
+            # degrading to the fallback.
+            print(
+                "session_init: _extract_prev_session_dir regex failed on "
+                "existing CLAUDE.md, falling back to Resume-line; file may "
+                "have unexpected format",
+                file=sys.stderr,
+            )
+
+        # Fallback: derive from Resume line session_id + project root basename.
+        # _RESUME_LINE_RE reads both the current line and one written before
+        # the `--agent` flag was added.
+        resume_match = _RESUME_LINE_RE.search(content)
+        if resume_match:
+            session_id = resume_match.group(1)
+            # Same slug derivation and sanitisation as every session path,
+            # so the fallback lands on the directory the writers used.
+            derived = str(
+                _build_session_path(project_slug(project_dir), session_id)
+            )
+            return _validate_under_pact_sessions(derived)
+
+    except (IOError, OSError):
+        pass
+    return None
+
+
+def format_session_substitutions(
+    team_name: str, session_dir: str, plugin_root: str
+) -> str:
+    """The sentence telling the orchestrator which values replace the
+    {team_name}, {session_dir} and {plugin_root} placeholders in commands.
+
+    An empty session_dir (no session id on stdin) is named as unavailable
+    rather than substituted.
+    """
+    if session_dir:
+        return (
+            f'Session placeholder variables (substitute before running commands): '
+            f'Use the name `{team_name}` wherever {{team_name}} appears in commands. '
+            f'Use `{session_dir}` wherever {{session_dir}} appears in commands. '
+            f'Use `{plugin_root}` wherever {{plugin_root}} appears in commands.'
+        )
+    return (
+        f'Session placeholder variables (substitute before running commands): '
+        f'Use the name `{team_name}` wherever {{team_name}} appears in commands. '
+        f'Session dir unavailable (session_id missing from stdin) — '
+        f'do not run commands that depend on {{session_dir}} until next clean start. '
+        f'Use `{plugin_root}` wherever {{plugin_root}} appears in commands.'
+    )
 
 
 def restore_last_session(
