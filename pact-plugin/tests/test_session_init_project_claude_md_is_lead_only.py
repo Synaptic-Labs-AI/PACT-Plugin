@@ -125,6 +125,39 @@ class TestTeammateWritesNothing:
         )
         assert MIGRATED not in context and MIGRATED not in system_message
 
+    @pytest.mark.parametrize("agent_type", TEAMMATES + [None])
+    def test_no_lock_sidecar_is_left_beside_an_existing_claude_md(
+        self, agent_type, monkeypatch, tmp_path
+    ):
+        """A teammate, or a frame whose stdin did not parse (None), still reads
+        the project CLAUDE.md for the previous session dir. That read takes no
+        lock, so the project's file set is unchanged. The spy proves the read
+        ran, so the arm cannot pass on a path that never reaches the reader.
+        """
+        import shared.session_resume as session_resume
+
+        reads = []
+        real = session_resume.resolve_project_claude_md_path
+
+        def spy(project_dir):
+            reads.append(project_dir)
+            return real(project_dir)
+
+        monkeypatch.setattr(session_resume, "resolve_project_claude_md_path", spy)
+        project = _project(tmp_path, "p", user_md=True)
+        before = sorted(p.name for p in project.rglob("*"))
+        if agent_type is None:
+            monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+            monkeypatch.chdir(project)
+            with patch("sys.stdin", io.StringIO("{not json")), \
+                 patch("sys.stdout", new_callable=io.StringIO):
+                with pytest.raises(SystemExit):
+                    session_init.main()
+        else:
+            _run(monkeypatch, project, agent_type)
+        assert reads, "the start never read the project CLAUDE.md"
+        assert sorted(p.name for p in project.rglob("*")) == before
+
     @pytest.mark.parametrize("agent_type", UNRECOGNIZED)
     def test_an_unrecognized_agent_type_still_gets_the_startup_notice(
         self, agent_type, monkeypatch, tmp_path

@@ -123,7 +123,6 @@ from shared import backlog_store
 from shared.symlinks import SYMLINKS_VERIFIED_MESSAGE, setup_plugin_symlinks
 from shared.claude_md_manager import (
     ensure_project_memory_md,
-    file_lock,
     migrate_to_managed_structure,
     resolve_project_claude_md_path,
     strip_orphan_kernel_block,
@@ -494,9 +493,11 @@ _SESSION_STARTED_RE = re.compile(
 def _extract_session_started(project_dir: str) -> str | None:
     """The "Started" value in the project CLAUDE.md's Current Session block.
 
-    None when there is no CLAUDE.md, no such line, or the lock times out. Only
-    the exact shape update_session_info writes is returned, so no other text
-    from the file can reach the block it rewrites.
+    None when there is no CLAUDE.md, it cannot be read, or it has no such line.
+    Only the exact shape update_session_info writes is returned, so no other
+    text from the file can reach the block it rewrites. Read without the
+    sidecar lock: every writer replaces the file whole, so the read sees the
+    old file or the new one.
     """
     if not project_dir:
         return None
@@ -504,9 +505,8 @@ def _extract_session_started(project_dir: str) -> str | None:
         claude_md, source = resolve_project_claude_md_path(project_dir)
         if source == "new_default":
             return None
-        with file_lock(claude_md):
-            content = claude_md.read_text(encoding="utf-8")
-    except (OSError, TimeoutError):
+        content = claude_md.read_text(encoding="utf-8")
+    except OSError:
         return None
     match = _SESSION_STARTED_RE.search(content)
     return match.group(1) if match else None

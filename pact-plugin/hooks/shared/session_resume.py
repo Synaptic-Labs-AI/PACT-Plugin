@@ -516,21 +516,13 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
         if source == "new_default":
             return None
 
-        # Acquire the same sidecar file_lock that update_session_info
-        # uses for its read-mutate-write pass. A concurrent write (e.g.,
-        # from another session_init invocation racing the WRITE step at
-        # L1148) could otherwise produce a torn read here, surfacing as
-        # either a corrupted Session-dir match or a fallback-regex hit
-        # on a half-written SESSION_START block. The lock serializes
-        # against the writer. Re-entrancy is safe: this read at step 5a
-        # runs BEFORE update_session_info (step 5b) acquires its own
-        # lock. No nesting; fail-open on TimeoutError per file_lock
-        # contract.
-        try:
-            with file_lock(claude_md):
-                content = claude_md.read_text(encoding="utf-8")
-        except TimeoutError:
-            return None
+        # No lock. Every writer of the project CLAUDE.md replaces it whole
+        # (_atomic_write_text: a temp file, then os.replace), so this read
+        # sees the old file or the new one and never a torn one. Taking the
+        # sidecar lock would only create a `.CLAUDE.md.lock` beside the file
+        # for frames that never write it (a teammate, or input that did not
+        # parse).
+        content = claude_md.read_text(encoding="utf-8")
 
         # Primary: match "- Session dir: `<path>`" in the Current Session block.
         match = re.search(r'- Session dir:\s*`([^`]+)`', content)
