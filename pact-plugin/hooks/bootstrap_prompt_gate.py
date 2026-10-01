@@ -8,7 +8,8 @@ Used by: hooks.json UserPromptSubmit hook (no matcher — fires on every prompt)
 Layer 2 of the four-layer bootstrap gate enforcement (#401). On each user
 message, checks for the session-scoped bootstrap-complete marker file:
   - Marker exists → suppressOutput (zero tokens, sub-ms)
-  - No marker + PACT team-lead session (is_lead) → inject additionalContext instructing bootstrap
+  - No marker + PACT team-lead session (is_lead) → inject additionalContext instructing bootstrap,
+    prefixed with a lead note when SessionStart did not treat the session as the lead
   - Non-PACT session (no context file) → no-op passthrough
   - Non-lead / plain primary frame (not is_lead) → no-op passthrough
     (NOT a teammate: teammates have no UserPromptSubmit-fire path)
@@ -102,6 +103,7 @@ try:
     from shared.stale_session import (
         detect_stale_session_block as _detect_stale_session_block,
     )
+    from shared.session_journal import read_events_from
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_advisory("module imports", _module_load_error)
 
@@ -122,6 +124,17 @@ _BOOTSTRAP_INSTRUCTION_TEMPLATE = (
 
 _SESSION_DIR_HINT = (
     "\n\nPACT_SESSION_DIR={session_dir}"
+)
+
+# Prepended for a lead whose session journal has no session_start event.
+# session_init writes that event only for a frame it treats as the lead, so a
+# lead without one was given the no-role startup notice (a lead forked without
+# `--agent` is one). Keyed on the journal, not on the heal's return: the marker
+# writer heals the same file in parallel and can win that race.
+_NOT_TREATED_AS_LEAD_NOTE = (
+    "This session is the PACT team-lead. Any startup notice saying it has no "
+    "recognized agent role, or that PACT cannot dispatch specialist agents "
+    "in this session, does not apply.\n\n"
 )
 
 # `_detect_stale_session_block` (and its `_RESUME_LINE_RE` /
@@ -181,9 +194,12 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
     # Staleness runs ONLY here (lead + no-marker): the marker-set fast path
     # above keeps its zero-tokens/sub-ms contract (no per-prompt file read),
     # and a marker-set session has by definition completed bootstrap.
-    return _BOOTSTRAP_INSTRUCTION_TEMPLATE.format(
+    instruction = _BOOTSTRAP_INSTRUCTION_TEMPLATE.format(
         session_dir_hint=_SESSION_DIR_HINT.format(session_dir=session_dir)
     ) + (_detect_stale_session_block(input_data) or "")
+    if not read_events_from(session_dir, event_type="session_start"):
+        instruction = _NOT_TREATED_AS_LEAD_NOTE + instruction
+    return instruction
 
 
 def main():
