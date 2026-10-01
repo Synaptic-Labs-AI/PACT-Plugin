@@ -238,6 +238,32 @@ class TestSafetyNetUnknownFrame:
             "a teammate frame received the unknown-role notice"
         )
 
+    @pytest.mark.parametrize("source", SOURCES)
+    def test_the_user_keeps_the_launch_notice_when_the_hook_fails(
+        self, source, monkeypatch, tmp_path
+    ):
+        """An exception inside the unknown-frame branch reaches the safety net.
+        The user-facing channel still carries the notice on a launch, ahead of
+        the failure report, and only the failure report on a compact or clear."""
+        project = tmp_path / "plain"
+        project.mkdir()
+
+        def _fail():
+            raise RuntimeError("forced failure")
+
+        monkeypatch.setattr(session_init, "strip_orphan_kernel_block", _fail)
+        output = _run_real(monkeypatch, project, _frame(source))
+
+        assert output["hookSpecificOutput"]["additionalContext"] == _UNKNOWN_FRAME_CONTEXT
+        warning = "PACT hook warning (session_init): forced failure"
+        if source == "fork":
+            expected = f"{_UNKNOWN_ROLE_NOTICE} {_FORK_RECOGNISED_LATER} | {warning}"
+        elif source in ("startup", "resume"):
+            expected = f"{_UNKNOWN_ROLE_NOTICE} | {warning}"
+        else:
+            expected = warning
+        assert output["systemMessage"] == expected
+
 
 class TestUnknownFrameOutputIsExact:
     """The WHOLE output, in a clean sandbox with nothing stubbed. Exact

@@ -664,6 +664,21 @@ def _build_safety_net_context(
     )
 
 
+def _unknown_role_launch_notice(source: str | None) -> str | None:
+    """The user-facing notice for a frame with no PACT role, or None.
+
+    Launch events only (_LAUNCH_SOURCES): compact and clear repeat within one
+    launch. A forked lead looks like a plain fork here, so on a fork the notice
+    adds that a fork of a lead needs no relaunch: its first prompt carries the
+    lead agent_type, and bootstrap_prompt_gate records it as the lead then.
+    """
+    if source == "fork":
+        return f"{_UNKNOWN_ROLE_NOTICE} {_FORK_RECOGNISED_LATER}"
+    if source in _LAUNCH_SOURCES:
+        return _UNKNOWN_ROLE_NOTICE
+    return None
+
+
 def _unknown_frame_output(source: str) -> dict:
     """Build the whole SessionStart output for a frame with no PACT role.
 
@@ -677,13 +692,9 @@ def _unknown_frame_output(source: str) -> dict:
     written into the project.
     """
     system_messages = []
-    if source == "fork":
-        # A forked lead looks like a plain fork here, so the notice stays
-        # conditional; its first prompt carries the lead agent_type, and
-        # bootstrap_prompt_gate records it as the lead then.
-        system_messages.append(f"{_UNKNOWN_ROLE_NOTICE} {_FORK_RECOGNISED_LATER}")
-    elif source in _LAUNCH_SOURCES:
-        system_messages.append(_UNKNOWN_ROLE_NOTICE)
+    notice = _unknown_role_launch_notice(source)
+    if notice:
+        system_messages.append(notice)
     symlink_result = setup_plugin_symlinks()
     if symlink_result and "failed" in symlink_result.lower():
         system_messages.append(symlink_result)
@@ -2368,13 +2379,19 @@ def main():
         # Code's hook-output schema supports both fields in the same JSON.
         print(f"Hook warning (session_init): {str(e)[:200]}", file=sys.stderr)
         safety_net_context = _build_safety_net_context(team_name, frame_role, source)
+        warning = f"PACT hook warning (session_init): {str(e)[:100]}"
+        # A frame with no PACT role still gets its launch notice, so the user
+        # keeps the relaunch hint the normal unknown-frame output carries.
+        notice = (
+            _unknown_role_launch_notice(source) if frame_role == "unknown" else None
+        )
         # hookEventName is required by the harness; missing it silently fails open
         output = {
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
                 "additionalContext": safety_net_context,
             },
-            "systemMessage": f"PACT hook warning (session_init): {str(e)[:100]}",
+            "systemMessage": f"{notice} | {warning}" if notice else warning,
         }
         print(json.dumps(output))
         sys.exit(0)
