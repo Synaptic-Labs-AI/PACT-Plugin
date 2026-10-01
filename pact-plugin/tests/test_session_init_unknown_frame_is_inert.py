@@ -618,6 +618,32 @@ class TestResumedLeadIsRecognised:
             f"(journal events {noflag[3]} vs {flag[3]})"
         )
 
+    def test_a_lead_under_the_unresolved_slug_is_recovered_after_adoption(
+        self, monkeypatch, tmp_path
+    ):
+        """A project reached through a symlink has two slugs: the link's
+        basename and the resolved one. A lead's session folder written under the
+        old slug is adopted to the new one BEFORE the recovery looks for the
+        context file, so the lead resumed without `--agent` is still the lead."""
+        real = tmp_path / "real-proj"
+        real.mkdir()
+        link = tmp_path / "link-proj"
+        link.symlink_to(real)
+        old = _build_session_path(link.name, _SESSION_ID)
+        new = _session_dir(link)
+        assert old != new, "the link does not change the slug, so this layout tests nothing"
+        old.mkdir(parents=True)
+        (old / "pact-session-context.json").write_text("{}")
+
+        output = _run_real(monkeypatch, link, _frame(source="resume"))
+
+        assert (new / "pact-session-context.json").is_file(), (
+            "the old-slug session folder was not adopted"
+        )
+        assert output["hookSpecificOutput"]["additionalContext"].startswith(LADDER), (
+            "the recovery ran before the adoption, so the resumed lead went inert"
+        )
+
     def test_a_resumed_session_without_the_context_file_stays_inert(
         self, monkeypatch, tmp_path
     ):
