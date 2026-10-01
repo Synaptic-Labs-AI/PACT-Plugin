@@ -2984,6 +2984,75 @@ def test_the_age_line_keys_on_the_trigger_and_not_on_the_anchor(monkeypatch, tmp
     )
 
 
+def _drive_lead_session_init(monkeypatch, home, project_dir, session_id, source):
+    """Run the real `session_init.main()` for a LEAD frame with a session id and
+    return its additionalContext. Unlike `_drive_session_init`, the context
+    cache, the context file and the journal run for real, because the age
+    line's anchor is read back from this session's journal."""
+    import io
+    from unittest.mock import patch
+
+    import session_init
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+    monkeypatch.setattr(Path, "home", lambda: home)
+    stdin_data = json.dumps({"session_id": session_id, "source": source,
+                             "agent_type": "PACT:pact-orchestrator"})
+
+    with patch("session_init.setup_plugin_symlinks", return_value=None), \
+         patch("session_init.ensure_project_memory_md", return_value=None), \
+         patch("session_init.check_pinned_staleness", return_value=None), \
+         patch("session_init.get_task_list", return_value=None), \
+         patch("session_init.restore_last_session", return_value=None), \
+         patch("session_init.update_session_info", return_value=None), \
+         patch("session_init.check_resume_state", return_value=None), \
+         patch("session_init._registry_resolve", return_value=None), \
+         patch("session_init.get_peer_context", return_value=None), \
+         patch("sys.stdin", io.StringIO(stdin_data)), \
+         patch("sys.stdout", new_callable=io.StringIO) as captured:
+        try:
+            session_init.main()
+        except SystemExit as exc:
+            assert exc.code == 0
+
+    payload = json.loads(captured.getvalue().strip())
+    return payload.get("hookSpecificOutput", {}).get("additionalContext", "")
+
+
+def test_a_fork_start_anchors_the_age_line_for_its_next_compact(monkeypatch, tmp_path):
+    """A fork is a launch under a new session id, so the next compact in that
+    fork compares the backlog against the fork's start. The other arm runs the
+    same compact with no start before it, a compact-only journal, which has
+    nothing to compare against and stays silent; the fork event is the only
+    difference between the arms.
+
+    RED WHEN fork is dropped from session_init's consuming sources.
+    """
+    project = tmp_path / "project"
+    _repo(project)
+    store = tmp_path / ".claude" / "pact-backlog"
+    name = backlog.store_path().stem
+    _write(store, f"{name}.json",
+           _backlog(project, updated="2026-09-01T00:00:00Z",
+                    items=[_item(title="SEEDED BACKLOG ITEM")]))
+    age_line = "nothing written to the backlog since this context was built"
+
+    forked = "f0f0f0f0-0000-0000-0000-000000000001"
+    _drive_lead_session_init(monkeypatch, tmp_path, project, forked, "fork")
+    context = _drive_lead_session_init(
+        monkeypatch, tmp_path, project, forked, "compact"
+    )
+    assert "SEEDED BACKLOG ITEM" in context, "the block did not render"
+    assert age_line in context, "the compact after a fork found no anchor"
+
+    compact_only = "c0c0c0c0-0000-0000-0000-000000000002"
+    context = _drive_lead_session_init(
+        monkeypatch, tmp_path, project, compact_only, "compact"
+    )
+    assert "SEEDED BACKLOG ITEM" in context, "the block did not render"
+    assert age_line not in context, "a compact-only journal must stay silent"
+
+
 def test_a_refused_write_preserves_the_first_writers_data_and_stays_armed(tmp_path, monkeypatch):
     """A guard that refuses AND loses the data passes a refusal-only assertion.
 

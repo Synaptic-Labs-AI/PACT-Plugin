@@ -1054,7 +1054,7 @@ _ARCHIVE_STAMP_SHAPE_RE = re.compile(
 )
 
 # First-surface gate (F-ARCH-1): session_start sources that CONSUME a
-# surfaced summary. A resume/startup/clear start after a candidate's mtime
+# surfaced summary. A resume/startup/clear/fork start after a candidate's mtime
 # means a later start already had the pointer available — re-naming at every
 # subsequent start would re-surface consumed state. compact is the PRODUCER
 # (a post-summary compact writes a NEWER summary, it does not consume this
@@ -1062,7 +1062,14 @@ _ARCHIVE_STAMP_SHAPE_RE = re.compile(
 # costs are asymmetric (a false suppression kills the pointer's primary
 # purpose; a false naming costs one sentence), so ambiguity fails toward
 # naming.
-_FIRST_SURFACE_CONSUMING_SOURCES = frozenset({"resume", "startup", "clear"})
+# A fork is a launch under a NEW session id, so like startup it builds a fresh
+# context, which the backlog age line anchors on. It cannot suppress a summary
+# wrongly: its own dir is new, the only file a start puts there before its
+# session_start is the root-drained artifact (never a candidate), and every
+# candidate comes from a compaction in the fork, so it is newer than the start.
+_FIRST_SURFACE_CONSUMING_SOURCES = frozenset(
+    {"resume", "startup", "clear", "fork"}
+)
 
 
 def _latest_consuming_start_ts(session_dir: str) -> float | None:
@@ -1112,8 +1119,8 @@ def _resume_own_summary_clause(session_dir: str) -> str:
 
     FIRST-SURFACE GATE (F-ARCH-1): a candidate (canonical or archive,
     uniformly) is SUPPRESSED when a consuming session_start event
-    (resume/startup/clear — see _FIRST_SURFACE_CONSUMING_SOURCES) has a ts
-    STRICTLY after the candidate's mtime: that later start already had the
+    (resume/startup/clear/fork — see _FIRST_SURFACE_CONSUMING_SOURCES) has a
+    ts STRICTLY after the candidate's mtime: that later start already had the
     pointer available, so naming again would re-surface consumed state at
     every subsequent start. Among archives, the NEWEST UNSUPPRESSED
     shape-conforming one wins. Fail-open toward naming: a missing/unreadable/
@@ -2505,7 +2512,8 @@ def main():
         # the line where there has been no re-injection at all.
         # A compact-only journal therefore stays silent. That is the narrow
         # accepted case, NOT a defect: _age_line refuses to fabricate a
-        # left-hand side, and it self-heals at the next startup/resume/clear.
+        # left-hand side, and it self-heals at the next startup, resume, clear
+        # or fork.
         notice = backlog_store.session_block(
             project_dir,
             context_anchor=(
