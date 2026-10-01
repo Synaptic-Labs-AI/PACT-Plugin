@@ -8,14 +8,18 @@ treated as the lead. Two pins keep every writer lead-gated:
 - CENSUS, over the shipped Python under hooks/, skills/, scripts/, bin/ and
   telegram/ (plus a text scan of their non-Python, non-markdown files), each
   compared with a known set, so a new site fails with instructions:
-  calls to the write APIs (through an import alias too); callers of
-  build_context_cache, whose returned path a writer could use without naming
-  the file; code strings naming the file; uses of the context module's path
-  global; and relocation calls in functions that derive a session path. Each
-  scan has a seeded positive control, and every directory of shipped code must
-  be a scan root. Not covered: markdown instruction files (all of them only
-  read the file today), and a relocation whose path reaches the function
-  under a name that does not mark it as a session path.
+  references to the write APIs (a call, a functools.partial or an assignment,
+  through an import alias too); references to build_context_cache, whose
+  returned path a writer could use without naming the file; code strings
+  naming the file; uses of the context module's path global; and relocation
+  or link calls (os.symlink, os.link, Path.symlink_to, Path.hardlink_to: the
+  recovery check's is_file() follows a link), through a module alias or a
+  from-import too, in functions that derive a session path. Each scan has a
+  seeded positive control, and every directory of shipped code must be a scan
+  root. Not covered: markdown instruction files (all of them only read the
+  file today); a relocation whose path reaches the function under a name that
+  does not mark it as a session path; and a filename split across string
+  parts, which only deliberate construction produces.
 - BEHAVIOUR: each known writer, driven for a non-lead frame, writes nothing,
   while a lead control on the same setup writes the file.
 """
@@ -41,13 +45,15 @@ _PATH_BUILDER = "build_context_cache"
 _TRACKED_APIS = _WRITE_APIS | {_PATH_BUILDER}
 _CONTEXT_MODULE = "hooks/shared/pact_context.py"
 
-# Relocation calls: module functions, Path.rename, and Path.replace, which takes
-# one argument where str.replace takes two.
+# Relocation and link calls: module functions, Path's link methods, Path.rename,
+# and Path.replace, which takes one argument where str.replace takes two.
 _MODULE_RELOCATIONS = frozenset({
     ("os", "rename"), ("os", "replace"), ("os", "renames"),
+    ("os", "symlink"), ("os", "link"),
     ("shutil", "move"), ("shutil", "copytree"), ("shutil", "copy"),
     ("shutil", "copy2"), ("shutil", "copyfile"),
 })
+_PATH_LINKS = frozenset({"symlink_to", "hardlink_to"})
 # What marks a function as deriving a session path.
 _SESSION_PATH_CALLS = frozenset({
     "build_session_path", "_build_session_path", "project_slug",
@@ -55,8 +61,9 @@ _SESSION_PATH_CALLS = frozenset({
 })
 _SESSION_PATH_NAMES = ("session_dir", "session_path", "session_folder")
 
-# (file, enclosing function, write API called). The three lead-gated writers,
-# plus write_context itself, which is persist_context behind a path builder.
+# (file, enclosing function, write API referenced). The three lead-gated
+# writers, plus write_context itself, which is persist_context behind a path
+# builder.
 KNOWN_WRITE_CALLS = frozenset({
     ("hooks/session_init.py", "main", "persist_context"),
     ("hooks/shared/pact_context.py", "heal_context_if_missing", "write_context"),
@@ -64,8 +71,9 @@ KNOWN_WRITE_CALLS = frozenset({
     ("hooks/shared/pact_context.py", "write_context", "persist_context"),
 })
 
-# (file, enclosing function) of every caller of build_context_cache, which
-# returns the context file's path. Both pass it straight to persist_context.
+# (file, enclosing function) of every reference to build_context_cache, which
+# returns the context file's path. Both call it and pass the path straight to
+# persist_context.
 KNOWN_PATH_BUILDER_CALLS = frozenset({
     ("hooks/session_init.py", "main"),
     ("hooks/shared/pact_context.py", "write_context"),
@@ -109,19 +117,6 @@ _INSTRUCTION = (
 )
 
 
-def _relocation(call):
-    func = call.func
-    if not isinstance(func, ast.Attribute):
-        return None
-    if isinstance(func.value, ast.Name) and (func.value.id, func.attr) in _MODULE_RELOCATIONS:
-        return f"{func.value.id}.{func.attr}"
-    if func.attr == "rename" and len(call.args) == 1:
-        return "Path.rename"
-    if func.attr == "replace" and len(call.args) == 1 and not call.keywords:
-        return "Path.replace"
-    return None
-
-
 def _own_nodes(function):
     """The nodes of ``function`` itself, not of functions or classes nested in it."""
     pending = list(ast.iter_child_nodes(function))
@@ -148,25 +143,36 @@ def _derives_a_session_path(function):
 
 
 class _Census(ast.NodeVisitor):
-    """Collect tracked-API calls, code strings naming the file, uses of the
-    context module's path global, and session-path relocations, keyed by
+    """Collect tracked-API references, code strings naming the file, uses of
+    the context module's path global, and session-path relocations, keyed by
     (file, enclosing function)."""
 
     def __init__(self, rel, tree):
         self.rel = rel
         self.stack = []
         self.docstrings = set()
-        self.api_calls = set()
+        self.api_refs = set()
         self.name_sites = set()
         self.path_refs = set()
         self.relocations = set()
-        # `from ... import persist_context as _persist` binds a second name.
+        # `from ... import persist_context as _persist` binds a second name,
+        # and `import shutil as sh` or `from os import rename` binds a
+        # relocation. Resolved per file, which errs toward flagging.
         self.aliases = {api: api for api in _TRACKED_APIS}
+        self.modules = {}
+        self.functions = {}
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
+            if isinstance(node, ast.Import):
                 for alias in node.names:
+                    if alias.asname:
+                        self.modules[alias.asname] = alias.name
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    bound = alias.asname or alias.name
                     if alias.name in _TRACKED_APIS:
-                        self.aliases[alias.asname or alias.name] = alias.name
+                        self.aliases[bound] = alias.name
+                    if (node.module, alias.name) in _MODULE_RELOCATIONS:
+                        self.functions[bound] = f"{node.module}.{alias.name}"
 
     def _where(self):
         return ".".join(self.stack) or "<module>"
@@ -180,27 +186,43 @@ class _Census(ast.NodeVisitor):
         self._note_docstring(node)
         self.generic_visit(node)
 
+    def _relocation(self, call):
+        func = call.func
+        if isinstance(func, ast.Name):
+            return self.functions.get(func.id)
+        if not isinstance(func, ast.Attribute):
+            return None
+        if isinstance(func.value, ast.Name):
+            module = self.modules.get(func.value.id, func.value.id)
+            if (module, func.attr) in _MODULE_RELOCATIONS:
+                return f"{module}.{func.attr}"
+        if func.attr in _PATH_LINKS:
+            return f"Path.{func.attr}"
+        if func.attr == "rename" and len(call.args) == 1:
+            return "Path.rename"
+        if func.attr == "replace" and len(call.args) == 1 and not call.keywords:
+            return "Path.replace"
+        return None
+
     def _visit_scope(self, node):
         self._note_docstring(node)
         self.stack.append(node.name)
         if not isinstance(node, ast.ClassDef) and _derives_a_session_path(node):
             for inner in _own_nodes(node):
-                if isinstance(inner, ast.Call) and _relocation(inner):
-                    self.relocations.add((self.rel, self._where(), _relocation(inner)))
+                moved = isinstance(inner, ast.Call) and self._relocation(inner)
+                if moved:
+                    self.relocations.add((self.rel, self._where(), moved))
         self.generic_visit(node)
         self.stack.pop()
 
     visit_FunctionDef = visit_AsyncFunctionDef = visit_ClassDef = _visit_scope
 
-    def visit_Call(self, node):
-        func = node.func
-        name = (
-            func.id if isinstance(func, ast.Name)
-            else func.attr if isinstance(func, ast.Attribute) else None
-        )
-        if name in self.aliases:
-            self.api_calls.add((self.rel, self._where(), self.aliases[name]))
-        self.generic_visit(node)
+    # A reference, not only a call: a call's func is a Load reference too, and
+    # functools.partial(write_context) or `p = pact_context.persist_context`
+    # hands the API on without calling it here.
+    def visit_Name(self, node):
+        if isinstance(node.ctx, ast.Load) and node.id in self.aliases:
+            self.api_refs.add((self.rel, self._where(), self.aliases[node.id]))
 
     def visit_Constant(self, node):
         if (
@@ -211,6 +233,8 @@ class _Census(ast.NodeVisitor):
             self.name_sites.add((self.rel, self._where()))
 
     def visit_Attribute(self, node):
+        if isinstance(node.ctx, ast.Load) and node.attr in self.aliases:
+            self.api_refs.add((self.rel, self._where(), self.aliases[node.attr]))
         if node.attr == "_context_path" and self.rel != _CONTEXT_MODULE:
             self.path_refs.add((self.rel, self._where()))
         self.generic_visit(node)
@@ -239,7 +263,7 @@ def _python_census(plugin):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             census = _Census(path.relative_to(plugin).as_posix(), tree)
             census.visit(tree)
-            for rel, where, api in census.api_calls:
+            for rel, where, api in census.api_refs:
                 if api in _WRITE_APIS:
                     found["write_calls"].add((rel, where, api))
                 else:
@@ -289,14 +313,23 @@ class TestCensus:
         hooks = tmp_path / "hooks"
         hooks.mkdir()
         (hooks / "seeded.py").write_text(
+            "import functools\n"
             "import os\n"
+            "import shutil as sh\n"
+            "from os import rename\n"
             "from pathlib import Path\n"
+            "from shutil import copytree\n"
             "import shared.pact_context as pact_context\n"
             "from shared.pact_context import persist_context as _persist\n\n"
             "def via_api():\n"
             "    pact_context.write_context('t', 's', 'p', 'r')\n\n"
             "def via_alias(target, context):\n"
             "    _persist(target, context)\n\n"
+            "def via_partial(target):\n"
+            "    return functools.partial(_persist, target)\n\n"
+            "def via_assignment(target, context):\n"
+            "    write = pact_context.persist_context\n"
+            "    write(target, context)\n\n"
             "def via_builder():\n"
             "    target, context = pact_context.build_context_cache('t', 's', 'p', 'r')\n"
             "    target.write_text(str(context))\n\n"
@@ -305,18 +338,43 @@ class TestCensus:
             "def via_global():\n"
             "    pact_context._context_path.write_text('{}')\n\n"
             "def relocated(old_session_dir, new_session_dir):\n"
-            "    os.rename(old_session_dir, new_session_dir)\n"
+            "    os.rename(old_session_dir, new_session_dir)\n\n"
+            "def from_import_rename(old_session_dir, new_session_dir):\n"
+            "    rename(old_session_dir, new_session_dir)\n\n"
+            "def from_import_copy(old_session_dir, new_session_dir):\n"
+            "    copytree(old_session_dir, new_session_dir)\n\n"
+            "def module_alias_move(old_session_dir, new_session_dir):\n"
+            "    sh.move(old_session_dir, new_session_dir)\n\n"
+            "def symlinked(old_session_dir, new_session_dir):\n"
+            "    os.symlink(old_session_dir, new_session_dir)\n\n"
+            "def hard_linked(old_session_dir, new_session_dir):\n"
+            "    os.link(old_session_dir, new_session_dir)\n\n"
+            "def path_symlinked(old_session_dir, new_session_dir):\n"
+            "    Path(new_session_dir).symlink_to(old_session_dir)\n\n"
+            "def path_hard_linked(old_session_dir, new_session_dir):\n"
+            "    Path(new_session_dir).hardlink_to(old_session_dir)\n"
         )
         found = _python_census(tmp_path)
         assert found["scanned"]["hooks"] == 1
         assert found["write_calls"] == {
             ("hooks/seeded.py", "via_api", "write_context"),
             ("hooks/seeded.py", "via_alias", "persist_context"),
+            ("hooks/seeded.py", "via_partial", "persist_context"),
+            ("hooks/seeded.py", "via_assignment", "persist_context"),
         }
         assert found["path_builder_calls"] == {("hooks/seeded.py", "via_builder")}
         assert found["name_sites"] == {("hooks/seeded.py", "direct")}
         assert found["path_refs"] == {("hooks/seeded.py", "via_global")}
-        assert found["relocations"] == {("hooks/seeded.py", "relocated", "os.rename")}
+        assert found["relocations"] == {
+            ("hooks/seeded.py", "relocated", "os.rename"),
+            ("hooks/seeded.py", "from_import_rename", "os.rename"),
+            ("hooks/seeded.py", "from_import_copy", "shutil.copytree"),
+            ("hooks/seeded.py", "module_alias_move", "shutil.move"),
+            ("hooks/seeded.py", "symlinked", "os.symlink"),
+            ("hooks/seeded.py", "hard_linked", "os.link"),
+            ("hooks/seeded.py", "path_symlinked", "Path.symlink_to"),
+            ("hooks/seeded.py", "path_hard_linked", "Path.hardlink_to"),
+        }
 
     def test_a_str_replace_is_not_a_relocation(self, tmp_path):
         """Path.replace takes one argument; str.replace takes two."""
