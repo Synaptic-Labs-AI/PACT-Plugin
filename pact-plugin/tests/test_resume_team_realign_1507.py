@@ -721,8 +721,8 @@ def test_xi_stale_block_and_working_recovery_coexist_scoped(tmp_path,
     the ambiguous-census deny, the composite reason carries BOTH diagnoses,
     each scoped to ITS OWN records with no contradiction inside one message:
       * the stale-block WARNING (about the CLAUDE.md 'Current Session' block —
-        its 'completing bootstrap will rewrite the CLAUDE.md session records'
-        claim is scoped to exactly those records), and
+        its 'do not trust the recorded lines' instruction is scoped to
+        exactly those records), and
       * the re-align HINT (about pact-session-context.json — the measured
         working recovery, leaving session_id/journal untouched).
     The composer is A-xor-B by construction: with the incumbent fired the

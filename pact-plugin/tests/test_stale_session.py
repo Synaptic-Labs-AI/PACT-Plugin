@@ -72,6 +72,22 @@ def test_mismatch_returns_warning_naming_recorded_and_actual(tmp_path, monkeypat
     assert "stale session block" in result
 
 
+def test_the_warning_names_both_causes_and_promises_no_rewrite(tmp_path, monkeypatch):
+    """The block names another session because another lead recorded itself
+    in this project since, or this session's write failed at SessionStart.
+    No step rewrites it later, so the warning points at this session's own
+    startup values instead of promising a rewrite."""
+    _write_claude_md(tmp_path, _RECORDED_DIFFERENT)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+    result = detect_stale_session_block({"session_id": _LIVE_ID})
+
+    assert "another lead may have started in this project since" in result
+    assert "the CLAUDE.md write failed at SessionStart" in result
+    assert "this session's own startup context" in result
+    assert "rewrite" not in result
+
+
 # =============================================================================
 # None-branch 5: recorded == actual (healthy resume)
 # =============================================================================

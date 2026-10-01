@@ -40,10 +40,10 @@ _RESUME_LINE_RE = re.compile(
 _STALENESS_WARNING_TEMPLATE = (
     "\n\nWARNING — stale session block: the project CLAUDE.md 'Current "
     "Session' block records session {recorded} but this session is "
-    "{actual}. session_init likely failed at SessionStart this session "
-    "(or the CLAUDE.md write failed). Do NOT trust the recorded Team/"
-    "Session dir/Resume lines for THIS session; completing bootstrap "
-    "will rewrite the CLAUDE.md session records."
+    "{actual}: another lead may have started in this project since, or the "
+    "CLAUDE.md write failed at SessionStart. Do NOT trust the recorded Team/"
+    "Session dir/Resume lines for THIS session; use the session values in "
+    "this session's own startup context."
 )
 
 # FORWARD NOTE — a SIBLING restart-detection signal is planned for this leaf:
@@ -59,9 +59,10 @@ _STALENESS_WARNING_TEMPLATE = (
 def detect_stale_session_block(input_data: dict) -> str | None:
     """Detect a stale 'Current Session' block in the project CLAUDE.md.
 
-    When session_init crashes at SessionStart, the previous session's
-    Resume/Team/Session-dir lines survive in CLAUDE.md and misdirect
-    recovery. Compare the recorded Resume-line session_id against this
+    When the block names another session, its Resume/Team/Session-dir lines
+    misdirect recovery: another lead recorded itself in this project after
+    this session started, or this session's own CLAUDE.md write failed at
+    SessionStart. Compare the recorded Resume-line session_id against this
     frame's raw stdin session_id; on mismatch, return an advisory warning
     string for additionalContext composition. Returns None (no warning)
     when:
@@ -86,8 +87,10 @@ def detect_stale_session_block(input_data: dict) -> str | None:
     ./CLAUDE.md fallback — same existing-file precedence as
     resolve_project_claude_md_path (parity pinned by test). False
     positives: none in healthy flows — session_init rewrites the block
-    before the first prompt on startup/clear, and resume keeps the same
-    session_id.
+    before the first prompt for every lead it recognises, a resume keeps
+    the same session_id, and bootstrap_prompt_gate replaces the block at the
+    first prompt of a lead session_init did not record (and asks this
+    detector nothing for that lead).
     """
     raw_id = input_data.get("session_id")
     # Canonical validity predicate (shared with the heal gate and

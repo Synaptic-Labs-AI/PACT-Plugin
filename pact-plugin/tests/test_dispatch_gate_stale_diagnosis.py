@@ -184,14 +184,12 @@ def test_hint_names_the_measured_manual_repoint_not_a_bootstrap_pointer(
         assert marker in reason, (
             f"measured-recovery element missing from the hint: {marker!r}"
         )
-    # Scoped to the HINT constant, not the emitted reason: the shared
-    # detector's stale-block — legitimately prepended on this leg — carries
-    # its own "completing bootstrap will rewrite the CLAUDE.md session
-    # records" claim, which is a different sentence from a different
-    # module and not this tripwire's subject.
+    # Checked against the whole emitted reason: the shared detector's
+    # stale-block, prepended on this leg, must not promise a bootstrap
+    # rewrite either.
     for phrase in _FORBIDDEN_INERT_REMEDIES:
-        assert phrase not in _STALE_REALIGN_HINT, (
-            f"inert bootstrap-pointer remedy reintroduced into the hint: "
+        assert phrase not in reason, (
+            f"inert bootstrap-pointer remedy in the deny: "
             f"{phrase!r}. Completing bootstrap does not rewrite these "
             "records."
         )
