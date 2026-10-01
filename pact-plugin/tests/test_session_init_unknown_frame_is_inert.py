@@ -53,8 +53,8 @@ _SESSION_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 _PROJECT_DIR = "/tmp/pact-unknown-frame-inert"
 USER_MD = "# My project\n\nBuild with make.\n"
 
-# The four lifecycle sources plus one the source ladder does not recognize.
-SOURCES = ("startup", "resume", "compact", "clear", "a-source-nobody-has-added-yet")
+# The five lifecycle sources plus one the source ladder does not recognize.
+SOURCES = ("startup", "resume", "compact", "clear", "fork", "a-source-nobody-has-added-yet")
 
 
 def _run_main(frame, source, monkeypatch, tmp_path):
@@ -229,7 +229,7 @@ class TestUnknownFrameOutputIsExact:
             "hookEventName": "SessionStart",
             "additionalContext": _UNKNOWN_FRAME_CONTEXT,
         }
-        if source in ("startup", "resume"):
+        if source in ("startup", "resume", "fork"):
             assert output.get("systemMessage") == _UNKNOWN_ROLE_NOTICE
         else:
             assert "systemMessage" not in output, output.get("systemMessage")

@@ -379,6 +379,21 @@ class TestUnknownRoleStartupWarning:
             "(the typo'd-orchestrator case #1 exists to catch)"
         )
 
+    @pytest.mark.parametrize("source,fires", [
+        ("startup", True), ("resume", True), ("fork", True),
+        ("compact", False), ("clear", False),
+    ])
+    def test_fires_on_launch_sources_only(self, source, fires, monkeypatch, tmp_path):
+        """Each launch fires SessionStart once, so the notice rides launch
+        sources only; compact and clear can repeat within one launch."""
+        stdin = json.dumps({"session_id": _SESSION_ID, "source": source,
+                            "agent_type": "pact-architct"})
+        blob = self._run_capture_systemmessage(stdin, monkeypatch, tmp_path)
+        assert (self._notice_text() in blob) is fires, (
+            f"source={source!r}: the unknown-role notice must "
+            f"{'fire' if fires else 'not fire'}"
+        )
+
     def test_unresolvable_registry_present_unrecognized_fires(self, monkeypatch, tmp_path):
         """(e) fail-OPEN residual: env CLAUDE_PLUGIN_ROOT empty → registry
         unresolvable → a present-but-(unverifiable) agent_type fires. An install

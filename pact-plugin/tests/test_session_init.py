@@ -1423,7 +1423,7 @@ class TestInprocessModeNoticeIntegration:
     """#864 Phase 1 §9.2: the in-process teammateMode notice wired into main().
 
     Drives session_init.main() end-to-end and asserts the notice appears in the
-    emitted systemMessage for launch events (startup/resume) when the effective
+    emitted systemMessage for launch events (startup/resume/fork) when the effective
     mode is not positively tmux, and is ABSENT for mid-launch context resets
     (compact/clear) and when the mode is tmux.
 
@@ -1518,6 +1518,7 @@ class TestInprocessModeNoticeIntegration:
             ("startup", "in-process", True),
             ("startup", "tmux", False),
             ("resume", "in-process", True),     # D1: resume re-warns (walk-away case)
+            ("fork", "in-process", True),       # a fork is a new launch
             ("compact", "in-process", False),   # mid-launch reset -> suppressed
             ("clear", "in-process", False),     # mid-launch reset -> suppressed
             ("startup", None, True),            # no teammateMode -> auto -> emit (fail-safe)
@@ -1593,7 +1594,7 @@ class TestInprocessModeNoticeIntegration:
         )
         assert self._DOC_REF not in system_msg, (
             "an unrecognized source must SUPPRESS the in-process notice "
-            "(normalizes to 'unknown'; not in the startup/resume allowlist)"
+            "(normalizes to 'unknown'; not in the launch-source allowlist)"
         )
 
     def test_missing_source_defaults_to_startup_and_emits(self, monkeypatch, tmp_path):
@@ -4394,6 +4395,19 @@ class TestSourceAwareness:
         assert "paused state" in additional
         # Should NOT have recovery instructions for context resets
         assert "compact-summary.txt" not in additional
+        assert "CONTEXT CLEARED" not in additional
+        assert "POST-COMPACTION" not in additional
+
+    def test_fork_takes_the_resume_limb(self, monkeypatch, tmp_path):
+        """A fork (`--resume <id> --fork-session`) continues its parent's
+        conversation, so it gets the resume limb, not the unrecognized-source
+        note."""
+        additional, _, _ = self._run_main_with_source(
+            monkeypatch, tmp_path, source="fork", team_exists=False
+        )
+
+        assert "paused state" in additional
+        assert "unrecognized session source" not in additional
         assert "CONTEXT CLEARED" not in additional
         assert "POST-COMPACTION" not in additional
 

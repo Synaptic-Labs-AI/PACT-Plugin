@@ -6,7 +6,7 @@ Used by: Claude Code settings.json SessionStart hook
 
 Performs PACT environment initialization:
 0. Checks if ~/.claude/teams is in additionalDirectories (emits setup tip if not configured)
-0b. Emits a one-time in-process teammateMode notice recommending tmux for unattended runs (startup/resume only)
+0b. Emits a one-time in-process teammateMode notice recommending tmux for unattended runs (startup/resume/fork only)
 1. Creates plugin symlinks for @reference resolution
 3. Ensures project CLAUDE.md exists with memory sections
 3b. One-time migration: wraps existing project CLAUDE.md in PACT_MANAGED boundary (#404)
@@ -174,7 +174,7 @@ _INPROCESS_MODE_NOTICE = (
 # neither channel. The notice rides TWO CHANNELS, AND EACH CHANNEL HAS ITS OWN
 # POPULATION, BECAUSE THE GATES USE DIFFERENT PREDICATES. Do not state one
 # population for the pair.
-#   systemMessage: on a launch event (`startup` or `resume`), for an unknown
+#   systemMessage: on a launch event (_LAUNCH_SOURCES), for an unknown
 #     frame, and for an agent_type that is present but is not the lead and is
 #     not a registered specialist (_should_warn_unknown_role). So a typo such
 #     as `--agent pact-architct` classifies as a teammate and reaches this
@@ -197,6 +197,11 @@ _UNKNOWN_FRAME_CONTEXT = (
     "PACT cannot dispatch specialist agents in this session, so PACT "
     "workflows that spawn specialists will not work here."
 )
+
+# SessionStart sources that start a new launch, so they carry the one-per-launch
+# notices. A fork (`--resume <id> --fork-session`) is a new process with a new
+# session id. compact and clear can repeat within one launch.
+_LAUNCH_SOURCES = ("startup", "resume", "fork")
 
 # Appended after the ladder for a frame whose role was never resolved (None):
 # its population includes real leads, so it keeps the ladder, and this cue
@@ -805,7 +810,7 @@ def _unknown_frame_output(source: str) -> dict:
     written into the project.
     """
     system_messages = []
-    if source in ("startup", "resume"):
+    if source in _LAUNCH_SOURCES:
         system_messages.append(_UNKNOWN_ROLE_NOTICE)
     symlink_result = setup_plugin_symlinks()
     if symlink_result and "failed" in symlink_result.lower():
@@ -1319,7 +1324,7 @@ def main():
 
     Performs PACT environment initialization:
     0. Checks if ~/.claude/teams is in additionalDirectories (emits setup tip if not configured)
-    0b. Emits a one-time in-process teammateMode notice recommending tmux for unattended runs (startup/resume only)
+    0b. Emits a one-time in-process teammateMode notice recommending tmux for unattended runs (startup/resume/fork only)
     1. Creates plugin symlinks for @reference resolution
     3. Ensures project CLAUDE.md exists with memory sections
     3b. One-time migration: wraps existing project CLAUDE.md in PACT_MANAGED boundary (#404)
@@ -1387,7 +1392,7 @@ def main():
         context_parts = []
         system_messages = []
 
-        # Detect session source: startup, resume, compact, clear
+        # Detect session source: startup, resume, compact, clear, fork
         # Default to "startup" if missing (backwards compat with older Claude Code).
         # Validate against the known set — an unrecognized source is surfaced
         # as "unknown" so it cannot inject arbitrary text into additionalContext.
@@ -1395,7 +1400,7 @@ def main():
         # unhashable inputs (list, dict) that would otherwise raise TypeError,
         # bubble to the outer safety-net, and skip the session_start journal
         # write — breaking #414 R2's fail-open contract.
-        _VALID_SOURCES = {"startup", "resume", "compact", "clear"}
+        _VALID_SOURCES = {"startup", "resume", "compact", "clear", "fork"}
         raw_source = input_data.get("source", "startup")
         source = (
             raw_source
@@ -1507,12 +1512,13 @@ def main():
         # relaunch itself) → system_messages channel, mirroring the step-0
         # additionalDirectories tip.
         #
-        # WHEN: emit only on session-LAUNCH events (startup + resume). A
-        # resumed session is the walk-away/unattended case worth re-warning,
-        # and each launch fires SessionStart exactly once for that source — so
-        # NO marker file is needed to stay once-per-launch. `compact` and
-        # `clear` are mid-launch context-reset events that CAN re-fire within a
-        # single launch; they are SUPPRESSED so the notice is never repeated.
+        # WHEN: emit only on session-LAUNCH events (_LAUNCH_SOURCES). A
+        # resumed or forked session is the walk-away/unattended case worth
+        # re-warning, and each launch fires SessionStart exactly once for that
+        # source — so NO marker file is needed to stay once-per-launch.
+        # `compact` and `clear` are mid-launch context-reset events that CAN
+        # re-fire within a single launch; they are SUPPRESSED so the notice is
+        # never repeated.
         # An unrecognized source (normalized to "unknown") is also suppressed.
         #
         # Fail-safe: should_emit_inprocess_notice() is total (never raises) and
@@ -1525,7 +1531,7 @@ def main():
         # this tuple normalizes to "unknown" (see source-normalization above)
         # and is SUPPRESSED — update this allowlist if such a launch source is
         # added upstream.
-        if source in ("startup", "resume"):
+        if source in _LAUNCH_SOURCES:
             try:
                 from shared.teammate_mode import should_emit_inprocess_notice
                 if should_emit_inprocess_notice():
@@ -1540,7 +1546,7 @@ def main():
         # Surface that so a mis-launched orchestrator is observable.
         # Conditional emission mirroring the 0b notice shape (NOT a new
         # numbered init step — keeps clear of the module/main() docstring-parity
-        # convention). Launch events only (startup/resume): a mid-launch
+        # convention). Launch events only (_LAUNCH_SOURCES): a mid-launch
         # compact/clear context-reset must not re-fire it. The decision (incl.
         # the is_lead-first ordering, the live specialist-registry check against
         # env plugin_root, and the PACT:-strip) lives in _should_warn_unknown_role
@@ -1550,7 +1556,7 @@ def main():
         # above, a recovered lead is "lead", and a frame whose stdin did not
         # parse is None. _UNKNOWN_FRAME_CONTEXT is the literal's other carrier.
         if (
-            source in ("startup", "resume")
+            source in _LAUNCH_SOURCES
             and frame_role == "teammate"
             and _should_warn_unknown_role(input_data)
         ):
@@ -1920,7 +1926,7 @@ def main():
             # lead-only write — a teammate/plain frame would append a phantom
             # anchor to (or create) a session journal it does not own.
             # `source` is the already-normalized value from the `_VALID_SOURCES`
-            # check above — one of {startup, resume, compact, clear, unknown}.
+            # check above — one of {startup, resume, compact, clear, fork, unknown}.
             # Persisting it here gives downstream triage direct attribution for
             # marker-wipe and other source-conditioned behavior, instead of
             # forcing triangulation from timing clusters (#414 R2).
@@ -2220,7 +2226,16 @@ def main():
                     f"Re-engage secretary: SendMessage(to='secretary', "
                     f"message='Context cleared: deliver fresh briefing with current project state.')."
                 ))
-            elif source == "resume":
+            elif source in ("resume", "fork"):
+                # A fork continues its parent's conversation under a NEW session
+                # id, so it takes this limb: the bootstrap directive is above,
+                # and resume_summary_clause is "" because that probe runs for
+                # source == "resume" only (a fork's own dir is new). Step 5a
+                # reads the project CLAUDE.md block, which still names the
+                # PARENT session, so prev_session_dir and the resume and
+                # paused-state surfacing point at the parent. That is right
+                # for a continuation; do not "fix" it to the fork's own id.
+                #
                 # Normal resume: model retains context, team exists. A compact
                 # summary from an earlier compaction of this session may sit
                 # in the session's own dir — usually archived-in-place, since
@@ -2495,7 +2510,7 @@ def main():
         )
         if notice.context:
             context_parts.append(notice.context)
-        if notice.alert and source in ("startup", "resume"):
+        if notice.alert and source in _LAUNCH_SOURCES:
             system_messages.append(notice.alert)
 
         # Build output

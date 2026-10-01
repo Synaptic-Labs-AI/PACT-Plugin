@@ -423,8 +423,8 @@ afternoon.
 
 The source-gate pair is the reason this record exists. Twenty-four arms all
 killed their mutations while the launch-source gate sat entirely unpinned:
-deleting `source in ("startup", "resume")` from the call site left the whole
-file green. A kill count measures the mutations someone thought of, so it
+deleting the launch-source check from the call site left the whole file
+green. A kill count measures the mutations someone thought of, so it
 cannot reveal a property nobody named. Mutation testing proves the arms
 present are not vacuous; only enumerating the spec's properties says which
 arms are missing, and neither substitutes for the other.
@@ -1587,13 +1587,13 @@ def test_session_init_emits_the_block_for_a_worktree_session(monkeypatch, tmp_pa
 
 
 def test_the_alert_channel_is_gated_on_the_launch_source(monkeypatch, tmp_path):
-    """`alert` reaches the user on startup and resume, and NOT on compact,
-    while `context` carries the loud text on all three.
+    """`alert` reaches the user on startup, resume and fork, and NOT on
+    compact, while `context` carries the loud text on all four.
 
     This is a SEPARATE property from the channel asymmetry, and the channel
-    arms do not reach it: deleting `source in ("startup", "resume")` from the
-    call site leaves every channel assertion intact and ships a systemMessage
-    on every compaction. Measured before this arm existed — the whole file
+    arms do not reach it: deleting the launch-source check from the call
+    site leaves every channel assertion intact and ships a systemMessage on
+    every compaction. Measured before this arm existed — the whole file
     stayed green under exactly that mutation.
 
     RED WHEN the source gate is deleted (compact gains a systemMessage) or
@@ -1607,7 +1607,7 @@ def test_the_alert_channel_is_gated_on_the_launch_source(monkeypatch, tmp_path):
     # the alert channel for the gate to act on.
     _write(tmp_path / ".claude" / "pact-backlog", "demo.json", "{ not json at all")
 
-    for source in ("startup", "resume"):
+    for source in ("startup", "resume", "fork"):
         context, system_message = _drive_session_init(
             monkeypatch, tmp_path, project, source
         )
