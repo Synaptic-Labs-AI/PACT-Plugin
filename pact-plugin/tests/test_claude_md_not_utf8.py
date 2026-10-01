@@ -9,8 +9,9 @@ UnicodeDecodeError in the strict reads of the project CLAUDE.md, and session_ini
 fell into its safety net for a lead and a teammate alike; one in the global
 ~/.claude/CLAUDE.md did the same for every session. The rule now: a read that
 only reads decodes with replacement, and a read that feeds a rewrite decodes
-strictly and, when it cannot, leaves the file untouched and reports the skip.
-Writing replacement characters back would corrupt the user's file.
+strictly and, when it cannot, leaves the file untouched. It reports the skip
+only when the rewrite was due: with nothing to do, a bad file gets what a valid
+one gets. Writing replacement characters back would corrupt the user's file.
 
 Every arm runs a control on a valid copy of the same layout, so a skip is
 shown on a layout that provably reaches the rewrite. The session-start arms
@@ -76,9 +77,12 @@ def _managed_md(tmp_path):
 
 class TestSessionStart:
 
-    @pytest.mark.parametrize("layout", ["managed", "unmanaged"])
+    @pytest.mark.parametrize("layout, notice", [
+        ("managed", "Pinned staleness skipped"),
+        ("unmanaged", "Migration skipped"),
+    ])
     def test_a_lead_start_skips_the_rewrites_and_keeps_its_ladder(
-        self, tmp_path, layout
+        self, tmp_path, layout, notice
     ):
         """A managed file reaches the session block and stale-pin rewrites; an
         unmanaged one reaches the migration."""
@@ -101,7 +105,8 @@ class TestSessionStart:
 
         assert (proj / rel).read_bytes() == before
         assert SAFETY_NET not in out.get("systemMessage", "")
-        assert NOT_UTF8 in out.get("systemMessage", "")
+        assert notice in out.get("systemMessage", "")
+        assert "Session info skipped" in out.get("systemMessage", "")
         assert out["hookSpecificOutput"]["additionalContext"].startswith(
             "YOUR PACT ROLE: orchestrator.")
 
@@ -138,6 +143,75 @@ class TestSessionStart:
         assert (home / ".claude" / "CLAUDE.md").read_bytes() == before
         assert SAFETY_NET not in out.get("systemMessage", "")
         assert "Kernel block strip skipped" in out.get("systemMessage", "")
+
+
+class TestNothingToDo:
+    """With nothing for a rewriter to do, a bad file gets the result a valid one
+    gets: no skip notice. Each arm's would-change twin is above or below."""
+
+    def test_a_global_file_without_a_kernel_block_gives_no_notice(self, tmp_path):
+        text = b"# global\n\nMy own instructions.\n"
+        outs = []
+        for name, data in (("control", text), ("subject", text + BAD)):
+            home, proj, env = _sandbox(tmp_path / name)
+            (home / ".claude").mkdir(parents=True, exist_ok=True)
+            (home / ".claude" / "CLAUDE.md").write_bytes(data)
+            outs.append(_start(str(uuid.uuid4()), None, home, env))
+            assert (home / ".claude" / "CLAUDE.md").read_bytes() == data
+
+        assert NOT_UTF8 not in outs[1].get("systemMessage", "")
+        assert outs[1].get("systemMessage") == outs[0].get("systemMessage")
+
+    def test_a_managed_file_with_no_pin_gives_no_migration_or_staleness_notice(
+        self, tmp_path
+    ):
+        home, proj, env = _sandbox(tmp_path)
+        _start(str(uuid.uuid4()), LEAD, home, env)
+        md = proj / ".claude" / "CLAUDE.md"
+        before = md.read_bytes() + BAD
+        md.write_bytes(before)
+
+        message = _start(str(uuid.uuid4()), LEAD, home, env).get("systemMessage", "")
+
+        assert md.read_bytes() == before
+        assert "Migration skipped" not in message
+        assert "Pinned staleness skipped" not in message
+        assert "Session info skipped" in message, (
+            "a new session's block is a rewrite that was due"
+        )
+
+    def test_a_compaction_reports_no_session_info_skip(self, tmp_path):
+        sid = str(uuid.uuid4())
+        home, proj, env = _sandbox(tmp_path)
+        _start(sid, LEAD, home, env)
+        md = proj / ".claude" / "CLAUDE.md"
+        valid = md.read_bytes()
+        _start(sid, LEAD, home, env, source="compact")
+        assert md.read_bytes() == valid, "control: a compaction rewrote the block"
+
+        md.write_bytes(valid + BAD)
+        message = _start(sid, LEAD, home, env, source="compact").get(
+            "systemMessage", "")
+
+        assert md.read_bytes() == valid + BAD
+        assert "Session info skipped" not in message
+
+    def test_the_pin_marker_writer_reports_its_own_no_op(self, tmp_path, monkeypatch):
+        import pin_marker_writer
+
+        project = tmp_path / "p"
+        project.mkdir()
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+
+        (project / "CLAUDE.md").write_text(USER_MD, encoding="utf-8")
+        assert pin_marker_writer._plan_and_write() == "noop_not_migrated", (
+            "control: the valid file was not a no-op"
+        )
+
+        before = USER_MD.encode("utf-8") + BAD
+        (project / "CLAUDE.md").write_bytes(before)
+        assert pin_marker_writer._plan_and_write() == "noop_not_migrated"
+        assert (project / "CLAUDE.md").read_bytes() == before
 
 
 class TestFirstPrompt:

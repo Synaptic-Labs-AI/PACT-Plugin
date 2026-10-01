@@ -38,6 +38,7 @@ from shared.claude_md_manager import (
     WORKING_MEMORY_COMMENT,
     ContainmentError,
     _atomic_write_text,
+    _read_replaced,
     ensure_dot_claude_parent,
     file_lock,
     resolve_project_claude_md_path,
@@ -150,6 +151,7 @@ def update_session_info(
     # from the same two names, so a rename carries to the readers.
     SESSION_START = SESSION_START_MARKER
     SESSION_END = SESSION_END_MARKER
+    session_pattern = re.escape(SESSION_START) + r".*?" + re.escape(SESSION_END)
 
     timestamp = started or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -306,7 +308,7 @@ def update_session_info(
                     # character-class fix closes ONE production and leaves the
                     # grammar. The callable takes the grammar off the path.
                     new_content = re.sub(
-                        re.escape(SESSION_START) + r".*?" + re.escape(SESSION_END),
+                        session_pattern,
                         lambda _match: session_block,
                         content,
                         count=1,
@@ -374,6 +376,13 @@ def update_session_info(
             except UnicodeDecodeError:
                 # The file is rewritten here, so it is decoded strictly and
                 # left untouched, never rewritten with replacement characters.
+                # Case 1's no-op, a block already equal to this one (a
+                # compaction) or no START..END span, is no skip to report.
+                replaced = _read_replaced(target_file)
+                if SESSION_START in replaced and SESSION_END in replaced:
+                    match = re.search(session_pattern, replaced, flags=re.DOTALL)
+                    if match is None or match.group(0) == session_block:
+                        return None
                 return (
                     "Session info skipped: the project CLAUDE.md is not valid "
                     "UTF-8, so it was left unchanged. The Current Session block "

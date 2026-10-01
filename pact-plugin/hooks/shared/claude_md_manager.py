@@ -475,6 +475,19 @@ def _restore_line_ending(content: str, line_ending: str) -> str:
     return content.replace("\r\n", "\n").replace("\n", line_ending)
 
 
+def _read_replaced(path: Path) -> str:
+    """`path` decoded with replacement, for a rewriter whose strict decode just
+    failed to ask whether it had anything to do. Replacement never swallows an
+    ASCII byte, so every marker sits where the bytes put it. NEVER WRITE THE
+    RESULT BACK: that would put U+FFFD over the user's bytes. An unreadable
+    file reads as empty.
+    """
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
 def _atomic_write_text(target: Path, content: str, project_root: Path) -> None:
     """Replace `target`'s contents with `content` atomically, iff the directory
     the write will bind into is contained within `project_root` (#1247).
@@ -966,20 +979,24 @@ def strip_orphan_kernel_block() -> str | None:
             # overlapping-but-different sets: containment safely ALLOWS a
             # benign in-project leaf redirect (os.replace swaps the leaf, no
             # write-through) that the old blanket guard refused.
+            START_MARKER = "<!-- PACT_START:"
+            END_MARKER = "<!-- PACT_END -->"
+
             try:
                 content = target_file.read_text(encoding="utf-8")
             except OSError:
                 return None
             except UnicodeDecodeError:
                 # This pass rewrites the file, so it is decoded strictly and
-                # left untouched rather than written back with U+FFFD.
+                # left untouched rather than written back with U+FFFD. With no
+                # marker there was nothing to strip, so no skip to report.
+                replaced = _read_replaced(target_file)
+                if START_MARKER not in replaced and END_MARKER not in replaced:
+                    return None
                 return (
                     f"Kernel block strip skipped: {target_file} is not valid "
                     "UTF-8, so it was left unchanged."
                 )
-
-            START_MARKER = "<!-- PACT_START:"
-            END_MARKER = "<!-- PACT_END -->"
 
             has_start = START_MARKER in content
             has_end = END_MARKER in content
@@ -1336,7 +1353,10 @@ def migrate_to_managed_structure() -> str | None:
                 return None
             except UnicodeDecodeError:
                 # This pass rewrites the file, so it is decoded strictly and
-                # left untouched rather than written back with U+FFFD.
+                # left untouched rather than written back with U+FFFD. A file
+                # already migrated had nothing to do, so no skip to report.
+                if MANAGED_START_MARKER in _read_replaced(target_file):
+                    return None
                 return (
                     f"Migration skipped: {target_file} is not valid UTF-8, so "
                     "it was left unchanged."

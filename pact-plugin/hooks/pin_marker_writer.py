@@ -251,7 +251,10 @@ def _plan_and_write() -> str:
         if path is None or base is None:
             return "noop_no_file"
 
-        content = path.read_text(encoding="utf-8")
+        # Decoded with replacement, so a file that is not UTF-8 still gets the
+        # ladder's own no-op. The text is NEVER WRITTEN as read: the write
+        # below needs a strict re-read under the lock to equal it.
+        content = path.read_text(encoding="utf-8", errors="replace")
         planned = plan_insertion(content)
         if isinstance(planned, SkipReason):
             return planned.value
@@ -315,8 +318,9 @@ def _plan_and_write() -> str:
     except TimeoutError:
         return "skipped_lock"
     except UnicodeDecodeError:
-        # The file is rewritten here, so it is decoded strictly and left
-        # untouched rather than written back with replacement characters.
+        # The strict re-read under the lock: a marker was due and the file is
+        # not UTF-8, so it is left untouched rather than written back with
+        # replacement characters.
         return "skipped_not_utf8"
     except OSError as error:
         return f"error_os: {str(error)[:50]}"
