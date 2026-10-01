@@ -202,7 +202,7 @@ _UNKNOWN_FRAME_CONTEXT = (
 # its population includes real leads, so it keeps the ladder, and this cue
 # tells a non-lead reader to ignore it.
 _UNRESOLVED_ROLE_CUE = (
-    "Note: session_init failed before the session role was resolved, so this "
+    "Note: session_init could not determine this session's role, so this "
     "frame was not classified. If you are not driving PACT as the "
     "orchestrator, ignore the instructions above."
 )

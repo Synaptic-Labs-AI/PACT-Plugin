@@ -5486,7 +5486,7 @@ class TestBuildSafetyNetContext:
         )
         # The distinguishing sentence is what keeps an unresolved frame apart
         # from a resolved-empty one. It rides BESIDE the ladder, not instead.
-        assert "failed before the session role was resolved" in result
+        assert "could not determine this session's role" in result
         assert result.startswith("YOUR PACT ROLE: orchestrator."), (
             "an unresolved frame lost the orchestrator marker. The classifier "
             "not running says nothing about who the reader is, and that frame "
@@ -6194,7 +6194,7 @@ class TestNonDictStdinNeverRaiseDominance:
         and only this one says the role was never resolved.
         """
         additional, spy = self._run_main(stdin_str, monkeypatch, tmp_path)
-        assert "failed before the session role was resolved" in additional, (
+        assert "could not determine this session's role" in additional, (
             f"non-dict stdin ({label}) must hit the unresolved-role safety net; "
             f"got: {additional[:80]!r}"
         )

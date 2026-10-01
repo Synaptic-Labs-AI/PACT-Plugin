@@ -157,7 +157,7 @@ class TestSafetyNetThreeWay:
         """
         out = _build_safety_net_context("session-x", None)
         assert out, "the safety net returned an empty string for an unresolved frame"
-        assert "before the session role was resolved" in out, (
+        assert "could not determine this session's role" in out, (
             "the unresolved-frame case lost its distinguishing sentence, so it "
             "can no longer be told apart from the resolved-empty case"
         )

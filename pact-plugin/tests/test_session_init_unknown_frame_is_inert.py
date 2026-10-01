@@ -171,7 +171,7 @@ class TestSafetyNetUnknownFrame:
         assert BOOTSTRAP in out, (
             "an unresolved frame kept the marker and lost the bootstrap directive"
         )
-        assert "before the session role was resolved" in out, (
+        assert "could not determine this session's role" in out, (
             "the unresolved-frame case lost its distinguishing sentence, so a "
             "reader can no longer tell it from the resolved-empty case"
         )
@@ -417,6 +417,9 @@ class TestMalformedStdin:
         parts = output["hookSpecificOutput"]["additionalContext"].split(" | ")
         assert parts[0].startswith(LADDER) and BOOTSTRAP in parts[0], parts[0][:200]
         assert parts[1] == _UNRESOLVED_ROLE_CUE, parts[1][:200]
+        assert "fail" not in parts[1], (
+            "the cue says session_init failed, which is false on this path"
+        )
         assert _UNKNOWN_ROLE_NOTICE not in json.dumps(output)
         assert "partially failed" not in json.dumps(output), (
             "the malformed-stdin path raised into the safety net"
