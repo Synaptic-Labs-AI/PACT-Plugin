@@ -24,8 +24,11 @@ Scope boundary — what is swept and why:
 Suppression contract:
     An intentional unused import (re-export facade, monkeypatch seam,
     availability probe) carries `# noqa: F401  # <category>: <reason>` on
-    the import statement's FIRST physical line. The sweep honors exactly
-    that convention; an unmarked unused import fails the suite — with ONE
+    the import statement's FIRST physical line, which covers the whole
+    statement, or on the physical line of the one name it keeps inside a
+    multi-line import, which covers the names on that line only. The sweep
+    honors exactly that convention; an unmarked unused import fails the
+    suite — with ONE
     exception, which this file's own liveness filter introduced: a
     CONCURRENT run's planted probe is removed from the tests/ surface
     before the gate ever sees it. See `_is_foreign_live_probe`.
@@ -201,7 +204,8 @@ class TestSweptTreeIsClean:
             f"unused imports in swept surface '{label}' — fix, or "
             "mark an intentional re-export/probe with "
             "'# noqa: F401  # <category>: <reason>' on the statement's first "
-            "line:\n" + "\n".join(findings)
+            "line, or on the kept name's own line in a multi-line import:\n"
+            + "\n".join(findings)
         )
 
 
@@ -582,6 +586,32 @@ class TestGateEdgeBehavior:
             encoding="utf-8",
         )
         assert _gate_check([mod]) == []
+
+    def test_multiline_parenthesized_noqa_on_the_names_own_line_excluded(
+        self, tmp_path
+    ):
+        mod = tmp_path / "own_line.py"
+        mod.write_text(
+            "from json import (\n"
+            "    dumps,  # noqa: F401  # re-export: fixture\n"
+            ")\n",
+            encoding="utf-8",
+        )
+        assert _gate_check([mod]) == []
+
+    def test_own_line_noqa_leaves_an_unmarked_name_in_the_statement_flagged(
+        self, tmp_path
+    ):
+        """The control for the own-line suppression: it covers its line only."""
+        mod = tmp_path / "own_line_control.py"
+        mod.write_text(
+            "from json import (\n"
+            "    dumps,  # noqa: F401  # re-export: fixture\n"
+            "    loads,\n"
+            ")\n",
+            encoding="utf-8",
+        )
+        assert f"{mod}:1: unused import loads" in _gate_check([mod])
 
     def test_dunder_all_reexport_not_flagged(self, tmp_path):
         mod = tmp_path / "all_reexport.py"

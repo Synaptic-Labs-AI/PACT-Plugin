@@ -125,12 +125,55 @@ class TestNoqaSuppression:
         )
         assert _names(src) == []
 
-    def test_noqa_on_inner_line_of_parenthesized_import_is_invisible(self):
-        # Contract: suppression is read from the statement's FIRST physical
-        # line only — per-name noqa inside the parens does not suppress.
+    def test_noqa_on_a_names_own_line_suppresses_that_name(self):
+        # As ruff does: a noqa on the physical line where a name appears
+        # inside the parens suppresses that name.
         src = (
             "from json import (\n"
             "    dumps,  # noqa: F401\n"
+            ")\n"
+        )
+        assert _names(src) == []
+
+    def test_noqa_on_a_names_own_line_leaves_the_other_names_reported(self):
+        # The control: the noqa covers its own line only, and the finding
+        # keeps the statement's first line.
+        src = (
+            "from json import (\n"
+            "    dumps,  # noqa: F401\n"
+            "    loads,\n"
+            ")\n"
+        )
+        assert cui.Finding(1, "loads") in cui.find_unused_imports(
+            src, try_scope="strict"
+        )
+
+    def test_noqa_on_an_inner_line_does_not_reach_a_name_on_the_first_line(self):
+        src = (
+            "from json import (dumps,\n"
+            "    loads,  # noqa: F401\n"
+            ")\n"
+        )
+        assert _names(src) == ["dumps"]
+
+    def test_noqa_on_an_aliased_names_own_line_suppresses_it(self):
+        src = (
+            "from json import (\n"
+            "    dumps as encode,  # noqa: F401\n"
+            "    loads as decode,\n"
+            ")\n"
+        )
+        assert _names(src) == ["loads as decode"]
+
+    def test_noqa_on_a_backslash_continued_names_line_suppresses_it(self):
+        src = "import os, \\\n    sys  # noqa: F401\n"
+        assert _names(src) == ["os"]
+        assert _names("import os, \\\n    sys\n") == ["os", "sys"]
+
+    def test_inner_line_noqa_for_another_code_does_not_suppress(self):
+        src = (
+            "from json import (\n"
+            "    dumps,  # noqa: E501\n"
             ")\n"
         )
         assert _names(src) == ["dumps"]
