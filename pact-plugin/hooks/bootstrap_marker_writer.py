@@ -369,7 +369,7 @@ def _write_marker(session_dir: Path, session_id: str, plugin_root: str,
         raise
 
 
-def _write_back_aligned_team_name() -> None:
+def _write_back_aligned_team_name(input_data: dict) -> None:
     """Self-heal the PERSISTED team name to the IDENTITY-MATCHED one (#989).
 
     Per-prompt, lead-gated write-back. ``get_team_name()`` resolves the REAL
@@ -383,7 +383,9 @@ def _write_back_aligned_team_name() -> None:
 
     Fires ONLY when the aligned name is non-empty AND differs from the
     persisted name (the normal no-divergence CLI case is a clean no-op — they
-    match, so this returns immediately). Caller has already lead-gated.
+    match, so this returns immediately). Lead-gated here, not only at the
+    caller, as heal_context_if_missing gates itself: the write site refuses a
+    non-lead frame whoever calls it.
 
     NEVER raises — every error is swallowed. The marker write is the load-
     bearing action; a write-back failure must not abort it or crash the hook.
@@ -402,6 +404,8 @@ def _write_back_aligned_team_name() -> None:
     (a lead session_init did not record): bootstrap_prompt_gate owns that
     lead's block until it has read and replaced it.
     """
+    if not pact_context.is_lead(input_data):
+        return
     try:
         aligned = pact_context.get_team_name()
         if not aligned:
@@ -524,7 +528,7 @@ def _try_write_marker(input_data: dict) -> None:
     # lead-gated like the marker write below. No-op when they already match
     # (the normal CLI case). Never raises. Done BEFORE the secretary check so
     # the check (and the marker's session_id) read the aligned team.
-    _write_back_aligned_team_name()
+    _write_back_aligned_team_name(input_data)
 
     # Pre-condition: team config + secretary member exist on disk.
     team_name = pact_context.get_team_name()

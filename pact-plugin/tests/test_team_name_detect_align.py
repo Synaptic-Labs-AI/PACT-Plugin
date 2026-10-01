@@ -699,7 +699,7 @@ class TestWriteBackTwoFileConsistency:
         )
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "project"))
 
-        bmw._write_back_aligned_team_name()
+        bmw._write_back_aligned_team_name({"agent_type": "PACT:pact-orchestrator"})
 
         # Context written; CLAUDE.md NOT touched; file NOT created.
         assert calls["write_context"] == 1
@@ -748,7 +748,7 @@ class TestWriteBackTwoFileConsistency:
             session_dir=str(tmp_path / "sess"),
         )
 
-        bmw._write_back_aligned_team_name()
+        bmw._write_back_aligned_team_name({"agent_type": "PACT:pact-orchestrator"})
 
         assert order == ["context", "claude_md"], (
             "context file (load-bearing) must be written BEFORE the CLAUDE.md line"
@@ -771,7 +771,7 @@ class TestWriteBackTwoFileConsistency:
             lambda *a, **k: calls.__setitem__("write_context",
                                               calls["write_context"] + 1),
         )
-        bmw._write_back_aligned_team_name()
+        bmw._write_back_aligned_team_name({"agent_type": "PACT:pact-orchestrator"})
         assert calls["write_context"] == 0
 
     def test_write_back_inert_on_empty_aligned(self, monkeypatch):
@@ -788,7 +788,7 @@ class TestWriteBackTwoFileConsistency:
             lambda *a, **k: calls.__setitem__("write_context",
                                               calls["write_context"] + 1),
         )
-        bmw._write_back_aligned_team_name()
+        bmw._write_back_aligned_team_name({"agent_type": "PACT:pact-orchestrator"})
         assert calls["write_context"] == 0
 
 

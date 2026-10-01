@@ -740,7 +740,10 @@ class TestTeamNameWriteBack:
     _PERSISTED = "session-cccc3333"
     _ALIGNED = "pact-real-team"
 
-    def _seed_and_run(self, monkeypatch, project, agent_type):
+    def _seed_and_run(self, monkeypatch, project, agent_type, sink=False):
+        """Seed a divergent context file, then run the marker writer's entry
+        point, or with ``sink`` call the write-back helper directly, past the
+        entry point's own lead check."""
         pact_context.reset_for_tests()
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
         pact_context.write_context(self._PERSISTED, _SID, str(project), "")
@@ -751,8 +754,30 @@ class TestTeamNameWriteBack:
             pact_context, "_resolve_aligned_team_name",
             lambda *args, **kwargs: self._ALIGNED,
         )
-        bootstrap_marker_writer._try_write_marker(_frame(agent_type))
+        if sink:
+            pact_context.init(_frame(agent_type))
+            bootstrap_marker_writer._write_back_aligned_team_name(_frame(agent_type))
+        else:
+            bootstrap_marker_writer._try_write_marker(_frame(agent_type))
         return before, _context_file(project).read_text()
+
+    @pytest.mark.parametrize("agent_type", [TEAMMATE, None], ids=["teammate", "no-role"])
+    def test_the_write_back_itself_refuses_a_non_lead_frame(
+        self, agent_type, monkeypatch, tmp_path
+    ):
+        """The write site gates itself, as heal_context_if_missing does, so a
+        caller that skips the entry point's lead check still cannot write."""
+        _, after = self._seed_and_run(
+            monkeypatch, _project(tmp_path, "control"), LEAD, sink=True
+        )
+        assert json.loads(after)["team_name"] == self._ALIGNED, (
+            "control: a lead frame did not rewrite the divergent team name"
+        )
+
+        before, after = self._seed_and_run(
+            monkeypatch, _project(tmp_path, "subject"), agent_type, sink=True
+        )
+        assert after == before
 
     @pytest.mark.parametrize("agent_type", [TEAMMATE, None], ids=["teammate", "no-role"])
     def test_a_non_lead_frame_does_not_rewrite_the_team_name(
