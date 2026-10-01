@@ -40,7 +40,6 @@ from session_init import (  # noqa: E402
 LADDER = "YOUR PACT ROLE: orchestrator."
 TEAMMATE_MARKER = "YOUR PACT ROLE: teammate."
 _SESSION_ID = "11111111-2222-3333-4444-555555555555"
-_PROJECT_DIR = "/tmp/pact-three-way-gate"
 
 
 def _run_main(frame, monkeypatch, tmp_path):
@@ -50,7 +49,7 @@ def _run_main(frame, monkeypatch, tmp_path):
     below carries the agent type the classifier reads, so the branch under test
     is the one the hook takes in production.
     """
-    monkeypatch.setenv("CLAUDE_PROJECT_DIR", _PROJECT_DIR)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "proj"))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     stdin_data = json.dumps({"session_id": _SESSION_ID, "source": "startup", **frame})
     with patch("session_init.setup_plugin_symlinks", return_value=None), \
@@ -59,7 +58,7 @@ def _run_main(frame, monkeypatch, tmp_path):
          patch("session_init.get_task_list", return_value=None), \
          patch("session_init.restore_last_session", return_value=None), \
          patch("session_init.build_context_cache",
-               return_value=(Path("/tmp/ctx.json"), {})), \
+               return_value=(tmp_path / "ctx.json", {})), \
          patch("session_init.persist_context", return_value=None), \
          patch("session_init.append_event"), \
          patch("session_init.update_session_info", return_value=None), \

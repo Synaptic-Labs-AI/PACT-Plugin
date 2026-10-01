@@ -52,7 +52,6 @@ BOOTSTRAP = 'Skill("PACT:bootstrap")'
 TEAMMATE_MARKER = "YOUR PACT ROLE: teammate."
 LEAD = {"agent_type": "PACT:pact-orchestrator"}
 _SESSION_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-_PROJECT_DIR = "/tmp/pact-unknown-frame-inert"
 USER_MD = "# My project\n\nBuild with make.\n"
 
 # The five lifecycle sources plus one the source ladder does not recognize.
@@ -62,7 +61,7 @@ SOURCES = ("startup", "resume", "compact", "clear", "fork", "a-source-nobody-has
 def _run_main(frame, source, monkeypatch, tmp_path):
     """Drive ``session_init.main()`` with its heavy collaborators stubbed and
     return the additionalContext. THE ROLE GATE IS NOT STUBBED."""
-    monkeypatch.setenv("CLAUDE_PROJECT_DIR", _PROJECT_DIR)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "proj"))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     stdin_data = json.dumps({"session_id": _SESSION_ID, "source": source, **frame})
     with patch("session_init.setup_plugin_symlinks", return_value=None), \
@@ -71,7 +70,7 @@ def _run_main(frame, source, monkeypatch, tmp_path):
          patch("session_init.get_task_list", return_value=None), \
          patch("session_init.restore_last_session", return_value=None), \
          patch("session_init.build_context_cache",
-               return_value=(Path("/tmp/ctx.json"), {})), \
+               return_value=(tmp_path / "ctx.json", {})), \
          patch("session_init.persist_context", return_value=None), \
          patch("session_init.append_event"), \
          patch("session_init.update_session_info", return_value=None), \
