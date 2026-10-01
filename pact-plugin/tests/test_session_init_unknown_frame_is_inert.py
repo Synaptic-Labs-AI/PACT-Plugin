@@ -4,9 +4,14 @@
 ``claude``, ``claude -p``, every ``claude plugin eval`` run. session_init gives
 that frame exactly ``_UNKNOWN_FRAME_CONTEXT`` and returns before any project
 write, unless its own session folder holds a lead's context file (a lead
-resumed without ``--agent``). The lead, teammate and unclassified (None)
-frames are unchanged; a SessionStart whose stdin was not valid JSON is
-unclassified.
+resumed without ``--agent``). Against main, this branch leaves the lead
+frame's SessionStart output unchanged (its CLAUDE.md Resume line now carries
+``--agent``), stops the teammate frame from creating, migrating or
+stale-marking the project CLAUDE.md (pinned in
+test_session_init_project_claude_md_is_lead_only.py), and treats a
+SessionStart whose stdin was not valid JSON as unclassified (None): it keeps
+the ladder and gets the unresolved-role cue instead of the no-role notice
+(TestMalformedStdin).
 
 The arms below pin the whole output by EXACT EQUALITY, so an emission added to
 main() later that reaches an unknown frame fails them. The no-write arms each
@@ -471,10 +476,11 @@ class TestUnknownFrameKeepsTheEnvFileExport:
         )
 
 
-def _seed_lead_session_dir(project_dir):
-    """A lead's session folder as a compaction and a /clear leave it: the
-    bootstrap marker, the session's own compact summary, and one staged summary
-    old enough that a settle pass resolves it."""
+def _seed_session_dir_without_context(project_dir):
+    """A session folder as a compaction and a /clear leave a lead's, minus the
+    lead's context file: the bootstrap marker, the session's own compact
+    summary, and one staged summary old enough that a settle pass resolves
+    it."""
     folder = _session_dir(project_dir)
     folder.mkdir(parents=True)
     (folder / BOOTSTRAP_MARKER_NAME).write_text("")
@@ -494,7 +500,7 @@ def _snapshot(folder):
     return {p.name: p.read_bytes() for p in sorted(folder.iterdir())}
 
 
-class TestUnknownFrameLeavesALeadSessionDirAlone:
+class TestUnknownFrameLeavesAFolderWithoutAContextFileAlone:
     """A session folder under this session id that holds no lead context file
     does not make the frame a lead: it stays unknown and the folder stays as it
     was. The lead control, on the same seed, must clear the marker, archive the
@@ -506,7 +512,7 @@ class TestUnknownFrameLeavesALeadSessionDirAlone:
     def test_the_folder_is_byte_identical(self, source, monkeypatch, tmp_path):
         control = tmp_path / "control"
         control.mkdir()
-        folder = _seed_lead_session_dir(control)
+        folder = _seed_session_dir_without_context(control)
         _run_real(monkeypatch, control, _frame(source="clear", **LEAD))
         names = {p.name for p in folder.iterdir()}
         assert BOOTSTRAP_MARKER_NAME not in names, (
@@ -521,11 +527,12 @@ class TestUnknownFrameLeavesALeadSessionDirAlone:
 
         plain = tmp_path / "plain"
         plain.mkdir()
-        folder = _seed_lead_session_dir(plain)
+        folder = _seed_session_dir_without_context(plain)
         before = _snapshot(folder)
         _run_real(monkeypatch, plain, _frame(source=source))
         assert _snapshot(folder) == before, (
-            f"an unknown frame (source={source!r}) changed the lead's session folder"
+            f"an unknown frame (source={source!r}) changed a session folder that "
+            f"holds no lead context file"
         )
 
 

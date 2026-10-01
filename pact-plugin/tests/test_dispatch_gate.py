@@ -647,7 +647,10 @@ def _run_gate_in_fresh_process(tmp_path, frame):
     file. The team lookup and context resolution run for real. The gate's
     journal needs a session directory this process does not have, so the
     harness replaces only the journal sink, with a recorder that prints the
-    journaled decision on stderr. Returns the completed process."""
+    journaled decision on stderr. Before the hook runs it also prints
+    ``COLD <bool>`` on stderr: True when ``shared.background_work`` is not yet
+    imported, so a caller can assert the gate ran from a cold import. Returns
+    the completed process."""
     import os
     import subprocess
     import sys
