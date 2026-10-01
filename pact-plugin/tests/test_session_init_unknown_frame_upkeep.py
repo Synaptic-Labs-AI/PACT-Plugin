@@ -8,7 +8,9 @@ pins; task resumption needs tasks in the session's store; the last-session
 snapshot needs a previous session's journal; the backlog block needs a backlog
 record), so a leak of one of them into ``_unknown_frame_output`` passes there.
 The arm below pins the same exact output in a sandbox seeded to trigger each of
-them, and a lead control on an identical copy proves every seed fires.
+them, and lead controls on identical copies prove every seed fires: one with a
+session id for the team-scoped seeds, and one with none, whose resumption reads
+the CLAUDE_CODE_TASK_LIST_ID store the unknown frame would read.
 
 It also pins the one kept upkeep item that module leaves unobserved: orphan
 merge-authorization tokens are reaped for an unknown frame too.
@@ -59,7 +61,8 @@ SEEDED = [
     ("additionalContext", "/PACT:prune-memory"),
     ("additionalContext", "PACT plugin:"),
     ("additionalContext", "PACT Runtime Config"),
-    # The lead's own team store, not the task-list store the plain arm reads.
+    # The lead's own team store. The task-list store the plain arm would read
+    # is proven by its own control below.
     ("additionalContext", "Resumption context: Features: Ship the feature"),
     ("additionalContext", "Previous session summary"),
     ("additionalContext", "SEEDED BACKLOG ITEM"),
@@ -165,6 +168,18 @@ class TestUnknownFrameOutputIsExactInAPactProject:
         assert (control / ".claude" / "CLAUDE.md").read_text().count(_STALE_MARKER) == 3, (
             "control: a lead start did not mark the unmarked stale pin, so this "
             "layout never reaches the staleness writer"
+        )
+        # With no session id no team context is built, so task resumption
+        # falls back to the CLAUDE_CODE_TASK_LIST_ID store
+        # (task_utils.get_task_list), the store a leak into the unknown frame
+        # would read.
+        no_team = _project(tmp_path, "control-no-team", claude_md)
+        no_team_output = _run(monkeypatch, no_team, None, source, **LEAD)
+        assert "Resumption context: Features: Keep the list" in _channel(
+            no_team_output, "additionalContext"
+        ), (
+            "control: resumption with no team context did not read the "
+            "task-list store, so that seed proves nothing"
         )
 
         output = _run(monkeypatch, plain, _PLAIN_SID, source)
