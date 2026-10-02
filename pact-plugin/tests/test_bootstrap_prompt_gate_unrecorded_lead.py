@@ -554,6 +554,31 @@ os.replace, os.close = replace, close
 """
 
 
+# Used by the flock source below: is `fd` the project's CLAUDE.md lock file?
+# Compared by inode, not by patching os.open: Python 3.9's pathlib binds
+# os.open as a method, so a replacement function there breaks every Path.open.
+_IS_CLAUDE_MD_LOCK = """
+import errno, fcntl, os
+_flock = fcntl.flock
+def _is_claude_md_lock(fd):
+    lock = os.path.join(os.environ["CLAUDE_PROJECT_DIR"], ".claude", ".CLAUDE.md.lock")
+    try:
+        held, named = os.fstat(fd), os.stat(lock)
+    except OSError:
+        return False
+    return (held.st_dev, held.st_ino) == (named.st_dev, named.st_ino)
+"""
+
+# This one: unlocking the CLAUDE.md lock file unlocks it, then raises EIO.
+_EIO_ON_LOCK_RELEASE = _IS_CLAUDE_MD_LOCK + """
+def flock(fd, operation):
+    _flock(fd, operation)
+    if operation & fcntl.LOCK_UN and _is_claude_md_lock(fd):
+        raise OSError(errno.EIO, "injected")
+fcntl.flock = flock
+"""
+
+
 def _with_site(tmp_path, env, source):
     site = tmp_path / "site"
     site.mkdir(exist_ok=True)
@@ -632,6 +657,24 @@ class TestATransientRewriteFailureLeavesTheRecordingOpen:
         assert out.startswith(_NOTE_MARK)
         self._assert_recorded_once(out, home, lead, proj)
         assert "Session info failed" not in out
+        assert len(_events(home, lead, "session_start")) == 1
+        assert len(_events(home, lead, "session_resumption_surfaced")) == 1
+        assert _prompt(_WRITER_FIRST, lead, home, env) == ""
+
+    def test_a_lock_release_that_fails_after_the_write_records_on_the_same_prompt(
+        self, tmp_path
+    ):
+        """The block is replaced before the lock is released, so a failure
+        releasing it is no failed write: the lead is recorded, claim and all,
+        on this prompt."""
+        home, proj, env, parent, lead = _unrecorded_lead_with_secretary(tmp_path)
+
+        out = _prompt(_WRITER_FIRST, lead, home,
+                      _with_site(tmp_path, env, _EIO_ON_LOCK_RELEASE))
+
+        assert out.startswith(_NOTE_MARK)
+        self._assert_recorded_once(out, home, lead, proj)
+        assert "lock" not in out.split(_VALUES_MARK, 1)[1].lower()
         assert len(_events(home, lead, "session_start")) == 1
         assert len(_events(home, lead, "session_resumption_surfaced")) == 1
         assert _prompt(_WRITER_FIRST, lead, home, env) == ""
