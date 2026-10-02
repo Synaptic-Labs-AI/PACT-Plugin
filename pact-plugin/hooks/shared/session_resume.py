@@ -126,16 +126,16 @@ _PATH_PRECONDITION_ERRNOS = frozenset({
 })
 
 
-def session_info_failure(error: BaseException) -> str:
-    """The "Session info failed: <cause>." status for `error`: a plain str
-    when the error says the path is unusable, a TransientSessionInfoFailure
+def session_info_failure(e: BaseException) -> str:
+    """The "Session info failed: <cause>." status for `e`: a plain str when
+    the error says the path is unusable, a TransientSessionInfoFailure
     otherwise. The wording is a routing contract; see the backstop note in
     update_session_info."""
     status = (
-        f"Session info failed: {failure_cause(error)}. "
+        f"Session info failed: {failure_cause(e)}. "
         "The Current Session block in CLAUDE.md is now stale."
     )
-    if isinstance(error, OSError) and error.errno in _PATH_PRECONDITION_ERRNOS:
+    if isinstance(e, OSError) and e.errno in _PATH_PRECONDITION_ERRNOS:
         return status
     return TransientSessionInfoFailure(status)
 
