@@ -2546,7 +2546,7 @@ The journal survives crashes because:
 
 `{config_dir}` is this session's Claude config root — the value of `$CLAUDE_CONFIG_DIR` when set and non-empty, otherwise `$HOME/.claude`. Read it off an absolute path the platform already injected into your context — your plugin root is `{config_dir}/plugins/…` — rather than shelling out for the variable. Substitute it before running any command; never assume `~/.claude`.
 
-The wrap-up command harvests journal events to pact-memory before session close. The journal persists in the sessions directory for 30 days (TTL cleanup), providing a recovery window even if harvest fails. Paused sessions are exempt from TTL cleanup.
+The wrap-up command harvests journal events to pact-memory before session close. The session directory, journal included, is removed 30 days after its last write, or 180 days after it when the journal records a `session_paused` or `session_refreshed` event. A directory past its limit is kept while its journal holds an `agent_handoff` event recorded after its last `session_consolidated` event. The current session's directory is never removed.
 
 ### Re-reading Cut Workflow Commands
 

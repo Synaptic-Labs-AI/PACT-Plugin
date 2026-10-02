@@ -174,7 +174,7 @@ esac
 
 The `session_consolidated` write fires under the `true` branch regardless of whether step 6 takes the "PR still open" branch (which ALSO writes `session_paused`) or the "PR merged / no PR" branch. `{task_count}` and `{memories_saved}` come from the secretary's consolidation summary (step 1); when the secretary cannot produce exact counts, emit the event with `0` for either field rather than skipping the write — the event's EXISTENCE is the detector signal and the payload is advisory audit trail.
 
-**Recovery note**: The journal lives in `{config_dir}/pact-sessions/{slug}/{session_id}/`, independent of the team directory — it survives both natural TTL cleanup and explicit team teardown. Old session directories are cleaned automatically after 30 days (with paused-session preservation). See [pact-state-recovery.md](../protocols/pact-state-recovery.md) for the full State Recovery Protocol.
+**Recovery note**: The journal lives in `{config_dir}/pact-sessions/{slug}/{session_id}/`, independent of the team directory — it survives both natural TTL cleanup and explicit team teardown. Old session directories are removed 30 days after their last write, or 180 days after it for a paused or refreshed session. See [pact-state-recovery.md](../protocols/pact-state-recovery.md) for the full State Recovery Protocol.
 
 ## 6. Worktree Cleanup
 
