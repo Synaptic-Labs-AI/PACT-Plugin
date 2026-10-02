@@ -48,7 +48,7 @@ Events are JSONL entries with common fields `v` (schema version), `type`, and `t
 
 | Type | Written By | Fields | Recovery Use |
 |------|-----------|--------|--------------|
-| `session_start` | session_init hook | `team`, `session_id`, `project_dir`, `worktree`, `source` | Session boundary marker; `source` ∈ {`startup`, `resume`, `compact`, `clear`, `unknown`} attributes the event to startup vs auto-compact vs `/clear` vs `/resume` for direct triage (no timing-cluster triangulation needed) |
+| `session_start` | session_init hook (lead sessions); bootstrap_prompt_gate hook (once, at the first prompt of a lead the session_init hook did not record) | `team`, `session_id`, `project_dir`, `worktree`, `source` | Session boundary marker; `source` names the start that wrote it: `startup` (new session, or a start that reported no source), `resume` (resumed session), `compact` (after compaction), `clear` (after `/clear`), `fork` (session forked from another session), `unknown` (a start that reported any other source), `prompt` (recorded at the first prompt instead of at the start) |
 | `session_end` | session_end hook | `warning` (optional) | Detect incomplete shutdowns |
 | `session_paused` | pause command | `pr_number`, `pr_url`, `branch`, `worktree_path`, `consolidation_completed`, `team_name` | Resume paused PR work |
 | `session_refreshed` | refresh command | `consolidation_completed`, `halt_active`; optional: `halt_task_ids`, `feature_task_id`, `feature_subject`, `team_name`, `next_phase`, `worktrees`, `pr_number` | Resume mid-workstream after context refresh |
