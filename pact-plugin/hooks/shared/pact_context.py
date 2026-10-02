@@ -144,7 +144,7 @@ def _build_session_path(slug: str, session_id: str) -> Path:
     Path traversal guard: resolves the constructed path and verifies it
     stays under ~/.claude/pact-sessions/ using Path.parents containment
     (immune to sibling-prefix collisions by design — matches
-    session_init._validate_under_pact_sessions). A malicious session_id
+    session_resume._validate_under_pact_sessions). A malicious session_id
     like "../../etc" would resolve outside the expected tree — fall back
     to a sanitized basename. Fail-closed: if the validation itself
     raises, return a slug-only path (no session_id component). The
@@ -1138,7 +1138,8 @@ def _is_unknown_or_missing_session(raw_id: object) -> bool:
       and was written into CLAUDE.md anyway via a different code path.
     * A session_id containing C0 control characters (newline, CR, NUL,
       etc.) passed all existing non-empty/non-sentinel checks but, when
-      interpolated into ``f"- Resume: `claude --resume {session_id}`"``
+      interpolated into the ``- Resume:`` line
+      (``claude --agent PACT:pact-orchestrator --resume {session_id}``)
       by update_session_info, could inject a fake CLAUDE.md line via
       embedded newlines. The unified helper strips C0 controls to close
       this injection path at the session_id entry point.

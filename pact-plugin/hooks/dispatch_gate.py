@@ -26,6 +26,7 @@ Cheapest-rule-first ordering with short-circuit on first non-ALLOW:
   ③ name presence                   ⑧ task-assigned check
   ④ name length/NFKC/regex/reserved ⑨ prompt heuristic (WARN)
   ⑤ plugin agents/ + specialist registry
+⑥'s refusal for a non-lead frame with no session team runs between ② and ③.
 
 Every gate decision (ALLOW/DENY/WARN) is journaled. Prompt text is
 redacted at the journal-write boundary (sk-/xoxb-/ghp_/AKIA/JWT
@@ -302,13 +303,23 @@ _TEAMMATE_SPAWN_REFUSAL = (
     "the team-lead to spawn it."
 )
 
+# Rule ⑥'s refusal for any other non-lead frame. The context-failure suffix and
+# the stale-session hint are withheld for the same reason: both repair a lead's
+# state.
+_NON_LEAD_SPAWN_REFUSAL = (
+    "PACT dispatch_gate: PACT specialists are spawned only by a PACT "
+    "team-lead, and this session is not one. If this session is a PACT "
+    "teammate, ask the team-lead to spawn it. To drive PACT, start a "
+    "session with `--agent PACT:pact-orchestrator`."
+)
+
 
 def _resolves_a_registered_team(input_data: dict) -> bool:
     """True iff the frame's own session resolves a team membership.
 
     A teammate in its own process is registered in its team; a solo specialist
     session is not. The import lives here so a failure to import or resolve
-    counts as not registered, and rule ⑥ keeps its bootstrap text.
+    counts as not registered, and rule ⑥ gives the non-lead refusal.
     """
     try:
         from shared.background_work import frame_team_and_name
@@ -324,9 +335,9 @@ def evaluate_dispatch(
 ) -> tuple[str, str | None, str | None]:
     """Single composition function. Returns ``(decision, reason, rule)``.
 
-    ``input_data`` is the full hook frame when the caller has it. Rule ⑥ reads
-    its role and registered team membership to word the refusal; without it,
-    rule ⑥ keeps the bootstrap text.
+    ``input_data`` is the full hook frame when the caller has it. Its role and
+    registered team membership decide rule ⑥'s refusal for a non-lead frame,
+    which is checked before rule ③; without it, rule ⑥ keeps the bootstrap text.
 
     decision ∈ {``"ALLOW"``, ``"DENY"``, ``"WARN"``}.
     reason: human-readable explanation (None for ALLOW).
@@ -364,6 +375,17 @@ def evaluate_dispatch(
     # ② Non-pact-* spawns are not this gate's business — fall through.
     if not isinstance(subagent_type, str) or not subagent_type.startswith("pact-"):
         return ("ALLOW", None, None)
+
+    # Rule ⑥'s refusals for a non-lead frame with no session team, checked
+    # before ③-⑤: a frame told to fix its name, its subagent_type or the plugin
+    # install would only reach this refusal. The role is tested first, so a
+    # lead's path is unchanged.
+    if isinstance(input_data, dict):
+        role = pact_context.classify_session_role(input_data)
+        if role != "lead" and not pact_context.get_team_name():
+            if role == "teammate" and _resolves_a_registered_team(input_data):
+                return ("DENY", _TEAMMATE_SPAWN_REFUSAL, "team_name_unavailable")
+            return ("DENY", _NON_LEAD_SPAWN_REFUSAL, "team_name_unavailable")
 
     # ③ Required string presence on name. (AC-2 / #979: the team_name-presence
     # check was dropped — Claude Code v2.1.178+ ignores Agent(team_name=), so
@@ -446,13 +468,11 @@ def evaluate_dispatch(
     # their team-dir reads against session_team, NEVER the caller arg, so the
     # spawn-arg team_name is not a path component anywhere in this gate. The
     # empty-session_team fail-closed is RETAINED because ⑦/⑧ structurally
-    # depend on session_team being a non-empty path segment.
+    # depend on session_team being a non-empty path segment. A non-lead frame
+    # with no session team was refused above, so this text reaches a lead or a
+    # caller that passed no frame.
     session_team = pact_context.get_team_name()
     if not session_team:
-        if (isinstance(input_data, dict)
-                and pact_context.classify_session_role(input_data) == "teammate"
-                and _resolves_a_registered_team(input_data)):
-            return ("DENY", _TEAMMATE_SPAWN_REFUSAL, "team_name_unavailable")
         message = ("PACT dispatch_gate: session team_name is unavailable "
                    "(pact-session-context.json missing or unreadable). "
                    "Re-run /PACT:bootstrap to restore session context.")
@@ -562,9 +582,9 @@ def _journal_decision(decision: str, reason: str | None, rule: str | None,
 # ``team_name_unavailable`` (rule ⑥) and ``no_task_assigned`` (rule ⑧) — that
 # never name the real cause. Other deny rules (name validation, plugin-install,
 # registry) are NOT restart-symptoms, so they are deliberately excluded: a
-# stale-session note on them would misdirect recovery. Rule ⑥'s refusal in a
-# teammate's own process is not a restart symptom either, so the composer
-# returns ``_TEAMMATE_SPAWN_REFUSAL`` verbatim.
+# stale-session note on them would misdirect recovery. Rule ⑥'s refusals for a
+# non-lead frame are not restart symptoms either, so the composer returns both
+# verbatim.
 _STALE_DIAGNOSABLE_RULES = frozenset({"team_name_unavailable", "no_task_assigned"})
 
 # Actionable re-align guidance appended after the shared detector's stale-block
@@ -772,8 +792,8 @@ _MISSING_DENY_REASON = (
 def _compose_deny_diagnosis(
     rule: str | None, message: str | None, input_data: dict,
 ) -> str:
-    """Return the user-facing deny text: ``_TEAMMATE_SPAWN_REFUSAL`` verbatim,
-    ELSE the incumbent stale-team diagnosis if it fired, ELSE the cause
+    """Return the user-facing deny text: either rule-⑥ non-lead refusal
+    verbatim, ELSE the incumbent stale-team diagnosis if it fired, ELSE the cause
     enumeration on rule ⑧, ELSE ``message`` unchanged.
 
     A-xor-B BY CONSTRUCTION — the two blocks are mutually exclusive, and the
@@ -833,7 +853,7 @@ def _compose_deny_diagnosis(
     """
     if not isinstance(message, str):
         return _MISSING_DENY_REASON
-    if message == _TEAMMATE_SPAWN_REFUSAL:
+    if message in (_TEAMMATE_SPAWN_REFUSAL, _NON_LEAD_SPAWN_REFUSAL):
         return message
 
     augmented = _augment_deny_with_stale_diagnosis(rule, message, input_data)

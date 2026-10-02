@@ -259,7 +259,7 @@ class TestFallbackGoesDarkWithoutResolution:
 class TestLeadKeepsOrchestratorBlockAndUnknownGetsNeither:
     """LEG 3 — real-composition regression: a LEAD frame takes the else-branch
     (no resolver call), keeps the orchestrator-directive block, and gets NO peer
-    body. An UNKNOWN/plain frame takes its own branch and gets NEITHER.
+    body. An UNKNOWN/plain frame returns at its own branch and gets NEITHER.
 
     RENAMED FROM TestLeadAndUnknownKeepOrchestratorBlock. The old name grouped
     the two roles into one claim, which is the grouping the role gate removed."""
@@ -272,10 +272,10 @@ class TestLeadKeepsOrchestratorBlockAndUnknownGetsNeither:
         assert _ORCH_MARKER in additional
         assert _PEER_LIST_PREFIX not in additional
 
-    def test_plain_unknown_frame_emits_the_block_but_no_peer_body(self, tmp_path):
-        """The unit-level twin in test_session_init_teammate_peer_inject.py
-        carries the full reasoning. This is the real-composition half: it drives
-        the assembled hook rather than a mocked seam, so it proves the branch
+    def test_plain_unknown_frame_emits_neither_the_block_nor_a_peer_body(self, tmp_path):
+        """The unit-level twin in test_session_init_teammate_peer_inject.py pins
+        the exact text. This is the real-composition half: it drives the
+        assembled hook rather than a mocked seam, so it proves the branch
         survives composition and is not an artefact of the unit mocks.
         """
         frame = {
@@ -285,8 +285,9 @@ class TestLeadKeepsOrchestratorBlockAndUnknownGetsNeither:
             "hook_event_name": "SessionStart",
         }
         additional, _ = _run_real_session_init(frame, tmp_path)
-        assert _ORCH_MARKER in additional
         assert "relaunch with `--agent PACT:pact-orchestrator`" in additional
+        assert "PACT cannot dispatch specialist agents in this session" in additional
+        assert _ORCH_MARKER not in additional
         assert _PEER_LIST_PREFIX not in additional
 
 

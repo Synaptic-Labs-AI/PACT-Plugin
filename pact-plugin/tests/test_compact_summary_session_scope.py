@@ -393,7 +393,7 @@ class TestResumeOwnSummaryClause:
     # ── Cycle-2 first-surface gate (architect-confirmed semantics) ─────────
     #
     # A candidate (canonical or archive) is named only if NO consuming
-    # session_start (source in {resume, startup, clear}; absent/unknown
+    # session_start (source in {resume, startup, clear, fork}; absent/unknown
     # NON-consuming) has ts strictly after its mtime. Newest unsuppressed
     # archive wins. Missing/unreadable/empty journal fails OPEN to naming.
     #

@@ -150,11 +150,13 @@ VARIETY_ASSESSED_DISPATCH_SCOPE = "dispatch"
 # handler: the handler catches the symptom and leaves the dependency in place.
 #
 # WHERE THE LIFECYCLE LIVES, AND IT IS TWO SURFACES RATHER THAN ONE.
-# `session_init.check_pin_stale_block_directive` writes the marker and removes
-# it, at SessionStart. `track_files.clear_pin_staleness_marker_if_resolved`
-# removes it MID-SESSION as well, on a hand edit to the managed file and on the
-# archive command, and only after it re-reads the signal and finds the
-# condition clear.
+# `session_init.check_pin_stale_block_directive` is the marker's only writer,
+# at SessionStart. TODAY IT NEVER WRITES IT: it runs before session_init
+# resolves the session dir, so get_session_dir() is empty there, no marker is
+# written, and pin_staleness_gate never arms (issue #1651).
+# `track_files.clear_pin_staleness_marker_if_resolved` removes the marker
+# MID-SESSION as well, on a hand edit to the managed file and on the archive
+# command, and only after it re-reads the signal and finds the condition clear.
 #
 # A NAME COLLISION THAT TRAPS A SEARCH, RECORDED BECAUSE SOMEBODY CHECKED IT
 # RATHER THAN ASSUMED IT. `pin_marker_writer.py` is registered on

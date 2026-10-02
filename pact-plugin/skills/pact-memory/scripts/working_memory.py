@@ -393,10 +393,17 @@ def file_lock(target_file: Path):
         # Release before close. flock is released automatically on fd close
         # by the kernel, but an explicit LOCK_UN ensures immediate release
         # even if close is delayed (e.g., by subsequent finalizer work).
+        # Each step ignores its own OSError: the locked work is over, so a
+        # release failure must not fail a body that succeeded or replace the
+        # error of one that did not.
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        finally:
+        except OSError:
+            pass
+        try:
             os.close(lock_fd)
+        except OSError:
+            pass
 
 
 # Why the sync sites lock the WHOLE read->mutate->write window (not just the
@@ -864,7 +871,13 @@ def _atomic_write_text(target: Path, content: str, project_root: Path) -> None:
                 pass
             raise
     finally:
-        os.close(parent_fd)
+        # The only step after the rename. A close that fails once the rename
+        # has put the new file in place is not a failed write, and after a
+        # failed write it must not replace the error that stopped it.
+        try:
+            os.close(parent_fd)
+        except OSError:
+            pass
 
 
 def extract_managed_region(content: str) -> Optional[Tuple[str, int]]:

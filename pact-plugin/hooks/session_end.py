@@ -197,16 +197,18 @@ _UUID_PATTERN = re.compile(
 # PACT-owned space. `\Z` (strict end-of-string) — see _UUID_PATTERN.
 _TEAM_NAME_PATTERN = re.compile(r'^pact-[a-f0-9-]+\Z')
 
-# Default threshold for active (non-paused) session directory cleanup.
+# Default threshold for active (neither paused nor refreshed) session
+# directory cleanup.
 # 30 days balances disk usage (~50KB × 30 sessions = ~1.5MB) against
 # cross-session recovery value.
 _SESSION_MAX_AGE_DAYS = 30
 
-# Extended threshold for paused session directories. Paused state is
-# in-progress user work that has not been consolidated to memory or merged,
+# Extended threshold for checkpointed (paused or refreshed) session
+# directories. A checkpoint marks in-progress work the user means to resume,
 # so it gets a longer TTL than active sessions to protect the pause→resume
-# workflow across long gaps. The extended TTL is protection, not permanent
-# retention — paused sessions still age out past this threshold.
+# and refresh→resume workflows across long gaps. The extended TTL is
+# protection, not permanent retention — checkpointed sessions still age out
+# past this threshold.
 _PAUSED_SESSION_MAX_AGE_DAYS = 180
 
 
@@ -416,6 +418,10 @@ def cleanup_old_sessions(
     refresh→resume workflows without retaining checkpoint state forever —
     checkpointed sessions still age out past 180 days.
 
+    A directory's age runs from the newer of its own mtime and its newest
+    direct child's (`_dir_max_child_mtime`); a directory whose children
+    cannot be observed is kept.
+
     A directory older than its TTL is removed ONLY when
     `_journal_carries_unharvested_handoffs` returns False. It answers True
     for a journal that holds an `agent_handoff` event AFTER its last
@@ -436,7 +442,8 @@ def cleanup_old_sessions(
         current_session_id: Current session's UUID (never deleted)
         sessions_dir: Override for base directory (testing)
         max_age_days: TTL for active sessions in days (default: 30)
-        paused_max_age_days: TTL for paused sessions in days (default: 180).
+        paused_max_age_days: TTL for checkpointed (paused or refreshed)
+            sessions in days (default: 180).
             Exposed as a kwarg so tests can inject smaller values for
             boundary verification; production call sites use the default.
         old_slug: The unresolved project basename; swept as well when it
@@ -488,7 +495,17 @@ def _reap_slug_dir(
             if entry.name == current_session_id:
                 continue
             try:
-                age_days = (time.time() - entry.stat().st_mtime) / 86400
+                # Age by the newer of the dir's own mtime and its newest
+                # child's: a journal append or an in-place rewrite does not
+                # move the dir's own mtime (see _dir_max_child_mtime), so a
+                # live session would otherwise age out. The max can only make
+                # an entry younger than its own mtime says. None means the
+                # children could not be observed: keep the dir.
+                child_mtime = _dir_max_child_mtime(entry, glob="*")
+                if child_mtime is None:
+                    continue
+                newest = max(entry.stat().st_mtime, child_mtime)
+                age_days = (time.time() - newest) / 86400
                 # Select TTL per entry: checkpointed sessions (paused OR
                 # refreshed) get the extended threshold; active sessions
                 # get the standard one.
@@ -529,12 +546,15 @@ def _dir_max_child_mtime(entry: Path, glob: str = "*.json") -> float | None:
     """
     Return the max mtime across children of `entry` matching `glob`.
 
-    Generalized helper used by both reapers:
+    Generalized helper used by all three reapers:
     - tasks reaper passes `glob="*.json"` — platform `TaskUpdate` rewrites
       individual `{id}.json` files; only *.json entries carry the signal.
     - teams reaper passes `glob="*"` — the team dir holds config.json
       AND member subdirectories AND arbitrary future sidecars; any child
       touch indicates the team is live.
+    - session reaper (`_reap_slug_dir`) passes `glob="*"` and ages the
+      session dir by the newer of this result and the dir's own mtime — a
+      journal append rewrites a child without moving the dir's mtime.
 
     Why max-child rather than parent-dir stat: POSIX in-place overwrite
     (e.g. `config.json` rewrite via write-then-rename-or-truncate) does
@@ -545,19 +565,23 @@ def _dir_max_child_mtime(entry: Path, glob: str = "*.json") -> float | None:
     upper bound on "when was anything under this dir last touched."
 
     Return values (cycle-5 refinement):
-    - `float`: either a successful max-child mtime, OR the parent's
+    - `float`: either the max mtime of the children whose `lstat()`
+      succeeded (an mtime at or below 0, from 1970 or earlier, is still an
+      observation and is returned as is), OR the parent's
       `lstat().st_mtime` when the dir is legitimately empty (no children
       matched the glob).
-    - `None` sentinel: "could not determine age." Two triggers:
+    - `None` sentinel: "no child could be observed." Two triggers:
       (a) outer `entry.glob()` raised OSError AND parent `lstat()` also
       raised — we can't enumerate OR fall back; OR
-      (b) at least one child was observed but EVERY `child.lstat()`
-      raised — distinguishable from empty-dir because we saw children.
-      Callers MUST treat `None` as "skip this entry, count as skipped"
-      rather than proceeding to an age calculation that would collapse
-      "can't observe" into "use parent mtime" (a false-reap risk under
-      permission regressions). The empty-dir case keeps the old semantic
-      (fall back to parent mtime so stale empty dirs still age out).
+      (b) children were seen but EVERY `child.lstat()` raised —
+      distinguishable from empty-dir because we saw children.
+      Callers MUST skip the entry on `None` rather than proceed to an age
+      calculation that would collapse "can't observe" into "use parent
+      mtime" (a false-reap risk under permission regressions). The tasks
+      and teams reapers count the entry as skipped; the session reaper
+      keeps the dir and counts nothing. The empty-dir case keeps the old
+      semantic (fall back to parent mtime so stale empty dirs still age
+      out).
 
     Fail-open: never raises. Returns a valid mtime or `None` in every
     branch. The parent-stat fallback uses `lstat()` (symlink-own
@@ -567,14 +591,14 @@ def _dir_max_child_mtime(entry: Path, glob: str = "*.json") -> float | None:
     Args:
         entry: Directory to probe.
         glob: Glob pattern selecting which children to consult. Default
-            `"*.json"` matches the tasks-reaper convention; teams reaper
-            passes `"*"` to walk all children (config.json + subdirs).
+            `"*.json"` matches the tasks-reaper convention; the teams and
+            session reapers pass `"*"` to walk all children.
 
     Returns:
         Max child mtime, or parent mtime on empty-dir, or `None` sentinel
         when age cannot be determined (see above).
     """
-    latest = 0.0
+    latest = None
     saw_any_child = False
     try:
         for child in entry.glob(glob):
@@ -587,14 +611,17 @@ def _dir_max_child_mtime(entry: Path, glob: str = "*.json") -> float | None:
                 # link's own mtime is the correct signal. lstat is the
                 # portable pre-3.10 form (stat(follow_symlinks=False)
                 # requires Python 3.10+).
-                latest = max(latest, child.lstat().st_mtime)
+                mtime = child.lstat().st_mtime
             except OSError:
                 continue
+            latest = mtime if latest is None else max(latest, mtime)
     except OSError:
         pass
-    if latest > 0.0:
+    # Any observed child answers, whatever its value: an mtime at or below 0
+    # (1970 or earlier) is an observation, not a failure to observe.
+    if latest is not None:
         return latest
-    # latest == 0.0 here. Two distinct scenarios:
+    # No child observed. Two distinct scenarios:
     # - saw_any_child=False: legitimately empty (or outer glob raised
     #   before yielding). Fall back to parent mtime so stale empties age
     #   out — the intended empty-dir semantic.
@@ -1011,9 +1038,10 @@ def _prune_registry_dead_teams(
                         # below, which would turn "I cannot tell" back into
                         # "drop it". Bail out instead, pruning nothing.
                         return 0
-        except ValueError:
-            # Malformed JSON only. Do NOT widen this back to OSError: that is
-            # the route by which an unobservable team becomes a dropped line.
+        except (ValueError, RecursionError):
+            # Malformed JSON only, a line nested too deep to parse included.
+            # Do NOT widen this back to OSError: that is the route by which
+            # an unobservable team becomes a dropped line.
             keep = False
         if keep:
             kept_lines.append(stripped)
@@ -1089,7 +1117,8 @@ def main():
         except Exception as e:
             print(f"Hook warning (session_end journal): {e}", file=sys.stderr)
 
-        # Clean up stale session directories (dual TTL: 30d active, 180d paused)
+        # Clean up stale session directories (dual TTL: 30d active, 180d
+        # paused or refreshed)
         cleanup_old_sessions(
             project_slug=project_slug,
             current_session_id=current_session_id,

@@ -423,8 +423,8 @@ afternoon.
 
 The source-gate pair is the reason this record exists. Twenty-four arms all
 killed their mutations while the launch-source gate sat entirely unpinned:
-deleting `source in ("startup", "resume")` from the call site left the whole
-file green. A kill count measures the mutations someone thought of, so it
+deleting the launch-source check from the call site left the whole file
+green. A kill count measures the mutations someone thought of, so it
 cannot reveal a property nobody named. Mutation testing proves the arms
 present are not vacuous; only enumerating the spec's properties says which
 arms are missing, and neither substitutes for the other.
@@ -1501,16 +1501,19 @@ def test_no_bin_executable_was_added():
 # --------------------------------------------------------------------------
 # the live seam: session_init, driven for real
 # --------------------------------------------------------------------------
-def _drive_session_init(monkeypatch, home, project_dir, source):
+def _drive_session_init(monkeypatch, home, project_dir, source,
+                        agent_type="pact-backend-coder"):
     """Run the real `session_init.main()` and return (context, system_message).
 
     Only the heavy collaborators unrelated to this feature are stubbed. The
     resolution path — home-pinned directory, then exact membership in the
     stored roots — runs unstubbed, because that path IS what these tests
     exist to check and replacing it with a stub would leave the one thing that
-    can break untested. The frame carries no `agent_type`, making it a NON-LEAD
-    frame: the block sits outside the lead-only branch, so a call site scoped
-    one level in emits nothing here while every lead-framed test still passes.
+    can break untested. The frame defaults to a teammate `agent_type`, a
+    NON-LEAD frame that still reaches the block (a frame with no `agent_type`
+    returns before it): the block sits outside the lead-only branch, so a call
+    site scoped one level in emits nothing here while every lead-framed test
+    still passes.
     """
     import io
     from unittest.mock import patch
@@ -1519,7 +1522,7 @@ def _drive_session_init(monkeypatch, home, project_dir, source):
 
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
     monkeypatch.setattr(Path, "home", lambda: home)
-    stdin_data = json.dumps({"source": source})
+    stdin_data = json.dumps({"source": source, "agent_type": agent_type})
 
     with patch("session_init.setup_plugin_symlinks", return_value=None), \
          patch("session_init.ensure_project_memory_md", return_value=None), \
@@ -1572,19 +1575,25 @@ def test_session_init_emits_the_block_for_a_worktree_session(monkeypatch, tmp_pa
     assert "SEEDED BACKLOG ITEM" in context, (
         "the backlog block did not reach a worktree session's context"
     )
-    assert context.startswith("YOUR PACT ROLE:"), (
+    lead_context, _ = _drive_session_init(
+        monkeypatch, tmp_path, worktree, "startup", agent_type="PACT:pact-orchestrator"
+    )
+    assert "SEEDED BACKLOG ITEM" in lead_context, (
+        "the backlog block did not reach a lead worktree session's context"
+    )
+    assert lead_context.startswith("YOUR PACT ROLE:"), (
         "the block displaced the byte-0 role marker"
     )
 
 
 def test_the_alert_channel_is_gated_on_the_launch_source(monkeypatch, tmp_path):
-    """`alert` reaches the user on startup and resume, and NOT on compact,
-    while `context` carries the loud text on all three.
+    """`alert` reaches the user on startup, resume and fork, and NOT on
+    compact, while `context` carries the loud text on all four.
 
     This is a SEPARATE property from the channel asymmetry, and the channel
-    arms do not reach it: deleting `source in ("startup", "resume")` from the
-    call site leaves every channel assertion intact and ships a systemMessage
-    on every compaction. Measured before this arm existed — the whole file
+    arms do not reach it: deleting the launch-source check from the call
+    site leaves every channel assertion intact and ships a systemMessage on
+    every compaction. Measured before this arm existed — the whole file
     stayed green under exactly that mutation.
 
     RED WHEN the source gate is deleted (compact gains a systemMessage) or
@@ -1598,7 +1607,7 @@ def test_the_alert_channel_is_gated_on_the_launch_source(monkeypatch, tmp_path):
     # the alert channel for the gate to act on.
     _write(tmp_path / ".claude" / "pact-backlog", "demo.json", "{ not json at all")
 
-    for source in ("startup", "resume"):
+    for source in ("startup", "resume", "fork"):
         context, system_message = _drive_session_init(
             monkeypatch, tmp_path, project, source
         )
@@ -2973,6 +2982,75 @@ def test_the_age_line_keys_on_the_trigger_and_not_on_the_anchor(monkeypatch, tmp
         "though the anchor is present — this is the row that separates the "
         "correct gate from a render-when-not-None rule"
     )
+
+
+def _drive_lead_session_init(monkeypatch, home, project_dir, session_id, source):
+    """Run the real `session_init.main()` for a LEAD frame with a session id and
+    return its additionalContext. Unlike `_drive_session_init`, the context
+    cache, the context file and the journal run for real, because the age
+    line's anchor is read back from this session's journal."""
+    import io
+    from unittest.mock import patch
+
+    import session_init
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+    monkeypatch.setattr(Path, "home", lambda: home)
+    stdin_data = json.dumps({"session_id": session_id, "source": source,
+                             "agent_type": "PACT:pact-orchestrator"})
+
+    with patch("session_init.setup_plugin_symlinks", return_value=None), \
+         patch("session_init.ensure_project_memory_md", return_value=None), \
+         patch("session_init.check_pinned_staleness", return_value=None), \
+         patch("session_init.get_task_list", return_value=None), \
+         patch("session_init.restore_last_session", return_value=None), \
+         patch("session_init.update_session_info", return_value=None), \
+         patch("session_init.check_resume_state", return_value=None), \
+         patch("session_init._registry_resolve", return_value=None), \
+         patch("session_init.get_peer_context", return_value=None), \
+         patch("sys.stdin", io.StringIO(stdin_data)), \
+         patch("sys.stdout", new_callable=io.StringIO) as captured:
+        try:
+            session_init.main()
+        except SystemExit as exc:
+            assert exc.code == 0
+
+    payload = json.loads(captured.getvalue().strip())
+    return payload.get("hookSpecificOutput", {}).get("additionalContext", "")
+
+
+def test_a_fork_start_anchors_the_age_line_for_its_next_compact(monkeypatch, tmp_path):
+    """A fork is a launch under a new session id, so the next compact in that
+    fork compares the backlog against the fork's start. The other arm runs the
+    same compact with no start before it, a compact-only journal, which has
+    nothing to compare against and stays silent; the fork event is the only
+    difference between the arms.
+
+    RED WHEN fork is dropped from session_init's consuming sources.
+    """
+    project = tmp_path / "project"
+    _repo(project)
+    store = tmp_path / ".claude" / "pact-backlog"
+    name = backlog.store_path().stem
+    _write(store, f"{name}.json",
+           _backlog(project, updated="2026-09-01T00:00:00Z",
+                    items=[_item(title="SEEDED BACKLOG ITEM")]))
+    age_line = "nothing written to the backlog since this context was built"
+
+    forked = "f0f0f0f0-0000-0000-0000-000000000001"
+    _drive_lead_session_init(monkeypatch, tmp_path, project, forked, "fork")
+    context = _drive_lead_session_init(
+        monkeypatch, tmp_path, project, forked, "compact"
+    )
+    assert "SEEDED BACKLOG ITEM" in context, "the block did not render"
+    assert age_line in context, "the compact after a fork found no anchor"
+
+    compact_only = "c0c0c0c0-0000-0000-0000-000000000002"
+    context = _drive_lead_session_init(
+        monkeypatch, tmp_path, project, compact_only, "compact"
+    )
+    assert "SEEDED BACKLOG ITEM" in context, "the block did not render"
+    assert age_line not in context, "a compact-only journal must stay silent"
 
 
 def test_a_refused_write_preserves_the_first_writers_data_and_stays_armed(tmp_path, monkeypatch):

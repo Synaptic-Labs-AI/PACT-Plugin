@@ -174,6 +174,7 @@ try:
         MARKER_SCHEMA_VERSION,
         expected_marker_signature,
     )
+    from shared.session_journal import read_last_event_from
     from shared.session_resume import update_session_info
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_advisory("module imports", _module_load_error)
@@ -368,7 +369,7 @@ def _write_marker(session_dir: Path, session_id: str, plugin_root: str,
         raise
 
 
-def _write_back_aligned_team_name() -> None:
+def _write_back_aligned_team_name(input_data: dict) -> None:
     """Self-heal the PERSISTED team name to the IDENTITY-MATCHED one (#989).
 
     Per-prompt, lead-gated write-back. ``get_team_name()`` resolves the REAL
@@ -382,7 +383,9 @@ def _write_back_aligned_team_name() -> None:
 
     Fires ONLY when the aligned name is non-empty AND differs from the
     persisted name (the normal no-divergence CLI case is a clean no-op — they
-    match, so this returns immediately). Caller has already lead-gated.
+    match, so this returns immediately). Lead-gated here, not only at the
+    caller, as heal_context_if_missing gates itself: the write site refuses a
+    non-lead frame whoever calls it.
 
     NEVER raises — every error is swallowed. The marker write is the load-
     bearing action; a write-back failure must not abort it or crash the hook.
@@ -396,7 +399,13 @@ def _write_back_aligned_team_name() -> None:
     write-back still happens). When present, we pass the FULL correct tuple
     (session_id / aligned team_name / session_dir / plugin_root) because
     ``update_session_info`` rewrites the WHOLE managed session block.
+
+    The CLAUDE.md write is also skipped while the journal has no session_start
+    (a lead session_init did not record): bootstrap_prompt_gate owns that
+    lead's block until it has read and replaced it.
     """
+    if not pact_context.is_lead(input_data):
+        return
     try:
         aligned = pact_context.get_team_name()
         if not aligned:
@@ -449,6 +458,15 @@ def _write_back_aligned_team_name() -> None:
             # Absent (e.g. gitignored worktree CLAUDE.md): SKIP the CLAUDE.md
             # write. The context-file write-back above already happened; the
             # human-readable line just stays absent, which is correct here.
+            return
+        # A lead session_init did not record has no session_start yet.
+        # bootstrap_prompt_gate records it on this same prompt: it reads the
+        # old block (to surface the previous session's claim) and then
+        # replaces it, and only after that appends session_start. Writing the
+        # block here first would erase what that hook has yet to read, so the
+        # block is its alone until session_start appears; the context file
+        # above is still written.
+        if read_last_event_from(session_dir, "session_start") is None:
             return
         # Present: rewrite the whole managed session block with the aligned
         # team name + the full correct tuple.
@@ -510,7 +528,7 @@ def _try_write_marker(input_data: dict) -> None:
     # lead-gated like the marker write below. No-op when they already match
     # (the normal CLI case). Never raises. Done BEFORE the secretary check so
     # the check (and the marker's session_id) read the aligned team.
-    _write_back_aligned_team_name()
+    _write_back_aligned_team_name(input_data)
 
     # Pre-condition: team config + secretary member exist on disk.
     team_name = pact_context.get_team_name()

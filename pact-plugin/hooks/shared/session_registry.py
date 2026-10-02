@@ -132,7 +132,7 @@ def _sanitize_agent_name(name: str) -> str:
 def _is_under_pact_sessions(path: Path) -> bool:
     """Return True iff ``path`` resolves to within the pact-sessions root.
 
-    INLINE equivalent of ``session_init._validate_under_pact_sessions`` (can't
+    INLINE equivalent of ``session_resume._validate_under_pact_sessions`` (can't
     import it — §self-containment). The registry path is a fixed constant, so
     this is mostly belt-and-suspenders, but it stays as defense-in-depth: it
     collapses ``..`` segments and follows symlinks via ``resolve(strict=False)``
@@ -269,8 +269,8 @@ def resolve(session_id: str) -> str | None:
                 continue
             try:
                 obj = json.loads(line)
-            except ValueError:
-                continue  # skip a torn/garbage line, never raise
+            except (ValueError, RecursionError):
+                continue  # skip a torn/garbage/too-deep line, never raise
             if isinstance(obj, dict) and obj.get("session_id") == session_id:
                 value = obj.get("value")
                 if isinstance(value, str):

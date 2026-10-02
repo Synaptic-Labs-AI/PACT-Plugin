@@ -10,8 +10,10 @@ Rule coverage:
     length/NFKC/regex/reserved-token violations → DENY
   - specialist_not_registered — subagent_type not in agent registry → DENY
   - team_name_unavailable — SSOT session team empty (fail-closed) → DENY.
-    A registered teammate's frame gets the ask-the-team-lead text instead of
-    the bootstrap text, with no context or stale-session suffix.
+    Only a lead frame gets the bootstrap text. A registered teammate's frame
+    gets the ask-the-team-lead text and any other frame the non-lead refusal,
+    both with no context or stale-session suffix, and both ahead of the name
+    and plugin checks.
     (#979: team_name_required + team_name_mismatch were DROPPED — the
     Agent(team_name=) arg is platform-ignored, so the session team is
     resolved solely from the SSOT, never matched against the spawn arg.)
@@ -60,6 +62,7 @@ from fixtures.role_frames import captured_pretooluse_teammate_tmux
 _SUPPRESS_EXPECTED = {"suppressOutput": True}
 _TEAM = "pact-test"
 _NAME = "tester"
+_LEAD_AGENT_TYPE = "PACT:pact-orchestrator"
 
 
 # =============================================================================
@@ -72,8 +75,11 @@ def _make_input(
     name=_NAME,
     team_name=_TEAM,
     prompt="Standard mission. Check TaskList for tasks assigned to you.",
+    agent_type=None,
 ):
-    return {
+    """A spawn frame. Without ``agent_type`` it has no role, so rule ⑥ gives it
+    the non-lead refusal; pass ``_LEAD_AGENT_TYPE`` to reach the lead's text."""
+    frame = {
         "hook_event_name": "PreToolUse",
         "session_id": "test-session",
         "tool_name": "Agent",
@@ -84,6 +90,9 @@ def _make_input(
             "prompt": prompt,
         },
     }
+    if agent_type is not None:
+        frame["agent_type"] = agent_type
+    return frame
 
 
 def _run_main(input_data, capsys):
@@ -520,7 +529,9 @@ def test_deny_when_session_team_unavailable(tmp_path, monkeypatch, capsys):
     _seed_plugin(plugin_root)
     _setup_session(monkeypatch, tmp_path, plugin_root, team_name="")
     _seed_team(tmp_path, members=(), tasks=((_NAME, "pending"),))
-    code, out = _run_main(_make_input(team_name=_TEAM), capsys)
+    code, out = _run_main(
+        _make_input(team_name=_TEAM, agent_type=_LEAD_AGENT_TYPE), capsys
+    )
     assert code == 2
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
     assert "session team_name is unavailable" in reason
@@ -532,20 +543,35 @@ _TEAMMATE_REFUSAL = (
     "team-lead to spawn it."
 )
 
+_NON_LEAD_REFUSAL = (
+    "PACT dispatch_gate: PACT specialists are spawned only by a PACT "
+    "team-lead, and this session is not one. If this session is a PACT "
+    "teammate, ask the team-lead to spawn it. To drive PACT, start a session "
+    "with `--agent PACT:pact-orchestrator`."
+)
 
-def _deny_with_no_context(monkeypatch, tmp_path, capsys, frame, registered_as=""):
+
+def _deny_with_no_context(monkeypatch, tmp_path, capsys, frame, registered_as="",
+                          plugin="seeded"):
     """Run the gate with no context file and the plugin root from the env, so
     rule ⑥ fires. ``registered_as`` is the member name the frame's session is
-    registered under, or "" for no registry entry. Returns the deny reason."""
+    registered under, or "" for no registry entry. ``plugin`` is "seeded",
+    "no-agents" (root exported, no agents/ dir) or "unset" (no root at all).
+    Returns the deny reason."""
     import shared.pact_context as ctx_module
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     plugin_root = tmp_path / "plugin"
-    _seed_plugin(plugin_root)
+    plugin_root.mkdir(exist_ok=True)
+    if plugin == "seeded":
+        _seed_plugin(plugin_root)
     monkeypatch.setattr(ctx_module, "_context_path", tmp_path / "pact-session-context.json")
     monkeypatch.setattr(ctx_module, "_cache", None)
     monkeypatch.setattr(ctx_module, "init", lambda input_data: None)
-    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+    if plugin == "unset":
+        monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+    else:
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
     members = (registered_as,) if registered_as else ()
@@ -562,7 +588,7 @@ def _deny_with_no_context(monkeypatch, tmp_path, capsys, frame, registered_as=""
 
 
 def test_rule_6_tells_a_lead_to_rerun_bootstrap(tmp_path, monkeypatch, capsys):
-    frame = {**_make_input(), "agent_type": "PACT:pact-orchestrator"}
+    frame = _make_input(agent_type=_LEAD_AGENT_TYPE)
 
     reason = _deny_with_no_context(monkeypatch, tmp_path, capsys, frame)
     assert "session team_name is unavailable" in reason
@@ -582,16 +608,24 @@ def test_rule_6_tells_a_teammate_to_ask_the_team_lead(tmp_path, monkeypatch, cap
     assert [(row["decision"], row["rule"]) for row in rows] == [("DENY", "team_name_unavailable")]
 
 
-def test_rule_6_keeps_the_bootstrap_text_for_a_solo_specialist(tmp_path, monkeypatch, capsys):
+def _assert_non_lead_refusal(reason, journal):
+    """The exact non-lead refusal, so no context path or stale hint rides along,
+    journaled under rule ⑥'s own rule id."""
+    assert reason == _NON_LEAD_REFUSAL
+    rows = [e for e in journal if e.get("type") == "dispatch_decision"]
+    assert [(row["decision"], row["rule"]) for row in rows] == [("DENY", "team_name_unavailable")]
+
+
+def test_rule_6_refuses_a_non_lead_solo_specialist(tmp_path, monkeypatch, capsys):
     """A specialist's own main session has a teammate role but no registered team."""
-    frame = {**_make_input(), "agent_type": "pact-backend-coder"}
+    journal = _capture_journal(monkeypatch)
+    frame = _make_input(agent_type="pact-backend-coder")
 
     reason = _deny_with_no_context(monkeypatch, tmp_path, capsys, frame)
-    assert "Re-run /PACT:bootstrap" in reason
-    assert str(tmp_path / "pact-session-context.json") in reason
+    _assert_non_lead_refusal(reason, journal)
 
 
-def test_rule_6_keeps_the_bootstrap_text_when_team_resolution_raises(
+def test_rule_6_refuses_a_non_lead_teammate_when_team_resolution_raises(
     tmp_path, monkeypatch, capsys
 ):
     import shared.background_work as background_work
@@ -599,6 +633,7 @@ def test_rule_6_keeps_the_bootstrap_text_when_team_resolution_raises(
     def _raise(_input_data):
         raise RuntimeError("team resolution failed")
 
+    journal = _capture_journal(monkeypatch)
     monkeypatch.setattr(background_work, "frame_team_and_name", _raise)
     frame = captured_pretooluse_teammate_tmux()
     frame.update(tool_name="Agent", tool_input=_make_input()["tool_input"])
@@ -606,41 +641,84 @@ def test_rule_6_keeps_the_bootstrap_text_when_team_resolution_raises(
     reason = _deny_with_no_context(
         monkeypatch, tmp_path, capsys, frame, registered_as="tmux-subject"
     )
-    assert "Re-run /PACT:bootstrap" in reason
+    _assert_non_lead_refusal(reason, journal)
 
 
-def test_rule_6_keeps_the_bootstrap_text_for_a_frame_with_no_role(tmp_path, monkeypatch, capsys):
+def test_rule_6_refuses_a_non_lead_frame_with_no_role(tmp_path, monkeypatch, capsys):
+    journal = _capture_journal(monkeypatch)
     reason = _deny_with_no_context(monkeypatch, tmp_path, capsys, _make_input())
-    assert "Re-run /PACT:bootstrap" in reason
-    assert str(tmp_path / "pact-session-context.json") in reason
+    _assert_non_lead_refusal(reason, journal)
 
 
-def test_rule_6_tells_a_registered_teammate_to_ask_the_team_lead_in_a_fresh_process(tmp_path):
-    """A fresh interpreter runs hooks/dispatch_gate.py as __main__ for a registered
-    separate-process teammate with no context file.
+# Spawn defects that rules ③-⑤ deny, as (spawn fields, plugin setup, the rule
+# id each one journals for a lead).
+_EARLIER_DENIALS = {
+    "no-name": ({"name": ""}, "seeded", "name_required"),
+    "invalid-name": ({"name": "Bad Name"}, "seeded", "name_invalid_regex"),
+    "no-plugin-root": ({}, "unset", "plugin_root_unavailable"),
+    "no-agents-dir": ({}, "no-agents", "plugin_agents_missing"),
+    "unregistered-type": ({"subagent_type": "pact-nonexistent"}, "seeded", "specialist_not_registered"),
+}
 
-    Rule ⑥ imports background_work inside a function and treats any failure
-    there as "not registered", so a broken import silently swaps in the bootstrap
-    text while the verdict stays DENY. The arms above run after conftest has
-    already imported background_work, so they cannot see that break. The gate's
-    journal needs a session directory this process does not have, so the harness
-    records the journaled decision itself.
-    """
+
+def _journaled_rules(journal):
+    return [(e["decision"], e["rule"]) for e in journal if e.get("type") == "dispatch_decision"]
+
+
+@pytest.mark.parametrize("defect", sorted(_EARLIER_DENIALS))
+@pytest.mark.parametrize("frame_kind", ["no-role", "registered-teammate"])
+def test_rule_6_refuses_a_non_lead_frame_before_any_earlier_denial(
+    tmp_path, monkeypatch, capsys, frame_kind, defect
+):
+    """A non-lead frame told to fix its name, its subagent_type or the plugin
+    install would be refused anyway, so it gets the refusal first."""
+    journal = _capture_journal(monkeypatch)
+    fields, plugin, _rule = _EARLIER_DENIALS[defect]
+    spawn = _make_input(**fields)
+    if frame_kind == "no-role":
+        reason = _deny_with_no_context(monkeypatch, tmp_path, capsys, spawn, plugin=plugin)
+        expected = _NON_LEAD_REFUSAL
+    else:
+        frame = captured_pretooluse_teammate_tmux()
+        frame.update(tool_name="Agent", tool_input=spawn["tool_input"])
+        reason = _deny_with_no_context(
+            monkeypatch, tmp_path, capsys, frame, registered_as="tmux-subject", plugin=plugin
+        )
+        expected = _TEAMMATE_REFUSAL
+    assert reason == expected
+    assert _journaled_rules(journal) == [("DENY", "team_name_unavailable")]
+
+
+@pytest.mark.parametrize("defect", sorted(_EARLIER_DENIALS))
+def test_rule_6_leaves_a_lead_frame_on_the_earlier_denials(
+    tmp_path, monkeypatch, capsys, defect
+):
+    """Control: the same defects from a lead with no context keep their own rule."""
+    journal = _capture_journal(monkeypatch)
+    fields, plugin, rule = _EARLIER_DENIALS[defect]
+    frame = _make_input(agent_type=_LEAD_AGENT_TYPE, **fields)
+
+    reason = _deny_with_no_context(monkeypatch, tmp_path, capsys, frame, plugin=plugin)
+    assert reason not in (_NON_LEAD_REFUSAL, _TEAMMATE_REFUSAL)
+    assert _journaled_rules(journal) == [("DENY", rule)]
+
+
+def _run_gate_in_fresh_process(tmp_path, frame):
+    """Run hooks/dispatch_gate.py as __main__ in a fresh interpreter over
+    ``frame``, with HOME and the config dir under ``tmp_path`` and no context
+    file. The team lookup and context resolution run for real. The gate's
+    journal needs a session directory this process does not have, so the
+    harness replaces only the journal sink, with a recorder that prints the
+    journaled decision on stderr. Before the hook runs it also prints
+    ``COLD <bool>`` on stderr: True when ``shared.background_work`` is not yet
+    imported, so a caller can assert the gate ran from a cold import. Returns
+    the completed process."""
     import os
     import subprocess
     import sys
 
     plugin = Path(__file__).resolve().parents[1]
     hook = plugin / "hooks" / "dispatch_gate.py"
-    _seed_team(tmp_path, members=("tmux-subject",), tasks=((_NAME, "pending"),))
-    frame = captured_pretooluse_teammate_tmux()
-    frame.update(tool_name="Agent", tool_input=_make_input()["tool_input"])
-    registry = tmp_path / ".claude" / "pact-sessions" / ".teammate-registry.jsonl"
-    registry.parent.mkdir(parents=True)
-    registry.write_text(
-        json.dumps({"session_id": frame["session_id"], "value": f"tmux-subject@{_TEAM}"}) + "\n",
-        encoding="utf-8",
-    )
     harness = (
         "import runpy, sys\n"
         "import shared.session_journal as journal\n"
@@ -655,13 +733,55 @@ def test_rule_6_tells_a_registered_teammate_to_ask_the_team_lead_in_a_fresh_proc
     env.update(HOME=str(tmp_path), CLAUDE_CONFIG_DIR=str(tmp_path / ".claude"),
                CLAUDE_PLUGIN_ROOT=str(plugin), PYTHONPATH=str(plugin / "hooks"))
 
-    proc = subprocess.run([sys.executable, "-c", harness], input=json.dumps(frame),
-                          capture_output=True, text=True, timeout=60, env=env)
+    return subprocess.run([sys.executable, "-c", harness], input=json.dumps(frame),
+                          capture_output=True, text=True, timeout=60, env=env,
+                          cwd=str(tmp_path))
+
+
+def test_rule_6_tells_a_registered_teammate_to_ask_the_team_lead_in_a_fresh_process(tmp_path):
+    """A fresh interpreter runs hooks/dispatch_gate.py as __main__ for a registered
+    separate-process teammate with no context file.
+
+    Rule ⑥ imports background_work inside a function and treats any failure
+    there as "not registered", so a broken import silently swaps in the non-lead
+    refusal while the verdict stays DENY. The arms above run after conftest has
+    already imported background_work, so they cannot see that break.
+    """
+    _seed_team(tmp_path, members=("tmux-subject",), tasks=((_NAME, "pending"),))
+    frame = captured_pretooluse_teammate_tmux()
+    frame.update(tool_name="Agent", tool_input=_make_input()["tool_input"])
+    registry = tmp_path / ".claude" / "pact-sessions" / ".teammate-registry.jsonl"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(
+        json.dumps({"session_id": frame["session_id"], "value": f"tmux-subject@{_TEAM}"}) + "\n",
+        encoding="utf-8",
+    )
+
+    proc = _run_gate_in_fresh_process(tmp_path, frame)
 
     assert "COLD True" in proc.stderr, proc.stderr
     assert proc.returncode == 2, proc.stderr
     reason = json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
     assert reason == _TEAMMATE_REFUSAL
+    assert "JOURNALED DENY team_name_unavailable" in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize(
+    "agent_type", [None, "pact-backend-coder", _LEAD_AGENT_TYPE],
+    ids=["no-role", "solo-specialist", "lead-control"],
+)
+def test_rule_6_refuses_a_non_lead_frame_in_a_fresh_process(tmp_path, agent_type):
+    """The non-lead refusal through the real team lookup: no context file and
+    nothing in pact_context stubbed. The lead control on the same setup gets the
+    bootstrap text, so the refusal comes from the role, not from the setup."""
+    proc = _run_gate_in_fresh_process(tmp_path, _make_input(agent_type=agent_type))
+
+    assert proc.returncode == 2, proc.stderr
+    reason = json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+    if agent_type == _LEAD_AGENT_TYPE:
+        assert "Re-run /PACT:bootstrap" in reason, reason
+    else:
+        assert reason == _NON_LEAD_REFUSAL
     assert "JOURNALED DENY team_name_unavailable" in proc.stderr, proc.stderr
 
 
@@ -1358,7 +1478,7 @@ def test_deny_when_plugin_root_unavailable_context_file_absent(
     monkeypatch.setattr(ctx_module, "init", lambda input_data: None)
     _seed_team(tmp_path, members=(), tasks=((_NAME, "pending"),))
 
-    code, out = _run_main(_make_input(), capsys)
+    code, out = _run_main(_make_input(agent_type=_LEAD_AGENT_TYPE), capsys)
 
     assert code == 2
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
@@ -1381,7 +1501,7 @@ def test_deny_when_plugin_root_unavailable_context_underivable(
     monkeypatch.setattr(ctx_module, "init", lambda input_data: None)
     _seed_team(tmp_path, members=(), tasks=((_NAME, "pending"),))
 
-    code, out = _run_main(_make_input(), capsys)
+    code, out = _run_main(_make_input(agent_type=_LEAD_AGENT_TYPE), capsys)
 
     assert code == 2
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
@@ -1408,7 +1528,7 @@ def test_env_fallback_rescues_plugin_root_and_team_deny_names_cause(
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
     _seed_team(tmp_path, members=(), tasks=((_NAME, "pending"),))
 
-    code, out = _run_main(_make_input(), capsys)
+    code, out = _run_main(_make_input(agent_type=_LEAD_AGENT_TYPE), capsys)
 
     assert code == 2
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]

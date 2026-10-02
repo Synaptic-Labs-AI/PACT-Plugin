@@ -315,6 +315,21 @@ class TestCheckToolAllowed:
         result = _check_tool_allowed(input_data)
         assert result is None
 
+    @pytest.mark.parametrize("tool_name", ["Edit", "Write", "Agent", "NotebookEdit"])
+    def test_no_role_frame_allows_what_an_unmarked_lead_is_denied(
+        self, monkeypatch, tmp_path, tool_name
+    ):
+        """A frame with no agent_type (plain `claude`, `claude -p`, an eval run)
+        is not gated: only a lead without a marker is denied. The lead control
+        on the same unmarked session proves the setup reaches the lead check,
+        not the empty-session-dir early return."""
+        from bootstrap_gate import _check_tool_allowed
+
+        _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+
+        assert _check_tool_allowed(_make_input(tool_name)) is not None
+        assert _check_tool_allowed(_make_input(tool_name, agent_type=None)) is None
+
     def test_teammate_via_qualified_agent_type(self, monkeypatch, tmp_path):
         """Teammate carrying a qualified non-lead agent_type → None.
 

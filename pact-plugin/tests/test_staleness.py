@@ -830,17 +830,33 @@ class TestStalenessErrorPaths:
 
         assert result is None
 
-    def test_read_text_unicode_decode_error_returns_none(self, tmp_path):
-        """UnicodeDecodeError on read_text() should return None gracefully."""
-        from staleness import check_pinned_staleness
+    @pytest.mark.parametrize("due", [False, True])
+    def test_a_file_that_is_not_utf8_is_skipped_only_when_a_pin_is_due(
+        self, tmp_path, due
+    ):
+        """The pass plans on a replace-decoded copy and decodes strictly only
+        before it writes. It reports the skip only when it would have marked a
+        pin, and never writes replacement characters."""
+        from staleness import (
+            _UNDECODABLE_SKIP, check_pinned_staleness, PINNED_STALENESS_DAYS,
+        )
 
-        claude_md = self._create_claude_md(tmp_path, "# Project\n")
+        old_date = (datetime.now() - timedelta(days=PINNED_STALENESS_DAYS + 10)).strftime("%Y-%m-%d")
+        pin = f"### Old Feature (PR #50, merged {old_date})\n" if due else "### Current\n"
+        text = f"# Project Memory\n\n## Pinned Context\n\n{pin}- Details\n\n"
 
-        error = UnicodeDecodeError("utf-8", b"", 0, 1, "invalid")
-        with patch.object(type(claude_md), "read_text", side_effect=error):
-            result = check_pinned_staleness(claude_md_path=claude_md)
+        control = self._create_claude_md(tmp_path, text)
+        check_pinned_staleness(claude_md_path=control)
+        assert (control.read_text(encoding="utf-8") != text) is due, (
+            "control: the valid file's rewrite did not match the arm"
+        )
 
-        assert result is None
+        before = text.encode("utf-8") + b"caf\xe9\n"
+        control.write_bytes(before)
+        result = check_pinned_staleness(claude_md_path=control)
+
+        assert result == (_UNDECODABLE_SKIP if due else None)
+        assert control.read_bytes() == before
 
     def test_write_text_ioerror_returns_error_message(self, tmp_path):
         """IOError on write_text() (line 218) should return an error message string."""

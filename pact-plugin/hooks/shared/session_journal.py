@@ -94,12 +94,18 @@ _TAIL_WINDOW_BYTES = 32 * 1024
 # trusts disk content. Loosening this dict without auditing all readers
 # will silently break extractors assuming validated shape.
 _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
-    # hooks/session_init.py writes session_start with team, session_id,
-    # project_dir, worktree on the valid-stdin path only (under R3, the event
-    # is dropped entirely when stdin lacks session_id to avoid an unreapable
-    # `unknown-*` directory leak). Of these, session_id and project_dir are
-    # the load-bearing fields downstream consumers depend on; team is
-    # redundant with CLAUDE.md and worktree is empty at write time.
+    # Two hooks write session_start with team, session_id, project_dir and
+    # worktree. hooks/session_init.py writes it for a lead on the valid-stdin
+    # path only (under R3, the event is dropped entirely when stdin lacks
+    # session_id to avoid an unreapable `unknown-*` directory leak).
+    # hooks/bootstrap_prompt_gate.py writes it once for a lead session_init did
+    # not record, at the first prompt that records it. A recording whose
+    # CLAUDE.md block rewrite fails in a way that may clear is retried on
+    # later prompts, and the third such failure records the lead anyway; a
+    # failed append is retried quietly on later prompts. Of these fields,
+    # session_id and project_dir are the load-bearing fields downstream
+    # consumers depend on; team is redundant with CLAUDE.md and worktree is
+    # empty at write time.
     "session_start": {"session_id": str, "project_dir": str},
     # shared/compaction_owner.py writes compaction_attributed, best effort, once a
     # settle's write is recorded as acted, so there is at most one row per
@@ -447,10 +453,12 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
 # happy-path + wrong-type case to TestValidateOptionalFieldTypes in
 # test_session_journal.py.
 _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
-    # hooks/session_init.py writes session_start with an optional `source`
-    # drawn from stdin. The session_init normalization path clamps non-str
-    # inputs to "unknown" before the journal write; this schema contract
-    # catches any future writer that bypasses that path.
+    # session_start's optional `source`: hooks/session_init.py writes the
+    # stdin source when it is one of startup, resume, compact, clear or fork
+    # ("startup" when stdin has none) and "unknown" for any other value,
+    # including a non-str one; hooks/bootstrap_prompt_gate.py writes "prompt".
+    # This schema contract catches any future writer that bypasses those
+    # paths and emits a non-str source.
     "session_start": {"source": str},
     # hooks/session_end.py writes session_end with an optional `warning`
     # string when check_unpaused_pr detects an open PR that was NOT
@@ -1361,7 +1369,8 @@ def _read_events_at(
                 if not _ts_ge(event.get("ts"), since):
                     continue
                 events.append(event)
-            except (json.JSONDecodeError, ValueError):
+            except (json.JSONDecodeError, ValueError, RecursionError):
+                # RecursionError: a line nested too deep to parse is malformed too.
                 continue  # Skip malformed lines
         return events
 
@@ -1496,7 +1505,8 @@ def _scan_lines_for_event(
                 ):
                     continue
                 return event
-        except (json.JSONDecodeError, ValueError):
+        except (json.JSONDecodeError, ValueError, RecursionError):
+            # RecursionError: a line nested too deep to parse is malformed too.
             continue
     return None
 

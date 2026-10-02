@@ -142,10 +142,17 @@ def file_lock(target_file: Path):
         # Release before close. flock is released automatically on fd close
         # by the kernel, but an explicit LOCK_UN ensures immediate release
         # even if close is delayed (e.g., by subsequent finalizer work).
+        # Each step ignores its own OSError: the locked work is over, so a
+        # release failure must not fail a body that succeeded or replace the
+        # error of one that did not.
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        finally:
+        except OSError:
+            pass
+        try:
             os.close(lock_fd)
+        except OSError:
+            pass
 
 # Outer boundary wrapping all PACT-managed content in project CLAUDE.md.
 # User-owned content goes OUTSIDE this block.
@@ -473,6 +480,19 @@ def _restore_line_ending(content: str, line_ending: str) -> str:
     if line_ending == "\n":
         return content
     return content.replace("\r\n", "\n").replace("\n", line_ending)
+
+
+def _read_replaced(path: Path) -> str:
+    """`path` decoded with replacement, for a rewriter whose strict decode just
+    failed to ask whether it had anything to do. Replacement never swallows an
+    ASCII byte, so every marker sits where the bytes put it. NEVER WRITE THE
+    RESULT BACK: that would put U+FFFD over the user's bytes. An unreadable
+    file reads as empty.
+    """
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
 def _atomic_write_text(target: Path, content: str, project_root: Path) -> None:
@@ -808,7 +828,13 @@ def _atomic_write_text(target: Path, content: str, project_root: Path) -> None:
                 pass
             raise
     finally:
-        os.close(parent_fd)
+        # The only step after the rename. A close that fails once the rename
+        # has put the new file in place is not a failed write, and after a
+        # failed write it must not replace the error that stopped it.
+        try:
+            os.close(parent_fd)
+        except OSError:
+            pass
 
 
 def _strip_legacy_lines(content: str) -> str:
@@ -911,6 +937,66 @@ def _strip_legacy_lines(content: str) -> str:
 
 
 
+def _plan_kernel_strip(
+    content: str, target_file: Path
+) -> tuple[str | None, str | None]:
+    """Decide the kernel strip for `content`: (notice, new_content).
+
+    `new_content` is `content` with the kernel block removed, or None when the
+    strip is not due. `notice` is then what the pass returns: None with no
+    marker, or the malformed-marker warning. Pure, so a file that is not
+    valid UTF-8 gets the same decision from its replace-decoded copy.
+    """
+    START_MARKER = "<!-- PACT_START:"
+    END_MARKER = "<!-- PACT_END -->"
+
+    has_start = START_MARKER in content
+    has_end = END_MARKER in content
+
+    if not has_start and not has_end:
+        # Normal idempotent no-op for already-migrated installs.
+        return None, None
+
+    if has_start != has_end:
+        # Only one of the two markers is present. Defensive no-op
+        # to avoid data loss; surface a status string so
+        # session_init.py routes it via systemMessage. This case
+        # can occur if a prior plugin write crashed mid-file or
+        # the user manually deleted one marker.
+        which = "PACT_START" if has_start else "PACT_END"
+        missing = "PACT_END" if has_start else "PACT_START"
+        return (
+            f"Migration skipped: {target_file} contains "
+            f"{which} but no matching {missing}. To avoid data "
+            f"loss, inspect the file and either remove the "
+            f"orphan {which} marker or restore the matching "
+            f"{missing} marker."
+        ), None
+
+    pre_marker, rest = content.split(START_MARKER, 1)
+    if END_MARKER not in rest:
+        # END marker exists in content but appears textually
+        # before START. Same defensive handling.
+        return (
+            f"Migration skipped: {target_file} contains "
+            "both PACT_START and PACT_END markers but PACT_END "
+            "appears before PACT_START. Inspect the file and "
+            "reorder or remove the orphan markers."
+        ), None
+
+    _, post_marker = rest.split(END_MARKER, 1)
+
+    # Preserve one blank line at the removal boundary so the
+    # user's spacing around the obsolete block survives the strip.
+    pre_clean = pre_marker.rstrip("\r\n")
+    post_clean = post_marker.lstrip("\r\n")
+    if pre_clean and post_clean:
+        return None, pre_clean + "\n\n" + post_clean
+    if pre_clean:
+        return None, pre_clean + "\n"
+    return None, post_clean
+
+
 def strip_orphan_kernel_block() -> str | None:
     """
     SUNSET BEFORE v5.0.0: one-version-window migration helper.
@@ -970,58 +1056,22 @@ def strip_orphan_kernel_block() -> str | None:
                 content = target_file.read_text(encoding="utf-8")
             except OSError:
                 return None
-
-            START_MARKER = "<!-- PACT_START:"
-            END_MARKER = "<!-- PACT_END -->"
-
-            has_start = START_MARKER in content
-            has_end = END_MARKER in content
-
-            if not has_start and not has_end:
-                # Normal idempotent no-op for already-migrated installs.
-                return None
-
-            if has_start != has_end:
-                # Only one of the two markers is present. Defensive no-op
-                # to avoid data loss; surface a status string so
-                # session_init.py routes it via systemMessage. This case
-                # can occur if a prior plugin write crashed mid-file or
-                # the user manually deleted one marker.
-                which = "PACT_START" if has_start else "PACT_END"
-                missing = "PACT_END" if has_start else "PACT_START"
+            except UnicodeDecodeError:
+                # This pass rewrites the file, so it is decoded strictly and
+                # left untouched rather than written back with U+FFFD. When the
+                # strip was not due, the replaced copy gets the valid file's
+                # own result. The copy is never written.
+                notice, due = _plan_kernel_strip(_read_replaced(target_file), target_file)
+                if due is None:
+                    return notice
                 return (
-                    f"Migration skipped: {target_file} contains "
-                    f"{which} but no matching {missing}. To avoid data "
-                    f"loss, inspect the file and either remove the "
-                    f"orphan {which} marker or restore the matching "
-                    f"{missing} marker."
+                    f"Kernel block strip skipped: {target_file} is not valid "
+                    "UTF-8, so it was left unchanged."
                 )
 
-            pre_marker, rest = content.split(START_MARKER, 1)
-            if END_MARKER not in rest:
-                # END marker exists in content but appears textually
-                # before START. Same defensive handling.
-                return (
-                    f"Migration skipped: {target_file} contains "
-                    "both PACT_START and PACT_END markers but PACT_END "
-                    "appears before PACT_START. Inspect the file and "
-                    "reorder or remove the orphan markers."
-                )
-
-            _, post_marker = rest.split(END_MARKER, 1)
-
-            # Preserve one blank line at the removal boundary so the
-            # user's spacing around the obsolete block survives the strip.
-            pre_clean = pre_marker.rstrip("\r\n")
-            post_clean = post_marker.lstrip("\r\n")
-            if pre_clean and post_clean:
-                new_content = pre_clean + "\n\n" + post_clean
-            elif pre_clean:
-                new_content = pre_clean + "\n"
-            elif post_clean:
-                new_content = post_clean
-            else:
-                new_content = ""
+            notice, new_content = _plan_kernel_strip(content, target_file)
+            if new_content is None:
+                return notice
 
             try:
                 # anchor: GLOBAL config dir, NOT a project root -- do not unify
@@ -1327,6 +1377,16 @@ def migrate_to_managed_structure() -> str | None:
                 content = target_file.read_text(encoding="utf-8")
             except OSError:
                 return None
+            except UnicodeDecodeError:
+                # This pass rewrites the file, so it is decoded strictly and
+                # left untouched rather than written back with U+FFFD. A file
+                # already migrated had nothing to do, so no skip to report.
+                if MANAGED_START_MARKER in _read_replaced(target_file):
+                    return None
+                return (
+                    f"Migration skipped: {target_file} is not valid UTF-8, so "
+                    "it was left unchanged."
+                )
 
             # Idempotent guard: already migrated
             if MANAGED_START_MARKER in content:

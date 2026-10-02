@@ -7,8 +7,16 @@ Used by: hooks.json UserPromptSubmit hook (no matcher — fires on every prompt)
 
 Layer 2 of the four-layer bootstrap gate enforcement (#401). On each user
 message, checks for the session-scoped bootstrap-complete marker file:
-  - Marker exists → suppressOutput (zero tokens, sub-ms)
-  - No marker + PACT team-lead session (is_lead) → inject additionalContext instructing bootstrap
+  - Marker exists and the journal has a session_start → suppressOutput (zero
+    tokens, sub-ms). The lead-recorded flag counts as a session_start when
+    the recording could not append one; see _RECORDED_FLAG
+  - No marker + PACT team-lead session (is_lead) → inject additionalContext instructing bootstrap.
+    When the session journal has no session_start event (session_init did not
+    record this lead), the instruction is prefixed with a lead note, and the
+    lead is recorded here instead: see _record_unrecorded_lead
+  - Marker exists but the journal has no session_start (the marker writer
+    stamped first, in parallel on the same prompt) + team-lead → the lead note
+    and the recording, with no bootstrap instruction
   - Non-PACT session (no context file) → no-op passthrough
   - Non-lead / plain primary frame (not is_lead) → no-op passthrough
     (NOT a teammate: teammates have no UserPromptSubmit-fire path)
@@ -102,6 +110,7 @@ try:
     from shared.stale_session import (
         detect_stale_session_block as _detect_stale_session_block,
     )
+    from shared.session_journal import _journal_path_from
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_advisory("module imports", _module_load_error)
 
@@ -124,6 +133,23 @@ _SESSION_DIR_HINT = (
     "\n\nPACT_SESSION_DIR={session_dir}"
 )
 
+# Prepended for a lead whose session journal has no session_start event.
+# session_init writes that event only for a frame it treats as the lead, so a
+# lead without one either was not recognised at SessionStart or did not reach
+# the journal write. Not recognised: a fork without `--agent`, or a lead resumed
+# without `--agent` whose own session dir no longer holds its context file
+# (reaped after the TTL, or the project moved); each got the no-role notice.
+# Did not reach the write: session_init raised, had no session id, or got input
+# that did not parse; each got the ladder. The note is true in every case: its
+# second sentence speaks only of a notice, so it is vacuous where none was
+# given. Keyed on the journal, not on the heal's return: the marker writer heals
+# the same file in parallel and can win that race.
+_NOT_TREATED_AS_LEAD_NOTE = (
+    "This session is the PACT team-lead. Any startup notice saying it has no "
+    "recognized agent role, or that PACT cannot dispatch specialist agents "
+    "in this session, does not apply.\n\n"
+)
+
 # `_detect_stale_session_block` (and its `_RESUME_LINE_RE` /
 # `_STALENESS_WARNING_TEMPLATE` constants) moved to shared/stale_session.py —
 # the single SSOT now also consumed by dispatch_gate. The historical
@@ -131,12 +157,95 @@ _SESSION_DIR_HINT = (
 # site and tests are behavior-identical.
 
 
+def _journal_has_session_start(session_dir: str) -> bool:
+    """True once the session journal holds a session_start event.
+
+    Reads FORWARD and stops at the first one. Do not swap in the tail-window
+    reader: session_start sits at the head of a recorded journal (session_init
+    writes it as the session starts, this hook at the first prompt that
+    records the lead), so a
+    forward scan reads one line where a tail read would read the whole window
+    and then fall back to a full scan. Only a journal with no session_start is
+    read to the end, and that is an unrecorded lead, whose recording writes
+    one. A line that does not parse is skipped, and a journal that cannot be
+    read counts as having none.
+    """
+    try:
+        with _journal_path_from(session_dir).open("rb") as journal:
+            for line in journal:
+                if b"session_start" not in line:
+                    continue
+                try:
+                    if json.loads(line).get("type") == "session_start":
+                        return True
+                except (ValueError, AttributeError, RecursionError):
+                    # RecursionError: a line nested deeper than the decoder
+                    # can recurse. Uncaught, it would silence the gate.
+                    continue
+    except OSError:
+        pass
+    return False
+
+
+# Left in the session dir by _record_unrecorded_lead when its session_start
+# append fails (an unwritable journal). It counts as recorded, so the note and
+# the block rewrite are not repeated after the recording; while it stands
+# without a session_start, each lead prompt retries the append quietly.
+_RECORDED_FLAG = "lead-recorded"
+
+# Counts the recordings whose block rewrite failed in a way that may clear.
+# At _MAX_TRANSIENT_ATTEMPTS the lead is recorded anyway, with the failure
+# shown, so no failure can keep a session unrecorded for its whole life.
+_ATTEMPTS_FILE = "lead-record-attempts"
+_MAX_TRANSIENT_ATTEMPTS = 3
+
+
+def _may_retry_recording(session_dir: str) -> bool:
+    """Count one transient rewrite failure; True while the count is under the
+    bound. An error reading or writing the count returns False, so the lead is
+    recorded instead of retried. Never raises."""
+    path = Path(session_dir) / _ATTEMPTS_FILE
+    try:
+        try:
+            attempts = int(path.read_text(encoding="utf-8")) + 1
+        except FileNotFoundError:
+            attempts = 1
+        path.write_text(str(attempts), encoding="utf-8")
+    except (OSError, ValueError):
+        return False
+    return attempts < _MAX_TRANSIENT_ATTEMPTS
+
+
+def _append_session_start(input_data: dict, session_dir: str) -> bool:
+    """Append this lead's session_start (source "prompt"); True when it
+    landed. Never raises."""
+    try:
+        import os
+
+        from shared.session_journal import append_event, make_event
+
+        return append_event(
+            make_event(
+                "session_start",
+                team=pact_context.get_team_name(),
+                session_id=str(input_data["session_id"]),
+                project_dir=os.environ.get("CLAUDE_PROJECT_DIR", "") or os.getcwd(),
+                worktree="",
+                source="prompt",
+            ),
+            session_dir=session_dir,
+        )
+    except Exception:  # noqa: BLE001 — called after the block rewrite and on quiet retries
+        return False
+
+
 def _check_bootstrap_needed(input_data: dict) -> str | None:
     """Determine whether a bootstrap instruction should be injected.
 
     Returns the additionalContext string to inject, or None if the gate
-    should be a no-op (marker exists, non-PACT session, or a plain/non-lead
-    primary frame — NOT a teammate; teammates never fire UserPromptSubmit).
+    should be a no-op (marker exists and the session is recorded, non-PACT
+    session, or a plain/non-lead primary frame — NOT a teammate; teammates
+    never fire UserPromptSubmit).
     """
     # Initialize context (sets session-scoped path from input_data)
     pact_context.init(input_data)
@@ -148,18 +257,24 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
     # healed session still flows into the no-marker inject branch below.
     pact_context.heal_context_if_missing(input_data)
 
-    # Fast path: check marker first (cheapest check, most common case)
     session_dir = pact_context.get_session_dir()
     if not session_dir:
         # No session dir → non-PACT session or uninitialized context → no-op
         return None
 
+    # Fast path: the marker is set AND the journal records this session →
+    # suppress (zero tokens). The marker alone is not enough: the marker writer
+    # runs in parallel on the same prompt and can stamp before this check, and
+    # a lead session_init did not record would then never be recorded. The
+    # journal test is a forward scan that stops at the head of a recorded
+    # journal, so it stays sub-ms.
+    #
     # Use the same safe-marker-check helper as the sibling
     # bootstrap_gate.py so both enforcement points share one safe-check
     # contract. The helper enforces leaf-symlink, ancestor-symlink, and
     # marker-content fingerprint defenses (post-#662).
-    if is_marker_set(Path(session_dir)):
-        # Bootstrap already done → suppress (zero tokens)
+    marker_set = is_marker_set(Path(session_dir))
+    if marker_set and _journal_has_session_start(session_dir):
         return None
 
     # Lead-role gate (#878): only the team-lead drives the bootstrap ritual.
@@ -176,14 +291,189 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
     if not pact_context.is_lead(input_data):
         return None
 
-    # Lead session, no marker → inject bootstrap instruction with session
-    # dir, composed with the staleness advisory (or "") by concatenation.
-    # Staleness runs ONLY here (lead + no-marker): the marker-set fast path
-    # above keeps its zero-tokens/sub-ms contract (no per-prompt file read),
-    # and a marker-set session has by definition completed bootstrap.
-    return _BOOTSTRAP_INSTRUCTION_TEMPLATE.format(
+    # Recorded: session_start in the journal (already known absent when the
+    # marker is set), or the flag a recording leaves when that append failed.
+    # Under the flag, retry the append quietly: no note, no rewrite, no output.
+    recorded = not marker_set and _journal_has_session_start(session_dir)
+    if not recorded and (Path(session_dir) / _RECORDED_FLAG).exists():
+        _append_session_start(input_data, session_dir)
+        recorded = True
+
+    if marker_set:
+        if recorded:
+            return None
+        # Bootstrap is complete but the journal has no session_start: record
+        # this lead, with no bootstrap instruction. A recording whose rewrite
+        # fails, or raises before it, in a way that may clear leaves no
+        # session_start and no flag, so the next prompt retries it, up to
+        # _MAX_TRANSIENT_ATTEMPTS.
+        return _NOT_TREATED_AS_LEAD_NOTE.rstrip("\n") + _record_unrecorded_lead(
+            input_data, session_dir
+        )
+
+    # Lead session, no marker → inject bootstrap instruction with session dir.
+    instruction = _BOOTSTRAP_INSTRUCTION_TEMPLATE.format(
         session_dir_hint=_SESSION_DIR_HINT.format(session_dir=session_dir)
-    ) + (_detect_stale_session_block(input_data) or "")
+    )
+    if recorded:
+        # Recorded by session_init (or by an earlier prompt here): append the
+        # staleness advisory (or "").
+        return instruction + (_detect_stale_session_block(input_data) or "")
+    # Not recorded: session_init's block, journal anchor, worktree record and
+    # session values are missing or name another session, so record them now.
+    # No staleness advisory: the block is replaced below.
+    return (
+        _NOT_TREATED_AS_LEAD_NOTE
+        + instruction
+        + _record_unrecorded_lead(input_data, session_dir)
+    )
+
+
+def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
+    """Record a lead session_init did not record; return what follows the
+    instruction.
+
+    Reached on a lead prompt with no session_start in the journal and no
+    lead-recorded flag, whether or not the bootstrap marker is set. The
+    session_start written here (or the flag, when that append fails) closes
+    that branch, so this runs once per session. A run whose block rewrite
+    fails, or raises before it, in a way that may clear (the lock held past
+    its timeout, an I/O error) writes neither and returns "", so the note goes
+    out alone and the next prompt runs this again. The third such failure
+    records the lead anyway, with the failure shown (see
+    _MAX_TRANSIENT_ATTEMPTS). A failure that says the path is unusable records
+    the lead at once, with the failure shown. In order:
+
+    1. If the project CLAUDE.md holds a Current Session block (both markers),
+       read it. When the block names another session, read that session's
+       pause or refresh claim. Then replace the block with this session's
+       values (every field can be stale: the session id, the team, or the
+       Session dir of a project that moved). A file with no block, and a
+       missing file, are left alone: this never creates or migrates CLAUDE.md.
+       A file that is not valid UTF-8 is left alone too, and the skip is
+       reported after the session values. A skip like that one, which the
+       next prompt would meet again, still records the lead.
+    2. Record the worktree identity, as session_init does for a lead.
+    3. Append session_start (source "prompt") and, when a claim was read,
+       session_resumption_surfaced. Both follow every read above. When the
+       session_start append fails (an unwritable journal), create the
+       lead-recorded flag in its place; later prompts retry the append
+       quietly.
+       bootstrap_marker_writer leaves this lead's block alone until it sees a
+       session_start, so whichever hook runs first, the old block is read
+       before anything replaces it.
+
+    Returns the session-value sentence, followed by the claim, on the run
+    that records. A fork's transcript carries its parent's session values, so
+    the sentence says that these replace them. Never raises: on any error it
+    returns "", and the note and instruction still go out.
+    """
+    if pact_context._is_unknown_or_missing_session(input_data.get("session_id")):
+        return ""
+    try:
+        # Imported here: this branch runs only until the lead is recorded, and
+        # the modules below are not needed on any other prompt.
+        import os
+
+        from shared.claude_md_manager import (
+            SESSION_END_MARKER,
+            SESSION_START_MARKER,
+            resolve_project_claude_md_path,
+        )
+        from shared.project_scope import _record_worktree_identity
+        from shared.session_journal import append_event, make_event
+        from shared.session_resume import (
+            RESUMPTION_MARKER_MISSING_DIRECTIVE,
+            TransientSessionInfoFailure,
+            _extract_prev_session_dir,
+            check_resume_state,
+            format_session_substitutions,
+            session_info_failure,
+            update_session_info,
+        )
+        from shared.stale_session import _RESUME_LINE_RE
+
+        session_id = str(input_data["session_id"])
+        team = pact_context.get_team_name()
+        plugin_root = pact_context.get_plugin_root()
+        # update_session_info writes the file CLAUDE_PROJECT_DIR names, so the
+        # block is looked for there, through the same resolver.
+        env_project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+        project_dir = env_project_dir or os.getcwd()
+
+        claim = None
+        block_status = None
+        try:
+            if env_project_dir:
+                claude_md, source = resolve_project_claude_md_path(env_project_dir)
+                # Read-only here (markers and the Resume line are ASCII); the
+                # rewrite below decodes strictly and skips a file that is not
+                # UTF-8, reporting it in its status.
+                content = (
+                    "" if source == "new_default"
+                    else claude_md.read_text(encoding="utf-8", errors="replace")
+                )
+                if SESSION_START_MARKER in content and SESSION_END_MARKER in content:
+                    recorded = _RESUME_LINE_RE.search(content)
+                    if recorded is None or recorded.group(1) != session_id:
+                        claim = check_resume_state(
+                            _extract_prev_session_dir(env_project_dir)
+                        )
+                    # NOTHING AFTER THIS REWRITE MAY RAISE. The claim above
+                    # was read from the block this call replaces. A raise
+                    # after it returns "" and drops the claim, and the retry
+                    # (still no session_start) finds the block naming this
+                    # session and reads no claim. Every later step fails soft.
+                    # Adding one that can raise needs per-step handling that
+                    # still returns the claim. A raise up to and inside this
+                    # call is caught below and classified like its status.
+                    block_status = update_session_info(
+                        session_id, team, session_dir, plugin_root
+                    )
+        except Exception as e:  # noqa: BLE001 — classified and bounded below
+            block_status = session_info_failure(e)
+        if isinstance(
+            block_status, TransientSessionInfoFailure
+        ) and _may_retry_recording(session_dir):
+            # The block was not replaced and may be next time: record
+            # nothing, so the next prompt reads the same block, claim and
+            # all, and tries again. At the bound, fall through and record
+            # with the failure shown, as a skip does.
+            print(
+                "bootstrap_prompt_gate: could not record this lead "
+                f"session: {block_status}",
+                file=sys.stderr,
+            )
+            return ""
+        _record_worktree_identity(session_id, project_dir)
+        if not _append_session_start(input_data, session_dir):
+            # The journal is not writable: the flag stands in for
+            # session_start, so this note and rewrite are not repeated.
+            try:
+                (Path(session_dir) / _RECORDED_FLAG).touch()
+            except OSError:
+                pass
+        parts = [
+            format_session_substitutions(team, session_dir, plugin_root)
+            + " These replace any session values earlier in this conversation."
+        ]
+        if claim:
+            parts.append(claim)
+            if not append_event(
+                make_event("session_resumption_surfaced"), session_dir=session_dir
+            ):
+                parts.append(RESUMPTION_MARKER_MISSING_DIRECTIVE)
+        if block_status and (
+            "skipped" in block_status.lower() or "failed" in block_status.lower()
+        ):
+            parts.append(block_status)
+        return "\n\n" + "\n\n".join(parts)
+    except Exception as e:  # noqa: BLE001 — never block the instruction
+        print(
+            f"bootstrap_prompt_gate: could not record this lead session: {e}",
+            file=sys.stderr,
+        )
+        return ""
 
 
 def main():

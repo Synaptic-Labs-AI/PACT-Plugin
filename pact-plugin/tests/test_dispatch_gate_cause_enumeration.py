@@ -92,6 +92,7 @@ from test_dispatch_gate import (  # noqa: E402 — sibling harness reuse
     _run_main,
     _full_setup,
     _capture_journal,
+    _LEAD_AGENT_TYPE,
     _TEAM,
     _NAME,
 )
@@ -311,7 +312,7 @@ def test_rule_six_deny_never_receives_the_enumeration(
     _reset_context_caches(monkeypatch)
     _write_project_claude_md(monkeypatch, tmp_path, _LIVE_SESSION_ID)
 
-    code, out = _run_main(_make_input(), capsys)
+    code, out = _run_main(_make_input(agent_type=_LEAD_AGENT_TYPE), capsys)
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
 
     assert code == 2, "rule 6 must actually fire, else this test is vacuous"
@@ -805,7 +806,7 @@ def test_rule_six_under_stale_mismatch_gets_incumbent_without_enumeration(
     _write_project_claude_md(monkeypatch, tmp_path, _STALE_SESSION_ID)
     _reset_context_caches(monkeypatch)
 
-    code, out = _run_main(_make_input(), capsys)
+    code, out = _run_main(_make_input(agent_type=_LEAD_AGENT_TYPE), capsys)
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
 
     assert code == 2, "rule 6 must actually fire, else this test is vacuous"
@@ -865,7 +866,7 @@ def test_emitted_equals_journaled_except_where_a_block_applies(
     _write_project_claude_md(monkeypatch, leg_1, _LIVE_SESSION_ID)
     _reset_context_caches(monkeypatch)
 
-    code_1, out_1 = _run_main(_make_input(), capsys)
+    code_1, out_1 = _run_main(_make_input(agent_type=_LEAD_AGENT_TYPE), capsys)
     emitted_1 = out_1["hookSpecificOutput"]["permissionDecisionReason"]
     rule_1, journaled_1 = _journaled(journal, 0)
 

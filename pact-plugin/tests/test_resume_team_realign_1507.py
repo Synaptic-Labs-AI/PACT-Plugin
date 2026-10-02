@@ -445,6 +445,7 @@ def test_iii_empty_ssot_fails_closed_with_census_inputs(tmp_path, monkeypatch,
     assert ctx_module.get_team_name() == ""
     spawn = _make_spawn()
     spawn["session_id"] = frame_sid
+    spawn["agent_type"] = "PACT:pact-orchestrator"
     code, out = _run_dispatch(spawn, capsys)
     assert code == 2, f"empty SSOT must fail-closed (frame_sid={frame_sid})"
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
@@ -720,8 +721,8 @@ def test_xi_stale_block_and_working_recovery_coexist_scoped(tmp_path,
     the ambiguous-census deny, the composite reason carries BOTH diagnoses,
     each scoped to ITS OWN records with no contradiction inside one message:
       * the stale-block WARNING (about the CLAUDE.md 'Current Session' block —
-        its 'completing bootstrap will rewrite the CLAUDE.md session records'
-        claim is scoped to exactly those records), and
+        its 'do not trust the recorded lines' instruction is scoped to
+        exactly those records), and
       * the re-align HINT (about pact-session-context.json — the measured
         working recovery, leaving session_id/journal untouched).
     The composer is A-xor-B by construction: with the incumbent fired the

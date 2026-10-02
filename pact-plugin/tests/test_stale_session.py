@@ -72,6 +72,22 @@ def test_mismatch_returns_warning_naming_recorded_and_actual(tmp_path, monkeypat
     assert "stale session block" in result
 
 
+def test_the_warning_names_both_causes_and_promises_no_rewrite(tmp_path, monkeypatch):
+    """The block names another session because another lead recorded itself
+    in this project since, or this session's write failed at SessionStart.
+    No step rewrites it later, so the warning points at this session's own
+    startup values instead of promising a rewrite."""
+    _write_claude_md(tmp_path, _RECORDED_DIFFERENT)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+    result = detect_stale_session_block({"session_id": _LIVE_ID})
+
+    assert "another lead may have started in this project since" in result
+    assert "the CLAUDE.md write failed at SessionStart" in result
+    assert "this session's own startup context" in result
+    assert "rewrite" not in result
+
+
 # =============================================================================
 # None-branch 5: recorded == actual (healthy resume)
 # =============================================================================
@@ -143,10 +159,10 @@ def test_no_claude_md_anywhere_returns_none(tmp_path, monkeypatch):
 
 
 def test_non_utf8_claude_md_returns_none(tmp_path, monkeypatch):
-    """A corrupted/non-UTF-8 CLAUDE.md (the partial-write this detector exists
-    to flag) raises UnicodeDecodeError on read_text → swallowed → None. The
-    helper is advisory; its failure budget is 'no warning', never a raise that
-    would suppress a consumer's whole injection."""
+    """A non-UTF-8 byte inside the recorded id itself: the read decodes it to
+    U+FFFD instead of raising, so no Resume line matches and the result is
+    None. The helper is advisory; its failure budget is 'no warning', never a
+    raise that would suppress a consumer's whole injection."""
     target = tmp_path / ".claude" / "CLAUDE.md"
     target.parent.mkdir(parents=True, exist_ok=True)
     # 0x80 is an invalid UTF-8 start byte → read_text(encoding='utf-8') raises.
@@ -212,8 +228,10 @@ def test_legacy_claude_md_used_when_preferred_absent(tmp_path, monkeypatch):
         ("- Resume:   `claude --resume deadbeef`", "deadbeef"),  # extra spaces
         ("- Resume: `claude --resume 11111111-2222-4000-8000-000000000000`",
          "11111111-2222-4000-8000-000000000000"),
+        ("- Resume: `claude --agent PACT:pact-orchestrator --resume abc123-def`",
+         "abc123-def"),
     ],
-    ids=["hex_dash", "extra_spaces", "full_uuid"],
+    ids=["hex_dash", "extra_spaces", "full_uuid", "with_agent_flag"],
 )
 def test_resume_line_regex_extracts_hex_id(line, expected):
     m = _RESUME_LINE_RE.search(line)
@@ -233,3 +251,20 @@ def test_resume_line_regex_extracts_hex_id(line, expected):
 )
 def test_resume_line_regex_rejects_malformed(line):
     assert _RESUME_LINE_RE.search(line) is None
+
+
+def test_the_written_resume_line_carries_the_lead_flag_and_parses(
+    tmp_path, monkeypatch
+):
+    """The Resume line update_session_info writes relaunches the orchestrator,
+    and this regex still reads its id."""
+    from shared.session_resume import update_session_info
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+    update_session_info(_LIVE_ID, "session-11111111")
+    written = "".join(p.read_text() for p in project.rglob("CLAUDE.md"))
+    assert f"`claude --agent PACT:pact-orchestrator --resume {_LIVE_ID}`" in written
+    m = _RESUME_LINE_RE.search(written)
+    assert m is not None and m.group(1) == _LIVE_ID

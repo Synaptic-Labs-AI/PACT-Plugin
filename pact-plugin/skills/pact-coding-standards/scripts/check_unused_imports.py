@@ -25,12 +25,17 @@ supplies one.
 
 Suppression and carve-outs:
     * `# noqa` / `# noqa: F401` on the import statement's FIRST physical
-      line suppresses findings for that whole statement (this is what makes
-      suppression work for parenthesized multi-line imports). Codes are
-      matched as exact word-bounded tokens: a noqa listing only other codes
-      does not suppress, `F401x`/`F4011` are different codes, and a code
-      list with no recognizable code suppresses nothing — only a truly bare
-      `# noqa` blanket-suppresses.
+      line suppresses findings for that whole statement. Inside a
+      parenthesized import, the same marker on the physical line where one
+      imported name appears suppresses only the names on that line. Lines
+      joined by backslashes count as one line, whose marker sits on the last
+      of them (a comment cannot precede a backslash), so in a
+      backslash-continued import a marker on its last line suppresses the
+      whole statement. All of this matches ruff. Codes are matched as exact
+      word-bounded tokens: a noqa listing only other codes does not
+      suppress, `F401x`/`F4011` are different codes, and a code list with no
+      recognizable code suppresses nothing — only a truly bare `# noqa`
+      blanket-suppresses.
     * `from __future__ import ...` is never flagged.
     * Imports inside an `if TYPE_CHECKING:` block are never flagged (they
       serve string annotations the AST usage walk cannot see). The carve-out
@@ -58,6 +63,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import io
 import re
 import sys
 import tokenize
@@ -102,6 +108,63 @@ def _line_has_noqa_f401(line: str) -> bool:
         token.upper() == "F401"
         for token in _NOQA_CODE_TOKEN_RE.findall(codes_region)
     )
+
+
+def _alias_lines(source: str, node: ast.stmt) -> list[int]:
+    """The physical line each name of a multi-line import starts on, in
+    `node.names` order.
+
+    `ast.alias` carries no position before Python 3.10, so the lines are read
+    from the statement's own tokens on every interpreter: each name starts at
+    the first NAME token after the `import` keyword or after a comma. When the
+    tokens do not line up with `node.names`, every name gets the statement's
+    first line, which leaves only first-line suppression in force.
+    """
+    fallback = [node.lineno] * len(node.names)
+    segment = ast.get_source_segment(source, node)
+    if segment is None:
+        return fallback
+    starts: list[int] = []
+    expecting = False
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(segment).readline):
+            if tok.type == tokenize.NAME and expecting:
+                starts.append(node.lineno + tok.start[0] - 1)
+                expecting = False
+            elif tok.type == tokenize.NAME and tok.string == "import" and not starts:
+                expecting = True
+            elif tok.type == tokenize.OP and tok.string == "," and starts:
+                expecting = True
+    except (tokenize.TokenError, SyntaxError):
+        return fallback
+    return starts if len(starts) == len(node.names) else fallback
+
+
+def _backslash_join_ends(source: str) -> dict[int, int]:
+    """Map each physical line a backslash continues to the last line of its
+    joined run, the line a noqa for any of them must sit on.
+
+    Read from the token stream: two consecutive tokens on different rows
+    with no NL, NEWLINE or COMMENT between them are joined by a backslash. A
+    line break inside parentheses always emits NL, so it joins nothing.
+    """
+    continues: set[int] = set()
+    prev = None
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+            if (
+                prev is not None
+                and tok.start[0] > prev.end[0]
+                and prev.type not in (tokenize.NL, tokenize.NEWLINE, tokenize.COMMENT)
+            ):
+                continues.update(range(prev.end[0], tok.start[0]))
+            prev = tok
+    except (tokenize.TokenError, SyntaxError):
+        return {}
+    ends: dict[int, int] = {}
+    for row in sorted(continues, reverse=True):
+        ends[row] = ends.get(row + 1, row + 1)
+    return ends
 
 
 def _is_type_checking_test(test: ast.expr) -> bool:
@@ -204,6 +267,17 @@ def find_unused_imports(source: str, *, try_scope: str) -> list[Finding]:
 
     tree = ast.parse(source)
     lines = source.splitlines()
+    join_ends: dict[int, int] | None = None
+
+    def noqa_line(row: int) -> int:
+        """The physical line a noqa for `row` must sit on: `row` itself, or,
+        when a backslash continues `row`, the last line of that joined run."""
+        nonlocal join_ends
+        if not lines[row - 1].rstrip().endswith("\\"):
+            return row
+        if join_ends is None:
+            join_ends = _backslash_join_ends(source)
+        return join_ends.get(row, row)
 
     collector = _ScopedImportCollector()
     collector.visit(tree)
@@ -218,11 +292,18 @@ def find_unused_imports(source: str, *, try_scope: str) -> list[Finding]:
             continue  # carve-out: optional-dependency probes, consumer tier
         if isinstance(node, ast.ImportFrom) and node.module == "__future__":
             continue  # carve-out: compiler directive, never "used"
-        if _line_has_noqa_f401(lines[node.lineno - 1]):
+        if _line_has_noqa_f401(lines[noqa_line(node.lineno) - 1]):
             continue  # suppression: first physical line of the statement
-        for alias in node.names:
+        name_lines = (
+            _alias_lines(source, node)
+            if node.end_lineno != node.lineno
+            else [node.lineno] * len(node.names)
+        )
+        for alias, name_line in zip(node.names, name_lines):
             if alias.name == "*":
                 continue  # carve-out: star imports are not tracked
+            if _line_has_noqa_f401(lines[noqa_line(name_line) - 1]):
+                continue  # suppression: the name's own physical line
             if isinstance(node, ast.Import):
                 bound = (alias.asname or alias.name).split(".")[0]
             else:

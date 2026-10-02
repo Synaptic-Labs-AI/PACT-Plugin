@@ -245,8 +245,9 @@ class TestNoRoutedProducerInterpolatesAnException:
     EVERY ARM ABOVE NAMES A SITE, so each one goes blind to a site added
     later. This arm is keyed on the PROPERTY instead: no message-building
     expression inside a routed producer may reference a name bound by an
-    `except ... as NAME` clause. A new leak spelled any way at all reddens
-    here.
+    `except ... as NAME` clause, or a parameter annotated as an exception
+    (a helper that builds the message from the caught exception it is
+    handed). A new leak spelled any way at all reddens here.
 
     THE KNOWN BOUND: this reaches producers named below, and a path that
     arrives from something other than an exception is invisible to it.
@@ -260,8 +261,22 @@ class TestNoRoutedProducerInterpolatesAnException:
             "strip_orphan_kernel_block",
         ],
         "hooks/staleness.py": ["check_pinned_staleness"],
-        "hooks/shared/session_resume.py": ["update_session_info"],
+        "hooks/shared/session_resume.py": [
+            "update_session_info",
+            "session_info_failure",
+        ],
     }
+
+    @staticmethod
+    def _exception_params(func: ast.FunctionDef) -> set:
+        """Parameters annotated as an exception type: BaseException,
+        Exception, or any *Error."""
+        params = func.args.posonlyargs + func.args.args + func.args.kwonlyargs
+        return {
+            a.arg for a in params
+            if isinstance(a.annotation, ast.Name)
+            and a.annotation.id.endswith(("Exception", "Error"))
+        }
 
     def test_no_exception_name_reaches_a_message_build(self):
         plugin_root = Path(__file__).parent.parent
@@ -278,7 +293,7 @@ class TestNoRoutedProducerInterpolatesAnException:
                 bound = {
                     h.name for h in ast.walk(node)
                     if isinstance(h, ast.ExceptHandler) and h.name
-                }
+                } | self._exception_params(node)
                 if not bound:
                     continue
                 for inner in ast.walk(node):
@@ -316,7 +331,7 @@ class TestNoRoutedProducerInterpolatesAnException:
                             f"{rel}:{inner.lineno} {ast.unparse(inner)[:80]}"
                         )
         # NON-VACUITY: the guard is worthless if it scanned nothing.
-        assert checked == 6, f"expected 6 producers, scanned {checked}"
+        assert checked == 7, f"expected 7 producers, scanned {checked}"
         assert not offenders, (
             "a routed producer interpolates a caught exception into a "
             "message. Render the cause with shared.failure_cause instead:\n"

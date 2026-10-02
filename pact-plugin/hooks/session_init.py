@@ -6,7 +6,7 @@ Used by: Claude Code settings.json SessionStart hook
 
 Performs PACT environment initialization:
 0. Checks if ~/.claude/teams is in additionalDirectories (emits setup tip if not configured)
-0b. Emits a one-time in-process teammateMode notice recommending tmux for unattended runs (startup/resume only)
+0b. Emits a one-time in-process teammateMode notice recommending tmux for unattended runs (startup/resume/fork only)
 1. Creates plugin symlinks for @reference resolution
 3. Ensures project CLAUDE.md exists with memory sections
 3b. One-time migration: wraps existing project CLAUDE.md in PACT_MANAGED boundary (#404)
@@ -116,15 +116,13 @@ from shared.pact_config import llm_options
 from shared.peer_context import get_peer_context
 from shared.session_registry import resolve as _registry_resolve
 from shared.paths import get_claude_config_dir
-from shared import state_file
-from shared.project_scope import WORKTREE_IDENTITY_FILE, _rev_parse_path
+from shared.project_scope import _record_worktree_identity
 from shared import backlog_store
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
 from shared.symlinks import SYMLINKS_VERIFIED_MESSAGE, setup_plugin_symlinks
 from shared.claude_md_manager import (
     ensure_project_memory_md,
-    file_lock,
     migrate_to_managed_structure,
     resolve_project_claude_md_path,
     strip_orphan_kernel_block,
@@ -134,6 +132,10 @@ from shared.merge_guard_common import (
     cleanup_orphan_tokens as _cleanup_orphan_tokens,
 )
 from shared.session_resume import (
+    RESUMPTION_MARKER_MISSING_DIRECTIVE,
+    _extract_prev_session_dir,
+    _validate_under_pact_sessions,  # noqa: F401  # re-export: tests import it from session_init
+    format_session_substitutions,
     update_session_info,
     restore_last_session,
     check_resumption_context,
@@ -164,33 +166,62 @@ _INPROCESS_MODE_NOTICE = (
     "— see reference/unattended-runs.md."
 )
 
-# Unknown-role startup warning. The lead-only writes below are gated
-# behind is_lead, which keys on the harness-set agent_type field. A session
-# launched WITHOUT `--agent` (or with a non-PACT agent_type) carries no
-# recognizable role — classify_session_role() returns "unknown" — so its
-# session_init silently performs none of the lead-only writes. That is the
-# intended fail-toward-teammate direction, but it is invisible to an operator
-# who MEANT to launch the orchestrator and forgot the flag. This notice makes
-# that case observable. IT RIDES TWO CHANNELS ACROSS THREE EMISSION SITES,
-# AND EACH CHANNEL HAS ITS OWN POPULATION, BECAUSE THE GATES USE DIFFERENT
-# PREDICATES. Do not state one population for the pair.
-#   systemMessage: THE EMISSION NEEDS TWO CONDITIONS TOGETHER. The source
-#     must be a launch event (`startup` or `resume`), AND
-#     _should_warn_unknown_role must pass. That predicate is the WIDER of
-#     the two: it passes for a frame with no recognized role, and ALSO for
-#     an agent_type that is present but is not the lead and is not a
-#     registered specialist. So a typo such as `--agent pact-architct`
-#     classifies as a teammate and reaches this channel ON A LAUNCH, and on
-#     a compact or a clear it reaches no channel at all.
-#   additionalContext: gated by `frame_role == "unknown"`, which needs an
-#     ABSENT agent_type, because a truthy agent_type classifies as a
-#     teammate. A typo does NOT reach this channel.
+# Unknown-role notice. A session started without a PACT role (plain `claude`,
+# `claude -p`, a `claude plugin eval` run, or a forgotten `--agent`) carries no
+# agent_type, so classify_session_role() returns "unknown". session_init gives
+# that frame _UNKNOWN_FRAME_CONTEXT and writes nothing into its project. A lead
+# resumed (not forked) without `--agent` also arrives with no agent_type at
+# SessionStart; while its own session dir still holds the context file only a
+# lead writes, session_init recovers it as the lead (_lead_context_persisted)
+# and it gets neither channel. A lead forked without `--agent` has a new
+# session id that holds no such file, and a resumed lead whose dir was reaped
+# or whose project moved has lost it, so each stays unknown here and gets both
+# channels; bootstrap_prompt_gate recognises it as the lead at its first
+# prompt and records it at the first prompt that can. The notice rides TWO
+# CHANNELS, AND EACH CHANNEL HAS ITS OWN POPULATION, BECAUSE THE GATES USE
+# DIFFERENT PREDICATES. Do not state one population for the pair.
+#   systemMessage: on a launch event (_LAUNCH_SOURCES), for an unknown
+#     frame, and for an agent_type that is present but is not the lead and is
+#     not a registered specialist (_should_warn_unknown_role). So a typo such
+#     as `--agent pact-architct` classifies as a teammate and reaches this
+#     channel ON A LAUNCH, and on a compact or a clear it reaches no channel
+#     at all.
+#   additionalContext: inside _UNKNOWN_FRAME_CONTEXT, for `frame_role ==
+#     "unknown"` only (an absent agent_type on stdin that parsed, with no lead
+#     context file for this session), both at the early branch in main() and
+#     in the exception safety net. A typo does NOT reach it.
 # Pure literal so tests can pin the exact substring.
 _UNKNOWN_ROLE_NOTICE = (
     "PACT: this session has no recognized agent role (no `--agent` flag, or an "
     "unrecognized agent_type), so lead-only session setup was skipped. If you "
     "meant to drive PACT as the orchestrator, relaunch with "
     "`--agent PACT:pact-orchestrator`."
+)
+
+# Follows the notice on a fork, which a forked lead also receives.
+_FORK_RECOGNISED_LATER = (
+    "A fork of a PACT lead session is recognised as the lead at its first "
+    "prompt; no relaunch is needed."
+)
+
+_UNKNOWN_FRAME_CONTEXT = (
+    f"{_UNKNOWN_ROLE_NOTICE} "
+    "PACT cannot dispatch specialist agents in this session, so PACT "
+    "workflows that spawn specialists will not work here."
+)
+
+# SessionStart sources that start a new launch, so they carry the one-per-launch
+# notices. A fork (`--resume <id> --fork-session`) is a new process with a new
+# session id. compact and clear can repeat within one launch.
+_LAUNCH_SOURCES = ("startup", "resume", "fork")
+
+# Appended after the ladder for a frame whose role was never resolved (None):
+# its population includes real leads, so it keeps the ladder, and this cue
+# tells a non-lead reader to ignore it.
+_UNRESOLVED_ROLE_CUE = (
+    "Note: session_init could not determine this session's role, so this "
+    "frame was not classified. If you are not driving PACT as the "
+    "orchestrator, ignore the instructions above."
 )
 
 
@@ -213,17 +244,16 @@ _SYMLINK_REPOINT_NOTICE = (
 
 
 def _should_warn_unknown_role(input_data: dict) -> bool:
-    """Decide whether the unknown-role startup notice should fire.
+    """Decide whether a teammate-classified frame's agent_type is unrecognized,
+    so the unknown-role startup notice should fire.
 
-    Fires when the frame has NO recognized PACT role:
-      classify_session_role == "unknown"  (agent_type absent)
-        OR
-      agent_type is present AND NOT is_lead AND NOT a recognized specialist.
-
-    The "present-but-unrecognized" arm catches a mis-launched / typo'd
-    agent_type (e.g. ``--agent pact-architct``) that the absent-only check
-    misses. Recognized = the live ``agents/pact-*.md`` registry (SSOT), tested
-    via ``is_registered_pact_specialist``.
+    main() calls this only for a frame classify_session_role() puts in the
+    teammate bucket (agent_type present, not a lead spelling); a frame with no
+    agent_type gets the notice from _unknown_frame_output instead. It fires when
+    agent_type is NOT is_lead AND NOT a recognized specialist, which catches a
+    mis-launched / typo'd agent_type (e.g. ``--agent pact-architct``).
+    Recognized = the live ``agents/pact-*.md`` registry (SSOT), tested via
+    ``is_registered_pact_specialist``.
 
     ORDERING IS LOAD-BEARING — do NOT reorder (security-engineer ruling):
     ``is_lead`` is checked BEFORE the registry. ``pact-orchestrator.md`` IS in
@@ -247,8 +277,6 @@ def _should_warn_unknown_role(input_data: dict) -> bool:
     correct — an install with no resolvable plugin_root is broken, and a
     spurious advisory notice is harmless (the notice never DENIES).
     """
-    if classify_session_role(input_data) == "unknown":
-        return True
     if is_lead(input_data):
         return False
     agent_type = input_data.get("agent_type")
@@ -293,8 +321,10 @@ def check_pin_slot_status() -> Optional[str]:
             return None
 
         try:
-            content = path.read_text(encoding="utf-8")
-        except (IOError, OSError, UnicodeDecodeError):
+            # Read-only: a byte that is not UTF-8 decodes to U+FFFD and the
+            # rest of the file still counts.
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except (IOError, OSError):
             return None
 
         parsed = _parse_pinned_section(content)
@@ -322,10 +352,12 @@ def check_pin_stale_block_directive() -> Optional[str]:
     directive is architecturally binding via Tier-0 additionalContext
     (survives compaction per plan row 5 / compaction durability model).
 
-    Side effect (Phase F): writes a session-scoped pin-staleness-pending
-    marker so pin_staleness_gate.py (PreToolUse) can block later Edit/Write
-    on CLAUDE.md Pinned Context. Clears the marker when detection is
-    negative so resolved state does not leave the gate armed.
+    Intended side effect (Phase F): write a session-scoped
+    pin-staleness-pending marker so pin_staleness_gate.py (PreToolUse) can
+    block later Edit/Write on CLAUDE.md Pinned Context, and clear it when
+    detection is negative. It never happens today: session_init calls this at
+    step 4b, before build_context_cache, when get_session_dir() is still
+    empty, so no marker is written and the gate never arms.
     """
     # Defense-in-depth (Back-M1): _staleness_block_check is fail-open by
     # its own contract, but session_init is on the SessionStart hot path —
@@ -385,18 +417,14 @@ def check_pin_stale_block_directive() -> Optional[str]:
     # 🔴 NAME THE COMMAND THAT ARCHIVES. This directive named
     # `/PACT:pin-memory`, which does NOT archive: it ADDS a pin and it sends
     # the user to `/PACT:prune-memory` for removal. THIS IS THE PRIMARY
-    # enforcement surface for the stale-pin condition, AND IN AN UNKNOWN FRAME
-    # IT IS THE ONLY ONE. This directive is appended when the frame role is not
-    # `teammate`, so a lead frame and an unknown frame alike receive it, while
-    # `pin_staleness_gate` returns early unless `pact_context.is_lead` holds.
-    # THE GATE BACKSTOPS THE LEAD FRAME AND IT DOES NOT REACH AN UNKNOWN ONE,
-    # so an incorrect command here reaches a user that nothing refuses later.
-    # DO NOT WRITE THAT A BACKSTOP COVERS THIS TEXT. The exclusion of the
-    # unknown frame is INCIDENTAL rather than intended, and the repair for it
-    # is tracked on its own, because a DENY widened to a population it does not
-    # cover needs its own over-block check.
-    # The gate carried the same incorrect name and the two were corrected
-    # together.
+    # enforcement surface for the stale-pin condition. It reaches a lead frame
+    # or a frame whose stdin did not parse (None): a teammate is gated at the
+    # call site, and an unknown frame returns from main() before the call.
+    # Nothing refuses a wrong command later: `pin_staleness_gate` reads a
+    # marker this function writes under get_session_dir(), which is still
+    # empty at step 4b (build_context_cache runs later), so the marker is
+    # never written and the gate never arms. The gate carried the same
+    # incorrect name and the two were corrected together.
     # BEFORE YOU EDIT THIS STRING, OPEN THE COMMAND FILE AND CONFIRM THE
     # COMMAND ARCHIVES. This text is not evidence about its own subject.
     return (
@@ -464,149 +492,6 @@ def check_additional_directories() -> str | None:
         return None  # Fail-open: never block session start
 
 
-def _validate_under_pact_sessions(path: str) -> str | None:
-    """Reject extracted session paths that escape the pact-sessions root.
-
-    Defense-in-depth against tampered CLAUDE.md content. The Session dir / Resume
-    lines are user-editable text, so a malicious or accidentally corrupted file
-    could point _extract_prev_session_dir at any filesystem location (e.g.
-    /etc, /var, a sibling project's secrets). Callers consume the returned path
-    to read journal events; an attacker who controlled the path could exfiltrate
-    or trigger reads outside the PACT sessions tree.
-
-    The check calls ``Path.resolve(strict=False)`` on both the candidate AND the
-    sessions root so ``..`` segments are collapsed and symlinks followed before
-    the containment check. A naive string-prefix comparison against
-    ``str(Path(path))`` is NOT sufficient: ``Path()`` normalizes redundant
-    slashes but leaves ``..`` segments intact, so ``~/.claude/pact-sessions/../../etc/passwd``
-    would textually start with the prefix yet resolve outside the tree once the
-    filesystem is asked to dereference it. ``resolve(strict=False)`` does the
-    canonicalization explicitly and does NOT require the path to exist.
-
-    The containment check uses ``Path`` comparison semantics
-    (``candidate == sessions_root or sessions_root in candidate.parents``)
-    instead of string prefix + ``os.sep``. This eliminates the sibling-prefix
-    collision class (``pact-sessions-evil`` vs ``pact-sessions``) by design,
-    rather than relying on an explicit separator guard.
-
-    Returns the original string on success and None on rejection (silent
-    fail-closed — callers already treat None as "no previous session").
-    """
-    try:
-        sessions_root = (get_claude_config_dir() / "pact-sessions").resolve()
-        candidate = Path(path).resolve(strict=False)
-        if candidate == sessions_root or sessions_root in candidate.parents:
-            return path
-    except (TypeError, ValueError, OSError):
-        pass
-    return None
-
-
-def _extract_prev_session_dir(project_dir: str) -> str | None:
-    """
-    Extract the previous session's directory path from the project CLAUDE.md.
-
-    Reads the "## Current Session" block written by update_session_info()
-    and extracts the session dir from lines like
-    "- Session dir: `~/.claude/pact-sessions/PACT-Plugin/abc12345-...`".
-
-    Honors both supported project CLAUDE.md locations
-    ($project_dir/.claude/CLAUDE.md preferred, $project_dir/CLAUDE.md legacy).
-
-    Falls back to deriving the path from the Resume line's session_id +
-    the resolved project slug if the Session dir line is absent (backward
-    compat with sessions that wrote team name but not session dir) or names
-    a directory that is no longer there (the line was written before the
-    directory moved to the resolved slug).
-
-    Both extracted paths (primary and fallback) are validated against the
-    canonical pact-sessions prefix via _validate_under_pact_sessions before
-    being returned. Defense-in-depth against tampered CLAUDE.md content.
-
-    This is used to locate the previous session's journal for resume context
-    and pause state detection. Returns None if neither CLAUDE.md exists, the
-    session dir can't be extracted, or the extracted path is outside the
-    pact-sessions tree.
-
-    Args:
-        project_dir: CLAUDE_PROJECT_DIR path
-
-    Returns:
-        Previous session directory path string, or None if not found
-    """
-    if not project_dir:
-        return None
-
-    try:
-        claude_md, source = resolve_project_claude_md_path(project_dir)
-        # source == "new_default" means neither location exists -- nothing to read
-        if source == "new_default":
-            return None
-
-        # Acquire the same sidecar file_lock that update_session_info
-        # uses for its read-mutate-write pass. A concurrent write (e.g.,
-        # from another session_init invocation racing the WRITE step at
-        # L1148) could otherwise produce a torn read here, surfacing as
-        # either a corrupted Session-dir match or a fallback-regex hit
-        # on a half-written SESSION_START block. The lock serializes
-        # against the writer. Re-entrancy is safe: this read at step 5a
-        # runs BEFORE update_session_info (step 5b) acquires its own
-        # lock. No nesting; fail-open on TimeoutError per file_lock
-        # contract.
-        try:
-            with file_lock(claude_md):
-                content = claude_md.read_text(encoding="utf-8")
-        except TimeoutError:
-            return None
-
-        # Primary: match "- Session dir: `<path>`" in the Current Session block.
-        match = re.search(r'- Session dir:\s*`([^`]+)`', content)
-        if match:
-            raw = match.group(1)
-            # Expand ~ to actual home directory
-            if raw.startswith("~/"):
-                expanded = str(Path.home() / raw[2:])
-            else:
-                expanded = raw
-            validated = _validate_under_pact_sessions(expanded)
-            # A validated line naming a directory that is gone falls through
-            # to the derivation below; a rejected line still returns None.
-            if validated is None or Path(validated).is_dir():
-                return validated
-        else:
-            # The primary regex missed even though CLAUDE.md is on disk. This
-            # is usually benign (older sessions wrote only the Resume line,
-            # not the Session dir line — handled by the fallback just below),
-            # but it is also how a silent format regression would present.
-            # Log a one-line stderr warning so future drift in the
-            # SESSION_START block surfaces during testing instead of silently
-            # degrading to the fallback.
-            print(
-                "session_init: _extract_prev_session_dir regex failed on "
-                "existing CLAUDE.md, falling back to Resume-line; file may "
-                "have unexpected format",
-                file=sys.stderr,
-            )
-
-        # Fallback: derive from Resume line session_id + project root basename.
-        # Resume line format: "- Resume: `claude --resume <session_id>`"
-        resume_match = re.search(
-            r'- Resume:\s*`claude --resume\s+([0-9a-f-]+)`', content
-        )
-        if resume_match:
-            session_id = resume_match.group(1)
-            # Same slug derivation and sanitisation as every session path,
-            # so the fallback lands on the directory the writers used.
-            derived = str(
-                build_session_path(project_slug(project_dir), session_id)
-            )
-            return _validate_under_pact_sessions(derived)
-
-    except (IOError, OSError):
-        pass
-    return None
-
-
 # The "Started" line update_session_info writes, in its exact timestamp shape.
 _SESSION_STARTED_RE = re.compile(
     r"^- Started: (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC)$", re.MULTILINE
@@ -616,9 +501,11 @@ _SESSION_STARTED_RE = re.compile(
 def _extract_session_started(project_dir: str) -> str | None:
     """The "Started" value in the project CLAUDE.md's Current Session block.
 
-    None when there is no CLAUDE.md, no such line, or the lock times out. Only
-    the exact shape update_session_info writes is returned, so no other text
-    from the file can reach the block it rewrites.
+    None when there is no CLAUDE.md, it cannot be read, or it has no such line.
+    Only the exact shape update_session_info writes is returned, so no other
+    text from the file can reach the block it rewrites. Read without the
+    sidecar lock: every writer replaces the file whole, so the read sees the
+    old file or the new one.
     """
     if not project_dir:
         return None
@@ -626,9 +513,10 @@ def _extract_session_started(project_dir: str) -> str | None:
         claude_md, source = resolve_project_claude_md_path(project_dir)
         if source == "new_default":
             return None
-        with file_lock(claude_md):
-            content = claude_md.read_text(encoding="utf-8")
-    except (OSError, TimeoutError):
+        # Read-only, and the pattern takes ASCII digits only, so a replaced
+        # byte cannot reach the block.
+        content = claude_md.read_text(encoding="utf-8", errors="replace")
+    except OSError:
         return None
     match = _SESSION_STARTED_RE.search(content)
     return match.group(1) if match else None
@@ -697,69 +585,26 @@ def _build_safety_net_context(
     Build a minimal governance-delivery additionalContext string for the
     exception safety net in main().
 
-    The returned string MUST start with the role-appropriate
-    "YOUR PACT ROLE: <role>." marker at byte 0 (line-anchored). For a lead /
-    unknown / unclassified frame (the default) the marker is
-    "YOUR PACT ROLE: orchestrator." and the string includes the
-    `Skill("PACT:bootstrap")` invocation so the team-lead still loads its
-    operating instructions, governance policy, and workflow protocols even
-    when main() failed before building the normal team-identification
-    string. For a teammate frame (frame_role == "teammate") the marker is
-    "YOUR PACT ROLE: teammate." and the body is a minimal TaskList directive —
-    a teammate MUST NOT be handed the orchestrator-only bootstrap directive.
+    For "lead", "teammate" and None the returned string MUST start with the
+    role-appropriate "YOUR PACT ROLE: <role>." marker at byte 0
+    (line-anchored). frame_role is captured in main() BEFORE the risky
+    assembly (alongside team_name), and its three values and None are four
+    cases:
 
-    frame_role is captured in main() BEFORE the risky assembly (alongside
-    team_name). THE THREE VALUES AND None ARE FOUR CASES. "teammate" gets the
-    teammate marker. "lead" and "unknown" BOTH get the orchestrator marker.
-    None means the classifier DID NOT RUN, so nothing is known, and it gets a
-    role-free failure note.
-
-    WHY "unknown" KEEPS THE MARKER, AND DO NOT SUPPRESS IT AGAIN WITHOUT
-    READING THIS. "unknown" means agent_type was ABSENT, and the classifier
-    docstring names what that covers: a non-PACT / no-`--agent` PRIMARY frame.
-    That is an ordinary user who typed plain `claude`. Withholding the marker
-    withholds the bootstrap directive, so the bootstrap marker is never
-    stamped, so bootstrap_gate (PreToolUse, no matcher key, every tool call)
-    denies Edit, Write and Agent. THE USER READS THAT AS A TOTAL TOOL-LOAD
-    FAILURE, AND IT WAS REPORTED FROM THE FIELD.
-
-    A PRIOR SUPPRESSION HERE CITED A CENSUS, AND THE CENSUS DID NOT MEASURE
-    THIS POPULATION. It counted subagent transcripts that received the
-    orchestrator instructions. POPULATION, re-measured: 166 files matching
-    subagents/*.jsonl for one team session, 13 of which carry a SessionStart
-    record, holding 70 such records between them. ALL 70 have
-    type == "attachment" and carry the LEAD session id, and the set of
-    distinct session ids across the 70 has exactly ONE member. They are the
-    LEAD's own hook output, which the platform attaches into the transcripts
-    of the sidechains that are live at that moment. Those frames classify
-    "lead", so a gate keyed on "unknown" cannot change one byte of them, and
-    150 of the 166 files carry no SessionStart record at all. NO SUBAGENT
-    FRAME REACHES THIS HOOK.
-
-    THE OPERATOR CUE STILL RIDES ALONG. An "unknown" frame also receives
-    _UNKNOWN_ROLE_NOTICE, appended AFTER the marker so the byte-0 contract
-    above holds. The notice is ADDITIVE and must never replace the ladder: the
-    cost of the notice is a few hundred bytes, and the cost of withholding the
-    ladder is a user who cannot use any tool.
-
-    THE None PATH KEEPS THE LADDER TOO, AND THAT RULING REPLACED AN EARLIER
-    ONE. The earlier ruling withheld the ladder from an unresolved frame on
-    the argument that text claiming a role asserts more than the system knows.
-    It priced the cost as a REACTIVE route, because the bootstrap_gate deny
-    names its own remedy. THE FIELD REPORT RETIRED THAT PRICE: the reporter
-    did not recover through the deny text, he rolled the plugin back.
-
-    AND A FULL REVERT IS A SMALLER DELTA FROM A KNOWN-GOOD SHIPPED ARTIFACT
-    THAN A PARTIAL ONE. 4.6.34 had no None branch at all. Leaving None
-    suppressed keeps one novel behaviour of which the only justification is
-    now discredited, and it makes the drift-robustness argument for this
-    revert dishonest, because that argument rests on a return to 4.6.34
-    semantics.
-
-    WHAT SURVIVES OF THE OLD ARGUMENT IS THE CUE, NOT THE SUPPRESSION. An
-    unresolved frame does NOT receive the unknown-role notice, because that
-    notice asserts a classifier result that was never computed. It receives
-    its own sentence, which keeps it separable from a resolved-empty frame.
+    - "teammate": the "YOUR PACT ROLE: teammate." marker and a minimal
+      TaskList directive. A teammate MUST NOT be handed the orchestrator-only
+      bootstrap directive.
+    - "unknown": _UNKNOWN_FRAME_CONTEXT, the same text the early branch in
+      main() emits. It claims no role, so it carries no marker and no
+      bootstrap directive.
+    - "lead": the "YOUR PACT ROLE: orchestrator." marker and the
+      `Skill("PACT:bootstrap")` invocation, so the team-lead still loads its
+      operating instructions even when main() failed before building the
+      normal team-identification string.
+    - None: the classifier did not run. The orchestrator marker and bootstrap
+      directive, plus its own cue telling a non-lead reader to ignore them.
+      Its population includes real leads, which bootstrap_gate does gate, so
+      it keeps the ladder.
 
     This helper is deliberately zero-risk: only string literals, a single
     f-string interpolation of team_name (which is either None or a validated
@@ -772,19 +617,15 @@ def _build_safety_net_context(
                    exception fired before generate_team_name() ran.
         frame_role: Session role ("lead" / "teammate" / "unknown") captured
                     before the exception, or None if the exception fired before
-                    the capture. Four cases: "teammate" selects the teammate
-                    marker, None selects a role-free note that claims no role
-                    and carries no bootstrap directive, and every other value
-                    ("lead" and "unknown" today) selects the orchestrator
-                    marker, with "unknown" also receiving the operator notice.
+                    the capture or the stdin did not parse. See the four cases
+                    above.
         source: The SessionStart source captured before the exception, or None.
                 On "compact" the orchestrator prelude carries the teammate
                 clause, as the normal compact directive does.
 
     Returns:
         Minimal additionalContext string suitable for the except-block
-        safety net. Leads with the role-appropriate "YOUR PACT ROLE: <role>."
-        marker at byte 0.
+        safety net.
     """
     if frame_role == "teammate":
         # Teammate fail-open: byte-0 teammate marker + a minimal directive to
@@ -797,6 +638,8 @@ def _build_safety_net_context(
             'session_init partially failed — check systemMessage for details. '
             'Check TaskList for tasks assigned to you.'
         )
+    if frame_role == "unknown":
+        return _UNKNOWN_FRAME_CONTEXT
     prelude = (
         'YOUR PACT ROLE: orchestrator.\n\n'
         + (f'{COMPACTION_TEAMMATE_CLAUSE}\n\n' if source == "compact" else '')
@@ -805,36 +648,9 @@ def _build_safety_net_context(
         'Do not evaluate whether it is needed. '
         'You must invoke Skill("PACT:bootstrap") on every session start.'
     )
-    # TWO ROLES REACH THIS LADDER BESIDE "lead", AND EACH GETS ITS OWN CUE
-    # APPENDED. Appended, never prepended: the byte-0 marker contract in this
-    # docstring is what the line-anchored readers key on.
-    #
-    # "unknown" is a primary frame launched with no `--agent`, and its cue
-    # names that fact, because the classifier established it.
-    #
-    # None means the classifier DID NOT RUN. THE FRAME BEHIND IT IS THE SAME
-    # POPULATION AS EVERY OTHER FRAME, WHICH IS MOSTLY A PRIMARY USER, so
-    # withholding the ladder there denies an ordinary user their tools. The
-    # earlier ruling withheld it and priced the cost as a REACTIVE route,
-    # because the bootstrap_gate deny names its own remedy. THE FIELD REPORT
-    # IS EVIDENCE THAT ROUTE DOES NOT WORK: the reporter did not recover
-    # through the deny text, he rolled the plugin back.
-    #
-    # THE ONE HALF OF THE OLD ARGUMENT THAT SURVIVES IS THE CUE, NOT THE
-    # SUPPRESSION. An unresolved frame must NOT receive the unknown-role
-    # notice, because that notice asserts a classifier result that was never
-    # computed. It gets its own sentence instead, which keeps it separable
-    # from a resolved-empty frame for anyone who debugs the early window.
-    if frame_role == "unknown":
-        cue = f'\n\n{_UNKNOWN_ROLE_NOTICE}'
-    elif frame_role is None:
-        cue = (
-            '\n\nNote: session_init failed before the session role was '
-            'resolved, so this frame was not classified. If you are not '
-            'driving PACT as the orchestrator, ignore the instructions above.'
-        )
-    else:
-        cue = ''
+    # None means the classifier did not run, so the frame may be a real lead:
+    # it keeps the ladder, and the cue tells a non-lead reader to ignore it.
+    cue = f'\n\n{_UNRESOLVED_ROLE_CUE}' if frame_role is None else ''
     if team_name:
         return (
             f'{prelude}\n\n'
@@ -847,6 +663,64 @@ def _build_safety_net_context(
         'Session team: NOT GENERATED (session_init failed early — check '
         f'systemMessage for details). The platform auto-creates the session team.{cue}'
     )
+
+
+def _unknown_role_launch_notice(source: str | None) -> str | None:
+    """The user-facing notice for a frame with no PACT role, or None.
+
+    Launch events only (_LAUNCH_SOURCES): compact and clear repeat within one
+    launch. A forked lead looks like a plain fork here, so on a fork the notice
+    adds that a fork of a lead needs no relaunch: its first prompt carries the
+    lead agent_type, and bootstrap_prompt_gate recognises it as the lead then
+    and records it at the first prompt that can.
+    """
+    if source == "fork":
+        return f"{_UNKNOWN_ROLE_NOTICE} {_FORK_RECOGNISED_LATER}"
+    if source in _LAUNCH_SOURCES:
+        return _UNKNOWN_ROLE_NOTICE
+    return None
+
+
+def _unknown_frame_output(source: str) -> dict:
+    """Build the whole SessionStart output for a frame with no PACT role.
+
+    An explicit allowlist: apart from the prelude main() runs for every frame
+    before the branch (the CLAUDE_ENV_FILE export in _persist_project_dir_env
+    and the old-slug session-dir adoption), an emission or write reaches an
+    unknown frame only if it is listed here. Kept are the notice, the
+    machine-wide upkeep (symlink refresh, kernel-block strip, orphan-token
+    cleanup), and the faults a user can act on (a failed symlink refresh, a
+    failed or skipped kernel strip, a malformed settings.json). Nothing is
+    written into the project.
+    """
+    system_messages = []
+    notice = _unknown_role_launch_notice(source)
+    if notice:
+        system_messages.append(notice)
+    symlink_result = setup_plugin_symlinks()
+    if symlink_result and "failed" in symlink_result.lower():
+        system_messages.append(symlink_result)
+    kernel_strip_msg = strip_orphan_kernel_block()
+    if kernel_strip_msg and (
+        "failed" in kernel_strip_msg.lower() or "skipped" in kernel_strip_msg.lower()
+    ):
+        system_messages.append(kernel_strip_msg)
+    try:
+        _cleanup_orphan_tokens(TOKEN_DIR)
+    except Exception:
+        pass  # Fail-open: never block session init for disk hygiene.
+    settings_warn = check_settings_well_formed()
+    if settings_warn:
+        system_messages.append(settings_warn)
+    output = {
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": _UNKNOWN_FRAME_CONTEXT,
+        }
+    }
+    if system_messages:
+        output["systemMessage"] = " | ".join(system_messages)
+    return output
 
 
 def _clear_bootstrap_marker(session_path: Path) -> None:
@@ -867,6 +741,27 @@ def _clear_bootstrap_marker(session_path: Path) -> None:
         (session_path / BOOTSTRAP_MARKER_NAME).unlink(missing_ok=True)
     except OSError:
         pass  # Fail-open: don't block session init for marker cleanup
+
+
+def _lead_context_persisted(session_id, project_dir: str) -> bool:
+    """True when this session id already has a pact-session-context.json.
+
+    Only a lead frame writes that file (session_init persists it under
+    frame_is_lead, and the context heal is is_lead-gated), so its presence
+    under this session's own id means a lead ran here. A lead resumed (not
+    forked) without `--agent` carries no agent_type at SessionStart only; this
+    is how it is recognised, while its own session dir still holds the file.
+    A fork has a new session id, and a reaped dir or a moved project has lost
+    the file, so neither is recognised here; bootstrap_prompt_gate records
+    both at the first prompt that can. Fail-closed: any error reads as absent.
+    """
+    if _is_unknown_or_missing_session(session_id) or not project_dir:
+        return False
+    try:
+        session_path = build_session_path(project_slug(project_dir), str(session_id))
+        return (session_path / "pact-session-context.json").is_file()
+    except Exception:
+        return False
 
 
 def _adopt_old_slug_session_dir(session_id: str, project_dir: str) -> bool:
@@ -1044,7 +939,7 @@ _ARCHIVE_STAMP_SHAPE_RE = re.compile(
 )
 
 # First-surface gate (F-ARCH-1): session_start sources that CONSUME a
-# surfaced summary. A resume/startup/clear start after a candidate's mtime
+# surfaced summary. A resume/startup/clear/fork start after a candidate's mtime
 # means a later start already had the pointer available — re-naming at every
 # subsequent start would re-surface consumed state. compact is the PRODUCER
 # (a post-summary compact writes a NEWER summary, it does not consume this
@@ -1052,7 +947,14 @@ _ARCHIVE_STAMP_SHAPE_RE = re.compile(
 # costs are asymmetric (a false suppression kills the pointer's primary
 # purpose; a false naming costs one sentence), so ambiguity fails toward
 # naming.
-_FIRST_SURFACE_CONSUMING_SOURCES = frozenset({"resume", "startup", "clear"})
+# A fork is a launch under a NEW session id, so like startup it builds a fresh
+# context, which the backlog age line anchors on. It cannot suppress a summary
+# wrongly: its own dir is new, the only file a start puts there before its
+# session_start is the root-drained artifact (never a candidate), and every
+# candidate comes from a compaction in the fork, so it is newer than the start.
+_FIRST_SURFACE_CONSUMING_SOURCES = frozenset(
+    {"resume", "startup", "clear", "fork"}
+)
 
 
 def _latest_consuming_start_ts(session_dir: str) -> float | None:
@@ -1102,8 +1004,8 @@ def _resume_own_summary_clause(session_dir: str) -> str:
 
     FIRST-SURFACE GATE (F-ARCH-1): a candidate (canonical or archive,
     uniformly) is SUPPRESSED when a consuming session_start event
-    (resume/startup/clear — see _FIRST_SURFACE_CONSUMING_SOURCES) has a ts
-    STRICTLY after the candidate's mtime: that later start already had the
+    (resume/startup/clear/fork — see _FIRST_SURFACE_CONSUMING_SOURCES) has a
+    ts STRICTLY after the candidate's mtime: that later start already had the
     pointer available, so naming again would re-surface consumed state at
     every subsequent start. Among archives, the NEWEST UNSUPPRESSED
     shape-conforming one wins. Fail-open toward naming: a missing/unreadable/
@@ -1272,52 +1174,13 @@ def _persist_project_dir_env(project_dir: str) -> None:
         pass
 
 
-def _record_worktree_identity(session_id: str, project_dir: str) -> None:
-    """Record which repository this session's linked worktree belongs to.
-
-    Writes `<session_dir>/worktree-identity.json` when `project_dir` lies inside
-    a linked worktree (its git dir and common dir differ), including a
-    subdirectory of one. The working-memory write guard reads it back once that
-    worktree is removed and git can no longer say which repository the declared
-    directory was in. Runs for every role, so a separate-process teammate
-    records its own session.
-
-    Fail-open: any error leaves no record.
-    """
-    try:
-        directory = Path(project_dir)
-        if not directory.is_dir():
-            return
-        git_dir = _rev_parse_path(directory, "--git-dir")
-        common_dir = _rev_parse_path(directory, "--git-common-dir")
-        if git_dir is None or common_dir is None or git_dir == common_dir:
-            return
-        worktree = _rev_parse_path(directory, "--show-toplevel")
-        if worktree is None:
-            return
-        record = {
-            "session_id": session_id,
-            "declared": os.path.realpath(project_dir),
-            "worktree": str(worktree),
-            "common_dir": str(common_dir),
-        }
-        state_file.write_text(
-            build_session_path(project_slug(project_dir), session_id)
-            / WORKTREE_IDENTITY_FILE,
-            json.dumps(record),
-            root=get_claude_config_dir() / "pact-sessions",
-        )
-    except Exception:
-        return
-
-
 def main():
     """
     Main entry point for the SessionStart hook.
 
     Performs PACT environment initialization:
     0. Checks if ~/.claude/teams is in additionalDirectories (emits setup tip if not configured)
-    0b. Emits a one-time in-process teammateMode notice recommending tmux for unattended runs (startup/resume only)
+    0b. Emits a one-time in-process teammateMode notice recommending tmux for unattended runs (startup/resume/fork only)
     1. Creates plugin symlinks for @reference resolution
     3. Ensures project CLAUDE.md exists with memory sections
     3b. One-time migration: wraps existing project CLAUDE.md in PACT_MANAGED boundary (#404)
@@ -1385,7 +1248,7 @@ def main():
         context_parts = []
         system_messages = []
 
-        # Detect session source: startup, resume, compact, clear
+        # Detect session source: startup, resume, compact, clear, fork
         # Default to "startup" if missing (backwards compat with older Claude Code).
         # Validate against the known set — an unrecognized source is surfaced
         # as "unknown" so it cannot inject arbitrary text into additionalContext.
@@ -1393,7 +1256,7 @@ def main():
         # unhashable inputs (list, dict) that would otherwise raise TypeError,
         # bubble to the outer safety-net, and skip the session_start journal
         # write — breaking #414 R2's fail-open contract.
-        _VALID_SOURCES = {"startup", "resume", "compact", "clear"}
+        _VALID_SOURCES = {"startup", "resume", "compact", "clear", "fork"}
         raw_source = input_data.get("source", "startup")
         source = (
             raw_source
@@ -1413,15 +1276,51 @@ def main():
         # non-dict would have raised at raw_source and bubbled to the outer
         # safety net). classify_session_role does input_data.get(...) so it is
         # total only on a dict — capturing here, NEVER in the except, preserves
-        # the safety net's never-raise contract. One capture serves three sites:
-        #   - the lead-only advisory gates below (steps 4/4a/4b): a teammate
-        #     frame must not receive lead pin advisories (m2);
+        # the safety net's never-raise contract. Every later role decision reads
+        # this one capture:
+        #   - the resumed-lead recovery, which may turn "unknown" into "lead";
+        #   - the unknown-frame early branch, which returns before any project
+        #     write;
+        #   - step 0c's notice (`== "teammate"`);
+        #   - frame_is_lead, which gates steps 3/3b and 4 and the Class-A
+        #     writes (5a/5b/8);
+        #   - the advisory gates at 4a/4b and the 4d/4e config block
+        #     (`!= "teammate"`): a teammate frame must not receive lead pin
+        #     advisories (m2);
         #   - the teammate peer-context branch (the `== "teammate"` gate, m3);
+        #   - the unresolved-role cue on the ladder (`is None`);
         #   - the role-aware exception safety net (_build_safety_net_context).
         # If the exception fires before this point, frame_role stays None and
         # the safety net emits the orchestrator marker — identical to prior
         # behavior, a KNOWN no-regression default, not a misroute.
-        frame_role = classify_session_role(input_data)
+        # Stdin that did not parse leaves input_data empty, so the classifier
+        # would run on no evidence: that frame stays None too (ladder + cue).
+        if stdin_json_error is None:
+            frame_role = classify_session_role(input_data)
+
+        # Adopt a session dir written under the unresolved project basename
+        # BEFORE any writer below can create the resolved-slug dir.
+        _adopt_old_slug_session_dir(input_data.get("session_id", ""), project_dir)
+
+        # A lead resumed (not forked) without `--agent` has no agent_type at
+        # SessionStart only. While its own session dir still holds the context
+        # file only a lead writes, recover the role from that. A fork's new
+        # session id holds no such file, and a reaped dir or a moved project
+        # has lost it; bootstrap_prompt_gate records those at the first
+        # prompt that can. Adoption above has already moved a dir written under the
+        # unresolved slug.
+        if frame_role == "unknown" and _lead_context_persisted(
+            input_data.get("session_id"), project_dir
+        ):
+            frame_role = "lead"
+
+        # No recognized role: emit the notice, keep machine-wide upkeep and
+        # fault reports, write nothing into the project.
+        if frame_role == "unknown":
+            print(json.dumps(_unknown_frame_output(source)))
+            sys.exit(0)
+
+        _settle_staged_summaries(input_data.get("session_id", ""), project_dir)
 
         # Clear a stale compact-summary — BY MOVING IT, in BOTH of its homes.
         # Only "compact" source keeps either in place (postcompact_archive just
@@ -1434,12 +1333,6 @@ def main():
         # cleared, for the same reason as before, but the previous code cleared
         # it BY DESTROYING the bytes, and those are the only copy. See
         # _archive_stale_compact_summary and _archive_own_dir_stale_summary.
-        # Adopt a session dir written under the unresolved project basename
-        # BEFORE any writer below can create the resolved-slug dir.
-        _adopt_old_slug_session_dir(input_data.get("session_id", ""), project_dir)
-
-        _settle_staged_summaries(input_data.get("session_id", ""), project_dir)
-
         if source != "compact":
             _archive_stale_compact_summary(
                 input_data.get("session_id", ""), project_dir
@@ -1478,12 +1371,13 @@ def main():
         # relaunch itself) → system_messages channel, mirroring the step-0
         # additionalDirectories tip.
         #
-        # WHEN: emit only on session-LAUNCH events (startup + resume). A
-        # resumed session is the walk-away/unattended case worth re-warning,
-        # and each launch fires SessionStart exactly once for that source — so
-        # NO marker file is needed to stay once-per-launch. `compact` and
-        # `clear` are mid-launch context-reset events that CAN re-fire within a
-        # single launch; they are SUPPRESSED so the notice is never repeated.
+        # WHEN: emit only on session-LAUNCH events (_LAUNCH_SOURCES). A
+        # resumed or forked session is the walk-away/unattended case worth
+        # re-warning, and each launch fires SessionStart exactly once for that
+        # source — so NO marker file is needed to stay once-per-launch.
+        # `compact` and `clear` are mid-launch context-reset events that CAN
+        # re-fire within a single launch; they are SUPPRESSED so the notice is
+        # never repeated.
         # An unrecognized source (normalized to "unknown") is also suppressed.
         #
         # Fail-safe: should_emit_inprocess_notice() is total (never raises) and
@@ -1496,7 +1390,7 @@ def main():
         # this tuple normalizes to "unknown" (see source-normalization above)
         # and is SUPPRESSED — update this allowlist if such a launch source is
         # added upstream.
-        if source in ("startup", "resume"):
+        if source in _LAUNCH_SOURCES:
             try:
                 from shared.teammate_mode import should_emit_inprocess_notice
                 if should_emit_inprocess_notice():
@@ -1504,24 +1398,27 @@ def main():
             except Exception:  # noqa: BLE001 — fail-safe → emit; never block init
                 system_messages.append(_INPROCESS_MODE_NOTICE)
 
-        # 0c. Unknown-role startup warning. The lead-only writes in
-        # steps 5a/5b/8 are gated behind is_lead below; a frame with NO
-        # recognized role (no `--agent` flag, OR a present-but-unrecognized /
-        # typo'd agent_type) silently performs none of them. Surface that so a
-        # mis-launched orchestrator is observable. Conditional emission mirroring
-        # the 0b notice shape (NOT a new numbered init step — keeps clear of the
-        # module/main() docstring-parity convention). Launch events only
-        # (startup/resume): a mid-launch compact/clear context-reset must not
-        # re-fire it. The unknown-role decision (incl. the is_lead-first ordering,
-        # the live specialist-registry check against env plugin_root, and the
-        # PACT:-strip) lives in _should_warn_unknown_role — total (never raises),
-        # so no try/except is needed at the call site.
+        # 0c. Unrecognized-role startup warning. The project CLAUDE.md steps
+        # (3/3b, 4) and the Class-A writes (5a/5b/8) are gated on
+        # frame_is_lead, so a frame whose agent_type is present but
+        # unrecognized (a typo'd `--agent`) silently performs none of them.
+        # Surface that so a mis-launched orchestrator is observable.
+        # Conditional emission mirroring the 0b notice shape (NOT a new
+        # numbered init step — keeps clear of the module/main() docstring-parity
+        # convention). Launch events only (_LAUNCH_SOURCES): a mid-launch
+        # compact/clear context-reset must not re-fire it. The decision (incl.
+        # the is_lead-first ordering, the live specialist-registry check against
+        # env plugin_root, and the PACT:-strip) lives in _should_warn_unknown_role
+        # — total (never raises), so no try/except is needed at the call site.
         #
-        # This literal is emitted at TWO other sites: the unknown-role limb of
-        # the frame-role gate below, and _build_safety_net_context on the
-        # exception path. The gating decision of each site, and its cause, are
-        # recorded at that site.
-        if source in ("startup", "resume") and _should_warn_unknown_role(input_data):
+        # Only a teammate-classified frame is checked: an unknown frame returned
+        # above, a recovered lead is "lead", and a frame whose stdin did not
+        # parse is None. _UNKNOWN_FRAME_CONTEXT is the literal's other carrier.
+        if (
+            source in _LAUNCH_SOURCES
+            and frame_role == "teammate"
+            and _should_warn_unknown_role(input_data)
+        ):
             system_messages.append(_UNKNOWN_ROLE_NOTICE)
 
         # 1. Refresh the plugin symlinks (enables @~/.claude/protocols/pact-plugin/
@@ -1549,26 +1446,38 @@ def main():
             # A LINK MOVED. Report it on each source, with the caveat beside it.
             context_parts.append(f"{symlink_result}. {_SYMLINK_REPOINT_NOTICE}")
 
-        # 3. Ensure project has CLAUDE.md with memory sections
-        project_md_msg = ensure_project_memory_md()
-        if project_md_msg:
-            if "failed" in project_md_msg.lower() or "skipped" in project_md_msg.lower():
-                system_messages.append(project_md_msg)
-            else:
-                context_parts.append(project_md_msg)
+        # Lead-role gate (#877). Taken from frame_role, which is is_lead's
+        # verdict on agent_type plus the resumed-lead recovery above. Computed
+        # once and reused for steps 3/3b and the Class-A writes below, so they
+        # share one verdict.
+        frame_is_lead = frame_role == "lead"
 
-        # 3b. One-time migration: wrap existing project CLAUDE.md in
-        # PACT_MANAGED boundary and add PACT_MEMORY markers (#404).
-        # Runs after ensure_project_memory_md() so newly created files
-        # already have the new structure, and before staleness checks
-        # so the staleness parser sees the migrated layout.
-        # Idempotent no-op when PACT_MANAGED_START marker is already present.
-        migration_msg = migrate_to_managed_structure()
-        if migration_msg:
-            if "failed" in migration_msg.lower() or "skipped" in migration_msg.lower():
-                system_messages.append(migration_msg)
-            else:
-                context_parts.append(migration_msg)
+        # Steps 3/3b create and migrate the project CLAUDE.md, and only a lead
+        # does. A teammate whose project dir is a worktree would otherwise plant
+        # a template there that diverts every CLAUDE.md resolver away from the
+        # main repo's file, or rewrite a tracked CLAUDE.md in the worktree; in
+        # the lead's own dir the lead has already written it.
+        if frame_is_lead:
+            # 3. Ensure project has CLAUDE.md with memory sections
+            project_md_msg = ensure_project_memory_md()
+            if project_md_msg:
+                if "failed" in project_md_msg.lower() or "skipped" in project_md_msg.lower():
+                    system_messages.append(project_md_msg)
+                else:
+                    context_parts.append(project_md_msg)
+
+            # 3b. One-time migration: wrap existing project CLAUDE.md in
+            # PACT_MANAGED boundary and add PACT_MEMORY markers (#404).
+            # Runs after ensure_project_memory_md() so newly created files
+            # already have the new structure, and before staleness checks
+            # so the staleness parser sees the migrated layout.
+            # Idempotent no-op when PACT_MANAGED_START marker is already present.
+            migration_msg = migrate_to_managed_structure()
+            if migration_msg:
+                if "failed" in migration_msg.lower() or "skipped" in migration_msg.lower():
+                    system_messages.append(migration_msg)
+                else:
+                    context_parts.append(migration_msg)
 
         # Step 3c retired in v4.2.15 — orphan-stripper sunset; see git log for context.
 
@@ -1598,19 +1507,18 @@ def main():
         except Exception:
             pass  # Fail-open: never block session init for disk hygiene.
 
-        # 4. Check for stale pinned context. The informational surfacing is a
-        # lead-oriented pin advisory (m2): suppress it for a teammate frame
-        # (which has no pin-management authority — pins live in CLAUDE.md, a
-        # lead/orchestrator memory surface), but keep the failed/skipped
-        # DIAGNOSTICS on system_messages for every frame. The check CALL and its
-        # marker side-effect are unchanged — m2 gates advisory SURFACINGS, not
-        # writes (#877 owns write-gating).
-        staleness_msg = check_pinned_staleness()
-        if staleness_msg:
-            if "failed" in staleness_msg.lower() or "skipped" in staleness_msg.lower():
-                system_messages.append(staleness_msg)
-            elif frame_role != "teammate":
-                context_parts.append(staleness_msg)
+        # 4. Check for stale pinned context. The check rewrites the project
+        # CLAUDE.md (it inserts STALE markers), so like steps 3/3b only a lead
+        # runs it: a teammate in a worktree would otherwise mark a tracked
+        # CLAUDE.md. Failed/skipped diagnostics go to system_messages, the
+        # advisory to context.
+        if frame_is_lead:
+            staleness_msg = check_pinned_staleness()
+            if staleness_msg:
+                if "failed" in staleness_msg.lower() or "skipped" in staleness_msg.lower():
+                    system_messages.append(staleness_msg)
+                else:
+                    context_parts.append(staleness_msg)
 
         # 4a. Surface pin slot count (#492). Tier-0 additionalContext —
         # architecturally binding, survives compaction. Fail-open: None
@@ -1641,10 +1549,11 @@ def main():
         # resolved LLM-consumed options. Lead-only via the fail-safe
         # `frame_role != "teammate"` idiom (matching the 4a/4b advisory gates):
         # the consumers (peer-review, orchestrate/pact-scope-detection) are all
-        # lead/orchestrator flows; an unknown/solo frame still receives it
-        # (harmless if unconsumed). Not enumerated as a numbered step in the
-        # docstring — like 4a/4b/4c, it is a context surfacing within the pin/
-        # config region, so the module<->main() docstring parity is untouched.
+        # lead/orchestrator flows. An unknown frame returned earlier, so on
+        # this path the idiom admits a lead and a frame whose stdin did not
+        # parse (None). Not enumerated as a numbered step in the docstring —
+        # like 4a/4b/4c, it is a context surfacing within the pin/config
+        # region, so the module<->main() docstring parity is untouched.
         if frame_role != "teammate":
             # 4d. Warn if settings.json is malformed — Claude Code drops it
             # WHOLESALE in headless mode, silently taking the `env` block (and
@@ -1669,8 +1578,9 @@ def main():
 
         # 5a. Build the session context FIRST so get_session_dir() works for
         # subsequent journal writes. build_context_cache() populates the _cache
-        # immediately (for every frame), enabling append_event() to derive the
-        # journal path; persist_context() then writes the file (lead frames only).
+        # immediately (for every frame that reaches it with a usable session
+        # id), enabling append_event() to derive the journal path;
+        # persist_context() then writes the file (frame_is_lead only).
         # Defensive substitution: the RA1+RG2 schema validator (commit 2d6448c)
         # rejects empty strings for str-typed required fields, so an empty
         # session_id would cause append_event() to silently drop the
@@ -1813,21 +1723,17 @@ def main():
         if not session_id_was_missing:
             _record_worktree_identity(session_id, project_dir)
 
-        # Lead-role gate (#877). is_lead is total (never raises) and reads only
-        # the harness-set agent_type. Computed once and reused for both Class-A
-        # writes below so the disk-write split and the journal-anchor gate share
-        # one verdict.
-        frame_is_lead = is_lead(input_data)
         if not session_id_was_missing:
             try:
                 # SEAM (#877): compose the two halves directly. ALWAYS build +
-                # cache (every frame gets the in-process context so
-                # get_session_dir() and append_event's path-resolution behave
-                # identically), then persist to disk ONLY for a lead frame so a
-                # teammate/plain frame never clobbers the lead's on-disk
-                # session-context file (or creates a phantom session dir).
+                # cache (every frame that reaches this point gets the
+                # in-process context so get_session_dir() and append_event's
+                # path-resolution behave identically), then persist to disk
+                # ONLY for a lead frame so a teammate frame never clobbers the
+                # lead's on-disk session-context file (or creates a phantom
+                # session dir).
                 # build_context_cache is the sole owner of _cache; persist_context
-                # is the is_lead-gated best-effort disk side-effect. See the
+                # is the frame_is_lead-gated best-effort disk side-effect. See the
                 # build_context_cache / persist_context docstrings.
                 # A compaction is not a session start, so it keeps the recorded
                 # start. That also leaves the file byte-identical when an
@@ -1879,7 +1785,7 @@ def main():
             # lead-only write — a teammate/plain frame would append a phantom
             # anchor to (or create) a session journal it does not own.
             # `source` is the already-normalized value from the `_VALID_SOURCES`
-            # check above — one of {startup, resume, compact, clear, unknown}.
+            # check above — one of {startup, resume, compact, clear, fork, unknown}.
             # Persisting it here gives downstream triage direct attribution for
             # marker-wipe and other source-conditioned behavior, instead of
             # forcing triangulation from timing clusters (#414 R2).
@@ -1899,21 +1805,9 @@ def main():
         # exists — the platform pre-creates exactly one team per session).
         # Session placeholder variable substitution instructions tell the orchestrator how to
         # replace {team_name}, {session_dir}, and {plugin_root} in command snippets.
-        if session_dir:
-            _substitutions = (
-                f'Session placeholder variables (substitute before running commands): '
-                f'Use the name `{team_name}` wherever {{team_name}} appears in commands. '
-                f'Use `{session_dir}` wherever {{session_dir}} appears in commands. '
-                f'Use `{plugin_root}` wherever {{plugin_root}} appears in commands.'
-            )
-        else:
-            _substitutions = (
-                f'Session placeholder variables (substitute before running commands): '
-                f'Use the name `{team_name}` wherever {{team_name}} appears in commands. '
-                f'Session dir unavailable (session_id missing from stdin) — '
-                f'do not run commands that depend on {{session_dir}} until next clean start. '
-                f'Use `{plugin_root}` wherever {{plugin_root}} appears in commands.'
-            )
+        _substitutions = format_session_substitutions(
+            team_name, session_dir, plugin_root
+        )
         # Single platform-managed directive for every session source. The
         # platform pre-creates exactly one team per session (Claude Code
         # v2.1.178+), so the team always exists by the time the orchestrator
@@ -1983,9 +1877,10 @@ def main():
         # are mode-exclusive (one teammate fires exactly one), so injecting the
         # peer-context body here causes no double-injection. classify_session_role
         # is the fail-safe gate: only a genuine "teammate" frame takes this branch;
-        # "lead" AND "unknown"/empty agent_type both fall to the else-branch, which
-        # keeps the existing orchestrator-directive ladder UNCHANGED. Emitting the
-        # marker-free body (include_role_marker=False) ALSO suppresses the
+        # a lead (including a recovered resumed lead) or a frame whose stdin
+        # did not parse (None) reaches the else-branch: an unknown frame
+        # returned after the old-slug adoption. Emitting the marker-free body
+        # (include_role_marker=False) ALSO suppresses the
         # "YOUR PACT ROLE: orchestrator" block for teammate frames — that
         # unconditional orchestrator block was the mis-roling bug (a teammate
         # self-identifying as orchestrator); the role marker is omitted because
@@ -2028,41 +1923,8 @@ def main():
             except Exception:
                 pass  # fail-open: no injection; never the orchestrator safety-net
         else:
-            # "lead" AND "unknown" BOTH take this branch, and the "unknown"
-            # half is the load-bearing part. DO NOT SPLIT IT OUT AGAIN WITHOUT
-            # READING THIS. "unknown" means agent_type was ABSENT, which is a
-            # non-PACT / no-`--agent` PRIMARY frame: an ordinary user who typed
-            # plain `claude`. Withholding the ladder from that frame withholds
-            # the bootstrap directive, so the bootstrap marker is never
-            # stamped, so bootstrap_gate (PreToolUse, no matcher key, every
-            # tool call) denies Edit, Write and Agent. THE USER READS THAT AS A
-            # TOTAL TOOL-LOAD FAILURE, AND IT WAS REPORTED FROM THE FIELD. The
-            # `clear` source is the worst cell: `is_marker_reset` above ERASES
-            # the marker on that path, so a `clear` frame with no ladder loses
-            # the marker AND the instruction that would rebuild it.
-            #
-            # A PRIOR SUPPRESSION HERE CITED A CENSUS THAT DID NOT MEASURE
-            # THIS POPULATION. Re-measured: of 166 files matching
-            # subagents/*.jsonl for one team session, 13 carry a SessionStart
-            # record, holding 70 records between them. All 70 have
-            # type == "attachment" and carry the LEAD session id, and the set
-            # of distinct session ids across the 70 has exactly ONE member.
-            # They are the LEAD's own hook output, attached by the platform
-            # into the transcripts of the live sidechains. Those frames
-            # classify "lead", so a gate keyed on "unknown" cannot change one
-            # byte of them, and 150 of the 166 files carry no SessionStart
-            # record at all. NO SUBAGENT FRAME REACHES THIS HOOK.
-            #
-            # AND THE ERROR THAT LET IT SHIP WAS A MODEL, NOT A MISSING CHECK,
-            # WHICH IS WHY REVIEW DID NOT CATCH IT. The comment above this
-            # module's _UNKNOWN_ROLE_NOTICE describes the no-`--agent` frame as
-            # an operator "who MEANT to launch the orchestrator and forgot the
-            # flag", and the emitted notice says the same. THAT NAMES THE FRAME
-            # AFTER A MISTAKE. Nobody wrote down that it is also the ORDINARY
-            # way a user starts Claude Code, so a branch that withheld the
-            # ladder from it read as harmless to each reviewer, because each
-            # reviewer held the same model. A missing check is caught by
-            # reading the branch. A wrong model is not.
+            # Only a lead, or a frame whose role was never resolved (stdin that
+            # did not parse), reaches this branch.
             #
             # The team always exists (the platform pre-creates it), so the
             # directive is source-agnostic; the per-source branches differ only
@@ -2211,7 +2073,17 @@ def main():
                     f"Re-engage secretary: SendMessage(to='secretary', "
                     f"message='Context cleared: deliver fresh briefing with current project state.')."
                 ))
-            elif source == "resume":
+            elif source in ("resume", "fork"):
+                # A fork continues its parent's conversation under a NEW session
+                # id, so it takes this limb: the bootstrap directive is above,
+                # and resume_summary_clause is "" because that probe runs for
+                # source == "resume" only (a fork's own dir is new). Step 5a
+                # reads the project CLAUDE.md block, which names the last lead
+                # recorded in this project (the parent, unless another lead
+                # started here since), so prev_session_dir and the resume and
+                # paused-state surfacing point at that session. That is right
+                # for a continuation; do not "fix" it to the fork's own id.
+                #
                 # Normal resume: model retains context, team exists. A compact
                 # summary from an earlier compaction of this session may sit
                 # in the session's own dir — usually archived-in-place, since
@@ -2244,24 +2116,8 @@ def main():
                     f'Note: unrecognized session source "{source}". '
                     f'Run TaskList to check current state.'
                 ))
-
-            # THE OPERATOR CUE, AND IT IS ADDITIVE. A frame with no agent_type
-            # keeps the whole ladder above and ALSO gets told that no role was
-            # recognized, so an operator who MEANT to launch the orchestrator
-            # and forgot the flag still sees it. INDEX 1, immediately after the
-            # ladder each source limb just wrote at index 0: the role message
-            # must stay first, because this gate runs LATE and the banner and
-            # the pin surfacings are already in context_parts. An append would
-            # leave the cue below diagnostics a reader meets first, and an
-            # insert at 0 would displace the marker the line-anchored readers
-            # key on. NO SOURCE GATE: this limb writes to context_parts, which
-            # a frame after a compact does not carry over from before, so a
-            # source gate would remove the only copy that reader gets. The
-            # sibling emission into system_messages does gate on source,
-            # because that one answers a REPETITION question about a reader
-            # that remembers.
-            if frame_role == "unknown":
-                context_parts.insert(1, _UNKNOWN_ROLE_NOTICE)
+            if frame_role is None:
+                context_parts.insert(1, _UNRESOLVED_ROLE_CUE)
 
         # 5a. Capture the PREVIOUS session's dir from project CLAUDE.md
         # before step 5b overwrites the Current Session block with THIS
@@ -2285,8 +2141,8 @@ def main():
         # directory would accumulate indefinitely.
         # Lead-only (#877): the CLAUDE.md "## Current Session" block is the true
         # CROSS-PROCESS CLOBBER — a teammate/plain frame writing it overwrites
-        # the lead's session block in the shared project file. Gate on is_lead
-        # in addition to the existing sentinel guard.
+        # the lead's session block in the shared project file. Gate on
+        # frame_is_lead in addition to the existing sentinel guard.
         if frame_is_lead and not _is_unknown_or_missing_session(session_id):
             session_msg = update_session_info(
                 session_id, team_name, session_dir, plugin_root,
@@ -2444,21 +2300,15 @@ def main():
                         "read conclusions reached during the arc they are "
                         "resuming."
                     )
-                    context_parts.append(
-                        "RESUMPTION MARKER MISSING: this session resumes an "
-                        "interrupted workstream, but the marker the secretary "
-                        "reads at spawn was not recorded. Tell the secretary "
-                        "NOT to rebuild the Working Memory block, in its spawn "
-                        "dispatch. Without that the block is rebuilt from the "
-                        "store, and agents spawned to judge this arc read the "
-                        "arc's own conclusions."
-                    )
+                    context_parts.append(RESUMPTION_MARKER_MISSING_DIRECTIVE)
 
         # Cross-session backlog. Deliberately OUTSIDE the frame_is_lead block:
-        # every frame gets the block, and the INDENTATION IS THE WHOLE GATE —
-        # one level in would scope it to lead frames that also carry a resume
-        # prompt, which reads as correct at the call site and silently emits
-        # nothing for everyone else. Column 8, level with `# Build output`.
+        # every frame that reaches this point (lead, teammate, and a frame whose
+        # stdin did not parse) gets the block; an unknown frame returned
+        # earlier. The INDENTATION IS THE WHOLE GATE — one level in would
+        # scope it to lead frames that also carry a resume prompt, which reads
+        # as correct at the call site and silently emits nothing for everyone
+        # else. Column 8, level with `# Build output`.
         #
         # session_block is TOTAL and is the outermost call: it converts every
         # failure into a return value, so nothing here can raise. That is
@@ -2491,7 +2341,8 @@ def main():
         # the line where there has been no re-injection at all.
         # A compact-only journal therefore stays silent. That is the narrow
         # accepted case, NOT a defect: _age_line refuses to fabricate a
-        # left-hand side, and it self-heals at the next startup/resume/clear.
+        # left-hand side, and it self-heals at the next startup, resume, clear
+        # or fork.
         notice = backlog_store.session_block(
             project_dir,
             context_anchor=(
@@ -2500,7 +2351,7 @@ def main():
         )
         if notice.context:
             context_parts.append(notice.context)
-        if notice.alert and source in ("startup", "resume"):
+        if notice.alert and source in _LAUNCH_SOURCES:
             system_messages.append(notice.alert)
 
         # Build output
@@ -2533,13 +2384,19 @@ def main():
         # Code's hook-output schema supports both fields in the same JSON.
         print(f"Hook warning (session_init): {str(e)[:200]}", file=sys.stderr)
         safety_net_context = _build_safety_net_context(team_name, frame_role, source)
+        warning = f"PACT hook warning (session_init): {str(e)[:100]}"
+        # A frame with no PACT role still gets its launch notice, so the user
+        # keeps the relaunch hint the normal unknown-frame output carries.
+        notice = (
+            _unknown_role_launch_notice(source) if frame_role == "unknown" else None
+        )
         # hookEventName is required by the harness; missing it silently fails open
         output = {
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
                 "additionalContext": safety_net_context,
             },
-            "systemMessage": f"PACT hook warning (session_init): {str(e)[:100]}",
+            "systemMessage": f"{notice} | {warning}" if notice else warning,
         }
         print(json.dumps(output))
         sys.exit(0)

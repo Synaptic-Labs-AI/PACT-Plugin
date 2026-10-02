@@ -133,7 +133,8 @@ _STALE_PIN_DOC = (
 )
 
 
-def _route(tmp_home, project_dir, live, *, agent_type=None, env=None, tasks=None):
+def _route(tmp_home, project_dir, live, *, agent_type="PACT:pact-orchestrator",
+           env=None, tasks=None):
     """Drive the live ``session_init.main()`` and return the two channels.
 
     ``live`` names the ONE status source left unpatched. ``env`` carries any extra
@@ -143,6 +144,9 @@ def _route(tmp_home, project_dir, live, *, agent_type=None, env=None, tasks=None
     ``check_resumption_context``, NOT THAT STATUS SOURCE. The status source
     stays unpatched and builds its own message from these tasks, so a reword of
     that message is visible to the arm.
+    ``agent_type`` defaults to a lead spelling: every status source routed here
+    runs on the lead path, and a frame with no agent_type returns before most
+    of them.
     Returns the pair ``(system_message, additional_context)``, with an absent
     channel reported as the empty string, because ``main()`` omits a channel it
     has nothing for.

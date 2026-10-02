@@ -3,7 +3,7 @@ Tests for bootstrap_prompt_gate.py — UserPromptSubmit hook that injects
 bootstrap-first instructions until bootstrap-complete marker exists.
 
 Tests cover:
-1. Marker exists → suppressOutput (fast path, zero tokens)
+1. Marker set + session_start recorded → suppressOutput (fast path, zero tokens)
 2. No marker + PACT team-lead session → inject additionalContext with bootstrap instruction
 3. Non-PACT session (no session dir) → suppressOutput (no-op passthrough)
 4. Teammate / non-lead frame (non-lead agent_type) → suppressOutput (no-op passthrough)
@@ -20,6 +20,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 from unittest.mock import patch
 
 import pytest
@@ -43,7 +44,7 @@ _SLUG = "project"
 
 
 def _make_input(session_id=_SESSION_ID, source="startup",
-                agent_type="pact-orchestrator"):
+                agent_type: Optional[str] = "pact-orchestrator"):
     """Build a minimal UserPromptSubmit hook input dict.
 
     #878: the gate now keys lead-detection on the harness-set agent_type via
@@ -81,8 +82,8 @@ def _setup_pact_session(monkeypatch, tmp_path, with_marker=False,
     Monkeypatches Path.home to tmp_path so get_session_dir() returns a
     path under tmp_path. Writes a context file and patches pact_context
     module state. When ``with_marker=True``, writes a properly-stamped
-    properly-stamped marker (post-#662); empty `touch` markers no longer satisfy the
-    gate.
+    marker (post-#662); empty `touch` markers no longer satisfy the
+    gate. It also records session_start, as session_init does for a lead.
 
     Returns the session_dir path.
     """
@@ -121,8 +122,23 @@ def _setup_pact_session(monkeypatch, tmp_path, with_marker=False,
             json.dumps({"v": 1, "sid": sid, "sig": sig}),
             encoding="utf-8",
         )
+        # A bootstrapped session is a recorded one: the gate suppresses only
+        # when the journal also holds session_start.
+        _seed_session_start(session_dir)
 
     return session_dir
+
+
+def _seed_session_start(session_dir):
+    """Record session_start in ``session_dir``'s journal, as session_init does
+    for a lead it recognised, so the gate takes its recorded-lead branch."""
+    from shared.session_journal import append_event, make_event
+
+    assert append_event(
+        make_event("session_start", session_id=Path(session_dir).name,
+                   project_dir=_PROJECT_DIR, source="startup"),
+        session_dir=str(session_dir),
+    )
 
 
 # =============================================================================
@@ -134,7 +150,7 @@ class TestCheckBootstrapNeeded:
     """Tests for _check_bootstrap_needed() decision logic."""
 
     def test_returns_none_when_marker_exists(self, monkeypatch, tmp_path):
-        """Marker exists → None (suppress path)."""
+        """Marker set and session_start recorded → None (suppress path)."""
         from bootstrap_prompt_gate import _check_bootstrap_needed
 
         _setup_pact_session(monkeypatch, tmp_path, with_marker=True)
@@ -245,7 +261,7 @@ class TestMainEntryPoint:
         assert 'Skill("PACT:bootstrap")' in hso["additionalContext"]
 
     def test_suppress_when_marker_exists(self, monkeypatch, tmp_path, capsys):
-        """Marker exists → suppressOutput."""
+        """Marker set and session_start recorded → suppressOutput."""
         _setup_pact_session(monkeypatch, tmp_path, with_marker=True)
 
         _, output = _run_main(_make_input(), capsys)
@@ -408,7 +424,8 @@ class TestMarkerLifecycle:
     """P3: Marker creation → gate self-disable → idempotent suppress."""
 
     def test_gate_transitions_on_marker_creation(self, monkeypatch, tmp_path, capsys):
-        """Before marker: inject. After marker stamp: suppress."""
+        """Before marker: inject, and the first prompt records session_start.
+        After marker stamp: suppress."""
         import hashlib
         import shared.pact_context as ctx_module
 
@@ -437,7 +454,8 @@ class TestMarkerLifecycle:
         assert output_after == _SUPPRESS_EXPECTED
 
     def test_repeated_calls_with_marker_are_idempotent(self, monkeypatch, tmp_path, capsys):
-        """Multiple calls with marker present all produce suppressOutput."""
+        """Multiple calls with the marker set and session_start recorded all
+        produce suppressOutput."""
         import shared.pact_context as ctx_module
 
         _setup_pact_session(monkeypatch, tmp_path, with_marker=True)
@@ -647,13 +665,12 @@ class TestStalenessDetection:
         assert _detect_stale_session_block(
             {"session_id": self._ACTUAL}) is None
 
-    def test_non_utf8_claude_md_returns_none(self, monkeypatch, tmp_path):
+    def test_non_utf8_byte_elsewhere_still_warns(self, monkeypatch, tmp_path):
         """Non-UTF-8 CLAUDE.md (e.g. a latin-1 byte from a wrong-editor
-        save, or a partial/corrupted session_init write — the very failure
-        neighborhood this detector exists to flag) → silent skip, NOT a
-        raise. UnicodeDecodeError is a ValueError, not an OSError; an
-        OSError-only catch lets it escape (RED on reverting the widened
-        catch tuple)."""
+        save) → no raise, and the stale Resume line is still read: the
+        detector only reads, so it decodes with replacement. A strict read
+        raised UnicodeDecodeError (a ValueError, not an OSError), and an
+        escape would have suppressed the consumer's whole injection."""
         from bootstrap_prompt_gate import _detect_stale_session_block
 
         project = tmp_path / "proj"
@@ -667,8 +684,8 @@ class TestStalenessDetection:
         )
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
 
-        assert _detect_stale_session_block(
-            {"session_id": self._ACTUAL}) is None
+        warning = _detect_stale_session_block({"session_id": self._ACTUAL})
+        assert warning is not None and self._STALE in warning
 
     @pytest.mark.parametrize("layout", ["both", "preferred_only",
                                         "legacy_only", "neither"])
@@ -703,9 +720,11 @@ class TestStalenessDetection:
         if source == "new_default":
             assert result is None, "neither file exists → silent skip"
         else:
-            resolver_recorded = _RE_RESUME_TEST.search(
+            resume_line = _RE_RESUME_TEST.search(
                 resolved_path.read_text(encoding="utf-8")
-            ).group(1)
+            )
+            assert resume_line is not None
+            resolver_recorded = resume_line.group(1)
             assert result is not None
             assert resolver_recorded in result, (
                 f"staleness reader and resolver disagree on which CLAUDE.md "
@@ -713,18 +732,16 @@ class TestStalenessDetection:
             )
 
 
-# Test-local mirror of the production regex, used ONLY to extract the
-# resolver-chosen file's recorded id in the parity test above.
-import re as _re_for_parity  # noqa: E402
-_RE_RESUME_TEST = _re_for_parity.compile(
-    r"- Resume:\s*`claude --resume\s+([0-9a-f-]+)`"
-)
+# The production Resume-line regex, used ONLY to extract the resolver-chosen
+# file's recorded id in the parity test above. Imported rather than mirrored,
+# so it reads both Resume-line forms the production parser reads.
+from shared.stale_session import _RESUME_LINE_RE as _RE_RESUME_TEST  # noqa: E402
 
 
 class TestStalenessComposition:
     """Placement tests: staleness composes onto the bootstrap instruction
-    ONLY on the lead+no-marker inject branch; the marker-set fast path
-    never reads CLAUDE.md (perf contract pin)."""
+    ONLY on the lead+no-marker inject branch; the fast path (marker set and
+    session_start recorded) never reads CLAUDE.md (perf contract pin)."""
 
     _ACTUAL_HEX = "deadbeef-0000-1111-2222-333344445555"
     _STALE = "01dcafe0-9999-8888-7777-666655554444"
@@ -745,8 +762,9 @@ class TestStalenessComposition:
         AND the staleness warning in one additionalContext string."""
         from bootstrap_prompt_gate import _check_bootstrap_needed
 
-        _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+        session_dir = _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
         self._stale_project(monkeypatch, tmp_path)
+        _seed_session_start(session_dir)
 
         result = _check_bootstrap_needed(_make_input(
             session_id=self._ACTUAL_HEX))
@@ -758,6 +776,34 @@ class TestStalenessComposition:
         assert "stale session block" in result       # warning appended
         assert result.index("PACT:bootstrap") < result.index(
             "stale session block"), "warning is APPENDED, not prepended"
+
+    def test_unrecorded_lead_replaces_a_foreign_block_instead_of_warning(
+            self, monkeypatch, tmp_path):
+        """The same mismatch with no session_start in the journal: the lead
+        was not recorded at SessionStart, so the gate replaces the block with
+        this session's values and gives no warning."""
+        from bootstrap_prompt_gate import _check_bootstrap_needed
+
+        _setup_pact_session(monkeypatch, tmp_path, with_marker=False)
+        project = tmp_path / "proj"
+        target = project / ".claude" / "CLAUDE.md"
+        target.parent.mkdir(parents=True)
+        target.write_text(
+            "<!-- SESSION_START -->\n## Current Session\n"
+            f"- Resume: `claude --resume {self._STALE}`\n"
+            "<!-- SESSION_END -->\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+
+        result = _check_bootstrap_needed(_make_input(
+            session_id=self._ACTUAL_HEX))
+
+        assert result is not None
+        assert "PACT:bootstrap" in result
+        assert "stale session block" not in result
+        assert self._ACTUAL_HEX in target.read_text(encoding="utf-8")
+        assert self._STALE not in target.read_text(encoding="utf-8")
 
     def test_match_returns_instruction_only(self, monkeypatch, tmp_path):
         from bootstrap_prompt_gate import _check_bootstrap_needed
@@ -861,9 +907,9 @@ class TestStalenessComposition:
 
     def test_marker_set_fast_path_never_runs_staleness(
             self, monkeypatch, tmp_path):
-        """Perf contract pin: the marker-set fast path suppresses WITHOUT
-        any CLAUDE.md read — _detect_stale_session_block must not be
-        called at all."""
+        """Perf contract pin: the fast path (marker set and session_start
+        recorded) suppresses WITHOUT any CLAUDE.md read —
+        _detect_stale_session_block must not be called at all."""
         import bootstrap_prompt_gate as gate_module
 
         _setup_pact_session(monkeypatch, tmp_path, with_marker=True)
@@ -878,10 +924,10 @@ class TestStalenessComposition:
         result = gate_module._check_bootstrap_needed(_make_input(
             session_id=self._ACTUAL_HEX))
 
-        assert result is None, "marker set → suppress"
+        assert result is None, "marker set and session_start recorded → suppress"
         assert calls == [], (
-            "fast path must not invoke the staleness check (zero-read "
-            "perf contract)"
+            "the fast path (marker set and session_start recorded) must not "
+            "invoke the staleness check (zero-read perf contract)"
         )
 
     def test_non_lead_path_never_runs_staleness(self, monkeypatch, tmp_path):
@@ -962,10 +1008,13 @@ class TestSubprocessStalenessE2E:
     _SID = "deadbeef-4242-4242-4242-deadbeef4242"
     _STALE_SID = "0badcafe-9999-8888-7777-666655554444"
 
-    def _run_gate_subprocess(self, tmp_path, recorded_sid):
+    def _run_gate_subprocess(self, tmp_path, recorded_sid, recorded=True):
         """Scaffold: HOME under tmp_path, real project dir whose
-        .claude/CLAUDE.md records ``recorded_sid``, context file ABSENT,
-        lead UserPromptSubmit frame for ``_SID``. Returns
+        .claude/CLAUDE.md records ``recorded_sid`` in a Current Session block,
+        context file ABSENT, lead UserPromptSubmit frame for ``_SID``. With
+        ``recorded`` the journal already holds session_init's session_start
+        (session_init recorded the lead, then the context file was lost);
+        without it the journal is absent too. Returns
         (CompletedProcess, healed_context_path)."""
         import subprocess
 
@@ -974,18 +1023,27 @@ class TestSubprocessStalenessE2E:
         claude_md = project / ".claude" / "CLAUDE.md"
         claude_md.parent.mkdir(parents=True)
         claude_md.write_text(
-            "# Project\n\n## Current Session\n"
+            "# Project\n\n<!-- SESSION_START -->\n## Current Session\n"
             f"- Resume: `claude --resume {recorded_sid}`\n"
-            "- Team: `pact-old`\n",
+            "- Team: `pact-old`\n<!-- SESSION_END -->\n",
             encoding="utf-8",
         )
 
         plugin_root = home / "plugin"
         plugin_root.mkdir(parents=True)
 
-        # Session dir intentionally NOT created; context file ABSENT.
-        ctx = (home / ".claude" / "pact-sessions" / "staleproj" /
-               self._SID / "pact-session-context.json")
+        # Context file ABSENT.
+        session_dir = home / ".claude" / "pact-sessions" / "staleproj" / self._SID
+        ctx = session_dir / "pact-session-context.json"
+        if recorded:
+            session_dir.mkdir(parents=True)
+            (session_dir / "session-journal.jsonl").write_text(
+                json.dumps({"v": 1, "type": "session_start",
+                            "ts": "2026-01-01T00:00:00Z", "session_id": self._SID,
+                            "project_dir": str(project), "source": "startup"})
+                + "\n",
+                encoding="utf-8",
+            )
 
         hook_path = (
             Path(__file__).parent.parent / "hooks" /
@@ -1050,6 +1108,27 @@ class TestSubprocessStalenessE2E:
         assert content["team_name"] == "session-deadbeef"
         assert content["session_id"] == self._SID
 
+    def test_unrecorded_heal_chain_replaces_the_block_without_a_warning(
+            self, tmp_path):
+        """The same chain with no session_start (session_init crashed before
+        recording the lead): the gate records the lead itself, so the block
+        names this session and no warning is given."""
+        result, ctx = self._run_gate_subprocess(
+            tmp_path, recorded_sid=self._STALE_SID, recorded=False
+        )
+
+        context = json.loads(result.stdout.strip())["hookSpecificOutput"][
+            "additionalContext"]
+        assert "PACT:bootstrap" in context
+        assert "stale session block" not in context
+        assert result.returncode == 0, (
+            f"stderr={result.stderr!r} stdout={result.stdout!r}"
+        )
+        block = (tmp_path / "staleproj" / ".claude" / "CLAUDE.md").read_text(
+            encoding="utf-8")
+        assert self._SID in block and self._STALE_SID not in block
+        assert ctx.exists()
+
     def test_heal_chain_with_matching_block_injects_instruction_only(
             self, tmp_path):
         """Match (healthy resume shape) → instruction WITHOUT the warning;
@@ -1066,3 +1145,26 @@ class TestSubprocessStalenessE2E:
             f"stderr={result.stderr!r} stdout={result.stdout!r}"
         )
         assert ctx.exists()
+
+
+class TestJournalScanSurvivesAnUnparseableLine:
+    """_journal_has_session_start counts a line json.loads cannot parse as not
+    a session_start. Nesting this deep raises RecursionError on every supported
+    interpreter (3.9 from depth 1000, 3.14 from about 1,000,000), and an escape
+    would reach main's catch-all and silence the gate for the prompt."""
+
+    _DEEP = ('{"type": "x", "note": "session_start", "a": '
+             + "[" * 1_000_000 + "]" * 1_000_000 + "}\n")
+
+    def _scan(self, tmp_path, *lines):
+        from bootstrap_prompt_gate import _journal_has_session_start
+
+        (tmp_path / "session-journal.jsonl").write_text("".join(lines))
+        return _journal_has_session_start(str(tmp_path))
+
+    def test_a_deep_line_before_a_session_start_is_skipped(self, tmp_path):
+        start = json.dumps({"v": 1, "type": "session_start", "ts": "x"}) + "\n"
+        assert self._scan(tmp_path, self._DEEP, start) is True
+
+    def test_a_deep_line_alone_reads_as_no_session_start(self, tmp_path):
+        assert self._scan(tmp_path, self._DEEP) is False

@@ -52,6 +52,7 @@ from test_dispatch_gate import (  # noqa: E402 — sibling harness reuse
     _run_main,
     _full_setup,
     _seed_team,
+    _LEAD_AGENT_TYPE,
     _TEAM,
 )
 
@@ -183,14 +184,12 @@ def test_hint_names_the_measured_manual_repoint_not_a_bootstrap_pointer(
         assert marker in reason, (
             f"measured-recovery element missing from the hint: {marker!r}"
         )
-    # Scoped to the HINT constant, not the emitted reason: the shared
-    # detector's stale-block — legitimately prepended on this leg — carries
-    # its own "completing bootstrap will rewrite the CLAUDE.md session
-    # records" claim, which is a different sentence from a different
-    # module and not this tripwire's subject.
+    # Checked against the whole emitted reason: the shared detector's
+    # stale-block, prepended on this leg, must not promise a bootstrap
+    # rewrite either.
     for phrase in _FORBIDDEN_INERT_REMEDIES:
-        assert phrase not in _STALE_REALIGN_HINT, (
-            f"inert bootstrap-pointer remedy reintroduced into the hint: "
+        assert phrase not in reason, (
+            f"inert bootstrap-pointer remedy in the deny: "
             f"{phrase!r}. Completing bootstrap does not rewrite these "
             "records."
         )
@@ -335,7 +334,7 @@ def test_team_name_unavailable_deny_augmented_on_stale_mismatch(
     _seed_team_with_lead(tmp_path, _TEAM, lead_id)
     _write_project_claude_md(monkeypatch, tmp_path, _RECORDED_STALE_ID)
 
-    code, out = _run_main(_make_input(), capsys)
+    code, out = _run_main(_make_input(agent_type=_LEAD_AGENT_TYPE), capsys)
 
     assert code == 2, f"[{mode_label}] DENY"
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
@@ -352,11 +351,29 @@ def test_team_name_unavailable_deny_unaugmented_when_no_mismatch(
     _seed_team_with_lead(tmp_path, _TEAM, lead_id)
     _write_project_claude_md(monkeypatch, tmp_path, _RECORDED_HEALTHY_ID)
 
-    code, out = _run_main(_make_input(), capsys)
+    code, out = _run_main(_make_input(agent_type=_LEAD_AGENT_TYPE), capsys)
 
     assert code == 2
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
     assert _AUGMENT_MARKER not in reason, f"[{mode_label}] NOT augmented (healthy)"
+
+
+def test_team_name_unavailable_non_lead_deny_carries_no_stale_hint(
+    tmp_path, monkeypatch, capsys
+):
+    """The ENABLE leg's stale input from a frame with no role. The recorded
+    session is the lead's, so the hint would tell a plain session to repair the
+    lead's context file; the refusal is returned verbatim instead."""
+    from dispatch_gate import _NON_LEAD_SPAWN_REFUSAL
+
+    _setup_empty_team_name(monkeypatch, tmp_path)
+    _seed_team_with_lead(tmp_path, _TEAM, _MODES[0][1])
+    _write_project_claude_md(monkeypatch, tmp_path, _RECORDED_STALE_ID)
+
+    code, out = _run_main(_make_input(), capsys)
+
+    assert code == 2
+    assert out["hookSpecificOutput"]["permissionDecisionReason"] == _NON_LEAD_SPAWN_REFUSAL
 
 
 def test_team_name_unavailable_teammate_deny_carries_no_stale_hint(
@@ -491,6 +508,27 @@ def test_augment_helper_appends_on_detected_mismatch(monkeypatch):
     assert out.startswith("ORIGINAL")
     assert _AUGMENT_MARKER in out
     assert _REALIGN_MARKER in out
+
+
+def test_composer_returns_both_rule_six_refusals_verbatim_on_detected_mismatch(
+    monkeypatch,
+):
+    """With the detector firing, the lead's text is augmented and neither
+    non-lead refusal is."""
+    import dispatch_gate
+    monkeypatch.setattr(
+        dispatch_gate,
+        "detect_stale_session_block",
+        lambda _d: "\n\nWARNING — stale session block: ...",
+    )
+    compose = dispatch_gate._compose_deny_diagnosis
+    frame = {"session_id": "x"}
+    assert _AUGMENT_MARKER in compose("team_name_unavailable", "ORIGINAL", frame)
+    for refusal in (
+        dispatch_gate._TEAMMATE_SPAWN_REFUSAL,
+        dispatch_gate._NON_LEAD_SPAWN_REFUSAL,
+    ):
+        assert compose("team_name_unavailable", refusal, frame) == refusal
 
 
 # =============================================================================

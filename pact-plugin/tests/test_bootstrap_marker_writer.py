@@ -1700,9 +1700,12 @@ class TestConcurrentTwoHealerRace:
         assert content["plugin_root"] == str(plugin_root)
         assert content["started_at"]
 
-        # No leftover mkstemp temp files (atomic-rename hygiene).
+        # No leftover mkstemp temp files (atomic-rename hygiene). The journal
+        # holds the session_start the gate writes for a lead session_init did
+        # not record.
         stray = [p for p in session_dir.iterdir()
-                 if p.name != "pact-session-context.json"]
+                 if p.name not in ("pact-session-context.json",
+                                   "session-journal.jsonl")]
         assert stray == [], f"unexpected files after race: {stray}"
 
         # Heal != forged bootstrap on EVERY schedule: marker pre-conditions

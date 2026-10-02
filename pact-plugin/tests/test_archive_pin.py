@@ -275,6 +275,7 @@ class TestExtractPinBlock_Verbatim:
         block = archive_pin.extract_pin_block(pinned, 0, pins)
 
         assert "First Pin" in block
+        assert pins[1].date_comment is not None
         assert pins[1].date_comment not in block, (
             f"pin 0's block swallowed pin 1's date comment "
             f"({pins[1].date_comment!r}) — the archived record would carry "

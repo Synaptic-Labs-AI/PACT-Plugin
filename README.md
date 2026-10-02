@@ -332,7 +332,7 @@ PACT maintains a per-session append-only JSONL journal at `~/.claude/pact-sessio
 - **Best-effort durability** — no `fsync` per write (hot path), but cross-process visibility is immediate after lock release
 - **Single-host scope** — advisory locks don't cross machines, which is fine because `pact-sessions` is per-host already
 
-The journal is the durable backbone of workflow state. It survives context compaction, Claude Code task garbage collection, `TeamDelete`, and crashes. The wrap-up command harvests journal events to pact-memory before session close; the journal persists for 30 days afterward as a recovery window. Paused sessions are exempt from TTL cleanup.
+The journal is the durable backbone of workflow state. It survives context compaction, Claude Code task garbage collection, `TeamDelete`, and crashes. The wrap-up command harvests journal events to pact-memory before session close; the session directory, journal included, is removed 30 days after the newest modification time of the directory or of a file or folder directly inside it, or 180 days after that time for a session that was paused or refreshed. A directory past its limit is kept while its journal holds HANDOFFs not yet consolidated to memory.
 
 Knowledge memory (pact-memory) and workflow state (session journal) are intentionally separate: pact-memory captures durable lessons and decisions; the journal captures where the workflow is right now and what artifacts have been produced. The [`pact-state-recovery.md`](pact-plugin/protocols/pact-state-recovery.md) protocol documents the recovery hierarchy across both.
 
@@ -652,7 +652,7 @@ When installed as a plugin, PACT lives in your plugin cache:
 │   └── cache/
 │       └── pact-plugin/
 │           └── PACT/
-│               └── 4.8.1/      # Plugin version
+│               └── 4.8.2/      # Plugin version
 │                   ├── agents/
 │                   ├── commands/
 │                   ├── skills/

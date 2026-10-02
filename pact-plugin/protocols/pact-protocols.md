@@ -2486,7 +2486,7 @@ Events are JSONL entries with common fields `v` (schema version), `type`, and `t
 
 | Type | Written By | Fields | Recovery Use |
 |------|-----------|--------|--------------|
-| `session_start` | session_init hook | `team`, `session_id`, `project_dir`, `worktree`, `source` | Session boundary marker; `source` ∈ {`startup`, `resume`, `compact`, `clear`, `unknown`} attributes the event to startup vs auto-compact vs `/clear` vs `/resume` for direct triage (no timing-cluster triangulation needed) |
+| `session_start` | session_init hook (lead sessions); bootstrap_prompt_gate hook (once, for a lead the session_init hook did not record, at the first prompt whose recording completes. A recording whose CLAUDE.md block rewrite fails in a way that may clear is retried on later prompts, and the third such failure records the lead anyway; a failed `session_start` append is retried quietly on later prompts) | `team`, `session_id`, `project_dir`, `worktree`, `source` | Session boundary marker; `source` names the start that wrote it: `startup` (new session, or a start that reported no source), `resume` (resumed session), `compact` (after compaction), `clear` (after `/clear`), `fork` (session forked from another session), `unknown` (a start that reported any other source), `prompt` (recorded at a prompt instead of at the start) |
 | `session_end` | session_end hook | `warning` (optional) | Detect incomplete shutdowns |
 | `session_paused` | pause command | `pr_number`, `pr_url`, `branch`, `worktree_path`, `consolidation_completed`, `team_name` | Resume paused PR work |
 | `session_refreshed` | refresh command | `consolidation_completed`, `halt_active`; optional: `halt_task_ids`, `feature_task_id`, `feature_subject`, `team_name`, `next_phase`, `worktrees`, `pr_number` | Resume mid-workstream after context refresh |
@@ -2546,7 +2546,7 @@ The journal survives crashes because:
 
 `{config_dir}` is this session's Claude config root — the value of `$CLAUDE_CONFIG_DIR` when set and non-empty, otherwise `$HOME/.claude`. Read it off an absolute path the platform already injected into your context — your plugin root is `{config_dir}/plugins/…` — rather than shelling out for the variable. Substitute it before running any command; never assume `~/.claude`.
 
-The wrap-up command harvests journal events to pact-memory before session close. The journal persists in the sessions directory for 30 days (TTL cleanup), providing a recovery window even if harvest fails. Paused sessions are exempt from TTL cleanup.
+The wrap-up command harvests journal events to pact-memory before session close. The session directory, journal included, is removed 30 days after the newest modification time of the directory or of an entry directly inside it, or 180 days after that time when the journal records a `session_paused` or `session_refreshed` event. A directory past its limit is kept while its journal holds an `agent_handoff` event recorded after its last `session_consolidated` event. The current session's directory is never removed.
 
 ### Re-reading Cut Workflow Commands
 

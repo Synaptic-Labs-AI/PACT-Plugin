@@ -70,6 +70,7 @@ a real finding and must not be smoothed over.
 
 from __future__ import annotations
 
+import errno
 import os
 import subprocess
 import textwrap
@@ -1276,6 +1277,136 @@ class TestDescriptorHygiene:
         assert after - before == 0, (
             f"leaked {after - before} fds over {self.CALLS} refusals"
         )
+
+
+class TestACloseAfterTheRenameIsNotAFailedWrite:
+    """Closing the parent directory is the only step after the rename. Once
+    the rename has put the new file in place, a failure there is not a failed
+    write; after a failed write it must not replace the error that stopped it.
+    """
+
+    @staticmethod
+    def _close_fails_once_after_replace(monkeypatch, replace_error=None):
+        real_replace, real_close = os.replace, os.close
+        state = {"armed": False, "fired": 0}
+
+        def replace(*args, **kwargs):
+            state["armed"] = True
+            if replace_error is not None:
+                raise replace_error
+            return real_replace(*args, **kwargs)
+
+        def close(fd):
+            real_close(fd)
+            if state["armed"]:
+                state["armed"] = False
+                state["fired"] += 1
+                raise OSError(errno.EIO, "injected close failure")
+
+        monkeypatch.setattr(os, "replace", replace)
+        monkeypatch.setattr(os, "close", close)
+        return state
+
+    def test_a_close_that_fails_after_the_rename_reports_success(
+        self, tmp_path, monkeypatch, twin
+    ):
+        project, target = _nested_project(tmp_path)
+        twin._atomic_write_text(target, "warmup\n", project)
+        before = _fd_count()
+        state = self._close_fails_once_after_replace(monkeypatch)
+
+        twin._atomic_write_text(target, "NEW\n", project)
+
+        assert state["fired"] == 1
+        assert target.read_text(encoding="utf-8") == "NEW\n"
+        assert _fd_count() - before == 0
+
+    def test_a_close_that_fails_after_a_failed_write_keeps_the_write_error(
+        self, tmp_path, monkeypatch, twin
+    ):
+        project, target = _nested_project(tmp_path)
+        state = self._close_fails_once_after_replace(
+            monkeypatch, OSError(errno.ENOSPC, "injected replace failure")
+        )
+
+        with pytest.raises(OSError) as raised:
+            twin._atomic_write_text(target, "NEW\n", project)
+
+        assert raised.value.errno == errno.ENOSPC
+        assert state["fired"] == 1
+        assert target.read_text(encoding="utf-8") == "ORIGINAL\n"
+
+
+class TestALockReleaseFailureIsNotTheBodysFailure:
+    """file_lock releases with flock(LOCK_UN) and then a close. A failure in
+    either comes after the locked work is done: it must not turn a body that
+    succeeded into a failure, nor replace the error of a body that failed."""
+
+    @staticmethod
+    def _release_step_fails_once(monkeypatch, step):
+        import fcntl
+        real_flock, real_close = fcntl.flock, os.close
+        state = {"locked_fd": None, "fired": 0}
+
+        def flock(fd, operation):
+            real_flock(fd, operation)
+            if operation & fcntl.LOCK_UN == 0:
+                state["locked_fd"] = fd
+            elif step == "unlock" and fd == state["locked_fd"]:
+                state["fired"] += 1
+                raise OSError(errno.EIO, "injected unlock failure")
+
+        def close(fd):
+            real_close(fd)
+            if step == "close" and fd == state["locked_fd"]:
+                state["locked_fd"] = None
+                state["fired"] += 1
+                raise OSError(errno.EIO, "injected close failure")
+
+        monkeypatch.setattr(fcntl, "flock", flock)
+        monkeypatch.setattr(os, "close", close)
+        return state
+
+    @staticmethod
+    def _lock_is_free(target):
+        import fcntl
+        fd = os.open(str(target.parent / f".{target.name}.lock"), os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+        return True
+
+    @pytest.mark.parametrize("step", ["unlock", "close"])
+    def test_a_failing_release_after_a_good_body_raises_nothing(
+        self, tmp_path, monkeypatch, twin, step
+    ):
+        project, target = _nested_project(tmp_path)
+        with twin.file_lock(target):
+            pass
+        before = _fd_count()
+        state = self._release_step_fails_once(monkeypatch, step)
+
+        with twin.file_lock(target):
+            target.write_text("NEW\n", encoding="utf-8")
+
+        assert state["fired"] == 1
+        monkeypatch.undo()
+        assert target.read_text(encoding="utf-8") == "NEW\n"
+        assert _fd_count() - before == 0
+        assert self._lock_is_free(target)
+
+    def test_a_failing_release_keeps_the_bodys_own_error(
+        self, tmp_path, monkeypatch, twin
+    ):
+        project, target = _nested_project(tmp_path)
+        state = self._release_step_fails_once(monkeypatch, "unlock")
+
+        with pytest.raises(ValueError, match="the body failed"):
+            with twin.file_lock(target):
+                raise ValueError("the body failed")
+
+        assert state["fired"] == 1
 
 
 # ===========================================================================

@@ -10,7 +10,8 @@ Used by: scripts/archive_pin.py (pin archival resolution) and
          `stays_in_declared_project` with
          `get_worktree_identity_from_session_record()`; `same_repository` is
          one of its rules. hooks/session_init.py writes the record
-         (`WORKTREE_IDENTITY_FILE`); skills/pact-memory/scripts/pact_session.py
+         (`WORKTREE_IDENTITY_FILE`) through `_record_worktree_identity`;
+         skills/pact-memory/scripts/pact_session.py
          re-exports the reader and shares `_session_record_on_disk`.
 
 WHY THIS IS NOT IN git_helpers.py. That module is a narrow subprocess
@@ -34,8 +35,9 @@ import os
 from pathlib import Path
 from typing import Optional, Set
 
+from . import state_file
 from .git_helpers import run_git
-from .pact_context import _UNSAFE_SLUG_CHARS_RE
+from .pact_context import _UNSAFE_SLUG_CHARS_RE, _build_session_path, project_slug
 from .paths import get_claude_config_dir
 
 # Git LOCATES the repository from these instead of discovering it from `-C` or
@@ -309,8 +311,8 @@ _WORKTREE_IDENTITY_PATHS = ("declared", "worktree", "common_dir")
 def get_worktree_identity_from_session_record() -> dict:
     """Return the worktree identity session_init recorded for this session, or {}.
 
-    session_init writes it into the session's own folder, for every role, when
-    the session starts inside a linked worktree. The working-memory write guard
+    session_init writes it into the session's own folder, for lead and teammate
+    frames, when the session starts inside a linked worktree. The working-memory write guard
     and archive_pin pass it to `stays_in_declared_project`, which reads it only
     when the declared directory no longer exists. Both hold this one object:
     pact_session re-exports it, and archive_pin imports it from here.
@@ -336,3 +338,42 @@ def get_worktree_identity_from_session_record() -> dict:
         if not isinstance(value, str) or not os.path.isabs(value):
             return {}
     return record
+
+
+def _record_worktree_identity(session_id: str, project_dir: str) -> None:
+    """Record which repository this session's linked worktree belongs to.
+
+    Writes `<session_dir>/worktree-identity.json` when `project_dir` lies inside
+    a linked worktree (its git dir and common dir differ), including a
+    subdirectory of one. The working-memory write guard reads it back once that
+    worktree is removed and git can no longer say which repository the declared
+    directory was in. Runs for lead and teammate frames, so a separate-process
+    teammate records its own session; an unknown frame returns before it.
+
+    Fail-open: any error leaves no record.
+    """
+    try:
+        directory = Path(project_dir)
+        if not directory.is_dir():
+            return
+        git_dir = _rev_parse_path(directory, "--git-dir")
+        common_dir = _rev_parse_path(directory, "--git-common-dir")
+        if git_dir is None or common_dir is None or git_dir == common_dir:
+            return
+        worktree = _rev_parse_path(directory, "--show-toplevel")
+        if worktree is None:
+            return
+        record = {
+            "session_id": session_id,
+            "declared": os.path.realpath(project_dir),
+            "worktree": str(worktree),
+            "common_dir": str(common_dir),
+        }
+        state_file.write_text(
+            _build_session_path(project_slug(project_dir), session_id)
+            / WORKTREE_IDENTITY_FILE,
+            json.dumps(record),
+            root=get_claude_config_dir() / "pact-sessions",
+        )
+    except Exception:
+        return
