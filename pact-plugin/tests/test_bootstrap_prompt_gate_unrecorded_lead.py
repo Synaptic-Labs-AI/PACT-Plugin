@@ -522,8 +522,8 @@ class TestTheMarkerWriterCannotPreemptTheRecording:
 
 _ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
 
-# Loaded by every hook process started with _with_eio on PYTHONPATH: the rename
-# that would put a new CLAUDE.md in place raises EIO.
+# sitecustomize sources, loaded by every hook process _with_site starts.
+# This one: the rename that would put a new CLAUDE.md in place raises EIO.
 _EIO_ON_REPLACE = """
 import errno, os
 _replace = os.replace
@@ -534,11 +534,30 @@ def replace(src, dst, *args, **kwargs):
 os.replace = replace
 """
 
+# This one: the rename into CLAUDE.md succeeds, and the next close (the
+# parent directory's) raises EIO after closing the descriptor.
+_EIO_ON_CLOSE_AFTER_REPLACE = """
+import errno, os
+_replace, _close = os.replace, os.close
+_armed = []
+def replace(src, dst, *args, **kwargs):
+    result = _replace(src, dst, *args, **kwargs)
+    if str(dst).endswith("CLAUDE.md"):
+        _armed.append(True)
+    return result
+def close(fd):
+    _close(fd)
+    if _armed:
+        _armed.clear()
+        raise OSError(errno.EIO, "injected")
+os.replace, os.close = replace, close
+"""
 
-def _with_eio(tmp_path, env):
-    site = tmp_path / "eio-site"
+
+def _with_site(tmp_path, env, source):
+    site = tmp_path / "site"
     site.mkdir(exist_ok=True)
-    (site / "sitecustomize.py").write_text(_EIO_ON_REPLACE, encoding="utf-8")
+    (site / "sitecustomize.py").write_text(source, encoding="utf-8")
     return {**env, "PYTHONPATH": str(site)}
 
 
@@ -585,7 +604,7 @@ class TestATransientRewriteFailureLeavesTheRecordingOpen:
             (_sdir(home, lead) / "session-journal.jsonl").mkdir(parents=True)
         before = _block(proj)
 
-        failed = _prompt(_WRITER_FIRST, lead, home, _with_eio(tmp_path, env))
+        failed = _prompt(_WRITER_FIRST, lead, home, _with_site(tmp_path, env, _EIO_ON_REPLACE))
 
         if journal_works:
             self._assert_open(failed, home, lead, proj, before)
@@ -599,6 +618,22 @@ class TestATransientRewriteFailureLeavesTheRecordingOpen:
             assert len(_events(home, lead, "session_start")) == 1
         else:
             assert (_sdir(home, lead) / _FLAG).exists()
+        assert _prompt(_WRITER_FIRST, lead, home, env) == ""
+
+    def test_a_close_that_fails_after_the_rename_records_on_the_same_prompt(self, tmp_path):
+        """The new block is in place once the rename succeeds, so a failure
+        closing the directory afterwards is no failed write: the lead is
+        recorded, claim and all, on this prompt."""
+        home, proj, env, parent, lead = _unrecorded_lead_with_secretary(tmp_path)
+
+        out = _prompt(_WRITER_FIRST, lead, home,
+                      _with_site(tmp_path, env, _EIO_ON_CLOSE_AFTER_REPLACE))
+
+        assert out.startswith(_NOTE_MARK)
+        self._assert_recorded_once(out, home, lead, proj)
+        assert "Session info failed" not in out
+        assert len(_events(home, lead, "session_start")) == 1
+        assert len(_events(home, lead, "session_resumption_surfaced")) == 1
         assert _prompt(_WRITER_FIRST, lead, home, env) == ""
 
     @pytest.mark.skipif(_ROOT, reason="root ignores directory permissions")

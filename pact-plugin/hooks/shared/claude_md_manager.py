@@ -821,7 +821,13 @@ def _atomic_write_text(target: Path, content: str, project_root: Path) -> None:
                 pass
             raise
     finally:
-        os.close(parent_fd)
+        # The only step after the rename. A close that fails once the rename
+        # has put the new file in place is not a failed write, and after a
+        # failed write it must not replace the error that stopped it.
+        try:
+            os.close(parent_fd)
+        except OSError:
+            pass
 
 
 def _strip_legacy_lines(content: str) -> str:
