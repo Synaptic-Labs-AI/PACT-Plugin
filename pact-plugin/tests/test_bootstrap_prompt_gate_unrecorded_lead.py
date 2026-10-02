@@ -29,6 +29,7 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
@@ -75,7 +76,7 @@ def _start(sid, source, agent_type, home, env):
     return _run("session_init.py", frame, home, env)
 
 
-def _prompt_frame(sid, agent_type=LEAD):
+def _prompt_frame(sid, agent_type: Optional[str] = LEAD):
     frame = {"hook_event_name": "UserPromptSubmit", "session_id": sid,
              "prompt": "first prompt"}
     if agent_type is not None:
@@ -83,7 +84,7 @@ def _prompt_frame(sid, agent_type=LEAD):
     return frame
 
 
-def _gate(sid, home, env, agent_type=LEAD):
+def _gate(sid, home, env, agent_type: Optional[str] = LEAD):
     out = _run("bootstrap_prompt_gate.py", _prompt_frame(sid, agent_type), home, env)
     return out.get("hookSpecificOutput", {}).get("additionalContext", "")
 
@@ -353,7 +354,7 @@ def _unrecorded_lead_with_secretary(tmp_path):
     return home, proj, env, parent, lead
 
 
-def _prompt(order, lead, home, env, agent_type=LEAD):
+def _prompt(order, lead, home, env, agent_type: Optional[str] = LEAD):
     outs = {hook: _run(hook, _prompt_frame(lead, agent_type), home, env) for hook in order}
     return outs["bootstrap_prompt_gate.py"].get("hookSpecificOutput", {}).get(
         "additionalContext", "")
@@ -457,5 +458,25 @@ class TestTheMarkerWriterCannotPreemptTheRecording:
 
         assert context == ""
         assert not (_sdir(home, lead) / "bootstrap-complete").exists()
+        assert _events(home, lead, "session_start") == []
+        assert _block(proj) == before
+
+    @pytest.mark.parametrize("agent_type", [None, "pact-backend-coder"],
+                             ids=["no-role", "teammate"])
+    def test_a_non_lead_frame_after_a_lead_stamped_the_marker_writes_nothing(
+        self, tmp_path, agent_type
+    ):
+        # The marker writer is lead-gated, so the arm above never has the marker
+        # set. Stamp it with a lead frame so a non-lead frame meets the state the
+        # recording branch keys on: marker set, no session_start.
+        home, proj, env, parent, lead = _unrecorded_lead_with_secretary(tmp_path)
+        _run("bootstrap_marker_writer.py", _prompt_frame(lead), home, env)
+        assert (_sdir(home, lead) / "bootstrap-complete").exists(), "control: marker set"
+        assert _events(home, lead, "session_start") == [], "control: not recorded"
+        before = _block(proj)
+
+        context = _gate(lead, home, env, agent_type=agent_type)
+
+        assert context == ""
         assert _events(home, lead, "session_start") == []
         assert _block(proj) == before

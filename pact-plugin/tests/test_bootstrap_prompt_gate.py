@@ -3,7 +3,7 @@ Tests for bootstrap_prompt_gate.py — UserPromptSubmit hook that injects
 bootstrap-first instructions until bootstrap-complete marker exists.
 
 Tests cover:
-1. Marker exists → suppressOutput (fast path, zero tokens)
+1. Marker set + session_start recorded → suppressOutput (fast path, zero tokens)
 2. No marker + PACT team-lead session → inject additionalContext with bootstrap instruction
 3. Non-PACT session (no session dir) → suppressOutput (no-op passthrough)
 4. Teammate / non-lead frame (non-lead agent_type) → suppressOutput (no-op passthrough)
@@ -20,6 +20,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 from unittest.mock import patch
 
 import pytest
@@ -43,7 +44,7 @@ _SLUG = "project"
 
 
 def _make_input(session_id=_SESSION_ID, source="startup",
-                agent_type="pact-orchestrator"):
+                agent_type: Optional[str] = "pact-orchestrator"):
     """Build a minimal UserPromptSubmit hook input dict.
 
     #878: the gate now keys lead-detection on the harness-set agent_type via
@@ -81,7 +82,7 @@ def _setup_pact_session(monkeypatch, tmp_path, with_marker=False,
     Monkeypatches Path.home to tmp_path so get_session_dir() returns a
     path under tmp_path. Writes a context file and patches pact_context
     module state. When ``with_marker=True``, writes a properly-stamped
-    properly-stamped marker (post-#662); empty `touch` markers no longer satisfy the
+    marker (post-#662); empty `touch` markers no longer satisfy the
     gate. It also records session_start, as session_init does for a lead.
 
     Returns the session_dir path.
@@ -149,7 +150,7 @@ class TestCheckBootstrapNeeded:
     """Tests for _check_bootstrap_needed() decision logic."""
 
     def test_returns_none_when_marker_exists(self, monkeypatch, tmp_path):
-        """Marker exists → None (suppress path)."""
+        """Marker set and session_start recorded → None (suppress path)."""
         from bootstrap_prompt_gate import _check_bootstrap_needed
 
         _setup_pact_session(monkeypatch, tmp_path, with_marker=True)
@@ -260,7 +261,7 @@ class TestMainEntryPoint:
         assert 'Skill("PACT:bootstrap")' in hso["additionalContext"]
 
     def test_suppress_when_marker_exists(self, monkeypatch, tmp_path, capsys):
-        """Marker exists → suppressOutput."""
+        """Marker set and session_start recorded → suppressOutput."""
         _setup_pact_session(monkeypatch, tmp_path, with_marker=True)
 
         _, output = _run_main(_make_input(), capsys)
@@ -423,7 +424,8 @@ class TestMarkerLifecycle:
     """P3: Marker creation → gate self-disable → idempotent suppress."""
 
     def test_gate_transitions_on_marker_creation(self, monkeypatch, tmp_path, capsys):
-        """Before marker: inject. After marker stamp: suppress."""
+        """Before marker: inject, and the first prompt records session_start.
+        After marker stamp: suppress."""
         import hashlib
         import shared.pact_context as ctx_module
 
@@ -452,7 +454,8 @@ class TestMarkerLifecycle:
         assert output_after == _SUPPRESS_EXPECTED
 
     def test_repeated_calls_with_marker_are_idempotent(self, monkeypatch, tmp_path, capsys):
-        """Multiple calls with marker present all produce suppressOutput."""
+        """Multiple calls with the marker set and session_start recorded all
+        produce suppressOutput."""
         import shared.pact_context as ctx_module
 
         _setup_pact_session(monkeypatch, tmp_path, with_marker=True)
@@ -717,9 +720,11 @@ class TestStalenessDetection:
         if source == "new_default":
             assert result is None, "neither file exists → silent skip"
         else:
-            resolver_recorded = _RE_RESUME_TEST.search(
+            resume_line = _RE_RESUME_TEST.search(
                 resolved_path.read_text(encoding="utf-8")
-            ).group(1)
+            )
+            assert resume_line is not None
+            resolver_recorded = resume_line.group(1)
             assert result is not None
             assert resolver_recorded in result, (
                 f"staleness reader and resolver disagree on which CLAUDE.md "
@@ -735,8 +740,8 @@ from shared.stale_session import _RESUME_LINE_RE as _RE_RESUME_TEST  # noqa: E40
 
 class TestStalenessComposition:
     """Placement tests: staleness composes onto the bootstrap instruction
-    ONLY on the lead+no-marker inject branch; the marker-set fast path
-    never reads CLAUDE.md (perf contract pin)."""
+    ONLY on the lead+no-marker inject branch; the fast path (marker set and
+    session_start recorded) never reads CLAUDE.md (perf contract pin)."""
 
     _ACTUAL_HEX = "deadbeef-0000-1111-2222-333344445555"
     _STALE = "01dcafe0-9999-8888-7777-666655554444"
@@ -794,6 +799,7 @@ class TestStalenessComposition:
         result = _check_bootstrap_needed(_make_input(
             session_id=self._ACTUAL_HEX))
 
+        assert result is not None
         assert "PACT:bootstrap" in result
         assert "stale session block" not in result
         assert self._ACTUAL_HEX in target.read_text(encoding="utf-8")
@@ -901,9 +907,9 @@ class TestStalenessComposition:
 
     def test_marker_set_fast_path_never_runs_staleness(
             self, monkeypatch, tmp_path):
-        """Perf contract pin: the marker-set fast path suppresses WITHOUT
-        any CLAUDE.md read — _detect_stale_session_block must not be
-        called at all."""
+        """Perf contract pin: the fast path (marker set and session_start
+        recorded) suppresses WITHOUT any CLAUDE.md read —
+        _detect_stale_session_block must not be called at all."""
         import bootstrap_prompt_gate as gate_module
 
         _setup_pact_session(monkeypatch, tmp_path, with_marker=True)
@@ -918,10 +924,10 @@ class TestStalenessComposition:
         result = gate_module._check_bootstrap_needed(_make_input(
             session_id=self._ACTUAL_HEX))
 
-        assert result is None, "marker set → suppress"
+        assert result is None, "marker set and session_start recorded → suppress"
         assert calls == [], (
-            "fast path must not invoke the staleness check (zero-read "
-            "perf contract)"
+            "the fast path (marker set and session_start recorded) must not "
+            "invoke the staleness check (zero-read perf contract)"
         )
 
     def test_non_lead_path_never_runs_staleness(self, monkeypatch, tmp_path):
