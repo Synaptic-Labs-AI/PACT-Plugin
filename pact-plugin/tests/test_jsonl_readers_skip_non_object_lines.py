@@ -18,8 +18,6 @@ _NON_OBJECTS = ['["x"]', '"x"', "42", "null"]
 
 @pytest.mark.parametrize("line", ['["agent_handoff"]', '"agent_handoff"'])
 def test_the_handoff_census_skips_a_non_object_line(tmp_path, line):
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
     import handoff_census as hc
     journal = tmp_path / ".claude" / "pact-sessions" / "proj" / "sess"
     journal.mkdir(parents=True)

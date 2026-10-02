@@ -111,8 +111,6 @@ class TestFailureLog:
 
 
 def test_the_handoff_census_skips_the_deep_line(tmp_path):
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
     import handoff_census as hc
     journal = tmp_path / ".claude" / "pact-sessions" / "proj" / "sess"
     journal.mkdir(parents=True)
