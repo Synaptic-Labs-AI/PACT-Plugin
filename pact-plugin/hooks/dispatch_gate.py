@@ -26,6 +26,7 @@ Cheapest-rule-first ordering with short-circuit on first non-ALLOW:
   ③ name presence                   ⑧ task-assigned check
   ④ name length/NFKC/regex/reserved ⑨ prompt heuristic (WARN)
   ⑤ plugin agents/ + specialist registry
+⑥'s refusal for a non-lead frame with no session team runs between ② and ③.
 
 Every gate decision (ALLOW/DENY/WARN) is journaled. Prompt text is
 redacted at the journal-write boundary (sk-/xoxb-/ghp_/AKIA/JWT
@@ -334,9 +335,9 @@ def evaluate_dispatch(
 ) -> tuple[str, str | None, str | None]:
     """Single composition function. Returns ``(decision, reason, rule)``.
 
-    ``input_data`` is the full hook frame when the caller has it. Rule ⑥ reads
-    its role and registered team membership to word the refusal; without it,
-    rule ⑥ keeps the bootstrap text.
+    ``input_data`` is the full hook frame when the caller has it. Its role and
+    registered team membership decide rule ⑥'s refusal for a non-lead frame,
+    which is checked before rule ③; without it, rule ⑥ keeps the bootstrap text.
 
     decision ∈ {``"ALLOW"``, ``"DENY"``, ``"WARN"``}.
     reason: human-readable explanation (None for ALLOW).
@@ -374,6 +375,17 @@ def evaluate_dispatch(
     # ② Non-pact-* spawns are not this gate's business — fall through.
     if not isinstance(subagent_type, str) or not subagent_type.startswith("pact-"):
         return ("ALLOW", None, None)
+
+    # Rule ⑥'s refusals for a non-lead frame with no session team, checked
+    # before ③-⑤: a frame told to fix its name, its subagent_type or the plugin
+    # install would only reach this refusal. The role is tested first, so a
+    # lead's path is unchanged.
+    if isinstance(input_data, dict):
+        role = pact_context.classify_session_role(input_data)
+        if role != "lead" and not pact_context.get_team_name():
+            if role == "teammate" and _resolves_a_registered_team(input_data):
+                return ("DENY", _TEAMMATE_SPAWN_REFUSAL, "team_name_unavailable")
+            return ("DENY", _NON_LEAD_SPAWN_REFUSAL, "team_name_unavailable")
 
     # ③ Required string presence on name. (AC-2 / #979: the team_name-presence
     # check was dropped — Claude Code v2.1.178+ ignores Agent(team_name=), so
@@ -456,15 +468,11 @@ def evaluate_dispatch(
     # their team-dir reads against session_team, NEVER the caller arg, so the
     # spawn-arg team_name is not a path component anywhere in this gate. The
     # empty-session_team fail-closed is RETAINED because ⑦/⑧ structurally
-    # depend on session_team being a non-empty path segment.
+    # depend on session_team being a non-empty path segment. A non-lead frame
+    # with no session team was refused above, so this text reaches a lead or a
+    # caller that passed no frame.
     session_team = pact_context.get_team_name()
     if not session_team:
-        if isinstance(input_data, dict):
-            role = pact_context.classify_session_role(input_data)
-            if role == "teammate" and _resolves_a_registered_team(input_data):
-                return ("DENY", _TEAMMATE_SPAWN_REFUSAL, "team_name_unavailable")
-            if role != "lead":
-                return ("DENY", _NON_LEAD_SPAWN_REFUSAL, "team_name_unavailable")
         message = ("PACT dispatch_gate: session team_name is unavailable "
                    "(pact-session-context.json missing or unreadable). "
                    "Re-run /PACT:bootstrap to restore session context.")
