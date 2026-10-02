@@ -329,6 +329,7 @@ class TestNothingIsWrittenOutsideTheBranch:
 
 
 _INSTRUCTION_MARK = 'Skill("PACT:bootstrap")'
+_FLAG = "lead-recorded"
 
 
 def _secretary_team(home, sid):
@@ -412,6 +413,8 @@ class TestTheMarkerWriterCannotPreemptTheRecording:
 
         assert failed.startswith(_NOTE_MARK) and _VALUES_MARK not in failed
         assert _events(home, lead, "session_start") == []
+        assert not (_sdir(home, lead) / _FLAG).exists(), (
+            "a failure before the rewrite leaves no flag, so the next prompt retries")
         md.rmdir()
         md.write_text(saved, encoding="utf-8")
 
@@ -425,9 +428,10 @@ class TestTheMarkerWriterCannotPreemptTheRecording:
         assert len(_events(home, lead, "session_start")) == 1
         assert len(_events(home, lead, "session_resumption_surfaced")) == 1
 
-    def test_a_soft_failed_append_still_shows_the_claim_and_the_retry_does_not(
-        self, tmp_path
-    ):
+    def test_a_soft_failed_append_is_recorded_once_and_retried_quietly(self, tmp_path):
+        """The session_start append fails soft: the note, values and claim go
+        out once and the flag stands in for session_start. Once the journal is
+        writable again, the next prompt appends session_start silently."""
         home, proj, env, parent, lead = _unrecorded_lead_with_secretary(tmp_path)
         journal = _sdir(home, lead) / "session-journal.jsonl"
         journal.mkdir(parents=True)  # every append fails soft: it returns False
@@ -437,16 +441,49 @@ class TestTheMarkerWriterCannotPreemptTheRecording:
         assert failed.count("PR #5151") == 1, "the claim read before the rewrite is shown"
         assert "RESUMPTION MARKER MISSING" in failed
         assert f"--resume {lead}" in _block(proj)
+        assert (_sdir(home, lead) / _FLAG).exists()
+        recorded = _block(proj)
         journal.rmdir()
 
         retried = _prompt(_WRITER_FIRST, lead, home, env)
-        third = _prompt(_WRITER_FIRST, lead, home, env)
 
-        assert _VALUES_MARK in retried and "PR #5151" not in retried
-        assert third == ""
-        assert _block(proj).count("<!-- SESSION_START -->") == 1
+        assert retried == "", "no R1 output: the note and rewrite happened once"
+        assert _block(proj) == recorded
+        assert [e.get("source") for e in _events(home, lead, "session_start")] == ["prompt"]
+
+        assert _prompt(_WRITER_FIRST, lead, home, env) == ""
         assert len(_events(home, lead, "session_start")) == 1
         assert _events(home, lead, "session_resumption_surfaced") == []
+
+    def test_a_journal_that_stays_unwritable_records_the_lead_once(self, tmp_path):
+        home, proj, env, parent, lead = _unrecorded_lead_with_secretary(tmp_path)
+        (_sdir(home, lead) / "session-journal.jsonl").mkdir(parents=True)
+
+        first = _prompt(_WRITER_FIRST, lead, home, env)
+        recorded = _block(proj)
+
+        assert _VALUES_MARK in first and first.count("PR #5151") == 1
+        assert _prompt(_WRITER_FIRST, lead, home, env) == ""
+        assert _prompt(_WRITER_FIRST, lead, home, env) == ""
+        assert _block(proj) == recorded, "the Started line must not move each prompt"
+
+    def test_a_lead_without_the_marker_gets_the_note_once(self, tmp_path):
+        """No secretary, so no marker: later prompts keep the bootstrap
+        instruction but not the note, the values or the block rewrite."""
+        home, proj, env = _sandbox(tmp_path)
+        parent, lead = str(uuid.uuid4()), str(uuid.uuid4())
+        _start(parent, "startup", LEAD, home, env)
+        _start(lead, "fork", None, home, env)
+        (_sdir(home, lead) / "session-journal.jsonl").mkdir(parents=True)
+
+        first = _gate(lead, home, env)
+        recorded = _block(proj)
+        second = _gate(lead, home, env)
+
+        assert first.startswith(_NOTE_MARK) and _VALUES_MARK in first
+        assert _INSTRUCTION_MARK in second
+        assert _NOTE_MARK not in second and _VALUES_MARK not in second
+        assert _block(proj) == recorded
 
     @pytest.mark.parametrize("agent_type", [None, "pact-backend-coder"],
                              ids=["no-role", "teammate"])

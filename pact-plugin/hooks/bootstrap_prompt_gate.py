@@ -8,7 +8,8 @@ Used by: hooks.json UserPromptSubmit hook (no matcher — fires on every prompt)
 Layer 2 of the four-layer bootstrap gate enforcement (#401). On each user
 message, checks for the session-scoped bootstrap-complete marker file:
   - Marker exists and the journal has a session_start → suppressOutput (zero
-    tokens, sub-ms)
+    tokens, sub-ms). The lead-recorded flag counts as a session_start when
+    the recording could not append one; see _RECORDED_FLAG
   - No marker + PACT team-lead session (is_lead) → inject additionalContext instructing bootstrap.
     When the session journal has no session_start event (session_init did not
     record this lead), the instruction is prefixed with a lead note, and the
@@ -185,6 +186,36 @@ def _journal_has_session_start(session_dir: str) -> bool:
     return False
 
 
+# Left in the session dir by _record_unrecorded_lead when its session_start
+# append fails (an unwritable journal). It counts as recorded, so the note and
+# the block rewrite happen once per session; while it stands without a
+# session_start, each lead prompt retries the append quietly.
+_RECORDED_FLAG = "lead-recorded"
+
+
+def _append_session_start(input_data: dict, session_dir: str) -> bool:
+    """Append this lead's session_start (source "prompt"); True when it
+    landed. Never raises."""
+    try:
+        import os
+
+        from shared.session_journal import append_event, make_event
+
+        return append_event(
+            make_event(
+                "session_start",
+                team=pact_context.get_team_name(),
+                session_id=str(input_data["session_id"]),
+                project_dir=os.environ.get("CLAUDE_PROJECT_DIR", "") or os.getcwd(),
+                worktree="",
+                source="prompt",
+            ),
+            session_dir=session_dir,
+        )
+    except Exception:  # noqa: BLE001 — called after the block rewrite and on quiet retries
+        return False
+
+
 def _check_bootstrap_needed(input_data: dict) -> str | None:
     """Determine whether a bootstrap instruction should be injected.
 
@@ -237,10 +268,21 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
     if not pact_context.is_lead(input_data):
         return None
 
+    # Recorded: session_start in the journal (already known absent when the
+    # marker is set), or the flag a recording leaves when that append failed.
+    # Under the flag, retry the append quietly: no note, no rewrite, no output.
+    recorded = not marker_set and _journal_has_session_start(session_dir)
+    if not recorded and (Path(session_dir) / _RECORDED_FLAG).exists():
+        _append_session_start(input_data, session_dir)
+        recorded = True
+
     if marker_set:
+        if recorded:
+            return None
         # Bootstrap is complete but the journal has no session_start: record
         # this lead, with no bootstrap instruction. A recording that fails
-        # leaves no session_start, so the next prompt retries it.
+        # before its rewrite leaves no session_start and no flag, so the next
+        # prompt retries it.
         return _NOT_TREATED_AS_LEAD_NOTE.rstrip("\n") + _record_unrecorded_lead(
             input_data, session_dir
         )
@@ -249,7 +291,7 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
     instruction = _BOOTSTRAP_INSTRUCTION_TEMPLATE.format(
         session_dir_hint=_SESSION_DIR_HINT.format(session_dir=session_dir)
     )
-    if _journal_has_session_start(session_dir):
+    if recorded:
         # Recorded by session_init (or by an earlier prompt here): append the
         # staleness advisory (or "").
         return instruction + (_detect_stale_session_block(input_data) or "")
@@ -267,10 +309,11 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
     """Record a lead session_init did not record; return what follows the
     instruction.
 
-    Reached on a lead prompt with no session_start in the journal, whether or
-    not the bootstrap marker is set. The session_start written here closes
-    that branch, so this runs once per session; a run that fails before it
-    writes session_start runs again on the next prompt. In order:
+    Reached on a lead prompt with no session_start in the journal and no
+    lead-recorded flag, whether or not the bootstrap marker is set. The
+    session_start written here (or the flag, when that append fails) closes
+    that branch, so this runs once per session; a run that raises before its
+    block rewrite writes neither and runs again on the next prompt. In order:
 
     1. If the project CLAUDE.md holds a Current Session block (both markers),
        read it. When the block names another session, read that session's
@@ -282,7 +325,10 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
        reported after the session values.
     2. Record the worktree identity, as session_init does for a lead.
     3. Append session_start (source "prompt") and, when a claim was read,
-       session_resumption_surfaced. Both follow every read above.
+       session_resumption_surfaced. Both follow every read above. When the
+       session_start append fails (an unwritable journal), create the
+       lead-recorded flag in its place; later prompts retry the append
+       quietly.
        bootstrap_marker_writer leaves this lead's block alone until it sees a
        session_start, so whichever hook runs first, the old block is read
        before anything replaces it.
@@ -350,17 +396,13 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
                     session_id, team, session_dir, plugin_root
                 )
         _record_worktree_identity(session_id, project_dir)
-        append_event(
-            make_event(
-                "session_start",
-                team=team,
-                session_id=session_id,
-                project_dir=project_dir,
-                worktree="",
-                source="prompt",
-            ),
-            session_dir=session_dir,
-        )
+        if not _append_session_start(input_data, session_dir):
+            # The journal is not writable: the flag stands in for
+            # session_start, so this note and rewrite are not repeated.
+            try:
+                (Path(session_dir) / _RECORDED_FLAG).touch()
+            except OSError:
+                pass
         parts = [
             format_session_substitutions(team, session_dir, plugin_root)
             + " These replace any session values earlier in this conversation."
