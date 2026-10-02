@@ -13,7 +13,9 @@ agent_type, so the gate records it then, once: it reads the old block (and the
 previous session's pause or refresh claim when the block names another
 session), replaces the block, records the worktree identity, and appends
 session_start(source="prompt"). bootstrap_marker_writer leaves the block alone
-until that session_start exists, so the hook order does not matter.
+until that session_start exists, and the gate suppresses only when the marker
+is set AND session_start exists, so the hook order does not matter even when
+the writer stamps the marker first.
 
 Every test drives the real hooks in a fresh interpreter under tmp_path. HOME is
 the sandbox and every CLAUDE_* var except the three set here is dropped, so no
@@ -323,3 +325,137 @@ class TestNothingIsWrittenOutsideTheBranch:
         assert (proj / "CLAUDE.md").read_text(encoding="utf-8") == content
         assert sorted(p.name for p in proj.iterdir()) == ["CLAUDE.md"]
         assert _VALUES_MARK in context, "control: the branch ran"
+
+
+_INSTRUCTION_MARK = 'Skill("PACT:bootstrap")'
+
+
+def _secretary_team(home, sid):
+    """A team for ``sid`` that already lists the secretary, as a resumed lead's
+    surviving team does, so the marker writer's preconditions hold and it
+    stamps bootstrap-complete on the first prompt."""
+    team = home / ".claude" / "teams" / _ALIGNED_TEAM
+    team.mkdir(parents=True)
+    (team / "config.json").write_text(json.dumps({
+        "name": _ALIGNED_TEAM, "leadSessionId": sid,
+        "members": [{"name": "team-lead"},
+                    {"name": "secretary", "agentType": "pact-secretary"}],
+    }), encoding="utf-8")
+
+
+def _unrecorded_lead_with_secretary(tmp_path):
+    home, proj, env = _sandbox(tmp_path)
+    parent, lead = str(uuid.uuid4()), str(uuid.uuid4())
+    _start(parent, "startup", LEAD, home, env)
+    _pause(_sdir(home, parent), 5151)
+    _start(lead, "fork", None, home, env)
+    _secretary_team(home, lead)
+    return home, proj, env, parent, lead
+
+
+def _prompt(order, lead, home, env, agent_type=LEAD):
+    outs = {hook: _run(hook, _prompt_frame(lead, agent_type), home, env) for hook in order}
+    return outs["bootstrap_prompt_gate.py"].get("hookSpecificOutput", {}).get(
+        "additionalContext", "")
+
+
+_WRITER_FIRST = ("bootstrap_marker_writer.py", "bootstrap_prompt_gate.py")
+_GATE_FIRST = ("bootstrap_prompt_gate.py", "bootstrap_marker_writer.py")
+
+
+class TestTheMarkerWriterCannotPreemptTheRecording:
+    """The marker writer runs beside the gate on every prompt and can stamp
+    bootstrap-complete first. The gate suppresses only when the journal also
+    holds session_start, so an unrecorded lead is recorded either way."""
+
+    def test_writer_first_records_the_lead_without_the_instruction(self, tmp_path):
+        home, proj, env, parent, lead = _unrecorded_lead_with_secretary(tmp_path)
+
+        _run("bootstrap_marker_writer.py", _prompt_frame(lead), home, env)
+        assert (_sdir(home, lead) / "bootstrap-complete").exists(), (
+            "control: the writer stamped before the gate ran")
+        context = _gate(lead, home, env)
+
+        block = _block(proj)
+        assert f"--resume {lead}" in block and parent not in block
+        assert context.startswith(_NOTE_MARK) and _VALUES_MARK in context
+        assert _INSTRUCTION_MARK not in context, "bootstrap is already complete"
+        assert "PR #5151" in context, "the previous session's pause must be surfaced"
+        assert [e.get("source") for e in _events(home, lead, "session_start")] == ["prompt"]
+        assert len(_events(home, lead, "session_resumption_surfaced")) == 1
+
+        assert _prompt(_WRITER_FIRST, lead, home, env) == ""
+        assert len(_events(home, lead, "session_start")) == 1
+
+    def test_gate_first_records_the_lead_and_the_writer_stamps(self, tmp_path):
+        home, proj, env, parent, lead = _unrecorded_lead_with_secretary(tmp_path)
+
+        context = _prompt(_GATE_FIRST, lead, home, env)
+
+        assert f"--resume {lead}" in _block(proj)
+        assert context.startswith(_NOTE_MARK) and _INSTRUCTION_MARK in context
+        assert "PR #5151" in context
+        assert (_sdir(home, lead) / "bootstrap-complete").exists()
+        assert _prompt(_GATE_FIRST, lead, home, env) == ""
+        assert len(_events(home, lead, "session_start")) == 1
+        assert len(_events(home, lead, "session_resumption_surfaced")) == 1
+
+    def test_a_failed_recording_is_retried_once_and_not_duplicated(self, tmp_path):
+        home, proj, env, parent, lead = _unrecorded_lead_with_secretary(tmp_path)
+        md = proj / ".claude" / "CLAUDE.md"
+        saved = md.read_text(encoding="utf-8")
+        md.unlink()
+        md.mkdir()  # reading it raises: the recording fails before any write
+
+        failed = _prompt(_WRITER_FIRST, lead, home, env)
+
+        assert failed.startswith(_NOTE_MARK) and _VALUES_MARK not in failed
+        assert _events(home, lead, "session_start") == []
+        md.rmdir()
+        md.write_text(saved, encoding="utf-8")
+
+        retried = _prompt(_WRITER_FIRST, lead, home, env)
+        third = _prompt(_WRITER_FIRST, lead, home, env)
+
+        assert retried.count("PR #5151") == 1 and _VALUES_MARK in retried
+        assert third == ""
+        assert _block(proj).count("<!-- SESSION_START -->") == 1
+        assert f"--resume {lead}" in _block(proj)
+        assert len(_events(home, lead, "session_start")) == 1
+        assert len(_events(home, lead, "session_resumption_surfaced")) == 1
+
+    def test_a_soft_failed_append_still_shows_the_claim_and_the_retry_does_not(
+        self, tmp_path
+    ):
+        home, proj, env, parent, lead = _unrecorded_lead_with_secretary(tmp_path)
+        journal = _sdir(home, lead) / "session-journal.jsonl"
+        journal.mkdir(parents=True)  # every append fails soft: it returns False
+
+        failed = _prompt(_WRITER_FIRST, lead, home, env)
+
+        assert failed.count("PR #5151") == 1, "the claim read before the rewrite is shown"
+        assert "RESUMPTION MARKER MISSING" in failed
+        assert f"--resume {lead}" in _block(proj)
+        journal.rmdir()
+
+        retried = _prompt(_WRITER_FIRST, lead, home, env)
+        third = _prompt(_WRITER_FIRST, lead, home, env)
+
+        assert _VALUES_MARK in retried and "PR #5151" not in retried
+        assert third == ""
+        assert _block(proj).count("<!-- SESSION_START -->") == 1
+        assert len(_events(home, lead, "session_start")) == 1
+        assert _events(home, lead, "session_resumption_surfaced") == []
+
+    @pytest.mark.parametrize("agent_type", [None, "pact-backend-coder"],
+                             ids=["no-role", "teammate"])
+    def test_a_non_lead_frame_stamps_nothing_and_writes_nothing(self, tmp_path, agent_type):
+        home, proj, env, parent, lead = _unrecorded_lead_with_secretary(tmp_path)
+        before = _block(proj)
+
+        context = _prompt(_WRITER_FIRST, lead, home, env, agent_type=agent_type)
+
+        assert context == ""
+        assert not (_sdir(home, lead) / "bootstrap-complete").exists()
+        assert _events(home, lead, "session_start") == []
+        assert _block(proj) == before

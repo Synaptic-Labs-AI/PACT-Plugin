@@ -82,7 +82,7 @@ def _setup_pact_session(monkeypatch, tmp_path, with_marker=False,
     path under tmp_path. Writes a context file and patches pact_context
     module state. When ``with_marker=True``, writes a properly-stamped
     properly-stamped marker (post-#662); empty `touch` markers no longer satisfy the
-    gate.
+    gate. It also records session_start, as session_init does for a lead.
 
     Returns the session_dir path.
     """
@@ -121,6 +121,9 @@ def _setup_pact_session(monkeypatch, tmp_path, with_marker=False,
             json.dumps({"v": 1, "sid": sid, "sig": sig}),
             encoding="utf-8",
         )
+        # A bootstrapped session is a recorded one: the gate suppresses only
+        # when the journal also holds session_start.
+        _seed_session_start(session_dir)
 
     return session_dir
 

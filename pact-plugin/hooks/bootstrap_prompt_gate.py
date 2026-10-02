@@ -7,11 +7,15 @@ Used by: hooks.json UserPromptSubmit hook (no matcher — fires on every prompt)
 
 Layer 2 of the four-layer bootstrap gate enforcement (#401). On each user
 message, checks for the session-scoped bootstrap-complete marker file:
-  - Marker exists → suppressOutput (zero tokens, sub-ms)
+  - Marker exists and the journal has a session_start → suppressOutput (zero
+    tokens, sub-ms)
   - No marker + PACT team-lead session (is_lead) → inject additionalContext instructing bootstrap.
     When the session journal has no session_start event (session_init did not
     record this lead), the instruction is prefixed with a lead note, and the
     lead is recorded here instead: see _record_unrecorded_lead
+  - Marker exists but the journal has no session_start (the marker writer
+    stamped first, in parallel on the same prompt) + team-lead → the lead note
+    and the recording, with no bootstrap instruction
   - Non-PACT session (no context file) → no-op passthrough
   - Non-lead / plain primary frame (not is_lead) → no-op passthrough
     (NOT a teammate: teammates have no UserPromptSubmit-fire path)
@@ -105,7 +109,7 @@ try:
     from shared.stale_session import (
         detect_stale_session_block as _detect_stale_session_block,
     )
-    from shared.session_journal import read_last_event_from
+    from shared.session_journal import _journal_path_from
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_advisory("module imports", _module_load_error)
 
@@ -152,12 +156,40 @@ _NOT_TREATED_AS_LEAD_NOTE = (
 # site and tests are behavior-identical.
 
 
+def _journal_has_session_start(session_dir: str) -> bool:
+    """True once the session journal holds a session_start event.
+
+    Reads FORWARD and stops at the first one. Do not swap in the tail-window
+    reader: session_start sits at the head of a recorded journal (session_init
+    writes it as the session starts, this hook at its first prompt), so a
+    forward scan reads one line where a tail read would read the whole window
+    and then fall back to a full scan. Only a journal with no session_start is
+    read to the end, and that is an unrecorded lead, whose recording writes
+    one. A line that does not parse is skipped, and a journal that cannot be
+    read counts as having none.
+    """
+    try:
+        with _journal_path_from(session_dir).open("rb") as journal:
+            for line in journal:
+                if b"session_start" not in line:
+                    continue
+                try:
+                    if json.loads(line).get("type") == "session_start":
+                        return True
+                except (ValueError, AttributeError):
+                    continue
+    except OSError:
+        pass
+    return False
+
+
 def _check_bootstrap_needed(input_data: dict) -> str | None:
     """Determine whether a bootstrap instruction should be injected.
 
     Returns the additionalContext string to inject, or None if the gate
-    should be a no-op (marker exists, non-PACT session, or a plain/non-lead
-    primary frame — NOT a teammate; teammates never fire UserPromptSubmit).
+    should be a no-op (marker exists and the session is recorded, non-PACT
+    session, or a plain/non-lead primary frame — NOT a teammate; teammates
+    never fire UserPromptSubmit).
     """
     # Initialize context (sets session-scoped path from input_data)
     pact_context.init(input_data)
@@ -169,18 +201,24 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
     # healed session still flows into the no-marker inject branch below.
     pact_context.heal_context_if_missing(input_data)
 
-    # Fast path: check marker first (cheapest check, most common case)
     session_dir = pact_context.get_session_dir()
     if not session_dir:
         # No session dir → non-PACT session or uninitialized context → no-op
         return None
 
+    # Fast path: the marker is set AND the journal records this session →
+    # suppress (zero tokens). The marker alone is not enough: the marker writer
+    # runs in parallel on the same prompt and can stamp before this check, and
+    # a lead session_init did not record would then never be recorded. The
+    # journal test is a forward scan that stops at the head of a recorded
+    # journal, so it stays sub-ms.
+    #
     # Use the same safe-marker-check helper as the sibling
     # bootstrap_gate.py so both enforcement points share one safe-check
     # contract. The helper enforces leaf-symlink, ancestor-symlink, and
     # marker-content fingerprint defenses (post-#662).
-    if is_marker_set(Path(session_dir)):
-        # Bootstrap already done → suppress (zero tokens)
+    marker_set = is_marker_set(Path(session_dir))
+    if marker_set and _journal_has_session_start(session_dir):
         return None
 
     # Lead-role gate (#878): only the team-lead drives the bootstrap ritual.
@@ -197,14 +235,19 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
     if not pact_context.is_lead(input_data):
         return None
 
-    # Lead session, no marker → inject bootstrap instruction with session
-    # dir. Both branches run ONLY here (lead + no-marker): the marker-set fast
-    # path above keeps its zero-tokens/sub-ms contract (no per-prompt file
-    # read), and a marker-set session has by definition completed bootstrap.
+    if marker_set:
+        # Bootstrap is complete but the journal has no session_start: record
+        # this lead, with no bootstrap instruction. A recording that fails
+        # leaves no session_start, so the next prompt retries it.
+        return _NOT_TREATED_AS_LEAD_NOTE.rstrip("\n") + _record_unrecorded_lead(
+            input_data, session_dir
+        )
+
+    # Lead session, no marker → inject bootstrap instruction with session dir.
     instruction = _BOOTSTRAP_INSTRUCTION_TEMPLATE.format(
         session_dir_hint=_SESSION_DIR_HINT.format(session_dir=session_dir)
     )
-    if read_last_event_from(session_dir, "session_start") is not None:
+    if _journal_has_session_start(session_dir):
         # Recorded by session_init (or by an earlier prompt here): append the
         # staleness advisory (or "").
         return instruction + (_detect_stale_session_block(input_data) or "")
@@ -222,9 +265,10 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
     """Record a lead session_init did not record; return what follows the
     instruction.
 
-    Reached on a lead prompt with no bootstrap marker and no session_start in
-    the journal. The session_start written here closes that branch, so this
-    runs once per session. In order:
+    Reached on a lead prompt with no session_start in the journal, whether or
+    not the bootstrap marker is set. The session_start written here closes
+    that branch, so this runs once per session; a run that fails before it
+    writes session_start runs again on the next prompt. In order:
 
     1. If the project CLAUDE.md holds a Current Session block (both markers),
        read it. When the block names another session, read that session's
@@ -294,6 +338,12 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
                     claim = check_resume_state(
                         _extract_prev_session_dir(env_project_dir)
                     )
+                # NOTHING AFTER THIS REWRITE MAY RAISE. The claim above was
+                # read from the block this call replaces. A raise from here on
+                # returns "" and drops it, and the retry (still no
+                # session_start) finds the block naming this session and reads
+                # no claim. Every later step fails soft. Adding one that can
+                # raise needs per-step handling that still returns the claim.
                 block_status = update_session_info(
                     session_id, team, session_dir, plugin_root
                 )
