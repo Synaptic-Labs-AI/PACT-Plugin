@@ -1,7 +1,10 @@
 {
   "extraPaths": [
     "pact-plugin/hooks",
+    "pact-plugin/hooks/shared",
     "pact-plugin/skills/pact-memory",
-    "pact-plugin/skills/pact-memory/scripts"
+    "pact-plugin/skills/pact-memory/scripts",
+    "pact-plugin/scripts",
+    "pact-plugin/tests/fixtures"
   ]
 }
