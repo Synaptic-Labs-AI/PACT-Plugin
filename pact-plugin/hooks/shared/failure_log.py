@@ -231,9 +231,11 @@ def read_failures() -> list[dict[str, Any]]:
             if not stripped:
                 continue
             try:
-                entries.append(json.loads(stripped))
+                entry = json.loads(stripped)
             except (json.JSONDecodeError, ValueError, RecursionError):
                 continue  # Skip malformed or too-deep lines
+            if isinstance(entry, dict):  # and a line that is not an object
+                entries.append(entry)
         return entries
     except Exception:
         return []

@@ -699,8 +699,12 @@ class FileBasedRouter(UpdateRouter):
                 line = line.strip()
                 if line:
                     try:
-                        updates.append(json.loads(line))
+                        update = json.loads(line)
                     except (json.JSONDecodeError, RecursionError):
+                        update = None
+                    if isinstance(update, dict):
+                        updates.append(update)
+                    else:
                         logger.debug("Skipping malformed inbox line")
         except OSError:
             pass

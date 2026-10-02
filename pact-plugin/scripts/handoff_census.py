@@ -90,7 +90,7 @@ def journal_handoffs(root: Path):
                 event = json.loads(line)
             except (json.JSONDecodeError, RecursionError):
                 continue
-            if event.get("type") != "agent_handoff":
+            if not isinstance(event, dict) or event.get("type") != "agent_handoff":
                 continue
             keys = event.get("handoff")
             if isinstance(keys, list):

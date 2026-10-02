@@ -49,7 +49,9 @@ class TestSessionJournal:
         from shared.session_journal import read_last_event_from
         # The scan runs from the end, so the deep line comes first.
         sd = self._journal(tmp_path, json.dumps(_PAUSE), _deep("session_paused"))
-        assert read_last_event_from(sd, "session_paused")["pr_number"] == 6161
+        event = read_last_event_from(sd, "session_paused")
+        assert event is not None
+        assert event["pr_number"] == 6161
 
     def test_the_pause_claim_survives_a_deep_line(self, tmp_path):
         from shared.session_resume import check_resume_state
