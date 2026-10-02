@@ -1365,7 +1365,8 @@ def _read_events_at(
                 if not _ts_ge(event.get("ts"), since):
                     continue
                 events.append(event)
-            except (json.JSONDecodeError, ValueError):
+            except (json.JSONDecodeError, ValueError, RecursionError):
+                # RecursionError: a line nested too deep to parse is malformed too.
                 continue  # Skip malformed lines
         return events
 
@@ -1500,7 +1501,8 @@ def _scan_lines_for_event(
                 ):
                     continue
                 return event
-        except (json.JSONDecodeError, ValueError):
+        except (json.JSONDecodeError, ValueError, RecursionError):
+            # RecursionError: a line nested too deep to parse is malformed too.
             continue
     return None
 

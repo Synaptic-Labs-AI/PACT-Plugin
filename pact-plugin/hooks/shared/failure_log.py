@@ -168,7 +168,7 @@ def append_failure(
                     continue
                 try:
                     json.loads(stripped)
-                except (json.JSONDecodeError, ValueError):
+                except (json.JSONDecodeError, ValueError, RecursionError):
                     continue
                 kept.append(stripped)
 
@@ -232,8 +232,8 @@ def read_failures() -> list[dict[str, Any]]:
                 continue
             try:
                 entries.append(json.loads(stripped))
-            except (json.JSONDecodeError, ValueError):
-                continue  # Skip malformed lines
+            except (json.JSONDecodeError, ValueError, RecursionError):
+                continue  # Skip malformed or too-deep lines
         return entries
     except Exception:
         return []

@@ -269,8 +269,8 @@ def resolve(session_id: str) -> str | None:
                 continue
             try:
                 obj = json.loads(line)
-            except ValueError:
-                continue  # skip a torn/garbage line, never raise
+            except (ValueError, RecursionError):
+                continue  # skip a torn/garbage/too-deep line, never raise
             if isinstance(obj, dict) and obj.get("session_id") == session_id:
                 value = obj.get("value")
                 if isinstance(value, str):

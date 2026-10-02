@@ -1038,9 +1038,10 @@ def _prune_registry_dead_teams(
                         # below, which would turn "I cannot tell" back into
                         # "drop it". Bail out instead, pruning nothing.
                         return 0
-        except ValueError:
-            # Malformed JSON only. Do NOT widen this back to OSError: that is
-            # the route by which an unobservable team becomes a dropped line.
+        except (ValueError, RecursionError):
+            # Malformed JSON only, a line nested too deep to parse included.
+            # Do NOT widen this back to OSError: that is the route by which
+            # an unobservable team becomes a dropped line.
             keep = False
         if keep:
             kept_lines.append(stripped)

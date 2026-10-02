@@ -88,7 +88,7 @@ def journal_handoffs(root: Path):
                 continue
             try:
                 event = json.loads(line)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, RecursionError):
                 continue
             if event.get("type") != "agent_handoff":
                 continue
