@@ -488,7 +488,17 @@ def _reap_slug_dir(
             if entry.name == current_session_id:
                 continue
             try:
-                age_days = (time.time() - entry.stat().st_mtime) / 86400
+                # Age by the newer of the dir's own mtime and its newest
+                # child's: a journal append or an in-place rewrite does not
+                # move the dir's own mtime (see _dir_max_child_mtime), so a
+                # live session would otherwise age out. The max can only make
+                # an entry younger than its own mtime says. None means the
+                # children could not be observed: keep the dir.
+                child_mtime = _dir_max_child_mtime(entry, glob="*")
+                if child_mtime is None:
+                    continue
+                newest = max(entry.stat().st_mtime, child_mtime)
+                age_days = (time.time() - newest) / 86400
                 # Select TTL per entry: checkpointed sessions (paused OR
                 # refreshed) get the extended threshold; active sessions
                 # get the standard one.

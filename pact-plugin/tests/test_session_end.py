@@ -22,6 +22,18 @@ from unittest.mock import patch
 import pytest
 
 
+def _backdate(session_dir, stamp):
+    """Set a session dir's mtime and every direct child's to ``stamp``.
+
+    The session reaper ages a dir by the newer of its own mtime and its newest
+    child's, so a fixture that backdates only the dir leaves it looking fresh.
+    """
+    import os as _os
+    for child in Path(session_dir).iterdir():
+        _os.utime(str(child), (stamp, stamp), follow_symlinks=False)
+    _os.utime(str(session_dir), (stamp, stamp))
+
+
 class TestGetProjectSlug:
     """Tests for session_end.get_project_slug() — reads via get_project_dir()."""
 
@@ -1239,22 +1251,20 @@ class TestCleanupOldSessions:
         (session_dir / "pact-session-context.json").write_text("{}")
         if age_days > 0:
             old_time = _time.time() - (age_days * 86400)
-            import os as _os
-            _os.utime(str(session_dir), (old_time, old_time))
+            _backdate(session_dir, old_time)
         return session_dir
 
     def _age_dir(self, session_dir, age_days):
-        """Helper: backdate a directory's mtime.
+        """Helper: backdate a session dir and its children.
 
         Separate from _create_session_dir because writing the journal into
         the directory bumps the parent mtime. The age must be applied AFTER
         every child write, or the entry looks fresh and the age test skips
         it before the carrier guard is ever reached.
         """
-        import os as _os
         import time as _time
         old_time = _time.time() - (age_days * 86400)
-        _os.utime(str(session_dir), (old_time, old_time))
+        _backdate(session_dir, old_time)
 
     def _write_journal(self, session_dir, event_types):
         """Helper: write one journal line for each event type given.
@@ -2269,14 +2279,13 @@ class TestCleanupOldSessionsBoundary:
 
     def _create_session_dir(self, slug_dir, session_id, age_days=0):
         """Helper: create a session directory with controlled mtime."""
-        import os as _os
         import time as _time
         session_dir = slug_dir / session_id
         session_dir.mkdir(parents=True, exist_ok=True)
         (session_dir / "pact-session-context.json").write_text("{}")
         if age_days > 0:
             old_time = _time.time() - (age_days * 86400)
-            _os.utime(str(session_dir), (old_time, old_time))
+            _backdate(session_dir, old_time)
         return session_dir
 
     def test_exactly_at_boundary_not_deleted(self, tmp_path):
@@ -2286,7 +2295,6 @@ class TestCleanupOldSessionsBoundary:
         We use 6.9 days (safely under 7) to avoid flakiness from time
         elapsing between utime() and the stat() call inside cleanup.
         """
-        import os as _os
         import time as _time
         from session_end import cleanup_old_sessions
 
@@ -2300,7 +2308,7 @@ class TestCleanupOldSessionsBoundary:
         (boundary_dir / "context.json").write_text("{}")
         # Set to 6.9 days — safely under threshold
         under_time = _time.time() - (6.9 * 86400)
-        _os.utime(str(boundary_dir), (under_time, under_time))
+        _backdate(boundary_dir, under_time)
 
         cleanup_old_sessions(
             project_slug="my-project",
@@ -2314,7 +2322,6 @@ class TestCleanupOldSessionsBoundary:
 
     def test_just_over_boundary_deleted(self, tmp_path):
         """Directory at 7.01 days should be deleted (strictly greater than)."""
-        import os as _os
         import time as _time
         from session_end import cleanup_old_sessions
 
@@ -2327,7 +2334,7 @@ class TestCleanupOldSessionsBoundary:
         old_dir.mkdir(parents=True, exist_ok=True)
         (old_dir / "context.json").write_text("{}")
         over_time = _time.time() - (7.01 * 86400)
-        _os.utime(str(old_dir), (over_time, over_time))
+        _backdate(old_dir, over_time)
 
         cleanup_old_sessions(
             project_slug="my-project",
@@ -2366,7 +2373,6 @@ class TestCleanupOldSessionsBoundary:
 
     def test_non_empty_old_dir_still_removed(self, tmp_path):
         """Old session dirs with files inside should be fully removed (shutil.rmtree)."""
-        import os as _os
         import time as _time
         from session_end import cleanup_old_sessions
 
@@ -2382,7 +2388,7 @@ class TestCleanupOldSessionsBoundary:
         (old_dir / "some-other-artifact.json").write_text("{}")
         # Set mtime AFTER all writes (writing updates dir mtime on Unix)
         old_time = _time.time() - (31 * 86400)
-        _os.utime(str(old_dir), (old_time, old_time))
+        _backdate(old_dir, old_time)
 
         cleanup_old_sessions(
             project_slug="my-project",
@@ -2754,10 +2760,9 @@ class TestCleanupRefreshedPreservation:
         return session_dir
 
     def _set_age(self, session_dir, age_days):
-        import os as _os
         import time as _time
         old_time = _time.time() - (age_days * 86400)
-        _os.utime(str(session_dir), (old_time, old_time))
+        _backdate(session_dir, old_time)
 
     def _write_journal(self, session_dir, events):
         journal = session_dir / "session-journal.jsonl"
@@ -2872,10 +2877,9 @@ class TestCleanupPausedPreservation:
 
     def _set_age(self, session_dir, age_days):
         """Set directory mtime to simulate age. Call AFTER writing all files."""
-        import os as _os
         import time as _time
         old_time = _time.time() - (age_days * 86400)
-        _os.utime(str(session_dir), (old_time, old_time))
+        _backdate(session_dir, old_time)
 
     def _write_journal(self, session_dir, events):
         """Helper: write events to a session's journal."""
@@ -3095,7 +3099,6 @@ class TestTTLDefault:
 
     def test_29_day_session_kept_at_default(self, tmp_path):
         """A 29-day-old session should be kept with default TTL."""
-        import os as _os
         import time as _time
         from session_end import cleanup_old_sessions
 
@@ -3113,7 +3116,7 @@ class TestTTLDefault:
         recent_dir.mkdir(parents=True, exist_ok=True)
         (recent_dir / "context.json").write_text("{}")
         old_time = _time.time() - (29 * 86400)
-        _os.utime(str(recent_dir), (old_time, old_time))
+        _backdate(recent_dir, old_time)
 
         # Use default max_age_days (should be 30)
         cleanup_old_sessions(
@@ -3126,7 +3129,6 @@ class TestTTLDefault:
 
     def test_31_day_session_cleaned_at_default(self, tmp_path):
         """A 31-day-old session should be cleaned with default TTL."""
-        import os as _os
         import time as _time
         from session_end import cleanup_old_sessions
 
@@ -3144,7 +3146,7 @@ class TestTTLDefault:
         old_dir.mkdir(parents=True, exist_ok=True)
         (old_dir / "context.json").write_text("{}")
         old_time = _time.time() - (31 * 86400)
-        _os.utime(str(old_dir), (old_time, old_time))
+        _backdate(old_dir, old_time)
 
         # Use default max_age_days (should be 30)
         cleanup_old_sessions(
@@ -3990,7 +3992,6 @@ class TestCleanupOldSessionsUnchangedRegression:
 
     def test_parent_reaper_still_reaps_uuid_sibling(self, tmp_path):
         """Smoke regression: basic UUID reap behavior intact."""
-        import os as _os
         import time as _time
         from session_end import cleanup_old_sessions
 
@@ -4002,7 +4003,7 @@ class TestCleanupOldSessionsUnchangedRegression:
             d.mkdir(parents=True)
             (d / "ctx.json").write_text("{}")
         old_time = _time.time() - (40 * 86400)
-        _os.utime(str(slug_dir / old), (old_time, old_time))
+        _backdate(slug_dir / old, old_time)
 
         cleanup_old_sessions(
             project_slug="proj",
@@ -4666,13 +4667,13 @@ class TestReaperSymlinkHandling:
         link_uuid = "22222222-3333-4444-5555-666666666666"
 
         # Current + real-old sessions
-        import time as _time, os as _os
+        import time as _time
         for sid in (current, real_old):
             d = slug_dir / sid
             d.mkdir()
             (d / "ctx.json").write_text("{}")
         old_time = _time.time() - (40 * 86400)
-        _os.utime(str(slug_dir / real_old), (old_time, old_time))
+        _backdate(slug_dir / real_old, old_time)
 
         # Symlink with a valid UUID name pointing at aged external target
         victim = self._aged_target(tmp_path, "sessions")
@@ -5757,3 +5758,86 @@ class TestSentinelFalseReapHardening:
         )
         assert skipped == 1
         assert d.exists()
+
+
+class TestSessionDirAgedByNewestChild:
+    """cleanup_old_sessions ages a session dir by the newer of its own mtime
+    and its newest child's. Appending to the journal, or rewriting a file in
+    place, does not move the dir's own mtime, so a live session whose dir has
+    had no entry created or removed for a whole TTL must still survive."""
+
+    CURRENT = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    OTHER = "11111111-2222-3333-4444-555555555555"
+
+    @staticmethod
+    def _set_age(path, days):
+        import os as _os
+        import time as _time
+        stamp = _time.time() - days * 86400
+        _os.utime(str(path), (stamp, stamp))
+
+    def _session(self, tmp_path, dir_days, child_days, checkpointed=False):
+        session_dir = tmp_path / "proj" / self.OTHER
+        session_dir.mkdir(parents=True)
+        events = [{"v": 1, "type": "session_start", "ts": "2026-01-01T00:00:00Z"}]
+        if checkpointed:
+            events.append({"v": 1, "type": "session_paused", "ts": "2026-01-01T00:00:00Z",
+                           "pr_number": 1, "pr_url": "https://example.invalid/pull/1",
+                           "branch": "b", "worktree_path": "/tmp/x",
+                           "consolidation_completed": True})
+        (session_dir / "session-journal.jsonl").write_text(
+            "".join(json.dumps(e) + "\n" for e in events))
+        (session_dir / "pact-session-context.json").write_text("{}")
+        for child in session_dir.iterdir():
+            self._set_age(child, child_days)
+        self._set_age(session_dir, dir_days)  # last: child writes bump it
+        return session_dir
+
+    def _reap(self, tmp_path):
+        from session_end import cleanup_old_sessions
+        cleanup_old_sessions(project_slug="proj", current_session_id=self.CURRENT,
+                             sessions_dir=str(tmp_path), max_age_days=30,
+                             paused_max_age_days=180)
+
+    def test_an_old_dir_with_a_fresh_journal_survives(self, tmp_path):
+        session_dir = self._session(tmp_path, dir_days=40, child_days=0)
+        self._reap(tmp_path)
+        assert session_dir.exists()
+
+    def test_an_old_dir_with_old_children_is_reaped(self, tmp_path):
+        session_dir = self._session(tmp_path, dir_days=40, child_days=40)
+        self._reap(tmp_path)
+        assert not session_dir.exists()
+
+    def test_a_checkpointed_dir_inside_its_longer_ttl_survives(self, tmp_path):
+        session_dir = self._session(tmp_path, dir_days=100, child_days=100,
+                                    checkpointed=True)
+        self._reap(tmp_path)
+        assert session_dir.exists()
+
+    def test_a_checkpointed_dir_past_its_longer_ttl_is_reaped(self, tmp_path):
+        session_dir = self._session(tmp_path, dir_days=200, child_days=200,
+                                    checkpointed=True)
+        self._reap(tmp_path)
+        assert not session_dir.exists()
+
+    def test_a_fresh_dir_with_old_children_survives(self, tmp_path):
+        """A recent create or unlink moved the dir's own mtime, which then
+        outranks the older children: the age can only get younger."""
+        session_dir = self._session(tmp_path, dir_days=0, child_days=40)
+        self._reap(tmp_path)
+        assert session_dir.exists()
+
+    def test_children_that_cannot_be_observed_keep_the_dir(self, tmp_path, monkeypatch):
+        session_dir = self._session(tmp_path, dir_days=40, child_days=40)
+        real_lstat = Path.lstat
+
+        def lstat(path, *args, **kwargs):
+            if path.parent == session_dir:
+                raise PermissionError(13, "denied", str(path))
+            return real_lstat(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "lstat", lstat)
+        self._reap(tmp_path)
+        monkeypatch.undo()
+        assert session_dir.exists()
