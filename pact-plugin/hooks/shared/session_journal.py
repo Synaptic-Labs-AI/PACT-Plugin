@@ -99,10 +99,13 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # path only (under R3, the event is dropped entirely when stdin lacks
     # session_id to avoid an unreapable `unknown-*` directory leak).
     # hooks/bootstrap_prompt_gate.py writes it once for a lead session_init did
-    # not record, at the first prompt that records it; a failed recording or
-    # append is retried on later prompts. Of these fields, session_id and
-    # project_dir are the load-bearing fields downstream consumers depend on;
-    # team is redundant with CLAUDE.md and worktree is empty at write time.
+    # not record, at the first prompt that records it. A recording whose
+    # CLAUDE.md block rewrite fails in a way that may clear is retried on
+    # later prompts, and the third such failure records the lead anyway; a
+    # failed append is retried quietly on later prompts. Of these fields,
+    # session_id and project_dir are the load-bearing fields downstream
+    # consumers depend on; team is redundant with CLAUDE.md and worktree is
+    # empty at write time.
     "session_start": {"session_id": str, "project_dir": str},
     # shared/compaction_owner.py writes compaction_attributed, best effort, once a
     # settle's write is recorded as acted, so there is at most one row per
