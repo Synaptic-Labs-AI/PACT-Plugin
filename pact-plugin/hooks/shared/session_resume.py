@@ -19,6 +19,7 @@ Manages:
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import sys
@@ -106,6 +107,22 @@ _PROMPT_CONTROL_CHARS_RE = re.compile("[\\x00-\\x1f\\x7f-\\x9f\\u2028\\u2029]+")
 # a long free-form string or a non-string type in the `phase` field.
 _PHASE_TRUNCATION_LIMIT = 80
 
+
+class TransientSessionInfoFailure(str):
+    """An update_session_info status for a failure that may clear on its own:
+    the lock held past its timeout, or an I/O error. The text is unchanged, so
+    callers that route on its wording see no difference; a caller that retries
+    tests for this type instead of matching the words."""
+
+
+# OSErrors that say the path itself is unusable, so a retry meets the same
+# refusal. Any other errno, and any other exception, may clear and counts as
+# transient.
+_PATH_PRECONDITION_ERRNOS = frozenset(
+    {errno.EACCES, errno.EPERM, errno.EROFS, errno.ENOENT, errno.ENOTDIR}
+)
+
+
 def update_session_info(
     session_id: str,
     team_name: str,
@@ -134,7 +151,8 @@ def update_session_info(
             not a session start, so session_init passes the value already there.
 
     Returns:
-        Status message or None if no action taken.
+        Status message or None if no action taken. A failure that may clear on
+        its own returns a TransientSessionInfoFailure.
     """
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
     if not project_dir:
@@ -433,25 +451,31 @@ def update_session_info(
                 # message in this function tells the user that the Current
                 # Session block stopped updating, which is the failure a
                 # later session inherits when it reads the stale pointer.
-                return (
+                status = (
                     f"Session info failed: {failure_cause(e)}. "
                     "The Current Session block in CLAUDE.md is now stale."
                 )
+                if isinstance(e, OSError) and e.errno in _PATH_PRECONDITION_ERRNOS:
+                    return status
+                return TransientSessionInfoFailure(status)
     except TimeoutError:
-        return (
+        return TransientSessionInfoFailure(
             "Failed to acquire lock on project CLAUDE.md within 5s "
             "(another session_init hook may be running concurrently). "
             "Session info update skipped; will retry on next session start."
         )
-    except OSError:
+    except OSError as e:
         # #1245: lock ACQUISITION PermissionError escapes `except TimeoutError`;
         # catch it at the same skip-and-retry level (the inner except Exception
         # handles only post-acquisition failures, inside the `with file_lock`).
         # Opaque, matching the sibling TimeoutError message -- no path leak.
-        return (
+        status = (
             "Could not acquire lock on project CLAUDE.md "
             "(path precondition not met); session info update skipped."
         )
+        if e.errno in _PATH_PRECONDITION_ERRNOS:
+            return status
+        return TransientSessionInfoFailure(status)
 
 
 def _validate_under_pact_sessions(path: str) -> str | None:

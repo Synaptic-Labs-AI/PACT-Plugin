@@ -412,6 +412,7 @@ class TestTheMarkerWriterCannotPreemptTheRecording:
         failed = _prompt(_WRITER_FIRST, lead, home, env)
 
         assert failed.startswith(_NOTE_MARK) and _VALUES_MARK not in failed
+        assert "PR #5151" not in failed, "the claim waits for the prompt that records"
         assert _events(home, lead, "session_start") == []
         assert not (_sdir(home, lead) / _FLAG).exists(), (
             "a failure before the rewrite leaves no flag, so the next prompt retries")
@@ -517,3 +518,140 @@ class TestTheMarkerWriterCannotPreemptTheRecording:
         assert context == ""
         assert _events(home, lead, "session_start") == []
         assert _block(proj) == before
+
+
+_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
+
+# Loaded by every hook process started with _with_eio on PYTHONPATH: the rename
+# that would put a new CLAUDE.md in place raises EIO.
+_EIO_ON_REPLACE = """
+import errno, os
+_replace = os.replace
+def replace(src, dst, *args, **kwargs):
+    if str(dst).endswith("CLAUDE.md"):
+        raise OSError(errno.EIO, "injected")
+    return _replace(src, dst, *args, **kwargs)
+os.replace = replace
+"""
+
+
+def _with_eio(tmp_path, env):
+    site = tmp_path / "eio-site"
+    site.mkdir(exist_ok=True)
+    (site / "sitecustomize.py").write_text(_EIO_ON_REPLACE, encoding="utf-8")
+    return {**env, "PYTHONPATH": str(site)}
+
+
+class TestATransientRewriteFailureLeavesTheRecordingOpen:
+    """When the block rewrite fails for a reason that may clear (the lock held
+    past its timeout, an I/O error), nothing is recorded: the note goes out,
+    and the values and the claim wait for the prompt that records. A skip by
+    design still closes the recording."""
+
+    @staticmethod
+    def _assert_open(out, home, lead, proj, before):
+        assert out.startswith(_NOTE_MARK)
+        assert _VALUES_MARK not in out and "PR #5151" not in out
+        assert _events(home, lead, "session_start") == []
+        assert not (_sdir(home, lead) / _FLAG).exists()
+        assert _block(proj) == before
+
+    @staticmethod
+    def _assert_recorded_once(out, home, lead, proj):
+        assert _VALUES_MARK in out and out.count("PR #5151") == 1
+        assert f"--resume {lead}" in _block(proj)
+
+    def test_a_lock_held_past_its_timeout_retries_on_the_next_prompt(self, tmp_path):
+        import fcntl
+        home, proj, env, parent, lead = _unrecorded_lead_with_secretary(tmp_path)
+        before = _block(proj)
+        fd = os.open(str(proj / ".claude" / ".CLAUDE.md.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            held = _prompt(_WRITER_FIRST, lead, home, env)
+        finally:
+            os.close(fd)
+
+        self._assert_open(held, home, lead, proj, before)
+        self._assert_recorded_once(_prompt(_WRITER_FIRST, lead, home, env), home, lead, proj)
+        assert len(_events(home, lead, "session_start")) == 1
+        assert len(_events(home, lead, "session_resumption_surfaced")) == 1
+        assert _prompt(_WRITER_FIRST, lead, home, env) == ""
+
+    @pytest.mark.parametrize("journal_works", [True, False], ids=["journal", "no-journal"])
+    def test_an_io_failure_retries_on_the_next_prompt(self, tmp_path, journal_works):
+        home, proj, env, parent, lead = _unrecorded_lead_with_secretary(tmp_path)
+        if not journal_works:
+            (_sdir(home, lead) / "session-journal.jsonl").mkdir(parents=True)
+        before = _block(proj)
+
+        failed = _prompt(_WRITER_FIRST, lead, home, _with_eio(tmp_path, env))
+
+        if journal_works:
+            self._assert_open(failed, home, lead, proj, before)
+        else:
+            assert failed.startswith(_NOTE_MARK) and _VALUES_MARK not in failed
+            assert not (_sdir(home, lead) / _FLAG).exists()
+            assert _block(proj) == before
+        recorded = _prompt(_WRITER_FIRST, lead, home, env)
+        self._assert_recorded_once(recorded, home, lead, proj)
+        if journal_works:
+            assert len(_events(home, lead, "session_start")) == 1
+        else:
+            assert (_sdir(home, lead) / _FLAG).exists()
+        assert _prompt(_WRITER_FIRST, lead, home, env) == ""
+
+    @pytest.mark.skipif(_ROOT, reason="root ignores directory permissions")
+    def test_a_directory_that_refuses_the_write_closes_the_recording(self, tmp_path):
+        """EACCES from the write itself, with the lock file already there: the
+        same refusal as a lock that cannot be created, so the same outcome."""
+        home, proj, env, parent, lead = _unrecorded_lead_with_secretary(tmp_path)
+        before = _block(proj)
+        dot_claude = proj / ".claude"
+        (dot_claude / ".CLAUDE.md.lock").touch()
+        dot_claude.chmod(0o500)
+        try:
+            out = _prompt(_WRITER_FIRST, lead, home, env)
+            again = _prompt(_WRITER_FIRST, lead, home, env)
+        finally:
+            dot_claude.chmod(0o700)
+
+        assert _VALUES_MARK in out and out.count("PR #5151") == 1
+        assert "Session info failed: PermissionError (EACCES)" in out
+        assert again == ""
+        assert len(_events(home, lead, "session_start")) == 1
+        assert _block(proj) == before
+
+    @pytest.mark.skipif(_ROOT, reason="root ignores directory permissions")
+    def test_a_lock_that_cannot_be_created_closes_the_recording(self, tmp_path):
+        """EACCES creating the lock file: the path itself is unusable, so the
+        skip stands and the lead is recorded without the rewrite."""
+        home, proj, env, parent, lead = _unrecorded_lead_with_secretary(tmp_path)
+        before = _block(proj)
+        dot_claude = proj / ".claude"
+        (dot_claude / ".CLAUDE.md.lock").unlink(missing_ok=True)
+        dot_claude.chmod(0o500)
+        try:
+            out = _prompt(_WRITER_FIRST, lead, home, env)
+            again = _prompt(_WRITER_FIRST, lead, home, env)
+        finally:
+            dot_claude.chmod(0o700)
+
+        assert _VALUES_MARK in out and out.count("PR #5151") == 1
+        assert "Could not acquire lock on project CLAUDE.md" in out
+        assert again == ""
+        assert len(_events(home, lead, "session_start")) == 1
+        assert _block(proj) == before
+
+    def test_a_file_that_is_not_utf8_closes_the_recording(self, tmp_path):
+        home, proj, env, parent, lead = _unrecorded_lead_with_secretary(tmp_path)
+        md = proj / ".claude" / "CLAUDE.md"
+        data = md.read_bytes() + b"caf\xe9\n"
+        md.write_bytes(data)
+
+        out = _prompt(_WRITER_FIRST, lead, home, env)
+
+        assert _VALUES_MARK in out and "not valid UTF-8" in out
+        assert _prompt(_WRITER_FIRST, lead, home, env) == ""
+        assert len(_events(home, lead, "session_start")) == 1
+        assert md.read_bytes() == data

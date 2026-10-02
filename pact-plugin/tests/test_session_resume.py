@@ -3306,3 +3306,101 @@ class TestMigrateAndSessionUpdate:
         memory_region = final[memory_start_idx:memory_end_idx]
         assert "sess-direct" not in memory_region
         assert SESSION_START not in memory_region
+
+
+class TestUpdateSessionInfoMarksTransientFailures:
+    """A failure that may clear on retry comes back as a
+    TransientSessionInfoFailure, with the same text as before, so the
+    first-prompt recording can leave itself open; a skip by design comes back
+    as a plain str."""
+
+    _BLOCK = ("<!-- SESSION_START -->\n## Current Session\n- Resume: `x`\n"
+              "<!-- SESSION_END -->\n")
+
+    # (errno, transient): the path-precondition errnos close; any other retries.
+    _ERRNOS = [
+        (errno.ENOSPC, True), (errno.EAGAIN, True), (errno.EINTR, True),
+        (errno.EBUSY, True), (errno.EIO, True),
+        (errno.EACCES, False), (errno.EPERM, False), (errno.EROFS, False),
+        (errno.ENOENT, False), (errno.ENOTDIR, False),
+    ]
+    _ERRNO_IDS = [f"{errno.errorcode[code]}-{transient}" for code, transient in _ERRNOS]
+
+    def _project(self, tmp_path, monkeypatch):
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".claude" / "CLAUDE.md").write_text(self._BLOCK, encoding="utf-8")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+
+    @staticmethod
+    def _lock_raising(error):
+        import contextlib
+
+        @contextlib.contextmanager
+        def lock(_target):
+            raise error
+            yield  # pragma: no cover
+
+        return lock
+
+    def _update(self):
+        from shared.session_resume import update_session_info
+        return update_session_info("sid", "team", "/tmp/s", "/tmp/p")
+
+    def test_a_lock_timeout_is_transient(self, tmp_path, monkeypatch):
+        from shared import session_resume
+        self._project(tmp_path, monkeypatch)
+        monkeypatch.setattr(session_resume, "file_lock", self._lock_raising(TimeoutError()))
+        result = self._update()
+        assert isinstance(result, session_resume.TransientSessionInfoFailure)
+        assert result.startswith("Failed to acquire lock on project CLAUDE.md within 5s")
+
+    def _update_with_write_raising(self, tmp_path, monkeypatch, error):
+        from shared import session_resume
+        self._project(tmp_path, monkeypatch)
+
+        def fail(*_args, **_kwargs):
+            raise error
+
+        monkeypatch.setattr(session_resume, "_atomic_write_text", fail)
+        return self._update()
+
+    @pytest.mark.parametrize("code, transient", _ERRNOS, ids=_ERRNO_IDS)
+    def test_an_io_backstop_error_is_classified_by_errno(
+        self, tmp_path, monkeypatch, code, transient
+    ):
+        from shared.session_resume import TransientSessionInfoFailure
+        result = self._update_with_write_raising(tmp_path, monkeypatch, OSError(code, "io"))
+        assert result.startswith("Session info failed: ")
+        assert isinstance(result, TransientSessionInfoFailure) is transient
+
+    def test_a_backstop_cause_that_is_not_an_oserror_is_transient(self, tmp_path, monkeypatch):
+        from shared.session_resume import TransientSessionInfoFailure
+        error = UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed")
+        result = self._update_with_write_raising(tmp_path, monkeypatch, error)
+        assert result.startswith("Session info failed: ")
+        assert isinstance(result, TransientSessionInfoFailure)
+
+    def test_a_containment_refusal_is_by_design(self, tmp_path, monkeypatch):
+        from shared import session_resume
+        from shared.claude_md_manager import ContainmentError
+        self._project(tmp_path, monkeypatch)
+
+        def refuse(*_args, **_kwargs):
+            raise ContainmentError("no")
+
+        monkeypatch.setattr(session_resume, "_atomic_write_text", refuse)
+        result = self._update()
+        assert result == "Session info skipped: path precondition not met."
+        assert not isinstance(result, session_resume.TransientSessionInfoFailure)
+
+    @pytest.mark.parametrize("code, transient", _ERRNOS, ids=_ERRNO_IDS)
+    def test_a_lock_acquisition_error_is_classified_by_errno(
+        self, tmp_path, monkeypatch, code, transient
+    ):
+        from shared import session_resume
+        self._project(tmp_path, monkeypatch)
+        monkeypatch.setattr(session_resume, "file_lock",
+                            self._lock_raising(OSError(code, "lock")))
+        result = self._update()
+        assert result.startswith("Could not acquire lock on project CLAUDE.md")
+        assert isinstance(result, session_resume.TransientSessionInfoFailure) is transient

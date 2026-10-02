@@ -281,8 +281,8 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
             return None
         # Bootstrap is complete but the journal has no session_start: record
         # this lead, with no bootstrap instruction. A recording that fails
-        # before its rewrite leaves no session_start and no flag, so the next
-        # prompt retries it.
+        # before its rewrite, or whose rewrite fails in a way that may clear,
+        # leaves no session_start and no flag, so the next prompt retries it.
         return _NOT_TREATED_AS_LEAD_NOTE.rstrip("\n") + _record_unrecorded_lead(
             input_data, session_dir
         )
@@ -312,8 +312,10 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
     Reached on a lead prompt with no session_start in the journal and no
     lead-recorded flag, whether or not the bootstrap marker is set. The
     session_start written here (or the flag, when that append fails) closes
-    that branch, so this runs once per session; a run that raises before its
-    block rewrite writes neither and runs again on the next prompt. In order:
+    that branch, so this runs once per session. A run that raises before its
+    block rewrite, or whose rewrite fails in a way that may clear (the lock
+    held past its timeout, an I/O error), writes neither and returns "", so
+    the note goes out alone and the next prompt runs this again. In order:
 
     1. If the project CLAUDE.md holds a Current Session block (both markers),
        read it. When the block names another session, read that session's
@@ -322,7 +324,8 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
        Session dir of a project that moved). A file with no block, and a
        missing file, are left alone: this never creates or migrates CLAUDE.md.
        A file that is not valid UTF-8 is left alone too, and the skip is
-       reported after the session values.
+       reported after the session values. A skip like that one, which the
+       next prompt would meet again, still records the lead.
     2. Record the worktree identity, as session_init does for a lead.
     3. Append session_start (source "prompt") and, when a claim was read,
        session_resumption_surfaced. Both follow every read above. When the
@@ -333,10 +336,10 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
        session_start, so whichever hook runs first, the old block is read
        before anything replaces it.
 
-    Returns the session-value sentence, followed by the claim. A fork's
-    transcript carries its parent's session values, so the sentence says that
-    these replace them. Never raises: on any error it returns "", and the note
-    and instruction still go out.
+    Returns the session-value sentence, followed by the claim, on the run
+    that records. A fork's transcript carries its parent's session values, so
+    the sentence says that these replace them. Never raises: on any error it
+    returns "", and the note and instruction still go out.
     """
     if pact_context._is_unknown_or_missing_session(input_data.get("session_id")):
         return ""
@@ -354,6 +357,7 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
         from shared.session_journal import append_event, make_event
         from shared.session_resume import (
             RESUMPTION_MARKER_MISSING_DIRECTIVE,
+            TransientSessionInfoFailure,
             _extract_prev_session_dir,
             check_resume_state,
             format_session_substitutions,
@@ -395,6 +399,16 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
                 block_status = update_session_info(
                     session_id, team, session_dir, plugin_root
                 )
+                if isinstance(block_status, TransientSessionInfoFailure):
+                    # The block was not replaced and may be next time: record
+                    # nothing, so the next prompt reads the same block, claim
+                    # and all, and tries again.
+                    print(
+                        "bootstrap_prompt_gate: could not record this lead "
+                        f"session: {block_status}",
+                        file=sys.stderr,
+                    )
+                    return ""
         _record_worktree_identity(session_id, project_dir)
         if not _append_session_start(input_data, session_dir):
             # The journal is not writable: the flag stands in for
