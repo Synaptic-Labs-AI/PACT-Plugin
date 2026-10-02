@@ -5841,3 +5841,89 @@ class TestSessionDirAgedByNewestChild:
         self._reap(tmp_path)
         monkeypatch.undo()
         assert session_dir.exists()
+
+
+class TestMaxChildMtimeObservesNonPositiveMtimes:
+    """_dir_max_child_mtime returns None only when no child could be
+    observed. A child whose mtime is 0 or earlier (1970 or before) was
+    observed, so its mtime is the answer, and the three reapers age the dir
+    by it instead of keeping it forever."""
+
+    @staticmethod
+    def _stamp(path, mtime):
+        import os as _os
+        _os.utime(str(path), (mtime, mtime))
+
+    def _dir(self, parent, name, child_mtimes, dir_mtime=None):
+        d = parent / name
+        d.mkdir(parents=True)
+        for i, mtime in enumerate(child_mtimes, start=1):
+            child = d / f"{i}.json"
+            child.write_text("{}")
+            self._stamp(child, mtime)
+        if dir_mtime is not None:
+            self._stamp(d, dir_mtime)
+        return d
+
+    def test_children_at_zero_return_zero(self, tmp_path):
+        from session_end import _dir_max_child_mtime
+        assert _dir_max_child_mtime(self._dir(tmp_path, "d", [0, 0])) == 0.0
+
+    def test_children_before_1970_return_the_newest(self, tmp_path):
+        from session_end import _dir_max_child_mtime
+        assert _dir_max_child_mtime(self._dir(tmp_path, "d", [-100, -50])) == -50.0
+
+    def test_a_fresh_child_beside_a_zero_one_wins(self, tmp_path):
+        import time as _time
+        from session_end import _dir_max_child_mtime
+        now = int(_time.time())
+        assert _dir_max_child_mtime(self._dir(tmp_path, "d", [0, now])) == now
+
+    def test_children_that_cannot_be_observed_return_none(self, tmp_path, monkeypatch):
+        from session_end import _dir_max_child_mtime
+        d = self._dir(tmp_path, "d", [0, 0])
+        real_lstat = Path.lstat
+
+        def lstat(path, *args, **kwargs):
+            if path.parent == d:
+                raise PermissionError(13, "denied", str(path))
+            return real_lstat(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "lstat", lstat)
+        assert _dir_max_child_mtime(d) is None
+
+    def test_an_empty_dir_returns_its_own_mtime(self, tmp_path):
+        from session_end import _dir_max_child_mtime
+        d = self._dir(tmp_path, "d", [], dir_mtime=12345)
+        assert _dir_max_child_mtime(d) == 12345
+
+    @pytest.mark.parametrize("dir_days, reaped", [(40, True), (0, False)])
+    def test_the_session_reaper_ages_epoch_children_by_its_own_mtime(
+        self, tmp_path, dir_days, reaped
+    ):
+        import time as _time
+        from session_end import cleanup_old_sessions
+        sid = "11111111-2222-3333-4444-555555555555"
+        d = self._dir(tmp_path / "proj", sid, [0],
+                      dir_mtime=_time.time() - dir_days * 86400)
+        cleanup_old_sessions(project_slug="proj",
+                             current_session_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                             sessions_dir=str(tmp_path), max_age_days=30)
+        assert d.exists() is not reaped
+
+    def test_the_teams_reaper_reaps_a_dir_whose_files_all_read_1970(self, tmp_path):
+        from session_end import cleanup_old_teams
+        d = tmp_path / "pact-deadbeef"
+        d.mkdir()
+        (d / "config.json").write_text("{}")
+        self._stamp(d / "config.json", 0)
+        assert cleanup_old_teams(current_team_name="pact-abcd1234",
+                                 teams_base_dir=str(tmp_path), max_age_days=30) == (1, 0)
+        assert not d.exists()
+
+    def test_the_tasks_reaper_reaps_a_dir_whose_files_all_read_1970(self, tmp_path):
+        from session_end import cleanup_old_tasks
+        d = self._dir(tmp_path, "pact-stale", [0])
+        assert cleanup_old_tasks(skip_names={"pact-current"},
+                                 tasks_base_dir=str(tmp_path), max_age_days=30) == (1, 0)
+        assert not d.exists()

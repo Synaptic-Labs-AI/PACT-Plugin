@@ -565,15 +565,16 @@ def _dir_max_child_mtime(entry: Path, glob: str = "*.json") -> float | None:
     upper bound on "when was anything under this dir last touched."
 
     Return values (cycle-5 refinement):
-    - `float`: either a successful max-child mtime, OR the parent's
+    - `float`: either the max mtime of the children whose `lstat()`
+      succeeded (an mtime at or below 0, from 1970 or earlier, is still an
+      observation and is returned as is), OR the parent's
       `lstat().st_mtime` when the dir is legitimately empty (no children
       matched the glob).
-    - `None` sentinel: "could not determine age." Two triggers:
+    - `None` sentinel: "no child could be observed." Two triggers:
       (a) outer `entry.glob()` raised OSError AND parent `lstat()` also
       raised — we can't enumerate OR fall back; OR
-      (b) at least one child was observed but none yielded a positive
-      mtime — EVERY `child.lstat()` raised, or every observed mtime is at
-      or below 0 — distinguishable from empty-dir because we saw children.
+      (b) children were seen but EVERY `child.lstat()` raised —
+      distinguishable from empty-dir because we saw children.
       Callers MUST skip the entry on `None` rather than proceed to an age
       calculation that would collapse "can't observe" into "use parent
       mtime" (a false-reap risk under permission regressions). The tasks
@@ -597,7 +598,7 @@ def _dir_max_child_mtime(entry: Path, glob: str = "*.json") -> float | None:
         Max child mtime, or parent mtime on empty-dir, or `None` sentinel
         when age cannot be determined (see above).
     """
-    latest = 0.0
+    latest = None
     saw_any_child = False
     try:
         for child in entry.glob(glob):
@@ -610,14 +611,17 @@ def _dir_max_child_mtime(entry: Path, glob: str = "*.json") -> float | None:
                 # link's own mtime is the correct signal. lstat is the
                 # portable pre-3.10 form (stat(follow_symlinks=False)
                 # requires Python 3.10+).
-                latest = max(latest, child.lstat().st_mtime)
+                mtime = child.lstat().st_mtime
             except OSError:
                 continue
+            latest = mtime if latest is None else max(latest, mtime)
     except OSError:
         pass
-    if latest > 0.0:
+    # Any observed child answers, whatever its value: an mtime at or below 0
+    # (1970 or earlier) is an observation, not a failure to observe.
+    if latest is not None:
         return latest
-    # latest == 0.0 here. Two distinct scenarios:
+    # No child observed. Two distinct scenarios:
     # - saw_any_child=False: legitimately empty (or outer glob raised
     #   before yielding). Fall back to parent mtime so stale empties age
     #   out — the intended empty-dir semantic.
