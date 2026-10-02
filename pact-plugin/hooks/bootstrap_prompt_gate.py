@@ -176,7 +176,9 @@ def _journal_has_session_start(session_dir: str) -> bool:
                 try:
                     if json.loads(line).get("type") == "session_start":
                         return True
-                except (ValueError, AttributeError):
+                except (ValueError, AttributeError, RecursionError):
+                    # RecursionError: a line nested deeper than the decoder
+                    # can recurse. Uncaught, it would silence the gate.
                     continue
     except OSError:
         pass

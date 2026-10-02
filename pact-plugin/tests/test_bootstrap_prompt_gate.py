@@ -1145,3 +1145,26 @@ class TestSubprocessStalenessE2E:
             f"stderr={result.stderr!r} stdout={result.stdout!r}"
         )
         assert ctx.exists()
+
+
+class TestJournalScanSurvivesAnUnparseableLine:
+    """_journal_has_session_start counts a line json.loads cannot parse as not
+    a session_start. Nesting this deep raises RecursionError on every supported
+    interpreter (3.9 from depth 1000, 3.14 from about 1,000,000), and an escape
+    would reach main's catch-all and silence the gate for the prompt."""
+
+    _DEEP = ('{"type": "x", "note": "session_start", "a": '
+             + "[" * 1_000_000 + "]" * 1_000_000 + "}\n")
+
+    def _scan(self, tmp_path, *lines):
+        from bootstrap_prompt_gate import _journal_has_session_start
+
+        (tmp_path / "session-journal.jsonl").write_text("".join(lines))
+        return _journal_has_session_start(str(tmp_path))
+
+    def test_a_deep_line_before_a_session_start_is_skipped(self, tmp_path):
+        start = json.dumps({"v": 1, "type": "session_start", "ts": "x"}) + "\n"
+        assert self._scan(tmp_path, self._DEEP, start) is True
+
+    def test_a_deep_line_alone_reads_as_no_session_start(self, tmp_path):
+        assert self._scan(tmp_path, self._DEEP) is False
