@@ -3317,14 +3317,16 @@ class TestUpdateSessionInfoMarksTransientFailures:
     _BLOCK = ("<!-- SESSION_START -->\n## Current Session\n- Resume: `x`\n"
               "<!-- SESSION_END -->\n")
 
-    # (errno, transient): the path-precondition errnos close; any other retries.
-    _ERRNOS = [
-        (errno.ENOSPC, True), (errno.EAGAIN, True), (errno.EINTR, True),
-        (errno.EBUSY, True), (errno.EIO, True),
-        (errno.EACCES, False), (errno.EPERM, False), (errno.EROFS, False),
-        (errno.ENOENT, False), (errno.ENOTDIR, False),
+    # (errno name, transient): the path-precondition errnos close; any other
+    # retries. Named, not numbered: ENOTSUP and EOPNOTSUPP share a value on Linux.
+    _ERRNO_NAMES = [
+        ("ENOSPC", True), ("EAGAIN", True), ("EINTR", True), ("EBUSY", True), ("EIO", True),
+        ("EACCES", False), ("EPERM", False), ("EROFS", False), ("ENOENT", False),
+        ("ENOTDIR", False), ("ENOTSUP", False), ("EOPNOTSUPP", False), ("ENOLCK", False),
+        ("EISDIR", False), ("ELOOP", False), ("ENAMETOOLONG", False),
     ]
-    _ERRNO_IDS = [f"{errno.errorcode[code]}-{transient}" for code, transient in _ERRNOS]
+    _ERRNOS = [(getattr(errno, name), transient) for name, transient in _ERRNO_NAMES]
+    _ERRNO_IDS = [f"{name}-{transient}" for name, transient in _ERRNO_NAMES]
 
     def _project(self, tmp_path, monkeypatch):
         (tmp_path / ".claude").mkdir()

@@ -116,11 +116,28 @@ class TransientSessionInfoFailure(str):
 
 
 # OSErrors that say the path itself is unusable, so a retry meets the same
-# refusal. Any other errno, and any other exception, may clear and counts as
-# transient.
-_PATH_PRECONDITION_ERRNOS = frozenset(
-    {errno.EACCES, errno.EPERM, errno.EROFS, errno.ENOENT, errno.ENOTDIR}
-)
+# refusal: no access, no such path, a directory where the lock file or the
+# file belongs, and a filesystem without flock. Any other errno, and any other
+# exception, may clear and counts as transient.
+_PATH_PRECONDITION_ERRNOS = frozenset({
+    errno.EACCES, errno.EPERM, errno.EROFS, errno.ENOENT, errno.ENOTDIR,
+    errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOLCK, errno.EISDIR, errno.ELOOP,
+    errno.ENAMETOOLONG,
+})
+
+
+def session_info_failure(error: BaseException) -> str:
+    """The "Session info failed: <cause>." status for `error`: a plain str
+    when the error says the path is unusable, a TransientSessionInfoFailure
+    otherwise. The wording is a routing contract; see the backstop note in
+    update_session_info."""
+    status = (
+        f"Session info failed: {failure_cause(error)}. "
+        "The Current Session block in CLAUDE.md is now stale."
+    )
+    if isinstance(error, OSError) and error.errno in _PATH_PRECONDITION_ERRNOS:
+        return status
+    return TransientSessionInfoFailure(status)
 
 
 def update_session_info(
@@ -451,13 +468,7 @@ def update_session_info(
                 # message in this function tells the user that the Current
                 # Session block stopped updating, which is the failure a
                 # later session inherits when it reads the stale pointer.
-                status = (
-                    f"Session info failed: {failure_cause(e)}. "
-                    "The Current Session block in CLAUDE.md is now stale."
-                )
-                if isinstance(e, OSError) and e.errno in _PATH_PRECONDITION_ERRNOS:
-                    return status
-                return TransientSessionInfoFailure(status)
+                return session_info_failure(e)
     except TimeoutError:
         return TransientSessionInfoFailure(
             "Failed to acquire lock on project CLAUDE.md within 5s "

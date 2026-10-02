@@ -193,6 +193,28 @@ def _journal_has_session_start(session_dir: str) -> bool:
 # without a session_start, each lead prompt retries the append quietly.
 _RECORDED_FLAG = "lead-recorded"
 
+# Counts the recordings whose block rewrite failed in a way that may clear.
+# At _MAX_TRANSIENT_ATTEMPTS the lead is recorded anyway, with the failure
+# shown, so no failure can keep a session unrecorded for its whole life.
+_ATTEMPTS_FILE = "lead-record-attempts"
+_MAX_TRANSIENT_ATTEMPTS = 3
+
+
+def _may_retry_recording(session_dir: str) -> bool:
+    """Count one transient rewrite failure; True while the count is under the
+    bound. An error reading or writing the count returns False, so the lead is
+    recorded instead of retried. Never raises."""
+    path = Path(session_dir) / _ATTEMPTS_FILE
+    try:
+        try:
+            attempts = int(path.read_text(encoding="utf-8")) + 1
+        except FileNotFoundError:
+            attempts = 1
+        path.write_text(str(attempts), encoding="utf-8")
+    except (OSError, ValueError):
+        return False
+    return attempts < _MAX_TRANSIENT_ATTEMPTS
+
 
 def _append_session_start(input_data: dict, session_dir: str) -> bool:
     """Append this lead's session_start (source "prompt"); True when it
@@ -281,9 +303,10 @@ def _check_bootstrap_needed(input_data: dict) -> str | None:
         if recorded:
             return None
         # Bootstrap is complete but the journal has no session_start: record
-        # this lead, with no bootstrap instruction. A recording that fails
-        # before its rewrite, or whose rewrite fails in a way that may clear,
-        # leaves no session_start and no flag, so the next prompt retries it.
+        # this lead, with no bootstrap instruction. A recording whose rewrite
+        # fails, or raises before it, in a way that may clear leaves no
+        # session_start and no flag, so the next prompt retries it, up to
+        # _MAX_TRANSIENT_ATTEMPTS.
         return _NOT_TREATED_AS_LEAD_NOTE.rstrip("\n") + _record_unrecorded_lead(
             input_data, session_dir
         )
@@ -313,10 +336,13 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
     Reached on a lead prompt with no session_start in the journal and no
     lead-recorded flag, whether or not the bootstrap marker is set. The
     session_start written here (or the flag, when that append fails) closes
-    that branch, so this runs once per session. A run that raises before its
-    block rewrite, or whose rewrite fails in a way that may clear (the lock
-    held past its timeout, an I/O error), writes neither and returns "", so
-    the note goes out alone and the next prompt runs this again. In order:
+    that branch, so this runs once per session. A run whose block rewrite
+    fails, or raises before it, in a way that may clear (the lock held past
+    its timeout, an I/O error) writes neither and returns "", so the note goes
+    out alone and the next prompt runs this again. The third such failure
+    records the lead anyway, with the failure shown (see
+    _MAX_TRANSIENT_ATTEMPTS). A failure that says the path is unusable records
+    the lead at once, with the failure shown. In order:
 
     1. If the project CLAUDE.md holds a Current Session block (both markers),
        read it. When the block names another session, read that session's
@@ -362,6 +388,7 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
             _extract_prev_session_dir,
             check_resume_state,
             format_session_substitutions,
+            session_info_failure,
             update_session_info,
         )
         from shared.stale_session import _RESUME_LINE_RE
@@ -376,40 +403,48 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
 
         claim = None
         block_status = None
-        if env_project_dir:
-            claude_md, source = resolve_project_claude_md_path(env_project_dir)
-            # Read-only here (markers and the Resume line are ASCII); the
-            # rewrite below decodes strictly and skips a file that is not
-            # UTF-8, reporting it in its status.
-            content = (
-                "" if source == "new_default"
-                else claude_md.read_text(encoding="utf-8", errors="replace")
-            )
-            if SESSION_START_MARKER in content and SESSION_END_MARKER in content:
-                recorded = _RESUME_LINE_RE.search(content)
-                if recorded is None or recorded.group(1) != session_id:
-                    claim = check_resume_state(
-                        _extract_prev_session_dir(env_project_dir)
-                    )
-                # NOTHING AFTER THIS REWRITE MAY RAISE. The claim above was
-                # read from the block this call replaces. A raise from here on
-                # returns "" and drops it, and the retry (still no
-                # session_start) finds the block naming this session and reads
-                # no claim. Every later step fails soft. Adding one that can
-                # raise needs per-step handling that still returns the claim.
-                block_status = update_session_info(
-                    session_id, team, session_dir, plugin_root
+        try:
+            if env_project_dir:
+                claude_md, source = resolve_project_claude_md_path(env_project_dir)
+                # Read-only here (markers and the Resume line are ASCII); the
+                # rewrite below decodes strictly and skips a file that is not
+                # UTF-8, reporting it in its status.
+                content = (
+                    "" if source == "new_default"
+                    else claude_md.read_text(encoding="utf-8", errors="replace")
                 )
-                if isinstance(block_status, TransientSessionInfoFailure):
-                    # The block was not replaced and may be next time: record
-                    # nothing, so the next prompt reads the same block, claim
-                    # and all, and tries again.
-                    print(
-                        "bootstrap_prompt_gate: could not record this lead "
-                        f"session: {block_status}",
-                        file=sys.stderr,
+                if SESSION_START_MARKER in content and SESSION_END_MARKER in content:
+                    recorded = _RESUME_LINE_RE.search(content)
+                    if recorded is None or recorded.group(1) != session_id:
+                        claim = check_resume_state(
+                            _extract_prev_session_dir(env_project_dir)
+                        )
+                    # NOTHING AFTER THIS REWRITE MAY RAISE. The claim above
+                    # was read from the block this call replaces. A raise
+                    # after it returns "" and drops the claim, and the retry
+                    # (still no session_start) finds the block naming this
+                    # session and reads no claim. Every later step fails soft.
+                    # Adding one that can raise needs per-step handling that
+                    # still returns the claim. A raise up to and inside this
+                    # call is caught below and classified like its status.
+                    block_status = update_session_info(
+                        session_id, team, session_dir, plugin_root
                     )
-                    return ""
+        except Exception as e:  # noqa: BLE001 — classified and bounded below
+            block_status = session_info_failure(e)
+        if isinstance(
+            block_status, TransientSessionInfoFailure
+        ) and _may_retry_recording(session_dir):
+            # The block was not replaced and may be next time: record
+            # nothing, so the next prompt reads the same block, claim and
+            # all, and tries again. At the bound, fall through and record
+            # with the failure shown, as a skip does.
+            print(
+                "bootstrap_prompt_gate: could not record this lead "
+                f"session: {block_status}",
+                file=sys.stderr,
+            )
+            return ""
         _record_worktree_identity(session_id, project_dir)
         if not _append_session_start(input_data, session_dir):
             # The journal is not writable: the flag stands in for

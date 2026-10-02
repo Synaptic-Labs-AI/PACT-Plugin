@@ -404,20 +404,17 @@ class TestTheMarkerWriterCannotPreemptTheRecording:
 
     def test_a_failed_recording_is_retried_once_and_not_duplicated(self, tmp_path):
         home, proj, env, parent, lead = _unrecorded_lead_with_secretary(tmp_path)
-        md = proj / ".claude" / "CLAUDE.md"
-        saved = md.read_text(encoding="utf-8")
-        md.unlink()
-        md.mkdir()  # reading it raises: the recording fails before any write
 
-        failed = _prompt(_WRITER_FIRST, lead, home, env)
+        # The gate's read of CLAUDE.md raises EIO: the recording fails before
+        # any write, in a way that may clear.
+        failed = _prompt(_WRITER_FIRST, lead, home,
+                         _with_site(tmp_path, env, _EIO_ON_GATE_READ))
 
         assert failed.startswith(_NOTE_MARK) and _VALUES_MARK not in failed
         assert "PR #5151" not in failed, "the claim waits for the prompt that records"
         assert _events(home, lead, "session_start") == []
         assert not (_sdir(home, lead) / _FLAG).exists(), (
             "a failure before the rewrite leaves no flag, so the next prompt retries")
-        md.rmdir()
-        md.write_text(saved, encoding="utf-8")
 
         retried = _prompt(_WRITER_FIRST, lead, home, env)
         third = _prompt(_WRITER_FIRST, lead, home, env)
@@ -554,8 +551,8 @@ os.replace, os.close = replace, close
 """
 
 
-# Used by the flock source below: is `fd` the project's CLAUDE.md lock file?
-# Compared by inode, not by patching os.open: Python 3.9's pathlib binds
+# Shared by the two flock sources below: is `fd` the project's CLAUDE.md lock
+# file? Compared by inode, not by patching os.open: Python 3.9's pathlib binds
 # os.open as a method, so a replacement function there breaks every Path.open.
 _IS_CLAUDE_MD_LOCK = """
 import errno, fcntl, os
@@ -575,6 +572,28 @@ def flock(fd, operation):
     _flock(fd, operation)
     if operation & fcntl.LOCK_UN and _is_claude_md_lock(fd):
         raise OSError(errno.EIO, "injected")
+fcntl.flock = flock
+"""
+
+
+# This one: the gate's own read of CLAUDE.md raises EIO (other hooks read it).
+_EIO_ON_GATE_READ = """
+import errno, pathlib, sys
+_read_text = pathlib.Path.read_text
+def read_text(self, *args, **kwargs):
+    if self.name == "CLAUDE.md" and sys.argv[0].endswith("bootstrap_prompt_gate.py"):
+        raise OSError(errno.EIO, "injected")
+    return _read_text(self, *args, **kwargs)
+pathlib.Path.read_text = read_text
+"""
+
+# This one: taking the CLAUDE.md lock raises ENOTSUP, as on a filesystem
+# without flock.
+_ENOTSUP_ON_LOCK = _IS_CLAUDE_MD_LOCK + """
+def flock(fd, operation):
+    if operation & fcntl.LOCK_EX and _is_claude_md_lock(fd):
+        raise OSError(errno.ENOTSUP, "injected")
+    return _flock(fd, operation)
 fcntl.flock = flock
 """
 
@@ -678,6 +697,88 @@ class TestATransientRewriteFailureLeavesTheRecordingOpen:
         assert len(_events(home, lead, "session_start")) == 1
         assert len(_events(home, lead, "session_resumption_surfaced")) == 1
         assert _prompt(_WRITER_FIRST, lead, home, env) == ""
+
+    @pytest.mark.parametrize("journal_works", [True, False], ids=["journal", "no-journal"])
+    def test_a_failure_that_never_clears_records_at_the_bound(self, tmp_path, journal_works):
+        """EIO on every rename into CLAUDE.md: two prompts send only the note,
+        and the third records the lead with the failure shown."""
+        home, proj, env, parent, lead = _unrecorded_lead_with_secretary(tmp_path)
+        if not journal_works:
+            (_sdir(home, lead) / "session-journal.jsonl").mkdir(parents=True)
+        before = _block(proj)
+        failing = _with_site(tmp_path, env, _EIO_ON_REPLACE)
+
+        first = _prompt(_WRITER_FIRST, lead, home, failing)
+        second = _prompt(_WRITER_FIRST, lead, home, failing)
+        third = _prompt(_WRITER_FIRST, lead, home, failing)
+
+        for out in (first, second):
+            assert out.startswith(_NOTE_MARK)
+            assert _VALUES_MARK not in out and "PR #5151" not in out
+        assert _VALUES_MARK in third and third.count("PR #5151") == 1
+        assert "Session info failed: OSError (EIO)" in third
+        assert _block(proj) == before
+        if journal_works:
+            assert len(_events(home, lead, "session_start")) == 1
+        else:
+            assert (_sdir(home, lead) / _FLAG).exists()
+        assert _prompt(_WRITER_FIRST, lead, home, failing) == ""
+
+    def test_a_count_that_cannot_be_kept_records_at_once(self, tmp_path):
+        """The attempt count fails toward recording: when it cannot be read or
+        written, the first transient failure records the lead."""
+        home, proj, env, parent, lead = _unrecorded_lead_with_secretary(tmp_path)
+        (_sdir(home, lead) / "lead-record-attempts").mkdir(parents=True)
+
+        out = _prompt(_WRITER_FIRST, lead, home, _with_site(tmp_path, env, _EIO_ON_REPLACE))
+
+        assert _VALUES_MARK in out and out.count("PR #5151") == 1
+        assert "Session info failed: OSError (EIO)" in out
+        assert len(_events(home, lead, "session_start")) == 1
+
+    def test_a_filesystem_without_flock_closes_the_recording(self, tmp_path):
+        home, proj, env, parent, lead = _unrecorded_lead_with_secretary(tmp_path)
+        before = _block(proj)
+        failing = _with_site(tmp_path, env, _ENOTSUP_ON_LOCK)
+
+        out = _prompt(_WRITER_FIRST, lead, home, failing)
+
+        assert _VALUES_MARK in out and out.count("PR #5151") == 1
+        assert "Could not acquire lock on project CLAUDE.md" in out
+        assert _prompt(_WRITER_FIRST, lead, home, failing) == ""
+        assert len(_events(home, lead, "session_start")) == 1
+        assert _block(proj) == before
+
+    def test_a_directory_at_the_lock_file_closes_the_recording(self, tmp_path):
+        home, proj, env, parent, lead = _unrecorded_lead_with_secretary(tmp_path)
+        before = _block(proj)
+        lock = proj / ".claude" / ".CLAUDE.md.lock"
+        lock.unlink(missing_ok=True)
+        lock.mkdir()
+
+        out = _prompt(_WRITER_FIRST, lead, home, env)
+
+        assert _VALUES_MARK in out and out.count("PR #5151") == 1
+        assert "Could not acquire lock on project CLAUDE.md" in out
+        assert _prompt(_WRITER_FIRST, lead, home, env) == ""
+        assert len(_events(home, lead, "session_start")) == 1
+        assert _block(proj) == before
+
+    def test_a_directory_at_claude_md_closes_the_recording(self, tmp_path):
+        """The gate's own read raises EISDIR before any rewrite: the path is
+        unusable, so the lead is recorded at once with the failure shown."""
+        home, proj, env, parent, lead = _unrecorded_lead_with_secretary(tmp_path)
+        md = proj / ".claude" / "CLAUDE.md"
+        md.unlink()
+        md.mkdir()
+
+        out = _prompt(_WRITER_FIRST, lead, home, env)
+
+        assert _VALUES_MARK in out
+        assert "Session info failed: IsADirectoryError (EISDIR)" in out
+        assert _prompt(_WRITER_FIRST, lead, home, env) == ""
+        assert len(_events(home, lead, "session_start")) == 1
+        assert md.is_dir()
 
     @pytest.mark.skipif(_ROOT, reason="root ignores directory permissions")
     def test_a_directory_that_refuses_the_write_closes_the_recording(self, tmp_path):
