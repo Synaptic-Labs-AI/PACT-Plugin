@@ -13,7 +13,7 @@ present and correct on every hook event, in every process, under the tmux
 forked without `--agent` carries **no** `agent_type` at SessionStart, though its
 later events carry the lead spelling (measured headless on Claude Code 2.1.285
 and 2.1.286). session_init recovers a resumed lead from its own context file,
-and bootstrap_prompt_gate records the rest at their first prompt. The signal is
+and bootstrap_prompt_gate records the rest at the first prompt that can. The signal is
 **value-membership, not field-presence**:
 
 | Role | `agent_type` value |

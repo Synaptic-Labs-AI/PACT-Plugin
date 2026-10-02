@@ -162,7 +162,8 @@ def _journal_has_session_start(session_dir: str) -> bool:
 
     Reads FORWARD and stops at the first one. Do not swap in the tail-window
     reader: session_start sits at the head of a recorded journal (session_init
-    writes it as the session starts, this hook at its first prompt), so a
+    writes it as the session starts, this hook at the first prompt that
+    records the lead), so a
     forward scan reads one line where a tail read would read the whole window
     and then fall back to a full scan. Only a journal with no session_start is
     read to the end, and that is an unrecorded lead, whose recording writes
@@ -188,8 +189,8 @@ def _journal_has_session_start(session_dir: str) -> bool:
 
 # Left in the session dir by _record_unrecorded_lead when its session_start
 # append fails (an unwritable journal). It counts as recorded, so the note and
-# the block rewrite happen once per session; while it stands without a
-# session_start, each lead prompt retries the append quietly.
+# the block rewrite are not repeated after the recording; while it stands
+# without a session_start, each lead prompt retries the append quietly.
 _RECORDED_FLAG = "lead-recorded"
 
 
@@ -344,8 +345,8 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
     if pact_context._is_unknown_or_missing_session(input_data.get("session_id")):
         return ""
     try:
-        # Imported here: this branch runs once per session, and the modules
-        # below are not needed on any other prompt.
+        # Imported here: this branch runs only until the lead is recorded, and
+        # the modules below are not needed on any other prompt.
         import os
 
         from shared.claude_md_manager import (

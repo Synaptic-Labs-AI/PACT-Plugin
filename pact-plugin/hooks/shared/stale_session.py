@@ -88,9 +88,9 @@ def detect_stale_session_block(input_data: dict) -> str | None:
     resolve_project_claude_md_path (parity pinned by test). False
     positives: none in healthy flows — session_init rewrites the block
     before the first prompt for every lead it recognises, a resume keeps
-    the same session_id, and bootstrap_prompt_gate replaces the block at the
-    first prompt of a lead session_init did not record (and asks this
-    detector nothing for that lead).
+    the same session_id, and bootstrap_prompt_gate replaces the block when it
+    records a lead session_init did not record, at the first prompt that can
+    (and asks this detector nothing for that lead).
     """
     raw_id = input_data.get("session_id")
     # Canonical validity predicate (shared with the heal gate and

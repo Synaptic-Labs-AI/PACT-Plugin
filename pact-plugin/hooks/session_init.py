@@ -176,8 +176,8 @@ _INPROCESS_MODE_NOTICE = (
 # and it gets neither channel. A lead forked without `--agent` has a new
 # session id that holds no such file, and a resumed lead whose dir was reaped
 # or whose project moved has lost it, so each stays unknown here and gets both
-# channels; bootstrap_prompt_gate recognises and records it as the lead at its
-# first prompt. The notice rides TWO
+# channels; bootstrap_prompt_gate recognises it as the lead at its first
+# prompt and records it at the first prompt that can. The notice rides TWO
 # CHANNELS, AND EACH CHANNEL HAS ITS OWN POPULATION, BECAUSE THE GATES USE
 # DIFFERENT PREDICATES. Do not state one population for the pair.
 #   systemMessage: on a launch event (_LAUNCH_SOURCES), for an unknown
@@ -671,7 +671,8 @@ def _unknown_role_launch_notice(source: str | None) -> str | None:
     Launch events only (_LAUNCH_SOURCES): compact and clear repeat within one
     launch. A forked lead looks like a plain fork here, so on a fork the notice
     adds that a fork of a lead needs no relaunch: its first prompt carries the
-    lead agent_type, and bootstrap_prompt_gate records it as the lead then.
+    lead agent_type, and bootstrap_prompt_gate recognises it as the lead then
+    and records it at the first prompt that can.
     """
     if source == "fork":
         return f"{_UNKNOWN_ROLE_NOTICE} {_FORK_RECOGNISED_LATER}"
@@ -752,7 +753,7 @@ def _lead_context_persisted(session_id, project_dir: str) -> bool:
     is how it is recognised, while its own session dir still holds the file.
     A fork has a new session id, and a reaped dir or a moved project has lost
     the file, so neither is recognised here; bootstrap_prompt_gate records
-    both at their first prompt. Fail-closed: any error reads as absent.
+    both at the first prompt that can. Fail-closed: any error reads as absent.
     """
     if _is_unknown_or_missing_session(session_id) or not project_dir:
         return False
@@ -1305,8 +1306,8 @@ def main():
         # SessionStart only. While its own session dir still holds the context
         # file only a lead writes, recover the role from that. A fork's new
         # session id holds no such file, and a reaped dir or a moved project
-        # has lost it; bootstrap_prompt_gate records those at their first
-        # prompt. Adoption above has already moved a dir written under the
+        # has lost it; bootstrap_prompt_gate records those at the first
+        # prompt that can. Adoption above has already moved a dir written under the
         # unresolved slug.
         if frame_role == "unknown" and _lead_context_persisted(
             input_data.get("session_id"), project_dir
