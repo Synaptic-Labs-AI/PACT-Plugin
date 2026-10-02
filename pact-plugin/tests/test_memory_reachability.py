@@ -162,12 +162,15 @@ def test_a_section_past_the_cut_is_refused(tmp_path):
     (root / "MEMORY.md").write_text("# Index\n" + filler + "\n## Late\n", encoding="utf-8")
     (root / "feedback_orphan.md").write_text("x", encoding="utf-8")
     block = mr.emit_edit(mr.scan(root), "## Late")
+    assert block is not None
     assert block.startswith("REFUSED") and "past the loaded prefix" in block
 
 
 def test_an_unknown_heading_is_refused(tmp_path):
     root = _tree(tmp_path / "agent")
-    assert mr.emit_edit(mr.scan(root), "## Nope").startswith("REFUSED")
+    block = mr.emit_edit(mr.scan(root), "## Nope")
+    assert block is not None
+    assert block.startswith("REFUSED")
 
 
 def test_emit_is_silent_on_a_clean_tree(tmp_path):
