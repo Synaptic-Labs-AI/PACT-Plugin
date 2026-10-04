@@ -1183,11 +1183,11 @@ class TestBuildMigratedContentAdversarial:
         assert _MANAGED_END in result
 
     def test_partial_session_markers_start_only(self):
-        """If only SESSION_START is present with no SESSION_END, the session
-        block regex won't match, so the marker text remains in the remaining
-        content. Must not crash or corrupt the output.
+        """If only SESSION_START is present with no SESSION_END, the parser
+        reads the session block as malformed, so the migration refuses and
+        leaves the content unchanged, naming the marker's line.
         """
-        from shared.claude_md_manager import _build_migrated_content
+        from shared.claude_md_manager import _build_migrated_content, _plan_migration
 
         content = (
             "# Project Memory\n"
@@ -1201,15 +1201,9 @@ class TestBuildMigratedContentAdversarial:
             "## Working Memory\n"
         )
 
-        result = _build_migrated_content(content)
-
-        # Output must still have valid structure
-        assert _MANAGED_START in result
-        assert _MANAGED_END in result
-        assert _MEMORY_START in result
-        assert _MEMORY_END in result
-        # The orphaned SESSION_START text should survive somewhere
-        assert "pact-orphaned" in result
+        assert _build_migrated_content(content) == content
+        new_content, refusal = _plan_migration(content)
+        assert new_content is None and refusal is not None and "line 3" in refusal
 
     def test_memory_heading_with_trailing_whitespace(self):
         """'## Retrieved Context   ' (trailing spaces) must still match
@@ -2964,7 +2958,8 @@ class TestStripOrphanKernelBlock(_StripOrphanBlockTestBase):
         result = self.call_stripper()
         assert result is not None
         assert "skipped" in result.lower()
-        assert "PACT_END appears before PACT_START" in result
+        # The end marker on line 2 comes before any start marker.
+        assert "line 2" in result
 
     def test_leaf_symlink_out_of_config_allowed_victim_untouched(self, tmp_path):
         """A leaf symlink escaping the config dir is ALLOWED; the strip lands on

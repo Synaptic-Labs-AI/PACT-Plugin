@@ -113,6 +113,8 @@ from pin_caps import (
 # `pin_caps_gate` inside its own test bodies for the same reason, so this
 # follows the convention already in force here rather than inventing one.
 from shared.claude_md_manager import (
+    MANAGED_END_MARKER,
+    MANAGED_START_MARKER,
     MEMORY_END_MARKER,
     MEMORY_START_MARKER,
     PINNED_END_MARKER,
@@ -220,12 +222,18 @@ def assert_is_shipping_shape(content: str) -> None:
     a shape production never emits. A guard that names one of two boundaries
     certifies the fixtures it was written against and nothing wider.
     """
-    assert extract_managed_region(content) is not None, (
+    # Located by the marker text, not by extract_managed_region: some fixtures
+    # carry an unclosed fence inside the region on purpose, and the fence-aware
+    # reader then rightly finds no region. This guard certifies how the
+    # fixture was built, which the fence state does not change.
+    start = content.find(MANAGED_START_MARKER)
+    end = content.find(MANAGED_END_MARKER, start + 1)
+    assert start != -1 and end != -1, (
         "fixture has no PACT-managed region, so every reader silently fell "
         "back to scanning the whole file. Build it from the production "
         "emitter, never from a hand-typed literal."
     )
-    region_text, _offset = extract_managed_region(content)
+    region_text = content[start:end]
     assert MEMORY_START_MARKER in region_text, (
         "fixture has no PACT_MEMORY start marker inside its managed region, "
         "so the pin planner has no window to anchor in. Build it from the "

@@ -1,32 +1,3 @@
 # Locators that commit C3 moves onto the finder: the managed region, migration anchors and kernel block (S1-S4).
 # Format: path<TAB>function<TAB>kind<TAB>expression. Delete an entry in the commit
 # that routes its site through hooks/shared/claude_md_markers.py.
-
-# hooks/shared/claude_md_manager.py _build_migrated_content: S4
-hooks/shared/claude_md_manager.py	_build_migrated_content	.search	pattern.search(content_sans_routing)
-hooks/shared/claude_md_manager.py	_build_migrated_content	.startswith	lstripped.startswith("# ")
-hooks/shared/claude_md_manager.py	_build_migrated_content	.startswith	lstripped.startswith("## ")
-hooks/shared/claude_md_manager.py	_build_migrated_content	==	stripped == h
-hooks/shared/claude_md_manager.py	_build_migrated_content	in	MANAGED_START_MARKER in content
-hooks/shared/claude_md_manager.py	_build_migrated_content	in	comment not in body
-hooks/shared/claude_md_manager.py	_build_migrated_content	in	session_end in content_sans_routing
-hooks/shared/claude_md_manager.py	_build_migrated_content	in	session_start in content_sans_routing
-hooks/shared/claude_md_manager.py	_build_migrated_content	in	stripped_line in memory_sections
-hooks/shared/claude_md_manager.py	_build_migrated_content	line split	memory_text.splitlines(keepends=True)
-hooks/shared/claude_md_manager.py	_build_migrated_content	line split	remaining.splitlines(keepends=True)
-hooks/shared/claude_md_manager.py	_build_migrated_content	re.sub	re.sub( r"^# Project Memory\s*\n" r"(?:\s*\n)*" r"(?:This file contains project-specific memory managed by the PACT framework\.\s*\n)?", "", remaining, )
-# hooks/shared/claude_md_manager.py _plan_kernel_strip: S1
-hooks/shared/claude_md_manager.py	_plan_kernel_strip	.split	content.split(START_MARKER, 1)
-hooks/shared/claude_md_manager.py	_plan_kernel_strip	.split	rest.split(END_MARKER, 1)
-hooks/shared/claude_md_manager.py	_plan_kernel_strip	==	has_start != has_end
-hooks/shared/claude_md_manager.py	_plan_kernel_strip	in	END_MARKER in content
-hooks/shared/claude_md_manager.py	_plan_kernel_strip	in	END_MARKER not in rest
-hooks/shared/claude_md_manager.py	_plan_kernel_strip	in	START_MARKER in content
-# hooks/shared/claude_md_manager.py extract_managed_region: S2
-hooks/shared/claude_md_manager.py	extract_managed_region	.find	content.find(MANAGED_END_MARKER, region_start)
-hooks/shared/claude_md_manager.py	extract_managed_region	.find	content.find(MANAGED_START_MARKER)
-hooks/shared/claude_md_manager.py	extract_managed_region	==	end_idx == -1
-hooks/shared/claude_md_manager.py	extract_managed_region	==	start_idx == -1
-# hooks/shared/claude_md_manager.py migrate_to_managed_structure: S3 (and the skip path :1384)
-hooks/shared/claude_md_manager.py	migrate_to_managed_structure	in	MANAGED_START_MARKER in _read_replaced(target_file)
-hooks/shared/claude_md_manager.py	migrate_to_managed_structure	in	MANAGED_START_MARKER in content
