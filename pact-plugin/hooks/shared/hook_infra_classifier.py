@@ -186,11 +186,16 @@ L3_CANDIDATE_HOOKS: frozenset[str] = frozenset({
 _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
     "missed_wake_scan": frozenset({
         "background_launch", "background_work",
-        "constants", "intentional_wait", "pact_context",
-        "paths",
-        "session_journal", "session_registry", "session_state", "state_file",
+        "claude_md_drift", "claude_md_manager", "claude_md_markers",
+        "constants", "failure_cause", "git_helpers", "intentional_wait", "pact_context",
+        "paths", "pin_caps", "pin_growth", "project_scope",
+        "session_journal", "session_registry", "session_state", "staleness", "state_file",
         "task_utils",
     }),  # state_file reached via background_work's state-file reads and writes.
+         # claude_md_drift and the CLAUDE.md modules it reads through (the
+         # resolver in staleness, pin_caps, pin_growth, claude_md_manager and
+         # their own imports) reached via the drift advisory, imported inside
+         # a function.
     "teammate_idle": frozenset({
         "background_launch", "background_work",
         "constants", "error_output", "intentional_wait",
@@ -199,15 +204,17 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
     }),
     "track_files": frozenset({
         "background_launch", "background_work",
-        "claude_md_manager", "claude_md_markers", "constants", "error_output",
-        "failure_cause", "git_helpers", "intentional_wait", "pact_context", "paths",
-        "pin_caps", "project_scope", "session_journal", "session_registry", "session_state",
-        "staleness", "state_file", "task_utils",
+        "claude_md_drift", "claude_md_manager", "claude_md_markers", "constants",
+        "error_output", "failure_cause", "git_helpers", "intentional_wait", "pact_context",
+        "paths", "pin_caps", "pin_growth", "project_scope", "session_journal",
+        "session_registry", "session_state", "staleness", "state_file", "task_utils",
     }),  # regenerated from the live derivation, not hand-listed: the Layer 1
          # fold adds background_work + intentional_wait, and the rest were
          # already reached through the pin-staleness clear this hook carries.
          # claude_md_markers reached via claude_md_manager, whose managed-region,
          # kernel and migration planners import the parser inside functions.
+         # claude_md_drift and pin_growth reached via the pin-growth report and
+         # record jobs, imported inside functions.
     "agent_handoff_emitter": frozenset({
         "agent_handoff_marker", "canonical_json", "constants",
         "pact_context", "paths",

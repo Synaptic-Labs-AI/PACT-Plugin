@@ -29,6 +29,7 @@ VALID_HOOK_EVENTS = {
     "PostCompact",
     "PreToolUse",
     "PostToolUse",
+    "PostToolUseFailure",
     "UserPromptSubmit",
     "SubagentStart",
     "SubagentStop",

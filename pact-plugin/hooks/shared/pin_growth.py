@@ -505,6 +505,9 @@ class PinDecision(NamedTuple):
     growth: int | None  # None when the rule did not run
     cause: str | None  # None, "not_found", "size_bound", "error", "count" or "size"
     reason: str | None  # the advisory or the deny text
+    # On a count denial, the size cap's own deny text when the change crosses it
+    # too; None otherwise. A report names both caps from it.
+    size_reason: str | None = None
 
 
 def pin_spans(doc: Document, S: tuple[int, int]) -> list[tuple[int, int]]:
@@ -610,12 +613,14 @@ def _decide(before: str, after: str, use_timer: bool, trim: bool) -> PinDecision
             size_before, size_after = _size_pins(t, R, post_pins)
         pins_before = len(post_pins) - (growth or 0)
     growth = growth or 0
+    size_reason = None
     if growth > 0 and len(post_pins) > PIN_COUNT_CAP:
         reason = compute_deny_reason(size_before, post_pins, growth=growth)
         cause = "count"
+        size_reason = compute_deny_reason(size_before, size_after, growth=0)
     else:
         reason = compute_deny_reason(size_before, size_after, growth=0)
         cause = "size"
     if reason is None:
         return PinDecision("ALLOW", pins_before, len(post_pins), growth, None, None)
-    return PinDecision("DENY", pins_before, len(post_pins), growth, cause, reason)
+    return PinDecision("DENY", pins_before, len(post_pins), growth, cause, reason, size_reason)
