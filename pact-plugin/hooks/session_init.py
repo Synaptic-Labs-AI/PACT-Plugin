@@ -75,12 +75,12 @@ from staleness import (  # noqa: F401
     PINNED_CONTEXT_TOKEN_BUDGET,
     _get_project_claude_md_path,
     _estimate_tokens,
-    _parse_pinned_section,
+    locate_pinned,
 )
 from pin_caps import (  # noqa: F401
     PIN_COUNT_CAP,
     format_slot_status,
-    parse_pins,
+    section_pins,
 )
 
 from shared import (
@@ -328,15 +328,23 @@ def check_pin_slot_status() -> Optional[str]:
         except (IOError, OSError):
             return None
 
-        parsed = _parse_pinned_section(content)
-        if parsed is None:
-            # Empty or missing Pinned Context section — surface 0-used state
-            # so the orchestrator sees pin headroom from session start.
-            return format_slot_status([])
+        # The parser is imported here, not at module level, so a session
+        # start that never reaches this line does not load it.
+        from shared.claude_md_markers import State, parse
 
-        _, _, pinned_content = parsed
+        doc = parse(content)
+        located = locate_pinned(doc)
+        if located.state is State.ABSENT:
+            # Missing Pinned Context section — surface 0-used state so the
+            # orchestrator sees pin headroom from session start.
+            return format_slot_status([])
+        if located.state is not State.FOUND:
+            # The section cannot be told from an example, so its pins cannot
+            # be counted: say nothing rather than report 0 used.
+            return None
+
         try:
-            pins = parse_pins(pinned_content)
+            pins = section_pins(doc, located)
         except Exception:  # noqa: BLE001 — fail-open by construction
             return None
 

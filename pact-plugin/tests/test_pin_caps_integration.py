@@ -179,10 +179,10 @@ class TestCheckPinSlotStatus_SessionInit:
             "session_init._get_project_claude_md_path", lambda: claude_md
         )
 
-        def _boom(_pinned):
+        def _boom(_doc, _located):
             raise RuntimeError("nope")
 
-        monkeypatch.setattr(si, "parse_pins", _boom)
+        monkeypatch.setattr(si, "section_pins", _boom)
         assert check_pin_slot_status() is None
 
 

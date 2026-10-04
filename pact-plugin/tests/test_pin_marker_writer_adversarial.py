@@ -13,8 +13,8 @@ there.
 
 FOUR PROPERTIES THE PRIMARY FILE CANNOT REACH, each with the reason:
 
-  1. THE TWO-STATE DENY. `compute_deny_reason` compares a PRE-edit parse
-     against a POST-edit parse. No single-document probe reaches it at any
+  1. THE TWO-STATE DENY. The cap decision compares the text before an edit
+     with the text after it. No single-document probe reaches it at any
      probe count, because the compared quantity does not exist until two
      documents are parsed. Certified here on DOCUMENT PAIRS, driven through
      the gate's own pipeline in the gate's own order.
@@ -99,8 +99,6 @@ import pytest
 from pin_caps import (
     PIN_COUNT_CAP,
     PIN_SIZE_CAP,
-    apply_edit_and_parse,
-    compute_deny_reason,
 )
 # `pin_caps_gate` is imported LAZILY, inside `gate_verdict`, and must stay that
 # way. It is a hook SCRIPT, and importing it at module scope pulls it in during
@@ -256,21 +254,20 @@ def marked(content: str) -> str:
 
 
 def gate_verdict(content: str, tool_input: dict):
-    """Drive the gate's OWN pipeline, in the gate's OWN order.
+    """Drive the gate's OWN decision: its deny reason, or None when it allows.
 
-    Composed from the gate's real functions rather than re-implemented, so a
-    change to how the gate assembles pre/post reaches this test.
+    `gate_decision` is the gate's pure decision for an Edit or Write of the
+    file whose text is `content`, so a change to how the gate builds the text
+    after the edit, or decides on it, reaches this test.
 
     The import is INSIDE this function deliberately -- see the note at the
     module imports. Moving it to the top breaks two counter-tests at
     full-suite scale.
     """
-    from pin_caps_gate import _extract_new_body, _parse_baseline
+    from pin_caps_gate import gate_decision
 
-    pre_pins = _parse_baseline(content)
-    post_pins = apply_edit_and_parse(content, tool_input)
-    new_body = _extract_new_body(tool_input, pre_pins=pre_pins, post_pins=post_pins)
-    return compute_deny_reason(pre_pins, post_pins, new_body=new_body)
+    decision = gate_decision(content, "Write" if "content" in tool_input else "Edit", tool_input)
+    return decision.reason if decision.verdict == "DENY" else None
 
 
 # --------------------------------------------------------------------------
@@ -406,8 +403,8 @@ class TestThePlannerIsAlive:
         reaches the totality guard, so it proves the sweep above is testing a
         live distinction rather than an impossible one.
         """
-        assert plan_insertion(None) is SkipReason.PLAN_FAILED
-        assert plan_insertion(42) is SkipReason.PLAN_FAILED
+        assert plan_insertion(None) is SkipReason.PLAN_FAILED  # pyright: ignore[reportArgumentType]
+        assert plan_insertion(42) is SkipReason.PLAN_FAILED  # pyright: ignore[reportArgumentType]
 
 
 # --------------------------------------------------------------------------
@@ -649,11 +646,14 @@ class TestNoCaughtTerminatorEndsThePinnedRegion:
             caught_marker_below_the_pins + "\n" + WORKING_MEMORY_HEADING,
             1,
         )
-        parsed = _parse_pinned_section(doc)
-        assert parsed is not None
-        assert not doc[parsed[1]:].startswith(WORKING_MEMORY_HEADING), (
-            "the reconstructed defect no longer moves the region end, so the "
-            "offset assertion above cannot detect it"
+        # The fence-aware locator reads an END marker with no START above it as
+        # an unpaired pair: the Pinned section cannot be located, so no reader
+        # charges it and the gate allows with its not-found advisory. The
+        # caught marker therefore un-charges the appended pin by hiding the
+        # section, where the retired parse did it by moving the section's end.
+        assert _parse_pinned_section(doc) is None, (
+            "the reconstructed defect no longer makes the section unlocatable, "
+            "so the behavioural assertion below is not measuring it"
         )
         append = {
             "old_string": WORKING_MEMORY_HEADING,
@@ -1240,8 +1240,8 @@ class TestWholeDocumentLineEndings:
         if isinstance(planned, SkipReason):
             pytest.skip(f"planner refuses a CRLF document ({planned.value}); "
                         "refusal is a safe outcome and there is nothing to certify")
-        new = apply_insertion(doc, planned)
-        assert certify_expel_nothing(doc, new, planned) is True, (
+        new = apply_insertion(doc, planned)  # pyright: ignore[reportArgumentType]
+        assert certify_expel_nothing(doc, new, planned) is True, (  # pyright: ignore[reportArgumentType]
             "a CRLF document was inserted into WITHOUT byte preservation"
         )
 

@@ -278,29 +278,15 @@ class TestPinCapsGate_Matrix_Edit:
             assert result is not None, f"pre={pre_body} post={post_body} should DENY"
             assert "cap" in result.lower()
 
-    def test_edit_embedded_pin_denies(self, gate_env):
-        """Edit with a naked `### ` heading (no `<!-- pinned: -->` date-comment)
-        correctly DENIES via `DENY_REASON_EMBEDDED_PIN`. Post-#529 (PR #530)
-        the Edit path mirrors Write: legitimate date-marked adds allow
-        (covered in `TestPinCapsGate_Smoke::
-        test_edit_legitimate_new_pin_with_date_comment_allows`); smuggles
-        (heading without a preceding date-comment marker) still deny.
-
-        Prior to #530 this test used a legitimate-shaped date-marked payload
-        and asserted DENY — codifying the #529 asymmetric-path bug as
-        intended behavior. The payload has been reworked to a true smuggle
-        so the assertion reflects the actual contract: naked `### Title`
-        without a date-comment marker is the smuggle signature.
-        """
+    def test_edit_undated_heading_is_counted_as_a_pin(self, gate_env):
+        """An undated `### ` heading added by an Edit is a pin, counted by the
+        count axis: at 3 pins plus one it is under the cap and allowed. There
+        is no embedded-pin refusal keyed on the missing date comment."""
         env = gate_env(pin_count=3)
         result = _call_gate({
             "tool_name": "Edit",
             "tool_input": {
                 "file_path": str(env["claude_md"]),
-                # Prepend a naked `### ` heading (no `<!-- pinned: -->`
-                # marker) before the Pinned-Context section's terminator
-                # boundary — a real smuggle attempt that preserves existing
-                # pins but injects an undated heading.
                 "old_string": "## Working Memory\n",
                 "new_string": (
                     "### SmuggledNoDateMarker\n"
@@ -310,39 +296,89 @@ class TestPinCapsGate_Matrix_Edit:
                 "replace_all": False,
             },
         })
-        assert result is not None
-        assert "embedded pin" in result.lower()
+        assert result is None, f"an undated pin under the cap must be allowed, got: {result!r}"
 
     def test_edit_invalid_override_denies(self, gate_env):
-        """Edit new_string with override rationale exceeding 120 chars → DENY."""
+        """An override row whose rationale exceeds 120 chars, on a pin the
+        Edit changes → DENY with the invalid-override reason."""
         env = gate_env(pin_count=3)
         too_long = "x" * 121
         result = _call_gate({
             "tool_name": "Edit",
             "tool_input": {
                 "file_path": str(env["claude_md"]),
-                "old_string": "Pin0",
-                "new_string": f"<!-- pinned: 2026-04-20, pin-size-override: {too_long} -->",
+                "old_string": "<!-- pinned: 2026-04-20 -->\n### Pin0",
+                "new_string": f"<!-- pinned: 2026-04-20, pin-size-override: {too_long} -->\n### Pin0",
                 "replace_all": False,
             },
         })
         assert result is not None
         assert "override" in result.lower()
 
-    def test_edit_empty_override_denies(self, gate_env):
-        """Empty rationale → DENY with invalid-override reason."""
+    def test_override_text_inside_a_heading_is_not_an_override(self, gate_env):
+        """Override text written into a heading line is not an override row:
+        nothing is granted, so there is nothing to refuse (main refused it by
+        scanning the raw fragment)."""
         env = gate_env(pin_count=3)
         result = _call_gate({
             "tool_name": "Edit",
             "tool_input": {
                 "file_path": str(env["claude_md"]),
                 "old_string": "Pin0",
-                "new_string": "<!-- pinned: 2026-04-20, pin-size-override:  -->",
+                "new_string": "<!-- pinned: 2026-04-20, pin-size-override: {} -->".format("x" * 121),
+                "replace_all": False,
+            },
+        })
+        assert result is None, result
+
+    def test_edit_empty_override_denies(self, gate_env):
+        """An override row with a blank rationale on a pin the Edit changes →
+        DENY with the invalid-override reason."""
+        env = gate_env(pin_count=3)
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "old_string": "<!-- pinned: 2026-04-20 -->\n### Pin0",
+                "new_string": "<!-- pinned: 2026-04-20, pin-size-override:   -->\n### Pin0",
                 "replace_all": False,
             },
         })
         assert result is not None
         assert "empty" in result.lower() or "override" in result.lower()
+
+    def test_a_fenced_example_of_the_override_syntax_is_not_an_override(self, gate_env):
+        """A new pin documenting the override syntax inside a fence, with an
+        empty rationale, is allowed: fenced lines are not override rows."""
+        env = gate_env(pin_count=3)
+        example = (
+            "<!-- pinned: 2026-04-21 -->\n### Override syntax\n"
+            "```\n<!-- pinned: 2026-04-20, pin-size-override:   -->\n```\n\n"
+        )
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "old_string": "## Working Memory\n",
+                "new_string": example + "## Working Memory\n",
+                "replace_all": False,
+            },
+        })
+        assert result is None, result
+
+    def test_an_unchanged_pins_old_invalid_override_is_not_rechecked(self, gate_env):
+        """A Write that leaves a pin and its invalid override untouched is not
+        refused for that override: only pins the change adds or edits are
+        checked."""
+        env = gate_env(pin_count=3)
+        bad = env["claude_md"].read_text(encoding="utf-8").replace(
+            "<!-- pinned: 2026-04-20 -->\n### Pin2", "<!-- pinned: 2026-04-20, pin-size-override:   -->\n### Pin2", 1)
+        env["claude_md"].write_text(bad, encoding="utf-8")
+        result = _call_gate({
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(env["claude_md"]), "content": bad.replace("### Pin0", "### Pin0 renamed")},
+        })
+        assert result is None, result
 
     @pytest.mark.parametrize("terminator", ["\n", "\r", " ", " ", ""])
     def test_edit_override_with_line_terminator_denies(self, gate_env, terminator):
@@ -408,59 +444,32 @@ class TestPinCapsGate_Matrix_Edit:
         [
             ("\n", "0x0a"),
             ("\r", "0x0d"),
-            (" ", "0x2028"),
-            (" ", "0x2029"),
-            ("", "0x0085"),
+            ("\u2028", "0x2028"),
+            ("\u2029", "0x2029"),
+            ("\x85", "0x0085"),
         ],
     )
-    def test_splitlines_eats_forbidden_chars_before_validation(
-        self, terminator, ord_hex
+    def test_a_terminator_in_a_rationale_never_passes_as_an_override(
+        self, gate_env, terminator, ord_hex
     ):
-        """Upstream-split invariant (per auditor-2 recommendation,
-        2026-04-21 consultant mode): Python's str.splitlines() recognizes
-        every char in `_FORBIDDEN_RATIONALE_CHARS` as a line boundary,
-        which is WHY the char check at `pin_caps_gate.py:184` is not
-        runtime-reachable in the current call graph.
-
-        `_extract_override_rationale` applies `splitlines()` and then
-        runs `OVERRIDE_COMMENT_RE.fullmatch` on each stripped line. A
-        forbidden char in the middle of what looks like a single override
-        comment splits the comment across two lines — neither line
-        fullmatches, so extraction returns None and
-        `_validate_override_rationale` is called with None (short-circuits
-        before reaching the char-check block).
-
-        This test asserts the load-bearing upstream-split behavior. If a
-        future refactor of `_extract_override_rationale` stops calling
-        splitlines (e.g., moves to a regex that scans the whole fragment
-        in one pass), this test fails loudly and the char-check block at
-        `pin_caps_gate.py:184` becomes the load-bearing defense. Converts
-        the latent dead-code tradeoff into a loud one.
-        """
-        # The canonical override-comment fragment, with a forbidden char
-        # injected mid-rationale.
-        candidate = (
-            f"<!-- pinned: 2026-04-20, "
-            f"pin-size-override: before{terminator}after -->"
-        )
-        parts = candidate.splitlines()
-        # At least two parts — splitlines recognized the terminator.
-        assert len(parts) >= 2, (
-            f"splitlines() did NOT split on {ord_hex} ({terminator!r}) — "
-            f"if this fails, the forbidden-char check at pin_caps_gate.py:184 "
-            f"has become runtime-reachable. Update the inline comment in "
-            f"that file and re-verify the char-check block is exercised."
-        )
-
-        # Downstream: the gate's extractor returns None (no override
-        # captured) because no single line fullmatches the OVERRIDE_COMMENT_RE.
-        from pin_caps_gate import _extract_override_rationale
-        result = _extract_override_rationale(candidate)
-        assert result is None, (
-            f"override extractor captured a rationale despite {ord_hex} "
-            f"splitting the line — extractor behavior has changed; "
-            f"review test_edit_override_with_line_terminator_never_accepted."
-        )
+        """A forbidden line terminator inside an override rationale never
+        unlocks the size cap. The parser ends a row only at \\r and \\n, and
+        attributes no comment row holding U+2028, U+2029 or U+0085, so no
+        override is granted: a pin grown past 1,500 characters under such a
+        comment is refused, on size or as an invalid override."""
+        env = gate_env(pin_count=3)
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "old_string": "<!-- pinned: 2026-04-20 -->\n### Pin0\nxxxx",
+                "new_string": (f"<!-- pinned: 2026-04-20, pin-size-override: before{terminator}after -->\n"
+                               f"### Pin0\n" + "y" * 1600),
+                "replace_all": False,
+            },
+        })
+        assert result is not None, f"{ord_hex}: a smuggled terminator unlocked the size cap"
+        assert "chars (cap: 1500)" in result or "line terminator" in result, (ord_hex, result)
 
     @pytest.mark.parametrize(
         "terminator,ord_hex",
@@ -472,65 +481,22 @@ class TestPinCapsGate_Matrix_Edit:
         ],
     )
     def test_oracle_symmetry_terminator_smuggling(self, terminator, ord_hex):
-        """Gate extractor and parse_pins MUST agree on terminator-smuggling.
-
-        Regression for #492 cycle-8 F1 (security-engineer-1 PoC): pre-fix,
-        the gate extractor used `splitlines()` while the parser (`parse_pins`)
-        used `split("\\n")`. A rationale embedding U+2028/U+2029/U+0085
-        split at the gate boundary but survived as one line at the parser
-        boundary, which then `.translate(_FORBIDDEN_TERMINATOR_TABLE)`
-        silently stripped the char and accepted the laundered rationale.
-        Net: an oversize pin with a smuggled terminator in its rationale
-        passed the gate (extractor saw "no override claimed" → size check
-        unguarded) while the parser on next reload treated it as a valid
-        override (size cap bypassed).
-
-        Post-fix: both sides use `splitlines()`. For ANY terminator in
-        `_FORBIDDEN_RATIONALE_CHARS`, the candidate splits on BOTH sides.
-        Neither the gate nor the parser can capture a rationale → the
-        `has_size_override` flag never becomes True on a smuggled pin →
-        the size cap is enforced end-to-end.
-
-        Invariant: `_extract_override_rationale(candidate)` is None
-        ⇔ `parse_pins(synthetic_pinned_section).override_rationale` is None.
-        """
-        import pin_caps_gate
+        """The parser never grants an override whose rationale holds a
+        terminator, and the gate never lets one through as valid: a smuggled
+        terminator cannot unlock the size cap on either side."""
         from pin_caps import parse_pins
+        from pin_caps_gate import gate_decision
 
         candidate = (
             f"<!-- pinned: 2026-04-20, "
             f"pin-size-override: smuggled{terminator}rationale -->"
         )
-        gate_result = pin_caps_gate._extract_override_rationale(candidate)
-
-        # Build a synthetic pinned-section body (what parse_pins receives
-        # after `_parse_pinned_section` extracts the section).
-        pinned_section = f"{candidate}\n### TargetPin\nbody text here\n"
-        parsed = parse_pins(pinned_section)
-        assert len(parsed) == 1, (
-            f"Expected exactly one pin from the synthetic section; got "
-            f"{len(parsed)} — test fixture drift."
-        )
-        parser_rationale = parsed[0].override_rationale
-
-        # Oracle-symmetry invariant: gate and parser MUST agree.
-        assert (gate_result is None) == (parser_rationale is None), (
-            f"Oracle asymmetry on terminator {ord_hex}: "
-            f"gate.extract={gate_result!r} vs parser.override_rationale="
-            f"{parser_rationale!r}. This is exactly the bypass #492 cycle-8 F1 "
-            f"fixed — parser must not accept what the gate rejected."
-        )
-        # After the fix, both must be None (terminator-split prevented a
-        # rationale from ever being captured on either side).
-        assert gate_result is None, (
-            f"Gate extractor still captured a rationale on {ord_hex} "
-            f"despite splitlines-based extraction — fix regressed."
-        )
-        assert parser_rationale is None, (
-            f"Parser still captured a rationale on {ord_hex} despite "
-            f"splitlines-based parsing (pin_caps.py:191 fix regressed). "
-            f"Size cap bypass is live again."
-        )
+        parsed = parse_pins(f"{candidate}\n### TargetPin\nbody text here\n")
+        assert all(pin.override_rationale is None for pin in parsed), (ord_hex, parsed)
+        before = _build_claude_md(3)
+        after = before.replace("<!-- pinned: 2026-04-20 -->\n### Pin0", f"{candidate}\n### Pin0", 1)
+        decision = gate_decision(before, "Write", {"content": after})
+        assert decision.cause != "override" or "line terminator" in (decision.reason or ""), decision
 
     @pytest.mark.parametrize("baseline", ["fresh", "missing", "corrupt"])
     def test_edit_teammate_bypass(self, gate_env, baseline):
@@ -687,7 +653,8 @@ class TestPinCapsGate_Matrix_Write:
     def test_write_missing_baseline_over_cap_denies(
         self, gate_env, pre_count
     ):
-        """Write over-cap with missing baseline → fail-CLOSED asymmetric.
+        """Write over-cap with missing baseline → compared with an empty file,
+        refused on count (the one refusing failure path).
 
         `pre_count` has no semantic meaning here (baseline="missing")
         but we still parametrize to catch any accidental baseline-state
@@ -703,7 +670,7 @@ class TestPinCapsGate_Matrix_Write:
             },
         })
         assert result is not None
-        assert "Refusing Write" in result
+        assert "Pin count cap" in result
 
     def test_write_missing_baseline_under_cap_allows(self, gate_env):
         """Write clean (under-cap) with missing baseline → ALLOW.

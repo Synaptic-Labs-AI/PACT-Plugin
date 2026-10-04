@@ -869,46 +869,25 @@ class TestFencedBodiesAreMarkedAtTheTrueEnd:
         doc = build_claude_md(pinned_body="### A pin\nplain prose only\n\n")
         assert isinstance(plan_insertion(doc), Insertion)
 
-    def test_the_fence_blind_scan_would_split_the_block_and_the_planner_does_not(self):
-        """Shows the defect a fence-blind scan causes, beside the planner.
-
-        The line scanner the readers still use stops on the heading-shaped line
-        INSIDE the user's fence; an END marker placed there would split the
-        code block. The planner's section runs past the fence.
+    def test_the_reader_and_the_planner_both_run_past_the_fence(self):
+        """The heading-shaped line INSIDE the user's fence ends neither the
+        planner's section nor the reader's, so an END marker never splits the
+        code block and the reader counts the pin the writer marks.
         """
-        from shared.pin_markers import _PINNED_TERMINATOR
-        from staleness import _find_terminator_offset
+        from staleness import _parse_pinned_section
 
         doc = build_claude_md(
             pinned_body="### A pin\n```\n## Not a heading\n```\nmore\n\n"
         )
-        body_from = doc.index("## Pinned Context\n") + len("## Pinned Context\n")
-        blind_end = _find_terminator_offset(doc, body_from, _PINNED_TERMINATOR)
-        assert doc[blind_end:].startswith("## Not a heading")
-
         planned = plan_insertion(doc)
         assert isinstance(planned, Insertion)
         assert doc[planned.end_offset:].startswith("## Working Memory")
 
-    def test_no_reader_was_taught_about_fences(self):
-        """PR A changes NO reader. Repairing `_find_terminator_offset` would be
-        an extent-contract change: on a currently-truncated pinned region a
-        more complete reader RAISES the observed pin count, which can cross a
-        count threshold and produce an over-block introduced BY the repair.
-
-        The check is for a fence DELIMITER LITERAL, not for the word "fence".
-        `staleness.py` already explains in prose why it does no fence tracking,
-        so the word is present and is not evidence of logic. A real fence
-        handler cannot be written without one of these literals, which makes
-        their absence the load-bearing signal.
-        """
-        source = (HOOKS_DIR / "staleness.py").read_text(encoding="utf-8")
-        for delimiter in ("```", "~~~"):
-            assert delimiter not in source, (
-                f"staleness.py contains the fence delimiter {delimiter!r}: a "
-                "reader was taught about fences, which is an extent-contract "
-                "change and does not belong in this PR"
-            )
+        parsed = _parse_pinned_section(doc)
+        assert parsed is not None
+        _, pinned_end, body = parsed
+        assert "## Not a heading" in body
+        assert doc[pinned_end:].startswith("## Working Memory")
 
 
 TERMINATOR_CORPUS = [
@@ -1709,31 +1688,32 @@ class TestRegistration:
 # Non-goal
 # --------------------------------------------------------------------------
 
-def test_the_reader_is_wired_to_the_END_marker_only():
+def test_the_reader_is_wired_to_the_marker_pair():
     """SUPERSEDES `test_no_reader_is_wired_to_the_markers`, whose CLAIM this
     change retires.
 
-    That test pinned a STAGING decision -- ship the marker inert, wire a reader
-    later -- and the user retired that charter. A declared END with no reader
-    and no marker-aware writer is not a smaller change than this one, it is a
-    BROKEN one: the writer would append new pins below the marker where no cap
-    measures them.
-
-    THE ASYMMETRY IS THE REAL CONTRACT AND IT IS WHAT THIS TEST NOW PINS. The
-    parse consumes the END marker, because that is where the region stops. It
-    has no reason to consult the START marker: the pinned scan BEGINS at the
-    `## Pinned Context` heading, so the START declares a boundary the parser
-    already knows. Wiring it would add a second opinion about a settled offset.
+    A declared END with no reader and no marker-aware writer is BROKEN: the
+    writer would append new pins below the marker where no cap measures them.
+    The reader locates the START and END markers as one pair, through the
+    fence-aware parser: a pin added below the END marker is outside the
+    section, and a pair that is not well formed is reported, not guessed at.
     """
-    staleness_source = (HOOKS_DIR / "staleness.py").read_text(encoding="utf-8")
-    assert "PINNED_END_MARKER" in staleness_source, (
-        "the parse no longer reads the END marker, so the declared region end "
-        "is unwired and the pair is inert again"
-    )
-    assert "PINNED_START_MARKER" not in staleness_source, (
-        "the parse has started consulting the START marker; the pinned scan "
-        "already begins at the heading and does not need a second opinion"
-    )
+    from shared.claude_md_markers import State, parse
+    from staleness import locate_pinned
+
+    doc = build_claude_md(pinned_body="### A pin\nprose\n\n")
+    planned = plan_insertion(doc)
+    assert isinstance(planned, Insertion)
+    from shared.pin_markers import apply_insertion
+
+    marked = apply_insertion(doc, planned)
+    below = planned.end_offset + len(planned.start_line) + len(planned.end_line)
+    marked = marked[:below] + "### Below the end marker\nprose\n" + marked[below:]
+    parsed = parse(marked)
+    located = locate_pinned(parsed, unique=True)
+    assert located.state is State.FOUND
+    rows = range(located.spans[0][0], located.spans[0][1] + 1)
+    assert not any("Below the end marker" in parsed.lines[row].content for row in rows)
 
 
 # --------------------------------------------------------------------------

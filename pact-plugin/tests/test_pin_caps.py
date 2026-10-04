@@ -501,6 +501,15 @@ def _make_pin(heading="### X", body_chars=100, override=False):
     )
 
 
+def _pin_text(*names, undated=()):
+    """A pinned body holding one pin per name, dated unless named in `undated`."""
+    return "".join(
+        ("" if name in undated else "<!-- pinned: 2026-04-21 -->\n")
+        + f"### {name}\nbody of {name}\n\n"
+        for name in names
+    )
+
+
 def _managed_content(pinned_section_body: str) -> str:
     """Wrap pinned-section body in the PACT_MANAGED region so
     _parse_pinned_section can extract it. Matches the structure produced
@@ -705,13 +714,13 @@ class TestComputeDenyReason_Smoke:
         from pin_caps import compute_deny_reason
         pre = [_make_pin() for _ in range(3)]
         post = [_make_pin() for _ in range(4)]
-        assert compute_deny_reason(pre, post, new_body="") is None
+        assert compute_deny_reason(pre, post) is None
 
     def test_pre_clean_post_count_violation_denies(self):
         from pin_caps import PIN_COUNT_CAP, compute_deny_reason
         pre = [_make_pin(heading=f"### P{i}") for i in range(PIN_COUNT_CAP)]
         post = pre + [_make_pin(heading="### Extra")]
-        reason = compute_deny_reason(pre, post, new_body="")
+        reason = compute_deny_reason(pre, post)
         assert reason is not None
         assert "Pin count cap" in reason
         assert "prune-memory" in reason
@@ -721,37 +730,76 @@ class TestComputeDenyReason_Smoke:
         from pin_caps import PIN_COUNT_CAP, compute_deny_reason
         pre = [_make_pin(heading=f"### P{i}") for i in range(PIN_COUNT_CAP + 3)]
         post = list(pre)  # Refactor Edit — count unchanged.
-        assert compute_deny_reason(pre, post, new_body="") is None
+        assert compute_deny_reason(pre, post) is None
 
     def test_pre_over_cap_post_decreases_allows(self):
         from pin_caps import PIN_COUNT_CAP, compute_deny_reason
         pre = [_make_pin(heading=f"### P{i}") for i in range(PIN_COUNT_CAP + 3)]
         post = pre[:-1]  # Archival Edit — count down by 1.
-        assert compute_deny_reason(pre, post, new_body="") is None
+        assert compute_deny_reason(pre, post) is None
 
     def test_pre_over_cap_post_even_worse_denies(self):
         from pin_caps import PIN_COUNT_CAP, compute_deny_reason
         pre = [_make_pin(heading=f"### P{i}") for i in range(PIN_COUNT_CAP + 1)]
         post = pre + [_make_pin(heading="### MoreWorse")]
-        reason = compute_deny_reason(pre, post, new_body="")
+        reason = compute_deny_reason(pre, post)
         assert reason is not None
         assert "Pin count cap" in reason
 
-    def test_embedded_pin_in_body_denies_regardless_of_state(self):
-        from pin_caps import compute_deny_reason
-        pre = []
-        post = [_make_pin()]
-        reason = compute_deny_reason(
-            pre, post, new_body="### Sneaky Heading\nBody.\n"
-        )
-        assert reason is not None
-        assert "embedded pin structure" in reason
+    # NO EMBEDDED-PIN CHECK. A `### ` line smuggled into a pin body is a pin
+    # once the body is parsed, so the pin-growth rule counts it and the count
+    # axis denies it. A fenced one is not a pin. The check's only remaining
+    # effect was to refuse renames, swaps, moves and add-one-delete-one changes
+    # of an undated pin, which add no pin. The rows below pin its removal: each
+    # change was DENIED by the removed check and is ALLOWED now. `growth` is the
+    # value the pin-growth rule gives each change.
+
+    def test_the_embedded_pin_check_and_its_parameter_are_gone(self):
+        import inspect
+
+        import pin_caps
+        assert "new_body" not in inspect.signature(pin_caps.compute_deny_reason).parameters
+        assert not hasattr(pin_caps, "DENY_REASON_EMBEDDED_PIN")
+
+    def test_an_undated_rename_below_the_cap_is_allowed(self):
+        from pin_caps import compute_deny_reason, parse_pins
+        pre = parse_pins(_pin_text("A", "B", "C"))
+        post = parse_pins(_pin_text("A", "Renamed", "C", undated=("Renamed",)))
+        assert post[1].date_comment is None
+        assert compute_deny_reason(pre, post, growth=0) is None
+
+    @pytest.mark.parametrize("change", ["rename", "swap", "move", "add one, delete one"])
+    def test_an_undated_change_that_adds_no_pin_is_allowed_at_13(self, change):
+        from pin_caps import compute_deny_reason, parse_pins
+        names = [f"P{i}" for i in range(13)]
+        if change == "rename":
+            after, undated = names[:12] + ["Renamed"], ("Renamed",)
+        elif change == "swap":
+            after, undated = [names[1], names[0]] + names[2:], (names[0],)
+        elif change == "move":
+            after, undated = names[1:] + [names[0]], (names[0],)
+        else:
+            after, undated = names[1:] + ["Brand new"], ("Brand new",)
+        pre = parse_pins(_pin_text(*names))
+        post = parse_pins(_pin_text(*after, undated=undated))
+        assert len(pre) == len(post) == 13
+        assert compute_deny_reason(pre, post, growth=0) is None
+
+    def test_a_prose_heading_smuggled_into_a_body_at_12_is_denied_on_count(self):
+        from pin_caps import compute_deny_reason, parse_pins
+        names = [f"P{i}" for i in range(12)]
+        before = _pin_text(*names)
+        after = before.replace("body of P3\n", "body of P3\n### smuggled\nmore\n")
+        pre, post = parse_pins(before), parse_pins(after)
+        assert (len(pre), len(post)) == (12, 13)
+        reason = compute_deny_reason(pre, post, growth=1)
+        assert reason is not None and "Pin count cap reached (13/12)" in reason
 
     def test_pre_clean_post_size_violation_denies(self):
         from pin_caps import PIN_SIZE_CAP, compute_deny_reason
         pre = [_make_pin(body_chars=100)]
         post = [_make_pin(body_chars=PIN_SIZE_CAP + 50, override=False)]
-        reason = compute_deny_reason(pre, post, new_body="")
+        reason = compute_deny_reason(pre, post)
         assert reason is not None
         assert "New pin body" in reason
 
@@ -783,7 +831,7 @@ class TestComputeDenyReason_Smoke:
         post = pre[:-2] + [pre[-1]]
         assert len(post) <= PIN_COUNT_CAP  # count-violation resolved
         # Remediation must be allowed — the size violation is net-equivalent.
-        assert compute_deny_reason(pre, post, new_body="") is None
+        assert compute_deny_reason(pre, post) is None
 
     def test_multi_kind_pre_count_plus_size_worsening_size_denies(self):
         """Same pre-state (count + size) but the Edit WORSENS size while
@@ -801,7 +849,7 @@ class TestComputeDenyReason_Smoke:
         post = pre[:-2] + [_make_pin(heading="### Huge",
                                      body_chars=PIN_SIZE_CAP + 200,
                                      override=False)]
-        reason = compute_deny_reason(pre, post, new_body="")
+        reason = compute_deny_reason(pre, post)
         assert reason is not None
         assert "New pin body" in reason
 
@@ -829,7 +877,7 @@ class TestComputeDenyReason_Smoke:
         post.append(_make_pin(heading="### Huge",
                               body_chars=PIN_SIZE_CAP + 200, override=False))
         assert len(post) == len(pre)  # count unchanged
-        reason = compute_deny_reason(pre, post, new_body="")
+        reason = compute_deny_reason(pre, post)
         assert reason is not None
         assert f"{PIN_SIZE_CAP + 200}" in reason, (
             f"deny-reason should reference the worsened size "
@@ -848,7 +896,7 @@ class TestComputeDenyReason_Smoke:
         pre.append(_make_pin(heading="### Huge",
                              body_chars=PIN_SIZE_CAP + 50, override=False))
         post = list(pre)  # identical state
-        assert compute_deny_reason(pre, post, new_body="") is None
+        assert compute_deny_reason(pre, post) is None
 
     def test_count_improves_size_worsens_denies(self):
         """F4 asymmetry cover: count IMPROVES (still violating but fewer
@@ -867,7 +915,7 @@ class TestComputeDenyReason_Smoke:
         post.append(_make_pin(heading="### Huge",
                               body_chars=PIN_SIZE_CAP + 200, override=False))
         assert len(post) == PIN_COUNT_CAP + 1 and len(post) < len(pre)
-        reason = compute_deny_reason(pre, post, new_body="")
+        reason = compute_deny_reason(pre, post)
         assert reason is not None
         assert f"{PIN_SIZE_CAP + 200}" in reason
 
@@ -895,7 +943,7 @@ class TestComputeDenyReason_Smoke:
             _make_pin(heading="### A", body_chars=PIN_SIZE_CAP + 90),
             _make_pin(heading="### B", body_chars=PIN_SIZE_CAP + 1000),
         ]
-        reason = compute_deny_reason(pre, post, new_body="")
+        reason = compute_deny_reason(pre, post)
         assert reason is not None, (
             "F5 regression: non-first-violator worsening must deny via "
             "max-violator scalar"
@@ -921,7 +969,7 @@ class TestComputeDenyReason_Smoke:
             _make_pin(heading="### A", body_chars=PIN_SIZE_CAP + 90),
             _make_pin(heading="### B", body_chars=PIN_SIZE_CAP + 500),
         ]
-        assert compute_deny_reason(pre, post, new_body="") is None
+        assert compute_deny_reason(pre, post) is None
 
 
 class TestDenyReasonTemplates_Constants:
@@ -958,9 +1006,6 @@ class TestDenyReasonTemplates_Constants:
         rendered = DENY_REASON_SIZE.format(chars=PIN_SIZE_CAP + 100, cap=PIN_SIZE_CAP)
         assert str(PIN_SIZE_CAP) in rendered
 
-    def test_embedded_pin_template_is_static(self):
-        from pin_caps import DENY_REASON_EMBEDDED_PIN
-        assert "### " in DENY_REASON_EMBEDDED_PIN
 
     def test_override_missing_template_renders(self):
         from pin_caps import DENY_REASON_OVERRIDE_MISSING, PIN_SIZE_CAP

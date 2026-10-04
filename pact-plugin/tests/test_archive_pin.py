@@ -411,8 +411,11 @@ class TestExtractPinBlock_Verbatim:
         assert len(pins) == 2, f"fixture must parse as 2 pins, got {len(pins)}"
         assert pins[1].date_comment, "the RETAINED pin must carry a date comment"
 
+        from shared.claude_md_markers import parse
+
+        doc = parse(pinned)
         heading_starts = [
-            m.start() for m in pin_caps._PIN_HEADING_RE.finditer(pinned)
+            doc.lines[row].start for row in doc.find_lines(pin_caps._PIN_HEADING_ROW)
         ]
         archived = archive_pin.extract_pin_block(pinned, 0, pins)
         # The rule a removal step must NOT use.

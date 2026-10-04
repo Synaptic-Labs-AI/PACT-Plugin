@@ -25,38 +25,41 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from shared.claude_md_manager import (
+    MANAGED_END_MARKER,
+    MANAGED_START_MARKER,
+    MEMORY_END_MARKER,
     MEMORY_START_MARKER,
     PACT_BOUNDARY_PREFIXES,
     PINNED_END_MARKER,
+    PINNED_START_MARKER,
     SESSION_BOUNDARY_PREFIX,
-    extract_managed_region,
 )
 from shared.failure_cause import failure_cause
 from shared.project_scope import git_env_without_location
 from pin_caps import (
     PIN_STALE_BLOCK_THRESHOLD,
+    _PIN_HEADING_ROW,
     CapViolation,
     check_stale_block,
     parse_pins,
 )
 
-# Boundary prefix alternation used by _parse_pinned_section. Built from
-# PACT_BOUNDARY_PREFIXES (round 5, item 1) so the three-prefix union is
-# defined in one place.
-_BOUNDARY_ALT = "|".join(PACT_BOUNDARY_PREFIXES)
+# THE ONE PINNED LOCATOR'S PATTERNS (`locate_pinned`). The heading and the
+# terminator match ONE row's content at column 0, through the fence-aware
+# parser, so a fenced or indented `## Pinned Context` is not the heading and a
+# fenced `## ` line does not end the section. The stop prefixes end the section
+# at any PACT boundary marker line, indented up to 3 spaces: the memory and
+# managed markers, the pinned pair's end marker, the routing block and the
+# session block.
+_PINNED_HEADING = re.compile(r"## Pinned Context\s*$")
+_PINNED_TERMINATOR = re.compile(r"#{1,2}\s")
+_PINNED_STOP_PREFIXES = tuple(
+    f"<!-- {prefix}" for prefix in (*PACT_BOUNDARY_PREFIXES, SESSION_BOUNDARY_PREFIX)
+)
 
-# Compiled so `_parse_pinned_section` can pass a `pos` to `.search()`. The
-# module-level `re.search` function takes no start position, and the start
-# position is what bounds the first-match selection there.
-_PINNED_HEADING_RE = re.compile(r'^## Pinned Context\s*\n', re.MULTILINE)
-
-# NOTE FOR ANYONE RE-ADDING A PROBE PATTERN HERE. A second alphabet used to live
-# at this spot, for a well-formedness gate that tried to DETECT the cases where a
-# declared end over-reaches. It was narrower than the terminator alternation it
-# guarded, so it caught the heading cases and missed the boundary-comment ones,
-# and that shipped a cardinal over-block. The gate is gone: `_parse_pinned_section`
-# now BOUNDS the declared end instead of policing it, so there is no second
-# alphabet to keep in sync and nothing here to widen.
+# A STALE marker this module writes, anywhere on a row, which is where the
+# already-marked test has always looked for one.
+_STALE_MARK_ROW = re.compile(r".*?<!-- STALE: Last relevant \d{4}-\d{2}-\d{2} -->")
 
 
 # Staleness detection constants
@@ -103,111 +106,73 @@ PINNED_CONTEXT_TOKEN_BUDGET = 3200
 _BUDGET_WARNING_PREFIX = "<!-- WARNING: Pinned context"
 
 # THE SHAPE OF A WARNING LINE, WITHOUT AN ANCHOR. This is a regex SOURCE
-# STRING and not a compiled pattern, on purpose: an un-anchored shape is not
-# callable, so no call site can obtain a position-blind predicate by accident.
-# The two compositions below are the only predicates that exist.
+# STRING and not a compiled pattern, on purpose: the two row patterns below are
+# the only predicates that exist.
 #
-# THE SHAPE CARRIES ITS OWN BOUNDS. `[^\n]*?` cannot cross a newline, so the
-# match always ends inside the line it starts on, and it is LAZY so it stops at
-# the FIRST `-->`. An HTML comment ends at its first `-->`; a greedy run to the
-# LAST one on the line would swallow whatever a user appended after the comment
-# had already closed.
+# THE SHAPE CARRIES ITS OWN BOUNDS. `[^\n]*?` cannot cross a newline, and it is
+# LAZY so it stops at the FIRST `-->`. An HTML comment ends at its first `-->`;
+# a greedy run to the LAST one on the line would swallow whatever a user
+# appended after the comment had already closed.
 #
 # THE `~N tokens (budget: M)` SHAPE IS LOAD-BEARING, NOT DECORATION. It is what
 # separates a line this module emitted from a line that merely opens with the
 # same words, and requiring it is what keeps the strip off a user's own prose.
 #
-# THIS SHAPE AND THE EMITTED FORMAT IN `apply_staleness_markings` ARE A MATCHED
+# THIS SHAPE AND THE EMITTED FORMAT IN `_budget_warning_line` ARE A MATCHED
 # PAIR. Change one and change the other in the SAME commit: a format this shape
 # cannot match is a warning that can never be refreshed or removed, and every
 # later pass stacks another warning above it.
-_BUDGET_WARNING_SHAPE = (
-    rf"{re.escape(_BUDGET_WARNING_PREFIX)} ~\d+ tokens \(budget: \d+\)[^\n]*?-->\n?"
-)
+_BUDGET_WARNING_HEAD = rf"{re.escape(_BUDGET_WARNING_PREFIX)} ~\d+ tokens \(budget: \d+\)"
+_BUDGET_WARNING_SHAPE = rf"{_BUDGET_WARNING_HEAD}[^\n]*?-->\n?"
 
-# Matches ONE complete warning comment line at the very head of a pinned body.
+# RECOGNITION AND MEASUREMENT ONLY: a PROSE row that STARTS with a warning,
+# matched through the parser's `find_lines`. It lets `_has_budget_warning` see
+# a warning wherever it sits and `_body_without_warnings` take each one out of
+# a MEASUREMENT COPY. A warning-shaped line inside a fenced block is the user's
+# text and is neither. DO NOT GIVE THIS PATTERN TO CODE THAT DELETES FROM THE
+# DOCUMENT: it matches a row that carries text after the comment closes.
+_BUDGET_WARNING_ROW = re.compile(_BUDGET_WARNING_SHAPE)
+
+# DELETION: a PROSE row that IS one warning and nothing more, its comment
+# closing at the row's end. `_strip_budget_warnings` removes only such rows,
+# and only the contiguous run that starts the body, the one position this
+# module ever writes a warning to. STRICT ON PURPOSE: this deletes bytes from a
+# user's CLAUDE.md, a file that is frequently gitignored, so an over-match has
+# no commit to recover from. A row with text after the warning closes is not
+# one, so that text is never deleted.
 #
-# EACH PATTERN CARRIES ITS OWN ANCHOR, so no call site can widen it. `\A` pins
-# the match to offset 0, the only offset this module ever writes such a line to.
-# The shape above is deliberately left uncompiled, so it is not callable as a
-# predicate and the anchor cannot be chosen by a caller.
-#
-# STRICT ON PURPOSE. This predicate DELETES bytes from a user's CLAUDE.md, a
-# file that is frequently gitignored, so an over-match has no commit to recover
-# from. A loose variant that matched anywhere in the region would also reach
-# text a user wrote inside a pin body. Compare `_find_declared_end_offset`:
-# a predicate's tolerance follows its failure direction, never its resemblance
-# to a predicate that looks like it.
-#
-# THE SYMPTOM THAT WILL MAKE SOMEBODY WANT TO LOOSEN THIS, AND WHY TO REFUSE.
-# A warning line that is not at the head of the body keeps its place, because
-# this predicate is anchored and cannot reach it. The report arrives as "the
-# hook shows two warnings". That one is real and it is accepted. The law is
+# THE SYMPTOM THAT WILL MAKE SOMEBODY WANT TO LOOSEN THE STRIP, AND WHY TO
+# REFUSE. A warning line that is not at the head of the body keeps its place,
+# because the strip takes only the leading run. The report arrives as "the hook
+# shows two warnings". That one is real and it is accepted. The law is
 # CONDITIONAL, not a constant:
 #     count = N + (1 if estimate_tokens(user_text) > BUDGET else 0)
-# where N is the number of lines of this shape that the anchored strip cannot
-# reach. No pass raises the count.
+# where N is the number of warning rows the leading-run strip cannot reach. No
+# pass raises the count. A pin written ABOVE an existing warning takes that
+# warning off the head and raises N with no user action at all, and
+# `commands/pin-memory.md` instructs the tail placement rather than enforcing
+# it.
 #
-# THE CONDITION USED TO CARRY THE STRANDED LINES, AND THIS REPLACES THAT LAW:
-#     count = N + (1 if estimate_tokens(user_text + stranded) > BUDGET else 0)
-# The replaced form was correct while the measurement counted the whole body.
-# The measurement site now calls `_body_without_warnings`, so a line of this
-# shape contributes no token wherever it sits. That closes the second symptom,
-# "the hook reports a breach my own pins did not cause", which the replaced
-# form recorded as accepted.
-#
-# N IS NOT A COUNT OF WHAT A USER DID, AND THE EARLIER WORDING SAID IT WAS. It
-# read "the number of lines the user moved below the head". A pin written ABOVE
-# an existing warning takes that warning off offset 0 and raises N with no user
-# action at all, and `commands/pin-memory.md` instructs the tail placement
-# rather than enforcing it.
-#
-# DO NOT WIDEN THIS PATTERN TO REACH THEM. It DELETES, so a wider anchor reaches
-# text a user wrote inside a pin body, and this file is frequently gitignored.
-# The correct repair separates the two questions: EXCLUDE lines of this shape
-# from the COUNT wherever they sit, and keep the DELETE on the contiguous head
-# run. `_body_without_warnings` is that exclusion. Apply it to a THROWAWAY COPY
-# at the measurement site. Never modify `pinned_content` itself.
+# DO NOT WIDEN THE STRIP TO REACH THEM. It DELETES, so a wider reach removes
+# text a user wrote inside a pin body. The repair separates the two questions:
+# EXCLUDE warning rows from the COUNT wherever they sit, and keep the DELETE on
+# the leading run. `_body_without_warnings` is that exclusion. Apply it to a
+# THROWAWAY COPY at the measurement site. Never modify `pinned_content` itself.
 #
 # TWO HAZARDS STAND BEHIND THAT RULE AND THEY BIND AT DIFFERENT PLACES.
 #   1. THE WRITE-BACK, and this is the one that binds AT THE MEASUREMENT SITE.
 #      `apply_staleness_markings` writes `pinned_content` back into the
 #      document, so an in-place exclusion there DELETES the stranded line from
-#      the user's file. Measured against a control: the warning count drops
-#      from 1 to 0, the file bytes change, and a line the user positioned is
-#      gone from a file that is frequently gitignored.
-#   2. THE OFFSETS, and this one binds ABOVE the marker loop. `entry_starts`
-#      holds offsets into that string and the stale-marker loop writes at those
-#      offsets, so an in-place exclusion applied before the loop puts markers in
-#      wrong positions. Measured: the second pin loses its marker, 2 becomes 1.
-# `entry_starts` is last read above the measurement, so hazard 2 is spent by
-# the time the measurement runs. DO NOT READ THAT AS PERMISSION: hazard 1 holds
-# there, and a later editor can put an exclusion higher up, where hazard 2 is
-# live again. The exclusion looks like a pure read, which is what makes each of
-# the two easy to miss.
+#      the user's file.
+#   2. THE OFFSETS, and this one binds ABOVE the marker loop. The heading rows
+#      the stale-marker loop writes after are offsets into that string, so an
+#      in-place exclusion applied before the loop puts markers in wrong
+#      positions.
 #
-# THIS REFUSAL IS ENFORCED AND NOT ONLY STATED. A test drives this compiled
-# object over a body whose only warning sits below the head and requires it to
-# find nothing: see `test_the_deleting_pattern_cannot_reach_below_the_head`. A
-# wider anchor turns that red. No arm that drives DOCUMENTS can catch the
-# widening, because the strip reads this pattern at offset 0 only, so every
-# anchor gives byte-identical output today.
-_LEADING_BUDGET_WARNING_RE = re.compile(rf"\A{_BUDGET_WARNING_SHAPE}")
-
-# RECOGNITION AND MEASUREMENT ONLY. DO NOT GIVE THIS PATTERN TO CODE THAT
-# DELETES FROM THE DOCUMENT. `(?m)^` reports a match at ANY line start, which is
-# what lets `_has_budget_warning` see a warning that is not at the head, and what
-# lets `_body_without_warnings` take each one out of a MEASUREMENT COPY.
-#
-# THE SUBJECT OF THE BAR IS THE DOCUMENT, NOT THE PATTERN, and the earlier
-# wording said "code that deletes" without naming what gets deleted. The hazard
-# is a wide pattern that removes bytes from a user's file, which is frequently
-# gitignored, so an over-match has no commit to recover from. A copy that no
-# caller writes back removes no byte from the document, so the two callers above
-# are sanctioned. A caller that assigns the result over `pinned_content` is not.
-# The deleting anchor stays inside the compiled object above, so this wider reach
-# cannot travel to it.
-_ANY_BUDGET_WARNING_RE = re.compile(rf"(?m)^{_BUDGET_WARNING_SHAPE}")
+# THE POSITION RULE AND THE WHOLE-ROW RULE ARE ENFORCED, NOT ONLY STATED: see
+# `test_the_strip_cannot_reach_below_the_head` and
+# `test_text_after_a_warning_on_its_row_is_never_deleted`.
+_BUDGET_WARNING_WHOLE_ROW =re.compile(rf"{_BUDGET_WARNING_HEAD}(?:(?!-->).)*-->\Z")
 
 
 def _find_existing_claude_md(base: Path) -> Optional[Path]:
@@ -358,15 +323,15 @@ _estimate_tokens = estimate_tokens
 
 def _strip_budget_warnings(pinned_content: str) -> str:
     """
-    Remove the run of budget-warning comment lines at the head of a pinned body.
+    Remove the run of budget-warning rows at the head of a pinned body.
 
     Returns the body a user would have written, with this module's own earlier
-    reports taken back out. THIS IS THE DELETING HALF and it is anchored: a
-    warning line that is not at the head SURVIVES this strip and keeps its place
-    in the document. The note at `_LEADING_BUDGET_WARNING_RE` says why the repair
-    for that is not a wider strip.
+    reports taken back out. THIS IS THE DELETING HALF and it takes only the
+    leading run: a warning row that is not at the head SURVIVES this strip and
+    keeps its place in the document. The note at `_BUDGET_WARNING_WHOLE_ROW`
+    says why the repair for that is not a wider strip.
 
-    IT IS NOT THE MEASURING HALF, AND THE TWO ARE NOW SEPARATE.
+    IT IS NOT THE MEASURING HALF, AND THE TWO ARE SEPARATE.
     `_body_without_warnings` takes the surviving lines out of a copy at the
     measurement site, so a line this strip cannot reach contributes no token.
     Do not read that as a reason to widen this one. The count and the delete
@@ -380,485 +345,191 @@ def _strip_budget_warnings(pinned_content: str) -> str:
         pinned_content: The pinned section body.
 
     Returns:
-        The body with any leading budget-warning lines removed.
+        The body with any leading budget-warning rows removed.
     """
-    while True:
-        match = _LEADING_BUDGET_WARNING_RE.match(pinned_content)
-        if match is None:
-            return pinned_content
-        pinned_content = pinned_content[match.end():]
+    from shared.claude_md_markers import parse
+
+    doc = parse(pinned_content)
+    run = 0
+    for row in doc.find_lines(_BUDGET_WARNING_WHOLE_ROW):
+        if row != run:
+            break
+        run += 1
+    if run == 0:
+        return pinned_content
+    return pinned_content[doc.lines[run - 1].end:]
 
 
 def _has_budget_warning(pinned_content: str) -> bool:
-    r"""
+    """
     Report whether this module has already written a warning anywhere in
     `pinned_content`.
 
-    RECOGNITION, NOT DELETION, AND THAT IS WHY THE ANCHOR DIFFERS. This
-    predicate and `_strip_budget_warnings` share ONE shape,
-    `_BUDGET_WARNING_SHAPE`, and differ only in position: the strip takes back
-    the run at offset 0, this reports a match at ANY line start. The shape is
-    what identifies a line as this module's own, so the wider anchor does not
-    widen what counts as a warning. The narrower anchor stays INSIDE the
-    pattern the strip uses, so no call site can widen what gets deleted.
-
-    DO NOT MERGE THE TWO INTO ONE PATTERN CHOSEN BY THE CALL SITE. That works
-    -- `.match` on a line-anchored pattern is identical to `\A` -- and it puts
-    the deleting anchor where a later edit can move it. The cardinal failure
-    here is deletion of a user's own text from a file that is frequently
-    gitignored.
+    RECOGNITION, NOT DELETION, AND THAT IS WHY THE REACH DIFFERS. This
+    predicate and `_strip_budget_warnings` share ONE shape and differ in
+    position: the strip takes back the leading run, this reports a warning row
+    ANYWHERE. The shape is what identifies a line as this module's own, so the
+    wider reach does not widen what counts as a warning.
 
     THE ACCEPTED CONSEQUENCE, RULED ON AND NOT OVERLOOKED. A user can write a
     complete warning line into their own pinned prose: a maintainer who pastes
     the emitted format into a note is the realistic case. In a section with NO
     entries, that body now enters the pass. If it ALSO exceeds the budget, this
     module adds ONE current warning above it. BOTH conditions are required. A
-    quoted line in a body below the budget changes nothing at all.
-
-    THIS COST IS NOT NEW, AND THAT IS THE REASON TO ACCEPT IT. A section WITH
-    entries has always behaved this way, and the suite pins it: see
-    `test_user_line_quoting_the_warning_is_preserved`, which asserts a count of
-    two for a pin body that quotes the warning. The two documents differ only
-    in whether they hold an entry, so they must not differ here. The corner was
-    the inconsistency, and this is the repair.
-
-    The cost is also the smaller of the two failures, which is a second and
-    subordinate reason. One extra advisory line is visible, it stays at one on
-    every later pass, and the user can delete it. The alternative was to leave
-    the corner alone, which keeps a stale number in the document without limit
-    and announces nothing.
+    quoted line in a body below the budget changes nothing at all. A section
+    WITH entries has always behaved this way, and the suite pins it: see
+    `test_user_line_quoting_the_warning_is_preserved`.
 
     Args:
         pinned_content: The pinned section body.
 
     Returns:
-        True when a budget warning this module wrote sits at any line start.
+        True when a PROSE row starts with a budget warning this module wrote.
     """
-    return _ANY_BUDGET_WARNING_RE.search(pinned_content) is not None
+    from shared.claude_md_markers import parse
+
+    return bool(parse(pinned_content).find_lines(_BUDGET_WARNING_ROW))
 
 
 def _body_without_warnings(pinned_content: str) -> str:
     """
-    Return a MEASUREMENT COPY of the pinned body with each warning line gone.
+    Return a MEASUREMENT COPY of the pinned body with each warning row gone.
 
     THE RESULT IS FOR MEASURING AND FOR NOTHING ELSE. A caller that assigns it
-    back over `pinned_content` turns this strip into a DELETING pass:
-    `apply_staleness_markings` writes that name into the document, so the lines
-    removed here leave the user's file. Those lines sit where a user positioned
-    them, and CLAUDE.md is frequently gitignored, so no commit brings them back.
-    Measured against a control: an in-place exclusion at the measurement site
-    takes the warning count from 1 to 0 and changes the file bytes, while the
-    copy keeps the line and the pass reports no modification.
-
-    WHY A NAMED FUNCTION AND NOT AN INLINE `.sub` AT THE CALL SITE. The inline
-    form reads as a pure expression, which is the appearance that makes the
-    hazard above easy to miss. The name carries the contract, and this docstring
-    has somewhere to live.
+    back over `pinned_content` turns this into a DELETING pass:
+    `apply_staleness_markings` writes that name into the document, so the rows
+    removed here would leave the user's file. Those lines sit where a user
+    positioned them, and CLAUDE.md is frequently gitignored, so no commit
+    brings them back.
 
     IT REACHES A WARNING WHEREVER IT SITS, which is the point: the COUNT stops
     depending on POSITION. A line stranded below the head and a line pushed off
     the head by a new pin above it are then treated alike.
-    `_strip_budget_warnings` keeps the narrow anchor, because that one deletes.
+    `_strip_budget_warnings` keeps the narrow reach, because that one deletes.
 
     Args:
         pinned_content: The pinned section body. It is NOT modified.
 
     Returns:
-        A new string with each budget-warning line of this module's own shape
-        removed. Measure it. Do not write it back.
+        A new string without the rows that start with a budget warning of this
+        module's own shape. Measure it. Do not write it back.
     """
-    return _ANY_BUDGET_WARNING_RE.sub("", pinned_content)
+    from shared.claude_md_markers import parse
+
+    doc = parse(pinned_content)
+    warnings = set(doc.find_lines(_BUDGET_WARNING_ROW))
+    return "".join(pinned_content[line.start:line.end]
+                   for line in doc.lines if line.row not in warnings)
 
 
-def _find_terminator_offset(
-    content: str,
-    start: int,
-    terminator_pattern: "re.Pattern[str]",
-) -> int:
+def locate_pinned(doc, *, unique: bool = False):
     """
-    Find the absolute offset of the first line matching `terminator_pattern`.
+    THE ONE PINNED LOCATOR: the `## Pinned Context` section of a parsed
+    CLAUDE.md, as a `Located` whose FOUND span is (heading row, last body row).
+    Every reader of the Pinned section and the pin-growth rule call this.
 
-    Simple line-by-line search — no fence tracking needed because callers
-    operate within the PACT-managed region (round 10 structural guarantee).
-    The managed region contains only plugin-generated content; user-authored
-    fenced code blocks live outside PACT_MANAGED_START/END.
+    1. The memory block. FOUND: the search runs inside it. ABSENT: a reader
+       (`unique=False`) keeps the window it always had, the managed block when
+       that is FOUND and otherwise the whole document; the cap decision
+       (`unique=True`) gets the ABSENT result back, because it cannot tell
+       PACT's section from a user's without the block. Any other state comes
+       back as it is: a reader stays silent, the gate allows with its
+       advisory.
+    2. The optional pinned marker pair inside that scope. FOUND: the search
+       narrows to the pair's interior (the start marker sits above the heading).
+       ABSENT: the scope stands. Any other state comes back.
+    3. The section: its first visible heading through the row before the first
+       terminator row (`#` or `##` heading) or PACT boundary marker line. A
+       heading only inside an HTML comment is UNKNOWN, never ABSENT. With
+       `unique`, two visible headings are DUPLICATE.
 
     Args:
-        content: Text to scan (typically the managed region extract, not
-            the full file).
-        start: Absolute offset in `content` where scanning begins.
-        terminator_pattern: Compiled regex matched against individual lines
-            via `.match`.
+        doc: A `shared.claude_md_markers.Document`.
+        unique: True only where the pin count decides the cap.
 
     Returns:
-        Absolute offset of the first terminator line, or `len(content)` if
-        none found.
+        The `Located` of the section, or of the block that stopped the search.
     """
-    pos = start
-    while pos < len(content):
-        nl = content.find("\n", pos)
-        if nl == -1:
-            line = content[pos:]
-            line_end = len(content)
-        else:
-            line = content[pos:nl]
-            line_end = nl + 1
+    from shared.claude_md_markers import State
 
-        if terminator_pattern.match(line):
-            return pos
+    memory = doc.find_block(MEMORY_START_MARKER, MEMORY_END_MARKER)
+    if memory.state is State.FOUND:
+        scope = _interior(memory)
+    elif memory.state is State.ABSENT and not unique:
+        managed = doc.find_block(MANAGED_START_MARKER, MANAGED_END_MARKER)
+        scope = _interior(managed) if managed.state is State.FOUND else None
+    else:
+        return memory
+    pair = doc.find_block(PINNED_START_MARKER, PINNED_END_MARKER, scope)
+    if pair.state is State.FOUND:
+        scope = _interior(pair)
+    elif pair.state is not State.ABSENT:
+        return pair
+    return doc.find_section(_PINNED_HEADING, _PINNED_TERMINATOR, scope,
+                            stop_prefixes=_PINNED_STOP_PREFIXES, unique=unique)
 
-        pos = line_end
 
-    return len(content)
-
-
-def _find_declared_end_offset(content: str, start: int, literal: str) -> Optional[int]:
-    """
-    Find the offset of the first line that IS `literal`, scanning from `start`.
-
-    Line-anchored, and deliberately NOT a bare `find()`. `extract_managed_region`
-    can use a bare find because the managed region holds only plugin-generated
-    content, and its docstring states that guarantee. The pinned region does NOT
-    have it, because a user writes the pins. Measured on a pin whose body quotes
-    the marker mid-line: a bare find reports a 30-character body and LOSES a pin,
-    where a line-wise compare reports 118 and keeps them all.
-
-    TRAILING WHITESPACE IS TOLERATED. LEADING WHITESPACE IS NOT. That asymmetry
-    is the whole correctness argument of this function, so do not "tidy" it into
-    a `.strip()`:
-
-      - `_find_terminator_offset` matches the RAW line via `.match`, so it does
-        not match an indented marker line.
-      - A `.strip()` compare here WOULD match one. The two locators then
-        disagree about which line ends the region, the declared offset lands
-        INSIDE the pinned body, and the region TRUNCATES.
-      - Measured, on a document whose first pin quotes the marker on an indented
-        line: `.strip()` reports 1 pin where the current parse reports 2.
-        `.rstrip()` reports 2. A dropped pin is a cap that fails OPEN.
-
-    THE SIBLING PREDICATES IN `pin_markers` USE `.strip()` AND THAT IS CORRECT
-    THERE, which is exactly why this one is easy to get wrong.
-    `marker_line_present` and `_is_already_marked` decide whether to REFUSE a
-    write, so over-matching costs a skipped write and is fail-SAFE. This
-    function decides where a cap stops counting, so over-matching drops a pin
-    out of the counted span and is fail-OPEN. Same-looking predicates, OPPOSITE
-    failure directions.
-
-    A PREDICATE'S TOLERANCE IS SET BY ITS FAILURE DIRECTION, NEVER BY SYMMETRY
-    WITH A PREDICATE THAT LOOKS LIKE IT.
-
-    HOW THIS NEARLY WENT WRONG, recorded because the mechanism is the reusable
-    part. `.strip()` was not chosen here carelessly. The argument FOR it is
-    written out in `_is_already_marked`'s docstring -- careful and measured, 6
-    of 6 against byte-exact's 3 of 6 -- and it was carried across to this
-    function. IT IS A CORRECT ARGUMENT ABOUT A DIFFERENT QUESTION. A docstring
-    states its conclusion out loud and leaves its premise implicit, so reasoning
-    lifted out of one arrives without the condition that made it true. The
-    premise there is "a match REFUSES a write". Here a match BOUNDS a region,
-    and the conclusion inverts with the premise.
-
-    THE SYMMETRY ERROR RUNS BOTH WAYS, so do not correct it in the other
-    direction either: having made THIS locator strict, do NOT go and tighten
-    the certificate's presence check to match. That check should stay
-    `.strip()`. Over-detection there refuses a write, which is the safe side.
-    Two policies, on purpose. Unifying them breaks one of the two, whichever
-    way you unify.
-
-    Args:
-        content: Text to scan (typically the managed region extract).
-        start: Offset in `content` where scanning begins.
-        literal: The exact marker text the line must carry.
-
-    Returns:
-        Offset of the first matching line, or None when no line matches.
-    """
-    pos = start
-    while pos < len(content):
-        nl = content.find("\n", pos)
-        if nl == -1:
-            line, line_end = content[pos:], len(content)
-        else:
-            line, line_end = content[pos:nl], nl + 1
-
-        if line.rstrip() == literal:
-            return pos
-
-        pos = line_end
-
-    return None
+def _interior(located) -> Tuple[int, int]:
+    """The rows strictly inside a FOUND block, as a scope (possibly empty)."""
+    first, last = located.spans[0]
+    return first + 1, last - 1
 
 
 def _parse_pinned_section(
     content: str, *, allow_empty_section: bool = False
 ) -> Optional[Tuple[int, int, str]]:
     """
-    Extract the Pinned Context section from CLAUDE.md content.
+    Extract the Pinned Context section body from CLAUDE.md content.
 
-    Returns positions in the FULL file content (not managed-region-relative)
-    so callers can use them directly for read-mutate-write on the file.
+    The offset view of `locate_pinned` (with `unique=False`). Returns positions
+    in the FULL file content so callers can use them directly for
+    read-mutate-write on the file.
 
-    Round 10 structural guarantee: the parser operates within the
-    PACT-managed region only. This region contains only plugin-generated
-    content (no user-authored fenced code blocks), so fence-aware scanning
-    is unnecessary. If the managed region is not present (pre-migration
-    file), falls back to scanning the full content.
-
-    A DECLARED END BOUNDS THE INFERRED ONE. IT NEVER EXTENDS IT:
-
-        inferred   := first terminator line at or after the heading
-        declared   := first PINNED_END_MARKER line at or after the heading
-        region_end := inferred                      when declared is absent
-                   := min(declared, inferred)       otherwise
-
-    THE INVARIANT IS THE WHOLE SAFETY ARGUMENT, and it holds by construction
-    rather than by case analysis: `region_end <= inferred` FOR EVERY DOCUMENT.
-    `inferred` is what every reader of this region returned before a declared
-    end existed, so this parse cannot widen any span, on any input, including
-    shapes nobody has enumerated. It can only narrow one.
-
-    THIS IS A NO-OP ON EVERY DOCUMENT CARRYING THE CANONICAL MARKER NAME, and
-    that is by design rather than by accident. `PINNED_END_MARKER` carries the
-    `PACT_MEMORY_` prefix, so the inferred scan already stops at its line and
-    the two offsets coincide. Measured across eleven document shapes, the
-    declared and inferred parses agree in every one. The declared parse earns
-    its place against a RENAME: take the marker out of the boundary family and
-    the inferred scan overruns it and charges the marker text, while this parse
-    still excludes it. That is the only shape where the two differ.
-
-    UNMARKED AND HALF-MARKED FILES FAIL OPEN TO THE INFERRED SCAN. No marker at
-    all, or a START with no END, is a correct and expected state -- not an
-    error, not an incomplete write, not a repair opportunity. Such a document
-    parses exactly as it did before this pair existed, and nothing here raises.
-
-    OVER-REACH IS UNREPRESENTABLE RATHER THAN DETECTED, and that distinction is
-    worth the sentence. A foreign section between the body and a declared end --
-    a heading OR a PACT boundary comment -- stops the inferred scan, so `min`
-    takes the inferred offset and the foreign section stays out. No clause
-    enumerates those shapes, so no clause can enumerate them too narrowly.
-
-    AN EARLIER REVISION DID ENUMERATE THEM, with a gate that probed for H1/H2
-    headings only while the scan also matched the boundary-comment alternation.
-    It therefore caught the heading shapes and missed the boundary ones, and
-    shipped a cardinal over-block: a boundary comment between the pins and the
-    declared end was swallowed into the last pin, which crossed the size cap and
-    denied edits that had previously passed. THE LESSON IS ABOUT THE FORM, NOT
-    THE ALPHABET -- widening the gate's pattern would have fixed those cases and
-    left the same shape of defect available to the next person who edited either
-    pattern. A bounded operator has no alphabet to get wrong.
-
-    `_find_declared_end_offset` still matters and covers a DIFFERENT hazard:
-    it refuses an indented marker line, so a marker quoted inside a pin body
-    cannot become the declared end at all. Read its docstring before changing
-    it -- its whitespace policy is deliberately stricter than the certificate's,
-    and the two must not be unified.
+    THE BODY STARTS AT THE FIRST NON-BLANK ROW AFTER THE HEADING, not at the
+    row after it. Blank rows between the heading and the first pin stay outside
+    the body, as they always have, because `_strip_budget_warnings` takes back
+    only a warning at the head of the body and `apply_staleness_markings`
+    writes a new one there. The body ends with the section's last row,
+    terminator included.
 
     AN EMPTY SECTION IS AN INSTRUMENT LIMIT, NOT AN ABSENT ONE, AND
     `allow_empty_section` IS THE OPT-IN THAT SAYS SO. A heading with a body of
-    whitespace has a COMPUTABLE span, and the decline below returns None for it
-    anyway, so a caller cannot tell "no section" from "an empty section". That
-    conflation costs one caller a cardinal over-block: a gate that compares two
-    documents falls back to a wider slice on the empty side, counts memory
-    entries as pins, and denies a faithful edit.
-
-    THE DEFAULT PRESERVES TODAY, AND THAT IS THE WHOLE SAFETY ARGUMENT. Passing
-    nothing gives the decline that every caller was written against. MEASURED
-    across the seven non-test callers at the time of writing: FOUR change
-    behaviour if the RETURN changes (the warning pass below gets a pass for an
-    empty section, the pin read below continues with zero pins,
-    `scripts/archive_pin` stops raising `_Unevaluable`, `scripts/check_pin_caps`
-    loses its reason string), and NONE of the four asked for that. So the return
-    does not change. An opt-in argument moves zero of them, because no caller
-    passes an argument that did not exist.
-
-    THE PARAMETER IS KEYWORD-ONLY ON PURPOSE. A positional second argument could
-    be bound by accident by a caller, or by a test double whose signature drifts
-    from this one, and that binding would be silent. A keyword makes the opt-in
-    unreachable unless it is named.
-
-    WHAT IT DOES NOT SUPPLY. A document with NO `## Pinned Context` heading has
-    no span to return, so this parameter changes nothing for it: the position is
-    UNDEFINED rather than declined, and no flag here can invent one.
-
-    THIS WINDOW IS LOOSER THAN THE WRITER WINDOW ON PURPOSE, AND THE WRITER MUST
-    NOT BE WIDENED TO AGREE WITH IT. `pin_markers._narrow_to_memory_region`
-    resolves the memory region for the PIN WRITER, and it is deliberately
-    stricter than this parse at each of the three points below. THE TWO
-    DIRECTIONS ARE NOT THE SAME SIZE OF MISTAKE. Widening the writer back to the
-    managed region reopens the placement defect its narrow window closes, so that
-    direction is a defect. Narrowing THIS parse is a possible future change with
-    an unmeasured blast radius, so that direction is open work rather than a
-    tidying pass. Neither gap is closed here, and an editor who finds the two
-    windows inconsistent must leave them inconsistent.
-
-    THE SEARCH START BELOW TAKES A BARE SUBSTRING SEARCH, where the writer needs
-    the marker to occupy a LINE. So the marker text carried INSIDE a longer
-    session line moves this search start and does not move the writer window. NO
-    CODE AT EITHER SITE HOLDS THAT CLOSED. What holds it closed is the newline
-    substitution in `session_resume._sanitize_prompt_field`, which is recorded at
-    that one site, so a change there separates the two starts with no signal at
-    either function.
-
-    THE TWO END BOUNDARIES AGREE TODAY, AND NO LINE OF CODE STATES THE
-    AGREEMENT. `MEMORY_END_MARKER` carries the `PACT_MEMORY_` prefix, and the
-    terminator alternation below is built from `PACT_BOUNDARY_PREFIXES`, so this
-    scan stops at that marker BY PREFIX MEMBERSHIP and not by naming it. A READER
-    OF THE CODE SEES NO END BOUND AND A DRIVER OF A DOCUMENT SEES ONE. DO NOT
-    TIDY THAT AGREEMENT AWAY, and drive a document before you conclude the two
-    ends differ.
-
-    THIS SCAN REACHES THAT MARKER ONLY WHEN NOTHING STOPS IT EARLIER. A heading
-    or a boundary comment between the pinned body and the marker ends the scan at
-    that earlier line, and the canonical template puts a `## Working Memory`
-    heading in that position. So on a template-made document this scan does not
-    reach the marker, and a rename of it changes nothing there. DO NOT READ THAT
-    AS PERMISSION TO MOVE THE MARKER OUT OF THE PREFIX FAMILY, OR THE PREFIX OUT
-    OF THE ALTERNATION. A document with no such heading between the pins and the
-    marker DOES reach it, a user edit can make one, and the pin cap gate compares
-    two user documents. On that document each change removes the bound with
-    nothing to see, while the writer is unchanged.
-
-    A MISSING MARKER PAIR SPLITS THE TWO IN KIND RATHER THAN IN WIDTH. The writer
-    returns None and plans nothing. This parse keeps its search start at 0 and
-    continues across the full managed region. That fall-back is this function's
-    behaviour and not a model for the writer.
+    whitespace has a computable span, and the default returns None for it
+    anyway, so a caller cannot tell "no section" from "an empty section". A
+    gate that compares two documents needs that difference: falling back to a
+    wider slice on the empty side counts memory entries as pins and denies a
+    faithful edit. The default preserves the decline every other caller was
+    written against, and the parameter is keyword-only so a positional
+    argument cannot opt in by accident.
 
     Args:
         content: Full CLAUDE.md file content.
-        allow_empty_section: When True, a resolved heading whose body is empty
+        allow_empty_section: When True, a FOUND section whose body is empty
             or whitespace returns its span with an empty body instead of None.
-            Default False preserves the behaviour every caller was written
-            against. A MISSING heading returns None either way.
 
     Returns:
-        Tuple of (pinned_start, pinned_end, pinned_content) or None if
-        no Pinned Context section exists, or it is empty and
-        `allow_empty_section` is False. Offsets are absolute positions in
-        the original `content` string.
+        Tuple of (pinned_start, pinned_end, pinned_content), or None when the
+        section is not FOUND (absent, uncertain, or inside a malformed or
+        duplicated block), or it is empty and `allow_empty_section` is False.
+        Offsets are absolute positions in the original `content` string.
     """
-    # Bound to managed region if available (round 10). Offset adjustment
-    # converts managed-region-relative positions back to full-file positions.
-    region_result = extract_managed_region(content)
-    if region_result is not None:
-        scan_text, offset = region_result
-    else:
-        scan_text, offset = content, 0
+    from shared.claude_md_markers import State, parse
 
-    # START THE SEARCH BELOW THE MEMORY START MARKER WHEN THAT MARKER IS
-    # THERE. THIS IS THE FIRST-MATCH SELECTION AND IT IS THE LEVER FOR THE
-    # UNDER-BLOCK, WHICH THE TERMINATOR BELOW IS NOT.
-    #
-    # The window is the MANAGED region, and the session block sits in it
-    # ABOVE the memory markers. `re.search` takes the FIRST match, so a
-    # forged `## Pinned Context` heading in the session block WINS over the
-    # genuine one. MEASURED on document PAIRS through
-    # `pin_staleness_gate._counts_show_an_add`: the counted body was then
-    # the forged pin on the two sides, the count read 1 against 1, and the
-    # increase test stayed False WHILE A REAL PIN WAS ADDED. The gate missed
-    # the addition. That is an UNDER-block, and it is what this bound closes.
-    #
-    # `pos` MOVES THE SEARCH, NOT THE WINDOW, so `scan_text` and `offset`
-    # keep their meaning and every offset returned below is unchanged.
-    #
-    # WHAT THIS DOES NOT TOUCH, ON PURPOSE. A document with NO memory start
-    # marker keeps today's behaviour, because `search_from` stays 0. That
-    # missing-pair class is the subject of the standing pin-count alert about
-    # this counting window, and it is not this bound.
-    search_from = 0
-    memory_start = scan_text.find(MEMORY_START_MARKER)
-    if memory_start != -1:
-        search_from = memory_start + len(MEMORY_START_MARKER)
-
-    pinned_match = _PINNED_HEADING_RE.search(scan_text, search_from)
-    if not pinned_match:
+    doc = parse(content)
+    located = locate_pinned(doc)
+    if located.state is not State.FOUND:
         return None
-
-    pinned_start = pinned_match.end()
-
-    # Find the end of pinned section (next H1/H2 heading, or a plugin-managed
-    # boundary marker — PACT_MEMORY_, PACT_MANAGED_, PACT_ROUTING_ — or end
-    # of scan region). No fence-awareness needed — managed region contains
-    # only plugin-generated content (round 10 structural guarantee).
-    # THE SESSION PREFIX STOPS THIS SCAN RUNNING THROUGH THE SESSION-END
-    # MARKER. IT IS A DIFFERENT DEFECT FROM THE ONE THE SEARCH BOUND ABOVE
-    # CLOSES, AND THE TWO ARE DELIBERATELY SEPARATE.
-    #
-    # MEASURED, before the search bound above existed: with a forged
-    # `## Pinned Context` heading in the session block the body ran from that
-    # forgery THROUGH the session-end marker, and the returned body carried
-    # the marker. It does not carry it now.
-    #
-    # THIS TERM ALONE DID NOT CLOSE THE UNDER-BLOCK, and that is why the
-    # search bound above is there rather than a wider alternation here. The
-    # start of the span, and not its end, is what put the forged pin on the
-    # two sides of the comparison.
-    #
-    # THE MEMORY END BOUNDARY RIDES ON `_BOUNDARY_ALT` AND IS NAMED NOWHERE.
-    # `MEMORY_END_MARKER` carries the `PACT_MEMORY_` prefix, so this scan stops
-    # at it by PREFIX MEMBERSHIP when it reaches it. It reaches it only when no
-    # heading and no boundary comment sits between the pinned body and the
-    # marker, and the canonical template puts a `## Working Memory` heading
-    # there. THAT IS NOT PERMISSION TO DROP THE PREFIX. On a document with no
-    # such heading the marker IS the bound, and taking `PACT_MEMORY_` out of
-    # this alternation, or renaming that marker out of the prefix family,
-    # removes the bound with nothing to see at this site or at the writer.
-    next_section_pattern = re.compile(
-        rf'(?:#{{1,2}}\s|<!-- (?:{_BOUNDARY_ALT}|{SESSION_BOUNDARY_PREFIX}))'
+    heading, last = located.spans[0]
+    pinned_end = doc.lines[last].end
+    pinned_start = next(
+        (doc.lines[row].start for row in range(heading + 1, last + 1)
+         if doc.lines[row].content.strip()),
+        pinned_end,
     )
-    pinned_end = _find_terminator_offset(
-        scan_text, pinned_start, next_section_pattern
-    )
-
-    # THE DECLARED END IS A CEILING, NOT AN OVERRIDE. Absent marker ->
-    # `declared_end` is None and the inferred scan stands unchanged.
-    declared_end = _find_declared_end_offset(
-        scan_text, pinned_start, PINNED_END_MARKER
-    )
-    if declared_end is not None:
-        # `min(declared, inferred) <= inferred` FOR EVERY INPUT, and `inferred`
-        # is the extent every reader had before a declared end existed. So this
-        # parse can never return a span LARGER than the one the scan already
-        # produced -- for any document, including shapes nobody has enumerated.
-        # A declared end can only ever pull the boundary IN.
-        #
-        # THAT IS WHY THERE IS NO WELL-FORMEDNESS GATE. A gate DETECTS
-        # over-reach; a ceiling makes it UNREPRESENTABLE. Each malformed shape
-        # the gate used to name now falls out of the arithmetic instead of
-        # needing a clause: an interloping heading or boundary comment stops the
-        # inferred scan early, so `min` takes the inferred offset and the foreign
-        # section stays out. Nothing here enumerates what "malformed" means, so
-        # nothing here can enumerate it too narrowly.
-        #
-        # THE RENAME ARM IS THIS LINE, not a case beside it. A marker renamed out
-        # of the boundary family is not matched by the scan, so the inferred scan
-        # overruns it and `inferred > declared`; the `min` then selects the
-        # declared offset and the marker text stays out of the body. Excluding it
-        # is the only measured difference between the declared and inferred
-        # parses, and this operator is what produces it.
-        #
-        # WHAT STOOD HERE BEFORE WAS A GATE WHOSE PROBE ALPHABET WAS NARROWER
-        # THAN THIS SCAN'S. It probed `#{1,2}\s` while the scan also matches the
-        # boundary-comment alternation, so a boundary comment between the body
-        # and the declared end did not trip it, the declared offset won
-        # unbounded, and the region over-reached -- charging PACT's own text into
-        # the last pin and denying edits that previously passed. The comment
-        # defending it argued that such a comment "already stopped the inferred
-        # scan, so pinned_end is at or before it either way". The inferred scan
-        # does stop earlier. The branch that sentence guarded then DISCARDED that
-        # value and substituted the declared one, which is exactly what "either
-        # way" denies. It reasoned from the pre-override world inside the code
-        # performing the override.
-        pinned_end = min(pinned_end, declared_end)
-
-    pinned_content = scan_text[pinned_start:pinned_end]
-    # THE DECLINE IS OPT-OUT-ABLE AND THE HEADING CHECK ABOVE IS NOT. Reaching
-    # this line means `## Pinned Context` RESOLVED, so the span is computable
-    # and the only question is whether the caller wants an empty one. A caller
-    # that passes the flag has said it can tell an empty section from an absent
-    # one and needs the difference.
+    pinned_content = content[pinned_start:pinned_end]
     if not pinned_content.strip() and not allow_empty_section:
         return None
-
-    return pinned_start + offset, pinned_end + offset, pinned_content
+    return pinned_start, pinned_end, pinned_content
 
 
 def detect_stale_entries(
@@ -871,18 +542,22 @@ def detect_stale_entries(
     or as a standalone YYYY-MM-DD) older than PINNED_STALENESS_DAYS, and
     has not already been marked with a STALE comment.
 
+    An entry starts at a PROSE row beginning `### `, read with the fence-aware
+    parser, so a `### ` line inside a fenced block is part of the entry above.
+
     Args:
         pinned_content: The text of the Pinned Context section (after the
             ## heading).
 
     Returns:
         List of (entry_index, date_string, entry_heading) tuples for each
-        stale entry found. entry_index is the position within entry_starts.
+        stale entry found. entry_index is the entry's position in the section.
     """
-    entry_pattern = re.compile(r'^### ', re.MULTILINE)
-    entry_starts = [m.start() for m in entry_pattern.finditer(pinned_content)]
+    from shared.claude_md_markers import parse
 
-    if not entry_starts:
+    doc = parse(pinned_content)
+    headings = doc.find_lines(_PIN_HEADING_ROW)
+    if not headings:
         return []
 
     now = datetime.now(timezone.utc)
@@ -894,26 +569,16 @@ def detect_stale_entries(
     )
     # Fallback: any standalone YYYY-MM-DD date in the entry header line
     standalone_date_pattern = re.compile(r'(\d{4}-\d{2}-\d{2})')
-    # Pattern to detect existing staleness marker
-    stale_marker_pattern = re.compile(r'<!-- STALE: Last relevant \d{4}-\d{2}-\d{2} -->')
 
     stale_entries: List[Tuple[int, str, str]] = []
 
-    for i, start in enumerate(entry_starts):
-        if i + 1 < len(entry_starts):
-            end = entry_starts[i + 1]
-        else:
-            end = len(pinned_content)
-
-        entry_text = pinned_content[start:end]
-
+    for i, (first, last) in enumerate(_entry_rows(doc, headings)):
         # Skip entries already marked stale
-        if stale_marker_pattern.search(entry_text):
+        if doc.find_lines(_STALE_MARK_ROW, (first, last)):
             continue
 
-        # Extract the heading line for context
-        nl_pos = entry_text.find("\n")
-        heading = entry_text[:nl_pos] if nl_pos != -1 else entry_text
+        entry_text = pinned_content[doc.lines[first].start:doc.lines[last].end]
+        heading = doc.lines[first].content
 
         # Look for PR merged date first (most specific)
         date_str = None
@@ -938,6 +603,31 @@ def detect_stale_entries(
             stale_entries.append((i, date_str, heading))
 
     return stale_entries
+
+
+def _entry_rows(doc, headings) -> List[Tuple[int, int]]:
+    """(heading row, last row) of each entry: to the row before the next
+    heading, the last entry to the end of the document."""
+    ends = [row - 1 for row in headings[1:]] + [len(doc.lines) - 1]
+    return list(zip(headings, ends))
+
+
+def _stale_marker_line(date_str: str) -> str:
+    """The STALE marker row this module inserts below a stale entry's heading."""
+    return f"<!-- STALE: Last relevant {date_str} -->\n"
+
+
+def _budget_warning_line(pinned_tokens: int) -> str:
+    """The warning row written at the head of an over-budget pinned body.
+
+    THIS FORMAT AND `_BUDGET_WARNING_SHAPE` ARE A MATCHED PAIR: change one and
+    change the other in the SAME commit.
+    """
+    return (
+        f"{_BUDGET_WARNING_PREFIX} ~{pinned_tokens} tokens "
+        f"(budget: {PINNED_CONTEXT_TOKEN_BUDGET}). "
+        f"Consider archiving stale pins. -->\n"
+    )
 
 
 def apply_staleness_markings(
@@ -993,41 +683,35 @@ def apply_staleness_markings(
     # same value reports no modification and skips the write.
     original_pinned_content = pinned_content
 
-    # STEP 1, BEFORE ANY OFFSET IS TAKEN OR ANY TOKEN IS COUNTED: take back the
+    # STEP 1, BEFORE ANY ROW IS READ OR ANY TOKEN IS COUNTED: take back the
     # warning written by an earlier pass. Every step below then sees the user's
-    # own pinned body. Order is load-bearing -- `entry_starts` holds offsets
-    # into this string, so a later strip would invalidate them.
-    pinned_content = _strip_budget_warnings(pinned_content)
+    # own pinned body. Order is load-bearing -- the heading rows below are
+    # offsets into this string, so a later strip would invalidate them.
+    from shared.claude_md_markers import parse
 
-    entry_pattern = re.compile(r'^### ', re.MULTILINE)
-    entry_starts = [m.start() for m in entry_pattern.finditer(pinned_content)]
-    stale_marker_pattern = re.compile(r'<!-- STALE: Last relevant \d{4}-\d{2}-\d{2} -->')
+    body = _strip_budget_warnings(pinned_content)
+
+    doc = parse(body)
+    entries = _entry_rows(doc, doc.find_lines(_PIN_HEADING_ROW))
 
     # Count already-marked entries
-    already_stale = 0
-    for i, start in enumerate(entry_starts):
-        end = entry_starts[i + 1] if i + 1 < len(entry_starts) else len(pinned_content)
-        entry_text = pinned_content[start:end]
-        if stale_marker_pattern.search(entry_text):
-            already_stale += 1
+    already_stale = sum(1 for first, last in entries
+                        if doc.find_lines(_STALE_MARK_ROW, (first, last)))
 
     # Detect new stale entries
-    stale_entries = detect_stale_entries(pinned_content)
+    stale_entries = detect_stale_entries(body)
 
-    # Apply stale markers in reverse order so string offsets remain valid
+    # Apply stale markers in reverse order so string offsets remain valid.
+    # `body` is the parsed text and is never rewritten; the result builds in
+    # `pinned_content`.
+    pinned_content = body
     for idx, date_str, _heading in reversed(stale_entries):
-        start = entry_starts[idx]
-        end = entry_starts[idx + 1] if idx + 1 < len(entry_starts) else len(pinned_content)
-        entry_text = pinned_content[start:end]
-
-        stale_marker = f"<!-- STALE: Last relevant {date_str} -->\n"
-        nl_pos = entry_text.find("\n")
-        if nl_pos == -1:
-            # Entry is a single line with no newline; skip it
+        heading = doc.lines[entries[idx][0]]
+        if body[heading.end - 1:heading.end] not in ("\n", "\r"):
+            # The heading is the body's last row and has no line break; skip it
             continue
-        heading_end = nl_pos + 1
-        new_entry = entry_text[:heading_end] + stale_marker + entry_text[heading_end:]
-        pinned_content = pinned_content[:start] + new_entry + pinned_content[end:]
+        pinned_content = (pinned_content[:heading.end] + _stale_marker_line(date_str)
+                          + pinned_content[heading.end:])
 
     total_stale = already_stale + len(stale_entries)
 
@@ -1044,11 +728,7 @@ def apply_staleness_markings(
     pinned_tokens = estimate_tokens(_body_without_warnings(pinned_content))
     budget_warning = ""
     if pinned_tokens > PINNED_CONTEXT_TOKEN_BUDGET:
-        pinned_content = (
-            f"{_BUDGET_WARNING_PREFIX} ~{pinned_tokens} tokens "
-            f"(budget: {PINNED_CONTEXT_TOKEN_BUDGET}). "
-            f"Consider archiving stale pins. -->\n"
-        ) + pinned_content
+        pinned_content = _budget_warning_line(pinned_tokens) + pinned_content
         # ONE number, used by both consumers. The comment in the file and the
         # status string returned to the caller are built from the same
         # measurement, so a reader can never be shown two different figures for
@@ -1128,8 +808,9 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
 
     pinned_start, pinned_end, pinned_content = parsed
 
-    entry_pattern = re.compile(r'^### ', re.MULTILINE)
-    entry_starts = [m.start() for m in entry_pattern.finditer(pinned_content)]
+    from shared.claude_md_markers import parse
+
+    has_entries = bool(parse(pinned_content).find_lines(_PIN_HEADING_ROW))
 
     # A section with no entries still needs a pass when a warning is sitting in
     # it. Delete the last pin and the old guard returned here, which stranded
@@ -1160,7 +841,7 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
     # size, so this code never starts a report in a document it has not written
     # to before. The strict `~N tokens (budget: M)` shape carries that
     # discrimination, not the anchor.
-    if not entry_starts and not _has_budget_warning(pinned_content):
+    if not has_entries and not _has_budget_warning(pinned_content):
         return None
 
     new_content, stale_count, modified, budget_warning = apply_staleness_markings(

@@ -88,16 +88,15 @@ class TestCheckPinCaps_Advisory_StatusQuery:
     default (no-flag) behavior — the CLI has no add-time flags to select."""
 
     def test_status_zero_pins(self, patched_claude_md):
-        """Empty Pinned Context body routes through fail-open in _resolve_pins
-        (parsed is None → reason='no pinned section'). --status surfaces
-        the fail-open signal rather than a fake 0/12 slot state."""
+        """An empty Pinned Context section is FOUND and holds no pins, so the
+        slot state is a true 0/12, as session start reports it. A section that
+        is absent or cannot be read still fails open with a reason."""
         patched_claude_md(_make_pinned_content(0))
         rc, payload = _run_cli(["--status"])
         assert rc == 0
         assert payload["allowed"] is True
         assert payload["violation"] is None
-        assert "unknown" in payload["slot_status"]
-        assert "proceeding" in payload["slot_status"]
+        assert payload["slot_status"].startswith("Pin slots: 0/12 used")
         assert payload["evictable_pins"] == []
 
     def test_status_with_pins(self, patched_claude_md):
@@ -179,10 +178,10 @@ class TestCheckPinCaps_Advisory_FailOpen:
         patched_claude_md(_make_pinned_content(3))
         import check_pin_caps
 
-        def _boom(_pinned_content):
+        def _boom(_doc, _located):
             raise RuntimeError("parse blew up")
 
-        monkeypatch.setattr(check_pin_caps, "parse_pins", _boom)
+        monkeypatch.setattr(check_pin_caps, "section_pins", _boom)
         rc, payload = _run_cli(["--status"])
         assert rc == 0
         assert payload["allowed"] is True

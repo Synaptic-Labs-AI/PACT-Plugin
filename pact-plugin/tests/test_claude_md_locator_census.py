@@ -28,6 +28,15 @@ What counts as a site:
   stray rule. Nor is a STALE, `pinned:` or WARNING comment pattern: those are
   per-pin line data, located by position inside a resolved pin or Pinned
   section. `find_section`'s stop prefixes are marker literals by design.
+- A regex call whose subject is a parser row's `.content` (`line.content`,
+  `doc.lines[k].content`) and whose pattern is a per-pin comment pattern (the
+  date or override comment, the STALE mark, the budget WARNING) is not a site
+  either: it reads line data on a row the finder has already classified. A
+  call with a heading or block-marker pattern stays a site under every method,
+  so a fence-blind row scan for a heading is still caught, and so does any call
+  on raw text.
+- The functions in NAMED_EXEMPT, by name. Each one needs an architect ruling,
+  its reason stated beside it, and a site to cover.
 
 "A marker" is a PACT marker comment, a PACT section heading, a session-block
 field (`- Resume:` and its siblings), a module-level name holding one (closed
@@ -78,6 +87,16 @@ MARKER_TEXT = re.compile(
     r"|##\s*(Pinned Context|Working Memory|Retrieved Context|Current Session)"
     r"|# PACT Framework and Managed|pinned:|STALE:"
     r"|-\s*(Resume|Session dir|Started|Team|Plugin root):")
+# The per-pin comments a strike on a parser row's content may remove (C-8's line
+# data). A pattern built from one of them, and from no block marker, heading or
+# session field, is the only pattern the row-content exemption takes.
+LINE_DATA = re.compile(r"<!--\s*(STALE|pinned|WARNING: Pinned)|pinned:|STALE:")
+# Everything else MARKER_TEXT names: block markers, PACT headings, the managed
+# title and session fields.
+NON_LINE_DATA = re.compile(
+    BLOCK_MARKER.pattern
+    + r"|##\s*(Pinned Context|Working Memory|Retrieved Context|Current Session)"
+    r"|# PACT Framework and Managed|-\s*(Resume|Session dir|Started|Team|Plugin root):")
 HEADING_ANCHORED = re.compile(r"^(\(\?m\))?(\^|\\n|\n)#{1,3}( |\\s|\s)")
 HEADING_PLAIN = re.compile(r"^#{1,3}( |$)")
 SHELL_MARKER = re.compile(
@@ -91,6 +110,15 @@ LINE_BREAKS = ("\n", "\r\n", "\r")
 # The finder's lookups. Their results carry states and rows, never marker text,
 # and the markers in their arguments are the finder's to locate.
 FINDER_CALLS = {"find_block", "find_marker", "find_section", "find_lines", "inner", "offsets", "scope_known"}
+
+# Functions whose marker reads are exempt by name, with their nested functions.
+# A closed set: an entry needs an architect ruling and its reason here.
+NAMED_EXEMPT = frozenset({
+    # Rule U's region R is fence-blind by the certified reference configuration.
+    # Its correctness is certified by the pin-growth populations and the clause
+    # mutants, not by this census.
+    ("hooks/shared/pin_growth.py", "clause_region_r"),
+})
 
 
 # --- the scanner ----------------------------------------------------------------
@@ -298,11 +326,33 @@ def _arg(call, index, keyword):
     return next((k.value for k in call.keywords if k.arg == keyword), ast.Constant(None))
 
 
-def _locators(nodes, needle, re_aliases, re_funcs, finders, splits_marker_text, strict=False, block=None):
+def _subject(call, is_re_module):
+    """The text argument a regex call searches: after the pattern for a `re`
+    function, after the replacement for `sub`/`subn`."""
+    index = (1 if is_re_module else 0) + (1 if call.func.attr in ("sub", "subn") else 0)
+    if len(call.args) > index:
+        return call.args[index]
+    return next((k.value for k in call.keywords if k.arg == "string"), None)
+
+
+def _reads_row_content(call, is_re_module, line_data):
+    """A per-pin comment pattern applied to a parser row's `.content`: line
+    data, not a locator. Only with a pattern `line_data` accepts."""
+    subject = _subject(call, is_re_module)
+    if not (isinstance(subject, ast.Attribute) and subject.attr == "content"):
+        return False
+    pattern = call.args[0] if is_re_module and call.args else call.func.value
+    return line_data(pattern)
+
+
+def _locators(nodes, needle, re_aliases, re_funcs, finders, splits_marker_text, strict=False, block=None,
+              line_data=lambda x: False):
     """(kind, node) for each searching expression whose needle satisfies `needle`.
     strict: only the searched-for operand counts (left of `in`, the first argument,
     the pattern) and a value tested against constants is not a search. `block`
-    tests a `find_lines` or `find_section` pattern; None skips both."""
+    tests a `find_lines` or `find_section` pattern; None skips both. `line_data`
+    accepts a pattern for the row-content strike exemption; the default refuses
+    the exemption everywhere."""
     out = []
     for n in nodes:
         kind = None
@@ -323,8 +373,12 @@ def _locators(nodes, needle, re_aliases, re_funcs, finders, splits_marker_text, 
                 recv = f.value
                 is_re = isinstance(recv, ast.Name) and recv.id in re_aliases
                 if is_re and f.attr in RE_FUN and argm:
-                    kind = "re." + f.attr
-                elif (not is_re and f.attr in RE_FUN - {"split"} and needle(recv)) or (f.attr in FIND and argm):
+                    if not _reads_row_content(n, True, line_data):
+                        kind = "re." + f.attr
+                elif not is_re and f.attr in RE_FUN - {"split"} and needle(recv):
+                    if not _reads_row_content(n, False, line_data):
+                        kind = "." + f.attr
+                elif f.attr in FIND and argm:
                     kind = "." + f.attr
                 elif f.attr == "marker_rows" and needle(_arg(n, 0, "literal")):
                     kind = ".marker_rows"
@@ -384,12 +438,20 @@ def _segment(source, node):
     return " ".join(text.split())
 
 
-def census_sources(sources):
-    """Every site in {path: python source}, as a Counter of entry tuples."""
+def _exempt(rel, qual, exempt):
+    return any(rel == path and (qual == name or qual.startswith(name + "."))
+               for path, name in exempt)
+
+
+def census_sources(sources, exempt=NAMED_EXEMPT):
+    """Every site in {path: python source}, as a Counter of entry tuples,
+    leaving out the functions `exempt` names."""
     trees = {rel: ast.parse(src) for rel, src in sources.items()}
     handles = {rel: any(_is_marker(_text(x)) for x in ast.walk(t)) for rel, t in trees.items()}
     names = _marker_names(trees, handles)
     block_names = _marker_names(trees, dict.fromkeys(trees, False), BLOCK_MARKER)
+    data_names = _marker_names(trees, dict.fromkeys(trees, False), LINE_DATA)
+    other_names = _marker_names(trees, dict.fromkeys(trees, True), NON_LINE_DATA)
     for rel, t in trees.items():
         handles[rel] = handles[rel] or any(isinstance(x, ast.Name) and x.id in names for x in ast.walk(t))
     helpers = _parametric_locators(trees)
@@ -397,6 +459,8 @@ def census_sources(sources):
     for rel, tree in sorted(trees.items()):
         re_aliases, re_funcs = _re_imports(tree)
         for qual, fn in _functions(tree):
+            if _exempt(rel, qual, exempt):
+                continue
             nodes = _own_nodes(fn)
             splits = any(isinstance(n, ast.Call) and _is_line_split(n) for n in nodes)
             pred = lambda x, al, rel=rel, splits=splits: _mentions(
@@ -404,12 +468,22 @@ def census_sources(sources):
             aliases, finders = _bindings(nodes, pred)
             needle = lambda x, al=aliases, pred=pred: pred(x, al)
             handles_markers = any(needle(n) for n in nodes if isinstance(n, ast.expr))
+            block_pred = lambda x, al: _mentions(x, block_names, al, text=BLOCK_MARKER)
+            block_aliases, _ = _bindings(nodes, block_pred)
+            block_marker = lambda x, al=block_aliases, pred=block_pred: pred(x, al)
             block = None
             if any(isinstance(n, ast.Attribute) and n.attr in ("find_lines", "find_section") for n in nodes):
-                block_pred = lambda x, al: _mentions(x, block_names, al, text=BLOCK_MARKER)
-                block_aliases, _ = _bindings(nodes, block_pred)
-                block = lambda x, al=block_aliases, pred=block_pred: pred(x, al)
-            found = _locators(nodes, needle, re_aliases, re_funcs, finders, handles_markers, block=block)
+                block = block_marker
+            # A strike pattern is line data when it names a per-pin comment and no
+            # other marker: a block marker, a heading or a session field.
+            data_pred = lambda x, al: _mentions(x, data_names, al, text=LINE_DATA)
+            data_aliases, _ = _bindings(nodes, data_pred)
+            other_pred = lambda x, al: _mentions(x, other_names, al, headings=True, text=NON_LINE_DATA)
+            other_aliases, _ = _bindings(nodes, other_pred)
+            line_data = (lambda x, da=data_aliases, oa=other_aliases:
+                         data_pred(x, da) and not other_pred(x, oa))
+            found = _locators(nodes, needle, re_aliases, re_funcs, finders, handles_markers, block=block,
+                              line_data=line_data)
             found += [("helper call", n) for n in nodes if isinstance(n, ast.Call)
                       and _callee(n) in helpers and any(needle(a) for a in _call_args(n))]
             for kind, node in found:
@@ -567,6 +641,16 @@ def _kinds(body):
       "return loc.state == State.FOUND and SESSION_START_MARKER in text"), "in"),
     ("marker compared with a finder result",
      "return parse(text).find_marker(SESSION_START_MARKER).state == SESSION_END_MARKER", "=="),
+    ("pin comment pattern on raw text", 'return re.compile(r"<!-- pinned: .*-->").sub("", text)', ".sub"),
+    ("block marker pattern on row content",
+     "return re.compile(re.escape(SESSION_START_MARKER)).match(parse(text).lines[0].content)", ".match"),
+    ("block marker re function on row content",
+     "return [re.search(SESSION_END_MARKER, line.content) for line in parse(text).lines]", "re.search"),
+    ("block marker strike on every row",
+     'return [re.compile(re.escape(SESSION_START_MARKER)).sub("", line.content) for line in parse(text).lines]',
+     ".sub"),
+    ("heading strike on row content",
+     'return re.compile(r"^## Pinned Context\\s*$").sub("", parse(text).lines[0].content)', ".sub"),
 ])
 def test_seeded_shapes_are_caught(shape, body, kind):
     if shape == "call-derived constant":
@@ -631,6 +715,53 @@ def test_a_marker_rows_wrapper_searching_for_its_parameter_is_caught_at_its_mark
     assert [(f, k) for (_r, f, k, _e) in found] == [("caller", "helper call")], found
 
 
+def test_a_fence_blind_row_scan_on_row_content_is_caught():
+    """A match or search over every row's `.content` reads FENCE and CODE rows
+    too, so it is a site even though its subject is a parser row; only a strike
+    of a per-pin comment is exempt."""
+    src = ('import re\nfrom shared.claude_md_markers import parse\n'
+           'MEMORY_START_MARKER = "<!-- PACT_MEMORY_START -->"\n'
+           '_PINNED = re.compile(r"^## Pinned Context\\s*$")\n'
+           '_START_RE = re.compile(re.escape(MEMORY_START_MARKER))\n'
+           '_DATE_COMMENT_RE = re.compile(r"<!--\\s*pinned:\\s*.+?-->")\n'
+           'def heading_row(content):\n'
+           '    for line in parse(content).lines:\n'
+           '        if _PINNED.match(line.content):\n'
+           '            return line.row\n'
+           'def strike_starts(content):\n'
+           '    return [_START_RE.sub("", line.content) for line in parse(content).lines]\n'
+           'def strike_dates(doc, first, last):\n'
+           '    return [_DATE_COMMENT_RE.sub("", line.content) for line in doc.lines[first:last + 1]]\n'
+           '_OVERRIDE_ROW = re.compile(r"\\s*<!--\\s*pinned:.*pin-size-override:.*-->")\n'
+           'def override_row(doc, row):\n'
+           '    return _OVERRIDE_ROW.fullmatch(doc.lines[row].content)\n')
+    found = sorted((f, k) for (_r, f, k, _e) in census_sources({"hooks/seeded.py": src}))
+    assert found == [("heading_row", ".match"), ("strike_starts", ".sub")], found
+
+
+def test_a_named_exemption_drops_its_function_and_only_it():
+    src = (_CONSTS +
+           "def exempt(text):\n    return SESSION_START_MARKER in text\n"
+           "def kept(text):\n    return SESSION_END_MARKER in text\n")
+    named = frozenset({("hooks/seeded.py", "exempt")})
+    assert sorted(f for (_r, f, _k, _e) in census_sources({"hooks/seeded.py": src}, named)) == ["kept"]
+    assert sorted(f for (_r, f, _k, _e) in census_sources({"hooks/seeded.py": src}, frozenset())) == [
+        "exempt", "kept"]
+
+
+def test_every_named_exemption_names_a_function_that_still_has_a_site():
+    """A rename leaves an entry pointing at nothing, and a function moved onto
+    the finder leaves an entry exempting nothing: either one fails here."""
+    sources = _shipped_sources()
+    unexempted = census_sources(sources, frozenset())
+    for path, name in sorted(NAMED_EXEMPT):
+        assert path in sources, f"{path} is not shipped; drop its NAMED_EXEMPT entry"
+        quals = {qual for qual, _fn in _functions(ast.parse(sources[path]))}
+        assert name in quals, f"{path} has no function {name}; drop or rename its NAMED_EXEMPT entry"
+        assert any(_exempt(rel, qual, frozenset({(path, name)})) for (rel, qual, _k, _e) in unexempted), (
+            f"{path}::{name} holds no census site any more; drop its NAMED_EXEMPT entry")
+
+
 def test_a_module_level_block_pattern_is_caught_at_find_lines():
     src = (_CONSTS + "_START_RE = re.compile(re.escape(SESSION_START_MARKER))\n"
            "def f(text):\n    return parse(text).find_lines(_START_RE)\n")
@@ -679,6 +810,11 @@ def test_an_anchored_heading_pattern_is_caught_in_a_marker_module():
     # An identity test is never a site, on a finder result or on a marker.
     "loc = parse(text).find_block(SESSION_START_MARKER, SESSION_END_MARKER)\nreturn loc.state is State.FOUND",
     "m = SESSION_END_MARKER\nreturn [l for l in lines if l is m]",
+    # Line data: a per-pin comment pattern applied to a row the finder classified.
+    'return [re.compile(r"<!-- pinned: .*-->").sub("", line.content) for line in parse(text).lines]',
+    'return re.sub(r"<!-- pinned: .*-->", "", parse(text).lines[1].content)',
+    'return re.compile(r"<!-- STALE: .*-->").search(parse(text).lines[2].content)',
+    'return re.compile(r"\\s*<!--\\s*pinned:.*pin-size-override:.*-->").fullmatch(parse(text).lines[0].content)',
 ])
 def test_finder_routed_calls_writers_and_unrelated_searches_are_not_sites(body):
     assert _kinds(body) == []

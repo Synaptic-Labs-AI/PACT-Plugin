@@ -358,7 +358,8 @@ _pin_caps = _load_hook_module("pin_caps")
 _staleness = _load_hook_module("staleness")
 
 parse_pins = _pin_caps.parse_pins
-_PIN_HEADING_RE = _pin_caps._PIN_HEADING_RE
+_PIN_HEADING_ROW = _pin_caps._PIN_HEADING_ROW
+_date_comment_row = _pin_caps._date_comment_row
 _parse_pinned_section = _staleness._parse_pinned_section
 get_project_claude_md_path = _staleness.get_project_claude_md_path
 # The (path, base) form. `base` is the directory the resolver ACTUALLY found
@@ -399,23 +400,18 @@ class _Unevaluable(Exception):
         self.claude_md_path = claude_md_path
 
 
-def _span_start(pinned_content: str, heading_start: int, date_comment) -> int:
-    """Offset where a pin's span begins: its date-comment LINE, else its heading.
+def _span_start(doc, heading: int) -> int:
+    """Offset where a pin's span begins: its date-comment ROW, else its heading.
 
     Extracted so the START of pin N and the END of pin N-1 are computed by the
     SAME rule. Deriving the end from the next HEADING instead would make the
     two asymmetric and let each block swallow the following pin's date comment.
+    The comment row is the one `parse_pins` attributes to the pin, so the span
+    and the parse agree by construction; the row's start keeps its indentation
+    inside the span.
     """
-    if not date_comment:
-        return heading_start
-    preceding = pinned_content[:heading_start]
-    # rfind takes the NEAREST preceding occurrence, so an identical comment
-    # string inside an earlier pin's body cannot capture the span.
-    comment_at = preceding.rfind(date_comment)
-    if comment_at == -1:
-        return heading_start
-    # Back up to that LINE's first character, so indentation is inside the span.
-    return preceding.rfind("\n", 0, comment_at) + 1
+    row = _date_comment_row(doc, 0, heading)
+    return doc.lines[heading if row is None else row].start
 
 
 def extract_pin_block(pinned_content: str, index: int, pins) -> str:
@@ -471,23 +467,25 @@ def extract_pin_block(pinned_content: str, index: int, pins) -> str:
     Args:
         pinned_content: The Pinned Context section body (what parse_pins ate).
         index: Position of the pin within that section.
-        pins: The full parsed Pin list -- the NEXT pin's date_comment is needed
-            to place this pin's end boundary.
+        pins: The full parsed Pin list (`parse_pins(pinned_content)`). Its
+            length bounds `index`; the span edges come from the same rows the
+            parse read.
 
     Raises:
         _Unevaluable: if the section's headings no longer agree with `index`.
     """
-    starts = [m.start() for m in _PIN_HEADING_RE.finditer(pinned_content)]
-    if index < 0 or index >= len(starts) or index >= len(pins):
+    from shared.claude_md_markers import parse
+
+    doc = parse(pinned_content)
+    headings = doc.find_lines(_PIN_HEADING_ROW)
+    if index < 0 or index >= len(headings) or index >= len(pins):
         raise _Unevaluable(
-            f"pin index {index} out of range (section has {len(starts)} pins)"
+            f"pin index {index} out of range (section has {len(headings)} pins)"
         )
 
-    block_start = _span_start(pinned_content, starts[index], pins[index].date_comment)
-    if index + 1 < len(starts) and index + 1 < len(pins):
-        block_end = _span_start(
-            pinned_content, starts[index + 1], pins[index + 1].date_comment
-        )
+    block_start = _span_start(doc, headings[index])
+    if index + 1 < len(headings) and index + 1 < len(pins):
+        block_end = _span_start(doc, headings[index + 1])
     else:
         block_end = len(pinned_content)
 
