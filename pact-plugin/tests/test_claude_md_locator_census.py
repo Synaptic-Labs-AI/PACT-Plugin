@@ -36,6 +36,12 @@ of them, or text assembled from literal pieces that spells one. In a module that
 handles markers, an anchored `^## `/`\\n### ` heading pattern counts too, and a
 bare `## ` prefix counts inside a function that splits text into lines.
 
+A finder lookup (find_block, find_marker, find_section, find_lines, inner,
+offsets, scope_known) is an opaque value. Its result is not a marker, so a name
+bound from it is not one and comparing its state or rows is not a site, and a
+marker in its arguments marks nothing outside the call. An `is` comparison is
+never a site.
+
 Named limits, not seen by the scan:
 - A search whose needle arrives only as a parameter. The helper's own body
   is not a site; its callers that pass a marker are.
@@ -82,6 +88,9 @@ FIND = {"find", "rfind", "index", "rindex", "split", "rsplit", "partition", "rpa
 RE_FUN = {"search", "match", "fullmatch", "finditer", "findall", "sub", "subn", "split"}
 NOT_HELPERS = FIND | RE_FUN | {"compile", "get", "write", "write_text", "read_text", "join", "format"}
 LINE_BREAKS = ("\n", "\r\n", "\r")
+# The finder's lookups. Their results carry states and rows, never marker text,
+# and the markers in their arguments are the finder's to locate.
+FINDER_CALLS = {"find_block", "find_marker", "find_section", "find_lines", "inner", "offsets", "scope_known"}
 
 
 # --- the scanner ----------------------------------------------------------------
@@ -95,6 +104,20 @@ def _text(node):
     return None
 
 
+def _is_finder_call(node):
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in FINDER_CALLS
+
+
+def _walk(node):
+    """ast.walk that does not enter a finder call: such a call is an opaque value."""
+    todo = [node]
+    while todo:
+        n = todo.pop()
+        if not _is_finder_call(n):
+            yield n
+            todo.extend(ast.iter_child_nodes(n))
+
+
 def _literal(node):
     if isinstance(node, ast.Constant):
         return True
@@ -103,7 +126,9 @@ def _literal(node):
 
 
 def _pieces(node):
-    """The string constants under node, in source order."""
+    """The string constants under node, in source order, outside finder calls."""
+    if _is_finder_call(node):
+        return []
     t = _text(node)
     if t is not None:
         return [t]
@@ -141,7 +166,7 @@ def _is_marker(s, headings=False, plain=False, text=MARKER_TEXT):
 
 
 def _mentions(node, names, aliases=(), headings=False, plain=False, text=MARKER_TEXT):
-    for x in ast.walk(node):
+    for x in _walk(node):
         if isinstance(x, ast.Name) and (x.id in names or x.id in aliases):
             return True
         if isinstance(x, ast.Attribute) and x.attr in names:
@@ -335,7 +360,7 @@ def _parametric_locators(trees):
             if not params or fn.name in NOT_HELPERS:
                 continue
             nodes = _own_nodes(fn)
-            is_param = lambda x, p=params: any(isinstance(y, ast.Name) and y.id in p for y in ast.walk(x))
+            is_param = lambda x, p=params: any(isinstance(y, ast.Name) and y.id in p for y in _walk(x))
             _, finders = _bindings(nodes, lambda v, al: False)
             if _locators(nodes, is_param, re_aliases, re_funcs, finders, False, strict=True):
                 direct.add(fn.name)
@@ -536,6 +561,12 @@ def _kinds(body):
     ("find_section terminator by keyword",
      'return parse(text).find_section(heading=re.compile(r"^### "), terminator=re.compile("<!-- PACT_MEMORY_END"))',
      ".find_section"),
+    ("alias of a marker literal", "m = SESSION_START_MARKER\nreturn [l for l in lines if l.strip() == m]", "=="),
+    ("marker search beside a finder result",
+     ("loc = parse(text).find_block(SESSION_START_MARKER, SESSION_END_MARKER)\n"
+      "return loc.state == State.FOUND and SESSION_START_MARKER in text"), "in"),
+    ("marker compared with a finder result",
+     "return parse(text).find_marker(SESSION_START_MARKER).state == SESSION_END_MARKER", "=="),
 ])
 def test_seeded_shapes_are_caught(shape, body, kind):
     if shape == "call-derived constant":
@@ -563,6 +594,32 @@ def test_a_helper_searching_for_its_parameter_is_caught_at_its_marker_call():
            "    return _via(text, SESSION_START_MARKER)\n")
     found = census_sources({"hooks/seeded.py": src})
     assert [(f, k) for (_r, f, k, _e) in found] == [("caller", "helper call")], found
+
+
+def test_a_helper_searching_raw_text_for_its_parameter_stays_a_locator():
+    src = (_CONSTS +
+           "def _has(text, lit):\n    return lit in text\n"
+           "def caller(text):\n    return _has(text, SESSION_START_MARKER)\n")
+    found = census_sources({"hooks/seeded.py": src})
+    assert [(f, k) for (_r, f, k, _e) in found] == [("caller", "helper call")], found
+
+
+@pytest.mark.parametrize("src", [
+    # The helper's parameter reaches only a finder call, so the helper is no locator.
+    ("def _is_found(doc, literal):\n    return doc.find_marker(literal).state == State.FOUND\n"
+     "def caller(text):\n    return _is_found(parse(text), SESSION_START_MARKER)\n"),
+    # A helper comparing rows, called with a scope taken from a finder result.
+    ("def _pair_state(doc, scope, heading, last):\n"
+     "    pair = doc.find_block(SESSION_START_MARKER, SESSION_END_MARKER, scope)\n"
+     "    return pair.spans[0] == (heading - 1, last + 1)\n"
+     "def plan(text):\n"
+     "    doc = parse(text)\n"
+     "    mem = doc.find_block(SESSION_START_MARKER, SESSION_END_MARKER)\n"
+     "    scope = (mem.spans[0][0] + 1, mem.spans[0][1] - 1)\n"
+     "    return _pair_state(doc, scope, 3, 4)\n"),
+])
+def test_helpers_that_only_read_finder_results_are_not_sites(src):
+    assert census_sources({"hooks/seeded.py": _CONSTS + src}) == collections.Counter()
 
 
 def test_a_marker_rows_wrapper_searching_for_its_parameter_is_caught_at_its_marker_call():
@@ -607,6 +664,21 @@ def test_an_anchored_heading_pattern_is_caught_in_a_marker_module():
     'return parse(text).find_section(re.compile(r"^### "), None)',
     # The section header comment: any comment that names no PACT marker.
     'return parse(text).find_lines(re.compile(r"<!--(?!\\s*(?:PACT_|SESSION_))[^>]*-->\\s*$"), scope=(4, 4))',
+    # Reading a finder result: its state, rows and offsets name no marker.
+    "loc = parse(text).find_block(SESSION_START_MARKER, SESSION_END_MARKER)\nreturn loc.state == State.FOUND",
+    ("loc = parse(text).find_block(SESSION_START_MARKER, SESSION_END_MARKER)\n"
+     "return loc.state in (State.DUPLICATE, State.MALFORMED)"),
+    "loc = parse(text).find_marker(SESSION_START_MARKER)\nreturn loc.spans[0] == (3, 3)",
+    "return parse(text + 'x').find_block(SESSION_START_MARKER, SESSION_END_MARKER).state != State.FOUND",
+    ("start = parse(text).find_marker(SESSION_START_MARKER).state\n"
+     "end = parse(text).find_marker(SESSION_END_MARKER).state\n"
+     "return {start, end} == {State.FOUND, State.ABSENT}"),
+    ("doc = parse(text)\nloc = doc.find_block(SESSION_START_MARKER, SESSION_END_MARKER)\n"
+     "rows = doc.inner(loc)\nstart, end = doc.offsets(rows[0], rows[-1])\n"
+     "return rows == (1, 2), end != start, doc.scope_known(loc.spans[0]) == True"),
+    # An identity test is never a site, on a finder result or on a marker.
+    "loc = parse(text).find_block(SESSION_START_MARKER, SESSION_END_MARKER)\nreturn loc.state is State.FOUND",
+    "m = SESSION_END_MARKER\nreturn [l for l in lines if l is m]",
 ])
 def test_finder_routed_calls_writers_and_unrelated_searches_are_not_sites(body):
     assert _kinds(body) == []
