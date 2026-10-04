@@ -15,11 +15,12 @@ the verdict.
 
 Gate fires when ALL hold:
   1. Tool is Edit or Write (enforced by hooks.json matcher)
-  2. `_frame_gate` names the frame: the lead, a PACT specialist type, or any
-     frame whose session belongs to a PACT team (in-process teammates and
-     Agent-tool subagents share the lead's session). A plain session and a
-     non-PACT --agent session are not gated. A team member's count denial asks
-     it to have the team-lead free a slot instead of naming the pin command.
+  2. `claude_md_manager.gate_frame` names the frame: the lead, a PACT
+     specialist type, or any frame whose session belongs to a PACT team
+     (in-process teammates and Agent-tool subagents share the lead's session).
+     A plain session and a non-PACT --agent session are not gated. A team
+     member's count denial asks it to have the team-lead free a slot instead
+     of naming the pin command.
   3. `claude_md_manager.gate_target` returns a target: the project CLAUDE.md
      the resolver returns once the change exists, so a Write that creates it
      is gated too. The text before is the file the resolver returns now, or
@@ -73,6 +74,7 @@ def _emit_load_failure_allow(stage: str, error: BaseException) -> NoReturn:
 try:
     import shared.pact_context as pact_context
     from shared import file_lock
+    from shared.claude_md_manager import MEMBER_PIN_INSTRUCTION
     from shared.failure_log import append_failure
     import pin_caps
     from pin_caps import (
@@ -104,10 +106,6 @@ _OVERRIDE_ROW = re.compile(
 )
 _OVERRIDE_FIELD_LENGTH = len("pin-size-override:")
 _COMMENT_CLOSE_LENGTH = len("-->")
-
-# A team member cannot run the pin commands, so its count denial asks the
-# team-lead instead. Size and override denials name no command and keep their text.
-_MEMBER_COUNT_INSTRUCTION = "Ask the team-lead to free a pin slot; do not prune pins yourself."
 
 _FAIL_BASELINE_READ = "pin_caps_gate_baseline_read"
 _FAIL_DECISION = "pin_caps_gate_decision"
@@ -255,33 +253,13 @@ def _unreadable_decision(claude_md_path: Path, tool_name: str, tool_input: dict)
     )
 
 
-def _frame_gate(input_data: dict) -> Optional[str]:
-    """Which kind of frame the gate checks: "lead", "member" (a frame whose
-    session belongs to a PACT team), "specialist" (a PACT specialist type with
-    no team, such as a solo --agent session), or None for a frame it does not
-    check. Never raises: a team read that fails means "not in a team"."""
-    if pact_context.is_lead(input_data):
-        return "lead"
-    agent_type = input_data.get("agent_type")
-    specialist = isinstance(agent_type, str) and pact_context.strip_pact_namespace(agent_type).startswith("pact-")
-    try:
-        from shared.background_work import frame_team_and_name
-
-        team = frame_team_and_name(input_data)[0]
-    except Exception:  # noqa: BLE001 — a failed membership read gates nothing
-        team = ""
-    if team:
-        return "member"
-    return "specialist" if specialist else None
-
-
 def _member_reason(decision):
     """A team member's denial: a count denial keeps its violation line and asks
     the team-lead instead of naming the pin command; others are unchanged."""
     if decision.verdict != "DENY" or decision.cause != "count" or not decision.reason:
         return decision
     violation = decision.reason.split(". ", 1)[0].rstrip(".")
-    return decision._replace(reason=f"{violation}. {_MEMBER_COUNT_INSTRUCTION}")
+    return decision._replace(reason=f"{violation}. {MEMBER_PIN_INSTRUCTION}")
 
 
 def _gate(input_data: dict):
@@ -301,11 +279,11 @@ def _gate(input_data: dict):
         return None
 
     pact_context.init(input_data)
-    frame = _frame_gate(input_data)
+    from shared.claude_md_manager import gate_frame, gate_target
+
+    frame = gate_frame(input_data)
     if frame is None:
         return None
-
-    from shared.claude_md_manager import gate_target
 
     target = gate_target(file_path)
     if target is None:

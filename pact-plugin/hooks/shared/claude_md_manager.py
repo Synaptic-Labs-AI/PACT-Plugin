@@ -1795,3 +1795,41 @@ def gate_target(file_path: str) -> GateTarget | None:
     except (OSError, RuntimeError, ValueError):
         return None
     return GateTarget(target, before, base)
+
+
+# What a team member is told when a change would add pins past the cap, in
+# place of the pin command it cannot run. The gate's count denial and the drift
+# report share this one copy.
+MEMBER_PIN_INSTRUCTION = "Ask the team-lead to free a pin slot; do not prune pins yourself."
+
+
+def gate_frame(input_data) -> str | None:
+    """Which kind of hook frame the pin-cap checks cover: "lead", "member" (a
+    frame whose session belongs to a PACT team: in-process teammates and
+    Agent-tool subagents share the lead's session), "specialist" (a PACT
+    specialist type in no team, such as a solo --agent session), or None for a
+    frame they do not cover (a plain session, a non-PACT --agent session).
+
+    The pin-cap gate and the CLAUDE.md drift checks share this one predicate.
+    Never raises: a failed role read means None, and a failed team read means
+    "not in a team". Both reads are imported here, not at module level, because
+    every hook loads this module.
+    """
+    try:
+        from .pact_context import is_lead, strip_pact_namespace
+
+        if is_lead(input_data):
+            return "lead"
+        agent_type = input_data.get("agent_type")
+        specialist = isinstance(agent_type, str) and strip_pact_namespace(agent_type).startswith("pact-")
+    except Exception:  # noqa: BLE001 — an unreadable frame is not covered
+        return None
+    try:
+        from .background_work import frame_team_and_name
+
+        team = frame_team_and_name(input_data)[0]
+    except Exception:  # noqa: BLE001 — a failed membership read covers nothing
+        team = ""
+    if team:
+        return "member"
+    return "specialist" if specialist else None

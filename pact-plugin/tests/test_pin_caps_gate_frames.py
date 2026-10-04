@@ -188,7 +188,7 @@ def test_a_tmux_specialist_with_no_team_is_gated_with_the_lead_text(seam):
     assert not _context_file(seam).exists()
     result = _run(seam, _adding_a_pin(captured_pretooluse_teammate_tmux(), seam))
     _lead_denial(result)
-    assert MEMBER_TEXT not in result[1]
+    assert MEMBER_TEXT not in (result[1] or "")
 
 
 def test_a_registered_tmux_teammate_is_gated_and_asks_the_team_lead(seam):
@@ -257,17 +257,41 @@ def test_a_corrupt_context_file_gates_nothing_and_raises_nothing(seam):
 
 
 def test_a_team_read_that_raises_gates_nothing(monkeypatch):
-    import pin_caps_gate
     import shared.background_work as background_work
+    from shared.claude_md_manager import gate_frame
 
     def _raises(_frame):
         raise RuntimeError("team read failed")
 
     monkeypatch.setattr(background_work, "frame_team_and_name", _raises)
     frame = _adding_a_pin(constructed_pretooluse_teammate_inprocess(), Path("/nonexistent"))
-    assert pin_caps_gate._frame_gate(frame) is None
+    assert gate_frame(frame) is None
     # A specialist type is still gated, with the lead's text, when the team read fails.
-    assert pin_caps_gate._frame_gate(_with(frame, agent_type="pact-backend-coder")) == "specialist"
+    assert gate_frame(_with(frame, agent_type="pact-backend-coder")) == "specialist"
+
+
+@pytest.mark.parametrize("frame", [None, "text", ["list"], {"agent_type": ["not", "a", "string"]}])
+def test_gate_frame_never_raises_on_a_malformed_frame(frame):
+    from shared.claude_md_manager import gate_frame
+
+    assert gate_frame(frame) is None
+
+
+def test_importing_claude_md_manager_does_not_load_the_team_read():
+    """Every hook loads claude_md_manager through the shared package, so
+    gate_frame's team read stays inside the function. The control: calling
+    gate_frame does load it, so the probe can see the module."""
+    probe = (
+        "import sys, shared.claude_md_manager as m\n"
+        "print('shared.background_work' in sys.modules, 'shared.background_launch' in sys.modules)\n"
+        "m.gate_frame({'session_id': 's', 'agent_type': 'fr-backend'})\n"
+        "print('shared.background_work' in sys.modules)\n"
+    )
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
+    env["PYTHONPATH"] = str(HOOK.parent)
+    result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, env=env, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["False", "False", "True"], result.stdout
 
 
 # ---------------------------------------------------------------------------

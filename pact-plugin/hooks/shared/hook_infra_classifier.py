@@ -217,7 +217,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # seam (emit_task_metadata_snapshot); its own transitive edges
          # (agent_handoff_marker, session_journal) were already here.
     "session_init": frozenset({
-        "backlog_store",
+        "background_launch", "background_work", "backlog_store",
         "claude_md_manager", "claude_md_markers", "compaction_owner", "constants",
         "dispatch_helpers", "failure_cause",
         "failure_log", "gh_helpers", "git_helpers", "handoff_schema", "marker_schema",
@@ -225,8 +225,10 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "peer_context", "pin_caps", "plugin_manifest", "project_scope",
         "session_journal", "session_registry", "session_resume",
         "session_state", "stale_session", "staleness", "state_file", "symlinks",
-        "task_utils", "teammate_mode",
-    }),  # stale_session reached via session_resume's Current Session reader,
+        "intentional_wait", "task_utils", "teammate_mode",
+    }),  # background_launch, background_work and intentional_wait reached via
+         # claude_md_manager.gate_frame's function-level team read.
+         # stale_session reached via session_resume's Current Session reader,
          # which takes the Resume-line pattern from it.
          # gh_helpers reached via session_resume's function-level
          # `from shared import check_pr_state`, a name the package re-exports.
@@ -319,12 +321,15 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # staleness -> pin_caps) and are now gone from this closure.
          # bootstrap_marker_writer's OWN closure (below) is unchanged.
     "bootstrap_marker_writer": frozenset({
+        "background_launch", "background_work",
         "compaction_owner", "claude_md_manager", "claude_md_markers", "constants", "failure_cause",
-        "gh_helpers", "git_helpers", "handoff_schema", "marker_schema",
+        "gh_helpers", "git_helpers", "handoff_schema", "intentional_wait", "marker_schema",
         "pact_context", "paths", "pin_caps", "project_scope", "session_journal",
         "session_registry", "session_resume", "session_state", "stale_session",
-        "staleness", "state_file",
-    }),  # gh_helpers reached via session_resume's function-level
+        "staleness", "state_file", "task_utils",
+    }),  # background_launch, background_work, intentional_wait and task_utils
+         # reached via claude_md_manager.gate_frame's function-level team read.
+         # gh_helpers reached via session_resume's function-level
          # `from shared import check_pr_state`, a name the package re-exports.
          # stale_session reached via session_resume, whose Current Session
          # reader takes the Resume-line pattern from it; claude_md_markers via
