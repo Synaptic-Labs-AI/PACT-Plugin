@@ -6,7 +6,7 @@ Location: pact-plugin/hooks/pin_caps.py
 Summary: Parses the Pinned Context section of CLAUDE.md and enforces
 per-session caps (count, per-pin size, stale-block threshold). Pure
 helpers — no I/O, no side effects. Invoked by three consumers:
-  - scripts/check_pin_caps.py: CLI for /PACT:pin-memory add-time enforcement
+  - scripts/check_pin_caps.py: advisory slot-status CLI for the pin commands
   - staleness.py: SessionStart stale-block signal emission
   - session_init.py: slot-count + stale-block directive surfacing
 
@@ -80,9 +80,9 @@ OVERRIDE_COMMENT_RE = re.compile(
 )
 
 # Standalone <!-- pinned: YYYY-MM-DD[, ...] --> comment without override.
-# Unanchored BY DESIGN: `_extract_body_chars` runs it with `.sub` over a whole
-# pin body, so it cannot be anchored. Terminator refusal, not anchoring, is
-# what keeps it safe under every call convention (Sec-M2).
+# Unanchored BY DESIGN: `_charge` strikes it with `.sub` wherever it sits on a
+# row, so it cannot be anchored. Terminator refusal, not anchoring, is what
+# keeps it safe under every call convention (Sec-M2).
 _DATE_COMMENT_RE = re.compile(
     rf'{_PIN_COMMENT_OPEN}{_COMMENT_CHAR}+?{_PIN_COMMENT_CLOSE}',
     re.IGNORECASE,
@@ -164,7 +164,7 @@ class Pin(NamedTuple):
 class CapViolation(NamedTuple):
     """A cap-enforcement refusal result."""
 
-    kind: Literal["count", "size", "stale", "embedded_pin", "empty", "invalid_override"]
+    kind: Literal["count", "size", "stale", "empty", "invalid_override"]
     detail: str
     offending_pin_chars: Optional[int]
     current_count: Optional[int]
@@ -331,77 +331,6 @@ def has_size_override(pin: Pin) -> bool:
     return pin.override_rationale is not None
 
 
-def check_add_allowed(
-    existing: List[Pin],
-    new_body: str,
-    new_has_override: bool,
-) -> Optional[CapViolation]:
-    """Check whether a new pin may be added given current state.
-
-    Returns None if the add is allowed; a CapViolation otherwise. Count
-    cap is strict (predicate: `len(existing) >= PIN_COUNT_CAP`). Size cap
-    is strict unless new_has_override is True (override grants unlimited
-    size per curator discretion — user decision 2026-04-20, no sub-cap).
-
-    Args:
-        existing: Current parsed pins.
-        new_body: Body text of the proposed new pin (the text that would
-            follow the heading). Counted via _extract_body_chars so
-            date-comment + STALE markers do not inflate.
-        new_has_override: Whether the proposed pin carries a valid
-            override rationale. Caller is responsible for validating
-            rationale shape (via OVERRIDE_COMMENT_RE) before passing True.
-    """
-    current_count = len(existing)
-
-    if current_count >= PIN_COUNT_CAP:
-        return CapViolation(
-            kind="count",
-            detail=(
-                f"pin count cap reached ({current_count}/{PIN_COUNT_CAP}); "
-                f"evict a pin before adding"
-            ),
-            offending_pin_chars=None,
-            current_count=current_count,
-        )
-
-    new_chars = _extract_body_chars(new_body)
-    if new_chars > PIN_SIZE_CAP and not new_has_override:
-        return CapViolation(
-            kind="size",
-            detail=(
-                f"new pin body is {new_chars} chars (cap: {PIN_SIZE_CAP}); "
-                f"compress or add pin-size-override rationale"
-            ),
-            offending_pin_chars=new_chars,
-            current_count=current_count,
-        )
-
-    # Embedded-pin cap-bypass defense: a candidate body containing a
-    # level-3 heading (`### `) would be counted as an additional pin by
-    # parse_pins on reload, defeating the count cap. Detect by running
-    # the candidate body through parse_pins directly — any non-empty
-    # result means the body smuggles at least one pin structure (either
-    # a full `<!-- pinned:...-->\n### Heading` pair OR a lone heading,
-    # both of which parse_pins treats as a Pin on reload). Conservative
-    # by design: curators can structure pin bodies with H4+ (`#### `)
-    # or bold/italic instead of H3 — rejecting H3 in bodies closes the
-    # smuggle vector regardless of whether a date-comment accompanies it.
-    if parse_pins(new_body):
-        return CapViolation(
-            kind="embedded_pin",
-            detail=(
-                "candidate body contains an embedded pin structure "
-                "(a `### ` heading); would smuggle past the count cap "
-                "on reload. Use `#### ` or bold for in-body structure."
-            ),
-            offending_pin_chars=None,
-            current_count=current_count,
-        )
-
-    return None
-
-
 def check_stale_block(
     pins: List[Pin],
     threshold: int = PIN_STALE_BLOCK_THRESHOLD,
@@ -431,16 +360,11 @@ def check_stale_block(
 # ---------------------------------------------------------------------------
 # Hook-primary cap enforcement helpers (cycle-8).
 #
-# These extend pin_caps's pure-helper surface with post-state predicates used
-# by the PreToolUse gate (pin_caps_gate.py). They are additive — nothing here
-# changes existing `check_add_allowed` semantics. Shared between the gate and
-# the advisory CLI (check_pin_caps.py) so deny-reason phrasing stays in one
-# place (Risk R9 — phrasing drift).
-#
-# Key semantic differences vs. `check_add_allowed`:
-#   - `>`  (strict), not `>=`  — this is a POST-state check, not a pre-add gate.
-#   - No new_body param at predicate layer — the post-state pin list already
-#     reflects any simulated add.
+# Post-state predicates used by the PreToolUse gate (pin_caps_gate.py), shared
+# with the advisory CLI (check_pin_caps.py) so deny-reason phrasing stays in
+# one place (Risk R9 — phrasing drift). They read the pin list after the
+# change, so the count predicate is `>` (strict): a state at the cap is not a
+# violation, only a pin past it is.
 # ---------------------------------------------------------------------------
 
 
@@ -478,10 +402,9 @@ def evaluate_full_state(pins: List[Pin]) -> Optional[CapViolation]:
 
     POST-state predicate: `>` (strict), not `>=`. A state at the cap
     exactly (e.g. 12/12) is NOT a violation here — only a strict
-    overshoot is. Compared to `check_add_allowed` which is pre-add
-    (`>=` refuses the 12th add), `evaluate_full_state` refuses only the
-    13th+ slot. The gate (pin_caps_gate.py) then layers a net-worse
-    predicate on top of this to prevent pre-malformed livelock.
+    overshoot is, so only the 13th+ slot counts. `compute_deny_reason`
+    layers a net-worse predicate on top of this to prevent pre-malformed
+    livelock.
 
     Checks, in order of precedence:
       1. count:   len(pins) > PIN_COUNT_CAP
@@ -555,25 +478,19 @@ def _violation_for_kind(pins: List[Pin], kind: str) -> Optional[CapViolation]:
                       start surfacing path; the cap-compare pipeline
                       does not ingest it here.
 
-    Post-parse-derivable from candidate new_body (not from post_pins):
-      - `"embedded_pin"` — constructed in `check_add_allowed` when
-                      `parse_pins(new_body)` returns non-empty. Not
-                      derivable from a parsed pin list alone — requires
-                      the candidate body — so returns None here.
-
     Reserved-no-emitter (declared in the `CapViolation.kind` Literal
     but no constructor anywhere in the codebase):
       - `"empty"`            — reserved for a future empty-pin predicate.
       - `"invalid_override"` — intent was to represent an invalid
-                      override rationale, but the actual emitter path at
-                      `pin_caps_gate.py:293-295` returns a bare formatted
-                      string (`f"Pin cap violation (invalid override):
-                      {reason}"`) without constructing a CapViolation.
-                      A render branch at `pin_caps.py:821-825` remains
-                      but is unreachable under the current emitter
-                      graph. If a future refactor routes override
-                      failures through a CapViolation, the render
-                      branch + Literal entry become live simultaneously.
+                      override rationale, but the gate reports one with
+                      its own formatted string (`"Pin cap violation
+                      (invalid override): {reason}"`) without
+                      constructing a CapViolation. The render branch in
+                      `_render_deny_reason` remains but is unreachable
+                      under the current emitter graph. If a future
+                      refactor routes override failures through a
+                      CapViolation, the render branch + Literal entry
+                      become live simultaneously.
 
     For any kind outside {count, size}, returns None and the caller
     treats it as "not-present on this axis." When a future cap-axis is

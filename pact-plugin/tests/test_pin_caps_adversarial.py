@@ -338,37 +338,6 @@ class TestPinCapsAdversarial_EdgeCaseParsing:
         assert pins[0].date_comment is None
 
 
-class TestPinCapsAdversarial_CountCapWithOversizedPins:
-    """Count-cap applies even when existing pins carry overrides."""
-
-    def test_count_cap_respects_existing_override_pins(self):
-        from pin_caps import Pin, check_add_allowed
-        # 12 existing pins — some with override rationale. Count is 12.
-        pins = [
-            Pin(heading=f"### P{i}", body="x" * 2000,
-                body_chars=2000, date_comment=None,
-                override_rationale="reason" if i % 2 == 0 else None,
-                is_stale=False)
-            for i in range(12)
-        ]
-        result = check_add_allowed(pins, "new", new_has_override=False)
-        assert result is not None
-        assert result.kind == "count"
-
-    def test_count_cap_respects_stale_pins(self):
-        """Stale pins still occupy a slot — count cap applies."""
-        from pin_caps import Pin, check_add_allowed
-        pins = [
-            Pin(heading=f"### P{i}", body="x", body_chars=1,
-                date_comment=None, override_rationale=None,
-                is_stale=True)
-            for i in range(12)
-        ]
-        result = check_add_allowed(pins, "new", False)
-        assert result is not None
-        assert result.kind == "count"
-
-
 class TestPinCapsAdversarial_SessionInitReentry:
     """check_pin_slot_status is called every SessionStart — MUST be side-effect-free."""
 

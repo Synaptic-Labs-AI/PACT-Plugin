@@ -4,7 +4,7 @@ Tests for hooks/pin_caps.py — parse_pins, cap predicates, slot-status formatte
 Risk tier: CRITICAL (enforcement layer for CLAUDE.md surgery). Coverage
 target: 90%+ with adversarial testing.
 
-Test organization uses scope-suffix naming (TestPinCapCount_Gate, etc.) to
+Test organization uses scope-suffix naming (TestEvaluateFullState_Smoke, etc.) to
 avoid basename collision with other test files per pytest shadow-class
 gotcha — duplicate test class basenames across files silently drop the
 losing file's tests.
@@ -162,155 +162,48 @@ class TestParsePins_OverrideComment:
         assert pins[0].date_comment == "<!-- pinned: 2026-04-20 -->"
 
 
-class TestPinCapCount_Gate:
-    """Count-cap boundary matrix — strict predicate len(existing) >= 12."""
+class TestPinCountCap_EveryPinOccupiesASlot:
+    """The count axis counts every pin, whatever it carries. A size override
+    exempts a pin from the size cap only, and a STALE pin still holds its
+    slot until it is archived."""
 
-    def _mk_pins(self, n):
+    def _pins(self, n, *, override=False, stale=False):
         from pin_caps import Pin
         return [
-            Pin(heading=f"### P{i}", body="x", body_chars=1,
-                date_comment=None, override_rationale=None, is_stale=False)
+            Pin(heading=f"### P{i}", body="x" * 2000, body_chars=2000,
+                date_comment=None,
+                override_rationale="verbatim" if override else None,
+                is_stale=stale)
             for i in range(n)
         ]
 
-    def test_count_below_cap_allows_add(self):
-        """At 11/12, adding is allowed."""
-        from pin_caps import check_add_allowed
-        assert check_add_allowed(self._mk_pins(11), "new", False) is None
+    @pytest.mark.parametrize("override,stale", [(True, False), (False, True), (True, True)])
+    def test_a_13th_pin_is_refused_whatever_the_pins_carry(self, override, stale):
+        from pin_caps import compute_deny_reason
+        pre = self._pins(12, override=override, stale=stale)
+        post = self._pins(13, override=override, stale=stale)
+        reason = compute_deny_reason(pre, post, growth=1)
+        assert reason is not None and "13/12" in reason
 
-    def test_count_at_cap_refuses_add(self):
-        """At 12/12, off-by-one hazard — predicate is >=."""
-        from pin_caps import check_add_allowed
-        result = check_add_allowed(self._mk_pins(12), "new", False)
-        assert result is not None
-        assert result.kind == "count"
-        assert result.current_count == 12
-        assert "12/12" in result.detail
-
-    def test_count_above_cap_refuses_add(self):
-        from pin_caps import check_add_allowed
-        result = check_add_allowed(self._mk_pins(13), "new", False)
-        assert result is not None
-        assert result.kind == "count"
-        assert result.current_count == 13
-
-    def test_count_zero_allows_add(self):
-        from pin_caps import check_add_allowed
-        assert check_add_allowed([], "new", False) is None
-
-    def test_count_cap_ignores_override_flag(self):
-        """Override is a SIZE bypass only, not a count bypass."""
-        from pin_caps import check_add_allowed
-        result = check_add_allowed(self._mk_pins(12), "new", True)
-        assert result is not None
-        assert result.kind == "count"
+    def test_an_override_on_the_added_pin_does_not_lift_the_count_cap(self):
+        from pin_caps import compute_deny_reason
+        pre = self._pins(12, override=True)
+        post = pre + self._pins(1, override=True)
+        assert "13/12" in (compute_deny_reason(pre, post, growth=1) or "")
 
 
-class TestPinSizeCap_Gate:
-    """Size-cap boundary matrix × override state — 1499 / 1500 / 1501."""
+class TestParsePins_HeadingShape:
+    """Only a `### ` line is a pin heading."""
 
-    @pytest.mark.parametrize("body_chars,expected_violation", [
-        (1499, False),
-        (1500, False),  # predicate is > not >=, so exactly at cap is allowed
-        (1501, True),
-    ])
-    def test_size_boundary_without_override(self, body_chars, expected_violation):
-        from pin_caps import check_add_allowed
-        body = "x" * body_chars
-        result = check_add_allowed([], body, False)
-        if expected_violation:
-            assert result is not None
-            assert result.kind == "size"
-            assert result.offending_pin_chars == body_chars
-        else:
-            assert result is None
+    def test_an_h4_line_is_not_a_pin(self):
+        from pin_caps import parse_pins
+        pins = parse_pins("### Real\nBody with subsection:\n#### H4 Title\nnested content\n")
+        assert [p.heading for p in pins] == ["### Real"]
 
-    @pytest.mark.parametrize("body_chars", [1499, 1500, 1501, 5000])
-    def test_override_bypasses_size_cap(self, body_chars):
-        """Valid override → any size is allowed."""
-        from pin_caps import check_add_allowed
-        body = "x" * body_chars
-        assert check_add_allowed([], body, True) is None
-
-    def test_size_violation_detail_includes_cap(self):
-        from pin_caps import check_add_allowed
-        result = check_add_allowed([], "x" * 2000, False)
-        assert result is not None
-        assert "1500" in result.detail
-        assert "2000" in result.detail
-
-
-class TestCheckAddAllowed_EmbeddedHeading:
-    """Embedded-pin cap-bypass defense: candidate bodies containing a
-    level-3 heading (`### `) are rejected because parse_pins on reload
-    would count them as additional pins, defeating the count cap.
-
-    Conservative by design (per team-lead direction 2026-04-21): rejects ANY
-    embedded pin structure detected by parse_pins, whether accompanied
-    by a date-comment or not. Legitimate pin bodies can use `#### ` or
-    bold/italic for in-body structure.
-
-    Counter-test-by-revert: remove the `if parse_pins(new_body): ...`
-    branch and the `test_embedded_pin_structure_rejected` +
-    `test_lone_heading_rejected_conservative` cases go red.
-    """
-
-    def test_normal_body_allowed(self):
-        """Plain body with no heading or pin-comment — allowed."""
-        from pin_caps import check_add_allowed
-        assert check_add_allowed([], "regular content with no headings", False) is None
-
-    def test_embedded_pin_structure_rejected(self):
-        """Body smuggling a full `<!-- pinned:-->\\n### Heading` pair — rejected."""
-        from pin_caps import check_add_allowed
-        body = "<!-- pinned: 2026-04-21 -->\n### Embedded Pin\nbody"
-        result = check_add_allowed([], body, False)
-        assert result is not None
-        assert result.kind == "embedded_pin"
-        assert "smuggle" in result.detail.lower()
-
-    def test_prose_mentioning_pin_syntax_allowed(self):
-        """Body referencing pin comment inline with no `### ` heading — allowed."""
-        from pin_caps import check_add_allowed
-        body = "Look at the <!-- pinned: x --> line in CLAUDE.md for the canonical form"
-        assert check_add_allowed([], body, False) is None
-
-    def test_lone_heading_rejected_conservative(self):
-        """Body with lone `### ` heading (no preceding date-comment) — REJECTED.
-
-        parse_pins returns a Pin for heading-only entries (date_comment=None),
-        and that Pin counts toward the cap on reload. Conservative check
-        closes the smuggle vector regardless of date-comment presence.
-        """
-        from pin_caps import check_add_allowed
-        body = "### Just a heading\nbody content"
-        result = check_add_allowed([], body, False)
-        assert result is not None
-        assert result.kind == "embedded_pin"
-
-    def test_h4_heading_in_body_allowed(self):
-        """`#### ` (H4) does not match the `^### ` pin-heading pattern — allowed."""
-        from pin_caps import check_add_allowed
-        body = "Body with subsection:\n#### H4 Title\nnested content"
-        assert check_add_allowed([], body, False) is None
-
-    def test_embedded_pin_ignores_other_cap_paths(self):
-        """Embedded-pin check fires after count + size caps; fresh state passes those."""
-        from pin_caps import check_add_allowed
-        # Zero existing pins, small body, but contains embedded structure.
-        body = "### Smuggle\nx"
-        result = check_add_allowed([], body, False)
-        assert result is not None
-        assert result.kind == "embedded_pin"
-        assert result.current_count == 0
-
-    def test_embedded_pin_not_bypassed_by_override(self):
-        """Override flag is a SIZE-cap bypass only — must not bypass embedded check."""
-        from pin_caps import check_add_allowed
-        body = "<!-- pinned: 2026-04-21 -->\n### Embedded\nbody"
-        result = check_add_allowed([], body, True)
-        assert result is not None
-        assert result.kind == "embedded_pin"
+    def test_prose_mentioning_a_pin_comment_is_not_a_pin(self):
+        from pin_caps import parse_pins
+        body = "Look at the <!-- pinned: x --> line in CLAUDE.md for the canonical form\n"
+        assert parse_pins(body) == []
 
 
 class TestExtractBodyChars:
@@ -756,10 +649,14 @@ class TestComputeDenyReason_Smoke:
 
     def test_the_embedded_pin_check_and_its_parameter_are_gone(self):
         import inspect
+        import typing
 
         import pin_caps
         assert "new_body" not in inspect.signature(pin_caps.compute_deny_reason).parameters
         assert not hasattr(pin_caps, "DENY_REASON_EMBEDDED_PIN")
+        assert not hasattr(pin_caps, "check_add_allowed")
+        kinds = typing.get_args(typing.get_type_hints(pin_caps.CapViolation)["kind"])
+        assert "count" in kinds and "embedded_pin" not in kinds
 
     def test_an_undated_rename_below_the_cap_is_allowed(self):
         from pin_caps import compute_deny_reason, parse_pins

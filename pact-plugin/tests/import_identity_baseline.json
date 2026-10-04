@@ -2043,7 +2043,6 @@
     "tests/test_pin_caps.py": {
       "pin_caps": "hooks/pin_caps.py",
       "pin_caps.DENY_REASON_COUNT": null,
-      "pin_caps.DENY_REASON_EMBEDDED_PIN": null,
       "pin_caps.DENY_REASON_OVERRIDE_MISSING": null,
       "pin_caps.DENY_REASON_SIZE": null,
       "pin_caps.OVERRIDE_RATIONALE_MAX": null,
@@ -2052,7 +2051,6 @@
       "pin_caps.PIN_STALE_BLOCK_THRESHOLD": null,
       "pin_caps.Pin": null,
       "pin_caps.apply_edit_and_parse": null,
-      "pin_caps.check_add_allowed": null,
       "pin_caps.check_stale_block": null,
       "pin_caps.compute_deny_reason": null,
       "pin_caps.evaluate_full_state": null,
@@ -2062,8 +2060,6 @@
     },
     "tests/test_pin_caps_adversarial.py": {
       "pin_caps": "hooks/pin_caps.py",
-      "pin_caps.Pin": null,
-      "pin_caps.check_add_allowed": null,
       "pin_caps.parse_pins": null,
       "pin_staleness_gate": "hooks/pin_staleness_gate.py",
       "pin_staleness_gate.PIN_STALENESS_MARKER_NAME": null,
@@ -2212,7 +2208,6 @@
       "pin_caps.apply_edit_and_parse": null,
       "pin_caps.compute_deny_reason": null,
       "pin_caps_gate": "hooks/pin_caps_gate.py",
-      "pin_caps_gate._extract_new_body": null,
       "pin_caps_gate._parse_baseline": null,
       "shared.claude_md_manager": "hooks/shared/claude_md_manager.py",
       "shared.claude_md_manager.MEMORY_END_MARKER": null,
