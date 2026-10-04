@@ -16,6 +16,8 @@ come from their shipped module, not from the parser.
 import ast
 import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -765,7 +767,7 @@ def test_parse_needs_str():
         parse(b"bytes")  # type: ignore[arg-type]
 
 
-def test_module_imports_only_re_dataclasses_and_enum():
+def test_module_imports_only_re_typing_and_enum():
     tree = ast.parse(Path(claude_md_markers.__file__).read_text(encoding="utf-8"))
     imported = set()
     for node in ast.walk(tree):
@@ -773,4 +775,32 @@ def test_module_imports_only_re_dataclasses_and_enum():
             imported.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
             imported.add(node.module)
-    assert imported == {"__future__", "re", "dataclasses", "enum"}
+    assert imported == {"__future__", "re", "typing", "enum"}
+
+
+def test_importing_the_finder_does_not_load_dataclasses():
+    # A fresh, isolated interpreter: dataclasses costs every hook process
+    # several milliseconds, and no hot hook loads it otherwise. The module is
+    # loaded from its file, so the probe changes no import path.
+    finder = str(Path(claude_md_markers.__file__).resolve())
+    probe = (
+        "import importlib.util, sys\n"
+        "before = 'dataclasses' in sys.modules\n"
+        f"spec = importlib.util.spec_from_file_location('claude_md_markers', {finder!r})\n"
+        "module = sys.modules[spec.name] = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(module)\n"
+        "print(before, 'dataclasses' in sys.modules)\n"
+    )
+    result = subprocess.run([sys.executable, "-I", "-c", probe],
+                            capture_output=True, text=True, check=True)
+    assert result.stdout.split() == ["False", "False"]
+
+
+def test_line_and_located_keep_their_fields_defaults_and_immutability():
+    line = claude_md_markers.Line(0, 0, 2, "x", Kind.PROSE)
+    assert line._fields == ("row", "start", "end", "content", "kind", "in_html")
+    assert line.in_html is False
+    assert claude_md_markers.Located._fields == ("state", "spans", "reason", "cause")
+    with pytest.raises(AttributeError):
+        line.row = 1  # type: ignore[misc]
+    assert hash(line) == hash(claude_md_markers.Line(0, 0, 2, "x", Kind.PROSE))

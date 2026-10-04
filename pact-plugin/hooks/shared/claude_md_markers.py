@@ -5,8 +5,9 @@ Location: pact-plugin/hooks/shared/claude_md_markers.py
 Summary: The one fence-aware parser and locator for PACT's markers in a
 CLAUDE.md. `parse(text)` classifies every line as prose, fence, code or
 unknown, and the returned `Document` answers each lookup with an explicit
-state. Pure: str in, no I/O, stdlib only (`re`, `dataclasses`, `enum`), so
-every hot hook can import it.
+state. Pure: str in, no I/O, stdlib only (`re`, `typing`, `enum`), so every
+hot hook can import it; `Line` and `Located` are NamedTuples, not dataclasses,
+because `dataclasses` would add its own import cost to every hook process.
 
 Used by: every reader and writer of a PACT marker or section in a CLAUDE.md,
 and by the pin-cap gate's parsers. Callers never split lines themselves: they
@@ -81,8 +82,8 @@ in it is ABSENT or empty.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from enum import Enum
+from typing import NamedTuple
 
 
 class Kind(Enum):
@@ -111,8 +112,7 @@ class Cause(Enum):
     COMMENTED = "commented"  # find_section: the only matching heading is hidden
 
 
-@dataclass(frozen=True)
-class Line:
+class Line(NamedTuple):
     row: int
     start: int
     end: int  # includes the terminator
@@ -121,8 +121,7 @@ class Line:
     in_html: bool = False  # hidden: see GRAMMAR; never on an UNKNOWN row
 
 
-@dataclass(frozen=True)
-class Located:
+class Located(NamedTuple):
     state: State
     spans: tuple[tuple[int, int], ...]  # inclusive (first_row, last_row); FOUND/DUPLICATE only
     reason: str  # names 1-based line numbers; empty for FOUND and ABSENT
