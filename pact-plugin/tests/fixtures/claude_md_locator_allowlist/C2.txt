@@ -1,0 +1,31 @@
+# Locators that commit C2 moves onto the finder: the session block (plan rows S5-S11).
+# Format: path<TAB>function<TAB>kind<TAB>expression. Delete an entry in the commit
+# that routes its site through hooks/shared/claude_md_markers.py.
+
+# hooks/bootstrap_prompt_gate.py _record_unrecorded_lead: S10
+hooks/bootstrap_prompt_gate.py	_record_unrecorded_lead	.search	_RESUME_LINE_RE.search(content)
+hooks/bootstrap_prompt_gate.py	_record_unrecorded_lead	==	recorded.group(1) != session_id
+hooks/bootstrap_prompt_gate.py	_record_unrecorded_lead	in	SESSION_END_MARKER in content
+hooks/bootstrap_prompt_gate.py	_record_unrecorded_lead	in	SESSION_START_MARKER in content
+# hooks/session_init.py _extract_session_started: S9
+hooks/session_init.py	_extract_session_started	.search	_SESSION_STARTED_RE.search(content)
+# hooks/shared/session_resume.py _extract_prev_session_dir: S7
+hooks/shared/session_resume.py	_extract_prev_session_dir	.search	_RESUME_LINE_RE.search(content)
+hooks/shared/session_resume.py	_extract_prev_session_dir	re.search	re.search(r'- Session dir:\s*`([^`]+)`', content)
+# hooks/shared/session_resume.py update_session_info: S5, S6 (and the skip path :417-418)
+hooks/shared/session_resume.py	update_session_info	.replace	content.replace( MEMORY_START_MARKER, session_block + "\n\n" + MEMORY_START_MARKER, 1, )
+hooks/shared/session_resume.py	update_session_info	.replace	content.replace( insert_marker, session_block + "\n\n" + insert_marker, 1, )
+hooks/shared/session_resume.py	update_session_info	==	match.group(0) == session_block
+hooks/shared/session_resume.py	update_session_info	==	new_content != content
+hooks/shared/session_resume.py	update_session_info	in	MANAGED_START_MARKER in content
+hooks/shared/session_resume.py	update_session_info	in	MEMORY_START_MARKER in content
+hooks/shared/session_resume.py	update_session_info	in	SESSION_END in content
+hooks/shared/session_resume.py	update_session_info	in	SESSION_END in replaced
+hooks/shared/session_resume.py	update_session_info	in	SESSION_START in content
+hooks/shared/session_resume.py	update_session_info	in	SESSION_START in replaced
+hooks/shared/session_resume.py	update_session_info	in	insert_marker in content
+hooks/shared/session_resume.py	update_session_info	re.search	re.search(session_pattern, replaced, flags=re.DOTALL)
+hooks/shared/session_resume.py	update_session_info	re.sub	re.sub( session_pattern, lambda _match: session_block, content, count=1, flags=re.DOTALL, )
+# hooks/shared/stale_session.py detect_stale_session_block: S8
+hooks/shared/stale_session.py	detect_stale_session_block	.search	_RESUME_LINE_RE.search(content)
+hooks/shared/stale_session.py	detect_stale_session_block	==	recorded != actual
