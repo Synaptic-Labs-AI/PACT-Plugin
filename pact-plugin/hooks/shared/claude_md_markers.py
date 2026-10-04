@@ -69,7 +69,9 @@ STATES. A lookup reads only certain rows (those before the boundary). For
    UNKNOWN rows;
 7. ABSENT: none, and the scope is known;
 8. UNKNOWN: none, and the scope is not known.
-`find_section` returns FOUND, ABSENT, UNKNOWN or, with `unique`, DUPLICATE
+`may_hold(literal)` tells whether any UNKNOWN row contains the literal as text,
+so a caller can tell an uncertain region that may hide a block from one that
+cannot. `find_section` returns FOUND, ABSENT, UNKNOWN or, with `unique`, DUPLICATE
 among visible headings; never MALFORMED. A literal wholly inside a line-local
 inline code span is a mention, not a stray; a backtick run after an odd number
 of backslashes loses its first backtick (an escaped literal) when it opens.
@@ -276,6 +278,13 @@ class Document:
 
     def scope_known(self, scope=None) -> bool:
         return all(line.kind is not Kind.UNKNOWN for line in self._rows(scope))
+
+    def may_hold(self, literal: str, scope=None) -> bool:
+        """True when an UNKNOWN row in `scope` contains `literal` anywhere: a
+        lookup that read UNKNOWN may have missed it there. Certain rows are not
+        read; a lookup has already judged them."""
+        return any(line.kind is Kind.UNKNOWN and literal in line.content
+                   for line in self._rows(scope))
 
     def _is_marker_line(self, line: Line, literal: str) -> bool:
         if line.kind is not Kind.PROSE:

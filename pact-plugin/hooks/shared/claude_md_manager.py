@@ -981,6 +981,13 @@ def _plan_kernel_strip(
     if block.state is State.ABSENT:
         # Normal idempotent no-op for already-migrated installs.
         return None, None
+    if block.state is State.UNKNOWN and not (
+        doc.may_hold(_KERNEL_START_MARKER) or doc.may_hold(_KERNEL_END_MARKER)
+    ):
+        # The file runs on into an uncertain region (an unclosed fence), but
+        # no kernel marker text is in it, so there is no block to strip and
+        # nothing to report.
+        return None, None
     if block.state is not State.FOUND:
         # A duplicate, a marker with no partner, or a block the parser
         # cannot place: a defensive no-op to avoid data loss. The status

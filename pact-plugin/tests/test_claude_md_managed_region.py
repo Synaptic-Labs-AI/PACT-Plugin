@@ -96,12 +96,24 @@ def test_the_kernel_strip_removes_the_real_block_and_keeps_a_fenced_example(home
     (f"{KERNEL}\n\n{KERNEL}\n", "lines 1, 5"),  # two blocks
     (f"# pre\n{KS}\n# post\n", "line 2"),  # a start with no end
     (f"intro\n```\nnever closed\n{KERNEL}\n", "line 2"),  # a block past an unclosed fence
-    ("intro\n```\nnever closed\n", "line 2"),  # no block, but the rest is uncertain
+    (f"intro\n```\nnever closed\n{KS}\n", "line 2"),  # only its start marker past the fence
+    (f"intro\n```\nnever closed\n{KE}\n", "line 2"),  # only its end marker past the fence
 ])
 def test_the_kernel_strip_refuses_a_block_it_cannot_place(home_file, text, line):
     home_file.write_text(text, encoding="utf-8")
     status = _str(strip_orphan_kernel_block())
     assert status.startswith("Migration skipped: ") and line in status
+    assert home_file.read_text(encoding="utf-8") == text
+
+
+def test_the_kernel_strip_is_silent_on_an_uncertain_region_with_no_kernel_text(home_file):
+    # The unclosed fence leaves the rest of the file uncertain, but no kernel
+    # marker text is in it, so there is nothing to strip or report. A project
+    # file in the same shape is still refused by the migration (the
+    # unmigrated-file rows below).
+    text = "# Mine\nintro\n```\nnever closed\n"
+    home_file.write_text(text, encoding="utf-8")
+    assert strip_orphan_kernel_block() is None
     assert home_file.read_text(encoding="utf-8") == text
 
 

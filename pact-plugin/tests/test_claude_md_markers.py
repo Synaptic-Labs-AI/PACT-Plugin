@@ -577,6 +577,16 @@ def test_inner_offsets_and_scope():
         _session(doc, (0, 6))
 
 
+def test_may_hold_reads_only_the_uncertain_rows():
+    # Rows 0-1 are certain; the unclosed fence on row 2 makes rows 2-4 UNKNOWN.
+    doc = _doc(f"see {S} here", "intro", "```", f"x {E} y", "tail")
+    assert doc.may_hold(E)  # on an UNKNOWN row, mid-line
+    assert not doc.may_hold(S)  # only on a certain row
+    assert not doc.may_hold("<!-- PACT_START:")  # nowhere
+    assert not doc.may_hold(E, (0, 1))  # outside the scope
+    assert not parse(f"{S}\n{E}\n").may_hold(E)  # every row certain
+
+
 def test_find_lines_pattern_sees_content_without_its_terminator():
     doc = parse("intro\r\n## Pinned Context\r\nx\n")
     assert doc.find_lines(re.compile(r"^## Pinned Context\s*\n")) == ()
