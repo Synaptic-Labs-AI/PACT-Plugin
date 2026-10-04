@@ -3648,7 +3648,8 @@
       "scripts.working_memory._MANAGED_END_MARKER": null,
       "scripts.working_memory._MANAGED_START_MARKER": null,
       "scripts.working_memory._SESSION_END_MARKER": null,
-      "scripts.working_memory._resolve_write_window": null,
+      "scripts.working_memory._resolve_write_scope": null,
+      "scripts.working_memory.parse": null,
       "scripts.working_memory.sync_retrieved_to_claude_md": null,
       "scripts.working_memory.sync_to_claude_md": null,
       "unittest.mock.patch": null

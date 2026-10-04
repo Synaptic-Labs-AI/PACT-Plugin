@@ -2544,9 +2544,9 @@ class TestStripLegacyLines:
         whitespace >3 spaces as indicating an indented code block instead
         of a fenced block. Our walker uses a simpler "any leading
         whitespace" convention for symmetry with the other walker sites
-        (_find_preamble_cutoff, staleness._find_terminator_offset,
-        working_memory._find_terminator_offset) — this is documented
-        divergence from strict CommonMark, sufficient for CLAUDE.md use.
+        (_find_preamble_cutoff, staleness._find_terminator_offset) — this is
+        documented divergence from strict CommonMark, sufficient for CLAUDE.md
+        use.
         """
         from shared.claude_md_manager import _strip_legacy_lines
 

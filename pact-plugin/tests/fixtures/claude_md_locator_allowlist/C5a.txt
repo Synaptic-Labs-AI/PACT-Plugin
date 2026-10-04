@@ -1,12 +1,3 @@
 # Locators that commit C5a moves onto the finder: the Working Memory and Retrieved Context sections (S26, S28, the S14 twin).
 # Format: path<TAB>function<TAB>kind<TAB>expression. Delete an entry in the commit
 # that routes its site through hooks/shared/claude_md_markers.py.
-
-# skills/pact-memory/scripts/working_memory.py _parse_retrieved_context_section: S26 (calls the S14 twin)
-skills/pact-memory/scripts/working_memory.py	_parse_retrieved_context_section	.finditer	entry_pattern.finditer(section_content)
-skills/pact-memory/scripts/working_memory.py	_parse_retrieved_context_section	.search	section_pattern.search(scan_text)
-skills/pact-memory/scripts/working_memory.py	_parse_retrieved_context_section	helper call	_find_terminator_offset( scan_text, section_header_end, next_section_pattern )
-# skills/pact-memory/scripts/working_memory.py _parse_working_memory_section: S26 (calls the S14 twin)
-skills/pact-memory/scripts/working_memory.py	_parse_working_memory_section	.finditer	entry_pattern.finditer(section_content)
-skills/pact-memory/scripts/working_memory.py	_parse_working_memory_section	.search	section_pattern.search(scan_text)
-skills/pact-memory/scripts/working_memory.py	_parse_working_memory_section	helper call	_find_terminator_offset( scan_text, section_header_end, next_section_pattern )

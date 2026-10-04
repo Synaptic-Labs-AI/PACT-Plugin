@@ -1,6 +1,6 @@
 """Arms for the DECLINE path of the three-step write-window rule.
 
-THE MECHANISM. `_resolve_write_window` picks the window a section write may
+THE MECHANISM. `_resolve_write_scope` picks the window a section write may
 search, in three steps. STEP 1 uses the memory marker pair. STEP 2 derives the
 window from the session-block end to the managed end. STEP 3 DECLINES, and the
 two sync writers turn that decline into `SyncResult.NO_WINDOW`.
@@ -98,7 +98,8 @@ class TestTheWindowFamilySelectsThreeDifferentSteps:
         from scripts.working_memory import (
             MEMORY_START_MARKER,
             _SESSION_END_MARKER,
-            _resolve_write_window,
+            _resolve_write_scope,
+            parse,
         )
 
         step1, step2, step3, memory_pair_text, session_text = _family()
@@ -110,9 +111,18 @@ class TestTheWindowFamilySelectsThreeDifferentSteps:
         assert session_text in step2 and session_text not in step3
         assert step2.replace(session_text, "") == step3
 
-        w1 = _resolve_write_window(step1)
-        w2 = _resolve_write_window(step2)
-        w3 = _resolve_write_window(step3)
+        def window_rows(doc):
+            """The contents of the rows the resolver picks, or None."""
+            parsed = parse(doc)
+            scope = _resolve_write_scope(parsed)
+            if scope is None:
+                return None
+            first, last = scope
+            return [line.content for line in parsed.lines[first:last + 1]]
+
+        w1 = window_rows(step1)
+        w2 = window_rows(step2)
+        w3 = window_rows(step3)
 
         # COARSE FIRST: the decline is the property this file exists for.
         assert w3 is None, (
@@ -129,21 +139,19 @@ class TestTheWindowFamilySelectsThreeDifferentSteps:
         # took step 2, because the two documents differ in text, so it does
         # not show that step 1 ran at all. MEASURED: this arm survived a
         # mutant that made step 1 unavailable, until these two lines existed.
-        w1_text, _ = w1
-        w2_text, _ = w2
         # The step-1 window IS the memory region, so the start marker bounds
         # it from outside. With step 1 unavailable this document falls to
         # step 2, whose window opens above the pair and CONTAINS that marker.
-        assert MEMORY_START_MARKER not in w1_text, (
+        assert MEMORY_START_MARKER not in w1, (
             "the step-1 window contains the memory start marker, so it is the "
             "session-block window and step 1 did not run"
         )
-        assert "## Working Memory" in w1_text, (
+        assert "## Working Memory" in w1, (
             "the step-1 window does not hold the memory section it should be"
         )
         # The step-2 window opens BELOW the session block, so the end marker
         # of that block bounds it from outside.
-        assert _SESSION_END_MARKER not in w2_text, (
+        assert _SESSION_END_MARKER not in w2, (
             "the step-2 window contains the session-end marker, so it is the "
             "wide region rather than the window below the session block"
         )

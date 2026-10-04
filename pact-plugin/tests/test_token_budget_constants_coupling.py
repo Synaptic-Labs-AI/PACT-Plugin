@@ -1086,10 +1086,10 @@ class TestAfterSectionSurvivesTheSync:
         """PROOF OF THE EXCLUSION CAUSE, so the exclusion is not a promise.
 
         The excluded assignment sits in the arm taken when `after_section` is
-        empty OR begins with a newline. `_find_terminator_offset` returns the
-        offset of the START of the terminator LINE, so the after-section either
-        begins at a terminator character or is empty. IT CANNOT BEGIN WITH A
-        NEWLINE, so the arm is reached only with an empty value.
+        empty OR begins with a newline. The parser's section span ends with a
+        whole row, so the after-section starts at the START of the terminator
+        ROW and either begins at a terminator character or is empty. IT CANNOT
+        BEGIN WITH A NEWLINE, so the arm is reached only with an empty value.
 
         THIS IS THE ARM THAT RETURNS THE DECISION TO A PERSON. If a later edit
         to the parser makes a newline-leading after-section reachable, this

@@ -29,10 +29,10 @@ SHIPPED_TOPS = ("hooks", "skills", "scripts")
 
 # The helpers that each held a line-scanning reading of `the marker occupies a
 # line` or `the memory region inside the managed block`, plus working_memory's
-# copy of the managed-region extractor.
+# copies of the managed-region extractor and of the section terminator scanner.
 RETIRED = ("marker_line_span", "marker_line_offset", "marker_line_present",
            "_narrow_to_memory_region", "_is_already_marked", "_is_end_marked")
-RETIRED_IN_WORKING_MEMORY = RETIRED + ("extract_managed_region",)
+RETIRED_IN_WORKING_MEMORY = RETIRED + ("extract_managed_region", "_find_terminator_offset")
 WORKING_MEMORY = PLUGIN / "skills" / "pact-memory" / "scripts" / "working_memory.py"
 
 
@@ -56,7 +56,7 @@ def test_the_scan_sees_the_shipped_tree():
     assert "hooks/shared/pin_markers.py" in files
     assert "skills/pact-memory/scripts/working_memory.py" in files
     assert "plan_insertion" in _defined_functions(files["hooks/shared/pin_markers.py"])
-    assert "_resolve_write_window" in _defined_functions(WORKING_MEMORY)
+    assert "_resolve_write_scope" in _defined_functions(WORKING_MEMORY)
 
 
 @pytest.mark.parametrize("name", RETIRED)

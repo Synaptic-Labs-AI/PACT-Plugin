@@ -274,18 +274,19 @@ class TestWorkingMemoryUsesTheFinder:
         assert result.stdout.strip() == f"finder: {expected}"
 
     def test_the_write_window_ignores_a_fenced_copy_of_the_whole_block(self):
-        from scripts.working_memory import _resolve_write_window
+        from scripts.working_memory import _resolve_write_scope, parse
 
         real = build_claude_md()
         fenced_copy = "```markdown\n" + real + "```\n\n"
-        doc = fenced_copy + real
-        resolved = _resolve_write_window(doc)
-        assert resolved is not None
-        window, offset = resolved
-        real_memory = doc.index(MEMORY_START_MARKER, len(fenced_copy))
-        assert offset == real_memory + len(MEMORY_START_MARKER) + 1
-        assert window.startswith("## Retrieved Context\n")
-        assert doc[offset + len(window):].startswith(MEMORY_END_MARKER)
+        doc = parse(fenced_copy + real)
+        scope = _resolve_write_scope(doc)
+        assert scope is not None
+        first, last = scope
+        real_memory_row = (fenced_copy + real[:real.index(MEMORY_START_MARKER)]).count("\n")
+        assert first == real_memory_row + 1
+        assert doc.lines[real_memory_row].content == MEMORY_START_MARKER
+        assert doc.lines[first].content == "## Retrieved Context"
+        assert doc.lines[last + 1].content == MEMORY_END_MARKER
 
     @pytest.mark.parametrize("label, doc", [
         ("unknown", "```\nopen fence above the block\n\n" + build_claude_md()),
@@ -298,15 +299,17 @@ class TestWorkingMemoryUsesTheFinder:
         ("unpaired", f"preamble\n{MANAGED_START_MARKER}\n## Working Memory\n"),
     ])
     def test_the_write_window_declines_an_uncertain_block(self, label, doc):
-        from scripts.working_memory import _resolve_write_window
+        from scripts.working_memory import _resolve_write_scope, parse
 
-        assert _resolve_write_window(doc) is None, label
+        assert _resolve_write_scope(parse(doc)) is None, label
 
     @pytest.mark.parametrize("doc", ["", "no markers at all\n", "# Title\n\n## Working Memory\n"])
     def test_a_file_with_no_managed_block_keeps_the_whole_file_window(self, doc):
-        from scripts.working_memory import _resolve_write_window
+        from scripts.working_memory import _resolve_write_scope, parse
 
-        assert _resolve_write_window(doc) == (doc, 0)
+        parsed = parse(doc)
+        assert _resolve_write_scope(parsed) == (0, len(parsed.lines) - 1)
+        assert "".join(line.content + "\n" for line in parsed.lines) == doc
 
     def test_retrieved_context_goes_above_the_real_working_memory_heading(self, tmp_path, monkeypatch):
         from scripts.working_memory import sync_retrieved_to_claude_md
