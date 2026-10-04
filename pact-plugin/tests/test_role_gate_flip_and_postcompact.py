@@ -236,17 +236,18 @@ class TestClassBGateBypassFlip:
     ], ids=["lead", "teammate", "plain"])
     def test_pin_caps_gate_bypass(self, frame, expect_bypass, monkeypatch, tmp_path):
         """A non-lead frame returns None at the is_lead bypass BEFORE reading
-        tool_input / calling match_project_claude_md. Make the post-is_lead
-        path observable via a sentinel on match_project_claude_md: non-lead must
-        return None without hitting it; lead must hit it."""
+        tool_input / calling gate_target. Make the post-is_lead path
+        observable via a sentinel on gate_target: non-lead must return None
+        without hitting it; lead must hit it."""
         import pin_caps_gate as g
+        import shared.claude_md_manager as manager
 
         monkeypatch.setattr(g.pact_context, "init", lambda _d: None)
         reached = {"hit": False}
         def _sentinel(_path):
             reached["hit"] = True
-            return None  # no claude_md match → gate ultimately returns None
-        monkeypatch.setattr(g, "match_project_claude_md", _sentinel)
+            return None  # no gate target → gate ultimately returns None
+        monkeypatch.setattr(manager, "gate_target", _sentinel)
 
         # tool_name must be a _GATED_TOOLS member ({Edit, Write}) to pass the
         # gate's first guard and reach the is_lead branch.
@@ -255,7 +256,7 @@ class TestClassBGateBypassFlip:
         result = g._check_tool_allowed(inp)
         assert result is None  # empty match → no deny regardless of role
         assert reached["hit"] is (not expect_bypass), (
-            "non-lead must bypass before match_project_claude_md; "
+            "non-lead must bypass before gate_target; "
             "lead must reach it"
         )
 

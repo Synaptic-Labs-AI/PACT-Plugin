@@ -22,7 +22,7 @@ import threading
 
 import pytest
 
-from helpers import make_claude_md_with_pins, make_pin_entry  # noqa: E402
+from helpers import make_claude_md_with_pins, make_pin_entry, point_resolver_at  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -46,10 +46,7 @@ def gate_with_captured_failures(tmp_path, monkeypatch, pact_context):
         project_dir=str(tmp_path),
     )
 
-    import staleness
-    monkeypatch.setattr(
-        staleness, "get_project_claude_md_path", lambda: claude_md
-    )
+    point_resolver_at(monkeypatch, tmp_path)
 
     failures = []
 
@@ -249,7 +246,9 @@ class TestFailureLogClassification:
         DENIES the tool; it does NOT skip observability.
         """
         env = gate_with_captured_failures
-        # Baseline NOT created → IOError on read → _FAIL_BASELINE_READ.
+        # A CLAUDE.md that resolves but cannot be read (a directory) →
+        # IsADirectoryError on read → _FAIL_BASELINE_READ.
+        env["claude_md"].mkdir()
         result = _call_gate({
             "tool_name": "Write",
             "tool_input": {
@@ -363,10 +362,7 @@ class TestFileLockContention:
             project_dir=str(tmp_path),
         )
 
-        import staleness
-        monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: claude_md
-        )
+        point_resolver_at(monkeypatch, tmp_path)
 
         N_THREADS = 4
         barrier = threading.Barrier(N_THREADS)
@@ -424,10 +420,7 @@ class TestFileLockContention:
             project_dir=str(tmp_path),
         )
 
-        import staleness
-        monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: claude_md
-        )
+        point_resolver_at(monkeypatch, tmp_path)
 
         N_THREADS = 4
         barrier = threading.Barrier(N_THREADS)

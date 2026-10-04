@@ -27,7 +27,7 @@ and must be rewritten.
 
 import pytest
 
-from helpers import make_claude_md_with_pins, make_pin_entry  # noqa: E402
+from helpers import make_claude_md_with_pins, make_pin_entry, point_resolver_at  # noqa: E402
 
 
 @pytest.fixture
@@ -40,10 +40,7 @@ def gate_env(tmp_path, monkeypatch, pact_context):
         project_dir=str(tmp_path),
     )
 
-    import staleness
-    monkeypatch.setattr(
-        staleness, "get_project_claude_md_path", lambda: claude_md
-    )
+    point_resolver_at(monkeypatch, tmp_path)
 
     def _setup(pin_count=3, body_chars=4):
         entries = [
@@ -358,18 +355,19 @@ class TestCounterRevert_GrowthPredicate:
 
 
 class TestCounterRevert_WriteBaselineFailClosed:
-    """Revert the unreadable-baseline Write refusal → target test FAILS
-    (the Write would fail open on a missing baseline + over-cap content)."""
+    """Revert the unreadable-file Write refusal → target test FAILS (the Write
+    would fail open over a CLAUDE.md that resolves but cannot be read; here it
+    is a directory, which root cannot read either)."""
 
     def test_target_test_passes_on_production_source(
         self, tmp_path, monkeypatch, pact_context
     ):
-        """Baseline: Write 13/12 against missing baseline DENIES."""
-        claude_md = tmp_path / "CLAUDE.md"  # Not created.
+        """Baseline: Write 13/12 over an unreadable CLAUDE.md DENIES."""
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.mkdir()
         pact_context(team_name="test-team", session_id="session-closed", project_dir=str(tmp_path))
 
-        import staleness
-        monkeypatch.setattr(staleness, "get_project_claude_md_path", lambda: claude_md)
+        point_resolver_at(monkeypatch, tmp_path)
 
         result = _call_gate({
             "tool_name": "Write",
@@ -386,10 +384,10 @@ class TestCounterRevert_WriteBaselineFailClosed:
 
         monkeypatch.setattr(pin_caps_gate, "_unreadable_decision", lambda *args: None)
         claude_md = tmp_path / "CLAUDE.md"
+        claude_md.mkdir()
         pact_context(team_name="test-team", session_id="session-closed-revert", project_dir=str(tmp_path))
 
-        import staleness
-        monkeypatch.setattr(staleness, "get_project_claude_md_path", lambda: claude_md)
+        point_resolver_at(monkeypatch, tmp_path)
 
         result = _call_gate({
             "tool_name": "Write",

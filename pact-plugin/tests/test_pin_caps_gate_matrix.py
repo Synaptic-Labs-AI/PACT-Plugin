@@ -36,7 +36,7 @@ import json
 
 import pytest
 
-from helpers import make_claude_md_with_pins, make_pin_entry  # noqa: E402
+from helpers import make_claude_md_with_pins, make_pin_entry, point_resolver_at  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -59,10 +59,7 @@ def gate_env(tmp_path, monkeypatch, pact_context):
         project_dir=str(tmp_path),
     )
 
-    import staleness
-    monkeypatch.setattr(
-        staleness, "get_project_claude_md_path", lambda: claude_md
-    )
+    point_resolver_at(monkeypatch, tmp_path)
 
     def _setup(pin_count=3, baseline="fresh"):
         if baseline == "missing":
@@ -144,8 +141,8 @@ class TestPinCapsGate_Matrix_Edit:
     """Edit-tool cap checks across violation × baseline × bypass.
 
     The Edit path goes: baseline read → parse → simulate via str.replace →
-    compute_deny_reason. Edit + missing baseline is an explicit fail-OPEN
-    path (asymmetric rule applies ONLY to Write — #3).
+    compute_deny_reason. An Edit of a file that does not exist replaces
+    nothing, so it allows.
     """
 
     @pytest.mark.parametrize(
@@ -520,7 +517,7 @@ class TestPinCapsGate_Matrix_Edit:
         )
 
     def test_edit_missing_baseline_allows(self, gate_env):
-        """Edit with missing baseline → fail-OPEN (asymmetric rule is Write-only)."""
+        """Edit with no file before → nothing to replace → ALLOW."""
         env = gate_env(pin_count=0, baseline="missing")
         result = _call_gate({
             "tool_name": "Edit",
@@ -653,12 +650,12 @@ class TestPinCapsGate_Matrix_Write:
     def test_write_missing_baseline_over_cap_denies(
         self, gate_env, pre_count
     ):
-        """Write over-cap with missing baseline → compared with an empty file,
-        refused on count (the one refusing failure path).
+        """Write over-cap with no file before (a first Write) → compared with
+        an empty file, refused on count.
 
         `pre_count` has no semantic meaning here (baseline="missing")
         but we still parametrize to catch any accidental baseline-state
-        dependency on the fail-closed path.
+        dependency on the first-Write path.
         """
         env = gate_env(pin_count=pre_count, baseline="missing")
         new_content = _build_claude_md(13)
@@ -673,9 +670,9 @@ class TestPinCapsGate_Matrix_Write:
         assert "Pin count cap" in result
 
     def test_write_missing_baseline_under_cap_allows(self, gate_env):
-        """Write clean (under-cap) with missing baseline → ALLOW.
+        """Write clean (under-cap) with no file before → ALLOW.
 
-        Asymmetric fail-CLOSED fires ONLY on a concrete over-cap Write.
+        A first Write is refused only when its own pins are over the cap.
         """
         env = gate_env(baseline="missing")
         new_content = _build_claude_md(3)
@@ -799,7 +796,7 @@ class TestPinCapsGate_Matrix_Passthrough:
         assert result is None
 
     def test_missing_file_path_allows(self, gate_env):
-        """No file_path → match_project_claude_md returns None → allow."""
+        """No file_path → gate_target returns None → allow."""
         result = _call_gate({
             "tool_name": "Edit",
             "tool_input": {

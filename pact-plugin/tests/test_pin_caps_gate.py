@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers import make_claude_md_with_pins, make_pin_entry  # noqa: E402
+from helpers import make_claude_md_with_pins, make_pin_entry, point_resolver_at  # noqa: E402
 
 HOOK = Path(__file__).resolve().parent.parent / "hooks" / "pin_caps_gate.py"
 
@@ -48,13 +48,7 @@ def caps_gate_env(tmp_path, monkeypatch, pact_context):
         project_dir=str(tmp_path),
     )
 
-    # Point the lifted match_project_claude_md at our tmp CLAUDE.md via
-    # staleness.get_project_claude_md_path (the lazy import inside
-    # shared/claude_md_manager.match_project_claude_md).
-    import staleness
-    monkeypatch.setattr(
-        staleness, "get_project_claude_md_path", lambda: claude_md
-    )
+    point_resolver_at(monkeypatch, tmp_path)
 
     def _setup(pin_count: int = 1):
         entries = [
@@ -424,22 +418,20 @@ class TestPinCapsGate_FailOpen:
 
 
 class TestPinCapsGate_WriteBaselineFailClosed:
-    """The one refusing failure path (Sec N7): a Write with no readable
-    baseline is compared with an empty file, so its own pins over the cap
-    are refused with the count reason."""
+    """A Write with no project CLAUDE.md before it (a first Write) is compared
+    with an empty file, so its own pins over the cap are refused with the
+    count reason. A CLAUDE.md that resolves but cannot be read takes the same
+    comparison (the real-hook rows)."""
 
     def test_write_over_cap_with_missing_baseline_denies(
         self, tmp_path, monkeypatch, pact_context
     ):
-        """Baseline CLAUDE.md doesn't exist on disk; Write payload is
-        13/12. Compared with an empty file, the Write adds 13 pins."""
+        """No CLAUDE.md on disk; the Write payload is 13/12. Compared with an
+        empty file, the Write adds 13 pins."""
         claude_md = tmp_path / "CLAUDE.md"  # Deliberately NOT created.
         pact_context(team_name="t", session_id="s", project_dir=str(tmp_path))
 
-        import staleness
-        monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: claude_md
-        )
+        point_resolver_at(monkeypatch, tmp_path)
 
         entries = [
             make_pin_entry(title=f"Pin{i}", body_chars=4) for i in range(13)
@@ -463,10 +455,7 @@ class TestPinCapsGate_WriteBaselineFailClosed:
         claude_md = tmp_path / "CLAUDE.md"  # Deliberately NOT created.
         pact_context(team_name="t", session_id="s", project_dir=str(tmp_path))
 
-        import staleness
-        monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: claude_md
-        )
+        point_resolver_at(monkeypatch, tmp_path)
 
         entries = [
             make_pin_entry(title=f"Pin{i}", body_chars=4) for i in range(3)
@@ -483,15 +472,11 @@ class TestPinCapsGate_WriteBaselineFailClosed:
     def test_edit_with_missing_baseline_fails_open(
         self, tmp_path, monkeypatch, pact_context
     ):
-        """Edit (not Write) with baseline missing → fail-OPEN.
-        Asymmetric rule applies only to Write."""
+        """An Edit of a CLAUDE.md that does not exist replaces nothing → allow."""
         claude_md = tmp_path / "CLAUDE.md"
         pact_context(team_name="t", session_id="s", project_dir=str(tmp_path))
 
-        import staleness
-        monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: claude_md
-        )
+        point_resolver_at(monkeypatch, tmp_path)
 
         result = _call_gate({
             "tool_name": "Edit",

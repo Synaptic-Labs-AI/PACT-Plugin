@@ -16,7 +16,10 @@ the verdict.
 Gate fires when ALL hold:
   1. Tool is Edit or Write (enforced by hooks.json matcher)
   2. The frame is the lead's (parity with pin_staleness_gate)
-  3. Target file path resolves to the project CLAUDE.md
+  3. `claude_md_manager.gate_target` returns a target: the project CLAUDE.md
+     the resolver returns once the change exists, so a Write that creates it
+     is gated too. The text before is the file the resolver returns now, or
+     empty when none resolves.
 
 FAIL-OPEN. An over-block is the worst outcome, so every failure allows:
   - a module-load failure prints a systemMessage saying the gate is not
@@ -65,10 +68,7 @@ def _emit_load_failure_allow(stage: str, error: BaseException) -> NoReturn:
 # ─── fail-open wrapper on cross-package imports ────────────────────────────
 try:
     import shared.pact_context as pact_context
-    from shared import (
-        file_lock,
-        match_project_claude_md,
-    )
+    from shared import file_lock
     from shared.failure_log import append_failure
     import pin_caps
     from pin_caps import (
@@ -264,18 +264,25 @@ def _gate(input_data: dict):
     if not isinstance(tool_input, dict):
         return None
 
-    claude_md_path = match_project_claude_md(tool_input.get("file_path", ""))
-    if claude_md_path is None:
+    file_path = tool_input.get("file_path", "")
+    if not isinstance(file_path, str) or Path(file_path).name.casefold() != "claude.md":
+        return None
+    from shared.claude_md_manager import gate_target
+
+    target = gate_target(file_path)
+    if target is None:
         return None
 
-    before, read_error = _read_baseline(claude_md_path)
-    if before is None:
-        append_failure(
-            classification=read_error or _FAIL_BASELINE_READ,
-            error=f"read failed for {claude_md_path}",
-            source=tool_name,
-        )
-        return _unreadable_decision(claude_md_path, tool_name, tool_input)
+    before = ""
+    if target.before is not None:
+        before, read_error = _read_baseline(target.before)
+        if before is None:
+            append_failure(
+                classification=read_error or _FAIL_BASELINE_READ,
+                error=f"read failed for {target.before}",
+                source=tool_name,
+            )
+            return _unreadable_decision(target.before, tool_name, tool_input)
 
     decision = gate_decision(before, tool_name, tool_input)
     if decision.cause == "error":

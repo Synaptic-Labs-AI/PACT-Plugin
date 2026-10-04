@@ -175,22 +175,73 @@ _BUDGET_WARNING_ROW = re.compile(_BUDGET_WARNING_SHAPE)
 _BUDGET_WARNING_WHOLE_ROW =re.compile(rf"{_BUDGET_WARNING_HEAD}(?:(?!-->).)*-->\Z")
 
 
-def _find_existing_claude_md(base: Path) -> Optional[Path]:
+def _existing_anchor(path: Path) -> Tuple[Path, Tuple[str, ...]]:
+    """The deepest ancestor of `path` (itself included) that exists, and the
+    names below it, in order."""
+    rest: List[str] = []
+    while not path.exists() and path.parent != path:
+        rest.append(path.name)
+        path = path.parent
+    return path, tuple(reversed(rest))
+
+
+def _case_insensitive(directory: Path) -> bool:
+    """Whether names are matched without case where `directory` lives: its
+    case-swapped spelling names the same directory. A name with no cased
+    letters cannot be probed and reads as case-sensitive."""
+    swapped = directory.name.swapcase()
+    if swapped == directory.name:
+        return False
+    try:
+        return os.path.samefile(directory, directory.with_name(swapped))
+    except (OSError, ValueError):
+        return False
+
+
+def same_path(a: Path, b: Path) -> bool:
+    """Whether `a` and `b` name the same file, created or not.
+
+    When both exist, `os.path.samefile`. Otherwise the deepest existing
+    ancestor of each must be the same directory, and the names below it must
+    be equal, or equal case-folded where that directory's volume matches names
+    without case. Never raises: an error reads as different paths.
+    """
+    try:
+        if a.exists() and b.exists():
+            return os.path.samefile(a, b)
+        anchor_a, rest_a = _existing_anchor(a)
+        anchor_b, rest_b = _existing_anchor(b)
+        if not os.path.samefile(anchor_a, anchor_b):
+            return False
+        if rest_a == rest_b:
+            return True
+        folded = [name.casefold() for name in rest_a] == [name.casefold() for name in rest_b]
+        return folded and _case_insensitive(anchor_a)
+    except (OSError, ValueError):
+        return False
+
+
+def _find_existing_claude_md(base: Path, assume_present: Optional[Path] = None) -> Optional[Path]:
     """
     Look for an existing project CLAUDE.md under `base`, honoring both
     supported locations: `.claude/CLAUDE.md` (preferred) then `CLAUDE.md`
     (legacy). Returns the first match or None.
+
+    `assume_present` is counted as an existing file: a candidate that does not
+    exist matches when it is `same_path` to it, so a caller can ask which file
+    would resolve once a Write creates it.
     """
-    dot_claude = base / ".claude" / "CLAUDE.md"
-    if dot_claude.exists():
-        return dot_claude
-    legacy = base / "CLAUDE.md"
-    if legacy.exists():
-        return legacy
+    for candidate in (base / ".claude" / "CLAUDE.md", base / "CLAUDE.md"):
+        if candidate.exists():
+            return candidate
+        if assume_present is not None and same_path(candidate, assume_present):
+            return candidate
     return None
 
 
-def _resolve_project_claude_md_with_base() -> Tuple[Optional[Path], Optional[Path]]:
+def _resolve_project_claude_md_with_base(
+    assume_present: Optional[Path] = None,
+) -> Tuple[Optional[Path], Optional[Path]]:
     """
     Resolve the project-level CLAUDE.md AND the trusted base directory it was
     found under, so a write caller can containment-check the target against the
@@ -213,6 +264,10 @@ def _resolve_project_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
     now a thin wrapper returning `[0]`, so read-only callers and the
     resolver-parity lint are unaffected.
 
+    `assume_present` is counted as an existing file at its place in that
+    order (see `_find_existing_claude_md`). Without it, every caller resolves
+    exactly as before.
+
     Returns:
         (path, base) where path is an existing project CLAUDE.md and base is
         the directory it was found under; (None, None) if none exists.
@@ -220,7 +275,7 @@ def _resolve_project_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
     if project_dir:
         base = Path(project_dir)
-        found = _find_existing_claude_md(base)
+        found = _find_existing_claude_md(base, assume_present)
         if found is not None:
             return found, base
 
@@ -248,7 +303,7 @@ def _resolve_project_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
             if not common_dir.is_absolute():
                 common_dir = Path.cwd() / common_dir
             repo_root = common_dir.resolve().parent
-            found = _find_existing_claude_md(repo_root)
+            found = _find_existing_claude_md(repo_root, assume_present)
             if found is not None:
                 return found, repo_root
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -256,7 +311,7 @@ def _resolve_project_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
 
     # Last resort: current working directory
     cwd = Path.cwd()
-    found = _find_existing_claude_md(cwd)
+    found = _find_existing_claude_md(cwd, assume_present)
     return (found, cwd) if found is not None else (None, None)
 
 

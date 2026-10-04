@@ -733,3 +733,12 @@ def make_claude_md_with_pins(entries: list[str]) -> str:
         f"{MEMORY_END_MARKER}\n"
         f"{MANAGED_END_MARKER}\n"
     )
+
+
+def point_resolver_at(monkeypatch, project_dir) -> None:
+    """Make the project CLAUDE.md resolver look under `project_dir`, as it
+    does in a session: CLAUDE_PROJECT_DIR names it, and it is the working
+    directory, so the resolver's git step never reaches the repository the
+    suite runs in."""
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+    monkeypatch.chdir(project_dir)

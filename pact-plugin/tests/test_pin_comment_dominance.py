@@ -33,7 +33,7 @@ import itertools
 
 import pytest
 
-from helpers import make_claude_md_with_pins  # noqa: E402
+from helpers import make_claude_md_with_pins, point_resolver_at  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # The corpus grammar.
@@ -539,8 +539,7 @@ def dominance_gate_env(tmp_path, monkeypatch, pact_context):
         session_id="session-dominance",
         project_dir=str(tmp_path),
     )
-    import staleness
-    monkeypatch.setattr(staleness, "get_project_claude_md_path", lambda: claude_md)
+    point_resolver_at(monkeypatch, tmp_path)
     return claude_md
 
 

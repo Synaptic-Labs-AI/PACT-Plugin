@@ -30,7 +30,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from .failure_cause import failure_cause
 from .paths import get_claude_config_dir
@@ -1752,3 +1752,46 @@ def match_project_claude_md(file_path_str: str) -> Path | None:
     if target != canonical:
         return None
     return canonical
+
+
+class GateTarget(NamedTuple):
+    """The project CLAUDE.md an Edit or Write lands on (`target`), the file the
+    resolver returns before the change (`before`, None when none resolves),
+    and the base directory the target resolved under."""
+
+    target: Path
+    before: Path | None
+    base: Path
+
+
+def gate_target(file_path: str) -> GateTarget | None:
+    """The project CLAUDE.md the pin-cap gate checks for this Edit or Write
+    `file_path`, or None when it checks none.
+
+    Gated: an absolute path whose name is `claude.md` in any case, which the
+    project resolver returns once the change exists. The resolver runs with
+    the target counted as present, so a Write that creates the file is gated,
+    and a Write to a file the resolver would not return (`./CLAUDE.md` while
+    `.claude/CLAUDE.md` exists) is not. `before` is what the resolver returns
+    now, which can be a different file from the target.
+
+    A relative path is not gated, and any failure while resolving returns
+    None: a path the gate is unsure of is allowed.
+    """
+    if not isinstance(file_path, str) or not file_path:
+        return None
+    target = Path(file_path)
+    if not target.is_absolute() or target.name.casefold() != "claude.md":
+        return None
+    try:
+        from staleness import _resolve_project_claude_md_with_base, same_path
+    except ImportError:
+        return None
+    try:
+        resolved, base = _resolve_project_claude_md_with_base(assume_present=target)
+        if resolved is None or base is None or not same_path(resolved, target):
+            return None
+        before = _resolve_project_claude_md_with_base()[0]
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return GateTarget(target, before, base)
