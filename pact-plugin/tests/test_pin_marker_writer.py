@@ -51,7 +51,6 @@ from shared.pin_markers import (
     SkipReason,
     apply_insertion,
     certify_expel_nothing,
-    marker_line_present,
     plan_insertion,
 )
 from clock_shift.clock_shift_env import carry_clock_shift
@@ -451,20 +450,26 @@ class TestExpelNothing:
         good = plan_insertion(old)
         assert certify_expel_nothing(old, apply_insertion(old, good), good) is True
 
-    def test_certificate_refuses_when_the_file_already_quotes_a_marker(self):
-        """Driven DIRECTLY, because in the assembled write the presence check
-        in `plan_insertion` refuses this file earlier.
-
-        The two mechanisms are independent on purpose and neither may be
-        removed on the ground that the other covers it, so each is pinned on
-        its own.
+    def test_a_file_already_quoting_a_marker_is_refused_by_the_planner(self):
+        """The collision guard moved from the certificate to the planner. The
+        marker pair is a `find_block` lookup in the memory block, so marker text
+        at the end of a prose line is a stray and the plan is a refusal that
+        names the line. The certificate is positional and certifies bytes only:
+        a copy of the marker text elsewhere neither blocks nor satisfies it.
         """
+        from shared.claude_md_markers import Cause, State
+        from shared.pin_markers import Refusal
+
         old = build_claude_md(
             pinned_body="### A pin\nI wrote " + START_LINE + "in my notes\n\n"
         )
+        planned = plan_insertion(old)
+        assert isinstance(planned, Refusal)
+        assert planned.located.state is State.MALFORMED
+        assert planned.located.cause is Cause.STRAY
+
         forced = Insertion(0, 0, START_LINE, END_LINE)
-        new = apply_insertion(old, forced)
-        assert certify_expel_nothing(old, new, forced) is False
+        assert certify_expel_nothing(old, apply_insertion(old, forced), forced) is True
 
     def test_certificate_never_raises(self):
         forced = Insertion(0, 0, START_LINE, END_LINE)
@@ -562,22 +567,25 @@ class TestTheDetectorAcceptsOnlyWhatTheWriterEmits:
         shared = marked.replace(START_LINE, shape(PINNED_START_MARKER))
         assert plan_insertion(shared) is not SkipReason.ALREADY_MARKED
 
-    def test_a_carrier_in_the_gap_no_longer_blocks_the_write(self):
+    def test_a_carrier_in_the_gap_is_half_a_pair_not_already_marked(self):
         """THE DEFECT ITSELF. A document merely MENTIONING the marker above the
         heading used to read as already migrated and was refused permanently.
+
+        It still does not read as marked. A marker line elsewhere in the memory
+        block is now one half of a pair the writer did not make, so the planner
+        reports UNPAIRED and writes nothing (it used to plan a write that the
+        certificate then refused as a collision: no write either way).
         """
         doc = build_claude_md(
             retrieved=f"\n### 2026-01-01\n**Context**: one\n{PINNED_START_MARKER}\nthree\n\n"
         )
-        assert isinstance(plan_insertion(doc), Insertion), (
-            "a gap carrier still blocks the write; the defect is not fixed"
-        )
+        assert plan_insertion(doc) is SkipReason.UNPAIRED
 
-    def test_a_mention_inside_the_pinned_body_does_not_block_the_write(self):
+    def test_a_marker_line_inside_the_pinned_body_is_half_a_pair(self):
         doc = build_claude_md(
             pinned_body=f"### A pin\n{PINNED_START_MARKER}\nmore\n\n"
         )
-        assert isinstance(plan_insertion(doc), Insertion)
+        assert plan_insertion(doc) is SkipReason.UNPAIRED
 
 
 class TestAdjacencySurvivesBothMachineWriters:
@@ -614,14 +622,25 @@ class TestAdjacencySurvivesBothMachineWriters:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
         return target
 
+    @staticmethod
+    def _rows_above_heading(text):
+        """The contents of the rows above the first `## Pinned Context`
+        heading row, nearest last, as the fence-aware parser splits them."""
+        from shared.claude_md_markers import parse
+        from shared.pin_markers import _PINNED_HEADING
+        doc = parse(text)
+        headings = doc.find_lines(_PINNED_HEADING)
+        assert headings, "no pinned heading"
+        return [line.content for line in doc.lines[:headings[0]]]
+
     def _adjacent(self, text):
-        from shared.claude_md_manager import extract_managed_region
-        from shared.pin_markers import _PINNED_HEADING, _is_already_marked
-        region = extract_managed_region(text)
-        assert region is not None
-        heading = _PINNED_HEADING.search(region[0])
-        assert heading is not None
-        return _is_already_marked(region[0], heading.start())
+        """The writer's START line still sits directly above the heading, and
+        the planner does not plan a second pair. A carrier in the memory block
+        makes the pair lookup refuse rather than re-insert."""
+        assert not isinstance(plan_insertion(text), Insertion), (
+            "the planner would insert a second pair"
+        )
+        return self._rows_above_heading(text)[-1].strip() == PINNED_START_MARKER
 
     def test_the_above_heading_writer_cannot_break_adjacency(self, tmp_path, monkeypatch):
         from scripts import working_memory as wm
@@ -682,16 +701,12 @@ class TestAdjacencySurvivesBothMachineWriters:
         where the writer puts it.)
         """
         from scripts import working_memory as wm
-        from shared.claude_md_manager import extract_managed_region
-        from shared.pin_markers import _PINNED_HEADING
         target = self._project(tmp_path, monkeypatch)
         wm.sync_retrieved_to_claude_md(
             memories=[{"context": "c", "goal": f"one\n{PINNED_START_MARKER}\nthree"}],
             query="q", scores=[0.9], memory_ids=["mid"])
 
-        region, _ = extract_managed_region(target.read_text(encoding="utf-8"))
-        heading = _PINNED_HEADING.search(region)
-        marker_line = region[:heading.start()].splitlines()[-1]
+        marker_line = self._rows_above_heading(target.read_text(encoding="utf-8"))[-1]
         assert marker_line == marker_line.strip() == PINNED_START_MARKER, (
             "the marker line has fused with adjacent content; the detector "
             "will stop recognising it and re-insert"
@@ -705,16 +720,12 @@ class TestAdjacencySurvivesBothMachineWriters:
         degrade SILENTLY with no other failing test.
         """
         from scripts import working_memory as wm
-        from shared.claude_md_manager import extract_managed_region
-        from shared.pin_markers import _PINNED_HEADING
         target = self._project(tmp_path, monkeypatch)
         wm.sync_retrieved_to_claude_md(
             memories=[{"context": "c", "goal": f"one\n{PINNED_START_MARKER}\nthree"}],
             query="q", scores=[0.9], memory_ids=["mid"])
 
-        region, _ = extract_managed_region(target.read_text(encoding="utf-8"))
-        heading = _PINNED_HEADING.search(region)
-        gap_lines = region[:heading.start()].splitlines()
+        gap_lines = self._rows_above_heading(target.read_text(encoding="utf-8"))
         # The line immediately above the marker line must be blank -- that is
         # the structural separator the rebuild emits.
         assert gap_lines[-1].strip() == PINNED_START_MARKER
@@ -799,32 +810,23 @@ class TestCardinalRegression:
         )
 
 
-class TestFencedBodyRefusal:
-    """A pinned body containing ANY fence marker is refused.
+class TestFencedBodiesAreMarkedAtTheTrueEnd:
+    """A pinned body holding a fenced snippet is marked, and its END marker
+    lands at the end of the SECTION, never inside the user's code block.
 
-    THE PREDICATE IS A BARE SUBSTRING TEST AND THAT IS THE POINT. The
-    terminator scan has no fence awareness, and the guarantee it relies on --
-    that the managed region holds only plugin-generated content -- is FALSE for
-    the pinned section, where pins are user-authored. So on a fenced body the
-    offset it returns cannot be trusted.
-
-    The intuitive repair is a backtick tracker that finds the first terminator
-    OUTSIDE a fence, plus a refusal gate for ambiguous cases. It was measured
-    and it FAILS, and the two failures below are why this suite pins them by
-    name. Crucially the refusal gate does not save that design either, because
-    the gate asks the SAME tracker whether the landing line is inside a fence:
-    on these shapes the tracker believes it is not, so the gate stays silent
-    exactly where it is needed. A guard that consults the mechanism it guards
-    cannot catch that mechanism failing.
+    This replaces a substring refusal: any fence marker in the body used to
+    refuse the write, because the terminator scan could not see fences. The
+    section is now one fence-aware `find_section` call, so a heading-shaped
+    line inside a fence is code, not a terminator. A fence the parser cannot
+    pair (unclosed, or opened on a list or quote line) makes the section
+    UNKNOWN, and the plan is a refusal that names the line.
     """
 
-    FENCED_SHAPES = [
+    CLOSED_FENCES = [
         ("backtick fence with a heading inside",
          "### A pin\n```\n## Not a heading\n```\nmore\n\n"),
         ("balanced fence with a heading-shaped line",
          "### A pin\n```\n# install deps\n```\nmore\n\n"),
-        ("unclosed fence",
-         "### A pin\n```\ncode that never closes\n\n"),
         ("four backticks wrapping three",
          "### A pin\n````\n```\n## Inner\n```\n````\nmore\n\n"),
         ("tilde fence containing a heading-shaped line",
@@ -836,13 +838,29 @@ class TestFencedBodyRefusal:
     ]
 
     @pytest.mark.parametrize(
-        "label,body", FENCED_SHAPES, ids=[r[0] for r in FENCED_SHAPES]
+        "label,body", CLOSED_FENCES, ids=[r[0] for r in CLOSED_FENCES]
     )
-    def test_every_fenced_shape_is_refused(self, label, body):
+    def test_every_closed_fence_gets_its_end_marker_at_the_section_end(self, label, body):
         doc = build_claude_md(pinned_body=body)
-        assert plan_insertion(doc) is SkipReason.FENCED_BODY, (
-            f"{label}: a fenced body must be refused, never placed"
+        planned = plan_insertion(doc)
+        assert isinstance(planned, Insertion), f"{label}: refused, got {planned!r}"
+        assert doc[planned.start_offset:].startswith("## Pinned Context\n")
+        assert doc[planned.end_offset:].startswith("## Working Memory\n"), (
+            f"{label}: the END marker would land inside the section"
         )
+        assert doc[planned.start_offset:planned.end_offset].endswith(body)
+
+    def test_an_unclosed_fence_refuses_and_names_the_line(self):
+        from shared.claude_md_markers import Cause, State
+        from shared.pin_markers import Refusal
+
+        planned = plan_insertion(
+            build_claude_md(pinned_body="### A pin\n```\ncode that never closes\n\n")
+        )
+        assert isinstance(planned, Refusal)
+        assert planned.located.state is State.UNKNOWN
+        assert planned.located.cause is Cause.UNCLOSED_FENCE
+        assert "line " in planned.located.reason
 
     def test_an_unfenced_body_is_still_inserted(self):
         """NON-VACUITY. A predicate that refused everything would pass every
@@ -851,27 +869,26 @@ class TestFencedBodyRefusal:
         doc = build_claude_md(pinned_body="### A pin\nplain prose only\n\n")
         assert isinstance(plan_insertion(doc), Insertion)
 
-    def test_the_refusal_is_what_prevents_the_misplacement(self):
-        """Shows the defect the refusal avoids, so a later reader can see what
-        is at stake before narrowing the predicate.
+    def test_the_fence_blind_scan_would_split_the_block_and_the_planner_does_not(self):
+        """Shows the defect a fence-blind scan causes, beside the planner.
 
-        The fence-blind scan really does stop on the heading-shaped line INSIDE
-        the user's fence. Were the body not refused, the end marker would be
-        placed there, splitting the user's code block.
+        The line scanner the readers still use stops on the heading-shaped line
+        INSIDE the user's fence; an END marker placed there would split the
+        code block. The planner's section runs past the fence.
         """
-        from shared.claude_md_manager import extract_managed_region
-        from shared.pin_markers import _PINNED_HEADING, _PINNED_TERMINATOR
+        from shared.pin_markers import _PINNED_TERMINATOR
         from staleness import _find_terminator_offset
 
         doc = build_claude_md(
             pinned_body="### A pin\n```\n## Not a heading\n```\nmore\n\n"
         )
-        region_text, _start = extract_managed_region(doc)
-        heading = _PINNED_HEADING.search(region_text)
-        end = _find_terminator_offset(
-            region_text, heading.end(), _PINNED_TERMINATOR
-        )
-        assert region_text[end:].startswith("## Not a heading")
+        body_from = doc.index("## Pinned Context\n") + len("## Pinned Context\n")
+        blind_end = _find_terminator_offset(doc, body_from, _PINNED_TERMINATOR)
+        assert doc[blind_end:].startswith("## Not a heading")
+
+        planned = plan_insertion(doc)
+        assert isinstance(planned, Insertion)
+        assert doc[planned.end_offset:].startswith("## Working Memory")
 
     def test_no_reader_was_taught_about_fences(self):
         """PR A changes NO reader. Repairing `_find_terminator_offset` would be
@@ -907,107 +924,56 @@ TERMINATOR_CORPUS = [
 ]
 
 
+def _parity_doc(tail: str) -> str:
+    """A managed block holding a memory block whose pinned section is followed
+    by `tail`. A tail that closes the memory block itself gets no second END."""
+    memory_end = "" if MEMORY_END_MARKER in tail else MEMORY_END_MARKER + "\n"
+    return (
+        "# User heading\n\n"
+        + MANAGED_START_MARKER + "\n"
+        + MEMORY_START_MARKER + "\n"
+        + "## Pinned Context\n\n### A pin\nbody prose\n\n"
+        + tail
+        + memory_end
+        + MANAGED_END_MARKER + "\ntrailing\n"
+    )
+
+
 class TestTerminatorParityWithTheReader:
-    """THE TWIN GUARD.
-
-    `pin_markers` compiles the same terminator SHAPE that
-    `staleness._parse_pinned_section` compiles inline. Two definitions of
-    "where does a section end" is precisely the drift these markers exist to
-    close, so reintroducing it unguarded would be self-defeating.
-
-    The guard pins BEHAVIOUR, not pattern source. A source comparison fires on
-    a semantically identical rewrite, and a guard that reddens on harmless
-    edits gets weakened or deleted -- which is how the real coverage dies. So
-    this drives BOTH implementations over a corpus of whole documents and
-    compares the offset each one lands on. The reader is exercised through its
-    own real function rather than through a copy of its regex.
-
-    The property is the one that actually matters: THE BOUNDARY THIS WRITE
-    DECLARES MUST BE THE BOUNDARY THE CURRENT READER INFERS. If those ever
-    disagree, the markers stop describing the region they wrap.
+    """THE BOUNDARY THIS WRITE DECLARES MUST BE THE BOUNDARY THE CURRENT READER
+    INFERS. The planner's END offset (the row that ends its fence-aware
+    section) is compared with the end `staleness._parse_pinned_section`
+    infers, over a corpus of whole documents with no fences, where the two
+    must agree. The reader is exercised through its own real function.
     """
 
     @pytest.mark.parametrize(
         "label,tail", TERMINATOR_CORPUS, ids=[r[0] for r in TERMINATOR_CORPUS]
     )
-    def test_the_planners_body_extent_equals_the_readers(self, label, tail):
-        """RE-ANCHORED after the END marker was removed, and the re-anchoring
-        is the point.
-
-        This guard used to compare the offset the write DECLARED against the
-        offset the reader INFERRED. There is no declared end any more, so that
-        comparison has no left-hand side. The twin-drift RISK did not go away
-        with it: this planner still compiles its own terminator, and still uses
-        it to decide whether the body is empty and whether it is fenced. What
-        changed is the CONSEQUENCE of drift, not its possibility.
-
-        So the property moves to the extent both implementations measure. If
-        the two terminators ever disagree, the planner and the live reader see
-        different pinned bodies, and this reddens.
-        """
+    def test_the_planners_end_equals_the_readers(self, label, tail):
         from staleness import _parse_pinned_section
-        from shared.claude_md_manager import extract_managed_region
-        from shared.pin_markers import _PINNED_HEADING, _PINNED_TERMINATOR
-        from staleness import _find_terminator_offset
 
-        doc = (
-            "# User heading\n\n"
-            + MANAGED_START_MARKER + "\n"
-            + "## Pinned Context\n\n### A pin\nbody prose\n\n"
-            + tail
-            + MANAGED_END_MARKER + "\ntrailing\n"
-        )
+        doc = _parity_doc(tail)
         parsed = _parse_pinned_section(doc)
         assert parsed is not None, f"{label}: the reader found no pinned section"
-
-        region_text, _start = extract_managed_region(doc)
-        heading = _PINNED_HEADING.search(region_text)
-        planner_body = region_text[
-            heading.end():
-            _find_terminator_offset(region_text, heading.end(), _PINNED_TERMINATOR)
-        ]
-        assert planner_body == parsed[2], (
-            f"{label}: the planner measures a different pinned body than the "
+        planned = plan_insertion(doc)
+        assert isinstance(planned, Insertion), f"{label}: refused, got {planned!r}"
+        assert planned.end_offset == parsed[1], (
+            f"{label}: the planner declares a different section end than the "
             "reader infers. The two terminator definitions have drifted."
         )
 
     def test_the_parity_check_can_actually_fail(self, monkeypatch):
-        """NON-VACUITY, by mutating the twin rather than the caller.
-
-        Without this arm a parity test that compared a value to itself would
-        pass forever while guarding nothing.
-        """
+        """NON-VACUITY, by mutating the planner's terminator so it no longer
+        stops on an H2."""
         import shared.pin_markers as pin_markers
-        from staleness import _parse_pinned_section, _find_terminator_offset
-        from shared.claude_md_manager import extract_managed_region
+        from staleness import _parse_pinned_section
 
-        doc = (
-            "# User heading\n\n"
-            + MANAGED_START_MARKER + "\n"
-            + "## Pinned Context\n\n### A pin\nbody prose\n\n"
-            + "## Working Memory\n\nentry\n"
-            + MANAGED_END_MARKER + "\ntrailing\n"
-        )
+        doc = _parity_doc("## Working Memory\n\nentry\n")
+        assert plan_insertion(doc).end_offset == _parse_pinned_section(doc)[1]
 
-        def planner_body():
-            region_text, _s = extract_managed_region(doc)
-            h = pin_markers._PINNED_HEADING.search(region_text)
-            return region_text[
-                h.end():
-                _find_terminator_offset(
-                    region_text, h.end(), pin_markers._PINNED_TERMINATOR
-                )
-            ]
-
-        # Sanity: they agree before the mutation.
-        assert planner_body() == _parse_pinned_section(doc)[2]
-
-        # Mutate the planner's terminator so it no longer stops on an H2.
-        monkeypatch.setattr(
-            pin_markers, "_PINNED_TERMINATOR",
-            re.compile(r'(?:<!-- (?:PACT_MEMORY_|PACT_MANAGED_|PACT_ROUTING_))'),
-        )
-        assert planner_body() != _parse_pinned_section(doc)[2], (
+        monkeypatch.setattr(pin_markers, "_PINNED_TERMINATOR", re.compile(r"#\s"))
+        assert plan_insertion(doc).end_offset != _parse_pinned_section(doc)[1], (
             "the mutated planner still agreed with the reader, so the parity "
             "assertion cannot detect drift"
         )
@@ -1086,11 +1052,10 @@ class TestIdempotenceOnASingleMarker:
         whole-file substring search treats a document merely MENTIONING the
         marker as already migrated, and refuses it permanently.
 
-        The contract is now positional, and it is the PLANNER'S contract. Only
-        the shape `apply_insertion` emits counts as already-migrated, so a copy
-        anywhere else no longer suppresses the plan. Whether the WRITE then
-        happens is a separate stage with its own answer -- see the comment on
-        the loop below.
+        The contract is positional, and it is the PLANNER'S contract. Only
+        the shape `apply_insertion` emits counts as already-migrated; a copy
+        anywhere else is either outside the memory block (ignored) or half of
+        a pair the writer did not make (UNPAIRED).
         """
         old = build_claude_md()
         planned = plan_insertion(old)
@@ -1100,30 +1065,24 @@ class TestIdempotenceOnASingleMarker:
         # The writer's own position: marked.
         assert plan_insertion(marked) is SkipReason.ALREADY_MARKED
 
-        # Every other position: the PLANNER no longer refuses them as
-        # already-migrated, so a write is PLANNED. The WRITER may still refuse
-        # a planned write -- each stray copy here sits on its own line followed
-        # by a newline, so it trips the certificate and reports a collision.
-        # THIS ASSERTS THE PLANNER'S CONTRACT, NOT THE WRITER'S OUTCOME, and an
-        # earlier version of this comment claimed the write proceeds, which is
-        # false at the writer level. That is a single-stage claim about a
-        # two-stage pipeline -- the same shape as the design-document claim
-        # this change set corrects, committed inside the correction itself.
+        # A copy OUTSIDE the memory block is not where the pair lives, so the
+        # planner ignores it and plans the write. A copy INSIDE the memory
+        # block is half of a pair the writer did not make: UNPAIRED, never
+        # ALREADY_MARKED, and no write.
         #
-        # Asserted as `isinstance(..., Insertion)` and deliberately NOT as
-        # `is not ALREADY_MARKED` -- "not the old wrong answer" is satisfied by
-        # ANY refusal, including a wrong one, and is not the same claim as "the
-        # right answer". An earlier draft of this test used the weak form.
+        # Asserted as specific outcomes and deliberately NOT as `is not
+        # ALREADY_MARKED` -- "not the old wrong answer" is satisfied by ANY
+        # refusal, including a wrong one.
         for label, placed in [
             ("prepended to the file", f"{PINNED_START_MARKER}\n" + old),
-            ("above another heading",
-             old.replace("## Working Memory", f"{PINNED_START_MARKER}\n## Working Memory")),
             ("appended to the file", old + f"{PINNED_START_MARKER}\n"),
         ]:
             assert isinstance(plan_insertion(placed), Insertion), (
-                f"{label}: a stray copy did not leave the document writable "
+                f"{label}: a copy outside the memory block blocked the write "
                 f"(got {plan_insertion(placed)!r})"
             )
+        inside = old.replace("## Working Memory", f"{PINNED_START_MARKER}\n## Working Memory")
+        assert plan_insertion(inside) is SkipReason.UNPAIRED
 
 
 # --------------------------------------------------------------------------
@@ -1435,18 +1394,19 @@ class TestEndToEnd:
         written = target.read_text(encoding="utf-8")
         assert written.count(PINNED_START_MARKER) == 1
 
-    def test_a_fenced_pinned_body_is_left_untouched(self, tmp_path):
-        original = build_claude_md(
-            pinned_body="### A pin\n```\n## Not a heading\n```\nmore\n\n"
-        )
+    def test_a_fenced_pinned_body_is_marked_around_the_fence(self, tmp_path):
+        fenced = "```\n## Not a heading\n```\n"
+        original = build_claude_md(pinned_body=f"### A pin\n{fenced}more\n\n")
         target = self._project(tmp_path, original)
         rc, out, err = run_hook(
             {"hook_event_name": "UserPromptSubmit", "prompt": "/PACT:pin-memory"},
             tmp_path,
         )
         assert rc == 0
-        assert target.read_text(encoding="utf-8") == original
-        assert PINNED_START_MARKER not in target.read_text(encoding="utf-8")
+        written = target.read_text(encoding="utf-8")
+        assert written == apply_insertion(original, plan_insertion(original))
+        assert written.count(fenced) == 1
+        assert written.index(START_LINE) < written.index(fenced) < written.index(END_LINE)
 
     def test_absent_claude_md_is_never_created(self, tmp_path):
         """The hook must not bring the file into being under any circumstance."""
@@ -1463,13 +1423,11 @@ class TestEndToEnd:
 # Registration
 # --------------------------------------------------------------------------
 
-class TestFencedBodyCensusEvent:
-    """The refusal emits a countable signal.
-
-    The frequency of a fenced pinned body has been measured on ONE disk, by the
-    same people who chose the predicate -- a self-applied control over a single
-    population. This event turns it into a live count across every consumer,
-    and it arrives before anything decides to trust the declared boundary.
+class TestTheJournalCarriesTheOutcome:
+    """Every pin command journals exactly one event, carrying the outcome
+    verbatim, including a refusal that names the line the parser could not
+    read. The fenced-body census event this class once pinned is gone with the
+    fenced-body refusal: a fenced body is now marked at its true end.
     """
 
     def _capture(self, monkeypatch, outcome):
@@ -1484,45 +1442,14 @@ class TestFencedBodyCensusEvent:
         pin_marker_writer._journal({}, "typed", "PACT:pin-memory", outcome)
         return events
 
-    def test_a_fenced_skip_emits_the_census_event(self, monkeypatch):
-        events = self._capture(monkeypatch, SkipReason.FENCED_BODY.value)
-        types = [e["type"] for e in events]
-        assert "pin_marker_write" in types
-        assert "fenced_body_skipped" in types
-
-    def test_the_census_event_carries_no_file_content(self, monkeypatch):
-        events = self._capture(monkeypatch, SkipReason.FENCED_BODY.value)
-        census = next(e for e in events if e["type"] == "fenced_body_skipped")
-        assert set(census) == {"v", "type", "ts", "route", "command"}
-        assert census["route"] == "typed"
-        assert census["command"] == "PACT:pin-memory"
-
-    def test_the_census_event_records_a_DECLINED_decision_not_a_guess(
-        self, monkeypatch
-    ):
-        """It must NOT carry what the boundary "would have been". The only
-        mechanism able to compute that is the fence tracker measured to be
-        wrong on real shapes, so such a field would be a fabricated
-        measurement -- worse than none, because it would read as data.
-        """
-        events = self._capture(monkeypatch, SkipReason.FENCED_BODY.value)
-        census = next(e for e in events if e["type"] == "fenced_body_skipped")
-        for forbidden in ("offset", "end_offset", "divergence", "would_have",
-                          "fence_aware", "body", "content", "path"):
-            assert not any(forbidden in key for key in census), (
-                f"the census event carries {forbidden!r}, which would be a "
-                "computed guess rather than a record of a declined decision"
-            )
-
     @pytest.mark.parametrize("outcome", [
         "written", "noop_no_section", "noop_empty_section", "already_marked",
+        "refused_unknown: line 9 starts an uncertain region: a code fence is not closed",
     ])
-    def test_other_outcomes_do_not_emit_the_census_event(
-        self, monkeypatch, outcome
-    ):
-        """NON-VACUITY. An event emitted unconditionally would count nothing."""
+    def test_one_event_carries_the_outcome(self, monkeypatch, outcome):
         events = self._capture(monkeypatch, outcome)
         assert [e["type"] for e in events] == ["pin_marker_write"]
+        assert events[0]["outcome"] == outcome
 
 
 class TestCollisionIsDistinguishableFromCompletedMigration:
@@ -1555,20 +1482,14 @@ class TestCollisionIsDistinguishableFromCompletedMigration:
             "the write proceeded into an ambiguous document"
         )
 
-    def test_a_stray_own_line_copy_is_labelled_a_collision(
+    def test_a_stray_own_line_copy_is_reported_as_half_a_pair(
         self, tmp_path, monkeypatch
     ):
-        """ARM 1 -- the label fires on the condition that CAUSED the failure.
-
-        The stray copy sits under Working Memory, where the adjacency detector
-        does not look, so the planner returns an `Insertion` and the
-        CERTIFICATE is the mechanism that refuses. No injection: this is a
-        document a user could be holding today.
-
-        FAILING INPUT: a planner that refuses this document first -- the
-        `Insertion` precondition reddens and the certificate is masked again
-        -- or a certificate degraded to a constant True, which reddens the
-        outcome assertion.
+        """A stray own-line copy under Working Memory, a document a user could
+        be holding today. The pair lookup in the memory block finds one START
+        and no END, so the planner reports UNPAIRED and the file is untouched.
+        It used to plan a write that the certificate refused as a collision;
+        the collision label now means a complete pair off the writer's rows.
         """
         import pin_marker_writer
         from staleness import _resolve_project_claude_md_with_base
@@ -1578,12 +1499,7 @@ class TestCollisionIsDistinguishableFromCompletedMigration:
                 f"\n### 2026-01-02\nA working entry.\n{PINNED_START_MARKER}\n"
             )
         )
-        # PRECONDITIONS, asserted before any result is read.
         assert START_LINE in original, "FIXTURE INVALID: no own-line copy"
-        assert isinstance(plan_insertion(original), Insertion), (
-            "FIXTURE INVALID: the planner refused, so the certificate branch "
-            "is never reached and any outcome below is a clean negative"
-        )
         (tmp_path / "CLAUDE.md").write_text(original, encoding="utf-8")
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
         resolved, _base = _resolve_project_claude_md_with_base()
@@ -1592,49 +1508,22 @@ class TestCollisionIsDistinguishableFromCompletedMigration:
             "real CLAUDE.md"
         )
 
-        outcome = pin_marker_writer._plan_and_write()
+        assert pin_marker_writer._plan_and_write() == SkipReason.UNPAIRED.value
+        assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8") == original
 
-        # The collision value is produced at exactly ONE site, inside the
-        # certificate-failure branch, so the value is its own witness that the
-        # branch was reached.
-        assert outcome == SkipReason.MARKER_COLLISION.value
-
-    def test_a_mid_line_mention_does_not_borrow_the_collision_label(
+    def test_an_assembly_defect_is_reported_as_certificate_failed(
         self, tmp_path, monkeypatch
     ):
-        """ARM 2 -- THE ARM THAT PROVES THE FIX. It cannot be built from a
-        document alone; it needs an injected assembly defect.
-
-        A mid-line mention is invisible to the certificate's unbounded
-        replace, so it cannot make the certificate fail by itself. The only
-        way to reach the failure branch while holding one is to break the
-        ASSEMBLY. Under the old predicate -- the bare marker -- that genuine
-        defect was reported as a benign collision.
-
-        FAILING INPUT: restoring the bare marker at the label site. This test
-        reddens and names the mislabel, while every other test in this file
-        stays green. That is the whole reason this arm exists.
+        """With an injected assembly defect, the writer reports
+        `certificate_failed` and writes nothing. Every document carrying a
+        marker is refused by the planner first, so this is the certificate's
+        only refusal and it never borrows a collision label.
         """
         import pin_marker_writer
         import shared.pin_markers as pin_markers
         from staleness import _resolve_project_claude_md_with_base
 
-        original = build_claude_md(
-            pinned_body=(
-                f"### A pin\nProse naming the {PINNED_START_MARKER} inline.\n\n"
-            )
-        )
-        # PRECONDITIONS. The second is what makes the arm DISCRIMINATING:
-        # without a bare-marker occurrence the OLD predicate would also have
-        # answered "not a collision", and the arm would prove nothing.
-        assert START_LINE not in original, (
-            "FIXTURE INVALID: the copy is not mid-line, so the certificate "
-            "would refuse for the collision reason instead"
-        )
-        assert PINNED_START_MARKER in original, (
-            "FIXTURE INVALID: no bare mention, so the old predicate is never "
-            "exercised and this arm cannot discriminate"
-        )
+        original = build_claude_md()
         assert isinstance(plan_insertion(original), Insertion), (
             "FIXTURE INVALID: the planner refused before the certificate"
         )
@@ -1655,14 +1544,13 @@ class TestCollisionIsDistinguishableFromCompletedMigration:
 
         # MEASURED, NOT ASSUMED: the injection reached the writer. The import
         # of `apply_insertion` is function-local, so if it had bound an
-        # unpatched reference the write would have succeeded and this would
-        # read `written`.
+        # unpatched reference the write would have succeeded.
         assert outcome != "written", (
             "the injected assembly defect never took effect, so the outcome "
             "below says nothing about the label"
         )
         assert outcome == "certificate_failed"
-        assert outcome != SkipReason.MARKER_COLLISION.value
+        assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8") == original
 
     def test_the_two_refusal_reasons_are_different_values(self):
         """A collision and an assembly defect call for opposite responses, so
@@ -1695,71 +1583,45 @@ class TestTheGuardHoldsUnderEveryLineTerminator:
 
     @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
     def test_a_document_already_carrying_a_marker_line_is_refused(self, newline):
-        """THE FIX. Under LF this was refused by accident; under CRLF it was
-        not refused at all and a second marker was written.
-
-        FAILING INPUT: restoring the accident -- deleting the collision clause
-        from the certificate. The `crlf` arm reddens; the `lf` arm does NOT,
-        because the replace still catches it there. The lf arm is the CONTROL
-        that shows the crlf arm is measuring the terminator and not the rule.
+        """The guard is the planner's pair lookup, and the parser ends rows at
+        LF, CRLF and CR alike, so an own-line copy in the memory block is half
+        a pair under every terminator. (It used to rest on the certificate's
+        unbounded replace, which caught it under LF only by accident.)
         """
         original = self._doc(newline, f"### A pin\n{PINNED_START_MARKER}\nmore\n\n")
-        assert marker_line_present(original, PINNED_START_MARKER), (
-            "FIXTURE INVALID: no marker line"
-        )
-        planned = plan_insertion(original)
-        assert isinstance(planned, Insertion), (
-            "FIXTURE INVALID: the planner refused, so the certificate is never "
-            "consulted and the result below is a clean negative"
-        )
-        composed = apply_insertion(original, planned)
-        assert composed.count(PINNED_START_MARKER) == 2, (
-            "FIXTURE INVALID: the composition does not carry the second marker "
-            "this test exists to refuse"
-        )
-        assert certify_expel_nothing(original, composed, planned) is False
+        assert plan_insertion(original) is SkipReason.UNPAIRED
 
     @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
-    def test_a_mid_line_mention_still_writes_under_either_terminator(self, newline):
-        """THE OVER-REACH GUARD, and it is the reason the fix is a line
-        predicate rather than a substring test. Prose naming the marker must
-        still be written into.
-
-        FAILING INPUT: widening the collision clause to `marker in old`. Both
-        arms redden, which is what distinguishes over-reach from the defect --
-        the fix reddens one arm, over-reach reddens both.
+    def test_a_mid_line_mention_refuses_and_a_quoted_one_writes(self, newline):
+        """Marker text off a marker line is stray under either terminator, so
+        the plan refuses; the same text inside backticks is a mention, and the
+        write goes ahead with the certificate accepting it.
         """
-        original = self._doc(
+        from shared.claude_md_markers import Cause
+        from shared.pin_markers import Refusal
+
+        stray = self._doc(
             newline, f"### A pin\nProse naming the {PINNED_START_MARKER} inline.\n\n"
         )
-        assert PINNED_START_MARKER in original, "FIXTURE INVALID: no mention"
-        assert not marker_line_present(original, PINNED_START_MARKER), (
-            "FIXTURE INVALID: the mention occupies a line, so this is the "
-            "collision case rather than the mid-line case"
+        refused = plan_insertion(stray)
+        assert isinstance(refused, Refusal) and refused.located.cause is Cause.STRAY
+
+        quoted = self._doc(
+            newline, f"### A pin\nProse naming the `{PINNED_START_MARKER}` inline.\n\n"
         )
-        planned = plan_insertion(original)
-        assert isinstance(planned, Insertion), "FIXTURE INVALID: planner refused"
+        planned = plan_insertion(quoted)
+        assert isinstance(planned, Insertion), f"planner refused: {planned!r}"
         assert certify_expel_nothing(
-            original, apply_insertion(original, planned), planned
+            quoted, apply_insertion(quoted, planned), planned
         ) is True
 
-    def test_marker_line_present_is_terminator_agnostic(self):
+    @pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"], ids=["lf", "crlf", "cr"])
+    def test_the_writers_own_pair_is_recognised_under_every_terminator(self, newline):
         """The property is `occupies a line`, not `is followed by one specific
-        byte sequence`. CR is included because `splitlines` splits on it, so
-        excluding it would be an untested asymmetry rather than a decision.
-
-        FAILING INPUT: reimplementing the predicate as `START_LINE in text`.
-        The crlf and cr cases go False and this reddens.
-        """
-        for newline in ("\n", "\r\n", "\r"):
-            text = f"above{newline}{PINNED_START_MARKER}{newline}below{newline}"
-            assert marker_line_present(text, PINNED_START_MARKER) is True, (
-                f"missed {newline!r}"
-            )
-        assert marker_line_present(
-            f"prose {PINNED_START_MARKER} inline\n", PINNED_START_MARKER
-        ) is False
-        assert marker_line_present("no marker here\r\n", PINNED_START_MARKER) is False
+        byte sequence`."""
+        old = build_claude_md()
+        marked = apply_insertion(old, plan_insertion(old)).replace("\n", newline)
+        assert plan_insertion(marked) is SkipReason.ALREADY_MARKED
 
     def test_the_shipped_terminator_pattern_carries_no_end_anchor(self):
         """A SWEEP RESULT PINNED, because the site is safe by its CALLERS
@@ -2124,12 +1986,17 @@ class TestACallerInfluencedValueCannotMoveTheWindow:
     """
 
     def test_the_marker_text_in_the_session_block_does_not_move_the_start(self):
-        """FAILING INPUT: locating the boundary with `region_text.find(...)`
-        rather than a marker LINE. The window then starts inside the session
-        block and this reddens.
+        """The session value is backtick-quoted, so its marker text is a
+        mention and the memory block is still the genuine one. The same text
+        unquoted is a stray, and the plan refuses naming the line: in neither
+        case does the text become the boundary.
+
+        FAILING INPUT: locating the memory block with a substring search. The
+        quoted arm then plans from the session block and the unquoted arm
+        writes instead of refusing.
         """
-        from shared.claude_md_manager import extract_managed_region
-        from shared.pin_markers import _narrow_to_memory_region
+        from shared.claude_md_markers import Cause
+        from shared.pin_markers import Refusal
 
         doc = doc_with_the_marker_text_in_the_session_block()
         assert doc.count(MEMORY_START_MARKER) == 2, (
@@ -2140,21 +2007,13 @@ class TestACallerInfluencedValueCannotMoveTheWindow:
             "FIXTURE INVALID: the forged text is not inside a longer line, so "
             "this fixture is not the shape a caller can produce"
         )
+        planned = plan_insertion(doc)
+        assert isinstance(planned, Insertion), f"a sound document was refused: {planned!r}"
+        assert planned.start_offset > doc.rindex(MEMORY_START_MARKER)
 
-        region = extract_managed_region(doc)
-        assert region is not None, "FIXTURE INVALID: no managed region"
-        narrowed = _narrow_to_memory_region(region[0], region[1])
-        assert narrowed is not None, "the window was refused on a sound document"
-
-        window_text, _offset = narrowed
-        assert "SESSION_END" not in window_text, (
-            "the window starts inside the SESSION BLOCK and swallows it, "
-            "which is the region this narrowing exists to exclude"
-        )
-        assert window_text.startswith("## Retrieved Context"), (
-            "the window does not begin at the line after the genuine memory "
-            "start marker"
-        )
+        unquoted = doc.replace(f"`/tmp/x{MEMORY_START_MARKER}y`", f"/tmp/x{MEMORY_START_MARKER}y")
+        refused = plan_insertion(unquoted)
+        assert isinstance(refused, Refusal) and refused.located.cause is Cause.STRAY
 
     def test_the_planner_still_anchors_on_the_declared_heading(self):
         """POSITIVE CONTROL AT THE PUBLIC PATH. NOT A KILL ARM, and the
@@ -2189,52 +2048,43 @@ class TestACallerInfluencedValueCannotMoveTheWindow:
     def test_the_end_marker_text_in_a_pin_does_not_truncate_the_window(self):
         """The same rule at the OTHER boundary, with a different producer.
 
-        FAILING INPUT: locating the end with `region_text.find(...)`. The
-        window then stops at the pin that merely names the marker, and the
-        pinned body is cut short.
+        Mid-line marker text in a pin body is a stray, so the memory block
+        lookup is MALFORMED and the plan refuses naming the line, rather than
+        ending the memory block at the pin. (Before the parser, the line rule
+        ignored it and the write went ahead.)
         """
-        from shared.claude_md_manager import extract_managed_region
-        from shared.pin_markers import _narrow_to_memory_region
+        from shared.claude_md_markers import Cause, State
+        from shared.pin_markers import Refusal
 
         doc = doc_with_the_end_marker_text_in_a_pin()
         assert doc.count(MEMORY_END_MARKER) == 2, (
             "FIXTURE INVALID: the pin does not carry the end marker text"
         )
-        region = extract_managed_region(doc)
-        assert region is not None, "FIXTURE INVALID: no managed region"
-        narrowed = _narrow_to_memory_region(region[0], region[1])
-        assert narrowed is not None, "the window was refused on a sound document"
+        refused = plan_insertion(doc)
+        assert isinstance(refused, Refusal)
+        assert refused.located.state is State.MALFORMED
+        assert refused.located.cause is Cause.STRAY
 
-        window_text, _offset = narrowed
-        assert "## Working Memory" in window_text, (
-            "the window was truncated at a pin that merely names the end "
-            "marker, so the memory region lost its tail"
+    @pytest.mark.parametrize("indent", [1, 2, 3])
+    def test_a_marker_line_indented_up_to_three_spaces_is_accepted(self, indent):
+        """A marker line takes up to 3 spaces of indent, so an indented but
+        faithful marker line is still a boundary."""
+        doc = build_claude_md().replace(
+            MEMORY_START_MARKER + "\n", " " * indent + MEMORY_START_MARKER + "\n"
         )
+        planned = plan_insertion(doc)
+        assert isinstance(planned, Insertion), f"refused: {planned!r}"
+        assert planned.start_offset > doc.index(MEMORY_START_MARKER)
 
-    def test_an_indented_marker_line_is_accepted(self):
-        """THE TOLERANCE, PINNED IN THE DIRECTION IT WAS CHOSEN.
-
-        `marker_line_span` compares STRIPPED, so an indented but faithful
-        marker line is still a boundary. A raw comparison would refuse this
-        document, which is the over-block direction.
-
-        MEASURED, and recorded because the two predicates genuinely differ:
-        `_find_terminator_offset` matches the RAW line and does NOT match this
-        one. The disagreement does not reach the planner, because that scan
-        runs INSIDE the window produced here, so the marker line is excluded
-        before it is ever judged.
-        """
-        from shared.claude_md_manager import extract_managed_region
-        from shared.pin_markers import _narrow_to_memory_region
+    def test_a_marker_line_indented_four_spaces_is_stray(self):
+        """Four spaces is indented code to Markdown, not a marker line. The old
+        stripped comparison accepted any indent; the marker text is now a stray
+        and the plan refuses naming the line."""
+        from shared.claude_md_markers import Cause
+        from shared.pin_markers import Refusal
 
         doc = build_claude_md().replace(
             MEMORY_START_MARKER + "\n", "    " + MEMORY_START_MARKER + "\n"
         )
-        region = extract_managed_region(doc)
-        assert region is not None, "FIXTURE INVALID: no managed region"
-        narrowed = _narrow_to_memory_region(region[0], region[1])
-        assert narrowed is not None, (
-            "an indented but faithful marker line was refused, which is an "
-            "over-block on a document the plugin itself could emit"
-        )
-        assert "SESSION_END" not in narrowed[0]
+        refused = plan_insertion(doc)
+        assert isinstance(refused, Refusal) and refused.located.cause is Cause.STRAY

@@ -1,38 +1,3 @@
 # Locators that commit C4 moves onto the finder: pin markers and the memory region (S19-S25, S27).
 # Format: path<TAB>function<TAB>kind<TAB>expression. Delete an entry in the commit
 # that routes its site through hooks/shared/claude_md_markers.py.
-
-# hooks/pin_marker_writer.py _plan_and_write: S23
-hooks/pin_marker_writer.py	_plan_and_write	helper call	marker_line_present(content, PINNED_END_MARKER)
-hooks/pin_marker_writer.py	_plan_and_write	helper call	marker_line_present(content, PINNED_START_MARKER)
-hooks/pin_marker_writer.py	_plan_and_write	in	END_LINE in content
-hooks/pin_marker_writer.py	_plan_and_write	in	START_LINE in content
-# hooks/shared/pin_markers.py _is_already_marked: S19
-hooks/shared/pin_markers.py	_is_already_marked	==	gap_lines[-1].strip() == PINNED_START_MARKER
-hooks/shared/pin_markers.py	_is_already_marked	line split	region_text[:heading_start].splitlines()
-# hooks/shared/pin_markers.py _is_end_marked: S19
-hooks/shared/pin_markers.py	_is_end_marked	==	tail.splitlines()[0].strip() == PINNED_END_MARKER
-hooks/shared/pin_markers.py	_is_end_marked	line split	tail.splitlines()
-# hooks/shared/pin_markers.py _narrow_to_memory_region: S20
-hooks/shared/pin_markers.py	_narrow_to_memory_region	helper call	marker_line_span(region_text, MEMORY_START_MARKER)
-hooks/shared/pin_markers.py	_narrow_to_memory_region	helper call	marker_line_span(tail, MEMORY_END_MARKER)
-# hooks/shared/pin_markers.py certify_expel_nothing: S22
-hooks/shared/pin_markers.py	certify_expel_nothing	helper call	marker_line_present(old, PINNED_END_MARKER)
-hooks/shared/pin_markers.py	certify_expel_nothing	helper call	marker_line_present(old, PINNED_START_MARKER)
-# hooks/shared/pin_markers.py plan_insertion: S21
-hooks/shared/pin_markers.py	plan_insertion	.search	_PINNED_HEADING.search(region_text)
-hooks/shared/pin_markers.py	plan_insertion	helper call	_find_terminator_offset( region_text, body_from, _PINNED_TERMINATOR )
-hooks/shared/pin_markers.py	plan_insertion	helper call	marker_line_offset(content, PINNED_END_MARKER)
-hooks/shared/pin_markers.py	plan_insertion	helper call	marker_line_offset(content, PINNED_START_MARKER)
-# skills/pact-memory/scripts/working_memory.py _narrow_to_memory_region: S25
-skills/pact-memory/scripts/working_memory.py	_narrow_to_memory_region	helper call	marker_line_span(region_text, MEMORY_START_MARKER)
-skills/pact-memory/scripts/working_memory.py	_narrow_to_memory_region	helper call	marker_line_span(tail, MEMORY_END_MARKER)
-# skills/pact-memory/scripts/working_memory.py _resolve_write_window: S25
-skills/pact-memory/scripts/working_memory.py	_resolve_write_window	in	_MANAGED_END_MARKER in content
-# skills/pact-memory/scripts/working_memory.py extract_managed_region: S24
-skills/pact-memory/scripts/working_memory.py	extract_managed_region	.find	content.find(_MANAGED_END_MARKER, region_start)
-skills/pact-memory/scripts/working_memory.py	extract_managed_region	.find	content.find(_MANAGED_START_MARKER)
-skills/pact-memory/scripts/working_memory.py	extract_managed_region	==	end_idx == -1
-skills/pact-memory/scripts/working_memory.py	extract_managed_region	==	start_idx == -1
-# skills/pact-memory/scripts/working_memory.py sync_retrieved_to_claude_md: S27
-skills/pact-memory/scripts/working_memory.py	sync_retrieved_to_claude_md	re.search	re.search( r'^## Working Memory', content, re.MULTILINE )

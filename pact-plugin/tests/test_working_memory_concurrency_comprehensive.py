@@ -408,10 +408,12 @@ class TestSyncSemanticsUnchangedUnderLock:
         claude_dir.mkdir(parents=True, exist_ok=True)
         claude_md = claude_dir / "CLAUDE.md"
         # Minimal managed-region layout with all 4 markers and a Working Memory
-        # section the sync will rewrite.
+        # section the sync will rewrite. The managed start is the real literal:
+        # a lone PACT_MANAGED_END with no matching start is a malformed block,
+        # and the sync declines it rather than writing.
         claude_md.write_text(
             "# Project\n\n"
-            "<!-- PACT_MANAGED_START -->\n"
+            f"{wm._MANAGED_START_MARKER}\n"
             "<!-- PACT_MEMORY_START -->\n"
             "## Working Memory\n"
             "<!-- Auto-managed by pact-memory skill. -->\n\n"
@@ -426,7 +428,7 @@ class TestSyncSemanticsUnchangedUnderLock:
 
         final = claude_md.read_text(encoding="utf-8")
         markers = [
-            "<!-- PACT_MANAGED_START -->",
+            wm._MANAGED_START_MARKER,
             "<!-- PACT_MEMORY_START -->",
             "<!-- PACT_MEMORY_END -->",
             "<!-- PACT_MANAGED_END -->",
