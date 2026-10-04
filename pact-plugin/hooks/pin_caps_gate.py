@@ -73,7 +73,6 @@ def _emit_load_failure_allow(stage: str, error: BaseException) -> NoReturn:
 # ─── fail-open wrapper on cross-package imports ────────────────────────────
 try:
     import shared.pact_context as pact_context
-    from shared import file_lock
     from shared.claude_md_manager import MEMBER_PIN_INSTRUCTION
     from shared.failure_log import append_failure
     import pin_caps
@@ -224,16 +223,19 @@ def gate_decision(before: str, tool_name: str, tool_input: dict):
 
 
 def _read_baseline(claude_md_path: Path) -> tuple[Optional[str], Optional[str]]:
-    """Read current CLAUDE.md under file_lock for TOCTOU defense.
+    """Read the CLAUDE.md before the change, without the writers' lock, with
+    undecodable bytes replaced.
+
+    The gate only reads, so it takes no lock: a writer holding it would delay
+    the gate up to the lock timeout and then turn the read into a failure,
+    which refuses a Write.
 
     Returns (content, error_classification). On success: (text, None).
     On I/O failure: (None, _FAIL_BASELINE_READ).
     """
     try:
-        with file_lock(claude_md_path):
-            content = claude_md_path.read_text(encoding="utf-8", errors="replace")
-        return content, None
-    except (IOError, OSError, TimeoutError, UnicodeDecodeError):
+        return claude_md_path.read_text(encoding="utf-8", errors="replace"), None
+    except OSError:
         return None, _FAIL_BASELINE_READ
 
 

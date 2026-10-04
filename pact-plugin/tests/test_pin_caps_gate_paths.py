@@ -15,6 +15,8 @@ A path the gate is unsure of is not gated, so it is allowed.
 import os
 import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -162,6 +164,42 @@ def test_both_memory_markers_removed_allows_with_the_advisory_and_keeps_allowing
     assert _gate(tmp_path, claude_md, _write(_without_memory_markers(_pins(18)))) == "advisory"
     claude_md.write_text(_without_memory_markers(_pins(18)), encoding="utf-8")
     assert _gate(tmp_path, claude_md, _write(_without_memory_markers(_pins(19)))) == "advisory"
+
+
+# ---------------------------------------------------------------------------
+# A writer holding the CLAUDE.md lock neither delays nor decides the gate
+# ---------------------------------------------------------------------------
+
+_HOLD_LOCK = (
+    "import fcntl, os, sys\n"
+    "fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)\n"
+    "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+    "print('held', flush=True)\n"
+    "sys.stdin.read()\n"
+)
+
+
+def test_a_held_writer_lock_neither_delays_nor_decides_the_gate(tmp_path):
+    """A child holds the writers' sidecar lock, with their own fcntl.flock,
+    for the whole row. The gate reads without it: a rename at 13 pins is
+    allowed and a pin added is denied, both well inside the writers' 5 s lock
+    timeout, which a gate waiting on the lock would reach."""
+    claude_md = tmp_path / ".claude" / "CLAUDE.md"
+    claude_md.parent.mkdir()
+    claude_md.write_text(_pins(13), encoding="utf-8")
+    sidecar = claude_md.parent.resolve() / f".{claude_md.name}.lock"
+    holder = subprocess.Popen([sys.executable, "-c", _HOLD_LOCK, str(sidecar)],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    assert holder.stdin is not None and holder.stdout is not None
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        start = time.monotonic()
+        assert _gate(tmp_path, claude_md, _write(_pins(13).replace("### Pin5\n", "### Pin5 renamed\n"))) == "allow"
+        assert _gate(tmp_path, claude_md, _write(_pins(14))) == "deny"
+        assert time.monotonic() - start < 5.0
+    finally:
+        holder.stdin.close()
+        holder.wait(timeout=10)
 
 
 # ---------------------------------------------------------------------------

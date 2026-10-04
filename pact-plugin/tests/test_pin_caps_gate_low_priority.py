@@ -6,9 +6,8 @@ Items covered:
   1. failure_log classification assertions for the gate's error paths
      (_FAIL_BASELINE_READ, _FAIL_DECISION, _FAIL_UNEXPECTED). A parse or
      decision failure allows: only the unreadable-baseline Write refuses.
-  2. file_lock adversarial concurrent access — two near-simultaneous
-     hook invocations must serialize correctly without corruption or
-     deadlock.
+  2. concurrent access — near-simultaneous hook invocations, which read
+     the file without a lock, all complete and agree.
 
 Item 3 (CLI parse_known_args silent-accept) is already covered in
 test_pin_caps_phantom_green.py::TestPhantomGreen_CliBypass.
@@ -326,14 +325,13 @@ class TestFailureLogClassification:
 
 
 # ---------------------------------------------------------------------------
-# file_lock adversarial concurrency
+# Concurrent gate calls
 # ---------------------------------------------------------------------------
 
 
 class TestFileLockContention:
-    """file_lock serializes the baseline-read section. Two near-
-    simultaneous hook invocations must complete without corruption
-    or deadlock.
+    """The gate reads CLAUDE.md without a lock. Near-simultaneous hook
+    invocations must all complete, without a torn result or a hang.
 
     Uses threading.Barrier(N+1) — the standard pattern from MEMORY.md
     (feedback_threading_barrier_race_detection). Each reader thread
@@ -346,8 +344,7 @@ class TestFileLockContention:
         """Two concurrent Edit gate calls against the same CLAUDE.md
         both terminate with sensible results (no deadlock).
 
-        Both calls target an under-cap state → both ALLOW. The point is
-        that `file_lock` serializes them without blocking indefinitely.
+        Both calls target an under-cap state → both ALLOW, and none blocks.
         """
         claude_md = tmp_path / "CLAUDE.md"
         entries = [
@@ -392,7 +389,7 @@ class TestFileLockContention:
         for t in threads:
             t.join(timeout=10.0)
             assert not t.is_alive(), (
-                "file_lock deadlock suspected — worker did not terminate"
+                "a gate call hung — worker did not terminate"
             )
 
         # No thread raised.
