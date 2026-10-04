@@ -44,6 +44,15 @@ miniature inert-ship false-negative at the classifier layer. The asymmetry
 favors closure: a false positive costs one L2 test; a false negative is the
 inert-ship class. The companion meta-test's oracle MUST also be AST
 relative-following, or it reproduces the blind spot.
+
+A package initialiser is followed only for the names it re-exports. `from
+shared import check_pr_state` is an edge to gh_helpers, the module
+shared/__init__.py imports that name from, because the hook calls into it. The
+initialiser's other imports are not edges, although Python runs them whenever
+any shared module loads: following them would put that file's whole closure
+into every hook that imports from shared. A closure therefore names the helpers
+whose code a hook can call, not the modules it loads at runtime. Module-load
+scope and import cost are pinned by their own tests.
 """
 
 from __future__ import annotations
@@ -204,7 +213,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "backlog_store",
         "claude_md_manager", "claude_md_markers", "compaction_owner", "constants",
         "dispatch_helpers", "failure_cause",
-        "failure_log", "git_helpers", "handoff_schema", "marker_schema",
+        "failure_log", "gh_helpers", "git_helpers", "handoff_schema", "marker_schema",
         "merge_guard_common", "pact_config", "pact_context", "paths",
         "peer_context", "pin_caps", "plugin_manifest", "project_scope",
         "session_journal", "session_registry", "session_resume",
@@ -212,6 +221,8 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "task_utils", "teammate_mode",
     }),  # stale_session reached via session_resume's Current Session reader,
          # which takes the Resume-line pattern from it.
+         # gh_helpers reached via session_resume's function-level
+         # `from shared import check_pr_state`, a name the package re-exports.
          # claude_md_markers reached via session_resume and stale_session,
          # which locate the Current Session block through the parser.
          # backlog_store reached via `from shared import backlog_store`, an edge
@@ -231,9 +242,10 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # That import runs on the compact branch only, with its output
          # captured, and a failure to load reads as no marker.
     "session_end": frozenset({
-        "constants", "error_output", "pact_context", "paths", "session_journal",
-        "session_registry", "session_state", "task_utils",
-    }),
+        "constants", "error_output", "gh_helpers", "pact_context", "paths",
+        "session_journal", "session_registry", "session_state", "task_utils",
+    }),  # gh_helpers reached via `from shared import check_pr_state`, a name
+         # the package re-exports from it.
     "postcompact_archive": frozenset({
         "compaction_owner", "constants", "error_output", "pact_context", "paths",
         "session_journal", "session_registry", "session_state",
@@ -301,11 +313,13 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # bootstrap_marker_writer's OWN closure (below) is unchanged.
     "bootstrap_marker_writer": frozenset({
         "compaction_owner", "claude_md_manager", "claude_md_markers", "constants", "failure_cause",
-        "git_helpers", "handoff_schema", "marker_schema",
+        "gh_helpers", "git_helpers", "handoff_schema", "marker_schema",
         "pact_context", "paths", "pin_caps", "project_scope", "session_journal",
         "session_registry", "session_resume", "session_state", "stale_session",
         "staleness", "state_file",
-    }),  # stale_session reached via session_resume, whose Current Session
+    }),  # gh_helpers reached via session_resume's function-level
+         # `from shared import check_pr_state`, a name the package re-exports.
+         # stale_session reached via session_resume, whose Current Session
          # reader takes the Resume-line pattern from it; claude_md_markers via
          # session_resume, which locates that block through the parser; state_file via
          # project_scope, which writes the worktree identity record.

@@ -37,6 +37,7 @@ top-level-edge perturbation is the explicit non-vacuity anchor.
 from __future__ import annotations
 
 import ast
+import functools
 from pathlib import Path
 
 import pytest
@@ -81,6 +82,19 @@ def _is_shared(stem: str, idx: dict[str, Path]) -> bool:
     return "/shared/" in f"/{idx[stem].as_posix()}"
 
 
+@functools.lru_cache(maxsize=None)
+def _shared_reexports() -> dict[str, str]:
+    """name -> module stem, for each name hooks/shared/__init__.py imports at
+    module level (`from .gh_helpers import check_pr_state`, `from pin_caps
+    import ...`)."""
+    tree = ast.parse((HOOKS / "shared" / "__init__.py").read_text(encoding="utf-8"))
+    return {
+        alias.asname or alias.name: node.module.split(".")[-1]
+        for node in tree.body if isinstance(node, ast.ImportFrom) and node.module
+        for alias in node.names
+    }
+
+
 def _direct_hook_imports(
     path: Path, idx: dict[str, Path], shared_only: bool = False,
 ) -> set[str]:
@@ -95,11 +109,17 @@ def _direct_hook_imports(
     `from`, so reading only `node.module` misses them: `from . import X` has
     no module at all, and `from shared import X` names only the package. An
     alias that is a function or constant rather than a module is not in `idx`
-    and adds nothing.
+    and adds nothing itself.
+
+    A name the `shared` package re-exports (`from shared import check_pr_state`,
+    `from . import check_pr_state` inside hooks/shared/, or a
+    `shared.check_pr_state` read) is an edge to the module shared/__init__.py
+    imports it from. The initialiser's other imports are not edges.
 
     `shared_only` models the BUG the architect caught — a derivation that only
     follows hooks/shared/ edges and never traverses top-level helper modules."""
     out: set[str] = set()
+    reexports = _shared_reexports()
     tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
@@ -112,12 +132,17 @@ def _direct_hook_imports(
                 for alias in node.names:
                     if alias.name in idx:
                         out.add(alias.name)
+                    elif reexports.get(alias.name) in idx:
+                        out.add(reexports[alias.name])
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 parts = alias.name.split(".")
                 cand = parts[1] if parts[0] == "shared" and len(parts) > 1 else parts[0]
                 if cand in idx:
                     out.add(cand)
+        elif (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+              and node.value.id == "shared" and reexports.get(node.attr) in idx):
+            out.add(reexports[node.attr])
     if shared_only:
         out = {m for m in out if _is_shared(m, idx)}
     return out
@@ -202,6 +227,21 @@ class TestClosureMatchesLiveImportGraph:
         )
         assert {"state_file", "pact_context"} <= _direct_hook_imports(probe, idx)
         assert "get_team_name" not in _direct_hook_imports(probe, idx)
+
+    @pytest.mark.parametrize("source", [
+        "from shared import check_pr_state\n",
+        "from . import check_pr_state\n",
+        "import shared.paths\nshared.check_pr_state(1)\n",
+    ])
+    def test_the_oracle_follows_a_name_the_shared_package_re_exports(self, tmp_path, source):
+        """A re-exported name is an edge to the module shared/__init__.py imports
+        it from: check_pr_state to gh_helpers. The initialiser's other imports
+        (symlinks among them) are not edges."""
+        probe = tmp_path / "probe.py"
+        probe.write_text(source, encoding="utf-8")
+        found = _direct_hook_imports(probe, _module_index())
+        assert "gh_helpers" in found
+        assert "symlinks" not in found
 
 
 # The TOP-LEVEL helpers (hooks/*.py, NOT hooks/shared/*.py) that session_init
@@ -535,7 +575,9 @@ class TestClassifierQuietAndLoud:
     def test_primary_only_change_requires_waiver(self):
         # A hooks/ file that is neither a seam hook nor a seam helper -> PRIMARY,
         # not SECONDARY -> the auditable waiver path (never a silent pass).
-        c = classify_diff(["pact-plugin/hooks/shared/gh_helpers.py"])
+        # If a seam hook comes to reach it, pick another such module.
+        assert "variety_divergence" not in SEAM_READING_HELPERS | SEAM_DEPENDENT_HOOKS
+        c = classify_diff(["pact-plugin/hooks/shared/variety_divergence.py"])
         assert c.primary and not c.secondary and c.waiver_required
 
     def test_fires_secondary_on_a_seam_hook(self):
@@ -660,7 +702,7 @@ class TestOracleStaticImportBoundBackstop:
             if isinstance(node, ast.Import):
                 names = [alias.name for alias in node.names]
             elif isinstance(node, ast.ImportFrom):
-                names = [node.module]
+                names = [node.module] if node.module else []
             else:
                 continue
             for name in names:
