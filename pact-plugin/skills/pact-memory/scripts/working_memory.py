@@ -186,18 +186,20 @@ COMPRESSED_ENTRY_TOKEN_CEILING = 128
 
 # The line prefix that carries the pointer to the durable record.
 #
-# NAMED BECAUSE FOUR EXECUTABLE SITES MUST AGREE, AND A RENAME AT SOME OF
+# NAMED BECAUSE FIVE EXECUTABLE SITES MUST AGREE, AND A RENAME AT SOME OF
 # THEM IS A SILENT DEFECT. Two sites WRITE the line
-# (`_format_memory_entry` and `_format_retrieved_entry`). Two sites READ it
-# by prefix: `_compress_memory_entry` keeps it, and
-# `_apply_entry_token_ceiling` holds it out of the cut.
+# (`_format_memory_entry` and `_format_retrieved_entry`). Three sites READ
+# it by prefix: `_compress_memory_entry` keeps it,
+# `_apply_entry_token_ceiling` holds it out of the cut, and
+# `_memory_id_line` finds it for the one-entry-per-memory rule of the
+# Retrieved Context sync.
 #
 # THAT EXCLUSION FROM THE CUT IS THE PROPERTY THE CUT RULE RESTS ON. This
 # design accepts truncation rather than refusal ONLY WHILE the recovery
-# pointer survives the cut. So a rename at the two writers without the two
+# pointer survives the cut. So a rename at the two writers without the
 # readers, or the opposite, makes the id line droppable again: THE
 # RECOVERY ROUTE GOES, nothing raises and nothing reddens. One name for
-# the four sites makes that silent rename not possible.
+# the five sites makes that silent rename not possible.
 #
 # THE VALUE CARRIES NO COLON, because the readers test a PREFIX and the
 # writers append `: ` and the value.
@@ -2729,6 +2731,14 @@ def _format_retrieved_entry(
     return "\n".join(lines)
 
 
+def _memory_id_line(entry: str) -> Optional[str]:
+    """The entry's `**Memory ID**` line as written, or None when it has none."""
+    for line in entry.split("\n"):
+        if line.startswith(_MEMORY_ID_LABEL):
+            return line
+    return None
+
+
 def sync_retrieved_to_claude_md(
     memories: List[Dict[str, Any]],
     query: str,
@@ -2741,7 +2751,8 @@ def sync_retrieved_to_claude_md(
 
     Maintains a rolling window of the last 3 retrieved memories. New entries
     are added at the top of the section, and entries beyond MAX_RETRIEVED_MEMORIES
-    are removed.
+    are removed. A memory already in the window moves to the top rather than
+    appearing twice.
 
     Args:
         memories: List of memory dictionaries that were retrieved.
@@ -2892,6 +2903,18 @@ def sync_retrieved_to_claude_md(
             memory_id = memory_ids[0] if memory_ids else None
             new_entry = _format_retrieved_entry(top_memory, query, score, memory_id)
             new_entries.append(new_entry)
+
+            # One entry per memory. A repeat moves to the top with its new
+            # header instead of adding a second copy, which would evict a
+            # distinct memory from the window. Entries are compared by their
+            # Memory ID line, not their body: the same memory found by another
+            # query is still one memory. With no id there is nothing to
+            # compare, so nothing is dropped.
+            id_line = _memory_id_line(new_entry)
+            if id_line is not None:
+                existing_entries = [
+                    entry for entry in existing_entries if _memory_id_line(entry) != id_line
+                ]
 
             # Build new entries list: new entry first, then existing (up to max - 1)
             all_entries = new_entries + existing_entries

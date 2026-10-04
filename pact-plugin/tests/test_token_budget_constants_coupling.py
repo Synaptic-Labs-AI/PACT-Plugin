@@ -1388,14 +1388,16 @@ class TestFieldNameSurvivesTheCut:
 
 
 class TestMemoryIdLabelSites:
-    """The four executable sites must REFERENCE the label constant.
+    """The five executable sites must REFERENCE the label constant.
 
     THE COUPLING, AND WHY IT NEEDS A SOURCE-SHAPE ARM RATHER THAN A
-    BEHAVIOURAL ONE. Two sites WRITE the recovery-pointer line and two
-    sites READ it by prefix. The read sites are what hold that line out of
+    BEHAVIOURAL ONE. Two sites WRITE the recovery-pointer line and three
+    sites READ it by prefix. Two of the read sites hold that line out of
     the cut, and the design accepts truncation rather than refusal ONLY
-    WHILE that pointer survives. A rename applied to some of the four and
-    not the rest makes the id line droppable, and the recovery route goes.
+    WHILE that pointer survives. The third keys the Retrieved Context
+    sync's one-entry-per-memory rule on it. A rename applied to some of the
+    five and not the rest makes the id line droppable, and the recovery
+    route goes.
 
     MEASURED, AND IT IS WHY THIS ARM EXISTS IN THIS FORM:
     - A change to the label VALUE is CAUGHT TODAY. Driving the constant
@@ -1417,6 +1419,7 @@ class TestMemoryIdLabelSites:
     FUNCTIONS = (
         "_compress_memory_entry",       # READ, keeps the line
         "_apply_entry_token_ceiling",   # READ, holds the line out of the cut
+        "_memory_id_line",              # READ, keys one entry per memory
         "_format_memory_entry",         # WRITE
         "_format_retrieved_entry",      # WRITE
     )
@@ -1450,7 +1453,7 @@ class TestMemoryIdLabelSites:
     def test_the_site_references_the_constant_and_spells_no_literal(
         self, function_name
     ):
-        """Each of the four sites uses the NAME, and none carries the value.
+        """Each of the five sites uses the NAME, and none carries the value.
 
         COUNTING RULE: the function is located by `ast` in the module source
         by name. A REFERENCE is an `ast.Name` node that carries the constant
@@ -1500,7 +1503,7 @@ class TestMemoryIdLabelSites:
                     literals.append(ast.unparse(node))
 
         assert self.LABEL_NAME in names, (
-            f"{function_name} does not reference {self.LABEL_NAME}. The four "
+            f"{function_name} does not reference {self.LABEL_NAME}. The five "
             f"sites must move together, or a rename half-applies in silence."
         )
         assert not literals, (
