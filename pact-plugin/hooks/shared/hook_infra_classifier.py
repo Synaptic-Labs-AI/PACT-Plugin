@@ -202,7 +202,8 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # (agent_handoff_marker, session_journal) were already here.
     "session_init": frozenset({
         "backlog_store",
-        "claude_md_manager", "compaction_owner", "constants", "dispatch_helpers", "failure_cause",
+        "claude_md_manager", "claude_md_markers", "compaction_owner", "constants",
+        "dispatch_helpers", "failure_cause",
         "failure_log", "git_helpers", "handoff_schema", "marker_schema",
         "merge_guard_common", "pact_config", "pact_context", "paths",
         "peer_context", "pin_caps", "plugin_manifest", "project_scope",
@@ -211,6 +212,8 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "task_utils", "teammate_mode",
     }),  # stale_session reached via session_resume's Current Session reader,
          # which takes the Resume-line pattern from it.
+         # claude_md_markers reached via session_resume and stale_session,
+         # which locate the Current Session block through the parser.
          # backlog_store reached via `from shared import backlog_store`, an edge
          # the oracle resolves since it reads modules named in the import alias.
          # pact_config reached via the SessionStart runtime-config injection
@@ -237,10 +240,11 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
     }),  # compaction_owner reached via staging and settling the summary;
          # session_journal via compaction_owner's compaction_attributed event.
     "dispatch_gate": frozenset({
-        "background_launch", "background_work", "constants",
-        "dispatch_helpers", "intentional_wait", "pact_config", "pact_context",
-        "paths", "session_journal", "session_registry", "session_state",
-        "stale_session", "state_file", "task_utils",
+        "background_launch", "background_work", "claude_md_manager", "claude_md_markers",
+        "constants", "dispatch_helpers", "failure_cause", "git_helpers",
+        "intentional_wait", "pact_config", "pact_context", "paths", "pin_caps",
+        "project_scope", "session_journal", "session_registry", "session_state",
+        "stale_session", "staleness", "state_file", "task_utils",
     }),  # pact_config reached here via the *_MODE resolver edge
          # (dispatch_gate -> shared.pact_config.get_enum for
          # PACT_DISPATCH_INLINE_MISSION_MODE); pact_config is stdlib-only, so it
@@ -248,6 +252,19 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # stale_session reached here via the deny-message self-diagnosis
          # (dispatch_gate -> shared.stale_session.detect_stale_session_block);
          # its own transitive pact_context edge was already in this closure.
+         # claude_md_markers and claude_md_manager reached via the imports
+         # inside stale_session's Current Session reader (the parser and the
+         # two SESSION marker constants). Nothing on this hook's module-load
+         # path imports the parser (session_resume, which shared/__init__
+         # loads, imports it inside its functions too), and the reader runs
+         # inside detect_stale_session_block's catch-all, so a parser that
+         # fails to import drops the stale-block note from the deny message
+         # and never fails this hook's fail-closed module load. The
+         # derivation also follows claude_md_manager's own imports:
+         # failure_cause at module level, and staleness inside functions,
+         # which brings pin_caps and project_scope (staleness's module-level
+         # imports) and git_helpers (project_scope's). Reading the two
+         # constants runs none of those functions.
          # background_work reached via rule ⑥'s registered-teammate check
          # (dispatch_gate -> shared.background_work.frame_team_and_name, imported
          # inside a function); background_launch, intentional_wait and
@@ -283,13 +300,14 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # staleness -> pin_caps) and are now gone from this closure.
          # bootstrap_marker_writer's OWN closure (below) is unchanged.
     "bootstrap_marker_writer": frozenset({
-        "compaction_owner", "claude_md_manager", "constants", "failure_cause", "git_helpers", "handoff_schema",
-        "marker_schema",
+        "compaction_owner", "claude_md_manager", "claude_md_markers", "constants", "failure_cause",
+        "git_helpers", "handoff_schema", "marker_schema",
         "pact_context", "paths", "pin_caps", "project_scope", "session_journal",
         "session_registry", "session_resume", "session_state", "stale_session",
         "staleness", "state_file",
     }),  # stale_session reached via session_resume, whose Current Session
-         # reader takes the Resume-line pattern from it; state_file via
+         # reader takes the Resume-line pattern from it; claude_md_markers via
+         # session_resume, which locates that block through the parser; state_file via
          # project_scope, which writes the worktree identity record.
          # handoff_schema reached TRANSITIVELY, via session_resume's
          # resolve_handoff_field on the resume-brief decision summary — this

@@ -591,9 +591,9 @@ class TestStalenessDetection:
             target = project / "CLAUDE.md"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(
-            "# Project\n\n## Current Session\n"
+            "# Project\n\n<!-- SESSION_START -->\n## Current Session\n"
             f"- Resume: `claude --resume {recorded_sid}`\n"
-            "- Team: `pact-old`\n",
+            "- Team: `pact-old`\n<!-- SESSION_END -->\n",
             encoding="utf-8",
         )
         return project
@@ -679,7 +679,8 @@ class TestStalenessDetection:
         # Valid stale Resume line followed by one invalid UTF-8
         # continuation byte (0xE9 = latin-1 'é').
         target.write_bytes(
-            f"- Resume: `claude --resume {self._STALE}`\n".encode("utf-8")
+            f"<!-- SESSION_START -->\n- Resume: `claude --resume {self._STALE}`\n"
+            "<!-- SESSION_END -->\n".encode("utf-8")
             + b"caf\xe9\n"
         )
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
@@ -751,7 +752,8 @@ class TestStalenessComposition:
         target = project / ".claude" / "CLAUDE.md"
         target.parent.mkdir(parents=True)
         target.write_text(
-            f"- Resume: `claude --resume {self._STALE}`\n", encoding="utf-8"
+            f"<!-- SESSION_START -->\n- Resume: `claude --resume {self._STALE}`\n"
+            "<!-- SESSION_END -->\n", encoding="utf-8"
         )
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
         return project

@@ -134,9 +134,9 @@ def _write_project_claude_md(monkeypatch, root, recorded_session_id):
     proj = root / "project_md"
     proj.mkdir(parents=True, exist_ok=True)
     (proj / "CLAUDE.md").write_text(
-        "# Project\n\n## Current Session\n"
+        "# Project\n\n<!-- SESSION_START -->\n## Current Session\n"
         f"- Resume: `claude --resume {recorded_session_id}`\n"
-        f"- Team: `{_TEAM}`\n",
+        f"- Team: `{_TEAM}`\n<!-- SESSION_END -->\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(proj))

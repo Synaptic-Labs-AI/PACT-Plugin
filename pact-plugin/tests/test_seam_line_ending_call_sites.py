@@ -12,11 +12,11 @@ THE POPULATION IS THE CALL SITES, NOT THE TWO TWIN MODULES. COUNTING RULE,
 STATED BESIDE THE NUMBER: one entry for each CALL EXPRESSION of
 `_atomic_write_text` in a `.py` file below `hooks/` and `skills/`, tests
 excluded, imports and comment mentions not counted. An AST walk of 78 files
-returns TEN, in five modules:
+returns NINE, in five modules:
 
     hooks/staleness.py                            1   check_pinned_staleness
     hooks/pin_marker_writer.py                    1   _plan_and_write
-    hooks/shared/session_resume.py                3   update_session_info
+    hooks/shared/session_resume.py                2   update_session_info
     hooks/shared/claude_md_manager.py             3   strip_orphan_kernel_block
                                                       ensure_project_memory_md
                                                       migrate_to_managed_structure
@@ -129,7 +129,7 @@ class TestSeedFixtureIsCrlf:
 
 
 class TestWorkingMemoryTwinCallSites:
-    """skills/pact-memory/scripts/working_memory.py, 2 of the 10 sites."""
+    """skills/pact-memory/scripts/working_memory.py, 2 of the 9 sites."""
 
     def test_sync_to_claude_md_keeps_the_crlf_of_the_target(
         self, tmp_path, monkeypatch
@@ -177,7 +177,7 @@ class TestWorkingMemoryTwinCallSites:
 
 
 class TestCanonicalTwinCallSites:
-    """hooks/shared/claude_md_manager.py, 3 of the 10 sites."""
+    """hooks/shared/claude_md_manager.py, 3 of the 9 sites."""
 
     def test_migrate_to_managed_structure_keeps_the_crlf_of_the_target(
         self, tmp_path, monkeypatch
@@ -205,14 +205,14 @@ class TestCanonicalTwinCallSites:
 
 
 class TestStalenessCallSite:
-    """hooks/staleness.py, 1 of the 10 sites."""
+    """hooks/staleness.py, 1 of the 9 sites."""
 
     def test_check_pinned_staleness_keeps_the_crlf_of_the_target(self, tmp_path):
         """SITE staleness.py:1069, in `check_pinned_staleness`.
 
         This is the site the seam repair REMOVED a call-site restore from. It
         is the one site the design records as already armed end to end, and it
-        is repeated here so the ten sites read from one table.
+        is repeated here so the nine sites read from one table.
         """
         from staleness import check_pinned_staleness
 
@@ -248,8 +248,8 @@ class TestTheCoverageReportNamesItsMisses:
     # event this table SHOULD notice.
     #
     # THE VALUE IS A COUNT, because one function can hold more than one call.
-    # `update_session_info` holds three. A set of names would collapse those
-    # three into one and lose the cardinality this table exists to hold.
+    # `update_session_info` holds two. A set of names would collapse those
+    # two into one and lose the cardinality this table exists to hold.
     DRIVEN = {
         "skills/pact-memory/scripts/working_memory.py::sync_to_claude_md": 1,
         "skills/pact-memory/scripts/working_memory.py::sync_retrieved_to_claude_md": 1,
@@ -308,11 +308,13 @@ class TestTheCoverageReportNamesItsMisses:
             "invocation rather than from arguments, so an end-to-end drive "
             "needs the hook input harness. NOT ATTEMPTED here."
         ),
-        "session_resume.py:198 / :220 / :272 update_session_info": (
-            "THREE sites in ONE function, reached by three different document "
-            "shapes: a rewrite of an existing session block, an insertion "
-            "before a marker, and an append at the end. Driving all three "
-            "needs three seeds. NOT ATTEMPTED here."
+        "session_resume.py update_session_info (two sites)": (
+            "TWO sites in ONE function. The file-creation write is "
+            "CREATE-ONLY, so it has no CRLF to preserve, as for "
+            "ensure_project_memory_md. The other writes the planner's result "
+            "for three document shapes (a rewrite of the block, an insertion "
+            "before a marker or heading, an append at the end); its CRLF case "
+            "is driven end to end in test_claude_md_session_block.py, not here."
         ),
     }
 
@@ -326,13 +328,13 @@ class TestTheCoverageReportNamesItsMisses:
         for site, reason in self.UNDRIVEN.items():
             assert reason.strip(), f"{site} is recorded with no reason"
 
-    # Keys of UNDRIVEN carry their own count, because one of them holds three
+    # Keys of UNDRIVEN carry their own count, because one of them holds two
     # calls in one function.
     UNDRIVEN_COUNTS = {
         "hooks/shared/claude_md_manager.py::ensure_project_memory_md": 1,
         "hooks/shared/claude_md_manager.py::strip_orphan_kernel_block": 1,
         "hooks/pin_marker_writer.py::_plan_and_write": 1,
-        "hooks/shared/session_resume.py::update_session_info": 3,
+        "hooks/shared/session_resume.py::update_session_info": 2,
     }
 
     _SEARCH_ROOTS = ("hooks", "skills")

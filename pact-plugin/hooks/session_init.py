@@ -142,6 +142,7 @@ from shared.session_resume import (
     check_resume_state,
     has_unspent_refresh,
 )
+from shared.stale_session import session_block_rows
 
 
 # One-time startup notice about unattended-run stalls, emitted when the
@@ -492,20 +493,23 @@ def check_additional_directories() -> str | None:
         return None  # Fail-open: never block session start
 
 
-# The "Started" line update_session_info writes, in its exact timestamp shape.
+# The "Started" line update_session_info writes, in its exact timestamp shape,
+# and its value on a row already found.
 _SESSION_STARTED_RE = re.compile(
     r"^- Started: (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC)$", re.MULTILINE
 )
+_STARTED_VALUE_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$")
 
 
 def _extract_session_started(project_dir: str) -> str | None:
     """The "Started" value in the project CLAUDE.md's Current Session block.
 
-    None when there is no CLAUDE.md, it cannot be read, or it has no such line.
-    Only the exact shape update_session_info writes is returned, so no other
-    text from the file can reach the block it rewrites. Read without the
-    sidecar lock: every writer replaces the file whole, so the read sees the
-    old file or the new one.
+    None when there is no CLAUDE.md, it cannot be read, or the line is not in
+    a Current Session block the parser finds (a copy in a fenced example is
+    not read). Only the exact shape update_session_info writes is returned, so
+    no other text from the file can reach the block it rewrites. Read without
+    the sidecar lock: every writer replaces the file whole, so the read sees
+    the old file or the new one.
     """
     if not project_dir:
         return None
@@ -518,8 +522,9 @@ def _extract_session_started(project_dir: str) -> str | None:
         content = claude_md.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    match = _SESSION_STARTED_RE.search(content)
-    return match.group(1) if match else None
+    rows = session_block_rows(content, _SESSION_STARTED_RE)
+    match = _STARTED_VALUE_RE.search(rows[0]) if rows else None
+    return match.group(0) if match else None
 
 
 def _kept_started_at(session_id: str, project_dir: str) -> str | None:
@@ -712,7 +717,7 @@ def _unknown_frame_output(source: str) -> dict:
     settings_warn = check_settings_well_formed()
     if settings_warn:
         system_messages.append(settings_warn)
-    output = {
+    output: dict[str, object] = {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
             "additionalContext": _UNKNOWN_FRAME_CONTEXT,
