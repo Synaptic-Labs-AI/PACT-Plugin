@@ -231,14 +231,13 @@ class TestClassBGateBypassFlip:
 
     @pytest.mark.parametrize("frame, expect_bypass", [
         (lead_frame_qualified(), False),
-        (teammate_frame(), True),
+        (teammate_frame(), False),
         (plain_frame(), True),
     ], ids=["lead", "teammate", "plain"])
     def test_pin_caps_gate_bypass(self, frame, expect_bypass, monkeypatch, tmp_path):
-        """A non-lead frame returns None at the is_lead bypass BEFORE reading
-        tool_input / calling gate_target. Make the post-is_lead path
-        observable via a sentinel on gate_target: non-lead must return None
-        without hitting it; lead must hit it."""
+        """A frame the gate does not check (a plain session in no PACT team)
+        returns None BEFORE gate_target; the lead and a PACT specialist reach
+        it. Made observable via a sentinel on gate_target."""
         import pin_caps_gate as g
         import shared.claude_md_manager as manager
 
@@ -256,8 +255,8 @@ class TestClassBGateBypassFlip:
         result = g._check_tool_allowed(inp)
         assert result is None  # empty match → no deny regardless of role
         assert reached["hit"] is (not expect_bypass), (
-            "non-lead must bypass before gate_target; "
-            "lead must reach it"
+            "an ungated frame must stop before gate_target; "
+            "the lead and a PACT specialist must reach it"
         )
 
     # --- pin_staleness_gate._check_tool_allowed ---

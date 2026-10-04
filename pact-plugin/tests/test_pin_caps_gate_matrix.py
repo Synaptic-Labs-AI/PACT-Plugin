@@ -13,12 +13,12 @@ Matrix axes:
   baseline:  fresh (existing CLAUDE.md with N < cap pins)
              missing (no CLAUDE.md on disk)
              corrupt (CLAUDE.md exists but no Pinned Context section)
-  bypass:    team-lead (agent_name empty)
-             teammate (agent_name non-empty)
+  frame:     team-lead
+             teammate (gated like the lead; a count denial asks the
+             team-lead instead of naming the pin command)
 
 Full 2 * 6 * 3 * 2 = 72 logical cells. Not every combination produces a
-distinct outcome (e.g., teammate bypass short-circuits all violation
-axes). Parameterization collapses duplicates while preserving meaningful
+distinct outcome. Parameterization collapses duplicates while preserving meaningful
 discrimination. Total parameterized cases: ~100.
 
 Invariants enforced:
@@ -109,7 +109,7 @@ def _call_gate(input_data):
     # #878: the gate now keys lead-detection on is_lead (the harness-set
     # agent_type), not the old empty-resolve_agent_name heuristic. Default to a
     # LEAD frame (the unmarked case these DENY tests assume) unless the caller
-    # supplies an explicit agent_type (teammate/plain bypass tests).
+    # supplies an explicit agent_type (the teammate tests).
     from pin_caps_gate import _check_tool_allowed
     if "agent_type" not in input_data:
         input_data = {**input_data, "agent_type": "pact-orchestrator"}
@@ -159,65 +159,22 @@ class TestPinCapsGate_Matrix_Edit:
         ],
     )
     def test_edit_count_axis(self, gate_env, pre_count, post_count, expected_allow):
-        """Count-axis Edit: count-DECREASE and count-UNCHANGED cases only.
-
-        Post-#529 (PR #530), count-INCREASE via Edit IS allowed when the
-        new pin carries a `<!-- pinned: -->` date-comment marker — see
-        `TestPinCapsGate_Smoke::test_edit_legitimate_new_pin_with_date_comment_allows`
-        for the legitimate-add legitimate-allow path, and
-        `test_edit_embedded_pin_denies` (this file) for the smuggle-deny
-        counter. Count-increase coverage in this parametrized matrix is
-        intentionally scoped to DECREASE + UNCHANGED: fixture/payload
-        bookkeeping for date-marked increase-adds is heavier than the
-        incremental signal justifies, since the smoke file already pins
-        the legitimate-allow outcome.
-
-        The honest test: use Edit to REMOVE `### PinN` headings entirely
-        (no `### ` in new_string). Pre count 3 → remove 0 → post count
-        3 (allow). Pre count 3 → remove a pin-comment → post 2 (allow).
-        For count-INCREASE coverage see the smoke file; for over-cap
-        count denies see the Write matrix.
-
-        For Edit, we test count-DECREASE (allow paths) and count-UNCHANGED
-        (irrelevant-fragment Edit).
-        """
-        # Count-increase via Edit with a date-marker is a legitimate add
-        # (covered by TestPinCapsGate_Smoke); count-increase via Edit
-        # WITHOUT a date-marker is a smuggle and denies (covered by
-        # test_edit_embedded_pin_denies above). Skip increase cases in
-        # this parametrized matrix to keep the payload bookkeeping lean.
-        if post_count > pre_count:
-            pytest.skip(
-                "count-increase Edit coverage: legitimate (date-marked) "
-                "allow case → TestPinCapsGate_Smoke; smuggle (no date "
-                "marker) deny case → test_edit_embedded_pin_denies"
-            )
-
+        """Count-axis Edit, each case a real change. Pins are added as undated
+        `### ` lines before `## Working Memory`: rule U counts a heading as a pin
+        whatever its comment, so an undated add is ordinary growth, allowed up
+        to the cap and denied past it. A decrease removes the last pin blocks;
+        an unchanged count edits one pin's body."""
         env = gate_env(pin_count=pre_count)
-        # Use a small non-heading Edit: patch a body character. The
-        # post-state pin count is unchanged, so regardless of pre_count,
-        # net-worse on count axis is False.
-        # To simulate a DECREASE, the Edit replaces a whole `### PinN`
-        # block + body with a plain-text marker (no `### `).
-        if post_count < pre_count:
-            # Remove (pre_count - post_count) pin blocks.
-            # Each pin block: "<!-- pinned: 2026-04-20 -->\n### PinN\nxxxx"
-            baseline = env["claude_md"].read_text(encoding="utf-8")
-            for n in range(post_count, pre_count):
-                block = (
-                    f"<!-- pinned: 2026-04-20 -->\n### Pin{n}\nxxxx"
-                )
-                baseline = baseline.replace(block, "", 1)
-            env["claude_md"].write_text(baseline, encoding="utf-8")
-            # Now re-read; the Edit is a no-op trailing whitespace fix
-            # just to exercise the gate.
-            old_string = "## Working Memory"
-            new_string = "## Working Memory"  # idempotent Edit
+        baseline = env["claude_md"].read_text(encoding="utf-8")
+        if post_count > pre_count:
+            added = "".join(f"### Added{i}\nbody\n\n" for i in range(post_count - pre_count))
+            old_string, new_string = "## Working Memory", added + "## Working Memory"
+        elif post_count < pre_count:
+            blocks = [f"<!-- pinned: 2026-04-20 -->\n### Pin{n}\nxxxx" for n in range(post_count, pre_count)]
+            old_string, new_string = "\n\n" + "\n\n".join(blocks), ""
         else:
-            # Same count — no-op Edit just to exercise the gate with
-            # no `### ` in new_string.
-            old_string = "## Working Memory"
-            new_string = "## Working Memory"
+            old_string, new_string = "### Pin0\nxxxx", "### Pin0\nxxxy"
+        assert old_string in baseline, (pre_count, post_count)
 
         result = _call_gate({
             "tool_name": "Edit",
@@ -495,26 +452,28 @@ class TestPinCapsGate_Matrix_Edit:
         decision = gate_decision(before, "Write", {"content": after})
         assert decision.cause != "override" or "line terminator" in (decision.reason or ""), decision
 
-    @pytest.mark.parametrize("baseline", ["fresh", "missing", "corrupt"])
-    def test_edit_teammate_bypass(self, gate_env, baseline):
-        """Teammate session bypasses the gate regardless of baseline state.
-
-        #878: a non-lead agent_type bypasses (the gate keys on is_lead, not
-        resolve_agent_name)."""
+    @pytest.mark.parametrize("baseline, gated", [("fresh", True), ("missing", False), ("corrupt", False)])
+    def test_edit_teammate_is_gated(self, gate_env, baseline, gated):
+        """A teammate's Edit is gated like the lead's. Adding ten pins to the
+        3-pin file is refused with the ask-the-team-lead text; with no file, or
+        a file with no Working Memory heading, the Edit replaces nothing and is
+        allowed, as it is for the lead."""
         env = gate_env(pin_count=3, baseline=baseline)
+        added = "".join(f"<!-- pinned: 2026-04-21 -->\n### Added{i}\nbody\n\n" for i in range(10))
         result = _call_gate({
             "tool_name": "Edit",
             "agent_type": "pact-backend-coder",
             "tool_input": {
                 "file_path": str(env["claude_md"]),
-                "old_string": "anything",
-                "new_string": _build_claude_md(99),  # Wildly over-cap
+                "old_string": "## Working Memory",
+                "new_string": added + "## Working Memory",
                 "replace_all": False,
             },
         })
-        assert result is None, (
-            f"teammate should bypass regardless of baseline={baseline}, got {result!r}"
-        )
+        if gated:
+            assert result is not None and result.endswith("Ask the team-lead to free a pin slot; do not prune pins yourself."), result
+        else:
+            assert result is None, (baseline, result)
 
     def test_edit_missing_baseline_allows(self, gate_env):
         """Edit with no file before → nothing to replace → ALLOW."""
@@ -727,8 +686,9 @@ class TestPinCapsGate_Matrix_Write:
         assert "override" in result.lower()
 
     @pytest.mark.parametrize("baseline", ["fresh", "missing", "corrupt"])
-    def test_write_teammate_bypass(self, gate_env, baseline):
-        """#878: a non-lead agent_type bypasses (gate keys on is_lead)."""
+    def test_write_teammate_is_gated(self, gate_env, baseline):
+        """A teammate's 99-pin Write is refused whatever the file before, with
+        the ask-the-team-lead text in place of the pin command."""
         env = gate_env(pin_count=3, baseline=baseline)
         result = _call_gate({
             "tool_name": "Write",
@@ -738,7 +698,8 @@ class TestPinCapsGate_Matrix_Write:
                 "content": _build_claude_md(99),
             },
         })
-        assert result is None
+        assert result is not None and result.endswith("Ask the team-lead to free a pin slot; do not prune pins yourself."), result
+        assert "/PACT:" not in result
 
 
 # ---------------------------------------------------------------------------

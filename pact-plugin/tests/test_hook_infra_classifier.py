@@ -417,6 +417,10 @@ COVERED_L2 = {
     # that names one. The same non-mocked L2 test runs the real hook as a child
     # process after the transcript record lands.
     "bootstrap_gate": "test_compaction_owner_seam.py",
+    # pin_caps_gate joined SEAM_DEPENDENT_HOOKS when it began gating frames by
+    # PACT team membership. Its non-mocked L2 test runs the real hook against a
+    # real team config, session context and session registry.
+    "pin_caps_gate": "test_pin_caps_gate_frames.py",
 }
 
 # Documented forward-only BACKLOG: seam hooks whose non-mocked L2 test is a named

@@ -95,6 +95,11 @@ SEAM_DEPENDENT_HOOKS: frozenset[str] = frozenset({
     # compaction each was and journaling the verdict. Its L2 test runs the real
     # hooks over a temporary projects tree.
     "postcompact_archive",
+    # pin_caps_gate: which frames it checks now reads the session context and
+    # the session registry (a frame whose session belongs to a PACT team), and
+    # it resolves the project CLAUDE.md. It denies a refused change (fail-loud)
+    # and allows on every failure, so it is L2-only.
+    "pin_caps_gate",
 })
 
 # Hooks confirmed to FAIL SILENTLY on a broken seam (a consequential effect that
@@ -378,6 +383,14 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "pact_context", "paths", "session_journal", "session_registry",
         "session_state", "state_file", "task_utils"
     }),
+    "pin_caps_gate": frozenset({
+        "background_launch", "background_work", "claude_md_manager",
+        "claude_md_markers", "constants", "failure_cause", "failure_log",
+        "git_helpers", "intentional_wait", "pact_context", "paths", "pin_caps",
+        "pin_growth", "project_scope", "session_journal", "session_registry",
+        "session_state", "staleness", "state_file", "task_utils",
+    }),  # from the live derivation: the team read (background_work), the
+         # resolver (claude_md_manager, staleness) and the decision (pin_growth).
 }
 
 # Every helper module (top-level OR shared) transitively reachable from at least

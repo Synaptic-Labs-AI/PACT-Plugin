@@ -25,6 +25,11 @@ This module serves TWO frame sets, kept deliberately separate by provenance:
    (``agent_type`` / ``session_id`` / ``team_name`` / ``teammate_name``) are
    preserved verbatim because they are the point.
 
+3. ONE CONSTRUCTED frame (``constructed_pretooluse_teammate_inprocess``) - an
+   in-process teammate's PreToolUse Edit or Write, which no capture covers yet.
+   Its key set is the union of two captured key sets, and its ``_meta`` says it
+   is constructed and NOT captured. Replace it with a capture when one exists.
+
 These captured frames are the committed source of ground truth for the
 discriminator tests and the #917 marker-poisoning regression - the raw capture
 JSONL lives under the (gitignored) ``docs/`` tree, so promoting the frames here
@@ -587,3 +592,40 @@ def captured_posttooluse_teammate_inprocess_bash_background():
     exists to document.
     """
     return captured_frame("posttooluse_teammate_inprocess_bash_background")
+
+
+_CONSTRUCTED_PRETOOLUSE_TEAMMATE_INPROCESS = {
+    "_meta": {
+        "capture_method": (
+            "constructed: key set of the captured in-process teammate PostToolUse "
+            "(2026-09-11) and the captured in-process subagent PreToolUse "
+            "(CC 2.1.177); NOT captured"
+        ),
+    },
+    "agent_id": "afr-backend-0123456789abcdef",
+    "agent_type": "fr-backend",
+    "cwd": "<cwd>",
+    "effort": {"level": "<synthetic>"},
+    "hook_event_name": "PreToolUse",
+    "permission_mode": "<synthetic>",
+    "prompt_id": "<synthetic>",
+    # The in-process collapse: a teammate shares the lead's session.
+    "session_id": _CAPTURED_FRAMES["pretooluse_lead_inprocess"]["session_id"],
+    "tool_input": {"file_path": "<abs path>", "old_string": "<s>", "new_string": "<s>", "replace_all": False},
+    "tool_name": "Edit",
+    "tool_use_id": "toolu_<synthetic>",
+    "transcript_path": "<transcript_path>",
+}
+
+
+def constructed_pretooluse_teammate_inprocess(tool_name="Edit"):
+    """An in-process teammate's PreToolUse frame, CONSTRUCTED, not captured.
+
+    `agent_type` is the teammate's own name (no `pact-` prefix), `agent_id` is
+    hex with no `@`, and `session_id` is the lead's. `tool_name="Write"` gives
+    the Write variant, with `tool_input` holding `file_path` and `content`.
+    """
+    frame = copy.deepcopy(_CONSTRUCTED_PRETOOLUSE_TEAMMATE_INPROCESS)
+    if tool_name == "Write":
+        frame.update(tool_name="Write", tool_input={"file_path": "<abs path>", "content": "<content>"})
+    return frame

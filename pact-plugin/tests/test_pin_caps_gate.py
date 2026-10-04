@@ -13,7 +13,7 @@ CODE/TEST phase split.
 Minimum coverage shipped in the code-phase commit:
   - happy-path ALLOW (under-cap Edit)
   - happy-path DENY (count cap — pre-clean, post-violation)
-  - teammate bypass (agent_name non-empty → always allow)
+  - a teammate's change is gated, and its count denial asks the team-lead
   - fail-open on _check_tool_allowed exception (SACROSANCT)
   - Write-baseline fail-CLOSED when baseline read fails AND Write is
     over-cap
@@ -276,13 +276,10 @@ class TestPinCapsGate_Smoke:
         })
         assert result is None
 
-    def test_teammate_bypass(self, caps_gate_env):
-        """Teammate sessions (non-lead agent_type) bypass the gate.
-
-        #878: lead-detection migrated to is_lead, which reads agent_type
-        directly (no longer resolve_agent_name). A specialist agent_type is not
-        a lead spelling, so the gate bypasses.
-        """
+    def test_a_teammate_write_is_gated_and_asks_the_team_lead(self, caps_gate_env):
+        """A PACT specialist frame in a PACT team's session is gated like the
+        lead, and its count denial asks the team-lead to free a slot instead of
+        naming the pin command."""
         env = caps_gate_env(pin_count=3)
         entries = [
             make_pin_entry(title=f"Pin{i}", body_chars=4) for i in range(13)
@@ -296,7 +293,10 @@ class TestPinCapsGate_Smoke:
                 "content": new_content,
             },
         })
-        assert result is None
+        assert result is not None
+        assert result.startswith("Pin count cap reached (13/12).")
+        assert result.endswith("Ask the team-lead to free a pin slot; do not prune pins yourself.")
+        assert "/PACT:" not in result
 
     def test_edit_legitimate_new_pin_with_date_comment_allows(
         self, caps_gate_env

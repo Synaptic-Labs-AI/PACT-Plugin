@@ -15,7 +15,11 @@ the verdict.
 
 Gate fires when ALL hold:
   1. Tool is Edit or Write (enforced by hooks.json matcher)
-  2. The frame is the lead's (parity with pin_staleness_gate)
+  2. `_frame_gate` names the frame: the lead, a PACT specialist type, or any
+     frame whose session belongs to a PACT team (in-process teammates and
+     Agent-tool subagents share the lead's session). A plain session and a
+     non-PACT --agent session are not gated. A team member's count denial asks
+     it to have the team-lead free a slot instead of naming the pin command.
   3. `claude_md_manager.gate_target` returns a target: the project CLAUDE.md
      the resolver returns once the change exists, so a Write that creates it
      is gated too. The text before is the file the resolver returns now, or
@@ -100,6 +104,10 @@ _OVERRIDE_ROW = re.compile(
 )
 _OVERRIDE_FIELD_LENGTH = len("pin-size-override:")
 _COMMENT_CLOSE_LENGTH = len("-->")
+
+# A team member cannot run the pin commands, so its count denial asks the
+# team-lead instead. Size and override denials name no command and keep their text.
+_MEMBER_COUNT_INSTRUCTION = "Ask the team-lead to free a pin slot; do not prune pins yourself."
 
 _FAIL_BASELINE_READ = "pin_caps_gate_baseline_read"
 _FAIL_DECISION = "pin_caps_gate_decision"
@@ -247,32 +255,68 @@ def _unreadable_decision(claude_md_path: Path, tool_name: str, tool_input: dict)
     )
 
 
+def _frame_gate(input_data: dict) -> Optional[str]:
+    """Which kind of frame the gate checks: "lead", "member" (a frame whose
+    session belongs to a PACT team), "specialist" (a PACT specialist type with
+    no team, such as a solo --agent session), or None for a frame it does not
+    check. Never raises: a team read that fails means "not in a team"."""
+    if pact_context.is_lead(input_data):
+        return "lead"
+    agent_type = input_data.get("agent_type")
+    specialist = isinstance(agent_type, str) and pact_context.strip_pact_namespace(agent_type).startswith("pact-")
+    try:
+        from shared.background_work import frame_team_and_name
+
+        team = frame_team_and_name(input_data)[0]
+    except Exception:  # noqa: BLE001 — a failed membership read gates nothing
+        team = ""
+    if team:
+        return "member"
+    return "specialist" if specialist else None
+
+
+def _member_reason(decision):
+    """A team member's denial: a count denial keeps its violation line and asks
+    the team-lead instead of naming the pin command; others are unchanged."""
+    if decision.verdict != "DENY" or decision.cause != "count" or not decision.reason:
+        return decision
+    violation = decision.reason.split(". ", 1)[0].rstrip(".")
+    return decision._replace(reason=f"{violation}. {_MEMBER_COUNT_INSTRUCTION}")
+
+
 def _gate(input_data: dict):
     """The decision for a frame the gate checks, or None for one it does not."""
     tool_name = input_data.get("tool_name", "")
     if tool_name not in _GATED_TOOLS:
         return None
 
-    pact_context.init(input_data)
-
-    # Lead-role gate (#878) — mirror pin_staleness_gate. is_lead keys on the
-    # harness-set agent_type and never raises.
-    if not pact_context.is_lead(input_data):
-        return None
-
     tool_input = input_data.get("tool_input", {})
     if not isinstance(tool_input, dict):
         return None
 
+    # The basename test comes first, so no frame or resolver work runs for any
+    # other file.
     file_path = tool_input.get("file_path", "")
     if not isinstance(file_path, str) or Path(file_path).name.casefold() != "claude.md":
         return None
+
+    pact_context.init(input_data)
+    frame = _frame_gate(input_data)
+    if frame is None:
+        return None
+
     from shared.claude_md_manager import gate_target
 
     target = gate_target(file_path)
     if target is None:
         return None
+    decision = _decide(target, tool_name, tool_input)
+    return _member_reason(decision) if frame == "member" else decision
 
+
+def _decide(target, tool_name: str, tool_input: dict):
+    """The decision on a change to `target`, compared with the file that
+    resolves before it, or with empty text when none does."""
     before = ""
     if target.before is not None:
         before, read_error = _read_baseline(target.before)
