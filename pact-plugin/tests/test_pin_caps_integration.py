@@ -345,8 +345,9 @@ class TestPinMemoryCommand_Grammar:
         """Hook deny-reasons are enumerated so curators see the exact
         actionable next step without leaving the command text."""
         assert "Pin count cap reached" in pin_memory_content
+        assert "Ask the team-lead to free a pin slot" in pin_memory_content
         assert "New pin body is" in pin_memory_content
-        assert "Embedded pin structure" in pin_memory_content
+        assert "is its own pin" in pin_memory_content
         assert "Override rationale malformed" in pin_memory_content
 
     def test_documents_rationale_120_char_limit(self, pin_memory_content):
@@ -449,12 +450,11 @@ class TestPruneMemoryCommand_Grammar:
         assert "Cancel" in prune_memory_content
         assert "unchanged" in prune_memory_content
 
-    def test_documents_net_worse_allows_evict(self, prune_memory_content):
-        """The hook ALLOWS the prune edit because count strictly
-        decreases (net-worse predicate). This must be called out so
-        curators understand why the same hook that denies adds allows
-        evicts."""
-        assert "net-worse" in prune_memory_content
+    def test_documents_why_the_hook_allows_a_prune(self, prune_memory_content):
+        """The hook ALLOWS the prune edit because the change adds no pin.
+        This must be called out so curators understand why the same hook
+        that denies adds allows evicts."""
+        assert "adds no pin" in prune_memory_content
         assert "pin_caps_gate" in prune_memory_content
 
     def test_documents_stale_preference(self, prune_memory_content):

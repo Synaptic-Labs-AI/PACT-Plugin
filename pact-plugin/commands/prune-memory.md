@@ -14,13 +14,16 @@ retry the add.
 Demotion is not deletion. A pin leaves `## Pinned Context` only once its
 content is provably somewhere else — see [Step 3](#step-3--archive-the-selected-pin).
 
-The `pin_caps_gate` PreToolUse hook ALLOWS the resulting Edit because
-the pin count strictly decreases (net-worse predicate: pre has ≥N
-pins, post has N-1 — not worse, so allow). **The hook cannot enforce the
-archive**: it sees a count decrease and allows it, whether or not Step 3
-ran. Step 3 is enforced by this file and by nothing else, which is why
-every exit below emits a journal event — an invocation that evicts a pin
-while emitting nothing is the one state that should never occur.
+Only the team-lead runs this command, with the user. A teammate or subagent
+whose pin was denied by the count cap asks the team-lead for a free slot
+instead.
+
+The `pin_caps_gate` PreToolUse hook ALLOWS the resulting `Edit` because
+the change adds no pin. **The hook cannot enforce the archive**: it sees a
+change that adds no pin and allows it, whether or not Step 3 ran. Step 3 is
+enforced by this file and by nothing else, which is why every exit below
+emits a journal event — an invocation that evicts a pin while emitting
+nothing is the one state that should never occur.
 
 ## Process
 
@@ -316,8 +319,7 @@ something unusable. **A field is present exactly when the fact it names was
 established**, which is why a missing handle is a refusal and never an
 invitation to reconstruct one.
 
-The `pin_caps_gate` hook ALLOWS the edit because `len(post_pins) <
-len(pre_pins)` — strictly better, not worse.
+The `pin_caps_gate` hook ALLOWS the edit because it adds no pin.
 
 ### Step 5 — Report
 

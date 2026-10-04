@@ -10,11 +10,17 @@ argument-hint: "[optional: e.g., critical gotcha, key architectural decision]"
 
 ## Caps (enforced mechanically)
 
-Cap violations are denied by `hooks/pin_caps_gate.py` when the Edit/`Write` tool call lands. You do NOT need to invoke a CLI check before adding — the hook is authoritative.
+Cap violations are denied by `hooks/pin_caps_gate.py` when the `Edit`/`Write` tool call lands. You do NOT need to invoke a CLI check before adding — the hook is authoritative.
 
-- **Count**: 12 pins maximum.
-- **Size**: 1500 characters per pin body (excludes `<!-- pinned: ... -->` and `<!-- STALE: ... -->` auto-markers).
+- **Count**: 12 pins maximum. Every `### ` line outside a fenced code block, including one in another pin's body, is a pin.
+- **Size**: 1500 characters per pin body (excludes `<!-- pinned: ... -->` and `<!-- STALE: ... -->` auto-markers). A fenced code example inside the body counts toward the size; trailing spaces and tabs do not.
 - **Override**: verbatim load-bearing content MAY carry a `pin-size-override` rationale (≤ 120 chars, single line) — see [Size Override](#size-override). The hook validates the rationale in-band.
+
+At the cap, renaming, moving, reordering or rewriting pins is allowed. The count cap refuses only a change that adds a pin; the size cap still applies to every pin body.
+
+Make every pin change with `Edit`. A change made through `Bash` (`sed`, a script) is not checked by the hook; when it grows the file past a pin cap, PACT reports it afterwards.
+
+If the hook allows an edit with a note that it could not locate the Pinned section, could not read or check the file, stopped the check early, or is not checking pin caps, the cap was NOT enforced for that change. Tell the curator, and repair the file. The usual cause is an unclosed code fence above or inside the Pinned Context section.
 
 ## When to Pin
 
@@ -36,7 +42,7 @@ Cap violations are denied by `hooks/pin_caps_gate.py` when the Edit/`Write` tool
 ### Adding a pin
 
 1. Read existing CLAUDE.md.
-2. Locate or create a `## Pinned Context` section (place it before `## Working Memory`).
+2. Locate or create a `## Pinned Context` section (place it before `## Working Memory`). If the file has a `<!-- PACT_MEMORY_START -->` … `<!-- PACT_MEMORY_END -->` block, the section MUST be inside it: a Pinned Context section outside that block is not capped.
 3. **If the file carries a `<!-- PACT_MEMORY_PINNED_END -->` line, the new entry MUST go ABOVE that line.** The pinned region ends there. A pin placed below it sits outside the region, so the count and size caps do not measure it and the hook cannot deny it — the pin is silently uncapped. Insert immediately before that line, after the last existing entry. If the file has no such line, append at the end of the section as usual.
 4. Add the new entry with a date tag. **Make this write with the `Edit` tool. Do NOT use the `Write` tool.** Step 1 gave you the full file, so a `Write` call looks like the short route to the new content. After a `Write`, a file that had CRLF line endings has LF line endings. The curator then sees a change to a file they did not edit. An `Edit` keeps the line endings of the file. Use the example below:
    ```markdown
@@ -58,8 +64,10 @@ Cap violations are denied by `hooks/pin_caps_gate.py` when the Edit/`Write` tool
 If the pin_caps_gate hook denies the Edit/Write, the deny reason tells you which cap fired. You MUST NOT bypass.
 
 - **Pin count cap reached (12/12)**: Run `/PACT:prune-memory` to demote an existing pin to long-term memory, then retry the add. Demotion archives the pin to pact-memory before removing it, so the content is preserved rather than lost.
+  - A teammate, or a subagent in a PACT team session, gets "Ask the team-lead to free a pin slot; do not prune pins yourself." instead. Do NOT run `/PACT:prune-memory`. Ask the team-lead for a free slot, naming the pin you need to add: with `SendMessage`, or in your final report if you are a subagent.
+  - As the team-lead, answer that request by running `/PACT:prune-memory` with the user to free a slot, then tell the requester to retry.
 - **New pin body is N chars (cap: 1500)**: Compress the body, or add a `pin-size-override` rationale if the content is verbatim load-bearing.
-- **Embedded pin structure in body**: Your new pin body contains a `### ` heading, which would be counted as an additional pin on reload. Use `#### ` or bold for in-body structure instead.
+- **A `### ` line in a pin body**: That line is its own pin and counts toward the count cap. For structure inside a body, use `#### `, bold, or a fenced code example. A fenced line is not a pin, but it counts toward the body size.
 - **Override rationale malformed**: The rationale is empty, exceeds 120 chars, or contains a line terminator (`\n`, `\r`, or a Unicode line separator). Fix the rationale and retry.
 
 ## Size Override
