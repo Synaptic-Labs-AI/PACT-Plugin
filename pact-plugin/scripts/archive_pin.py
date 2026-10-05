@@ -338,13 +338,22 @@ _WRITE_ATTEMPTED_STATUSES = frozenset({"wrote", "failed"})
 
 
 def _load_hook_module(name: str):
-    """Load a module from hooks/ by explicit file path.
+    """Load a module from hooks/ by explicit file path, or return it when
+    that file is already loaded.
 
     Registers the loaded module in sys.modules under `name` before executing
     so modules loaded via this same helper resolve `from {name} import ...`
     against the already-loaded object (staleness does `from pin_caps import`).
     """
     module_path = _HOOKS_DIR / f"{name}.py"
+    # Reuse the module when this same file is already loaded (a test process
+    # imports pin_caps before a script): a second copy would leave the earlier
+    # importers bound to the first one, so a patch to one copy misses the
+    # other. A different file under the same name is not reused.
+    loaded = sys.modules.get(name)
+    loaded_file = getattr(loaded, "__file__", None)
+    if loaded is not None and loaded_file and Path(loaded_file).resolve() == module_path.resolve():
+        return loaded
     spec = importlib.util.spec_from_file_location(name, str(module_path))
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load {name} from {module_path}")

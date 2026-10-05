@@ -156,14 +156,9 @@ class TestCounterRevert_SizePredicate:
         self, gate_env, monkeypatch
     ):
         """Revert the size cap (no body is ever over it) → no refusal."""
-        from shared import pin_growth
+        import pin_caps
 
-        # Patch the pin_caps the decision calls, not `import pin_caps`: a
-        # script loaded by file path (check_pin_caps) puts a fresh pin_caps in
-        # sys.modules, while shared.pin_growth keeps the one it bound at import.
-        monkeypatch.setitem(
-            pin_growth.compute_deny_reason.__globals__, "PIN_SIZE_CAP", 10 ** 9
-        )
+        monkeypatch.setattr(pin_caps, "PIN_SIZE_CAP", 10 ** 9)
         env = gate_env(pin_count=0)
         env["claude_md"].write_text(
             _build_claude_md(1, pin_body_chars=100), encoding="utf-8"
