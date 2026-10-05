@@ -119,7 +119,7 @@ def test_the_started_reader_reads_only_a_found_block(case, tmp_path):
     from session_init import _extract_session_started
 
     text = _text(case)
-    (tmp_path / "CLAUDE.md").write_text(text, encoding="utf-8", newline="")
+    (tmp_path / "CLAUDE.md").write_bytes(text.encode("utf-8"))
     got = _extract_session_started(str(tmp_path))
     if _state(case, "SESSION") != "FOUND":
         assert got is None
@@ -128,9 +128,8 @@ def test_the_started_reader_reads_only_a_found_block(case, tmp_path):
     first, last = doc.find_block(SESSION_START_MARKER, SESSION_END_MARKER).spans[0]
     alone = tmp_path / "alone"
     alone.mkdir()
-    (alone / "CLAUDE.md").write_text(
-        "".join(text[line.start:line.end] for line in doc.lines[first:last + 1]),
-        encoding="utf-8", newline="")
+    (alone / "CLAUDE.md").write_bytes(
+        "".join(text[line.start:line.end] for line in doc.lines[first:last + 1]).encode("utf-8"))
     assert got == _extract_session_started(str(alone))
 
 
@@ -251,7 +250,7 @@ def test_the_started_reader_reads_most_found_blocks(tmp_path):
         if _state(case, "SESSION") == "FOUND":
             project = tmp_path / case
             project.mkdir()
-            (project / "CLAUDE.md").write_text(_text(case), encoding="utf-8", newline="")
+            (project / "CLAUDE.md").write_bytes(_text(case).encode("utf-8"))
             read += _extract_session_started(str(project)) is not None
     assert read >= 30
 
