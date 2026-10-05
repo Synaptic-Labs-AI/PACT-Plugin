@@ -11,8 +11,9 @@ and the last keeps its trailing spaces; each read-back condition refuses a
 rebuild that changed the user's text (driven through test doubles that undo
 one part of the fix); an input whose marker already reads stray is refused
 when a rebuild makes a further copy live, including the real rebuild moving an
-open HTML block above a fenced copy; and an input with an uncertain region is
-refused at the managed lookup, before any rebuild.
+open HTML block above a fenced copy; a reorder that changes how a carried line
+reads is refused; and an input with an uncertain region is refused at the
+managed lookup, before any rebuild.
 """
 
 import pytest
@@ -253,3 +254,69 @@ def test_a_rebuild_that_moves_an_open_html_block_above_a_fenced_marker_is_refuse
     new_content, refusal = _plan_migration(content)
     assert new_content is None
     assert refusal == "the migrated file would change how '<!-- PACT_START:' reads"
+
+
+# A Pinned section that ends inside a CDATA block that is never closed takes the
+# text the rebuild moves below it into that block.
+UNCLOSED_CDATA_PIN = "## Pinned Context\n### A pin\n<![CDATA[\nraw\n"
+
+
+def test_a_reorder_that_swallows_the_users_fenced_code_is_refused():
+    content = f"Notes\n```sh\necho hi\n```\n{UNCLOSED_CDATA_PIN}"
+    assert _plan_migration(content) == (None, "the migrated file would change how line 20 reads")
+
+
+def test_the_same_file_with_the_block_closed_migrates_with_its_fence():
+    new_content = _plan(f"Notes\n```sh\necho hi\n```\n{UNCLOSED_CDATA_PIN}]]>\n")
+    assert new_content.endswith(f"{MANAGED_END_MARKER}\n\nNotes\n```sh\necho hi\n```\n")
+
+
+def test_a_reorder_that_swallows_a_memory_sections_fenced_code_is_refused():
+    content = f"## Working Memory\n- entry\n```sh\necho hi\n```\n{UNCLOSED_CDATA_PIN}"
+    assert _plan_migration(content) == (None, "the migrated file would change how line 16 reads")
+
+
+def test_a_reorder_that_closes_an_html_block_over_carried_rows_is_refused():
+    # Every row stays prose: only whether an HTML block hides it changes. The
+    # user's `]]>` closes the block the moved Pinned section opens.
+    content = f"Notes\nmore\n]]>\n{UNCLOSED_CDATA_PIN}"
+    assert _plan_migration(content) == (None, "the migrated file would change how line 10 reads")
+
+
+def test_a_session_block_that_opens_an_html_block_migrates():
+    # The session block's `<?php` is never closed, so in the original it covers
+    # the rest of the file and the `~~~` below it is prose. Cut out, it would
+    # leave that `~~~` an unclosed fence; moved to the top, it still covers it.
+    content = (
+        "## Working Memory\n- entry\n"
+        "<!-- SESSION_START -->\n## Current Session\n<?php\n<!-- SESSION_END -->\n"
+        "Notes\n~~~\n"
+    )
+    assert _plan(content).count("\nNotes\n~~~\n") == 1
+
+
+# Two documents from the fence oracle's generator (seed 1, documents 1224 and
+# 1353), as measured. In the first the session block opens an HTML block that
+# covers the rest of the file, so cutting it out would make the rows below it
+# read UNKNOWN; against the original file every carried row reads the same and
+# it migrates. In the second a fenced row turns to prose; the rows the cut
+# leaves UNKNOWN must not hide that.
+SESSION_BLOCK_COVERS_THE_REST = (
+    "see the ## Working Memory section\r\n<!-- SESSION_START -->\n<?php\r<!-- SESSION_END -->\n"
+    "    `````a`b\n---\r\n<!-- PACT_START: x\n<!-- PACT_START: x\n    four spaces\n<!-- PACT_END -->\n"
+    "## Working Memory\r\nentry\n## Working Memory\ntext <!-- mid -->\r\n## Working Memory\n- e\n"
+)
+FENCE_TURNS_TO_PROSE_BELOW_A_CUT = (
+    "\ufeff~~~ md\r\n## Pinned Context\n~~~\r<!-- PACT_START: v3 -->\ruse `<!-- SESSION_START -->` here\r"
+    "<!-- PACT_END -->\n\n<!-- SESSION_START -->\r<script type=x>\n<!-- SESSION_END -->\n```\u2028\r<prefix\r\n"
+    "<?php\n## Pinned Context\n?>\n## Pinned Context  "
+)
+
+
+def test_a_generated_file_whose_session_block_covers_the_rest_migrates():
+    assert _plan_migration(SESSION_BLOCK_COVERS_THE_REST)[1] is None
+
+
+def test_a_generated_file_whose_fence_turns_to_prose_below_a_cut_is_refused():
+    assert _plan_migration(FENCE_TURNS_TO_PROSE_BELOW_A_CUT) == (
+        None, "the migrated file would change how line 20 reads")

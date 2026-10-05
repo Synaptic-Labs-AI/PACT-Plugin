@@ -38,7 +38,7 @@ from .paths import get_claude_config_dir
 # The finder is imported inside the functions that use it: shared/__init__.py
 # imports this module, so a module-level import would load it in every hook.
 if TYPE_CHECKING:
-    from .claude_md_markers import Document
+    from .claude_md_markers import Document, Line
 
 # Project-level CLAUDE.md is preferred at .claude/CLAUDE.md (the new default)
 # but Claude Code also accepts ./CLAUDE.md for backwards compatibility.
@@ -876,6 +876,13 @@ def _strip_legacy_lines(content: str) -> str:
         removed. Content inside fenced code blocks (backtick or tilde) is
         preserved byte for byte. Pure function.
     """
+    return _drop_spans(content, _legacy_line_spans(content))
+
+
+def _legacy_line_spans(content: str) -> list[tuple[int, int]]:
+    """The (start, end) spans of the lines `_strip_legacy_lines` removes, each
+    with its line break, so the migration can tell where the text it keeps
+    stood in the original."""
     # PR #404: length-tracked fence state per CommonMark §4.5 — closing
     # fence must use the same character and run length >= the opening. A
     # 4-backtick outer fence containing a 3-backtick inner example must
@@ -886,16 +893,14 @@ def _strip_legacy_lines(content: str) -> str:
     pos = 0
     fence_open_len = 0  # 0 = not inside a fence
     fence_char = ""     # "`" or "~" when inside a fence
-    out_parts: list[str] = []
+    spans: list[tuple[int, int]] = []
     while pos < len(content):
         nl = content.find("\n", pos)
         if nl == -1:
             line = content[pos:]
-            raw_segment = line
             line_end = len(content)
         else:
             line = content[pos:nl]
-            raw_segment = content[pos:nl + 1]
             line_end = nl + 1
 
         stripped = line.lstrip()
@@ -906,17 +911,13 @@ def _strip_legacy_lines(content: str) -> str:
                 run_len = len(stripped) - len(stripped.lstrip("`"))
                 fence_open_len = run_len
                 fence_char = "`"
-                out_parts.append(raw_segment)
             elif stripped.startswith("~~~"):
                 run_len = len(stripped) - len(stripped.lstrip("~"))
                 fence_open_len = run_len
                 fence_char = "~"
-                out_parts.append(raw_segment)
             elif _STALE_ORCHESTRATOR_LINE_RE.match(line):
                 # Non-fenced legacy line: drop it entirely
-                pass
-            else:
-                out_parts.append(raw_segment)
+                spans.append((pos, line_end))
         else:
             # Inside a fence — check for fence close (same char, run >= open)
             if fence_char == "`" and stripped.startswith("```"):
@@ -934,12 +935,10 @@ def _strip_legacy_lines(content: str) -> str:
                 if run_len >= fence_open_len and not after_run:
                     fence_open_len = 0
                     fence_char = ""
-            # Keep fence body verbatim regardless
-            out_parts.append(raw_segment)
 
         pos = line_end
 
-    return "".join(out_parts)
+    return spans
 
 
 
@@ -1475,6 +1474,17 @@ def _drop_spans(text: str, spans: list[tuple[int, int]]) -> str:
     return "".join(kept)
 
 
+def _offset_before_drop(offset: int, spans: list[tuple[int, int]]) -> int:
+    """Where `offset` in `_drop_spans(text, spans)` stands in `text`."""
+    dropped = pos = 0
+    for start, end in sorted(spans):
+        if start > pos and offset < start - dropped:
+            break
+        dropped += max(pos, end) - max(pos, start)
+        pos = max(pos, end)
+    return offset + dropped
+
+
 def _legacy_header_end(doc: Document) -> int:
     """Offset where the text starts after the legacy `# Project Memory` title,
     the blank rows below it, and the template's description row with the
@@ -1604,10 +1614,12 @@ def _plan_migration(content: str) -> tuple[str | None, str | None]:
     remaining = _drop_spans(content, cuts)
 
     # Remove the old top-level heading and description line
-    remaining = remaining[_legacy_header_end(parse(remaining)):]
+    header_end = _legacy_header_end(parse(remaining))
+    remaining = remaining[header_end:]
 
     # Strip legacy template lines (e.g., stale orchestrator-loader line)
-    remaining = _strip_legacy_lines(remaining)
+    legacy = _legacy_line_spans(remaining)
+    remaining = _drop_spans(remaining, legacy)
 
     # Classify the rows. A memory heading opens a memory section; any other
     # `# `/`## ` heading opens a user section. Headings are found only on prose
@@ -1633,9 +1645,9 @@ def _plan_migration(content: str) -> tuple[str | None, str | None]:
             (row, heading) for row in rows.find_lines(pattern) if not rows.lines[row].in_html)
     boundaries = {
         row for row in rows.find_lines(_SECTION_BOUNDARY_RE) if not rows.lines[row].in_html}
-    user_rows: list[str] = []
-    bodies: dict[str, list[list[str]]] = {heading: [] for heading in _MEMORY_HEADING_RES}
-    current: list[str] = user_rows
+    user_rows: list[Line] = []
+    bodies: dict[str, list[list[Line]]] = {heading: [] for heading in _MEMORY_HEADING_RES}
+    current: list[Line] = user_rows
     for line in rows.lines:
         if line.row in heading_at:
             current = []
@@ -1643,17 +1655,31 @@ def _plan_migration(content: str) -> tuple[str | None, str | None]:
             continue
         if line.row in boundaries:
             current = user_rows
-        current.append(remaining[line.start:line.end])
+        current.append(line)
 
-    # Each heading's body: its sections joined, each without trailing blanks.
-    memory_sections: dict[str, str] = {}
+    def text_of(lines: list[Line]) -> str:
+        return "".join(remaining[line.start:line.end] for line in lines)
+
+    # Each heading's sections, each without trailing blanks; empty ones dropped.
+    memory_sections: dict[str, list[tuple[list[Line], str]]] = {heading: [] for heading in bodies}
     for heading, sections in bodies.items():
-        parts_of = [body for body in ("".join(section).rstrip() for section in sections) if body]
-        memory_sections[heading] = "\n".join(parts_of)
-    user_text = _trim_blank_edges("".join(user_rows))
+        for lines in sections:
+            text = text_of(lines).rstrip()
+            if text:
+                memory_sections[heading].append((lines, text))
+    user_all = text_of(user_rows)
+    user_text = _trim_blank_edges(user_all)
 
     # Build the new structure — all content goes inside the managed block
     parts: list[str] = []
+    # Each carried piece of the old file: its rows, where its text starts in
+    # those rows' text, where it lands in the rebuilt file, and its length.
+    carried: list[tuple[list[Line], int, int, int]] = []
+
+    def carry(lines: list[Line], start: int, text: str) -> None:
+        carried.append((lines, start, len(bom) + sum(map(len, parts)), len(text)))
+        parts.append(text)
+
     parts.extend([MANAGED_START_MARKER, "\n", f"{MANAGED_TITLE}\n"])
 
     if session_block:
@@ -1668,10 +1694,10 @@ def _plan_migration(content: str) -> tuple[str | None, str | None]:
         "## Retrieved Context": RETRIEVED_CONTEXT_COMMENT,
         "## Working Memory": WORKING_MEMORY_COMMENT,
     }
-    heading_chunks: list[str] = []
-    for heading in ("## Retrieved Context", "## Pinned Context", "## Working Memory"):
-        body = memory_sections[heading]
+    for index, heading in enumerate(("## Retrieved Context", "## Pinned Context", "## Working Memory")):
+        pieces = memory_sections[heading]
         comment = heading_comments.get(heading)
+        parts.append(f"\n{heading}\n" if index else f"{heading}\n")
         # ADD THE COMMENT ONLY WHEN THE SECTION ARRIVES WITHOUT ONE, and test
         # for it on EVERY ROW OF THE BODY rather than at the start.
         #
@@ -1683,21 +1709,25 @@ def _plan_migration(content: str) -> tuple[str | None, str | None]:
         # A row that holds only the comment counts. A quote of it inside a
         # fence, in inline code or mid-line does not, so that body gains the
         # comment.
-        if comment and not _has_comment_row(body, comment):
-            body = f"{comment}\n{body}" if body else comment
-        if body:
-            heading_chunks.append(f"{heading}\n{body}\n")
-        else:
-            heading_chunks.append(f"{heading}\n")
-    parts.append("\n".join(heading_chunks))
-    if not parts[-1].endswith("\n"):
-        parts.append("\n")
+        if comment and not _has_comment_row("\n".join(text for _, text in pieces), comment):
+            parts.append(f"{comment}\n")
+        for number, (lines, text) in enumerate(pieces):
+            if number:
+                parts.append("\n")
+            carry(lines, 0, text)
+        if pieces:
+            parts.append("\n")
     parts.extend([MEMORY_END_MARKER, "\n"])
 
     parts.extend(["\n", MANAGED_END_MARKER, "\n"])
 
     if user_text:
-        parts.extend(["\n", user_text, "\n"])
+        parts.append("\n")
+        # The trim drops only whole whitespace-only lines, so the user's text
+        # starts on the line of its first visible character.
+        first_visible = len(user_all) - len(user_all.lstrip())
+        carry(user_rows, user_all.rfind("\n", 0, first_visible) + 1, user_text)
+        parts.append("\n")
 
     new_content = bom + "".join(parts)
     # The rebuilt file must read back as one managed block, one memory block,
@@ -1735,6 +1765,30 @@ def _plan_migration(content: str) -> tuple[str | None, str | None]:
     for literal in (*_MIGRATION_CARRIED_MARKERS, *routing):
         if reading(written.find_marker(literal)) != reading(doc.find_marker(literal)):
             return None, f"the migrated file would change how {literal!r} reads"
+    # Every carried row reads as it did in the original file: the same kind,
+    # and hidden in an HTML block or not. A memory section moved above the
+    # user's text can end inside an HTML block that is never closed, and turn
+    # the user's fenced code into prose with no marker involved. The original
+    # file is the reference, not the text the sections were cut from: cutting
+    # out a session block that opens an HTML block uncovers what it covered.
+    def origin(offset: int) -> int:
+        return _offset_before_drop(_offset_before_drop(offset, legacy) + header_end, cuts)
+
+    original_at = {line.start: line for line in doc.lines}
+    written_at = {line.start: line for line in written.lines}
+    for source_rows, start, out_start, length in carried:
+        offset = 0
+        for source in source_rows:
+            before = original_at.get(origin(source.start))
+            # The row the session cut leaves behind is skipped when it starts
+            # mid-row in the original; the rows around it show any change.
+            if start <= offset < start + length and before is not None:
+                at = out_start + offset - start
+                after = written_at.get(at)
+                if after is None or (after.kind, after.in_html) != (before.kind, before.in_html):
+                    number = sum(1 for other in written.lines if other.start <= at)
+                    return None, f"the migrated file would change how line {number} reads"
+            offset += source.end - source.start
     return new_content, None
 
 
