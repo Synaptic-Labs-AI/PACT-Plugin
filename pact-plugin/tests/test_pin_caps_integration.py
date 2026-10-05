@@ -345,7 +345,7 @@ class TestPinMemoryCommand_Grammar:
         """Hook deny-reasons are enumerated so curators see the exact
         actionable next step without leaving the command text."""
         assert "Pin count cap reached" in pin_memory_content
-        assert "Ask the team-lead to free a pin slot" in pin_memory_content
+        assert "Do not change CLAUDE.md yourself, by any route; tell the team-lead." in pin_memory_content
         assert "New pin body is" in pin_memory_content
         assert "is its own pin" in pin_memory_content
         assert "Override rationale malformed" in pin_memory_content

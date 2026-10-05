@@ -177,7 +177,7 @@ _GROW_PIN_4 = ("python3 - <<'EOF'\nimport pathlib\np = pathlib.Path('CLAUDE.md')
 
 
 _PRUNE_STEP = "If the growth was not intended, run /PACT:prune-memory to demote pins."
-_MEMBER_STEP = "Ask the team-lead to free a pin slot; do not prune pins yourself."
+_MEMBER_STEP = "Do not change CLAUDE.md yourself, by any route; tell the team-lead."
 
 
 def _count_report(w, step):

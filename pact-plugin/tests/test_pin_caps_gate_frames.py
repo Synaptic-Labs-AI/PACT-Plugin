@@ -6,8 +6,8 @@ Summary: runs the real pin_caps_gate.py as a subprocess against a real config
          and a real project CLAUDE.md at 12 pins. The gate checks the lead, a
          PACT specialist type, and any frame whose session belongs to a PACT
          team; it checks no plain session and no non-PACT --agent session. A
-         team member's count denial asks the team-lead to free a slot instead
-         of naming the pin command.
+         team member's count denial tells it not to change CLAUDE.md by any
+         route and to tell the team-lead, instead of naming the pin command.
 Used by: hook_infra_classifier's COVERED_L2 mapping for `pin_caps_gate`.
 
 Every subprocess gets HOME, CLAUDE_CONFIG_DIR and CLAUDE_PROJECT_DIR inside
@@ -53,7 +53,7 @@ TMUX_SESSION = captured_pretooluse_teammate_tmux()["session_id"]
 SOLO_SESSION = captured_teammate_sessionstart()["session_id"]
 PLAIN_SESSION = captured_plain_userpromptsubmit()["session_id"]
 OTHER_AGENT_SESSION = "c0ffee00-0000-4000-8000-000000000001"
-MEMBER_TEXT = "Ask the team-lead to free a pin slot; do not prune pins yourself."
+MEMBER_TEXT = "Do not change CLAUDE.md yourself, by any route; tell the team-lead."
 NEW_PIN = "<!-- pinned: 2026-04-21 -->\n### New\nbody\n\n## Working Memory"
 
 

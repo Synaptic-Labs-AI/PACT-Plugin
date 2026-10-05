@@ -1800,7 +1800,7 @@ def gate_target(file_path: str) -> GateTarget | None:
 # What a team member is told when a change would add pins past the cap, in
 # place of the pin command it cannot run. The gate's count denial and the drift
 # report share this one copy.
-MEMBER_PIN_INSTRUCTION = "Ask the team-lead to free a pin slot; do not prune pins yourself."
+MEMBER_PIN_INSTRUCTION = "Do not change CLAUDE.md yourself, by any route; tell the team-lead."
 
 
 def gate_frame(input_data) -> str | None:

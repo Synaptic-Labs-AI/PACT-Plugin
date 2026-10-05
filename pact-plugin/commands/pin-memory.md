@@ -63,9 +63,9 @@ If the hook allows an edit with a note that it could not locate the Pinned secti
 
 If the pin_caps_gate hook denies the Edit/Write, the deny reason tells you which cap fired. You MUST NOT bypass.
 
-- **Pin count cap reached (12/12)**: Run `/PACT:prune-memory` to demote an existing pin to long-term memory, then retry the add. Demotion archives the pin to pact-memory before removing it, so the content is preserved rather than lost.
-  - A teammate, or a subagent in a PACT team session, gets "Ask the team-lead to free a pin slot; do not prune pins yourself." instead. Do NOT run `/PACT:prune-memory`. Ask the team-lead for a free slot, naming the pin you need to add: with `SendMessage`, or in your final report if you are a subagent.
-  - As the team-lead, answer that request by running `/PACT:prune-memory` with the user to free a slot, then tell the requester to retry.
+- **Pin count cap reached (N/12)**: Run `/PACT:prune-memory` to demote an existing pin to long-term memory, then retry the add. Demotion archives the pin to pact-memory before removing it, so the content is preserved rather than lost.
+  - A teammate, or a subagent in a PACT team session, gets "Do not change CLAUDE.md yourself, by any route; tell the team-lead." instead. Do not write `CLAUDE.md` by any route, not only an `Edit` or a `Write`: do NOT run `/PACT:prune-memory`, and do NOT retry the edit. Send the pin's text to the team-lead: with `SendMessage`, or in your final report if you are a subagent.
+  - As the team-lead, when you receive a pin that way, free a slot with the user via `/PACT:prune-memory`, then add the pin yourself.
 - **New pin body is N chars (cap: 1500)**: Compress the body, or add a `pin-size-override` rationale if the content is verbatim load-bearing.
 - **A `### ` line in a pin body**: That line is its own pin and counts toward the count cap. For structure inside a body, use `#### `, bold, or a fenced code example. A fenced line is not a pin, but it counts toward the body size.
 - **Override rationale malformed**: The rationale is empty, exceeds 120 chars, or contains a line terminator (`\n`, `\r`, or a Unicode line separator). Fix the rationale and retry.

@@ -19,8 +19,8 @@ Gate fires when ALL hold:
      specialist type, or any frame whose session belongs to a PACT team
      (in-process teammates and Agent-tool subagents share the lead's session).
      A plain session and a non-PACT --agent session are not gated. A team
-     member's count denial asks it to have the team-lead free a slot instead
-     of naming the pin command.
+     member's count denial tells it not to change CLAUDE.md by any route and
+     to tell the team-lead, instead of naming the pin command.
   3. `claude_md_manager.gate_target` returns a target: the project CLAUDE.md
      the resolver returns once the change exists, so a Write that creates it
      is gated too. The text before is the file the resolver returns now, or

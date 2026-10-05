@@ -15,8 +15,8 @@ Demotion is not deletion. A pin leaves `## Pinned Context` only once its
 content is provably somewhere else — see [Step 3](#step-3--archive-the-selected-pin).
 
 Only the team-lead runs this command, with the user. A teammate or subagent
-whose pin was denied by the count cap asks the team-lead for a free slot
-instead.
+whose pin was denied by the count cap sends the pin to the team-lead instead,
+and the team-lead adds it after freeing a slot.
 
 The `pin_caps_gate` PreToolUse hook ALLOWS the resulting `Edit` because
 the change adds no pin. **The hook cannot enforce the archive**: it sees a

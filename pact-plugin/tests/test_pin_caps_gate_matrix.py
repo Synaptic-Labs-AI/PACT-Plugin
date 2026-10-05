@@ -471,7 +471,7 @@ class TestPinCapsGate_Matrix_Edit:
             },
         })
         if gated:
-            assert result is not None and result.endswith("Ask the team-lead to free a pin slot; do not prune pins yourself."), result
+            assert result is not None and result.endswith("Do not change CLAUDE.md yourself, by any route; tell the team-lead."), result
         else:
             assert result is None, (baseline, result)
 
@@ -698,7 +698,7 @@ class TestPinCapsGate_Matrix_Write:
                 "content": _build_claude_md(99),
             },
         })
-        assert result is not None and result.endswith("Ask the team-lead to free a pin slot; do not prune pins yourself."), result
+        assert result is not None and result.endswith("Do not change CLAUDE.md yourself, by any route; tell the team-lead."), result
         assert "/PACT:" not in result
 
 

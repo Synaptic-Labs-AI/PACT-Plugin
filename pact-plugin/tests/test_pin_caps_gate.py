@@ -278,8 +278,8 @@ class TestPinCapsGate_Smoke:
 
     def test_a_teammate_write_is_gated_and_asks_the_team_lead(self, caps_gate_env):
         """A PACT specialist frame in a PACT team's session is gated like the
-        lead, and its count denial asks the team-lead to free a slot instead of
-        naming the pin command."""
+        lead, and its count denial tells it not to change CLAUDE.md by any
+        route and to tell the team-lead, instead of naming the pin command."""
         env = caps_gate_env(pin_count=3)
         entries = [
             make_pin_entry(title=f"Pin{i}", body_chars=4) for i in range(13)
@@ -295,7 +295,7 @@ class TestPinCapsGate_Smoke:
         })
         assert result is not None
         assert result.startswith("Pin count cap reached (13/12).")
-        assert result.endswith("Ask the team-lead to free a pin slot; do not prune pins yourself.")
+        assert result.endswith("Do not change CLAUDE.md yourself, by any route; tell the team-lead.")
         assert "/PACT:" not in result
 
     def test_edit_legitimate_new_pin_with_date_comment_allows(
