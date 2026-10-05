@@ -1515,8 +1515,9 @@ def _has_comment_row(body: str, comment: str) -> bool:
 # The PACT markers the migration carries as the user wrote them. The rebuilt
 # file must read each the same way the original did, so a fenced or commented
 # copy the rebuild made live is refused rather than written. The routing pair
-# is read as a block: its two marker lines share a prefix. The managed, memory
-# and session markers are checked as blocks before these.
+# is read as a block, and each of its two literals on its own: its two marker
+# lines share a prefix. The managed, memory and session markers are checked as
+# blocks before these.
 _ROUTING_START_PREFIX = "<!-- PACT_ROUTING_START"
 _ROUTING_END_MARKER = "<!-- PACT_ROUTING_END -->"
 _MIGRATION_CARRIED_MARKERS = (PINNED_START_MARKER, PINNED_END_MARKER, _KERNEL_START_MARKER, _KERNEL_END_MARKER)
@@ -1719,17 +1720,21 @@ def _plan_migration(content: str) -> tuple[str | None, str | None]:
             "the migrated file would leave a region PACT cannot read, which the "
             "original did not have"
         )
-    # State AND cause: a line that held a marker as stray text and now holds it
-    # as a marker line reads MALFORMED both times, for a different reason.
+    # State, cause AND the number of marker lines or blocks found. A line that
+    # held a marker as stray text and now holds it as a marker line reads
+    # MALFORMED both times, for a different cause. A marker that already reads
+    # DUPLICATE still does with one more live copy, on one more line.
     def reading(located):
-        return located.state, located.cause
+        return located.state, located.cause, len(located.spans)
 
-    for literal in _MIGRATION_CARRIED_MARKERS:
-        if reading(written.find_marker(literal)) != reading(doc.find_marker(literal)):
-            return None, f"the migrated file would change how {literal!r} reads"
     routing = (_ROUTING_START_PREFIX, _ROUTING_END_MARKER)
     if reading(written.find_block(*routing)) != reading(doc.find_block(*routing)):
         return None, "the migrated file would change how the routing block reads"
+    # Each routing literal on its own as well: an unpaired or nested block
+    # carries no lines, so only these count a copy of one of its markers.
+    for literal in (*_MIGRATION_CARRIED_MARKERS, *routing):
+        if reading(written.find_marker(literal)) != reading(doc.find_marker(literal)):
+            return None, f"the migrated file would change how {literal!r} reads"
     return new_content, None
 
 

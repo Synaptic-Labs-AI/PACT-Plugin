@@ -23,7 +23,7 @@ from shared.claude_md_manager import (
     PINNED_START_MARKER,
     _plan_migration,
 )
-from shared.claude_md_markers import parse
+from shared.claude_md_markers import State, parse
 
 BOM_BEFORE_FENCE = "﻿```md\n<!-- SESSION_START -->\n```\n## Working Memory\n- entry\n"
 
@@ -88,15 +88,20 @@ def test_a_rebuild_that_makes_a_carried_marker_live_is_refused(strip_the_user_te
     assert refusal == reason
 
 
-def test_a_rebuild_that_unfences_a_second_routing_pair_is_refused(monkeypatch):
-    # A real routing pair and a fenced example of one. A rebuild that loses the
-    # fence lines makes the example live: two pairs where there was one. Read
-    # as a block the routing lookup goes from FOUND to DUPLICATE; read by its
-    # shared prefix it is DUPLICATE both times and the damage goes unseen.
+@pytest.fixture
+def drop_the_fence_lines(monkeypatch):
+    """A rebuild that loses the user text's fence lines, so a fenced example goes live."""
     monkeypatch.setattr(
         claude_md_manager, "_trim_blank_edges",
         lambda text: "\n".join(line for line in text.split("\n") if not line.startswith("```")).strip(),
     )
+
+
+def test_a_rebuild_that_unfences_a_second_routing_pair_is_refused(drop_the_fence_lines):
+    # A real routing pair and a fenced example of one. A rebuild that loses the
+    # fence lines makes the example live: two pairs where there was one. Read
+    # as a block the routing lookup goes from FOUND to DUPLICATE; read by its
+    # shared prefix it is DUPLICATE both times and the damage goes unseen.
     content = (
         "<!-- PACT_ROUTING_START: Managed by pact-plugin - do not edit this block -->\n"
         "<!-- PACT_ROUTING_END -->\n"
@@ -106,6 +111,43 @@ def test_a_rebuild_that_unfences_a_second_routing_pair_is_refused(monkeypatch):
     new_content, refusal = _plan_migration(content)
     assert new_content is None
     assert refusal == "the migrated file would change how the routing block reads"
+
+
+def test_a_rebuild_that_unfences_a_third_copy_of_a_duplicate_marker_is_refused(drop_the_fence_lines):
+    # The marker already reads DUPLICATE, so its state and cause are the same
+    # after the fenced copy goes live. Only the number of marker lines changes.
+    content = (
+        f"{PINNED_START_MARKER}\nnotes\n{PINNED_START_MARKER}\n"
+        f"```md\n{PINNED_START_MARKER}\n```\n"
+        "## Working Memory\n- entry\n"
+    )
+    assert parse(content).find_marker(PINNED_START_MARKER).state is State.DUPLICATE
+    new_content, refusal = _plan_migration(content)
+    assert new_content is None
+    assert refusal == f"the migrated file would change how {PINNED_START_MARKER!r} reads"
+
+
+def test_a_rebuild_that_unfences_a_second_unpaired_routing_end_is_refused(drop_the_fence_lines):
+    # A routing end with no start reads MALFORMED, unpaired, as a block, with
+    # or without a second copy, so the block lookup cannot see the copy go
+    # live. The end marker read on its own goes from FOUND to DUPLICATE.
+    content = (
+        "<!-- PACT_ROUTING_END -->\n"
+        "```md\n<!-- PACT_ROUTING_END -->\n```\n"
+        "## Working Memory\n- entry\n"
+    )
+    new_content, refusal = _plan_migration(content)
+    assert new_content is None
+    assert refusal == "the migrated file would change how '<!-- PACT_ROUTING_END -->' reads"
+
+
+def test_an_honest_rebuild_of_a_duplicate_marker_migrates_unchanged():
+    # Every marker line is carried as written, so a marker that already reads
+    # DUPLICATE reads DUPLICATE on as many lines after the rebuild.
+    content = f"{PINNED_START_MARKER}\nnotes\n{PINNED_START_MARKER}\n## Working Memory\n- entry\n"
+    new_content = _plan(content)
+    assert new_content.endswith(f"{MANAGED_END_MARKER}\n\n{PINNED_START_MARKER}\nnotes\n{PINNED_START_MARKER}\n")
+    assert len(parse(new_content).find_marker(PINNED_START_MARKER).spans) == 2
 
 
 def test_a_live_unpaired_routing_marker_in_the_users_notes_migrates_unchanged():
