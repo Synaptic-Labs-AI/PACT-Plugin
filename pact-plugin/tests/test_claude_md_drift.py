@@ -810,6 +810,28 @@ def test_the_report_jobs_add_one_read_and_one_hash_when_nothing_changed(world):
     print(f"report job, unchanged file: {(time.perf_counter() - started) / 5 * 1000:.1f} ms per process")
 
 
+def test_the_prompt_check_on_an_unchanged_file_reads_and_hashes_only(world):
+    """A prompt after the baseline was recorded, with the file unchanged, reads
+    and hashes the file and stops: it loads neither the pin-growth rule nor
+    difflib, and it does not rewrite the baseline."""
+    assert _prompt(world) is None  # the first prompt records the baseline
+    baseline = world.project_dir / "claude-md-baseline.json"
+    before = (baseline.read_bytes(), baseline.stat().st_mtime_ns)
+    probe = (
+        "import json, sys\n"
+        "import shared.claude_md_drift as d\n"
+        "print(d.drift_advisory(json.loads(sys.argv[1])))\n"
+        "print(sorted(m for m in ('shared.pin_growth', 'difflib') if m in sys.modules))\n"
+    )
+    frame = json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": SID, "agent_type": LEAD,
+                        "prompt": "hello"})
+    result = subprocess.run([sys.executable, "-c", probe, frame], capture_output=True, text=True,
+                            env=carry_clock_shift(dict(world.env, PYTHONPATH=str(HOOKS))),
+                            cwd=world.repo, timeout=60)
+    assert result.stdout.split("\n")[:2] == ["None", "[]"], result.stderr
+    assert (baseline.read_bytes(), baseline.stat().st_mtime_ns) == before
+
+
 @pytest.mark.parametrize("module", ["track_files", "missed_wake_scan"])
 def test_the_hosts_load_nothing_heavy_at_module_level(module, tmp_path):
     probe = (f"import sys; import {module}; "
