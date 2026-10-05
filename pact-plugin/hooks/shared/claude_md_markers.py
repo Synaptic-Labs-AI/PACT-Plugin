@@ -59,7 +59,8 @@ read as the real block again.
 STATES. A lookup reads only certain rows (those before the boundary). For
 `find_block` and `find_marker`, the first of these that holds wins:
 1. MALFORMED, stray: a certain PROSE row holds the literal outside a marker
-   line and outside every inline code span;
+   line and outside every inline code span. The reason names those rows; the
+   spans are the literal's marker lines in scope, one (row, row) each;
 2. MALFORMED, nested or unpaired: in row order, a start before the previous
    start's end, or an end with no start before it;
 3. MALFORMED, unpaired: a start with no end while the scope is known;
@@ -125,7 +126,10 @@ class Line(NamedTuple):
 
 class Located(NamedTuple):
     state: State
-    spans: tuple[tuple[int, int], ...]  # inclusive (first_row, last_row); FOUND/DUPLICATE only
+    # inclusive (first_row, last_row): the block or marker for FOUND, each one for
+    # DUPLICATE, each clean marker line (row, row) for MALFORMED cause stray;
+    # empty otherwise
+    spans: tuple[tuple[int, int], ...]
     reason: str  # names 1-based line numbers; empty for FOUND and ABSENT
     cause: Cause | None
 
@@ -312,8 +316,10 @@ class Document:
                      and not any(self._is_marker_line(line, literal) for literal in literals)
                      and any(_has_stray(line.content, literal) for literal in literals))
 
-    def _stray(self, rows: tuple[int, ...]) -> Located:
-        return Located(State.MALFORMED, (),
+    def _stray(self, rows: tuple[int, ...], marker_rows: tuple[int, ...]) -> Located:
+        """MALFORMED stray: the reason names the stray `rows`; the spans are the
+        clean `marker_rows`, the lines that take effect once the strays are fixed."""
+        return Located(State.MALFORMED, tuple((row, row) for row in sorted(set(marker_rows))),
                        f"marker text on {_lines_text(rows)} is not a marker line: it is "
                        f"indented, quoted, list-prefixed or shares its line", Cause.STRAY)
 
@@ -331,7 +337,7 @@ class Document:
         rows = self.marker_rows(literal, scope)
         strays = self._stray_rows((literal,), scope)
         if strays:
-            return self._stray(strays)
+            return self._stray(strays, rows)
         if len(rows) > 1:
             return Located(State.DUPLICATE, tuple((row, row) for row in rows),
                            f"{literal!r} appears on {_lines_text(rows)}", Cause.DUPLICATE)
@@ -347,7 +353,7 @@ class Document:
                         + [(row, False) for row in self.marker_rows(end_literal, scope)])
         strays = self._stray_rows((start_literal, end_literal), scope)
         if strays:
-            return self._stray(strays)
+            return self._stray(strays, tuple(row for row, _ in events))
         pairs, open_row = [], None
         for row, is_start in events:
             if is_start and open_row is not None:

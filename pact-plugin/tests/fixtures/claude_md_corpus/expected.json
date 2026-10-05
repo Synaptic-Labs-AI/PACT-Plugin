@@ -983,6 +983,12 @@
    },
    "SESSION": {
     "cause": "stray",
+    "spans": [
+     [
+      2,
+      2
+     ]
+    ],
     "state": "MALFORMED"
    }
   },
@@ -1225,6 +1231,12 @@
    },
    "SESSION": {
     "cause": "stray",
+    "spans": [
+     [
+      2,
+      2
+     ]
+    ],
     "state": "MALFORMED"
    }
   },
@@ -1274,6 +1286,12 @@
    },
    "SESSION": {
     "cause": "stray",
+    "spans": [
+     [
+      2,
+      2
+     ]
+    ],
     "state": "MALFORMED"
    }
   },
@@ -1296,6 +1314,12 @@
    },
    "SESSION": {
     "cause": "stray",
+    "spans": [
+     [
+      2,
+      2
+     ]
+    ],
     "state": "MALFORMED"
    }
   },
@@ -1340,6 +1364,12 @@
    },
    "SESSION": {
     "cause": "stray",
+    "spans": [
+     [
+      2,
+      2
+     ]
+    ],
     "state": "MALFORMED"
    }
   },
@@ -2046,6 +2076,16 @@
    },
    "SESSION": {
     "cause": "stray",
+    "spans": [
+     [
+      1,
+      1
+     ],
+     [
+      3,
+      3
+     ]
+    ],
     "state": "MALFORMED"
    }
   },
@@ -3373,6 +3413,12 @@
   "blocks": {
    "KERNEL": {
     "cause": "stray",
+    "spans": [
+     [
+      1,
+      1
+     ]
+    ],
     "state": "MALFORMED"
    },
    "MANAGED": {
@@ -3428,6 +3474,12 @@
   "blocks": {
    "KERNEL": {
     "cause": "stray",
+    "spans": [
+     [
+      2,
+      2
+     ]
+    ],
     "state": "MALFORMED"
    },
    "MANAGED": {

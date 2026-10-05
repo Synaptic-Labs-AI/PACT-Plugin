@@ -253,6 +253,31 @@ def test_backslash_escapes_on_inline_code_runs(line, state):
     assert _session(_doc(line)).state is state
 
 
+# A stray result's spans are the clean marker lines, the lines that take effect
+# once the strays are fixed; its reason names the stray lines.
+@pytest.mark.parametrize("lines, spans, stray_line", [
+    (("> " + S,), (), "line 1"),
+    (("> " + S, "x", S), ((2, 2),), "line 1"),
+    ((S, "x", "> " + S, S), ((0, 0), (3, 3)), "line 3"),
+])
+def test_a_stray_marker_carries_its_clean_marker_lines_as_spans(lines, spans, stray_line):
+    located = _doc(*lines).find_marker(S)
+    assert (located.state, located.spans, located.cause) == (State.MALFORMED, spans, Cause.STRAY)
+    assert f"marker text on {stray_line} " in located.reason
+
+
+def test_a_stray_block_carries_its_clean_start_and_end_lines_as_spans():
+    located = _session(_doc("> " + S, S, "x", E))
+    assert (located.state, located.spans, located.cause) == (
+        State.MALFORMED, ((1, 1), (3, 3)), Cause.STRAY)
+    assert "marker text on line 1 " in located.reason
+
+
+def test_a_clean_marker_line_outside_the_scope_is_not_a_span():
+    located = _doc(S, "x", "> " + S, S).find_marker(S, (1, 3))
+    assert (located.state, located.spans, located.cause) == (State.MALFORMED, ((3, 3),), Cause.STRAY)
+
+
 # --- prefix markers --------------------------------------------------------
 
 @pytest.mark.parametrize("start_line", [

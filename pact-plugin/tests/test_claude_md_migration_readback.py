@@ -9,8 +9,10 @@ byte. These rows pin what that arm cannot name one by one: the byte-order mark
 stays at byte 0 and nowhere else; the first kept line keeps its indentation
 and the last keeps its trailing spaces; each read-back condition refuses a
 rebuild that changed the user's text (driven through test doubles that undo
-one part of the fix); and an input with an uncertain region is refused at the
-managed lookup, before any rebuild.
+one part of the fix); an input whose marker already reads stray is refused
+when a rebuild makes a further copy live, including the real rebuild moving an
+open HTML block above a fenced copy; and an input with an uncertain region is
+refused at the managed lookup, before any rebuild.
 """
 
 import pytest
@@ -23,7 +25,7 @@ from shared.claude_md_manager import (
     PINNED_START_MARKER,
     _plan_migration,
 )
-from shared.claude_md_markers import State, parse
+from shared.claude_md_markers import Cause, State, parse
 
 BOM_BEFORE_FENCE = "﻿```md\n<!-- SESSION_START -->\n```\n## Working Memory\n- entry\n"
 
@@ -183,3 +185,71 @@ def test_an_uncertain_input_is_refused_at_the_managed_lookup_before_any_rebuild(
     managed = parse(content).find_block(MANAGED_START_MARKER, MANAGED_END_MARKER)
     assert managed.reason
     assert _plan_migration(content) == (None, managed.reason)
+
+
+# An input whose marker already reads stray reads stray after any rebuild that
+# keeps that stray, so state and cause cannot see a further copy going live.
+# The number of clean marker lines a stray result carries can.
+
+STRAY_ROUTING_AND_FENCED_EXAMPLE = (
+    "> <!-- PACT_ROUTING_START: quoted -->\n> <!-- PACT_ROUTING_END -->\n"
+    "```md\n<!-- PACT_ROUTING_START: example -->\n<!-- PACT_ROUTING_END -->\n```\n"
+    "## Working Memory\n- entry\n"
+)
+TWO_STRAY_PINNED_STARTS = f"    {PINNED_START_MARKER}\n> {PINNED_START_MARKER}\n## Working Memory\n- entry\n"
+STRAY_PINNED_AND_REAL_PINNED_SECTION = (
+    f"> {PINNED_START_MARKER}\n"
+    "## Pinned Context\n"
+    f"{PINNED_START_MARKER}\n<!-- pinned: 2026-04-20 -->\n### A pin\nbody\n{PINNED_END_MARKER}\n"
+    "## Working Memory\n- entry\n"
+)
+ROUTING = ("<!-- PACT_ROUTING_START", "<!-- PACT_ROUTING_END -->")
+
+
+def _reads_stray_with_no_marker_line(content, *literals):
+    """The literal (or the block of a start and end literal) reads stray in
+    `content`, and no line of it is a marker line."""
+    doc = parse(content)
+    located = doc.find_block(*literals) if len(literals) == 2 else doc.find_marker(*literals)
+    return ((located.state, located.cause) == (State.MALFORMED, Cause.STRAY)
+            and not any(doc.marker_rows(literal) for literal in literals))
+
+
+def test_a_rebuild_that_makes_a_fenced_copy_live_in_a_stray_input_is_refused(drop_the_fence_lines):
+    # Both quoted routing markers are stray before and after, so every routing
+    # lookup reads stray both times; the example's two lines become live marker
+    # lines, and only their count changes.
+    assert _reads_stray_with_no_marker_line(STRAY_ROUTING_AND_FENCED_EXAMPLE, *ROUTING)
+    new_content, refusal = _plan_migration(STRAY_ROUTING_AND_FENCED_EXAMPLE)
+    assert new_content is None
+    assert refusal == "the migrated file would change how the routing block reads"
+
+
+def test_a_rebuild_that_turns_one_of_two_strays_into_a_marker_line_is_refused(strip_the_user_text):
+    # Stripping the user text de-indents the first copy into a marker line; the
+    # quoted copy keeps the literal stray.
+    assert _reads_stray_with_no_marker_line(TWO_STRAY_PINNED_STARTS, PINNED_START_MARKER)
+    new_content, refusal = _plan_migration(TWO_STRAY_PINNED_STARTS)
+    assert new_content is None
+    assert refusal == f"the migrated file would change how {PINNED_START_MARKER!r} reads"
+
+
+@pytest.mark.parametrize("content", [
+    STRAY_ROUTING_AND_FENCED_EXAMPLE, TWO_STRAY_PINNED_STARTS, STRAY_PINNED_AND_REAL_PINNED_SECTION,
+], ids=["fenced routing example", "two stray pinned starts", "stray pinned and a real Pinned section"])
+def test_an_input_that_reads_stray_migrates_under_the_real_rebuild(content):
+    _plan(content)
+
+
+def test_a_rebuild_that_moves_an_open_html_block_above_a_fenced_marker_is_refused():
+    # The Pinned section ends inside an HTML block that never closes. Moved into
+    # the memory block above the user's notes, it swallows the notes, so the
+    # fence no longer opens and the fenced kernel marker becomes a live line.
+    content = (
+        "Notes\n~~~\n<!-- PACT_START: v2 -->\n~~~\nsee <!-- PACT_START: v3 --> here\n"
+        "## Pinned Context\n### p\n<![CDATA[\n## Working Memory\n- e\n"
+    )
+    assert _reads_stray_with_no_marker_line(content, "<!-- PACT_START:")
+    new_content, refusal = _plan_migration(content)
+    assert new_content is None
+    assert refusal == "the migrated file would change how '<!-- PACT_START:' reads"

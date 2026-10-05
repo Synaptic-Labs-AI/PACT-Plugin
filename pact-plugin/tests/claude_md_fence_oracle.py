@@ -211,6 +211,8 @@ def scan(text: str) -> Scan:
 # - a scope is an inclusive (first, last); (first, first - 1) with first from 0 to
 #   the row count is empty and known; any other scope outside the rows is a
 #   ValueError. Lookups read only the rows in scope;
+# - a stray result carries one (row, row) span per marker line of the looked-up
+#   literals in scope, in row order; the stray rows themselves are not spans;
 # - first match wins: stray; a nested start or an end with no start, in row order;
 #   a start left open in a known scope; two or more pairs or marker lines
 #   (DUPLICATE); a start left open in an unknown scope (UNKNOWN); one pair or
@@ -310,10 +312,10 @@ def find_block(scan: Scan, start: str, end: str, scope: Optional[tuple[int, int]
     _check_literal(start)
     _check_literal(end)
     rows = scope_rows(scan, scope)
-    if _stray(scan, rows, (start, end)):
-        return Block(MALFORMED, (), STRAY)
-    pairs, open_row = [], None
     starts, ends = set(_marker_rows(scan, rows, start)), set(_marker_rows(scan, rows, end))
+    if _stray(scan, rows, (start, end)):
+        return Block(MALFORMED, tuple((i, i) for i in rows if i in starts or i in ends), STRAY)
+    pairs, open_row = [], None
     for i in rows:
         if i in starts:
             if open_row is not None:
@@ -339,9 +341,9 @@ def find_block(scan: Scan, start: str, end: str, scope: Optional[tuple[int, int]
 def find_marker(scan: Scan, literal: str, scope: Optional[tuple[int, int]] = None) -> Block:
     _check_literal(literal)
     rows = scope_rows(scan, scope)
-    if _stray(scan, rows, (literal,)):
-        return Block(MALFORMED, (), STRAY)
     found = _marker_rows(scan, rows, literal)
+    if _stray(scan, rows, (literal,)):
+        return Block(MALFORMED, tuple((i, i) for i in found), STRAY)
     if len(found) >= 2:
         return Block(DUPLICATE, tuple((i, i) for i in found), DUPLICATED)
     if found:

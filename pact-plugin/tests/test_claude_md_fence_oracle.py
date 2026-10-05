@@ -266,11 +266,13 @@ def test_the_finder_matches_the_oracle_on_generated_documents(seed):
                 and not str(rows[boundary][2]).lstrip(" ").startswith("<!--")):
             seen["boundary from another HTML type"] += 1
         seen[("KERNEL", blocks["KERNEL"][0])] += 1
-        for state, _spans, block_cause in blocks.values():
+        for state, spans, block_cause in blocks.values():
             seen[state] += 1
             seen[(state, block_cause)] += 1
-        for state, _spans, _cause in markers.values():
+            seen["stray block with spans"] += block_cause == oracle.STRAY and bool(spans)
+        for state, spans, marker_cause in markers.values():
             seen[("marker", state)] += 1
+            seen["stray marker with spans"] += marker_cause == oracle.STRAY and bool(spans)
         for (name, unique), (state, _spans, section_cause) in sections.items():
             seen[("section", state)] += 1
             seen[("section", state, unique)] += 1
@@ -282,7 +284,7 @@ def test_the_finder_matches_the_oracle_on_generated_documents(seed):
                 "in_html row", "empty scope", "boundary from another HTML type", ("KERNEL", oracle.FOUND),
                 oracle.FOUND, oracle.ABSENT, oracle.DUPLICATE, oracle.UNKNOWN,
                 (oracle.MALFORMED, oracle.STRAY), (oracle.MALFORMED, oracle.UNPAIRED),
-                (oracle.MALFORMED, oracle.NESTED),
+                (oracle.MALFORMED, oracle.NESTED), "stray block with spans", "stray marker with spans",
                 ("marker", oracle.FOUND), ("marker", oracle.ABSENT), ("marker", oracle.DUPLICATE),
                 ("marker", oracle.UNKNOWN), ("marker", oracle.MALFORMED),
                 ("section", oracle.FOUND), ("section", oracle.ABSENT), ("section", oracle.UNKNOWN),
