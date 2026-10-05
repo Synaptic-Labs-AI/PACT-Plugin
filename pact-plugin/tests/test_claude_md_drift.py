@@ -25,6 +25,7 @@ from types import SimpleNamespace
 
 import pytest
 from clock_shift.clock_shift_env import carry_clock_shift
+from fixtures.role_frames import captured_posttoolusefailure_bash_headless
 
 from shared.claude_md_manager import (
     MANAGED_END_MARKER,
@@ -129,12 +130,19 @@ def _context(out):
     return (out.get("hookSpecificOutput") or {}).get("additionalContext")
 
 
+def _failure_frame() -> dict:
+    """A PostToolUseFailure Bash frame with the captured key set."""
+    return {k: v for k, v in captured_posttoolusefailure_bash_headless().items() if k != "_meta"}
+
+
 def _bash(w, command, *, event="PostToolUse", run=True, **frame):
     """Run `command` in the repository (unless `run` is False), then fire
-    track_files.py with the Bash frame for it; return the hook's output."""
+    track_files.py with the Bash frame for it; return the hook's output. A
+    PostToolUseFailure frame carries the captured failure key set."""
     rc = _sh(w, command) if run else 0
-    out = _hook(w, TRACK, {"hook_event_name": event, "tool_name": "Bash",
-                           "tool_input": {"command": command}, "session_id": SID,
+    base = (_failure_frame() if event == "PostToolUseFailure"
+            else {"hook_event_name": event, "tool_name": "Bash"})
+    out = _hook(w, TRACK, {**base, "tool_input": {"command": command}, "session_id": SID,
                            "agent_type": LEAD, **frame})
     out["_rc"] = rc
     return out
@@ -205,14 +213,14 @@ class TestBashGrowthIsReported:
         assert _context(out) is None  # no record yet: record one, report nothing
         return out
 
-    def _unchanged_by_hook(self, w, command, **frame):
+    def _unchanged_by_hook(self, w, command, *, event="PostToolUse", **frame):
         """Run the command, snapshot the file and git state, fire the hook,
         and require the hook left both exactly as they were."""
         rc = _sh(w, command)
         before = (w.claude_md.read_bytes(), w.claude_md.stat().st_mtime_ns,
                   subprocess.run(["git", "status", "--porcelain"], cwd=w.repo,
                                  capture_output=True, text=True).stdout)
-        out = _bash(w, command, run=False, **frame)
+        out = _bash(w, command, event=event, run=False, **frame)
         after = (w.claude_md.read_bytes(), w.claude_md.stat().st_mtime_ns,
                  subprocess.run(["git", "status", "--porcelain"], cwd=w.repo,
                                 capture_output=True, text=True).stdout)
@@ -260,10 +268,19 @@ class TestBashGrowthIsReported:
             "mark = '## Working Memory'\n"
             "p.write_text(s.replace(mark, '### Pin 12\\nsecret body\\n\\n' + mark, 1))\n")
         out = self._unchanged_by_hook(world, "python3 add_pin.py && false",
-                                      hook_event_name="PostToolUseFailure")
+                                      event="PostToolUseFailure")
         assert out["_rc"] != 0
         assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUseFailure"
         assert "count cap" in out["hookSpecificOutput"]["additionalContext"]
+
+    @pytest.mark.parametrize("before, phrase", [(0, "0 pins then"), (1, "1 pin then"),
+                                                (2, "2 pins then")])
+    def test_the_count_before_reads_in_the_right_number(self, world, before, phrase):
+        world.claude_md.write_text(_doc(_pins(before)), encoding="utf-8")
+        _bash(world, "true")
+        (world.repo / "grown.md").write_text(_doc(_pins(13)), encoding="utf-8")
+        report = _context(_bash(world, "cp grown.md CLAUDE.md"))
+        assert report is not None and f"{phrase}, 13 now." in report
 
     def test_a_pact_specialist_with_no_team_keeps_the_pin_command(self, world):
         """A solo --agent session of a PACT specialist type: checked by the gate,
@@ -548,6 +565,49 @@ class TestTeammateGrowth:
 
 
 # ---------------------------------------------------------------------------
+# Record names: an agent_id, else "lead" for the lead and "session" for a frame
+# alone in its own session; no other frame is ever keyed "lead"
+# ---------------------------------------------------------------------------
+
+class TestRecordKeys:
+
+    MEMBER = {"agent_type": "probe-coder"}  # an in-process member: the lead's session
+
+    def test_an_in_process_member_without_an_agent_id_keeps_no_record(self, world):
+        _bash(world, "true")  # the lead's record
+        lead = world.session_dir / "claude-md-last-seen" / "lead.json"
+        before = (lead.read_bytes(), lead.stat().st_mtime_ns)
+        _sh(world, _append_pin_script(12))
+        out = _bash(world, "python3 add_pin.py && false", event="PostToolUseFailure", run=False,
+                    **self.MEMBER)
+        assert _context(out) is None
+        _edit(world, world.claude_md.read_text(), **self.MEMBER)
+        assert (lead.read_bytes(), lead.stat().st_mtime_ns) == before
+        assert sorted(path.name for path in lead.parent.glob("*.json")) == ["lead.json"]
+        assert "count cap" in (_context(_bash(world, "true")) or "")  # the lead still hears of it
+
+    def test_the_same_frame_with_an_agent_id_reports_and_keys_by_it(self, world):
+        frame: dict = {**self.MEMBER, "agent_id": "aprobe-coder-0123456789abcdef"}
+        _bash(world, "true", event="PostToolUseFailure", **frame)
+        _sh(world, _append_pin_script(12))
+        out = _bash(world, "python3 add_pin.py && false", event="PostToolUseFailure", run=False,
+                    **frame)
+        assert _context(out) == _count_report(world, _MEMBER_STEP)
+        records = world.session_dir / "claude-md-last-seen"
+        assert sorted(path.name for path in records.glob("*.json")) == [f"{frame['agent_id']}.json"]
+
+    @pytest.mark.parametrize("frame, step", [
+        ({"agent_type": "pact-backend-coder", "session_id": "teammate-session"}, _MEMBER_STEP),
+        ({"agent_type": "pact-backend-coder", "session_id": "solo-session"}, _PRUNE_STEP),
+    ], ids=["separate-process-member", "solo-specialist"])
+    def test_a_frame_alone_in_its_own_session_is_keyed_session(self, world, frame, step):
+        _bash(world, "true", **frame)
+        assert _context(_bash(world, _append_pin_script(12), **frame)) == _count_report(world, step)
+        own = world.project_dir / frame["session_id"] / "claude-md-last-seen"
+        assert sorted(path.name for path in own.glob("*.json")) == ["session.json"]
+
+
+# ---------------------------------------------------------------------------
 # A session the pin-cap gate does not check gets no record and no report
 # ---------------------------------------------------------------------------
 
@@ -620,7 +680,8 @@ class TestWiring:
         tool_input = ({"command": "sleep 5 &", "run_in_background": True} if tool == "Bash"
                       else {"file_path": str(world.repo / "notes.md")})
         for event in ("PostToolUseFailure", "PostToolUse"):
-            frame = {"hook_event_name": event, "tool_name": tool, "tool_input": tool_input,
+            base = _failure_frame() if event == "PostToolUseFailure" else {"hook_event_name": event}
+            frame = {**base, "tool_name": tool, "tool_input": tool_input,
                      "session_id": SID, "agent_type": LEAD}
             monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(frame)))
             with pytest.raises(SystemExit):

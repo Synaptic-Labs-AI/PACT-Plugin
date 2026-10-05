@@ -14,12 +14,14 @@ Every subprocess gets HOME, CLAUDE_CONFIG_DIR and CLAUDE_PROJECT_DIR inside
 tmp_path, so no row can read the real ~/.claude. The team read is never
 monkeypatched in a subprocess row; the one in-process row makes it raise.
 
-REVERT-CARDINALITY NON-VACUITY GATE, MEASURED. Run against the gate as it was
-before frame gating (lead only), this file reports 17 failed, 14 passed. Every
-row that gates a specialist, a team member or a subagent fails, and so does
-every row-set row whose lead outcome is a denial or an advisory. The 14 that
-pass are the lead's rows (including the lead spelling on a teammate frame),
-the frames the gate must not check, the coverage row, and the six row-set rows
+REVERT-CARDINALITY NON-VACUITY GATE, MEASURED. Run against the gate checking
+the lead only (gate_frame's result replaced by is_lead), this file reports 19
+failed, 22 passed. Every row that gates a specialist, a team member or a
+subagent fails, on the captured in-process frame and the constructed one alike,
+and so does every row-set row whose lead outcome is a denial or an advisory.
+The 22 that pass are the lead's rows (including the lead spelling on both
+in-process frames), the frames the gate must not check, the rows that call
+gate_frame without running the gate, the coverage row, and the six row-set rows
 where every frame is allowed, which an ungated frame is too. If that revert
 ever reports 0 failed, this file has stopped measuring the seam.
 """
@@ -37,6 +39,7 @@ import pytest
 from fixtures.role_frames import (
     captured_plain_userpromptsubmit,
     captured_pretooluse_lead_inprocess,
+    captured_pretooluse_teammate_inprocess_edit,
     captured_pretooluse_teammate_inprocess_subagent,
     captured_pretooluse_teammate_tmux,
     captured_teammate_sessionstart,
@@ -173,6 +176,18 @@ def _with(frame: dict, **fields) -> dict:
     return frame
 
 
+def _in_process_teammate(source: str, tool_name: str = "Edit") -> dict:
+    """An in-process teammate's PreToolUse frame: the captured Edit frame, or
+    the constructed one. A Write keeps the captured key set and changes the tool."""
+    if source == "captured":
+        frame = captured_pretooluse_teammate_inprocess_edit()
+        return frame if tool_name == "Edit" else _with(frame, tool_name="Write")
+    return constructed_pretooluse_teammate_inprocess(tool_name)
+
+
+IN_PROCESS_SOURCES = ("captured", "constructed")
+
+
 # ---------------------------------------------------------------------------
 # Which frames are gated, and the text each sees
 # ---------------------------------------------------------------------------
@@ -205,24 +220,27 @@ def test_an_in_process_subagent_with_no_team_is_not_gated(seam):
     assert _run(seam, _adding_a_pin(_subagent(), seam)) == ("allow", None)
 
 
+@pytest.mark.parametrize("source", IN_PROCESS_SOURCES)
 @pytest.mark.parametrize("tool_name", ["Edit", "Write"])
-def test_an_in_process_teammate_is_gated_and_asks_the_team_lead(seam, tool_name):
+def test_an_in_process_teammate_is_gated_and_asks_the_team_lead(seam, tool_name, source):
     _lead_context(seam)
-    _member_denial(_run(seam, _adding_a_pin(constructed_pretooluse_teammate_inprocess(tool_name), seam)))
+    _member_denial(_run(seam, _adding_a_pin(_in_process_teammate(source, tool_name), seam)))
 
 
-def test_an_in_process_teammate_without_an_agent_id_is_gated(seam):
+@pytest.mark.parametrize("source", IN_PROCESS_SOURCES)
+def test_an_in_process_teammate_without_an_agent_id_is_gated(seam, source):
     _lead_context(seam)
-    frame = constructed_pretooluse_teammate_inprocess()
+    frame = _in_process_teammate(source)
     del frame["agent_id"]
     _member_denial(_run(seam, _adding_a_pin(frame, seam)))
 
 
+@pytest.mark.parametrize("source", IN_PROCESS_SOURCES)
 @pytest.mark.parametrize("with_context", [True, False])
-def test_a_frame_with_the_lead_spelling_is_gated_with_the_lead_text(seam, with_context):
+def test_a_frame_with_the_lead_spelling_is_gated_with_the_lead_text(seam, with_context, source):
     if with_context:
         _lead_context(seam)
-    frame = _with(constructed_pretooluse_teammate_inprocess(), agent_type="PACT:pact-orchestrator")
+    frame = _with(_in_process_teammate(source), agent_type="PACT:pact-orchestrator")
     _lead_denial(_run(seam, _adding_a_pin(frame, seam)))
 
 

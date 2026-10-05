@@ -21,7 +21,9 @@ THREE RECORDS.
   once per session; the two-file check under the cached base runs on every
   call, so a new `.claude/CLAUDE.md` is picked up at once.
 - The last-seen record, `<session dir>/claude-md-last-seen/<key>.json`, one per
-  agent (its `agent_id`, else `lead`): the base, the resolved path, the hash
+  agent (its `agent_id`; else `lead` for the lead and `session` for a frame
+  alone in its own session; a teammate in the lead's session without an
+  `agent_id` keeps none): the base, the resolved path, the hash
   and the text, as of the last Bash call, or Edit or Write the gate checked. A
   record for another base counts as none.
 - The baseline, `claude-md-baseline.json` in the project's directory under the
@@ -48,6 +50,8 @@ _BASE_CACHE = "claude-md-base.json"
 _LAST_SEEN_DIR = "claude-md-last-seen"
 _BASELINE = "claude-md-baseline.json"
 _RECORD_KEY = re.compile(r"[A-Za-z0-9_-]{1,128}")
+_LEAD_KEY = "lead"
+_SESSION_KEY = "session"
 
 # The Pinned section's state in a baseline.
 _FOUND = "found"
@@ -101,8 +105,9 @@ def _report_after_bash(frame: dict) -> str | None:
     kind = gate_frame(frame)
     if kind is None:
         return None  # a frame the pin-cap gate does not check: no record, no report
+    key = _record_key(frame, kind)
     session_dir = _session_dir(frame)
-    if session_dir is None:
+    if key is None or session_dir is None:
         return None
     path, base = _resolve(session_dir)
     if path is None or base is None:
@@ -111,7 +116,7 @@ def _report_after_bash(frame: dict) -> str | None:
     if text is None:
         return None
     digest = _digest(text)
-    record_path = session_dir / _LAST_SEEN_DIR / f"{_record_key(frame)}.json"
+    record_path = session_dir / _LAST_SEEN_DIR / f"{key}.json"
     record = _read_json(record_path)
     report = None
     if record is not None and record.get("base") == str(base) and isinstance(record.get("text"), str):
@@ -135,10 +140,12 @@ def _record_after_write(frame: dict) -> None:
 
     # Only an edit the gate checked moves a record. Another file named
     # CLAUDE.md would otherwise absorb growth made outside any tool.
-    if gate_frame(frame) is None or gate_target(file_path) is None:
+    kind = gate_frame(frame)
+    if kind is None or gate_target(file_path) is None:
         return
+    key = _record_key(frame, kind)
     session_dir = _session_dir(frame)
-    if session_dir is None:
+    if key is None or session_dir is None:
         return
     path, base = _resolve(session_dir)
     if path is None or base is None:
@@ -147,7 +154,7 @@ def _record_after_write(frame: dict) -> None:
     if text is None:
         return
     digest = _digest(text)
-    _write_json(session_dir / _LAST_SEEN_DIR / f"{_record_key(frame)}.json",
+    _write_json(session_dir / _LAST_SEEN_DIR / f"{key}.json",
                 {"base": str(base), "path": str(path), "hash": digest, "text": text})
     if not pact_context.is_lead(frame):
         return
@@ -190,7 +197,7 @@ def _drift_advisory(frame: dict) -> str | None:
 
         if count > PIN_COUNT_CAP and count > stored:
             advisory = (
-                f"The project CLAUDE.md ({path}) now holds {count} pins, over the cap "
+                f"The project CLAUDE.md ({path}) now holds {_pin_count(count)}, over the cap "
                 f"of {PIN_COUNT_CAP}; it held {stored} at the last check. The pins grew "
                 "outside the pin-cap gate (a shell command, another tool, another session "
                 "or an edit outside any tool). Nothing was refused or changed. If the "
@@ -229,9 +236,13 @@ def _bash_report(path: Path, decision, kind: str) -> str:
         step = "If the growth was not intended, run /PACT:prune-memory to demote pins."
     return (
         f"The project CLAUDE.md ({path}) has grown past the pin {caps} since the last "
-        f"check: {decision.pins_before} pins then, {decision.pins_after} now. The file was "
+        f"check: {_pin_count(decision.pins_before)} then, {decision.pins_after} now. The file was "
         f"left as it is; nothing was refused or reverted. {step}"
     )
+
+
+def _pin_count(count: int) -> str:
+    return f"{count} pin" if count == 1 else f"{count} pins"
 
 
 def _pin_state(text: str) -> tuple[str, int | None]:
@@ -310,11 +321,23 @@ def _session_dir(frame: dict) -> Path | None:
     return Path(session_dir) if session_dir else None
 
 
-def _record_key(frame: dict) -> str:
+def _record_key(frame: dict, kind: str) -> str | None:
+    """The frame's last-seen record name, or None when it may keep none.
+
+    A valid agent_id names the record. Without one, the lead's frame is
+    "lead", and a frame alone in its own session (a separate-process teammate,
+    a solo specialist) is "session". A teammate frame without an agent_id in
+    the lead's session gets None: any name would be shared with the lead or
+    another teammate. The lead's prompt-time advisory still sees that growth."""
     agent_id = frame.get("agent_id")
-    if isinstance(agent_id, str) and _RECORD_KEY.fullmatch(agent_id):
+    if (isinstance(agent_id, str) and _RECORD_KEY.fullmatch(agent_id)
+            and agent_id not in (_LEAD_KEY, _SESSION_KEY)):
         return agent_id
-    return "lead"
+    if kind == "lead":
+        return _LEAD_KEY
+    if pact_context.get_session_dir():
+        return None  # the lead's session (its context file resolved)
+    return _SESSION_KEY
 
 
 def _read(path: Path) -> str | None:
