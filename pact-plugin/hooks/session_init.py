@@ -122,6 +122,12 @@ from shared import backlog_store
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
 from shared.symlinks import SYMLINKS_VERIFIED_MESSAGE, setup_plugin_symlinks
 from shared.claude_md_manager import (
+    MANAGED_END_MARKER,
+    MANAGED_START_MARKER,
+    MEMORY_END_MARKER,
+    MEMORY_START_MARKER,
+    SESSION_END_MARKER,
+    SESSION_START_MARKER,
     ensure_project_memory_md,
     migrate_to_managed_structure,
     resolve_project_claude_md_path,
@@ -349,6 +355,90 @@ def check_pin_slot_status() -> Optional[str]:
             return None
 
         return format_slot_status(pins)
+    except Exception:  # noqa: BLE001 — outer fail-open
+        return None
+
+
+# The Retrieved Context and Working Memory headings as the pact-memory syncs
+# match them (skills/pact-memory/scripts/working_memory.py). Inside a found
+# memory block every row is certain, so a sync refuses only when its heading is
+# commented out, and the heading alone decides that.
+_SYNC_HEADINGS = (
+    ("Retrieved Context", re.compile(r"^## Retrieved Context\s*$")),
+    ("Working Memory", re.compile(r"^## Working Memory\s*$")),
+)
+# The first line number a lookup's reason names ("line 5", "lines 4, 9").
+_REASON_LINE = re.compile(r"\blines? (\d+)")
+
+
+def check_claude_md_refusals() -> Optional[str]:
+    """Return the per-launch line for a project CLAUDE.md that PACT will not
+    update, or None.
+
+    One parse checks the managed, session and memory blocks, and inside a
+    found memory block the Retrieved Context, Pinned Context and Working
+    Memory sections. A block or section counts when its lookup is a
+    duplicate, malformed, uncertain or commented out; an absent one does not.
+    The line names the file, the earliest reason (its line and likely cause)
+    and every block or section not updated; two real Pinned headings add that
+    the pin cap is not checked. A missing, unreadable or non-UTF-8
+    file gives None: the writers report those themselves. Read-only, and
+    fail-open on the SessionStart hot path.
+    """
+    try:
+        path = _get_project_claude_md_path()
+        if path is None:
+            return None
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+
+        # The parser is imported here, not at module level, so a session
+        # start that never reaches this line does not load it.
+        from shared.claude_md_markers import State, parse
+
+        refused_states = (State.DUPLICATE, State.MALFORMED, State.UNKNOWN)
+        doc = parse(content)
+        # Each lookup, and the names it stands for when it is refused.
+        lookups = [doc.find_block(MANAGED_START_MARKER, MANAGED_END_MARKER),
+                   doc.find_block(SESSION_START_MARKER, SESSION_END_MARKER)]
+        labels: list[tuple[str, ...]] = [("the PACT managed block",), ("Current Session",)]
+        memory = doc.find_block(MEMORY_START_MARKER, MEMORY_END_MARKER)
+        pinned = None
+        if memory.state is State.FOUND:
+            first, last = memory.spans[0]
+            interior = (first + 1, last - 1)
+            (retrieved_name, retrieved_heading), (working_name, working_heading) = _SYNC_HEADINGS
+            pinned = locate_pinned(doc, unique=True)
+            lookups += [doc.find_section(retrieved_heading, None, interior), pinned,
+                        doc.find_section(working_heading, None, interior)]
+            labels += [(retrieved_name,), ("Pinned Context",), (working_name,)]
+        else:
+            lookups.append(memory)
+            labels.append(("the PACT memory block", "Retrieved Context", "Pinned Context",
+                           "Working Memory"))
+
+        refused = [index for index, located in enumerate(lookups)
+                   if located.state in refused_states]
+        if not refused:
+            return None
+
+        def line_of(index: int) -> int:
+            found = _REASON_LINE.search(lookups[index].reason)
+            return int(found.group(1)) if found else len(doc.lines) + 1
+
+        earliest = lookups[min(refused, key=line_of)]
+        names = ", ".join(name for index in refused for name in labels[index])
+        # Two real Pinned headings: the gate allows pin edits with its advisory
+        # and the writers take the first heading, so the cap is off unnoticed.
+        cap_off = pinned is not None and pinned.state is State.DUPLICATE
+        return (
+            f"PACT could not update {path}: {earliest.reason}. Sections not updated "
+            f"until it is fixed: {names}"
+            + (", and the pin cap is not checked until it is fixed" if cap_off else "")
+            + "."
+        )
     except Exception:  # noqa: BLE001 — outer fail-open
         return None
 
@@ -1532,6 +1622,14 @@ def main():
                     system_messages.append(staleness_msg)
                 else:
                     context_parts.append(staleness_msg)
+
+        # 4d. Name the project CLAUDE.md's blocks and sections PACT will not
+        # update, on every launch until the file is fixed. Lead only, beside
+        # each writer's own status; a compaction is not a launch.
+        if frame_is_lead and source != "compact":
+            refusal_msg = check_claude_md_refusals()
+            if refusal_msg:
+                system_messages.append(refusal_msg)
 
         # 4a. Surface pin slot count (#492). Tier-0 additionalContext —
         # architecturally binding, survives compaction. Fail-open: None

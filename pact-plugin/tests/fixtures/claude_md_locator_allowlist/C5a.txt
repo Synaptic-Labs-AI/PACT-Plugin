@@ -1,3 +1,0 @@
-# Locators that commit C5a moves onto the finder: the Working Memory and Retrieved Context sections (S26, S28, the S14 twin).
-# Format: path<TAB>function<TAB>kind<TAB>expression. Delete an entry in the commit
-# that routes its site through hooks/shared/claude_md_markers.py.

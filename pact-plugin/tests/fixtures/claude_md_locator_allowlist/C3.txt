@@ -1,3 +1,0 @@
-# Locators that commit C3 moves onto the finder: the managed region, migration anchors and kernel block (S1-S4).
-# Format: path<TAB>function<TAB>kind<TAB>expression. Delete an entry in the commit
-# that routes its site through hooks/shared/claude_md_markers.py.

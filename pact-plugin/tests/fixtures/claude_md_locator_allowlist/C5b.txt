@@ -1,3 +1,0 @@
-# Locators that commit C5b moves onto the finder: the Pinned section and pin parsing (S12-S18, S29-S33).
-# Format: path<TAB>function<TAB>kind<TAB>expression. Delete an entry in the commit
-# that routes its site through hooks/shared/claude_md_markers.py.

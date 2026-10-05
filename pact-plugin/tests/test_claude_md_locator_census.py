@@ -2,15 +2,10 @@
 through hooks/shared/claude_md_markers.py.
 
 A scan of every shipped Python file finds each expression that locates a marker
-or a PACT heading in text. Every site found must be listed in exactly one
-per-commit allowlist under tests/fixtures/claude_md_locator_allowlist/, and every
-listed entry must still match a site. A commit that moves a caller onto the
-finder deletes that caller's entries in the same commit; the last commit asserts
-every allowlist is empty.
-
-An entry is `path<TAB>function<TAB>kind<TAB>expression`, where the expression is
-the site's source text with its whitespace collapsed. There are no line numbers,
-so moving code does not break an entry; editing a site's own text does.
+or a PACT heading in text. There must be none: such an expression goes through
+the finder instead. A failure lists each site as
+`path<TAB>function<TAB>kind<TAB>expression`, the expression being the site's
+source text with its whitespace collapsed.
 
 What counts as a site:
 - `in`, `==` and `!=` with a marker on either side;
@@ -72,8 +67,6 @@ import re
 import pytest
 
 PLUGIN = pathlib.Path(__file__).resolve().parent.parent
-ALLOWLIST_DIR = pathlib.Path(__file__).resolve().parent / "fixtures" / "claude_md_locator_allowlist"
-COMMITS = ("C2", "C3", "C4", "C5a", "C5b")
 FINDER = "hooks/shared/claude_md_markers.py"
 TOPS = ("hooks", "skills", "scripts", "bin", "telegram")
 
@@ -517,56 +510,17 @@ def shell_marker_lines(sources):
     return out
 
 
-def load_allowlists():
-    """{commit: Counter of entries}; `#` starts a comment line."""
-    out = {}
-    for commit in COMMITS:
-        entries = collections.Counter()
-        path = ALLOWLIST_DIR / f"{commit}.txt"
-        for raw in path.read_text(encoding="utf-8").splitlines():
-            if not raw.strip() or raw.startswith("#"):
-                continue
-            parts = raw.split("\t")
-            assert len(parts) == 4, f"{path.name}: malformed entry {raw!r}"
-            entries[tuple(parts)] += 1
-        out[commit] = entries
-    return out
-
-
 def _fmt(entries):
     return "\n".join("\t".join(e) + (f"  (x{n})" if n > 1 else "") for e, n in sorted(entries.items()))
 
 
 # --- the census over the shipped tree ---------------------------------------------
 
-def test_every_locator_site_is_listed_in_a_commit_allowlist():
-    allowed = sum(load_allowlists().values(), collections.Counter())
-    unlisted = shipped_census() - allowed
-    assert not unlisted, (
+def test_no_shipped_site_locates_a_marker_without_the_finder():
+    sites = shipped_census()
+    assert not sites, (
         "These shipped sites locate a PACT marker without the finder "
-        "(hooks/shared/claude_md_markers.py). Route them through it, or, only for a "
-        "site that predates the migration, list it in its commit's allowlist:\n"
-        + _fmt(unlisted))
-
-
-def test_every_allowlist_entry_still_matches_a_site():
-    allowed = sum(load_allowlists().values(), collections.Counter())
-    stale = allowed - shipped_census()
-    assert not stale, (
-        "These allowlist entries match no shipped site. A commit that moves a caller "
-        "onto the finder deletes its entries; delete these:\n" + _fmt(stale))
-
-
-def test_no_site_is_listed_by_two_commits():
-    lists = load_allowlists()
-    seen = {}
-    doubled = []
-    for commit, entries in lists.items():
-        for entry in entries:
-            if entry in seen:
-                doubled.append((entry, seen[entry], commit))
-            seen[entry] = commit
-    assert not doubled, doubled
+        "(hooks/shared/claude_md_markers.py). Route them through it:\n" + _fmt(sites))
 
 
 def test_the_scan_reads_the_shipped_tree_and_skips_the_finder():
