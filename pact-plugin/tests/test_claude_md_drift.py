@@ -606,6 +606,30 @@ class TestRecordKeys:
         own = world.project_dir / frame["session_id"] / "claude-md-last-seen"
         assert sorted(path.name for path in own.glob("*.json")) == ["session.json"]
 
+    @pytest.mark.parametrize("agent_id", ["lead", "session"])
+    def test_an_agent_id_spelling_a_reserved_name_is_not_used_as_one(self, world, agent_id):
+        """A member whose agent_id is literally "lead" or "session" is treated as
+        a member without one: it never reads or moves the lead's record, and it
+        keeps no record of its own."""
+        frame = {**self.MEMBER, "agent_id": agent_id}
+        _bash(world, "true")  # the lead's record, at 12 pins
+        lead = world.session_dir / "claude-md-last-seen" / "lead.json"
+        before = (lead.read_bytes(), lead.stat().st_mtime_ns)
+        _sh(world, _append_pin_script(12))
+        out = _bash(world, "python3 add_pin.py && false", event="PostToolUseFailure", run=False,
+                    **frame)
+        assert _context(out) is None
+        _edit(world, world.claude_md.read_text(), **frame)
+        assert (lead.read_bytes(), lead.stat().st_mtime_ns) == before
+        assert sorted(path.name for path in lead.parent.glob("*.json")) == ["lead.json"]
+
+    def test_a_frame_alone_in_its_own_session_with_agent_id_lead_is_keyed_session(self, world):
+        frame = {"agent_type": "pact-backend-coder", "session_id": "solo-session", "agent_id": "lead"}
+        _bash(world, "true", **frame)
+        assert _context(_bash(world, _append_pin_script(12), **frame)) == _count_report(world, _PRUNE_STEP)
+        own = world.project_dir / frame["session_id"] / "claude-md-last-seen"
+        assert sorted(path.name for path in own.glob("*.json")) == ["session.json"]
+
 
 # ---------------------------------------------------------------------------
 # A session the pin-cap gate does not check gets no record and no report

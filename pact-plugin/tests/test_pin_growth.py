@@ -15,6 +15,7 @@ is refused only when it adds pins and leaves more than 12.
 
 import difflib
 import random
+import re
 import signal
 import subprocess
 import sys
@@ -489,6 +490,68 @@ def test_replace_all_every_site_is_denied_and_first_site_only_is_allowed():
     assert verdict(REPLACE_BEFORE, first_site) == "ALLOW"
 
 
+def _edit_for(before, after):
+    """The smallest Edit turning `before` into `after`: the differing middle,
+    widened a character at a time on both sides until old_string occurs once."""
+    p = 0
+    while p < min(len(before), len(after)) and before[p] == after[p]:
+        p += 1
+    s = 0
+    while s < min(len(before), len(after)) - p and before[-1 - s] == after[-1 - s]:
+        s += 1
+    a, b, c, d = p, len(before) - s, p, len(after) - s
+    while a == b or before.find(before[a:b]) != before.rfind(before[a:b]):
+        if a > 0:
+            a, c = a - 1, c - 1
+        if b < len(before):
+            b, d = b + 1, d + 1
+    return before[a:b], after[c:d]
+
+
+# A first Write has no text before, so it has no Edit form.
+FORMS_ROWS = [(n, b, a, expected) for rows, expected in ((ALLOWED + RESIDUALS, "ALLOW"), (DENIED, "DENY"),
+                                                          (NOT_FOUND, "ALLOW_ADVISORY"))
+              for n, b, a in rows if b]
+
+
+@pytest.mark.parametrize("name, before, after, expected", FORMS_ROWS, ids=[r[0] for r in FORMS_ROWS])
+def test_every_row_gets_one_verdict_as_a_write_an_edit_and_a_replace_all_edit(name, before, after, expected):
+    """The gate's own decision, which simulates the tool on the text before,
+    decides each row the same way in all three forms."""
+    from pin_caps_gate import gate_decision
+
+    old, new = _edit_for(before, after)
+    assert before.replace(old, new, 1) == after
+    forms = [("Write", {"content": after}),
+             ("Edit", {"old_string": old, "new_string": new, "replace_all": False}),
+             ("Edit", {"old_string": old, "new_string": new, "replace_all": True})]
+    assert [gate_decision(before, tool, tool_input).verdict for tool, tool_input in forms] == [expected] * 3
+
+
+def test_the_gate_applies_every_replace_all_site_and_only_the_first_without_it():
+    """old_string occurs twice, first in a snippet's fence, then in prose. Without
+    replace_all the tool would refuse a non-unique old_string; the gate applies
+    the first site and does not fail."""
+    from pin_caps_gate import gate_decision
+
+    edit = {"old_string": "marker line\n", "new_string": "marker line\n### Added\n"}
+    assert gate_decision(REPLACE_BEFORE, "Edit", {**edit, "replace_all": True}).verdict == "DENY"
+    assert gate_decision(REPLACE_BEFORE, "Edit", {**edit, "replace_all": False}).verdict == "ALLOW"
+
+
+@pytest.mark.parametrize("before", [B13, T13], ids=["located", "past an unclosed fence"])
+def test_an_edit_whose_literal_replace_changes_nothing_is_allowed(before):
+    """The hook sees old_string before the tool normalises quotes, so its replace
+    can miss: that is a plain allow, with no advisory even where the Pinned
+    section cannot be located."""
+    from pin_caps_gate import gate_decision
+
+    missing = {"old_string": "\u2018not in the file\u2019", "new_string": "### A\n### B\n", "replace_all": False}
+    assert missing["old_string"] not in before
+    assert gate_decision(before, "Edit", missing).verdict == "ALLOW"
+    assert gate_decision(before, "Edit", {**missing, "old_string": ""}).verdict == "ALLOW"
+
+
 def test_a_change_that_leaves_the_text_unchanged_counts_no_growth():
     assert grow(B13, B13) == 0
 
@@ -701,6 +764,13 @@ def test_an_unlocatable_section_allows_with_the_not_found_advisory(name, before,
     decision = decide(before, after)
     assert (decision.verdict, decision.cause) == ("ALLOW_ADVISORY", "not_found")
     assert decision.reason
+
+
+@pytest.mark.parametrize("name, before, after", [r for r in NOT_FOUND if "markers removed" not in r[0]],
+                         ids=[r[0] for r in NOT_FOUND if "markers removed" not in r[0]])
+def test_the_not_found_advisory_names_the_line(name, before, after):
+    # With both memory markers gone nothing is uncertain, so no line is named.
+    assert re.search(r"\blines? \d", decide(before, after).reason)
 
 
 def test_an_undated_pin_renamed_at_the_cap_is_allowed_and_a_smuggled_heading_is_denied_on_count():

@@ -289,3 +289,29 @@ def test_the_finder_matches_the_oracle_on_generated_documents(seed):
                 ("section", oracle.DUPLICATE, True), ("section", oracle.COMMENTED)):
         assert seen[key] >= 20, (key, seen)
     assert seen[("section", oracle.DUPLICATE, False)] == 0, "only unique=True may return DUPLICATE"
+
+
+try:
+    from hypothesis import given, settings
+    from hypothesis import strategies as st
+    HAS_HYPOTHESIS = True
+except ImportError:
+    HAS_HYPOTHESIS = False
+
+
+@pytest.mark.skipif(not HAS_HYPOTHESIS, reason="hypothesis not installed")
+def test_the_finder_matches_the_oracle_on_seeds_hypothesis_draws():
+    """The comparison above on generator seeds that hypothesis draws, beside the
+    two fixed ones. It runs where hypothesis is installed and shows as a skip
+    where it is not; the fixed-seed test runs everywhere."""
+
+    @settings(max_examples=50, deadline=None)
+    @given(st.integers(min_value=3, max_value=2**32 - 1))
+    def compare(seed):
+        rnd = random.Random(seed)
+        for _ in range(20):
+            text = _document(rnd)
+            scope = _random_scope(rnd, len(oracle.split_rows(text)))
+            assert _finder_view(text, scope) == _oracle_view(text, scope), (seed, repr(text), scope)
+
+    compare()

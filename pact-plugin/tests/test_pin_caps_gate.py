@@ -601,6 +601,19 @@ class TestPinCapsGate_RealHook:
         finally:
             claude_md.chmod(0o644)
 
+    @pytest.mark.parametrize("call, expected", [
+        (_edit("### Pin5\n", "### Pin5 renamed\n"), "allow"),
+        (_edit("### Pin11\nxxxx", "### Pin11\nxxxx\n\n<!-- pinned: 2026-04-21 -->\n### New\nbody"), "deny"),
+    ], ids=["a rename", "a pin added"])
+    def test_a_byte_that_is_not_utf8_in_a_pin_body_changes_no_decision(self, tmp_path, call, expected):
+        """The file on disk holds a 0xFF byte in a pin body at 12 pins: the gate
+        reads it replaced and decides as it would without it."""
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_bytes(_pins(12).replace("### Pin3\nxxxx", "### Pin3\nxxx", 1).encode("utf-8")
+                              .replace(b"### Pin3\nxxx", b"### Pin3\nxxx\xff", 1))
+        assert b"\xff" in claude_md.read_bytes()
+        assert _outcome(_run_hook(tmp_path, _frame(claude_md, *call))) == expected
+
     def test_a_module_load_failure_allows_and_says_so(self, tmp_path):
         """A gate that cannot import its modules allows the call (exit 0) and
         says on stdout and stderr that pin caps are not being checked."""

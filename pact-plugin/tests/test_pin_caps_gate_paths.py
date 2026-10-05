@@ -12,6 +12,7 @@ resolver's `assume_present` and `gate_target`'s refusals to gate.
 A path the gate is unsure of is not gated, so it is allowed.
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -155,6 +156,14 @@ FIRST_WRITES = [
 @pytest.mark.parametrize("name, content, expected", FIRST_WRITES, ids=[row[0] for row in FIRST_WRITES])
 def test_a_first_write(tmp_path, name, content, expected):
     assert _gate(tmp_path, tmp_path / ".claude" / "CLAUDE.md", _write(content)) == expected
+
+
+def test_the_not_located_advisory_names_the_line_it_could_not_read(tmp_path):
+    """The advisory names the row where the uncertain region starts, so the
+    user can find the unclosed fence."""
+    result = _run_hook(tmp_path, _frame(tmp_path / ".claude" / "CLAUDE.md", *_write(NOT_LOCATED + _pins(20))))
+    assert _outcome(result) == "advisory"
+    assert "line 3" in json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
 
 
 def test_both_memory_markers_removed_allows_with_the_advisory_and_keeps_allowing(tmp_path):

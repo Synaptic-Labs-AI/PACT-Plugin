@@ -75,6 +75,18 @@ def test_a_file_pact_can_update_gives_no_report(project, text):
     assert check_claude_md_refusals() is None
 
 
+def test_a_memory_block_missing_only_its_end_marker_is_named(project):
+    """Deleting only the memory end marker leaves its start unpaired: the report
+    names that line and every section of the block."""
+    text = _managed().replace(MEMORY_END_MARKER + "\n", "", 1)
+    start_line = text.splitlines().index(MEMORY_START_MARKER) + 1
+    path = _write(project, text)
+    report = check_claude_md_refusals()
+    assert report.startswith(f"PACT could not update {path}: ")
+    assert f"line {start_line} has no end marker" in report
+    assert _names(report) == list(MEMORY_SECTIONS)
+
+
 def test_an_unclosed_fence_before_the_markers_names_every_block(project):
     path = _write(project, "# Notes\n```\nopen\n" + _managed())
     report = check_claude_md_refusals()

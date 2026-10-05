@@ -32,6 +32,7 @@ from fixtures.pin_growth import generators as G
 from fixtures.pin_growth import harness as H
 from fixtures.pin_growth import replay
 from fixtures.pin_growth import rows as R
+from fixtures.pin_growth.fixed_row_flips import OLD_VERDICT
 
 TESTS = Path(__file__).resolve().parent
 FULL = bool(os.environ.get("CI"))
@@ -164,6 +165,78 @@ def test_the_fixed_rows_are_the_ported_rows():
     assert sum(families.values()) == 18, families
     assert set(families) <= set(R.FAMILIES)
     assert all(r.label == R.GROWTH for r in ALL_ROWS if r.family)
+
+
+def test_each_row_the_old_gate_decided_differently_keeps_its_new_verdict():
+    """The fixed rows the old gate decided the other way, with its verdict
+    named per row: each still gets the opposite verdict from the gate that
+    replaced it, and each flip is a correction or a signed-off residual. A
+    faithful row the old gate refused is allowed now; a growth row it allowed
+    is refused now; a growth row it refused and the gate allows carries the
+    family the user signed off."""
+    from pin_caps_gate import gate_decision
+
+    rows = {r.key: r for r in R.FIXED_ROWS}
+    assert set(OLD_VERDICT) <= set(rows)
+    kinds = collections.Counter()
+    for key, old in OLD_VERDICT.items():
+        row = rows[key]
+        new = gate_decision(row.pre, "Write", {"content": row.post}).verdict
+        new = "DENY" if new == "DENY" else "ALLOW"
+        assert new != old, key
+        if row.label == R.FAITHFUL:
+            assert new == "ALLOW", key
+            kinds["honest edit no longer refused"] += 1
+        elif new == "DENY":
+            kinds["growth now refused"] += 1
+        else:
+            assert row.family, key
+            kinds["signed-off residual"] += 1
+    assert kinds == {"honest edit no longer refused": 54, "growth now refused": 3, "signed-off residual": 10}
+
+
+@pytest.mark.parametrize("population", list(POPULATIONS))
+def test_the_counted_matcher_gives_the_stdlib_opcodes_on_every_population(population):
+    """The rule's alignment copies CPython's find_longest_match to count its steps;
+    on every population's slice it must give difflib's own opcodes, so a change to
+    the stdlib on any interpreter turns this red."""
+    import difflib
+
+    from shared.claude_md_markers import parse
+
+    for item in POPULATIONS[population][0]():
+        a = [line.content for line in parse(item.pre or "").lines]
+        b = [line.content for line in parse(item.post).lines]
+        counted = pin_growth.CountedMatcher(a, b, pin_growth._Budget(10 ** 12)).get_opcodes()
+        assert counted == difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes(), item.key
+
+
+def _with_a_replaced_byte(pre, post):
+    """Both texts with the last character of one unchanged pin-body line replaced
+    by U+FFFD, which is what the gate reads for a byte that is not UTF-8. The
+    line keeps its length, so no size charge moves. None when no body line is
+    unchanged and unique on both sides."""
+    for line in pre.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        if (len(body) > 1 and body[0] not in "#<`~>-*|" and pre.count(line) == 1 and post.count(line) == 1):
+            marked = body[:-1] + "\ufffd" + line[len(body):]
+            return pre.replace(line, marked), post.replace(line, marked)
+    return None
+
+
+def test_a_byte_that_is_not_utf8_in_a_pin_body_changes_no_faithful_decision():
+    checked = 0
+    for row in R.FIXED_ROWS:
+        if row.label != R.FAITHFUL or not row.pre:
+            continue
+        marked = _with_a_replaced_byte(row.pre, row.post)
+        if marked is None:
+            continue
+        checked += 1
+        plain = pin_growth.pin_cap_decision(row.pre, row.post, use_timer=False)
+        replaced = pin_growth.pin_cap_decision(*marked, use_timer=False)
+        assert (replaced.verdict, replaced.cause) == (plain.verdict, plain.cause), row.key
+    assert checked >= 100
 
 
 def test_undated_pins_are_never_refused_and_a_smuggled_heading_is_denied_on_the_count():

@@ -269,3 +269,48 @@ def test_a_fenced_date_line_does_not_split_an_entry():
 
     assert isinstance(parsed, tuple)
     assert parsed[3] == [entry]
+
+
+# --------------------------------------------------------------------------
+# A pin whose snippet quotes a section heading, with the real section present
+
+def _snippet_shapes(heading):
+    return {
+        "followed by another heading": f"```markdown\n{heading}\n\n### 2026-01-01 example\n```\n",
+        "the snippet's last heading": f"```markdown\n### 2026-01-01 example\n{heading}\n```\n",
+        "an inline-code mention": f"See the `{heading}` section.\n",
+    }
+
+
+def _visible_pins(text):
+    from shared.claude_md_markers import Kind, parse
+    from staleness import locate_pinned
+
+    doc = parse(text)
+    first, last = locate_pinned(doc, unique=True).spans[0]
+    return sum(doc.lines[row].kind is Kind.PROSE and doc.lines[row].content.startswith("### ")
+               for row in range(first + 1, last + 1))
+
+
+@pytest.mark.parametrize("shape", ["followed by another heading", "the snippet's last heading",
+                                   "an inline-code mention"])
+@pytest.mark.parametrize("heading, sync", WRITERS)
+def test_a_pin_snippet_quoting_the_heading_leaves_the_pin_and_feeds_the_real_section(
+    tmp_path, monkeypatch, heading, sync, shape
+):
+    """The entry goes under the real section; the pin, its snippet bytes and the
+    pin count come out as they went in."""
+    snippet = _snippet_shapes(heading)[shape]
+    pins = PINS.replace("Some pinned prose.\n", "Some pinned prose.\n" + snippet)
+    doc = _memory_block(pins + f"{heading}\n\n### 2025-12-31 an older entry\nolder\n\n")
+    root, path = _project(tmp_path, monkeypatch, doc)
+    pins_before = _visible_pins(doc)
+
+    assert sync(root, path)
+
+    written = path.read_text(encoding="utf-8")
+    assert written.count(snippet) == 1 and written.index(snippet) < written.index("## Pinned Context") + len(pins)
+    assert _visible_pins(written) == pins_before == 1
+    _assert_one_section_in_the_memory_block(written, heading)
+    real = _real_rows(written, heading)[0]
+    assert _row_of(written, "a context") > real
