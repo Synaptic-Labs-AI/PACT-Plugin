@@ -293,22 +293,17 @@ def test_the_finder_matches_the_oracle_on_generated_documents(seed):
     assert seen[("section", oracle.DUPLICATE, False)] == 0, "only unique=True may return DUPLICATE"
 
 
-try:
-    from hypothesis import given, settings
-    from hypothesis import strategies as st
-    HAS_HYPOTHESIS = True
-except ImportError:
-    HAS_HYPOTHESIS = False
-
-
-@pytest.mark.skipif(not HAS_HYPOTHESIS, reason="hypothesis not installed")
 def test_the_finder_matches_the_oracle_on_seeds_hypothesis_draws():
     """The comparison above on generator seeds that hypothesis draws, beside the
     two fixed ones. It runs where hypothesis is installed and shows as a skip
-    where it is not; the fixed-seed test runs everywhere."""
+    where it is not; the fixed-seed test runs everywhere. It imports hypothesis
+    through importorskip, so the skip carries its reason and the type checker
+    never needs hypothesis installed."""
+    hypothesis = pytest.importorskip("hypothesis", reason="hypothesis not installed")
+    strategies = pytest.importorskip("hypothesis.strategies", reason="hypothesis not installed")
 
-    @settings(max_examples=50, deadline=None)
-    @given(st.integers(min_value=3, max_value=2**32 - 1))
+    @hypothesis.settings(max_examples=50, deadline=None)
+    @hypothesis.given(strategies.integers(min_value=3, max_value=2**32 - 1))
     def compare(seed):
         rnd = random.Random(seed)
         for _ in range(20):
