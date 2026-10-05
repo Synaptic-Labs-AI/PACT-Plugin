@@ -216,10 +216,11 @@ def test_a_migration_that_would_not_read_back_is_refused(monkeypatch, title):
 
 def test_an_indented_memory_heading_is_not_adopted():
     # The memory headings match at column 0 only; an indented one is a
-    # boundary, so its text goes below the managed block, not into Pinned.
+    # boundary, so its text goes below the managed block, not into Pinned,
+    # and keeps its indentation as the user wrote it.
     new_content = _str(_plan_migration("## Retrieved Context\n- r1\n  ## Pinned Context\n### mine\n")[0])
     assert "## Pinned Context\n\n## Working Memory" in new_content
-    assert new_content.endswith(f"{MANAGED_END_MARKER}\n\n## Pinned Context\n### mine\n")
+    assert new_content.endswith(f"{MANAGED_END_MARKER}\n\n  ## Pinned Context\n### mine\n")
 
 
 def test_the_migration_skip_path_plans_on_the_replace_decoded_copy(project_file, monkeypatch):

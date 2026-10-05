@@ -1512,6 +1512,34 @@ def _has_comment_row(body: str, comment: str) -> bool:
     )
 
 
+# The PACT markers the migration carries as the user wrote them. The rebuilt
+# file must read each the same way the original did, so a fenced or commented
+# copy the rebuild made live is refused rather than written. The routing pair
+# is read as a block: its two marker lines share a prefix. The managed, memory
+# and session markers are checked as blocks before these.
+_ROUTING_START_PREFIX = "<!-- PACT_ROUTING_START"
+_ROUTING_END_MARKER = "<!-- PACT_ROUTING_END -->"
+_MIGRATION_CARRIED_MARKERS = (PINNED_START_MARKER, PINNED_END_MARKER, _KERNEL_START_MARKER, _KERNEL_END_MARKER)
+
+
+def _split_bom(content: str) -> tuple[str, str]:
+    """The leading U+FEFF of `content`, or "", and the text after it."""
+    return ("\ufeff", content[1:]) if content.startswith("\ufeff") else ("", content)
+
+
+def _trim_blank_edges(text: str) -> str:
+    """`text` without its leading and trailing whitespace-only lines and without
+    its final line ending. Every other byte is kept as written, the first kept
+    line's indentation and the last kept line's trailing spaces included."""
+    lines = text.split("\n")
+    first, last = 0, len(lines)
+    while first < last and not lines[first].strip():
+        first += 1
+    while last > first and not lines[last - 1].strip():
+        last -= 1
+    return "\n".join(lines[first:last])
+
+
 def _plan_migration(content: str) -> tuple[str | None, str | None]:
     """Plan the migration of `content` into the managed structure:
     (new_content, refusal).
@@ -1519,9 +1547,13 @@ def _plan_migration(content: str) -> tuple[str | None, str | None]:
     Both None: already migrated (the PACT_MANAGED pair is found). A refusal
     names why the file is left alone: a managed, session or memory pair the
     parser cannot place, a memory heading whose only copy is commented out, or
-    a rebuilt file that does not read back as one managed block, one memory
-    block and the session block it had. Pure, so a file that is not valid
-    UTF-8 gets the same plan from its replace-decoded copy.
+    a rebuilt file that does not read back the way it must (see the end of
+    this function). Pure, so a file that is not valid UTF-8 gets the same plan
+    from its replace-decoded copy.
+
+    The user's text keeps every byte: only whitespace-only lines at its two
+    edges are trimmed, and a leading byte-order mark stays at byte 0 of the
+    rebuilt file, before PACT's marker.
 
     Extracts the PACT-managed sections (session, memory) from the existing
     content and reassembles them inside the new boundary markers. Any content
@@ -1537,6 +1569,7 @@ def _plan_migration(content: str) -> tuple[str | None, str | None]:
     """
     from .claude_md_markers import Cause, State, parse
 
+    bom, content = _split_bom(content)
     doc = parse(content)
     managed = doc.find_block(MANAGED_START_MARKER, MANAGED_END_MARKER)
     if managed.state is State.FOUND:
@@ -1616,7 +1649,7 @@ def _plan_migration(content: str) -> tuple[str | None, str | None]:
     for heading, sections in bodies.items():
         parts_of = [body for body in ("".join(section).rstrip() for section in sections) if body]
         memory_sections[heading] = "\n".join(parts_of)
-    user_text = "".join(user_rows).strip()
+    user_text = _trim_blank_edges("".join(user_rows))
 
     # Build the new structure — all content goes inside the managed block
     parts: list[str] = []
@@ -1665,20 +1698,38 @@ def _plan_migration(content: str) -> tuple[str | None, str | None]:
     if user_text:
         parts.extend(["\n", user_text, "\n"])
 
-    new_content = "".join(parts)
+    new_content = bom + "".join(parts)
     # The rebuilt file must read back as one managed block, one memory block,
-    # and a session block exactly when one was extracted.
+    # the session block exactly when one was extracted, no uncertain region the
+    # original did not have, and every other PACT marker as the original read
+    # it. A rebuild that fails any of these changed the user's text.
     written = parse(new_content)
+    session_after = State.FOUND if session_block else State.ABSENT
     if (
         written.find_block(MANAGED_START_MARKER, MANAGED_END_MARKER).state is not State.FOUND
         or written.find_block(MEMORY_START_MARKER, MEMORY_END_MARKER).state is not State.FOUND
-        or (written.find_block(SESSION_START_MARKER, SESSION_END_MARKER).state is State.FOUND)
-        is not bool(session_block)
+        or written.find_block(SESSION_START_MARKER, SESSION_END_MARKER).state is not session_after
     ):
         return None, (
             "the migrated file did not read back as one managed block, one "
             "memory block and the Current Session block it had"
         )
+    if doc.boundary is None and written.boundary is not None:
+        return None, (
+            "the migrated file would leave a region PACT cannot read, which the "
+            "original did not have"
+        )
+    # State AND cause: a line that held a marker as stray text and now holds it
+    # as a marker line reads MALFORMED both times, for a different reason.
+    def reading(located):
+        return located.state, located.cause
+
+    for literal in _MIGRATION_CARRIED_MARKERS:
+        if reading(written.find_marker(literal)) != reading(doc.find_marker(literal)):
+            return None, f"the migrated file would change how {literal!r} reads"
+    routing = (_ROUTING_START_PREFIX, _ROUTING_END_MARKER)
+    if reading(written.find_block(*routing)) != reading(doc.find_block(*routing)):
+        return None, "the migrated file would change how the routing block reads"
     return new_content, None
 
 

@@ -2,7 +2,8 @@
 Location: pact-plugin/tests/test_claude_md_corpus_writers.py
 Summary: Every corpus file through the readers and writers, not only the
          finder: the Current Session block's planner and reader, the pin-marker
-         planner, the legacy kernel strip's planner and the one Pinned locator.
+         planner, the legacy kernel strip's planner, the migration's planner and
+         the one Pinned locator.
 Used by: pytest.
 
 The expected outcome of each call is read from the corpus's hand-written block
@@ -14,13 +15,23 @@ blank separator rows changed, every other row keeps its bytes, its kind and its
 hidden flag, and a second plan writes nothing.
 """
 
+import collections
 import json
 import re
 from pathlib import Path
 
 import pytest
 
-from shared.claude_md_manager import SESSION_END_MARKER, SESSION_START_MARKER, _plan_kernel_strip
+from shared.claude_md_manager import (
+    MANAGED_END_MARKER,
+    MANAGED_START_MARKER,
+    MEMORY_END_MARKER,
+    MEMORY_START_MARKER,
+    SESSION_END_MARKER,
+    SESSION_START_MARKER,
+    _plan_kernel_strip,
+    _plan_migration,
+)
 from shared.claude_md_markers import State, parse
 from shared.pin_markers import Refusal, SkipReason, plan_insertion
 from shared.session_resume import _plan_session_block, _session_block_text
@@ -165,6 +176,50 @@ def test_the_kernel_strip(case):
         assert _plan_kernel_strip(new, Path("/nonexistent/CLAUDE.md")) == (None, None)
     else:
         assert new is None and notice and _NAMES_A_LINE.search(notice), notice
+
+
+# --- the migration into the managed structure -------------------------------
+
+_PACT_MARKERS = {MANAGED_START_MARKER, MANAGED_END_MARKER, MEMORY_START_MARKER, MEMORY_END_MARKER,
+                 SESSION_START_MARKER, SESSION_END_MARKER}
+_PACT_HEADINGS = {"## Retrieved Context", "## Pinned Context", "## Working Memory"}
+
+
+def _is_pact_line(line):
+    """A marker line (up to 3 spaces before the marker) or a memory heading at
+    column 0: the lines the migration rebuilds. An indented heading is the
+    user's."""
+    text = line.rstrip()
+    body = text.lstrip(" ")
+    return (body in _PACT_MARKERS and len(text) - len(body) <= 3) or text in _PACT_HEADINGS
+
+
+@pytest.mark.parametrize("case", _CASES)
+def test_the_migration(case):
+    """An unmigrated file is rebuilt into one managed block holding one memory
+    block, keeps the session block it had, and keeps every line of the user's
+    byte for byte; PACT's own marker and section-heading lines are rebuilt. A
+    block the table calls uncertain is refused with the line named."""
+    text = _text(case)
+    new, refusal = _plan_migration(text)
+    states = {name: _state(case, name) for name in ("MANAGED", "MEMORY", "SESSION")}
+    if states["MANAGED"] == "FOUND":
+        assert (new, refusal) == (None, None)
+        return
+    if _UNCERTAIN & set(states.values()):
+        assert new is None and refusal and _NAMES_A_LINE.search(refusal), refusal
+        return
+    if new is None:
+        assert refusal and _NAMES_A_LINE.search(refusal), refusal
+        return
+    doc = parse(new)
+    assert doc.find_block(MANAGED_START_MARKER, MANAGED_END_MARKER).state is State.FOUND
+    assert doc.find_block(MEMORY_START_MARKER, MEMORY_END_MARKER).state is State.FOUND
+    assert doc.find_block(SESSION_START_MARKER, SESSION_END_MARKER).state.value == states["SESSION"]
+    users = collections.Counter(line for line in text.lstrip("\ufeff").splitlines()
+                                if line.strip() and not _is_pact_line(line))
+    assert not users - collections.Counter(new.splitlines()), users - collections.Counter(new.splitlines())
+    assert _plan_migration(new) == (None, None)
 
 
 # --- the one Pinned locator -------------------------------------------------
