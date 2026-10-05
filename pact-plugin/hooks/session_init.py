@@ -380,8 +380,9 @@ def check_claude_md_refusals() -> Optional[str]:
     Memory sections. A block or section counts when its lookup is a
     duplicate, malformed, uncertain or commented out; an absent one does not.
     The line names the file, the earliest reason (its line and likely cause)
-    and every block or section not updated; two real Pinned headings add that
-    the pin cap is not checked. A missing, unreadable or non-UTF-8
+    and every block or section not updated; when the pin-cap gate cannot
+    locate the Pinned section either, it adds that the pin cap is not
+    checked. A missing, unreadable or non-UTF-8
     file gives None: the writers report those themselves. Read-only, and
     fail-open on the SessionStart hot path.
     """
@@ -405,12 +406,13 @@ def check_claude_md_refusals() -> Optional[str]:
                    doc.find_block(SESSION_START_MARKER, SESSION_END_MARKER)]
         labels: list[tuple[str, ...]] = [("the PACT managed block",), ("Current Session",)]
         memory = doc.find_block(MEMORY_START_MARKER, MEMORY_END_MARKER)
-        pinned = None
+        # The gate's own Pinned lookup. Outside a found memory block it is the
+        # memory block's result, so it is refused exactly when that block is.
+        pinned = locate_pinned(doc, unique=True)
         if memory.state is State.FOUND:
             first, last = memory.spans[0]
             interior = (first + 1, last - 1)
             (retrieved_name, retrieved_heading), (working_name, working_heading) = _SYNC_HEADINGS
-            pinned = locate_pinned(doc, unique=True)
             lookups += [doc.find_section(retrieved_heading, None, interior), pinned,
                         doc.find_section(working_heading, None, interior)]
             labels += [(retrieved_name,), ("Pinned Context",), (working_name,)]
@@ -430,9 +432,9 @@ def check_claude_md_refusals() -> Optional[str]:
 
         earliest = lookups[min(refused, key=line_of)]
         names = ", ".join(name for index in refused for name in labels[index])
-        # Two real Pinned headings: the gate allows pin edits with its advisory
-        # and the writers take the first heading, so the cap is off unnoticed.
-        cap_off = pinned is not None and pinned.state is State.DUPLICATE
+        # A refused Pinned lookup makes the gate allow every pin edit with its
+        # advisory, so the cap is off until the file is fixed.
+        cap_off = pinned.state in refused_states
         return (
             f"PACT could not update {path}: {earliest.reason}. Sections not updated "
             f"until it is fixed: {names}"

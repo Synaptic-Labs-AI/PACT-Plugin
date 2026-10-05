@@ -7,7 +7,8 @@ Used by: pytest.
 
 Every CLAUDE.md here is written under tmp_path. Rows cover: a clean file and an
 absent section say nothing; each refused block or section is named, with the
-earliest reason's line; an unreadable or non-UTF-8 file says nothing; and the
+earliest reason's line; the pin-cap clause is added exactly when the Pinned
+section cannot be located; an unreadable or non-UTF-8 file says nothing; and the
 message reaches a lead on startup and resume, but not on a compaction and not
 a teammate.
 """
@@ -25,6 +26,7 @@ from shared.claude_md_manager import (
     MANAGED_TITLE,
     MEMORY_END_MARKER,
     MEMORY_START_MARKER,
+    PINNED_START_MARKER,
     SESSION_END_MARKER,
     SESSION_START_MARKER,
 )
@@ -82,9 +84,10 @@ def test_a_memory_block_missing_only_its_end_marker_is_named(project):
     start_line = text.splitlines().index(MEMORY_START_MARKER) + 1
     path = _write(project, text)
     report = check_claude_md_refusals()
-    assert report.startswith(f"PACT could not update {path}: ")
+    assert report is not None and report.startswith(f"PACT could not update {path}: ")
     assert f"line {start_line} has no end marker" in report
     assert _names(report) == list(MEMORY_SECTIONS)
+    assert report.endswith(CAP_OFF)
 
 
 def test_an_unclosed_fence_before_the_markers_names_every_block(project):
@@ -92,6 +95,7 @@ def test_an_unclosed_fence_before_the_markers_names_every_block(project):
     report = check_claude_md_refusals()
     assert report is not None and report.startswith(f"PACT could not update {path}: line 2 ")
     assert _names(report) == ["the PACT managed block", "Current Session", *MEMORY_SECTIONS]
+    assert report.endswith(CAP_OFF)
 
 
 def test_two_session_blocks_name_only_the_session_block(project):
@@ -99,6 +103,17 @@ def test_two_session_blocks_name_only_the_session_block(project):
     report = check_claude_md_refusals()
     assert report is not None and "lines 4, 9" in report
     assert _names(report) == ["Current Session"]
+    assert not report.endswith(CAP_OFF)
+
+
+def test_a_file_with_no_memory_block_reports_without_the_cap_clause(project):
+    # Only the session block is refused; with no memory block the Pinned
+    # section is absent, not unlocatable.
+    _write(project, f"# Notes\n\n{SB}\n{SB}")
+    report = check_claude_md_refusals()
+    assert report is not None and "lines 3, 8" in report
+    assert _names(report) == ["Current Session"]
+    assert not report.endswith(CAP_OFF)
 
 
 @pytest.mark.parametrize("body, name, line", [
@@ -107,7 +122,9 @@ def test_two_session_blocks_name_only_the_session_block(project):
      "Pinned Context", "line 14"),
     # two Pinned headings: the cap cannot tell which section it counts
     ("## Pinned Context\n### a\n\n## Pinned Context\n### b\n", "Pinned Context", "lines 10, 13"),
-    # the only Working Memory heading is commented out
+    # the pinned start marker has no end marker
+    (f"{PINNED_START_MARKER}\n## Pinned Context\n### a\n", "Pinned Context", "line 10"),
+    # the only Working Memory heading is commented out, and there is no Pinned section
     ("## Retrieved Context\n- r1\n\n<!--\n## Working Memory\n-->\n", "Working Memory", "line 14"),
 ])
 def test_a_refused_section_inside_the_memory_block_is_named_alone(project, body, name, line):
@@ -115,8 +132,8 @@ def test_a_refused_section_inside_the_memory_block_is_named_alone(project, body,
     report = check_claude_md_refusals()
     assert report is not None and line in report
     assert _names(report) == [name]
-    # Only two real Pinned headings turn the cap off without an advisory per edit.
-    assert report.endswith(CAP_OFF) == (line == "lines 10, 13")
+    # A Pinned section the gate cannot locate turns the cap off; an absent one does not.
+    assert report.endswith(CAP_OFF) == (name == "Pinned Context")
 
 
 def test_an_unclosed_fence_inside_the_memory_block_names_the_block_and_its_sections(project):
@@ -124,6 +141,7 @@ def test_an_unclosed_fence_inside_the_memory_block_names_the_block_and_its_secti
     report = check_claude_md_refusals()
     assert report is not None and "line 12 starts an uncertain region" in report
     assert _names(report) == ["the PACT managed block", *MEMORY_SECTIONS]
+    assert report.endswith(CAP_OFF)
 
 
 def test_the_earliest_reason_is_reported(project):
