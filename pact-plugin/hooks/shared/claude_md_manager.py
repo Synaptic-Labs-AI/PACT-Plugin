@@ -842,13 +842,14 @@ def _atomic_write_text(target: Path, content: str, project_root: Path) -> None:
 
 def _legacy_spans_after_cuts(doc: Document, cuts: list[tuple[int, int]],
                              header_end: int) -> list[tuple[int, int]]:
-    """The stale loader lines the ORIGINAL file `doc` reads as prose, as spans
-    in the text left after dropping `cuts` from `doc.text` and then its first
-    `header_end` characters. Parsing that text instead would decide on a text
-    the cuts have changed: a cut session block that closes an HTML block can
-    leave a fenced quote below it reading as prose. A row inside a cut maps to
-    an empty span, so it stays; a row a cut only touches is a marker row, and
-    the header's rows (the title, blank rows, the description) never match."""
+    """The stale loader lines the ORIGINAL file `doc` reads as visible prose,
+    as spans in the text left after dropping `cuts` from `doc.text` and then
+    its first `header_end` characters. Parsing that text instead would decide
+    on a text the cuts have changed: a cut session block that closes an HTML
+    block can leave a fenced quote below it reading as prose. A row inside a
+    cut maps to an empty span, so it stays; a row a cut only touches is a
+    marker row, and the header's rows (the title, blank rows, the
+    description) never match."""
     return [(_offset_after_drop(start, cuts) - header_end, _offset_after_drop(end, cuts) - header_end)
             for start, end in _legacy_line_spans(doc)]
 
