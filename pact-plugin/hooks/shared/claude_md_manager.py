@@ -38,7 +38,7 @@ from .paths import get_claude_config_dir
 # The finder is imported inside the functions that use it: shared/__init__.py
 # imports this module, so a module-level import would load it in every hook.
 if TYPE_CHECKING:
-    from .claude_md_markers import Document, Line
+    from .claude_md_markers import Document, Line, Located
 
 # Project-level CLAUDE.md is preferred at .claude/CLAUDE.md (the new default)
 # but Claude Code also accepts ./CLAUDE.md for backwards compatibility.
@@ -1551,6 +1551,18 @@ def _trim_blank_edges(text: str) -> str:
     return "\n".join(lines[first:last])
 
 
+def _readback_reason(name: str, located: Located) -> str:
+    """Why the rebuilt file's `name` lookup failed, naming a line where one
+    exists. A duplicate, malformed or uncertain result carries its own reason.
+    A block found where the original had none names its first line in the
+    rebuilt file, as the other reasons do."""
+    if located.reason:
+        return located.reason
+    if located.spans:
+        return f"it has a {name} at line {located.spans[0][0] + 1} that the original did not have"
+    return f"its {name} is missing"
+
+
 def _plan_migration(content: str) -> tuple[str | None, str | None]:
     """Plan the migration of `content` into the managed structure:
     (new_content, refusal).
@@ -1736,15 +1748,18 @@ def _plan_migration(content: str) -> tuple[str | None, str | None]:
     # it. A rebuild that fails any of these changed the user's text.
     written = parse(new_content)
     session_after = State.FOUND if session_block else State.ABSENT
-    if (
-        written.find_block(MANAGED_START_MARKER, MANAGED_END_MARKER).state is not State.FOUND
-        or written.find_block(MEMORY_START_MARKER, MEMORY_END_MARKER).state is not State.FOUND
-        or written.find_block(SESSION_START_MARKER, SESSION_END_MARKER).state is not session_after
+    for name, (start_marker, end_marker), wanted in (
+        ("managed block", (MANAGED_START_MARKER, MANAGED_END_MARKER), State.FOUND),
+        ("memory block", (MEMORY_START_MARKER, MEMORY_END_MARKER), State.FOUND),
+        ("Current Session block", (SESSION_START_MARKER, SESSION_END_MARKER), session_after),
     ):
-        return None, (
-            "the migrated file did not read back as one managed block, one "
-            "memory block and the Current Session block it had"
-        )
+        located = written.find_block(start_marker, end_marker)
+        if located.state is not wanted:
+            return None, (
+                "the migrated file did not read back as one managed block, one "
+                "memory block and the Current Session block it had: "
+                + _readback_reason(name, located)
+            )
     if doc.boundary is None and written.boundary is not None:
         return None, (
             "the migrated file would leave a region PACT cannot read, which the "

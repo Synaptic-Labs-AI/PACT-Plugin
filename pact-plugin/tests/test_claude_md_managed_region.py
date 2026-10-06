@@ -32,7 +32,7 @@ from shared.claude_md_manager import (
     migrate_to_managed_structure,
     strip_orphan_kernel_block,
 )
-from shared.claude_md_markers import State, parse
+from shared.claude_md_markers import Document, Located, State, parse
 
 KS, KE = "<!-- PACT_START: v3.16 -->", "<!-- PACT_END -->"
 KERNEL = f"{KS}\nstale persona\n{KE}"
@@ -203,15 +203,40 @@ def test_the_migration_refuses_a_pair_it_cannot_place(project_file, text, line):
     assert project_file.read_text(encoding="utf-8") == text
 
 
-@pytest.mark.parametrize("title", [
-    f"# T\n{MANAGED_END_MARKER}",  # a second managed end marker
-    f"# T\n{MEMORY_START_MARKER}",  # a second memory start marker
-    f"# T\n\n{SB}",  # a session block the file did not have
+@pytest.mark.parametrize("title, reason", [
+    # a second managed end marker
+    (f"# T\n{MANAGED_END_MARKER}", f"{MANAGED_END_MARKER!r} on line 19 has no start marker before it"),
+    # a second memory start marker
+    (f"# T\n{MEMORY_START_MARKER}",
+     f"{MEMORY_START_MARKER!r} on line 5 starts a block inside the block started on line 3"),
+    # a session block the file did not have
+    (f"# T\n\n{SB}", "it has a Current Session block at line 4 that the original did not have"),
 ])
-def test_a_migration_that_would_not_read_back_is_refused(monkeypatch, title):
+def test_a_migration_that_would_not_read_back_is_refused_naming_the_line(monkeypatch, title, reason):
     monkeypatch.setattr(claude_md_manager, "MANAGED_TITLE", title)
     new_content, refusal = _plan_migration("# Project Memory\n\n" + SECTIONS)
-    assert new_content is None and "did not read back" in _str(refusal)
+    assert new_content is None
+    assert refusal == (
+        "the migrated file did not read back as one managed block, one memory block "
+        f"and the Current Session block it had: {reason}")
+
+
+def test_a_rebuild_that_loses_the_session_block_is_refused_naming_it_missing(monkeypatch):
+    # The rebuilt file loses its Current Session block: its session lookup reads
+    # ABSENT, which carries no reason of its own.
+    find_block = Document.find_block
+
+    def losing_the_session_block(doc, start, end, scope=None):
+        if doc.text.startswith(MANAGED_START_MARKER) and start == SESSION_START_MARKER:
+            return Located(State.ABSENT, (), "", None)
+        return find_block(doc, start, end, scope)
+
+    monkeypatch.setattr(Document, "find_block", losing_the_session_block)
+    new_content, refusal = _plan_migration(f"# Project Memory\n\n{SB}\n" + SECTIONS)
+    assert new_content is None
+    assert refusal == (
+        "the migrated file did not read back as one managed block, one memory block "
+        "and the Current Session block it had: its Current Session block is missing")
 
 
 def test_an_indented_memory_heading_is_not_adopted():
