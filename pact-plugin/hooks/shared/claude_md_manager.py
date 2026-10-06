@@ -866,7 +866,7 @@ def _legacy_line_spans(doc: Document) -> list[tuple[int, int]]:
     """The (start, end) span in `doc.text` of each stale loader line the
     parser reads as prose, with its line break. A leading U+FEFF is not part
     of row 0's span, so it stays at byte 0."""
-    return [(_row_start(doc, row), doc.lines[row].end)
+    return [(doc.row_start(row), doc.lines[row].end)
             for row in doc.find_lines(_STALE_ORCHESTRATOR_LINE_RE)]
 
 
@@ -877,17 +877,11 @@ _KERNEL_START_MARKER = "<!-- PACT_START:"
 _KERNEL_END_MARKER = "<!-- PACT_END -->"
 
 
-def _row_start(doc: Document, row: int) -> int:
-    """Where `row`'s content starts in the original text: after a leading
-    U+FEFF, which stays put."""
-    return doc.lines[row].start + (1 if row == 0 and doc.text.startswith("﻿") else 0)
-
-
 def _marker_span(doc: Document, row: int) -> tuple[int, int]:
     """(start, end) in the original text of the marker comment on `row`,
     without the up-to-3-space indent before it or the blanks after it."""
     content = doc.lines[row].content
-    start = _row_start(doc, row)
+    start = doc.row_start(row)
     return start + len(content) - len(content.lstrip(" ")), start + len(content.rstrip(" \t"))
 
 
@@ -1563,7 +1557,7 @@ def _plan_migration(content: str) -> tuple[str | None, str | None]:
         cuts.append((start, end))
     if memory.state is State.FOUND:
         for row in memory.spans[0]:
-            cuts.append((_row_start(doc, row), doc.lines[row].end))
+            cuts.append((doc.row_start(row), doc.lines[row].end))
     remaining = _drop_spans(content, cuts)
 
     # Remove the old top-level heading and description line

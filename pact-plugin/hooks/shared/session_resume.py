@@ -154,17 +154,11 @@ _SESSION_DIR_ROW_RE = re.compile(r"- Session dir:\s*`[^`]+`")
 _BACKTICK_VALUE_RE = re.compile(r"`([^`]+)`")
 
 
-def _row_start(doc: Document, row: int) -> int:
-    """Where `row`'s content starts in the original text: after a leading
-    U+FEFF, which stays put."""
-    return doc.lines[row].start + (1 if row == 0 and doc.text.startswith("﻿") else 0)
-
-
 def _content_span(doc: Document, first: int, last: int) -> tuple[int, int]:
     """(start, end) in the original text of rows first..last, without the
     last row's terminator, which stays put. Document.offsets() would take the
     U+FEFF and the terminator with the rows."""
-    return _row_start(doc, first), _row_start(doc, last) + len(doc.lines[last].content)
+    return doc.row_start(first), doc.row_start(last) + len(doc.lines[last].content)
 
 
 def _session_block_refusal(reason: str) -> str:
@@ -316,15 +310,15 @@ def _session_block_insertion(doc: Document) -> tuple[int | None, str | None]:
         if located.state in (State.DUPLICATE, State.MALFORMED):
             return None, located.reason
     if managed.state is State.FOUND and memory_start.state is State.FOUND:
-        return _row_start(doc, memory_start.spans[0][0]), None
+        return doc.row_start(memory_start.spans[0][0]), None
     memory = doc.find_block(MEMORY_START_MARKER, MEMORY_END_MARKER)
     if memory.state is State.FOUND:
-        return _row_start(doc, memory.spans[0][0]), None
+        return doc.row_start(memory.spans[0][0]), None
     if memory.state is not State.ABSENT:
         return None, memory.reason
     heading = doc.find_section(_RETRIEVED_CONTEXT_HEADING, None)
     if heading.state is State.FOUND:
-        return _row_start(doc, heading.spans[0][0]), None
+        return doc.row_start(heading.spans[0][0]), None
     if heading.state is State.ABSENT:
         return None, None
     return None, heading.reason

@@ -143,6 +143,17 @@ def test_rows_end_only_at_cr_lf_and_crlf(text, contents):
     assert "".join(text[line.start:line.end] for line in doc.lines) == text
 
 
+@pytest.mark.parametrize("text, row, start", [
+    ("\ufeffa\nb\n", 0, 1),  # after the byte-order mark
+    ("a\nb\n", 0, 0),
+    ("\ufeffa\r\nbc\n", 1, 4),  # a later row starts where its line does
+])
+def test_row_start_is_where_the_content_begins(text, row, start):
+    doc = parse(text)
+    assert doc.row_start(row) == start
+    assert text[start:start + len(doc.lines[row].content)] == doc.lines[row].content
+
+
 def test_bom_is_outside_row_zero_content_and_inside_offsets():
     text = "\ufeff" + S + "\nbody\n" + E + "\n"
     doc = parse(text)

@@ -442,6 +442,11 @@ class Document:
         first, last = located.spans[0]
         return tuple(range(first + 1, last))
 
+    def row_start(self, row: int) -> int:
+        """Where `row`'s content starts in the original text: after a leading
+        U+FEFF, which `lines[0].start` counts and which stays put."""
+        return self.lines[row].start + (1 if row == 0 and self.text.startswith(_BOM) else 0)
+
     def offsets(self, first_row: int, last_row: int) -> tuple[int, int]:
         """(start, end) of the rows in the original text, terminator included.
         ValueError on an empty range: insert at `lines[row].start` instead."""
