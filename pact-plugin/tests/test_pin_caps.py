@@ -195,6 +195,45 @@ class TestOverrideRationaleText_PublicReader:
         assert self._read(f"```\n{row}\n```\n", row=1) is None
 
 
+class TestPinsInRows_PublicReader:
+    """The public reader of the pins in a row range of a whole-file parse."""
+
+    TEXT = (
+        "# Notes\n<!-- PACT_MEMORY_START -->\n## Pinned Context\n"
+        "<!-- pinned: 2026-04-20 -->\n### First\nbody one\n```\n### fenced, not a pin\n```\n"
+        "<!-- pinned: 2026-04-21, pin-size-override: reason here -->\n### Second\nbody two\n"
+        "## Working Memory\n<!-- PACT_MEMORY_END -->\n"
+    )
+
+    def _located(self):
+        from shared.claude_md_markers import parse
+        from staleness import locate_pinned
+        doc = parse(self.TEXT)
+        located = locate_pinned(doc)
+        return doc, located, located.spans[0]
+
+    def test_over_the_section_body_it_reads_what_section_pins_reads(self):
+        from pin_caps import pins_in_rows, section_pins
+        doc, located, (heading, last) = self._located()
+        pins = pins_in_rows(doc, heading + 1, last)
+        assert pins == section_pins(doc, located)
+        assert [pin.heading for pin in pins] == ["### First", "### Second"]
+        assert "### fenced, not a pin" in pins[0].body
+        assert pins[1].override_rationale == "reason here"
+
+    def test_a_narrower_range_reads_only_the_pins_headed_in_it(self):
+        from pin_caps import pins_in_rows
+        doc, _, (heading, last) = self._located()
+        second = next(row for row in range(heading, last + 1) if doc.lines[row].content == "### Second")
+        (pin,) = pins_in_rows(doc, second - 1, last)
+        assert (pin.heading, pin.override_rationale) == ("### Second", "reason here")
+
+    def test_an_empty_range_reads_no_pins(self):
+        from pin_caps import pins_in_rows
+        doc, _, (heading, _) = self._located()
+        assert pins_in_rows(doc, heading + 1, heading) == []
+
+
 class TestPinCountCap_EveryPinOccupiesASlot:
     """The count axis counts every pin, whatever it carries. A size override
     exempts a pin from the size cap only, and a STALE pin still holds its

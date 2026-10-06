@@ -265,7 +265,7 @@ def _override_rationale(doc, row: int) -> Optional[str]:
     return None
 
 
-def _pins_in(doc, first: int, last: int) -> List[Pin]:
+def pins_in_rows(doc, first: int, last: int) -> List[Pin]:
     """The pins whose heading rows lie in rows `first`..`last` of `doc`.
 
     A heading is a PROSE row starting `### `; a `### ` line inside a fenced
@@ -317,7 +317,7 @@ def parse_pins(pinned_content: str) -> List[Pin]:
     from shared.claude_md_markers import parse
 
     doc = parse(pinned_content)
-    return _pins_in(doc, 0, len(doc.lines) - 1)
+    return pins_in_rows(doc, 0, len(doc.lines) - 1)
 
 
 def section_pins(doc, located) -> List[Pin]:
@@ -332,7 +332,7 @@ def section_pins(doc, located) -> List[Pin]:
     if located.state is not State.FOUND:
         raise ValueError(f"section_pins needs a FOUND section, not {located.state.value}")
     heading, last = located.spans[0]
-    return _pins_in(doc, heading + 1, last)
+    return pins_in_rows(doc, heading + 1, last)
 
 
 def has_size_override(pin: Pin) -> bool:
