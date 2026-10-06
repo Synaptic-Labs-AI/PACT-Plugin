@@ -425,6 +425,24 @@ def test_a_pin_counts_as_grown_past_the_cap_only_when_it_ends_over_it_and_larger
     assert replay.grows_past_cap(before, after) is grows
 
 
+# A pin just under the cap, one over it and a small one; the replay pads to 13.
+SYNTHETIC = R.doc([("### Near the cap", [NEAR_CAP]), ("### Over the cap", [NEAR_CAP + " " + NEAR_CAP[:300]]),
+                   ("### Small", ["A short body."])])
+
+
+def test_the_replay_labels_agree_with_the_gate_on_a_synthetic_file():
+    """The real-file runner's check on a file every run has: each replayed change
+    through the real gate, judged as the runner judges it."""
+    cases = [(label, pin_growth.pin_cap_decision(pre, post, use_timer=False))
+             for _, pre, post, label in replay.replay(SYNTHETIC)]
+    assert {label for label, _ in cases} >= {R.FAITHFUL, replay.SIZE, R.GROWTH}
+    assert [(label, d.verdict, d.cause) for label, d in cases if _replay_fault(label, d)] == []
+    # A size refusal recast as a refusal for count, or as an allow, must be flagged.
+    sized = [d for label, d in cases if label == replay.SIZE]
+    assert all(_replay_fault(replay.SIZE, d._replace(cause="count")) for d in sized)
+    assert all(_replay_fault(replay.SIZE, d._replace(verdict="ALLOW", cause=None)) for d in sized)
+
+
 def test_ordinary_edits_on_real_files_are_refused_only_for_pin_size():
     """Replays files a user keeps: a project's or a home CLAUDE.md. Leave out the
     parser corpus and census repro files: their pins sit inside fenced documents the
