@@ -172,8 +172,8 @@ MEMORY_END_MARKER = "<!-- PACT_MEMORY_END -->"
 
 # The auto-managed comment each memory heading carries. NAMED HERE so the two
 # writers in THIS module cannot drift apart, which they did: the creation
-# template emitted these and `_build_migrated_content` did not, so a document
-# through migration came out with headings and no comments.
+# template emitted these and the migration did not, so a migrated document
+# came out with headings and no comments.
 #
 # THE TEXT IS SPELLED HERE RATHER THAN IMPORTED, AND THAT IS FORCED RATHER THAN
 # PREFERRED. The canonical definition is `WORKING_MEMORY_COMMENT` and
@@ -286,7 +286,7 @@ PINNED_START_MARKER = "<!-- PACT_MEMORY_PINNED_START -->"
 PINNED_END_MARKER = "<!-- PACT_MEMORY_PINNED_END -->"
 
 # Canonical H1 title for the managed block. Extracted as a constant so
-# the three template sites (ensure_project_memory_md, _build_migrated_content,
+# the three template sites (ensure_project_memory_md, _plan_migration,
 # session_resume.update_session_info Case 0) cannot drift apart. Changing this
 # value changes the title everywhere in one place.
 MANAGED_TITLE = "# PACT Framework and Managed Project Memory"
@@ -837,16 +837,6 @@ def _atomic_write_text(target: Path, content: str, project_root: Path) -> None:
             os.close(parent_fd)
         except OSError:
             pass
-
-
-def _strip_legacy_lines(content: str) -> str:
-    """`content` without the lines from older PACT templates that are now
-    obsolete: the stale orchestrator-loader line, where the parser reads it as
-    prose. A fenced, code or uncertain row that quotes it stays byte for byte.
-    Pure."""
-    from .claude_md_markers import parse
-
-    return _drop_spans(content, _legacy_line_spans(parse(content)))
 
 
 def _legacy_spans_after_cuts(doc: Document, cuts: list[tuple[int, int]],
@@ -1457,19 +1447,6 @@ def _legacy_header_end(doc: Document) -> int:
     return lines[row].start if row < len(lines) else len(doc.text)
 
 
-def _has_comment_row(body: str, comment: str) -> bool:
-    """True when a row of `body` is `comment` as a marker line (at most 3
-    spaces of indent, nothing after it). A fenced, inline-code or mid-line
-    quote of the comment is not one."""
-    from .claude_md_markers import State, parse
-
-    doc = parse(body)
-    return any(
-        doc.find_marker(comment, (row, row)).state is State.FOUND
-        for row in range(len(doc.lines))
-    )
-
-
 # The PACT markers the migration carries as the user wrote them. The rebuilt
 # file must read each the same way the original did, so a fenced or commented
 # copy the rebuild made live is refused rather than written. The routing pair
@@ -1669,7 +1646,9 @@ def _plan_migration(content: str) -> tuple[str | None, str | None]:
         # A row that holds only the comment counts. A quote of it inside a
         # fence, in inline code or mid-line does not, so that body gains the
         # comment.
-        if comment and not _has_comment_row("\n".join(text for _, text in pieces), comment):
+        if comment and not any(
+                rows.find_marker(comment, (section_line.row, section_line.row)).state is State.FOUND
+                for section_lines, _ in pieces for section_line in section_lines):
             parts.append(f"{comment}\n")
         for number, (lines, text) in enumerate(pieces):
             if number:
@@ -1753,27 +1732,6 @@ def _plan_migration(content: str) -> tuple[str | None, str | None]:
                     return None, f"the migrated file would change how line {number} reads"
             offset += source.end - source.start
     return new_content, None
-
-
-def _build_migrated_content(content: str) -> str:
-    """
-    Transform old-format CLAUDE.md content into the new managed structure.
-
-    The migration as _plan_migration plans it. This is a pure function (no
-    I/O) for testability.
-
-    Idempotency guard: content that is already migrated, or that the planner
-    refuses, is returned unchanged.
-
-    Args:
-        content: The existing CLAUDE.md file content.
-
-    Returns:
-        The restructured content with PACT_MANAGED and PACT_MEMORY boundaries,
-        or the original content unchanged.
-    """
-    new_content, _refusal = _plan_migration(content)
-    return content if new_content is None else new_content
 
 
 def match_project_claude_md(file_path_str: str) -> Path | None:

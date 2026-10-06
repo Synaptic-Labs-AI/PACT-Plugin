@@ -286,7 +286,7 @@ class TestMigrationSyncPipeline:
         comment group would greedily swallow ``<!-- PACT_MEMORY_END -->``
         unless the (?!PACT_) negative lookahead blocks it.
         """
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
         from scripts.working_memory import sync_to_claude_md
 
         project_dir = tmp_path / "project"

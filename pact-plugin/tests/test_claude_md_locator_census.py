@@ -26,10 +26,14 @@ What counts as a site:
 - A regex call whose subject is a parser row's `.content` (`line.content`,
   `doc.lines[k].content`) and whose pattern is a per-pin comment pattern (the
   date or override comment, the STALE mark, the budget WARNING) is not a site
-  either: it reads line data on a row the finder has already classified. A
-  call with a heading or block-marker pattern stays a site under every method,
-  so a fence-blind row scan for a heading is still caught, and so does any call
-  on raw text.
+  either, when that same row is guarded as PROSE where the call runs: the call
+  sits in the true branch of an `if` or a conditional expression, or in the
+  element of a comprehension, whose test or filter is `row.kind is PROSE` (or
+  `==`), alone or as one operand of an `and`. It then reads line data on a row
+  the finder has classified as prose. Without the guard the call is a site,
+  because the row may be a FENCE or CODE row. A call with a heading or
+  block-marker pattern stays a site under every method, so a fence-blind row
+  scan for a heading is still caught, and so does any call on raw text.
 - The functions in NAMED_EXEMPT, by name. Each one needs an architect ruling,
   its reason stated beside it, and a site to cover.
 
@@ -56,6 +60,16 @@ Named limits, not seen by the scan:
   literal pieces are assembled).
 - A `find_lines` or `find_section` wrapper that takes its pattern as a
   parameter: its callers are not checked, because most pass headings.
+- Part of a CLAUDE.md that reaches a whole-text parse through a name or a
+  second call: the piece check reads the argument expression one call up from
+  a function that parses its own parameter, and catches a slice or split piece
+  anywhere inside it, but not one stored in a name first or built in a caller
+  further up.
+
+Limits that err toward a site, the safe direction for a test: a per-pin read
+on a row that came from `find_lines` (which returns PROSE rows) but carries no
+kind check is a site, and so is a guard written as an early `continue` or
+`return`. The fix is the one-line positive guard.
 """
 
 import ast
@@ -338,14 +352,57 @@ def _reads_row_content(call, is_re_module, line_data):
     return line_data(pattern)
 
 
+def _is_prose_test(test, row):
+    """`test` holds only when `row`'s kind is PROSE: it is `row.kind is PROSE`
+    (or `==`), or an `and` with that comparison as one operand. A `not`, an `or`
+    or a comparison on another row is no guard."""
+    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And):
+        return any(_is_prose_test(value, row) for value in test.values)
+    return (isinstance(test, ast.Compare) and len(test.ops) == 1
+            and isinstance(test.ops[0], (ast.Is, ast.Eq))
+            and isinstance(test.left, ast.Attribute) and test.left.attr == "kind"
+            and ast.unparse(test.left.value) == row
+            and isinstance(test.comparators[0], ast.Attribute) and test.comparators[0].attr == "PROSE")
+
+
+def _prose_guarded(call, is_re_module, parents):
+    """The row whose `.content` the call reads is PROSE where the call runs: the
+    call sits in the true branch of an `if` or a conditional expression, or in
+    the element of a comprehension, whose test or filter is a PROSE test on that
+    same row (`line` for `line.content`, `doc.lines[k]` for `doc.lines[k].content`,
+    compared as source). The walk stops at the enclosing function."""
+    subject = _subject(call, is_re_module)
+    if not isinstance(subject, ast.Attribute):
+        return False
+    row = ast.unparse(subject.value)
+    child, node = call, parents.get(call)
+    while node is not None and not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        if isinstance(node, ast.If) and child in node.body and _is_prose_test(node.test, row):
+            return True
+        if isinstance(node, ast.IfExp) and child is node.body and _is_prose_test(node.test, row):
+            return True
+        element = (node.key, node.value) if isinstance(node, ast.DictComp) else (getattr(node, "elt", None),)
+        if (isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp))
+                and any(child is part for part in element)
+                and any(_is_prose_test(f, row) for g in node.generators for f in g.ifs)):
+            return True
+        child, node = node, parents.get(node)
+    return False
+
+
 def _locators(nodes, needle, re_aliases, re_funcs, finders, splits_marker_text, strict=False, block=None,
-              line_data=lambda x: False):
+              line_data=lambda x: False, parents=None):
     """(kind, node) for each searching expression whose needle satisfies `needle`.
     strict: only the searched-for operand counts (left of `in`, the first argument,
     the pattern) and a value tested against constants is not a search. `block`
     tests a `find_lines` or `find_section` pattern; None skips both. `line_data`
-    accepts a pattern for the row-content strike exemption; the default refuses
-    the exemption everywhere."""
+    accepts a pattern for the row-content strike exemption, and `parents` (a child
+    to parent map of the function) places the call under its PROSE guard; the
+    defaults refuse the exemption everywhere."""
+    def exempt_read(call, is_re_module):
+        return (parents is not None and _reads_row_content(call, is_re_module, line_data)
+                and _prose_guarded(call, is_re_module, parents))
+
     out = []
     for n in nodes:
         kind = None
@@ -366,10 +423,10 @@ def _locators(nodes, needle, re_aliases, re_funcs, finders, splits_marker_text, 
                 recv = f.value
                 is_re = isinstance(recv, ast.Name) and recv.id in re_aliases
                 if is_re and f.attr in RE_FUN and argm:
-                    if not _reads_row_content(n, True, line_data):
+                    if not exempt_read(n, True):
                         kind = "re." + f.attr
                 elif not is_re and f.attr in RE_FUN - {"split"} and needle(recv):
-                    if not _reads_row_content(n, False, line_data):
+                    if not exempt_read(n, False):
                         kind = "." + f.attr
                 elif f.attr in FIND and argm:
                     kind = "." + f.attr
@@ -475,8 +532,9 @@ def census_sources(sources, exempt=NAMED_EXEMPT):
             other_aliases, _ = _bindings(nodes, other_pred)
             line_data = (lambda x, da=data_aliases, oa=other_aliases:
                          data_pred(x, da) and not other_pred(x, oa))
+            parents = {child: parent for parent in ast.walk(fn) for child in ast.iter_child_nodes(parent)}
             found = _locators(nodes, needle, re_aliases, re_funcs, finders, handles_markers, block=block,
-                              line_data=line_data)
+                              line_data=line_data, parents=parents)
             found += [("helper call", n) for n in nodes if isinstance(n, ast.Call)
                       and _callee(n) in helpers and any(needle(a) for a in _call_args(n))]
             for kind, node in found:
@@ -535,6 +593,212 @@ def test_shipped_shell_scripts_carry_no_marker_literal():
                for f in sorted(PLUGIN.rglob("*.sh")) if "tests" not in f.relative_to(PLUGIN).parts}
     assert sources, "no shipped shell script found; the scan is not reading the tree"
     assert not shell_marker_lines(sources)
+
+
+# --- whole-text parsing -------------------------------------------------------------
+
+# Every `parse(...)` call in shipped code, as (path, function, argument source).
+# Each parses a whole CLAUDE.md text, the file read or the whole text a writer
+# plans to write, or a text that is not a CLAUDE.md. A part of a CLAUDE.md parsed
+# alone reads its rows without the rows above them, so a fence or an HTML block
+# opened earlier is lost. A new call fails `test_every_shipped_parse_reads_a_whole_text`
+# until it is checked and listed here, and an entry no call matches fails too.
+WHOLE_TEXT_PARSES = frozenset({
+    ("hooks/bootstrap_prompt_gate.py", "_record_unrecorded_lead", "content"),
+    ("hooks/pin_caps_gate.py", "_invalid_override", "after"),
+    ("hooks/pin_caps_gate.py", "_invalid_override", "before"),
+    ("hooks/pin_staleness_gate.py", "_counts_show_an_add", "new_text"),
+    ("hooks/pin_staleness_gate.py", "_counts_show_an_add", "old_text"),
+    ("hooks/session_init.py", "check_claude_md_refusals", "content"),
+    ("hooks/session_init.py", "check_pin_slot_status", "content"),
+    ("hooks/shared/claude_md_drift.py", "_pin_state", "text"),
+    ("hooks/shared/claude_md_manager.py", "_plan_kernel_strip", "content"),
+    ("hooks/shared/claude_md_manager.py", "_plan_kernel_strip", "new_content"),
+    ("hooks/shared/claude_md_manager.py", "_plan_migration", "content"),
+    ("hooks/shared/claude_md_manager.py", "_plan_migration", "new_content"),
+    # The file with the managed, session and legacy rows cut out, read whole.
+    ("hooks/shared/claude_md_manager.py", "_plan_migration", "remaining"),
+    ("hooks/shared/claude_md_manager.py", "extract_managed_region", "content"),
+    ("hooks/shared/pin_growth.py", "_decide", "after"),
+    ("hooks/shared/pin_growth.py", "_decide", "before"),
+    ("hooks/shared/pin_markers.py", "plan_insertion", "apply_insertion(content, insertion)"),
+    ("hooks/shared/pin_markers.py", "plan_insertion", "content"),
+    ("hooks/shared/session_resume.py", "_plan_session_block", "content"),
+    ("hooks/shared/session_resume.py", "_plan_session_block", "new_content"),
+    ("hooks/shared/stale_session.py", "session_block_rows", "content"),
+    ("hooks/staleness.py", "_parse_pinned_section", "content"),
+    ("hooks/staleness.py", "check_pinned_block_signal", "content"),
+    ("hooks/staleness.py", "check_pinned_staleness", "content"),
+    ("hooks/staleness.py", "check_pinned_staleness", "new_content"),
+    ("scripts/archive_pin.py", "archive_pin", "content"),
+    ("scripts/archive_pin.py", "archive_pin", "post"),
+    ("scripts/archive_pin.py", "archive_pin", "post.replace(block, '', 1)"),
+    ("scripts/check_pin_caps.py", "_resolve_pins", "content"),
+    # Python source, through `ast.parse`.
+    ("skills/pact-coding-standards/scripts/check_unused_imports.py", "find_unused_imports", "source"),
+    ("skills/pact-memory/scripts/working_memory.py", "_parse_section", "content"),
+    ("skills/pact-memory/scripts/working_memory.py", "sync_retrieved_to_claude_md", "content"),
+    ("skills/pact-memory/scripts/working_memory.py", "sync_retrieved_to_claude_md", "new_content"),
+    ("skills/pact-memory/scripts/working_memory.py", "sync_to_claude_md", "content"),
+    ("skills/pact-memory/scripts/working_memory.py", "sync_to_claude_md", "new_content"),
+})
+
+
+def parse_calls(sources):
+    """(path, function, argument source) for each call in {path: python source}
+    whose callee is named `parse`: a bare name, a name imported as `parse` under
+    another name, or an attribute (`claude_md_markers.parse`, `ast.parse`)."""
+    out = set()
+    for rel, src in sources.items():
+        tree = ast.parse(src)
+        names = {"parse"} | {alias.asname for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+                             for alias in node.names if alias.name == "parse" and alias.asname}
+        quals = {id(node): qual for qual, fn in _functions(tree) for node in _own_nodes(fn)}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            callee = node.func
+            if (isinstance(callee, ast.Name) and callee.id in names) or (
+                    isinstance(callee, ast.Attribute) and callee.attr == "parse"):
+                argument = ast.unparse(node.args[0]) if node.args else ""
+                out.add((rel, quals.get(id(node), "<module>"), argument))
+    return out
+
+
+_PIECE_METHODS = {"split", "rsplit", "partition", "rpartition", "splitlines"}
+
+
+def _is_piece(node):
+    """`node` is part of a text built in place: a slice (`text[a:b]`) or one
+    piece of a split or partition (`text.split(x)[1]`)."""
+    if not isinstance(node, ast.Subscript):
+        return False
+    if isinstance(node.slice, ast.Slice):
+        return True
+    call = node.value
+    return (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+            and call.func.attr in _PIECE_METHODS)
+
+
+def piece_arguments(sources):
+    """(path, caller, callee, argument source) for each call that passes part
+    of a text to a parameter a WHOLE_TEXT_PARSES function parses: a piece
+    anywhere in the argument expression (`content[1:].lstrip()` too). The callee
+    is matched by name in its own module, by the name it is imported under
+    from any module (a package re-export and an alias too), and by attribute
+    name (`staleness._parse_pinned_section`)."""
+    trees = {rel: ast.parse(src) for rel, src in sources.items()}
+    parsed = collections.defaultdict(set)  # (path, function) -> positions and names it parses
+    for rel, qual, argument in WHOLE_TEXT_PARSES:
+        fn = dict(_functions(trees[rel])).get(qual) if rel in trees else None
+        if fn is None:
+            continue
+        positional = [a.arg for a in fn.args.posonlyargs + fn.args.args]
+        if argument in positional:
+            parsed[(rel, qual)] |= {positional.index(argument), argument}
+        elif argument in [a.arg for a in fn.args.kwonlyargs]:
+            parsed[(rel, qual)].add(argument)
+    out = set()
+    for rel, tree in trees.items():
+        quals = {id(node): qual for qual, fn in _functions(tree) for node in _own_nodes(fn)}
+        local = {qual: (path, qual) for path, qual in parsed if path == rel}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    target = next((t for t in parsed if t[1] == alias.name), None)
+                    if target is not None:
+                        local[alias.asname or alias.name] = target
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            callee = node.func
+            if isinstance(callee, ast.Name):
+                target = local.get(callee.id)
+            elif isinstance(callee, ast.Attribute):
+                target = next((t for t in parsed if t[1] == callee.attr), None)
+            else:
+                target = None
+            if target is None:
+                continue
+            passed = [a for i, a in enumerate(node.args) if i in parsed[target]]
+            passed += [k.value for k in node.keywords if k.arg in parsed[target]]
+            for argument in passed:
+                if any(_is_piece(n) for n in ast.walk(argument)):
+                    out.add((rel, quals.get(id(node), "<module>"), target[1], ast.unparse(argument)))
+    return out
+
+
+def test_every_shipped_parse_reads_a_whole_text():
+    calls = parse_calls(_shipped_sources())
+    assert not calls - WHOLE_TEXT_PARSES, (
+        "These shipped calls parse a text not checked as a whole CLAUDE.md or a non-CLAUDE text. "
+        "Parse the whole file and read its rows, or list the call in WHOLE_TEXT_PARSES:\n"
+        + "\n".join("\t".join(c) for c in sorted(calls - WHOLE_TEXT_PARSES)))
+    assert not WHOLE_TEXT_PARSES - calls, (
+        "These WHOLE_TEXT_PARSES entries match no shipped call; drop or update them:\n"
+        + "\n".join("\t".join(c) for c in sorted(WHOLE_TEXT_PARSES - calls)))
+
+
+@pytest.mark.parametrize("src, call", [
+    ("from shared.claude_md_markers import parse\n"
+     "def section(text, start):\n    return parse(text[start:])\n", "text[start:]"),
+    ("from shared.claude_md_markers import parse as read\n"
+     "def section(text, start):\n    return read(text[start:])\n", "text[start:]"),
+    ("from shared import claude_md_markers\n"
+     "def section(body):\n    return claude_md_markers.parse(body)\n", "body"),
+    ("import shared.claude_md_markers as markers\n"
+     "def section(body):\n    return markers.parse(body)\n", "body"),
+])
+def test_a_parse_of_part_of_a_text_is_a_new_call(src, call):
+    calls = parse_calls({**_shipped_sources(), "hooks/seeded.py": src})
+    assert calls - WHOLE_TEXT_PARSES == {("hooks/seeded.py", "section", call)}
+
+
+def test_no_shipped_call_passes_part_of_a_text_to_a_listed_parse():
+    pieces = piece_arguments(_shipped_sources())
+    assert not pieces, (
+        "These calls pass part of a text to a function that parses it as a whole CLAUDE.md. "
+        "Pass the whole text and read its rows:\n" + "\n".join("\t".join(p) for p in sorted(pieces)))
+
+
+@pytest.mark.parametrize("src, piece", [
+    ("from staleness import _parse_pinned_section\n"
+     "def caller(content):\n    return _parse_pinned_section(content[1:])\n", "content[1:]"),
+    ("from staleness import _parse_pinned_section as pinned\n"
+     "def caller(content):\n    return pinned(content.split('## Notes')[1])\n", "content.split('## Notes')[1]"),
+    ("import staleness\n"
+     "def caller(content, start):\n    return staleness._parse_pinned_section(content[start:])\n",
+     "content[start:]"),
+    ("from shared.pin_growth import _decide\n"
+     "def caller(before, after):\n    return _decide(before.partition('x')[2], after, True)\n",
+     "before.partition('x')[2]"),
+    ("from shared import extract_managed_region\n"
+     "def caller(content):\n    return extract_managed_region(content[5:])\n", "content[5:]"),
+    ("from staleness import _parse_pinned_section\n"
+     "def caller(content):\n    return _parse_pinned_section(''.join(content.splitlines(True)[1:]))\n",
+     "''.join(content.splitlines(True)[1:])"),
+    ("from staleness import _parse_pinned_section\n"
+     "def caller(content):\n    return _parse_pinned_section(content[1:].lstrip())\n",
+     "content[1:].lstrip()"),
+])
+def test_a_caller_passing_part_of_a_text_to_a_listed_parse_is_caught(src, piece):
+    pieces = piece_arguments({**_shipped_sources(), "hooks/seeded.py": src})
+    assert {(p[0], p[1], p[3]) for p in pieces} == {("hooks/seeded.py", "caller", piece)}
+
+
+def test_a_caller_passing_whole_texts_to_a_listed_parse_is_not_caught():
+    # A slice passed to a parameter the function does not parse (`trim`) is no piece.
+    src = ("from staleness import _parse_pinned_section as pinned\n"
+           "from shared.pin_growth import _decide\n"
+           "def caller(content, before, after, flags):\n"
+           "    return pinned(content), _decide(before, after, flags[1:])\n")
+    assert piece_arguments({**_shipped_sources(), "hooks/seeded.py": src}) == set()
+
+
+def test_a_listed_whole_text_parse_is_not_new():
+    src = ("from shared.claude_md_markers import parse\n"
+           "def check_pinned_block_signal(content):\n    return parse(content)\n")
+    assert parse_calls({"hooks/staleness.py": src}) <= WHOLE_TEXT_PARSES
 
 
 # --- seeded positives and negatives -----------------------------------------------
@@ -671,8 +935,9 @@ def test_a_marker_rows_wrapper_searching_for_its_parameter_is_caught_at_its_mark
 
 def test_a_fence_blind_row_scan_on_row_content_is_caught():
     """A match or search over every row's `.content` reads FENCE and CODE rows
-    too, so it is a site even though its subject is a parser row; only a strike
-    of a per-pin comment is exempt."""
+    too, so it is a site even though its subject is a parser row. Only a read of
+    a per-pin comment on a row guarded as PROSE is exempt; the same read without
+    the guard is a site."""
     src = ('import re\nfrom shared.claude_md_markers import parse\n'
            'MEMORY_START_MARKER = "<!-- PACT_MEMORY_START -->"\n'
            '_PINNED = re.compile(r"^## Pinned Context\\s*$")\n'
@@ -688,9 +953,47 @@ def test_a_fence_blind_row_scan_on_row_content_is_caught():
            '    return [_DATE_COMMENT_RE.sub("", line.content) for line in doc.lines[first:last + 1]]\n'
            '_OVERRIDE_COMMENT_ROW = re.compile(r"\\s*<!--\\s*pinned:.*pin-size-override:.*-->")\n'
            'def override_row(doc, row):\n'
-           '    return _OVERRIDE_COMMENT_ROW.fullmatch(doc.lines[row].content)\n')
+           '    return _OVERRIDE_COMMENT_ROW.fullmatch(doc.lines[row].content)\n'
+           'def strike_prose_dates(doc, first, last):\n'
+           '    return [_DATE_COMMENT_RE.sub("", line.content) for line in doc.lines[first:last + 1]\n'
+           '            if line.kind is Kind.PROSE]\n'
+           'def prose_override_row(doc, row):\n'
+           '    if doc.lines[row].kind is Kind.PROSE:\n'
+           '        return _OVERRIDE_COMMENT_ROW.fullmatch(doc.lines[row].content)\n')
     found = sorted((f, k) for (_r, f, k, _e) in census_sources({"hooks/seeded.py": src}))
-    assert found == [("heading_row", ".match"), ("strike_starts", ".sub")], found
+    assert found == [("heading_row", ".match"), ("override_row", ".fullmatch"),
+                     ("strike_dates", ".sub"), ("strike_starts", ".sub")], found
+
+
+_STALE_SEARCH = 'return re.compile(r"<!-- STALE: .*-->").search('
+
+
+@pytest.mark.parametrize("shape, body, kind", [
+    ("strike on every row",
+     'return [re.compile(r"<!-- pinned: .*-->").sub("", line.content) for line in parse(text).lines]', ".sub"),
+    ("strike on one row", 'return re.sub(r"<!-- pinned: .*-->", "", parse(text).lines[1].content)', "re.sub"),
+    ("override read on any row",
+     ('doc = parse(text)\n'
+      'return re.compile(r"\\s*<!--\\s*pinned:.*pin-size-override:.*-->").fullmatch(doc.lines[3].content)'),
+     ".fullmatch"),
+    ("guard on another row",
+     "doc = parse(text)\nif doc.lines[0].kind is Kind.PROSE:\n    " + _STALE_SEARCH + "doc.lines[1].content)",
+     ".search"),
+    ("read in the else branch",
+     ("line = parse(text).lines[0]\nif line.kind is Kind.PROSE:\n    return None\n"
+      "else:\n    " + _STALE_SEARCH + "line.content)"), ".search"),
+    ("negated guard",
+     "line = parse(text).lines[0]\nif not (line.kind is Kind.PROSE):\n    " + _STALE_SEARCH + "line.content)",
+     ".search"),
+    ("guard in an or",
+     "line = parse(text).lines[0]\nif line.kind is Kind.PROSE or text:\n    " + _STALE_SEARCH + "line.content)",
+     ".search"),
+    ("kind compared with another kind",
+     "line = parse(text).lines[0]\nif line.kind is Kind.CODE:\n    " + _STALE_SEARCH + "line.content)",
+     ".search"),
+])
+def test_a_per_pin_read_without_a_prose_guard_on_its_row_is_caught(shape, body, kind):
+    assert _kinds(body) == [kind], shape
 
 
 def test_a_named_exemption_drops_its_function_and_only_it():
@@ -764,11 +1067,17 @@ def test_an_anchored_heading_pattern_is_caught_in_a_marker_module():
     # An identity test is never a site, on a finder result or on a marker.
     "loc = parse(text).find_block(SESSION_START_MARKER, SESSION_END_MARKER)\nreturn loc.state is State.FOUND",
     "m = SESSION_END_MARKER\nreturn [l for l in lines if l is m]",
-    # Line data: a per-pin comment pattern applied to a row the finder classified.
-    'return [re.compile(r"<!-- pinned: .*-->").sub("", line.content) for line in parse(text).lines]',
-    'return re.sub(r"<!-- pinned: .*-->", "", parse(text).lines[1].content)',
-    'return re.compile(r"<!-- STALE: .*-->").search(parse(text).lines[2].content)',
-    'return re.compile(r"\\s*<!--\\s*pinned:.*pin-size-override:.*-->").fullmatch(parse(text).lines[0].content)',
+    # Line data: a per-pin comment pattern applied to a row the finder classified
+    # as PROSE, guarded by a comprehension filter, a conditional expression, an
+    # `if` with `==`, and an `and`.
+    ('return [re.compile(r"<!-- pinned: .*-->").sub("", line.content) for line in parse(text).lines\n'
+     '        if line.kind is Kind.PROSE]'),
+    ('line = parse(text).lines[1]\n'
+     'return re.sub(r"<!-- pinned: .*-->", "", line.content) if line.kind is Kind.PROSE else None'),
+    ('doc = parse(text)\nif doc.lines[2].kind == Kind.PROSE:\n'
+     '    return re.compile(r"<!-- STALE: .*-->").search(doc.lines[2].content)'),
+    ('doc = parse(text)\nif text and doc.lines[0].kind is Kind.PROSE:\n'
+     '    return re.compile(r"\\s*<!--\\s*pinned:.*pin-size-override:.*-->").fullmatch(doc.lines[0].content)'),
 ])
 def test_finder_routed_calls_writers_and_unrelated_searches_are_not_sites(body):
     assert _kinds(body) == []
