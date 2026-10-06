@@ -186,9 +186,18 @@ class TestOverrideRationaleText_PublicReader:
          "keep a, b, reconfirmed: soon"),
         ("<!-- pinned: 2026-04-20, reconfirmed: 2026-07-01 because a, pin-size-override: reason, "
          "reconfirmed: 2026-07-25 because b -->", "reason"),
+        ("<!-- pinned: 2026-04-20, pin-size-override: keep (v2) -->", "keep (v2)"),
+        ("<!-- pinned: 2026-04-20, pin-size-override: keep it. -->", "keep it."),
+        ("<!-- pinned: 2026-04-20, pin-size-override: keep (v2). - reconfirmed: 2026-07-25 because x -->",
+         "keep (v2)."),
+        ("<!-- pinned: 2026-04-20, pin-size-override: ; reconfirmed: 2026-07-25 because x -->", ""),
+        ("<!-- pinned: 2026-04-20 (reconfirmed: 2026-07-25 because a, b), pin-size-override: reason -->",
+         "reason"),
     ], ids=["plain", "spacing and case", "empty field", "over the limit", "reconfirmed before it",
             "reconfirmed after it", "reconfirmed after it, any case", "a reconfirmed word with no date",
-            "reconfirmed on both sides"])
+            "reconfirmed on both sides", "a closing parenthesis kept", "a closing full stop kept",
+            "only the separator before a reconfirmation dropped", "only a separator before a reconfirmation",
+            "reconfirmed in parentheses before it, a comma in the reason"])
     def test_it_returns_the_stripped_field_before_any_validity_check(self, row, text):
         assert self._read(f"{row}\n### Entry\nBody.\n") == text
 
@@ -200,8 +209,10 @@ class TestOverrideRationaleText_PublicReader:
         "### Entry",
         "<!-- pinned: 2026-04-20, reconfirmed: 2026-07-25 because x -->",
         "<!-- pinned: 2026-04-20, note: x, pin-size-override: reason -->",
+        "<!-- pinned: 2026-04-20, note: x; reconfirmed: 2026-07-25 because y, pin-size-override: reason -->",
     ], ids=["date only", "other field", "prose after it", "field after a closed comment", "heading",
-            "reconfirmed only", "another field before the override"])
+            "reconfirmed only", "another field before the override",
+            "another field before a reconfirmation before the override"])
     def test_it_is_none_for_a_row_that_is_not_an_override_comment(self, row):
         assert self._read(f"{row}\n### Entry\nBody.\n") is None
 

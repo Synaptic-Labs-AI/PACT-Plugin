@@ -193,10 +193,20 @@ RECONFIRM = "reconfirmed: 2026-10-06 because the routing table still cites it in
 OVERRIDDEN = _doc("\n".join([_pin(1, body=_words("alpha", 1700), override=RATIONALE, date="2026-05-26")]
                             + _rest()))
 OVERRIDDEN_ROW = f"<!-- pinned: 2026-05-26, pin-size-override: {RATIONALE} -->"
-RECONFIRMED = [
-    ("after the rationale", f"<!-- pinned: 2026-05-26, pin-size-override: {RATIONALE}, {RECONFIRM} -->"),
-    ("before the override", f"<!-- pinned: 2026-05-26, {RECONFIRM}, pin-size-override: {RATIONALE} -->"),
-]
+RECONFIRM_WITH_COMMA = "reconfirmed: 2026-10-06 because the table, and the router, still cite it"
+# The separators a curator writes before a reconfirmation; the age reader
+# honours each, so the override reader must too.
+SEPARATORS = [(", ", "a comma"), ("; ", "a semicolon"), (" (", "a parenthesis"), (" - ", "a dash"),
+              (" ", "a space")]
+RECONFIRMED = (
+    [(f"after the rationale, {label}", f"<!-- pinned: 2026-05-26, pin-size-override: {RATIONALE}{sep}{RECONFIRM} -->")
+     for sep, label in SEPARATORS]
+    + [(f"before the override, {label}", f"<!-- pinned: 2026-05-26{sep}{RECONFIRM}, pin-size-override: {RATIONALE} -->")
+       for sep, label in SEPARATORS]
+    + [(f"before the override, {label}, a comma in the reason",
+        f"<!-- pinned: 2026-05-26{sep}{RECONFIRM_WITH_COMMA}, pin-size-override: {RATIONALE} -->")
+       for sep, label in SEPARATORS]
+)
 
 
 @pytest.mark.parametrize("name, row", RECONFIRMED, ids=[row[0] for row in RECONFIRMED])
@@ -223,6 +233,15 @@ INVALID_RECONFIRMED = [
      "Override rationale is 130 chars (max: 120). Shorten it."),
     ("before the override, empty rationale",
      f"<!-- pinned: 2026-05-26, {RECONFIRM}, pin-size-override:  -->",
+     "Override rationale is empty — provide a non-empty reason."),
+    ("after a semicolon, rationale over the limit",
+     f"<!-- pinned: 2026-05-26, pin-size-override: {LONG}; {RECONFIRM} -->",
+     "Override rationale is 130 chars (max: 120). Shorten it."),
+    ("before the override after a dash, a comma in the reason, rationale over the limit",
+     f"<!-- pinned: 2026-05-26 - {RECONFIRM_WITH_COMMA}, pin-size-override: {LONG} -->",
+     "Override rationale is 130 chars (max: 120). Shorten it."),
+    ("only a separator before the reconfirmation",
+     f"<!-- pinned: 2026-05-26, pin-size-override: ; {RECONFIRM} -->",
      "Override rationale is empty — provide a non-empty reason."),
 ]
 

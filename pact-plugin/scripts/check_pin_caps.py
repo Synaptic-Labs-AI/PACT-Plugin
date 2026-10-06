@@ -148,13 +148,12 @@ PINNED_STALENESS_DAYS = _staleness.PINNED_STALENESS_DAYS
 # The pinned date is the field after the comment's first colon, which follows
 # `pinned`: `<!--` and the whitespace before the keyword hold none. The
 # re-confirmation date is a `search`, not a `fullmatch`, because it sits in a
-# trailing clause (`, reconfirmed: YYYY-MM-DD because ...`) after the date. The
-# upstream body class refuses the `-->` terminator and nothing else, so that
-# trailing content reaches these patterns intact.
+# clause after the date or the override rationale. The upstream body class
+# refuses the `-->` terminator and nothing else, so that content reaches these
+# patterns intact. The reconfirmation is pin_caps' own definition, which the
+# override reader cuts out of a rationale, so the two readers agree on it.
 _LEADING_DATE_RE = re.compile(r"\s*(\d{4}-\d{2}-\d{2})")
-_RECONFIRMED_DATE_RE = re.compile(
-    r"reconfirmed:\s*(\d{4}-\d{2}-\d{2})", re.IGNORECASE
-)
+_RECONFIRMED_DATE_RE = _pin_caps.RECONFIRMED_DATE_RE
 
 
 def _parse_iso_date(value):

@@ -43,9 +43,10 @@ PIN_STALE_BLOCK_THRESHOLD = 2
 OVERRIDE_RATIONALE_MAX = 120
 
 # Single source for the pin-comment grammar. The strike pattern
-# (`_DATE_COMMENT_RE`) and the attribution row patterns (`_DATE_COMMENT_ROW`,
-# `_OVERRIDE_COMMENT_HEAD`) are built from these four fragments, so the strip
-# path and the attribution path cannot drift apart on the shape of a comment.
+# (`_DATE_COMMENT_RE`), the attribution row pattern (`_DATE_COMMENT_ROW`) and
+# the override reader's patterns are built from these four fragments, so the
+# strip path and the attribution path cannot drift apart on the shape of a
+# comment.
 #
 # `_COMMENT_CHAR` is one character of a comment interior: either a character
 # that is not `-`, or a `-` that does not start `-->`. A run of this class
@@ -101,21 +102,27 @@ _DATE_COMMENT_ROW = re.compile(
     rf'\s*{_PIN_COMMENT_OPEN}{_COMMENT_CHAR}+?{_PIN_COMMENT_CLOSE}\s*\Z',
     re.IGNORECASE,
 )
-# A reconfirmation clause: `, reconfirmed: YYYY-MM-DD`, then its reason.
-_RECONFIRM_CLAUSE = r',\s*reconfirmed:\s*\d{4}-\d{2}-\d{2}'
-# The start of a combined date and size-override comment, up to the field
-# name: the date, optionally a reconfirmation, then `, pin-size-override:`.
-# The rationale runs from there to the closing `-->`, less a reconfirmation
-# written after it, so either placement keeps the override:
+# A reconfirmation, wherever it sits in a pin comment. `check_pin_caps` dates
+# a pin from it and the override reader keeps it out of the rationale, so the
+# two read one shape.
+RECONFIRMED_DATE_RE = re.compile(r'reconfirmed:\s*(\d{4}-\d{2}-\d{2})', re.IGNORECASE)
+# What may separate a reconfirmation from the text before it.
+_RECONFIRM_SEPARATORS = " \t\u00a0,;(-\u2013\u2014"
+# A combined date and size-override comment. The override field starts at the
+# comment's first `, pin-size-override:`; before it sits the comma-free date,
+# alone or followed by a reconfirmation (a comma may lead that). The rationale
+# runs from the field name to the closing `-->`, less a reconfirmation written
+# after it, so either placement keeps the override:
 #   <!-- pinned: 2026-04-11, pin-size-override: verbatim dispatch form... -->
-#   <!-- pinned: 2026-04-11, reconfirmed: 2026-07-25 because R, pin-size-override: O -->
-#   <!-- pinned: 2026-04-11, pin-size-override: O, reconfirmed: 2026-07-25 because R -->
-_OVERRIDE_COMMENT_HEAD = re.compile(
-    rf'\s*{_PIN_COMMENT_OPEN}{_COMMENT_CHAR_NO_COMMA}+'
-    rf'(?:{_RECONFIRM_CLAUSE}{_COMMENT_CHAR}*?)?,\s*pin-size-override:',
-    re.IGNORECASE,
+#   <!-- pinned: 2026-04-11; reconfirmed: 2026-07-25 because R, pin-size-override: O -->
+#   <!-- pinned: 2026-04-11, pin-size-override: O (reconfirmed: 2026-07-25 because R) -->
+_PIN_COMMENT_START = re.compile(rf'\s*{_PIN_COMMENT_OPEN}', re.IGNORECASE)
+_OVERRIDE_FIELD = re.compile(r',\s*pin-size-override:', re.IGNORECASE)
+_OVERRIDE_DATE_PART = re.compile(
+    rf'{_COMMENT_CHAR_NO_COMMA}+?(?:,\s*)?{RECONFIRMED_DATE_RE.pattern}.*'
+    rf'|{_COMMENT_CHAR_NO_COMMA}+',
+    re.IGNORECASE | re.DOTALL,
 )
-_TRAILING_RECONFIRM = re.compile(rf'{_RECONFIRM_CLAUSE}\b.*\Z', re.IGNORECASE | re.DOTALL)
 # A row holding a STALE marker anywhere, which is where `is_stale` has always
 # looked for one.
 _STALE_MARKER_ANYWHERE_ROW = re.compile(rf'.*?{_STALE_MARKER_RE.pattern}', re.IGNORECASE)
@@ -241,23 +248,30 @@ def override_rationale_text(doc, row: int) -> Optional[str]:
     stripped, before any validity check; None when that row is not a PROSE
     row holding only an override comment.
 
-    The row is one closed pin comment whose text starts with the override
-    head: the date, optionally a reconfirmation, then `, pin-size-override:`.
-    The rationale is the text from the field name to the closing `-->`, less
-    a reconfirmation written after it (`, reconfirmed: YYYY-MM-DD ...`). The
+    The row is one closed pin comment with an override field: its first
+    `, pin-size-override:`, with only the comma-free date, or the date and a
+    reconfirmation, before it. The rationale is the text from the field name
+    to the closing `-->`, less a reconfirmation written after it
+    (`RECONFIRMED_DATE_RE`, then the rest) and the separator before that. The
     pin-cap gate validates it; `_override_rationale` decides with it.
     """
     from shared.claude_md_markers import Kind
 
     line = doc.lines[row]
-    head = None
+    start = field = None
     if line.kind is Kind.PROSE:
         if _DATE_COMMENT_ROW.match(line.content):
-            head = _OVERRIDE_COMMENT_HEAD.match(line.content)
-    if head is None:
+            start = _PIN_COMMENT_START.match(line.content)
+            field = _OVERRIDE_FIELD.search(line.content, start.end()) if start else None
+    if start is None or field is None:
         return None
-    rationale = line.content.rstrip()[head.end():-len(_PIN_COMMENT_CLOSE)]
-    return _TRAILING_RECONFIRM.sub("", rationale).strip()
+    if not _OVERRIDE_DATE_PART.fullmatch(line.content, start.end(), field.start()):
+        return None
+    rationale = line.content.rstrip()[field.end():-len(_PIN_COMMENT_CLOSE)]
+    reconfirm = RECONFIRMED_DATE_RE.search(rationale)
+    if reconfirm is not None:
+        rationale = rationale[:reconfirm.start()].rstrip(_RECONFIRM_SEPARATORS)
+    return rationale.strip()
 
 
 def _override_rationale(doc, row: int) -> Optional[str]:

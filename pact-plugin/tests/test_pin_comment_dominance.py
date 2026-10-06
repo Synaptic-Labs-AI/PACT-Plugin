@@ -505,8 +505,10 @@ class TestPinCommentRows_WholeRowReaders:
     def test_the_comment_patterns_stay_case_insensitive(self):
         import re
 
-        from pin_caps import _DATE_COMMENT_RE, _DATE_COMMENT_ROW, _OVERRIDE_COMMENT_HEAD
-        for pattern in (_DATE_COMMENT_RE, _DATE_COMMENT_ROW, _OVERRIDE_COMMENT_HEAD):
+        from pin_caps import (RECONFIRMED_DATE_RE, _DATE_COMMENT_RE, _DATE_COMMENT_ROW,
+                              _OVERRIDE_DATE_PART, _OVERRIDE_FIELD, _PIN_COMMENT_START)
+        for pattern in (_DATE_COMMENT_RE, _DATE_COMMENT_ROW, _PIN_COMMENT_START, _OVERRIDE_FIELD,
+                        _OVERRIDE_DATE_PART, RECONFIRMED_DATE_RE):
             assert pattern.flags & re.IGNORECASE, pattern.pattern
 
 

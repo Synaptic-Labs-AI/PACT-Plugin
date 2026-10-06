@@ -299,6 +299,24 @@ class TestPinAgeDays_Unit:
         assert pin.override_rationale == "verbatim form"
         assert check_pin_caps._pin_age_days(pin.date_comment, now=self.NOW) == 5
 
+    def test_the_reconfirmation_is_pin_caps_own_definition(self):
+        """One shape for both readers: what dates a pin here is what the
+        override reader cuts out of a rationale. The module compiles no
+        reconfirmation pattern of its own; the identity check alone cannot see
+        a copy, because `re.compile` caches equal patterns."""
+        import ast
+        import inspect
+
+        import check_pin_caps
+        import pin_caps
+
+        assert check_pin_caps._RECONFIRMED_DATE_RE is pin_caps.RECONFIRMED_DATE_RE
+        tree = ast.parse(inspect.getsource(check_pin_caps))
+        copies = [node.value for node in ast.walk(tree)
+                  if isinstance(node, ast.Constant) and isinstance(node.value, str)
+                  and "reconfirmed:" in node.value and "\\d" in node.value]
+        assert copies == []
+
     def test_size_override_comment_still_yields_age(self):
         """The override form carries a trailing clause too; age must still
         parse out of it, or every oversized pin would report unknown."""
