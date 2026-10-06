@@ -49,7 +49,6 @@ from __future__ import annotations
 
 # ─── stdlib first (used by _emit_load_failure_allow BEFORE wrapped imports) ─
 import json
-import re
 import sys
 from pathlib import Path
 from typing import NoReturn, Optional
@@ -75,36 +74,11 @@ try:
     import shared.pact_context as pact_context
     from shared.claude_md_manager import MEMBER_PIN_INSTRUCTION
     from shared.failure_log import append_failure
-    import pin_caps
-    from pin_caps import (
-        OVERRIDE_COMMENT_RE,
-        OVERRIDE_RATIONALE_MAX,
-    )
+    from pin_caps import OVERRIDE_RATIONALE_MAX
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-open catch-all
     _emit_load_failure_allow("module imports", _module_load_error)
 
 _GATED_TOOLS = frozenset({"Edit", "Write"})
-
-# Line-terminator chars refused in an override rationale. DERIVED from
-# pin_caps._FORBIDDEN_TERMINATOR_TABLE (the parser-side strip table) at
-# module load — single source of truth, cannot drift. Plan invariant #5:
-# parser / CLI / hook char sets MUST match; hand-maintained triple-twin
-# copies defeat the existing drift-guard test (test_staleness.py:1182)
-# which compares parser vs CLI only. A str.maketrans table maps
-# ordinal → None (delete-translate shape); chr() on each key recovers
-# the single-char string, and join() produces a membership-check string
-# compatible with `any(c in rationale for c in _FORBIDDEN_RATIONALE_CHARS)`.
-_FORBIDDEN_RATIONALE_CHARS = "".join(
-    chr(ordinal) for ordinal in pin_caps._FORBIDDEN_TERMINATOR_TABLE.keys()
-)
-
-# One row holding a full override comment, with the whitespace around it that
-# today's stripped match tolerated.
-_OVERRIDE_ROW = re.compile(
-    r"\s*(?:" + OVERRIDE_COMMENT_RE.pattern[2:-2] + r")\s*\Z", OVERRIDE_COMMENT_RE.flags
-)
-_OVERRIDE_FIELD_LENGTH = len("pin-size-override:")
-_COMMENT_CLOSE_LENGTH = len("-->")
 
 _FAIL_BASELINE_READ = "pin_caps_gate_baseline_read"
 _FAIL_DECISION = "pin_caps_gate_decision"
@@ -131,17 +105,6 @@ def _validate_override_rationale(rationale: Optional[str]) -> Optional[str]:
             f"(max: {OVERRIDE_RATIONALE_MAX}). Shorten it or compress "
             "the pin body."
         )
-    # Unreached at runtime: the parser ends a row at \r and \n, and the
-    # override row pattern cannot match across the other terminators
-    # (`test_splitlines_eats_forbidden_chars_before_validation`). Kept so a
-    # future extraction that spans rows fails closed on a terminator, and as
-    # the consumer of the derived `_FORBIDDEN_RATIONALE_CHARS`.
-    if any(c in rationale for c in _FORBIDDEN_RATIONALE_CHARS):
-        return (
-            "Override rationale contains a line terminator "
-            "(newline, carriage return, or Unicode line separator). "
-            "Remove the terminator and retry."
-        )
     return None
 
 
@@ -149,11 +112,16 @@ def _invalid_override(before: str, after: str) -> Optional[str]:
     """The deny reason for an invalid size override on a pin the change adds
     or edits, else None.
 
-    Read from the fence-aware parse of the text after: only PROSE rows of pins
-    whose text (comment row through body) is not in the text before verbatim.
-    So a fenced example of the override syntax is not an override, and an
-    unchanged or verbatim-moved pin is not re-checked.
+    Read from the fence-aware parse of the text after, on the one row the
+    parser attributes to each pin as its comment (the first row `pin_spans`
+    gives it), through `pin_caps.override_rationale_text`, so the gate and the
+    parser read the same override. An override-shaped row elsewhere in a body,
+    or in a fenced example, is body text for both, and a row holding a line
+    break `str.splitlines` breaks at is never attributed. Only pins whose text
+    (comment row through body) is not in the text before verbatim are checked,
+    so an unchanged or verbatim-moved pin is not re-checked.
     """
+    from pin_caps import override_rationale_text
     from shared.claude_md_markers import State, parse
     from shared.pin_growth import locate_pinned, pin_spans
 
@@ -166,20 +134,10 @@ def _invalid_override(before: str, after: str) -> Optional[str]:
         start, stop = doc.offsets(first, end)
         if doc.text[start:stop] in before:
             continue
-        for row in doc.find_lines(_OVERRIDE_ROW, (first, end)):
-            reason = _validate_override_rationale(_rationale(doc.lines[row].content))
-            if reason is not None:
-                return reason
+        reason = _validate_override_rationale(override_rationale_text(doc, first))
+        if reason is not None:
+            return reason
     return None
-
-
-def _rationale(row_content: str) -> str:
-    """The rationale of a row `_OVERRIDE_ROW` matched: the text between the
-    field name, which follows the comment's first comma (the date field holds
-    none), and the closing `-->`, stripped."""
-    comment = row_content.strip()
-    field = comment[comment.index(",") + 1:].lstrip()
-    return field[_OVERRIDE_FIELD_LENGTH:-_COMMENT_CLOSE_LENGTH].strip()
 
 
 def gate_decision(before: str, tool_name: str, tool_input: dict):

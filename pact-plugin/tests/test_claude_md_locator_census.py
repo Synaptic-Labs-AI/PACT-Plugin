@@ -686,9 +686,9 @@ def test_a_fence_blind_row_scan_on_row_content_is_caught():
            '    return [_START_RE.sub("", line.content) for line in parse(content).lines]\n'
            'def strike_dates(doc, first, last):\n'
            '    return [_DATE_COMMENT_RE.sub("", line.content) for line in doc.lines[first:last + 1]]\n'
-           '_OVERRIDE_ROW = re.compile(r"\\s*<!--\\s*pinned:.*pin-size-override:.*-->")\n'
+           '_OVERRIDE_COMMENT_ROW = re.compile(r"\\s*<!--\\s*pinned:.*pin-size-override:.*-->")\n'
            'def override_row(doc, row):\n'
-           '    return _OVERRIDE_ROW.fullmatch(doc.lines[row].content)\n')
+           '    return _OVERRIDE_COMMENT_ROW.fullmatch(doc.lines[row].content)\n')
     found = sorted((f, k) for (_r, f, k, _e) in census_sources({"hooks/seeded.py": src}))
     assert found == [("heading_row", ".match"), ("strike_starts", ".sub")], found
 

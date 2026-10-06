@@ -334,64 +334,45 @@ class TestPinCapsGate_Matrix_Edit:
         })
         assert result is None, result
 
-    @pytest.mark.parametrize("terminator", ["\n", "\r", " ", " ", ""])
-    def test_edit_override_with_line_terminator_denies(self, gate_env, terminator):
-        """Override rationale containing forbidden line-terminator chars → DENY.
-
-        Invariant: the gate's _FORBIDDEN_RATIONALE_CHARS is derived from
-        pin_caps._FORBIDDEN_TERMINATOR_TABLE (no twin-copy drift). This
-        test asserts each documented forbidden char trips the gate.
-
-        Note: rationales containing a newline don't even reach the line-
-        terminator check because OVERRIDE_COMMENT_RE.fullmatch requires a
-        single-line pin-size-override comment. The rationale extraction
-        uses splitlines() + .strip(), which strips newline/CR entirely,
-        so a rationale with a true newline is rejected at regex-match
-        time (returns None → no override claimed → no deny from invalid-
-        override path). U+2028/U+2029/U+0085 slip past splitlines in some
-        renderers — those ARE caught by the char check.
-        """
+    def test_an_override_shaped_row_inside_a_body_is_not_an_override(self, gate_env):
+        """Only the row the parser attributes to a pin as its comment is read as
+        its override. The same text further down an edited pin's body is body
+        text, so an empty rationale there is not refused."""
         env = gate_env(pin_count=3)
-        # Build the candidate — rationale has the terminator embedded.
-        rationale = f"valid text{terminator}injected"
-        # Put the override comment on its own line so splitlines isolates it.
-        new_string = f"<!-- pinned: 2026-04-20, pin-size-override: {rationale} -->"
         result = _call_gate({
             "tool_name": "Edit",
             "tool_input": {
                 "file_path": str(env["claude_md"]),
-                "old_string": "Pin0",
-                "new_string": new_string,
+                "old_string": "### Pin1\nxxxx",
+                "new_string": "### Pin1\nxxxx\n<!-- pinned: 2026-04-20, pin-size-override:   -->",
                 "replace_all": False,
             },
         })
-        # Empirical finding: Python's `splitlines()` recognizes U+2028,
-        # U+2029, U+0085 AND ASCII newline/CR as line boundaries. All
-        # five terminators are stripped BEFORE the gate's forbidden-char
-        # check — so the _FORBIDDEN_RATIONALE_CHARS check is effectively
-        # dead code for these specific chars. What matters observably:
-        # the terminator must NEVER be accepted into a parsed Pin's
-        # override_rationale. Either the gate denies, or the gate allows
-        # because no override was captured (rationale=None). A ALLOW
-        # result here means the terminator was not smuggled into a pin.
-        if result is not None:
-            assert terminator not in result, (
-                f"terminator {terminator!r} leaked into deny reason"
-            )
+        assert result is None, result
 
-    def test_gate_forbidden_chars_derived_from_parser_table(self):
-        """Invariant #5: no twin-copy drift. The gate's
-        `_FORBIDDEN_RATIONALE_CHARS` is derived at module load from
-        `pin_caps._FORBIDDEN_TERMINATOR_TABLE`, not duplicated as a
-        literal. A parser-side table change must propagate to the gate
-        without a second edit site.
-        """
-        import pin_caps
-        import pin_caps_gate
-        parser_chars = "".join(
-            chr(o) for o in pin_caps._FORBIDDEN_TERMINATOR_TABLE.keys()
-        )
-        assert set(pin_caps_gate._FORBIDDEN_RATIONALE_CHARS) == set(parser_chars)
+    @pytest.mark.parametrize("terminator, ord_hex", [
+        ("\n", "0x0a"), ("\r", "0x0d"), ("\u2028", "0x2028"), ("\u2029", "0x2029"),
+        ("\x85", "0x0085"), ("\x0b", "0x0b"), ("\x0c", "0x0c"), ("\x1c", "0x1c"),
+    ])
+    def test_a_terminator_in_a_rationale_is_not_an_override(self, gate_env, terminator, ord_hex):
+        """A comment row broken by a line terminator, or holding a character
+        `str.splitlines` breaks at, is not attributed to the pin, so it is not
+        an override: the gate does not refuse it as an invalid one, and a small
+        pin under it is allowed. The pin is the second, so the unattributed row
+        sits at the end of the first pin's rows, where a check of every row
+        would read it."""
+        env = gate_env(pin_count=3)
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "old_string": "<!-- pinned: 2026-04-20 -->\n### Pin1",
+                "new_string": (f"<!-- pinned: 2026-04-20, pin-size-override: valid text{terminator}injected -->\n"
+                               "### Pin1"),
+                "replace_all": False,
+            },
+        })
+        assert result is None, (ord_hex, result)
 
     @pytest.mark.parametrize(
         "terminator,ord_hex",
@@ -410,7 +391,7 @@ class TestPinCapsGate_Matrix_Edit:
         unlocks the size cap. The parser ends a row only at \\r and \\n, and
         attributes no comment row holding U+2028, U+2029 or U+0085, so no
         override is granted: a pin grown past 1,500 characters under such a
-        comment is refused, on size or as an invalid override."""
+        comment is refused on size."""
         env = gate_env(pin_count=3)
         result = _call_gate({
             "tool_name": "Edit",
@@ -423,7 +404,7 @@ class TestPinCapsGate_Matrix_Edit:
             },
         })
         assert result is not None, f"{ord_hex}: a smuggled terminator unlocked the size cap"
-        assert "chars (cap: 1500)" in result or "line terminator" in result, (ord_hex, result)
+        assert "chars (cap: 1500)" in result, (ord_hex, result)
 
     @pytest.mark.parametrize(
         "terminator,ord_hex",
@@ -450,7 +431,7 @@ class TestPinCapsGate_Matrix_Edit:
         before = _build_claude_md(3)
         after = before.replace("<!-- pinned: 2026-04-20 -->\n### Pin0", f"{candidate}\n### Pin0", 1)
         decision = gate_decision(before, "Write", {"content": after})
-        assert decision.cause != "override" or "line terminator" in (decision.reason or ""), decision
+        assert decision.cause != "override", decision
 
     @pytest.mark.parametrize("baseline, gated", [("fresh", True), ("missing", False), ("corrupt", False)])
     def test_edit_teammate_is_gated(self, gate_env, baseline, gated):
