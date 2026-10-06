@@ -3,7 +3,9 @@ Location: pact-plugin/tests/test_claude_md_corpus_writers.py
 Summary: Every corpus file through the readers and writers, not only the
          finder: the Current Session block's planner and reader, the pin-marker
          planner, the legacy kernel strip's planner, the migration's planner and
-         the one Pinned locator.
+         the one Pinned locator. One arm runs every CLAUDE.md writer over the
+         corpus and a sweep of open HTML blocks, and requires that none makes
+         the file less readable.
 Used by: pytest.
 
 The expected outcome of each call is read from the corpus's hand-written block
@@ -18,12 +20,22 @@ second plan writes nothing.
 """
 
 import collections
+import functools
+import itertools
 import json
+import logging
+import os
 import re
+import tempfile
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
+import archive_pin
+from fixtures.hf_cache import hf_cache_env
+from pin_caps import section_pins
+from scripts import working_memory
 from shared.claude_md_manager import (
     MANAGED_END_MARKER,
     MANAGED_START_MARKER,
@@ -34,11 +46,11 @@ from shared.claude_md_manager import (
     _plan_kernel_strip,
     _plan_migration,
 )
-from shared.claude_md_markers import State, parse
-from shared.pin_markers import Refusal, SkipReason, plan_insertion
+from shared.claude_md_markers import State, parse, uncertainty_added
+from shared.pin_markers import Insertion, Refusal, SkipReason, apply_insertion, plan_insertion
 from shared.session_resume import _plan_session_block, _session_block_text
 from shared.stale_session import recorded_session_id
-from staleness import locate_pinned
+from staleness import check_pinned_staleness, locate_pinned
 
 _CORPUS = Path(__file__).parent / "fixtures" / "claude_md_corpus"
 _EXPECTED = json.loads((_CORPUS / "expected.json").read_text(encoding="utf-8"))
@@ -277,3 +289,272 @@ def test_the_row_check_sees_a_kind_change_outside_the_changed_rows():
     # or an uncertain row: the check must report it.
     assert _changed_rows("a\nb\n", "a\n```\nb\n")[2] == [-1]
     assert _changed_rows("a\nb\n", "a\n\nb\n")[2] == []
+
+
+# --- no writer makes the file less readable ----------------------------------
+#
+# Every CLAUDE.md writer leaves no more rows the parser cannot read than it
+# found, wherever it changes the text or licenses a removal. Each writer is
+# driven where its check sits: the session, migration and kernel planners as
+# pure functions, the pin-marker planner (its check is inside it) then
+# `apply_insertion`, staleness and the two syncs on a real file, and the
+# archive through its verdict for every pin, whose removal is the Edit an
+# ARCHIVED verdict licenses. The population is the corpus and a sweep: into
+# three base files, a user's HTML-block opener before row i and its closer
+# (mid-line, at a row edge, or none) before row j >= i, for seven block types,
+# each file with and without a fence at its end. Every 7th file of each base
+# runs under CI and every 13th locally; an odd stride keeps both files of each
+# plain and fenced pair.
+
+_STRIDE = 7 if os.environ.get("CI") else 13
+
+_STALE_PIN = "### Fix the gate (PR #12, merged 2020-01-01)\nBody of the stale pin.\n"
+_SWEEP_BASES = {
+    "migrated": (
+        f"{MANAGED_START_MARKER}\n# PACT\n\n{SESSION_START_MARKER}\n## Current Session\n- Resume: x\n"
+        f"{SESSION_END_MARKER}\n\n{MEMORY_START_MARKER}\n## Retrieved Context\nrc entry\n"
+        f"## Pinned Context\n\n### Pin A\nBody A.\n\n{_STALE_PIN}\n### Pin C\nBody C.\n\n"
+        f"## Working Memory\nwm entry\n{MEMORY_END_MARKER}\n\n{MANAGED_END_MARKER}\n\n## Notes\nnotes\n"
+    ),
+    "unmigrated": (
+        f"# Project\nintro\n\n## Pinned Context\n\n### Pin A\nBody A.\n\n{_STALE_PIN}\n"
+        "### Pin C\nBody C.\n\n## Notes\nnotes\n"
+    ),
+    "kernel": (
+        f"# Me\nintro\n\n{KERNEL_START} v3 -->\nkernel one\nkernel two\n{KERNEL_END}\n\nnotes\nmore\n"
+    ),
+}
+_SWEEP_BLOCKS = {  # opener, a line closing it mid-line (None: no such line), a row-edge closer
+    "type 1": ("<pre>", "a </pre> b", "</pre>"),
+    "type 2": ("<!-- note", "a --> b", "-->"),
+    "type 3": ("<?php", "a ?> b", "?>"),
+    "type 4": ("<!NOTE", "a > b", ">"),
+    "type 5": ("<![CDATA[", "a ]]> b", "]]>"),
+    "type 6": ("<div>", None, ""),
+    "type 7": ("<custom-x>", None, ""),
+}
+_SWEEP_FENCE = "\n## F\n```\nc\n```\n"
+
+
+def sweep(base):
+    """(name, text) for each file the sweep builds from `base`."""
+    rows = base.splitlines(keepends=True)
+    for kind, (opener, mid, edge) in _SWEEP_BLOCKS.items():
+        for i in range(len(rows) + 1):
+            closers: "list[tuple[str, tuple[int, str] | None]]" = [("never closed", None)]
+            for j in range(i, len(rows) + 1):
+                if mid is not None:
+                    closers.append((f"closed mid-line at {j}", (j, mid)))
+                closers.append((f"closed at {j}", (j, edge)))
+            for closer_name, closer in closers:
+                out = list(rows)
+                if closer is not None:
+                    out.insert(closer[0], closer[1] + "\n")
+                out.insert(i, opener + "\n")
+                text = "".join(out)
+                name = f"{kind}, opened at {i}, {closer_name}"
+                yield name, text
+                yield name + ", fence after", text + _SWEEP_FENCE
+
+
+_MEMORY = {"id": "m1", "context": "a context", "goal": "a goal", "created_at": "2026-01-02T03:04:05+00:00"}
+_ADDS_UNREADABLE = re.compile(r"the update would .* a region PACT cannot read: ")
+
+
+def _plan_pin_markers(text):
+    planned = plan_insertion(text)
+    if isinstance(planned, Refusal):
+        return None, bool(_ADDS_UNREADABLE.search(planned.value))
+    return (apply_insertion(text, planned) if isinstance(planned, Insertion) else None), False
+
+
+def _planner(plan):
+    def write(raw, errors):
+        text = raw.decode("utf-8", errors=errors)
+        return [(text, plan(text), False)]
+    return write
+
+
+def _kernel_strip(raw, errors):
+    text = raw.decode("utf-8", errors=errors)
+    notice, new = _plan_kernel_strip(text, Path("/nonexistent/CLAUDE.md"))
+    return [(text, new, bool(_ADDS_UNREADABLE.search(notice or "")))]
+
+
+def _pin_markers(raw, errors):
+    text = raw.decode("utf-8", errors=errors)
+    new, refused = _plan_pin_markers(text)
+    return [(text, new, refused)]
+
+
+def _on_file(raw, run):
+    """Write `raw` to a CLAUDE.md in a new directory, run a writer that writes
+    the file itself, and return (the file's bytes after it, the result)."""
+    with tempfile.TemporaryDirectory() as directory, \
+            mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": directory}):
+        path = Path(directory) / "CLAUDE.md"
+        path.write_bytes(raw)
+        result = run(Path(directory), path)
+        return path.read_bytes(), result
+
+
+def _staleness(raw, errors):
+    after, status = _on_file(raw, lambda root, path: check_pinned_staleness(claude_md_path=path))
+    status = status or ""
+    refused = status.startswith("Pinned staleness skipped: ") and bool(_ADDS_UNREADABLE.search(status))
+    return [(raw.decode("utf-8", errors=errors), after.decode("utf-8", errors=errors), refused)]
+
+
+class _Warnings(logging.Handler):
+    def __init__(self):
+        super().__init__(logging.WARNING)
+        self.messages = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+def _sync(run):
+    def write(raw, errors):
+        warnings = _Warnings()
+        working_memory.logger.addHandler(warnings)
+        try:
+            after, _ = _on_file(raw, run)
+        finally:
+            working_memory.logger.removeHandler(warnings)
+        refused = any(_ADDS_UNREADABLE.search(message) for message in warnings.messages)
+        return [(raw.decode("utf-8", errors=errors), after.decode("utf-8", errors=errors), refused)]
+    return write
+
+
+def _verdict(raw, index):
+    """The archive's verdict on pin `index` of a CLAUDE.md holding `raw`, with
+    the memory CLI faked: a save returns an id and a get returns what was saved."""
+    saved = {}
+
+    def memory_cli(args, **kwargs):
+        if args[0] == "save":
+            saved["context"] = json.loads(kwargs["stdin_data"])["context"]
+            return 0, json.dumps({"ok": True, "result": {"memory_id": "a" * 32}}), ""
+        return 0, json.dumps({"ok": True, "result": {"context": saved["context"]}}), ""
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "CLAUDE.md"
+        path.write_bytes(raw)
+        with mock.patch.object(archive_pin, "get_project_claude_md_path", lambda: path), \
+                mock.patch.object(archive_pin, "_run_memory_cli", memory_cli):
+            return archive_pin.build_verdict(index, db_path=None)
+
+
+def _archive(raw, errors):
+    # The text as archive_pin reads it: universal newlines.
+    text = raw.decode("utf-8", errors=errors).replace("\r\n", "\n").replace("\r", "\n")
+    doc = parse(text)
+    located = locate_pinned(doc)
+    if located.state is not State.FOUND:
+        return []
+    outcomes = []
+    for index in range(len(section_pins(doc, located))):
+        verdict = _verdict(raw, index)
+        if verdict["outcome"] == "ARCHIVED":
+            assert text.count(verdict["delete_string"]) == 1
+            outcomes.append((text, text.replace(verdict["delete_string"], "", 1), False))
+        else:
+            refused = (verdict["outcome"] == "ARCHIVED_DELETE_UNSAFE"
+                       and verdict["reason"].startswith("removing the pin is refused: "))
+            outcomes.append((text, None, refused))
+    return outcomes
+
+
+_WRITERS = {
+    "session block": _planner(lambda text: _plan(text)[0]),
+    "migration": _planner(lambda text: _plan_migration(text)[0]),
+    "kernel strip": _kernel_strip,
+    "pin markers": _pin_markers,
+    "staleness": _staleness,
+    "working memory sync": _sync(lambda root, path: working_memory.sync_to_claude_md(
+        _MEMORY, target=path, claude_md_root=root)),
+    "retrieved context sync": _sync(lambda root, path: working_memory.sync_retrieved_to_claude_md(
+        [_MEMORY], "a query", None, ["m1"], claude_md_root=root)),
+    "archive": _archive,
+}
+# The writers that keep a check of their own; the others add no unreadable row
+# on any case, and this arm is what says so.
+_CHECKED = ("kernel strip", "pin markers", "staleness", "working memory sync",
+            "retrieved context sync", "archive")
+
+
+def _population():
+    """{group: {case: (raw bytes, decode errors)}}: the corpus, and every
+    `_STRIDE`th file of each base file's sweep."""
+    groups = {"corpus": {}}
+    for case in _CASES:
+        errors = "replace" if _EXPECTED[case].get("decode") == "replace" else "strict"
+        groups["corpus"][case] = ((_CORPUS / f"{case}.md").read_bytes(), errors)
+    for base_name, base in _SWEEP_BASES.items():
+        files = itertools.islice(sweep(base), 0, None, _STRIDE)
+        groups[base_name] = {name: (text.encode("utf-8"), "strict") for name, text in files}
+    return groups
+
+
+_POPULATION = _population()
+
+
+@functools.lru_cache(maxsize=None)
+def _judged(writer, group):
+    """(writes, refusals by the writer's own check, [(case, reason)] for each
+    write that adds unreadable rows) over one group of the population."""
+    writes, refusals, added = 0, 0, []
+    for case, (raw, errors) in _POPULATION[group].items():
+        for old, new, refused in _WRITERS[writer](raw, errors):
+            refusals += refused
+            if new is not None and new != old:
+                writes += 1
+                reason = uncertainty_added(parse(old), parse(new))
+                if reason is not None:
+                    added.append((case, reason))
+    return writes, refusals, added
+
+
+@pytest.mark.parametrize("group", list(_POPULATION))
+@pytest.mark.parametrize("writer", list(_WRITERS))
+def test_no_writer_makes_the_file_less_readable(writer, group):
+    """Wherever a writer changes the text, or licenses a removal, the new text
+    has no more rows the parser cannot read than the text it started from. A
+    failure names the cases; that writer needs the check the others have."""
+    _, _, added = _judged(writer, group)
+    assert not added, f"{writer} adds unreadable rows on {len(added)} case(s), e.g. {added[:3]}"
+
+
+def test_every_writer_writes_and_every_checked_writer_refuses():
+    """The arm is evidence only if each writer writes on some case, and each
+    writer with its own check refuses some case through that check."""
+    writes, refusals = collections.Counter(), collections.Counter()
+    for writer in _WRITERS:
+        for group in _POPULATION:
+            group_writes, group_refusals, _ = _judged(writer, group)
+            writes[writer] += group_writes
+            refusals[writer] += group_refusals
+    assert all(writes[writer] for writer in _WRITERS), writes
+    assert all(refusals[writer] for writer in _CHECKED), refusals
+
+
+@pytest.mark.requires_embedding_backend
+def test_the_archive_refuses_the_exposed_corpus_file_through_the_real_memory_cli(
+    tmp_path, monkeypatch, memory_store
+):
+    """The arm fakes the memory CLI. This row runs the real one on the corpus
+    file whose removal the archive refuses, so the faked seam is checked."""
+    raw = (_CORPUS / "hidden_declaration_closed_by_prose_ending_gt.md").read_bytes()
+    path = tmp_path / "CLAUDE.md"
+    path.write_bytes(raw)
+    monkeypatch.setattr(archive_pin, "get_project_claude_md_path", lambda: path)
+    for key, value in hf_cache_env().items():
+        monkeypatch.setenv(key, value)
+    verdict = archive_pin.build_verdict(0, db_path=str(memory_store("archive.db")))
+    assert verdict["outcome"] == "ARCHIVED_DELETE_UNSAFE"
+    assert verdict["reason"] == (
+        "removing the pin is refused: the update would make line 2 start a region PACT cannot "
+        "read: an HTML block is ended only by a line that starts a comment"
+    )
+    assert path.read_bytes() == raw

@@ -3092,6 +3092,61 @@
   "kinds": "P3 U3",
   "note": "a never-closed comment over a fence: the boundary is its start, and the session block above it stays found"
  },
+ "html_comment_unclosed_over_stale_pin": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "headings": {
+   "^### ": [
+    7,
+    13
+   ]
+  },
+  "kinds": "P15",
+  "note": "a never-closed comment between two stale pins, covering no fence, stays certain; a STALE row under the second pin would end it",
+  "sections": [
+   {
+    "cause": null,
+    "heading": "^## Pinned Context\\s*$",
+    "scope": null,
+    "spans": [
+     [
+      5,
+      14
+     ]
+    ],
+    "state": "FOUND",
+    "stop_prefixes": [
+     "<!-- PACT_MEMORY_",
+     "<!-- PACT_MANAGED_",
+     "<!-- PACT_ROUTING_",
+     "<!-- SESSION_"
+    ],
+    "terminator": "#{1,2}\\s",
+    "unique": false
+   }
+  ]
+ },
  "html_declaration_closed_by_prose": {
   "blocks": {
    "MANAGED": {
