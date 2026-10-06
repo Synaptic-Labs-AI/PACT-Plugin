@@ -2,8 +2,8 @@
 Location: pact-plugin/tests/test_pinned_section_parser_migration.py
 
 The Pinned section readers on the fence-aware parser: the one Pinned locator
-(`staleness.locate_pinned`), the pin parse (`pin_caps.parse_pins` and
-`section_pins`), the body charge, the staleness marks, the archive block, the
+(`staleness.locate_pinned`), the pin parse (`pin_caps.section_pins`, and the
+test helper `parse_pins`), the body charge, the staleness marks, the archive block, the
 pin age, the slot status, and the growth-driven deny predicate
 (`pin_caps.compute_deny_reason(..., growth=)`).
 
@@ -213,7 +213,7 @@ class TestReadersStaySilentOnAnUncertainSection:
 class TestThePinParseIsFenceAware:
 
     def test_a_fenced_heading_is_body_text_of_the_pin_above(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         pins = parse_pins(f"### Real\nintro\n{FENCE}\n### step one\n### step two\n{FENCE}\n")
         assert [p.heading for p in pins] == ["### Real"]
@@ -221,7 +221,8 @@ class TestThePinParseIsFenceAware:
 
     def test_a_fenced_override_example_grants_nothing(self):
         """G6: a fenced override comment directly before a fenced heading."""
-        from pin_caps import PIN_SIZE_CAP, parse_pins
+        from pin_caps import PIN_SIZE_CAP
+        from fixtures.pin_helpers import parse_pins
 
         example = (f"{FENCE}\n<!-- pinned: 2026-01-01, pin-size-override: example -->\n"
                    f"### Fake\n{'y' * (PIN_SIZE_CAP + 10)}\n{FENCE}\n")
@@ -231,7 +232,7 @@ class TestThePinParseIsFenceAware:
         assert pins[0].body_chars > PIN_SIZE_CAP
 
     def test_a_real_override_is_read_and_its_rationale_sliced(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         pins = parse_pins("  <!-- Pinned:  2026-01-01,  PIN-SIZE-OVERRIDE:  verbatim form  -->\n"
                           "### Big\nbody\n")
@@ -239,21 +240,21 @@ class TestThePinParseIsFenceAware:
         assert (pins[0].date_comment or "").startswith("<!-- Pinned:")
 
     def test_a_comment_row_holding_a_splitlines_break_is_not_attributed(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         row = "<!-- pinned: 2026-01-01, pin-size-override: a\vb -->"
         pins = parse_pins(f"{row}\n### P\nbody\n")
         assert pins[0].date_comment is None and pins[0].override_rationale is None
 
     def test_a_fenced_stale_marker_does_not_make_a_pin_stale(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         stale = "<!-- STALE: Last relevant 2026-01-01 -->"
         assert parse_pins(f"### P\n{stale}\n")[0].is_stale is True
         assert parse_pins(f"### P\n{FENCE}\n{stale}\n{FENCE}\n")[0].is_stale is False
 
     def test_a_fenced_comment_line_is_charged_as_body_text(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         comment = "<!-- pinned: 2026-01-01 -->"
         plain = parse_pins(f"### P\nx\n{comment}\n")[0].body_chars
@@ -262,12 +263,13 @@ class TestThePinParseIsFenceAware:
         assert fenced == len(f"x\n{FENCE}\n{comment}\n{FENCE}")
 
     def test_the_heading_carries_no_line_terminator(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         assert parse_pins("### P\r\nbody\r\n")[0].heading == "### P"
 
     def test_section_pins_reads_the_documents_own_rows(self):
-        from pin_caps import parse_pins, section_pins
+        from pin_caps import section_pins
+        from fixtures.pin_helpers import parse_pins
         from staleness import _parse_pinned_section
 
         text = _doc(_pins(2) + f"### Third\n{FENCE}\n### fenced\n{FENCE}\n\n")
@@ -345,12 +347,13 @@ _LINES_1485 = ["w" * 98] * 14 + ["w" * 99]  # 14*98 + 99 + 14 breaks = 1,485
 class TestTrailingWhitespaceIsNotCharged:
 
     def _verdict(self, before, after, growth=0):
-        from pin_caps import compute_deny_reason, parse_pins
+        from pin_caps import compute_deny_reason
+        from fixtures.pin_helpers import parse_pins
 
         return compute_deny_reason(parse_pins(before), parse_pins(after), growth=growth)
 
     def test_the_fixture_charges_1485(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         assert parse_pins(_pin_of(_LINES_1485))[0].body_chars == 1485
 
@@ -405,7 +408,7 @@ class TestTheOtherReaders:
 
     def test_the_archive_block_keeps_a_fenced_heading_inside_its_pin(self):
         import archive_pin
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         body = ("<!-- pinned: 2026-01-01 -->\n### A\nintro\n"
                 f"{FENCE}\n### fenced\n{FENCE}\n\n"

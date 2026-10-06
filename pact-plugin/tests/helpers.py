@@ -666,7 +666,7 @@ def make_pin_entry(
     """Build a single pinned entry with optional override and stale marker.
 
     Produces the two-line comment + heading + body shape expected by
-    pin_caps.parse_pins. Body is padded with 'x' characters to reach the
+    pin_helpers.parse_pins. Body is padded with 'x' characters to reach the
     requested body_chars count (post-marker-stripping). The override
     rationale, when provided, is inserted into the `<!-- pinned: ... -->`
     annotation line per the plan's combined-comment grammar.
@@ -691,7 +691,7 @@ def make_pin_entry(
 def make_pinned_section(entries: list[str]) -> str:
     """Join pinned entries into a Pinned Context section body.
 
-    Returned text is suitable for pin_caps.parse_pins (i.e., AFTER the
+    Returned text is suitable for pin_helpers.parse_pins (i.e., AFTER the
     "## Pinned Context" heading — the third element of
     staleness._parse_pinned_section).
     """
@@ -703,7 +703,7 @@ def make_claude_md_with_pins(entries: list[str]) -> str:
 
     Matches the layered boundary contract (#404): outer PACT_MANAGED_START/END
     wraps all plugin-managed content. Pinned Context lives inside the
-    managed region so pin_caps.parse_pins + staleness._parse_pinned_section
+    managed region so pin_helpers.parse_pins + staleness._parse_pinned_section
     both read it via _extract_managed_region.
 
     Emits the canonical marker strings imported from

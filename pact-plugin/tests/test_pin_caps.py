@@ -1,5 +1,5 @@
 """
-Tests for hooks/pin_caps.py — parse_pins, cap predicates, slot-status formatter.
+Tests for hooks/pin_caps.py — the pin readers, cap predicates, slot-status formatter.
 
 Risk tier: CRITICAL (enforcement layer for CLAUDE.md surgery). Coverage
 target: 90%+ with adversarial testing.
@@ -18,19 +18,19 @@ class TestParsePins_ParsingSemantics:
     """Parsing entry boundaries, date comments, and stale markers."""
 
     def test_empty_input_returns_empty_list(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         assert parse_pins("") == []
 
     def test_whitespace_only_returns_empty_list(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         assert parse_pins("   \n\n  \n") == []
 
     def test_no_headings_returns_empty_list(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         assert parse_pins("Just prose text without any heading.") == []
 
     def test_single_pin_without_date_comment(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = "### First Entry\nBody text for the first entry.\n"
         pins = parse_pins(content)
         assert len(pins) == 1
@@ -40,7 +40,7 @@ class TestParsePins_ParsingSemantics:
         assert pins[0].is_stale is False
 
     def test_single_pin_with_date_comment(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = "<!-- pinned: 2026-04-11 -->\n### Entry Title\nBody.\n"
         pins = parse_pins(content)
         assert len(pins) == 1
@@ -48,7 +48,7 @@ class TestParsePins_ParsingSemantics:
         assert pins[0].override_rationale is None
 
     def test_pin_with_stale_marker(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = (
             "<!-- pinned: 2026-01-01 -->\n"
             "### Stale Entry\n"
@@ -60,7 +60,7 @@ class TestParsePins_ParsingSemantics:
         assert pins[0].is_stale is True
 
     def test_multiple_pins_parsed_in_order(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = (
             "### First\nBody 1.\n\n"
             "### Second\nBody 2.\n\n"
@@ -70,7 +70,7 @@ class TestParsePins_ParsingSemantics:
         assert [p.heading for p in pins] == ["### First", "### Second", "### Third"]
 
     def test_heading_without_body(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         pins = parse_pins("### Orphan")
         assert len(pins) == 1
         assert pins[0].heading == "### Orphan"
@@ -87,7 +87,7 @@ class TestParsePins_OverrideComment:
 
     def test_live_claude_md_override_line_parses(self):
         """Exact match against the live CLAUDE.md:68 line."""
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = f"{self.LIVE_OVERRIDE_LINE}\n### Entry\nBody.\n"
         pins = parse_pins(content)
         assert len(pins) == 1
@@ -96,7 +96,7 @@ class TestParsePins_OverrideComment:
         )
 
     def test_override_rationale_extracted_exactly(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = (
             "<!-- pinned: 2026-04-20, pin-size-override: reason here -->\n"
             "### Entry\nBody.\n"
@@ -105,7 +105,7 @@ class TestParsePins_OverrideComment:
         assert pins[0].override_rationale == "reason here"
 
     def test_empty_rationale_rejected(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = (
             "<!-- pinned: 2026-04-20, pin-size-override:  -->\n"
             "### Entry\nBody.\n"
@@ -115,7 +115,7 @@ class TestParsePins_OverrideComment:
         assert pins[0].override_rationale is None
 
     def test_rationale_exactly_at_limit_accepted(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         rationale = "x" * 120
         content = (
             f"<!-- pinned: 2026-04-20, pin-size-override: {rationale} -->\n"
@@ -125,7 +125,7 @@ class TestParsePins_OverrideComment:
         assert pins[0].override_rationale == rationale
 
     def test_rationale_over_limit_rejected(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         rationale = "x" * 121
         content = (
             f"<!-- pinned: 2026-04-20, pin-size-override: {rationale} -->\n"
@@ -135,7 +135,7 @@ class TestParsePins_OverrideComment:
         assert pins[0].override_rationale is None
 
     def test_malformed_override_falls_back_to_date_only(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         # Missing rationale keyword entirely — treated as no override.
         content = (
             "<!-- pinned: 2026-04-20, pin-size: nope -->\n"
@@ -149,7 +149,7 @@ class TestParsePins_OverrideComment:
 
         A second override comment further back is not considered.
         """
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = (
             "<!-- pinned: 2026-04-01, pin-size-override: old rationale -->\n"
             "\n"
@@ -292,12 +292,12 @@ class TestParsePins_HeadingShape:
     """Only a `### ` line is a pin heading."""
 
     def test_an_h4_line_is_not_a_pin(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         pins = parse_pins("### Real\nBody with subsection:\n#### H4 Title\nnested content\n")
         assert [p.heading for p in pins] == ["### Real"]
 
     def test_prose_mentioning_a_pin_comment_is_not_a_pin(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         body = "Look at the <!-- pinned: x --> line in CLAUDE.md for the canonical form\n"
         assert parse_pins(body) == []
 
@@ -306,7 +306,7 @@ class TestExtractBodyChars:
     """body_chars excludes auto-generated markers (date comment, STALE marker)."""
 
     def test_plain_body_counted_in_full(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         body = "x" * 500
         content = f"### Entry\n{body}\n"
         pins = parse_pins(content)
@@ -314,7 +314,7 @@ class TestExtractBodyChars:
         assert pins[0].body_chars == 500
 
     def test_stale_marker_excluded_from_count(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         body_text = "x" * 100
         content = (
             "### Entry\n"
@@ -326,7 +326,7 @@ class TestExtractBodyChars:
         assert pins[0].body_chars == 100
 
     def test_date_comment_inside_body_excluded(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         body_text = "y" * 50
         content = (
             "### Entry\n"
@@ -499,20 +499,6 @@ def _pin_text(*names, undated=()):
     )
 
 
-def _managed_content(pinned_section_body: str) -> str:
-    """Wrap pinned-section body in the PACT_MANAGED region so
-    _parse_pinned_section can extract it. Matches the structure produced
-    by claude_md_manager.
-    """
-    return (
-        "# PACT\n\n"
-        "<!-- PACT_MANAGED_START -->\n"
-        "## Pinned Context\n"
-        f"{pinned_section_body}"
-        "<!-- PACT_MANAGED_END -->\n"
-    )
-
-
 class TestEvaluateFullState_Smoke:
     """evaluate_full_state — post-state (>, strict) cap predicate."""
 
@@ -551,149 +537,6 @@ class TestEvaluateFullState_Smoke:
         from pin_caps import PIN_SIZE_CAP, evaluate_full_state
         pins = [_make_pin(body_chars=PIN_SIZE_CAP + 500, override=True)]
         assert evaluate_full_state(pins) is None
-
-
-class TestApplyEditAndParse_Smoke:
-    """apply_edit_and_parse — Edit/Write simulation + section-bounded parse."""
-
-    def test_write_full_replacement_parses_pins(self):
-        from pin_caps import apply_edit_and_parse
-        new = _managed_content(
-            "<!-- pinned: 2026-04-21 -->\n### A\nBody A.\n\n"
-        )
-        pins = apply_edit_and_parse(current_content="", tool_input={"content": new})
-        assert len(pins) == 1
-        assert pins[0].heading == "### A"
-
-    def test_edit_single_match_adds_pin(self):
-        from pin_caps import apply_edit_and_parse
-        before = _managed_content("<!-- pinned: 2026-04-21 -->\n### A\nBody.\n\n")
-        tool_input = {
-            "old_string": "### A\nBody.\n",
-            "new_string": "### A\nBody.\n\n<!-- pinned: 2026-04-21 -->\n### B\nBody B.\n",
-            "replace_all": False,
-        }
-        pins = apply_edit_and_parse(current_content=before, tool_input=tool_input)
-        assert [p.heading for p in pins] == ["### A", "### B"]
-
-    def test_edit_replace_all_applies_all_matches(self):
-        from pin_caps import apply_edit_and_parse
-        before = _managed_content(
-            "<!-- pinned: 2026-04-21 -->\n### A\nKEEP.\n\n"
-            "<!-- pinned: 2026-04-21 -->\n### B\nKEEP.\n\n"
-        )
-        tool_input = {
-            "old_string": "KEEP.",
-            "new_string": "REPLACED.",
-            "replace_all": True,
-        }
-        pins = apply_edit_and_parse(current_content=before, tool_input=tool_input)
-        assert all("REPLACED" in p.body for p in pins)
-
-    def test_missing_pinned_section_returns_empty(self):
-        from pin_caps import apply_edit_and_parse
-        # No Pinned Context section at all.
-        pins = apply_edit_and_parse(
-            current_content="",
-            tool_input={"content": "# Some\nRandom content.\n"},
-        )
-        assert pins == []
-
-    def test_write_non_string_content_raises(self):
-        from pin_caps import apply_edit_and_parse
-        with pytest.raises(TypeError):
-            apply_edit_and_parse(
-                current_content="", tool_input={"content": 42},
-            )
-
-    def test_edit_non_string_strings_raise(self):
-        from pin_caps import apply_edit_and_parse
-        with pytest.raises(TypeError):
-            apply_edit_and_parse(
-                current_content="x",
-                tool_input={"old_string": 1, "new_string": "y"},
-            )
-
-    def test_edit_empty_old_string_replace_all_no_op(self):
-        """F6 #492 cycle-4: Edit with empty old_string + replace_all=True must
-        simulate as a no-op (return pre-state parse), not run str.replace which
-        would interleave new_string between every character and produce gibberish.
-
-        Pre-fix behavior: `str.replace(current, "", JUNK)` yields
-        `JUNKjJUNKuJUNK...` etc.; _parse_pinned_section returns None;
-        parse_pins returns []; compute_deny_reason compares post=[] vs pre,
-        sees no net-worse violation, allows. A curator could weaponize
-        this to pass the gate while the real Edit tool's behavior on
-        empty old_string is undefined/harmful.
-
-        Post-fix: empty old_string is treated as a no-op -> post-state
-        equals pre-state -> gate's net-worse contract kicks in normally.
-        """
-        from pin_caps import apply_edit_and_parse
-        before = _managed_content(
-            "<!-- pinned: 2026-04-21 -->\n### A\nBody A.\n\n"
-            "<!-- pinned: 2026-04-21 -->\n### B\nBody B.\n\n"
-        )
-        tool_input = {
-            "old_string": "",
-            "new_string": "JUNK",
-            "replace_all": True,
-        }
-        pins = apply_edit_and_parse(current_content=before, tool_input=tool_input)
-        # Pre-state has 2 pins; post-state must match.
-        assert len(pins) == 2
-        assert [p.heading for p in pins] == ["### A", "### B"]
-        # Bodies must not contain any JUNK interleaving.
-        assert all("JUNK" not in p.body for p in pins), (
-            "F6 regressed: empty-old-string with replace_all=True interleaved "
-            "new_string into pin bodies (str.replace behavior leaked through)."
-        )
-
-    def test_edit_empty_old_string_replace_all_false_no_op(self):
-        """F6 counter: empty old_string with replace_all=False must also
-        no-op. str.replace(s, "", new, 1) prepends `new` once at position
-        0 — which is BEFORE the managed-region markers. A naive assertion
-        on pin body content would be trivially satisfied because
-        _parse_pinned_section isolates the managed region (phantom-green
-        #492 F6.1).
-
-        Differentiating probe: craft new_string as a FULL synthetic
-        managed region containing a smuggled pin. Under str.replace
-        revert, the prepend creates a second managed region at position
-        0 that extract_managed_region picks up first → parsed pins are
-        the SMUGGLED pin, not the original. Under the F6 no-op guard,
-        the original managed region is preserved → parsed pins are the
-        ORIGINAL pin.
-        """
-        from pin_caps import apply_edit_and_parse
-        before = _managed_content(
-            "<!-- pinned: 2026-04-21 -->\n### A\nBody A.\n\n"
-        )
-        # Smuggle payload: a full synthetic managed region wrapping an
-        # "### Evil" pin. If str.replace runs (revert), this prepends a
-        # spurious managed region at position 0 that extract_managed_region
-        # captures first — parsed pins become [Evil], not [A].
-        smuggle_payload = (
-            "<!-- PACT_MANAGED_START -->\n"
-            "## Pinned Context\n"
-            "<!-- pinned: 2026-04-21 -->\n### Evil\nevil body.\n\n"
-            "<!-- PACT_MANAGED_END -->\n"
-        )
-        tool_input = {
-            "old_string": "",
-            "new_string": smuggle_payload,
-            "replace_all": False,
-        }
-        pins = apply_edit_and_parse(current_content=before, tool_input=tool_input)
-        assert len(pins) == 1
-        # Load-bearing assertion: the ORIGINAL pin heading survives, NOT
-        # the smuggled one. Under revert, this assertion fails because
-        # the smuggled managed region is the one parsed.
-        assert pins[0].heading == "### A", (
-            f"F6 regressed: empty-old-string + replace_all=False allowed "
-            f"str.replace to prepend a synthetic managed region, smuggling "
-            f"a pin past the no-op guard. Got heading {pins[0].heading!r}."
-        )
 
 
 class TestComputeDenyReason_Smoke:
@@ -755,7 +598,8 @@ class TestComputeDenyReason_Smoke:
         assert "count" in kinds and "embedded_pin" not in kinds
 
     def test_an_undated_rename_below_the_cap_is_allowed(self):
-        from pin_caps import compute_deny_reason, parse_pins
+        from pin_caps import compute_deny_reason
+        from fixtures.pin_helpers import parse_pins
         pre = parse_pins(_pin_text("A", "B", "C"))
         post = parse_pins(_pin_text("A", "Renamed", "C", undated=("Renamed",)))
         assert post[1].date_comment is None
@@ -763,7 +607,8 @@ class TestComputeDenyReason_Smoke:
 
     @pytest.mark.parametrize("change", ["rename", "swap", "move", "add one, delete one"])
     def test_an_undated_change_that_adds_no_pin_is_allowed_at_13(self, change):
-        from pin_caps import compute_deny_reason, parse_pins
+        from pin_caps import compute_deny_reason
+        from fixtures.pin_helpers import parse_pins
         names = [f"P{i}" for i in range(13)]
         if change == "rename":
             after, undated = names[:12] + ["Renamed"], ("Renamed",)
@@ -779,7 +624,8 @@ class TestComputeDenyReason_Smoke:
         assert compute_deny_reason(pre, post, growth=0) is None
 
     def test_a_prose_heading_smuggled_into_a_body_at_12_is_denied_on_count(self):
-        from pin_caps import compute_deny_reason, parse_pins
+        from pin_caps import compute_deny_reason
+        from fixtures.pin_helpers import parse_pins
         names = [f"P{i}" for i in range(12)]
         before = _pin_text(*names)
         after = before.replace("body of P3\n", "body of P3\n### smuggled\nmore\n")

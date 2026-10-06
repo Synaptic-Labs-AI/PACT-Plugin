@@ -121,7 +121,7 @@ class TestPinCapsAdversarial_RegexCaseSensitivity:
     """STALE marker + pinned comment are IGNORECASE — lowercase variants match."""
 
     def test_lowercase_stale_marker_detected(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = (
             "### Pin\n<!-- stale: last relevant 2026-01-01 -->\nbody\n"
         )
@@ -129,7 +129,7 @@ class TestPinCapsAdversarial_RegexCaseSensitivity:
         assert pins[0].is_stale is True
 
     def test_mixed_case_pinned_comment_detected(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = (
             "<!-- Pinned: 2026-04-20 -->\n### Pin\nbody\n"
         )
@@ -137,7 +137,7 @@ class TestPinCapsAdversarial_RegexCaseSensitivity:
         assert pins[0].date_comment is not None
 
     def test_uppercase_override_keyword_detected(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = (
             "<!-- PINNED: 2026-04-20, PIN-SIZE-OVERRIDE: reason -->\n"
             "### Pin\nbody\n"
@@ -150,7 +150,7 @@ class TestPinCapsAdversarial_RationaleUtf8Boundary:
     """OVERRIDE_RATIONALE_MAX is character-count; multibyte UTF-8 must not overflow."""
 
     def test_unicode_rationale_at_limit_accepted(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         # 120 Japanese chars = 120 Python code points but 360 UTF-8 bytes.
         # Python len() counts code points → accepted.
         rationale = "あ" * 120
@@ -162,7 +162,7 @@ class TestPinCapsAdversarial_RationaleUtf8Boundary:
         assert pins[0].override_rationale == rationale
 
     def test_unicode_rationale_over_limit_rejected(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         rationale = "あ" * 121
         content = (
             f"<!-- pinned: 2026-04-20, pin-size-override: {rationale} -->\n"
@@ -191,7 +191,7 @@ class TestPinCapsAdversarial_LineTerminatorInjection_SecF5b:
         ("\r", "carriage return"),
     ])
     def test_forbidden_line_terminator_neutralized(self, forbidden_char, name):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         payload = f"injected{forbidden_char}second line"
         content = (
             f"<!-- pinned: 2026-04-20, pin-size-override: {payload} -->\n"
@@ -210,7 +210,7 @@ class TestPinCapsAdversarial_StalenessInline:
     """STALE marker embedded inline mid-body still detected."""
 
     def test_stale_marker_mid_body_detected(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = (
             "### Pin\n"
             "Some text before\n"
@@ -221,7 +221,7 @@ class TestPinCapsAdversarial_StalenessInline:
         assert pins[0].is_stale is True
 
     def test_stale_marker_on_same_line_as_body_detected(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = (
             "### Pin\n"
             "body <!-- STALE: Last relevant 2026-01-01 --> more body\n"
@@ -234,7 +234,7 @@ class TestPinCapsAdversarial_OverrideWithoutPinnedPrefix:
     """A bare override comment (no pinned: prefix) MUST not grant override."""
 
     def test_bare_override_comment_rejected(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         # No "pinned:" prefix — regex MUST NOT match.
         content = (
             "<!-- pin-size-override: looks valid -->\n"
@@ -250,7 +250,7 @@ class TestPinCapsAdversarial_RegexSafety:
 
     def test_long_override_text_terminates(self):
         """Very long candidate lines must not cause catastrophic backtracking."""
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         # 10k chars of non-'-->' — fullmatch must fail fast.
         junk = "x" * 10000
         content = (
@@ -267,7 +267,7 @@ class TestPinCapsAdversarial_RegexSafety:
         assert pins[0].override_rationale is None
 
     def test_many_pins_terminate_quickly(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         # 1000 pins → parser must be linear.
         content = "\n".join(f"### Pin {i}\nbody\n" for i in range(1000))
         import time
@@ -282,7 +282,7 @@ class TestPinCapsAdversarial_EdgeCaseParsing:
     """Parsing edge cases the happy path does not cover."""
 
     def test_heading_at_very_end_without_trailing_newline(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = "### Entry"
         pins = parse_pins(content)
         assert len(pins) == 1
@@ -290,7 +290,7 @@ class TestPinCapsAdversarial_EdgeCaseParsing:
         assert pins[0].body == ""
 
     def test_multiple_blank_lines_before_heading(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         # Multiple blank lines between pinned comment and heading
         content = (
             "<!-- pinned: 2026-04-20 -->\n"
@@ -302,7 +302,7 @@ class TestPinCapsAdversarial_EdgeCaseParsing:
         assert pins[0].date_comment == "<!-- pinned: 2026-04-20 -->"
 
     def test_content_between_date_comment_and_heading_breaks_attachment(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         # Prose line intervenes → walker sees prose as immediate preceding
         # line and does NOT attach date_comment.
         content = (
@@ -315,7 +315,7 @@ class TestPinCapsAdversarial_EdgeCaseParsing:
 
     def test_four_hash_heading_not_parsed_as_pin(self):
         """Only `### ` at start-of-line is a pin — `#### ` is not."""
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = "#### Not a pin\nbody\n"
         pins = parse_pins(content)
         # `_PIN_HEADING_RE` is `^### ` with re.MULTILINE, requiring
@@ -325,13 +325,13 @@ class TestPinCapsAdversarial_EdgeCaseParsing:
         assert pins == []
 
     def test_two_hash_heading_not_parsed_as_pin(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = "## Heading\nbody\n"
         pins = parse_pins(content)
         assert pins == []
 
     def test_only_whitespace_before_heading(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = "     \n### Pin\nbody\n"
         pins = parse_pins(content)
         assert len(pins) == 1

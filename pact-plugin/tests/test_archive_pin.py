@@ -63,6 +63,7 @@ import pin_caps  # noqa: E402
 from shared.claude_md_markers import parse  # noqa: E402
 from shared.project_scope import same_repository  # noqa: E402
 import staleness  # noqa: E402
+from fixtures import pin_helpers
 from fixtures.hf_cache import hf_cache_env
 
 
@@ -154,7 +155,7 @@ class TestExtractPinBlock_Verbatim:
     @pytest.mark.parametrize("label", sorted(PIN_FORMATS))
     def test_slice_is_verbatim_in_source(self, label):
         source = PIN_FORMATS[label]
-        pins = pin_caps.parse_pins(source)
+        pins = pin_helpers.parse_pins(source)
         assert pins, f"fixture {label} parsed no pins — test would be vacuous"
         block = _block(source, 0, pins)
         assert block in source, (
@@ -168,7 +169,7 @@ class TestExtractPinBlock_Verbatim:
         also a substring. Pin that the block actually carries the heading
         and the body, so a degenerate extractor cannot pass the test above."""
         source = PIN_FORMATS[label]
-        pins = pin_caps.parse_pins(source)
+        pins = pin_helpers.parse_pins(source)
         block = _block(source, 0, pins)
         assert pins[0].heading in block
         assert pins[0].body.strip() in block
@@ -179,7 +180,7 @@ class TestExtractPinBlock_Verbatim:
         walks BACKWARD over blank lines to find the date comment, so a
         rebuild drops them; a slice keeps them."""
         source = PIN_FORMATS["blank_line_before_heading"]
-        pins = pin_caps.parse_pins(source)
+        pins = pin_helpers.parse_pins(source)
         block = _block(source, 0, pins)
         assert "-->\n\n### Beta" in block
 
@@ -196,7 +197,7 @@ class TestExtractPinBlock_Verbatim:
         """
         slice_ok, rebuild_ok, rebuild_failures = [], [], []
         for label, source in PIN_FORMATS.items():
-            parsed = pin_caps.parse_pins(source)
+            parsed = pin_helpers.parse_pins(source)
             pin = parsed[0]
             block = _block(source, 0, parsed)
             date_comment = pin.date_comment or ""
@@ -221,7 +222,7 @@ class TestExtractPinBlock_Verbatim:
         the comment text. Both are verbatim substrings, so containment alone
         cannot tell them apart — this pins the stricter of the two."""
         source = PIN_FORMATS["leading_ws_on_comment"]
-        pins = pin_caps.parse_pins(source)
+        pins = pin_helpers.parse_pins(source)
         block = _block(source, 0, pins)
         assert block.startswith("  <!-- pinned:"), (
             f"slice dropped the comment line's indentation: {block[:40]!r}"
@@ -240,7 +241,7 @@ class TestExtractPinBlock_Verbatim:
             "<!-- pinned: 2026-01-01 -->\n### First\nbody one\n\n\n"
             "<!-- pinned: 2026-02-02 -->\n### Second\nbody two\n"
         )
-        pins = pin_caps.parse_pins(source)
+        pins = pin_helpers.parse_pins(source)
         block = _block(source, 0, pins)
         assert block in source
         assert block.endswith("\n\n\n"), (
@@ -250,7 +251,7 @@ class TestExtractPinBlock_Verbatim:
 
     def test_index_out_of_range_is_unevaluable(self):
         source = PIN_FORMATS["canonical"]
-        pins = pin_caps.parse_pins(source)
+        pins = pin_helpers.parse_pins(source)
         with pytest.raises(archive_pin._Unevaluable):
             _block(source, 5, pins)
 
@@ -258,7 +259,7 @@ class TestExtractPinBlock_Verbatim:
         """Block boundaries: pin 1's slice must not carry pin 0's content."""
         content = _two_pin_file()
         pinned = _pinned_body(content)
-        pins = pin_caps.parse_pins(pinned)
+        pins = pin_helpers.parse_pins(pinned)
         block = _block(pinned, 1, pins)
         assert "Second Pin" in block
         assert "First Pin" not in block
@@ -279,7 +280,7 @@ class TestExtractPinBlock_Verbatim:
         """
         content = _two_pin_file()
         pinned = _pinned_body(content)
-        pins = pin_caps.parse_pins(pinned)
+        pins = pin_helpers.parse_pins(pinned)
         block = _block(pinned, 0, pins)
 
         assert "First Pin" in block
@@ -349,7 +350,7 @@ class TestExtractPinBlock_Verbatim:
             "### Beta\n"
             "Beta's body.\n"
         )
-        pins = pin_caps.parse_pins(pinned)
+        pins = pin_helpers.parse_pins(pinned)
         assert len(pins) == 2, f"fixture must parse as 2 pins, got {len(pins)}"
         assert pinned.count(decoy) == 2, "fixture must contain the decoy twice"
 
@@ -415,7 +416,7 @@ class TestExtractPinBlock_Verbatim:
             "### Beta\n"
             "Beta's body.\n"
         )
-        pins = pin_caps.parse_pins(pinned)
+        pins = pin_helpers.parse_pins(pinned)
         assert len(pins) == 2, f"fixture must parse as 2 pins, got {len(pins)}"
         assert pins[1].date_comment, "the RETAINED pin must carry a date comment"
 
@@ -451,7 +452,7 @@ class TestExtractPinBlock_Verbatim:
         breaks one of these."""
         content = _two_pin_file()
         pinned = _pinned_body(content)
-        pins = pin_caps.parse_pins(pinned)
+        pins = pin_helpers.parse_pins(pinned)
         blocks = [
             _block(pinned, i, pins)
             for i in range(len(pins))
@@ -1713,7 +1714,7 @@ class TestArchivePin_RealCLI:
         fetched = _cli_get(verdict["memory_id"], db)
         pinned = _pinned_body(content)
         block = _block(
-            pinned, 0, pin_caps.parse_pins(pinned)
+            pinned, 0, pin_helpers.parse_pins(pinned)
         )
 
         assert block in fetched["context"], "block must land in `context`"
@@ -1746,7 +1747,7 @@ class TestArchivePin_RealCLI:
         fetched = _cli_get(verdict["memory_id"], db)
         block = _block(
             _pinned_body(content), 0,
-            pin_caps.parse_pins(_pinned_body(content)),
+            pin_helpers.parse_pins(_pinned_body(content)),
         )
         assert block in fetched["context"]
         assert "'apostrophes'" in fetched["context"]
@@ -1784,7 +1785,7 @@ class TestArchivePin_RealCLI:
         claude_md(_two_pin_file())
         pinned = _pinned_body(_two_pin_file())
         block = _block(
-            pinned, 0, pin_caps.parse_pins(pinned)
+            pinned, 0, pin_helpers.parse_pins(pinned)
         )
         payload = json.dumps(archive_pin._build_record(block, "First Pin"))
 
@@ -1995,7 +1996,7 @@ class TestArchivePin_FailureMatrix:
         claude_md(content)
         pinned = _pinned_body(content)
         block = _block(
-            pinned, 0, pin_caps.parse_pins(pinned)
+            pinned, 0, pin_helpers.parse_pins(pinned)
         )
 
         def _stub(args, **kwargs):
@@ -2301,7 +2302,7 @@ class TestArchivePin_SyncSuppressionBreach:
         claude_md(content)
         pinned = _pinned_body(content)
         block = _block(
-            pinned, 0, pin_caps.parse_pins(pinned)
+            pinned, 0, pin_helpers.parse_pins(pinned)
         )
 
         def _stub(args, **kwargs):

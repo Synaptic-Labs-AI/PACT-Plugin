@@ -2042,8 +2042,8 @@ class TestPinCapsTwinCopyDrift:
 # teaches people to ignore it.
 #
 # HOW IT WAS OBTAINED, so it can be re-derived rather than trusted: measured
-# over the STRIPPED body text, which is what pin_caps._extract_body_chars
-# returns after removing the per-line date comment and the STALE marker, across
+# over the STRIPPED body text, which is what pin_caps._charge counts after
+# removing the per-line date comment and the STALE marker, across
 # a real twelve-pin document. 12,306 chars over 1,757 words.
 #
 # The value is not the fragile part; the POPULATION is. Re-derive it the same
@@ -2178,7 +2178,9 @@ class TestPinnedBudgetAgainstCapsCoherence:
                 f"{comment}\n### Pin {i}\n{stale}\nbody words for pin {i} here\n\n"
             )
 
-        pins = pin_caps.parse_pins(pins_text)
+        from fixtures import pin_helpers
+
+        pins = pin_helpers.parse_pins(pins_text)
         assert len(pins) == pin_caps.PIN_COUNT_CAP, (
             "fixture did not parse into the expected number of pins; the "
             "control cannot certify a population it did not build"

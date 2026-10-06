@@ -511,7 +511,8 @@ class TestCheckPinCaps_Advisory_NeverExit2:
 class TestParsePins_MultilineRationale:
     """Parser-side defense against multi-line override rationales.
 
-    This test covers hooks/pin_caps.py:parse_pins (not the CLI). Pre-
+    This test covers the pin reader `pin_caps.pins_in_rows`, through the
+    test helper `parse_pins` (not the CLI). Pre-
     cycle-8 it lived in a CLI-focused test class; moved here post-CLI-
     demotion because the CLI no longer owns rationale validation.
     Hook-side rationale validation (identical semantics) is in
@@ -524,14 +525,14 @@ class TestParsePins_MultilineRationale:
           (b) must NOT capture the broken rationale as a valid override
               (silent downgrade to no-override is the documented behavior)
         """
-        import pin_caps
+        from fixtures import pin_helpers
         pinned_content = (
             "<!-- pinned: 2026-04-21, pin-size-override: split\n"
             "across-lines -->\n"
             "### Broken Pin\n"
             "body content\n"
         )
-        pins = pin_caps.parse_pins(pinned_content)
+        pins = pin_helpers.parse_pins(pinned_content)
         assert len(pins) == 1
         assert pins[0].override_rationale is None, (
             "Multi-line rationale was captured as a valid override — "

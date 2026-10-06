@@ -273,7 +273,7 @@ class TestPinCommentCharge_Metamorphic:
     """The defect stated as a property rather than as one example."""
 
     def test_neighbour_charge_is_invariant_under_equal_length_rationales(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         body_a = "x" * 40
         arrow = "<!-- pinned: 2026-02-02, pin-size-override: keep a -> b now -->"
@@ -308,7 +308,7 @@ class TestPinCommentTrigger_AnyGreaterThan:
         "count > 2 and count < 9",
     ])
     def test_neighbour_is_not_charged_for_the_comment(self, rationale):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         body_a = "x" * 40
         comment_b = f"<!-- pinned: 2026-02-02, pin-size-override: {rationale} -->"
@@ -332,7 +332,7 @@ class TestPinCommentReconfirmed_Repair:
         "reconfirmed: 2026-03-01 because n > 2",
     ])
     def test_date_survives_and_neighbour_is_not_charged(self, clause):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         body_a = "x" * 40
         comment_b = f"<!-- pinned: 2026-01-01, {clause} -->"
@@ -349,7 +349,7 @@ class TestPinCommentReconfirmed_Repair:
         """The whole point of the clause is that the age reads from it."""
         import re
 
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         body_a = "x" * 40
         comment_b = (
@@ -374,7 +374,8 @@ class TestPinCommentDateField_BypassClosure:
     EARLY_CLOSING = "<!-- pinned: 2026-01-01--> tail, pin-size-override: r -->"
 
     def test_oversized_body_with_early_closing_date_field_denies(self):
-        from pin_caps import PIN_SIZE_CAP, evaluate_full_state, parse_pins
+        from pin_caps import PIN_SIZE_CAP, evaluate_full_state
+        from fixtures.pin_helpers import parse_pins
 
         body = "y" * (PIN_SIZE_CAP + 100)
         section = f"{self.EARLY_CLOSING}\n### Oversized\n{body}\n"
@@ -388,7 +389,7 @@ class TestPinCommentDateField_BypassClosure:
         assert violation.kind == "size"
 
     def test_early_closing_date_field_grants_no_rationale(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         section = f"{self.EARLY_CLOSING}\n### Oversized\nshort\n"
         pins = parse_pins(section)
@@ -396,7 +397,8 @@ class TestPinCommentDateField_BypassClosure:
 
     def test_faithful_override_still_grants(self):
         """The closure must not refuse an honest curator line."""
-        from pin_caps import PIN_SIZE_CAP, evaluate_full_state, parse_pins
+        from pin_caps import PIN_SIZE_CAP, evaluate_full_state
+        from fixtures.pin_helpers import parse_pins
 
         body = "y" * (PIN_SIZE_CAP + 100)
         comment = (

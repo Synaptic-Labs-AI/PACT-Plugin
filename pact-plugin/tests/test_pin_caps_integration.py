@@ -639,7 +639,7 @@ class TestParsePinsVsDetectStaleEntries_Agreement:
         (5, {2}),
     ])
     def test_stale_marker_detection_agrees(self, n_pins, stale_indices):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         from helpers import make_pin_entry, make_pinned_section
         # Build content with explicit STALE markers — detect_stale_entries
         # skips already-marked entries, so our axis of comparison is
@@ -683,7 +683,7 @@ class TestLiveClaudeMdOverrideLine_RoundTrip:
     LIVE_RATIONALE = "verbatim dispatch form is load-bearing for LLM readers"
 
     def test_round_trip_preserves_rationale(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = f"{self.LIVE_LINE}\n### Canonical Task Form\nbody\n"
         pins = parse_pins(content)
         assert len(pins) == 1
@@ -691,7 +691,7 @@ class TestLiveClaudeMdOverrideLine_RoundTrip:
         assert pins[0].date_comment == self.LIVE_LINE
 
     def test_round_trip_inside_multi_pin_context(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = (
             "<!-- pinned: 2026-04-01 -->\n"
             "### Other Pin\n"

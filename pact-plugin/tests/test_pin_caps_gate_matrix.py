@@ -420,7 +420,7 @@ class TestPinCapsGate_Matrix_Edit:
         """The parser never grants an override whose rationale holds a
         terminator, and the gate never lets one through as valid: a smuggled
         terminator cannot unlock the size cap on either side."""
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         from pin_caps_gate import gate_decision
 
         candidate = (

@@ -54,6 +54,8 @@
     },
     "tests/test_archive_pin.py": {
       "archive_pin": "scripts/archive_pin.py",
+      "fixtures": "tests/fixtures/__init__.py",
+      "fixtures.pin_helpers": "tests/fixtures/pin_helpers.py",
       "helpers": "tests/helpers.py",
       "helpers.make_claude_md_with_pins": null,
       "helpers.make_pin_entry": null,
@@ -303,11 +305,12 @@
       "datetime.datetime": null,
       "datetime.timedelta": null,
       "datetime.timezone": null,
+      "fixtures": "tests/fixtures/__init__.py",
+      "fixtures.pin_helpers": "tests/fixtures/pin_helpers.py",
       "helpers": "tests/helpers.py",
       "helpers.make_claude_md_with_pins": null,
       "helpers.make_pin_entry": null,
       "pathlib.Path": null,
-      "pin_caps": "hooks/pin_caps.py",
       "staleness": "hooks/staleness.py",
       "unittest.mock.patch": null
     },
@@ -2041,6 +2044,8 @@
       "task_lifecycle_gate": "hooks/task_lifecycle_gate.py"
     },
     "tests/test_pin_caps.py": {
+      "fixtures.pin_helpers": "tests/fixtures/pin_helpers.py",
+      "fixtures.pin_helpers.parse_pins": null,
       "pin_caps": "hooks/pin_caps.py",
       "pin_caps.DENY_REASON_COUNT": null,
       "pin_caps.DENY_REASON_OVERRIDE_MISSING": null,
@@ -2050,17 +2055,15 @@
       "pin_caps.PIN_SIZE_CAP": null,
       "pin_caps.PIN_STALE_BLOCK_THRESHOLD": null,
       "pin_caps.Pin": null,
-      "pin_caps.apply_edit_and_parse": null,
       "pin_caps.check_stale_block": null,
       "pin_caps.compute_deny_reason": null,
       "pin_caps.evaluate_full_state": null,
       "pin_caps.format_slot_status": null,
-      "pin_caps.has_size_override": null,
-      "pin_caps.parse_pins": null
+      "pin_caps.has_size_override": null
     },
     "tests/test_pin_caps_adversarial.py": {
-      "pin_caps": "hooks/pin_caps.py",
-      "pin_caps.parse_pins": null,
+      "fixtures.pin_helpers": "tests/fixtures/pin_helpers.py",
+      "fixtures.pin_helpers.parse_pins": null,
       "pin_staleness_gate": "hooks/pin_staleness_gate.py",
       "pin_staleness_gate.PIN_STALENESS_MARKER_NAME": null,
       "pin_staleness_gate._check_tool_allowed": null,
@@ -2096,24 +2099,24 @@
       "staleness": "hooks/staleness.py"
     },
     "tests/test_pin_caps_gate_matrix.py": {
+      "fixtures.pin_helpers": "tests/fixtures/pin_helpers.py",
+      "fixtures.pin_helpers.parse_pins": null,
       "helpers": "tests/helpers.py",
       "helpers.make_claude_md_with_pins": null,
       "helpers.make_pin_entry": null,
-      "pin_caps": "hooks/pin_caps.py",
-      "pin_caps.parse_pins": null,
       "pin_caps_gate": "hooks/pin_caps_gate.py",
       "pin_caps_gate._check_tool_allowed": null,
       "pin_caps_gate._extract_override_rationale": null,
       "staleness": "hooks/staleness.py"
     },
     "tests/test_pin_caps_integration.py": {
+      "fixtures.pin_helpers": "tests/fixtures/pin_helpers.py",
+      "fixtures.pin_helpers.parse_pins": null,
       "helpers": "tests/helpers.py",
       "helpers.make_claude_md_with_pins": null,
       "helpers.make_pin_entry": null,
       "helpers.make_pinned_section": null,
       "pathlib.Path": null,
-      "pin_caps": "hooks/pin_caps.py",
-      "pin_caps.parse_pins": null,
       "pin_staleness_gate": "hooks/pin_staleness_gate.py",
       "pin_staleness_gate.PIN_STALENESS_MARKER_NAME": null,
       "session_init": "hooks/session_init.py",
@@ -2135,6 +2138,8 @@
       "unittest.mock.patch": null
     },
     "tests/test_pin_comment_dominance.py": {
+      "fixtures.pin_helpers": "tests/fixtures/pin_helpers.py",
+      "fixtures.pin_helpers.parse_pins": null,
       "helpers": "tests/helpers.py",
       "helpers.make_claude_md_with_pins": null,
       "pin_caps": "hooks/pin_caps.py",
@@ -2142,20 +2147,20 @@
       "pin_caps.PIN_SIZE_CAP": null,
       "pin_caps._DATE_COMMENT_RE": null,
       "pin_caps.evaluate_full_state": null,
-      "pin_caps.parse_pins": null,
       "pin_caps_gate": "hooks/pin_caps_gate.py",
       "pin_caps_gate._check_tool_allowed": null,
       "staleness": "hooks/staleness.py"
     },
     "tests/test_pin_comment_pipeline.py": {
+      "fixtures.pin_helpers": "tests/fixtures/pin_helpers.py",
+      "fixtures.pin_helpers._extract_body_chars": null,
+      "fixtures.pin_helpers.parse_pins": null,
       "pin_caps": "hooks/pin_caps.py",
       "pin_caps.OVERRIDE_COMMENT_RE": null,
       "pin_caps.PIN_STALE_BLOCK_THRESHOLD": null,
       "pin_caps._DATE_COMMENT_RE": null,
-      "pin_caps._extract_body_chars": null,
       "pin_caps.check_stale_block": null,
-      "pin_caps.compute_deny_reason": null,
-      "pin_caps.parse_pins": null
+      "pin_caps.compute_deny_reason": null
     },
     "tests/test_pin_marker_writer.py": {
       "__future__.annotations": null,
@@ -2205,7 +2210,6 @@
       "pin_caps": "hooks/pin_caps.py",
       "pin_caps.PIN_COUNT_CAP": null,
       "pin_caps.PIN_SIZE_CAP": null,
-      "pin_caps.apply_edit_and_parse": null,
       "pin_caps.compute_deny_reason": null,
       "pin_caps_gate": "hooks/pin_caps_gate.py",
       "pin_caps_gate._parse_baseline": null,
@@ -2958,6 +2962,8 @@
     "tests/test_staleness.py": {
       "datetime.datetime": null,
       "datetime.timedelta": null,
+      "fixtures": "tests/fixtures/__init__.py",
+      "fixtures.pin_helpers": "tests/fixtures/pin_helpers.py",
       "pathlib.Path": null,
       "pin_caps": "hooks/pin_caps.py",
       "pin_caps_gate": "hooks/pin_caps_gate.py",

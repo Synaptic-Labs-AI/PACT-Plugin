@@ -318,7 +318,7 @@ def check_pin_slot_status() -> Optional[str]:
     Defense-in-depth (Back-M2): the inner branches each handle their own
     failure modes, but the SessionStart hot path cannot afford an
     uncaught exception from a downstream helper (e.g., format_slot_status
-    regression, future parser change that raises outside parse_pins).
+    regression, future parser change that raises outside the pin reader).
     Wrap the full body in a blanket try/except — mirrors the sibling
     check_pin_stale_block_directive pattern above.
     """

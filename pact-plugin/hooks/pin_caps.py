@@ -62,7 +62,7 @@ OVERRIDE_RATIONALE_MAX = 120
 # It must never remove less, because less is a charge against the neighbour.
 #
 # Every fragment is NON-CAPTURING. `OVERRIDE_COMMENT_RE.groups` must stay 1,
-# because `parse_pins` reads the rationale as `group(1)`.
+# because its one group is the rationale.
 _COMMENT_CHAR = r'(?:[^-]|-(?!->))'
 _COMMENT_CHAR_NO_COMMA = r'(?:[^-,]|-(?!->))'
 _PIN_COMMENT_OPEN = r'<!--\s*pinned:\s*'
@@ -133,7 +133,7 @@ _OVERRIDE_FIELD = "pin-size-override:"
 _SPLITLINES_ONLY_BREAKS = "\v\f\x1c\x1d\x1e\x85\u2028\u2029"
 
 # Sec-F5b / cycle-7: Line terminators that must not survive inside an
-# override rationale. Stripped via str.translate in parse_pins.
+# override rationale. Stripped via str.translate in `_override_rationale`.
 # U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR, U+0085 NEXT LINE,
 # U+000D CARRIAGE RETURN, U+000A LINE FEED (ASCII newline) — any of
 # these can span logical lines in some renderers or split a
@@ -144,8 +144,8 @@ _SPLITLINES_ONLY_BREAKS = "\v\f\x1c\x1d\x1e\x85\u2028\u2029"
 #
 # This table is narrower than `str.splitlines()`, which also breaks at \v
 # (U+000B), \f (U+000C) and FS/GS/RS (U+001C/U+001D/U+001E). The parser splits
-# rows at \r\n, \r and \n only, so `parse_pins` closes the gap before this
-# translate runs: a candidate row holding any `_SPLITLINES_ONLY_BREAKS`
+# rows at \r\n, \r and \n only, so `_date_comment_row` closes the gap before
+# this translate runs: a candidate row holding any `_SPLITLINES_ONLY_BREAKS`
 # character is not attributed. The translate is defense-in-depth behind that
 # refusal; widen this table before relaxing it.
 _FORBIDDEN_TERMINATOR_TABLE = str.maketrans("", "", "\u2028\u2029\u0085\r\n")
@@ -215,19 +215,6 @@ def _charged_rows(doc, first: int, last: int) -> List[str]:
             content = "".join(pieces) + content[pos:]
         kept.append(content.rstrip(" \t"))
     return kept
-
-
-def _extract_body_chars(body: str) -> int:
-    """Count body chars excluding auto-generated markers.
-
-    The date comment and STALE marker are plugin-managed — they MUST NOT
-    count against the user's 1500-char budget. `body` is parsed on its own;
-    see `_charge` for what counts.
-    """
-    from shared.claude_md_markers import parse
-
-    doc = parse(body)
-    return _charge(doc, 0, len(doc.lines) - 1)
 
 
 def _date_comment_row(doc, floor: int, heading: int) -> Optional[int]:
@@ -318,26 +305,6 @@ def pins_in_rows(doc, first: int, last: int) -> List[Pin]:
             lines=tuple(row for row in rows if row.strip()),
         ))
     return pins
-
-
-def parse_pins(pinned_content: str) -> List[Pin]:
-    """Parse the Pinned Context section body into a list of Pin entries.
-
-    The text is parsed on its own with the fence-aware parser, so a `### `
-    line inside a fenced block is body text, not a pin. Never raises on str
-    input.
-
-    The pinned_content input is the body AFTER the "## Pinned Context"
-    heading (what `staleness._parse_pinned_section` returns in its third
-    tuple slot). A caller holding the whole document's parse and the located
-    section uses `section_pins` instead, which reads that parse's rows.
-    """
-    if not pinned_content:
-        return []
-    from shared.claude_md_markers import parse
-
-    doc = parse(pinned_content)
-    return pins_in_rows(doc, 0, len(doc.lines) - 1)
 
 
 def section_pins(doc, located) -> List[Pin]:
@@ -440,7 +407,7 @@ def evaluate_full_state(pins: List[Pin]) -> Optional[CapViolation]:
       2. size:    any pin has body_chars > PIN_SIZE_CAP AND no valid override
 
     Embedded-pin smuggle is not re-checked here — by the time `pins`
-    exists, parse_pins has already visited the structure; the bypass
+    exists, `pins_in_rows` has already visited the structure; the bypass
     either inflated count (caught by 1) or is benign.
 
     Returns None when no violation, otherwise the first violation found.
@@ -566,89 +533,6 @@ def _violation_for_kind(pins: List[Pin], kind: str) -> Optional[CapViolation]:
         return None
 
     return None
-
-
-def apply_edit_and_parse(current_content: str, tool_input: dict) -> List[Pin]:
-    """Simulate the post-tool CLAUDE.md state and return parsed pins.
-
-    For Edit:
-      Applies `old_string → new_string` via `str.replace(...)`. When
-      `replace_all` is true, Python's no-count str.replace matches the
-      tool's actual apply behavior (PREPARE task #41 confirmed byte-
-      identical). When `replace_all` is false, replaces only the first
-      occurrence (`count=1`), matching the tool's single-match semantics.
-
-    For Write:
-      Uses `tool_input['content']` directly as the full new file content.
-      `current_content` is ignored in that path — Write is a full-file
-      replacement.
-
-    After producing the simulated post-edit content, extracts the
-    Pinned Context section via `_parse_pinned_section` and returns
-    `parse_pins(pinned_content)`. Section-bounded by construction so
-    `### ` headings elsewhere (Working Memory, user prose) do NOT
-    inflate the count. If the post-edit content has no Pinned Context
-    section, returns [] (no pins → below every cap).
-
-    Raises on malformed tool_input (missing required keys, non-string
-    values). The caller (pin_caps_gate.main) is responsible for wrapping
-    the exception in the gate's outer fail-open. Embedding try/except
-    inside this helper would hide input corruption from the gate, which
-    needs to emit a failure_log entry on that path.
-    """
-    # Lazy import to avoid module-level coupling between pin_caps (pure
-    # helpers) and staleness (has CLAUDE.md resolution logic). The
-    # section-bounding contract lives in staleness._parse_pinned_section.
-    from staleness import _parse_pinned_section
-
-    if "content" in tool_input:
-        # Write path — full-file replacement.
-        new_content = tool_input["content"]
-        if not isinstance(new_content, str):
-            raise TypeError(
-                f"Write tool_input.content must be str, got "
-                f"{type(new_content).__name__}"
-            )
-        simulated = new_content
-    else:
-        # Edit path — old_string / new_string with replace_all.
-        old_string = tool_input.get("old_string")
-        new_string = tool_input.get("new_string")
-        if not isinstance(old_string, str) or not isinstance(new_string, str):
-            raise TypeError(
-                "Edit tool_input.old_string and .new_string must both be str"
-            )
-        if old_string == "":
-            # Empty old_string edge (blind-backend-coder-2 #492 F6):
-            # `str.replace(s, "", new)` interleaves `new` between every
-            # character (replace_all=True) or prepends it once (replace_all=
-            # False). Both outcomes produce gibberish that neither matches
-            # the Claude Code tool's actual apply behavior nor yields a
-            # parseable CLAUDE.md — `parse_pins` returns []; the gate sees
-            # "clean" post-state and allows. Treat the empty-old-string
-            # case as a no-op: return the PRE-state parse directly so the
-            # gate compares pre == post and applies the normal net-worse
-            # contract. Pre-malformed state never denies (F1 livelock
-            # precedent); honest simulation over misleading-clean from
-            # gibberish. The platform-level Edit tool's own validation of
-            # empty old_string is the primary defense — this branch just
-            # ensures the gate can't be weaponized into a silent bypass.
-            simulated = current_content
-        else:
-            replace_all = bool(tool_input.get("replace_all", False))
-            if replace_all:
-                simulated = current_content.replace(old_string, new_string)
-            else:
-                simulated = current_content.replace(old_string, new_string, 1)
-
-    parsed = _parse_pinned_section(simulated)
-    if parsed is None:
-        # No Pinned Context section in the post-edit state. Treat as
-        # "no pins" — caps cannot be violated when the section is absent.
-        return []
-
-    _, _, pinned_content = parsed
-    return parse_pins(pinned_content)
 
 
 def compute_deny_reason(
