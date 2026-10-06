@@ -11,8 +11,9 @@ Rows: the boundary row and cause for every block type, closure and covered
 row; the slice-start shape; the pin-cap gate on honest edits around such a
 block (never a DENY of a faithful edit, still a DENY of growth in a certain
 file); the Pinned readers' one path; the session writer and the per-launch
-report naming the line and cause; and `parse` keeping no state between calls.
-Every CLAUDE.md written here is under tmp_path.
+report naming the line and cause; a single block above an uncertain region
+that holds another copy of its marker; and `parse` keeping no state between
+calls. Every CLAUDE.md written here is under tmp_path.
 """
 import ast
 import pathlib
@@ -252,6 +253,34 @@ def test_the_per_launch_report_names_the_line_and_cause(project):
     report = session_init.check_claude_md_refusals()
     assert report is not None
     assert f"line {UNCERTAIN_LINE} starts an uncertain region: an HTML block is never closed" in report
+
+
+# --- one block above an uncertain region that may hold another copy ---------
+
+@pytest.mark.parametrize("tail, writes", [
+    ("Notes\n<![CDATA[\n```\nexample\n", True),  # no copy: the session block above is written
+    ("Notes\n<![CDATA[\n```\n<!-- SESSION_START -->\n", False),  # a copy past the boundary
+], ids=["no copy", "a copy"])
+def test_the_session_writer_writes_above_the_boundary_only_without_a_copy(project, tail, writes):
+    target = project / ".claude" / "CLAUDE.md"
+    text = _doc(_pins(2)) + tail
+    target.write_bytes(text.encode("utf-8"))
+    status = update_session_info("s1", "team", started="2026-10-01 00:00:00 UTC")
+    after = target.read_bytes().decode("utf-8")
+    assert (after != text) is writes and after.endswith(tail)
+    if not writes:
+        assert status is not None and "may hold another '<!-- SESSION_START -->'" in status
+
+
+def test_a_pin_added_while_a_memory_marker_copy_sits_past_an_unclosed_fence_is_allowed_with_the_advisory():
+    # The memory pair reads UNKNOWN, so the Pinned section is not found and the
+    # gate allows with its advisory; the same file without the copy is refused.
+    for tail, verdict in (("```\nexample:\n<!-- PACT_MEMORY_START -->\n", ("ALLOW_ADVISORY", "not_found")),
+                          ("```\nexample\n", ("DENY", "count"))):
+        before = _doc(_pins(12)) + "\n## Notes\n" + tail
+        decision = gate_decision(before, "Edit", {"old_string": "\n## Working Memory",
+                                                  "new_string": "\n" + _pin(13) + "\n## Working Memory"})
+        assert (decision.verdict, decision.cause) == verdict, tail
 
 
 # --- parse keeps no state between calls ------------------------------------

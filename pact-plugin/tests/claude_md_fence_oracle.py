@@ -244,8 +244,10 @@ def scan(text: str) -> Scan:
 # - first match wins: stray; a nested start or an end with no start, in row order;
 #   a start left open in a known scope; two or more pairs or marker lines
 #   (DUPLICATE); a start left open in an unknown scope (UNKNOWN); one pair or
-#   marker line (FOUND); none in a known scope (ABSENT); none (UNKNOWN). UNKNOWN
-#   carries the document's boundary cause.
+#   marker line while an uncertain row in scope holds a looked-up literal outside
+#   every inline code span (UNKNOWN); one pair or marker line (FOUND); none in a
+#   known scope (ABSENT); none (UNKNOWN). UNKNOWN carries the document's boundary
+#   cause.
 
 FOUND, ABSENT, DUPLICATE, MALFORMED = "FOUND", "ABSENT", "DUPLICATE", "MALFORMED"
 STRAY, UNPAIRED, NESTED, DUPLICATED, COMMENTED = "stray", "unpaired", "nested", "duplicate", "commented"
@@ -332,6 +334,12 @@ def _stray(scan: Scan, rows: range, literals: Sequence[str]) -> bool:
     return False
 
 
+def _copy_past_boundary(scan: Scan, rows: range, literals: Sequence[str]) -> bool:
+    """An uncertain row in scope holds a literal outside every inline code span."""
+    return any(scan.rows[i].kind == UNKNOWN and _occurrences_outside_spans(scan.rows[i].content, lit)
+               for i in rows for lit in literals)
+
+
 def _marker_rows(scan: Scan, rows: range, literal: str) -> list[int]:
     return [i for i in rows if scan.rows[i].kind == PROSE and _is_marker_line(scan.rows[i].content, literal)]
 
@@ -361,6 +369,8 @@ def find_block(scan: Scan, start: str, end: str, scope: Optional[tuple[int, int]
         return Block(DUPLICATE, tuple(pairs), DUPLICATED)
     if open_row is not None:
         return Block(UNKNOWN, (), scan.cause)
+    if pairs and _copy_past_boundary(scan, rows, (start, end)):
+        return Block(UNKNOWN, (), scan.cause)
     if pairs:
         return Block(FOUND, tuple(pairs), None)
     return Block(ABSENT, (), None) if known else Block(UNKNOWN, (), scan.cause)
@@ -374,6 +384,8 @@ def find_marker(scan: Scan, literal: str, scope: Optional[tuple[int, int]] = Non
         return Block(MALFORMED, tuple((i, i) for i in found), STRAY)
     if len(found) >= 2:
         return Block(DUPLICATE, tuple((i, i) for i in found), DUPLICATED)
+    if found and _copy_past_boundary(scan, rows, (literal,)):
+        return Block(UNKNOWN, (), scan.cause)
     if found:
         return Block(FOUND, ((found[0], found[0]),), None)
     return Block(ABSENT, (), None) if scope_known(scan, scope) else Block(UNKNOWN, (), scan.cause)

@@ -380,6 +380,44 @@ def test_a_declaration_over_a_fence_opener_makes_the_rest_uncertain():
     assert _session(doc).state is State.UNKNOWN
 
 
+# One certain pair or marker line above an uncertain region that holds another
+# copy of a literal cannot be told from a duplicate: read as prose, the copy is
+# a second marker line.
+M_BLOCK = f"{MANAGED_START_MARKER}\n# PACT\n{MANAGED_END_MARKER}\nNotes\n"
+
+
+@pytest.mark.parametrize("tail, reason", [
+    (f"<![CDATA[\n```\n{MANAGED_START_MARKER}\n",
+     f"line 7 may hold another {MANAGED_START_MARKER!r}; "
+     "line 5 starts an uncertain region: an HTML block is never closed"),
+    (f"```\n{MANAGED_START_MARKER}\n",
+     f"line 6 may hold another {MANAGED_START_MARKER!r}; line 5 starts an uncertain region: a code fence is not closed"),
+], ids=["past a never-closed HTML block", "past an unclosed fence"])
+def test_one_pair_with_a_copy_past_the_boundary_is_unknown(tail, reason):
+    located = parse(M_BLOCK + tail).find_block(MANAGED_START_MARKER, MANAGED_END_MARKER)
+    assert (located.state, located.spans, located.reason) == (State.UNKNOWN, (), reason)
+
+
+@pytest.mark.parametrize("tail", [
+    "<![CDATA[\n```\nexample\n",  # no copy
+    f"<![CDATA[\n```\nthe marker is `{MANAGED_START_MARKER}`\n",  # a mention in an inline code span
+], ids=["no copy", "a mention in code"])
+def test_one_pair_above_a_boundary_with_no_copy_is_found(tail):
+    located = parse(M_BLOCK + tail).find_block(MANAGED_START_MARKER, MANAGED_END_MARKER)
+    assert (located.state, located.spans) == (State.FOUND, ((0, 2),))
+
+
+@pytest.mark.parametrize("copy, state", [
+    (S, State.UNKNOWN),
+    (f"see `{S}` here", State.FOUND),
+], ids=["a copy", "a mention in code"])
+def test_one_marker_line_with_a_copy_past_the_boundary(copy, state):
+    located = _doc(S, "x", "```", copy).find_marker(S)
+    assert located.state is state
+    if state is State.UNKNOWN:
+        assert located.reason == f"line 4 may hold another {S!r}; line 3 starts an uncertain region: a code fence is not closed"
+
+
 def test_types_six_and_seven_are_not_modelled():
     doc = _doc("<div>", "```", S, E, "```", "</div>")
     assert _kinds(doc) == "P1 F1 C2 F1 P1"

@@ -3366,6 +3366,116 @@
   "kinds": "U5",
   "note": "a never-closed <pre> over a fence opener: the boundary is its start"
  },
+ "managed_above_html_boundary_no_copy": {
+  "blocks": {
+   "MANAGED": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   },
+   "MEMORY": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 4,
+  "boundary_cause": "unclosed_html",
+  "decode": "strict",
+  "kinds": "P4 U3",
+  "note": "one managed pair above a never-closed CDATA block that holds no marker: FOUND"
+ },
+ "managed_copy_in_code_span_past_boundary": {
+  "blocks": {
+   "MANAGED": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   },
+   "MEMORY": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 4,
+  "boundary_cause": "unclosed_html",
+  "decode": "strict",
+  "kinds": "P4 U3",
+  "note": "a managed start past the boundary inside an inline code span is a mention: the pair is FOUND"
+ },
+ "managed_copy_past_html_boundary": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 4,
+  "boundary_cause": "unclosed_html",
+  "decode": "strict",
+  "kinds": "P4 U3",
+  "note": "one managed pair above a never-closed CDATA block over a fence, and a second managed start inside it: not FOUND"
+ },
+ "managed_copy_past_unclosed_fence": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 4,
+  "boundary_cause": "unclosed_fence",
+  "decode": "strict",
+  "kinds": "P4 U2",
+  "note": "one managed pair above an unclosed fence that holds a second managed start: not FOUND"
+ },
  "marker_duplicate_session_start": {
   "blocks": {
    "MANAGED": {

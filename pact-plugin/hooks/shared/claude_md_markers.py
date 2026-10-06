@@ -77,10 +77,13 @@ STATES. A lookup reads only certain rows (those before the boundary). For
 3. MALFORMED, unpaired: a start with no end while the scope is known;
 4. DUPLICATE: two or more blocks or marker lines;
 5. UNKNOWN: a start with no end and the scope not known, even beside a pair;
-6. FOUND: exactly one block or marker line, even when the scope runs on into
-   UNKNOWN rows;
-7. ABSENT: none, and the scope is known;
-8. UNKNOWN: none, and the scope is not known.
+6. UNKNOWN: exactly one block or marker line, and an UNKNOWN row in scope
+   holds a literal outside every inline code span: read as prose it would be
+   a second copy. The reason names the first such row;
+7. FOUND: exactly one block or marker line, even when the scope runs on into
+   UNKNOWN rows that hold no literal;
+8. ABSENT: none, and the scope is known;
+9. UNKNOWN: none, and the scope is not known.
 `may_hold(literal)` tells whether any UNKNOWN row contains the literal as text,
 so a caller can tell an uncertain region that may hide a block from one that
 cannot. `find_section` returns FOUND, ABSENT, UNKNOWN or, with `unique`, DUPLICATE
@@ -340,6 +343,18 @@ class Document:
                        f"marker text on {_lines_text(rows)} is not a marker line: it is "
                        f"indented, quoted, list-prefixed or shares its line", Cause.STRAY)
 
+    def _uncertain_copy(self, literals: tuple[str, ...], scope) -> Located | None:
+        """UNKNOWN when an UNKNOWN row in `scope` holds one of `literals` outside
+        every inline code span: read as prose it is another copy, so a single
+        certain match cannot be told from a duplicate. None otherwise."""
+        for line in self._rows(scope):
+            if line.kind is Kind.UNKNOWN:
+                for literal in literals:
+                    if _has_stray(line.content, literal):
+                        return self._unknown(f"line {line.row + 1} may hold another {literal!r}; "
+                                             f"{self._boundary_reason()}")
+        return None
+
     def _unknown(self, reason: str) -> Located:
         return Located(State.UNKNOWN, (), reason, self.boundary_cause)
 
@@ -359,7 +374,8 @@ class Document:
             return Located(State.DUPLICATE, tuple((row, row) for row in rows),
                            f"{literal!r} appears on {_lines_text(rows)}", Cause.DUPLICATE)
         if rows:
-            return Located(State.FOUND, ((rows[0], rows[0]),), "", None)
+            return (self._uncertain_copy((literal,), scope)
+                    or Located(State.FOUND, ((rows[0], rows[0]),), "", None))
         if self.scope_known(scope):
             return Located(State.ABSENT, (), "", None)
         return self._unknown(self._boundary_reason())
@@ -399,7 +415,8 @@ class Document:
             return self._unknown(f"{start_literal!r} on line {open_row + 1} has no end marker "
                                  f"before the uncertain region; {self._boundary_reason()}")
         if pairs:
-            return Located(State.FOUND, tuple(pairs), "", None)
+            return (self._uncertain_copy((start_literal, end_literal), scope)
+                    or Located(State.FOUND, tuple(pairs), "", None))
         if known:
             return Located(State.ABSENT, (), "", None)
         return self._unknown(self._boundary_reason())
