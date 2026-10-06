@@ -14,7 +14,9 @@ decision, pin_cap_decision, and every axis counts:
 Every gate runs the slice, a fixed-seed prefix of the full sweep. With CI set the
 full sweep runs instead, with the certified seeds and counts. The local runner
 replays ordinary edits on real CLAUDE.md files named by PACT_PIN_GROWTH_REAL_FILES
-and is skipped without it; it reads those files and keeps nothing.
+and is skipped without it; it reads those files and keeps nothing. There an edit
+that grows a pin past the size cap must be refused for its size, and every other
+ordinary edit must be allowed.
 """
 
 import collections
@@ -352,20 +354,99 @@ def _real_files():
     return [Path(p) for p in raw.split(os.pathsep) if p]
 
 
-def test_ordinary_edits_on_real_files_are_never_refused():
+def _replay_fault(label, decision):
+    """What is wrong with `decision` on a replayed change labelled `label`, or None."""
+    refused = decision.verdict == "DENY"
+    if label == R.FAITHFUL:
+        return "refused" if refused else None
+    if label == R.GROWTH:
+        return None if refused else "allowed"
+    if label == replay.SIZE:
+        return None if refused and decision.cause == "size" else "not refused for the pin's size"
+    if label == replay.SIZE_AFTER_SLIP:
+        # Unlike SIZE, an allow passes. The text before held an unclosed fence, so the
+        # gate compared with pins it could not see, and the growth it allows is the
+        # under-block that uncertain text already carries. A refusal is still only
+        # for the pin's size.
+        return "refused, not for the pin's size" if refused and decision.cause != "size" else None
+    raise ValueError(f"unknown label {label!r}")
+
+
+def _decision(verdict, cause=None):
+    return pin_growth.PinDecision(verdict, 13, 13, 0, cause, None)
+
+
+def _row_id(value):
+    if isinstance(value, pin_growth.PinDecision):
+        return value.verdict + (f"/{value.cause}" if value.cause else "")
+    return str(value)
+
+
+@pytest.mark.parametrize("label,decision,passes", [
+    (R.FAITHFUL, _decision("ALLOW"), True),
+    (R.FAITHFUL, _decision("ALLOW_ADVISORY", "not_found"), True),
+    (R.FAITHFUL, _decision("DENY", "size"), False),
+    (replay.SIZE, _decision("DENY", "size"), True),
+    (replay.SIZE, _decision("DENY", "count"), False),
+    (replay.SIZE, _decision("ALLOW"), False),
+    (replay.SIZE, _decision("ALLOW_ADVISORY", "size_bound"), False),
+    (replay.SIZE_AFTER_SLIP, _decision("ALLOW"), True),
+    (replay.SIZE_AFTER_SLIP, _decision("DENY", "size"), True),
+    (replay.SIZE_AFTER_SLIP, _decision("DENY", "count"), False),
+    (R.GROWTH, _decision("DENY", "count"), True),
+    (R.GROWTH, _decision("ALLOW"), False),
+], ids=_row_id)
+def test_the_real_file_runner_passes_only_the_decision_each_label_expects(label, decision, passes):
+    assert (_replay_fault(label, decision) is None) is passes
+
+
+def _pin(body, comment="<!-- pinned: 2026-10-01 -->"):
+    return f"{comment}\n### A pin\n{body}\n\n"
+
+
+EXAMPLE = replay.snippet("```md", "```")
+NEAR_CAP = "word " * 296 + "end"  # 1,483 characters
+
+
+@pytest.mark.parametrize("before,after,grows", [
+    (_pin(NEAR_CAP), replay.with_body_insert(_pin(NEAR_CAP), EXAMPLE), True),
+    (_pin(NEAR_CAP[:1300]), replay.with_body_insert(_pin(NEAR_CAP[:1300]), EXAMPLE), False),
+    (_pin(NEAR_CAP * 2), _pin((NEAR_CAP * 2).replace("e", "E", 1)), False),
+    (_pin(NEAR_CAP, "<!-- pinned: 2026-10-01, pin-size-override: verbatim form -->"),
+     replay.with_body_insert(_pin(NEAR_CAP, "<!-- pinned: 2026-10-01, pin-size-override: verbatim form -->"),
+                             EXAMPLE), False),
+    (_pin(NEAR_CAP), _pin(NEAR_CAP + "\n<!-- STALE: Last relevant 2026-01-01 -->"), False),
+    (_pin(NEAR_CAP), _pin(NEAR_CAP + "\n```\n<!-- pinned: 2026-01-01 -->\n```"), True),
+], ids=["an example takes it over", "an example keeps it under", "over but no larger", "size override",
+        "a STALE marker is free", "a fenced comment is charged"])
+def test_a_pin_counts_as_grown_past_the_cap_only_when_it_ends_over_it_and_larger(before, after, grows):
+    """Over the cap and larger, counting as the size cap counts; a pin with a size
+    override never counts, and a pin or STALE comment costs nothing outside a fence."""
+    assert replay.grows_past_cap(before, after) is grows
+
+
+def test_ordinary_edits_on_real_files_are_refused_only_for_pin_size():
+    """Replays files a user keeps: a project's or a home CLAUDE.md. Leave out the
+    parser corpus and census repro files: their pins sit inside fenced documents the
+    replay's splitter reads as text, or their Pinned section is uncertain, so the
+    labels the replay gives them do not hold."""
     files = _real_files()
     if not files:
         pytest.skip(f"set {REAL_FILES_ENV} to CLAUDE.md paths, separated by {os.pathsep!r}, to replay real files")
+    fixtures = [str(p) for p in files if TESTS in p.resolve().parents]
+    assert not fixtures, f"these are test fixtures, not files a user keeps: {fixtures}"
     report, failures = {}, []
     for path in files:
         text = path.read_text(encoding="utf-8", errors="replace")
         n = collections.Counter()
         for what, pre, post, label in replay.replay(text):
             d = pin_growth.pin_cap_decision(pre, post, use_timer=False)
-            n[label] += 1
-            if (label == R.FAITHFUL) == (d.verdict == "DENY"):
-                failures.append((str(path), what, label, d.verdict, d.cause))
-        report[str(path)] = dict(n)
+            n[label, "refused" if d.verdict == "DENY" else "allowed"] += 1
+            fault = _replay_fault(label, d)
+            if fault:
+                failures.append((str(path), what, label, fault, d.verdict, d.cause))
+        if n:
+            report[str(path)] = {f"{label}, {outcome}": count for (label, outcome), count in sorted(n.items())}
     print(f"real-file replay: {report}")
-    assert any(report.values()), f"no file had a Pinned section with three pins: {report}"
+    assert report, "no file had a Pinned section with three pins"
     assert failures == [], failures[:20]
