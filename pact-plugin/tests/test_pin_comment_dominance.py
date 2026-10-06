@@ -5,12 +5,12 @@ Location: pact-plugin/tests/test_pin_comment_dominance.py
 
 Summary: pins the safety property that ties pin-comment attribution to the
 size charge, both read through the functions that ship. Attribution
-(`pin_caps._date_comment_row`, with the row patterns `_DATE_COMMENT_ROW` and
-`_OVERRIDE_COMMENT_ROW`) decides which row is a pin's comment. The charge
-(`pin_caps._charged_rows`) strikes pin comments from each body row. A pin's
-comment row sits at the end of the previous pin's body, so if the strike is
-NARROWER than attribution, the comment that annotates pin N is charged to pin
-N-1. The neighbour then takes a size deny that the curator did not cause.
+(`pin_caps._date_comment_row`, with the row pattern `_DATE_COMMENT_ROW`, which
+every override comment also matches) decides which row is a pin's comment. The
+charge (`pin_caps._charged_rows`) strikes pin comments from each body row. A
+pin's comment row sits at the end of the previous pin's body, so if the strike
+is NARROWER than attribution, the comment that annotates pin N is charged to
+pin N-1. The neighbour then takes a size deny that the curator did not cause.
 
 DOMINANCE, stated over a single row `L`:
 
