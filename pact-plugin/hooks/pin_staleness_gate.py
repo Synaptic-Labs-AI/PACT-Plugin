@@ -127,7 +127,6 @@ try:
     import shared.pact_context as pact_context
     from shared import match_project_claude_md
     from shared.constants import PIN_STALENESS_MARKER_NAME
-    from pin_caps import parse_pins
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_deny("module imports", _module_load_error)
 
@@ -346,8 +345,8 @@ def _is_memory_entry(pin) -> bool:
     and 0 that are date-led AND unmarked, so the R2 trigger population is
     EMPTY. COUNTING RULE: bound the region with
     `staleness._parse_pinned_section`, count `^### ` and `^<!-- pinned:` at
-    column 0, and judge with `_is_memory_entry` over `parse_pins`, the oracle
-    of this guard. CONTROLS: an impossible pattern returned 0, and
+    column 0, and judge with `_is_memory_entry` over the pins the cap's parser
+    reads, the oracle of this guard. CONTROLS: an impossible pattern returned 0, and
     `_is_memory_entry` returned True on a synthetic bare-date unmarked
     heading, so the 0 means EMPTY rather than an inert predicate. RE-RUN IT.
 
@@ -366,12 +365,13 @@ def _is_memory_entry(pin) -> bool:
     return pin.date_comment is None
 
 
-def _count_pin_comments(text: str) -> int:
-    """Count pins using `parse_pins` as the canonical oracle.
+def _count_pin_comments(doc, first: int, last: int) -> int:
+    """Count the pins in rows `first`..`last` of the whole-file parse `doc`,
+    with `pin_caps.pins_in_rows` as the canonical oracle.
 
     Symmetric-oracle invariant (closes 2 HIGH bypasses): the gate MUST
-    count pins using the same parser that enforces the count cap at
-    add-time (`pin_caps.parse_pins`).
+    count pins using the same parser that enforces the count cap
+    (`pin_caps.pins_in_rows`, the reader behind `section_pins`).
 
     🔴 AND THE SAME PARSER IS NOT ENOUGH. IT MUST READ THE SAME KIND OF
     OBJECT. The invariant said PARSER alone, and measured, the two gates
@@ -385,14 +385,19 @@ def _count_pin_comments(text: str) -> int:
     satisfies clause one and breaks clause two.
 
     A regex substring count of
-    `<!-- pinned:` is asymmetric with `parse_pins`, which:
+    `<!-- pinned:` is asymmetric with the parser, which:
       (a) recognizes a bare `### Heading` (no date comment) as a Pin,
       (b) tolerates arbitrary whitespace between `<!--` and `pinned:`
           via its `\\s*` patterns (e.g. `<!--  pinned:` double-space),
       (c) matches case-insensitively.
     Substring counts undercount (a) and (b), letting an adversarial ADD
     slip past the ADD-shape gate while still landing in CLAUDE.md as a
-    parse_pins-visible pin.
+    pin the parser counts.
+
+    AND THE ROWS COME FROM ONE PARSE OF THE WHOLE FILE. Text cut out of a file
+    and parsed on its own starts in a state the whole file does not have (an
+    HTML block or a fence opened above the cut), so its pins can differ from
+    the file's. The caller parses each document once and passes rows of it.
 
     THIS FUNCTION DOES NOT CHOOSE A SLICE, AND IT USED TO. It counted the
     managed region when the markers were present and the whole text when they
@@ -404,25 +409,26 @@ def _count_pin_comments(text: str) -> int:
 
     THE SLICE NOW BELONGS TO THE DECISION, in `_counts_show_an_add`, which is
     the only place that can see the two sides at one time. This function counts
-    across the body its caller supplies and nothing else. (`_is_add_shaped_edit`
+    across the rows its caller supplies and nothing else. (`_is_add_shaped_edit`
     chooses WHICH SIMULATION runs, the Write one or the Edit one. It does not
     choose the slice, and it no longer chooses between two comparisons either,
     because there is ONE comparison over two documents.)
 
-    THE COUNT PREDICATE, WHICH IS THE OTHER HALF OF THE PAIR. `parse_pins`
+    THE COUNT PREDICATE, WHICH IS THE OTHER HALF OF THE PAIR. The parser
     stays the oracle, so the symmetric-oracle invariant above holds. One class
     is then dropped from the result: a heading that is date-led AND carries no
     `<!-- pinned: -->` marker is a memory entry rather than a pin. See
     `_is_memory_entry` for the residual this predicate carries and for the
     population a user ruling declares empty.
 
-    Fail-open: non-str input returns 0. Any parse_pins failure (should
-    not raise by its own contract, but defense-in-depth) returns 0.
+    Fail-open: any failure (the reader should not raise by its own contract,
+    but defense-in-depth) returns 0. The import sits here, inside that catch,
+    and not under the module's fail-closed load wrapper.
     """
-    if not isinstance(text, str):
-        return 0
     try:
-        return sum(1 for pin in parse_pins(text) if not _is_memory_entry(pin))
+        from pin_caps import pins_in_rows
+
+        return sum(1 for pin in pins_in_rows(doc, first, last) if not _is_memory_entry(pin))
     except Exception as exc:  # noqa: BLE001 — fail-open
         # BROAD CATCH, SO IT EMITS. A parse fault here is a defect rather
         # than an expected state of the data.
@@ -440,9 +446,10 @@ def _counts_show_an_add(old_text: str, new_text: str) -> bool:
     one straddle over-blocked when no pin moved, and one MISSED a true add of
     four pins to five.
 
-    THE SELECTION, and it is a TOTAL function with no decline arm:
+    THE SELECTION, and it is a TOTAL function with one decline arm:
       0. THE COUNT SLICE FIRST. Ask each side for its `## Pinned Context`
-         span. If BOTH
+         span. If EITHER side's section is uncertain, the change is not an
+         add. If BOTH
          sides resolve one, that section is the slice for the two.
       1. Otherwise, ask each side whether it carries the managed markers.
       2. If the two agree, use that branch for the two.
@@ -485,7 +492,7 @@ def _counts_show_an_add(old_text: str, new_text: str) -> bool:
     SET. It covers the shapes step 0 cannot REACH, which are the documents
     where no pinned span resolves. It does NOT cover the shapes INSIDE the
     bounded slice. Measured example: a `### ` line added to a PIN BODY, fenced
-    or bare, sits within the span, and `parse_pins` counts it, so the two sides
+    or bare, sits within the span, and the parser counts it, so the two sides
     differ by one and the verdict is an add. That verdict is the same before
     and after this bound, so the bound neither opened it nor closed it.
 
@@ -509,41 +516,51 @@ def _counts_show_an_add(old_text: str, new_text: str) -> bool:
     arms that the caller declares SACROSANCT stay where they are.
     """
     # THESE IMPORTS ARE FUNCTION-LOCAL AND THAT IS THE EXCEPTION POSTURE, NOT A
-    # STYLE CHOICE. A raise from either one lands inside the caller's
+    # STYLE CHOICE. A raise from any of them lands inside the caller's
     # SACROSANCT fail-open catch, so an unresolvable import ALLOWS the edit.
     # That is the correct direction for this gate and it is the direction the
-    # module-load block at the top deliberately does NOT take. Moving either
-    # import to module scope would put it under the fail-CLOSED load wrapper
+    # module-load block at the top deliberately does NOT take. Moving any of
+    # them to module scope would put it under the fail-CLOSED load wrapper
     # and turn a missing dependency into a DENY of the user's own edit.
-    from shared.claude_md_manager import extract_managed_region
-    from staleness import _parse_pinned_section
+    from shared.claude_md_manager import MANAGED_END_MARKER, MANAGED_START_MARKER
+    from shared.claude_md_markers import State, parse
+    from staleness import locate_pinned
 
-    # STEP 0, THE COUNT BOUND. `allow_empty_section=True` is what makes an
-    # EMPTY pinned section resolve. Without it an empty section is
-    # indistinguishable from an absent one, this step declines, and the empty
-    # side falls back to a wider slice while the other side does not. That is
-    # the straddle again, in a new place.
-    old_pinned = _parse_pinned_section(old_text, allow_empty_section=True)
-    new_pinned = _parse_pinned_section(new_text, allow_empty_section=True)
-    if old_pinned is not None and new_pinned is not None:
+    # Each side is parsed once, whole, and every count below reads a row range
+    # of that parse.
+    old_doc, new_doc = parse(old_text), parse(new_text)
+
+    # STEP 0, THE COUNT BOUND. An EMPTY pinned section is FOUND too, as rows
+    # (heading + 1, heading), which count 0. Were it read as absent, this step
+    # would decline and the empty side would fall back to a wider slice while
+    # the other side does not. That is the straddle again, in a new place.
+    old_pinned, new_pinned = locate_pinned(old_doc), locate_pinned(new_doc)
+    # AN UNCERTAIN PINNED SECTION ON EITHER SIDE IS NOT AN ADD. The parser reads
+    # no pins on uncertain rows, so a side that is uncertain counts low: an edit
+    # that removes a stray opener above the section reveals the pins already
+    # there and would read as an add. The pin-cap gate does not count an
+    # uncertain section either.
+    if State.UNKNOWN in (old_pinned.state, new_pinned.state):
+        return False
+    if old_pinned.state is State.FOUND and new_pinned.state is State.FOUND:
         return (
-            _count_pin_comments(new_pinned[2])
-            > _count_pin_comments(old_pinned[2])
+            _count_pin_comments(new_doc, new_pinned.spans[0][0] + 1, new_pinned.spans[0][1])
+            > _count_pin_comments(old_doc, old_pinned.spans[0][0] + 1, old_pinned.spans[0][1])
         )
 
-    old_is_managed = extract_managed_region(old_text) is not None
-    new_is_managed = extract_managed_region(new_text) is not None
+    old_managed = old_doc.find_block(MANAGED_START_MARKER, MANAGED_END_MARKER)
+    new_managed = new_doc.find_block(MANAGED_START_MARKER, MANAGED_END_MARKER)
 
-    if old_is_managed and new_is_managed:
-        old_slice = extract_managed_region(old_text)[0]
-        new_slice = extract_managed_region(new_text)[0]
+    if old_managed.state is State.FOUND and new_managed.state is State.FOUND:
+        old_rows = (old_managed.spans[0][0] + 1, old_managed.spans[0][1] - 1)
+        new_rows = (new_managed.spans[0][0] + 1, new_managed.spans[0][1] - 1)
     else:
         # Either the two sides agree that no managed region is present, or they
         # DISAGREE and the whole text is the slice the two can always carry.
-        old_slice = old_text
-        new_slice = new_text
+        old_rows = (0, len(old_doc.lines) - 1)
+        new_rows = (0, len(new_doc.lines) - 1)
 
-    return _count_pin_comments(new_slice) > _count_pin_comments(old_slice)
+    return _count_pin_comments(new_doc, *new_rows) > _count_pin_comments(old_doc, *old_rows)
 
 
 def _simulate_post_edit_document(
