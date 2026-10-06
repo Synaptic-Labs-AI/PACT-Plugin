@@ -340,9 +340,40 @@ def test_a_generated_file_whose_fence_turns_to_prose_below_a_cut_is_refused():
 
 
 # The stale loader line from the legacy template is dropped only where the
-# user's file reads it as prose; a quote of it in the user's code stays.
+# user's file reads it as visible prose; a quote of it in the user's code, or
+# inside an HTML block that hides it, stays.
 
 LOADER = "The global PACT Orchestrator is loaded from `~/.claude/CLAUDE.md`."
+
+
+@pytest.mark.parametrize("block", [
+    "<!--\nold template, kept for reference:\n" + LOADER + "\n-->\n",
+    "<!-- note\n" + LOADER + "\n-->\n",
+    "<!-- " + LOADER + " -->\n",
+    "<pre>\n" + LOADER + "\n</pre>\n",
+    "<script>\n" + LOADER + "\n</script>\n",
+    "<?php\n" + LOADER + "\n?>\n",
+    "<![CDATA[\n" + LOADER + "\n]]>\n",
+], ids=["comment on its own rows", "comment under its opener row", "comment on one row", "pre",
+        "script", "processing instruction", "CDATA"])
+def test_a_loader_line_inside_an_html_block_that_hides_it_is_kept(block):
+    # The top-level copy goes; the copy the block hides is the user's text.
+    new_content = _plan("# Project Memory\n\n" + LOADER + "\n\nNotes\n" + block + "## Working Memory\n- entry\n")
+    assert new_content.count(LOADER) == 1
+    assert new_content.endswith(f"{MANAGED_END_MARKER}\n\nNotes\n{block}")
+
+
+@pytest.mark.parametrize("block", [
+    "<!DOCTYPE note\n" + LOADER + "\n>\n",
+    "<details>\n<summary>old</summary>\n\n" + LOADER + "\n</details>\n",
+    "<div>\n" + LOADER + "\n</div>\n",
+], ids=["declaration", "details", "div"])
+def test_a_loader_line_under_a_block_the_parser_reads_as_visible_is_dropped(block):
+    # The parser hides no declaration and does not model blocks like <details>
+    # or <div>: their rows are visible prose to every reader, so the line goes.
+    new_content = _plan("# Project Memory\n\nNotes\n" + block + "## Working Memory\n- entry\n")
+    assert LOADER not in new_content
+    assert new_content.endswith(f"{MANAGED_END_MARKER}\n\nNotes\n" + block.replace(LOADER + "\n", ""))
 
 
 @pytest.mark.parametrize("notes", [
@@ -378,25 +409,27 @@ def test_a_loader_line_inside_the_session_block_stays_in_it():
 
 def test_a_loader_line_the_original_reads_as_code_is_not_dropped(monkeypatch):
     # The session block closes an HTML block opened above it, and a stray
-    # `</pre>` sits below the fenced quote. With the session block cut out, the
-    # `<pre>` closes at that stray line instead, hiding the fence, so the text
-    # left reads the quote as prose; the original reads it as code, and the
-    # drop is decided on the original.
+    # `</pre>` sits inside the fence, above the quote. With the session block
+    # cut out, the `<pre>` closes at that stray line instead, hiding the fence
+    # opener, so the text left reads the quote as visible prose; the original
+    # reads it as code, and the drop is decided on the original.
     content = (
         f"# Project Memory\n\n<pre>\n{SESSION_START_MARKER}\n## Current Session\n</pre>\n"
-        f"{SESSION_END_MARKER}\n```text\n{LOADER}\n```\n</pre>\n## Working Memory\n- entry\n"
+        f"{SESSION_END_MARKER}\n```text\n</pre>\n{LOADER}\n```\n## Working Memory\n- entry\n"
     )
     doc = parse(content)
     cuts = [(_marker_span(doc, 3)[0], _marker_span(doc, 6)[1])]
     assert _legacy_line_spans(parse(_drop_spans(content, cuts)))  # the cut text would drop it
     assert _legacy_spans_after_cuts(doc, cuts, 0) == []
     # The migration decides the drop on the original file. The rebuild then
-    # moves the session block away from the HTML block it closed, which changes
-    # how the fence reads, so it refuses: the quote is never written out
-    # without its line.
+    # moves the session block away from the HTML block it closed, so the
+    # `<pre>` hides the fence opener and the closing fence line opens a fence
+    # that never closes. It refuses: the quote is never written out without
+    # its line.
     seen = []
     monkeypatch.setattr(claude_md_manager, "_legacy_spans_after_cuts",
                         lambda doc, *rest: seen.append(doc.text) or _legacy_spans_after_cuts(doc, *rest))
     new_content, refusal = _plan_migration(content)
     assert seen == [content]
-    assert new_content is None and refusal is not None and "would change how line" in refusal
+    assert new_content is None and refusal is not None
+    assert "would leave a region PACT cannot read" in refusal

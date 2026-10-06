@@ -17,6 +17,6 @@ def _build_migrated_content(content: str) -> str:
 
 def _strip_legacy_lines(content: str) -> str:
     """`content` without the stale orchestrator-loader lines the parser reads
-    as prose. A fenced, code or uncertain row that quotes one stays byte for
-    byte."""
+    as visible prose. A fenced, code or uncertain row that quotes one, or a row
+    inside an HTML block that hides it, stays byte for byte."""
     return _drop_spans(content, _legacy_line_spans(parse(content)))

@@ -365,10 +365,11 @@ if not SESSION_BOUNDARY_PREFIX:
 # in upgraded files; strip it during migration. Allows optional trailing
 # period / whitespace.
 #
-# Matched against the parser's PROSE rows only (`find_lines`), never against
-# the whole text with `re.MULTILINE`: a fenced, code or uncertain row that
-# quotes the line is the user's example and stays. A row's content holds no
-# line break, so `$` needs no flag.
+# Matched against the parser's visible PROSE rows only (`find_lines` rows
+# whose `in_html` is False), never against the whole text with `re.MULTILINE`:
+# a fenced, code or uncertain row that quotes the line, or a row inside an
+# HTML block that hides it, is the user's text and stays. A row's content
+# holds no line break, so `$` needs no flag.
 _STALE_ORCHESTRATOR_LINE_RE = re.compile(
     r"^The global PACT Orchestrator is loaded from `~/\.claude/CLAUDE\.md`\.?\s*$",
 )
@@ -854,10 +855,13 @@ def _legacy_spans_after_cuts(doc: Document, cuts: list[tuple[int, int]],
 
 def _legacy_line_spans(doc: Document) -> list[tuple[int, int]]:
     """The (start, end) span in `doc.text` of each stale loader line the
-    parser reads as prose, with its line break. A leading U+FEFF is not part
-    of row 0's span, so it stays at byte 0."""
+    parser reads as visible prose (`find_lines` rows whose `in_html` is
+    False), with its line break. A copy inside an HTML block that hides it,
+    such as a comment, is the user's text and stays. A leading U+FEFF is not
+    part of row 0's span, so it stays at byte 0."""
     return [(doc.row_start(row), doc.lines[row].end)
-            for row in doc.find_lines(_STALE_ORCHESTRATOR_LINE_RE)]
+            for row in doc.find_lines(_STALE_ORCHESTRATOR_LINE_RE)
+            if not doc.lines[row].in_html]
 
 
 
