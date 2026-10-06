@@ -234,6 +234,30 @@ class TestPinsInRows_PublicReader:
         assert pins_in_rows(doc, heading + 1, heading) == []
 
 
+class TestCharge_StrikeUpToTheLastClose:
+    """The charge strikes pin comments only up to a row's last `-->`."""
+
+    FRAGMENTS = ["<!-- pinned: ", "<!--pinned:", "2026-04-11", ", pin-size-override: r", "-->", " -->",
+                 "<!-- STALE: Last relevant 2026-01-01 -->", "<!-- STALE: Last relevant ", "text", "-", ">",
+                 "--", " ", "\t", "<!--"]
+
+    def test_it_charges_what_striking_the_whole_row_charges(self):
+        import random
+        from pin_caps import _MANAGED_COMMENT_RE, _charge
+        from shared.claude_md_markers import parse
+        rnd = random.Random(13)
+        for _ in range(5_000):
+            row = "".join(rnd.choice(self.FRAGMENTS) for _ in range(rnd.randint(1, 16)))
+            expected = len(_MANAGED_COMMENT_RE.sub("", row).rstrip(" \t").strip())
+            assert _charge(parse(row), 0, 0) == expected, row
+
+    def test_a_comment_after_the_last_close_is_not_struck_and_one_before_it_is(self):
+        from pin_caps import _charge
+        from shared.claude_md_markers import parse
+        row = "a <!-- pinned: 2026-04-11 --> b <!-- pinned: open"
+        assert _charge(parse(row), 0, 0) == len("a  b <!-- pinned: open")
+
+
 class TestPinCountCap_EveryPinOccupiesASlot:
     """The count axis counts every pin, whatever it carries. A size override
     exempts a pin from the size cap only, and a STALE pin still holds its

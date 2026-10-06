@@ -186,15 +186,23 @@ def _charge(doc, first: int, last: int) -> int:
     character whatever its terminator, so trailing blanks or a CRLF rewrite
     cannot push a pin past the cap. The charge is a function of the rows alone,
     so an unchanged pin is charged the same before and after any edit.
+
+    The strike reads a row only up to its last `-->`: no comment either pattern
+    strikes can end past it, so the result is the same, and a run of comment
+    openers with no close after them is not rescanned from each opener.
     """
     from shared.claude_md_markers import Kind
 
     kept = []
     for line in doc.lines[first:last + 1]:
-        if line.kind is Kind.PROSE:
-            content = _MANAGED_COMMENT_RE.sub("", line.content)
-        else:
-            content = line.content
+        content = line.content
+        close = content.rfind(_PIN_COMMENT_CLOSE)
+        if line.kind is Kind.PROSE and close >= 0:
+            pieces, pos = [], 0
+            for match in _MANAGED_COMMENT_RE.finditer(line.content, 0, close + len(_PIN_COMMENT_CLOSE)):
+                pieces.append(content[pos:match.start()])
+                pos = match.end()
+            content = "".join(pieces) + content[pos:]
         kept.append(content.rstrip(" \t"))
     return len("\n".join(kept).strip())
 

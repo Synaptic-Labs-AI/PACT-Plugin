@@ -20,6 +20,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -770,13 +771,48 @@ def test_an_unlocatable_section_allows_with_the_not_found_advisory(name, before,
                          ids=[r[0] for r in NOT_FOUND if "markers removed" not in r[0]])
 def test_the_not_found_advisory_names_the_line(name, before, after):
     # With both memory markers gone nothing is uncertain, so no line is named.
-    assert re.search(r"\blines? \d", decide(before, after).reason)
+    reason = decide(before, after).reason
+    assert reason is not None and re.search(r"\blines? \d", reason)
 
 
 def test_an_undated_pin_renamed_at_the_cap_is_allowed_and_a_smuggled_heading_is_denied_on_count():
     assert decide(UNDATED, sub(UNDATED, "### Undated\n", "### Undated renamed\n")).verdict == "ALLOW"
     smuggled = decide(B12, sub(B12, "body 7\n", "body 7\n### smuggled\nmore body\n"))
     assert (smuggled.verdict, smuggled.cause) == ("DENY", "count")
+
+
+@pytest.mark.parametrize("head, struck", [("see ", 0), ("see <!-- pinned: 2026-04-11 --> ", 27)],
+                         ids=["no close at all", "one closed comment first"])
+def test_a_row_of_comment_openers_with_no_close_after_them_decides_at_once(head, struck):
+    # 60 KB of pin-comment openers with no `-->` after them, mid-row so the row
+    # opens no HTML block. The strike reads a row only up to its last `-->`, so
+    # none of those openers is scanned.
+    row = head + "<!-- pinned: " * 4_700
+    before = claude_md(pins(5))
+    started = time.perf_counter()
+    decision = pin_growth.pin_cap_decision(before, sub(before, "body 3\n", f"body 3\n{row}\n"))
+    assert time.perf_counter() - started < 1.0
+    assert (decision.verdict, decision.cause) == ("DENY", "size")
+    assert decision.reason is not None
+    assert f"{len('body 3') + 1 + len(row.rstrip()) - struck} chars" in decision.reason
+
+
+@pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="no interval timer on this platform")
+def test_the_timer_covers_the_whole_decision(monkeypatch):
+    # Past the timer outside the alignment: reading the pins sleeps past it.
+    original = pin_growth.section_pins
+
+    def slow(doc, located):
+        time.sleep(2)
+        return original(doc, located)
+
+    monkeypatch.setattr(pin_growth, "TIMER_SECONDS", 0.2)
+    monkeypatch.setattr(pin_growth, "section_pins", slow)
+    decision = pin_growth.pin_cap_decision(B12, sub(B12, pin(12), pin(12) + NEW))
+    assert decision == pin_growth.PinDecision(
+        "ALLOW_ADVISORY", 0, 0, None, "size_bound",
+        "The pin cap check stopped early and allowed this change: the pin cap check ran past 0.2 s.")
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
 
 
 def test_the_budget_allows_with_the_size_advisory(monkeypatch):

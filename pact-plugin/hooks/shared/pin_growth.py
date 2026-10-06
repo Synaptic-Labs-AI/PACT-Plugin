@@ -484,7 +484,7 @@ def run_with_timer(work, use_timer: bool = True):
         return work()
 
     def on_alarm(signum, frame):
-        raise SizeBound(f"the pin-growth rule ran past {TIMER_SECONDS} s")
+        raise SizeBound(f"the pin cap check ran past {TIMER_SECONDS} s")
 
     try:
         previous = signal.signal(signal.SIGALRM, on_alarm)
@@ -503,7 +503,10 @@ class PinDecision(NamedTuple):
     pins_before: int
     pins_after: int
     growth: int | None  # None when the rule did not run
-    cause: str | None  # None, "not_found", "size_bound", "error", "count" or "size"
+    # None, "not_found", "size_bound", "error", "count" or "size". On
+    # "size_bound" the check stopped before it could count, so pins_before and
+    # pins_after are 0.
+    cause: str | None
     reason: str | None  # the advisory or the deny text
     # On a count denial, the size cap's own deny text when the change crosses it
     # too; None otherwise. A report names both caps from it.
@@ -575,16 +578,20 @@ def _not_found_text(located: Located) -> str:
 
 def pin_cap_decision(before: str, after: str, *, use_timer: bool = True, trim: bool = True) -> PinDecision:
     """The pin cap's verdict on a change from `before` to `after` (whole texts;
-    `before` is "" when no file resolved). Never raises: any failure allows
-    with an advisory, cause "error"."""
+    `before` is "" when no file resolved). Never raises: the step budget or the
+    timer, which covers the whole decision, allows with the size advisory, and
+    any other failure allows with an advisory, cause "error"."""
     try:
-        return _decide(before, after, use_timer, trim)
+        return run_with_timer(lambda: _decide(before, after, trim), use_timer)
+    except SizeBound as bound:
+        return PinDecision("ALLOW_ADVISORY", 0, 0, None, "size_bound",
+                           f"The pin cap check stopped early and allowed this change: {bound}.")
     except Exception as error:  # an over-block is the worst outcome, so a failure allows
         return PinDecision("ALLOW_ADVISORY", 0, 0, None, "error",
                            f"PACT could not check the pin cap: {type(error).__name__}: {error}")
 
 
-def _decide(before: str, after: str, use_timer: bool, trim: bool) -> PinDecision:
+def _decide(before: str, after: str, trim: bool) -> PinDecision:
     after_doc = parse(after)
     located = locate_pinned(after_doc)
     if located.state is not State.FOUND:
@@ -595,12 +602,7 @@ def _decide(before: str, after: str, use_timer: bool, trim: bool) -> PinDecision
     found_before = previous.state is State.FOUND
     growth, detail = None, {}
     if len(post_pins) > PIN_COUNT_CAP or not found_before:
-        try:
-            growth = run_with_timer(
-                lambda: pin_growth(before_doc, after_doc, trim=trim, detail=detail), use_timer)
-        except SizeBound as bound:
-            return PinDecision("ALLOW_ADVISORY", 0, len(post_pins), None, "size_bound",
-                               f"The pin cap check stopped early and allowed this change: {bound}.")
+        growth = pin_growth(before_doc, after_doc, trim=trim, detail=detail)
     if found_before:
         pre_pins = section_pins(before_doc, previous)
         size_before, size_after = pre_pins, post_pins
