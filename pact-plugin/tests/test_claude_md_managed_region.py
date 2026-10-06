@@ -101,6 +101,21 @@ def test_the_kernel_strip_keeps_a_leading_bom_first(home_file):
     assert written.startswith("\ufeff") and written.lstrip("\ufeff\n") == "# Notes\n"
 
 
+@pytest.mark.parametrize("text, plain", [
+    (KERNEL + "\n\n# Notes\n", "# Notes\n"),
+    ("\n\n" + KERNEL + "\n\n# Notes\n", "# Notes\n"),
+    (KERNEL + "\n", ""),
+    ("# pre\n" + KERNEL + "\n\n# post\n", "# pre\n\n# post\n"),
+    ("# pre\n" + KERNEL + "\n", "# pre\n"),
+], ids=["block on the first row", "blank rows then the block", "block alone", "text above and below",
+        "text above only"])
+def test_a_bom_file_strips_like_its_twin_without_one(home_file, text, plain):
+    # The mark is not text above the block, so it adds no blank rows.
+    assert claude_md_manager._plan_kernel_strip(text, home_file) == (None, plain)
+    with_bom = claude_md_manager._plan_kernel_strip("\ufeff" + text, home_file)
+    assert with_bom == (None, "\ufeff" + plain)
+
+
 @pytest.mark.parametrize("text, line", [
     (f"{KERNEL}\n\n{KERNEL}\n", "lines 1, 5"),  # two blocks
     (f"# pre\n{KS}\n# post\n", "line 2"),  # a start with no end

@@ -921,15 +921,18 @@ def _plan_kernel_strip(
     post_marker = content[_marker_span(doc, last)[1]:]
 
     # Preserve one blank line at the removal boundary so the
-    # user's spacing around the obsolete block survives the strip.
-    pre_clean = pre_marker.rstrip("\r\n")
+    # user's spacing around the obsolete block survives the strip. A leading
+    # byte order mark is not text above the block: the file strips as it would
+    # without one, and the mark stays first.
+    bom = "\ufeff" if pre_marker.startswith("\ufeff") else ""
+    pre_clean = pre_marker[len(bom):].rstrip("\r\n")
     post_clean = post_marker.lstrip("\r\n")
     if pre_clean and post_clean:
-        new_content = pre_clean + "\n\n" + post_clean
+        new_content = bom + pre_clean + "\n\n" + post_clean
     elif pre_clean:
-        new_content = pre_clean + "\n"
+        new_content = bom + pre_clean + "\n"
     else:
-        new_content = post_clean
+        new_content = bom + post_clean
     # The block can hold the line that closes an HTML block the user opened
     # above it; removing it would leave the rest of the file unreadable.
     reason = uncertainty_added(doc, parse(new_content))
