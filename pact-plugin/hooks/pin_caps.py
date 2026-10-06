@@ -44,7 +44,7 @@ OVERRIDE_RATIONALE_MAX = 120
 
 # Single source for the pin-comment grammar. The strike pattern
 # (`_DATE_COMMENT_RE`) and the attribution row patterns (`_DATE_COMMENT_ROW`,
-# `_OVERRIDE_COMMENT_ROW`) are built from these four fragments, so the strip
+# `_OVERRIDE_COMMENT_HEAD`) are built from these four fragments, so the strip
 # path and the attribution path cannot drift apart on the shape of a comment.
 #
 # `_COMMENT_CHAR` is one character of a comment interior: either a character
@@ -101,17 +101,24 @@ _DATE_COMMENT_ROW = re.compile(
     rf'\s*{_PIN_COMMENT_OPEN}{_COMMENT_CHAR}+?{_PIN_COMMENT_CLOSE}\s*\Z',
     re.IGNORECASE,
 )
-# The combined date and size-override comment:
+# A reconfirmation clause: `, reconfirmed: YYYY-MM-DD`, then its reason.
+_RECONFIRM_CLAUSE = r',\s*reconfirmed:\s*\d{4}-\d{2}-\d{2}'
+# The start of a combined date and size-override comment, up to the field
+# name: the date, optionally a reconfirmation, then `, pin-size-override:`.
+# The rationale runs from there to the closing `-->`, less a reconfirmation
+# written after it, so either placement keeps the override:
 #   <!-- pinned: 2026-04-11, pin-size-override: verbatim dispatch form... -->
-_OVERRIDE_COMMENT_ROW = re.compile(
-    rf'\s*{_PIN_COMMENT_OPEN}{_COMMENT_CHAR_NO_COMMA}+,\s*'
-    rf'pin-size-override:\s*{_COMMENT_CHAR}+?\s*{_PIN_COMMENT_CLOSE}\s*\Z',
+#   <!-- pinned: 2026-04-11, reconfirmed: 2026-07-25 because R, pin-size-override: O -->
+#   <!-- pinned: 2026-04-11, pin-size-override: O, reconfirmed: 2026-07-25 because R -->
+_OVERRIDE_COMMENT_HEAD = re.compile(
+    rf'\s*{_PIN_COMMENT_OPEN}{_COMMENT_CHAR_NO_COMMA}+'
+    rf'(?:{_RECONFIRM_CLAUSE}{_COMMENT_CHAR}*?)?,\s*pin-size-override:',
     re.IGNORECASE,
 )
+_TRAILING_RECONFIRM = re.compile(rf'{_RECONFIRM_CLAUSE}\b.*\Z', re.IGNORECASE | re.DOTALL)
 # A row holding a STALE marker anywhere, which is where `is_stale` has always
 # looked for one.
 _STALE_MARKER_ANYWHERE_ROW = re.compile(rf'.*?{_STALE_MARKER_RE.pattern}', re.IGNORECASE)
-_OVERRIDE_FIELD = "pin-size-override:"
 
 # Characters `str.splitlines()` breaks a line at that the parser does not. A
 # candidate comment row holding one is not attributed. Attribution used to split
@@ -222,8 +229,9 @@ def _date_comment_row(doc, floor: int, heading: int) -> Optional[int]:
     content = doc.lines[row].content
     if any(char in content for char in _SPLITLINES_ONLY_BREAKS):
         return None
-    if doc.find_lines(_DATE_COMMENT_ROW, (row, row)) or doc.find_lines(
-            _OVERRIDE_COMMENT_ROW, (row, row)):
+    # An override comment is a date comment whose text starts with the
+    # override head (`override_rationale_text`), so this attributes both.
+    if doc.find_lines(_DATE_COMMENT_ROW, (row, row)):
         return row
     return None
 
@@ -233,15 +241,23 @@ def override_rationale_text(doc, row: int) -> Optional[str]:
     stripped, before any validity check; None when that row is not a PROSE
     row holding only an override comment.
 
-    The rationale is the text between the field name, which follows the
-    comment's first comma (the date field holds none), and the closing `-->`.
-    The pin-cap gate validates it; `_override_rationale` decides with it.
+    The row is one closed pin comment whose text starts with the override
+    head: the date, optionally a reconfirmation, then `, pin-size-override:`.
+    The rationale is the text from the field name to the closing `-->`, less
+    a reconfirmation written after it (`, reconfirmed: YYYY-MM-DD ...`). The
+    pin-cap gate validates it; `_override_rationale` decides with it.
     """
-    if not doc.find_lines(_OVERRIDE_COMMENT_ROW, (row, row)):
+    from shared.claude_md_markers import Kind
+
+    line = doc.lines[row]
+    head = None
+    if line.kind is Kind.PROSE:
+        if _DATE_COMMENT_ROW.match(line.content):
+            head = _OVERRIDE_COMMENT_HEAD.match(line.content)
+    if head is None:
         return None
-    comment = doc.lines[row].content.strip()
-    field = comment[comment.index(",") + 1:].lstrip()
-    return field[len(_OVERRIDE_FIELD):-len(_PIN_COMMENT_CLOSE)].strip()
+    rationale = line.content.rstrip()[head.end():-len(_PIN_COMMENT_CLOSE)]
+    return _TRAILING_RECONFIRM.sub("", rationale).strip()
 
 
 def _override_rationale(doc, row: int) -> Optional[str]:

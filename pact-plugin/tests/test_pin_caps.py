@@ -176,7 +176,19 @@ class TestOverrideRationaleText_PublicReader:
         ("  <!--pinned:2026-04-20,PIN-SIZE-OVERRIDE:  a-b > c  -->\t", "a-b > c"),
         ("<!-- pinned: 2026-04-20, pin-size-override:  -->", ""),
         (f"<!-- pinned: 2026-04-20, pin-size-override: {'x' * 121} -->", "x" * 121),
-    ], ids=["plain", "spacing and case", "empty field", "over the limit"])
+        ("<!-- pinned: 2026-04-20, reconfirmed: 2026-07-25 because a, b, pin-size-override: reason -->",
+         "reason"),
+        ("<!-- pinned: 2026-04-20, pin-size-override: reason, reconfirmed: 2026-07-25 because a, b -->",
+         "reason"),
+        ("<!-- PINNED: 2026-04-20, PIN-SIZE-OVERRIDE: reason , Reconfirmed:2026-07-25 because x -->",
+         "reason"),
+        ("<!-- pinned: 2026-04-20, pin-size-override: keep a, b, reconfirmed: soon -->",
+         "keep a, b, reconfirmed: soon"),
+        ("<!-- pinned: 2026-04-20, reconfirmed: 2026-07-01 because a, pin-size-override: reason, "
+         "reconfirmed: 2026-07-25 because b -->", "reason"),
+    ], ids=["plain", "spacing and case", "empty field", "over the limit", "reconfirmed before it",
+            "reconfirmed after it", "reconfirmed after it, any case", "a reconfirmed word with no date",
+            "reconfirmed on both sides"])
     def test_it_returns_the_stripped_field_before_any_validity_check(self, row, text):
         assert self._read(f"{row}\n### Entry\nBody.\n") == text
 
@@ -186,13 +198,31 @@ class TestOverrideRationaleText_PublicReader:
         "<!-- pinned: 2026-04-20, pin-size-override: reason --> then prose",
         "<!-- pinned: 2026-04-20 --> , pin-size-override: reason -->",
         "### Entry",
-    ], ids=["date only", "other field", "prose after it", "field after a closed comment", "heading"])
+        "<!-- pinned: 2026-04-20, reconfirmed: 2026-07-25 because x -->",
+        "<!-- pinned: 2026-04-20, note: x, pin-size-override: reason -->",
+    ], ids=["date only", "other field", "prose after it", "field after a closed comment", "heading",
+            "reconfirmed only", "another field before the override"])
     def test_it_is_none_for_a_row_that_is_not_an_override_comment(self, row):
         assert self._read(f"{row}\n### Entry\nBody.\n") is None
 
     def test_it_is_none_for_an_override_comment_inside_a_fenced_block(self):
         row = "<!-- pinned: 2026-04-20, pin-size-override: reason here -->"
         assert self._read(f"```\n{row}\n```\n", row=1) is None
+
+    def test_a_row_of_repeated_override_fields_is_read_in_linear_time(self):
+        """A row that is not one closed pin comment is no override, however
+        many `, pin-size-override:` fields it holds: the date row refuses it in
+        one pass, before the override head is read."""
+        import time
+
+        from fixtures.pin_helpers import parse_pins
+
+        for tail in (" x", " --> x"):
+            row = "<!-- pinned: d" + ", pin-size-override: a" * 2000 + tail
+            started = time.perf_counter()
+            assert self._read(f"{row}\n### Entry\nBody.\n") is None
+            assert parse_pins(f"{row}\n### Entry\nBody.\n")[0].date_comment is None
+            assert time.perf_counter() - started < 2.0, tail
 
 
 class TestPinsInRows_PublicReader:

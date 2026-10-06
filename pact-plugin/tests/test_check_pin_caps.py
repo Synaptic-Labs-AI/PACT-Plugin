@@ -285,6 +285,20 @@ class TestPinAgeDays_Unit:
         )
         assert age == 5
 
+    @pytest.mark.parametrize("comment", [
+        "<!-- pinned: 2024-01-01, pin-size-override: verbatim form, reconfirmed: 2026-07-20 because x -->",
+        "<!-- pinned: 2024-01-01, reconfirmed: 2026-07-20 because x, pin-size-override: verbatim form -->",
+    ], ids=["after the rationale", "before the override"])
+    def test_a_reconfirmed_override_comment_yields_age_from_the_reconfirmation(self, comment):
+        """Read from the comment the parser attributes to the pin, which keeps
+        its override in either placement."""
+        import check_pin_caps
+        from fixtures.pin_helpers import parse_pins
+
+        pin = parse_pins(f"{comment}\n### P\nbody\n")[0]
+        assert pin.override_rationale == "verbatim form"
+        assert check_pin_caps._pin_age_days(pin.date_comment, now=self.NOW) == 5
+
     def test_size_override_comment_still_yields_age(self):
         """The override form carries a trailing clause too; age must still
         parse out of it, or every oversized pin would report unknown."""

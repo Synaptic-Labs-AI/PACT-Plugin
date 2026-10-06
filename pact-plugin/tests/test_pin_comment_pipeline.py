@@ -872,16 +872,24 @@ class TestPinCommentBacktracking_Pipeline:
     BUDGET_SECONDS = 5.0
 
     @pytest.mark.parametrize("length", [500, 1000, 2000])
-    def test_interior_whitespace_run_stays_within_budget(self, length):
-        from pin_caps import _OVERRIDE_COMMENT_ROW
+    @pytest.mark.parametrize("tail", ["x", "x -->"], ids=["open", "closed"])
+    @pytest.mark.parametrize("prefix", [
+        "<!-- pinned:",
+        "<!-- pinned: 2026-01-01, reconfirmed: 2026-07-25",
+        "<!-- pinned: 2026-01-01, pin-size-override: r, reconfirmed: 2026-07-25",
+    ], ids=["date field", "reconfirmed before the override", "reconfirmed after it"])
+    def test_interior_whitespace_run_stays_within_budget(self, prefix, tail, length):
+        from pin_caps import _OVERRIDE_COMMENT_HEAD, override_rationale_text
+        from shared.claude_md_markers import parse
 
         # An interior whitespace run inside one row, which is the shape
-        # attribution can actually receive. The trailing character closes it.
-        line = "<!-- pinned:" + " " * length + "x"
+        # attribution can actually receive. The character after it ends it.
+        line = prefix + " " * length + tail
         assert line.strip() == line
 
         started = time.perf_counter()
-        _OVERRIDE_COMMENT_ROW.match(line)
+        _OVERRIDE_COMMENT_HEAD.match(line)
+        override_rationale_text(parse(line + "\n"), 0)
         elapsed = time.perf_counter() - started
 
         assert elapsed < self.BUDGET_SECONDS, (

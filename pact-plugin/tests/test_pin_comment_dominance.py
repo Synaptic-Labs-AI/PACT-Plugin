@@ -462,10 +462,9 @@ class TestPinCommentRows_WholeRowReaders:
 
     Attribution matches the row patterns from the row's start
     (`Document.find_lines`) to its end (`\\s*\\Z`), so text before or
-    after a comment on its row refuses it. The rationale is the text after
-    the field name that follows the comment's first comma, and the date field
-    refuses a comma, so a date field that spells the field name is never read
-    as the rationale.
+    after a comment on its row refuses it. The override field starts at the
+    comment's first `, pin-size-override:`, so a date field that spells the
+    field name without that comma is never read as the rationale.
     """
 
     @staticmethod
@@ -506,8 +505,8 @@ class TestPinCommentRows_WholeRowReaders:
     def test_the_comment_patterns_stay_case_insensitive(self):
         import re
 
-        from pin_caps import _DATE_COMMENT_RE, _DATE_COMMENT_ROW, _OVERRIDE_COMMENT_ROW
-        for pattern in (_DATE_COMMENT_RE, _DATE_COMMENT_ROW, _OVERRIDE_COMMENT_ROW):
+        from pin_caps import _DATE_COMMENT_RE, _DATE_COMMENT_ROW, _OVERRIDE_COMMENT_HEAD
+        for pattern in (_DATE_COMMENT_RE, _DATE_COMMENT_ROW, _OVERRIDE_COMMENT_HEAD):
             assert pattern.flags & re.IGNORECASE, pattern.pattern
 
 

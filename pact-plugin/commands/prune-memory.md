@@ -130,6 +130,9 @@ curator keeps, collect a one-line reason and extend its date comment in place:
 <!-- pinned: 2026-05-26, reconfirmed: 2026-07-25 because {concrete reason} -->
 ```
 
+If the comment carries a `pin-size-override:` clause, keep that clause in the
+same comment.
+
 The reason MUST be single-line. Re-confirming resets the clock: age computes
 from the `reconfirmed:` date once present. The reason is free text and is
 subject to the same concreteness rule above.

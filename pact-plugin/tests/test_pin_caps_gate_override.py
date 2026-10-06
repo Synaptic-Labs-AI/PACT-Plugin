@@ -184,3 +184,51 @@ def test_a_rationale_holding_a_line_break_is_no_override_and_is_size_checked(sep
 
 def test_a_valid_override_on_a_new_pin_is_allowed():
     assert gate_decision(SMALL, *_new_pin(override="verbatim form")).verdict != "DENY"
+
+
+# Reconfirming an overridden pin as prune-memory.md says, in either placement
+# a curator writes: the override survives and its rationale is read alone.
+RATIONALE = "verbatim dispatch form is load-bearing for LLM routing"
+RECONFIRM = "reconfirmed: 2026-10-06 because the routing table still cites it in every dispatch"
+OVERRIDDEN = _doc("\n".join([_pin(1, body=_words("alpha", 1700), override=RATIONALE, date="2026-05-26")]
+                            + _rest()))
+OVERRIDDEN_ROW = f"<!-- pinned: 2026-05-26, pin-size-override: {RATIONALE} -->"
+RECONFIRMED = [
+    ("after the rationale", f"<!-- pinned: 2026-05-26, pin-size-override: {RATIONALE}, {RECONFIRM} -->"),
+    ("before the override", f"<!-- pinned: 2026-05-26, {RECONFIRM}, pin-size-override: {RATIONALE} -->"),
+]
+
+
+@pytest.mark.parametrize("name, row", RECONFIRMED, ids=[row[0] for row in RECONFIRMED])
+def test_reconfirming_an_overridden_pin_keeps_its_override(name, row):
+    from fixtures.pin_helpers import parse_pins
+    from shared.edit_simulation import simulate
+
+    call = _edit(OVERRIDDEN_ROW, row)
+    decision = gate_decision(OVERRIDDEN, *call)
+    assert decision.verdict == "ALLOW", (name, decision)
+    after = simulate(OVERRIDDEN, *call)
+    assert after is not None
+    body = after[after.index("## Pinned Context\n") + len("## Pinned Context\n"):after.index(WM)]
+    pin = parse_pins(body)[0]
+    assert (pin.override_rationale, pin.body_chars > 1500) == (RATIONALE, True), name
+
+
+INVALID_RECONFIRMED = [
+    ("after the rationale, rationale over the limit",
+     f"<!-- pinned: 2026-05-26, pin-size-override: {LONG}, {RECONFIRM} -->",
+     "Override rationale is 130 chars (max: 120). Shorten it."),
+    ("before the override, rationale over the limit",
+     f"<!-- pinned: 2026-05-26, {RECONFIRM}, pin-size-override: {LONG} -->",
+     "Override rationale is 130 chars (max: 120). Shorten it."),
+    ("before the override, empty rationale",
+     f"<!-- pinned: 2026-05-26, {RECONFIRM}, pin-size-override:  -->",
+     "Override rationale is empty — provide a non-empty reason."),
+]
+
+
+@pytest.mark.parametrize("name, row, reason", INVALID_RECONFIRMED, ids=[row[0] for row in INVALID_RECONFIRMED])
+def test_reconfirming_with_an_invalid_rationale_is_refused(name, row, reason):
+    decision = gate_decision(OVERRIDDEN, *_edit(OVERRIDDEN_ROW, row))
+    assert (decision.verdict, decision.cause) == ("DENY", "override"), (name, decision)
+    assert decision.reason == f"Pin cap violation (invalid override): {reason}"
