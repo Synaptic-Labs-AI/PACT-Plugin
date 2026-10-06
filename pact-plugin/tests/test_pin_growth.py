@@ -775,6 +775,28 @@ def test_the_not_found_advisory_names_the_line(name, before, after):
     assert reason is not None and re.search(r"\blines? \d", reason)
 
 
+NO_PINNED_BLOCK = sub(claude_md(""), "## Pinned Context\n\n", "")
+# No Pinned section anywhere after the change: no section in the memory block,
+# and none outside it either.
+NO_PINNED = [
+    ("a memory block that holds no Pinned section", NO_PINNED_BLOCK, sub(NO_PINNED_BLOCK, "wm entry one\n", "wm entry 1\n")),
+    ("a file with no memory block and no Pinned heading", "", "# User notes\n\nsome text\n"),
+    ("a change that deletes the Pinned section", B12, sub(B12, "## Pinned Context\n\n" + pins(12, {3: SNIP}), "")),
+]
+
+
+@pytest.mark.parametrize("name, before, after", NO_PINNED, ids=[r[0] for r in NO_PINNED])
+def test_no_pinned_section_anywhere_is_a_plain_allow(name, before, after):
+    assert decide(before, after) == pin_growth.PinDecision("ALLOW", 0, 0, None, None, None)
+
+
+def test_a_pinned_section_outside_the_memory_block_keeps_the_advisory():
+    # The cap's own locator reads ABSENT without the memory block, but a reader
+    # still finds the section, so the change is not a plain allow.
+    decision = decide("", PLAIN_PINNED)
+    assert (decision.verdict, decision.cause) == ("ALLOW_ADVISORY", "not_found")
+
+
 def test_an_undated_pin_renamed_at_the_cap_is_allowed_and_a_smuggled_heading_is_denied_on_count():
     assert decide(UNDATED, sub(UNDATED, "### Undated\n", "### Undated renamed\n")).verdict == "ALLOW"
     smuggled = decide(B12, sub(B12, "body 7\n", "body 7\n### smuggled\nmore body\n"))

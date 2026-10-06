@@ -55,6 +55,16 @@ class Tally(NamedTuple):
                 f"size_bound={len(self.size_bound)} families={dict(sorted(fam.items()))}")
 
 
+def _no_pinned_section(text: str) -> bool:
+    """True when neither the unique nor the reader's Pinned locator finds a
+    section in `text`: both read ABSENT."""
+    from shared.claude_md_markers import State, parse
+    from staleness import locate_pinned
+
+    doc = parse(text)
+    return all(locate_pinned(doc, unique=unique).state is State.ABSENT for unique in (True, False))
+
+
 def evaluate(items: Iterable[Item], decide: Callable = shipped_decide) -> Tally:
     counts = collections.Counter()
     over, under, unclassified, not_located, divergent, size_bound = [], [], [], [], [], []
@@ -73,7 +83,10 @@ def evaluate(items: Iterable[Item], decide: Callable = shipped_decide) -> Tally:
             size_bound.append(it.key)
         if n is None:
             counts["not located"] += 1
-            if verdict != "ALLOW_ADVISORY" or cause != "not_found":
+            # With no Pinned section anywhere the decision is a plain allow;
+            # with one PACT cannot read, the not-found advisory.
+            expected = ("ALLOW", None) if _no_pinned_section(it.post) else ("ALLOW_ADVISORY", "not_found")
+            if (verdict, cause) != expected:
                 divergent.append((it.key, shown))
             if verdict == "DENY":
                 over.append((it.key, shown))

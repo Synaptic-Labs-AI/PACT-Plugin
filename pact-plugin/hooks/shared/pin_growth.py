@@ -40,10 +40,11 @@ edited-in-place searches count one step per line they compare. Past
 size advisory. A bound only ever allows.
 
 THE DECISION. `pin_cap_decision` is the one verdict for the gate and the Bash
-report: the Pinned section after the change not located allows with an
-advisory; growth above zero with more than the cap's pins after it denies on
-count; the size axis compares the pins before with the pins after; the budget,
-the timer and any failure allow with an advisory. It never raises.
+report: no Pinned section anywhere after the change allows plainly, and one
+PACT cannot locate allows with an advisory; growth above zero with more than
+the cap's pins after it denies on count; the size axis compares the pins before
+with the pins after; the budget, the timer and any failure allow with an
+advisory. It never raises.
 """
 
 from __future__ import annotations
@@ -504,9 +505,10 @@ class PinDecision(NamedTuple):
     pins_before: int
     pins_after: int
     growth: int | None  # None when the rule did not run
-    # None, "not_found", "size_bound", "error", "count" or "size". On
-    # "size_bound" the check stopped before it could count, so pins_before and
-    # pins_after are 0.
+    # None for a plain verdict. Otherwise this decision's "not_found",
+    # "size_bound", "error", "count" or "size", or the pin-cap gate's own
+    # "override" or "unreadable". On "size_bound" the check stopped before it
+    # could count, so pins_before and pins_after are 0.
     cause: str | None
     reason: str | None  # the advisory or the deny text
     # On a count denial, the size cap's own deny text when the change crosses it
@@ -593,9 +595,15 @@ def pin_cap_decision(before: str, after: str, *, use_timer: bool = True, trim: b
 
 
 def _decide(before: str, after: str, trim: bool) -> PinDecision:
+    from staleness import locate_pinned as locate_any_pinned
+
     after_doc = parse(after)
     located = locate_pinned(after_doc)
     if located.state is not State.FOUND:
+        # No Pinned section anywhere after the change: nothing to cap, and
+        # nothing PACT failed to read.
+        if located.state is State.ABSENT and locate_any_pinned(after_doc).state is State.ABSENT:
+            return PinDecision("ALLOW", 0, 0, None, None, None)
         return PinDecision("ALLOW_ADVISORY", 0, 0, None, "not_found", _not_found_text(located))
     before_doc = parse(before)
     post_pins = section_pins(after_doc, located)
