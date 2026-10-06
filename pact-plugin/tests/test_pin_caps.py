@@ -162,6 +162,39 @@ class TestParsePins_OverrideComment:
         assert pins[0].date_comment == "<!-- pinned: 2026-04-20 -->"
 
 
+class TestOverrideRationaleText_PublicReader:
+    """The override rationale reader the pin-cap gate shares."""
+
+    @staticmethod
+    def _read(text, row=0):
+        from pin_caps import override_rationale_text
+        from shared.claude_md_markers import parse
+        return override_rationale_text(parse(text), row)
+
+    @pytest.mark.parametrize("row, text", [
+        ("<!-- pinned: 2026-04-20, pin-size-override: reason here -->", "reason here"),
+        ("  <!--pinned:2026-04-20,PIN-SIZE-OVERRIDE:  a-b > c  -->\t", "a-b > c"),
+        ("<!-- pinned: 2026-04-20, pin-size-override:  -->", ""),
+        (f"<!-- pinned: 2026-04-20, pin-size-override: {'x' * 121} -->", "x" * 121),
+    ], ids=["plain", "spacing and case", "empty field", "over the limit"])
+    def test_it_returns_the_stripped_field_before_any_validity_check(self, row, text):
+        assert self._read(f"{row}\n### Entry\nBody.\n") == text
+
+    @pytest.mark.parametrize("row", [
+        "<!-- pinned: 2026-04-20 -->",
+        "<!-- pinned: 2026-04-20, pin-size: nope -->",
+        "<!-- pinned: 2026-04-20, pin-size-override: reason --> then prose",
+        "<!-- pinned: 2026-04-20 --> , pin-size-override: reason -->",
+        "### Entry",
+    ], ids=["date only", "other field", "prose after it", "field after a closed comment", "heading"])
+    def test_it_is_none_for_a_row_that_is_not_an_override_comment(self, row):
+        assert self._read(f"{row}\n### Entry\nBody.\n") is None
+
+    def test_it_is_none_for_an_override_comment_inside_a_fenced_block(self):
+        row = "<!-- pinned: 2026-04-20, pin-size-override: reason here -->"
+        assert self._read(f"```\n{row}\n```\n", row=1) is None
+
+
 class TestPinCountCap_EveryPinOccupiesASlot:
     """The count axis counts every pin, whatever it carries. A size override
     exempts a pin from the size cap only, and a STALE pin still holds its

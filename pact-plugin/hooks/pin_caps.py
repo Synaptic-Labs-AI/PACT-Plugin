@@ -235,18 +235,27 @@ def _date_comment_row(doc, floor: int, heading: int) -> Optional[int]:
     return None
 
 
-def _override_rationale(doc, row: int) -> Optional[str]:
-    """The rationale of the override comment on `row`, or None.
+def override_rationale_text(doc, row: int) -> Optional[str]:
+    """The rationale field of the override comment on row `row` of `doc`,
+    stripped, before any validity check; None when that row is not a PROSE
+    row holding only an override comment.
 
-    `row` already matched a pin-comment row pattern. When it is the override
-    form, the rationale is the text between the field name, which follows the
+    The rationale is the text between the field name, which follows the
     comment's first comma (the date field holds none), and the closing `-->`.
+    The pin-cap gate validates it; `_override_rationale` decides with it.
     """
     if not doc.find_lines(_OVERRIDE_COMMENT_ROW, (row, row)):
         return None
     comment = doc.lines[row].content.strip()
     field = comment[comment.index(",") + 1:].lstrip()
-    rationale = field[len(_OVERRIDE_FIELD):-len(_PIN_COMMENT_CLOSE)].strip()
+    return field[len(_OVERRIDE_FIELD):-len(_PIN_COMMENT_CLOSE)].strip()
+
+
+def _override_rationale(doc, row: int) -> Optional[str]:
+    """The valid rationale of the override comment on `row`, or None."""
+    rationale = override_rationale_text(doc, row)
+    if rationale is None:
+        return None
     # Defense-in-depth: `_date_comment_row` has already refused every row
     # holding a line break this table lists.
     rationale = rationale.translate(_FORBIDDEN_TERMINATOR_TABLE)
