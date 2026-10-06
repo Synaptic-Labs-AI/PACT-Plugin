@@ -365,14 +365,10 @@ if not SESSION_BOUNDARY_PREFIX:
 # in upgraded files; strip it during migration. Allows optional trailing
 # period / whitespace.
 #
-# This pattern is applied per-line by `_strip_legacy_lines` via a
-# fence-aware walker, NOT module-wide with `re.MULTILINE`. The per-line
-# form is anchored to the full stripped line, so `$` matches end-of-line
-# without needing a MULTILINE flag. Removing MULTILINE is load-bearing:
-# with MULTILINE the pattern was hot inside user-authored fenced code
-# blocks and silently destroyed example content that quoted the stale
-# template line. Per-line application + fence tracking prevents that
-# failure mode entirely.
+# Matched against the parser's PROSE rows only (`find_lines`), never against
+# the whole text with `re.MULTILINE`: a fenced, code or uncertain row that
+# quotes the line is the user's example and stays. A row's content holds no
+# line break, so `$` needs no flag.
 _STALE_ORCHESTRATOR_LINE_RE = re.compile(
     r"^The global PACT Orchestrator is loaded from `~/\.claude/CLAUDE\.md`\.?\s*$",
 )
@@ -844,101 +840,34 @@ def _atomic_write_text(target: Path, content: str, project_root: Path) -> None:
 
 
 def _strip_legacy_lines(content: str) -> str:
-    r"""
-    Remove lines from older PACT template versions that are now obsolete.
+    """`content` without the lines from older PACT templates that are now
+    obsolete: the stale orchestrator-loader line, where the parser reads it as
+    prose. A fenced, code or uncertain row that quotes it stays byte for byte.
+    Pure."""
+    from .claude_md_markers import parse
 
-    Currently strips the stale orchestrator-loader line from the legacy
-    project CLAUDE.md template. Used by `_build_migrated_content` during
-    project migration. Centralizing the set of legacy-line patterns here
-    means adding a new pattern in the future only requires editing this
-    helper.
-
-    PR #404: fence-aware line walker that applies
-    `_STALE_ORCHESTRATOR_LINE_RE` ONLY to lines that are NOT inside a
-    fenced code block. Lines inside a fence are preserved verbatim, even
-    if they match the stale-line regex. This prevents silent data loss when
-    a user's CLAUDE.md contains a fenced code block that quotes the legacy
-    template verbatim (e.g., migration documentation, tutorial content).
-
-    Supports both backtick (```) and tilde (~~~) fences as independent
-    fence types per CommonMark §4.5. A line inside a backtick fence that
-    contains ~~~ does not affect tilde state (and vice versa).
-
-    Prior behavior used `re.MULTILINE` on the whole content, which stripped
-    matching lines regardless of fence state, silently destroying fenced
-    example content. Per-line application plus fence tracking fixes this.
-
-    Args:
-        content: The raw CLAUDE.md content to scrub.
-
-    Returns:
-        Content with all legacy template lines OUTSIDE fenced code blocks
-        removed. Content inside fenced code blocks (backtick or tilde) is
-        preserved byte for byte. Pure function.
-    """
-    return _drop_spans(content, _legacy_line_spans(content))
+    return _drop_spans(content, _legacy_line_spans(parse(content)))
 
 
-def _legacy_line_spans(content: str) -> list[tuple[int, int]]:
-    """The (start, end) spans of the lines `_strip_legacy_lines` removes, each
-    with its line break, so the migration can tell where the text it keeps
-    stood in the original."""
-    # PR #404: length-tracked fence state per CommonMark §4.5 — closing
-    # fence must use the same character and run length >= the opening. A
-    # 4-backtick outer fence containing a 3-backtick inner example must
-    # NOT toggle state on the inner line. fence_open_len > 0 means we're
-    # inside a fence; fence_char records which character opened it. This
-    # is the only fence walker that remains after the structural
-    # simplification (it processes user content during migration).
-    pos = 0
-    fence_open_len = 0  # 0 = not inside a fence
-    fence_char = ""     # "`" or "~" when inside a fence
-    spans: list[tuple[int, int]] = []
-    while pos < len(content):
-        nl = content.find("\n", pos)
-        if nl == -1:
-            line = content[pos:]
-            line_end = len(content)
-        else:
-            line = content[pos:nl]
-            line_end = nl + 1
+def _legacy_spans_after_cuts(doc: Document, cuts: list[tuple[int, int]],
+                             header_end: int) -> list[tuple[int, int]]:
+    """The stale loader lines the ORIGINAL file `doc` reads as prose, as spans
+    in the text left after dropping `cuts` from `doc.text` and then its first
+    `header_end` characters. Parsing that text instead would decide on a text
+    the cuts have changed: a cut session block that closes an HTML block can
+    leave a fenced quote below it reading as prose. A row inside a cut maps to
+    an empty span, so it stays; a row a cut only touches is a marker row, and
+    the header's rows (the title, blank rows, the description) never match."""
+    return [(_offset_after_drop(start, cuts) - header_end, _offset_after_drop(end, cuts) - header_end)
+            for start, end in _legacy_line_spans(doc)]
 
-        stripped = line.lstrip()
 
-        if fence_open_len == 0:
-            # Not inside a fence — check for fence open
-            if stripped.startswith("```"):
-                run_len = len(stripped) - len(stripped.lstrip("`"))
-                fence_open_len = run_len
-                fence_char = "`"
-            elif stripped.startswith("~~~"):
-                run_len = len(stripped) - len(stripped.lstrip("~"))
-                fence_open_len = run_len
-                fence_char = "~"
-            elif _STALE_ORCHESTRATOR_LINE_RE.match(line):
-                # Non-fenced legacy line: drop it entirely
-                spans.append((pos, line_end))
-        else:
-            # Inside a fence — check for fence close (same char, run >= open)
-            if fence_char == "`" and stripped.startswith("```"):
-                run_len = len(stripped) - len(stripped.lstrip("`"))
-                # Close only if the line is ONLY fence chars (+ optional
-                # trailing whitespace). CommonMark §4.5: closing fence
-                # cannot have info string.
-                after_run = stripped[run_len:].strip()
-                if run_len >= fence_open_len and not after_run:
-                    fence_open_len = 0
-                    fence_char = ""
-            elif fence_char == "~" and stripped.startswith("~~~"):
-                run_len = len(stripped) - len(stripped.lstrip("~"))
-                after_run = stripped[run_len:].strip()
-                if run_len >= fence_open_len and not after_run:
-                    fence_open_len = 0
-                    fence_char = ""
-
-        pos = line_end
-
-    return spans
+def _legacy_line_spans(doc: Document) -> list[tuple[int, int]]:
+    """The (start, end) span in `doc.text` of each stale loader line the
+    parser reads as prose, with its line break. A leading U+FEFF is not part
+    of row 0's span, so it stays at byte 0."""
+    return [(_row_start(doc, row), doc.lines[row].end)
+            for row in doc.find_lines(_STALE_ORCHESTRATOR_LINE_RE)]
 
 
 
@@ -1474,6 +1403,18 @@ def _drop_spans(text: str, spans: list[tuple[int, int]]) -> str:
     return "".join(kept)
 
 
+def _offset_after_drop(offset: int, spans: list[tuple[int, int]]) -> int:
+    """Where `offset` in `text`, outside every span, stands in
+    `_drop_spans(text, spans)`."""
+    dropped = pos = 0
+    for start, end in sorted(spans):
+        if start >= offset:
+            break
+        dropped += max(pos, min(end, offset)) - max(pos, start)
+        pos = max(pos, end)
+    return offset - dropped
+
+
 def _offset_before_drop(offset: int, spans: list[tuple[int, int]]) -> int:
     """Where `offset` in `_drop_spans(text, spans)` stands in `text`."""
     dropped = pos = 0
@@ -1629,8 +1570,8 @@ def _plan_migration(content: str) -> tuple[str | None, str | None]:
     header_end = _legacy_header_end(parse(remaining))
     remaining = remaining[header_end:]
 
-    # Strip legacy template lines (e.g., stale orchestrator-loader line)
-    legacy = _legacy_line_spans(remaining)
+    # Strip the stale template lines where the original file reads them as prose.
+    legacy = _legacy_spans_after_cuts(doc, cuts, header_end)
     remaining = _drop_spans(remaining, legacy)
 
     # Classify the rows. A memory heading opens a memory section; any other

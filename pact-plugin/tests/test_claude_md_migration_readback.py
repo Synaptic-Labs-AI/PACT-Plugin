@@ -12,8 +12,9 @@ rebuild that changed the user's text (driven through test doubles that undo
 one part of the fix); an input whose marker already reads stray is refused
 when a rebuild makes a further copy live, including the real rebuild moving an
 open HTML block above a fenced copy; a reorder that changes how a carried line
-reads is refused; and an input with an uncertain region is refused at the
-managed lookup, before any rebuild.
+reads is refused; the legacy loader line is dropped only where the original
+file reads it as prose; and an input with an uncertain region is refused at
+the managed lookup, before any rebuild.
 """
 
 import pytest
@@ -24,6 +25,12 @@ from shared.claude_md_manager import (
     MANAGED_START_MARKER,
     PINNED_END_MARKER,
     PINNED_START_MARKER,
+    SESSION_END_MARKER,
+    SESSION_START_MARKER,
+    _drop_spans,
+    _legacy_line_spans,
+    _legacy_spans_after_cuts,
+    _marker_span,
     _plan_migration,
 )
 from shared.claude_md_markers import Cause, State, parse
@@ -320,3 +327,64 @@ def test_a_generated_file_whose_session_block_covers_the_rest_migrates():
 def test_a_generated_file_whose_fence_turns_to_prose_below_a_cut_is_refused():
     assert _plan_migration(FENCE_TURNS_TO_PROSE_BELOW_A_CUT) == (
         None, "the migrated file would change how line 20 reads")
+
+
+# The stale loader line from the legacy template is dropped only where the
+# user's file reads it as prose; a quote of it in the user's code stays.
+
+LOADER = "The global PACT Orchestrator is loaded from `~/.claude/CLAUDE.md`."
+
+
+@pytest.mark.parametrize("notes", [
+    "```text\n    ```\n" + LOADER + "\n```\n",  # an indented fence-like line does not close the fence
+    "<!--\n```\n-->\n```\n" + LOADER + "\n```\n",  # a fence-like line inside a comment opens nothing
+], ids=["indented closer inside a fence", "fence line inside a comment"])
+def test_a_loader_line_quoted_in_the_users_code_is_kept(notes):
+    new_content = _plan("# Project Memory\n\n" + notes + "## Working Memory\n- entry\n")
+    assert new_content.endswith(f"{MANAGED_END_MARKER}\n\n{notes}")
+
+
+def test_a_loader_line_in_the_users_prose_is_dropped():
+    new_content = _plan("# Project Memory\n\nNotes\n" + LOADER + "\nmore\n## Working Memory\n- entry\n")
+    assert LOADER not in new_content
+    assert new_content.endswith(f"{MANAGED_END_MARKER}\n\nNotes\nmore\n")
+
+
+def test_a_loader_line_below_a_cut_session_block_is_dropped_in_place():
+    session = f"{SESSION_START_MARKER}\n## Current Session\n- Resume: `x`\n{SESSION_END_MARKER}"
+    new_content = _plan(f"# Project Memory\n\n{session}\nNotes\n{LOADER}\nmore\n## Working Memory\n- entry\n")
+    assert LOADER not in new_content and session in new_content
+    assert new_content.endswith(f"{MANAGED_END_MARKER}\n\nNotes\nmore\n")
+
+
+def test_a_loader_line_inside_the_session_block_stays_in_it():
+    # A row the session cut covers is never dropped, and the text after the
+    # cut is not shifted by a drop meant for a row inside it.
+    session = f"{SESSION_START_MARKER}\n## Current Session\n{LOADER}\n{SESSION_END_MARKER}"
+    new_content = _plan(f"# Project Memory\n\n{session}\nNotes after\n## Working Memory\n- entry\n")
+    assert session in new_content
+    assert new_content.endswith(f"{MANAGED_END_MARKER}\n\nNotes after\n")
+
+
+def test_a_loader_line_the_original_reads_as_code_is_not_dropped(monkeypatch):
+    # The session block closes an HTML block opened above it. With the block
+    # cut out, the text left reads the fenced quote below it as prose; the
+    # original reads it as code, and the drop is decided on the original.
+    content = (
+        f"# Project Memory\n\n<pre>\n{SESSION_START_MARKER}\n## Current Session\n</pre>\n"
+        f"{SESSION_END_MARKER}\n```text\n{LOADER}\n```\n## Working Memory\n- entry\n"
+    )
+    doc = parse(content)
+    cuts = [(_marker_span(doc, 3)[0], _marker_span(doc, 6)[1])]
+    assert _legacy_line_spans(parse(_drop_spans(content, cuts)))  # the cut text would drop it
+    assert _legacy_spans_after_cuts(doc, cuts, 0) == []
+    # The migration decides the drop on the original file. The rebuild then
+    # moves the session block away from the HTML block it closed, which changes
+    # how the fence reads, so it refuses: the quote is never written out
+    # without its line.
+    seen = []
+    monkeypatch.setattr(claude_md_manager, "_legacy_spans_after_cuts",
+                        lambda doc, *rest: seen.append(doc.text) or _legacy_spans_after_cuts(doc, *rest))
+    new_content, refusal = _plan_migration(content)
+    assert seen == [content]
+    assert new_content is None and refusal is not None and "would change how line" in refusal
