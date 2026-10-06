@@ -22,11 +22,11 @@ distinct outcome. Parameterization collapses duplicates while preserving meaning
 discrimination. Total parameterized cases: ~100.
 
 Invariants enforced:
-  #1 symmetric oracle (parse_pins on both sides)
+  #1 symmetric oracle (pin_caps.pins_in_rows on both sides)
   #2 net-worse strict `>`
   #3 Write-baseline fail-CLOSED asymmetric exception
   #4 failure_log observability on fail-open bypass paths
-  #5 no twin-copy drift (parser/hook share parse_pins, not regex clones)
+  #5 no twin-copy drift (parser/hook share pins_in_rows, not regex clones)
   #6 override validation ONLY in hook primary path
   #7 str.replace Edit-simulation byte-identical
   #8 full-replacement emulation (Write is full file, not fragment)

@@ -484,8 +484,9 @@ class TestStartEdgeDoesNotOrphanTheDateComment:
     what this class covers.
 
     THE HARM. A span starting at the `### ` heading leaves the evicted pin's
-    date comment behind. `parse_pins` walks backward to the nearest preceding
-    non-blank line, so the orphan attaches to the FOLLOWING pin — and if it
+    date comment behind. Attribution (`pin_caps._date_comment_row`) walks
+    backward to the nearest preceding non-blank line, so the orphan attaches
+    to the FOLLOWING pin — and if it
     carried a `pin-size-override`, the retained pin INHERITS an override it
     was never granted. An override grants unlimited size, so an unrelated
     eviction silently bypasses the 1500-char cap on a pin nobody touched.

@@ -42,9 +42,10 @@ PIN_STALE_BLOCK_THRESHOLD = 2
 # rationale from itself becoming a back-channel for oversized pins.
 OVERRIDE_RATIONALE_MAX = 120
 
-# Single source for the pin-comment grammar. Both oracles below are built
-# from these four fragments, so the strip path and the attribution path
-# cannot drift apart on the shape of a comment.
+# Single source for the pin-comment grammar. The strike pattern
+# (`_DATE_COMMENT_RE`) and the attribution row patterns (`_DATE_COMMENT_ROW`,
+# `_OVERRIDE_COMMENT_ROW`) are built from these four fragments, so the strip
+# path and the attribution path cannot drift apart on the shape of a comment.
 #
 # `_COMMENT_CHAR` is one character of a comment interior: either a character
 # that is not `-`, or a `-` that does not start `-->`. A run of this class
@@ -57,28 +58,13 @@ OVERRIDE_RATIONALE_MAX = 120
 # comma delimits. It refuses the terminator too, so attribution cannot accept
 # a line whose override clause sits after an early `-->`.
 #
-# The property these fragments deliver is DOMINANCE: every line that
+# The property these fragments deliver is DOMINANCE: every row that
 # attribution accepts, the strip removes in full. The strip may remove more.
 # It must never remove less, because less is a charge against the neighbour.
-#
-# Every fragment is NON-CAPTURING. `OVERRIDE_COMMENT_RE.groups` must stay 1,
-# because its one group is the rationale.
 _COMMENT_CHAR = r'(?:[^-]|-(?!->))'
 _COMMENT_CHAR_NO_COMMA = r'(?:[^-,]|-(?!->))'
 _PIN_COMMENT_OPEN = r'<!--\s*pinned:\s*'
 _PIN_COMMENT_CLOSE = r'-->'
-
-# Strict regex for the combined pin date + size-override comment.
-# Live form:
-#   <!-- pinned: 2026-04-11, pin-size-override: verbatim dispatch form... -->
-# Capture group 1 = rationale text. Self-anchoring via \A...\Z plus a body
-# class that positively refuses `-->` closes both a latent-misuse vector
-# (Sec-M2) and call-convention drift (Sec-F5).
-OVERRIDE_COMMENT_RE = re.compile(
-    rf'\A{_PIN_COMMENT_OPEN}{_COMMENT_CHAR_NO_COMMA}+,\s*'
-    rf'pin-size-override:\s*({_COMMENT_CHAR}+?)\s*{_PIN_COMMENT_CLOSE}\Z',
-    re.IGNORECASE,
-)
 
 # Standalone <!-- pinned: YYYY-MM-DD[, ...] --> comment without override.
 # Unanchored BY DESIGN: `_charge` strikes it with `.sub` wherever it sits on a
@@ -115,6 +101,8 @@ _DATE_COMMENT_ROW = re.compile(
     rf'\s*{_PIN_COMMENT_OPEN}{_COMMENT_CHAR}+?{_PIN_COMMENT_CLOSE}\s*\Z',
     re.IGNORECASE,
 )
+# The combined date and size-override comment:
+#   <!-- pinned: 2026-04-11, pin-size-override: verbatim dispatch form... -->
 _OVERRIDE_COMMENT_ROW = re.compile(
     rf'\s*{_PIN_COMMENT_OPEN}{_COMMENT_CHAR_NO_COMMA}+,\s*'
     rf'pin-size-override:\s*{_COMMENT_CHAR}+?\s*{_PIN_COMMENT_CLOSE}\s*\Z',

@@ -610,9 +610,10 @@ class TestPinCommentCorruptedMarker_RuledAcceptance:
 class TestPinCommentMixedLine_RuledAcceptance:
     """RULED ACCEPTANCE for a comment that SHARES A LINE WITH PROSE.
 
-    Attribution reads only whole lines: `parse_pins` runs `fullmatch` on the
-    STRIPPED line, so a line carrying prose either side of a comment is NEVER
-    attributed — it sets no date and grants no override. The strip is a
+    Attribution reads only whole rows: `pin_caps._date_comment_row` matches
+    the row patterns from the row's start to its end, so a line carrying prose
+    either side of a comment is NEVER attributed — it sets no date and grants
+    no override. The strip is a
     `.sub`, so it removes that comment's substring from the line anyway.
 
     SO THE STRIP REMOVES WHAT ATTRIBUTION NEVER ATTRIBUTES, and the counted
@@ -687,12 +688,11 @@ class TestPinCommentMixedLine_RuledAcceptance:
         would not exist, so the ruling would need re-reading rather than
         re-asserting.
         """
-        from pin_caps import OVERRIDE_COMMENT_RE, _DATE_COMMENT_RE
+        from pin_caps import _date_comment_row
+        from shared.claude_md_markers import parse
 
         for line in (self.MIXED_GT, self.MIXED_PLAIN):
-            stripped = line.strip()
-            assert _DATE_COMMENT_RE.fullmatch(stripped) is None
-            assert OVERRIDE_COMMENT_RE.fullmatch(stripped) is None
+            assert _date_comment_row(parse(f"{line}\n### P\n"), 0, 1) is None, line
 
     def test_the_same_comment_alone_on_its_line_is_attributed(self):
         """CONTROL, and it must PASS for the class above to mean anything.
@@ -701,10 +701,11 @@ class TestPinCommentMixedLine_RuledAcceptance:
         and the strip removes it completely. Without this the two assertions
         above would also hold for a pattern that simply matched nothing.
         """
-        from pin_caps import _DATE_COMMENT_RE
+        from pin_caps import _date_comment_row
+        from shared.claude_md_markers import parse
         from fixtures.pin_helpers import _extract_body_chars
 
-        assert _DATE_COMMENT_RE.fullmatch(self.ALONE) is not None
+        assert _date_comment_row(parse(f"{self.ALONE}\n### P\n"), 0, 1) == 0
         assert _extract_body_chars(self.ALONE) == 0
 
     def test_a_pin_body_holding_a_mixed_line_is_charged_the_prose_alone(self):
@@ -732,13 +733,13 @@ class TestPinCommentSplitComment_RuledAcceptance:
     does not. A failure here is not a delta to review and absorb — it is a
     ruling being reversed.
 
-    THE BEHAVIOUR. `_extract_body_chars` strips per line, so a comment that
-    spans a line break is not stripped at all and every one of its characters
-    counts against the curator's budget.
+    THE BEHAVIOUR. The size charge (`pin_caps._charge`) strikes per row, so a
+    comment that spans a line break is not stripped at all and every one of
+    its characters counts against the curator's budget.
 
-    WHY THAT IS CORRECT RATHER THAN A COST TO BE REPAID. `parse_pins`
-    attributes only after `splitlines()`, so a comment spanning a line break is
-    NOT A COMMENT to the attribution path — it sets no date and grants no
+    WHY THAT IS CORRECT RATHER THAN A COST TO BE REPAID. Attribution reads one
+    row at a time, so a comment spanning a line break is NOT A COMMENT to the
+    attribution path — it sets no date and grants no
     override. The previous whole-body strip removed it anyway, which is the
     two-oracles-disagree defect this whole change exists to remove. Charging it
     is what AGREEMENT between the two paths looks like, not a regression that a
@@ -845,8 +846,8 @@ class TestPinCommentMultiLine_Characterization:
     def test_the_per_line_discipline_lives_in_the_caller_not_the_pattern(self):
         """The distinction that decides what a line-bounded repair must bind.
 
-        `parse_pins` splits with `splitlines()` before it matches, so the
-        attribution PATH is per-line. The pattern is not. A repair may bind
+        The parser splits the text into rows before attribution matches, so
+        the attribution PATH is per-row. The pattern is not. A repair may bind
         either one, and the two are different changes.
         """
         from fixtures.pin_helpers import parse_pins
@@ -872,15 +873,15 @@ class TestPinCommentBacktracking_Pipeline:
 
     @pytest.mark.parametrize("length", [500, 1000, 2000])
     def test_interior_whitespace_run_stays_within_budget(self, length):
-        from pin_caps import OVERRIDE_COMMENT_RE
+        from pin_caps import _OVERRIDE_COMMENT_ROW
 
-        # An interior whitespace run survives `.strip()`, so this is the shape
-        # the parser can actually receive. The trailing character closes it.
+        # An interior whitespace run inside one row, which is the shape
+        # attribution can actually receive. The trailing character closes it.
         line = "<!-- pinned:" + " " * length + "x"
         assert line.strip() == line
 
         started = time.perf_counter()
-        OVERRIDE_COMMENT_RE.fullmatch(line)
+        _OVERRIDE_COMMENT_ROW.match(line)
         elapsed = time.perf_counter() - started
 
         assert elapsed < self.BUDGET_SECONDS, (

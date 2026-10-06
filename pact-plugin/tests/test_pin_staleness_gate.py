@@ -768,25 +768,13 @@ class TestPinStalenessGate_DecoyBypass:
     def test_edit_fragment_without_markers_uses_full_text_count(
         self, gate_env
     ):
-        """Edit fragment (no markers) falls through to full-text count.
+        """A bare heading and a dated heading each count as one pin.
 
-        Edit.old_string and Edit.new_string are typically raw fragments
-        that do not carry the PACT_MANAGED_START/END markers — they are
-        structurally INSIDE the managed region by virtue of the section
-        being edited. `_count_pin_comments` must fall through to full-text
-        parse_pins on these, otherwise a net-new pin added via Edit would
-        be invisible (extract_managed_region returns None → bounded count
-        fails → else-branch must cover it).
-
-        Post-symmetric-oracle: fragment counts now use
-        `len(parse_pins(text))` directly. Since parse_pins treats bare
-        `### Heading` as a Pin, `### Existing\\nbody\\n` parses as 1
-        pin (not 0). The gate still denies net-new adds because the
-        OLD fragment and NEW fragment both parse consistently: a fragment
-        with ONLY a bare `### Existing` counts 1; a fragment with a
-        `<!-- pinned: -->\\n### New` ALSO counts 1 (comment + heading
-        form one Pin). Adding a net-new heading anywhere raises the
-        count symmetrically.
+        The counter reads pins with `pin_caps.pins_in_rows`, which treats a
+        bare `### Heading` as a Pin, so `### Existing\\nbody\\n` counts 1
+        pin (not 0), and `<!-- pinned: -->\\n### New` ALSO counts 1
+        (comment + heading form one Pin). Adding a net-new heading anywhere
+        raises the count symmetrically.
         """
         gate_env(marker_present=True)
         old_fragment = "### Existing\nbody\n"
@@ -795,12 +783,11 @@ class TestPinStalenessGate_DecoyBypass:
         from shared.claude_md_manager import MANAGED_START_MARKER
         assert MANAGED_START_MARKER not in old_fragment
         assert MANAGED_START_MARKER not in new_fragment
-        # Fall-through to full-text parse_pins MUST return the parse_pins
-        # count on the fragment. Both fragments parse as 1 pin: a bare
-        # `### Heading` and a `<!-- pinned: -->\n### Heading` are both
-        # valid Pin shapes under parse_pins (this is the symmetric-oracle
-        # property — BareHeadingBypass and WhitespaceVariant tests below
-        # exercise the cross-fragment delta that matters for the gate).
+        # Both fragments count as 1 pin: a bare `### Heading` and a
+        # `<!-- pinned: -->\n### Heading` are both valid Pin shapes under
+        # `pins_in_rows` (this is the symmetric-oracle property —
+        # BareHeadingBypass and WhitespaceVariant tests below exercise the
+        # cross-fragment delta that matters for the gate).
         assert _count(old_fragment) == 1
         assert _count(new_fragment) == 1
 
@@ -808,12 +795,11 @@ class TestPinStalenessGate_DecoyBypass:
 class TestPinStalenessGate_CaseInsensitivity:
     """`_count_pin_comments` must match pin-comment markers case-insensitively.
 
-    Asymmetry guard: `pin_caps.OVERRIDE_COMMENT_RE` and the sibling
-    pin-comment regexes in pin_caps.py use `re.IGNORECASE`, so
-    `parse_pins` treats `<!-- PINNED:`, `<!-- Pinned:`, and
-    `<!-- pInNeD:` as valid pin comments. A case-sensitive
-    `.count("<!-- pinned:")` in the gate under-counts against what
-    parse_pins produces, letting a user slip past the gate with an
+    Asymmetry guard: the pin-comment patterns in pin_caps.py use
+    `re.IGNORECASE`, so `pin_caps.pins_in_rows` treats `<!-- PINNED:`,
+    `<!-- Pinned:`, and `<!-- pInNeD:` as valid pin comments. A
+    case-sensitive `.count("<!-- pinned:")` in the gate under-counts
+    against what `pins_in_rows` produces, letting a user slip past the gate with an
     upper-case marker while the cap check still sees the pin.
 
     Counter-test-by-revert: reverting the case-insensitive count in
@@ -873,7 +859,7 @@ class TestPinStalenessGate_CaseInsensitivity:
         assert result is not None, (
             "Upper-case `<!-- PINNED:` slipped past the gate — the "
             "case-sensitive `.count(\"<!-- pinned:\")` under-counts "
-            "vs parse_pins (which is IGNORECASE). Fix in "
+            "vs pins_in_rows (which is IGNORECASE). Fix in "
             "pin_staleness_gate.py:_count_pin_comments."
         )
         assert "stale pins" in result
@@ -884,16 +870,16 @@ class TestPinStalenessGate_BareHeadingBypass:
     adds with no preceding date comment MUST DENY.
 
     Before that fix, `_count_pin_comments` used a regex substring count
-    of `<!-- pinned:` tokens. This was asymmetric with `parse_pins`,
-    which recognizes a bare `### Heading` (no preceding date comment)
-    as a Pin. An adversarial ADD of a level-3 heading-only pin landed
-    as a parse_pins-visible pin on reload — yet the gate saw zero
+    of `<!-- pinned:` tokens. This was asymmetric with the cap check's
+    pin reader, which recognizes a bare `### Heading` (no preceding date
+    comment) as a Pin. An adversarial ADD of a level-3 heading-only pin
+    landed as a pin the cap check counts on reload — yet the gate saw zero
     `<!-- pinned:` tokens and let the ADD through while the cap-check
     CLI simultaneously counted the pin against the 12-pin quota.
 
-    Fix: `_count_pin_comments` now calls `parse_pins` directly, so the
-    gate and the cap-check share one oracle. ADDing a bare `### Heading`
-    raises the parse_pins count by 1 → gate denies.
+    Fix: `_count_pin_comments` reads pins with `pin_caps.pins_in_rows`, the
+    cap check's reader, so the gate and the cap-check share one oracle.
+    ADDing a bare `### Heading` raises that count by 1 → gate denies.
 
     Counter-test-by-revert: reverting the symmetric-oracle fix (restoring the regex
     substring count) MUST cause these tests to FAIL. A revert that
@@ -902,7 +888,7 @@ class TestPinStalenessGate_BareHeadingBypass:
 
     def test_edit_adding_bare_heading_without_comment_denied(self, gate_env):
         """Edit: old_string has no pin comment, new_string adds bare `### Smuggled`
-        with body → gate DENIES (parse_pins sees +1 pin).
+        with body → gate DENIES (the pin reader sees +1 pin).
 
         This is the load-bearing bypass: a curator with the
         stale-pins-pending marker armed could previously smuggle a
@@ -929,7 +915,7 @@ class TestPinStalenessGate_BareHeadingBypass:
 
     def test_write_adding_bare_heading_without_comment_denied(self, gate_env):
         """Write: full-file replacement adds a bare `### Smuggled` in the
-        managed region → gate DENIES (parse_pins sees +1 pin).
+        managed region → gate DENIES (the pin reader sees +1 pin).
 
         Write-path twin of the Edit case above. Exercises the same
         asymmetry via the Write-shape branch of `_is_add_shaped_edit`.
@@ -965,7 +951,7 @@ class TestPinStalenessGate_BareHeadingBypass:
         """
         fragment = "### Smuggled\nbody\n"
         assert _count(fragment) == 1, (
-            "parse_pins treats a bare `### Heading` as a Pin; "
+            "pins_in_rows treats a bare `### Heading` as a Pin; "
             "_count_pin_comments must agree (symmetric oracle). Under "
             "the pre-symmetric-oracle regex substring count, this returned 0."
         )
@@ -974,18 +960,18 @@ class TestPinStalenessGate_BareHeadingBypass:
 class TestPinStalenessGate_WhitespaceVariant:
     """Symmetric-oracle defense: whitespace-tolerant
     pin markers (`<!--  pinned:` with double-space, tabs, leading spaces)
-    MUST count toward the gate as parse_pins counts them.
+    MUST count toward the gate as the cap check's pin reader counts them.
 
     Before that fix, `_count_pin_comments` used a literal substring
     count of `<!-- pinned:` (case-insensitive via regex flag, but with
-    EXACTLY one space before `pinned:`). parse_pins tolerates
+    EXACTLY one space before `pinned:`). The pin reader tolerates
     `<!--\\s*pinned:` — two spaces, a tab, any whitespace run. A
     curator smuggling a pin with `<!--  pinned: 2026-04-20 -->` (double
-    space) landed as a parse_pins-visible pin on reload but was invisible
+    space) landed as a pin the cap check counts on reload but was invisible
     to the substring-count gate.
 
-    Fix: _count_pin_comments delegates to parse_pins, which uses the
-    whitespace-tolerant regex. Gate + cap-check now agree.
+    Fix: _count_pin_comments reads pins with `pin_caps.pins_in_rows`, whose
+    comment patterns are whitespace-tolerant. Gate + cap-check now agree.
 
     Counter-test-by-revert: reverting the symmetric-oracle fix MUST cause these tests
     to FAIL. If they pass after a revert, the defense is phantom-green.
@@ -994,7 +980,7 @@ class TestPinStalenessGate_WhitespaceVariant:
     def test_edit_adding_double_space_marker_denied(self, gate_env):
         """Edit: adding `<!--  pinned:` (double space) → DENIES.
 
-        parse_pins matches `<!--\\s*pinned:` → 1 new pin. Old substring
+        The pin reader matches `<!--\\s*pinned:` → 1 new pin. Old substring
         count of `<!-- pinned:` (single space) → 0 new pins → bypass.
         """
         env = gate_env(marker_present=True)
@@ -1048,7 +1034,7 @@ class TestPinStalenessGate_WhitespaceVariant:
     def test_count_pin_comments_counts_whitespace_variants(self):
         """Direct oracle assertion: whitespace-variant markers count as pins.
 
-        Isolates the cause from the effect: if parse_pins tolerates
+        Isolates the cause from the effect: if the pin reader tolerates
         `<!--  pinned:`, `<!--\\tpinned:` and so on, the gate must see
         the same count. Independent of the gate decision path.
         """
@@ -1063,7 +1049,7 @@ class TestPinStalenessGate_WhitespaceVariant:
         assert _count(tab_sep) == 1, (
             "Tab-separated `<!--\\tpinned:` did not count."
         )
-        # No space at all (parse_pins \s* permits zero whitespace too)
+        # No space at all (the pin reader's \s* permits zero whitespace too)
         no_space = "<!--pinned: 2026-04-20 -->\n### Z\nbody\n"
         assert _count(no_space) == 1, (
             "Zero-space `<!--pinned:` did not count."

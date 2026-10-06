@@ -151,10 +151,11 @@ WORKING_MEMORY_HEADING = "## Working Memory\n"
 def a_pin(n: int, body: str = "body prose") -> str:
     """One pin in the shape `commands/pin-memory.md` documents.
 
-    THE DATE COMMENT GOES ABOVE THE HEADING. `parse_pins` walks BACKWARD from
-    a heading to attribute a comment, so a comment placed below the heading
-    binds to the NEXT pin and leaves this one with `date_comment is None` --
-    which the gate then reads as a smuggle and denies for a reason that has
+    THE DATE COMMENT GOES ABOVE THE HEADING. Attribution
+    (`pin_caps._date_comment_row`) walks BACKWARD from a heading to find a
+    pin's comment, so a comment placed below the heading binds to the NEXT
+    pin and leaves this one with `date_comment is None` -- which the gate
+    then reads as a smuggle and denies for a reason that has
     nothing to do with the test. That mistake produced a false finding here
     once; the shape is pinned in a helper so it cannot recur per-test.
     """
