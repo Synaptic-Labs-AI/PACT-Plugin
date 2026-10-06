@@ -358,9 +358,10 @@ class TestPinCapsGate_Matrix_Edit:
         """A comment row broken by a line terminator, or holding a character
         `str.splitlines` breaks at, is not attributed to the pin, so it is not
         an override: the gate does not refuse it as an invalid one, and a small
-        pin under it is allowed. The pin is the second, so the unattributed row
-        sits at the end of the first pin's rows, where a check of every row
-        would read it."""
+        pin under it is allowed. The second pin is used because there the
+        unattributed row sits among the first pin's rows, where the gate used to
+        read it as an override and refuse a rationale holding U+2028, U+2029 or
+        U+0085 as invalid."""
         env = gate_env(pin_count=3)
         result = _call_gate({
             "tool_name": "Edit",

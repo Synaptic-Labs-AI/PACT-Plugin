@@ -50,6 +50,7 @@ from __future__ import annotations
 # ─── stdlib first (used by _emit_load_failure_allow BEFORE wrapped imports) ─
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import NoReturn, Optional
 
@@ -95,17 +96,20 @@ def _validate_override_rationale(rationale: Optional[str]) -> Optional[str]:
     if rationale is None:
         return None
     if not rationale:
-        return (
-            "Override rationale is empty — provide a non-empty reason "
-            "or compress the pin body."
-        )
+        return "Override rationale is empty — provide a non-empty reason."
     if len(rationale) > OVERRIDE_RATIONALE_MAX:
         return (
             f"Override rationale is {len(rationale)} chars "
-            f"(max: {OVERRIDE_RATIONALE_MAX}). Shorten it or compress "
-            "the pin body."
+            f"(max: {OVERRIDE_RATIONALE_MAX}). Shorten it."
         )
     return None
+
+
+def _collapsed(content: str) -> str:
+    """A row's content with each whitespace run made one space and the ends
+    stripped, so a re-indent, a trailing space or a line-ending rewrite leaves
+    it the same."""
+    return " ".join(content.split())
 
 
 def _invalid_override(before: str, after: str) -> Optional[str]:
@@ -117,9 +121,14 @@ def _invalid_override(before: str, after: str) -> Optional[str]:
     gives it), through `pin_caps.override_rationale_text`, so the gate and the
     parser read the same override. An override-shaped row elsewhere in a body,
     or in a fenced example, is body text for both, and a row holding a line
-    break `str.splitlines` breaks at is never attributed. Only pins whose text
-    (comment row through body) is not in the text before verbatim are checked,
-    so an unchanged or verbatim-moved pin is not re-checked.
+    break `str.splitlines` breaks at is never attributed.
+
+    An override row is checked only when the change added or edited it: its
+    text, whitespace collapsed, is looked up among every row of the text
+    before, of any kind (prose, code or past an unclosed fence), and a row
+    found there is used up and not checked. So an untouched old invalid
+    override is not refused for an edit elsewhere in its pin, a rename, a
+    move, a line-ending rewrite or a fence-closing Write.
     """
     from pin_caps import override_rationale_text
     from shared.claude_md_markers import State, parse
@@ -130,11 +139,16 @@ def _invalid_override(before: str, after: str) -> Optional[str]:
     if located.state is not State.FOUND:
         return None
     heading, last = located.spans[0]
-    for first, end in pin_spans(doc, (heading + 1, last)):
-        start, stop = doc.offsets(first, end)
-        if doc.text[start:stop] in before:
+    rows_before = Counter(_collapsed(line.content) for line in parse(before).lines)
+    for first, _end in pin_spans(doc, (heading + 1, last)):
+        rationale = override_rationale_text(doc, first)
+        if rationale is None:
             continue
-        reason = _validate_override_rationale(override_rationale_text(doc, first))
+        row = _collapsed(doc.lines[first].content)
+        if rows_before[row]:
+            rows_before[row] -= 1
+            continue
+        reason = _validate_override_rationale(rationale)
         if reason is not None:
             return reason
     return None
