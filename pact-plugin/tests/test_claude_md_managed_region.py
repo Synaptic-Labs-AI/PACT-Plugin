@@ -94,11 +94,11 @@ def test_the_kernel_strip_removes_the_real_block_and_keeps_a_fenced_example(home
 
 def test_the_kernel_strip_keeps_a_leading_bom_first(home_file):
     """A kernel block on the first row of a file that starts with a BOM is
-    removed and the BOM stays the file's first character."""
+    removed, the BOM stays the file's first character, and no blank rows are
+    left above the text that followed the block."""
     home_file.write_text("\ufeff" + KERNEL + "\n\n# Notes\n", encoding="utf-8")
     assert "Removed obsolete PACT kernel block" in _str(strip_orphan_kernel_block())
-    written = home_file.read_text(encoding="utf-8")
-    assert written.startswith("\ufeff") and written.lstrip("\ufeff\n") == "# Notes\n"
+    assert home_file.read_text(encoding="utf-8") == "\ufeff# Notes\n"
 
 
 @pytest.mark.parametrize("text, plain", [
