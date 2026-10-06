@@ -61,7 +61,7 @@ from shared.claude_md_manager import (
     PINNED_END_MARKER,
     PINNED_START_MARKER,
 )
-from shared.claude_md_markers import Document, Located, State, parse
+from shared.claude_md_markers import Document, Located, State, parse, uncertainty_added
 
 # The section's heading, terminator and stop prefixes, and the block-interior
 # helper, are the Pinned locator's own (`staleness.locate_pinned`), so the
@@ -155,8 +155,9 @@ class SkipReason(str, Enum):
 class Refusal:
     """A lookup the parser could not answer with certainty: UNKNOWN, DUPLICATE
     or MALFORMED, for the managed block, the memory block, the section or the
-    marker pair. The writer leaves the file untouched and journals `value`,
-    which names the line through `Located.reason`.
+    marker pair; or UNKNOWN for the text the insertion would produce. The
+    writer leaves the file untouched and journals `value`, which names the
+    line through `Located.reason`.
     """
 
     located: Located
@@ -209,6 +210,10 @@ def plan_insertion(content: str) -> Insertion | SkipReason | Refusal:
        heading -> EMPTY_SECTION. Fenced lines are code, so a heading-shaped
        line inside a fenced snippet in a pin body does not end the section.
     4. The marker pair, inside the memory block (see `_pair_state`).
+    5. The text the insertion would produce. A marker row is an HTML comment
+       line, so it can end a comment or declaration the user opened above the
+       heading and closed inside the section. More rows PACT cannot read than
+       the file has -> a `Refusal` naming the line.
 
     At any step, UNKNOWN, DUPLICATE or MALFORMED -> a `Refusal` naming the
     line, so the file is left byte-identical rather than guessed at.
@@ -246,12 +251,16 @@ def plan_insertion(content: str) -> Insertion | SkipReason | Refusal:
         # `last + 1` always exists: the memory END marker row closes the scope,
         # and it is a stop prefix, so the section ends on or before the row
         # above it.
-        return Insertion(
+        insertion = Insertion(
             start_offset=doc.lines[heading].start,
             end_offset=doc.lines[last + 1].start,
             start_line=START_LINE,
             end_line=END_LINE,
         )
+        reason = uncertainty_added(doc, parse(apply_insertion(content, insertion)))
+        if reason is not None:
+            return Refusal(Located(State.UNKNOWN, (), reason, None))
+        return insertion
     except Exception:  # noqa: BLE001 -- totality guard; see SkipReason.PLAN_FAILED
         return SkipReason.PLAN_FAILED
 

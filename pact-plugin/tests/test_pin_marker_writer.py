@@ -48,6 +48,7 @@ from shared.pin_markers import (
     END_LINE,
     START_LINE,
     Insertion,
+    Refusal,
     SkipReason,
     apply_insertion,
     certify_expel_nothing,
@@ -512,6 +513,29 @@ class TestPreconditionLadder:
         planned = plan_insertion(doc)
         assert isinstance(planned, SkipReason)
         assert "## Pinned Context" not in doc
+
+
+class TestTheMarkersNeverMakeTheFileLessReadable:
+    """The START row goes above the `## Pinned Context` heading. A comment the
+    user opened above the heading and closed inside the section would end at
+    that row, and the file would read as uncertain from the opener down. The
+    planner then refuses and names the opener's line on disk."""
+
+    def test_a_marker_row_that_would_end_an_open_comment_is_refused(self):
+        doc = build_claude_md(retrieved="<!-- note\n", pinned_body="### Pin A\nflow: a --> b\n\n")
+        line = doc.splitlines().index("<!-- note") + 1
+        planned = plan_insertion(doc)
+        assert isinstance(planned, Refusal)
+        assert planned.value == (
+            f"refused_unknown: the update would make line {line} start a region PACT cannot read: "
+            "an HTML block is ended only by a line that starts a comment"
+        )
+
+    def test_the_same_file_with_the_comment_closed_on_its_own_line_is_marked(self):
+        """The control: closed at a row edge, the comment ends where the user
+        ended it, and the marker rows end nothing."""
+        doc = build_claude_md(retrieved="<!-- note\n-->\n", pinned_body="### Pin A\nflow: a --> b\n\n")
+        assert isinstance(plan_insertion(doc), Insertion)
 
 
 class TestTheDetectorAcceptsOnlyWhatTheWriterEmits:
