@@ -50,7 +50,6 @@ marker placed here can pull a counted span in and never push it out.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from enum import Enum
 
@@ -59,29 +58,15 @@ from shared.claude_md_manager import (
     MANAGED_START_MARKER,
     MEMORY_END_MARKER,
     MEMORY_START_MARKER,
-    PACT_BOUNDARY_PREFIXES,
     PINNED_END_MARKER,
     PINNED_START_MARKER,
-    SESSION_BOUNDARY_PREFIX,
 )
 from shared.claude_md_markers import Document, Located, State, parse
 
-# The section heading and terminator, written for ONE row's content (no line
-# terminator). The terminator is an H1 or H2 heading; the PACT boundary
-# comments that also end a section are marker lines, so they go to
-# `find_section` as stop prefixes rather than into this pattern.
-_PINNED_HEADING = re.compile(r"^## Pinned Context\s*$")
-_PINNED_TERMINATOR = re.compile(r"#{1,2}\s")
-
-# The comment openings that end a section: every PACT-managed boundary and the
-# session block's. Derived from the canonical prefixes so a new prefix there
-# reaches this tuple without an edit here. PINNED_END_MARKER carries the
-# `PACT_MEMORY_` prefix, so on a marked document the section ends on the row
-# above it, and MEMORY_END_MARKER does too, so a section can never run out of
-# the memory block.
-BOUNDARY_PREFIXES = tuple(
-    f"<!-- {prefix}" for prefix in (*PACT_BOUNDARY_PREFIXES, SESSION_BOUNDARY_PREFIX)
-)
+# The section's heading, terminator and stop prefixes, and the block-interior
+# helper, are the Pinned locator's own (`staleness.locate_pinned`), so the
+# section this planner marks is the section every pin reader counts.
+from staleness import _PINNED_HEADING, _PINNED_STOP_PREFIXES, _PINNED_TERMINATOR, _interior
 
 # The literal lines that get spliced in. The trailing newline is part of each
 # unit: the certificate below is stated over these LINES, not over the bare
@@ -181,12 +166,6 @@ class Refusal:
         return f"refused_{self.located.state.value.lower()}: {self.located.reason}"
 
 
-def _interior(block: Located) -> tuple[int, int]:
-    """The rows strictly inside a FOUND block; an empty scope when none."""
-    start, end = block.spans[0]
-    return start + 1, end - 1
-
-
 def _pair_state(
     doc: Document, scope: tuple[int, int], heading: int, last: int
 ) -> SkipReason | Refusal | None:
@@ -250,7 +229,7 @@ def plan_insertion(content: str) -> Insertion | SkipReason | Refusal:
         scope = _interior(memory)
 
         section = doc.find_section(
-            _PINNED_HEADING, _PINNED_TERMINATOR, scope, stop_prefixes=BOUNDARY_PREFIXES
+            _PINNED_HEADING, _PINNED_TERMINATOR, scope, stop_prefixes=_PINNED_STOP_PREFIXES
         )
         if section.state is State.ABSENT:
             return SkipReason.NO_SECTION

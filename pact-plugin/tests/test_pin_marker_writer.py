@@ -627,7 +627,7 @@ class TestAdjacencySurvivesBothMachineWriters:
         """The contents of the rows above the first `## Pinned Context`
         heading row, nearest last, as the fence-aware parser splits them."""
         from shared.claude_md_markers import parse
-        from shared.pin_markers import _PINNED_HEADING
+        from staleness import _PINNED_HEADING
         doc = parse(text)
         headings = doc.find_lines(_PINNED_HEADING)
         assert headings, "no pinned heading"
@@ -943,19 +943,28 @@ class TestTerminatorParityWithTheReader:
         )
 
     def test_the_parity_check_can_actually_fail(self, monkeypatch):
-        """NON-VACUITY, by mutating the planner's terminator so it no longer
-        stops on an H2."""
-        import shared.pin_markers as pin_markers
+        """NON-VACUITY, by mutating the reader's terminator so it no longer
+        stops on an H2 while the planner keeps the one it imported."""
+        import staleness
         from staleness import _parse_pinned_section
 
         doc = _parity_doc("## Working Memory\n\nentry\n")
         assert plan_insertion(doc).end_offset == _parse_pinned_section(doc)[1]
 
-        monkeypatch.setattr(pin_markers, "_PINNED_TERMINATOR", re.compile(r"#\s"))
+        monkeypatch.setattr(staleness, "_PINNED_TERMINATOR", re.compile(r"#\s"))
         assert plan_insertion(doc).end_offset != _parse_pinned_section(doc)[1], (
-            "the mutated planner still agreed with the reader, so the parity "
+            "the mutated reader still agreed with the planner, so the parity "
             "assertion cannot detect drift"
         )
+
+    def test_the_planner_uses_the_readers_locator(self):
+        """One locator: the planner's heading, terminator, stop prefixes and
+        block interior are the reader's own objects, so the two cannot drift."""
+        import shared.pin_markers as pin_markers
+        import staleness
+
+        for name in ("_PINNED_HEADING", "_PINNED_TERMINATOR", "_PINNED_STOP_PREFIXES", "_interior"):
+            assert getattr(pin_markers, name) is getattr(staleness, name), name
 
 
 class TestIdempotenceOnASingleMarker:
@@ -1619,7 +1628,7 @@ class TestTheGuardHoldsUnderEveryLineTerminator:
 
         FAILING INPUT: appending `$` to `_PINNED_TERMINATOR`.
         """
-        from shared.pin_markers import _PINNED_TERMINATOR
+        from staleness import _PINNED_TERMINATOR
 
         assert not _PINNED_TERMINATOR.pattern.rstrip().endswith("$"), (
             "an end-anchored terminator pattern silently fails on CRLF and "
