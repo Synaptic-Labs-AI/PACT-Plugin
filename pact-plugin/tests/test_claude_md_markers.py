@@ -822,14 +822,23 @@ def test_parse_needs_str():
 
 
 def test_module_imports_only_re_typing_and_enum():
+    """At module level. `uncertainty_added` alone imports difflib, inside the
+    function and only once it has decided to refuse."""
     tree = ast.parse(Path(claude_md_markers.__file__).read_text(encoding="utf-8"))
-    imported = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imported.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            imported.add(node.module)
-    assert imported == {"__future__", "re", "typing", "enum"}
+
+    def imported(nodes):
+        names = set()
+        for node in nodes:
+            if isinstance(node, ast.Import):
+                names.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                names.add(node.module)
+        return names
+
+    assert imported(tree.body) == {"__future__", "re", "typing", "enum"}
+    local = {node.name: imported(ast.walk(node)) for node in ast.walk(tree)
+             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    assert {name: names for name, names in local.items() if names} == {"uncertainty_added": {"difflib"}}
 
 
 def test_importing_the_finder_does_not_load_dataclasses():

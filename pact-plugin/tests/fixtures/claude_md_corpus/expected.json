@@ -3016,6 +3016,33 @@
    }
   ]
  },
+ "html_comment_unclosed_over_fence": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P6",
+  "note": "a never-closed comment over a fence stays certain"
+ },
  "html_declaration_closed_by_prose": {
   "blocks": {
    "MANAGED": {

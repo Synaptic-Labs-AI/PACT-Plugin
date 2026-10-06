@@ -11,7 +11,8 @@ fence is never counted as growth.
 Used by: pin_caps_gate (lazily, on the CLAUDE.md path only) and
 claude_md_drift (lazily, when a file's hash changed), both through
 `pin_cap_decision`. Nothing else imports it, so the parser's other importers
-never load `difflib`.
+never load `difflib` at import; `claude_md_markers.uncertainty_added` loads it
+only when a writer's planned text would add rows PACT cannot read.
 
 THE RULE. S is the Pinned body after the change, from the one Pinned locator.
 R is the matching region before: the Pinned body when the text before has one,

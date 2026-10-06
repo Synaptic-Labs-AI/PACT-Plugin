@@ -70,7 +70,7 @@ except ImportError:
 # CLAUDE.md. Importable here only AFTER the pact_session import above: the
 # production entry `cli.py` puts only the skill root on sys.path, and
 # pact_session's bootstrap is what adds hooks/.
-from shared.claude_md_markers import Document, State, parse
+from shared.claude_md_markers import Document, Located, State, parse, uncertainty_added
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -1869,6 +1869,17 @@ def _parse_section(
     return content[:start], header, content[end:], entries
 
 
+def _read_back(planned: Document, heading: "re.Pattern[str]", terminator: "re.Pattern[str]") -> Optional[Located]:
+    """The section a sync wrote, as the next sync will find it in `planned`:
+    FOUND in its write scope, or None. The caller checks that its heading sits
+    where the sync put it."""
+    scope = _resolve_write_scope(planned)
+    if scope is None:
+        return None
+    section = planned.find_section(heading, terminator, scope, stop_prefixes=_SECTION_STOP_PREFIXES)
+    return section if section.state is State.FOUND else None
+
+
 def _parse_working_memory_section(
     content: str,
 ) -> tuple[str, str, str, list[str]] | str | None:
@@ -2586,12 +2597,24 @@ def sync_to_claude_md(
             # file with no managed block splits at end of file, with nothing
             # after.
             if section_header or after_section:
+                written_at = len(before_section)
                 new_content = before_section + section_text + after_section
             else:
                 # No managed block and no section: append at end
-                if not content.endswith("\n"):
-                    content += "\n"
-                new_content = content + "\n" + section_text
+                body = content if content.endswith("\n") else content + "\n"
+                written_at = len(body) + 1
+                new_content = body + "\n" + section_text
+
+            # Write nothing PACT could read less of, or that does not read back
+            # where it was written.
+            planned = parse(new_content)
+            refusal = uncertainty_added(parse(content), planned)
+            section = _read_back(planned, _WORKING_MEMORY_HEADING_ROW, _WORKING_MEMORY_TERMINATOR)
+            if refusal is None and (section is None or planned.offsets(*section.spans[0])[0] != written_at):
+                refusal = "the Working Memory section did not read back where it was written"
+            if refusal:
+                logger.warning("Not syncing memory to CLAUDE.md: %s", refusal)
+                return SyncResult(SyncResult.UNCERTAIN)
 
             # Write back to file (atomic: temp + rename, so a crash mid-write
             # cannot leave the always-loaded CLAUDE.md truncated)
@@ -2980,6 +3003,7 @@ def sync_retrieved_to_claude_md(
 
             if insert_pos is not None:
                 # Insert before Working Memory with blank line
+                written_at = insert_pos
                 new_content = content[:insert_pos] + section_text + "\n" + content[insert_pos:]
             elif section_header or after_section:
                 # The section exists, or it is missing inside a block, where the
@@ -2989,6 +3013,7 @@ def sync_retrieved_to_claude_md(
                 # file with no managed block splits at end of file, with
                 # nothing after. A blank line separates the section from what
                 # follows.
+                written_at = len(before_section)
                 if after_section and not after_section.startswith("\n"):
                     new_content = before_section + section_text + "\n" + after_section
                 else:
@@ -2996,9 +3021,19 @@ def sync_retrieved_to_claude_md(
             else:
                 # No managed block, no section and no Working Memory: append
                 # at end
-                if not content.endswith("\n"):
-                    content += "\n"
-                new_content = content + "\n" + section_text
+                body = content if content.endswith("\n") else content + "\n"
+                written_at = len(body) + 1
+                new_content = body + "\n" + section_text
+
+            # The same two checks as the Working Memory sync.
+            planned = parse(new_content)
+            refusal = uncertainty_added(parse(content), planned)
+            section = _read_back(planned, _RETRIEVED_CONTEXT_HEADING_ROW, _RETRIEVED_CONTEXT_TERMINATOR)
+            if refusal is None and (section is None or planned.offsets(*section.spans[0])[0] != written_at):
+                refusal = "the Retrieved Context section did not read back where it was written"
+            if refusal:
+                logger.warning("Not syncing retrieved memories to CLAUDE.md: %s", refusal)
+                return SyncResult(SyncResult.UNCERTAIN)
 
             # Write back to file (atomic: temp + rename, so a crash mid-write
             # cannot leave the always-loaded CLAUDE.md truncated)

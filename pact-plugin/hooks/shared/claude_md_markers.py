@@ -5,8 +5,8 @@ Location: pact-plugin/hooks/shared/claude_md_markers.py
 Summary: The one fence-aware parser and locator for PACT's markers in a
 CLAUDE.md. `parse(text)` classifies every line as prose, fence, code or
 unknown, and the returned `Document` answers each lookup with an explicit
-state. Pure: str in, no I/O, stdlib only (`re`, `typing`, `enum`), so every
-hot hook can import it; `Line` and `Located` are NamedTuples, not dataclasses,
+state. Pure: str in, no I/O, stdlib only (`re`, `typing`, `enum`; `difflib`
+only when `uncertainty_added` refuses), so every hot hook can import it; `Line` and `Located` are NamedTuples, not dataclasses,
 because `dataclasses` would add its own import cost to every hook process.
 
 Used by: every reader and writer of a PACT marker or section in a CLAUDE.md,
@@ -89,6 +89,10 @@ cannot. `find_section` returns FOUND, ABSENT, UNKNOWN or, with `unique`, DUPLICA
 among visible headings; never MALFORMED. A literal wholly inside a line-local
 inline code span is a mention, not a stray; a backtick run after an odd number
 of backslashes loses its first backtick (an escaped literal) when it opens.
+
+A writer passes the parse of the text it read and of the text it plans to
+`uncertainty_added`, and writes nothing when that returns a reason: a write
+must never add UNKNOWN rows.
 
 A scope is an inclusive (first_row, last_row). (first, first - 1), with first
 from 0 to the row count, is an empty scope: no rows, known, and every lookup
@@ -554,3 +558,36 @@ def _classify(contents: list[str]) -> tuple[list[Kind], list[bool], int | None, 
 def parse(text: str) -> Document:
     """Parse CLAUDE.md text. Never raises on str input; TypeError otherwise."""
     return Document(text)
+
+
+def uncertainty_added(before: Document, after: Document) -> str | None:
+    """Why a writer must not replace `before` with `after`, or None.
+
+    `before` is the parse of the text the writer read and `after` the parse of
+    the text it plans to write. The plan is refused when it holds more UNKNOWN
+    rows: the write would make or widen a region PACT cannot read. A write
+    above an existing boundary moves that boundary down without adding a row,
+    so it is allowed.
+
+    The reason names the boundary as a line of the file on disk: the rows of
+    the two texts are matched, so rows the writer adds above or below it do
+    not move the number. A boundary on a row the writer adds is named by the
+    line it follows.
+    """
+    if after.boundary is None or after.boundary_cause is None:
+        return None
+    unknown = sum(line.kind is Kind.UNKNOWN for line in after.lines)
+    if unknown <= sum(line.kind is Kind.UNKNOWN for line in before.lines):
+        return None
+    import difflib  # only on a refusal, so a write that goes ahead does not load it
+
+    cause = _BOUNDARY_TEXT[after.boundary_cause]
+    matcher = difflib.SequenceMatcher(None, [line.content for line in before.lines],
+                                      [line.content for line in after.lines], autojunk=False)
+    boundary = after.boundary
+    tag, i1, _, j1, _ = next(op for op in matcher.get_opcodes() if op[3] <= boundary < op[4])
+    if tag == "equal":
+        return (f"the update would make line {i1 + boundary - j1 + 1} start a region "
+                f"PACT cannot read: {cause}")
+    where = f"after line {i1}" if i1 else "at the start of the file"
+    return f"the update would write a line {where} that starts a region PACT cannot read: {cause}"
