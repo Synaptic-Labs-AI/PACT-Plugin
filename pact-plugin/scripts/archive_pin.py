@@ -59,7 +59,7 @@ UNEVALUABLE too. Uniqueness is verified after the save. Presence is governed
 by the invariant below.
 
 ARCHIVED_DELETE_UNSAFE means the archive SUCCEEDED and the removal must not
-proceed automatically. TWO CONDITIONS REACH IT, and they share ONE disposition
+proceed automatically. THREE CONDITIONS REACH IT, and they share ONE disposition
 -- content safe, no automatic Edit, remove by hand, no escape hatch -- which is
 why they share one outcome NAME rather than forking into a fifth:
 
@@ -80,10 +80,14 @@ why they share one outcome NAME rather than forking into a fifth:
                    and because the key's ABSENCE is itself the signal that no
                    write was attempted. See `_WRITE_ATTEMPTED_STATUSES` for
                    why a uniform key would destroy that signal.
+  LESS READABLE    removing the block would leave part of CLAUDE.md
+                   unreadable: the block holds the line that ended an HTML
+                   block opened above it. `reason` names the line to fix
+                   before the pin is removed by hand.
 
-Two conditions under one outcome is NOT the reason-table hazard named below:
+Three conditions under one outcome is NOT the reason-table hazard named below:
 that hazard is one outcome carrying two DISPOSITIONS, distinguished only by
-prose. These two carry the same disposition, and `_unsafe_reason` already
+prose. These three carry the same disposition, and `_unsafe_reason` already
 varies its prose across two conditions for the same reason. It is a
 distinct outcome rather than a reason on another one because THE OUTCOME NAME
 MUST DETERMINE THE DISPOSITION -- one outcome with two dispositions forces a
@@ -1038,7 +1042,7 @@ def archive_pin(index: int, db_path=None) -> dict:
         raise _Unevaluable(f"CLAUDE.md unreadable ({type(exc).__name__})",
                            claude_md_path=claude_md_path)
 
-    from shared.claude_md_markers import State, parse
+    from shared.claude_md_markers import State, parse, uncertainty_added
 
     doc = parse(content)
     located = locate_pinned(doc)
@@ -1349,6 +1353,26 @@ def archive_pin(index: int, db_path=None) -> dict:
             "occurrences": occurrences,
             "locations": _occurrence_offsets(post, block),
             "reason": _unsafe_reason(occurrences, claude_md_path, memory_id),
+        }
+
+    # --- the removal must leave CLAUDE.md as readable as it was -----------
+    # The block can hold the line that ends an HTML block the user opened
+    # above it. Removing it re-opens that block, and the file then reads as
+    # uncertain from the user's opener down. The replacement is exactly the
+    # removal Edit an ARCHIVED verdict licenses.
+    unreadable = uncertainty_added(parse(post), parse(post.replace(block, "", 1)))
+    if unreadable is not None:
+        return {
+            "outcome": "ARCHIVED_DELETE_UNSAFE",
+            "heading": heading,
+            "claude_md_path": claude_md_path,
+            "delete_string": block,
+            "memory_id": memory_id,
+            "chars": len(block),
+            "contained": True,
+            "occurrences": 1,
+            "locations": _occurrence_offsets(post, block),
+            "reason": f"removing the pin is refused: {unreadable}",
         }
 
     return {

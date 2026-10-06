@@ -205,7 +205,7 @@ name determines the disposition, so no row needs a footnote to be actionable:
 | Verdict | Meaning | Action |
 |---|---|---|
 | `ARCHIVED` | the pin's bytes are provably in long-term memory | proceed to Step 4 |
-| `ARCHIVED_DELETE_UNSAFE` | the archive **succeeded**; only the automatic removal is unsafe | do NOT Edit; hand the curator `memory_id`, `occurrences` and `locations` for manual removal; emit `delete_unsafe`; stop |
+| `ARCHIVED_DELETE_UNSAFE` | the archive **succeeded**; only the automatic removal is unsafe | do NOT Edit; hand the curator `memory_id`, `reason`, `occurrences` and `locations` for manual removal; emit `delete_unsafe`; stop |
 | `NOT_ARCHIVED` | the archive definitively failed | **refuse**; report `reason`; emit `archive_refused`; stop |
 | `UNEVALUABLE` | could not tell — CLI absent, crash, timeout, unreadable file | **refuse**; report `reason`; offer the escape hatch below |
 
@@ -214,11 +214,13 @@ name determines the disposition, so no row needs a footnote to be actionable:
 **The archive worked.** The pin's content is in long-term memory and the
 verdict carries the `memory_id` that proves it. What failed is only the
 automatic removal: the emitted handle did not occur exactly once in the file,
-so an `Edit` keyed on it would match the wrong text or none at all.
+so an `Edit` keyed on it would match the wrong text or none at all; or removing
+it would leave part of CLAUDE.md unreadable, and `reason` names the line to fix
+before removing the pin by hand.
 
 So the command does not remove the pin, and tells the curator plainly: *your
-content is safe under this `memory_id`; the block was found `occurrences`
-times; remove the pin by hand.* **The curator is not stuck at the cap** — the
+content is safe under this `memory_id`; `reason` says why it was not removed;
+remove the pin by hand.* **The curator is not stuck at the cap** — the
 eviction can still be completed manually, and the safety guarantee this command
 exists to provide already held. Say that explicitly; a curator meeting an
 unfamiliar refusal at 12/12 will otherwise read it as a dead end and start

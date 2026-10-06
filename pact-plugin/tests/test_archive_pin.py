@@ -2669,3 +2669,70 @@ class TestArchivePin_SyncStatusReachesTheArchive:
             "the projection must land the context VERBATIM -- that is what "
             "lets the occurrence check catch a same-file write-back"
         )
+
+
+class TestTheRemovalNeverMakesTheFileLessReadable:
+    """A pin can hold the line that ends an HTML block the user opened above
+    it. Removing that pin re-opens the block and the file reads as uncertain
+    from the opener down, so the verdict licenses no removal: the archive
+    stands, and ARCHIVED_DELETE_UNSAFE names the line to fix first."""
+
+    _DECLARATION = Path(__file__).parent / "fixtures" / "claude_md_corpus" / (
+        "hidden_declaration_closed_by_prose_ending_gt.md")
+    # A `<pre>` above the section, closed mid-line in pin A, with a fence after.
+    _PRE_OVER_FENCE = ("# P\n<pre>\n## Pinned Context\n\n### Pin A\nBody \nsee </pre> here\n\n"
+                       "### Pin B\nB.\n\n## Notes\n```\ncode\n```\n")
+
+    @staticmethod
+    def _verdict(claude_md, monkeypatch, content):
+        """Archive pin 0 with the memory CLI faked: a save returns an id and a
+        get returns what was saved."""
+        claude_md(content)
+        saved = {}
+
+        def _stub(args, **kwargs):
+            if args[0] == "save":
+                saved["context"] = json.loads(kwargs["stdin_data"])["context"]
+                return 0, json.dumps({"ok": True, "result": {"memory_id": "a" * 32}}), ""
+            return 0, json.dumps({"ok": True, "result": {"context": saved["context"]}}), ""
+
+        monkeypatch.setattr(archive_pin, "_run_memory_cli", _stub)
+        return archive_pin.build_verdict(0, db_path=None)
+
+    @pytest.mark.parametrize("name, cause", [
+        ("declaration", "an HTML block is ended only by a line that starts a comment"),
+        ("pre over a fence", "an HTML block is never closed"),
+    ])
+    def test_a_removal_that_would_reopen_a_block_is_refused(self, claude_md, monkeypatch, name, cause):
+        content = (self._DECLARATION.read_text(encoding="utf-8") if name == "declaration"
+                   else self._PRE_OVER_FENCE)
+        verdict = self._verdict(claude_md, monkeypatch, content)
+        block = verdict["delete_string"]
+        assert verdict == {
+            "outcome": "ARCHIVED_DELETE_UNSAFE",
+            "heading": "a" if name == "declaration" else "Pin A",
+            "claude_md_path": verdict["claude_md_path"],
+            "delete_string": block,
+            "memory_id": "a" * 32,
+            "chars": len(block),
+            "contained": True,
+            "occurrences": 1,
+            "locations": [content.index(block)],
+            "reason": ("removing the pin is refused: the update would make line 2 start a region "
+                       f"PACT cannot read: {cause}"),
+        }
+
+    @pytest.mark.parametrize("name", ["declaration", "pre over a fence"])
+    def test_the_same_file_with_the_block_closed_on_its_own_line_archives(
+        self, claude_md, monkeypatch, name
+    ):
+        """The control: closed at a row edge before pin A, the block ends where
+        the user ended it, and removing the pin re-opens nothing."""
+        if name == "declaration":
+            content = self._DECLARATION.read_text(encoding="utf-8").replace(
+                "<!Note to self\n", "<!Note to self\n>\n", 1)
+        else:
+            content = self._PRE_OVER_FENCE.replace("<pre>\n", "<pre>\n</pre>\n", 1)
+        verdict = self._verdict(claude_md, monkeypatch, content)
+        assert verdict["outcome"] == "ARCHIVED"
+        assert verdict["occurrences"] == 1
