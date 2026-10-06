@@ -13,14 +13,14 @@ argument-hint: "[optional: e.g., critical gotcha, key architectural decision]"
 Cap violations are denied by `hooks/pin_caps_gate.py` when the `Edit`/`Write` tool call lands. You do NOT need to invoke a CLI check before adding — the hook is authoritative.
 
 - **Count**: 12 pins maximum. Every `### ` line outside a fenced code block, including one in another pin's body, is a pin.
-- **Size**: 1500 characters per pin body (excludes `<!-- pinned: ... -->` and `<!-- STALE: ... -->` auto-markers). A fenced code example inside the body counts toward the size; trailing spaces and tabs do not.
+- **Size**: Each pin body is at most 1500 characters unless the pin carries a valid `pin-size-override`. A pin that is already over 1500 characters must not grow. The `<!-- pinned: ... -->` and `<!-- STALE: ... -->` markers do not count toward the size; a fenced code example inside the body does, and trailing spaces and tabs do not.
 - **Override**: verbatim load-bearing content MAY carry a `pin-size-override` rationale (≤ 120 chars, single line) — see [Size Override](#size-override). The hook validates the rationale in-band.
 
-At the cap, renaming, moving, reordering or rewriting pins is allowed. The count cap refuses only a change that adds a pin; the size cap still applies to every pin body.
+At the cap, renaming, moving, reordering or rewriting pins is allowed. The count cap refuses only a change that adds a pin; the size cap applies to each pin the change adds or grows.
 
-Make every pin change with `Edit`. A change made through `Bash` (`sed`, a script) is not checked by the hook; when it grows the file past a pin cap, PACT reports it afterwards.
+Make every pin change with `Edit`. Do not change pins through `Bash`.
 
-If the hook allows an edit with a note that it could not locate the Pinned section, could not read or check the file, stopped the check early, or is not checking pin caps, the cap was NOT enforced for that change. Tell the curator, and repair the file. The usual cause is an unclosed code fence above or inside the Pinned Context section.
+If the hook allows an edit with a note that it could not locate the Pinned section, could not read or check the file, stopped the check early, or is not checking pin caps, the cap was NOT enforced for that change. Tell the curator, and repair the file. When the note names a line, the fix is there: usually a code fence or an HTML block left open above or inside the Pinned Context section.
 
 ## When to Pin
 
@@ -42,8 +42,8 @@ If the hook allows an edit with a note that it could not locate the Pinned secti
 ### Adding a pin
 
 1. Read existing CLAUDE.md.
-2. Locate or create a `## Pinned Context` section (place it before `## Working Memory`). If the file has a `<!-- PACT_MEMORY_START -->` … `<!-- PACT_MEMORY_END -->` block, the section MUST be inside it: a Pinned Context section outside that block is not capped.
-3. **If the file carries a `<!-- PACT_MEMORY_PINNED_END -->` line, the new entry MUST go ABOVE that line.** The pinned region ends there. A pin placed below it sits outside the region, so the count and size caps do not measure it and the hook cannot deny it — the pin is silently uncapped. Insert immediately before that line, after the last existing entry. If the file has no such line, append at the end of the section as usual.
+2. Locate or create a `## Pinned Context` section (place it before `## Working Memory`). If the file has a `<!-- PACT_MEMORY_START -->` … `<!-- PACT_MEMORY_END -->` block, the section MUST be inside it.
+3. **If the file carries a `<!-- PACT_MEMORY_PINNED_END -->` line, the new entry MUST go ABOVE that line.** The pinned region ends there, so a pin placed below it is outside the Pinned Context section. Insert immediately before that line, after the last existing entry. If the file has no such line, append at the end of the section as usual.
 4. Add the new entry with a date tag. **Make this write with the `Edit` tool. Do NOT use the `Write` tool.** Step 1 gave you the full file, so a `Write` call looks like the short route to the new content. After a `Write`, a file that had CRLF line endings has LF line endings. The curator then sees a change to a file they did not edit. An `Edit` keeps the line endings of the file. Use the example below:
    ```markdown
    <!-- pinned: YYYY-MM-DD -->
@@ -61,7 +61,7 @@ If the hook allows an edit with a note that it could not locate the Pinned secti
 
 ## Refusal flow (hook-denied edits)
 
-If the pin_caps_gate hook denies the Edit/Write, the deny reason tells you which cap fired. You MUST NOT bypass.
+If the pin_caps_gate hook denies the `Edit`/`Write`, the deny reason tells you which cap fired. You MUST NOT bypass.
 
 - **Pin count cap reached (N/12)**: Run `/PACT:prune-memory` to demote an existing pin to long-term memory, then retry the add. Demotion archives the pin to pact-memory before removing it, so the content is preserved rather than lost.
   - A teammate, or a subagent in a PACT team session, gets "Do not change CLAUDE.md yourself, by any route; tell the team-lead." instead. Do not write `CLAUDE.md` by any route, not only an `Edit` or a `Write`: do NOT run `/PACT:prune-memory`, and do NOT retry the edit. Send the pin's text to the team-lead: with `SendMessage`, or in your final report if you are a subagent.
