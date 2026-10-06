@@ -57,11 +57,9 @@ boundary is the earliest of these rows:
   top-level rule cannot see while it does see the indented closer;
 - comment_boundary: the start of a multi-line HTML block of types 1-5 ended
   only by a line that itself starts with `<!--`, such as a PACT marker;
-- unclosed_html: the start of an HTML block of type 1, 3, 4 or 5 that is never
-  closed, when a row it covers (the rows after its start) would, read outside
-  any HTML block, open a fence, a container fence or an HTML block it does not
-  also end. A never-closed comment does not count: a PACT marker would have
-  closed it;
+- unclosed_html: the start of an HTML block that is never closed, when a row
+  it covers (the rows after its start) would, read outside any HTML block,
+  open a fence, a container fence or an HTML block it does not also end;
 - html_hides_fence: the start of an HTML block that closes but hides nothing
   (closed mid-line, or a declaration), when a row it covers, its end row
   included, is such a row.
@@ -546,8 +544,7 @@ def _classify(contents: list[str]) -> tuple[list[Kind], list[bool], int | None, 
                 break
     if fence is not None:
         candidates.append((first_opener, Cause.UNCLOSED_FENCE))
-    # A comment never closed covers no PACT marker: one would have closed it.
-    if html_end is not None and html_type != 2 and html_covers:
+    if html_end is not None and html_covers:
         candidates.append((html_start, Cause.UNCLOSED_HTML))
     if not candidates:
         return kinds, in_html, None, None

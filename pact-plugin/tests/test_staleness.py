@@ -4327,20 +4327,22 @@ class TestStalenessCitationsResolve:
 _STALE_PIN = "### Fix the gate (PR #12, merged 2020-01-01)\nBody of the stale pin.\n"
 _FENCE_TAIL = "\n## Fenced\n```\ncode\n```\n"
 # Two stale pins straddle a `<!-- note` that is never closed; the second pin's
-# STALE row would end it.
+# STALE row would end it. The comment covers no fence, so the file is certain
+# before the pass.
 _OPEN_COMMENT_BETWEEN_STALE_PINS = (
     "# Notes\n\n## Pinned Context\n\n### First pin 2020-01-01\nBody one.\n\n"
-    "<!-- note\n```\nexample\n\n### Second pin 2020-01-02\nBody two.\n"
+    "<!-- note\nexample\n\n### Second pin 2020-01-02\nBody two.\n"
 )
 _ENDED_BY_A_COMMENT = "an HTML block is ended only by a line that starts a comment"
 
 
 def _shapes_a_stale_row_would_open():
-    """(name, text, opener's line) for 14 unmigrated files: a type-2 comment or
+    """(name, text, opener's line) for 12 unmigrated files: a type-2 comment or
     a type-4 declaration, never closed or closed mid-line below the stale pin,
-    opened at the top of the file or in its Pinned section, each with and
-    without a fence at the end. A never-closed declaration over a fence already
-    leaves the Pinned section unreadable, so the pass does not run on those two."""
+    opened at the top of the file or in its Pinned section, the closed ones
+    also with a fence at the end. A never-closed comment or declaration over a
+    fence already leaves the Pinned section unreadable, so the pass does not
+    run on those."""
     for kind, opener, closer in (("type 2", "<!-- note", "flow: a --> b"),
                                  ("type 4", "<!NOTE", "x > y")):
         for closed in (False, True):
@@ -4351,7 +4353,7 @@ def _shapes_a_stale_row_would_open():
                         f"{_STALE_PIN}{tail}\n## Notes\nnotes\n")
                 name = f"{kind}, {'closed mid-line' if closed else 'never closed'}, {where}"
                 yield pytest.param(text, line, id=name)
-                if closed or kind == "type 2":
+                if closed:
                     yield pytest.param(text + _FENCE_TAIL, line, id=name + ", fence after")
 
 

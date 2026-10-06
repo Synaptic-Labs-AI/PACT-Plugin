@@ -8,9 +8,11 @@ block extraction, and check_pin_caps. A parse that starts mid-file starts in a
 state the whole file does not have, so the two can disagree; the readers must
 agree with `section_pins` on the whole file.
 
-The population rows run over the fence corpus and the fence oracle's document
-generator. The fixed rows use a file on which the whole file and the section's
-text read a different number of pins.
+The population row runs over the fence corpus and the fence oracle's document
+generator; wherever the whole file and the section's text both find the
+section they read the same pins, so the row's equality carries the guard. The
+fixed rows pin what the readers say on a file whose section the whole file
+cannot read, and tie the block signal to `section_pins`.
 """
 
 import glob
@@ -20,7 +22,7 @@ from pathlib import Path
 import archive_pin
 import check_pin_caps
 import staleness
-from pin_caps import PIN_STALE_BLOCK_THRESHOLD, _PIN_HEADING_ROW, parse_pins, section_pins
+from pin_caps import PIN_STALE_BLOCK_THRESHOLD, _PIN_HEADING_ROW, section_pins
 from shared.claude_md_markers import State, parse
 from test_claude_md_fence_oracle import _document
 
@@ -46,13 +48,6 @@ def _found(text):
         return None
     body = staleness._pinned_body(doc, located)
     return None if body is None else (doc, located, body)
-
-
-def _section_text(text):
-    """The Pinned section's text, cut out of the file, for a parse of its own."""
-    parsed = staleness._parse_pinned_section(text)
-    assert parsed is not None
-    return parsed[2]
 
 
 def _reader_views(text, tmp_path, monkeypatch):
@@ -102,11 +97,9 @@ def test_every_reader_reads_the_pins_section_pins_reads(tmp_path, monkeypatch):
     assert checked >= 40, f"only {checked} documents with a FOUND Pinned section and pins"
 
 
-# A `<!--` opened above the Pinned section and never closed. The whole file
-# reads every later row as prose, so the fenced `### ` line in pin A is a pin of
-# its own, and its date makes it a stale entry. The section's text parsed on its
-# own has no comment above it and reads the fence as code: two pins, nothing
-# stale.
+# A `<!--` opened above the Pinned section, never closed, and covering a fence
+# in pin A: the file reads as uncertain from the comment down, so no reader can
+# tell which of its rows are pins.
 _OPEN_COMMENT_FILE = (
     "# Notes\n<!-- a note that never closes\n\n## Pinned Context\n\n"
     "### A\nbody from 2020-01-01\n```md\n### fenced example 2020-01-01\n```\n\n"
@@ -114,38 +107,40 @@ _OPEN_COMMENT_FILE = (
 )
 
 
-def test_the_readers_read_the_whole_file_where_the_section_text_reads_differently(
+def test_every_reader_declines_where_the_whole_file_cannot_read_the_section(
         tmp_path, monkeypatch):
-    """Every reader reads the whole file's three pins, and the staleness
-    markings find its one stale entry, where the section's text parsed on its
-    own reads two pins and nothing stale."""
+    """The staleness markings write nothing and raise no block signal,
+    check_pin_caps reports the section unreadable, and the archive's index read
+    finds no section."""
     text = _OPEN_COMMENT_FILE
-    found = _found(text)
-    assert found is not None, "the shape no longer reads as a FOUND Pinned section"
-    doc, _located, (first, last) = found
-    views = _reader_views(text, tmp_path, monkeypatch)
-    assert views["pins"] == ["### A", "### fenced example 2020-01-01", "### B"]
-    assert views["entries"] == views["pins"] == views["check_pin_caps"]
-    assert len(views["blocks"]) == 3
-    stale = staleness.detect_stale_entries(doc, first, last)
-    assert [heading for _, _, heading in stale] == ["### fenced example 2020-01-01"]
-    _, stale_count, modified, _ = staleness.apply_staleness_markings(text, doc, first, last)
-    assert (stale_count, modified) == (1, True)
-    section = _section_text(text)
-    sliced = parse(section)
-    assert [p.heading for p in parse_pins(section)] == ["### A", "### B"], (
-        "the shape no longer separates the whole file from its section text")
-    assert staleness.detect_stale_entries(sliced, 0, len(sliced.lines) - 1) == []
+    assert _found(text) is None
+    claude_md = tmp_path / "CLAUDE.md"
+    claude_md.write_text(text, encoding="utf-8")
+    assert staleness.check_pinned_staleness(claude_md) is None
+    assert staleness.check_pinned_block_signal(claude_md) is None
+    assert claude_md.read_text(encoding="utf-8") == text
+    monkeypatch.setattr(check_pin_caps, "get_project_claude_md_path", lambda: claude_md)
+    assert check_pin_caps._resolve_pins() == ([], (
+        "pinned section unreadable: line 2 starts an uncertain region: "
+        "an HTML block is never closed"))
+    monkeypatch.setattr(archive_pin, "resolve_claude_md", lambda: (claude_md, tmp_path))
+
+    def _stop(*_args, **_kwargs):
+        raise archive_pin._Unevaluable("stopped before the save")
+
+    monkeypatch.setattr(archive_pin, "_run_memory_cli", _stop)
+    verdict = archive_pin.build_verdict(1, db_path=None)
+    assert (verdict["outcome"], verdict["reason"]) == ("UNEVALUABLE", "no Pinned Context section")
 
 
 def test_the_block_signal_counts_the_pins_section_pins_reads(tmp_path, monkeypatch):
-    """No file separates the block signal's two readings: the pins only the
-    whole file reads sit below a never-closed comment, and a STALE marker on
-    one of them would end that comment and leave the section unreadable. So
-    the signal is tied to its source: it counts the pins `section_pins` reads
-    from the whole-file parse."""
+    """Wherever the whole file and the section's text both find the section
+    they read the same pins, so no file separates the block signal's two
+    readings. The signal is tied to its source instead: it counts the pins
+    `section_pins` reads from the whole-file parse."""
+    text = "# Notes\n\n## Pinned Context\n\n### A\nbody a\n\n### B\nbody b\n"
     claude_md = tmp_path / "CLAUDE.md"
-    claude_md.write_text(_OPEN_COMMENT_FILE, encoding="utf-8")
+    claude_md.write_text(text, encoding="utf-8")
     seen = []
 
     def _all_stale(doc, located):
@@ -154,24 +149,4 @@ def test_the_block_signal_counts_the_pins_section_pins_reads(tmp_path, monkeypat
 
     monkeypatch.setattr(staleness, "section_pins", _all_stale)
     assert staleness.check_pinned_block_signal(claude_md) is not None
-    assert seen == [_OPEN_COMMENT_FILE]
-
-
-def test_the_archive_index_read_takes_the_whole_files_pins(tmp_path, monkeypatch):
-    """archive_pin's verdict names the whole file's pin at each index: index 1
-    is the fenced example there, where the section's text read alone has
-    `### B`."""
-    text = _OPEN_COMMENT_FILE
-    claude_md = tmp_path / "CLAUDE.md"
-    claude_md.write_text(text, encoding="utf-8")
-    monkeypatch.setattr(archive_pin, "resolve_claude_md", lambda: (claude_md, tmp_path))
-
-    def _stop(*_args, **_kwargs):
-        raise archive_pin._Unevaluable("stopped before the save")
-
-    monkeypatch.setattr(archive_pin, "_run_memory_cli", _stop)
-    verdict = archive_pin.build_verdict(1, db_path=None)
-    assert verdict["heading"] == "fenced example 2020-01-01"
-    assert verdict["delete_string"] == "### fenced example 2020-01-01\n```\n\n"
-    assert parse_pins(_section_text(text))[1].heading == "### B", (
-        "the shape no longer shifts the slice's pin at index 1")
+    assert seen == [text]

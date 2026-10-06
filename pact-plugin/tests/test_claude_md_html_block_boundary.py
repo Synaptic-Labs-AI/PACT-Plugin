@@ -48,13 +48,12 @@ def _covered(block_type, cover):
 
 
 def _expected(block_type, closure, cover):
-    """The ruled outcome: a never-closed block of type 1, 3, 4 or 5, a block
-    closed mid-line, or a declaration closed anywhere, over a row that starts
-    a structure."""
+    """The ruled outcome: a never-closed block, a block closed mid-line, or a
+    declaration closed anywhere, over a row that starts a structure."""
     if cover not in STARTS:
         return None, None
     if closure == "never":
-        return (1, Cause.UNCLOSED_HTML) if block_type != 2 else (None, None)
+        return 1, Cause.UNCLOSED_HTML
     if closure == "mid" or block_type == 4:
         return 1, Cause.HTML_HIDES_FENCE
     return None, None

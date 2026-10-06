@@ -3016,16 +3016,44 @@
    }
   ]
  },
+ "html_comment_unclosed_above_pinned_over_fence": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 1,
+  "boundary_cause": "unclosed_html",
+  "decode": "strict",
+  "kinds": "P1 U7",
+  "note": "a never-closed comment above Pinned covers a fence opener: the boundary is its start"
+ },
  "html_comment_unclosed_over_fence": {
   "blocks": {
    "MANAGED": {
-    "state": "ABSENT"
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
    },
    "MEMORY": {
-    "state": "ABSENT"
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
    },
    "PINNED": {
-    "state": "ABSENT"
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
    },
    "SESSION": {
     "spans": [
@@ -3037,11 +3065,11 @@
     "state": "FOUND"
    }
   },
-  "boundary": null,
-  "boundary_cause": null,
+  "boundary": 3,
+  "boundary_cause": "unclosed_html",
   "decode": "strict",
-  "kinds": "P6",
-  "note": "a never-closed comment over a fence stays certain"
+  "kinds": "P3 U3",
+  "note": "a never-closed comment over a fence: the boundary is its start, and the session block above it stays found"
  },
  "html_declaration_closed_by_prose": {
   "blocks": {

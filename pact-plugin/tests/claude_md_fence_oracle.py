@@ -29,9 +29,8 @@ The grammar it implements:
   condition is met on, or the last row) would, read outside any HTML block,
   open a fence, be a container fence, or start an HTML block whose end
   condition that row does not also meet. It hides nothing when it is closed
-  mid-line or is of type 4 (cause html_hides_fence), or is never closed and
-  of type 1, 3, 4 or 5 (cause unclosed_html). A never-closed comment does not
-  count.
+  mid-line or is of type 4 (cause html_hides_fence), or is never closed
+  (cause unclosed_html).
 - A container fence sets the boundary at its row: a PROSE row of up to 3
   spaces, then one or more container markers (`>` and any spaces or tabs, or a
   list marker - * + or 1-9 digits then . or ) and at least one space or tab),
@@ -205,7 +204,7 @@ def scan(text: str) -> Scan:
             html_start_row = r
             html_covers = False
     candidates = []
-    if html_end is not None and html_type in (1, 3, 4, 5) and html_covers:
+    if html_end is not None and html_covers:
         candidates.append((html_start_row, UNCLOSED_HTML))
     if hides_nothing_row is not None:
         candidates.append((hides_nothing_row, HTML_HIDES_FENCE))
