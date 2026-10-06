@@ -1329,3 +1329,42 @@ class TestPinStalenessGate_SimulationEditEdges:
             "something other than the simulated document, which is the "
             "silent bypass the guard exists to stop"
         )
+
+
+class TestPinStalenessGate_BlankFile:
+    """A file that is blank before the change holds no stale pins, so the
+    marker does not refuse a change to it, by Edit or by Write. A file that
+    holds pins is still refused on an add while the marker is set."""
+
+    PIN = "<!-- pinned: 2026-02-02 -->\n### B\ny\n"
+
+    @pytest.mark.parametrize("blank", ["", "\n  \t\n"], ids=["empty", "whitespace only"])
+    def test_an_edit_that_fills_a_blank_file_is_allowed(self, gate_env, blank):
+        paths = gate_env(marker_present=True)
+        paths["claude_md"].write_text(blank, encoding="utf-8")
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {"file_path": str(paths["claude_md"]), "old_string": "", "new_string": self.PIN},
+        })
+        assert result is None
+
+    @pytest.mark.parametrize("blank", ["", "\n  \t\n"], ids=["empty", "whitespace only"])
+    def test_a_write_of_pins_to_a_blank_file_is_allowed(self, gate_env, blank):
+        paths = gate_env(marker_present=True)
+        paths["claude_md"].write_text(blank, encoding="utf-8")
+        result = _call_gate({
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(paths["claude_md"]), "content": self.PIN},
+        })
+        assert result is None
+
+    def test_an_add_to_a_file_that_holds_pins_is_still_refused(self, gate_env):
+        paths = gate_env(marker_present=True)
+        current = paths["claude_md"].read_text(encoding="utf-8")
+        assert current.strip()
+        result = _call_gate({
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(paths["claude_md"]),
+                           "content": current.replace("## Working Memory", self.PIN + "\n## Working Memory")},
+        })
+        assert result is not None

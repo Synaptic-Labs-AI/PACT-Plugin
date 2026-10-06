@@ -621,6 +621,12 @@ def _is_add_shaped_edit(
     not, or count strictly decreases) and refactor edits (pin count
     unchanged) are allowed.
 
+    A FILE THAT IS BLANK BEFORE THE CHANGE IS NEVER REFUSED. It holds no
+    pins, so it cannot hold the stale pins the marker reports, and refusing a
+    Write or an Edit that fills it would refuse a file with nothing stale in
+    it. The marker can outlive the pins it was raised for when the file is
+    emptied outside any tool, and the clear runs only after a tool call.
+
     THERE IS ONE COMPARISON AND IT IS OVER TWO DOCUMENTS. The tool name selects
     WHICH SIMULATION builds the post-edit document. It does not select a
     comparison. `_simulate_post_edit_document` builds the document the tool call
@@ -663,6 +669,8 @@ def _is_add_shaped_edit(
         except (IOError, OSError):
             # Cannot read the pre-state, so there is nothing to compare
             # against. Fail-open.
+            return False
+        if current.strip() == "":
             return False
 
         simulated = _simulate_post_edit_document(tool_input, current, tool_name)
