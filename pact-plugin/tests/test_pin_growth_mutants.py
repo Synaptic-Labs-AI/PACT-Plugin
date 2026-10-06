@@ -28,9 +28,10 @@ from fixtures.pin_growth import harness as H
 from fixtures.pin_growth import mutants as MU
 from fixtures.pin_growth import rows as R
 
-ROWS = {r.key: r for r in R.FIXED_ROWS + R.COMMENTED_ROWS + R.CONTENT_FENCE_ROWS + R.REMOVAL_ROWS + R.CEILING_ROWS}
+ROWS = {r.key: r for r in (R.FIXED_ROWS + R.COMMENTED_ROWS + R.CONTENT_FENCE_ROWS + R.REMOVAL_ROWS + R.CEILING_ROWS
+                           + R.REVEAL_ROWS)}
 CLAUSES = ("clause_region_r", "clause_intact", "clause_refenced", "clause_guarded_pairing",
-           "clause_moved_block", "clause_edited_in_place", "clause_no_leaving_credit")
+           "clause_moved_block", "clause_edited_in_place", "clause_no_leaving_credit", "clause_past_stray_heading")
 NOT_A_DECISION = ("size_bound", "not_found", "unreadable", "error")
 
 
@@ -46,6 +47,13 @@ def _locate(m):
 
 
 MUTANTS = (
+    Mutant("R ends where the locator ends the Pinned section", "clause_past_stray_heading",
+           lambda m: MU.past_stray_heading(off=True),
+           ("reveal:demote-a-stray-heading-that-hides-pins-7-to-13-13-pins-6-counted",
+            "reveal:delete-a-stray-heading-that-hides-pins-7-to-13",
+            "reveal:fence-a-stray-heading-that-hides-pins-7-to-13",
+            "reveal:delete-a-user-heading-below-pinned-holding-three-lines-12-to-15",
+            "reveal:demote-a-user-heading-below-pinned-holding-three-lines-12-to-15")),
     Mutant("raw growth only: every fenced ### line counts as a pin", "fenced_line_is_new",
            lambda m: MU.no_new_fenced_lines(),
            ("bodiless:close-and-add-a-fenced-snippet-holding-two-lines-to-p9",
@@ -264,11 +272,12 @@ BASES = {
     "clause_moved_block": lambda m: MU.moved(),
     "clause_edited_in_place": lambda m: MU.edited_in_place(),
     "clause_no_leaving_credit": lambda m: MU.leaving_credit(_locate(m)),
+    "clause_past_stray_heading": lambda m: MU.past_stray_heading(),
 }
 
 
 def test_each_replacement_base_decides_as_the_clause_it_stands_in_for():
-    items = (H.items_from_rows(R.FIXED_ROWS + R.COMMENTED_ROWS)
+    items = (H.items_from_rows(R.FIXED_ROWS + R.COMMENTED_ROWS + R.REVEAL_ROWS)
              + H.items_from_cases(G.transition_stream(1, 0.5, 300))
              + H.items_from_cases(G.layout_stream(1, 300))
              + H.items_from_cases(G.commented_stream(G.layout_stream(1, 150))))

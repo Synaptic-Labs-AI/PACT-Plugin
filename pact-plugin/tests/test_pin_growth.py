@@ -775,6 +775,33 @@ def test_the_not_found_advisory_names_the_line(name, before, after):
     assert reason is not None and re.search(r"\blines? \d", reason)
 
 
+def _prose(seed, size):
+    """About `size` characters of varied words over several lines."""
+    rnd, words, total = random.Random(seed), [], 0
+    while total < size:
+        word = rnd.choice("gate cap pin fence parser marker section writer reader".split()) + str(rnd.randrange(50))
+        words.append(word)
+        total += len(word) + 1
+    return "\n".join(" ".join(words[k:k + 9]) for k in range(0, len(words), 9))
+
+
+BIG = _prose(11, 1700)
+# Pin 6's body holds a stray `## Notes`, so pin 7 below it, oversize with no
+# override, is not in the located Pinned section before the change.
+HIDDEN_BIG = claude_md(pins(10, {6: "body 6\n## Notes\nsome notes", 7: BIG}))
+
+
+def test_revealing_an_oversize_pin_below_a_stray_heading_is_allowed_on_size():
+    decision = decide(HIDDEN_BIG, sub(HIDDEN_BIG, "## Notes\n", "#### Notes\n"))
+    assert (decision.verdict, decision.cause) == ("ALLOW", None)
+
+
+def test_revealing_an_oversize_pin_and_growing_it_is_denied_on_size():
+    grown = sub(sub(HIDDEN_BIG, "## Notes\n", "#### Notes\n"), BIG, BIG + "\n" + _prose(13, 100))
+    decision = decide(HIDDEN_BIG, grown)
+    assert (decision.verdict, decision.cause) == ("DENY", "size")
+
+
 NO_PINNED_BLOCK = sub(claude_md(""), "## Pinned Context\n\n", "")
 # No Pinned section anywhere after the change: no section in the memory block,
 # and none outside it either.
@@ -983,7 +1010,8 @@ def test_the_module_imports_nothing_heavy_at_load():
     assert not loaded & {"staleness", "dataclasses", "subprocess", "datetime"}, loaded
 
 
-def test_clause_functions_are_the_seven_named_seams():
+def test_clause_functions_are_the_eight_named_seams():
     names = {name for name in dir(pin_growth) if name.startswith("clause_")}
     assert names == {"clause_region_r", "clause_intact", "clause_refenced", "clause_guarded_pairing",
-                     "clause_moved_block", "clause_edited_in_place", "clause_no_leaving_credit"}
+                     "clause_moved_block", "clause_edited_in_place", "clause_no_leaving_credit",
+                     "clause_past_stray_heading"}

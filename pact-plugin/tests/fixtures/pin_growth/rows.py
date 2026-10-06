@@ -11,7 +11,9 @@ pins, decided by how the row is built and never by the rule under test:
 
 The texts are ported byte for byte from the scratch model the rule was designed on;
 FIXED_ROWS_DIGEST pins them, so an edit to a builder below shows up as a digest
-change. Generated texts too long to build by hand live in data_rows.json.
+change. Generated texts too long to build by hand live in data_rows.json. The
+smaller lists after them (commented, content-fence, removal, ceiling and reveal
+rows) are built here directly.
 """
 
 import hashlib
@@ -957,6 +959,39 @@ def build_ceiling_rows() -> tuple:
     return tuple(b.rows)
 
 
+def build_reveal_rows() -> tuple:
+    """A `#` or `##` line below the Pinned heading ends the section, so the pins
+    under it are not counted. Demoting, deleting or fencing that line reveals
+    them, and they were there before; PACT's own Working Memory heading is not
+    such a line."""
+    b = _Builder()
+
+    def S(text, verdict, pre, post, family=None):
+        b.add("reveal", text, verdict, pre, post, family)
+
+    stray = {6: "body 6\n## Notes\nsome notes"}
+    s13, s12 = managed(pins(13, over=stray), wm=WM), managed(pins(12, over=stray), wm=WM)
+    S("demote a stray heading that hides pins 7 to 13 (13 pins, 6 counted)", "ALLOW", s13,
+      sub(s13, "## Notes\n", "#### Notes\n"))
+    S("delete a stray heading that hides pins 7 to 13", "ALLOW", s13, sub(s13, "## Notes\n", ""))
+    S("fence a stray heading that hides pins 7 to 13", "ALLOW", s13, sub(s13, "## Notes\n", "```\n## Notes\n```\n"))
+    S("demote a stray heading at 12 pins", "ALLOW", s12, sub(s12, "## Notes\n", "#### Notes\n"))
+    S("rename a stray heading, which still ends the section", "ALLOW", s13, sub(s13, "## Notes\n", "## Notes2\n"))
+    S("demote a stray heading and add a pin (13 to 14)", "DENY", s13,
+      sub(sub(s13, "## Notes\n", "#### Notes\n"), P(13), P(13) + NEWPIN))
+    S("add a pin below a stray heading without fixing it", "ALLOW", s13, sub(s13, P(13), P(13) + NEWPIN),
+      FAMILY_HEADING_ENDS_PINNED)
+    user = "## My notes\n### idea one\ntext\n### idea two\ntext\n### idea three\ntext\n\n"
+    u12 = managed(pins(12) + user, wm=WM)
+    S("delete a user heading below Pinned holding three ### lines (12 to 15)", "ALLOW", u12, sub(u12, "## My notes\n", ""))
+    S("demote a user heading below Pinned holding three ### lines (12 to 15)", "ALLOW", u12,
+      sub(u12, "## My notes\n", "#### My notes\n"))
+    w12 = managed(pins(12), wm=WM)
+    S("delete the Working Memory heading, so its two entries join the pins", "DENY", w12, sub(w12, "\n## Working Memory\n", "\n"))
+    S("fix a typo in a pin while a stray heading hides pins 7 to 13", "ALLOW", s13, sub(s13, "body 3\n", "body three\n"))
+    return tuple(b.rows)
+
+
 def build_fixed_rows() -> tuple:
     b = _Builder()
     _bodiless_rows(b)
@@ -984,3 +1019,4 @@ COMMENTED_ROWS = build_commented_rows()
 CONTENT_FENCE_ROWS = build_content_fence_rows()
 REMOVAL_ROWS = build_removal_rows()
 CEILING_ROWS = build_ceiling_rows()
+REVEAL_ROWS = build_reveal_rows()

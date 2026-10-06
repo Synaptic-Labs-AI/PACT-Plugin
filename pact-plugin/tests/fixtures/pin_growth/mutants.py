@@ -328,3 +328,33 @@ def net_growth(original, locate):
         grew = raw_a > raw_b and fa_a > fa_b
         return fa_a - fa_b if grew else 0
     return pin_growth
+
+
+def past_stray_heading(*, off=False):
+    """`clause_past_stray_heading`, or with `off` R left where the locator ends it."""
+    import re
+
+    from shared import pin_growth as g
+    from shared.claude_md_markers import State
+    from staleness import _PINNED_STOP_PREFIXES, _PINNED_TERMINATOR
+
+    def clause(t, R):
+        if off:
+            return R
+        pre, (s, e) = t.pre, t.S
+        first, last = R
+        end = g._pinned_scope_end(pre)
+        while last < end:
+            row = last + 1
+            if not pre.find_lines(_PINNED_TERMINATOR, (row, row)) or pre.find_lines(g._PACT_SECTION_ROW, (row, row)):
+                break
+            heading = re.compile(re.escape(pre.lines[row].content) + r"\s*$")
+            section = pre.find_section(heading, _PINNED_TERMINATOR, (row, end), stop_prefixes=_PINNED_STOP_PREFIXES)
+            if section.state is not State.FOUND or section.spans[0][0] != row:
+                break
+            below = section.spans[0][1]
+            if not any(s <= t.p2q.get(k, -1) <= e for k in range(row + 1, below + 1)):
+                break
+            last = below
+        return first, last
+    return clause

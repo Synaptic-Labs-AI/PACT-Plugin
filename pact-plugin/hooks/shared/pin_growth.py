@@ -16,6 +16,7 @@ only when a writer's planned text would add rows PACT cannot read.
 
 THE RULE. S is the Pinned body after the change, from the one Pinned locator.
 R is the matching region before: the Pinned body when the text before has one,
+extended by `clause_past_stray_heading` over pins a fixed stray heading reveals,
 otherwise `clause_region_r`. The two texts are aligned line by line, once, over
 the memory block only (the whole text when either side's block is not
 FOUND), with shared leading and trailing lines trimmed first.
@@ -43,8 +44,9 @@ THE DECISION. `pin_cap_decision` is the one verdict for the gate and the Bash
 report: no Pinned section anywhere after the change allows plainly, and one
 PACT cannot locate allows with an advisory; growth above zero with more than
 the cap's pins after it denies on count; the size axis compares the pins before
-with the pins after; the budget, the timer and any failure allow with an
-advisory. It never raises.
+with the pins after, and with a located section before allows when either its
+pins or the pins over R allow; the budget, the timer and any failure allow with
+an advisory. It never raises.
 """
 
 from __future__ import annotations
@@ -54,7 +56,7 @@ import re
 import signal
 from typing import NamedTuple
 
-from pin_caps import PIN_COUNT_CAP, Pin, _charge, compute_deny_reason, section_pins
+from pin_caps import PIN_COUNT_CAP, Pin, _charge, compute_deny_reason, pins_in_rows, section_pins
 
 from .claude_md_manager import MEMORY_END_MARKER, MEMORY_START_MARKER
 from .claude_md_markers import Document, Kind, Located, State, _closes, _opener, parse
@@ -63,6 +65,7 @@ STEP_BUDGET = 70_000_000
 TIMER_SECONDS = 30
 
 PACT_SECTIONS = ("## Working Memory", "## Retrieved Context")
+_PACT_SECTION_ROW = re.compile("(?:" + "|".join(map(re.escape, PACT_SECTIONS)) + r")[ \t]*$")
 _PINNED_HEADING_TEXT = "## Pinned Context"
 _FENCE_SHAPE = re.compile(r" {0,3}(`{3,}|~{3,})")
 
@@ -294,6 +297,44 @@ def clause_region_r(t: Texts) -> tuple[int, int]:
     return (lo, moved[-1] - 1) if moved else (lo, hi)
 
 
+def _pinned_scope_end(doc: Document) -> int:
+    """The last row the Pinned locator reads in `doc`, whose section it found:
+    the pinned pair's last interior row, or the memory block's."""
+    from staleness import PINNED_END_MARKER, PINNED_START_MARKER
+
+    first, last = doc.find_block(MEMORY_START_MARKER, MEMORY_END_MARKER).spans[0]
+    pair = doc.find_block(PINNED_START_MARKER, PINNED_END_MARKER, (first + 1, last - 1))
+    if pair.state is State.FOUND:
+        return pair.spans[0][1] - 1
+    return last - 1
+
+
+def clause_past_stray_heading(t: Texts, R: tuple[int, int]) -> tuple[int, int]:
+    """R, the Pinned body before, extended past each `#` or `##` line that ends
+    it, other than PACT's own section headings, while the section that line
+    starts has a row aligned into S. Demoting, deleting or fencing a stray
+    heading below Pinned reveals the pins under it, and they were there before.
+    A marker line or a PACT section heading always ends R."""
+    from staleness import _PINNED_STOP_PREFIXES, _PINNED_TERMINATOR
+
+    pre, (s, e) = t.pre, t.S
+    first, last = R
+    end = _pinned_scope_end(pre)
+    while last < end:
+        row = last + 1
+        if not pre.find_lines(_PINNED_TERMINATOR, (row, row)) or pre.find_lines(_PACT_SECTION_ROW, (row, row)):
+            break
+        heading = re.compile(re.escape(pre.lines[row].content) + r"\s*$")
+        section = pre.find_section(heading, _PINNED_TERMINATOR, (row, end), stop_prefixes=_PINNED_STOP_PREFIXES)
+        if section.state is not State.FOUND or section.spans[0][0] != row:
+            break
+        below = section.spans[0][1]
+        if not any(s <= t.p2q.get(k, -1) <= e for k in range(row + 1, below + 1)):
+            break
+        last = below
+    return first, last
+
+
 def clause_intact(t: Texts, R: tuple[int, int], i: int, j: int) -> bool:
     """Post CODE row j, aligned to pre row i in R, keeps its block: its fence
     opener and closer are aligned to pre rows on either side of i."""
@@ -464,7 +505,7 @@ def pin_growth(before: Document, after: Document, *, budget: int | None = None,
     t = Texts(before, after, a, b, p2q, q2p, S, steps, _fence_pairs(after), {})
     previous = locate_pinned(before)
     if previous.state is State.FOUND:
-        R = (previous.spans[0][0] + 1, previous.spans[0][1])
+        R = clause_past_stray_heading(t, (previous.spans[0][0] + 1, previous.spans[0][1]))
     else:
         R = clause_region_r(t)
     raw_after = sum(_is_head(after.lines[j].content) for j in range(S[0], S[1] + 1))
@@ -623,14 +664,22 @@ def _decide(before: str, after: str, trim: bool) -> PinDecision:
         else:
             size_before, size_after = _size_pins(t, R, post_pins)
         pins_before = len(post_pins) - (growth or 0)
+    size_reason = compute_deny_reason(size_before, size_after, growth=0)
+    if size_reason is not None and found_before:
+        # A pin revealed below a fixed stray heading was there before on the
+        # size axis too: read the pins before over R as the rule extends it,
+        # and allow when either reading allows.
+        if growth is None:
+            growth = pin_growth(before_doc, after_doc, trim=trim, detail=detail)
+            pins_before = len(post_pins) - (growth or 0)
+        if compute_deny_reason(pins_in_rows(before_doc, *detail["region"]), size_after, growth=0) is None:
+            size_reason = None
     growth = growth or 0
-    size_reason = None
     if growth > 0 and len(post_pins) > PIN_COUNT_CAP:
         reason = compute_deny_reason(size_before, post_pins, growth=growth)
         cause = "count"
-        size_reason = compute_deny_reason(size_before, size_after, growth=0)
     else:
-        reason = compute_deny_reason(size_before, size_after, growth=0)
+        reason, size_reason = size_reason, None
         cause = "size"
     if reason is None:
         return PinDecision("ALLOW", pins_before, len(post_pins), growth, None, None)
