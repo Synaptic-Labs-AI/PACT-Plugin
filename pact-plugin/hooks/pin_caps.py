@@ -106,8 +106,6 @@ _DATE_COMMENT_ROW = re.compile(
 # a pin from it and the override reader keeps it out of the rationale, so the
 # two read one shape.
 RECONFIRMED_DATE_RE = re.compile(r'reconfirmed:\s*(\d{4}-\d{2}-\d{2})', re.IGNORECASE)
-# What may separate a reconfirmation from the text before it.
-_RECONFIRM_SEPARATORS = " \t\u00a0,;(-\u2013\u2014"
 # A combined date and size-override comment. The override field starts at the
 # comment's first `, pin-size-override:`; before it sits the comma-free date,
 # alone or followed by a reconfirmation (a comma may lead that). The rationale
@@ -117,6 +115,10 @@ _RECONFIRM_SEPARATORS = " \t\u00a0,;(-\u2013\u2014"
 #   <!-- pinned: 2026-04-11; reconfirmed: 2026-07-25 because R, pin-size-override: O -->
 #   <!-- pinned: 2026-04-11, pin-size-override: O (reconfirmed: 2026-07-25 because R) -->
 _PIN_COMMENT_START = re.compile(rf'\s*{_PIN_COMMENT_OPEN}', re.IGNORECASE)
+_WORD_CHAR = re.compile(r'\w')
+# The separators dropped before a reconfirmation when the rationale holds no
+# word character.
+_RECONFIRM_SEPARATORS = " \t\u00a0,;:/|(-\u2013\u2014"
 _OVERRIDE_FIELD = re.compile(r',\s*pin-size-override:', re.IGNORECASE)
 _OVERRIDE_DATE_PART = re.compile(
     rf'{_COMMENT_CHAR_NO_COMMA}+?(?:,\s*)?{RECONFIRMED_DATE_RE.pattern}.*'
@@ -252,8 +254,9 @@ def override_rationale_text(doc, row: int) -> Optional[str]:
     `, pin-size-override:`, with only the comma-free date, or the date and a
     reconfirmation, before it. The rationale is the text from the field name
     to the closing `-->`, less a reconfirmation written after it
-    (`RECONFIRMED_DATE_RE`, then the rest) and the separator before that. The
-    pin-cap gate validates it; `_override_rationale` decides with it.
+    (`RECONFIRMED_DATE_RE`, then the rest) and the run of non-word characters
+    before that. The pin-cap gate validates it; `_override_rationale` decides
+    with it.
     """
     from shared.claude_md_markers import Kind
 
@@ -270,7 +273,16 @@ def override_rationale_text(doc, row: int) -> Optional[str]:
     rationale = line.content.rstrip()[field.end():-len(_PIN_COMMENT_CLOSE)]
     reconfirm = RECONFIRMED_DATE_RE.search(rationale)
     if reconfirm is not None:
-        rationale = rationale[:reconfirm.start()].rstrip(_RECONFIRM_SEPARATORS)
+        # Drop the reconfirmation and whatever separates it from the rationale:
+        # the run of non-word characters before it. A rationale with no word
+        # character (a symbol, an emoji) would be dropped with it, so it loses
+        # only the separator.
+        end = reconfirm.start()
+        while end and not _WORD_CHAR.match(rationale, end - 1):
+            end -= 1
+        if not end:
+            end = len(rationale[:reconfirm.start()].rstrip(_RECONFIRM_SEPARATORS))
+        rationale = rationale[:end]
     return rationale.strip()
 
 

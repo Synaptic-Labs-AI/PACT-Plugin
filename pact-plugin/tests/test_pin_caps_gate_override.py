@@ -209,19 +209,49 @@ RECONFIRMED = (
 )
 
 
-@pytest.mark.parametrize("name, row", RECONFIRMED, ids=[row[0] for row in RECONFIRMED])
-def test_reconfirming_an_overridden_pin_keeps_its_override(name, row):
+def _first_pin_after(call):
+    """The first pin of OVERRIDDEN after `call`, read from its Pinned body."""
     from fixtures.pin_helpers import parse_pins
     from shared.edit_simulation import simulate
 
+    after = simulate(OVERRIDDEN, *call)
+    assert after is not None
+    return parse_pins(after[after.index("## Pinned Context\n") + len("## Pinned Context\n"):after.index(WM)])[0]
+
+
+@pytest.mark.parametrize("name, row", RECONFIRMED, ids=[row[0] for row in RECONFIRMED])
+def test_reconfirming_an_overridden_pin_keeps_its_override(name, row):
     call = _edit(OVERRIDDEN_ROW, row)
     decision = gate_decision(OVERRIDDEN, *call)
     assert decision.verdict == "ALLOW", (name, decision)
-    after = simulate(OVERRIDDEN, *call)
-    assert after is not None
-    body = after[after.index("## Pinned Context\n") + len("## Pinned Context\n"):after.index(WM)]
-    pin = parse_pins(body)[0]
+    pin = _first_pin_after(call)
     assert (pin.override_rationale, pin.body_chars > 1500) == (RATIONALE, True), name
+
+
+# A rationale with no word character keeps it: only the separator before the
+# reconfirmation is dropped.
+@pytest.mark.parametrize("rationale, separator", [("\U0001f512", ", "), ("?!", "; ")],
+                         ids=["a lock emoji", "punctuation"])
+def test_a_symbol_rationale_before_a_reconfirmation_keeps_its_override(rationale, separator):
+    call = _edit(OVERRIDDEN_ROW, f"<!-- pinned: 2026-05-26, pin-size-override: {rationale}{separator}{RECONFIRM} -->")
+    decision = gate_decision(OVERRIDDEN, *call)
+    assert decision.verdict == "ALLOW", (rationale, decision)
+    assert _first_pin_after(call).override_rationale == rationale
+
+
+# A rationale at the cap stays at the cap whatever separates a reconfirmation
+# from it: the run of non-word characters before the reconfirmation is dropped.
+AT_CAP = "x" * 120
+CAP_SEPARATORS = [(" / ", "a slash"), (": ", "a colon"), (" | ", "a bar"), (" \u2014 ", "an em dash"),
+                  ("\t", "a tab"), (". ", "a full stop"), (" > ", "a greater-than sign")]
+
+
+@pytest.mark.parametrize("separator", [sep for sep, _ in CAP_SEPARATORS], ids=[label for _, label in CAP_SEPARATORS])
+def test_a_rationale_at_the_cap_before_a_reconfirmation_is_allowed(separator):
+    call = _edit(OVERRIDDEN_ROW, f"<!-- pinned: 2026-05-26, pin-size-override: {AT_CAP}{separator}{RECONFIRM} -->")
+    decision = gate_decision(OVERRIDDEN, *call)
+    assert decision.verdict == "ALLOW", (separator, decision)
+    assert _first_pin_after(call).override_rationale == AT_CAP
 
 
 INVALID_RECONFIRMED = [
@@ -243,6 +273,12 @@ INVALID_RECONFIRMED = [
     ("only a separator before the reconfirmation",
      f"<!-- pinned: 2026-05-26, pin-size-override: ; {RECONFIRM} -->",
      "Override rationale is empty — provide a non-empty reason."),
+    ("only a slash before the reconfirmation",
+     f"<!-- pinned: 2026-05-26, pin-size-override: / {RECONFIRM} -->",
+     "Override rationale is empty — provide a non-empty reason."),
+    ("one character over the cap, before a slash and a reconfirmation",
+     f"<!-- pinned: 2026-05-26, pin-size-override: {'x' * 121} / {RECONFIRM} -->",
+     "Override rationale is 121 chars (max: 120). Shorten it."),
 ]
 
 

@@ -189,14 +189,20 @@ class TestOverrideRationaleText_PublicReader:
         ("<!-- pinned: 2026-04-20, pin-size-override: keep (v2) -->", "keep (v2)"),
         ("<!-- pinned: 2026-04-20, pin-size-override: keep it. -->", "keep it."),
         ("<!-- pinned: 2026-04-20, pin-size-override: keep (v2). - reconfirmed: 2026-07-25 because x -->",
-         "keep (v2)."),
+         "keep (v2"),
         ("<!-- pinned: 2026-04-20, pin-size-override: ; reconfirmed: 2026-07-25 because x -->", ""),
+        ("<!-- pinned: 2026-04-20, pin-size-override: / reconfirmed: 2026-07-25 because x -->", ""),
+        ("<!-- pinned: 2026-04-20, pin-size-override: \U0001f512, reconfirmed: 2026-07-25 because x -->",
+         "\U0001f512"),
+        ("<!-- pinned: 2026-04-20, pin-size-override: ?!; reconfirmed: 2026-07-25 because x -->", "?!"),
         ("<!-- pinned: 2026-04-20 (reconfirmed: 2026-07-25 because a, b), pin-size-override: reason -->",
          "reason"),
     ], ids=["plain", "spacing and case", "empty field", "over the limit", "reconfirmed before it",
             "reconfirmed after it", "reconfirmed after it, any case", "a reconfirmed word with no date",
             "reconfirmed on both sides", "a closing parenthesis kept", "a closing full stop kept",
-            "only the separator before a reconfirmation dropped", "only a separator before a reconfirmation",
+            "the punctuation run before a reconfirmation dropped", "only a separator before a reconfirmation",
+            "only a slash before a reconfirmation", "a symbol rationale keeps its symbol",
+            "a punctuation rationale keeps its punctuation",
             "reconfirmed in parentheses before it, a comma in the reason"])
     def test_it_returns_the_stripped_field_before_any_validity_check(self, row, text):
         assert self._read(f"{row}\n### Entry\nBody.\n") == text
