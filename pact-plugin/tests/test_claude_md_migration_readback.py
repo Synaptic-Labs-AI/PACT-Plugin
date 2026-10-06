@@ -35,7 +35,7 @@ from shared.claude_md_manager import (
 )
 from shared.claude_md_markers import Cause, State, parse
 
-BOM_BEFORE_FENCE = "﻿```md\n<!-- SESSION_START -->\n```\n## Working Memory\n- entry\n"
+BOM_BEFORE_FENCE = "\ufeff```md\n<!-- SESSION_START -->\n```\n## Working Memory\n- entry\n"
 
 
 def _plan(content):
@@ -47,8 +47,8 @@ def _plan(content):
 
 def test_the_byte_order_mark_stays_at_byte_0_and_nowhere_else():
     new_content = _plan(BOM_BEFORE_FENCE)
-    assert new_content.startswith("﻿" + MANAGED_START_MARKER)
-    assert new_content.count("﻿") == 1
+    assert new_content.startswith("\ufeff" + MANAGED_START_MARKER)
+    assert new_content.count("\ufeff") == 1
     assert new_content.count("```md\n") == 1 and "\n```\n" in new_content
     assert _plan_migration(new_content) == (None, None)
 

@@ -235,7 +235,7 @@ def _document(rnd):
     if rnd.random() < 0.2:
         ends[-1] = ""
     text = "".join(r + e for r, e in zip(rows, ends))
-    return ("﻿" + text) if rnd.random() < 0.1 else text
+    return ("\ufeff" + text) if rnd.random() < 0.1 else text
 
 
 def _random_scope(rnd, n):

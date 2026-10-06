@@ -149,7 +149,7 @@ FIRST_WRITES = [
     ("the Pinned section past an unclosed fence, 20 pins", NOT_LOCATED + _pins(20), "advisory"),
     ("the Pinned section past an unclosed fence, 3 pins", NOT_LOCATED + _pins(3), "advisory"),
     ("13 pins with CRLF line endings", _pins(13).replace("\n", "\r\n"), "deny"),
-    ("13 pins after a byte order mark", "﻿" + _pins(13), "deny"),
+    ("13 pins after a byte order mark", "\ufeff" + _pins(13), "deny"),
 ]
 
 

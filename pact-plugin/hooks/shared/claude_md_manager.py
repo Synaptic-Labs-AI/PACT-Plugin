@@ -1437,7 +1437,7 @@ def _legacy_header_end(doc: Document) -> int:
     blank rows below that; 0 when the first row is not that title. Each
     stripped row must end with a line break, as the old pattern required."""
     lines = doc.lines
-    if not lines or doc.text.startswith("﻿") or not doc.find_lines(_LEGACY_TITLE_RE, (0, 0)):
+    if not lines or doc.text.startswith("\ufeff") or not doc.find_lines(_LEGACY_TITLE_RE, (0, 0)):
         return 0
 
     def ended(row: int) -> bool:

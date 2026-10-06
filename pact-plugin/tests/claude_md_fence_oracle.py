@@ -97,7 +97,7 @@ def split_rows(text: str) -> list[tuple[int, int, str]]:
             end = j
         out.append((i, end, content))
         i = end
-    if out and out[0][2].startswith("﻿"):
+    if out and out[0][2].startswith("\ufeff"):
         s, e, c = out[0]
         out[0] = (s, e, c[1:])
     return out

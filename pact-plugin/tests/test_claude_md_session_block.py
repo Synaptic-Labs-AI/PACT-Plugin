@@ -269,9 +269,9 @@ def test_a_block_above_an_uncertain_region_is_written(project):
 # --- encodings and line endings --------------------------------------------
 
 def test_a_leading_bom_stays_in_place(project):
-    _write(project, "﻿" + OLD_BLOCK + "\nafter\n")
+    _write(project, "\ufeff" + OLD_BLOCK + "\nafter\n")
     _update()
-    assert _read(project) == "﻿" + _block() + "\nafter\n"
+    assert _read(project) == "\ufeff" + _block() + "\nafter\n"
 
 
 def test_a_leading_bom_stays_first_when_the_block_goes_before_a_memory_start_on_row_0(project):

@@ -57,7 +57,7 @@ FAMILIES = (
 )
 
 F = "```"
-BOM = "﻿"
+BOM = "\ufeff"
 DATA = json.loads((Path(__file__).parent / "data_rows.json").read_text(encoding="utf-8"))
 
 

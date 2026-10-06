@@ -154,7 +154,7 @@ class Located(NamedTuple):
     cause: Cause | None
 
 
-_BOM = "﻿"
+_BOM = "\ufeff"
 _LINE_RE = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+\Z")
 _OPENER_RE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
 # Up to 3 spaces, one or more list or quote markers, then a fence run. Any

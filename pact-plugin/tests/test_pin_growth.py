@@ -226,7 +226,7 @@ ALLOWED = [
      sub(sub(H14, "```\n" + pin(5) + "```\n\n", pin(5)), "body 10\n", "body 10\n```\n### Pin 5\n```\n")),
     ("rewrite every line ending to CRLF", B13, B13.replace("\n", "\r\n")),
     ("rewrite every line ending to CR", B13, B13.replace("\n", "\r")),
-    ("add a byte order mark", B13, "﻿" + B13),
+    ("add a byte order mark", B13, "\ufeff" + B13),
     ("add trailing blanks to every line", B13, "\n".join(line + "  \t" for line in B13.split("\n"))),
     ("rewrite pin bodies", B13, B13.replace("body ", "rewritten body ")),
     ("a snippet line equal to a pin title, then a rename",
