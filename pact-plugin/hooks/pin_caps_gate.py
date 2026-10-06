@@ -105,10 +105,31 @@ def _validate_override_rationale(rationale: Optional[str]) -> Optional[str]:
 
 
 def _collapsed(content: str) -> str:
-    """A row's content with each whitespace run made one space and the ends
+    """`content` with each whitespace run made one space and the ends
     stripped, so a re-indent, a trailing space or a line-ending rewrite leaves
     it the same."""
     return " ".join(content.split())
+
+
+def _rationales(doc) -> Counter:
+    """The override rationales in the parsed document `doc`, whitespace
+    collapsed, one for each row that holds only an override comment, of any
+    kind. A fenced row, or one past an unclosed fence, is read as if it stood
+    alone."""
+    from pin_caps import override_rationale_text
+    from shared.claude_md_markers import Kind, parse
+
+    found = Counter()
+    for line in doc.lines:
+        if "<!--" not in line.content or "-->" not in line.content:
+            continue
+        if line.kind is Kind.PROSE:
+            rationale = override_rationale_text(doc, line.row)
+        else:
+            rationale = override_rationale_text(parse(line.content.strip()), 0)
+        if rationale is not None:
+            found[_collapsed(rationale)] += 1
+    return found
 
 
 def _invalid_override(before: str, after: str) -> Optional[str]:
@@ -122,12 +143,16 @@ def _invalid_override(before: str, after: str) -> Optional[str]:
     or in a fenced example, is body text for both, and a row holding a line
     break `str.splitlines` breaks at is never attributed.
 
-    An override row is checked only when the change added or edited it: its
-    text, whitespace collapsed, is looked up among every row of the text
-    before, of any kind (prose, code or past an unclosed fence), and a row
-    found there is used up and not checked. So an untouched old invalid
-    override is not refused for an edit elsewhere in its pin, a rename, a
-    move, a line-ending rewrite or a fence-closing Write.
+    An override is checked only when the change added it or edited its
+    rationale: the rationale, whitespace collapsed, is looked up among the
+    override comments on every row of the text before, of any kind (prose,
+    code or past an unclosed fence), and one found there is used up and not
+    checked. The rest of the row, the date, is not compared. So an untouched
+    old invalid override is not refused for an edit elsewhere in its pin, a
+    new date on its row, a rename, a move, a line-ending rewrite or a
+    fence-closing Write. Each old copy covers one copy after, so the change
+    cannot raise the number of invalid rationales, and an invalid one grants
+    no size exemption either way.
     """
     from pin_caps import override_rationale_text
     from shared.claude_md_markers import State, parse
@@ -138,14 +163,14 @@ def _invalid_override(before: str, after: str) -> Optional[str]:
     if located.state is not State.FOUND:
         return None
     heading, last = located.spans[0]
-    rows_before = Counter(_collapsed(line.content) for line in parse(before).lines)
+    rationales_before = _rationales(parse(before))
     for first, _end in pin_spans(doc, (heading + 1, last)):
         rationale = override_rationale_text(doc, first)
         if rationale is None:
             continue
-        row = _collapsed(doc.lines[first].content)
-        if rows_before[row]:
-            rows_before[row] -= 1
+        key = _collapsed(rationale)
+        if rationales_before[key]:
+            rationales_before[key] -= 1
             continue
         reason = _validate_override_rationale(rationale)
         if reason is not None:

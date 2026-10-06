@@ -3,11 +3,12 @@ Which size overrides the pin-cap gate checks: only an override row the change
 adds or edits.
 
 An override row is the comment the parser attributes to a pin. The gate looks
-its text, whitespace collapsed, up among every row of the file before the
-change, and checks only a row it does not find there. So an old invalid
-override stays untouched through edits elsewhere in its pin, renames, moves,
-line-ending rewrites and fence-closing Writes, and a change that adds an
-invalid override, or edits one and leaves it invalid, is refused.
+its rationale, whitespace collapsed, up among the override comments on every
+row of the file before the change, and checks only a rationale it does not
+find there. So an old invalid override stays untouched through edits elsewhere
+in its pin, a new date on its row, renames, moves, line-ending rewrites and
+fence-closing Writes, and a change that adds an invalid override, or edits a
+rationale and leaves it invalid, is refused.
 
 Rows drive `pin_caps_gate.gate_decision` on whole documents, the gate's own
 decision with no file I/O.
@@ -46,6 +47,8 @@ def _rest(start=2, stop=6):
 
 OVERSIZE = _doc("\n".join([_pin(1, body=_words("alpha", 1700), override=LONG)] + _rest()))
 SMALL = _doc("\n".join([_pin(1, body="short body", override=LONG)] + _rest()))
+SMALL_ROW = f"<!-- pinned: 2026-10-01, pin-size-override: {LONG} -->"
+VALID = _doc("\n".join([_pin(1, body="short body", override="verbatim form")] + _rest()))
 EMPTY = _doc("\n".join([_pin(1, body="short body", override="")] + _rest()))
 UNCLOSED = _doc("\n".join([_pin(1, body="short body", override=LONG),
                            _pin(2, body="Body of pin 2.\n```\nunclosed")] + _rest(3)))
@@ -85,6 +88,10 @@ FAITHFUL = [
      _write(_doc("\n".join(_rest() + [_pin(1, body="short body", override=LONG)])))),
     ("the pin renamed", SMALL, _edit("### Pin 1\n", "### Pin one\n")),
     ("an empty rationale's pin edited", EMPTY, _edit("short body", "shorter body")),
+    ("an empty rationale's date edited", EMPTY,
+     _edit("pinned: 2026-10-01, pin-size-override:", "pinned: 2026-10-05, pin-size-override:")),
+    ("the pin moved to the end by a Write with a new date", SMALL,
+     _write(_doc("\n".join(_rest() + [_pin(1, body="short body", override=LONG, date="2026-10-05")])))),
     ("a fence closed by a Write", UNCLOSED, _write(UNCLOSED.replace("```\nunclosed", "```\nunclosed\n```"))),
     ("a fence closed by an Edit", UNCLOSED, _edit("```\nunclosed", "```\nunclosed\n```")),
     ("a fence above it closed by a Write", UNCLOSED_ABOVE,
@@ -97,8 +104,12 @@ REFUSED = [
      "Override rationale is 131 chars (max: 120). Shorten it."),
     ("a new pin with an empty rationale", SMALL, _new_pin(override=""),
      "Override rationale is empty — provide a non-empty reason."),
-    ("the override's date edited, the rationale still invalid", SMALL,
-     _edit("pinned: 2026-10-01, pin-size-override: " + LONG, "pinned: 2026-10-02, pin-size-override: " + LONG),
+    ("the rationale edited to another invalid text", SMALL, _edit(LONG + " -->", LONG + "z -->"),
+     "Override rationale is 131 chars (max: 120). Shorten it."),
+    ("a valid rationale edited to an invalid one", VALID, _edit("verbatim form", LONG),
+     "Override rationale is 130 chars (max: 120). Shorten it."),
+    ("the invalid rationale copied to a new pin under a new date, the old one kept", SMALL,
+     _new_pin(override=LONG, date="2026-10-05"),
      "Override rationale is 130 chars (max: 120). Shorten it."),
     ("a first Write carrying an invalid override", "",
      _write(_doc("\n".join([_pin(i) for i in range(1, 4)] + [_pin(9, body="b", override=LONG)]))),
@@ -107,6 +118,24 @@ REFUSED = [
      _edit("<!-- pinned: 2026-10-01 -->\n### Pin 2", f"<!-- pinned: 2026-10-01, pin-size-override: {LONG} -->\n### Pin 2"),
      "Override rationale is 130 chars (max: 120). Shorten it."),
 ]
+
+
+# A new date on an old invalid override's row: the rationale is untouched.
+DATE_CHANGES = [
+    ("its date edited", _edit(SMALL_ROW, SMALL_ROW.replace("2026-10-01", "2026-10-05"))),
+    ("a replace_all date bump across every pin comment",
+     ("Edit", {"old_string": "2026-10-01", "new_string": "2026-10-02", "replace_all": True})),
+]
+
+
+@pytest.mark.parametrize("name, call", DATE_CHANGES, ids=[row[0] for row in DATE_CHANGES])
+def test_a_new_date_beside_an_old_invalid_override_is_allowed(name, call):
+    from shared.edit_simulation import simulate
+
+    after = simulate(SMALL, *call)
+    assert SMALL_ROW not in after and f"pin-size-override: {LONG} -->" in after, name
+    decision = gate_decision(SMALL, *call)
+    assert decision.verdict == "ALLOW", (name, decision)
 
 
 @pytest.mark.parametrize("name, before, call", FAITHFUL, ids=[row[0] for row in FAITHFUL])

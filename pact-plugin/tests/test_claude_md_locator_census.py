@@ -599,14 +599,23 @@ def test_shipped_shell_scripts_carry_no_marker_literal():
 
 # Every `parse(...)` call in shipped code, as (path, function, argument source).
 # Each parses a whole CLAUDE.md text, the file read or the whole text a writer
-# plans to write, or a text that is not a CLAUDE.md. A part of a CLAUDE.md parsed
-# alone reads its rows without the rows above them, so a fence or an HTML block
-# opened earlier is lost. A new call fails `test_every_shipped_parse_reads_a_whole_text`
-# until it is checked and listed here, and an entry no call matches fails too.
+# plans to write, or a text that is not a CLAUDE.md, with one third class: one
+# row's text read standalone as a prose row, by a named ruling, which is only
+# the ("hooks/pin_caps_gate.py", "_rationales", "line.content.strip()") entry.
+# A part of a CLAUDE.md parsed alone reads its rows without the rows above them,
+# so a fence or an HTML block opened earlier is lost. A new call fails
+# `test_every_shipped_parse_reads_a_whole_text` until it is checked and listed
+# here, and an entry no call matches fails too.
 WHOLE_TEXT_PARSES = frozenset({
     ("hooks/bootstrap_prompt_gate.py", "_record_unrecorded_lead", "content"),
     ("hooks/pin_caps_gate.py", "_invalid_override", "after"),
     ("hooks/pin_caps_gate.py", "_invalid_override", "before"),
+    # One row's text read standalone as a prose row, on the before side of the
+    # override re-check only: a fenced row, or one past an uncertainty
+    # boundary, is read for an override comment as if it stood alone. What it
+    # finds only marks an override as already present, so a misread can only
+    # skip the invalid-override message, never the cap.
+    ("hooks/pin_caps_gate.py", "_rationales", "line.content.strip()"),
     ("hooks/pin_staleness_gate.py", "_counts_show_an_add", "new_text"),
     ("hooks/pin_staleness_gate.py", "_counts_show_an_add", "old_text"),
     ("hooks/session_init.py", "check_claude_md_refusals", "content"),
