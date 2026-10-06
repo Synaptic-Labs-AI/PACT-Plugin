@@ -274,6 +274,17 @@ def test_a_leading_bom_stays_in_place(project):
     assert _read(project) == "﻿" + _block() + "\nafter\n"
 
 
+def test_a_leading_bom_stays_first_when_the_block_goes_before_a_memory_start_on_row_0(project):
+    """The new block goes before the memory start row. The BOM in front of that
+    row stays the file's first character, so the memory start line is still a
+    marker line and the memory block still reads back."""
+    _write(project, "\ufeff" + MEMORY_WITH_HEADING)
+    assert _update() == "Session info added to project CLAUDE.md"
+    written = _read(project)
+    assert written == "\ufeff" + _block() + "\n\n" + MEMORY_WITH_HEADING
+    assert parse(written).find_block(MEMORY_START_MARKER, MEMORY_END_MARKER).state is State.FOUND
+
+
 def test_a_crlf_file_stays_crlf_and_the_block_reads_back(project):
     _target(project).write_bytes(("intro\n" + OLD_BLOCK + "\nafter\n").replace("\n", "\r\n").encode())
     _update()
