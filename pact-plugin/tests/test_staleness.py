@@ -3653,12 +3653,10 @@ class TestBudgetWarningAnchorComposition:
         head). The counts are pinned, not merely non-zero: an exact figure per
         class refuses any trim and names the class that went missing.
         """
-        from staleness import _has_budget_warning, _strip_budget_warnings
-
         separating, both_true, both_false = [], [], []
         for name, text in _ANCHOR_CORPUS.items():
-            wide = _has_budget_warning(text)
-            at_head = _strip_budget_warnings(text) != text
+            wide = _recognised(text)
+            at_head = _kept_after_strip(text) != text
             if wide and not at_head:
                 separating.append(name)
             elif wide:
@@ -3674,6 +3672,26 @@ class TestBudgetWarningAnchorComposition:
         assert len(separating) == 2, f"separating members: {sorted(separating)}"
         assert len(both_true) == 2, f"both-true members: {sorted(both_true)}"
         assert len(both_false) == 7, f"both-false members: {sorted(both_false)}"
+
+
+def _kept_after_strip(text):
+    """The text the leading-warning strip keeps, with `text` read as a whole
+    document whose Pinned body is every row."""
+    from shared.claude_md_markers import parse
+    from staleness import _strip_budget_warnings
+
+    doc = parse(text)
+    row = _strip_budget_warnings(doc, 0, len(doc.lines) - 1)
+    return text[doc.lines[row].start:] if row < len(doc.lines) else ""
+
+
+def _recognised(text):
+    """`_has_budget_warning` on `text` read as a whole document."""
+    from shared.claude_md_markers import parse
+    from staleness import _has_budget_warning
+
+    doc = parse(text)
+    return _has_budget_warning(doc, 0, len(doc.lines) - 1)
 
 
 class TestDeletingAnchorStaysAtTheHead:
@@ -3696,10 +3714,8 @@ class TestDeletingAnchorStaysAtTheHead:
         THE POSITIVE LEG SITS IN THE SAME TEST, because "removed nothing" is
         also what a shape that matches nothing produces.
         """
-        from staleness import _strip_budget_warnings
-
         below_head = "a note the user wrote\n" + _ONE_WARNING_LINE + "more prose\n"
-        assert _strip_budget_warnings(below_head) == below_head, (
+        assert _kept_after_strip(below_head) == below_head, (
             "the strip removed a warning BELOW the head, so it now removes text "
             "a user wrote inside a pin body, from a file that is frequently "
             "gitignored. Exclude the line from the COUNT on a throwaway copy at "
@@ -3708,17 +3724,15 @@ class TestDeletingAnchorStaysAtTheHead:
 
         # POSITIVE CONTROL, in the same fixture.
         at_head = _ONE_WARNING_LINE + "a note the user wrote\n"
-        assert _strip_budget_warnings(at_head) == "a note the user wrote\n", (
+        assert _kept_after_strip(at_head) == "a note the user wrote\n", (
             "the strip did not remove a warning AT the head, so the negative "
             "leg above proves nothing about the position rule"
         )
 
     def test_text_after_a_warning_on_its_row_is_never_deleted(self):
         """A row carrying text after the warning closes is not deleted."""
-        from staleness import _strip_budget_warnings
-
         trailing = _ONE_WARNING_LINE.rstrip("\n") + " my own note\nbody\n"
-        assert _strip_budget_warnings(trailing) == trailing
+        assert _kept_after_strip(trailing) == trailing
 
 
 # ===========================================================================

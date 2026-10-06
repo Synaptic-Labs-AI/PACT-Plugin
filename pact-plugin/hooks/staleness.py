@@ -41,7 +41,7 @@ from pin_caps import (
     _PIN_HEADING_ROW,
     CapViolation,
     check_stale_block,
-    parse_pins,
+    section_pins,
 )
 
 # THE ONE PINNED LOCATOR'S PATTERNS (`locate_pinned`). The heading and the
@@ -127,8 +127,8 @@ _BUDGET_WARNING_SHAPE = rf"{_BUDGET_WARNING_HEAD}[^\n]*?-->\n?"
 
 # RECOGNITION AND MEASUREMENT ONLY: a PROSE row that STARTS with a warning,
 # matched through the parser's `find_lines`. It lets `_has_budget_warning` see
-# a warning wherever it sits and `_body_without_warnings` take each one out of
-# a MEASUREMENT COPY. A warning-shaped line inside a fenced block is the user's
+# a warning wherever it sits and `apply_staleness_markings` leave each one out
+# of the MEASUREMENT COPY it builds. A warning-shaped line inside a fenced block is the user's
 # text and is neither. DO NOT GIVE THIS PATTERN TO CODE THAT DELETES FROM THE
 # DOCUMENT: it matches a row that carries text after the comment closes.
 _BUDGET_WARNING_ROW = re.compile(_BUDGET_WARNING_SHAPE)
@@ -156,18 +156,10 @@ _BUDGET_WARNING_ROW = re.compile(_BUDGET_WARNING_SHAPE)
 # DO NOT WIDEN THE STRIP TO REACH THEM. It DELETES, so a wider reach removes
 # text a user wrote inside a pin body. The repair separates the two questions:
 # EXCLUDE warning rows from the COUNT wherever they sit, and keep the DELETE on
-# the leading run. `_body_without_warnings` is that exclusion. Apply it to a
-# THROWAWAY COPY at the measurement site. Never modify `pinned_content` itself.
-#
-# TWO HAZARDS STAND BEHIND THAT RULE AND THEY BIND AT DIFFERENT PLACES.
-#   1. THE WRITE-BACK, and this is the one that binds AT THE MEASUREMENT SITE.
-#      `apply_staleness_markings` writes `pinned_content` back into the
-#      document, so an in-place exclusion there DELETES the stranded line from
-#      the user's file.
-#   2. THE OFFSETS, and this one binds ABOVE the marker loop. The heading rows
-#      the stale-marker loop writes after are offsets into that string, so an
-#      in-place exclusion applied before the loop puts markers in wrong
-#      positions.
+# the leading run. `apply_staleness_markings` builds the body it writes and the
+# copy it measures from the same rows, and leaves warning rows out of the
+# MEASUREMENT COPY only. Never leave them out of the body it writes back: that
+# DELETES a stranded line from the user's file.
 #
 # THE POSITION RULE AND THE WHOLE-ROW RULE ARE ENFORCED, NOT ONLY STATED: see
 # `test_the_strip_cannot_reach_below_the_head` and
@@ -376,49 +368,40 @@ def estimate_tokens(text: str) -> int:
 _estimate_tokens = estimate_tokens
 
 
-def _strip_budget_warnings(pinned_content: str) -> str:
+def _strip_budget_warnings(doc, first: int, last: int) -> int:
     """
-    Remove the run of budget-warning rows at the head of a pinned body.
+    The first row after the run of budget-warning rows at the head of the
+    pinned body, rows `first`..`last` of `doc`; `first` when there is none.
 
-    Returns the body a user would have written, with this module's own earlier
-    reports taken back out. THIS IS THE DELETING HALF and it takes only the
-    leading run: a warning row that is not at the head SURVIVES this strip and
-    keeps its place in the document. The note at `_BUDGET_WARNING_WHOLE_ROW`
-    says why the repair for that is not a wider strip.
+    The rows from there on are the body a user would have written, with this
+    module's own earlier reports taken back out. THIS IS THE DELETING HALF and
+    it takes only the leading run: a warning row that is not at the head
+    SURVIVES this strip and keeps its place in the document. The note at
+    `_BUDGET_WARNING_WHOLE_ROW` says why the repair for that is not a wider
+    strip.
 
     IT IS NOT THE MEASURING HALF, AND THE TWO ARE SEPARATE.
-    `_body_without_warnings` takes the surviving lines out of a copy at the
-    measurement site, so a line this strip cannot reach contributes no token.
+    `apply_staleness_markings` leaves the surviving warning rows out of the
+    copy it measures, so a line this strip cannot reach contributes no token.
     Do not read that as a reason to widen this one. The count and the delete
     answer different questions, and only this one removes bytes a user can lose.
 
     A run, not a single line, because taking back N lines is the exact inverse
     of writing one -- so the function stays correct if a document somehow
     carries more than one, and it can never leave a partial residue behind.
-
-    Args:
-        pinned_content: The pinned section body.
-
-    Returns:
-        The body with any leading budget-warning rows removed.
     """
-    from shared.claude_md_markers import parse
-
-    doc = parse(pinned_content)
-    run = 0
-    for row in doc.find_lines(_BUDGET_WARNING_WHOLE_ROW):
+    run = first
+    for row in doc.find_lines(_BUDGET_WARNING_WHOLE_ROW, (first, last)):
         if row != run:
             break
         run += 1
-    if run == 0:
-        return pinned_content
-    return pinned_content[doc.lines[run - 1].end:]
+    return run
 
 
-def _has_budget_warning(pinned_content: str) -> bool:
+def _has_budget_warning(doc, first: int, last: int) -> bool:
     """
-    Report whether this module has already written a warning anywhere in
-    `pinned_content`.
+    Report whether this module has already written a warning anywhere in the
+    pinned body, rows `first`..`last` of `doc`.
 
     RECOGNITION, NOT DELETION, AND THAT IS WHY THE REACH DIFFERS. This
     predicate and `_strip_budget_warnings` share ONE shape and differ in
@@ -434,47 +417,8 @@ def _has_budget_warning(pinned_content: str) -> bool:
     quoted line in a body below the budget changes nothing at all. A section
     WITH entries has always behaved this way, and the suite pins it: see
     `test_user_line_quoting_the_warning_is_preserved`.
-
-    Args:
-        pinned_content: The pinned section body.
-
-    Returns:
-        True when a PROSE row starts with a budget warning this module wrote.
     """
-    from shared.claude_md_markers import parse
-
-    return bool(parse(pinned_content).find_lines(_BUDGET_WARNING_ROW))
-
-
-def _body_without_warnings(pinned_content: str) -> str:
-    """
-    Return a MEASUREMENT COPY of the pinned body with each warning row gone.
-
-    THE RESULT IS FOR MEASURING AND FOR NOTHING ELSE. A caller that assigns it
-    back over `pinned_content` turns this into a DELETING pass:
-    `apply_staleness_markings` writes that name into the document, so the rows
-    removed here would leave the user's file. Those lines sit where a user
-    positioned them, and CLAUDE.md is frequently gitignored, so no commit
-    brings them back.
-
-    IT REACHES A WARNING WHEREVER IT SITS, which is the point: the COUNT stops
-    depending on POSITION. A line stranded below the head and a line pushed off
-    the head by a new pin above it are then treated alike.
-    `_strip_budget_warnings` keeps the narrow reach, because that one deletes.
-
-    Args:
-        pinned_content: The pinned section body. It is NOT modified.
-
-    Returns:
-        A new string without the rows that start with a budget warning of this
-        module's own shape. Measure it. Do not write it back.
-    """
-    from shared.claude_md_markers import parse
-
-    doc = parse(pinned_content)
-    warnings = set(doc.find_lines(_BUDGET_WARNING_ROW))
-    return "".join(pinned_content[line.start:line.end]
-                   for line in doc.lines if line.row not in warnings)
+    return bool(doc.find_lines(_BUDGET_WARNING_ROW, (first, last)))
 
 
 def locate_pinned(doc, *, unique: bool = False):
@@ -536,16 +480,9 @@ def _parse_pinned_section(
     """
     Extract the Pinned Context section body from CLAUDE.md content.
 
-    The offset view of `locate_pinned` (with `unique=False`). Returns positions
-    in the FULL file content so callers can use them directly for
-    read-mutate-write on the file.
-
-    THE BODY STARTS AT THE FIRST NON-BLANK ROW AFTER THE HEADING, not at the
-    row after it. Blank rows between the heading and the first pin stay outside
-    the body, as they always have, because `_strip_budget_warnings` takes back
-    only a warning at the head of the body and `apply_staleness_markings`
-    writes a new one there. The body ends with the section's last row,
-    terminator included.
+    The offset view of `_pinned_body`, on the whole-file parse of `content`.
+    Returns positions in the FULL file content so callers can use them
+    directly for read-mutate-write on the file.
 
     AN EMPTY SECTION IS AN INSTRUMENT LIMIT, NOT AN ABSENT ONE, AND
     `allow_empty_section` IS THE OPT-IN THAT SAYS SO. A heading with a body of
@@ -574,22 +511,39 @@ def _parse_pinned_section(
     located = locate_pinned(doc)
     if located.state is not State.FOUND:
         return None
+    body = _pinned_body(doc, located)
+    if body is None:
+        if not allow_empty_section:
+            return None
+        pinned_end = doc.lines[located.spans[0][1]].end
+        return pinned_end, pinned_end, ""
+    first, last = body
+    pinned_start, pinned_end = doc.lines[first].start, doc.lines[last].end
+    return pinned_start, pinned_end, content[pinned_start:pinned_end]
+
+
+def _pinned_body(doc, located) -> Optional[Tuple[int, int]]:
+    """
+    The rows of a FOUND Pinned section's body in `doc`, or None when the body
+    is only blank rows.
+
+    THE BODY STARTS AT THE FIRST NON-BLANK ROW AFTER THE HEADING, not at the
+    row after it. Blank rows between the heading and the first pin stay outside
+    the body, as they always have, because `_strip_budget_warnings` takes back
+    only a warning at the head of the body and `apply_staleness_markings`
+    writes a new one there. The body ends with the section's last row,
+    terminator included.
+
+    Every reader of the body reads these rows of the whole-file parse; none
+    parses the body's text on its own, because a parse that starts mid-file
+    starts in a state the whole file does not have.
+    """
     heading, last = located.spans[0]
-    pinned_end = doc.lines[last].end
-    pinned_start = next(
-        (doc.lines[row].start for row in range(heading + 1, last + 1)
-         if doc.lines[row].content.strip()),
-        pinned_end,
-    )
-    pinned_content = content[pinned_start:pinned_end]
-    if not pinned_content.strip() and not allow_empty_section:
-        return None
-    return pinned_start, pinned_end, pinned_content
+    first = next((row for row in range(heading + 1, last + 1) if doc.lines[row].content.strip()), None)
+    return None if first is None else (first, last)
 
 
-def detect_stale_entries(
-    pinned_content: str,
-) -> List[Tuple[int, str, str]]:
+def detect_stale_entries(doc, first: int, last: int) -> List[Tuple[int, str, str]]:
     """
     Detect stale pinned context entries without modifying them.
 
@@ -601,17 +555,14 @@ def detect_stale_entries(
     parser, so a `### ` line inside a fenced block is part of the entry above.
 
     Args:
-        pinned_content: The text of the Pinned Context section (after the
-            ## heading).
+        doc: The whole-file parse.
+        first, last: The rows of the Pinned body.
 
     Returns:
         List of (entry_index, date_string, entry_heading) tuples for each
         stale entry found. entry_index is the entry's position in the section.
     """
-    from shared.claude_md_markers import parse
-
-    doc = parse(pinned_content)
-    headings = doc.find_lines(_PIN_HEADING_ROW)
+    headings = doc.find_lines(_PIN_HEADING_ROW, (first, last))
     if not headings:
         return []
 
@@ -627,13 +578,13 @@ def detect_stale_entries(
 
     stale_entries: List[Tuple[int, str, str]] = []
 
-    for i, (first, last) in enumerate(_entry_rows(doc, headings)):
+    for i, (entry_first, entry_last) in enumerate(_entry_rows(headings, last)):
         # Skip entries already marked stale
-        if doc.find_lines(_STALE_MARK_ROW, (first, last)):
+        if doc.find_lines(_STALE_MARK_ROW, (entry_first, entry_last)):
             continue
 
-        entry_text = pinned_content[doc.lines[first].start:doc.lines[last].end]
-        heading = doc.lines[first].content
+        entry_text = doc.text[doc.lines[entry_first].start:doc.lines[entry_last].end]
+        heading = doc.lines[entry_first].content
 
         # Look for PR merged date first (most specific)
         date_str = None
@@ -660,10 +611,10 @@ def detect_stale_entries(
     return stale_entries
 
 
-def _entry_rows(doc, headings) -> List[Tuple[int, int]]:
+def _entry_rows(headings, last: int) -> List[Tuple[int, int]]:
     """(heading row, last row) of each entry: to the row before the next
-    heading, the last entry to the end of the document."""
-    ends = [row - 1 for row in headings[1:]] + [len(doc.lines) - 1]
+    heading, the last entry to `last`, the body's last row."""
+    ends = [row - 1 for row in headings[1:]] + [last]
     return list(zip(headings, ends))
 
 
@@ -687,9 +638,9 @@ def _budget_warning_line(pinned_tokens: int) -> str:
 
 def apply_staleness_markings(
     content: str,
-    pinned_start: int,
-    pinned_end: int,
-    pinned_content: str,
+    doc,
+    first: int,
+    last: int,
 ) -> Tuple[str, int, bool, str]:
     """
     Apply stale markers and budget warnings to pinned content.
@@ -710,10 +661,10 @@ def apply_staleness_markings(
       - THE WARNING CANNOT INFLATE ITS OWN COUNT. The measured body contains NO
         line of this module's own shape, on pass 1 or pass 500, so the number
         does not creep upward as the report of it is re-read. The head run is
-        taken back from the document, and `_body_without_warnings` takes the
-        rest out of the measurement copy, so the figure reports the pins of the
-        user and nothing this module wrote. A stranded line stays visible in the
-        document and no longer counts against the budget.
+        taken back from the document, and the rest is left out of the
+        measurement copy, so the figure reports the pins of the user and nothing
+        this module wrote. A stranded line stays visible in the document and no
+        longer counts against the budget.
       - THE PASS IS IDEMPOTENT BY CONSTRUCTION, not by a guard. The emitted line
         is a pure function of the user's pinned body, so a second pass over
         unchanged pins produces identical bytes and writes nothing.
@@ -723,64 +674,69 @@ def apply_staleness_markings(
     facing the other way. Removing it is a REPAIR of a line this module wrote,
     which is why it is safe; this function never deletes anything a user wrote.
 
+    THE BODY IS READ AS ROWS OF THE WHOLE-FILE PARSE AND NEVER RE-PARSED. The
+    body written back and the copy measured are both built from `doc`'s rows,
+    with the STALE lines added below their headings, so no text is parsed on
+    its own: a parse that starts mid-file starts in a state the whole file does
+    not have.
+
     Args:
         content: Full CLAUDE.md file content.
-        pinned_start: Start offset of pinned section body in content.
-        pinned_end: End offset of pinned section body in content.
-        pinned_content: The pinned section body text.
+        doc: The whole-file parse of `content`.
+        first, last: The rows of the Pinned body (`_pinned_body`).
 
     Returns:
         Tuple of (new_full_content, stale_count, was_modified, budget_warning_str).
     """
+    pinned_start = doc.lines[first].start
+    pinned_end = doc.lines[last].end
     # The bytes to compare against at the end. `was_modified` is DERIVED from
     # this comparison rather than accumulated in a flag, so it cannot disagree
     # with what actually changed -- and a pass that rewrites a warning to the
     # same value reports no modification and skips the write.
-    original_pinned_content = pinned_content
+    original_pinned_content = content[pinned_start:pinned_end]
 
     # STEP 1, BEFORE ANY ROW IS READ OR ANY TOKEN IS COUNTED: take back the
     # warning written by an earlier pass. Every step below then sees the user's
-    # own pinned body. Order is load-bearing -- the heading rows below are
-    # offsets into this string, so a later strip would invalidate them.
-    from shared.claude_md_markers import parse
-
-    body = _strip_budget_warnings(pinned_content)
-
-    doc = parse(body)
-    entries = _entry_rows(doc, doc.find_lines(_PIN_HEADING_ROW))
+    # own pinned body.
+    kept_first = _strip_budget_warnings(doc, first, last)
+    entries = _entry_rows(doc.find_lines(_PIN_HEADING_ROW, (kept_first, last)), last)
 
     # Count already-marked entries
-    already_stale = sum(1 for first, last in entries
-                        if doc.find_lines(_STALE_MARK_ROW, (first, last)))
+    already_stale = sum(1 for entry_first, entry_last in entries
+                        if doc.find_lines(_STALE_MARK_ROW, (entry_first, entry_last)))
 
-    # Detect new stale entries
-    stale_entries = detect_stale_entries(body)
-
-    # Apply stale markers in reverse order so string offsets remain valid.
-    # `body` is the parsed text and is never rewritten; the result builds in
-    # `pinned_content`.
-    pinned_content = body
-    for idx, date_str, _heading in reversed(stale_entries):
+    # Detect new stale entries. A heading that is the file's last row and has
+    # no line break gets no marker.
+    stale_entries = detect_stale_entries(doc, kept_first, last)
+    markers = {}
+    for idx, date_str, _heading in stale_entries:
         heading = doc.lines[entries[idx][0]]
-        if body[heading.end - 1:heading.end] not in ("\n", "\r"):
-            # The heading is the body's last row and has no line break; skip it
-            continue
-        pinned_content = (pinned_content[:heading.end] + _stale_marker_line(date_str)
-                          + pinned_content[heading.end:])
+        if content[heading.end - 1:heading.end] in ("\n", "\r"):
+            markers[heading.row] = _stale_marker_line(date_str)
+
+    # Build the body to write and the copy to measure from the same rows.
+    # The measured copy leaves out EVERY warning row of this module's own
+    # shape, wherever it sits: step 1 removed the leading run FROM THE
+    # DOCUMENT, and the rest stays in the body written back, so the count
+    # stops depending on POSITION while the DELETE stays on the head run.
+    warnings = set(doc.find_lines(_BUDGET_WARNING_ROW, (kept_first, last)))
+    written: List[str] = []
+    measured: List[str] = []
+    for row in range(kept_first, last + 1):
+        line = doc.lines[row]
+        text = content[line.start:line.end]
+        written.append(text)
+        if row not in warnings:
+            measured.append(text)
+        if row in markers:
+            written.append(markers[row])
+            measured.append(markers[row])
+    pinned_content = "".join(written)
 
     total_stale = already_stale + len(stale_entries)
 
-    # Measure the body with EVERY warning of this module's own shape taken out,
-    # wherever it sits. Step 1 removed the leading run FROM THE DOCUMENT, on
-    # every pass and not only on the first one, which is the hazard the old
-    # presence guard reached for and missed. This takes the rest out of a
-    # THROWAWAY COPY, so the count stops depending on POSITION while the DELETE
-    # stays on the contiguous head run.
-    #
-    # THE RESULT IS NOT ASSIGNED BACK, AND THAT IS THE WHOLE SAFETY PROPERTY.
-    # `pinned_content` is written into the document below, so an in-place
-    # exclusion here would take a line the user positioned out of their file.
-    pinned_tokens = estimate_tokens(_body_without_warnings(pinned_content))
+    pinned_tokens = estimate_tokens("".join(measured))
     budget_warning = ""
     if pinned_tokens > PINNED_CONTEXT_TOKEN_BUDGET:
         pinned_content = _budget_warning_line(pinned_tokens) + pinned_content
@@ -857,15 +813,18 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
     except OSError:
         return None
 
-    parsed = _parse_pinned_section(content)
-    if parsed is None:
+    from shared.claude_md_markers import State, parse
+
+    doc = parse(content)
+    located = locate_pinned(doc)
+    if located.state is not State.FOUND:
         return None
+    body = _pinned_body(doc, located)
+    if body is None:
+        return None
+    first, last = body
 
-    pinned_start, pinned_end, pinned_content = parsed
-
-    from shared.claude_md_markers import parse
-
-    has_entries = bool(parse(pinned_content).find_lines(_PIN_HEADING_ROW))
+    has_entries = bool(doc.find_lines(_PIN_HEADING_ROW, body))
 
     # A section with no entries still needs a pass when a warning is sitting in
     # it. Delete the last pin and the old guard returned here, which stranded
@@ -878,7 +837,7 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
     # the old line stays.
     #
     # WHETHER A CURRENT WARNING GOES ABOVE IT TURNS ON THE MEASURED BODY ALONE,
-    # AND THAT CONDITION IS NEW. `_body_without_warnings` takes lines of this
+    # AND THAT CONDITION IS NEW. `apply_staleness_markings` leaves lines of this
     # shape out of the measurement wherever they sit, so the stranded line adds
     # no token to the decision.
     #   - If the pins of the user exceed the budget, this pass adds one warning
@@ -896,11 +855,11 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
     # size, so this code never starts a report in a document it has not written
     # to before. The strict `~N tokens (budget: M)` shape carries that
     # discrimination, not the anchor.
-    if not has_entries and not _has_budget_warning(pinned_content):
+    if not has_entries and not _has_budget_warning(doc, first, last):
         return None
 
     new_content, stale_count, modified, budget_warning = apply_staleness_markings(
-        content, pinned_start, pinned_end, pinned_content
+        content, doc, first, last
     )
 
     # Write back if modified — under file_lock with TOCTOU symlink guard.
@@ -1046,14 +1005,14 @@ def check_pinned_block_signal(
     except OSError:
         return None
 
-    parsed = _parse_pinned_section(content)
-    if parsed is None:
-        return None
-
-    _, _, pinned_content = parsed
+    from shared.claude_md_markers import State, parse
 
     try:
-        pins = parse_pins(pinned_content)
+        doc = parse(content)
+        located = locate_pinned(doc)
+        if located.state is not State.FOUND or _pinned_body(doc, located) is None:
+            return None
+        pins = section_pins(doc, located)
     except Exception:  # noqa: BLE001 — fail-open by construction
         return None
 

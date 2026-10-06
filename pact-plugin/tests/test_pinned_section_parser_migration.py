@@ -386,8 +386,8 @@ class TestTheOtherReaders:
         old = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%d")
         body = (f"### Real (PR #1, merged {old})\nbody\n"
                 f"{FENCE}\n### Example (PR #2, merged {old})\n{FENCE}\n")
-        _, count, modified, _ = apply_staleness_markings(body, 0, len(body), body)
-        new, _, _, _ = apply_staleness_markings(body, 0, len(body), body)
+        doc = parse(body)
+        new, count, modified, _ = apply_staleness_markings(body, doc, 0, len(doc.lines) - 1)
         assert (count, modified) == (1, True)
         assert new.count("<!-- STALE:") == 1
         assert new.index("<!-- STALE:") < new.index(FENCE)
@@ -397,9 +397,11 @@ class TestTheOtherReaders:
 
         line = "<!-- WARNING: Pinned context ~9 tokens (budget: 3). x -->\n"
         fenced = f"{FENCE}\n{line}{FENCE}\n"
-        assert _strip_budget_warnings(fenced) == fenced
-        assert _has_budget_warning(fenced) is False
-        assert _has_budget_warning(line) is True
+        fenced_doc, line_doc = parse(fenced), parse(line)
+        assert _strip_budget_warnings(fenced_doc, 0, 2) == 0
+        assert _has_budget_warning(fenced_doc, 0, 2) is False
+        assert _has_budget_warning(line_doc, 0, 0) is True
+        assert _strip_budget_warnings(line_doc, 0, 0) == 1  # the control: the bare line is stripped
 
     def test_the_archive_block_keeps_a_fenced_heading_inside_its_pin(self):
         import archive_pin
@@ -408,7 +410,8 @@ class TestTheOtherReaders:
         body = ("<!-- pinned: 2026-01-01 -->\n### A\nintro\n"
                 f"{FENCE}\n### fenced\n{FENCE}\n\n"
                 "<!-- pinned: 2026-02-02 -->\n### B\nbody\n")
-        block = archive_pin.extract_pin_block(body, 0, parse_pins(body))
+        doc = parse(body)
+        block = archive_pin.extract_pin_block(doc, 0, len(doc.lines) - 1, 0, parse_pins(body))
         assert block.startswith("<!-- pinned: 2026-01-01 -->\n### A")
         assert "### fenced" in block
         assert "2026-02-02" not in block

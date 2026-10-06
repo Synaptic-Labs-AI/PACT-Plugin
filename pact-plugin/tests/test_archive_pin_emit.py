@@ -44,7 +44,9 @@ import pytest
 from helpers import make_claude_md_with_pins, make_pin_entry  # noqa: E402
 
 import archive_pin  # noqa: E402
+import pin_caps  # noqa: E402
 import staleness  # noqa: E402
+from shared.claude_md_markers import parse  # noqa: E402
 import os
 from fixtures.hf_cache import hf_cache_env
 
@@ -88,12 +90,6 @@ def _two_pin_file():
     ])
 
 
-def _pinned_body(content):
-    parsed = staleness._parse_pinned_section(content)
-    assert parsed is not None, "fixture has no Pinned Context section"
-    return parsed[2]
-
-
 def _expected_block(content, index):
     """Compute the block INDEPENDENTLY of the verdict.
 
@@ -101,9 +97,18 @@ def _expected_block(content, index):
     verdict — comparing a field against itself is the vacuity mode this
     row exists to avoid.
     """
-    pinned = _pinned_body(content)
-    pins = archive_pin.parse_pins(pinned)
-    return archive_pin.extract_pin_block(pinned, index, pins)
+    doc = parse(content)
+    located = staleness.locate_pinned(doc)
+    body = staleness._pinned_body(doc, located)
+    assert body is not None, "fixture has no Pinned Context section"
+    first, last = body
+    return archive_pin.extract_pin_block(doc, first, last, index, _section_pins(content))
+
+
+def _section_pins(content):
+    """The pins of the whole file's Pinned section."""
+    doc = parse(content)
+    return pin_caps.section_pins(doc, staleness.locate_pinned(doc))
 
 
 def _ok_stub(context_value):
@@ -527,7 +532,7 @@ class TestStartEdgeDoesNotOrphanTheDateComment:
         verdict = archive_pin.build_verdict(0, db_path=None)
 
         after = content.replace(verdict["delete_string"], "", 1)
-        pins = archive_pin.parse_pins(_pinned_body(after))
+        pins = _section_pins(after)
         assert [p.heading for p in pins] == ["### Beta Pin"]
         assert pins[0].override_rationale is None, (
             "Beta inherited Alpha's pin-size-override and can now exceed the "
@@ -539,7 +544,7 @@ class TestStartEdgeDoesNotOrphanTheDateComment:
         heading_start = content.index("### Alpha Pin")
         orphaning = content[heading_start:content.index("### Beta Pin")]
         regressed = content.replace(orphaning, "", 1)
-        regressed_pins = archive_pin.parse_pins(_pinned_body(regressed))
+        regressed_pins = _section_pins(regressed)
         assert regressed_pins[0].override_rationale == (
             "load-bearing verbatim"
         ), (

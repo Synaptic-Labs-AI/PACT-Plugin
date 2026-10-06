@@ -141,7 +141,7 @@ get_project_claude_md_path = _staleness.get_project_claude_md_path
 PINNED_STALENESS_DAYS = _staleness.PINNED_STALENESS_DAYS
 
 # Date extraction from a parsed Pin.date_comment. The comment's own shape is
-# already validated upstream by `parse_pins` (`<!-- pinned: ... -->`, optionally
+# already validated upstream by `section_pins` (`<!-- pinned: ... -->`, optionally
 # carrying a trailing clause), so these only pull the dates back out of a
 # comment that already matched.
 #
@@ -174,7 +174,7 @@ def _parse_iso_date(value):
 def _pin_age_days(date_comment, now=None):
     """Return the pin's age in whole days, or None when it cannot be known.
 
-    Reads the `<!-- pinned: ... -->` comment that parse_pins already captured
+    Reads the `<!-- pinned: ... -->` comment that section_pins already captured
     on the Pin. RE-CONFIRMATION RESETS THE CLOCK: when a `reconfirmed:` date
     is present the age computes from THAT date, because the curator has
     re-attested the pin more recently than they first wrote it. That is the

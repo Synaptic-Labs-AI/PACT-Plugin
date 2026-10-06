@@ -313,21 +313,20 @@ def clear_pin_staleness_marker_if_resolved(
         # decision and stops.
         #
         # CASE A, CORRECT BY DETERMINACY, AT TWO RETURN POINTS RATHER THAN ONE.
-        # `_parse_pinned_section` returns None when no `## Pinned Context` title
-        # resolves in the scan text, and again when a title resolves with EMPTY
-        # content, because this caller takes the default
-        # `allow_empty_section=False`. EACH GIVES ZERO PINS, SO ZERO STALE PINS.
+        # `check_pinned_block_signal` returns None when no `## Pinned Context`
+        # title resolves in the file, and again when a title resolves with an
+        # EMPTY body. EACH GIVES ZERO PINS, SO ZERO STALE PINS.
         # CLEARED is a reading of the document at those two points rather than a
         # fallback from ambiguity, so the routing is correct and no repair
         # applies.
         #
         # CASE B, THE PIN PARSE DECLINES, IS A RESIDUAL OF THE CANNOT-TELL
-        # CLASS. The section resolved, `parse_pins` raised, its own handler
+        # CLASS. The section resolved, `section_pins` raised, its own handler
         # returned None, and the stale count is unknown. The marker then drops
         # on an unknown state, with the session-long durability described above.
         #
-        # WHY CASE B IS NOT REACHED ON DOCUMENT SHAPE TODAY. `parse_pins` reads
-        # rows of the fence-aware parser, and `parse` never raises on a str.
+        # WHY CASE B IS NOT REACHED ON DOCUMENT SHAPE TODAY. `section_pins` reads
+        # rows of the whole-file parse, and `parse` never raises on a str.
         # Every pattern it applies is compiled at MODULE scope in `pin_caps`, so
         # a document cannot produce `re.error`. Its one slice that could raise,
         # the comma that starts an override rationale, runs only on a row whose
@@ -337,7 +336,7 @@ def clear_pin_staleness_marker_if_resolved(
         # THE EDITS THAT REOPEN CASE B, named because nothing downstream would
         # flag them: a `re.compile` moved inside a function in `pin_caps` (it
         # turns `re.error` into a per-document event), a pattern built from
-        # document text, and a new callee in `parse_pins` with no handler of its
+        # document text, and a new callee in `section_pins` with no handler of its
         # own. A HANG IS NOT A RAISE: a catastrophic backtrack spins, and
         # neither branch above sees it.
         #

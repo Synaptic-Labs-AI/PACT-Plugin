@@ -134,7 +134,7 @@ Used by:
 
 Related:
   - scripts/check_pin_caps.py -- supplies the `--index` coordinate system
-  - hooks/pin_caps.py -- parse_pins / Pin, the parser this reuses
+  - hooks/pin_caps.py -- section_pins / Pin, the pin reader this reuses
   - skills/pact-memory/scripts/cli.py -- the save/get surface, reached by
     SUBPROCESS rather than import (keeps the process boundary the rest of
     the codebase keeps, and the CLI is the tested public surface)
@@ -366,10 +366,11 @@ def _load_hook_module(name: str):
 _pin_caps = _load_hook_module("pin_caps")
 _staleness = _load_hook_module("staleness")
 
-parse_pins = _pin_caps.parse_pins
+section_pins = _pin_caps.section_pins
 _PIN_HEADING_ROW = _pin_caps._PIN_HEADING_ROW
 _date_comment_row = _pin_caps._date_comment_row
-_parse_pinned_section = _staleness._parse_pinned_section
+locate_pinned = _staleness.locate_pinned
+_pinned_body = _staleness._pinned_body
 get_project_claude_md_path = _staleness.get_project_claude_md_path
 # The (path, base) form. `base` is the directory the resolver ACTUALLY found
 # the file under, captured before descending into `.claude` -- a trusted
@@ -409,26 +410,26 @@ class _Unevaluable(Exception):
         self.claude_md_path = claude_md_path
 
 
-def _span_start(doc, heading: int) -> int:
+def _span_start(doc, first: int, heading: int) -> int:
     """Offset where a pin's span begins: its date-comment ROW, else its heading.
 
     Extracted so the START of pin N and the END of pin N-1 are computed by the
     SAME rule. Deriving the end from the next HEADING instead would make the
     two asymmetric and let each block swallow the following pin's date comment.
-    The comment row is the one `parse_pins` attributes to the pin, so the span
-    and the parse agree by construction; the row's start keeps its indentation
-    inside the span.
+    The comment row is the one `section_pins` attributes to the pin, looked for
+    no higher than the body's first row, so the span and the pin agree by
+    construction; the row's start keeps its indentation inside the span.
     """
-    row = _date_comment_row(doc, 0, heading)
+    row = _date_comment_row(doc, first, heading)
     return doc.lines[heading if row is None else row].start
 
 
-def extract_pin_block(pinned_content: str, index: int, pins) -> str:
-    """Return the pin's block as a VERBATIM SLICE of `pinned_content`.
+def extract_pin_block(doc, first: int, last: int, index: int, pins) -> str:
+    """Return the pin's block as a VERBATIM SLICE of the file `doc` parsed.
 
     THIS IS A SLICE, NOT A RECONSTRUCTION, and the distinction is the whole
     point. Rebuilding the block as `date_comment + "\\n" + heading + "\\n" +
-    body` looks equivalent but is not: `parse_pins` walks BACKWARD over blank
+    body` looks equivalent but is not: the pin reader walks BACKWARD over blank
     lines to find the date comment and stores it `.strip()`ed, so a rebuilt
     block silently drops any blank line between comment and heading and any
     trailing whitespace on the comment line. Measured across five plausible
@@ -454,7 +455,7 @@ def extract_pin_block(pinned_content: str, index: int, pins) -> str:
                   pattern, `start` is the offset of THAT LINE'S FIRST CHARACTER
                   (so leading indentation is inside the slice); otherwise
                   `start` is the heading start.
-      - Take `source[start:end]` EXACTLY. Do not strip, rejoin, or normalize.
+      - Take `doc.text[start:end]` EXACTLY. Do not strip, rejoin, or normalize.
 
     The no-strip rule means the block carries the blank line(s) separating it
     from the next pin. That is safe and was measured rather than assumed:
@@ -473,32 +474,35 @@ def extract_pin_block(pinned_content: str, index: int, pins) -> str:
     Computing both edges with `_span_start` makes the spans partition the
     section instead of overlapping.
 
+    THE ROWS ARE THE WHOLE FILE'S, AND THE BODY IS NEVER RE-PARSED. `doc` is
+    the parse of the whole CLAUDE.md and `first`..`last` are its Pinned body
+    rows (`staleness._pinned_body`), so the headings this finds are the ones
+    `section_pins` reads: a parse that starts mid-file starts in a state the
+    whole file does not have.
+
     Args:
-        pinned_content: The Pinned Context section body (what parse_pins ate).
+        doc: The whole-file parse of CLAUDE.md.
+        first, last: The rows of the Pinned body.
         index: Position of the pin within that section.
-        pins: The full parsed Pin list (`parse_pins(pinned_content)`). Its
-            length bounds `index`; the span edges come from the same rows the
-            parse read.
+        pins: The section's Pin list (`section_pins`). Its length bounds
+            `index`; the span edges come from the same rows it read.
 
     Raises:
         _Unevaluable: if the section's headings no longer agree with `index`.
     """
-    from shared.claude_md_markers import parse
-
-    doc = parse(pinned_content)
-    headings = doc.find_lines(_PIN_HEADING_ROW)
+    headings = doc.find_lines(_PIN_HEADING_ROW, (first, last))
     if index < 0 or index >= len(headings) or index >= len(pins):
         raise _Unevaluable(
             f"pin index {index} out of range (section has {len(headings)} pins)"
         )
 
-    block_start = _span_start(doc, headings[index])
+    block_start = _span_start(doc, first, headings[index])
     if index + 1 < len(headings) and index + 1 < len(pins):
-        block_end = _span_start(doc, headings[index + 1])
+        block_end = _span_start(doc, first, headings[index + 1])
     else:
-        block_end = len(pinned_content)
+        block_end = doc.lines[last].end
 
-    return pinned_content[block_start:block_end]
+    return doc.text[block_start:block_end]
 
 
 # The project-identity predicate, and the reader for the session's worktree
@@ -1034,14 +1038,18 @@ def archive_pin(index: int, db_path=None) -> dict:
         raise _Unevaluable(f"CLAUDE.md unreadable ({type(exc).__name__})",
                            claude_md_path=claude_md_path)
 
-    parsed = _parse_pinned_section(content)
-    if parsed is None:
+    from shared.claude_md_markers import State, parse
+
+    doc = parse(content)
+    located = locate_pinned(doc)
+    body = _pinned_body(doc, located) if located.state is State.FOUND else None
+    if body is None:
         raise _Unevaluable("no Pinned Context section",
                            claude_md_path=claude_md_path)
 
-    _, _, pinned_content = parsed
+    first, last = body
     try:
-        pins = parse_pins(pinned_content)
+        pins = section_pins(doc, located)
     except Exception as exc:  # noqa: BLE001 -- parse fault is unevaluable
         raise _Unevaluable(f"pin parse failed ({type(exc).__name__})",
                            claude_md_path=claude_md_path)
@@ -1060,7 +1068,7 @@ def archive_pin(index: int, db_path=None) -> dict:
     # itself and pass unconditionally.
     heading = pin.heading[4:] if pin.heading.startswith("### ") else pin.heading
 
-    block = extract_pin_block(pinned_content, index, pins)
+    block = extract_pin_block(doc, first, last, index, pins)
     if not block.strip():
         raise _Unevaluable("pin block is empty", heading=heading,
                            claude_md_path=claude_md_path)

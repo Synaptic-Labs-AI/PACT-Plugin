@@ -86,7 +86,7 @@ class TestCheckPinnedBlockSignal_EndToEnd:
         assert check_pinned_block_signal(claude_md) is None
 
     def test_parse_exception_fails_open(self, tmp_path, monkeypatch):
-        """parse_pins raising does NOT propagate — block signal returns None."""
+        """The pin read raising does NOT propagate — block signal returns None."""
         from staleness import check_pinned_block_signal
         import staleness as staleness_mod
         claude_md = tmp_path / "CLAUDE.md"
@@ -94,10 +94,10 @@ class TestCheckPinnedBlockSignal_EndToEnd:
             _build_pinned_claude_md(2, stale_indices={0, 1}), encoding="utf-8"
         )
 
-        def _boom(_content):
+        def _boom(*_args):
             raise RuntimeError("parse blew up")
 
-        monkeypatch.setattr(staleness_mod, "parse_pins", _boom)
+        monkeypatch.setattr(staleness_mod, "section_pins", _boom)
         assert check_pinned_block_signal(claude_md) is None
 
 
@@ -663,8 +663,10 @@ class TestParsePinsVsDetectStaleEntries_Agreement:
         # carrying a STALE marker, so on marked fixtures it MUST return the
         # empty list — both parsers agree "marked entries are finalized
         # stale, no further flagging needed."
+        from shared.claude_md_markers import parse
         from staleness import detect_stale_entries
-        assert len(detect_stale_entries(content)) == 0, (
+        doc = parse(content)
+        assert len(detect_stale_entries(doc, 0, len(doc.lines) - 1)) == 0, (
             "detect_stale_entries flagged marker-carrying entries; it "
             "should skip them to avoid double-marking"
         )
