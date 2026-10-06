@@ -3016,6 +3016,27 @@
    }
   ]
  },
+ "html_comment_unclosed_above_pinned_no_structure": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P5",
+  "note": "a never-closed comment above Pinned that covers no fence or block start stays certain"
+ },
  "html_comment_unclosed_above_pinned_over_fence": {
   "blocks": {
    "MANAGED": {

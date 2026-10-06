@@ -222,23 +222,25 @@ def test_a_block_the_parser_cannot_place_is_refused_and_left_byte_identical(proj
     assert _read(project) == text
 
 
-def test_a_write_that_would_not_read_back_is_refused(project, monkeypatch):
-    _write(project, "intro\n" + OLD_BLOCK + "\n")
-    monkeypatch.setattr(session_resume, "_session_block_text",
-                        lambda *args: S + "\n" + S + "\n" + E)
-    status = _status()
-    assert "did not read back" in status
-    assert _read(project) == "intro\n" + OLD_BLOCK + "\n"
+READ_BACK = ("the rewritten Current Session block did not read back as one block "
+             "where it was written: ")
 
 
-def test_a_write_whose_block_reads_back_elsewhere_is_refused(project, monkeypatch):
-    # One well-formed block, so the state check passes; it starts a row below
-    # where the write put it, so only the position check refuses.
+@pytest.mark.parametrize("written, where", [
+    # two starts: the lookup's own reason names the lines
+    (S + "\n" + S + "\n" + E,
+     f"{S!r} on line 3 starts a block inside the block started on line 2"),
+    # one well-formed block a row below where the write put it
+    ("x\n" + S + "\n" + E, "it reads back at line 3, not line 2 where it was written"),
+    # no markers at all
+    ("no markers", "no block reads back at line 2, where it was written"),
+], ids=["two starts", "a row below", "no block"])
+def test_a_write_that_would_not_read_back_is_refused_naming_the_line(
+        project, monkeypatch, written, where):
     _write(project, "intro\n" + OLD_BLOCK + "\n")
-    monkeypatch.setattr(session_resume, "_session_block_text",
-                        lambda *args: "x\n" + S + "\n" + E)
+    monkeypatch.setattr(session_resume, "_session_block_text", lambda *args: written)
     status = _status()
-    assert "did not read back" in status
+    assert status.startswith("Session info skipped: " + READ_BACK + where + ". ")
     assert _read(project) == "intro\n" + OLD_BLOCK + "\n"
 
 

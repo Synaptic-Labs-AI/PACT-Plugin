@@ -282,13 +282,21 @@ def _plan_session_block(
     # The write must read back as one block, exactly where it was put.
     written = parse(new_content)
     check = written.find_block(SESSION_START_MARKER, SESSION_END_MARKER)
-    if check.state is not State.FOUND or (
-        _content_span(written, *check.spans[0]) != (start, start + len(session_block))
+    if check.state is State.FOUND and (
+        _content_span(written, *check.spans[0]) == (start, start + len(session_block))
     ):
-        return None, _session_block_refusal(
-            "the rewritten Current Session block did not read back as one block "
-            "where it was written")
-    return new_content, status
+        return new_content, status
+    written_line = sum(1 for line in written.lines if line.start <= start)
+    if check.reason:
+        where = check.reason
+    elif check.state is State.FOUND:
+        where = (f"it reads back at line {check.spans[0][0] + 1}, "
+                 f"not line {written_line} where it was written")
+    else:
+        where = f"no block reads back at line {written_line}, where it was written"
+    return None, _session_block_refusal(
+        "the rewritten Current Session block did not read back as one block "
+        f"where it was written: {where}")
 
 
 def _session_block_insertion(doc: Document) -> tuple[int | None, str | None]:

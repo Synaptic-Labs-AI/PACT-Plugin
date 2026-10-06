@@ -9,10 +9,12 @@ Used by: pytest.
 The expected outcome of each call is read from the corpus's hand-written block
 states (tests/fixtures/claude_md_corpus/expected.json), never computed by the
 parser: a block the table calls UNKNOWN, DUPLICATE or MALFORMED is refused with
-the line named, and a reader returns nothing from it. Every write is checked
-after the fact: the target block reads back FOUND once, only that block and
-blank separator rows changed, every other row keeps its bytes, its kind and its
-hidden flag, and a second plan writes nothing.
+the line named, and a reader returns nothing from it. A new Current Session
+block that would land inside an HTML block the file never closes is refused
+with that block's line named. Every write is checked after the fact: the
+target block reads back FOUND once, only that block and blank separator rows
+changed, every other row keeps its bytes, its kind and its hidden flag, and a
+second plan writes nothing.
 """
 
 import collections
@@ -43,6 +45,14 @@ _EXPECTED = json.loads((_CORPUS / "expected.json").read_text(encoding="utf-8"))
 _CASES = sorted(_EXPECTED)
 _UNCERTAIN = {"UNKNOWN", "DUPLICATE", "MALFORMED"}
 _NAMES_A_LINE = re.compile(r"\blines? \d")
+# Certain files with no Current Session block whose new block is appended
+# inside an HTML block the file opens and never closes. Its start marker would
+# end that block, so the read-back refuses, naming the line that opens it and
+# the cause.
+_APPENDED_INSIDE_AN_OPEN_BLOCK = {
+    "html_comment_unclosed_above_pinned_no_structure":
+        (2, "an HTML block is ended only by a line that starts a comment"),
+}
 KERNEL_START, KERNEL_END = "<!-- PACT_START:", "<!-- PACT_END -->"
 SID = "0123abcd-0000-4000-8000-00000000000a"
 STARTED = "2026-01-02 03:04:05 UTC"
@@ -98,6 +108,13 @@ def test_the_session_block_writer(case):
     new, status = _plan(text)
     if state in _UNCERTAIN:
         assert new is None and status and _NAMES_A_LINE.search(status), status
+        return
+    if case in _APPENDED_INSIDE_AN_OPEN_BLOCK:
+        assert state == "ABSENT"
+        line, cause = _APPENDED_INSIDE_AN_OPEN_BLOCK[case]
+        refusal = ("did not read back as one block where it was written: "
+                   f"line {line} starts an uncertain region: {cause}")
+        assert new is None and status and refusal in status, status
         return
     assert new is not None, status  # FOUND is rewritten with new values, ABSENT gets a block
     (b, brows), (a, arows), moved = _changed_rows(text, new)
