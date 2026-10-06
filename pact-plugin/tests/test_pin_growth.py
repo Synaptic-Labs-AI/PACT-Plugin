@@ -802,6 +802,14 @@ def test_revealing_an_oversize_pin_and_growing_it_is_denied_on_size():
     assert (decision.verdict, decision.cause) == ("DENY", "size")
 
 
+def test_revealing_an_oversize_pin_and_adding_a_new_one_is_denied_on_size():
+    # The revealed pin was there before and keeps its successor, so the new
+    # oversize pin has no pin before it to stand in for.
+    added = sub(sub(HIDDEN_BIG, "## Notes\n", "#### Notes\n"), pin(8), pin(8) + pin(50, body=_prose(12, 1700)))
+    decision = decide(HIDDEN_BIG, added)
+    assert (decision.verdict, decision.cause) == ("DENY", "size")
+
+
 NO_PINNED_BLOCK = sub(claude_md(""), "## Pinned Context\n\n", "")
 # No Pinned section anywhere after the change: no section in the memory block,
 # and none outside it either.

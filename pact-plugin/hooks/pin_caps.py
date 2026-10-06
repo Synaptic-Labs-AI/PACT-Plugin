@@ -22,7 +22,8 @@ divergence.
 from __future__ import annotations
 
 import re
-from typing import List, Literal, NamedTuple, Optional
+from collections import Counter
+from typing import Dict, List, Literal, NamedTuple, Optional, Tuple
 
 # Hard cap on total pin count. Enforcement predicate is `len(existing) >= 12
 # → refuse add` (off-by-one hazard per plan risk row 1).
@@ -159,6 +160,10 @@ class Pin(NamedTuple):
     date_comment: Optional[str]      # "<!-- pinned: YYYY-MM-DD[, ...] -->" preceding heading
     override_rationale: Optional[str]  # captured rationale; None if no override
     is_stale: bool                   # whether a STALE marker is present
+    # The body's non-blank rows as the size cap charges them: pin comments
+    # struck on prose rows, trailing blanks dropped. The per-pin size rule
+    # reads which text a pin holds from them.
+    lines: Tuple[str, ...] = ()
 
 
 class CapViolation(NamedTuple):
@@ -191,6 +196,11 @@ def _charge(doc, first: int, last: int) -> int:
     strikes can end past it, so the result is the same, and a run of comment
     openers with no close after them is not rescanned from each opener.
     """
+    return len("\n".join(_charged_rows(doc, first, last)).strip())
+
+
+def _charged_rows(doc, first: int, last: int) -> List[str]:
+    """Rows `first`..`last` of `doc` as `_charge` counts them."""
     from shared.claude_md_markers import Kind
 
     kept = []
@@ -204,7 +214,7 @@ def _charge(doc, first: int, last: int) -> int:
                 pos = match.end()
             content = "".join(pieces) + content[pos:]
         kept.append(content.rstrip(" \t"))
-    return len("\n".join(kept).strip())
+    return kept
 
 
 def _extract_body_chars(body: str) -> int:
@@ -297,13 +307,15 @@ def pins_in_rows(doc, first: int, last: int) -> List[Pin]:
             date_comment = doc.lines[comment_row].content.strip()
             override_rationale = _override_rationale(doc, comment_row)
         body_rows = (heading + 1, body_last)
+        rows = _charged_rows(doc, heading + 1, body_last)
         pins.append(Pin(
             heading=doc.lines[heading].content,
             body=doc.text[body_start:body_end],
-            body_chars=_charge(doc, heading + 1, body_last),
+            body_chars=len("\n".join(rows).strip()),
             date_comment=date_comment,
             override_rationale=override_rationale,
             is_stale=bool(doc.find_lines(_STALE_MARKER_ANYWHERE_ROW, body_rows)),
+            lines=tuple(row for row in rows if row.strip()),
         ))
     return pins
 
@@ -775,6 +787,143 @@ def compute_deny_reason(
 
     # Unknown kind — conservative: deny (safer than silent allow).
     return _render_deny_reason(post_violation)
+
+
+# The per-pin size rule's share: a post pin joins a pre pin when it holds at
+# least this fraction of its own word pairs from it, and a pre pin has a
+# successor when a post pin holds this fraction of the pre pin's pairs. Lower
+# admits more renamed rewrites as the same pin; higher sends more of them to
+# orphan pairing.
+_DESCENT_SHARE = 0.5
+
+
+def _violates(pin: Pin) -> bool:
+    return pin.body_chars > PIN_SIZE_CAP and not has_size_override(pin)
+
+
+def _word_pairs(pin: Pin) -> Counter:
+    """The pin's text as a multiset of consecutive word pairs, the words of
+    all its lines run together; a pin of one word is that word alone."""
+    words = " ".join(pin.lines).split()
+    if len(words) < 2:
+        return Counter(words)
+    return Counter(f"{left} {right}" for left, right in zip(words, words[1:]))
+
+
+def size_violation(pre_pins: List[Pin], post_pins: List[Pin]) -> Optional[str]:
+    """The per-pin size rule: the deny text for the first pin over the size cap
+    that the change made new or grew, or None. For a Pinned section located
+    before the change.
+
+    A pin violates when its charged body is over the cap with no valid
+    override. Pins before and after the change are joined into components by
+    the same heading (one to one, in order), by shared word pairs, and by text
+    that moved between them; renames and moves stay the same pin. In a
+    component that held a violator before, no violator after may be larger
+    than its largest violator before, and the violators after may not add up
+    to more than those before. A violator after in a component that held none
+    before must take a violator before with no successor, at least as large,
+    that sits in a component with no violator after.
+    """
+    bad = [q for q, pin in enumerate(post_pins) if _violates(pin)]
+    if not bad:
+        return None
+    parent: Dict[tuple, tuple] = {}
+
+    def find(node):
+        while parent.get(node, node) != node:
+            node = parent[node]
+        return node
+
+    def join(a, b):
+        a, b = find(a), find(b)
+        if a != b:
+            parent[a] = b
+
+    def normal(heading):
+        return " ".join(heading.split()).casefold()
+
+    edges, descended, partnered = [], set(), set()
+    for q, post in enumerate(post_pins):
+        for p, pre in enumerate(pre_pins):
+            if p not in partnered and normal(pre.heading) == normal(post.heading):
+                partnered.add(p)
+                edges.append((p, q))
+                descended.add(p)
+                break
+    pre_pairs = [_word_pairs(pin) for pin in pre_pins]
+    post_pairs = [_word_pairs(pin) for pin in post_pins]
+    for q, mine in enumerate(post_pairs):
+        size = sum(mine.values())
+        if not size:
+            continue
+        for p, theirs in enumerate(pre_pairs):
+            shared = sum((mine & theirs).values())
+            if shared >= _DESCENT_SHARE * size:
+                edges.append((p, q))
+            if sum(theirs.values()) and shared >= _DESCENT_SHARE * sum(theirs.values()):
+                descended.add(p)
+    for p, q in edges:
+        join(("q", q), ("p", p))
+
+    # Text moved between components joins them, so a paragraph moved from one
+    # oversize pin into another leaves the pair one maximum and one sum.
+    post_lines = [Counter(pin.lines) for pin in post_pins]
+    kept_lines: Dict[tuple, Counter] = {}
+    for q, lines in enumerate(post_lines):
+        kept_lines.setdefault(find(("q", q)), Counter()).update(lines)
+    links = []
+    for p, pin in enumerate(pre_pins):
+        root = find(("p", p))
+        lost = Counter(pin.lines) - kept_lines.get(root, Counter())
+        if lost:
+            links.extend((p, q) for q, lines in enumerate(post_lines)
+                         if find(("q", q)) != root and lines & lost)
+    pairs_before: Dict[tuple, Counter] = {}
+    pairs_after: Dict[tuple, Counter] = {}
+    first_pre: Dict[tuple, int] = {}
+    for p, pairs in enumerate(pre_pairs):
+        root = find(("p", p))
+        pairs_before.setdefault(root, Counter()).update(pairs)
+        first_pre.setdefault(root, p)
+    for q, pairs in enumerate(post_pairs):
+        pairs_after.setdefault(find(("q", q)), Counter()).update(pairs)
+    lost_pairs = {root: pairs - pairs_after.get(root, Counter()) for root, pairs in pairs_before.items()}
+    for q, pairs in enumerate(post_pairs):
+        root = find(("q", q))
+        gained = pairs - pairs_before.get(root, Counter())
+        count = sum(gained.values())
+        if not count:
+            continue
+        for other, lost in lost_pairs.items():
+            if other != root and lost and 2 * sum((gained & lost).values()) >= count:
+                links.append((first_pre[other], q))
+    for p, q in links:
+        join(("q", q), ("p", p))
+
+    components: Dict[tuple, tuple] = {}
+    for p, pin in enumerate(pre_pins):
+        if _violates(pin):
+            components.setdefault(find(("p", p)), ([], []))[0].append(pin.body_chars)
+    for q in bad:
+        components.setdefault(find(("q", q)), ([], []))[1].append(post_pins[q].body_chars)
+    orphans = []
+    for before, after in components.values():
+        if not after:
+            continue
+        if not before:
+            orphans.extend(after)
+        elif max(after) > max(before) or sum(after) > sum(before):
+            return DENY_REASON_SIZE.format(chars=max(after), cap=PIN_SIZE_CAP)
+    taken = {root for root, (_, after) in components.items() if after}
+    free = sorted(pin.body_chars for p, pin in enumerate(pre_pins)
+                  if _violates(pin) and p not in descended and find(("p", p)) not in taken)
+    for chars in sorted(orphans, reverse=True):
+        fit = next((size for size in free if size >= chars), None)
+        if fit is None:
+            return DENY_REASON_SIZE.format(chars=chars, cap=PIN_SIZE_CAP)
+        free.remove(fit)
+    return None
 
 
 def _growth_deny_reason(

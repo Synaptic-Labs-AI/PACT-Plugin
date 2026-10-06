@@ -43,10 +43,11 @@ size advisory. A bound only ever allows.
 THE DECISION. `pin_cap_decision` is the one verdict for the gate and the Bash
 report: no Pinned section anywhere after the change allows plainly, and one
 PACT cannot locate allows with an advisory; growth above zero with more than
-the cap's pins after it denies on count; the size axis compares the pins before
-with the pins after, and with a located section before allows when either its
-pins or the pins over R allow; the budget, the timer and any failure allow with
-an advisory. It never raises.
+the cap's pins after it denies on count; with a located section before, the
+size axis checks each new or grown pin's size on its own
+(`pin_caps.size_violation`) and allows when either the section's pins or the
+pins over R allow, and with none it compares the worst pins before and after;
+the budget, the timer and any failure allow with an advisory. It never raises.
 """
 
 from __future__ import annotations
@@ -56,7 +57,7 @@ import re
 import signal
 from typing import NamedTuple
 
-from pin_caps import PIN_COUNT_CAP, Pin, _charge, compute_deny_reason, pins_in_rows, section_pins
+from pin_caps import PIN_COUNT_CAP, Pin, _charge, compute_deny_reason, pins_in_rows, section_pins, size_violation
 
 from .claude_md_manager import MEMORY_END_MARKER, MEMORY_START_MARKER
 from .claude_md_markers import Document, Kind, Located, State, _closes, _opener, parse
@@ -664,15 +665,21 @@ def _decide(before: str, after: str, trim: bool) -> PinDecision:
         else:
             size_before, size_after = _size_pins(t, R, post_pins)
         pins_before = len(post_pins) - (growth or 0)
-    size_reason = compute_deny_reason(size_before, size_after, growth=0)
+    if found_before:
+        # Each new or grown pin's size on its own, renames and moves kept as
+        # the same pin.
+        size_reason = size_violation(size_before, size_after)
+    else:
+        size_reason = compute_deny_reason(size_before, size_after, growth=0)
     if size_reason is not None and found_before:
         # A pin revealed below a fixed stray heading was there before on the
         # size axis too: read the pins before over R as the rule extends it,
-        # and allow when either reading allows.
+        # and allow when either reading allows. The rule is not monotone in
+        # the pins before, so a wider reading alone could refuse.
         if growth is None:
             growth = pin_growth(before_doc, after_doc, trim=trim, detail=detail)
             pins_before = len(post_pins) - (growth or 0)
-        if compute_deny_reason(pins_in_rows(before_doc, *detail["region"]), size_after, growth=0) is None:
+        if size_violation(pins_in_rows(before_doc, *detail["region"]), size_after) is None:
             size_reason = None
     growth = growth or 0
     if growth > 0 and len(post_pins) > PIN_COUNT_CAP:
