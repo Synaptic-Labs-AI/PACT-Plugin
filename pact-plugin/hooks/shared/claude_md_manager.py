@@ -894,9 +894,11 @@ def _plan_kernel_strip(
     strip is not due. `notice` is then what the pass returns: None with no
     block, or why the block was left alone. Pure, so a file that is not valid
     UTF-8 gets the same decision from its replace-decoded copy. The block is
-    located by the parser, so a fenced or inline-code mention is not it.
+    located by the parser, so a fenced or inline-code mention is not it. A
+    removal that would leave part of the file unreadable is skipped, with the
+    line named.
     """
-    from .claude_md_markers import State, parse
+    from .claude_md_markers import State, parse, uncertainty_added
 
     doc = parse(content)
     block = doc.find_block(_KERNEL_START_MARKER, _KERNEL_END_MARKER)
@@ -929,10 +931,21 @@ def _plan_kernel_strip(
     pre_clean = pre_marker.rstrip("\r\n")
     post_clean = post_marker.lstrip("\r\n")
     if pre_clean and post_clean:
-        return None, pre_clean + "\n\n" + post_clean
-    if pre_clean:
-        return None, pre_clean + "\n"
-    return None, post_clean
+        new_content = pre_clean + "\n\n" + post_clean
+    elif pre_clean:
+        new_content = pre_clean + "\n"
+    else:
+        new_content = post_clean
+    # The block can hold the line that closes an HTML block the user opened
+    # above it; removing it would leave the rest of the file unreadable.
+    reason = uncertainty_added(doc, parse(new_content))
+    if reason:
+        return (
+            f"Migration skipped: {target_file}: {reason}. To avoid data loss the "
+            "file was left unchanged; inspect it and close the HTML block that "
+            "line opens."
+        ), None
+    return None, new_content
 
 
 def strip_orphan_kernel_block() -> str | None:

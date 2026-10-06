@@ -106,6 +106,31 @@ def test_the_kernel_strip_refuses_a_block_it_cannot_place(home_file, text, line)
     assert home_file.read_text(encoding="utf-8") == text
 
 
+@pytest.mark.parametrize("opener, closer", [
+    ("<pre>", "a </pre> b"),
+    ("<?php", "a ?> b"),
+    ("<![CDATA[", "a ]]> b"),
+])
+def test_the_kernel_strip_refuses_a_removal_that_takes_an_html_blocks_closer(
+        home_file, opener, closer):
+    # The block holds the line that closes an HTML block opened above it, and a
+    # fence follows: without that line the HTML block would cover the fence.
+    text = f"# Mine\n{opener}\nnotes\n{KS}\n{closer}\n{KE}\n\n```\nexample\n```\n"
+    home_file.write_text(text, encoding="utf-8")
+    assert _str(strip_orphan_kernel_block()) == (
+        f"Migration skipped: {home_file}: the update would make line 2 start a region "
+        "PACT cannot read: an HTML block is never closed. To avoid data loss the file "
+        "was left unchanged; inspect it and close the HTML block that line opens.")
+    assert home_file.read_text(encoding="utf-8") == text
+
+
+def test_the_kernel_strip_removes_a_block_after_the_html_blocks_closer(home_file):
+    home_file.write_text(f"# Mine\n<pre>\na </pre> b\n{KERNEL}\n\n```\nexample\n```\n",
+                         encoding="utf-8")
+    assert "Removed obsolete PACT kernel block" in _str(strip_orphan_kernel_block())
+    assert home_file.read_text(encoding="utf-8") == "# Mine\n<pre>\na </pre> b\n\n```\nexample\n```\n"
+
+
 def test_the_kernel_strip_is_silent_on_an_uncertain_region_with_no_kernel_text(home_file):
     # The unclosed fence leaves the rest of the file uncertain, but no kernel
     # marker text is in it, so there is nothing to strip or report. A project
