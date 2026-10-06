@@ -1199,14 +1199,14 @@ class TestPinStalenessGate_FailOpenIsReported:
 
 
 class TestPinStalenessGate_SimulationEditEdges:
-    """THE THREE DECLARED EDIT EDGES OF `_simulate_post_edit_document`.
+    """THE EDIT EDGES OF `_simulate_post_edit_document`.
 
-    Its docstring enumerates exactly three edges ported from
-    `pin_caps.build_simulated_pins`:
+    It reads the shared simulation, `shared.edit_simulation.simulate`:
       `replace_all` TRUE  -> replace each occurrence.
       `replace_all` FALSE -> replace the first occurrence.
-      an EMPTY `old_string` -> return the PRE-state.
-    The middle one was armed. The other two were not.
+      an EMPTY `old_string` on a file that holds text -> return the PRE-state,
+        because the tool refuses that edit. (On a blank file it creates or
+        fills the file; see `TestPinStalenessGate_SharedSimulation`.)
 
     WHY THESE ARMS READ THE SIMULATION DIRECTLY RATHER THAN THE VERDICT.
     Driven through the whole decision, an empty-`old_string` arm can pass
@@ -1218,13 +1218,13 @@ class TestPinStalenessGate_SimulationEditEdges:
     the unit these arms drive.
     """
 
-    def test_an_empty_old_string_returns_the_pre_state_unchanged(self):
-        """The malformed-payload guard, held by identity against the input.
+    def test_an_empty_old_string_on_a_file_with_text_returns_the_pre_state(self):
+        """The edit the tool refuses, held by identity against the input.
 
-        `str.replace` with an empty needle puts the replacement BETWEEN each
-        character, which is a document the tool never produces. The guard
-        returns the pre-state so the caller compares pre against pre and the
-        normal contract applies.
+        The Edit tool refuses an empty `old_string` on a file that holds text,
+        so the file is unchanged and the caller compares pre against pre.
+        `str.replace` with an empty needle would instead put the replacement
+        BETWEEN each character, a document the tool never produces.
 
         NON-VACUITY: identity with `current` is a strong oracle here, because
         the mutated form produces a document that is longer than the input by
@@ -1244,9 +1244,9 @@ class TestPinStalenessGate_SimulationEditEdges:
             "AN EMPTY `old_string` DID NOT RETURN THE PRE-STATE. "
             "`str.replace` with an empty needle interleaves the replacement "
             "between every character, so the gate would then compare the "
-            "pre-state against a document the tool cannot produce. The stated "
-            "reason for this edge is that a malformed payload must not become "
-            "a silent bypass, and that reason is now unheld.\n"
+            "pre-state against a document the tool cannot produce. The tool "
+            "refuses this edit on a file that holds text, so the gate must "
+            "judge the file unchanged.\n"
             f"  length in: {len(current)}   length out: {len(simulated or '')}"
         )
 
@@ -1323,12 +1323,70 @@ class TestPinStalenessGate_SimulationEditEdges:
         )
 
         assert verdict is False, (
-            "A MALFORMED EDIT PAYLOAD READ AS AN ADD. The empty `old_string` "
-            "guard returns the PRE-state, so the gate compares pre against "
-            "pre and must stay quiet. A True here means the caller counted "
-            "something other than the simulated document, which is the "
-            "silent bypass the guard exists to stop"
+            "AN EDIT THE TOOL REFUSES READ AS AN ADD. An empty `old_string` "
+            "on a file that holds text leaves it unchanged, so the gate "
+            "compares pre against pre and must stay quiet. A True here means "
+            "the caller counted something other than the simulated document"
         )
+
+
+class TestPinStalenessGate_SharedSimulation:
+    """The staleness gate judges the document the cap gate judges.
+
+    `_simulate_post_edit_document` reads `shared.edit_simulation.simulate`,
+    so each Edit shape the cap gate decides as the tool applies it (an empty
+    `old_string` on a blank file, a curly quote matched by its straight form,
+    `replace_all` through that match) reaches this gate as the same document.
+    The equality rows hold the shared call; the verdict rows, with the marker
+    present, hold the add the gate refuses and the refused edit it allows. A
+    fill of a blank file is allowed: see `TestPinStalenessGate_BlankFile`.
+    """
+
+    PIN = "<!-- pinned: 2026-02-02 -->\n### B\ny\n"
+    CURLY = "# P\n\n## Pinned Context\n\n<!-- pinned: 2026-01-01 -->\n### A\nsay “hi”\n"
+
+    @pytest.mark.parametrize("current, tool_input", [
+        ("", {"old_string": "", "new_string": PIN}),
+        ("\n  \n", {"old_string": "", "new_string": PIN}),
+        (CURLY, {"old_string": "", "new_string": PIN}),
+        (CURLY, {"old_string": "say \"hi\"", "new_string": "say \"hi\"\n\n" + PIN}),
+        (CURLY, {"old_string": "say “hi”", "new_string": "say \"hi\"\n\n" + PIN}),
+        (CURLY.replace("“hi”", "\"hi\""),
+         {"old_string": "say “hi”", "new_string": "say \"hi\"\n\n" + PIN}),
+        (CURLY + "say “hi”\n",
+         {"old_string": "say \"hi\"", "new_string": "x", "replace_all": True}),
+    ], ids=["create", "fill whitespace", "empty old_string on text", "straight on curly",
+            "exact curly", "curly on straight", "replace_all through the fold"])
+    def test_the_gate_reads_the_shared_simulation(self, current, tool_input):
+        import pin_staleness_gate
+        from shared.edit_simulation import simulate
+
+        expected = simulate(current, "Edit", tool_input)
+        assert expected != current or tool_input["old_string"] == ""
+        assert pin_staleness_gate._simulate_post_edit_document(tool_input, current, "Edit") == expected
+
+    def test_an_empty_old_string_on_a_file_with_text_is_allowed(self, gate_env):
+        paths = gate_env(marker_present=True)
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {"file_path": str(paths["claude_md"]), "old_string": "", "new_string": self.PIN},
+        })
+        assert result is None
+
+    @pytest.mark.parametrize("file_text, old_string", [
+        (CURLY, "say \"hi\""),
+        (CURLY, "say “hi”"),
+        (CURLY.replace("“hi”", "\"hi\""), "say “hi”"),
+    ], ids=["straight on curly", "exact curly", "curly on straight"])
+    def test_a_pin_added_through_a_quote_match_is_an_add(self, gate_env, file_text, old_string):
+        paths = gate_env(marker_present=True)
+        paths["claude_md"].write_text(file_text, encoding="utf-8")
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {"file_path": str(paths["claude_md"]), "old_string": old_string,
+                           "new_string": "say \"hi\"\n\n" + self.PIN},
+        })
+        assert result is not None
 
 
 class TestPinStalenessGate_BlankFile:
@@ -1338,7 +1396,11 @@ class TestPinStalenessGate_BlankFile:
 
     PIN = "<!-- pinned: 2026-02-02 -->\n### B\ny\n"
 
-    @pytest.mark.parametrize("blank", ["", "\n  \t\n"], ids=["empty", "whitespace only"])
+    BLANKS = ["", "\n  \t\n", "\ufeff", "\ufeff\n", "\u00a0"]
+    BLANK_IDS = ["empty", "whitespace only", "byte-order mark", "byte-order mark and newline",
+                 "no-break space"]
+
+    @pytest.mark.parametrize("blank", BLANKS, ids=BLANK_IDS)
     def test_an_edit_that_fills_a_blank_file_is_allowed(self, gate_env, blank):
         paths = gate_env(marker_present=True)
         paths["claude_md"].write_text(blank, encoding="utf-8")
@@ -1348,7 +1410,7 @@ class TestPinStalenessGate_BlankFile:
         })
         assert result is None
 
-    @pytest.mark.parametrize("blank", ["", "\n  \t\n"], ids=["empty", "whitespace only"])
+    @pytest.mark.parametrize("blank", BLANKS, ids=BLANK_IDS)
     def test_a_write_of_pins_to_a_blank_file_is_allowed(self, gate_env, blank):
         paths = gate_env(marker_present=True)
         paths["claude_md"].write_text(blank, encoding="utf-8")
@@ -1357,6 +1419,16 @@ class TestPinStalenessGate_BlankFile:
             "tool_input": {"file_path": str(paths["claude_md"]), "content": self.PIN},
         })
         assert result is None
+
+    def test_a_write_of_pins_to_a_next_line_only_file_is_refused(self, gate_env):
+        """U+0085 is not blank to the Edit tool, so the file is not blank."""
+        paths = gate_env(marker_present=True)
+        paths["claude_md"].write_text("\x85", encoding="utf-8")
+        result = _call_gate({
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(paths["claude_md"]), "content": self.PIN},
+        })
+        assert result is not None
 
     def test_an_add_to_a_file_that_holds_pins_is_still_refused(self, gate_env):
         paths = gate_env(marker_present=True)

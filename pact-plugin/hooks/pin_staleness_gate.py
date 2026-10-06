@@ -560,22 +560,19 @@ def _simulate_post_edit_document(
     MOVES IT: with a post-edit document there is no fragment, no anchor and
     no locus to bound.
 
-    THE SHAPE IS PORTED FROM `pin_caps.build_simulated_pins`, WHICH DOES THIS
-    FOR THE CAP GATE, so the two gates now read the same KIND of object. Its
-    three Edit edges are reproduced here:
-      `replace_all` TRUE  -> replace each occurrence.
-      `replace_all` FALSE -> replace the first occurrence.
-      an EMPTY `old_string` -> return the PRE-state. `str.replace` with an
-        empty needle puts the replacement between each character, which is a
-        document the tool never produces. Returning the pre-state makes the
-        caller compare pre against pre, so the normal contract applies and a
-        malformed payload cannot become a silent bypass.
+    THE SIMULATION IS THE CAP GATE'S OWN, `shared.edit_simulation.simulate`,
+    so the two gates read the same document for the same payload: an empty
+    `old_string` creates or fills a blank file and is refused on any other,
+    and a curly quote in `old_string` matches its straight form, as the tool
+    does.
 
-    WHERE I DIVERGE FROM THE PRECEDENT, AND WHY. `pin_caps` RAISES on a
-    non-string payload and leaves the fail-open to its caller. This returns
+    WHERE THIS DIVERGES FROM THE CAP GATE, AND WHY. The cap gate RAISES on a
+    malformed payload and leaves the fail-open to its caller. This returns
     None instead, because the caller here is a SACROSANCT fail-open gate that
     must not depend on an exception arriving at the correct handler. None and
     a raise reach the same verdict, and None reaches it without a handler.
+    The import sits here, inside the caller's fail-open catch, and not at
+    module level, where the load wrapper fails closed.
 
     THE KNOWN LIMIT OF THE SIMULATION, STATED RATHER THAN HIDDEN. For a
     NON-UNIQUE `old_string` with `replace_all` FALSE, this replaces the first
@@ -587,27 +584,11 @@ def _simulate_post_edit_document(
     Returns the post-edit document, or None when the payload cannot be read
     as an edit at all.
     """
-    if tool_name:
-        is_write = tool_name == "Write"
-    else:
-        is_write = "content" in tool_input
+    from shared.edit_simulation import simulate
 
-    if is_write:
-        # A Write IS the post-edit document. No simulation is necessary.
-        new_content = tool_input.get("content", "")
-        if not isinstance(new_content, str):
-            return None
-        return new_content
-
-    old_string = tool_input.get("old_string", "")
-    new_string = tool_input.get("new_string", "")
-    if not isinstance(old_string, str) or not isinstance(new_string, str):
-        return None
-    if old_string == "":
-        return current
-    if bool(tool_input.get("replace_all", False)):
-        return current.replace(old_string, new_string)
-    return current.replace(old_string, new_string, 1)
+    if not tool_name:
+        tool_name = "Write" if "content" in tool_input else "Edit"
+    return simulate(current, tool_name, tool_input)
 
 
 def _is_add_shaped_edit(
@@ -621,7 +602,8 @@ def _is_add_shaped_edit(
     not, or count strictly decreases) and refactor edits (pin count
     unchanged) are allowed.
 
-    A FILE THAT IS BLANK BEFORE THE CHANGE IS NEVER REFUSED. It holds no
+    A FILE THAT IS BLANK BEFORE THE CHANGE IS NEVER REFUSED, blank as the
+    Edit tool reads it (`shared.edit_simulation.is_blank`). It holds no
     pins, so it cannot hold the stale pins the marker reports, and refusing a
     Write or an Edit that fills it would refuse a file with nothing stale in
     it. The marker can outlive the pins it was raised for when the file is
@@ -670,7 +652,9 @@ def _is_add_shaped_edit(
             # Cannot read the pre-state, so there is nothing to compare
             # against. Fail-open.
             return False
-        if current.strip() == "":
+        from shared.edit_simulation import is_blank
+
+        if is_blank(current):
             return False
 
         simulated = _simulate_post_edit_document(tool_input, current, tool_name)

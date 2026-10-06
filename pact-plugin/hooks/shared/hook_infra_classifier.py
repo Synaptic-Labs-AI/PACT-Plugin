@@ -397,12 +397,13 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
     }),
     "pin_caps_gate": frozenset({
         "background_launch", "background_work", "claude_md_manager",
-        "claude_md_markers", "constants", "failure_cause", "failure_log",
-        "git_helpers", "intentional_wait", "pact_context", "paths", "pin_caps",
-        "pin_growth", "project_scope", "session_journal", "session_registry",
-        "session_state", "staleness", "state_file", "task_utils",
+        "claude_md_markers", "constants", "edit_simulation", "failure_cause",
+        "failure_log", "git_helpers", "intentional_wait", "pact_context", "paths",
+        "pin_caps", "pin_growth", "project_scope", "session_journal",
+        "session_registry", "session_state", "staleness", "state_file", "task_utils",
     }),  # from the live derivation: the team read (background_work), the
-         # resolver (claude_md_manager, staleness) and the decision (pin_growth).
+         # resolver (claude_md_manager, staleness), the edit simulation
+         # (edit_simulation) and the decision (pin_growth).
 }
 
 # Every helper module (top-level OR shared) transitively reachable from at least

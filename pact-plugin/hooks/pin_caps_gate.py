@@ -182,38 +182,23 @@ def _rationale(row_content: str) -> str:
     return field[_OVERRIDE_FIELD_LENGTH:-_COMMENT_CLOSE_LENGTH].strip()
 
 
-def _simulate(before: str, tool_name: str, tool_input: dict) -> str:
-    """The file after the tool runs: a Write's content, or an Edit applied
-    with str.replace (every site with replace_all, else the first). An empty
-    old_string changes nothing. Raises TypeError on a malformed tool_input."""
-    if tool_name == "Write":
-        content = tool_input.get("content")
-        if not isinstance(content, str):
-            raise TypeError(f"Write tool_input.content must be str, got {type(content).__name__}")
-        return content
-    old_string = tool_input.get("old_string")
-    new_string = tool_input.get("new_string")
-    if not isinstance(old_string, str) or not isinstance(new_string, str):
-        raise TypeError("Edit tool_input.old_string and .new_string must both be str")
-    if old_string == "":
-        return before
-    if tool_input.get("replace_all", False):
-        return before.replace(old_string, new_string)
-    return before.replace(old_string, new_string, 1)
-
-
 def gate_decision(before: str, tool_name: str, tool_input: dict):
     """The verdict on an Edit or Write of the project CLAUDE.md whose text is
     `before` ("" when no readable file). Pure: no I/O.
 
-    A change that leaves the text as it is allows: the hook sees old_string
-    before the tool's own quote normalisation, so its literal replace can miss.
-    An invalid size override on a pin the change adds or edits denies, cause
-    "override". Otherwise `pin_cap_decision` decides.
+    The text after is `shared.edit_simulation.simulate`'s, the edit the tool
+    will make: an empty old_string creates or fills a blank file, and a curly
+    quote matches its straight form. A malformed payload raises TypeError,
+    which the caller's fail-open catch allows. A change that leaves the text
+    as it is allows. An invalid size override on a pin the change adds or
+    edits denies, cause "override". Otherwise `pin_cap_decision` decides.
     """
+    from shared.edit_simulation import simulate
     from shared.pin_growth import PinDecision, pin_cap_decision
 
-    after = _simulate(before, tool_name, tool_input)
+    after = simulate(before, tool_name, tool_input)
+    if after is None:
+        raise TypeError(f"{tool_name} tool_input is not a well-formed {tool_name} payload")
     if after == before:
         return PinDecision("ALLOW", 0, 0, None, None, None)
     invalid = _invalid_override(before, after)
