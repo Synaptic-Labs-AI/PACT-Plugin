@@ -421,10 +421,59 @@ class TestDriftCheck:
         _edit_other(world, world.repo / "pkg" / "CLAUDE.md")
         assert "now holds 13 pins" in (_prompt(world) or "")
 
-    def test_a_gated_edit_that_lands_found_moves_the_baseline(self, world):
+    def test_a_gated_edit_below_the_cap_moves_the_baseline_silently(self, world):
+        self._baselined(world)
+        _edit(world, _doc(_pins(11)))
+        assert _prompt(world) is None
+        assert json.loads((world.project_dir / "claude-md-baseline.json").read_text())["count"] == 11
+
+    def test_growth_past_the_cap_a_gated_edit_made_is_reported_once_at_the_next_prompt(self, world):
+        """A lead's gated edit that leaves the file over the cap with more pins
+        than the baseline (a revealed pin the gate allowed) leaves the baseline,
+        so the next prompt reports it once."""
         self._baselined(world)
         _edit(world, _doc(_pins(13)))
+        advisory = _prompt(world)
+        assert advisory is not None and "now holds 13 pins" in advisory and "held 12" in advisory
         assert _prompt(world) is None
+
+    def test_a_gated_edit_that_lowers_an_over_cap_count_moves_the_baseline(self, world):
+        world.claude_md.write_text(_doc(_pins(14)), encoding="utf-8")
+        self._baselined(world)
+        _edit(world, _doc(_pins(13)))
+        assert json.loads((world.project_dir / "claude-md-baseline.json").read_text())["count"] == 13
+        assert _prompt(world) is None
+
+    def test_a_count_unknown_at_the_first_check_is_not_reported_as_zero(self, world):
+        """The first baseline is taken while an unclosed fence hides the pins
+        from the count; closing it, with the same pins, is reported as a count
+        PACT could not take before, never as growth from 0."""
+        unclosed = _pins(13).replace("secret body 5\n", "secret body 5\n```\nnever closed\n")
+        world.claude_md.write_text(_doc(unclosed), encoding="utf-8")
+        assert _prompt(world) is None
+        assert json.loads((world.project_dir / "claude-md-baseline.json").read_text())["count"] is None
+        world.claude_md.write_text(_doc(_pins(13)), encoding="utf-8")
+        advisory = _prompt(world)
+        assert advisory is not None and "now holds 13 pins" in advisory
+        assert "PACT could not count them at the last check" in advisory and "held 0" not in advisory
+        assert "outside the pin-cap gate" not in advisory
+        assert _prompt(world) is None
+
+    def test_pins_pact_migrates_into_a_memory_block_are_not_reported_as_growth_from_zero(self, world):
+        """A legacy file with 13 pins and no PACT markers: the first check
+        cannot count them and says so; after PACT's own migration adds the
+        markers, the count is reported as one PACT could not take before."""
+        legacy = ("# Project Memory\n\n## Retrieved Context\n\n## Pinned Context\n\n"
+                  + _pins(13) + "## Working Memory\n\n### 2026-01-02\nentry\n")
+        world.claude_md.write_text(legacy, encoding="utf-8")
+        assert "cannot be counted" in (_prompt(world) or "")
+        migrate = ("python3 -c 'from shared.claude_md_manager import migrate_to_managed_structure as m; "
+                   "print(m())'")
+        assert _sh(world, f"PYTHONPATH={HOOKS} {migrate}") == 0
+        assert MEMORY_START_MARKER in world.claude_md.read_text(encoding="utf-8")
+        advisory = _prompt(world)
+        assert advisory is not None and "now holds 13 pins" in advisory
+        assert "PACT could not count them at the last check" in advisory and "held 0" not in advisory
 
     def test_an_edit_on_the_not_found_path_leaves_the_baseline(self, world):
         self._baselined(world)
@@ -444,6 +493,14 @@ class TestDriftCheck:
         world.claude_md.write_text(_doc(_pins(13)), encoding="utf-8")
         assert _prompt(world, agent_type="pact-backend-coder") is None
         assert _prompt(world) is not None
+
+    def test_a_first_check_without_the_memory_markers_warns_once(self, world):
+        world.claude_md.write_text(_doc(_pins(13), markers=False), encoding="utf-8")
+        advisory = _prompt(world)
+        assert advisory is not None and "cannot be counted" in advisory
+        world.claude_md.write_text(_doc(_pins(14), markers=False), encoding="utf-8")
+        assert _prompt(world) is None
+        assert _prompt(world) is None
 
     def test_markers_removed_warn_once_then_stay_silent(self, world):
         self._baselined(world)
@@ -802,7 +859,11 @@ def test_the_report_jobs_add_one_read_and_one_hash_when_nothing_changed(world):
         return subprocess.run([sys.executable, "-c", probe, frame], capture_output=True,
                               text=True, env=env, cwd=world.repo, timeout=60)
 
-    first, second = run(), run()
+    first = run()
+    # The first call stored the record, so the job ran; a job that failed
+    # before its read would also load nothing and pass the check below.
+    assert (world.session_dir / "claude-md-last-seen" / "lead.json").exists(), first.stderr
+    second = run()
     assert first.stdout.strip() == "False" and second.stdout.strip() == "False", first.stderr
     started = time.perf_counter()
     for _ in range(5):

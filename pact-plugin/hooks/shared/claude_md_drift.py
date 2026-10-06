@@ -28,7 +28,8 @@ THREE RECORDS.
   record for another base counts as none.
 - The baseline, `claude-md-baseline.json` in the project's directory under the
   sessions root, one per project, written by lead frames only: the base, the
-  path, the hash, the fence-aware pin count and the Pinned section's state.
+  path, the hash, the fence-aware pin count (None when the pins could not be
+  counted) and the Pinned section's state.
 
 Keying on the base directory rather than the file makes a move from
 `./CLAUDE.md` to `.claude/CLAUDE.md` compare with the old text.
@@ -77,7 +78,9 @@ def record_after_write(frame: dict) -> None:
     """After an Edit or Write the pin-cap gate checked (a frame it checks, on
     the project CLAUDE.md): store the file as the new last-seen record, and
     in a lead frame, when the Pinned section is FOUND after it, update the
-    baseline. Never raises."""
+    baseline, unless the file is now over the cap with more pins than the
+    baseline holds (or the baseline could not count them): growth past the
+    cap that the gate allowed is reported at the next prompt. Never raises."""
     try:
         _record_after_write(frame)
     except Exception:  # noqa: BLE001
@@ -163,6 +166,16 @@ def _record_after_write(frame: dict) -> None:
         # Allowed on the not-FOUND advisory path: leave the baseline, so the
         # next prompt reports any growth past the cap once.
         return
+    from pin_caps import PIN_COUNT_CAP
+
+    baseline = _read_json(session_dir.parent / _BASELINE)
+    if count > PIN_COUNT_CAP and baseline is not None and _valid_baseline(baseline, base):
+        stored = baseline["count"]
+        if stored is None or stored < count:
+            # Growth past the cap that the gate allowed (a revealed pin, a
+            # Write over a file it could not read): leave the baseline, so the
+            # next prompt reports it once.
+            return
     _write_baseline(session_dir, base, path, digest, count, state)
 
 
@@ -188,28 +201,24 @@ def _drift_advisory(frame: dict) -> str | None:
         return None  # unchanged: one read and one hash, nothing parsed
     state, count = _pin_state(text)
     if baseline is None:
-        _write_baseline(session_dir, base, path, digest, count or 0, state)
-        return None
+        _write_baseline(session_dir, base, path, digest, count, state)
+        return _no_markers_advisory(path) if state == _NO_MARKERS else None
     advisory = None
     stored = baseline["count"]
     if count is not None:
         from pin_caps import PIN_COUNT_CAP
 
-        if count > PIN_COUNT_CAP and count > stored:
+        if count > PIN_COUNT_CAP and (stored is None or count > stored):
+            then = ("PACT could not count them at the last check" if stored is None
+                    else f"it held {stored} at the last check")
             advisory = (
                 f"The project CLAUDE.md ({path}) now holds {_pin_count(count)}, over the cap "
-                f"of {PIN_COUNT_CAP}; it held {stored} at the last check. The pins grew "
-                "outside the pin-cap gate (a shell command, another tool, another session "
-                "or an edit outside any tool). Nothing was refused or changed. If the "
-                "growth was not intended, run /PACT:prune-memory to demote pins."
+                f"of {PIN_COUNT_CAP}; {then}. Nothing was refused or changed. If the growth "
+                "was not intended, run /PACT:prune-memory to demote pins."
             )
         stored = count
     elif state == _NO_MARKERS and baseline.get("state") != _NO_MARKERS:
-        advisory = (
-            f"The pins in the project CLAUDE.md ({path}) cannot be counted: PACT's memory "
-            "markers are missing from it, so the pin cap does not apply to that file "
-            "until they return. Nothing was refused or changed."
-        )
+        advisory = _no_markers_advisory(path)
     _write_baseline(session_dir, base, path, digest, stored, state)
     return advisory
 
@@ -245,6 +254,14 @@ def _pin_count(count: int) -> str:
     return f"{count} pin" if count == 1 else f"{count} pins"
 
 
+def _no_markers_advisory(path: Path) -> str:
+    return (
+        f"The pins in the project CLAUDE.md ({path}) cannot be counted: PACT's memory "
+        "markers are missing from it, so the pin cap does not apply to that file "
+        "until they return. Nothing was refused or changed."
+    )
+
+
 def _pin_state(text: str) -> tuple[str, int | None]:
     """(state, fence-aware pin count). The count is None unless FOUND."""
     from pin_caps import section_pins
@@ -263,16 +280,18 @@ def _pin_state(text: str) -> tuple[str, int | None]:
 
 
 def _valid_baseline(baseline: dict, base: Path) -> bool:
+    """A baseline for this base directory, with a hash and a count that is an
+    int, or None when the pins could not be counted."""
+    count = baseline.get("count", False)
     return (
         baseline.get("base") == str(base)
         and isinstance(baseline.get("hash"), str)
-        and isinstance(baseline.get("count"), int)
-        and not isinstance(baseline.get("count"), bool)
+        and (count is None or (isinstance(count, int) and not isinstance(count, bool)))
     )
 
 
 def _write_baseline(session_dir: Path, base: Path, path: Path, digest: str,
-                    count: int, state: str) -> None:
+                    count: int | None, state: str) -> None:
     _write_json(session_dir.parent / _BASELINE,
                 {"base": str(base), "path": str(path), "hash": digest, "count": count,
                  "state": state})
