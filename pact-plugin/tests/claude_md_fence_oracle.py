@@ -24,13 +24,21 @@ The grammar it implements:
 - An HTML block of any of those types whose end condition is first met on a
   row that itself starts (after up to 3 spaces) with `<!--` sets the
   uncertainty boundary at the block's start.
+- An HTML block that hides nothing sets the boundary at its start row when one
+  of the rows it covers (the row after its start through the row its end
+  condition is met on, or the last row) would, read outside any HTML block,
+  open a fence, be a container fence, or start an HTML block whose end
+  condition that row does not also meet. It hides nothing when it is closed
+  mid-line or is of type 4 (cause html_hides_fence), or is never closed and
+  of type 1, 3, 4 or 5 (cause unclosed_html). A never-closed comment does not
+  count.
 - A container fence sets the boundary at its row: a PROSE row of up to 3
   spaces, then one or more container markers (`>` and any spaces or tabs, or a
   list marker - * + or 1-9 digits then . or ) and at least one space or tab),
   then a fence run; after a backtick run the line holds no backtick.
 - When pairing leaves a fence unclosed, the boundary is the first fence
   opener in the file.
-- The boundary is the earliest of the three; every row from it on is UNKNOWN,
+- The boundary is the earliest of these; every row from it on is UNKNOWN,
   and no UNKNOWN row is in_html.
 """
 
@@ -40,6 +48,7 @@ from typing import NamedTuple, Optional, Sequence
 PROSE, FENCE, CODE, UNKNOWN = "PROSE", "FENCE", "CODE", "UNKNOWN"
 UNCLOSED_FENCE, CONTAINER_FENCE, COMMENT_BOUNDARY = (
     "unclosed_fence", "container_fence", "comment_boundary")
+UNCLOSED_HTML, HTML_HIDES_FENCE = "unclosed_html", "html_hides_fence"
 
 _OPENER = re.compile(r"^( {0,3})(`{3,}|~{3,})(.*)$", re.DOTALL)
 _CLOSER_TAIL = re.compile(r"^[ \t]*$")
@@ -136,6 +145,15 @@ def _hides(block_type: int, end: "re.Pattern[str]", content: str) -> bool:
         end.match(edge) is not None or re.search(f"(?:{end.pattern})$", edge, end.flags) is not None)
 
 
+def _would_start_something(content: str) -> bool:
+    """Read outside any HTML block: a fence opener, a container fence, or the
+    start of an HTML block this row does not also end."""
+    if _opener(content) is not None or _container_fence(content):
+        return True
+    started = _html_start(content)
+    return started is not None and not started[1].search(content)
+
+
 def scan(text: str) -> Scan:
     rows = split_rows(text)
     kinds = [PROSE] * len(rows)
@@ -147,6 +165,8 @@ def scan(text: str) -> Scan:
     html_end = None         # end pattern while inside an HTML block
     html_type = 0
     html_start_row = 0
+    html_covers = False     # a covered row would start something outside the block
+    hides_nothing_row = None
     for r, (_s, _e, content) in enumerate(rows):
         if fence is not None:
             if _closes(content, *fence):
@@ -156,12 +176,16 @@ def scan(text: str) -> Scan:
                 kinds[r] = CODE
             continue
         if html_end is not None:
+            if _would_start_something(content):
+                html_covers = True
             if html_end.search(content):
                 if _COMMENT_START_LINE.match(content) and comment_row is None:
                     comment_row = html_start_row
                 if _hides(html_type, html_end, content):
                     for k in range(html_start_row, r + 1):
                         in_html[k] = True
+                elif html_covers and hides_nothing_row is None:
+                    hides_nothing_row = html_start_row
                 html_end = None
             continue
         op = _opener(content)
@@ -179,7 +203,12 @@ def scan(text: str) -> Scan:
         if started is not None and not started[1].search(content):
             html_type, html_end = started
             html_start_row = r
+            html_covers = False
     candidates = []
+    if html_end is not None and html_type in (1, 3, 4, 5) and html_covers:
+        candidates.append((html_start_row, UNCLOSED_HTML))
+    if hides_nothing_row is not None:
+        candidates.append((hides_nothing_row, HTML_HIDES_FENCE))
     if fence is not None and first_opener is not None:
         candidates.append((first_opener, UNCLOSED_FENCE))
     if container_row is not None:

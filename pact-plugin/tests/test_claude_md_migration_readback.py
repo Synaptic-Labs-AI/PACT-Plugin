@@ -251,16 +251,15 @@ def test_an_input_that_reads_stray_migrates_under_the_real_rebuild(content):
 
 def test_a_rebuild_that_moves_an_open_html_block_above_a_fenced_marker_is_refused():
     # The Pinned section ends inside an HTML block that never closes. Moved into
-    # the memory block above the user's notes, it swallows the notes, so the
-    # fence no longer opens and the fenced kernel marker becomes a live line.
+    # the memory block above the user's notes, it covers their fence, so the
+    # rebuilt file reads uncertain and the fenced kernel marker is never
+    # written out as a live line.
     content = (
         "Notes\n~~~\n<!-- PACT_START: v2 -->\n~~~\nsee <!-- PACT_START: v3 --> here\n"
         "## Pinned Context\n### p\n<![CDATA[\n## Working Memory\n- e\n"
     )
     assert _reads_stray_with_no_marker_line(content, "<!-- PACT_START:")
-    new_content, refusal = _plan_migration(content)
-    assert new_content is None
-    assert refusal == "the migrated file would change how '<!-- PACT_START:' reads"
+    assert _plan_migration(content) == (None, CDATA_OVER_A_FENCE_REFUSAL)
 
 
 # A Pinned section that ends inside a CDATA block that is never closed takes the
@@ -268,9 +267,19 @@ def test_a_rebuild_that_moves_an_open_html_block_above_a_fenced_marker_is_refuse
 UNCLOSED_CDATA_PIN = "## Pinned Context\n### A pin\n<![CDATA[\nraw\n"
 
 
+# Moved above the user's text, the never-closed CDATA block covers a fence opener,
+# so the rebuilt file reads uncertain from that block on and the managed lookup
+# cannot find its end.
+CDATA_OVER_A_FENCE_REFUSAL = (
+    "the migrated file did not read back as one managed block, one memory block and the Current "
+    "Session block it had: '<!-- PACT_MANAGED_START: Managed by pact-plugin - do not edit this "
+    "block -->' on line 1 has no end marker before the uncertain region; line 10 starts an "
+    "uncertain region: an HTML block is never closed")
+
+
 def test_a_reorder_that_swallows_the_users_fenced_code_is_refused():
     content = f"Notes\n```sh\necho hi\n```\n{UNCLOSED_CDATA_PIN}"
-    assert _plan_migration(content) == (None, "the migrated file would change how line 20 reads")
+    assert _plan_migration(content) == (None, CDATA_OVER_A_FENCE_REFUSAL)
 
 
 def test_the_same_file_with_the_block_closed_migrates_with_its_fence():
@@ -280,7 +289,7 @@ def test_the_same_file_with_the_block_closed_migrates_with_its_fence():
 
 def test_a_reorder_that_swallows_a_memory_sections_fenced_code_is_refused():
     content = f"## Working Memory\n- entry\n```sh\necho hi\n```\n{UNCLOSED_CDATA_PIN}"
-    assert _plan_migration(content) == (None, "the migrated file would change how line 16 reads")
+    assert _plan_migration(content) == (None, CDATA_OVER_A_FENCE_REFUSAL)
 
 
 def test_a_reorder_that_closes_an_html_block_over_carried_rows_is_refused():
@@ -290,24 +299,24 @@ def test_a_reorder_that_closes_an_html_block_over_carried_rows_is_refused():
     assert _plan_migration(content) == (None, "the migrated file would change how line 10 reads")
 
 
-def test_a_session_block_that_opens_an_html_block_migrates():
-    # The session block's `<?php` is never closed, so in the original it covers
-    # the rest of the file and the `~~~` below it is prose. Cut out, it would
-    # leave that `~~~` an unclosed fence; moved to the top, it still covers it.
+def test_a_session_block_that_opens_an_html_block_over_a_fence_is_refused():
+    # The session block's `<?php` is never closed and covers the `~~~` below it,
+    # which would open a fence if the `<?php` were prose: the original reads
+    # uncertain from line 5 and is not migrated.
     content = (
         "## Working Memory\n- entry\n"
         "<!-- SESSION_START -->\n## Current Session\n<?php\n<!-- SESSION_END -->\n"
         "Notes\n~~~\n"
     )
-    assert _plan(content).count("\nNotes\n~~~\n") == 1
+    assert _plan_migration(content) == (
+        None, "line 5 starts an uncertain region: an HTML block is never closed")
 
 
 # Two documents from the fence oracle's generator (seed 1, documents 1224 and
-# 1353), as measured. In the first the session block opens an HTML block that
-# covers the rest of the file, so cutting it out would make the rows below it
-# read UNKNOWN; against the original file every carried row reads the same and
-# it migrates. In the second a fenced row turns to prose; the rows the cut
-# leaves UNKNOWN must not hide that.
+# 1353). In each, a session block opens an HTML block that is never closed and
+# covers rows that would start a structure if its opener were prose (a comment
+# start, a fence), so the original reads uncertain from that opener and is not
+# migrated.
 SESSION_BLOCK_COVERS_THE_REST = (
     "see the ## Working Memory section\r\n<!-- SESSION_START -->\n<?php\r<!-- SESSION_END -->\n"
     "    `````a`b\n---\r\n<!-- PACT_START: x\n<!-- PACT_START: x\n    four spaces\n<!-- PACT_END -->\n"
@@ -320,13 +329,14 @@ FENCE_TURNS_TO_PROSE_BELOW_A_CUT = (
 )
 
 
-def test_a_generated_file_whose_session_block_covers_the_rest_migrates():
-    assert _plan_migration(SESSION_BLOCK_COVERS_THE_REST)[1] is None
+def test_a_generated_file_whose_session_block_covers_the_rest_is_refused():
+    assert _plan_migration(SESSION_BLOCK_COVERS_THE_REST) == (
+        None, "line 3 starts an uncertain region: an HTML block is never closed")
 
 
 def test_a_generated_file_whose_fence_turns_to_prose_below_a_cut_is_refused():
     assert _plan_migration(FENCE_TURNS_TO_PROSE_BELOW_A_CUT) == (
-        None, "the migrated file would change how line 20 reads")
+        None, "line 9 starts an uncertain region: an HTML block is never closed")
 
 
 # The stale loader line from the legacy template is dropped only where the
@@ -367,12 +377,14 @@ def test_a_loader_line_inside_the_session_block_stays_in_it():
 
 
 def test_a_loader_line_the_original_reads_as_code_is_not_dropped(monkeypatch):
-    # The session block closes an HTML block opened above it. With the block
-    # cut out, the text left reads the fenced quote below it as prose; the
-    # original reads it as code, and the drop is decided on the original.
+    # The session block closes an HTML block opened above it, and a stray
+    # `</pre>` sits below the fenced quote. With the session block cut out, the
+    # `<pre>` closes at that stray line instead, hiding the fence, so the text
+    # left reads the quote as prose; the original reads it as code, and the
+    # drop is decided on the original.
     content = (
         f"# Project Memory\n\n<pre>\n{SESSION_START_MARKER}\n## Current Session\n</pre>\n"
-        f"{SESSION_END_MARKER}\n```text\n{LOADER}\n```\n## Working Memory\n- entry\n"
+        f"{SESSION_END_MARKER}\n```text\n{LOADER}\n```\n</pre>\n## Working Memory\n- entry\n"
     )
     doc = parse(content)
     cuts = [(_marker_span(doc, 3)[0], _marker_span(doc, 6)[1])]

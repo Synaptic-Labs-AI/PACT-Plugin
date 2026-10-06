@@ -43,16 +43,29 @@ types 1-5 for fence suppression and `in_html`:
   only when the block is type 1, 2, 3 or 5, spans 2+ rows, and its end row
   begins or ends with the end token (spaces or tabs aside); a one-row,
   unclosed, mid-line-closed (`a --> b`) or type-4 block hides nothing.
+  A multi-row block that hides nothing may be HTML or a stray opener in
+  prose; the two readings differ only at a covered row that would open a
+  fence, a container fence or another HTML block, and such a row makes the
+  file uncertain (below).
 
 UNCERTAINTY BOUNDARY. Every row from `Document.boundary` on is UNKNOWN. The
-boundary is the earliest of three rows:
+boundary is the earliest of these rows:
 - unclosed_fence: when top-level pairing over the whole file leaves a fence
   unclosed, the first fence opener in the file, because sequential pairing
   cannot say which fence is the unpaired one;
 - container_fence: a fence opener after a list marker or `>`, whose opener the
   top-level rule cannot see while it does see the indented closer;
 - comment_boundary: the start of a multi-line HTML block of types 1-5 ended
-  only by a line that itself starts with `<!--`, such as a PACT marker.
+  only by a line that itself starts with `<!--`, such as a PACT marker;
+- unclosed_html: the start of an HTML block of type 1, 3, 4 or 5 that is never
+  closed, when a row it covers (the rows after its start) would, read outside
+  any HTML block, open a fence, a container fence or an HTML block it does not
+  also end. A never-closed comment does not count: a PACT marker would have
+  closed it;
+- html_hides_fence: the start of an HTML block that closes but hides nothing
+  (closed mid-line, or a declaration), when a row it covers, its end row
+  included, is such a row.
+A block that covers no such row stays certain.
 Do not narrow the boundary or add a recovery rule: each lets an example be
 read as the real block again.
 
@@ -112,6 +125,8 @@ class Cause(Enum):
     UNCLOSED_FENCE = "unclosed_fence"
     CONTAINER_FENCE = "container_fence"
     COMMENT_BOUNDARY = "comment_boundary"
+    UNCLOSED_HTML = "unclosed_html"
+    HTML_HIDES_FENCE = "html_hides_fence"
     COMMENTED = "commented"  # find_section: the only matching heading is hidden
 
 
@@ -152,9 +167,6 @@ _HTML_BLOCKS = (
     (re.compile(r" {0,3}<!\[CDATA\["), re.compile(r"\]\]>")),
 )
 _COMMENT_START_RE = _HTML_BLOCKS[1][0]
-# A declaration ends at any `>`, so an accidental `<!X` line would hide honest
-# rows: type 4 never sets in_html.
-_DECLARATION_END_RE = _HTML_BLOCKS[3][1]
 # What follows a prefix literal on its marker line: the rest of one comment.
 _REST_OF_COMMENT_RE = re.compile(r"(?:(?!-->).)*-->[ \t]*")
 # A backtick run and the backslashes directly before it.
@@ -163,6 +175,9 @@ _BOUNDARY_TEXT = {
     Cause.UNCLOSED_FENCE: "a code fence is not closed",
     Cause.CONTAINER_FENCE: "a code fence opens on a list or quote line",
     Cause.COMMENT_BOUNDARY: "an HTML block is ended only by a line that starts a comment",
+    Cause.UNCLOSED_HTML: "an HTML block is never closed",
+    Cause.HTML_HIDES_FENCE: ("an HTML block that ends mid-line, or a declaration, covers a code fence "
+                             "or another HTML block"),
 }
 
 
@@ -464,13 +479,28 @@ def _token_at_edge(content: str, end_re: re.Pattern) -> bool:
     return any(match.start() == 0 or match.end() == len(edge) for match in end_re.finditer(edge))
 
 
+def _starts_structure(content: str) -> bool:
+    """True when `content`, read outside any HTML block, would open a fence, a
+    container fence, or an HTML block it does not also close."""
+    if _opener(content) is not None or _CONTAINER_FENCE_RE.fullmatch(content):
+        return True
+    for start_re, end_re in _HTML_BLOCKS:
+        if start_re.match(content):
+            return not end_re.search(content)
+    return False
+
+
 def _classify(contents: list[str]) -> tuple[list[Kind], list[bool], int | None, Cause | None]:
     """One sequential pass: each row's kind and in_html flag, and the boundary."""
     kinds = []
     in_html = [False] * len(contents)
     fence = None  # the open fence string, while inside a fence
     html_end = None  # the end condition, while inside an HTML block
+    html_type = 0  # the open HTML block's type, 1-5
     html_start = 0
+    # Whether a row the open HTML block covers would start a structure if the
+    # block's opener were read as prose: where its two readings differ.
+    html_covers = False
     first_opener = None
     candidates = []  # (row, cause)
     for row, content in enumerate(contents):
@@ -483,11 +513,16 @@ def _classify(contents: list[str]) -> tuple[list[Kind], list[bool], int | None, 
             continue
         kinds.append(Kind.PROSE)
         if html_end is not None:
+            html_covers = html_covers or _starts_structure(content)
             if html_end.search(content):
                 if _COMMENT_START_RE.match(content):
                     candidates.append((html_start, Cause.COMMENT_BOUNDARY))
-                if html_end is not _DECLARATION_END_RE and _token_at_edge(content, html_end):
+                # A declaration ends at any `>`, so an accidental `<!X` line
+                # would hide honest rows: type 4 never hides.
+                if html_type != 4 and _token_at_edge(content, html_end):
                     in_html[html_start:row + 1] = [True] * (row + 1 - html_start)
+                elif html_covers:
+                    candidates.append((html_start, Cause.HTML_HIDES_FENCE))
                 html_end = None
             continue
         opened = _opener(content)
@@ -500,13 +535,16 @@ def _classify(contents: list[str]) -> tuple[list[Kind], list[bool], int | None, 
         if _CONTAINER_FENCE_RE.fullmatch(content):
             candidates.append((row, Cause.CONTAINER_FENCE))
             continue
-        for start_re, end_re in _HTML_BLOCKS:
+        for html_kind, (start_re, end_re) in enumerate(_HTML_BLOCKS, 1):
             if start_re.match(content):
                 if not end_re.search(content):
-                    html_end, html_start = end_re, row
+                    html_end, html_type, html_start, html_covers = end_re, html_kind, row, False
                 break
     if fence is not None:
         candidates.append((first_opener, Cause.UNCLOSED_FENCE))
+    # A comment never closed covers no PACT marker: one would have closed it.
+    if html_end is not None and html_type != 2 and html_covers:
+        candidates.append((html_start, Cause.UNCLOSED_HTML))
     if not candidates:
         return kinds, in_html, None, None
     row, cause = min(candidates, key=lambda candidate: candidate[0])

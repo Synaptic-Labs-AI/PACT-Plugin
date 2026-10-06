@@ -248,11 +248,13 @@ def _random_scope(rnd, n):
     return (first, rnd.randint(first, n - 1))
 
 
-@pytest.mark.parametrize("seed", [1, 2])
-def test_the_finder_matches_the_oracle_on_generated_documents(seed):
+# Seed 2 draws more: documents an HTML block makes uncertain take their other
+# results with them, and 1,000 draws leave two of the floors below short.
+@pytest.mark.parametrize("seed, draws", [(1, 1000), (2, 1100)])
+def test_the_finder_matches_the_oracle_on_generated_documents(seed, draws):
     rnd = random.Random(seed)
     seen = collections.Counter()
-    for _ in range(1000):
+    for _ in range(draws):
         text = _document(rnd)
         scope = _random_scope(rnd, len(oracle.split_rows(text)))
         expected = _oracle_view(text, scope)
@@ -280,7 +282,8 @@ def test_the_finder_matches_the_oracle_on_generated_documents(seed):
     # The generator must reach every boundary cause, closed fences, every block,
     # marker and section state, in_html rows and empty scopes, or the comparison
     # above proves less than it says.
-    for key in (None, oracle.UNCLOSED_FENCE, oracle.CONTAINER_FENCE, oracle.COMMENT_BOUNDARY, "closed fence",
+    for key in (None, oracle.UNCLOSED_FENCE, oracle.CONTAINER_FENCE, oracle.COMMENT_BOUNDARY,
+                oracle.UNCLOSED_HTML, oracle.HTML_HIDES_FENCE, "closed fence",
                 "in_html row", "empty scope", "boundary from another HTML type", ("KERNEL", oracle.FOUND),
                 oracle.FOUND, oracle.ABSENT, oracle.DUPLICATE, oracle.UNKNOWN,
                 (oracle.MALFORMED, oracle.STRAY), (oracle.MALFORMED, oracle.UNPAIRED),

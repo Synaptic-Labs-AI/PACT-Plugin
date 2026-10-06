@@ -1494,29 +1494,27 @@
  "e18d_declaration": {
   "blocks": {
    "MANAGED": {
-    "state": "ABSENT"
+    "cause": "html_hides_fence",
+    "state": "UNKNOWN"
    },
    "MEMORY": {
-    "state": "ABSENT"
+    "cause": "html_hides_fence",
+    "state": "UNKNOWN"
    },
    "PINNED": {
-    "state": "ABSENT"
+    "cause": "html_hides_fence",
+    "state": "UNKNOWN"
    },
    "SESSION": {
-    "spans": [
-     [
-      3,
-      5
-     ]
-    ],
-    "state": "FOUND"
+    "cause": "html_hides_fence",
+    "state": "UNKNOWN"
    }
   },
-  "boundary": null,
-  "boundary_cause": null,
+  "boundary": 0,
+  "boundary_cause": "html_hides_fence",
   "decode": "strict",
-  "kinds": "P6",
-  "note": "a type-4 block suppresses a fence opener"
+  "kinds": "U6",
+  "note": "a type-4 block over a fence opener hides nothing: the boundary is its start"
  },
  "e18e_cdata": {
   "blocks": {
@@ -2842,6 +2840,31 @@
    }
   ]
  },
+ "html_cdata_closed_midline_over_fence": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "html_hides_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "html_hides_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "html_hides_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "html_hides_fence",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 0,
+  "boundary_cause": "html_hides_fence",
+  "decode": "strict",
+  "kinds": "U6",
+  "note": "CDATA closed mid-line over a fence opener: the boundary is its start"
+ },
  "html_comment_hides_heading": {
   "blocks": {
    "MANAGED": {
@@ -3045,6 +3068,31 @@
   "kinds": "U4",
   "note": "a declaration with no > ended by a marker line sets the comment boundary at the declaration"
  },
+ "html_declaration_over_container_fence": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "html_hides_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "html_hides_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "html_hides_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "html_hides_fence",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 0,
+  "boundary_cause": "html_hides_fence",
+  "decode": "strict",
+  "kinds": "U6",
+  "note": "a declaration over a container fence: the boundary is its start"
+ },
  "html_pre_ended_by_prefix_marker": {
   "blocks": {
    "KERNEL": {
@@ -3122,6 +3170,58 @@
   ],
   "note": "markers inside a closed pre block stay live; its rows are in_html"
  },
+ "html_unclosed_pi_covers_nothing": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      2,
+      4
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P5",
+  "note": "a never-closed <? over prose and marker lines stays certain"
+ },
+ "html_unclosed_pi_over_block_start": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 0,
+  "boundary_cause": "unclosed_html",
+  "decode": "strict",
+  "kinds": "U5",
+  "note": "a never-closed <? over a <pre> it does not close: the boundary is its start"
+ },
  "html_unclosed_pre_hides_nothing": {
   "blocks": {
    "MANAGED": {
@@ -3164,6 +3264,31 @@
     "unique": false
    }
   ]
+ },
+ "html_unclosed_pre_over_fence": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 0,
+  "boundary_cause": "unclosed_html",
+  "decode": "strict",
+  "kinds": "U5",
+  "note": "a never-closed <pre> over a fence opener: the boundary is its start"
  },
  "marker_duplicate_session_start": {
   "blocks": {

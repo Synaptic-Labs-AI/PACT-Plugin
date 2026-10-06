@@ -364,12 +364,20 @@ def test_html_block_ending_on_its_start_line_suppresses_nothing_after(start):
 
 
 @pytest.mark.parametrize("start, end", [
-    ("<pre>", "</PRE>"), ("<?php", "?>"), ("<!DOCTYPE", ">"), ("<![CDATA[", "]]>"),
+    ("<pre>", "</PRE>"), ("<?php", "?>"), ("<![CDATA[", "]]>"),
 ])
 def test_open_html_block_suppresses_fences_until_its_end(start, end):
     doc = _doc(start, "```", end, S, "x", E)
     assert _kinds(doc) == "P6"
     assert _session(doc).spans == ((3, 5),)
+
+
+def test_a_declaration_over_a_fence_opener_makes_the_rest_uncertain():
+    # A declaration never hides its rows, so the fence opener it covers is read
+    # two ways; the boundary is the declaration's start.
+    doc = _doc("<!DOCTYPE", "```", ">", S, "x", E)
+    assert (doc.boundary, doc.boundary_cause) == (0, Cause.HTML_HIDES_FENCE)
+    assert _session(doc).state is State.UNKNOWN
 
 
 def test_types_six_and_seven_are_not_modelled():
