@@ -420,8 +420,8 @@ class TestPinCapsGate_FailOpen:
 class TestPinCapsGate_WriteBaselineFailClosed:
     """A Write with no project CLAUDE.md before it (a first Write) is compared
     with an empty file, so its own pins over the cap are refused with the
-    count reason. A CLAUDE.md that resolves but cannot be read takes the same
-    comparison (the real-hook rows)."""
+    count reason. A CLAUDE.md that resolves but cannot be read is not compared
+    with anything: the change is allowed with an advisory (the real-hook rows)."""
 
     def test_write_over_cap_with_missing_baseline_denies(
         self, tmp_path, monkeypatch, pact_context
@@ -533,8 +533,8 @@ REAL_HOOK_ROWS = [
     ("override: a fenced example of the override syntax", _pins(3), _edit("### Pin1\nxxxx", "### Pin1\n" + OVERRIDE_FENCED), "allow"),
     ("override: an invalid override row on an edited pin", _pins(3),
      _edit("<!-- pinned: 2026-04-20 -->\n### Pin0", "<!-- pinned: 2026-04-20, pin-size-override:   -->\n### Pin0"), "deny"),
-    ("unreadable file: a Write with 12 pins", "unreadable", _write(_pins(12)), "allow"),
-    ("unreadable file: a Write with 13 pins", "unreadable", _write(_pins(13)), "deny"),
+    ("unreadable file: a Write with 12 pins", "unreadable", _write(_pins(12)), "advisory"),
+    ("unreadable file: a Write with 13 pins", "unreadable", _write(_pins(13)), "advisory"),
     ("unreadable file: an Edit", "unreadable", _edit("### Pin1\n", "### Pin1 renamed\n"), "advisory"),
     ("not located: an unclosed fence above the Pinned section", _pins(13),
      _write("# notes\n\n```\nunclosed\n\n" + _pins(20)), "advisory"),

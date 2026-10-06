@@ -120,15 +120,15 @@ def test_a_relative_file_path_is_not_gated(tmp_path, relative):
     assert _gate(tmp_path, Path(relative), _write(_pins(13))) == "allow"
 
 
-@pytest.mark.parametrize("pins, expected", [(12, "allow"), (13, "deny")])
-def test_an_unreadable_legacy_file_before_a_write_to_dot_claude_is_read_as_empty(tmp_path, pins, expected):
+@pytest.mark.parametrize("pins", [12, 13])
+def test_a_write_to_dot_claude_over_an_unreadable_legacy_file_is_allowed_with_an_advisory(tmp_path, pins):
     if os.geteuid() == 0:
         pytest.skip("root reads a mode-000 file, so EACCES cannot be produced")
     legacy = tmp_path / "CLAUDE.md"
     legacy.write_text(_pins(13), encoding="utf-8")
     legacy.chmod(0o000)
     try:
-        assert _gate(tmp_path, tmp_path / ".claude" / "CLAUDE.md", _write(_pins(pins))) == expected
+        assert _gate(tmp_path, tmp_path / ".claude" / "CLAUDE.md", _write(_pins(pins))) == "advisory"
     finally:
         legacy.chmod(0o644)
 

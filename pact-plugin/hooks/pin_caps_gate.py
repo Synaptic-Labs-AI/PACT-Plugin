@@ -33,11 +33,10 @@ FAIL-OPEN. An over-block is the worst outcome, so every failure allows:
     and allows;
   - the decision itself allows with an advisory when the Pinned section cannot
     be located, when the check runs past its step budget or timer, or when it
-    fails.
-  The one refusing failure path: a Write over an existing CLAUDE.md that cannot
-  be read is compared with an empty file, so a Write whose own pins are over the
-  cap is refused. An Edit over an unreadable file is allowed with an advisory,
-  because it cannot be simulated.
+    fails;
+  - an Edit or a Write over a CLAUDE.md that exists but cannot be read is
+    allowed with an advisory: without the text before, the change cannot be
+    compared with it.
 
 Input: JSON from stdin with tool_name, tool_input, session_id, etc.
 Output: a deny (hookSpecificOutput.permissionDecision, exit 2), an allow with
@@ -197,18 +196,14 @@ def _read_baseline(claude_md_path: Path) -> tuple[Optional[str], Optional[str]]:
 
 
 def _unreadable_decision(claude_md_path: Path, tool_name: str, tool_input: dict):
-    """The decision when the project CLAUDE.md exists but cannot be read.
-
-    The one refusing failure path: a Write is compared with an empty file, so
-    a Write whose own pins are over the cap is refused. An Edit cannot be
-    simulated without the text, so it is allowed with an advisory."""
-    if tool_name == "Write":
-        return gate_decision("", tool_name, tool_input)
+    """The decision when the project CLAUDE.md exists but cannot be read: an
+    Edit or a Write is allowed with an advisory, because the change cannot be
+    compared with a text the hook cannot read."""
     from shared.pin_growth import PinDecision
 
     return PinDecision(
         "ALLOW_ADVISORY", 0, 0, None, "unreadable",
-        f"PACT could not read {claude_md_path}, so the pin cap was not checked for this Edit.",
+        f"PACT could not read {claude_md_path}, so the pin cap was not checked for this {tool_name}.",
     )
 
 

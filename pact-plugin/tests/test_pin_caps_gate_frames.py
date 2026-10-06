@@ -353,8 +353,8 @@ def test_the_row_set_covers_every_family_with_an_allowed_and_a_denied_row():
     for name, _before, _call, expected in REAL_HOOK_ROWS:
         families.setdefault(name.split(":")[0], set()).add("deny" if expected is None else expected)
     for family, outcomes in families.items():
-        if family == "not located":
-            assert outcomes == {"advisory"}
+        if family in ("not located", "unreadable file"):
+            assert outcomes == {"advisory"}, (family, outcomes)
         else:
             assert {"allow", "deny"} <= outcomes, (family, outcomes)
 

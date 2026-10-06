@@ -1,8 +1,8 @@
 """
 Counter-test-by-revert for pin_caps_gate.py predicates.
 
-For each refusal the gate makes (count growth, size, invalid override, and
-the unreadable-baseline Write) and for the growth rule that keeps an
+For each refusal the gate makes (count growth, size, invalid override), for
+the allow over a file it cannot read, and for the growth rule that keeps an
 over-cap file editable, we temporarily REVERT the enforcement via
 monkeypatch, run a target test, assert it would FAIL against the reverted
 source, then restore. This proves each predicate-level test is load-bearing
@@ -345,22 +345,22 @@ class TestCounterRevert_GrowthPredicate:
 
 
 # ---------------------------------------------------------------------------
-# UNREADABLE-BASELINE WRITE counter-test (the one refusing failure path)
+# UNREADABLE-FILE WRITE counter-test (every failure allows)
 # ---------------------------------------------------------------------------
 
 
-class TestCounterRevert_WriteBaselineFailClosed:
-    """Revert the unreadable-file Write refusal → target test FAILS (the Write
-    would fail open over a CLAUDE.md that resolves but cannot be read; here it
-    is a directory, which root cannot read either)."""
+class TestCounterRevert_UnreadableWriteAllows:
+    """Revert the unreadable-file allow to the old comparison with an empty
+    file → the Write is refused, so the target test is load-bearing (here the
+    CLAUDE.md is a directory, which root cannot read either)."""
 
     def test_target_test_passes_on_production_source(
         self, tmp_path, monkeypatch, pact_context
     ):
-        """Baseline: Write 13/12 over an unreadable CLAUDE.md DENIES."""
+        """Baseline: Write 13/12 over an unreadable CLAUDE.md is allowed."""
         claude_md = tmp_path / "CLAUDE.md"
         claude_md.mkdir()
-        pact_context(team_name="test-team", session_id="session-closed", project_dir=str(tmp_path))
+        pact_context(team_name="test-team", session_id="session-unreadable", project_dir=str(tmp_path))
 
         point_resolver_at(monkeypatch, tmp_path)
 
@@ -368,19 +368,20 @@ class TestCounterRevert_WriteBaselineFailClosed:
             "tool_name": "Write",
             "tool_input": {"file_path": str(claude_md), "content": _build_claude_md(13)},
         })
-        assert result is not None
-        assert "Pin count cap" in result
+        assert result is None, result
 
-    def test_counter_revert_fail_closed_causes_failure(
+    def test_counter_revert_to_an_empty_comparison_causes_failure(
         self, tmp_path, monkeypatch, pact_context
     ):
-        """Revert `_unreadable_decision` to allow unconditionally → the Write passes."""
+        """Revert `_unreadable_decision` to compare a Write with empty text →
+        the Write's own 13 pins are refused."""
         import pin_caps_gate
 
-        monkeypatch.setattr(pin_caps_gate, "_unreadable_decision", lambda *args: None)
+        monkeypatch.setattr(pin_caps_gate, "_unreadable_decision",
+                            lambda path, tool, tool_input: pin_caps_gate.gate_decision("", tool, tool_input))
         claude_md = tmp_path / "CLAUDE.md"
         claude_md.mkdir()
-        pact_context(team_name="test-team", session_id="session-closed-revert", project_dir=str(tmp_path))
+        pact_context(team_name="test-team", session_id="session-unreadable-revert", project_dir=str(tmp_path))
 
         point_resolver_at(monkeypatch, tmp_path)
 
@@ -388,6 +389,4 @@ class TestCounterRevert_WriteBaselineFailClosed:
             "tool_name": "Write",
             "tool_input": {"file_path": str(claude_md), "content": _build_claude_md(13)},
         })
-        assert result is None, (
-            f"fail-CLOSED counter-revert should ALLOW (fail-open), got: {result!r}"
-        )
+        assert result is not None and "Pin count cap" in result, result

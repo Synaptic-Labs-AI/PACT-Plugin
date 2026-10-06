@@ -4,8 +4,8 @@ HANDOFF items and auditor-2's residual sweep.
 
 Items covered:
   1. failure_log classification assertions for the gate's error paths
-     (_FAIL_BASELINE_READ, _FAIL_DECISION, _FAIL_UNEXPECTED). A parse or
-     decision failure allows: only the unreadable-baseline Write refuses.
+     (_FAIL_BASELINE_READ, _FAIL_DECISION, _FAIL_UNEXPECTED). Every failure
+     allows, a file the gate cannot read included.
   2. concurrent access — near-simultaneous hook invocations, which read
      the file without a lock, all complete and agree.
 
@@ -237,13 +237,11 @@ class TestFailureLogClassification:
         assert "RuntimeError" in unexpected_failures[0]["error"]
         assert "synthetic unexpected failure" in unexpected_failures[0]["error"]
 
-    def test_write_baseline_failclosed_records_classification(
+    def test_a_write_over_an_unreadable_file_records_classification(
         self, gate_with_captured_failures
     ):
-        """Write fail-CLOSED path still records a failure_log entry for
-        the baseline read. The closure is an asymmetric exception that
-        DENIES the tool; it does NOT skip observability.
-        """
+        """A Write over a CLAUDE.md the gate cannot read is allowed, and the
+        read failure is still recorded in failure_log."""
         env = gate_with_captured_failures
         # A CLAUDE.md that resolves but cannot be read (a directory) →
         # IsADirectoryError on read → _FAIL_BASELINE_READ.
@@ -255,10 +253,7 @@ class TestFailureLogClassification:
                 "content": _build_over_cap(),
             },
         })
-        assert result is not None
-        assert "Pin count cap" in result
-        # failure_log still captured the read failure (observability is
-        # NOT skipped just because the outer decision is DENY).
+        assert result is None, result
         read_failures = [
             f for f in env["failures"]
             if f["classification"] == "pin_caps_gate_baseline_read"
@@ -270,8 +265,7 @@ class TestFailureLogClassification:
         self, gate_with_captured_failures, monkeypatch
     ):
         """A parse failure no longer refuses a Write: the decision allows with
-        its error advisory, records _FAIL_DECISION, and only an unreadable file
-        refuses."""
+        its error advisory and records _FAIL_DECISION."""
         env = gate_with_captured_failures
         env["claude_md"].write_text(
             make_claude_md_with_pins([
