@@ -813,7 +813,7 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
     except OSError:
         return None
 
-    from shared.claude_md_markers import State, parse
+    from shared.claude_md_markers import State, parse, uncertainty_added
 
     doc = parse(content)
     located = locate_pinned(doc)
@@ -867,6 +867,14 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
     # same hardening as the other 5 (claude_md_manager + session_resume).
     # See `fcntl_sidecar_lock_pattern` for the canonical pattern.
     if modified:
+        # A STALE row is an HTML comment line, so it can end a comment or
+        # declaration the user left open above it, and the file then reads as
+        # uncertain from the user's opener down. Write nothing when the new
+        # text has more rows PACT cannot read than the file it was planned on.
+        reason = uncertainty_added(doc, parse(new_content))
+        if reason is not None:
+            return f"Pinned staleness skipped: {reason}"
+
         # Function-level import to avoid circular dependency:
         # session_init.py imports staleness at module level, and also
         # imports from shared.claude_md_manager — a module-level

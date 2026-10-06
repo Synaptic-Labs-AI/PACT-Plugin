@@ -4318,3 +4318,88 @@ class TestStalenessCitationsResolve:
         assert (cited - (defined - {victim})) == {victim}, (
             "deleting a cited definition did not surface it as missing"
         )
+
+
+# ===========================================================================
+# The markings never make the file less readable
+# ===========================================================================
+
+_STALE_PIN = "### Fix the gate (PR #12, merged 2020-01-01)\nBody of the stale pin.\n"
+_FENCE_TAIL = "\n## Fenced\n```\ncode\n```\n"
+# Two stale pins straddle a `<!-- note` that is never closed; the second pin's
+# STALE row would end it.
+_OPEN_COMMENT_BETWEEN_STALE_PINS = (
+    "# Notes\n\n## Pinned Context\n\n### First pin 2020-01-01\nBody one.\n\n"
+    "<!-- note\n```\nexample\n\n### Second pin 2020-01-02\nBody two.\n"
+)
+_ENDED_BY_A_COMMENT = "an HTML block is ended only by a line that starts a comment"
+
+
+def _shapes_a_stale_row_would_open():
+    """(name, text, opener's line) for 14 unmigrated files: a type-2 comment or
+    a type-4 declaration, never closed or closed mid-line below the stale pin,
+    opened at the top of the file or in its Pinned section, each with and
+    without a fence at the end. A never-closed declaration over a fence already
+    leaves the Pinned section unreadable, so the pass does not run on those two."""
+    for kind, opener, closer in (("type 2", "<!-- note", "flow: a --> b"),
+                                 ("type 4", "<!NOTE", "x > y")):
+        for closed in (False, True):
+            tail = closer + "\n" if closed else ""
+            for where, line in (("top", 2), ("Pinned", 4)):
+                top, pinned = (opener + "\n", "") if where == "top" else ("", opener + "\n")
+                text = (f"# Project\n{top}## Pinned Context\n\n{pinned}### Pin A\nBody A.\n\n"
+                        f"{_STALE_PIN}{tail}\n## Notes\nnotes\n")
+                name = f"{kind}, {'closed mid-line' if closed else 'never closed'}, {where}"
+                yield pytest.param(text, line, id=name)
+                if closed or kind == "type 2":
+                    yield pytest.param(text + _FENCE_TAIL, line, id=name + ", fence after")
+
+
+def _unknown_rows(text):
+    from shared.claude_md_markers import Kind, parse
+
+    return sum(1 for line in parse(text).lines if line.kind is Kind.UNKNOWN)
+
+
+class TestTheMarkingsNeverMakeTheFileLessReadable:
+    """A STALE row is an HTML comment line. Under a comment or declaration the
+    user left open above a stale pin, it would end that block, and the file
+    would read as uncertain from the opener down. The pass then writes nothing
+    and names the opener's line on disk."""
+
+    def test_a_stale_row_that_would_end_a_comment_between_two_stale_pins(self, tmp_path):
+        """The first pin's STALE row goes above the opener, and the line named
+        is still the opener's line on disk, 8."""
+        from staleness import check_pinned_staleness
+
+        path = tmp_path / "CLAUDE.md"
+        path.write_bytes(_OPEN_COMMENT_BETWEEN_STALE_PINS.encode("utf-8"))
+        status = check_pinned_staleness(claude_md_path=path)
+        assert status == ("Pinned staleness skipped: the update would make line 8 start a region "
+                          f"PACT cannot read: {_ENDED_BY_A_COMMENT}")
+        assert path.read_bytes() == _OPEN_COMMENT_BETWEEN_STALE_PINS.encode("utf-8")
+
+    @pytest.mark.parametrize("text, line", list(_shapes_a_stale_row_would_open()))
+    def test_a_stale_row_that_would_end_an_open_block_is_not_written(self, tmp_path, text, line):
+        from staleness import check_pinned_staleness
+
+        path = tmp_path / "CLAUDE.md"
+        path.write_bytes(text.encode("utf-8"))
+        status = check_pinned_staleness(claude_md_path=path)
+        assert status == (f"Pinned staleness skipped: the update would make line {line} start a "
+                          f"region PACT cannot read: {_ENDED_BY_A_COMMENT}")
+        assert path.read_bytes() == text.encode("utf-8")
+
+    def test_the_same_file_with_the_comment_closed_on_its_own_line_is_marked(self, tmp_path):
+        """The control: closed at a row edge, the comment ends where the user
+        ended it, and the STALE rows end nothing."""
+        from staleness import check_pinned_staleness
+
+        text = _OPEN_COMMENT_BETWEEN_STALE_PINS.replace("example\n", "example\n-->\n", 1)
+        path = tmp_path / "CLAUDE.md"
+        path.write_bytes(text.encode("utf-8"))
+        status = check_pinned_staleness(claude_md_path=path)
+        after = path.read_bytes().decode("utf-8")
+        assert status == "Pinned context: 2 stale pin(s) detected"
+        assert after.count("<!-- STALE: Last relevant ") == 2
+        assert _unknown_rows(after) == _unknown_rows(text) == 0
