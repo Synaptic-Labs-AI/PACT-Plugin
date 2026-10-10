@@ -8,7 +8,11 @@ row of the file before the change, and checks only a rationale it does not
 find there. So an old invalid override stays untouched through edits elsewhere
 in its pin, a new date on its row, renames, moves, line-ending rewrites and
 fence-closing Writes, and a change that adds an invalid override, or edits a
-rationale and leaves it invalid, is refused.
+rationale and leaves it invalid, is refused. Where either row carries a
+reconfirmation after its override field, the rationales are compared with
+their trailing non-word characters removed, since the reader cuts those with
+the reconfirmation; so adding, removing, moving or re-dating one leaves an old
+override untouched.
 
 Rows drive `pin_caps_gate.gate_decision` on whole documents, the gate's own
 decision with no file I/O.
@@ -287,3 +291,88 @@ def test_reconfirming_with_an_invalid_rationale_is_refused(name, row, reason):
     decision = gate_decision(OVERRIDDEN, *_edit(OVERRIDDEN_ROW, row))
     assert (decision.verdict, decision.cause) == ("DENY", "override"), (name, decision)
     assert decision.reason == f"Pin cap violation (invalid override): {reason}"
+
+
+# An old override over the cap that a curator reconfirms, unreconfirms or
+# re-dates without touching its rationale. The reader cuts a reconfirmation
+# written after the rationale together with the rationale's own trailing
+# punctuation, so either placement reads the same rationale.
+OLD = "y" * 124
+REC = "reconfirmed: 2026-10-10 because the dispatch template still cites it"
+ENDINGS = [(".", "a full stop"), (")", "a closing parenthesis"), ("!", "an exclamation mark"),
+           ("…", "an ellipsis"), ('"', "a quotation mark"), ('."', "a full stop and a quotation mark"),
+           (":", "a colon"), ("y", "a word character")]
+
+
+def _old(rationale):
+    return _doc("\n".join([_pin(1, body="short body", override=rationale, date="2026-05-26")] + _rest()))
+
+
+@pytest.mark.parametrize("ending", [e for e, _ in ENDINGS], ids=[label for _, label in ENDINGS])
+def test_a_reconfirmation_appended_after_an_old_invalid_override_is_allowed(ending):
+    rationale = OLD + ending
+    call = _edit(f"{rationale} -->", f"{rationale}, {REC} -->")
+    assert gate_decision(_old(rationale), *call).verdict == "ALLOW", ending
+
+
+@pytest.mark.parametrize("ending", [e for e, _ in ENDINGS], ids=[label for _, label in ENDINGS])
+def test_a_reconfirmation_removed_from_an_old_invalid_override_is_allowed(ending):
+    rationale = OLD + ending
+    call = _edit(f"{rationale}, {REC} -->", f"{rationale} -->")
+    assert gate_decision(_old(f"{rationale}, {REC}"), *call).verdict == "ALLOW", ending
+
+
+def test_a_reconfirmation_appended_by_a_whole_file_write_is_allowed():
+    before = _old(OLD + ".")
+    after = before.replace(f"{OLD}. -->", f"{OLD}., {REC} -->")
+    assert gate_decision(before, *_write(after)).verdict == "ALLOW"
+
+
+RECONFIRMED_OLD = _old(f"{OLD}., {REC}")
+UNTOUCHED = [
+    ("a reconfirmation placed before the override", _old(OLD + "."),
+     _edit("pinned: 2026-05-26, pin-size-override:", f"pinned: 2026-05-26, {REC}, pin-size-override:")),
+    ("the prune-memory rewrite moving the reconfirmation before the override", RECONFIRMED_OLD,
+     _edit(f"pinned: 2026-05-26, pin-size-override: {OLD}., {REC} -->",
+           f"pinned: 2026-05-26, reconfirmed: 2026-11-10 because the template still cites it, "
+           f"pin-size-override: {OLD}. -->")),
+    ("a reconfirmation re-dated", RECONFIRMED_OLD, _edit("2026-10-10", "2026-11-10")),
+    # A new reconfirmed pin above the old one reads the old rationale less its
+    # full stop. The old row matches its exact copy first, so the new pin's
+    # rationale is checked on its own, and it is valid.
+    ("a new reconfirmed pin above reading the old rationale less its full stop", _old("x" * 120 + "."),
+     _edit("<!-- pinned: 2026-05-26,",
+           _pin(8, body="b", override=f"{'x' * 120}, {REC}") + "\n<!-- pinned: 2026-05-26,")),
+]
+
+
+@pytest.mark.parametrize("name, before, call", UNTOUCHED, ids=[row[0] for row in UNTOUCHED])
+def test_an_old_invalid_override_is_untouched_by_where_its_reconfirmation_sits(name, before, call):
+    assert gate_decision(before, *call).verdict == "ALLOW", name
+
+
+# Where neither row carries a reconfirmation after its override field, the
+# comparison stays exact: punctuation edited alone is an edit.
+PUNCTUATION_EDITS = [
+    ("a valid rationale at the cap given a full stop", _old("x" * 120),
+     _edit("x" * 120 + " -->", "x" * 120 + ". -->"), 121),
+    ("a valid rationale at the cap given a full stop and a reconfirmation before the override",
+     _old("x" * 120),
+     _edit(f"pinned: 2026-05-26, pin-size-override: {'x' * 120} -->",
+           f"pinned: 2026-05-26, {REC}, pin-size-override: {'x' * 120}. -->"), 121),
+    ("an old invalid rationale's full stop removed", _old(OLD + "."), _edit(f"{OLD}. -->", f"{OLD} -->"), 124),
+    ("an old invalid rationale's words changed as a reconfirmation is appended", _old(OLD + "."),
+     _edit(f"{OLD}. -->", f"w{OLD[1:]}., {REC} -->"), 124),
+    # Removing a reconfirmation reveals only what was written before it; a
+    # full stop added in the same edit is new text.
+    ("a reconfirmation removed and a full stop added to a valid rationale at the cap",
+     _old(f"{'x' * 120}, {REC}"), _edit(f"{'x' * 120}, {REC} -->", f"{'x' * 120}. -->"), 121),
+]
+
+
+@pytest.mark.parametrize("name, before, call, length", PUNCTUATION_EDITS, ids=[row[0] for row in PUNCTUATION_EDITS])
+def test_an_edited_rationale_is_still_checked(name, before, call, length):
+    decision = gate_decision(before, *call)
+    assert (decision.verdict, decision.cause) == ("DENY", "override"), (name, decision)
+    assert decision.reason == (f"Pin cap violation (invalid override): Override rationale is {length} chars "
+                               f"(max: 120). Shorten it.")

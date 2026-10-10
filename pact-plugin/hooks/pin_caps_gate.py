@@ -49,7 +49,7 @@ from __future__ import annotations
 # ─── stdlib first (used by _emit_load_failure_allow BEFORE wrapped imports) ─
 import json
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import NoReturn, Optional
 
@@ -111,11 +111,46 @@ def _collapsed(content: str) -> str:
     return " ".join(content.split())
 
 
+def _trimmed(key: str) -> str:
+    """`key` less its trailing run of non-word characters, the run
+    `override_rationale_text` drops before a reconfirmation."""
+    from pin_caps import _WORD_CHAR
+
+    end = len(key)
+    while end and not _WORD_CHAR.match(key, end - 1):
+        end -= 1
+    return key[:end]
+
+
+def _override_key(content: str, rationale: str) -> tuple[str, Optional[str]]:
+    """The rationale `override_rationale_text` read from the override comment
+    `content` and, when a reconfirmation follows the comment's override field
+    (the reader then cuts it from the rationale), the text written between the
+    field and that reconfirmation, else None; both whitespace collapsed."""
+    from pin_caps import _OVERRIDE_FIELD, RECONFIRMED_DATE_RE
+
+    field = _OVERRIDE_FIELD.search(content)
+    reconfirm = RECONFIRMED_DATE_RE.search(content, field.end()) if field else None
+    written = _collapsed(content[field.end():reconfirm.start()]) if reconfirm else None
+    return _collapsed(rationale), written
+
+
+def _take(rows: Counter, prefix: Optional[str] = None) -> bool:
+    """Use up one old row of `rows` (written text: count); whether one was.
+    With `prefix`, only a reconfirmed row whose written text starts with it;
+    otherwise any, a row with no reconfirmation (None) first."""
+    for written in sorted(rows, key=lambda w: w is not None):
+        if rows[written] and (prefix is None or (written is not None and written.startswith(prefix))):
+            rows[written] -= 1
+            return True
+    return False
+
+
 def _rationales(doc) -> Counter:
-    """The override rationales in the parsed document `doc`, whitespace
-    collapsed, one for each row that holds only an override comment, of any
-    kind. A fenced row, or one past an unclosed fence, is read as if it stood
-    alone."""
+    """The override rationales in the parsed document `doc`, as
+    `_override_key` gives them, one for each row that holds only an override
+    comment, of any kind. A fenced row, or one past an unclosed fence, is read
+    as if it stood alone."""
     from pin_caps import override_rationale_text
     from shared.claude_md_markers import Kind, parse
 
@@ -128,7 +163,7 @@ def _rationales(doc) -> Counter:
         else:
             rationale = override_rationale_text(parse(line.content.strip()), 0)
         if rationale is not None:
-            found[_collapsed(rationale)] += 1
+            found[_override_key(line.content, rationale)] += 1
     return found
 
 
@@ -153,6 +188,19 @@ def _invalid_override(before: str, after: str) -> Optional[str]:
     fence-closing Write. Each old copy covers one copy after, so the change
     cannot raise the number of invalid rationales, and an invalid one grants
     no size exemption either way.
+
+    The reader cuts a reconfirmation written after the override field from
+    the rationale together with the run of non-word characters before it, so
+    adding, removing or moving one changes the rationale's trailing
+    punctuation without the curator touching it. So once the exact matches
+    are used up, a rationale not found is matched again with its trailing run
+    of non-word characters removed, against the old rationales left with
+    theirs removed, where it or the old row carries such a reconfirmation. A
+    reconfirmed rationale reads no longer than the old one it matches; one
+    without a reconfirmation matches only an old reconfirmed row whose written
+    text it begins, so it holds nothing the curator did not write. Where
+    neither row carries one, as when only the punctuation is edited, the
+    match stays exact.
     """
     from pin_caps import override_rationale_text
     from shared.claude_md_markers import State, parse
@@ -163,14 +211,22 @@ def _invalid_override(before: str, after: str) -> Optional[str]:
     if located.state is not State.FOUND:
         return None
     heading, last = located.spans[0]
-    rationales_before = _rationales(parse(before))
+    old = defaultdict(Counter)
+    for (key, written), count in _rationales(parse(before)).items():
+        old[key][written] += count
+    edited = []
     for first, _end in pin_spans(doc, (heading + 1, last)):
         rationale = override_rationale_text(doc, first)
         if rationale is None:
             continue
-        key = _collapsed(rationale)
-        if rationales_before[key]:
-            rationales_before[key] -= 1
+        key, written = _override_key(doc.lines[first].content, rationale)
+        if not _take(old[key]):
+            edited.append((key, written, rationale))
+    trimmed = defaultdict(Counter)
+    for key, rows in old.items():
+        trimmed[_trimmed(key)].update(rows)
+    for key, written, rationale in edited:
+        if _take(trimmed[_trimmed(key)], None if written is not None else key):
             continue
         reason = _validate_override_rationale(rationale)
         if reason is not None:
