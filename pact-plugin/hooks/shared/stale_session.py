@@ -36,6 +36,36 @@ import shared.pact_context as pact_context
 _RESUME_LINE_RE = re.compile(
     r"- Resume:\s*`claude (?:--agent\s+\S+\s+)?--resume\s+([0-9a-f-]+)`"
 )
+# The session id on a Resume row that session_block_rows already located.
+_RESUME_ID_RE = re.compile(r"--resume\s+([0-9a-f-]+)`")
+
+
+def session_block_rows(content: str, field: re.Pattern) -> tuple[str, ...] | None:
+    """The contents of the rows inside the Current Session block that `field`
+    matches at column 0, in order.
+
+    None when the block is not FOUND: absent, a duplicate, a stray marker, or
+    beyond an uncertain region. A field line in a fenced example or in prose
+    outside the block is never read. The finder and the marker pair are
+    imported here, not at module level: dispatch_gate loads this module under
+    a fail-closed import guard, and only this advisory read needs them.
+    """
+    from shared.claude_md_manager import SESSION_END_MARKER, SESSION_START_MARKER
+    from shared.claude_md_markers import State, parse
+
+    doc = parse(content)
+    block = doc.find_block(SESSION_START_MARKER, SESSION_END_MARKER)
+    if block.state is not State.FOUND:
+        return None
+    first, last = block.spans[0]
+    return tuple(doc.lines[row].content for row in doc.find_lines(field, (first + 1, last - 1)))
+
+
+def recorded_session_id(content: str) -> str | None:
+    """The session id the Current Session block's Resume line records, or None."""
+    rows = session_block_rows(content, _RESUME_LINE_RE)
+    match = _RESUME_ID_RE.search(rows[0]) if rows else None
+    return match.group(1) if match else None
 
 _STALENESS_WARNING_TEMPLATE = (
     "\n\nWARNING — stale session block: the project CLAUDE.md 'Current "
@@ -80,7 +110,10 @@ def detect_stale_session_block(input_data: dict) -> str | None:
          to a consumer's fail-open and suppress the ENTIRE injection, primary
          instruction included. A non-UTF-8 byte is decoded with replacement,
          so it neither raises nor hides a stale Resume line.
-      4. no Resume line matches the regex (tampered/garbage → no claim)
+      4. no Resume line sits inside a FOUND Current Session block (no
+         block, a duplicate or stray marker, a block past an uncertain
+         region, a line only in a fenced example, tampered or garbage
+         text → no claim), or reading it raises (an advisory never fails)
       5. recorded session_id equals this session's (healthy resume)
 
     Stdlib-only two-path read: .claude/CLAUDE.md preferred, legacy
@@ -122,10 +155,12 @@ def detect_stale_session_block(input_data: dict) -> str | None:
             return None
     except OSError:
         return None
-    match = _RESUME_LINE_RE.search(content)
-    if not match:
+    try:
+        recorded = recorded_session_id(content)
+    except Exception:  # noqa: BLE001 — advisory: an import or parse failure means no warning
         return None
-    recorded = match.group(1)
+    if recorded is None:
+        return None
     actual = str(raw_id)
     if recorded != actual:
         # Render-bound length cap (defense-in-depth, message-only). The

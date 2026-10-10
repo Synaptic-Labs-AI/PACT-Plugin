@@ -83,7 +83,7 @@ class TestPinCommentCarriers_Pipeline:
 
     @pytest.mark.parametrize("carrier", CARRIERS_WITH_GT)
     def test_carrier_holding_a_greater_than_is_not_charged(self, carrier):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         body_a = "Pin A body, which the curator did not touch."
         comment = f"<!-- pinned: 2026-03-01, pin-size-override: {carrier} -->"
@@ -104,7 +104,7 @@ class TestPinCommentCarriers_Pipeline:
         refuse a faithful rationale that carries a URL, an em-dash, an HTML
         entity or a Unicode arrow.
         """
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         body_a = "Pin A body, which the curator did not touch."
         comment = f"<!-- pinned: 2026-03-01, pin-size-override: {carrier} -->"
@@ -119,7 +119,7 @@ class TestPinCommentCarriers_Pipeline:
         The pin lost its date attribution AND the neighbour was charged, so
         both halves belong in one assertion.
         """
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         body_a = "Pin A body, which the curator did not touch."
         comment = ("<!-- pinned: 2026-03-01, reconfirmed: 2026-04-01 "
@@ -142,6 +142,16 @@ class TestPinCommentStale_Pipeline:
         ("marker alone", "body\n" + STALE_MARKER),
         ("date comment holding `>` then marker",
          "body\n<!-- pinned: 2026-01-01, a > b -->\n" + STALE_MARKER),
+    ]
+
+    # AN UNTERMINATED OPENER BEFORE THE MARKER MAKES THE MARKER UNREADABLE.
+    # The fence-aware parser reads `<!--` as the start of an HTML comment that
+    # runs to the first `-->`, which is the STALE row's own terminator, so the
+    # marker may be text inside the user's comment. A comment closed by a row
+    # that itself starts a comment is the parser's uncertain region: every row
+    # from the opener on is UNKNOWN, no marker is read there, and in a whole
+    # CLAUDE.md the Pinned section is not FOUND, so no reader acts on it.
+    UNREADABLE_STALE_CASES = [
         ("unterminated opener holding `>` then marker",
          "body\n<!-- pinned: 2026-01-01, a > b\nmore\n" + STALE_MARKER),
         ("unterminated opener without `>` then marker",
@@ -153,7 +163,7 @@ class TestPinCommentStale_Pipeline:
     )
     def test_stale_signal_survives_the_widened_strip(self, label, body):
         """NO-CHANGE CONTROL on the signal. The charge test below discriminates."""
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         pins = parse_pins(f"### P\n{body}\n")
         assert pins[0].is_stale is True, (
@@ -161,9 +171,20 @@ class TestPinCommentStale_Pipeline:
             f"`is_stale` must read the RAW body, not the stripped copy."
         )
 
+    @pytest.mark.parametrize(
+        "label,body", UNREADABLE_STALE_CASES, ids=[c[0] for c in UNREADABLE_STALE_CASES]
+    )
+    def test_a_marker_inside_an_unterminated_comment_is_not_read(self, label, body):
+        from fixtures.pin_helpers import parse_pins
+        from shared.claude_md_markers import Kind, parse
+
+        text = f"### P\n{body}\n"
+        assert parse(text).lines[-1].kind is Kind.UNKNOWN, label
+        assert parse_pins(text)[0].is_stale is False, label
+
     def test_a_greater_than_comment_beside_a_stale_marker_is_not_charged(self):
         """Both managed markers must leave the curator's budget alone."""
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         body = ("body\n"
                 "<!-- pinned: 2026-01-01, a > b -->\n"
@@ -175,7 +196,8 @@ class TestPinCommentStale_Pipeline:
 
     def test_stale_block_threshold_is_unchanged_by_greater_than_comments(self):
         """A region whose every comment holds `>` still reports stale overflow."""
-        from pin_caps import PIN_STALE_BLOCK_THRESHOLD, check_stale_block, parse_pins
+        from pin_caps import PIN_STALE_BLOCK_THRESHOLD, check_stale_block
+        from fixtures.pin_helpers import parse_pins
 
         region = ""
         for i in range(3):
@@ -195,7 +217,7 @@ class TestPinCommentMultiPin_Pipeline:
     """Attribution walks BACKWARD over several pins, and must not overreach."""
 
     def test_every_pin_in_a_six_pin_region_is_charged_only_its_own_body(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         bodies = [f"{'body ' * 8}pin {i}" for i in range(6)]
         region = ""
@@ -216,7 +238,7 @@ class TestPinCommentMultiPin_Pipeline:
 
     def test_backward_walk_takes_the_nearest_comment_over_blank_lines(self):
         """Two comments, blank lines between. The NEAREST one must win."""
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         nearest = "<!-- pinned: 2026-03-03, second > marker -->"
         region = (
@@ -266,7 +288,7 @@ class TestPinCommentMalformed_Pipeline:
         self, label, region, expected_pins
     ):
         """NO-CHANGE CONTROL on the pin count. The charge test below discriminates."""
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         pins = parse_pins(region)
         assert len(pins) == expected_pins, (
@@ -279,7 +301,7 @@ class TestPinCommentMalformed_Pipeline:
         This is the case that discriminates: the previous body class refused
         the `>` and charged the whole comment to the pin.
         """
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         pins = parse_pins("### P\nbody\n<!-- pinned: 2026-01-01, a > b -->\n")
         assert pins[0].body_chars == len("body")
@@ -307,11 +329,12 @@ class TestPinCommentTwoState_Pipeline:
         return "\n".join(lines) + "\n"
 
     def _verdict(self, stray):
-        from pin_caps import compute_deny_reason, parse_pins
+        from pin_caps import compute_deny_reason
+        from fixtures.pin_helpers import parse_pins
 
         pre = parse_pins(self._region(stray))
         post = parse_pins(self._region(None))
-        return compute_deny_reason(pre, post, "")
+        return compute_deny_reason(pre, post)
 
     def test_repairing_a_stray_opener_is_not_denied(self):
         """The fault this file was written for. It is fixed; keep it fixed.
@@ -408,11 +431,12 @@ class TestPinCommentTwoStateWellFormed_Pipeline:
         )
 
     def _verdict(self, post_comment):
-        from pin_caps import compute_deny_reason, parse_pins
+        from pin_caps import compute_deny_reason
+        from fixtures.pin_helpers import parse_pins
 
         pre = parse_pins(self._region(self.COMMENT))
         post = parse_pins(self._region(post_comment))
-        return compute_deny_reason(pre, post, "")
+        return compute_deny_reason(pre, post)
 
     def test_demoting_a_pin_comment_to_a_plain_comment_is_denied(self):
         """RULED ACCEPTANCE. This deny is CORRECT and is kept deliberately.
@@ -452,11 +476,12 @@ class TestPinCommentTwoStateWellFormed_Pipeline:
         code versions read the same pre-state and neither treats the rename
         as a regression peculiar to one of them.
         """
-        from pin_caps import compute_deny_reason, parse_pins
+        from pin_caps import compute_deny_reason
+        from fixtures.pin_helpers import parse_pins
 
         pre = parse_pins(self._region("<!-- pinned: 2026-02-02, note ok -->"))
         post = parse_pins(self._region("<!-- note: 2026-02-02, note ok -->"))
-        assert compute_deny_reason(pre, post, "") is not None
+        assert compute_deny_reason(pre, post) is not None
 
     def test_editing_the_rationale_without_removing_the_marker_is_allowed(self):
         """CONTROL. The advantage must SHRINK, not merely change.
@@ -521,14 +546,15 @@ class TestPinCommentCorruptedMarker_RuledAcceptance:
         )
 
     def test_corrupting_a_managed_marker_is_denied(self):
-        from pin_caps import compute_deny_reason, parse_pins
+        from pin_caps import compute_deny_reason
+        from fixtures.pin_helpers import parse_pins
 
         unterminated = self.WELL_FORMED.replace(" -->", "")
         assert len(self.WELL_FORMED) - len(unterminated) == 4
 
         pre = parse_pins(self._region(self.WELL_FORMED))
         post = parse_pins(self._region(unterminated))
-        assert compute_deny_reason(pre, post, "") is not None, (
+        assert compute_deny_reason(pre, post) is not None, (
             "the corrupted marker's characters are counted, so the body grew "
             "past the cap and the edit must be refused"
         )
@@ -547,34 +573,47 @@ class TestPinCommentCorruptedMarker_RuledAcceptance:
         records the premise without adding a second red at remediation time.
         The single intended red is the XPASS above.
         """
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         unterminated = self.WELL_FORMED.replace(" -->", "")
         pre = parse_pins(self._region(self.WELL_FORMED))[0].body_chars
         post = parse_pins(self._region(unterminated))[0].body_chars
         deleted = len(self.WELL_FORMED) - len(unterminated)
 
-        if post < pre:
-            # Forward run present: the drop must be far larger than the edit.
-            assert pre - post > deleted, (
-                "a fall of only the deleted characters would not be a "
-                "forward run, and the ruling's premise would not hold"
-            )
-        else:
-            # Forward run removed. The body may only grow by the characters
-            # that stopped being exempt, never by more.
-            assert post - pre == len(self.WELL_FORMED) - deleted, (
-                "the growth must equal exactly the characters that lost their "
-                "managed exemption"
-            )
+        assert post >= pre, (
+            "a four-character deletion fell the counted body: the forward run "
+            "the ruling weighed is back"
+        )
+
+    def test_the_parser_reads_no_pin_past_the_corrupted_marker(self):
+        """THE PARSER'S ARM, a fourth beside the three above.
+
+        The unterminated comment is closed, for the fence-aware parser, by the
+        next row that ends in `-->`, and that row (pin B's date comment) itself
+        starts a comment. That is the parser's uncertain region: every row
+        from the corrupted marker on is UNKNOWN. So pin B is not read as a pin,
+        and its rows, charged in full like every UNKNOWN row, join pin A's
+        body. The charge only rises, so the refusal above stands. In a whole
+        CLAUDE.md the Pinned section is not FOUND here, so the gate allows with
+        its advisory and the readers stay silent.
+        """
+        from fixtures.pin_helpers import parse_pins
+
+        unterminated = self.WELL_FORMED.replace(" -->", "")
+        pre = parse_pins(self._region(self.WELL_FORMED))
+        post = parse_pins(self._region(unterminated))
+        assert [p.heading for p in pre] == ["### PinA", "### PinB"]
+        assert [p.heading for p in post] == ["### PinA"]
+        assert post[0].body_chars > pre[0].body_chars + len(unterminated)
 
 
 class TestPinCommentMixedLine_RuledAcceptance:
     """RULED ACCEPTANCE for a comment that SHARES A LINE WITH PROSE.
 
-    Attribution reads only whole lines: `parse_pins` runs `fullmatch` on the
-    STRIPPED line, so a line carrying prose either side of a comment is NEVER
-    attributed — it sets no date and grants no override. The strip is a
+    Attribution reads only whole rows: `pin_caps._date_comment_row` matches
+    the row patterns from the row's start to its end, so a line carrying prose
+    either side of a comment is NEVER attributed — it sets no date and grants
+    no override. The strip is a
     `.sub`, so it removes that comment's substring from the line anyway.
 
     SO THE STRIP REMOVES WHAT ATTRIBUTION NEVER ATTRIBUTES, and the counted
@@ -649,12 +688,11 @@ class TestPinCommentMixedLine_RuledAcceptance:
         would not exist, so the ruling would need re-reading rather than
         re-asserting.
         """
-        from pin_caps import OVERRIDE_COMMENT_RE, _DATE_COMMENT_RE
+        from pin_caps import _date_comment_row
+        from shared.claude_md_markers import parse
 
         for line in (self.MIXED_GT, self.MIXED_PLAIN):
-            stripped = line.strip()
-            assert _DATE_COMMENT_RE.fullmatch(stripped) is None
-            assert OVERRIDE_COMMENT_RE.fullmatch(stripped) is None
+            assert _date_comment_row(parse(f"{line}\n### P\n"), 0, 1) is None, line
 
     def test_the_same_comment_alone_on_its_line_is_attributed(self):
         """CONTROL, and it must PASS for the class above to mean anything.
@@ -663,10 +701,26 @@ class TestPinCommentMixedLine_RuledAcceptance:
         and the strip removes it completely. Without this the two assertions
         above would also hold for a pattern that simply matched nothing.
         """
-        from pin_caps import _DATE_COMMENT_RE, _extract_body_chars
+        from pin_caps import _date_comment_row
+        from shared.claude_md_markers import parse
+        from fixtures.pin_helpers import _extract_body_chars
 
-        assert _DATE_COMMENT_RE.fullmatch(self.ALONE) is not None
+        assert _date_comment_row(parse(f"{self.ALONE}\n### P\n"), 0, 1) == 0
         assert _extract_body_chars(self.ALONE) == 0
+
+    def test_a_pin_body_holding_a_mixed_line_is_charged_the_prose_alone(self):
+        """The acceptance, through the function that computes the charge.
+
+        The assertion above pins the REGEX the ruling was about; this one pins
+        the body-size path a pin actually goes through, so a body-size change
+        that stopped striking a mixed-line comment fails here even while the
+        regex is untouched.
+        """
+        from fixtures.pin_helpers import parse_pins
+
+        for line in (self.MIXED_GT, self.MIXED_PLAIN):
+            pin = parse_pins(f"### P\n{line}\n")[0]
+            assert pin.body_chars == len((self.LEAD + self.TRAIL).strip()), line
 
 
 class TestPinCommentSplitComment_RuledAcceptance:
@@ -679,13 +733,13 @@ class TestPinCommentSplitComment_RuledAcceptance:
     does not. A failure here is not a delta to review and absorb — it is a
     ruling being reversed.
 
-    THE BEHAVIOUR. `_extract_body_chars` strips per line, so a comment that
-    spans a line break is not stripped at all and every one of its characters
-    counts against the curator's budget.
+    THE BEHAVIOUR. The size charge (`pin_caps._charge`) strikes per row, so a
+    comment that spans a line break is not stripped at all and every one of
+    its characters counts against the curator's budget.
 
-    WHY THAT IS CORRECT RATHER THAN A COST TO BE REPAID. `parse_pins`
-    attributes only after `splitlines()`, so a comment spanning a line break is
-    NOT A COMMENT to the attribution path — it sets no date and grants no
+    WHY THAT IS CORRECT RATHER THAN A COST TO BE REPAID. Attribution reads one
+    row at a time, so a comment spanning a line break is NOT A COMMENT to the
+    attribution path — it sets no date and grants no
     override. The previous whole-body strip removed it anyway, which is the
     two-oracles-disagree defect this whole change exists to remove. Charging it
     is what AGREEMENT between the two paths looks like, not a regression that a
@@ -717,7 +771,7 @@ class TestPinCommentSplitComment_RuledAcceptance:
         the fixture's own length rather than a literal, so re-wording the
         fixture cannot make this a false regression.
         """
-        from pin_caps import _extract_body_chars
+        from fixtures.pin_helpers import _extract_body_chars
 
         assert _extract_body_chars(self.SPLIT) == len(self.SPLIT), (
             "a comment spanning a line break must NOT be stripped; its "
@@ -732,7 +786,7 @@ class TestPinCommentSplitComment_RuledAcceptance:
         the two is the finding: the line break is the only difference, and it
         is what decides whether the characters count.
         """
-        from pin_caps import _extract_body_chars
+        from fixtures.pin_helpers import _extract_body_chars
 
         assert _extract_body_chars(self.JOINED) == 0
 
@@ -742,7 +796,7 @@ class TestPinCommentSplitComment_RuledAcceptance:
         Without this the class would pin a helper's behaviour on an input no
         document produces.
         """
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         body = "prose line one"
         region = (
@@ -792,11 +846,11 @@ class TestPinCommentMultiLine_Characterization:
     def test_the_per_line_discipline_lives_in_the_caller_not_the_pattern(self):
         """The distinction that decides what a line-bounded repair must bind.
 
-        `parse_pins` splits with `splitlines()` before it matches, so the
-        attribution PATH is per-line. The pattern is not. A repair may bind
+        The parser splits the text into rows before attribution matches, so
+        the attribution PATH is per-row. The pattern is not. A repair may bind
         either one, and the two are different changes.
         """
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         pins = parse_pins(f"### P\n{self.MULTI_LINE}\n")
         assert pins[0].date_comment is None
@@ -818,16 +872,24 @@ class TestPinCommentBacktracking_Pipeline:
     BUDGET_SECONDS = 5.0
 
     @pytest.mark.parametrize("length", [500, 1000, 2000])
-    def test_interior_whitespace_run_stays_within_budget(self, length):
-        from pin_caps import OVERRIDE_COMMENT_RE
+    @pytest.mark.parametrize("tail", ["x", "x -->"], ids=["open", "closed"])
+    @pytest.mark.parametrize("prefix", [
+        "<!-- pinned:",
+        "<!-- pinned: 2026-01-01, reconfirmed: 2026-07-25",
+        "<!-- pinned: 2026-01-01, pin-size-override: r, reconfirmed: 2026-07-25",
+    ], ids=["date field", "reconfirmed before the override", "reconfirmed after it"])
+    def test_interior_whitespace_run_stays_within_budget(self, prefix, tail, length):
+        from pin_caps import _OVERRIDE_DATE_PART, override_rationale_text
+        from shared.claude_md_markers import parse
 
-        # An interior whitespace run survives `.strip()`, so this is the shape
-        # the parser can actually receive. The trailing character closes it.
-        line = "<!-- pinned:" + " " * length + "x"
+        # An interior whitespace run inside one row, which is the shape
+        # attribution can actually receive. The character after it ends it.
+        line = prefix + " " * length + tail
         assert line.strip() == line
 
         started = time.perf_counter()
-        OVERRIDE_COMMENT_RE.fullmatch(line)
+        _OVERRIDE_DATE_PART.fullmatch(" " * length + tail)
+        override_rationale_text(parse(line + "\n"), 0)
         elapsed = time.perf_counter() - started
 
         assert elapsed < self.BUDGET_SECONDS, (

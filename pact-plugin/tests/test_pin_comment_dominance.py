@@ -3,26 +3,27 @@ Tests for the pin-comment DOMINANCE invariant in hooks/pin_caps.py.
 
 Location: pact-plugin/tests/test_pin_comment_dominance.py
 
-Summary: pins the safety property that ties the two pin-comment oracles
-together. `OVERRIDE_COMMENT_RE` and `_DATE_COMMENT_RE` recognise one concept.
-Attribution uses both. The strip uses `_DATE_COMMENT_RE` alone. If the strip
-is NARROWER than attribution, a comment that annotates pin N stays inside the
-slice of pin N-1, and its characters are charged to that neighbour. The
-neighbour then takes a size deny that the curator did not cause.
+Summary: pins the safety property that ties pin-comment attribution to the
+size charge, both read through the functions that ship. Attribution
+(`pin_caps._date_comment_row`, with the row pattern `_DATE_COMMENT_ROW`, which
+every override comment also matches) decides which row is a pin's comment. The
+charge (`pin_caps._charged_rows`) strikes pin comments from each body row. A
+pin's comment row sits at the end of the previous pin's body, so if the strike
+is NARROWER than attribution, the comment that annotates pin N is charged to
+pin N-1. The neighbour then takes a size deny that the curator did not cause.
 
-DOMINANCE, stated over a single line `L`:
+DOMINANCE, stated over a single row `L`:
 
-    OVERRIDE_COMMENT_RE.fullmatch(L) is not None
-      or _DATE_COMMENT_RE.fullmatch(L) is not None
-    =>  _DATE_COMMENT_RE.sub("", L) == ""
+    attribution reads L as the comment of the pin below it
+    =>  the charge keeps nothing of L
 
 The strip may remove MORE than attribution accepts. It must never remove
 less, because less is a charge against the neighbour.
 
-Used with: hooks/pin_caps.py (the two patterns and the four fragments they
-are built from) and hooks/pin_caps_gate.py (one lead-frame integration
-witness). Sibling coverage of the same module lives in test_pin_caps.py;
-this file owns the cross-oracle property only.
+Used with: hooks/pin_caps.py (attribution, the charge, and the four
+fragments their patterns are built from) and hooks/pin_caps_gate.py (one
+lead-frame integration witness). Sibling coverage of the same module lives
+in test_pin_caps.py; this file owns the cross-oracle property only.
 
 Test organization uses scope-suffix class naming per the convention in
 test_pin_caps.py — duplicate test class basenames across files silently drop
@@ -33,7 +34,7 @@ import itertools
 
 import pytest
 
-from helpers import make_claude_md_with_pins  # noqa: E402
+from helpers import make_claude_md_with_pins, point_resolver_at  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # The corpus grammar.
@@ -136,23 +137,37 @@ def build_corpus(openers, dates, clauses, closers):
     ]
 
 
+def attributed(line):
+    """Whether shipped attribution reads `line` as the comment of the pin
+    headed on the row below it."""
+    from pin_caps import _date_comment_row
+    from shared.claude_md_markers import parse
+
+    return _date_comment_row(parse(f"{line}\n### P\n"), 0, 1) is not None
+
+
+def charged(line):
+    """What the shipped size charge keeps of `line` as a row of a pin body."""
+    from pin_caps import _charged_rows
+    from shared.claude_md_markers import parse
+
+    return _charged_rows(parse(f"{line}\n"), 0, 0)[0]
+
+
 def measure_corpus(corpus):
     """Return (attributed, violations) for a list of candidate lines.
 
-    A line is ATTRIBUTED when either oracle full-matches it. An attributed
-    line is a VIOLATION when the strip leaves a residue.
+    A line is ATTRIBUTED when attribution reads it as a pin comment. An
+    attributed line is a VIOLATION when the charge keeps a residue of it.
     """
-    from pin_caps import OVERRIDE_COMMENT_RE, _DATE_COMMENT_RE
-
-    attributed = 0
+    count = 0
     violations = 0
     for line in corpus:
-        if (OVERRIDE_COMMENT_RE.fullmatch(line) is not None
-                or _DATE_COMMENT_RE.fullmatch(line) is not None):
-            attributed += 1
-            if _DATE_COMMENT_RE.sub("", line) != "":
+        if attributed(line):
+            count += 1
+            if charged(line) != "":
                 violations += 1
-    return attributed, violations
+    return count, violations
 
 
 def two_pin_section(body_a, comment_b, title_a="PinA", title_b="PinB"):
@@ -175,16 +190,8 @@ class TestPinCommentDominance_Property:
         corpus = build_corpus(
             CORPUS_OPENERS, CORPUS_DATES, CORPUS_CLAUSES, CORPUS_CLOSERS
         )
-        from pin_caps import _DATE_COMMENT_RE, OVERRIDE_COMMENT_RE
-
-        offenders = []
-        for line in corpus:
-            attributed = (
-                OVERRIDE_COMMENT_RE.fullmatch(line) is not None
-                or _DATE_COMMENT_RE.fullmatch(line) is not None
-            )
-            if attributed and _DATE_COMMENT_RE.sub("", line) != "":
-                offenders.append((line, _DATE_COMMENT_RE.sub("", line)))
+        offenders = [(line, charged(line)) for line in corpus
+                     if attributed(line) and charged(line) != ""]
 
         assert offenders == [], (
             f"{len(offenders)} line(s) are attributed as a pin comment but are "
@@ -206,8 +213,6 @@ class TestPinCommentDominance_Property:
 
     def test_realistic_curator_lines_are_attributed_and_stripped(self):
         """Named shapes, so the floor cannot be met by uninteresting lines."""
-        from pin_caps import _DATE_COMMENT_RE, OVERRIDE_COMMENT_RE
-
         lines = [
             "<!-- pinned: 2026-01-01 -->",
             "<!-- pinned: 2026-01-01, pin-size-override: verbatim form -->",
@@ -218,12 +223,8 @@ class TestPinCommentDominance_Property:
             "<!-- PINNED: 2026-01-01 -->",
         ]
         for line in lines:
-            attributed = (
-                OVERRIDE_COMMENT_RE.fullmatch(line) is not None
-                or _DATE_COMMENT_RE.fullmatch(line) is not None
-            )
-            assert attributed, f"not attributed as a pin comment: {line!r}"
-            assert _DATE_COMMENT_RE.sub("", line) == "", (
+            assert attributed(line), f"not attributed as a pin comment: {line!r}"
+            assert charged(line) == "", (
                 f"attributed but not stripped in full: {line!r}"
             )
 
@@ -273,7 +274,7 @@ class TestPinCommentCharge_Metamorphic:
     """The defect stated as a property rather than as one example."""
 
     def test_neighbour_charge_is_invariant_under_equal_length_rationales(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         body_a = "x" * 40
         arrow = "<!-- pinned: 2026-02-02, pin-size-override: keep a -> b now -->"
@@ -308,7 +309,7 @@ class TestPinCommentTrigger_AnyGreaterThan:
         "count > 2 and count < 9",
     ])
     def test_neighbour_is_not_charged_for_the_comment(self, rationale):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         body_a = "x" * 40
         comment_b = f"<!-- pinned: 2026-02-02, pin-size-override: {rationale} -->"
@@ -332,7 +333,7 @@ class TestPinCommentReconfirmed_Repair:
         "reconfirmed: 2026-03-01 because n > 2",
     ])
     def test_date_survives_and_neighbour_is_not_charged(self, clause):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         body_a = "x" * 40
         comment_b = f"<!-- pinned: 2026-01-01, {clause} -->"
@@ -349,7 +350,7 @@ class TestPinCommentReconfirmed_Repair:
         """The whole point of the clause is that the age reads from it."""
         import re
 
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         body_a = "x" * 40
         comment_b = (
@@ -374,7 +375,8 @@ class TestPinCommentDateField_BypassClosure:
     EARLY_CLOSING = "<!-- pinned: 2026-01-01--> tail, pin-size-override: r -->"
 
     def test_oversized_body_with_early_closing_date_field_denies(self):
-        from pin_caps import PIN_SIZE_CAP, evaluate_full_state, parse_pins
+        from pin_caps import PIN_SIZE_CAP, evaluate_full_state
+        from fixtures.pin_helpers import parse_pins
 
         body = "y" * (PIN_SIZE_CAP + 100)
         section = f"{self.EARLY_CLOSING}\n### Oversized\n{body}\n"
@@ -388,7 +390,7 @@ class TestPinCommentDateField_BypassClosure:
         assert violation.kind == "size"
 
     def test_early_closing_date_field_grants_no_rationale(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
 
         section = f"{self.EARLY_CLOSING}\n### Oversized\nshort\n"
         pins = parse_pins(section)
@@ -396,7 +398,8 @@ class TestPinCommentDateField_BypassClosure:
 
     def test_faithful_override_still_grants(self):
         """The closure must not refuse an honest curator line."""
-        from pin_caps import PIN_SIZE_CAP, evaluate_full_state, parse_pins
+        from pin_caps import PIN_SIZE_CAP, evaluate_full_state
+        from fixtures.pin_helpers import parse_pins
 
         body = "y" * (PIN_SIZE_CAP + 100)
         comment = (
@@ -454,80 +457,59 @@ class TestPinCommentStrip_NoCrossBoundary:
         assert _DATE_COMMENT_RE.sub("", body) == body
 
 
-class TestPinCommentFragments_NonCapturing:
-    """Every grammar fragment must stay non-capturing.
+class TestPinCommentRows_WholeRowReaders:
+    """Attribution and the rationale read a pin comment's whole row.
 
-    `parse_pins` reads the rationale as `group(1)`. A capturing fragment
-    shifts the group index, so the parser would silently read the date field
-    as the rationale.
+    Attribution matches the row patterns from the row's start
+    (`Document.find_lines`) to its end (`\\s*\\Z`), so text before or
+    after a comment on its row refuses it. The override field starts at the
+    comment's first `, pin-size-override:`, so a date field that spells the
+    field name without that comma is never read as the rationale.
     """
 
-    def test_override_pattern_has_exactly_one_group(self):
-        from pin_caps import OVERRIDE_COMMENT_RE
-        assert OVERRIDE_COMMENT_RE.groups == 1
+    @staticmethod
+    def _rationale(line):
+        from pin_caps import override_rationale_text
+        from shared.claude_md_markers import parse
 
-    def test_group_one_is_the_rationale_not_the_date(self):
-        """The behavioural half. The count alone cannot catch a swap."""
-        from pin_caps import OVERRIDE_COMMENT_RE
+        return override_rationale_text(parse(f"{line}\n"), 0)
+
+    @pytest.mark.parametrize("row", [
+        "lead <!-- pinned: 2026-01-01, pin-size-override: r -->",
+        "<!-- pinned: 2026-01-01, pin-size-override: r --> trail",
+        "lead <!-- pinned: 2026-01-01 -->",
+        "<!-- pinned: 2026-01-01 --> trail",
+    ])
+    def test_text_before_or_after_the_comment_refuses_the_row(self, row):
+        assert not attributed(row), f"attributed a row holding more than a comment: {row!r}"
+        assert self._rationale(row) is None
+
+    def test_the_whole_row_probe_is_not_vacuous(self):
+        """CONTROL. The same comments alone on their rows are attributed.
+
+        Without this, the refusals above also hold for attribution that
+        accepts nothing at all.
+        """
+        assert attributed("<!-- pinned: 2026-01-01, pin-size-override: r -->")
+        assert attributed("<!-- pinned: 2026-01-01 -->")
+        assert self._rationale("<!-- pinned: 2026-01-01, pin-size-override: r -->") == "r"
+
+    def test_the_rationale_is_the_override_field(self):
         line = "<!-- pinned: 2026-01-01, pin-size-override: keep a -> b -->"
-        found = OVERRIDE_COMMENT_RE.fullmatch(line)
-        assert found is not None
-        assert found.group(1) == "keep a -> b"
+        assert self._rationale(line) == "keep a -> b"
 
-    def test_the_override_anchors_hold_against_a_search_caller(self):
-        """`\\A...\\Z` must not be loosened to `^...$`.
+    def test_a_date_field_spelling_the_field_name_is_not_the_rationale(self):
+        line = "<!-- pinned: 2026-01-01 pin-size-override: date, pin-size-override: real -->"
+        assert self._rationale(line) == "real"
 
-        The module documents the self-anchor as protection against a FUTURE
-        `.search` or `.match` caller. `\\Z` matches only at the very end of the
-        string; `$` also matches before a trailing newline, so the caret form
-        would let a `.search` caller accept a line with a newline after the
-        terminator. Nothing in the dominance corpus can see that, because the
-        property is quantified over `fullmatch` and fullmatch is False on BOTH
-        forms for every trailing-newline input.
-
-        *** THE EXACT INPUT IS LOAD-BEARING AND THE OBVIOUS ONE IS VACUOUS. ***
-        `$` matches only before a SINGLE trailing newline sitting IMMEDIATELY
-        after the terminator. Measured on both forms:
-
-            terminator flush then \\n   shipped False   caret TRUE   <- the only
-                                                                       discriminator
-            a SPACE before the \\n      shipped False   caret False
-            two newlines               shipped False   caret False
-            no newline (control)       shipped True    caret True
-
-        TWO OF THE THREE CORPUS CLOSERS BEGIN WITH A SPACE, so copying one and
-        appending a newline — the natural way to write this test — produces an
-        input that passes on both forms and looks like a guard. Do NOT "tidy"
-        the spacing below: adding a space or a second newline silently disarms
-        this test.
-        """
-        from pin_caps import OVERRIDE_COMMENT_RE
-
-        flush = "<!-- pinned: 2026-01-01, pin-size-override: r -->\n"
-        assert OVERRIDE_COMMENT_RE.search(flush) is None, (
-            "a `.search` caller accepted a line with a newline after the "
-            "terminator, which means the self-anchor has been loosened from "
-            "`\\A...\\Z` to `^...$`"
-        )
-
-    def test_the_search_anchor_probe_is_not_vacuous(self):
-        """CONTROL. The same string WITHOUT the trailing newline must match.
-
-        Without this, the assertion above also passes for a pattern that
-        matches nothing at all.
-        """
-        from pin_caps import OVERRIDE_COMMENT_RE
-
-        assert OVERRIDE_COMMENT_RE.search(
-            "<!-- pinned: 2026-01-01, pin-size-override: r -->"
-        ) is not None
-
-    def test_both_patterns_stay_case_insensitive(self):
+    def test_the_comment_patterns_stay_case_insensitive(self):
         import re
 
-        from pin_caps import OVERRIDE_COMMENT_RE, _DATE_COMMENT_RE
-        assert OVERRIDE_COMMENT_RE.flags & re.IGNORECASE
-        assert _DATE_COMMENT_RE.flags & re.IGNORECASE
+        from pin_caps import (RECONFIRMED_DATE_RE, _DATE_COMMENT_RE, _DATE_COMMENT_ROW,
+                              _OVERRIDE_DATE_PART, _OVERRIDE_FIELD, _PIN_COMMENT_START)
+        for pattern in (_DATE_COMMENT_RE, _DATE_COMMENT_ROW, _PIN_COMMENT_START, _OVERRIDE_FIELD,
+                        _OVERRIDE_DATE_PART, RECONFIRMED_DATE_RE):
+            assert pattern.flags & re.IGNORECASE, pattern.pattern
 
 
 @pytest.fixture
@@ -539,8 +521,7 @@ def dominance_gate_env(tmp_path, monkeypatch, pact_context):
         session_id="session-dominance",
         project_dir=str(tmp_path),
     )
-    import staleness
-    monkeypatch.setattr(staleness, "get_project_claude_md_path", lambda: claude_md)
+    point_resolver_at(monkeypatch, tmp_path)
     return claude_md
 
 

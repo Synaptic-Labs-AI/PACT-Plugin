@@ -1,7 +1,8 @@
 """
 Smoke tests for hooks/pin_caps_gate.py — PreToolUse hook enforcing
-pin count / size / embedded-pin / override caps on Edit|Write of the
-project CLAUDE.md.
+pin count / size / override caps on Edit|Write of the project CLAUDE.md.
+There is no embedded-pin check: a `### ` line in a pin body is a pin, and
+the count axis counts it.
 
 Risk tier: CRITICAL (hook can deny every Edit to CLAUDE.md). Full
 matrix (count ladder, size ladder, teammate bypass cells, override
@@ -12,17 +13,24 @@ CODE/TEST phase split.
 Minimum coverage shipped in the code-phase commit:
   - happy-path ALLOW (under-cap Edit)
   - happy-path DENY (count cap — pre-clean, post-violation)
-  - teammate bypass (agent_name non-empty → always allow)
+  - a teammate's change is gated, and its count denial asks the team-lead
   - fail-open on _check_tool_allowed exception (SACROSANCT)
   - Write-baseline fail-CLOSED when baseline read fails AND Write is
     over-cap
 """
 
 import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
-from helpers import make_claude_md_with_pins, make_pin_entry  # noqa: E402
+from helpers import make_claude_md_with_pins, make_pin_entry, point_resolver_at  # noqa: E402
+
+HOOK = Path(__file__).resolve().parent.parent / "hooks" / "pin_caps_gate.py"
 
 
 @pytest.fixture
@@ -40,13 +48,7 @@ def caps_gate_env(tmp_path, monkeypatch, pact_context):
         project_dir=str(tmp_path),
     )
 
-    # Point the lifted match_project_claude_md at our tmp CLAUDE.md via
-    # staleness.get_project_claude_md_path (the lazy import inside
-    # shared/claude_md_manager.match_project_claude_md).
-    import staleness
-    monkeypatch.setattr(
-        staleness, "get_project_claude_md_path", lambda: claude_md
-    )
+    point_resolver_at(monkeypatch, tmp_path)
 
     def _setup(pin_count: int = 1):
         entries = [
@@ -117,22 +119,11 @@ class TestPinCapsGate_Smoke:
         assert result is not None
         assert "Pin count cap" in result
 
-    def test_write_with_embedded_pin_in_new_body_denies(self, caps_gate_env):
-        """F7 #492 cycle-4: Write where a NEW pin's body contains a `### `
-        heading must deny with embedded-pin reason — the heading would be
-        parsed as an extra pin on reload and defeat the count cap.
-
-        Pre-fix: `_extract_new_body` returned "" for Write, so
-        compute_deny_reason's embedded-pin check at pin_caps.py:686-687 never
-        ran on Write. Only the count cap caught pin inflation, and a
-        smuggled heading inside a body wouldn't register in the count
-        cap because the smuggle becomes visible only AFTER a reload.
-
-        Post-fix: `_extract_new_body` concatenates new-or-mutated-body
-        text from post_pins (bodies not byte-identical to any pre_pin
-        body) and feeds it to compute_deny_reason. A new pin whose body
-        contains `### Smuggled\\nbody` now denies at the gate.
-        """
+    def test_write_with_heading_in_new_pin_body_counts_it_as_a_pin(self, caps_gate_env):
+        """A `### ` line inside a new pin's body is itself a pin. The count
+        axis counts it, so under the cap the Write is allowed: there is no
+        separate embedded-pin refusal (it only ever refused faithful undated
+        renames, swaps and moves)."""
         env = caps_gate_env(pin_count=2)
         # Build a Write content with 3 pins — pins 0 and 1 are clean,
         # pin 2's body embeds a `### Smuggled` heading.
@@ -163,20 +154,13 @@ class TestPinCapsGate_Smoke:
                 "content": new_content,
             },
         })
-        assert result is not None, (
-            "F7 regressed: Write with embedded `### ` in new pin body no "
-            "longer denies; the embedded-pin defense-in-depth path is off."
-        )
-        assert "embedded pin structure" in result
+        assert result is None, f"4 pins after the Write is under the cap, got: {result!r}"
 
-    def test_write_with_mutated_existing_pin_body_embeds_denies(
+    def test_write_with_heading_in_mutated_pin_body_counts_it_as_a_pin(
         self, caps_gate_env
     ):
-        """F7 counter-test: mutating an EXISTING pin's body to embed a
-        `### Smuggled` heading (same heading, different body) must deny.
-        Catches the same-heading-mutated-body smuggle — identity-by-
-        body-text catches mutation even when the heading is unchanged.
-        """
+        """An existing pin's body gaining a `### ` line gains a pin; under the
+        cap that is allowed, with no embedded-pin refusal."""
         env = caps_gate_env(pin_count=3)  # baseline has 3 pins with clean bodies
         # Build a Write content that keeps pin headings the same but mutates
         # the first pin's body to smuggle `### Smuggled`.
@@ -208,11 +192,22 @@ class TestPinCapsGate_Smoke:
                 "content": new_content,
             },
         })
-        assert result is not None, (
-            "F7 regressed: same-heading-mutated-body smuggle not denied; "
-            "identity-by-body-text check is off."
-        )
-        assert "embedded pin structure" in result
+        assert result is None, f"4 pins after the Write is under the cap, got: {result!r}"
+
+    def test_a_heading_gained_in_a_pin_body_at_the_cap_is_denied_on_count(self, caps_gate_env):
+        """At 12 pins, a body gaining a prose `### ` line adds a pin past the
+        cap: denied with the count reason, not an embedded-pin reason."""
+        env = caps_gate_env(pin_count=12)
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "old_string": "### Pin3\nxxxx",
+                "new_string": "### Pin3\nxxxx\n### Smuggled\nmore",
+                "replace_all": False,
+            },
+        })
+        assert result is not None and "Pin count cap" in result
 
     def test_write_unchanged_preexisting_embedded_pin_allows(
         self, caps_gate_env
@@ -281,13 +276,10 @@ class TestPinCapsGate_Smoke:
         })
         assert result is None
 
-    def test_teammate_bypass(self, caps_gate_env):
-        """Teammate sessions (non-lead agent_type) bypass the gate.
-
-        #878: lead-detection migrated to is_lead, which reads agent_type
-        directly (no longer resolve_agent_name). A specialist agent_type is not
-        a lead spelling, so the gate bypasses.
-        """
+    def test_a_teammate_write_is_gated_and_asks_the_team_lead(self, caps_gate_env):
+        """A PACT specialist frame in a PACT team's session is gated like the
+        lead, and its count denial tells it not to change CLAUDE.md by any
+        route and to tell the team-lead, instead of naming the pin command."""
         env = caps_gate_env(pin_count=3)
         entries = [
             make_pin_entry(title=f"Pin{i}", body_chars=4) for i in range(13)
@@ -301,7 +293,10 @@ class TestPinCapsGate_Smoke:
                 "content": new_content,
             },
         })
-        assert result is None
+        assert result is not None
+        assert result.startswith("Pin count cap reached (13/12).")
+        assert result.endswith("Do not change CLAUDE.md yourself, by any route; tell the team-lead.")
+        assert "/PACT:" not in result
 
     def test_edit_legitimate_new_pin_with_date_comment_allows(
         self, caps_gate_env
@@ -345,16 +340,12 @@ class TestPinCapsGate_Smoke:
             f"denied (expected allow). Got: {result!r}"
         )
 
-    def test_edit_smuggled_pin_without_date_comment_denies(
+    def test_edit_undated_new_pin_under_the_cap_allows(
         self, caps_gate_env
     ):
-        """#529 dual-direction counter: an Edit whose `new_string` inserts
-        a naked `### Title` heading WITHOUT a `<!-- pinned: -->` date-comment
-        marker must still DENY with DENY_REASON_EMBEDDED_PIN — the smuggle
-        signature the fix must preserve. Together with the legitimate-allow
-        test, this pins the Edit-path discriminator: date-comment presence
-        is the signal that separates legitimate adds from smuggles.
-        """
+        """An Edit inserting a `### Title` with no `<!-- pinned: -->` comment
+        adds a pin; under the cap it is allowed. The date comment decides
+        nothing: the removed embedded-pin check refused exactly these."""
         env = caps_gate_env(pin_count=3)
         smuggled_block = (
             "### SmuggledNoDateMarker\n"
@@ -369,22 +360,39 @@ class TestPinCapsGate_Smoke:
                 "replace_all": False,
             },
         })
-        assert result is not None, (
-            "#529 dual-direction counter regressed: Edit with a naked "
-            "`### ` heading (no date-comment) allowed; smuggle-detection off."
-        )
-        assert "embedded pin structure" in result
+        assert result is None, f"an undated pin added under the cap must be allowed, got: {result!r}"
+
+    def test_undated_pin_renamed_or_swapped_at_13_allows(self, caps_gate_env):
+        """At 13 pins an undated pin renamed, or one pin deleted and an
+        undated one added, adds nothing: allowed (main refused both as an
+        embedded pin)."""
+        env = caps_gate_env(pin_count=13)
+        text = env["claude_md"].read_text(encoding="utf-8")
+        undated = text.replace("<!-- pinned: 2026-04-20 -->\n### Pin5\n", "### Pin5\n", 1)
+        env["claude_md"].write_text(undated, encoding="utf-8")
+        rename = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {"file_path": str(env["claude_md"]), "old_string": "### Pin5\n",
+                           "new_string": "### Pin5 renamed\n", "replace_all": False},
+        })
+        swap = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {"file_path": str(env["claude_md"]),
+                           "old_string": "<!-- pinned: 2026-04-20 -->\n### Pin7\nxxxx",
+                           "new_string": "### Undated newcomer\nyyyy", "replace_all": False},
+        })
+        assert rename is None and swap is None, (rename, swap)
 
 
 class TestPinCapsGate_FailOpen:
     """SACROSANCT: gate bugs never block (with Write-baseline exception)."""
 
-    def test_main_catches_unexpected_exception(self, caps_gate_env, monkeypatch):
-        """If _check_tool_allowed raises, main() fail-opens."""
+    def test_main_catches_unexpected_exception(self, caps_gate_env, monkeypatch, capsys):
+        """If the decision raises, main() fail-opens."""
         import pin_caps_gate
         monkeypatch.setattr(
             pin_caps_gate,
-            "_check_tool_allowed",
+            "_gate",
             lambda _: (_ for _ in ()).throw(RuntimeError("boom")),
         )
         stdin_payload = json.dumps({
@@ -396,6 +404,7 @@ class TestPinCapsGate_FailOpen:
         with pytest.raises(SystemExit) as exc_info:
             pin_caps_gate.main()
         assert exc_info.value.code == 0
+        assert json.loads(capsys.readouterr().out) == {"suppressOutput": True}
 
     def test_invalid_json_stdin_fails_open(self, monkeypatch):
         """Malformed stdin → fail-open with suppressOutput."""
@@ -409,21 +418,20 @@ class TestPinCapsGate_FailOpen:
 
 
 class TestPinCapsGate_WriteBaselineFailClosed:
-    """Asymmetric SACROSANCT exception: Write with unreadable baseline
-    AND over-cap content → fail-CLOSED (Sec N7)."""
+    """A Write with no project CLAUDE.md before it (a first Write) is compared
+    with an empty file, so its own pins over the cap are refused with the
+    count reason. A CLAUDE.md that resolves but cannot be read is not compared
+    with anything: the change is allowed with an advisory (the real-hook rows)."""
 
     def test_write_over_cap_with_missing_baseline_denies(
         self, tmp_path, monkeypatch, pact_context
     ):
-        """Baseline CLAUDE.md doesn't exist on disk; Write payload is
-        13/12. Asymmetric rule denies rather than fail-opening."""
+        """No CLAUDE.md on disk; the Write payload is 13/12. Compared with an
+        empty file, the Write adds 13 pins."""
         claude_md = tmp_path / "CLAUDE.md"  # Deliberately NOT created.
         pact_context(team_name="t", session_id="s", project_dir=str(tmp_path))
 
-        import staleness
-        monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: claude_md
-        )
+        point_resolver_at(monkeypatch, tmp_path)
 
         entries = [
             make_pin_entry(title=f"Pin{i}", body_chars=4) for i in range(13)
@@ -436,7 +444,7 @@ class TestPinCapsGate_WriteBaselineFailClosed:
             },
         })
         assert result is not None
-        assert "Refusing Write" in result
+        assert "Pin count cap" in result
 
     def test_write_under_cap_with_missing_baseline_allows(
         self, tmp_path, monkeypatch, pact_context
@@ -447,10 +455,7 @@ class TestPinCapsGate_WriteBaselineFailClosed:
         claude_md = tmp_path / "CLAUDE.md"  # Deliberately NOT created.
         pact_context(team_name="t", session_id="s", project_dir=str(tmp_path))
 
-        import staleness
-        monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: claude_md
-        )
+        point_resolver_at(monkeypatch, tmp_path)
 
         entries = [
             make_pin_entry(title=f"Pin{i}", body_chars=4) for i in range(3)
@@ -467,15 +472,11 @@ class TestPinCapsGate_WriteBaselineFailClosed:
     def test_edit_with_missing_baseline_fails_open(
         self, tmp_path, monkeypatch, pact_context
     ):
-        """Edit (not Write) with baseline missing → fail-OPEN.
-        Asymmetric rule applies only to Write."""
+        """An Edit of a CLAUDE.md that does not exist replaces nothing → allow."""
         claude_md = tmp_path / "CLAUDE.md"
         pact_context(team_name="t", session_id="s", project_dir=str(tmp_path))
 
-        import staleness
-        monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: claude_md
-        )
+        point_resolver_at(monkeypatch, tmp_path)
 
         result = _call_gate({
             "tool_name": "Edit",
@@ -487,3 +488,143 @@ class TestPinCapsGate_WriteBaselineFailClosed:
             },
         })
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# The real hook, run as a subprocess on a real PreToolUse frame
+# ---------------------------------------------------------------------------
+
+
+def _pins(n, bodies=None, extra=""):
+    entries = [make_pin_entry(title=f"Pin{i}", body_chars=4) for i in range(n)]
+    for i, body in (bodies or {}).items():
+        entries[i] = f"<!-- pinned: 2026-04-20 -->\n### Pin{i}\n{body}"
+    return make_claude_md_with_pins(entries) + extra
+
+
+SNIPPET = "xxxx\n```markdown\n### step one\n### step two\n```"
+OPEN = "xxxx\n```bash\necho hi"
+CLOSED = "xxxx\n```bash\necho hi\n```"
+LONG = "y" * 1600
+OVERRIDE_FENCED = "xxxx\n```\n<!-- pinned: 2026-04-20, pin-size-override:   -->\n```"
+
+
+def _edit(old, new, replace_all=False):
+    return "Edit", {"old_string": old, "new_string": new, "replace_all": replace_all}
+
+
+def _write(content):
+    return "Write", {"content": content}
+
+
+# (name, text before or "unreadable", tool and input, expected outcome). None as
+# the outcome builds the change from the file and adds one pin to it.
+REAL_HOOK_ROWS = [
+    ("count: a rename at 13 pins", _pins(13), _edit("### Pin5\n", "### Pin5 renamed\n"), "allow"),
+    ("count: a pin added at 12", _pins(12), _edit("### Pin11\nxxxx", "### Pin11\nxxxx\n\n<!-- pinned: 2026-04-21 -->\n### New\nbody"), "deny"),
+    ("snippet: a fenced snippet holding ### lines added at 13", _pins(13), _edit("### Pin9\nxxxx", "### Pin9\n" + SNIPPET), "allow"),
+    ("snippet: a snippet line renamed and a pin added", _pins(12, {3: SNIPPET}),
+     _edit("### step one\n", "### step 1\n"), None),
+    ("reveal: closing an unclosed fence that hid pins", _pins(13, {6: OPEN}), _write(_pins(13, {6: CLOSED})), "allow"),
+    ("reveal: closing an unclosed fence and adding a pin", _pins(13, {6: OPEN}),
+     _write(_pins(13, {6: CLOSED}, extra="")), None),
+    ("size: an oversize pin left as it is beside a rename", _pins(12, {4: LONG}), _edit("### Pin2\n", "### Pin2 renamed\n"), "allow"),
+    ("size: a pin grown past the size cap", _pins(12), _edit("### Pin4\nxxxx", "### Pin4\n" + LONG), "deny"),
+    ("override: a fenced example of the override syntax", _pins(3), _edit("### Pin1\nxxxx", "### Pin1\n" + OVERRIDE_FENCED), "allow"),
+    ("override: an invalid override row on an edited pin", _pins(3),
+     _edit("<!-- pinned: 2026-04-20 -->\n### Pin0", "<!-- pinned: 2026-04-20, pin-size-override:   -->\n### Pin0"), "deny"),
+    ("unreadable file: a Write with 12 pins", "unreadable", _write(_pins(12)), "advisory"),
+    ("unreadable file: a Write with 13 pins", "unreadable", _write(_pins(13)), "advisory"),
+    ("unreadable file: an Edit", "unreadable", _edit("### Pin1\n", "### Pin1 renamed\n"), "advisory"),
+    ("not located: an unclosed fence above the Pinned section", _pins(13),
+     _write("# notes\n\n```\nunclosed\n\n" + _pins(20)), "advisory"),
+]
+
+
+def _frame(claude_md, tool, tool_input):
+    return {
+        "hook_event_name": "PreToolUse",
+        "session_id": "session-real-hook",
+        "agent_type": "pact-orchestrator",
+        "cwd": str(claude_md.parent),
+        "tool_name": tool,
+        "tool_input": {"file_path": str(claude_md), **tool_input},
+    }
+
+
+def _run_hook(project, frame, hook=None):
+    env = {**os.environ, "HOME": str(project / "home"), "CLAUDE_PROJECT_DIR": str(project)}
+    (project / "home").mkdir(exist_ok=True)
+    return subprocess.run([sys.executable, str(hook or HOOK)], input=json.dumps(frame), capture_output=True,
+                          text=True, env=env, cwd=project, timeout=120)
+
+
+def _outcome(result):
+    if result.returncode == 2:
+        out = json.loads(result.stdout)["hookSpecificOutput"]
+        assert out["permissionDecision"] == "deny" and out["permissionDecisionReason"], out
+        return "deny"
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    out = json.loads(result.stdout)
+    if out == {"suppressOutput": True}:
+        return "allow"
+    specific = out["hookSpecificOutput"]
+    assert "permissionDecision" not in specific and specific["additionalContext"], out
+    return "advisory"
+
+
+class TestPinCapsGate_RealHook:
+    """One allowed and one denied change per family, through the shipped
+    pin_caps_gate.py run as a subprocess on a real PreToolUse frame, with the
+    project directory and HOME in tmp_path."""
+
+    @pytest.mark.parametrize("name, before, call, expected", REAL_HOOK_ROWS, ids=[r[0] for r in REAL_HOOK_ROWS])
+    def test_real_hook(self, tmp_path, name, before, call, expected):
+        claude_md = tmp_path / "CLAUDE.md"
+        if before == "unreadable":
+            if os.geteuid() == 0:
+                pytest.skip("root reads a mode-000 file, so EACCES cannot be produced")
+            claude_md.write_text(_pins(3), encoding="utf-8")
+            claude_md.chmod(0o000)
+        else:
+            claude_md.write_text(before, encoding="utf-8")
+        tool, tool_input = call
+        if expected is None:  # the rows whose change is built from the file: the edit adds one pin too
+            expected = "deny"
+            if tool == "Edit":
+                text = claude_md.read_text(encoding="utf-8").replace(tool_input["old_string"], tool_input["new_string"], 1)
+            else:
+                text = tool_input["content"]
+            tool, tool_input = _write(text.replace("## Working Memory", "<!-- pinned: 2026-04-21 -->\n### New\nbody\n\n## Working Memory", 1))
+        try:
+            assert _outcome(_run_hook(tmp_path, _frame(claude_md, tool, tool_input))) == expected
+        finally:
+            claude_md.chmod(0o644)
+
+    @pytest.mark.parametrize("call, expected", [
+        (_edit("### Pin5\n", "### Pin5 renamed\n"), "allow"),
+        (_edit("### Pin11\nxxxx", "### Pin11\nxxxx\n\n<!-- pinned: 2026-04-21 -->\n### New\nbody"), "deny"),
+    ], ids=["a rename", "a pin added"])
+    def test_a_byte_that_is_not_utf8_in_a_pin_body_changes_no_decision(self, tmp_path, call, expected):
+        """The file on disk holds a 0xFF byte in a pin body at 12 pins: the gate
+        reads it replaced and decides as it would without it."""
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_bytes(_pins(12).replace("### Pin3\nxxxx", "### Pin3\nxxx", 1).encode("utf-8")
+                              .replace(b"### Pin3\nxxx", b"### Pin3\nxxx\xff", 1))
+        assert b"\xff" in claude_md.read_bytes()
+        assert _outcome(_run_hook(tmp_path, _frame(claude_md, *call))) == expected
+
+    def test_a_module_load_failure_allows_and_says_so(self, tmp_path):
+        """A gate that cannot import its modules allows the call (exit 0) and
+        says on stdout and stderr that pin caps are not being checked."""
+        lonely = tmp_path / "lonely"
+        lonely.mkdir()
+        hook = lonely / "pin_caps_gate.py"
+        shutil.copy(HOOK, hook)  # no shared/ beside it, so its imports fail
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text(_pins(12), encoding="utf-8")
+        result = _run_hook(tmp_path, _frame(claude_md, *_write(_pins(14))), hook=hook)
+        assert result.returncode == 0, result
+        message = json.loads(result.stdout)["systemMessage"]
+        assert "not checking pin caps" in message and "ModuleNotFoundError" in message
+        assert "not checking pin caps" in result.stderr

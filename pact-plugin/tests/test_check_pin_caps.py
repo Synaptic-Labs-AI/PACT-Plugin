@@ -88,16 +88,15 @@ class TestCheckPinCaps_Advisory_StatusQuery:
     default (no-flag) behavior — the CLI has no add-time flags to select."""
 
     def test_status_zero_pins(self, patched_claude_md):
-        """Empty Pinned Context body routes through fail-open in _resolve_pins
-        (parsed is None → reason='no pinned section'). --status surfaces
-        the fail-open signal rather than a fake 0/12 slot state."""
+        """An empty Pinned Context section is FOUND and holds no pins, so the
+        slot state is a true 0/12, as session start reports it. A section that
+        is absent or cannot be read still fails open with a reason."""
         patched_claude_md(_make_pinned_content(0))
         rc, payload = _run_cli(["--status"])
         assert rc == 0
         assert payload["allowed"] is True
         assert payload["violation"] is None
-        assert "unknown" in payload["slot_status"]
-        assert "proceeding" in payload["slot_status"]
+        assert payload["slot_status"].startswith("Pin slots: 0/12 used")
         assert payload["evictable_pins"] == []
 
     def test_status_with_pins(self, patched_claude_md):
@@ -179,10 +178,10 @@ class TestCheckPinCaps_Advisory_FailOpen:
         patched_claude_md(_make_pinned_content(3))
         import check_pin_caps
 
-        def _boom(_pinned_content):
+        def _boom(_doc, _located):
             raise RuntimeError("parse blew up")
 
-        monkeypatch.setattr(check_pin_caps, "parse_pins", _boom)
+        monkeypatch.setattr(check_pin_caps, "section_pins", _boom)
         rc, payload = _run_cli(["--status"])
         assert rc == 0
         assert payload["allowed"] is True
@@ -285,6 +284,38 @@ class TestPinAgeDays_Unit:
             now=self.NOW,
         )
         assert age == 5
+
+    @pytest.mark.parametrize("comment", [
+        "<!-- pinned: 2024-01-01, pin-size-override: verbatim form, reconfirmed: 2026-07-20 because x -->",
+        "<!-- pinned: 2024-01-01, reconfirmed: 2026-07-20 because x, pin-size-override: verbatim form -->",
+    ], ids=["after the rationale", "before the override"])
+    def test_a_reconfirmed_override_comment_yields_age_from_the_reconfirmation(self, comment):
+        """Read from the comment the parser attributes to the pin, which keeps
+        its override in either placement."""
+        import check_pin_caps
+        from fixtures.pin_helpers import parse_pins
+
+        pin = parse_pins(f"{comment}\n### P\nbody\n")[0]
+        assert pin.override_rationale == "verbatim form"
+        assert check_pin_caps._pin_age_days(pin.date_comment, now=self.NOW) == 5
+
+    def test_the_reconfirmation_is_pin_caps_own_definition(self):
+        """One shape for both readers: what dates a pin here is what the
+        override reader cuts out of a rationale. The module compiles no
+        reconfirmation pattern of its own; the identity check alone cannot see
+        a copy, because `re.compile` caches equal patterns."""
+        import ast
+        import inspect
+
+        import check_pin_caps
+        import pin_caps
+
+        assert check_pin_caps._RECONFIRMED_DATE_RE is pin_caps.RECONFIRMED_DATE_RE
+        tree = ast.parse(inspect.getsource(check_pin_caps))
+        copies = [node.value for node in ast.walk(tree)
+                  if isinstance(node, ast.Constant) and isinstance(node.value, str)
+                  and "reconfirmed:" in node.value and "\\d" in node.value]
+        assert copies == []
 
     def test_size_override_comment_still_yields_age(self):
         """The override form carries a trailing clause too; age must still
@@ -512,7 +543,8 @@ class TestCheckPinCaps_Advisory_NeverExit2:
 class TestParsePins_MultilineRationale:
     """Parser-side defense against multi-line override rationales.
 
-    This test covers hooks/pin_caps.py:parse_pins (not the CLI). Pre-
+    This test covers the pin reader `pin_caps.pins_in_rows`, through the
+    test helper `parse_pins` (not the CLI). Pre-
     cycle-8 it lived in a CLI-focused test class; moved here post-CLI-
     demotion because the CLI no longer owns rationale validation.
     Hook-side rationale validation (identical semantics) is in
@@ -525,14 +557,14 @@ class TestParsePins_MultilineRationale:
           (b) must NOT capture the broken rationale as a valid override
               (silent downgrade to no-override is the documented behavior)
         """
-        import pin_caps
+        from fixtures import pin_helpers
         pinned_content = (
             "<!-- pinned: 2026-04-21, pin-size-override: split\n"
             "across-lines -->\n"
             "### Broken Pin\n"
             "body content\n"
         )
-        pins = pin_caps.parse_pins(pinned_content)
+        pins = pin_helpers.parse_pins(pinned_content)
         assert len(pins) == 1
         assert pins[0].override_rationale is None, (
             "Multi-line rationale was captured as a valid override — "

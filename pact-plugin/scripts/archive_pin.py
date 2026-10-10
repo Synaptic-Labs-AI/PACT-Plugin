@@ -59,7 +59,7 @@ UNEVALUABLE too. Uniqueness is verified after the save. Presence is governed
 by the invariant below.
 
 ARCHIVED_DELETE_UNSAFE means the archive SUCCEEDED and the removal must not
-proceed automatically. TWO CONDITIONS REACH IT, and they share ONE disposition
+proceed automatically. THREE CONDITIONS REACH IT, and they share ONE disposition
 -- content safe, no automatic Edit, remove by hand, no escape hatch -- which is
 why they share one outcome NAME rather than forking into a fifth:
 
@@ -80,10 +80,14 @@ why they share one outcome NAME rather than forking into a fifth:
                    and because the key's ABSENCE is itself the signal that no
                    write was attempted. See `_WRITE_ATTEMPTED_STATUSES` for
                    why a uniform key would destroy that signal.
+  LESS READABLE    removing the block would leave part of CLAUDE.md
+                   unreadable: the block holds the line that ended an HTML
+                   block opened above it. `reason` names the line to fix
+                   before the pin is removed by hand.
 
-Two conditions under one outcome is NOT the reason-table hazard named below:
+Three conditions under one outcome is NOT the reason-table hazard named below:
 that hazard is one outcome carrying two DISPOSITIONS, distinguished only by
-prose. These two carry the same disposition, and `_unsafe_reason` already
+prose. These three carry the same disposition, and `_unsafe_reason` already
 varies its prose across two conditions for the same reason. It is a
 distinct outcome rather than a reason on another one because THE OUTCOME NAME
 MUST DETERMINE THE DISPOSITION -- one outcome with two dispositions forces a
@@ -134,7 +138,7 @@ Used by:
 
 Related:
   - scripts/check_pin_caps.py -- supplies the `--index` coordinate system
-  - hooks/pin_caps.py -- parse_pins / Pin, the parser this reuses
+  - hooks/pin_caps.py -- section_pins / Pin, the pin reader this reuses
   - skills/pact-memory/scripts/cli.py -- the save/get surface, reached by
     SUBPROCESS rather than import (keeps the process boundary the rest of
     the codebase keeps, and the CLI is the tested public surface)
@@ -338,13 +342,22 @@ _WRITE_ATTEMPTED_STATUSES = frozenset({"wrote", "failed"})
 
 
 def _load_hook_module(name: str):
-    """Load a module from hooks/ by explicit file path.
+    """Load a module from hooks/ by explicit file path, or return it when
+    that file is already loaded.
 
     Registers the loaded module in sys.modules under `name` before executing
     so modules loaded via this same helper resolve `from {name} import ...`
     against the already-loaded object (staleness does `from pin_caps import`).
     """
     module_path = _HOOKS_DIR / f"{name}.py"
+    # Reuse the module when this same file is already loaded (a test process
+    # imports pin_caps before a script): a second copy would leave the earlier
+    # importers bound to the first one, so a patch to one copy misses the
+    # other. A different file under the same name is not reused.
+    loaded = sys.modules.get(name)
+    loaded_file = getattr(loaded, "__file__", None)
+    if loaded is not None and loaded_file and Path(loaded_file).resolve() == module_path.resolve():
+        return loaded
     spec = importlib.util.spec_from_file_location(name, str(module_path))
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load {name} from {module_path}")
@@ -357,9 +370,11 @@ def _load_hook_module(name: str):
 _pin_caps = _load_hook_module("pin_caps")
 _staleness = _load_hook_module("staleness")
 
-parse_pins = _pin_caps.parse_pins
-_PIN_HEADING_RE = _pin_caps._PIN_HEADING_RE
-_parse_pinned_section = _staleness._parse_pinned_section
+section_pins = _pin_caps.section_pins
+_PIN_HEADING_ROW = _pin_caps._PIN_HEADING_ROW
+_date_comment_row = _pin_caps._date_comment_row
+locate_pinned = _staleness.locate_pinned
+_pinned_body = _staleness._pinned_body
 get_project_claude_md_path = _staleness.get_project_claude_md_path
 # The (path, base) form. `base` is the directory the resolver ACTUALLY found
 # the file under, captured before descending into `.claude` -- a trusted
@@ -399,31 +414,26 @@ class _Unevaluable(Exception):
         self.claude_md_path = claude_md_path
 
 
-def _span_start(pinned_content: str, heading_start: int, date_comment) -> int:
-    """Offset where a pin's span begins: its date-comment LINE, else its heading.
+def _span_start(doc, first: int, heading: int) -> int:
+    """Offset where a pin's span begins: its date-comment ROW, else its heading.
 
     Extracted so the START of pin N and the END of pin N-1 are computed by the
     SAME rule. Deriving the end from the next HEADING instead would make the
     two asymmetric and let each block swallow the following pin's date comment.
+    The comment row is the one `section_pins` attributes to the pin, looked for
+    no higher than the body's first row, so the span and the pin agree by
+    construction; the row's start keeps its indentation inside the span.
     """
-    if not date_comment:
-        return heading_start
-    preceding = pinned_content[:heading_start]
-    # rfind takes the NEAREST preceding occurrence, so an identical comment
-    # string inside an earlier pin's body cannot capture the span.
-    comment_at = preceding.rfind(date_comment)
-    if comment_at == -1:
-        return heading_start
-    # Back up to that LINE's first character, so indentation is inside the span.
-    return preceding.rfind("\n", 0, comment_at) + 1
+    row = _date_comment_row(doc, first, heading)
+    return doc.lines[heading if row is None else row].start
 
 
-def extract_pin_block(pinned_content: str, index: int, pins) -> str:
-    """Return the pin's block as a VERBATIM SLICE of `pinned_content`.
+def extract_pin_block(doc, first: int, last: int, index: int, pins) -> str:
+    """Return the pin's block as a VERBATIM SLICE of the file `doc` parsed.
 
     THIS IS A SLICE, NOT A RECONSTRUCTION, and the distinction is the whole
     point. Rebuilding the block as `date_comment + "\\n" + heading + "\\n" +
-    body` looks equivalent but is not: `parse_pins` walks BACKWARD over blank
+    body` looks equivalent but is not: the pin reader walks BACKWARD over blank
     lines to find the date comment and stores it `.strip()`ed, so a rebuilt
     block silently drops any blank line between comment and heading and any
     trailing whitespace on the comment line. Measured across five plausible
@@ -449,7 +459,7 @@ def extract_pin_block(pinned_content: str, index: int, pins) -> str:
                   pattern, `start` is the offset of THAT LINE'S FIRST CHARACTER
                   (so leading indentation is inside the slice); otherwise
                   `start` is the heading start.
-      - Take `source[start:end]` EXACTLY. Do not strip, rejoin, or normalize.
+      - Take `doc.text[start:end]` EXACTLY. Do not strip, rejoin, or normalize.
 
     The no-strip rule means the block carries the blank line(s) separating it
     from the next pin. That is safe and was measured rather than assumed:
@@ -468,30 +478,35 @@ def extract_pin_block(pinned_content: str, index: int, pins) -> str:
     Computing both edges with `_span_start` makes the spans partition the
     section instead of overlapping.
 
+    THE ROWS ARE THE WHOLE FILE'S, AND THE BODY IS NEVER RE-PARSED. `doc` is
+    the parse of the whole CLAUDE.md and `first`..`last` are its Pinned body
+    rows (`staleness._pinned_body`), so the headings this finds are the ones
+    `section_pins` reads: a parse that starts mid-file starts in a state the
+    whole file does not have.
+
     Args:
-        pinned_content: The Pinned Context section body (what parse_pins ate).
+        doc: The whole-file parse of CLAUDE.md.
+        first, last: The rows of the Pinned body.
         index: Position of the pin within that section.
-        pins: The full parsed Pin list -- the NEXT pin's date_comment is needed
-            to place this pin's end boundary.
+        pins: The section's Pin list (`section_pins`). Its length bounds
+            `index`; the span edges come from the same rows it read.
 
     Raises:
         _Unevaluable: if the section's headings no longer agree with `index`.
     """
-    starts = [m.start() for m in _PIN_HEADING_RE.finditer(pinned_content)]
-    if index < 0 or index >= len(starts) or index >= len(pins):
+    headings = doc.find_lines(_PIN_HEADING_ROW, (first, last))
+    if index < 0 or index >= len(headings) or index >= len(pins):
         raise _Unevaluable(
-            f"pin index {index} out of range (section has {len(starts)} pins)"
+            f"pin index {index} out of range (section has {len(headings)} pins)"
         )
 
-    block_start = _span_start(pinned_content, starts[index], pins[index].date_comment)
-    if index + 1 < len(starts) and index + 1 < len(pins):
-        block_end = _span_start(
-            pinned_content, starts[index + 1], pins[index + 1].date_comment
-        )
+    block_start = _span_start(doc, first, headings[index])
+    if index + 1 < len(headings) and index + 1 < len(pins):
+        block_end = _span_start(doc, first, headings[index + 1])
     else:
-        block_end = len(pinned_content)
+        block_end = doc.lines[last].end
 
-    return pinned_content[block_start:block_end]
+    return doc.text[block_start:block_end]
 
 
 # The project-identity predicate, and the reader for the session's worktree
@@ -1027,14 +1042,26 @@ def archive_pin(index: int, db_path=None) -> dict:
         raise _Unevaluable(f"CLAUDE.md unreadable ({type(exc).__name__})",
                            claude_md_path=claude_md_path)
 
-    parsed = _parse_pinned_section(content)
-    if parsed is None:
+    from shared.claude_md_markers import State, parse, uncertainty_added
+
+    doc = parse(content)
+    located = locate_pinned(doc)
+    if located.state is State.ABSENT:
         raise _Unevaluable("no Pinned Context section",
                            claude_md_path=claude_md_path)
+    if located.state is not State.FOUND:
+        raise _Unevaluable(
+            f"pinned section unreadable: {located.reason or located.state.value}",
+            claude_md_path=claude_md_path,
+        )
+    body = _pinned_body(doc, located)
+    if body is None:
+        raise _Unevaluable("Pinned Context section has no pins",
+                           claude_md_path=claude_md_path)
 
-    _, _, pinned_content = parsed
+    first, last = body
     try:
-        pins = parse_pins(pinned_content)
+        pins = section_pins(doc, located)
     except Exception as exc:  # noqa: BLE001 -- parse fault is unevaluable
         raise _Unevaluable(f"pin parse failed ({type(exc).__name__})",
                            claude_md_path=claude_md_path)
@@ -1053,7 +1080,7 @@ def archive_pin(index: int, db_path=None) -> dict:
     # itself and pass unconditionally.
     heading = pin.heading[4:] if pin.heading.startswith("### ") else pin.heading
 
-    block = extract_pin_block(pinned_content, index, pins)
+    block = extract_pin_block(doc, first, last, index, pins)
     if not block.strip():
         raise _Unevaluable("pin block is empty", heading=heading,
                            claude_md_path=claude_md_path)
@@ -1334,6 +1361,26 @@ def archive_pin(index: int, db_path=None) -> dict:
             "occurrences": occurrences,
             "locations": _occurrence_offsets(post, block),
             "reason": _unsafe_reason(occurrences, claude_md_path, memory_id),
+        }
+
+    # --- the removal must leave CLAUDE.md as readable as it was -----------
+    # The block can hold the line that ends an HTML block the user opened
+    # above it. Removing it re-opens that block, and the file then reads as
+    # uncertain from the user's opener down. The replacement is exactly the
+    # removal Edit an ARCHIVED verdict licenses.
+    unreadable = uncertainty_added(parse(post), parse(post.replace(block, "", 1)))
+    if unreadable is not None:
+        return {
+            "outcome": "ARCHIVED_DELETE_UNSAFE",
+            "heading": heading,
+            "claude_md_path": claude_md_path,
+            "delete_string": block,
+            "memory_id": memory_id,
+            "chars": len(block),
+            "contained": True,
+            "occurrences": 1,
+            "locations": _occurrence_offsets(post, block),
+            "reason": f"removing the pin is refused: {unreadable}",
         }
 
     return {

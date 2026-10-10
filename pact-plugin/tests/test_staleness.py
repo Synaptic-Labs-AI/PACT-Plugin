@@ -1080,19 +1080,19 @@ class TestStalenessModuleDirect:
 
 
 class TestDeclaredPinnedEndMarker:
-    """The declared END boundary of `## Pinned Context`.
+    """The optional pinned marker pair around `## Pinned Context`.
 
-    WHY THIS CLASS EXISTS AT ALL, stated first because it is the trap. The
-    declared parse is a NO-OP on every document that carries the shipped
-    marker name: `PINNED_END_MARKER` sits in the `PACT_MEMORY_` family, so the
-    INFERRED forward scan already stops at its line and the two offsets
-    coincide. A suite that only feeds documents to the parser therefore
-    certifies the change as a no-op, which it is, and PROVES NOTHING.
+    The start marker sits immediately above the heading and the end marker
+    below the last pin. When the pair is FOUND, the section is searched for
+    inside it, so the end marker bounds the section by position and not by its
+    name. The end marker is also a PACT boundary line, so a section with no
+    pair ends at it too: on every document carrying the shipped names the pair
+    changes nothing. The non-vacuity arm is `test_rename_arm_*`, which renames
+    the end marker out of the boundary family.
 
-    THE NON-VACUITY ARM IS `test_rename_arm_*` BELOW, AND IT MUTATES THE
-    CONSTANT, NOT THE DOCUMENT. That is the only configuration in which the
-    declared parse and the inferred scan disagree. Any future edit that drops
-    that arm leaves this class unable to fail for the right reason.
+    A pair that is not well formed (an end with no start, a start with no end,
+    a marker quoted mid-line) reads MALFORMED, and the readers then stay
+    silent rather than guess where the section ends.
     """
 
     def _doc(self, pinned_body, above="", tail="## Working Memory\nnotes\n"):
@@ -1124,17 +1124,14 @@ class TestDeclaredPinnedEndMarker:
     def test_rename_arm_declared_parse_excludes_what_inferred_scan_charges(
         self, monkeypatch
     ):
-        """THE NON-VACUITY ARM. Rename the marker out of the boundary family
-        and the two parses diverge: the inferred scan overruns the marker and
-        charges its text to the pinned body, while the declared parse still
-        ends the region at it.
-
-        Today the marker escapes the body only because its NAME matches a
-        generic alternation -- an INCIDENTAL exclusion. This arm is what makes
-        the exclusion INTENTIONAL, and it is the sole measured difference
-        between the two parses.
+        """THE NON-VACUITY ARM. Rename the end marker out of the boundary
+        family. With the pair FOUND, the end marker still bounds the section,
+        because the section is searched for inside the pair. Without its pair
+        the renamed line is ordinary text, the scan runs past it, and it is
+        charged to the last pin.
         """
         import staleness
+        from shared.claude_md_manager import PINNED_START_MARKER
 
         renamed = "<!-- PINNED_REGION_END -->"
         # CONTROL: the rename must actually leave the family, or this arm
@@ -1144,56 +1141,61 @@ class TestDeclaredPinnedEndMarker:
             renamed.startswith("<!-- " + p) for p in PACT_BOUNDARY_PREFIXES
         ), "rename arm is vacuous: the substitute marker is still in the family"
 
-        content = self._doc(self.PIN_A + self.PIN_B + renamed + "\n")
+        unpaired = self._doc(self.PIN_A + self.PIN_B + renamed + "\n")
+        paired = self._doc(self.PIN_A + self.PIN_B + renamed + "\n",
+                           above=PINNED_START_MARKER + "\n")
 
-        # Arm 1: shipped constant -> the substitute is not the declared end,
-        # so the parse falls through to the inferred scan and CHARGES it.
-        inferred_body = staleness._parse_pinned_section(content)[2]
+        # Arm 1: no start marker, so no pair: the renamed line is charged.
+        inferred_body = staleness._parse_pinned_section(unpaired)[2]
 
-        # Arm 2: the constant IS the substitute -> the declared parse excludes.
+        # Arm 2: the constant IS the substitute and the start marker is
+        # there, so the pair is FOUND and bounds the section.
         monkeypatch.setattr(staleness, "PINNED_END_MARKER", renamed)
-        declared_body = staleness._parse_pinned_section(content)[2]
+        declared_body = staleness._parse_pinned_section(paired)[2]
 
         assert renamed in inferred_body, (
-            "inferred scan should have overrun the out-of-family marker"
+            "the scan should have run past the out-of-family marker"
         )
         assert renamed not in declared_body, (
-            "declared parse must exclude the marker it was told to look for"
+            "the found pair must exclude the marker it was told to look for"
         )
+        assert declared_body.count("### ") == 2
         assert len(declared_body) < len(inferred_body), (
             f"declared ({len(declared_body)}) must be shorter than inferred "
             f"({len(inferred_body)}); equal lengths mean the arm went vacuous"
         )
 
     def test_absent_end_marker_uses_the_inferred_scan(self):
-        """Fail open. No marker at all is the production shape on day one."""
+        """No pair at all is the production shape on day one, and it parses
+        exactly as the paired document does."""
         import staleness
+        from shared.claude_md_manager import PINNED_START_MARKER
         with_marker = staleness._parse_pinned_section(
             self._doc(self.PIN_A + self.PIN_B
-                      + staleness.PINNED_END_MARKER + "\n")
+                      + staleness.PINNED_END_MARKER + "\n",
+                      above=PINNED_START_MARKER + "\n")
         )[2]
         without = staleness._parse_pinned_section(
             self._doc(self.PIN_A + self.PIN_B)
         )[2]
         assert with_marker == without
 
-    def test_start_marker_without_end_does_not_raise_and_parses_the_same(self):
-        """Half-marked tolerance is REQUIRED, not optional. If the marker
-        writer lands before a document gains an END, every file it touches
-        carries a START alone. That is correct, not broken."""
+    def test_start_marker_without_end_does_not_raise_and_reads_malformed(self):
+        """A start marker with no end is a pair that is not well formed. The
+        pin-marker writer emits the two together, so only a hand edit makes
+        this shape. It does not raise; the section reads MALFORMED and the
+        offset view returns None, which every reader treats as silence."""
         import staleness
         from shared.claude_md_manager import PINNED_START_MARKER
+        from shared.claude_md_markers import State, parse
 
         half = self._doc(self.PIN_A + self.PIN_B,
                          above=PINNED_START_MARKER + "\n")
         plain = self._doc(self.PIN_A + self.PIN_B)
 
-        half_parsed = staleness._parse_pinned_section(half)
-        assert half_parsed is not None, (
-            "a START-only document must still parse; None means the half-marked "
-            "state was treated as absent rather than tolerated"
-        )
-        assert half_parsed[2] == staleness._parse_pinned_section(plain)[2]
+        assert staleness.locate_pinned(parse(half)).state is State.MALFORMED
+        assert staleness._parse_pinned_section(half) is None
+        assert staleness._parse_pinned_section(plain) is not None
 
     def test_heading_between_body_and_declared_end_is_not_swallowed(self):
         """A foreign H2 section before the declared end must stay OUT of the
@@ -1214,10 +1216,13 @@ class TestDeclaredPinnedEndMarker:
         """
         import staleness
 
+        from shared.claude_md_manager import PINNED_START_MARKER
+
         content = self._doc(
             self.PIN_A + self.PIN_B
             + "## Interloper\nforeign content\n\n"
-            + staleness.PINNED_END_MARKER + "\n"
+            + staleness.PINNED_END_MARKER + "\n",
+            above=PINNED_START_MARKER + "\n",
         )
         body = staleness._parse_pinned_section(content)[2]
         assert "foreign content" not in body, (
@@ -1283,10 +1288,13 @@ class TestDeclaredPinnedEndMarker:
         ]
         assert len(members) >= 5, "alphabet collapsed; the sweep is vacuous"
 
+        from shared.claude_md_manager import PINNED_START_MARKER
+
         for label, interloper in members:
             marked = staleness._parse_pinned_section(
                 self._doc(self.PIN_A + self.PIN_B + interloper
-                          + staleness.PINNED_END_MARKER + "\n")
+                          + staleness.PINNED_END_MARKER + "\n",
+                          above=PINNED_START_MARKER + "\n")
             )
             inferred = staleness._parse_pinned_section(
                 self._doc(self.PIN_A + self.PIN_B + interloper)
@@ -1301,32 +1309,30 @@ class TestDeclaredPinnedEndMarker:
                 f"{label}: foreign section pulled into the pinned span"
             )
 
-    def test_indented_marker_quoted_in_a_pin_body_does_not_truncate(self):
-        """THE FAIL-OPEN GUARD, and it is the reason
-        `_find_declared_end_offset` tolerates trailing whitespace only.
-
-        `_find_terminator_offset` matches the RAW line, so it does not match an
-        indented marker. A `.strip()` compare in the declared locator WOULD,
-        the two would disagree about which line ends the region, and the
-        declared offset would land INSIDE the pinned body -- dropping a pin out
-        of the counted span and failing the cap OPEN.
-
-        Counter-test protocol: change `.rstrip()` to `.strip()` in
-        `staleness._find_declared_end_offset` and this test must fail.
+    def test_an_end_marker_indented_up_to_three_spaces_ends_the_section(self):
+        """THE S15 WIDENING, accepted as an under-block and signed off by the
+        user. A marker line may be indented up to 3 spaces, so an end marker
+        quoted that way in a pin body IS the end marker: the section ends at
+        it and the pin below drops out of the counted span. Indented 4 or more
+        it is not a marker line, and as marker text outside a marker line it
+        makes the pair MALFORMED, so the readers stay silent. Neither shape
+        counts a pin that is not there.
         """
         import staleness
+        from shared.claude_md_manager import PINNED_START_MARKER
 
-        content = self._doc(
-            "<!-- pinned: 2026-01-01 -->\n### Alpha\ntext\n"
-            "  " + staleness.PINNED_END_MARKER + "\n"
-            "more alpha\n\n"
-            + self.PIN_B
-        )
-        body = staleness._parse_pinned_section(content)[2]
-        assert body.count("### ") == 2, (
-            f"expected both pins to stay in the counted span, got "
-            f"{body.count('### ')} -- an indented quote truncated the region"
-        )
+        def body(indent):
+            return staleness._parse_pinned_section(self._doc(
+                "<!-- pinned: 2026-01-01 -->\n### Alpha\ntext\n"
+                + indent + staleness.PINNED_END_MARKER + "\n"
+                "more alpha\n\n"
+                + self.PIN_B,
+                above=PINNED_START_MARKER + "\n",
+            ))
+
+        for indent in (" ", "  ", "   "):
+            assert body(indent)[2].count("### ") == 1, repr(indent)
+        assert body("    ") is None
 
     def test_trailing_whitespace_on_the_marker_line_is_tolerated(self):
         """The other half of the same asymmetry. A trailing-space marker line
@@ -1334,13 +1340,17 @@ class TestDeclaredPinnedEndMarker:
         locators stay in agreement. Tolerating it costs nothing."""
         import staleness
 
+        from shared.claude_md_manager import PINNED_START_MARKER
+
         padded = staleness._parse_pinned_section(
             self._doc(self.PIN_A + self.PIN_B
-                      + staleness.PINNED_END_MARKER + "   \n")
+                      + staleness.PINNED_END_MARKER + "   \n",
+                      above=PINNED_START_MARKER + "\n")
         )[2]
         clean = staleness._parse_pinned_section(
             self._doc(self.PIN_A + self.PIN_B
-                      + staleness.PINNED_END_MARKER + "\n")
+                      + staleness.PINNED_END_MARKER + "\n",
+                      above=PINNED_START_MARKER + "\n")
         )[2]
         assert padded == clean
 
@@ -1881,12 +1891,8 @@ class TestCheckPinnedStalenessHardening:
 
 class TestParsePinnedSectionTerminator:
     """Regression guard: `_parse_pinned_section` must terminate on PACT
-    boundary markers and H2 headings.
-
-    Round 10 simplified these tests: fence-awareness tests are deleted
-    because the parser now operates within the PACT-managed region only
-    (no user-authored fenced code blocks). The unfenced terminator test
-    remains as a regression guard for the basic termination contract.
+    boundary markers and H2 headings. The fence-aware rows live in
+    `test_pinned_section_parser_migration.py`.
     """
 
     def test_unfenced_pact_marker_still_terminates_pinned_section(self):
@@ -1896,6 +1902,7 @@ class TestParsePinnedSectionTerminator:
         content = (
             "# Project Memory\n"
             "\n"
+            "<!-- PACT_MEMORY_START -->\n"
             "## Pinned Context\n"
             "\n"
             "### Regular pin\n"
@@ -2027,41 +2034,6 @@ class TestPinCapsTwinCopyDrift:
             "in the same commit"
         )
 
-    def test_forbidden_line_terminator_chars_twins_match(self):
-        """Line-terminator char set MUST agree across parser and hook.
-
-        Cycle-7 introduced a CLI-side refusal for line terminators in
-        override rationales. Cycle-8 demoted the CLI to advisory-only;
-        rationale validation moved to the PreToolUse hook
-        (hooks/pin_caps_gate.py). The CLI no longer carries its own
-        forbidden-char set, so this test compares parser ↔ hook only.
-
-        Drift guard: the hook DERIVES its forbidden-char set from
-        `pin_caps._FORBIDDEN_TERMINATOR_TABLE` at module load (single
-        source of truth). In a correctly wired repo the equality always
-        holds because the hook's set is literally `chr(k) for k in the
-        parser table`. This test catches the regression of someone
-        reverting the derivation to a hand-maintained literal — if that
-        happens, drift is possible, and this assertion fires with both
-        sides enumerated.
-        """
-        import pin_caps
-        import pin_caps_gate
-
-        parser_chars = set(chr(k) for k in pin_caps._FORBIDDEN_TERMINATOR_TABLE.keys())
-        hook_chars = set(pin_caps_gate._FORBIDDEN_RATIONALE_CHARS)
-
-        assert parser_chars == hook_chars, (
-            "Line-terminator char-set drift between parser and hook:\n"
-            f"  pin_caps._FORBIDDEN_TERMINATOR_TABLE (parser):   {sorted(parser_chars)!r}\n"
-            f"  pin_caps_gate._FORBIDDEN_RATIONALE_CHARS (hook): {sorted(hook_chars)!r}\n"
-            "The hook SHOULD derive from the parser table at module load "
-            "(see pin_caps_gate.py) so it cannot drift. If you see this "
-            "failure, someone reverted the derivation to a hand-maintained "
-            "literal. Fix by restoring the `chr(k) for k in "
-            "pin_caps._FORBIDDEN_TERMINATOR_TABLE.keys()` form."
-        )
-
 
 # Chars per word in real pinned prose. FROZEN, not measured at test time: the
 # corpus it describes is a user's CLAUDE.md, which is gitignored and absent from
@@ -2070,8 +2042,8 @@ class TestPinCapsTwinCopyDrift:
 # teaches people to ignore it.
 #
 # HOW IT WAS OBTAINED, so it can be re-derived rather than trusted: measured
-# over the STRIPPED body text, which is what pin_caps._extract_body_chars
-# returns after removing the per-line date comment and the STALE marker, across
+# over the STRIPPED body text, which is what pin_caps._charge counts after
+# removing the per-line date comment and the STALE marker, across
 # a real twelve-pin document. 12,306 chars over 1,757 words.
 #
 # The value is not the fragile part; the POPULATION is. Re-derive it the same
@@ -2206,7 +2178,9 @@ class TestPinnedBudgetAgainstCapsCoherence:
                 f"{comment}\n### Pin {i}\n{stale}\nbody words for pin {i} here\n\n"
             )
 
-        pins = pin_caps.parse_pins(pins_text)
+        from fixtures import pin_helpers
+
+        pins = pin_helpers.parse_pins(pins_text)
         assert len(pins) == pin_caps.PIN_COUNT_CAP, (
             "fixture did not parse into the expected number of pins; the "
             "control cannot certify a population it did not build"
@@ -3638,113 +3612,53 @@ _ANCHOR_CORPUS = {
 
 
 class TestBudgetWarningAnchorComposition:
-    """One shape, two anchors, and the wider one must not widen the alphabet.
+    """One shape, two row patterns, and the deleting one must not widen it.
 
-    `_LEADING_BUDGET_WARNING_RE` DELETES and `_ANY_BUDGET_WARNING_RE` only
-    RECOGNISES. They are composed from the same `_BUDGET_WARNING_SHAPE` so that
-    the difference between them is a position and nothing else. These arms are
-    what hold that claim up.
-
-    WHAT THIS DELIBERATELY DOES NOT DO. It compares no pattern STRINGS. An
-    assertion that one pattern ends with the shared shape certifies nothing
-    about behaviour: two patterns can share a fragment and still match
-    different sets, and two IDENTICAL patterns satisfy such an assertion
-    perfectly. Both arms below CALL the compiled objects instead, because only
-    the shipped objects can testify about their own composition.
+    `_BUDGET_WARNING_WHOLE_ROW` is the row `_strip_budget_warnings` may DELETE
+    and `_BUDGET_WARNING_ROW` is the row `_has_budget_warning` RECOGNISES. Both
+    are composed from the same warning head, so every deletable row must be a
+    recognised row. These arms hold that up, and they call the shipped objects
+    through the parser rather than compare pattern strings: two patterns can
+    share a fragment and still match different sets.
 
     THE TWO ARMS HAVE DIFFERENT SUBJECTS, WHICH IS WHY THERE ARE TWO. The first
     is about the PATTERNS; the second is about what the corpus can still tell
-    apart. THREE STATES WERE RUN, and two of them separate the arms.
-      - TRIM the separating members out of the corpus: the equality arm still
-        PASSES, the second goes red.
-      - BREAK the shared shape to a literal that never matches: the equality
-        arm PASSES AGAIN, because both sides then say False to everything, and
-        the second still goes red.
-      - RE-ANCHOR the wide pattern, so the two are identical patterns: BOTH go
-        red.
-    The first arm alone therefore certifies nothing. That is the whole reason
-    the second one exists, and it is why neither may be deleted as a duplicate.
-
-    WHAT THIS PAIR DOES NOT COVER, AND IT IS THE MODULE'S CARDINAL HAZARD.
-    MEASURED: widen the DELETING pattern's anchor and the two arms stay GREEN.
-    The equality arm slices the text, and each anchor matches at a slice start,
-    so the two sides agree on every member. The arms are not weak here. They
-    measure a property that the widening does not disturb. That widening has
-    its own gate below, in `TestDeletingAnchorStaysAtTheHead`.
+    apart, because two predicates that both say False to everything agree for
+    free.
     """
 
-    def test_the_wide_anchor_matches_at_exactly_the_narrow_one_s_positions(self):
-        """The wide predicate equals the narrow one tried at every line start.
+    def test_every_deletable_row_is_a_recognised_row(self):
+        """The deleting pattern is never wider than the recognising one."""
+        from shared.claude_md_markers import parse
+        from staleness import _BUDGET_WARNING_ROW, _BUDGET_WARNING_WHOLE_ROW
 
-        This is the composition property stated as behaviour. If the wide
-        pattern ever gains a token the narrow one lacks, or loses one it has,
-        the two sides part company on some member of the corpus.
-        """
-        from staleness import _ANY_BUDGET_WARNING_RE, _LEADING_BUDGET_WARNING_RE
-
+        deletable_total = 0
         for name, text in _ANCHOR_CORPUS.items():
-            wide = _ANY_BUDGET_WARNING_RE.search(text) is not None
-            # SLICE THE TEXT. DO NOT PASS AN OFFSET AS `pos`. The two look
-            # interchangeable and are not. `\A` matches only at the TRUE start
-            # of the string, and `pos` DOES NOT MOVE IT, so
-            # `.match(text, k)` with k > 0 returns None for every input --
-            # whatever the shape is, and whether the shape is right or broken.
-            # MEASURED, with a control: against a deliberately broken pattern
-            # the `pos` form gives None for both, which is INDISTINGUISHABLE,
-            # while the slice form matches for the real one and not for the
-            # broken one, which SEPARATES. So the natural-looking `pos`
-            # spelling turns this whole arm vacuous, and it would still pass.
-            # Slicing re-anchors to the slice start, which is what actually
-            # exercises the shipped object.
-            #
-            # THIS CALL SHAPE IS LEGITIMATE HERE AND FORBIDDEN IN THE MODULE.
-            # `_LEADING_BUDGET_WARNING_RE` is the pattern that DELETES, and
-            # giving it a caller-chosen offset is the construction the module
-            # refuses: it moves the anchor out of the compiled object and into
-            # a convention, where a later caller can widen what gets deleted.
-            # Nothing here deletes a byte, so that hazard cannot arise, and
-            # only the shipped object can testify about its own composition.
-            # DO NOT COPY THIS LINE INTO A CALLER.
-            narrow_anywhere = any(
-                _LEADING_BUDGET_WARNING_RE.match(text[k:])
-                for k in _line_starts(text)
+            doc = parse(text)
+            deletable = set(doc.find_lines(_BUDGET_WARNING_WHOLE_ROW))
+            recognised = set(doc.find_lines(_BUDGET_WARNING_ROW))
+            deletable_total += len(deletable)
+            assert deletable <= recognised, (
+                f"{name!r}: rows {sorted(deletable - recognised)} are deletable "
+                f"but not recognised, so the deleting pattern widened the shape"
             )
-            assert wide == narrow_anywhere, (
-                f"the two anchors disagree on {name!r}: the wide pattern says "
-                f"{wide}, the narrow one tried at every line start says "
-                f"{narrow_anywhere}. They no longer share one shape."
-            )
+        assert deletable_total == 5, (
+            f"the corpus holds {deletable_total} deletable rows; the subset "
+            f"check above is vacuous when the deleting pattern matches nothing"
+        )
 
     def test_the_corpus_separates_the_two_anchors(self):
         """NON-VACUITY, and it guards the CORPUS rather than the predicates.
 
-        TWO PREDICATES AGREE FOR FREE WHEN BOTH SAY FALSE TO EVERYTHING. That
-        is the trap under the equality arm, and it has two entrances. A corpus
-        of only negative members passes it. So does a corpus of positives, if
-        the shared shape stops matching anything at all. The arm above cannot
-        see either one, because in both states its two sides agree perfectly.
-
-        SO THE CORPUS MUST CARRY BOTH KINDS AT ONCE: members that BOTH sides
-        match, and among them a member that only the LINE-START side can reach.
-        The first refuses a shape that matches nothing; the second refuses two
-        patterns that are secretly one.
-
-        MEASURED, NOT ASSERTED. Replace `_BUDGET_WARNING_SHAPE` with a literal
-        that can never match, and the equality arm above PASSES while this one
-        goes red. Re-anchor the wide pattern to the start of the string, and
-        this one goes red as well. Both states were run.
-
-        THE COUNTS ARE PINNED, NOT MERELY NON-ZERO. "At least one" survives a
-        trim down to one lucky member. An exact figure per class refuses any
-        trim, and names the class that went missing. Add a member and this arm
-        asks you to say which class it joined.
+        The corpus must carry members that BOTH predicates see and, among them,
+        members that only the recognising side reaches (a warning below the
+        head). The counts are pinned, not merely non-zero: an exact figure per
+        class refuses any trim and names the class that went missing.
         """
-        from staleness import _ANY_BUDGET_WARNING_RE, _LEADING_BUDGET_WARNING_RE
-
         separating, both_true, both_false = [], [], []
         for name, text in _ANCHOR_CORPUS.items():
-            wide = _ANY_BUDGET_WARNING_RE.search(text) is not None
-            at_head = _LEADING_BUDGET_WARNING_RE.match(text) is not None
+            wide = _recognised(text)
+            at_head = _kept_after_strip(text) != text
             if wide and not at_head:
                 separating.append(name)
             elif wide:
@@ -3752,93 +3666,75 @@ class TestBudgetWarningAnchorComposition:
             else:
                 both_false.append(name)
 
-        # THE TWO ENTRANCES TO THE TRAP GET SEPARATE MESSAGES, because they
-        # have different repairs and a reader who reaches this line is trying
-        # to work out which one they broke.
         assert separating or both_true, (
-            "the wide predicate matched NOTHING anywhere in the corpus. Either "
-            "the shared shape no longer matches the text this module writes, "
-            "or every positive member has left the corpus. The equality arm "
-            "above PASSES in that state, because two predicates that both say "
-            "False agree for free"
-        )
-        assert separating, (
-            "no corpus member is SEPARATING: for each member the wide "
-            "predicate agrees with the narrow one at offset 0. Either the "
-            "corpus lost its below-head member, or the wide predicate no "
-            "longer sees that member because its anchor is narrower. The "
-            "equality arm above names which. The property here would pass "
-            "unchanged if the two patterns were the same"
+            "the recognising predicate matched NOTHING anywhere in the corpus. "
+            "Either the shared shape no longer matches the text this module "
+            "writes, or every positive member has left the corpus"
         )
         assert len(separating) == 2, f"separating members: {sorted(separating)}"
         assert len(both_true) == 2, f"both-true members: {sorted(both_true)}"
         assert len(both_false) == 7, f"both-false members: {sorted(both_false)}"
 
 
+def _kept_after_strip(text):
+    """The text the leading-warning strip keeps, with `text` read as a whole
+    document whose Pinned body is every row."""
+    from shared.claude_md_markers import parse
+    from staleness import _strip_budget_warnings
+
+    doc = parse(text)
+    row = _strip_budget_warnings(doc, 0, len(doc.lines) - 1)
+    return text[doc.lines[row].start:] if row < len(doc.lines) else ""
+
+
+def _recognised(text):
+    """`_has_budget_warning` on `text` read as a whole document."""
+    from shared.claude_md_markers import parse
+    from staleness import _has_budget_warning
+
+    doc = parse(text)
+    return _has_budget_warning(doc, 0, len(doc.lines) - 1)
+
+
 class TestDeletingAnchorStaysAtTheHead:
-    """The pattern that DELETES must not reach past offset 0, by any call.
+    """The strip that DELETES must not reach past the head of the body.
 
-    THE HAZARD HERE IS THE CARDINAL ONE OF THIS MODULE. Widen this anchor and
-    a strip reaches text a user wrote inside a pin body, in a file that is
-    frequently gitignored, with no commit to recover from. The module refuses
-    that widening in its own prose. Until this arm, nothing enforced it.
+    THE HAZARD HERE IS THE CARDINAL ONE OF THIS MODULE. Widen the strip and it
+    reaches text a user wrote inside a pin body, in a file that is frequently
+    gitignored, with no commit to recover from. The position rule lives in
+    `_strip_budget_warnings` itself (the contiguous run of warning rows from
+    the first row), so driving the function is what tests it.
 
-    WHY NO DOCUMENT-LEVEL ARM CATCHES IT, which is the reason this gate reads
-    the OBJECT. `_strip_budget_warnings` reaches the pattern by `.match()` at
-    offset 0 alone, and each anchor matches at offset 0. MEASURED: with the
-    anchor widened to a line-anchored form, the strip returns BYTE-IDENTICAL
-    output and the whole file passes. The widening changes no behaviour today.
-    It removes a GUARANTEE, and a guarantee is invisible to an arm that drives
-    documents. The composition arms above miss it for a different reason, which
-    their own docstring records.
-
-    WHY `.search` IS THE PROBE. A start-of-string anchor makes `.search` and
-    `.match` agree on every input, so `.search` is harmless as a call site.
-    THAT AGREEMENT IS THE PROPERTY. If `.search` reaches further than `.match`
-    can, the pattern no longer pins itself to offset 0.
-
-    THIS GATE HOLDS NO LITERAL. It reads neither the pattern string nor the
-    module source, so a legitimate re-spelling passes. MEASURED: a caret with
-    no MULTILINE flag is equivalent to the shipped anchor, carries no hazard,
-    and this arm passes it. A gate on the pattern string REFUSES that spelling,
-    which is why this one does not read the string.
-
-    WHAT A LATER EDIT MUST DO TO SATISFY IT. Keep the compiled object unable to
-    match anywhere except offset 0. The sanctioned repair for the residual this
-    module accepts does NOT widen the delete: it excludes lines of this shape
-    from the COUNT at the measurement site, on a throwaway copy, and leaves the
-    delete on the contiguous run at the head.
+    The sanctioned repair for the residual this module accepts does NOT widen
+    the delete: it excludes warning rows from the COUNT at the measurement
+    site, on a throwaway copy, and leaves the delete on the run at the head.
     """
 
-    def test_the_deleting_pattern_cannot_reach_below_the_head(self):
-        """A warning below the head must be invisible to the deleting pattern.
+    def test_the_strip_cannot_reach_below_the_head(self):
+        """A warning below the head survives the strip.
 
-        THE NEGATIVE LEG IS THE GATE. `.search` scans every position, so it
-        reports a match wherever the pattern is able to match at all. On a body
-        whose only warning sits below the head, this pattern must find nothing.
-
-        THE POSITIVE LEG SITS IN THE SAME TEST, because "found nothing" is also
-        what a shape that matches nothing produces. Without it this gate would
-        report the cardinal hazard as covered while it checked nothing.
+        THE POSITIVE LEG SITS IN THE SAME TEST, because "removed nothing" is
+        also what a shape that matches nothing produces.
         """
-        from staleness import _LEADING_BUDGET_WARNING_RE
-
         below_head = "a note the user wrote\n" + _ONE_WARNING_LINE + "more prose\n"
-        assert _LEADING_BUDGET_WARNING_RE.search(below_head) is None, (
-            "the deleting pattern reached a warning BELOW the head, so a strip "
-            "built on it now removes text a user wrote inside a pin body, from "
-            "a file that is frequently gitignored. Do not widen this anchor. "
-            "Exclude the line from the COUNT on a throwaway copy at the "
-            "measurement site instead, and leave the delete at the head"
+        assert _kept_after_strip(below_head) == below_head, (
+            "the strip removed a warning BELOW the head, so it now removes text "
+            "a user wrote inside a pin body, from a file that is frequently "
+            "gitignored. Exclude the line from the COUNT on a throwaway copy at "
+            "the measurement site instead, and leave the delete at the head"
         )
 
-        # POSITIVE CONTROL, in the same fixture. The absence above must be
-        # caused by the ANCHOR, and not by a shape that matches nothing at all.
+        # POSITIVE CONTROL, in the same fixture.
         at_head = _ONE_WARNING_LINE + "a note the user wrote\n"
-        assert _LEADING_BUDGET_WARNING_RE.search(at_head) is not None, (
-            "the deleting pattern did not find a warning AT the head, so the "
-            "negative leg above proves nothing about the anchor"
+        assert _kept_after_strip(at_head) == "a note the user wrote\n", (
+            "the strip did not remove a warning AT the head, so the negative "
+            "leg above proves nothing about the position rule"
         )
+
+    def test_text_after_a_warning_on_its_row_is_never_deleted(self):
+        """A row carrying text after the warning closes is not deleted."""
+        trailing = _ONE_WARNING_LINE.rstrip("\n") + " my own note\nbody\n"
+        assert _kept_after_strip(trailing) == trailing
 
 
 # ===========================================================================
@@ -4424,3 +4320,90 @@ class TestStalenessCitationsResolve:
         assert (cited - (defined - {victim})) == {victim}, (
             "deleting a cited definition did not surface it as missing"
         )
+
+
+# ===========================================================================
+# The markings never make the file less readable
+# ===========================================================================
+
+_STALE_PIN = "### Fix the gate (PR #12, merged 2020-01-01)\nBody of the stale pin.\n"
+_FENCE_TAIL = "\n## Fenced\n```\ncode\n```\n"
+# Two stale pins straddle a `<!-- note` that is never closed; the second pin's
+# STALE row would end it. The comment covers no fence, so the file is certain
+# before the pass.
+_OPEN_COMMENT_BETWEEN_STALE_PINS = (
+    "# Notes\n\n## Pinned Context\n\n### First pin 2020-01-01\nBody one.\n\n"
+    "<!-- note\nexample\n\n### Second pin 2020-01-02\nBody two.\n"
+)
+_ENDED_BY_A_COMMENT = "an HTML block is ended only by a line that starts a comment"
+
+
+def _shapes_a_stale_row_would_open():
+    """(name, text, opener's line) for 12 unmigrated files: a type-2 comment or
+    a type-4 declaration, never closed or closed mid-line below the stale pin,
+    opened at the top of the file or in its Pinned section, the closed ones
+    also with a fence at the end. A never-closed comment or declaration over a
+    fence already leaves the Pinned section unreadable, so the pass does not
+    run on those."""
+    for kind, opener, closer in (("type 2", "<!-- note", "flow: a --> b"),
+                                 ("type 4", "<!NOTE", "x > y")):
+        for closed in (False, True):
+            tail = closer + "\n" if closed else ""
+            for where, line in (("top", 2), ("Pinned", 4)):
+                top, pinned = (opener + "\n", "") if where == "top" else ("", opener + "\n")
+                text = (f"# Project\n{top}## Pinned Context\n\n{pinned}### Pin A\nBody A.\n\n"
+                        f"{_STALE_PIN}{tail}\n## Notes\nnotes\n")
+                name = f"{kind}, {'closed mid-line' if closed else 'never closed'}, {where}"
+                yield pytest.param(text, line, id=name)
+                if closed:
+                    yield pytest.param(text + _FENCE_TAIL, line, id=name + ", fence after")
+
+
+def _unknown_rows(text):
+    from shared.claude_md_markers import Kind, parse
+
+    return sum(1 for line in parse(text).lines if line.kind is Kind.UNKNOWN)
+
+
+class TestTheMarkingsNeverMakeTheFileLessReadable:
+    """A STALE row is an HTML comment line. Under a comment or declaration the
+    user left open above a stale pin, it would end that block, and the file
+    would read as uncertain from the opener down. The pass then writes nothing
+    and names the opener's line on disk."""
+
+    def test_a_stale_row_that_would_end_a_comment_between_two_stale_pins(self, tmp_path):
+        """The first pin's STALE row goes above the opener, and the line named
+        is still the opener's line on disk, 8."""
+        from staleness import check_pinned_staleness
+
+        path = tmp_path / "CLAUDE.md"
+        path.write_bytes(_OPEN_COMMENT_BETWEEN_STALE_PINS.encode("utf-8"))
+        status = check_pinned_staleness(claude_md_path=path)
+        assert status == ("Pinned staleness skipped: the update would make line 8 start a region "
+                          f"PACT cannot read: {_ENDED_BY_A_COMMENT}")
+        assert path.read_bytes() == _OPEN_COMMENT_BETWEEN_STALE_PINS.encode("utf-8")
+
+    @pytest.mark.parametrize("text, line", list(_shapes_a_stale_row_would_open()))
+    def test_a_stale_row_that_would_end_an_open_block_is_not_written(self, tmp_path, text, line):
+        from staleness import check_pinned_staleness
+
+        path = tmp_path / "CLAUDE.md"
+        path.write_bytes(text.encode("utf-8"))
+        status = check_pinned_staleness(claude_md_path=path)
+        assert status == (f"Pinned staleness skipped: the update would make line {line} start a "
+                          f"region PACT cannot read: {_ENDED_BY_A_COMMENT}")
+        assert path.read_bytes() == text.encode("utf-8")
+
+    def test_the_same_file_with_the_comment_closed_on_its_own_line_is_marked(self, tmp_path):
+        """The control: closed at a row edge, the comment ends where the user
+        ended it, and the STALE rows end nothing."""
+        from staleness import check_pinned_staleness
+
+        text = _OPEN_COMMENT_BETWEEN_STALE_PINS.replace("example\n", "example\n-->\n", 1)
+        path = tmp_path / "CLAUDE.md"
+        path.write_bytes(text.encode("utf-8"))
+        status = check_pinned_staleness(claude_md_path=path)
+        after = path.read_bytes().decode("utf-8")
+        assert status == "Pinned context: 2 stale pin(s) detected"
+        assert after.count("<!-- STALE: Last relevant ") == 2
+        assert _unknown_rows(after) == _unknown_rows(text) == 0

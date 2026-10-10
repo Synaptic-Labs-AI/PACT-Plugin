@@ -13,8 +13,8 @@ there.
 
 FOUR PROPERTIES THE PRIMARY FILE CANNOT REACH, each with the reason:
 
-  1. THE TWO-STATE DENY. `compute_deny_reason` compares a PRE-edit parse
-     against a POST-edit parse. No single-document probe reaches it at any
+  1. THE TWO-STATE DENY. The cap decision compares the text before an edit
+     with the text after it. No single-document probe reaches it at any
      probe count, because the compared quantity does not exist until two
      documents are parsed. Certified here on DOCUMENT PAIRS, driven through
      the gate's own pipeline in the gate's own order.
@@ -99,8 +99,6 @@ import pytest
 from pin_caps import (
     PIN_COUNT_CAP,
     PIN_SIZE_CAP,
-    apply_edit_and_parse,
-    compute_deny_reason,
 )
 # `pin_caps_gate` is imported LAZILY, inside `gate_verdict`, and must stay that
 # way. It is a hook SCRIPT, and importing it at module scope pulls it in during
@@ -113,6 +111,8 @@ from pin_caps import (
 # `pin_caps_gate` inside its own test bodies for the same reason, so this
 # follows the convention already in force here rather than inventing one.
 from shared.claude_md_manager import (
+    MANAGED_END_MARKER,
+    MANAGED_START_MARKER,
     MEMORY_END_MARKER,
     MEMORY_START_MARKER,
     PINNED_END_MARKER,
@@ -124,9 +124,11 @@ from shared.claude_md_manager import (
 # files drifting into two different opinions about the shipping shape, which
 # is the defect this correction exists to remove.
 from tests.test_pin_marker_writer import production_head_and_tail
+from shared.claude_md_markers import Cause
 from shared.pin_markers import (
     START_LINE,
     Insertion,
+    Refusal,
     SkipReason,
     apply_insertion,
     certify_expel_nothing,
@@ -149,10 +151,11 @@ WORKING_MEMORY_HEADING = "## Working Memory\n"
 def a_pin(n: int, body: str = "body prose") -> str:
     """One pin in the shape `commands/pin-memory.md` documents.
 
-    THE DATE COMMENT GOES ABOVE THE HEADING. `parse_pins` walks BACKWARD from
-    a heading to attribute a comment, so a comment placed below the heading
-    binds to the NEXT pin and leaves this one with `date_comment is None` --
-    which the gate then reads as a smuggle and denies for a reason that has
+    THE DATE COMMENT GOES ABOVE THE HEADING. Attribution
+    (`pin_caps._date_comment_row`) walks BACKWARD from a heading to find a
+    pin's comment, so a comment placed below the heading binds to the NEXT
+    pin and leaves this one with `date_comment is None` -- which the gate
+    then reads as a smuggle and denies for a reason that has
     nothing to do with the test. That mistake produced a false finding here
     once; the shape is pinned in a helper so it cannot recur per-test.
     """
@@ -218,12 +221,18 @@ def assert_is_shipping_shape(content: str) -> None:
     a shape production never emits. A guard that names one of two boundaries
     certifies the fixtures it was written against and nothing wider.
     """
-    assert extract_managed_region(content) is not None, (
+    # Located by the marker text, not by extract_managed_region: some fixtures
+    # carry an unclosed fence inside the region on purpose, and the fence-aware
+    # reader then rightly finds no region. This guard certifies how the
+    # fixture was built, which the fence state does not change.
+    start = content.find(MANAGED_START_MARKER)
+    end = content.find(MANAGED_END_MARKER, start + 1)
+    assert start != -1 and end != -1, (
         "fixture has no PACT-managed region, so every reader silently fell "
         "back to scanning the whole file. Build it from the production "
         "emitter, never from a hand-typed literal."
     )
-    region_text, _offset = extract_managed_region(content)
+    region_text = content[start:end]
     assert MEMORY_START_MARKER in region_text, (
         "fixture has no PACT_MEMORY start marker inside its managed region, "
         "so the pin planner has no window to anchor in. Build it from the "
@@ -246,21 +255,20 @@ def marked(content: str) -> str:
 
 
 def gate_verdict(content: str, tool_input: dict):
-    """Drive the gate's OWN pipeline, in the gate's OWN order.
+    """Drive the gate's OWN decision: its deny reason, or None when it allows.
 
-    Composed from the gate's real functions rather than re-implemented, so a
-    change to how the gate assembles pre/post reaches this test.
+    `gate_decision` is the gate's pure decision for an Edit or Write of the
+    file whose text is `content`, so a change to how the gate builds the text
+    after the edit, or decides on it, reaches this test.
 
     The import is INSIDE this function deliberately -- see the note at the
     module imports. Moving it to the top breaks two counter-tests at
     full-suite scale.
     """
-    from pin_caps_gate import _extract_new_body, _parse_baseline
+    from pin_caps_gate import gate_decision
 
-    pre_pins = _parse_baseline(content)
-    post_pins = apply_edit_and_parse(content, tool_input)
-    new_body = _extract_new_body(tool_input, pre_pins=pre_pins, post_pins=post_pins)
-    return compute_deny_reason(pre_pins, post_pins, new_body=new_body)
+    decision = gate_decision(content, "Write" if "content" in tool_input else "Edit", tool_input)
+    return decision.reason if decision.verdict == "DENY" else None
 
 
 # --------------------------------------------------------------------------
@@ -396,8 +404,8 @@ class TestThePlannerIsAlive:
         reaches the totality guard, so it proves the sweep above is testing a
         live distinction rather than an impossible one.
         """
-        assert plan_insertion(None) is SkipReason.PLAN_FAILED
-        assert plan_insertion(42) is SkipReason.PLAN_FAILED
+        assert plan_insertion(None) is SkipReason.PLAN_FAILED  # pyright: ignore[reportArgumentType]
+        assert plan_insertion(42) is SkipReason.PLAN_FAILED  # pyright: ignore[reportArgumentType]
 
 
 # --------------------------------------------------------------------------
@@ -639,11 +647,14 @@ class TestNoCaughtTerminatorEndsThePinnedRegion:
             caught_marker_below_the_pins + "\n" + WORKING_MEMORY_HEADING,
             1,
         )
-        parsed = _parse_pinned_section(doc)
-        assert parsed is not None
-        assert not doc[parsed[1]:].startswith(WORKING_MEMORY_HEADING), (
-            "the reconstructed defect no longer moves the region end, so the "
-            "offset assertion above cannot detect it"
+        # The fence-aware locator reads an END marker with no START above it as
+        # an unpaired pair: the Pinned section cannot be located, so no reader
+        # charges it and the gate allows with its not-found advisory. The
+        # caught marker therefore un-charges the appended pin by hiding the
+        # section, where the retired parse did it by moving the section's end.
+        assert _parse_pinned_section(doc) is None, (
+            "the reconstructed defect no longer makes the section unlocatable, "
+            "so the behavioural assertion below is not measuring it"
         )
         append = {
             "old_string": WORKING_MEMORY_HEADING,
@@ -987,12 +998,13 @@ STILL_WRITES = [
     ("a path containing tildes", "### A pin\nsee ~/.claude/settings.json\n\n"),
 ]
 
-REFUSED = [
-    ("triple backtick fence", "### A pin\n```\ncode\n```\n\n"),
-    ("tilde fence", "### A pin\n~~~\ncode\n~~~\n\n"),
-    ("four backtick fence", "### A pin\n````\n```\ninner\n```\n````\n\n"),
-    ("unclosed backtick fence", "### A pin\n```\nnever closes\n\n"),
-    ("triple backtick mentioned in prose", "### A pin\ntype ``` to open\n\n"),
+# A closed fence is marked at the true section end; an unclosed one refuses.
+FENCED = [
+    ("triple backtick fence", "### A pin\n```\ncode\n```\n\n", True),
+    ("tilde fence", "### A pin\n~~~\ncode\n~~~\n\n", True),
+    ("four backtick fence", "### A pin\n````\n```\ninner\n```\n````\n\n", True),
+    ("unclosed backtick fence", "### A pin\n```\nnever closes\n\n", False),
+    ("triple backtick mentioned in prose", "### A pin\ntype ``` to open\n\n", True),
 ]
 
 
@@ -1010,13 +1022,19 @@ class TestFenceRefusalDoesNotOverMatch:
             "still be marked."
         )
 
-    @pytest.mark.parametrize("label,body", REFUSED, ids=[r[0] for r in REFUSED])
-    def test_these_shapes_are_refused(self, label, body):
-        """The other side of the boundary. Both tables are needed: the first
-        alone passes on a predicate that never refuses, the second alone
-        passes on one that always does."""
+    @pytest.mark.parametrize("label,body,writes", FENCED, ids=[r[0] for r in FENCED])
+    def test_fenced_shapes_are_marked_at_the_true_end_or_refused(self, label, body, writes):
+        """The other side of the boundary. A closed fence is code inside the
+        section, so the END marker lands at the section end; an unclosed fence
+        leaves the parser uncertain, and the plan refuses naming the line."""
         doc = claude_md(pinned_body=body)
-        assert plan_insertion(doc) is SkipReason.FENCED_BODY, f"{label}: expected refusal"
+        planned = plan_insertion(doc)
+        if writes:
+            assert isinstance(planned, Insertion), f"{label}: refused, got {planned!r}"
+            assert doc[planned.end_offset:].startswith(WORKING_MEMORY_HEADING)
+        else:
+            assert isinstance(planned, Refusal), f"{label}: expected refusal, got {planned!r}"
+            assert planned.located.cause is Cause.UNCLOSED_FENCE
 
     def test_a_fence_BELOW_the_terminator_does_not_refuse(self):
         """The predicate reads the TRUNCATED body, so a fence in the Working
@@ -1074,33 +1092,29 @@ class TestOnlyTheAdjacentLineSuppressesTheWrite:
         assert isinstance(planned, Insertion)
 
     def test_a_carrier_outside_the_adjacent_line_does_not_suppress_the_write(self):
-        """THE CORRECTED CONTRACT. A carrier anywhere but the adjacent line
-        must NOT stop the write.
+        """A carrier OUTSIDE the memory block, mid-line in the user's prose,
+        does not stop the write. The same mid-line text INSIDE the pinned body
+        is a stray in the block where the pair lives, so the plan refuses it
+        naming the line (it used to be written around).
 
         Asserted as `isinstance(..., Insertion)` rather than as "not
         already-marked", because the weak form is satisfied by ANY other
-        outcome -- including a refusal under a different name, which is the
-        exact failure this replaces.
-
-        FAILING INPUT: a detector that reverts to a whole-file substring test.
-        It returns a `SkipReason` for both rows and this reddens. Verified by
-        construction: the predecessor assertion, which demanded a `SkipReason`
-        on this same fixture, failed against the corrected planner.
+        outcome.
         """
         above = claude_md(n_pins=1)
         above = f"I documented {PINNED_START_MARKER} in my notes.\n\n" + above
+        assert_is_shipping_shape(above)
+        planned = plan_insertion(above)
+        assert isinstance(planned, Insertion), (
+            f"a carrier outside the memory block suppressed the write, got {planned}"
+        )
+
         inside = claude_md(
             pinned_body=f"### A pin\nI quoted {PINNED_START_MARKER} here\n\n"
         )
-        for label, doc in (("above the region", above), ("inside the body", inside)):
-            assert_is_shipping_shape(doc)
-            assert PINNED_START_MARKER in doc, f"{label}: fixture carries no carrier"
-            planned = plan_insertion(doc)
-            assert isinstance(planned, Insertion), (
-                f"{label}: a carrier off the adjacent line suppressed the "
-                f"write, got {planned}. The detector is matching somewhere "
-                "other than the line the writer emits."
-            )
+        assert_is_shipping_shape(inside)
+        refused = plan_insertion(inside)
+        assert isinstance(refused, Refusal) and refused.located.cause is Cause.STRAY
 
     def test_a_carrier_ON_the_adjacent_line_still_suppresses_it(self):
         """THE POSITIVE CONTROL, and the reason it must survive this rewrite.
@@ -1132,35 +1146,32 @@ class TestOnlyTheAdjacentLineSuppressesTheWrite:
         )
 
     def test_a_carrier_never_causes_a_second_marker_to_be_emitted(self):
-        """THE PROPERTY THE PREDECESSOR WAS REALLY PINNING, kept because the
-        wrong contract was wrapped around a real guard.
+        """A carrier must never cause a DOUBLE WRITE. The measure is what the
+        WRITER emitted, not the total occurrence count, because the carrier
+        itself is one of the occurrences and is not ours.
 
-        Its original intent was that a carrier must never cause a DOUBLE WRITE.
-        That was previously guaranteed BY the defect -- the write never ran at
-        all -- so it was true for the wrong reason and cost nothing to assert.
-        Now the write DOES run, which makes the property non-trivial for the
-        first time.
-
-        The measure is what the WRITER emitted, not the total occurrence count,
-        because the carrier itself is one of the occurrences and is not ours.
+        Outside the memory block the first pass writes and every later pass is
+        already-marked. Inside the pinned body the carrier is a stray, so every
+        pass refuses and nothing is emitted.
 
         FAILING INPUT: a detector that fails to recognise its own emitted
         marker on the second pass. Every pass writes again and the count
         climbs past `carriers + 1`.
         """
-        for label, doc in (
+        for label, doc, expect_write in (
             ("above the region",
              f"I documented {PINNED_START_MARKER} in my notes.\n\n"
-             + claude_md(n_pins=1)),
+             + claude_md(n_pins=1), True),
             ("inside the body",
-             claude_md(pinned_body=f"### A pin\nI quoted {PINNED_START_MARKER} here\n\n")),
+             claude_md(pinned_body=f"### A pin\nI quoted {PINNED_START_MARKER} here\n\n"),
+             False),
         ):
             carriers = doc.count(PINNED_START_MARKER)
             outcomes = []
             current = doc
             for _ in range(4):
                 planned = plan_insertion(current)
-                if isinstance(planned, SkipReason):
+                if not isinstance(planned, Insertion):
                     outcomes.append(planned.value)
                     continue
                 composed = apply_insertion(current, planned)
@@ -1170,18 +1181,18 @@ class TestOnlyTheAdjacentLineSuppressesTheWrite:
                 current = composed
                 outcomes.append("written")
 
-            assert outcomes[0] == "written", (
-                f"{label}: the first pass did not write, so this arm never "
-                f"reached the state it exists to test. outcomes={outcomes}"
-            )
-            assert outcomes[1:] == [SkipReason.ALREADY_MARKED.value] * 3, (
-                f"{label}: a later pass did not report already-marked. "
-                f"outcomes={outcomes}"
-            )
-            assert current.count(PINNED_START_MARKER) == carriers + 1, (
-                f"{label}: the writer emitted more than one marker across four "
-                f"passes -- {current.count(PINNED_START_MARKER)} occurrences "
-                f"against {carriers} carrier(s) plus one legitimate write."
+            if expect_write:
+                assert outcomes == ["written"] + [SkipReason.ALREADY_MARKED.value] * 3, (
+                    f"{label}: outcomes={outcomes}"
+                )
+            else:
+                assert all(o.startswith("refused_malformed: ") for o in outcomes), (
+                    f"{label}: outcomes={outcomes}"
+                )
+            assert current.count(PINNED_START_MARKER) == carriers + expect_write, (
+                f"{label}: the writer emitted the wrong number of markers across "
+                f"four passes -- {current.count(PINNED_START_MARKER)} occurrences "
+                f"against {carriers} carrier(s)."
             )
 
     def test_a_second_pinned_heading_is_ignored_first_find_wins(self):
@@ -1230,8 +1241,8 @@ class TestWholeDocumentLineEndings:
         if isinstance(planned, SkipReason):
             pytest.skip(f"planner refuses a CRLF document ({planned.value}); "
                         "refusal is a safe outcome and there is nothing to certify")
-        new = apply_insertion(doc, planned)
-        assert certify_expel_nothing(doc, new, planned) is True, (
+        new = apply_insertion(doc, planned)  # pyright: ignore[reportArgumentType]
+        assert certify_expel_nothing(doc, new, planned) is True, (  # pyright: ignore[reportArgumentType]
             "a CRLF document was inserted into WITHOUT byte preservation"
         )
 
@@ -1313,30 +1324,32 @@ def _run_hook_with_journal(pinned_body: str, prompt: str) -> tuple[int, list, st
         return proc.returncode, events, target.read_text(encoding="utf-8")
 
 
-class TestCensusEventReachesARealJournal:
-    """The census exists to convert a one-disk, self-applied count into a live
-    one. If the event never lands, every consumer reports zero and zero reads
-    as "fenced bodies are rare" -- the exact inference the census was built to
-    avoid depending on.
+class TestOutcomesReachARealJournal:
+    """The journal is the ONLY channel this hook has -- it is async, so stdout
+    is discarded. If the event never lands, every consumer reports nothing.
     """
 
     FENCED = "<!-- pinned: 2026-01-01 -->\n### A pin\n```\n## Not a heading\n```\nmore\n\n"
+    UNCLOSED = "<!-- pinned: 2026-01-01 -->\n### A pin\n```\nnever closed\n\n"
     PLAIN = "<!-- pinned: 2026-01-01 -->\n### A pin\nplain prose only\n\n"
 
-    def test_a_fenced_body_writes_both_events_to_a_real_journal(self):
+    def test_a_fenced_body_is_written_and_journals_one_event(self):
         rc, events, text = _run_hook_with_journal(self.FENCED, "/PACT:pin-memory x")
         assert rc == 0
-        types = [e["type"] for e in events]
-        assert "pin_marker_write" in types, (
-            "no journal event landed at all. The observability channel is the "
-            "ONLY one this hook has -- it is async, so stdout is discarded."
+        assert [e["type"] for e in events] == ["pin_marker_write"], (
+            "the journal did not carry exactly the one write event"
         )
-        assert "fenced_body_skipped" in types
-        outcome = next(e for e in events if e["type"] == "pin_marker_write")["outcome"]
-        assert outcome == SkipReason.FENCED_BODY.value, (
-            f"the event landed but reports {outcome!r}; the fixture did not "
-            "reach the fence predicate"
-        )
+        assert events[0]["outcome"] == "written"
+        assert text.index(PINNED_START_MARKER) < text.index("## Not a heading")
+        assert text.index("## Not a heading") < text.index(PINNED_END_MARKER)
+
+    def test_a_refusal_reaches_the_journal_naming_the_line(self):
+        rc, events, text = _run_hook_with_journal(self.UNCLOSED, "/PACT:pin-memory x")
+        assert rc == 0
+        assert [e["type"] for e in events] == ["pin_marker_write"]
+        outcome = events[0]["outcome"]
+        assert outcome.startswith("refused_unknown: "), outcome
+        assert "line " in outcome
         assert PINNED_START_MARKER not in text, "a refused body must not be written"
 
     def test_a_written_outcome_emits_only_the_write_event(self):
@@ -1379,94 +1392,50 @@ class TestCertificateRefusalReachability:
     recorded at `TestPlacementIsTheOnlyOffsetConstraint`.
     """
 
-    def test_a_carrier_on_its_own_line_reaches_the_certificate_and_is_refused(self):
-        """THE CERTIFICATE IS NOW REACHABLE BY THE CARRIER ROUTE, and that is
-        the two-independent-mechanisms property rather than a side effect.
+    def test_a_carrier_on_its_own_line_is_refused_by_the_planner(self):
+        """An own-line carrier in the pinned body is half a pair in the memory
+        block, so the PLANNER refuses it (UNPAIRED) and the certificate is not
+        consulted. The certificate is positional and certifies bytes: forced
+        onto this document, it accepts the composition, because a collision is
+        no longer its question.
 
-        The predecessor asserted the opposite -- that the planner refused first
-        so the certificate was never consulted. That was TRUE, and it was true
-        only because of the defect: an over-broad detector was firing early and
-        MASKING the later guard. Removing the mask makes the second mechanism
-        load-bearing for the first time.
-
-        PLACEMENT IS THE WHOLE FIXTURE. The certificate strips `START_LINE` --
-        the symbol PLUS its newline -- so a carrier sitting MID-LINE leaves
-        `START_LINE` absent from the original and the certificate PASSES. Only
-        a carrier occupying its OWN LINE puts `START_LINE` into the original
-        and makes the equality fail. The predecessor's fixture was mid-line, so
-        a rewrite that merely flipped its assertion would have demanded a
-        refusal that never comes.
-
-        FAILING INPUTS, two, and they are different mechanisms:
-          - the planner refusing first again: `isinstance(planned, Insertion)`
-            reddens, and the certificate is masked once more;
-          - the certificate degrading to a constant True: the refusal
-            assertion reddens.
+        FAILING INPUT: a planner that ignores the pair state. It returns an
+        Insertion and the first assertion reddens.
         """
         doc = claude_md(
             pinned_body=f"### A pin\nbody prose\n\n{PINNED_START_MARKER}\n\n"
         )
         assert_is_shipping_shape(doc)
         assert f"{PINNED_START_MARKER}\n" in doc, (
-            "precondition: the carrier must occupy its own line, or the "
-            "certificate cannot observe it at all"
+            "precondition: the carrier must occupy its own line"
         )
+        assert plan_insertion(doc) is SkipReason.UNPAIRED
 
-        planned = plan_insertion(doc)
-        assert isinstance(planned, Insertion), (
-            f"the planner refused before the certificate was reached, got "
-            f"{planned}. The early guard is masking the later one again."
+        forced = Insertion(
+            doc.index("## Pinned Context\n"), doc.index(WORKING_MEMORY_HEADING),
+            START_LINE, PINNED_END_MARKER + "\n",
         )
-        composed = apply_insertion(doc, planned)
-        assert certify_expel_nothing(doc, composed, planned) is False, (
-            "the certificate accepted a composition whose original already "
-            "carried the marker line; the second mechanism is not refusing"
-        )
+        assert certify_expel_nothing(doc, apply_insertion(doc, forced), forced) is True
 
-    def test_a_mid_line_carrier_does_NOT_reach_the_certificate(self):
-        """NON-VACUITY for the row above, and the measurement that decides its
-        fixture.
-
-        If the certificate refused on ANY carrier the test above would pass
-        without placement mattering, and the claim that the rewrite is a
-        fixture change rather than a claim change would be untested. Measured:
-        mid-line PASSES, own-line REFUSES.
-
-        FAILING INPUT: a certificate that strips the bare symbol rather than
-        the symbol-plus-newline. Both placements would then refuse and this
-        reddens.
-        """
-        doc = claude_md(
-            pinned_body=f"### A pin\nI quoted {PINNED_START_MARKER} here\n\n"
+    def test_a_quoted_mid_line_carrier_writes_and_certifies(self):
+        """NON-VACUITY for the row above: a carrier inside backticks is a
+        mention, so the plan writes and the certificate accepts. Unquoted, the
+        same text is a stray and refuses."""
+        quoted = claude_md(
+            pinned_body=f"### A pin\nI quoted `{PINNED_START_MARKER}` here\n\n"
         )
-        assert_is_shipping_shape(doc)
-        assert f"{PINNED_START_MARKER}\n" not in doc, (
-            "precondition: the carrier must NOT occupy its own line"
-        )
-        planned = plan_insertion(doc)
+        assert_is_shipping_shape(quoted)
+        planned = plan_insertion(quoted)
         assert isinstance(planned, Insertion)
-        composed = apply_insertion(doc, planned)
-        assert certify_expel_nothing(doc, composed, planned) is True, (
-            "a mid-line carrier was refused by the certificate, so placement "
-            "no longer discriminates and the arm above proves nothing"
-        )
+        assert certify_expel_nothing(quoted, apply_insertion(quoted, planned), planned) is True
 
-    def test_the_writer_reports_a_collision_rather_than_an_assembly_defect(self):
-        """END TO END, over BYTES ON DISK, because the branch under test lives
-        in the WRITER and is unreachable from the planner alone.
+        unquoted = quoted.replace(f"`{PINNED_START_MARKER}`", PINNED_START_MARKER)
+        refused = plan_insertion(unquoted)
+        assert isinstance(refused, Refusal) and refused.located.cause is Cause.STRAY
 
-        A refused composition has two causes that call for opposite responses:
-        a document already carrying the marker is a COLLISION -- expected and
-        countable -- while anything else is an assembly defect in this
-        plugin's own code. Reporting them as one outcome is what let the
-        collision hide under a success-shaped label.
-
-        This is also the arm a planner-only rewrite would have missed
-        entirely: I predicted the certificate would refuse and did NOT predict
-        that the refusal surfaces under a distinct outcome name.
-
-        FAILING INPUTS: the collision branch collapsing back into
-        `certificate_failed`, or the write proceeding and changing the file.
+    def test_the_writer_reports_the_half_pair_and_leaves_the_file(self):
+        """END TO END, over BYTES ON DISK. FAILING INPUTS: the write proceeding
+        and changing the file, or the refusal collapsing into a success label.
         """
         rc, events, text = _run_hook_with_journal(
             f"### A pin\nbody prose\n\n{PINNED_START_MARKER}\n\n",
@@ -1474,11 +1443,7 @@ class TestCertificateRefusalReachability:
         )
         assert rc == 0
         outcomes = [e["outcome"] for e in events if e["type"] == "pin_marker_write"]
-        assert outcomes == [SkipReason.MARKER_COLLISION.value], (
-            f"the writer did not report a collision; got {outcomes}"
-        )
-        # BYTES ON DISK: a refused composition must leave the file alone, and
-        # the carrier must still be the only occurrence.
+        assert outcomes == [SkipReason.UNPAIRED.value], f"got {outcomes}"
         assert text.count(PINNED_START_MARKER) == 1, (
             "the refused pass still altered the marker count on disk"
         )

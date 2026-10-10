@@ -1,0 +1,4210 @@
+{
+ "A1_backticks_inside_comment": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      3,
+      5
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "html_rows": [
+   0,
+   1,
+   2
+  ],
+  "kinds": "P6",
+  "note": "``` inside a comment opens no fence"
+ },
+ "A6a_comment_closes_on_start_line": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P1 F1 C3 F1",
+  "note": "<!--> closes on its start line"
+ },
+ "A6b_comment_dash_closes_on_start_line": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P1 F1 C3 F1",
+  "note": "<!---> closes on its start line"
+ },
+ "A6c_pi_closes_on_start_line": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P1 F1 C3 F1",
+  "note": "<?> closes on its start line"
+ },
+ "A7_comment_ended_by_marker_line": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "comment_boundary",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "comment_boundary",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "comment_boundary",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "comment_boundary",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 0,
+  "boundary_cause": "comment_boundary",
+  "decode": "strict",
+  "kinds": "U4",
+  "note": "an unclosed TODO comment ended by a marker"
+ },
+ "O1_comment_quotes_open_midline": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "html_rows": [
+   0,
+   1
+  ],
+  "kinds": "P2 F1 C3 F1",
+  "note": "a comment that quotes <!-- mid-line ends normally"
+ },
+ "O1b_inline_comment_in_prose": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      1,
+      3
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P4",
+  "note": "a comment mid-line is prose"
+ },
+ "boundary_literal_reading": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 2,
+  "boundary_cause": "unclosed_fence",
+  "decode": "strict",
+  "kinds": "P2 U11",
+  "note": "the container fence's indented closer is an unclosed top-level opener, so the boundary is the file's first opener"
+ },
+ "comment_four_space_start": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      1,
+      3
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P4",
+  "note": "a 4-space comment start is not a block"
+ },
+ "comment_three_space_start": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "comment_boundary",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "comment_boundary",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "comment_boundary",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "comment_boundary",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 0,
+  "boundary_cause": "comment_boundary",
+  "decode": "strict",
+  "kinds": "U4",
+  "note": "a 3-space comment start still opens a block"
+ },
+ "composed_first_opener_rule": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 0,
+  "boundary_cause": "unclosed_fence",
+  "decode": "strict",
+  "kinds": "U11",
+  "note": "sequential pairing cannot say which fence is unpaired: UNKNOWN from the first opener"
+ },
+ "container_blockquote_fence": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 0,
+  "boundary_cause": "container_fence",
+  "decode": "strict",
+  "kinds": "U6",
+  "note": "a fence opened on a > line"
+ },
+ "container_bullet_fence_once": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 0,
+  "boundary_cause": "container_fence",
+  "decode": "strict",
+  "kinds": "U6",
+  "note": "a fence opened on a bullet line"
+ },
+ "container_bullet_fence_twice": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 4,
+  "boundary_cause": "container_fence",
+  "decode": "strict",
+  "kinds": "P4 U8",
+  "note": "two bullet fences: the top-level pairing would hide Pin B; UNKNOWN instead"
+ },
+ "container_fence_00": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": 3,
+  "boundary_cause": "container_fence",
+  "decode": "strict",
+  "kinds": "P3 U2",
+  "note": "'-\\t```bash' is a container fence"
+ },
+ "container_fence_01": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": 3,
+  "boundary_cause": "container_fence",
+  "decode": "strict",
+  "kinds": "P3 U2",
+  "note": "'- \\t```bash' is a container fence"
+ },
+ "container_fence_02": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": 3,
+  "boundary_cause": "container_fence",
+  "decode": "strict",
+  "kinds": "P3 U2",
+  "note": "'-     ```bash' is a container fence"
+ },
+ "container_fence_03": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": 3,
+  "boundary_cause": "container_fence",
+  "decode": "strict",
+  "kinds": "P3 U2",
+  "note": "'* ~~~' is a container fence"
+ },
+ "container_fence_04": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": 3,
+  "boundary_cause": "container_fence",
+  "decode": "strict",
+  "kinds": "P3 U2",
+  "note": "'3) ````' is a container fence"
+ },
+ "container_fence_05": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": 3,
+  "boundary_cause": "container_fence",
+  "decode": "strict",
+  "kinds": "P3 U2",
+  "note": "'>````' is a container fence"
+ },
+ "container_fence_06": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": 3,
+  "boundary_cause": "container_fence",
+  "decode": "strict",
+  "kinds": "P3 U2",
+  "note": "'> > ```' is a container fence"
+ },
+ "container_fence_07": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": 3,
+  "boundary_cause": "container_fence",
+  "decode": "strict",
+  "kinds": "P3 U2",
+  "note": "'> - ```' is a container fence"
+ },
+ "container_fence_08": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": 3,
+  "boundary_cause": "container_fence",
+  "decode": "strict",
+  "kinds": "P3 U2",
+  "note": "'>> ~~~~' is a container fence"
+ },
+ "container_fence_09": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": 3,
+  "boundary_cause": "container_fence",
+  "decode": "strict",
+  "kinds": "P3 U2",
+  "note": "'> \\t```' is a container fence"
+ },
+ "container_fence_inside_comment": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      3,
+      5
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "html_rows": [
+   0,
+   1,
+   2
+  ],
+  "kinds": "P6",
+  "note": "a container-fence shape inside an HTML comment is prose"
+ },
+ "container_fence_inside_fence": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      3,
+      5
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "F1 C1 F1 P3",
+  "note": "a container-fence shape inside a fenced block is code"
+ },
+ "container_fence_not_shapes": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P8",
+  "note": "no space after the marker, an inline span, 4-space or tab indent, and a thematic break are not container fences"
+ },
+ "container_list_item_4col_fence_with_marker": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "cause": "stray",
+    "state": "MALFORMED"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P5",
+  "note": "a 4-column list-item fence: no fence at the top level, and the marker is stray"
+ },
+ "container_ordered_list_fence": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "container_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": 3,
+  "boundary_cause": "container_fence",
+  "decode": "strict",
+  "kinds": "P3 U3",
+  "note": "a fence on an ordered-list line, below a real block"
+ },
+ "duplicate_then_open_start": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "duplicate",
+    "spans": [
+     [
+      0,
+      2
+     ],
+     [
+      3,
+      5
+     ]
+    ],
+    "state": "DUPLICATE"
+   }
+  },
+  "boundary": 7,
+  "boundary_cause": "unclosed_fence",
+  "decode": "strict",
+  "kinds": "P7 U1",
+  "note": "two complete pairs are DUPLICATE whatever lies past the boundary"
+ },
+ "duplicate_then_unpaired_start": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "cause": "unpaired",
+    "state": "MALFORMED"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P7",
+  "note": "with every row certain, a start left open is unpaired, and MALFORMED outranks DUPLICATE"
+ },
+ "e10_tilde_fence_closed_by_backticks": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 0,
+  "boundary_cause": "unclosed_fence",
+  "decode": "strict",
+  "kinds": "U10",
+  "note": "``` does not close ~~~: the fence stays open"
+ },
+ "e10b_tilde_fence_closed_by_tilde": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      3,
+      5
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "F1 C1 F1 P3",
+  "note": "~~~ closes ~~~"
+ },
+ "e11_fenced_heading_in_pin_body": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "spans": [
+     [
+      0,
+      8
+     ]
+    ],
+    "state": "FOUND"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P5 F1 C1 F1 P1",
+  "note": "a fenced ### line inside a pin body is code"
+ },
+ "e12_bom_before_marker": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P3",
+  "note": "a leading BOM is not part of row 0"
+ },
+ "e12b_bom_before_fence": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "F1 C1 F1",
+  "note": "a BOM before a fence opener"
+ },
+ "e13_u2028_shares_marker_line": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "cause": "stray",
+    "spans": [
+     [
+      2,
+      2
+     ]
+    ],
+    "state": "MALFORMED"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P3",
+  "note": "U+2028 does not end a row, so the marker shares its line"
+ },
+ "e13b_cr_only": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P3",
+  "note": "CR alone ends a row"
+ },
+ "e13c_form_feed": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P3",
+  "note": "a form feed does not end a row"
+ },
+ "e13d_u2028_in_info_string": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "F1 C1 F1",
+  "note": "U+2028 in an info string still opens"
+ },
+ "e13e_u2028_after_closer": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 0,
+  "boundary_cause": "unclosed_fence",
+  "decode": "strict",
+  "kinds": "U4",
+  "note": "U+2028 after a closer run is not a closer"
+ },
+ "e14_backtick_info_string": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      1,
+      3
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": 4,
+  "boundary_cause": "unclosed_fence",
+  "decode": "strict",
+  "kinds": "P4 U1",
+  "note": "a backtick in a backtick info string: not an opener; the last ``` opens and stays open"
+ },
+ "e14b_tilde_info_with_backtick": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "F1 C1 F1",
+  "note": "a tilde info string may hold a backtick"
+ },
+ "e15_closer_followed_by_text": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "F1 C3 F1",
+  "note": "a closer run followed by text is content"
+ },
+ "e16_three_space_fence": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "F1 C1 F1",
+  "note": "a 3-space fence"
+ },
+ "e16b_four_space_fence": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      1,
+      3
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P5",
+  "note": "a 4-space ``` is not a fence"
+ },
+ "e16c_tab_indented_marker": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "cause": "stray",
+    "spans": [
+     [
+      2,
+      2
+     ]
+    ],
+    "state": "MALFORMED"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P3",
+  "note": "a tab-indented marker is stray"
+ },
+ "e16d_three_space_marker": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P3",
+  "note": "up to 3 spaces before a marker"
+ },
+ "e16e_four_space_marker": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "cause": "stray",
+    "spans": [
+     [
+      2,
+      2
+     ]
+    ],
+    "state": "MALFORMED"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P3",
+  "note": "4 spaces before a marker is stray"
+ },
+ "e17_blockquote_marker": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "cause": "stray",
+    "spans": [
+     [
+      2,
+      2
+     ]
+    ],
+    "state": "MALFORMED"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P3",
+  "note": "a quoted marker is stray"
+ },
+ "e17b_list_marker": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "cause": "stray",
+    "state": "MALFORMED"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P3",
+  "note": "a list-prefixed marker is stray"
+ },
+ "e17c_marker_sharing_line": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "cause": "stray",
+    "spans": [
+     [
+      2,
+      2
+     ]
+    ],
+    "state": "MALFORMED"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P3",
+  "note": "a marker sharing its line is stray"
+ },
+ "e17d_trailing_blanks_marker": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P3",
+  "note": "trailing blanks after a marker are allowed"
+ },
+ "e18_div_wrapped_block": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P2 F1 C3 F1 P1",
+  "note": "HTML types 6-7 are unmodelled: a fenced block under <div> stays code"
+ },
+ "e18b_pre_block_suppresses_fence": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      3,
+      5
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "html_rows": [
+   0,
+   1,
+   2
+  ],
+  "kinds": "P6",
+  "note": "a type-1 block suppresses a fence opener"
+ },
+ "e18c_processing_instruction": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      3,
+      5
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "html_rows": [
+   0,
+   1,
+   2
+  ],
+  "kinds": "P6",
+  "note": "a type-3 block suppresses a fence opener"
+ },
+ "e18d_declaration": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "html_hides_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "html_hides_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "html_hides_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "html_hides_fence",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 0,
+  "boundary_cause": "html_hides_fence",
+  "decode": "strict",
+  "kinds": "U6",
+  "note": "a type-4 block over a fence opener hides nothing: the boundary is its start"
+ },
+ "e18e_cdata": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      3,
+      5
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "html_rows": [
+   0,
+   1,
+   2
+  ],
+  "kinds": "P6",
+  "note": "a type-5 block suppresses a fence opener"
+ },
+ "e18f_prefix_is_not_pre": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P1 F1 C1 F1",
+  "note": "<prefix is not a type-1 start"
+ },
+ "e19_duplicate_blocks": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "cause": "duplicate",
+    "spans": [
+     [
+      0,
+      2
+     ],
+     [
+      3,
+      5
+     ]
+    ],
+    "state": "DUPLICATE"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P6",
+  "note": "two unfenced copies"
+ },
+ "e19b_nested_start": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "cause": "nested",
+    "state": "MALFORMED"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P5",
+  "note": "a start inside an open pair"
+ },
+ "e19c_start_without_end": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "cause": "unpaired",
+    "state": "MALFORMED"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P2",
+  "note": "a start with no end"
+ },
+ "e19d_end_before_start": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "cause": "unpaired",
+    "state": "MALFORMED"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P3",
+  "note": "an end before its start"
+ },
+ "e1_unclosed_fence_then_real_block": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 1,
+  "boundary_cause": "unclosed_fence",
+  "decode": "strict",
+  "kinds": "P1 U6",
+  "note": "an unclosed example fence above the real block: UNKNOWN from the opener"
+ },
+ "e20_unclosed_fence_in_pin_body": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 4,
+  "boundary_cause": "unclosed_fence",
+  "decode": "strict",
+  "kinds": "P4 U5",
+  "note": "an honest unclosed fence in a pin body"
+ },
+ "e21_unclosed_fence_at_eof": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": 4,
+  "boundary_cause": "unclosed_fence",
+  "decode": "strict",
+  "kinds": "P4 U2",
+  "note": "a pair above an unclosed fence at EOF stays FOUND"
+ },
+ "e22_invalid_utf8_byte": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "replace",
+  "kinds": "P3 F1 C1 F1",
+  "note": "a replace-decoded byte changes no fence state"
+ },
+ "e2_indented_code_block": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "cause": "stray",
+    "state": "MALFORMED"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P7",
+  "note": "an indented-code example of the block is stray, so writers refuse"
+ },
+ "e3_marker_in_html_comment_inside_fence": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P1 F1 C5 F1 P1",
+  "note": "a commented-out block inside a fence is code"
+ },
+ "e3b_marker_in_html_comment_no_fence": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "comment_boundary",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "comment_boundary",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "comment_boundary",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "comment_boundary",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 1,
+  "boundary_cause": "comment_boundary",
+  "decode": "strict",
+  "kinds": "P1 U6",
+  "note": "a comment ended by a line-start marker: UNKNOWN from the comment"
+ },
+ "e4_real_block_then_fenced_example": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P4 F1 C3 F1 P1",
+  "note": "the real block first, a fenced example after"
+ },
+ "e5_fenced_example_then_real_block": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      6,
+      8
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "F1 C3 F1 P4",
+  "note": "a fenced example first, the real block after"
+ },
+ "e6_inline_code_span": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P1",
+  "note": "inline-code mentions alone read ABSENT"
+ },
+ "e6b_inline_mention_plus_real_block": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      2,
+      4
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P5",
+  "note": "an inline-code mention beside a real block reads FOUND"
+ },
+ "e7_four_backtick_fence_containing_triple": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "F1 C5 F1 P1",
+  "note": "a 4-backtick fence is not closed by ```"
+ },
+ "e8_fence_indented_in_list_item": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P2 F1 C3 F1 P1",
+  "note": "a 2-space fence under a list item is a top-level fence"
+ },
+ "e9_crlf_fence": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      6,
+      8
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "F1 C3 F1 P4",
+  "note": "CRLF rows pair like LF rows"
+ },
+ "empty_file": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "",
+  "note": "no rows"
+ },
+ "escaped_backslash_opens_span": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      1,
+      3
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P4",
+  "note": "an escaped backslash before a backtick leaves the span open, so the marker is a mention"
+ },
+ "escaped_backticks_marker_stray": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "cause": "stray",
+    "spans": [
+     [
+      1,
+      1
+     ],
+     [
+      3,
+      3
+     ]
+    ],
+    "state": "MALFORMED"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P4",
+  "note": "a marker between escaped backticks is in prose, so it is stray"
+ },
+ "full_layout_with_fenced_markers": {
+  "blocks": {
+   "MANAGED": {
+    "spans": [
+     [
+      0,
+      22
+     ]
+    ],
+    "state": "FOUND"
+   },
+   "MEMORY": {
+    "spans": [
+     [
+      5,
+      21
+     ]
+    ],
+    "state": "FOUND"
+   },
+   "PINNED": {
+    "spans": [
+     [
+      8,
+      18
+     ]
+    ],
+    "state": "FOUND"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      1,
+      3
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P13 F1 C3 F1 P5",
+  "note": "every PACT pair real, with a pinned pair inside a fenced snippet"
+ },
+ "heading_fenced": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "spans": [
+     [
+      0,
+      7
+     ]
+    ],
+    "state": "FOUND"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "headings": {
+   "^## Pinned Context": [
+    1
+   ],
+   "^## Working Memory": []
+  },
+  "kinds": "P4 F1 C1 F1 P1",
+  "note": "a fenced heading is not the section"
+ },
+ "heading_indented_code": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "spans": [
+     [
+      0,
+      5
+     ]
+    ],
+    "state": "FOUND"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "headings": {
+   "^## Pinned Context": [
+    1
+   ],
+   "^## Working Memory": []
+  },
+  "kinds": "P6",
+  "note": "indented code is not the section; no MALFORMED"
+ },
+ "heading_indented_two": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "spans": [
+     [
+      0,
+      5
+     ]
+    ],
+    "state": "FOUND"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "headings": {
+   "^## Pinned Context": [
+    1
+   ],
+   "^## Working Memory": []
+  },
+  "kinds": "P6",
+  "note": "indented 2: not a heading to PACT is not the section; no MALFORMED"
+ },
+ "heading_mid_line_mention": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "spans": [
+     [
+      0,
+      5
+     ]
+    ],
+    "state": "FOUND"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "headings": {
+   "^## Pinned Context": [
+    1
+   ],
+   "^## Working Memory": []
+  },
+  "kinds": "P6",
+  "note": "a mention mid-line is not the section; no MALFORMED"
+ },
+ "heading_pinned_mentioned_mid_line": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "spans": [
+     [
+      0,
+      5
+     ]
+    ],
+    "state": "FOUND"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "headings": {
+   "^## Pinned Context": [
+    1
+   ],
+   "^## Working Memory": []
+  },
+  "kinds": "P6",
+  "note": "a mid-line mention of ## Pinned Context does not count"
+ },
+ "heading_quoted": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "spans": [
+     [
+      0,
+      5
+     ]
+    ],
+    "state": "FOUND"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "headings": {
+   "^## Pinned Context": [
+    1
+   ],
+   "^## Working Memory": []
+  },
+  "kinds": "P6",
+  "note": "a quoted heading is not the section; no MALFORMED"
+ },
+ "heading_real_plus_lookalikes": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "spans": [
+     [
+      0,
+      9
+     ]
+    ],
+    "state": "FOUND"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "headings": {
+   "^## Pinned Context": [
+    1
+   ],
+   "^## Working Memory": [
+    7
+   ]
+  },
+  "kinds": "P10",
+  "note": "the real column-0 heading is FOUND beside its lookalikes"
+ },
+ "heading_two_real_pinned": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "spans": [
+     [
+      0,
+      5
+     ]
+    ],
+    "state": "FOUND"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "headings": {
+   "^## Pinned Context": [
+    1,
+    4
+   ],
+   "^## Working Memory": []
+  },
+  "kinds": "P6",
+  "note": "two real Pinned headings; callers take the first, the gate wants one"
+ },
+ "hidden_comment_closed_mid_line": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "headings": {
+   "^### ": [
+    1,
+    4
+   ]
+  },
+  "kinds": "P5",
+  "note": "a comment closed mid-line hides nothing",
+  "sections": [
+   {
+    "cause": null,
+    "heading": "^## Pinned Context\\s*$",
+    "scope": null,
+    "spans": [
+     [
+      0,
+      4
+     ]
+    ],
+    "state": "FOUND",
+    "stop_prefixes": [],
+    "terminator": "#{1,2}\\s",
+    "unique": false
+   }
+  ]
+ },
+ "hidden_comment_in_pin_body": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "headings": {
+   "^### ": [
+    1,
+    3,
+    5
+   ]
+  },
+  "html_rows": [
+   2,
+   3,
+   4
+  ],
+  "kinds": "P6",
+  "note": "a pin hidden in a comment inside a pin body is still read by find_lines",
+  "sections": [
+   {
+    "cause": null,
+    "heading": "^## Pinned Context\\s*$",
+    "scope": null,
+    "spans": [
+     [
+      0,
+      5
+     ]
+    ],
+    "state": "FOUND",
+    "stop_prefixes": [],
+    "terminator": "#{1,2}\\s",
+    "unique": false
+   }
+  ]
+ },
+ "hidden_declaration_closed_at_row_edge": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P4",
+  "note": "a declaration never hides rows, even closed by a lone >: the heading inside it is FOUND",
+  "sections": [
+   {
+    "cause": null,
+    "heading": "^## Pinned Context\\s*$",
+    "scope": null,
+    "spans": [
+     [
+      1,
+      3
+     ]
+    ],
+    "state": "FOUND",
+    "stop_prefixes": [],
+    "terminator": "#{1,2}\\s",
+    "unique": true
+   }
+  ]
+ },
+ "hidden_declaration_closed_by_prose_ending_gt": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "spans": [
+     [
+      0,
+      5
+     ]
+    ],
+    "state": "FOUND"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "headings": {
+   "^### ": [
+    3
+   ]
+  },
+  "kinds": "P6",
+  "note": "an accidental declaration closed by prose ending in > hides nothing: the Pinned section is FOUND",
+  "sections": [
+   {
+    "cause": null,
+    "heading": "^## Pinned Context\\s*$",
+    "scope": [
+     1,
+     4
+    ],
+    "spans": [
+     [
+      2,
+      4
+     ]
+    ],
+    "state": "FOUND",
+    "stop_prefixes": [
+     "<!-- PACT_MEMORY_",
+     "<!-- PACT_MANAGED_",
+     "<!-- PACT_ROUTING_",
+     "<!-- SESSION_"
+    ],
+    "terminator": "#{1,2}\\s",
+    "unique": true
+   }
+  ]
+ },
+ "hidden_declaration_in_pin_body": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "headings": {
+   "^### ": [
+    1,
+    4
+   ]
+  },
+  "kinds": "P6",
+  "note": "a declaration closed by a later > hides nothing: both pins count",
+  "sections": [
+   {
+    "cause": null,
+    "heading": "^## Pinned Context\\s*$",
+    "scope": null,
+    "spans": [
+     [
+      0,
+      4
+     ]
+    ],
+    "state": "FOUND",
+    "stop_prefixes": [],
+    "terminator": "#{1,2}\\s",
+    "unique": false
+   }
+  ]
+ },
+ "hidden_declaration_spans_a_pin": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "headings": {
+   "^### ": [
+    1,
+    3,
+    5
+   ]
+  },
+  "kinds": "P6",
+  "note": "a declaration opened in a pin body hides nothing, so every pin counts",
+  "sections": [
+   {
+    "cause": null,
+    "heading": "^## Pinned Context\\s*$",
+    "scope": null,
+    "spans": [
+     [
+      0,
+      5
+     ]
+    ],
+    "state": "FOUND",
+    "stop_prefixes": [],
+    "terminator": "#{1,2}\\s",
+    "unique": false
+   }
+  ]
+ },
+ "hidden_old_heading_above_real": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "headings": {
+   "^## Pinned Context": [
+    1,
+    4
+   ]
+  },
+  "html_rows": [
+   0,
+   1,
+   2,
+   3
+  ],
+  "kinds": "P6",
+  "note": "a commented-out old Pinned section leaves the real one FOUND, also when unique",
+  "sections": [
+   {
+    "cause": null,
+    "heading": "^## Pinned Context\\s*$",
+    "scope": null,
+    "spans": [
+     [
+      4,
+      5
+     ]
+    ],
+    "state": "FOUND",
+    "stop_prefixes": [],
+    "terminator": "#{1,2}\\s",
+    "unique": true
+   },
+   {
+    "cause": null,
+    "heading": "^## Pinned Context\\s*$",
+    "scope": null,
+    "spans": [
+     [
+      4,
+      5
+     ]
+    ],
+    "state": "FOUND",
+    "stop_prefixes": [],
+    "terminator": "#{1,2}\\s",
+    "unique": false
+   }
+  ]
+ },
+ "hidden_old_heading_closer_with_text": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "html_rows": [
+   0,
+   1,
+   2
+  ],
+  "kinds": "P5",
+  "note": "a closer that begins its row still hides the comment",
+  "sections": [
+   {
+    "cause": null,
+    "heading": "^## Pinned Context\\s*$",
+    "scope": null,
+    "spans": [
+     [
+      3,
+      4
+     ]
+    ],
+    "state": "FOUND",
+    "stop_prefixes": [],
+    "terminator": "#{1,2}\\s",
+    "unique": true
+   }
+  ]
+ },
+ "hidden_pre_closed_at_row_end": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "headings": {
+   "^## Retrieved Context": [
+    1,
+    3
+   ]
+  },
+  "html_rows": [
+   0,
+   1,
+   2
+  ],
+  "kinds": "P5",
+  "note": "a pre block closed at the end of a row hides the old heading",
+  "sections": [
+   {
+    "cause": null,
+    "heading": "^## Retrieved Context\\s*$",
+    "scope": null,
+    "spans": [
+     [
+      3,
+      4
+     ]
+    ],
+    "state": "FOUND",
+    "stop_prefixes": [],
+    "terminator": "#\\s|##\\s(?!Retrieved Context)|---",
+    "unique": true
+   }
+  ]
+ },
+ "html_cdata_closed_midline_over_fence": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "html_hides_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "html_hides_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "html_hides_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "html_hides_fence",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 0,
+  "boundary_cause": "html_hides_fence",
+  "decode": "strict",
+  "kinds": "U6",
+  "note": "CDATA closed mid-line over a fence opener: the boundary is its start"
+ },
+ "html_comment_hides_heading": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "spans": [
+     [
+      0,
+      6
+     ]
+    ],
+    "state": "FOUND"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "headings": {
+   "^## Working Memory": [
+    2,
+    4
+   ]
+  },
+  "html_rows": [
+   1,
+   2,
+   3
+  ],
+  "kinds": "P7",
+  "note": "a heading inside a closed multi-line comment is read by find_lines but is not the section",
+  "sections": [
+   {
+    "cause": null,
+    "heading": "^## Working Memory\\s*$",
+    "scope": [
+     1,
+     5
+    ],
+    "spans": [
+     [
+      4,
+      5
+     ]
+    ],
+    "state": "FOUND",
+    "stop_prefixes": [
+     "<!-- PACT_MEMORY_",
+     "<!-- PACT_MANAGED_",
+     "<!-- PACT_ROUTING_",
+     "<!-- SESSION_"
+    ],
+    "terminator": "#\\s|##\\s(?!Working Memory)|---",
+    "unique": false
+   },
+   {
+    "cause": null,
+    "heading": "^## Working Memory\\s*$",
+    "scope": null,
+    "spans": [
+     [
+      4,
+      5
+     ]
+    ],
+    "state": "FOUND",
+    "stop_prefixes": [
+     "<!-- PACT_MEMORY_",
+     "<!-- PACT_MANAGED_",
+     "<!-- PACT_ROUTING_",
+     "<!-- SESSION_"
+    ],
+    "terminator": "#\\s|##\\s(?!Working Memory)|---",
+    "unique": false
+   },
+   {
+    "cause": null,
+    "heading": "^## Working Memory\\s*$",
+    "scope": null,
+    "spans": [
+     [
+      4,
+      6
+     ]
+    ],
+    "state": "FOUND",
+    "stop_prefixes": [],
+    "terminator": "#\\s|##\\s(?!Working Memory)|---",
+    "unique": false
+   }
+  ]
+ },
+ "html_comment_only_heading": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "headings": {
+   "^## Pinned Context": [
+    1
+   ]
+  },
+  "html_rows": [
+   0,
+   1,
+   2
+  ],
+  "kinds": "P4",
+  "note": "a heading found only inside a closed multi-line comment is UNKNOWN, cause commented",
+  "sections": [
+   {
+    "cause": "commented",
+    "heading": "^## Pinned Context\\s*$",
+    "scope": null,
+    "spans": [],
+    "state": "UNKNOWN",
+    "stop_prefixes": [],
+    "terminator": "#{1,2}\\s",
+    "unique": false
+   },
+   {
+    "cause": "commented",
+    "heading": "^## Pinned Context\\s*$",
+    "scope": null,
+    "spans": [],
+    "state": "UNKNOWN",
+    "stop_prefixes": [],
+    "terminator": "#{1,2}\\s",
+    "unique": true
+   }
+  ]
+ },
+ "html_comment_unclosed_above_pinned_no_structure": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P5",
+  "note": "a never-closed comment above Pinned that covers no fence or block start stays certain"
+ },
+ "html_comment_unclosed_above_pinned_over_fence": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 1,
+  "boundary_cause": "unclosed_html",
+  "decode": "strict",
+  "kinds": "P1 U7",
+  "note": "a never-closed comment above Pinned covers a fence opener: the boundary is its start"
+ },
+ "html_comment_unclosed_over_fence": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": 3,
+  "boundary_cause": "unclosed_html",
+  "decode": "strict",
+  "kinds": "P3 U3",
+  "note": "a never-closed comment over a fence: the boundary is its start, and the session block above it stays found"
+ },
+ "html_comment_unclosed_over_stale_pin": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "headings": {
+   "^### ": [
+    7,
+    13
+   ]
+  },
+  "kinds": "P15",
+  "note": "a never-closed comment between two stale pins, covering no fence, stays certain; a STALE row under the second pin would end it",
+  "sections": [
+   {
+    "cause": null,
+    "heading": "^## Pinned Context\\s*$",
+    "scope": null,
+    "spans": [
+     [
+      5,
+      14
+     ]
+    ],
+    "state": "FOUND",
+    "stop_prefixes": [
+     "<!-- PACT_MEMORY_",
+     "<!-- PACT_MANAGED_",
+     "<!-- PACT_ROUTING_",
+     "<!-- SESSION_"
+    ],
+    "terminator": "#{1,2}\\s",
+    "unique": false
+   }
+  ]
+ },
+ "html_declaration_closed_by_prose": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      2,
+      4
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P5",
+  "note": "a declaration closed by a prose line holding > sets no boundary and hides no row"
+ },
+ "html_declaration_ended_by_marker": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "comment_boundary",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "comment_boundary",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "comment_boundary",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "comment_boundary",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 0,
+  "boundary_cause": "comment_boundary",
+  "decode": "strict",
+  "kinds": "U4",
+  "note": "a declaration with no > ended by a marker line sets the comment boundary at the declaration"
+ },
+ "html_declaration_over_container_fence": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "html_hides_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "html_hides_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "html_hides_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "html_hides_fence",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 0,
+  "boundary_cause": "html_hides_fence",
+  "decode": "strict",
+  "kinds": "U6",
+  "note": "a declaration over a container fence: the boundary is its start"
+ },
+ "html_pre_ended_by_prefix_marker": {
+  "blocks": {
+   "KERNEL": {
+    "cause": "comment_boundary",
+    "state": "UNKNOWN"
+   },
+   "MANAGED": {
+    "cause": "comment_boundary",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "comment_boundary",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "comment_boundary",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "comment_boundary",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 0,
+  "boundary_cause": "comment_boundary",
+  "decode": "strict",
+  "kinds": "U4",
+  "note": "a pre block whose end is first met on a prefix marker line sets the comment boundary"
+ },
+ "html_pre_holds_live_marker": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      1,
+      3
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "html_rows": [
+   0,
+   1,
+   2,
+   3,
+   4
+  ],
+  "kinds": "P5",
+  "markers": [
+   {
+    "cause": null,
+    "literal": "<!-- SESSION_START -->",
+    "scope": null,
+    "spans": [
+     [
+      1,
+      1
+     ]
+    ],
+    "state": "FOUND"
+   }
+  ],
+  "note": "markers inside a closed pre block stay live; its rows are in_html"
+ },
+ "html_unclosed_pi_covers_nothing": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      2,
+      4
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P5",
+  "note": "a never-closed <? over prose and marker lines stays certain"
+ },
+ "html_unclosed_pi_over_block_start": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 0,
+  "boundary_cause": "unclosed_html",
+  "decode": "strict",
+  "kinds": "U5",
+  "note": "a never-closed <? over a <pre> it does not close: the boundary is its start"
+ },
+ "html_unclosed_pre_hides_nothing": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "headings": {
+   "^## Pinned Context": [
+    1
+   ]
+  },
+  "kinds": "P3",
+  "note": "a pre block never closed marks no row, so the heading below it is FOUND",
+  "sections": [
+   {
+    "cause": null,
+    "heading": "^## Pinned Context\\s*$",
+    "scope": null,
+    "spans": [
+     [
+      1,
+      2
+     ]
+    ],
+    "state": "FOUND",
+    "stop_prefixes": [],
+    "terminator": "#{1,2}\\s",
+    "unique": false
+   }
+  ]
+ },
+ "html_unclosed_pre_over_fence": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 0,
+  "boundary_cause": "unclosed_html",
+  "decode": "strict",
+  "kinds": "U5",
+  "note": "a never-closed <pre> over a fence opener: the boundary is its start"
+ },
+ "managed_above_html_boundary_no_copy": {
+  "blocks": {
+   "MANAGED": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   },
+   "MEMORY": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 4,
+  "boundary_cause": "unclosed_html",
+  "decode": "strict",
+  "kinds": "P4 U3",
+  "note": "one managed pair above a never-closed CDATA block that holds no marker: FOUND"
+ },
+ "managed_copy_in_code_span_past_boundary": {
+  "blocks": {
+   "MANAGED": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   },
+   "MEMORY": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 4,
+  "boundary_cause": "unclosed_html",
+  "decode": "strict",
+  "kinds": "P4 U3",
+  "note": "a managed start past the boundary inside an inline code span is a mention: the pair is FOUND"
+ },
+ "managed_copy_past_html_boundary": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "unclosed_html",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 4,
+  "boundary_cause": "unclosed_html",
+  "decode": "strict",
+  "kinds": "P4 U3",
+  "note": "one managed pair above a never-closed CDATA block over a fence, and a second managed start inside it: not FOUND"
+ },
+ "managed_copy_past_unclosed_fence": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 4,
+  "boundary_cause": "unclosed_fence",
+  "decode": "strict",
+  "kinds": "P4 U2",
+  "note": "one managed pair above an unclosed fence that holds a second managed start: not FOUND"
+ },
+ "marker_duplicate_session_start": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "cause": "nested",
+    "state": "MALFORMED"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P3",
+  "markers": [
+   {
+    "cause": "duplicate",
+    "literal": "<!-- SESSION_START -->",
+    "scope": null,
+    "spans": [
+     [
+      0,
+      0
+     ],
+     [
+      2,
+      2
+     ]
+    ],
+    "state": "DUPLICATE"
+   },
+   {
+    "cause": null,
+    "literal": "<!-- SESSION_START -->",
+    "scope": [
+     1,
+     2
+    ],
+    "spans": [
+     [
+      2,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   },
+   {
+    "cause": null,
+    "literal": "<!-- SESSION_START -->",
+    "scope": [
+     3,
+     2
+    ],
+    "spans": [],
+    "state": "ABSENT"
+   }
+  ],
+  "note": "two start marker lines: a DUPLICATE marker, a nested block"
+ },
+ "no_trailing_newline": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P3",
+  "note": "the last row has no terminator"
+ },
+ "pair_then_open_start": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 4,
+  "boundary_cause": "unclosed_fence",
+  "decode": "strict",
+  "kinds": "P4 U1",
+  "note": "one pair plus a start still open at the boundary: a second copy may lie past it"
+ },
+ "plain_session_block": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "spans": [
+     [
+      2,
+      4
+     ]
+    ],
+    "state": "FOUND"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P5",
+  "note": "a real block in plain prose"
+ },
+ "prefix_kernel_block": {
+  "blocks": {
+   "KERNEL": {
+    "spans": [
+     [
+      1,
+      3
+     ]
+    ],
+    "state": "FOUND"
+   },
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P5",
+  "markers": [
+   {
+    "cause": null,
+    "literal": "<!-- PACT_START:",
+    "scope": null,
+    "spans": [
+     [
+      1,
+      1
+     ]
+    ],
+    "state": "FOUND"
+   },
+   {
+    "cause": null,
+    "literal": "<!-- PACT_START:",
+    "scope": [
+     2,
+     4
+    ],
+    "spans": [],
+    "state": "ABSENT"
+   },
+   {
+    "cause": null,
+    "literal": "<!-- PACT_START:",
+    "scope": [
+     5,
+     4
+    ],
+    "spans": [],
+    "state": "ABSENT"
+   },
+   {
+    "cause": null,
+    "literal": "<!-- PACT_END -->",
+    "scope": null,
+    "spans": [
+     [
+      3,
+      3
+     ]
+    ],
+    "state": "FOUND"
+   }
+  ],
+  "note": "a legacy kernel start is a prefix literal: its pair is FOUND"
+ },
+ "prefix_kernel_inline_mention": {
+  "blocks": {
+   "KERNEL": {
+    "state": "ABSENT"
+   },
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P2",
+  "note": "a prefix literal inside an inline code span is a mention, not a marker"
+ },
+ "prefix_kernel_mid_line": {
+  "blocks": {
+   "KERNEL": {
+    "cause": "stray",
+    "spans": [
+     [
+      1,
+      1
+     ]
+    ],
+    "state": "MALFORMED"
+   },
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P2",
+  "note": "a prefix literal mid-line is stray"
+ },
+ "prefix_kernel_no_space": {
+  "blocks": {
+   "KERNEL": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   },
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P3",
+  "note": "a prefix with no space before the rest of its comment is still a marker line"
+ },
+ "prefix_kernel_words_after": {
+  "blocks": {
+   "KERNEL": {
+    "cause": "stray",
+    "spans": [
+     [
+      2,
+      2
+     ]
+    ],
+    "state": "MALFORMED"
+   },
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P3",
+  "note": "words after a prefix marker's comment make the line stray"
+ },
+ "prefix_line_repeats_literal": {
+  "blocks": {
+   "KERNEL": {
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND"
+   },
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P3",
+  "note": "a marker line is never stray, even when its comment repeats the literal"
+ },
+ "section_runs_into_unknown": {
+  "blocks": {
+   "MANAGED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "MEMORY": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "PINNED": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   },
+   "SESSION": {
+    "cause": "unclosed_fence",
+    "state": "UNKNOWN"
+   }
+  },
+  "boundary": 2,
+  "boundary_cause": "unclosed_fence",
+  "decode": "strict",
+  "kinds": "P2 U2",
+  "markers": [
+   {
+    "cause": "unclosed_fence",
+    "literal": "<!-- SESSION_START -->",
+    "scope": null,
+    "spans": [],
+    "state": "UNKNOWN"
+   },
+   {
+    "cause": null,
+    "literal": "<!-- SESSION_START -->",
+    "scope": [
+     0,
+     1
+    ],
+    "spans": [],
+    "state": "ABSENT"
+   }
+  ],
+  "note": "a section with no end before the boundary is UNKNOWN; scoped above it, FOUND",
+  "sections": [
+   {
+    "cause": "unclosed_fence",
+    "heading": "^## Working Memory\\s*$",
+    "scope": null,
+    "spans": [],
+    "state": "UNKNOWN",
+    "stop_prefixes": [],
+    "terminator": "#\\s|##\\s(?!Working Memory)|---",
+    "unique": false
+   },
+   {
+    "cause": null,
+    "heading": "^## Working Memory\\s*$",
+    "scope": [
+     0,
+     1
+    ],
+    "spans": [
+     [
+      0,
+      1
+     ]
+    ],
+    "state": "FOUND",
+    "stop_prefixes": [],
+    "terminator": "#\\s|##\\s(?!Working Memory)|---",
+    "unique": false
+   },
+   {
+    "cause": "unclosed_fence",
+    "heading": "^## Retrieved Context\\s*$",
+    "scope": null,
+    "spans": [],
+    "state": "UNKNOWN",
+    "stop_prefixes": [],
+    "terminator": "#\\s|##\\s(?!Retrieved Context)|---",
+    "unique": false
+   },
+   {
+    "cause": null,
+    "heading": "^## Retrieved Context\\s*$",
+    "scope": [
+     0,
+     1
+    ],
+    "spans": [],
+    "state": "ABSENT",
+    "stop_prefixes": [],
+    "terminator": "#\\s|##\\s(?!Retrieved Context)|---",
+    "unique": false
+   }
+  ]
+ },
+ "section_stop_prefix_in_pre": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "cause": "unpaired",
+    "state": "MALFORMED"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "html_rows": [
+   2,
+   3,
+   4,
+   5
+  ],
+  "kinds": "P7",
+  "markers": [
+   {
+    "cause": null,
+    "literal": "<!-- PACT_MEMORY_PINNED_END -->",
+    "scope": null,
+    "spans": [
+     [
+      3,
+      3
+     ]
+    ],
+    "state": "FOUND"
+   }
+  ],
+  "note": "a stop-prefix marker line inside a closed pre ends the section; so does a hidden heading",
+  "sections": [
+   {
+    "cause": null,
+    "heading": "^## Pinned Context\\s*$",
+    "scope": null,
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND",
+    "stop_prefixes": [
+     "<!-- PACT_MEMORY_",
+     "<!-- PACT_MANAGED_",
+     "<!-- PACT_ROUTING_",
+     "<!-- SESSION_"
+    ],
+    "terminator": "#{1,2}\\s",
+    "unique": false
+   },
+   {
+    "cause": null,
+    "heading": "^## Pinned Context\\s*$",
+    "scope": null,
+    "spans": [
+     [
+      0,
+      3
+     ]
+    ],
+    "state": "FOUND",
+    "stop_prefixes": [],
+    "terminator": "#{1,2}\\s",
+    "unique": false
+   }
+  ]
+ },
+ "section_terminator_in_comment": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "headings": {
+   "^### ": [
+    1,
+    5
+   ]
+  },
+  "html_rows": [
+   2,
+   3,
+   4
+  ],
+  "kinds": "P7",
+  "note": "a hidden Working Memory heading below the pins still ends the Pinned section",
+  "sections": [
+   {
+    "cause": null,
+    "heading": "^## Pinned Context\\s*$",
+    "scope": null,
+    "spans": [
+     [
+      0,
+      2
+     ]
+    ],
+    "state": "FOUND",
+    "stop_prefixes": [],
+    "terminator": "#{1,2}\\s",
+    "unique": false
+   },
+   {
+    "cause": "commented",
+    "heading": "^## Working Memory\\s*$",
+    "scope": null,
+    "spans": [],
+    "state": "UNKNOWN",
+    "stop_prefixes": [],
+    "terminator": "#\\s|##\\s(?!Working Memory)|---",
+    "unique": false
+   }
+  ]
+ },
+ "section_two_pinned_headings": {
+  "blocks": {
+   "MANAGED": {
+    "state": "ABSENT"
+   },
+   "MEMORY": {
+    "state": "ABSENT"
+   },
+   "PINNED": {
+    "state": "ABSENT"
+   },
+   "SESSION": {
+    "state": "ABSENT"
+   }
+  },
+  "boundary": null,
+  "boundary_cause": null,
+  "decode": "strict",
+  "kinds": "P4",
+  "note": "two Pinned headings: DUPLICATE when unique, else the first section",
+  "sections": [
+   {
+    "cause": "duplicate",
+    "heading": "^## Pinned Context\\s*$",
+    "scope": null,
+    "spans": [
+     [
+      0,
+      0
+     ],
+     [
+      2,
+      2
+     ]
+    ],
+    "state": "DUPLICATE",
+    "stop_prefixes": [],
+    "terminator": "#{1,2}\\s",
+    "unique": true
+   },
+   {
+    "cause": null,
+    "heading": "^## Pinned Context\\s*$",
+    "scope": null,
+    "spans": [
+     [
+      0,
+      1
+     ]
+    ],
+    "state": "FOUND",
+    "stop_prefixes": [],
+    "terminator": "#{1,2}\\s",
+    "unique": false
+   },
+   {
+    "cause": null,
+    "heading": "^## Pinned Context\\s*$",
+    "scope": [
+     2,
+     3
+    ],
+    "spans": [
+     [
+      2,
+      3
+     ]
+    ],
+    "state": "FOUND",
+    "stop_prefixes": [],
+    "terminator": "#{1,2}\\s",
+    "unique": true
+   }
+  ]
+ }
+}

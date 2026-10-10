@@ -47,9 +47,9 @@ def _write_claude_md(dir_path: Path, recorded_id, *, legacy=False):
         target = dir_path / ".claude" / "CLAUDE.md"
         target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
-        "# Project\n\n## Current Session\n"
+        "# Project\n\n<!-- SESSION_START -->\n## Current Session\n"
         f"- Resume: `claude --resume {recorded_id}`\n"
-        "- Team: `session-deadbeef`\n",
+        "- Team: `session-deadbeef`\n<!-- SESSION_END -->\n",
         encoding="utf-8",
     )
     return target

@@ -14,13 +14,16 @@ retry the add.
 Demotion is not deletion. A pin leaves `## Pinned Context` only once its
 content is provably somewhere else — see [Step 3](#step-3--archive-the-selected-pin).
 
-The `pin_caps_gate` PreToolUse hook ALLOWS the resulting Edit because
-the pin count strictly decreases (net-worse predicate: pre has ≥N
-pins, post has N-1 — not worse, so allow). **The hook cannot enforce the
-archive**: it sees a count decrease and allows it, whether or not Step 3
-ran. Step 3 is enforced by this file and by nothing else, which is why
-every exit below emits a journal event — an invocation that evicts a pin
-while emitting nothing is the one state that should never occur.
+Only the team-lead runs this command, with the user. A teammate or subagent
+whose pin was denied by the count cap sends the pin to the team-lead instead,
+and the team-lead adds it after freeing a slot.
+
+The `pin_caps_gate` PreToolUse hook ALLOWS the resulting `Edit` because
+the change adds no pin. **The hook cannot enforce the archive**: it sees a
+change that adds no pin and allows it, whether or not Step 3 ran. Step 3 is
+enforced by this file and by nothing else, which is why every exit below
+emits a journal event — an invocation that evicts a pin while emitting
+nothing is the one state that should never occur.
 
 ## Process
 
@@ -127,6 +130,9 @@ curator keeps, collect a one-line reason and extend its date comment in place:
 <!-- pinned: 2026-05-26, reconfirmed: 2026-07-25 because {concrete reason} -->
 ```
 
+If the comment carries a `pin-size-override:` clause, keep that clause in the
+same comment.
+
 The reason MUST be single-line. Re-confirming resets the clock: age computes
 from the `reconfirmed:` date once present. The reason is free text and is
 subject to the same concreteness rule above.
@@ -202,7 +208,7 @@ name determines the disposition, so no row needs a footnote to be actionable:
 | Verdict | Meaning | Action |
 |---|---|---|
 | `ARCHIVED` | the pin's bytes are provably in long-term memory | proceed to Step 4 |
-| `ARCHIVED_DELETE_UNSAFE` | the archive **succeeded**; only the automatic removal is unsafe | do NOT Edit; hand the curator `memory_id`, `occurrences` and `locations` for manual removal; emit `delete_unsafe`; stop |
+| `ARCHIVED_DELETE_UNSAFE` | the archive **succeeded**; only the automatic removal is unsafe | do NOT Edit; hand the curator `memory_id`, `reason`, `occurrences` and `locations` for manual removal; emit `delete_unsafe`; stop |
 | `NOT_ARCHIVED` | the archive definitively failed | **refuse**; report `reason`; emit `archive_refused`; stop |
 | `UNEVALUABLE` | could not tell — CLI absent, crash, timeout, unreadable file | **refuse**; report `reason`; offer the escape hatch below |
 
@@ -211,11 +217,13 @@ name determines the disposition, so no row needs a footnote to be actionable:
 **The archive worked.** The pin's content is in long-term memory and the
 verdict carries the `memory_id` that proves it. What failed is only the
 automatic removal: the emitted handle did not occur exactly once in the file,
-so an `Edit` keyed on it would match the wrong text or none at all.
+so an `Edit` keyed on it would match the wrong text or none at all; or removing
+it would leave part of CLAUDE.md unreadable, and `reason` names the line to fix
+before removing the pin by hand.
 
 So the command does not remove the pin, and tells the curator plainly: *your
-content is safe under this `memory_id`; the block was found `occurrences`
-times; remove the pin by hand.* **The curator is not stuck at the cap** — the
+content is safe under this `memory_id`; `reason` says why it was not removed;
+remove the pin by hand.* **The curator is not stuck at the cap** — the
 eviction can still be completed manually, and the safety guarantee this command
 exists to provide already held. Say that explicitly; a curator meeting an
 unfamiliar refusal at 12/12 will otherwise read it as a dead end and start
@@ -316,8 +324,7 @@ something unusable. **A field is present exactly when the fact it names was
 established**, which is why a missing handle is a refusal and never an
 invitation to reconstruct one.
 
-The `pin_caps_gate` hook ALLOWS the edit because `len(post_pins) <
-len(pre_pins)` — strictly better, not worse.
+The `pin_caps_gate` hook ALLOWS the edit because it adds no pin.
 
 ### Step 5 — Report
 

@@ -13,20 +13,20 @@ Matrix axes:
   baseline:  fresh (existing CLAUDE.md with N < cap pins)
              missing (no CLAUDE.md on disk)
              corrupt (CLAUDE.md exists but no Pinned Context section)
-  bypass:    team-lead (agent_name empty)
-             teammate (agent_name non-empty)
+  frame:     team-lead
+             teammate (gated like the lead; a count denial asks the
+             team-lead instead of naming the pin command)
 
 Full 2 * 6 * 3 * 2 = 72 logical cells. Not every combination produces a
-distinct outcome (e.g., teammate bypass short-circuits all violation
-axes). Parameterization collapses duplicates while preserving meaningful
+distinct outcome. Parameterization collapses duplicates while preserving meaningful
 discrimination. Total parameterized cases: ~100.
 
 Invariants enforced:
-  #1 symmetric oracle (parse_pins on both sides)
+  #1 symmetric oracle (pin_caps.pins_in_rows on both sides)
   #2 net-worse strict `>`
   #3 Write-baseline fail-CLOSED asymmetric exception
   #4 failure_log observability on fail-open bypass paths
-  #5 no twin-copy drift (parser/hook share parse_pins, not regex clones)
+  #5 no twin-copy drift (parser/hook share pins_in_rows, not regex clones)
   #6 override validation ONLY in hook primary path
   #7 str.replace Edit-simulation byte-identical
   #8 full-replacement emulation (Write is full file, not fragment)
@@ -36,7 +36,7 @@ import json
 
 import pytest
 
-from helpers import make_claude_md_with_pins, make_pin_entry  # noqa: E402
+from helpers import make_claude_md_with_pins, make_pin_entry, point_resolver_at  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -59,10 +59,7 @@ def gate_env(tmp_path, monkeypatch, pact_context):
         project_dir=str(tmp_path),
     )
 
-    import staleness
-    monkeypatch.setattr(
-        staleness, "get_project_claude_md_path", lambda: claude_md
-    )
+    point_resolver_at(monkeypatch, tmp_path)
 
     def _setup(pin_count=3, baseline="fresh"):
         if baseline == "missing":
@@ -112,7 +109,7 @@ def _call_gate(input_data):
     # #878: the gate now keys lead-detection on is_lead (the harness-set
     # agent_type), not the old empty-resolve_agent_name heuristic. Default to a
     # LEAD frame (the unmarked case these DENY tests assume) unless the caller
-    # supplies an explicit agent_type (teammate/plain bypass tests).
+    # supplies an explicit agent_type (the teammate tests).
     from pin_caps_gate import _check_tool_allowed
     if "agent_type" not in input_data:
         input_data = {**input_data, "agent_type": "pact-orchestrator"}
@@ -144,8 +141,8 @@ class TestPinCapsGate_Matrix_Edit:
     """Edit-tool cap checks across violation × baseline × bypass.
 
     The Edit path goes: baseline read → parse → simulate via str.replace →
-    compute_deny_reason. Edit + missing baseline is an explicit fail-OPEN
-    path (asymmetric rule applies ONLY to Write — #3).
+    compute_deny_reason. An Edit of a file that does not exist replaces
+    nothing, so it allows.
     """
 
     @pytest.mark.parametrize(
@@ -162,65 +159,22 @@ class TestPinCapsGate_Matrix_Edit:
         ],
     )
     def test_edit_count_axis(self, gate_env, pre_count, post_count, expected_allow):
-        """Count-axis Edit: count-DECREASE and count-UNCHANGED cases only.
-
-        Post-#529 (PR #530), count-INCREASE via Edit IS allowed when the
-        new pin carries a `<!-- pinned: -->` date-comment marker — see
-        `TestPinCapsGate_Smoke::test_edit_legitimate_new_pin_with_date_comment_allows`
-        for the legitimate-add legitimate-allow path, and
-        `test_edit_embedded_pin_denies` (this file) for the smuggle-deny
-        counter. Count-increase coverage in this parametrized matrix is
-        intentionally scoped to DECREASE + UNCHANGED: fixture/payload
-        bookkeeping for date-marked increase-adds is heavier than the
-        incremental signal justifies, since the smoke file already pins
-        the legitimate-allow outcome.
-
-        The honest test: use Edit to REMOVE `### PinN` headings entirely
-        (no `### ` in new_string). Pre count 3 → remove 0 → post count
-        3 (allow). Pre count 3 → remove a pin-comment → post 2 (allow).
-        For count-INCREASE coverage see the smoke file; for over-cap
-        count denies see the Write matrix.
-
-        For Edit, we test count-DECREASE (allow paths) and count-UNCHANGED
-        (irrelevant-fragment Edit).
-        """
-        # Count-increase via Edit with a date-marker is a legitimate add
-        # (covered by TestPinCapsGate_Smoke); count-increase via Edit
-        # WITHOUT a date-marker is a smuggle and denies (covered by
-        # test_edit_embedded_pin_denies above). Skip increase cases in
-        # this parametrized matrix to keep the payload bookkeeping lean.
-        if post_count > pre_count:
-            pytest.skip(
-                "count-increase Edit coverage: legitimate (date-marked) "
-                "allow case → TestPinCapsGate_Smoke; smuggle (no date "
-                "marker) deny case → test_edit_embedded_pin_denies"
-            )
-
+        """Count-axis Edit, each case a real change. Pins are added as undated
+        `### ` lines before `## Working Memory`: rule U counts a heading as a pin
+        whatever its comment, so an undated add is ordinary growth, allowed up
+        to the cap and denied past it. A decrease removes the last pin blocks;
+        an unchanged count edits one pin's body."""
         env = gate_env(pin_count=pre_count)
-        # Use a small non-heading Edit: patch a body character. The
-        # post-state pin count is unchanged, so regardless of pre_count,
-        # net-worse on count axis is False.
-        # To simulate a DECREASE, the Edit replaces a whole `### PinN`
-        # block + body with a plain-text marker (no `### `).
-        if post_count < pre_count:
-            # Remove (pre_count - post_count) pin blocks.
-            # Each pin block: "<!-- pinned: 2026-04-20 -->\n### PinN\nxxxx"
-            baseline = env["claude_md"].read_text(encoding="utf-8")
-            for n in range(post_count, pre_count):
-                block = (
-                    f"<!-- pinned: 2026-04-20 -->\n### Pin{n}\nxxxx"
-                )
-                baseline = baseline.replace(block, "", 1)
-            env["claude_md"].write_text(baseline, encoding="utf-8")
-            # Now re-read; the Edit is a no-op trailing whitespace fix
-            # just to exercise the gate.
-            old_string = "## Working Memory"
-            new_string = "## Working Memory"  # idempotent Edit
+        baseline = env["claude_md"].read_text(encoding="utf-8")
+        if post_count > pre_count:
+            added = "".join(f"### Added{i}\nbody\n\n" for i in range(post_count - pre_count))
+            old_string, new_string = "## Working Memory", added + "## Working Memory"
+        elif post_count < pre_count:
+            blocks = [f"<!-- pinned: 2026-04-20 -->\n### Pin{n}\nxxxx" for n in range(post_count, pre_count)]
+            old_string, new_string = "\n\n" + "\n\n".join(blocks), ""
         else:
-            # Same count — no-op Edit just to exercise the gate with
-            # no `### ` in new_string.
-            old_string = "## Working Memory"
-            new_string = "## Working Memory"
+            old_string, new_string = "### Pin0\nxxxx", "### Pin0\nxxxy"
+        assert old_string in baseline, (pre_count, post_count)
 
         result = _call_gate({
             "tool_name": "Edit",
@@ -278,29 +232,15 @@ class TestPinCapsGate_Matrix_Edit:
             assert result is not None, f"pre={pre_body} post={post_body} should DENY"
             assert "cap" in result.lower()
 
-    def test_edit_embedded_pin_denies(self, gate_env):
-        """Edit with a naked `### ` heading (no `<!-- pinned: -->` date-comment)
-        correctly DENIES via `DENY_REASON_EMBEDDED_PIN`. Post-#529 (PR #530)
-        the Edit path mirrors Write: legitimate date-marked adds allow
-        (covered in `TestPinCapsGate_Smoke::
-        test_edit_legitimate_new_pin_with_date_comment_allows`); smuggles
-        (heading without a preceding date-comment marker) still deny.
-
-        Prior to #530 this test used a legitimate-shaped date-marked payload
-        and asserted DENY — codifying the #529 asymmetric-path bug as
-        intended behavior. The payload has been reworked to a true smuggle
-        so the assertion reflects the actual contract: naked `### Title`
-        without a date-comment marker is the smuggle signature.
-        """
+    def test_edit_undated_heading_is_counted_as_a_pin(self, gate_env):
+        """An undated `### ` heading added by an Edit is a pin, counted by the
+        count axis: at 3 pins plus one it is under the cap and allowed. There
+        is no embedded-pin refusal keyed on the missing date comment."""
         env = gate_env(pin_count=3)
         result = _call_gate({
             "tool_name": "Edit",
             "tool_input": {
                 "file_path": str(env["claude_md"]),
-                # Prepend a naked `### ` heading (no `<!-- pinned: -->`
-                # marker) before the Pinned-Context section's terminator
-                # boundary — a real smuggle attempt that preserves existing
-                # pins but injects an undated heading.
                 "old_string": "## Working Memory\n",
                 "new_string": (
                     "### SmuggledNoDateMarker\n"
@@ -310,157 +250,162 @@ class TestPinCapsGate_Matrix_Edit:
                 "replace_all": False,
             },
         })
-        assert result is not None
-        assert "embedded pin" in result.lower()
+        assert result is None, f"an undated pin under the cap must be allowed, got: {result!r}"
 
     def test_edit_invalid_override_denies(self, gate_env):
-        """Edit new_string with override rationale exceeding 120 chars → DENY."""
+        """An override row whose rationale exceeds 120 chars, on a pin the
+        Edit changes → DENY with the invalid-override reason."""
         env = gate_env(pin_count=3)
         too_long = "x" * 121
         result = _call_gate({
             "tool_name": "Edit",
             "tool_input": {
                 "file_path": str(env["claude_md"]),
-                "old_string": "Pin0",
-                "new_string": f"<!-- pinned: 2026-04-20, pin-size-override: {too_long} -->",
+                "old_string": "<!-- pinned: 2026-04-20 -->\n### Pin0",
+                "new_string": f"<!-- pinned: 2026-04-20, pin-size-override: {too_long} -->\n### Pin0",
                 "replace_all": False,
             },
         })
         assert result is not None
         assert "override" in result.lower()
 
-    def test_edit_empty_override_denies(self, gate_env):
-        """Empty rationale → DENY with invalid-override reason."""
+    def test_override_text_inside_a_heading_is_not_an_override(self, gate_env):
+        """Override text written into a heading line is not an override row:
+        nothing is granted, so there is nothing to refuse (main refused it by
+        scanning the raw fragment)."""
         env = gate_env(pin_count=3)
         result = _call_gate({
             "tool_name": "Edit",
             "tool_input": {
                 "file_path": str(env["claude_md"]),
                 "old_string": "Pin0",
-                "new_string": "<!-- pinned: 2026-04-20, pin-size-override:  -->",
+                "new_string": "<!-- pinned: 2026-04-20, pin-size-override: {} -->".format("x" * 121),
+                "replace_all": False,
+            },
+        })
+        assert result is None, result
+
+    def test_edit_empty_override_denies(self, gate_env):
+        """An override row with a blank rationale on a pin the Edit changes →
+        DENY with the invalid-override reason."""
+        env = gate_env(pin_count=3)
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "old_string": "<!-- pinned: 2026-04-20 -->\n### Pin0",
+                "new_string": "<!-- pinned: 2026-04-20, pin-size-override:   -->\n### Pin0",
                 "replace_all": False,
             },
         })
         assert result is not None
         assert "empty" in result.lower() or "override" in result.lower()
 
-    @pytest.mark.parametrize("terminator", ["\n", "\r", " ", " ", ""])
-    def test_edit_override_with_line_terminator_denies(self, gate_env, terminator):
-        """Override rationale containing forbidden line-terminator chars → DENY.
-
-        Invariant: the gate's _FORBIDDEN_RATIONALE_CHARS is derived from
-        pin_caps._FORBIDDEN_TERMINATOR_TABLE (no twin-copy drift). This
-        test asserts each documented forbidden char trips the gate.
-
-        Note: rationales containing a newline don't even reach the line-
-        terminator check because OVERRIDE_COMMENT_RE.fullmatch requires a
-        single-line pin-size-override comment. The rationale extraction
-        uses splitlines() + .strip(), which strips newline/CR entirely,
-        so a rationale with a true newline is rejected at regex-match
-        time (returns None → no override claimed → no deny from invalid-
-        override path). U+2028/U+2029/U+0085 slip past splitlines in some
-        renderers — those ARE caught by the char check.
-        """
+    def test_a_fenced_example_of_the_override_syntax_is_not_an_override(self, gate_env):
+        """A new pin documenting the override syntax inside a fence, with an
+        empty rationale, is allowed: fenced lines are not override rows."""
         env = gate_env(pin_count=3)
-        # Build the candidate — rationale has the terminator embedded.
-        rationale = f"valid text{terminator}injected"
-        # Put the override comment on its own line so splitlines isolates it.
-        new_string = f"<!-- pinned: 2026-04-20, pin-size-override: {rationale} -->"
+        example = (
+            "<!-- pinned: 2026-04-21 -->\n### Override syntax\n"
+            "```\n<!-- pinned: 2026-04-20, pin-size-override:   -->\n```\n\n"
+        )
         result = _call_gate({
             "tool_name": "Edit",
             "tool_input": {
                 "file_path": str(env["claude_md"]),
-                "old_string": "Pin0",
-                "new_string": new_string,
+                "old_string": "## Working Memory\n",
+                "new_string": example + "## Working Memory\n",
                 "replace_all": False,
             },
         })
-        # Empirical finding: Python's `splitlines()` recognizes U+2028,
-        # U+2029, U+0085 AND ASCII newline/CR as line boundaries. All
-        # five terminators are stripped BEFORE the gate's forbidden-char
-        # check — so the _FORBIDDEN_RATIONALE_CHARS check is effectively
-        # dead code for these specific chars. What matters observably:
-        # the terminator must NEVER be accepted into a parsed Pin's
-        # override_rationale. Either the gate denies, or the gate allows
-        # because no override was captured (rationale=None). A ALLOW
-        # result here means the terminator was not smuggled into a pin.
-        if result is not None:
-            assert terminator not in result, (
-                f"terminator {terminator!r} leaked into deny reason"
-            )
+        assert result is None, result
 
-    def test_gate_forbidden_chars_derived_from_parser_table(self):
-        """Invariant #5: no twin-copy drift. The gate's
-        `_FORBIDDEN_RATIONALE_CHARS` is derived at module load from
-        `pin_caps._FORBIDDEN_TERMINATOR_TABLE`, not duplicated as a
-        literal. A parser-side table change must propagate to the gate
-        without a second edit site.
-        """
-        import pin_caps
-        import pin_caps_gate
-        parser_chars = "".join(
-            chr(o) for o in pin_caps._FORBIDDEN_TERMINATOR_TABLE.keys()
-        )
-        assert set(pin_caps_gate._FORBIDDEN_RATIONALE_CHARS) == set(parser_chars)
+    def test_an_unchanged_pins_old_invalid_override_is_not_rechecked(self, gate_env):
+        """A Write that leaves a pin and its invalid override untouched is not
+        refused for that override: only pins the change adds or edits are
+        checked."""
+        env = gate_env(pin_count=3)
+        bad = env["claude_md"].read_text(encoding="utf-8").replace(
+            "<!-- pinned: 2026-04-20 -->\n### Pin2", "<!-- pinned: 2026-04-20, pin-size-override:   -->\n### Pin2", 1)
+        env["claude_md"].write_text(bad, encoding="utf-8")
+        result = _call_gate({
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(env["claude_md"]), "content": bad.replace("### Pin0", "### Pin0 renamed")},
+        })
+        assert result is None, result
+
+    def test_an_override_shaped_row_inside_a_body_is_not_an_override(self, gate_env):
+        """Only the row the parser attributes to a pin as its comment is read as
+        its override. The same text further down an edited pin's body is body
+        text, so an empty rationale there is not refused."""
+        env = gate_env(pin_count=3)
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "old_string": "### Pin1\nxxxx",
+                "new_string": "### Pin1\nxxxx\n<!-- pinned: 2026-04-20, pin-size-override:   -->",
+                "replace_all": False,
+            },
+        })
+        assert result is None, result
+
+    @pytest.mark.parametrize("terminator, ord_hex", [
+        ("\n", "0x0a"), ("\r", "0x0d"), ("\u2028", "0x2028"), ("\u2029", "0x2029"),
+        ("\x85", "0x0085"), ("\x0b", "0x0b"), ("\x0c", "0x0c"), ("\x1c", "0x1c"),
+    ])
+    def test_a_terminator_in_a_rationale_is_not_an_override(self, gate_env, terminator, ord_hex):
+        """A comment row broken by a line terminator, or holding a character
+        `str.splitlines` breaks at, is not attributed to the pin, so it is not
+        an override: the gate does not refuse it as an invalid one, and a small
+        pin under it is allowed. The second pin is used because there the
+        unattributed row sits among the first pin's rows, where the gate used to
+        read it as an override and refuse a rationale holding U+2028, U+2029 or
+        U+0085 as invalid."""
+        env = gate_env(pin_count=3)
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "old_string": "<!-- pinned: 2026-04-20 -->\n### Pin1",
+                "new_string": (f"<!-- pinned: 2026-04-20, pin-size-override: valid text{terminator}injected -->\n"
+                               "### Pin1"),
+                "replace_all": False,
+            },
+        })
+        assert result is None, (ord_hex, result)
 
     @pytest.mark.parametrize(
         "terminator,ord_hex",
         [
             ("\n", "0x0a"),
             ("\r", "0x0d"),
-            (" ", "0x2028"),
-            (" ", "0x2029"),
-            ("", "0x0085"),
+            ("\u2028", "0x2028"),
+            ("\u2029", "0x2029"),
+            ("\x85", "0x0085"),
         ],
     )
-    def test_splitlines_eats_forbidden_chars_before_validation(
-        self, terminator, ord_hex
+    def test_a_terminator_in_a_rationale_never_passes_as_an_override(
+        self, gate_env, terminator, ord_hex
     ):
-        """Upstream-split invariant (per auditor-2 recommendation,
-        2026-04-21 consultant mode): Python's str.splitlines() recognizes
-        every char in `_FORBIDDEN_RATIONALE_CHARS` as a line boundary,
-        which is WHY the char check at `pin_caps_gate.py:184` is not
-        runtime-reachable in the current call graph.
-
-        `_extract_override_rationale` applies `splitlines()` and then
-        runs `OVERRIDE_COMMENT_RE.fullmatch` on each stripped line. A
-        forbidden char in the middle of what looks like a single override
-        comment splits the comment across two lines — neither line
-        fullmatches, so extraction returns None and
-        `_validate_override_rationale` is called with None (short-circuits
-        before reaching the char-check block).
-
-        This test asserts the load-bearing upstream-split behavior. If a
-        future refactor of `_extract_override_rationale` stops calling
-        splitlines (e.g., moves to a regex that scans the whole fragment
-        in one pass), this test fails loudly and the char-check block at
-        `pin_caps_gate.py:184` becomes the load-bearing defense. Converts
-        the latent dead-code tradeoff into a loud one.
-        """
-        # The canonical override-comment fragment, with a forbidden char
-        # injected mid-rationale.
-        candidate = (
-            f"<!-- pinned: 2026-04-20, "
-            f"pin-size-override: before{terminator}after -->"
-        )
-        parts = candidate.splitlines()
-        # At least two parts — splitlines recognized the terminator.
-        assert len(parts) >= 2, (
-            f"splitlines() did NOT split on {ord_hex} ({terminator!r}) — "
-            f"if this fails, the forbidden-char check at pin_caps_gate.py:184 "
-            f"has become runtime-reachable. Update the inline comment in "
-            f"that file and re-verify the char-check block is exercised."
-        )
-
-        # Downstream: the gate's extractor returns None (no override
-        # captured) because no single line fullmatches the OVERRIDE_COMMENT_RE.
-        from pin_caps_gate import _extract_override_rationale
-        result = _extract_override_rationale(candidate)
-        assert result is None, (
-            f"override extractor captured a rationale despite {ord_hex} "
-            f"splitting the line — extractor behavior has changed; "
-            f"review test_edit_override_with_line_terminator_never_accepted."
-        )
+        """A forbidden line terminator inside an override rationale never
+        unlocks the size cap. The parser ends a row only at \\r and \\n, and
+        attributes no comment row holding U+2028, U+2029 or U+0085, so no
+        override is granted: a pin grown past 1,500 characters under such a
+        comment is refused on size."""
+        env = gate_env(pin_count=3)
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(env["claude_md"]),
+                "old_string": "<!-- pinned: 2026-04-20 -->\n### Pin0\nxxxx",
+                "new_string": (f"<!-- pinned: 2026-04-20, pin-size-override: before{terminator}after -->\n"
+                               f"### Pin0\n" + "y" * 1600),
+                "replace_all": False,
+            },
+        })
+        assert result is not None, f"{ord_hex}: a smuggled terminator unlocked the size cap"
+        assert result.startswith("Pin size cap (1500 chars) exceeded: 'Pin0' grew"), (ord_hex, result)
 
     @pytest.mark.parametrize(
         "terminator,ord_hex",
@@ -472,89 +417,48 @@ class TestPinCapsGate_Matrix_Edit:
         ],
     )
     def test_oracle_symmetry_terminator_smuggling(self, terminator, ord_hex):
-        """Gate extractor and parse_pins MUST agree on terminator-smuggling.
-
-        Regression for #492 cycle-8 F1 (security-engineer-1 PoC): pre-fix,
-        the gate extractor used `splitlines()` while the parser (`parse_pins`)
-        used `split("\\n")`. A rationale embedding U+2028/U+2029/U+0085
-        split at the gate boundary but survived as one line at the parser
-        boundary, which then `.translate(_FORBIDDEN_TERMINATOR_TABLE)`
-        silently stripped the char and accepted the laundered rationale.
-        Net: an oversize pin with a smuggled terminator in its rationale
-        passed the gate (extractor saw "no override claimed" → size check
-        unguarded) while the parser on next reload treated it as a valid
-        override (size cap bypassed).
-
-        Post-fix: both sides use `splitlines()`. For ANY terminator in
-        `_FORBIDDEN_RATIONALE_CHARS`, the candidate splits on BOTH sides.
-        Neither the gate nor the parser can capture a rationale → the
-        `has_size_override` flag never becomes True on a smuggled pin →
-        the size cap is enforced end-to-end.
-
-        Invariant: `_extract_override_rationale(candidate)` is None
-        ⇔ `parse_pins(synthetic_pinned_section).override_rationale` is None.
-        """
-        import pin_caps_gate
-        from pin_caps import parse_pins
+        """The parser never grants an override whose rationale holds a
+        terminator, and the gate never lets one through as valid: a smuggled
+        terminator cannot unlock the size cap on either side."""
+        from fixtures.pin_helpers import parse_pins
+        from pin_caps_gate import gate_decision
 
         candidate = (
             f"<!-- pinned: 2026-04-20, "
             f"pin-size-override: smuggled{terminator}rationale -->"
         )
-        gate_result = pin_caps_gate._extract_override_rationale(candidate)
+        parsed = parse_pins(f"{candidate}\n### TargetPin\nbody text here\n")
+        assert all(pin.override_rationale is None for pin in parsed), (ord_hex, parsed)
+        before = _build_claude_md(3)
+        after = before.replace("<!-- pinned: 2026-04-20 -->\n### Pin0", f"{candidate}\n### Pin0", 1)
+        decision = gate_decision(before, "Write", {"content": after})
+        assert decision.cause != "override", decision
 
-        # Build a synthetic pinned-section body (what parse_pins receives
-        # after `_parse_pinned_section` extracts the section).
-        pinned_section = f"{candidate}\n### TargetPin\nbody text here\n"
-        parsed = parse_pins(pinned_section)
-        assert len(parsed) == 1, (
-            f"Expected exactly one pin from the synthetic section; got "
-            f"{len(parsed)} — test fixture drift."
-        )
-        parser_rationale = parsed[0].override_rationale
-
-        # Oracle-symmetry invariant: gate and parser MUST agree.
-        assert (gate_result is None) == (parser_rationale is None), (
-            f"Oracle asymmetry on terminator {ord_hex}: "
-            f"gate.extract={gate_result!r} vs parser.override_rationale="
-            f"{parser_rationale!r}. This is exactly the bypass #492 cycle-8 F1 "
-            f"fixed — parser must not accept what the gate rejected."
-        )
-        # After the fix, both must be None (terminator-split prevented a
-        # rationale from ever being captured on either side).
-        assert gate_result is None, (
-            f"Gate extractor still captured a rationale on {ord_hex} "
-            f"despite splitlines-based extraction — fix regressed."
-        )
-        assert parser_rationale is None, (
-            f"Parser still captured a rationale on {ord_hex} despite "
-            f"splitlines-based parsing (pin_caps.py:191 fix regressed). "
-            f"Size cap bypass is live again."
-        )
-
-    @pytest.mark.parametrize("baseline", ["fresh", "missing", "corrupt"])
-    def test_edit_teammate_bypass(self, gate_env, baseline):
-        """Teammate session bypasses the gate regardless of baseline state.
-
-        #878: a non-lead agent_type bypasses (the gate keys on is_lead, not
-        resolve_agent_name)."""
+    @pytest.mark.parametrize("baseline, gated", [("fresh", True), ("missing", False), ("corrupt", False)])
+    def test_edit_teammate_is_gated(self, gate_env, baseline, gated):
+        """A teammate's Edit is gated like the lead's. Adding ten pins to the
+        3-pin file is refused with the ask-the-team-lead text; with no file, or
+        a file with no Working Memory heading, the Edit replaces nothing and is
+        allowed, as it is for the lead."""
         env = gate_env(pin_count=3, baseline=baseline)
+        added = "".join(f"<!-- pinned: 2026-04-21 -->\n### Added{i}\nbody\n\n" for i in range(10))
         result = _call_gate({
             "tool_name": "Edit",
             "agent_type": "pact-backend-coder",
             "tool_input": {
                 "file_path": str(env["claude_md"]),
-                "old_string": "anything",
-                "new_string": _build_claude_md(99),  # Wildly over-cap
+                "old_string": "## Working Memory",
+                "new_string": added + "## Working Memory",
                 "replace_all": False,
             },
         })
-        assert result is None, (
-            f"teammate should bypass regardless of baseline={baseline}, got {result!r}"
-        )
+        if gated:
+            assert result is not None and result.endswith("Do not change CLAUDE.md yourself, by any route; tell the team-lead."), result
+        else:
+            assert result is None, (baseline, result)
 
     def test_edit_missing_baseline_allows(self, gate_env):
-        """Edit with missing baseline → fail-OPEN (asymmetric rule is Write-only)."""
+        """Edit with no file before → nothing to replace → ALLOW."""
         env = gate_env(pin_count=0, baseline="missing")
         result = _call_gate({
             "tool_name": "Edit",
@@ -687,11 +591,12 @@ class TestPinCapsGate_Matrix_Write:
     def test_write_missing_baseline_over_cap_denies(
         self, gate_env, pre_count
     ):
-        """Write over-cap with missing baseline → fail-CLOSED asymmetric.
+        """Write over-cap with no file before (a first Write) → compared with
+        an empty file, refused on count.
 
         `pre_count` has no semantic meaning here (baseline="missing")
         but we still parametrize to catch any accidental baseline-state
-        dependency on the fail-closed path.
+        dependency on the first-Write path.
         """
         env = gate_env(pin_count=pre_count, baseline="missing")
         new_content = _build_claude_md(13)
@@ -703,12 +608,12 @@ class TestPinCapsGate_Matrix_Write:
             },
         })
         assert result is not None
-        assert "Refusing Write" in result
+        assert "Pin count cap" in result
 
     def test_write_missing_baseline_under_cap_allows(self, gate_env):
-        """Write clean (under-cap) with missing baseline → ALLOW.
+        """Write clean (under-cap) with no file before → ALLOW.
 
-        Asymmetric fail-CLOSED fires ONLY on a concrete over-cap Write.
+        A first Write is refused only when its own pins are over the cap.
         """
         env = gate_env(baseline="missing")
         new_content = _build_claude_md(3)
@@ -763,8 +668,9 @@ class TestPinCapsGate_Matrix_Write:
         assert "override" in result.lower()
 
     @pytest.mark.parametrize("baseline", ["fresh", "missing", "corrupt"])
-    def test_write_teammate_bypass(self, gate_env, baseline):
-        """#878: a non-lead agent_type bypasses (gate keys on is_lead)."""
+    def test_write_teammate_is_gated(self, gate_env, baseline):
+        """A teammate's 99-pin Write is refused whatever the file before, with
+        the ask-the-team-lead text in place of the pin command."""
         env = gate_env(pin_count=3, baseline=baseline)
         result = _call_gate({
             "tool_name": "Write",
@@ -774,7 +680,8 @@ class TestPinCapsGate_Matrix_Write:
                 "content": _build_claude_md(99),
             },
         })
-        assert result is None
+        assert result is not None and result.endswith("Do not change CLAUDE.md yourself, by any route; tell the team-lead."), result
+        assert "/PACT:" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -832,7 +739,7 @@ class TestPinCapsGate_Matrix_Passthrough:
         assert result is None
 
     def test_missing_file_path_allows(self, gate_env):
-        """No file_path → match_project_claude_md returns None → allow."""
+        """No file_path → gate_target returns None → allow."""
         result = _call_gate({
             "tool_name": "Edit",
             "tool_input": {

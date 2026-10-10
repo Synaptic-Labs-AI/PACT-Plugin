@@ -1,10 +1,10 @@
 """
-Tests for hooks/pin_caps.py — parse_pins, cap predicates, slot-status formatter.
+Tests for hooks/pin_caps.py — the pin readers, cap predicates, slot-status formatter.
 
 Risk tier: CRITICAL (enforcement layer for CLAUDE.md surgery). Coverage
 target: 90%+ with adversarial testing.
 
-Test organization uses scope-suffix naming (TestPinCapCount_Gate, etc.) to
+Test organization uses scope-suffix naming (TestEvaluateFullState_Smoke, etc.) to
 avoid basename collision with other test files per pytest shadow-class
 gotcha — duplicate test class basenames across files silently drop the
 losing file's tests.
@@ -18,19 +18,19 @@ class TestParsePins_ParsingSemantics:
     """Parsing entry boundaries, date comments, and stale markers."""
 
     def test_empty_input_returns_empty_list(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         assert parse_pins("") == []
 
     def test_whitespace_only_returns_empty_list(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         assert parse_pins("   \n\n  \n") == []
 
     def test_no_headings_returns_empty_list(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         assert parse_pins("Just prose text without any heading.") == []
 
     def test_single_pin_without_date_comment(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = "### First Entry\nBody text for the first entry.\n"
         pins = parse_pins(content)
         assert len(pins) == 1
@@ -40,7 +40,7 @@ class TestParsePins_ParsingSemantics:
         assert pins[0].is_stale is False
 
     def test_single_pin_with_date_comment(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = "<!-- pinned: 2026-04-11 -->\n### Entry Title\nBody.\n"
         pins = parse_pins(content)
         assert len(pins) == 1
@@ -48,7 +48,7 @@ class TestParsePins_ParsingSemantics:
         assert pins[0].override_rationale is None
 
     def test_pin_with_stale_marker(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = (
             "<!-- pinned: 2026-01-01 -->\n"
             "### Stale Entry\n"
@@ -60,7 +60,7 @@ class TestParsePins_ParsingSemantics:
         assert pins[0].is_stale is True
 
     def test_multiple_pins_parsed_in_order(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = (
             "### First\nBody 1.\n\n"
             "### Second\nBody 2.\n\n"
@@ -70,7 +70,7 @@ class TestParsePins_ParsingSemantics:
         assert [p.heading for p in pins] == ["### First", "### Second", "### Third"]
 
     def test_heading_without_body(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         pins = parse_pins("### Orphan")
         assert len(pins) == 1
         assert pins[0].heading == "### Orphan"
@@ -87,7 +87,7 @@ class TestParsePins_OverrideComment:
 
     def test_live_claude_md_override_line_parses(self):
         """Exact match against the live CLAUDE.md:68 line."""
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = f"{self.LIVE_OVERRIDE_LINE}\n### Entry\nBody.\n"
         pins = parse_pins(content)
         assert len(pins) == 1
@@ -96,7 +96,7 @@ class TestParsePins_OverrideComment:
         )
 
     def test_override_rationale_extracted_exactly(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = (
             "<!-- pinned: 2026-04-20, pin-size-override: reason here -->\n"
             "### Entry\nBody.\n"
@@ -105,7 +105,7 @@ class TestParsePins_OverrideComment:
         assert pins[0].override_rationale == "reason here"
 
     def test_empty_rationale_rejected(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = (
             "<!-- pinned: 2026-04-20, pin-size-override:  -->\n"
             "### Entry\nBody.\n"
@@ -115,7 +115,7 @@ class TestParsePins_OverrideComment:
         assert pins[0].override_rationale is None
 
     def test_rationale_exactly_at_limit_accepted(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         rationale = "x" * 120
         content = (
             f"<!-- pinned: 2026-04-20, pin-size-override: {rationale} -->\n"
@@ -125,7 +125,7 @@ class TestParsePins_OverrideComment:
         assert pins[0].override_rationale == rationale
 
     def test_rationale_over_limit_rejected(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         rationale = "x" * 121
         content = (
             f"<!-- pinned: 2026-04-20, pin-size-override: {rationale} -->\n"
@@ -135,7 +135,7 @@ class TestParsePins_OverrideComment:
         assert pins[0].override_rationale is None
 
     def test_malformed_override_falls_back_to_date_only(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         # Missing rationale keyword entirely — treated as no override.
         content = (
             "<!-- pinned: 2026-04-20, pin-size: nope -->\n"
@@ -149,7 +149,7 @@ class TestParsePins_OverrideComment:
 
         A second override comment further back is not considered.
         """
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = (
             "<!-- pinned: 2026-04-01, pin-size-override: old rationale -->\n"
             "\n"
@@ -162,162 +162,198 @@ class TestParsePins_OverrideComment:
         assert pins[0].date_comment == "<!-- pinned: 2026-04-20 -->"
 
 
-class TestPinCapCount_Gate:
-    """Count-cap boundary matrix — strict predicate len(existing) >= 12."""
+class TestOverrideRationaleText_PublicReader:
+    """The override rationale reader the pin-cap gate shares."""
 
-    def _mk_pins(self, n):
+    @staticmethod
+    def _read(text, row=0):
+        from pin_caps import override_rationale_text
+        from shared.claude_md_markers import parse
+        return override_rationale_text(parse(text), row)
+
+    @pytest.mark.parametrize("row, text", [
+        ("<!-- pinned: 2026-04-20, pin-size-override: reason here -->", "reason here"),
+        ("  <!--pinned:2026-04-20,PIN-SIZE-OVERRIDE:  a-b > c  -->\t", "a-b > c"),
+        ("<!-- pinned: 2026-04-20, pin-size-override:  -->", ""),
+        (f"<!-- pinned: 2026-04-20, pin-size-override: {'x' * 121} -->", "x" * 121),
+        ("<!-- pinned: 2026-04-20, reconfirmed: 2026-07-25 because a, b, pin-size-override: reason -->",
+         "reason"),
+        ("<!-- pinned: 2026-04-20, pin-size-override: reason, reconfirmed: 2026-07-25 because a, b -->",
+         "reason"),
+        ("<!-- PINNED: 2026-04-20, PIN-SIZE-OVERRIDE: reason , Reconfirmed:2026-07-25 because x -->",
+         "reason"),
+        ("<!-- pinned: 2026-04-20, pin-size-override: keep a, b, reconfirmed: soon -->",
+         "keep a, b, reconfirmed: soon"),
+        ("<!-- pinned: 2026-04-20, reconfirmed: 2026-07-01 because a, pin-size-override: reason, "
+         "reconfirmed: 2026-07-25 because b -->", "reason"),
+        ("<!-- pinned: 2026-04-20, pin-size-override: keep (v2) -->", "keep (v2)"),
+        ("<!-- pinned: 2026-04-20, pin-size-override: keep it. -->", "keep it."),
+        ("<!-- pinned: 2026-04-20, pin-size-override: keep (v2). - reconfirmed: 2026-07-25 because x -->",
+         "keep (v2"),
+        ("<!-- pinned: 2026-04-20, pin-size-override: ; reconfirmed: 2026-07-25 because x -->", ""),
+        ("<!-- pinned: 2026-04-20, pin-size-override: / reconfirmed: 2026-07-25 because x -->", ""),
+        ("<!-- pinned: 2026-04-20, pin-size-override: \U0001f512, reconfirmed: 2026-07-25 because x -->",
+         "\U0001f512"),
+        ("<!-- pinned: 2026-04-20, pin-size-override: ?!; reconfirmed: 2026-07-25 because x -->", "?!"),
+        ("<!-- pinned: 2026-04-20 (reconfirmed: 2026-07-25 because a, b), pin-size-override: reason -->",
+         "reason"),
+    ], ids=["plain", "spacing and case", "empty field", "over the limit", "reconfirmed before it",
+            "reconfirmed after it", "reconfirmed after it, any case", "a reconfirmed word with no date",
+            "reconfirmed on both sides", "a closing parenthesis kept", "a closing full stop kept",
+            "the punctuation run before a reconfirmation dropped", "only a separator before a reconfirmation",
+            "only a slash before a reconfirmation", "a symbol rationale keeps its symbol",
+            "a punctuation rationale keeps its punctuation",
+            "reconfirmed in parentheses before it, a comma in the reason"])
+    def test_it_returns_the_stripped_field_before_any_validity_check(self, row, text):
+        assert self._read(f"{row}\n### Entry\nBody.\n") == text
+
+    @pytest.mark.parametrize("row", [
+        "<!-- pinned: 2026-04-20 -->",
+        "<!-- pinned: 2026-04-20, pin-size: nope -->",
+        "<!-- pinned: 2026-04-20, pin-size-override: reason --> then prose",
+        "<!-- pinned: 2026-04-20 --> , pin-size-override: reason -->",
+        "### Entry",
+        "<!-- pinned: 2026-04-20, reconfirmed: 2026-07-25 because x -->",
+        "<!-- pinned: 2026-04-20, note: x, pin-size-override: reason -->",
+        "<!-- pinned: 2026-04-20, note: x; reconfirmed: 2026-07-25 because y, pin-size-override: reason -->",
+    ], ids=["date only", "other field", "prose after it", "field after a closed comment", "heading",
+            "reconfirmed only", "another field before the override",
+            "another field before a reconfirmation before the override"])
+    def test_it_is_none_for_a_row_that_is_not_an_override_comment(self, row):
+        assert self._read(f"{row}\n### Entry\nBody.\n") is None
+
+    def test_it_is_none_for_an_override_comment_inside_a_fenced_block(self):
+        row = "<!-- pinned: 2026-04-20, pin-size-override: reason here -->"
+        assert self._read(f"```\n{row}\n```\n", row=1) is None
+
+    def test_a_row_of_repeated_override_fields_is_read_in_linear_time(self):
+        """A row that is not one closed pin comment is no override, however
+        many `, pin-size-override:` fields it holds: the date row refuses it in
+        one pass, before the override head is read."""
+        import time
+
+        from fixtures.pin_helpers import parse_pins
+
+        for tail in (" x", " --> x"):
+            row = "<!-- pinned: d" + ", pin-size-override: a" * 2000 + tail
+            started = time.perf_counter()
+            assert self._read(f"{row}\n### Entry\nBody.\n") is None
+            assert parse_pins(f"{row}\n### Entry\nBody.\n")[0].date_comment is None
+            assert time.perf_counter() - started < 2.0, tail
+
+
+class TestPinsInRows_PublicReader:
+    """The public reader of the pins in a row range of a whole-file parse."""
+
+    TEXT = (
+        "# Notes\n<!-- PACT_MEMORY_START -->\n## Pinned Context\n"
+        "<!-- pinned: 2026-04-20 -->\n### First\nbody one\n```\n### fenced, not a pin\n```\n"
+        "<!-- pinned: 2026-04-21, pin-size-override: reason here -->\n### Second\nbody two\n"
+        "## Working Memory\n<!-- PACT_MEMORY_END -->\n"
+    )
+
+    def _located(self):
+        from shared.claude_md_markers import parse
+        from staleness import locate_pinned
+        doc = parse(self.TEXT)
+        located = locate_pinned(doc)
+        return doc, located, located.spans[0]
+
+    def test_over_the_section_body_it_reads_what_section_pins_reads(self):
+        from pin_caps import pins_in_rows, section_pins
+        doc, located, (heading, last) = self._located()
+        pins = pins_in_rows(doc, heading + 1, last)
+        assert pins == section_pins(doc, located)
+        assert [pin.heading for pin in pins] == ["### First", "### Second"]
+        assert "### fenced, not a pin" in pins[0].body
+        assert pins[1].override_rationale == "reason here"
+
+    def test_a_narrower_range_reads_only_the_pins_headed_in_it(self):
+        from pin_caps import pins_in_rows
+        doc, _, (heading, last) = self._located()
+        second = next(row for row in range(heading, last + 1) if doc.lines[row].content == "### Second")
+        (pin,) = pins_in_rows(doc, second - 1, last)
+        assert (pin.heading, pin.override_rationale) == ("### Second", "reason here")
+
+    def test_an_empty_range_reads_no_pins(self):
+        from pin_caps import pins_in_rows
+        doc, _, (heading, _) = self._located()
+        assert pins_in_rows(doc, heading + 1, heading) == []
+
+
+class TestCharge_StrikeUpToTheLastClose:
+    """The charge strikes pin comments only up to a row's last `-->`."""
+
+    FRAGMENTS = ["<!-- pinned: ", "<!--pinned:", "2026-04-11", ", pin-size-override: r", "-->", " -->",
+                 "<!-- STALE: Last relevant 2026-01-01 -->", "<!-- STALE: Last relevant ", "text", "-", ">",
+                 "--", " ", "\t", "<!--"]
+
+    def test_it_charges_what_striking_the_whole_row_charges(self):
+        import random
+        from pin_caps import _MANAGED_COMMENT_RE, _charge
+        from shared.claude_md_markers import parse
+        rnd = random.Random(13)
+        for _ in range(5_000):
+            row = "".join(rnd.choice(self.FRAGMENTS) for _ in range(rnd.randint(1, 16)))
+            expected = len(_MANAGED_COMMENT_RE.sub("", row).rstrip(" \t").strip())
+            assert _charge(parse(row), 0, 0) == expected, row
+
+    def test_a_comment_after_the_last_close_is_not_struck_and_one_before_it_is(self):
+        from pin_caps import _charge
+        from shared.claude_md_markers import parse
+        row = "a <!-- pinned: 2026-04-11 --> b <!-- pinned: open"
+        assert _charge(parse(row), 0, 0) == len("a  b <!-- pinned: open")
+
+
+class TestPinCountCap_EveryPinOccupiesASlot:
+    """The count axis counts every pin, whatever it carries. A size override
+    exempts a pin from the size cap only, and a STALE pin still holds its
+    slot until it is archived."""
+
+    def _pins(self, n, *, override=False, stale=False):
         from pin_caps import Pin
         return [
-            Pin(heading=f"### P{i}", body="x", body_chars=1,
-                date_comment=None, override_rationale=None, is_stale=False)
+            Pin(heading=f"### P{i}", body="x" * 2000, body_chars=2000,
+                date_comment=None,
+                override_rationale="verbatim" if override else None,
+                is_stale=stale)
             for i in range(n)
         ]
 
-    def test_count_below_cap_allows_add(self):
-        """At 11/12, adding is allowed."""
-        from pin_caps import check_add_allowed
-        assert check_add_allowed(self._mk_pins(11), "new", False) is None
+    @pytest.mark.parametrize("override,stale", [(True, False), (False, True), (True, True)])
+    def test_a_13th_pin_is_refused_whatever_the_pins_carry(self, override, stale):
+        from pin_caps import compute_deny_reason
+        pre = self._pins(12, override=override, stale=stale)
+        post = self._pins(13, override=override, stale=stale)
+        reason = compute_deny_reason(pre, post, growth=1)
+        assert reason is not None and "13/12" in reason
 
-    def test_count_at_cap_refuses_add(self):
-        """At 12/12, off-by-one hazard — predicate is >=."""
-        from pin_caps import check_add_allowed
-        result = check_add_allowed(self._mk_pins(12), "new", False)
-        assert result is not None
-        assert result.kind == "count"
-        assert result.current_count == 12
-        assert "12/12" in result.detail
-
-    def test_count_above_cap_refuses_add(self):
-        from pin_caps import check_add_allowed
-        result = check_add_allowed(self._mk_pins(13), "new", False)
-        assert result is not None
-        assert result.kind == "count"
-        assert result.current_count == 13
-
-    def test_count_zero_allows_add(self):
-        from pin_caps import check_add_allowed
-        assert check_add_allowed([], "new", False) is None
-
-    def test_count_cap_ignores_override_flag(self):
-        """Override is a SIZE bypass only, not a count bypass."""
-        from pin_caps import check_add_allowed
-        result = check_add_allowed(self._mk_pins(12), "new", True)
-        assert result is not None
-        assert result.kind == "count"
+    def test_an_override_on_the_added_pin_does_not_lift_the_count_cap(self):
+        from pin_caps import compute_deny_reason
+        pre = self._pins(12, override=True)
+        post = pre + self._pins(1, override=True)
+        assert "13/12" in (compute_deny_reason(pre, post, growth=1) or "")
 
 
-class TestPinSizeCap_Gate:
-    """Size-cap boundary matrix × override state — 1499 / 1500 / 1501."""
+class TestParsePins_HeadingShape:
+    """Only a `### ` line is a pin heading."""
 
-    @pytest.mark.parametrize("body_chars,expected_violation", [
-        (1499, False),
-        (1500, False),  # predicate is > not >=, so exactly at cap is allowed
-        (1501, True),
-    ])
-    def test_size_boundary_without_override(self, body_chars, expected_violation):
-        from pin_caps import check_add_allowed
-        body = "x" * body_chars
-        result = check_add_allowed([], body, False)
-        if expected_violation:
-            assert result is not None
-            assert result.kind == "size"
-            assert result.offending_pin_chars == body_chars
-        else:
-            assert result is None
+    def test_an_h4_line_is_not_a_pin(self):
+        from fixtures.pin_helpers import parse_pins
+        pins = parse_pins("### Real\nBody with subsection:\n#### H4 Title\nnested content\n")
+        assert [p.heading for p in pins] == ["### Real"]
 
-    @pytest.mark.parametrize("body_chars", [1499, 1500, 1501, 5000])
-    def test_override_bypasses_size_cap(self, body_chars):
-        """Valid override → any size is allowed."""
-        from pin_caps import check_add_allowed
-        body = "x" * body_chars
-        assert check_add_allowed([], body, True) is None
-
-    def test_size_violation_detail_includes_cap(self):
-        from pin_caps import check_add_allowed
-        result = check_add_allowed([], "x" * 2000, False)
-        assert result is not None
-        assert "1500" in result.detail
-        assert "2000" in result.detail
-
-
-class TestCheckAddAllowed_EmbeddedHeading:
-    """Embedded-pin cap-bypass defense: candidate bodies containing a
-    level-3 heading (`### `) are rejected because parse_pins on reload
-    would count them as additional pins, defeating the count cap.
-
-    Conservative by design (per team-lead direction 2026-04-21): rejects ANY
-    embedded pin structure detected by parse_pins, whether accompanied
-    by a date-comment or not. Legitimate pin bodies can use `#### ` or
-    bold/italic for in-body structure.
-
-    Counter-test-by-revert: remove the `if parse_pins(new_body): ...`
-    branch and the `test_embedded_pin_structure_rejected` +
-    `test_lone_heading_rejected_conservative` cases go red.
-    """
-
-    def test_normal_body_allowed(self):
-        """Plain body with no heading or pin-comment — allowed."""
-        from pin_caps import check_add_allowed
-        assert check_add_allowed([], "regular content with no headings", False) is None
-
-    def test_embedded_pin_structure_rejected(self):
-        """Body smuggling a full `<!-- pinned:-->\\n### Heading` pair — rejected."""
-        from pin_caps import check_add_allowed
-        body = "<!-- pinned: 2026-04-21 -->\n### Embedded Pin\nbody"
-        result = check_add_allowed([], body, False)
-        assert result is not None
-        assert result.kind == "embedded_pin"
-        assert "smuggle" in result.detail.lower()
-
-    def test_prose_mentioning_pin_syntax_allowed(self):
-        """Body referencing pin comment inline with no `### ` heading — allowed."""
-        from pin_caps import check_add_allowed
-        body = "Look at the <!-- pinned: x --> line in CLAUDE.md for the canonical form"
-        assert check_add_allowed([], body, False) is None
-
-    def test_lone_heading_rejected_conservative(self):
-        """Body with lone `### ` heading (no preceding date-comment) — REJECTED.
-
-        parse_pins returns a Pin for heading-only entries (date_comment=None),
-        and that Pin counts toward the cap on reload. Conservative check
-        closes the smuggle vector regardless of date-comment presence.
-        """
-        from pin_caps import check_add_allowed
-        body = "### Just a heading\nbody content"
-        result = check_add_allowed([], body, False)
-        assert result is not None
-        assert result.kind == "embedded_pin"
-
-    def test_h4_heading_in_body_allowed(self):
-        """`#### ` (H4) does not match the `^### ` pin-heading pattern — allowed."""
-        from pin_caps import check_add_allowed
-        body = "Body with subsection:\n#### H4 Title\nnested content"
-        assert check_add_allowed([], body, False) is None
-
-    def test_embedded_pin_ignores_other_cap_paths(self):
-        """Embedded-pin check fires after count + size caps; fresh state passes those."""
-        from pin_caps import check_add_allowed
-        # Zero existing pins, small body, but contains embedded structure.
-        body = "### Smuggle\nx"
-        result = check_add_allowed([], body, False)
-        assert result is not None
-        assert result.kind == "embedded_pin"
-        assert result.current_count == 0
-
-    def test_embedded_pin_not_bypassed_by_override(self):
-        """Override flag is a SIZE-cap bypass only — must not bypass embedded check."""
-        from pin_caps import check_add_allowed
-        body = "<!-- pinned: 2026-04-21 -->\n### Embedded\nbody"
-        result = check_add_allowed([], body, True)
-        assert result is not None
-        assert result.kind == "embedded_pin"
+    def test_prose_mentioning_a_pin_comment_is_not_a_pin(self):
+        from fixtures.pin_helpers import parse_pins
+        body = "Look at the <!-- pinned: x --> line in CLAUDE.md for the canonical form\n"
+        assert parse_pins(body) == []
 
 
 class TestExtractBodyChars:
     """body_chars excludes auto-generated markers (date comment, STALE marker)."""
 
     def test_plain_body_counted_in_full(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         body = "x" * 500
         content = f"### Entry\n{body}\n"
         pins = parse_pins(content)
@@ -325,7 +361,7 @@ class TestExtractBodyChars:
         assert pins[0].body_chars == 500
 
     def test_stale_marker_excluded_from_count(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         body_text = "x" * 100
         content = (
             "### Entry\n"
@@ -337,7 +373,7 @@ class TestExtractBodyChars:
         assert pins[0].body_chars == 100
 
     def test_date_comment_inside_body_excluded(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         body_text = "y" * 50
         content = (
             "### Entry\n"
@@ -501,17 +537,12 @@ def _make_pin(heading="### X", body_chars=100, override=False):
     )
 
 
-def _managed_content(pinned_section_body: str) -> str:
-    """Wrap pinned-section body in the PACT_MANAGED region so
-    _parse_pinned_section can extract it. Matches the structure produced
-    by claude_md_manager.
-    """
-    return (
-        "# PACT\n\n"
-        "<!-- PACT_MANAGED_START -->\n"
-        "## Pinned Context\n"
-        f"{pinned_section_body}"
-        "<!-- PACT_MANAGED_END -->\n"
+def _pin_text(*names, undated=()):
+    """A pinned body holding one pin per name, dated unless named in `undated`."""
+    return "".join(
+        ("" if name in undated else "<!-- pinned: 2026-04-21 -->\n")
+        + f"### {name}\nbody of {name}\n\n"
+        for name in names
     )
 
 
@@ -555,149 +586,6 @@ class TestEvaluateFullState_Smoke:
         assert evaluate_full_state(pins) is None
 
 
-class TestApplyEditAndParse_Smoke:
-    """apply_edit_and_parse — Edit/Write simulation + section-bounded parse."""
-
-    def test_write_full_replacement_parses_pins(self):
-        from pin_caps import apply_edit_and_parse
-        new = _managed_content(
-            "<!-- pinned: 2026-04-21 -->\n### A\nBody A.\n\n"
-        )
-        pins = apply_edit_and_parse(current_content="", tool_input={"content": new})
-        assert len(pins) == 1
-        assert pins[0].heading == "### A"
-
-    def test_edit_single_match_adds_pin(self):
-        from pin_caps import apply_edit_and_parse
-        before = _managed_content("<!-- pinned: 2026-04-21 -->\n### A\nBody.\n\n")
-        tool_input = {
-            "old_string": "### A\nBody.\n",
-            "new_string": "### A\nBody.\n\n<!-- pinned: 2026-04-21 -->\n### B\nBody B.\n",
-            "replace_all": False,
-        }
-        pins = apply_edit_and_parse(current_content=before, tool_input=tool_input)
-        assert [p.heading for p in pins] == ["### A", "### B"]
-
-    def test_edit_replace_all_applies_all_matches(self):
-        from pin_caps import apply_edit_and_parse
-        before = _managed_content(
-            "<!-- pinned: 2026-04-21 -->\n### A\nKEEP.\n\n"
-            "<!-- pinned: 2026-04-21 -->\n### B\nKEEP.\n\n"
-        )
-        tool_input = {
-            "old_string": "KEEP.",
-            "new_string": "REPLACED.",
-            "replace_all": True,
-        }
-        pins = apply_edit_and_parse(current_content=before, tool_input=tool_input)
-        assert all("REPLACED" in p.body for p in pins)
-
-    def test_missing_pinned_section_returns_empty(self):
-        from pin_caps import apply_edit_and_parse
-        # No Pinned Context section at all.
-        pins = apply_edit_and_parse(
-            current_content="",
-            tool_input={"content": "# Some\nRandom content.\n"},
-        )
-        assert pins == []
-
-    def test_write_non_string_content_raises(self):
-        from pin_caps import apply_edit_and_parse
-        with pytest.raises(TypeError):
-            apply_edit_and_parse(
-                current_content="", tool_input={"content": 42},
-            )
-
-    def test_edit_non_string_strings_raise(self):
-        from pin_caps import apply_edit_and_parse
-        with pytest.raises(TypeError):
-            apply_edit_and_parse(
-                current_content="x",
-                tool_input={"old_string": 1, "new_string": "y"},
-            )
-
-    def test_edit_empty_old_string_replace_all_no_op(self):
-        """F6 #492 cycle-4: Edit with empty old_string + replace_all=True must
-        simulate as a no-op (return pre-state parse), not run str.replace which
-        would interleave new_string between every character and produce gibberish.
-
-        Pre-fix behavior: `str.replace(current, "", JUNK)` yields
-        `JUNKjJUNKuJUNK...` etc.; _parse_pinned_section returns None;
-        parse_pins returns []; compute_deny_reason compares post=[] vs pre,
-        sees no net-worse violation, allows. A curator could weaponize
-        this to pass the gate while the real Edit tool's behavior on
-        empty old_string is undefined/harmful.
-
-        Post-fix: empty old_string is treated as a no-op -> post-state
-        equals pre-state -> gate's net-worse contract kicks in normally.
-        """
-        from pin_caps import apply_edit_and_parse
-        before = _managed_content(
-            "<!-- pinned: 2026-04-21 -->\n### A\nBody A.\n\n"
-            "<!-- pinned: 2026-04-21 -->\n### B\nBody B.\n\n"
-        )
-        tool_input = {
-            "old_string": "",
-            "new_string": "JUNK",
-            "replace_all": True,
-        }
-        pins = apply_edit_and_parse(current_content=before, tool_input=tool_input)
-        # Pre-state has 2 pins; post-state must match.
-        assert len(pins) == 2
-        assert [p.heading for p in pins] == ["### A", "### B"]
-        # Bodies must not contain any JUNK interleaving.
-        assert all("JUNK" not in p.body for p in pins), (
-            "F6 regressed: empty-old-string with replace_all=True interleaved "
-            "new_string into pin bodies (str.replace behavior leaked through)."
-        )
-
-    def test_edit_empty_old_string_replace_all_false_no_op(self):
-        """F6 counter: empty old_string with replace_all=False must also
-        no-op. str.replace(s, "", new, 1) prepends `new` once at position
-        0 — which is BEFORE the managed-region markers. A naive assertion
-        on pin body content would be trivially satisfied because
-        _parse_pinned_section isolates the managed region (phantom-green
-        #492 F6.1).
-
-        Differentiating probe: craft new_string as a FULL synthetic
-        managed region containing a smuggled pin. Under str.replace
-        revert, the prepend creates a second managed region at position
-        0 that extract_managed_region picks up first → parsed pins are
-        the SMUGGLED pin, not the original. Under the F6 no-op guard,
-        the original managed region is preserved → parsed pins are the
-        ORIGINAL pin.
-        """
-        from pin_caps import apply_edit_and_parse
-        before = _managed_content(
-            "<!-- pinned: 2026-04-21 -->\n### A\nBody A.\n\n"
-        )
-        # Smuggle payload: a full synthetic managed region wrapping an
-        # "### Evil" pin. If str.replace runs (revert), this prepends a
-        # spurious managed region at position 0 that extract_managed_region
-        # captures first — parsed pins become [Evil], not [A].
-        smuggle_payload = (
-            "<!-- PACT_MANAGED_START -->\n"
-            "## Pinned Context\n"
-            "<!-- pinned: 2026-04-21 -->\n### Evil\nevil body.\n\n"
-            "<!-- PACT_MANAGED_END -->\n"
-        )
-        tool_input = {
-            "old_string": "",
-            "new_string": smuggle_payload,
-            "replace_all": False,
-        }
-        pins = apply_edit_and_parse(current_content=before, tool_input=tool_input)
-        assert len(pins) == 1
-        # Load-bearing assertion: the ORIGINAL pin heading survives, NOT
-        # the smuggled one. Under revert, this assertion fails because
-        # the smuggled managed region is the one parsed.
-        assert pins[0].heading == "### A", (
-            f"F6 regressed: empty-old-string + replace_all=False allowed "
-            f"str.replace to prepend a synthetic managed region, smuggling "
-            f"a pin past the no-op guard. Got heading {pins[0].heading!r}."
-        )
-
-
 class TestComputeDenyReason_Smoke:
     """compute_deny_reason — net-worse predicate over pre/post pin states."""
 
@@ -705,13 +593,13 @@ class TestComputeDenyReason_Smoke:
         from pin_caps import compute_deny_reason
         pre = [_make_pin() for _ in range(3)]
         post = [_make_pin() for _ in range(4)]
-        assert compute_deny_reason(pre, post, new_body="") is None
+        assert compute_deny_reason(pre, post) is None
 
     def test_pre_clean_post_count_violation_denies(self):
         from pin_caps import PIN_COUNT_CAP, compute_deny_reason
         pre = [_make_pin(heading=f"### P{i}") for i in range(PIN_COUNT_CAP)]
         post = pre + [_make_pin(heading="### Extra")]
-        reason = compute_deny_reason(pre, post, new_body="")
+        reason = compute_deny_reason(pre, post)
         assert reason is not None
         assert "Pin count cap" in reason
         assert "prune-memory" in reason
@@ -721,39 +609,85 @@ class TestComputeDenyReason_Smoke:
         from pin_caps import PIN_COUNT_CAP, compute_deny_reason
         pre = [_make_pin(heading=f"### P{i}") for i in range(PIN_COUNT_CAP + 3)]
         post = list(pre)  # Refactor Edit — count unchanged.
-        assert compute_deny_reason(pre, post, new_body="") is None
+        assert compute_deny_reason(pre, post) is None
 
     def test_pre_over_cap_post_decreases_allows(self):
         from pin_caps import PIN_COUNT_CAP, compute_deny_reason
         pre = [_make_pin(heading=f"### P{i}") for i in range(PIN_COUNT_CAP + 3)]
         post = pre[:-1]  # Archival Edit — count down by 1.
-        assert compute_deny_reason(pre, post, new_body="") is None
+        assert compute_deny_reason(pre, post) is None
 
     def test_pre_over_cap_post_even_worse_denies(self):
         from pin_caps import PIN_COUNT_CAP, compute_deny_reason
         pre = [_make_pin(heading=f"### P{i}") for i in range(PIN_COUNT_CAP + 1)]
         post = pre + [_make_pin(heading="### MoreWorse")]
-        reason = compute_deny_reason(pre, post, new_body="")
+        reason = compute_deny_reason(pre, post)
         assert reason is not None
         assert "Pin count cap" in reason
 
-    def test_embedded_pin_in_body_denies_regardless_of_state(self):
+    # NO EMBEDDED-PIN CHECK. A `### ` line smuggled into a pin body is a pin
+    # once the body is parsed, so the pin-growth rule counts it and the count
+    # axis denies it. A fenced one is not a pin. The check's only remaining
+    # effect was to refuse renames, swaps, moves and add-one-delete-one changes
+    # of an undated pin, which add no pin. The rows below pin its removal: each
+    # change was DENIED by the removed check and is ALLOWED now. `growth` is the
+    # value the pin-growth rule gives each change.
+
+    def test_the_embedded_pin_check_and_its_parameter_are_gone(self):
+        import inspect
+        import typing
+
+        import pin_caps
+        assert "new_body" not in inspect.signature(pin_caps.compute_deny_reason).parameters
+        assert not hasattr(pin_caps, "DENY_REASON_EMBEDDED_PIN")
+        assert not hasattr(pin_caps, "check_add_allowed")
+        kinds = typing.get_args(typing.get_type_hints(pin_caps.CapViolation)["kind"])
+        assert "count" in kinds and "embedded_pin" not in kinds
+
+    def test_an_undated_rename_below_the_cap_is_allowed(self):
         from pin_caps import compute_deny_reason
-        pre = []
-        post = [_make_pin()]
-        reason = compute_deny_reason(
-            pre, post, new_body="### Sneaky Heading\nBody.\n"
-        )
-        assert reason is not None
-        assert "embedded pin structure" in reason
+        from fixtures.pin_helpers import parse_pins
+        pre = parse_pins(_pin_text("A", "B", "C"))
+        post = parse_pins(_pin_text("A", "Renamed", "C", undated=("Renamed",)))
+        assert post[1].date_comment is None
+        assert compute_deny_reason(pre, post, growth=0) is None
+
+    @pytest.mark.parametrize("change", ["rename", "swap", "move", "add one, delete one"])
+    def test_an_undated_change_that_adds_no_pin_is_allowed_at_13(self, change):
+        from pin_caps import compute_deny_reason
+        from fixtures.pin_helpers import parse_pins
+        names = [f"P{i}" for i in range(13)]
+        if change == "rename":
+            after, undated = names[:12] + ["Renamed"], ("Renamed",)
+        elif change == "swap":
+            after, undated = [names[1], names[0]] + names[2:], (names[0],)
+        elif change == "move":
+            after, undated = names[1:] + [names[0]], (names[0],)
+        else:
+            after, undated = names[1:] + ["Brand new"], ("Brand new",)
+        pre = parse_pins(_pin_text(*names))
+        post = parse_pins(_pin_text(*after, undated=undated))
+        assert len(pre) == len(post) == 13
+        assert compute_deny_reason(pre, post, growth=0) is None
+
+    def test_a_prose_heading_smuggled_into_a_body_at_12_is_denied_on_count(self):
+        from pin_caps import compute_deny_reason
+        from fixtures.pin_helpers import parse_pins
+        names = [f"P{i}" for i in range(12)]
+        before = _pin_text(*names)
+        after = before.replace("body of P3\n", "body of P3\n### smuggled\nmore\n")
+        pre, post = parse_pins(before), parse_pins(after)
+        assert (len(pre), len(post)) == (12, 13)
+        reason = compute_deny_reason(pre, post, growth=1)
+        assert reason is not None and "Pin count cap reached (13/12)" in reason
 
     def test_pre_clean_post_size_violation_denies(self):
         from pin_caps import PIN_SIZE_CAP, compute_deny_reason
         pre = [_make_pin(body_chars=100)]
         post = [_make_pin(body_chars=PIN_SIZE_CAP + 50, override=False)]
-        reason = compute_deny_reason(pre, post, new_body="")
+        reason = compute_deny_reason(pre, post)
         assert reason is not None
-        assert "New pin body" in reason
+        assert f"Pin size cap ({PIN_SIZE_CAP} chars) exceeded: 'X' is {PIN_SIZE_CAP + 50} chars." in reason
 
     def test_multi_kind_pre_count_plus_size_reducing_count_allows(self):
         """Pre-state has BOTH count AND size violations; Edit reduces count
@@ -783,7 +717,7 @@ class TestComputeDenyReason_Smoke:
         post = pre[:-2] + [pre[-1]]
         assert len(post) <= PIN_COUNT_CAP  # count-violation resolved
         # Remediation must be allowed — the size violation is net-equivalent.
-        assert compute_deny_reason(pre, post, new_body="") is None
+        assert compute_deny_reason(pre, post) is None
 
     def test_multi_kind_pre_count_plus_size_worsening_size_denies(self):
         """Same pre-state (count + size) but the Edit WORSENS size while
@@ -801,9 +735,9 @@ class TestComputeDenyReason_Smoke:
         post = pre[:-2] + [_make_pin(heading="### Huge",
                                      body_chars=PIN_SIZE_CAP + 200,
                                      override=False)]
-        reason = compute_deny_reason(pre, post, new_body="")
+        reason = compute_deny_reason(pre, post)
         assert reason is not None
-        assert "New pin body" in reason
+        assert f"exceeded: 'Huge' is {PIN_SIZE_CAP + 200} chars." in reason
 
     def test_multi_kind_pre_count_plus_size_same_kind_size_worsens_denies(self):
         """F4 Pareto positive: pre and post both have count violation
@@ -829,7 +763,7 @@ class TestComputeDenyReason_Smoke:
         post.append(_make_pin(heading="### Huge",
                               body_chars=PIN_SIZE_CAP + 200, override=False))
         assert len(post) == len(pre)  # count unchanged
-        reason = compute_deny_reason(pre, post, new_body="")
+        reason = compute_deny_reason(pre, post)
         assert reason is not None
         assert f"{PIN_SIZE_CAP + 200}" in reason, (
             f"deny-reason should reference the worsened size "
@@ -848,7 +782,7 @@ class TestComputeDenyReason_Smoke:
         pre.append(_make_pin(heading="### Huge",
                              body_chars=PIN_SIZE_CAP + 50, override=False))
         post = list(pre)  # identical state
-        assert compute_deny_reason(pre, post, new_body="") is None
+        assert compute_deny_reason(pre, post) is None
 
     def test_count_improves_size_worsens_denies(self):
         """F4 asymmetry cover: count IMPROVES (still violating but fewer
@@ -867,7 +801,7 @@ class TestComputeDenyReason_Smoke:
         post.append(_make_pin(heading="### Huge",
                               body_chars=PIN_SIZE_CAP + 200, override=False))
         assert len(post) == PIN_COUNT_CAP + 1 and len(post) < len(pre)
-        reason = compute_deny_reason(pre, post, new_body="")
+        reason = compute_deny_reason(pre, post)
         assert reason is not None
         assert f"{PIN_SIZE_CAP + 200}" in reason
 
@@ -895,7 +829,7 @@ class TestComputeDenyReason_Smoke:
             _make_pin(heading="### A", body_chars=PIN_SIZE_CAP + 90),
             _make_pin(heading="### B", body_chars=PIN_SIZE_CAP + 1000),
         ]
-        reason = compute_deny_reason(pre, post, new_body="")
+        reason = compute_deny_reason(pre, post)
         assert reason is not None, (
             "F5 regression: non-first-violator worsening must deny via "
             "max-violator scalar"
@@ -921,7 +855,7 @@ class TestComputeDenyReason_Smoke:
             _make_pin(heading="### A", body_chars=PIN_SIZE_CAP + 90),
             _make_pin(heading="### B", body_chars=PIN_SIZE_CAP + 500),
         ]
-        assert compute_deny_reason(pre, post, new_body="") is None
+        assert compute_deny_reason(pre, post) is None
 
 
 class TestDenyReasonTemplates_Constants:
@@ -955,12 +889,9 @@ class TestDenyReasonTemplates_Constants:
 
     def test_size_template_renders(self):
         from pin_caps import DENY_REASON_SIZE, PIN_SIZE_CAP
-        rendered = DENY_REASON_SIZE.format(chars=PIN_SIZE_CAP + 100, cap=PIN_SIZE_CAP)
-        assert str(PIN_SIZE_CAP) in rendered
+        rendered = DENY_REASON_SIZE.format(pins="'P' is 1600 chars", cap=PIN_SIZE_CAP)
+        assert rendered.startswith(f"Pin size cap ({PIN_SIZE_CAP} chars) exceeded: 'P' is 1600 chars. ")
 
-    def test_embedded_pin_template_is_static(self):
-        from pin_caps import DENY_REASON_EMBEDDED_PIN
-        assert "### " in DENY_REASON_EMBEDDED_PIN
 
     def test_override_missing_template_renders(self):
         from pin_caps import DENY_REASON_OVERRIDE_MISSING, PIN_SIZE_CAP

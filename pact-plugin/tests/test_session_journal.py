@@ -2910,11 +2910,13 @@ class TestExtractPrevSessionDir:
         claude_md = tmp_path / "CLAUDE.md"
         claude_md.write_text(
             "# Project\n"
+            "<!-- SESSION_START -->\n"
             "## Current Session\n"
             "- Resume: `claude --resume abc123`\n"
             "- Team: `pact-abc12345`\n"
             "- Session dir: `~/.claude/pact-sessions/myproject/abc123`\n"
             "- Started: 2026-04-05\n"
+            "<!-- SESSION_END -->\n"
         )
         named = Path.home() / ".claude" / "pact-sessions" / "myproject" / "abc123"
         assert str(named).startswith(str(tmp_path))
@@ -2931,10 +2933,12 @@ class TestExtractPrevSessionDir:
         claude_md = tmp_path / "CLAUDE.md"
         claude_md.write_text(
             "# Project\n"
+            "<!-- SESSION_START -->\n"
             "## Current Session\n"
             "- Resume: `claude --resume abc12345-6789-0123-4567-890123456789`\n"
             "- Team: `pact-abc12345`\n"
             "- Started: 2026-04-05\n"
+            "<!-- SESSION_END -->\n"
         )
 
         result = _extract_prev_session_dir(str(tmp_path))

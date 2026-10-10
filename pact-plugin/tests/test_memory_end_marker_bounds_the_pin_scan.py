@@ -1,12 +1,12 @@
-"""The pin scan stops at the memory end marker, and no line of code says so.
+"""The pin scan stops at the memory end marker.
 
-WHAT THIS GUARDS. `staleness._parse_pinned_section` infers the end of the
-pinned body with a terminator alternation built from `PACT_BOUNDARY_PREFIXES`.
-`MEMORY_END_MARKER` is `<!-- PACT_MEMORY_END -->`, so it carries the
-`PACT_MEMORY_` prefix and the scan stops at it BY PREFIX MEMBERSHIP. NO LINE OF
-THAT FUNCTION NAMES THE MARKER. So a reader of the CODE sees no end bound and a
-driver of a DOCUMENT sees one, and a rename of the marker out of the prefix
-family removes the bound with nothing to see at either site.
+WHAT THIS GUARDS. `staleness.locate_pinned` resolves the memory block by its
+two markers and searches for the Pinned section inside it, and the section's
+stop prefixes, built from `PACT_BOUNDARY_PREFIXES`, also end it at any
+`<!-- PACT_MEMORY_` line. So the memory end marker bounds the pinned body two
+ways, and the controls below show what happens when neither holds: a body that
+runs on swallows the text below the marker, and a memory start marker left
+without its end makes the block MALFORMED, so the section is not read at all.
 
 THE RENAME IS THE EDIT THIS FILE EXISTS TO REDDEN. It happens in
 `claude_md_manager`, which is neither the reader nor the pin writer, so the
@@ -95,7 +95,7 @@ A_MARKER_OUTSIDE_THE_PREFIX_FAMILY = "<!-- NOT_A_PACT_BOUNDARY_END -->"
 PIN_BODY = "### A pin\nPinned prose.\n"
 
 
-def build_document(end_marker: str) -> str:
+def build_document(end_marker: str, start_marker: str = MEMORY_START_MARKER) -> str:
     """Compose a managed document with `end_marker` closing the memory region.
 
     The memory region holds Retrieved Context and Pinned Context and NO Working
@@ -110,7 +110,7 @@ def build_document(end_marker: str) -> str:
         "## Current Session\n"
         "- Resume: a session line\n"
         "<!-- PACT_SESSION_END -->\n"
-        f"{MEMORY_START_MARKER}\n"
+        f"{start_marker}\n"
         "## Retrieved Context\n"
         "\n"
         "## Pinned Context\n"
@@ -141,11 +141,9 @@ def test_the_pinned_body_stops_at_the_memory_end_marker():
         "pinned section and its absence check proves nothing."
     )
     assert BEYOND_THE_REGION not in body, (
-        "The pinned body ran past the memory end marker. That marker bounds "
-        "this scan only because its name carries a prefix in "
-        "PACT_BOUNDARY_PREFIXES, and no line of _parse_pinned_section names "
-        "it. Renaming the marker out of that family, or removing the prefix "
-        "from the tuple, removes the bound. Restore one or the other."
+        "The pinned body ran past the memory end marker. The section is "
+        "searched for inside the memory block, and the PACT_MEMORY_ stop "
+        "prefix ends it at that marker too; both bounds have gone."
     )
     assert MEMORY_END_MARKER not in body, (
         "The body carries the memory end marker line itself, so the scan "
@@ -158,11 +156,13 @@ def test_a_marker_outside_the_prefix_family_does_not_bound_the_scan():
 
     Without this, a document that stopped the scan for some other cause would
     pass the guard while measuring nothing. This arm drives the same document
-    with a marker the alternation does not match, and the body then carries the
-    text that the guard arm requires to be absent.
+    with neither memory marker in place, so no memory block bounds the search
+    and no stop prefix matches the substitute end line, and the body then
+    carries the text that the guard arm requires to be absent.
     """
     parsed = staleness._parse_pinned_section(
-        build_document(A_MARKER_OUTSIDE_THE_PREFIX_FAMILY)
+        build_document(A_MARKER_OUTSIDE_THE_PREFIX_FAMILY,
+                       start_marker="<!-- NOT_A_PACT_BOUNDARY_START -->")
     )
 
     assert parsed is not None, (
@@ -176,3 +176,14 @@ def test_a_marker_outside_the_prefix_family_does_not_bound_the_scan():
         "the guard arm above passes for a cause other than the prefix "
         "membership it claims to measure. The fixture separates nothing."
     )
+
+
+def test_a_memory_start_left_without_its_end_reads_nothing():
+    """The other half of the control: only the end marker renamed.
+
+    The memory start marker then has no end, the block is MALFORMED, and the
+    section is not read at all, so the text below can never be swallowed.
+    """
+    assert staleness._parse_pinned_section(
+        build_document(A_MARKER_OUTSIDE_THE_PREFIX_FAMILY)
+    ) is None

@@ -30,9 +30,15 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING, NamedTuple
 
 from .failure_cause import failure_cause
 from .paths import get_claude_config_dir
+
+# The finder is imported inside the functions that use it: shared/__init__.py
+# imports this module, so a module-level import would load it in every hook.
+if TYPE_CHECKING:
+    from .claude_md_markers import Document, Line, Located
 
 # Project-level CLAUDE.md is preferred at .claude/CLAUDE.md (the new default)
 # but Claude Code also accepts ./CLAUDE.md for backwards compatibility.
@@ -166,8 +172,8 @@ MEMORY_END_MARKER = "<!-- PACT_MEMORY_END -->"
 
 # The auto-managed comment each memory heading carries. NAMED HERE so the two
 # writers in THIS module cannot drift apart, which they did: the creation
-# template emitted these and `_build_migrated_content` did not, so a document
-# through migration came out with headings and no comments.
+# template emitted these and the migration did not, so a migrated document
+# came out with headings and no comments.
 #
 # THE TEXT IS SPELLED HERE RATHER THAN IMPORTED, AND THAT IS FORCED RATHER THAN
 # PREFERRED. The canonical definition is `WORKING_MEMORY_COMMENT` and
@@ -240,10 +246,10 @@ WORKING_MEMORY_COMMENT = "<!-- Auto-managed by pact-memory skill. Full history s
 #
 # 2. The literal CONTAINS no existing marker literal as a substring, and the
 #    qualifier sits BEFORE the START word for that reason. Containment matters
-#    because `extract_managed_region` uses first-find on both managed markers
-#    and session_resume runs an UNBOUNDED
-#    `content.replace(MEMORY_START_MARKER, ...)`: a literal that contained the
-#    memory start marker would collect a session block on every SessionStart.
+#    because the parser's stray rule reads a row that holds a marker literal
+#    anywhere but on a marker line of its own as MALFORMED: a literal that
+#    contained the memory start marker would make every memory-block lookup,
+#    and every writer that depends on one, refuse.
 PINNED_START_MARKER = "<!-- PACT_MEMORY_PINNED_START -->"
 
 # Declared END boundary of the `## Pinned Context` section. Read by
@@ -271,16 +277,16 @@ PINNED_START_MARKER = "<!-- PACT_MEMORY_PINNED_START -->"
 #
 # 1. The `PACT_MEMORY_` prefix, as above.
 # 2. The literal CONTAINS no existing marker literal as a substring, so the
-#    unbounded `content.replace(MEMORY_START_MARKER, ...)` in session_resume and
-#    the first-find in `extract_managed_region` cannot mistake it for one. The
-#    qualifier sits BEFORE the END word for that reason, exactly as the START
-#    twin puts it before START. Note that `PINNED_START_MARKER` is NOT a
-#    substring of this literal and this literal is not a substring of it: the
-#    two differ before either reaches its final word.
+#    parser's stray rule never reads its row as a misplaced copy of one, which
+#    would make that marker's lookup MALFORMED. The qualifier sits BEFORE the
+#    END word for that reason, exactly as the START twin puts it before START.
+#    Note that `PINNED_START_MARKER` is NOT a substring of this literal and
+#    this literal is not a substring of it: the two differ before either
+#    reaches its final word.
 PINNED_END_MARKER = "<!-- PACT_MEMORY_PINNED_END -->"
 
 # Canonical H1 title for the managed block. Extracted as a constant so
-# the three template sites (ensure_project_memory_md, _build_migrated_content,
+# the three template sites (ensure_project_memory_md, _plan_migration,
 # session_resume.update_session_info Case 0) cannot drift apart. Changing this
 # value changes the title everywhere in one place.
 MANAGED_TITLE = "# PACT Framework and Managed Project Memory"
@@ -359,14 +365,11 @@ if not SESSION_BOUNDARY_PREFIX:
 # in upgraded files; strip it during migration. Allows optional trailing
 # period / whitespace.
 #
-# This pattern is applied per-line by `_strip_legacy_lines` via a
-# fence-aware walker, NOT module-wide with `re.MULTILINE`. The per-line
-# form is anchored to the full stripped line, so `$` matches end-of-line
-# without needing a MULTILINE flag. Removing MULTILINE is load-bearing:
-# with MULTILINE the pattern was hot inside user-authored fenced code
-# blocks and silently destroyed example content that quoted the stale
-# template line. Per-line application + fence tracking prevents that
-# failure mode entirely.
+# Matched against the parser's visible PROSE rows only (`find_lines` rows
+# whose `in_html` is False), never against the whole text with `re.MULTILINE`:
+# a fenced, code or uncertain row that quotes the line, or a row inside an
+# HTML block that hides it, is the user's text and stays. A row's content
+# holds no line break, so `$` needs no flag.
 _STALE_ORCHESTRATOR_LINE_RE = re.compile(
     r"^The global PACT Orchestrator is loaded from `~/\.claude/CLAUDE\.md`\.?\s*$",
 )
@@ -837,104 +840,44 @@ def _atomic_write_text(target: Path, content: str, project_root: Path) -> None:
             pass
 
 
-def _strip_legacy_lines(content: str) -> str:
-    r"""
-    Remove lines from older PACT template versions that are now obsolete.
+def _legacy_spans_after_cuts(doc: Document, cuts: list[tuple[int, int]],
+                             header_end: int) -> list[tuple[int, int]]:
+    """The stale loader lines the ORIGINAL file `doc` reads as visible prose,
+    as spans in the text left after dropping `cuts` from `doc.text` and then
+    its first `header_end` characters. Parsing that text instead would decide
+    on a text the cuts have changed: a cut session block that closes an HTML
+    block can leave a fenced quote below it reading as prose. A row inside a
+    cut maps to an empty span, so it stays; a row a cut only touches is a
+    marker row, and the header's rows (the title, blank rows, the
+    description) never match."""
+    return [(_offset_after_drop(start, cuts) - header_end, _offset_after_drop(end, cuts) - header_end)
+            for start, end in _legacy_line_spans(doc)]
 
-    Currently strips the stale orchestrator-loader line from the legacy
-    project CLAUDE.md template. Used by `_build_migrated_content` during
-    project migration. Centralizing the set of legacy-line patterns here
-    means adding a new pattern in the future only requires editing this
-    helper.
 
-    PR #404: fence-aware line walker that applies
-    `_STALE_ORCHESTRATOR_LINE_RE` ONLY to lines that are NOT inside a
-    fenced code block. Lines inside a fence are preserved verbatim, even
-    if they match the stale-line regex. This prevents silent data loss when
-    a user's CLAUDE.md contains a fenced code block that quotes the legacy
-    template verbatim (e.g., migration documentation, tutorial content).
+def _legacy_line_spans(doc: Document) -> list[tuple[int, int]]:
+    """The (start, end) span in `doc.text` of each stale loader line the
+    parser reads as visible prose (`find_lines` rows whose `in_html` is
+    False), with its line break. A copy inside an HTML block that hides it,
+    such as a comment, is the user's text and stays. A leading U+FEFF is not
+    part of row 0's span, so it stays at byte 0."""
+    return [(doc.row_start(row), doc.lines[row].end)
+            for row in doc.find_lines(_STALE_ORCHESTRATOR_LINE_RE)
+            if not doc.lines[row].in_html]
 
-    Supports both backtick (```) and tilde (~~~) fences as independent
-    fence types per CommonMark §4.5. A line inside a backtick fence that
-    contains ~~~ does not affect tilde state (and vice versa).
 
-    Prior behavior used `re.MULTILINE` on the whole content, which stripped
-    matching lines regardless of fence state, silently destroying fenced
-    example content. Per-line application plus fence tracking fixes this.
 
-    Args:
-        content: The raw CLAUDE.md content to scrub.
+# The obsolete kernel block's markers. The start is a prefix: the marker line
+# carries a version (`<!-- PACT_START: v3 -->`).
+_KERNEL_START_MARKER = "<!-- PACT_START:"
+_KERNEL_END_MARKER = "<!-- PACT_END -->"
 
-    Returns:
-        Content with all legacy template lines OUTSIDE fenced code blocks
-        removed. Content inside fenced code blocks (backtick or tilde) is
-        preserved byte for byte. Pure function.
-    """
-    # PR #404: length-tracked fence state per CommonMark §4.5 — closing
-    # fence must use the same character and run length >= the opening. A
-    # 4-backtick outer fence containing a 3-backtick inner example must
-    # NOT toggle state on the inner line. fence_open_len > 0 means we're
-    # inside a fence; fence_char records which character opened it. This
-    # is the only fence walker that remains after the structural
-    # simplification (it processes user content during migration).
-    pos = 0
-    fence_open_len = 0  # 0 = not inside a fence
-    fence_char = ""     # "`" or "~" when inside a fence
-    out_parts: list[str] = []
-    while pos < len(content):
-        nl = content.find("\n", pos)
-        if nl == -1:
-            line = content[pos:]
-            raw_segment = line
-            line_end = len(content)
-        else:
-            line = content[pos:nl]
-            raw_segment = content[pos:nl + 1]
-            line_end = nl + 1
 
-        stripped = line.lstrip()
-
-        if fence_open_len == 0:
-            # Not inside a fence — check for fence open
-            if stripped.startswith("```"):
-                run_len = len(stripped) - len(stripped.lstrip("`"))
-                fence_open_len = run_len
-                fence_char = "`"
-                out_parts.append(raw_segment)
-            elif stripped.startswith("~~~"):
-                run_len = len(stripped) - len(stripped.lstrip("~"))
-                fence_open_len = run_len
-                fence_char = "~"
-                out_parts.append(raw_segment)
-            elif _STALE_ORCHESTRATOR_LINE_RE.match(line):
-                # Non-fenced legacy line: drop it entirely
-                pass
-            else:
-                out_parts.append(raw_segment)
-        else:
-            # Inside a fence — check for fence close (same char, run >= open)
-            if fence_char == "`" and stripped.startswith("```"):
-                run_len = len(stripped) - len(stripped.lstrip("`"))
-                # Close only if the line is ONLY fence chars (+ optional
-                # trailing whitespace). CommonMark §4.5: closing fence
-                # cannot have info string.
-                after_run = stripped[run_len:].strip()
-                if run_len >= fence_open_len and not after_run:
-                    fence_open_len = 0
-                    fence_char = ""
-            elif fence_char == "~" and stripped.startswith("~~~"):
-                run_len = len(stripped) - len(stripped.lstrip("~"))
-                after_run = stripped[run_len:].strip()
-                if run_len >= fence_open_len and not after_run:
-                    fence_open_len = 0
-                    fence_char = ""
-            # Keep fence body verbatim regardless
-            out_parts.append(raw_segment)
-
-        pos = line_end
-
-    return "".join(out_parts)
-
+def _marker_span(doc: Document, row: int) -> tuple[int, int]:
+    """(start, end) in the original text of the marker comment on `row`,
+    without the up-to-3-space indent before it or the blanks after it."""
+    content = doc.lines[row].content
+    start = doc.row_start(row)
+    return start + len(content) - len(content.lstrip(" ")), start + len(content.rstrip(" \t"))
 
 
 def _plan_kernel_strip(
@@ -944,57 +887,63 @@ def _plan_kernel_strip(
 
     `new_content` is `content` with the kernel block removed, or None when the
     strip is not due. `notice` is then what the pass returns: None with no
-    marker, or the malformed-marker warning. Pure, so a file that is not
-    valid UTF-8 gets the same decision from its replace-decoded copy.
+    block, or why the block was left alone. Pure, so a file that is not valid
+    UTF-8 gets the same decision from its replace-decoded copy. The block is
+    located by the parser, so a fenced or inline-code mention is not it. A
+    removal that would leave part of the file unreadable is skipped, with the
+    line named.
     """
-    START_MARKER = "<!-- PACT_START:"
-    END_MARKER = "<!-- PACT_END -->"
+    from .claude_md_markers import State, parse, uncertainty_added
 
-    has_start = START_MARKER in content
-    has_end = END_MARKER in content
-
-    if not has_start and not has_end:
+    doc = parse(content)
+    block = doc.find_block(_KERNEL_START_MARKER, _KERNEL_END_MARKER)
+    if block.state is State.ABSENT:
         # Normal idempotent no-op for already-migrated installs.
         return None, None
-
-    if has_start != has_end:
-        # Only one of the two markers is present. Defensive no-op
-        # to avoid data loss; surface a status string so
-        # session_init.py routes it via systemMessage. This case
-        # can occur if a prior plugin write crashed mid-file or
-        # the user manually deleted one marker.
-        which = "PACT_START" if has_start else "PACT_END"
-        missing = "PACT_END" if has_start else "PACT_START"
+    if block.state is State.UNKNOWN and not (
+        doc.may_hold(_KERNEL_START_MARKER) or doc.may_hold(_KERNEL_END_MARKER)
+    ):
+        # The file runs on into an uncertain region (an unclosed fence), but
+        # no kernel marker text is in it, so there is no block to strip and
+        # nothing to report.
+        return None, None
+    if block.state is not State.FOUND:
+        # A duplicate, a marker with no partner, or a block the parser
+        # cannot place: a defensive no-op to avoid data loss. The status
+        # names the line, and session_init routes it via systemMessage.
         return (
-            f"Migration skipped: {target_file} contains "
-            f"{which} but no matching {missing}. To avoid data "
-            f"loss, inspect the file and either remove the "
-            f"orphan {which} marker or restore the matching "
-            f"{missing} marker."
+            f"Migration skipped: {target_file}: {block.reason}. To avoid data "
+            "loss the file was left unchanged; inspect it and remove or "
+            "repair the PACT_START / PACT_END kernel markers."
         ), None
 
-    pre_marker, rest = content.split(START_MARKER, 1)
-    if END_MARKER not in rest:
-        # END marker exists in content but appears textually
-        # before START. Same defensive handling.
-        return (
-            f"Migration skipped: {target_file} contains "
-            "both PACT_START and PACT_END markers but PACT_END "
-            "appears before PACT_START. Inspect the file and "
-            "reorder or remove the orphan markers."
-        ), None
-
-    _, post_marker = rest.split(END_MARKER, 1)
+    first, last = block.spans[0]
+    pre_marker = content[:_marker_span(doc, first)[0]]
+    post_marker = content[_marker_span(doc, last)[1]:]
 
     # Preserve one blank line at the removal boundary so the
-    # user's spacing around the obsolete block survives the strip.
-    pre_clean = pre_marker.rstrip("\r\n")
+    # user's spacing around the obsolete block survives the strip. A leading
+    # byte order mark is not text above the block: the file strips as it would
+    # without one, and the mark stays first.
+    bom = "\ufeff" if pre_marker.startswith("\ufeff") else ""
+    pre_clean = pre_marker[len(bom):].rstrip("\r\n")
     post_clean = post_marker.lstrip("\r\n")
     if pre_clean and post_clean:
-        return None, pre_clean + "\n\n" + post_clean
-    if pre_clean:
-        return None, pre_clean + "\n"
-    return None, post_clean
+        new_content = bom + pre_clean + "\n\n" + post_clean
+    elif pre_clean:
+        new_content = bom + pre_clean + "\n"
+    else:
+        new_content = bom + post_clean
+    # The block can hold the line that closes an HTML block the user opened
+    # above it; removing it would leave the rest of the file unreadable.
+    reason = uncertainty_added(doc, parse(new_content))
+    if reason:
+        return (
+            f"Migration skipped: {target_file}: {reason}. To avoid data loss the "
+            "file was left unchanged; inspect it and close the HTML block that "
+            "line opens."
+        ), None
+    return None, new_content
 
 
 def strip_orphan_kernel_block() -> str | None:
@@ -1018,9 +967,10 @@ def strip_orphan_kernel_block() -> str | None:
       if `~/.claude/CLAUDE.md` is a symlink. Practical exploitability is
       low (requires pre-existing local write access) but the defensive
       guard is cheap.
-    - Malformed-pair feedback: when the migration skips due to a malformed
-      marker state (orphan marker or END-before-START), returns the warning
-      as a status string so session_init.py surfaces it via systemMessage.
+    - Malformed-pair feedback: when the strip skips a block the parser cannot
+      place (a duplicate, an orphan marker, END before START, or a block past
+      an unclosed fence), returns the warning, naming the line, as a status
+      string so session_init.py surfaces it via systemMessage.
       Hook stderr is NOT shown to users by Claude Code, so a returned
       string is the only way to deliver the warning.
 
@@ -1130,30 +1080,29 @@ def extract_managed_region(content: str) -> tuple[str, int] | None:
     Extract the PACT-managed region from a CLAUDE.md file.
 
     Returns the content between MANAGED_START_MARKER and MANAGED_END_MARKER
-    (exclusive of the markers themselves), or None if either marker is missing.
-
-    The managed region contains only plugin-generated content — no user-authored
-    fenced code blocks. This is the structural guarantee that makes fence-aware
-    parsing unnecessary for consumers that operate within the managed region.
+    (exclusive of the markers themselves), or None unless the fence-aware
+    parser finds exactly one pair. A fenced or inline-code copy of a marker is
+    not the region, and neither is a pair the parser cannot place.
 
     Args:
         content: Full CLAUDE.md file content.
 
     Returns:
         Tuple of (region_text, start_offset) where start_offset is the absolute
-        byte offset of the first character after MANAGED_START_MARKER in the
+        offset of the first character after MANAGED_START_MARKER in the
         original content. Callers that need to write back to the full file must
         add start_offset to any positions computed within region_text.
-        Returns None if either marker is missing.
+        Returns None when the pair is not found.
     """
-    start_idx = content.find(MANAGED_START_MARKER)
-    if start_idx == -1:
+    from .claude_md_markers import State, parse
+
+    doc = parse(content)
+    region = doc.find_block(MANAGED_START_MARKER, MANAGED_END_MARKER)
+    if region.state is not State.FOUND:
         return None
-    region_start = start_idx + len(MANAGED_START_MARKER)
-    end_idx = content.find(MANAGED_END_MARKER, region_start)
-    if end_idx == -1:
-        return None
-    return content[region_start:end_idx], region_start
+    first, last = region.spans[0]
+    region_start = _marker_span(doc, first)[1]
+    return content[region_start:_marker_span(doc, last)[0]], region_start
 
 
 def resolve_project_claude_md_path(
@@ -1326,12 +1275,15 @@ def migrate_to_managed_structure() -> str | None:
     PACT_MANAGED boundary and add PACT_MEMORY markers around memory sections.
 
     Called from session_init.py on every SessionStart. Idempotent no-op when
-    PACT_MANAGED_START marker is already present. Follows the same hardening
+    the parser finds the PACT_MANAGED pair. Follows the same hardening
     pattern as the other managed-file writers: file_lock, symlink guard inside
     the lock, fail-open on timeout/error.
 
-    Idempotency guard: if PACT_MANAGED_START is already present, the
-    function returns None without touching the file.
+    Idempotency guard: with the PACT_MANAGED pair found, the function returns
+    None without touching the file. A managed, session or memory pair the
+    parser cannot place (a duplicate, a marker with no partner, an uncertain
+    region) leaves the file unchanged and returns a "Migration skipped" status
+    naming the line.
 
     Migration strategy (applied when the guard passes):
     1. Locate the existing sections by their markers/headings:
@@ -1348,9 +1300,8 @@ def migrate_to_managed_structure() -> str | None:
        boundary as user-owned content
 
     User content with fenced code blocks containing ## memory headings is
-    preserved verbatim. The classifier tracks in_code_fence state and does
-    not misclassify fence-protected headings as real memory sections
-    (PR #404).
+    preserved verbatim: every marker and heading is located by the
+    fence-aware parser, so a fenced copy is never a real memory section.
 
     Returns:
         Status message on successful migration, None on no-op (already
@@ -1379,20 +1330,26 @@ def migrate_to_managed_structure() -> str | None:
                 return None
             except UnicodeDecodeError:
                 # This pass rewrites the file, so it is decoded strictly and
-                # left untouched rather than written back with U+FFFD. A file
-                # already migrated had nothing to do, so no skip to report.
-                if MANAGED_START_MARKER in _read_replaced(target_file):
+                # left untouched rather than written back with U+FFFD. The
+                # planner runs on the replace-decoded copy: a file already
+                # migrated had nothing to do, so no skip to report.
+                new_content, refusal = _plan_migration(_read_replaced(target_file))
+                if new_content is None and refusal is None:
                     return None
                 return (
                     f"Migration skipped: {target_file} is not valid UTF-8, so "
                     "it was left unchanged."
                 )
 
-            # Idempotent guard: already migrated
-            if MANAGED_START_MARKER in content:
+            new_content, refusal = _plan_migration(content)
+            if refusal is not None:
+                return (
+                    f"Migration skipped: {target_file}: {refusal}. The file was "
+                    "left unchanged."
+                )
+            if new_content is None:
+                # Idempotent guard: already migrated
                 return None
-
-            new_content = _build_migrated_content(content)
 
             try:
                 _atomic_write_text(
@@ -1422,193 +1379,252 @@ def migrate_to_managed_structure() -> str | None:
         )
 
 
+# The legacy template's title and description, stripped from the top of a
+# file during migration, and a blank row between them.
+_LEGACY_TITLE_RE = re.compile(r"# Project Memory\s*$")
+_LEGACY_DESCRIPTION_RE = re.compile(
+    r"This file contains project-specific memory managed by the PACT framework\.\s*$"
+)
+_BLANK_ROW_RE = re.compile(r"\s*$")
+# The three memory headings, each at column 0 (the classifier's exact test).
+_MEMORY_HEADING_RES = {
+    heading: re.compile(re.escape(heading) + r"\s*$")
+    for heading in ("## Retrieved Context", "## Pinned Context", "## Working Memory")
+}
+# Any `# ` or `## ` heading, indent-tolerant (see the boundary note in
+# _plan_migration).
+_SECTION_BOUNDARY_RE = re.compile(r"\s*#{1,2} +\S")
 
 
-def _build_migrated_content(content: str) -> str:
+def _drop_spans(text: str, spans: list[tuple[int, int]]) -> str:
+    """`text` without the given (start, end) spans; overlapping spans merge."""
+    kept: list[str] = []
+    pos = 0
+    for start, end in sorted(spans):
+        if start > pos:
+            kept.append(text[pos:start])
+        pos = max(pos, end)
+    kept.append(text[pos:])
+    return "".join(kept)
+
+
+def _offset_after_drop(offset: int, spans: list[tuple[int, int]]) -> int:
+    """Where `offset` in `text`, outside every span, stands in
+    `_drop_spans(text, spans)`."""
+    dropped = pos = 0
+    for start, end in sorted(spans):
+        if start >= offset:
+            break
+        dropped += max(pos, min(end, offset)) - max(pos, start)
+        pos = max(pos, end)
+    return offset - dropped
+
+
+def _offset_before_drop(offset: int, spans: list[tuple[int, int]]) -> int:
+    """Where `offset` in `_drop_spans(text, spans)` stands in `text`."""
+    dropped = pos = 0
+    for start, end in sorted(spans):
+        if start > pos and offset < start - dropped:
+            break
+        dropped += max(pos, end) - max(pos, start)
+        pos = max(pos, end)
+    return offset + dropped
+
+
+def _legacy_header_end(doc: Document) -> int:
+    """Offset where the text starts after the legacy `# Project Memory` title,
+    the blank rows below it, and the template's description row with the
+    blank rows below that; 0 when the first row is not that title. Each
+    stripped row must end with a line break, as the old pattern required."""
+    lines = doc.lines
+    if not lines or doc.text.startswith("\ufeff") or not doc.find_lines(_LEGACY_TITLE_RE, (0, 0)):
+        return 0
+
+    def ended(row: int) -> bool:
+        return lines[row].end > lines[row].start + len(lines[row].content)
+
+    if not ended(0):
+        return 0
+    row = 1
+    while row < len(lines) and ended(row) and doc.find_lines(_BLANK_ROW_RE, (row, row)):
+        row += 1
+    if row < len(lines) and ended(row) and doc.find_lines(_LEGACY_DESCRIPTION_RE, (row, row)):
+        row += 1
+        while row < len(lines) and ended(row) and doc.find_lines(_BLANK_ROW_RE, (row, row)):
+            row += 1
+    return lines[row].start if row < len(lines) else len(doc.text)
+
+
+# The PACT markers the migration carries as the user wrote them. The rebuilt
+# file must read each the same way the original did, so a fenced or commented
+# copy the rebuild made live is refused rather than written. The routing pair
+# is read as a block, and each of its two literals on its own: its two marker
+# lines share a prefix. The managed, memory and session markers are checked as
+# blocks before these.
+_ROUTING_START_PREFIX = "<!-- PACT_ROUTING_START"
+_ROUTING_END_MARKER = "<!-- PACT_ROUTING_END -->"
+_MIGRATION_CARRIED_MARKERS = (PINNED_START_MARKER, PINNED_END_MARKER, _KERNEL_START_MARKER, _KERNEL_END_MARKER)
+
+
+def _split_bom(content: str) -> tuple[str, str]:
+    """The leading U+FEFF of `content`, or "", and the text after it."""
+    return ("\ufeff", content[1:]) if content.startswith("\ufeff") else ("", content)
+
+
+def _trim_blank_edges(text: str) -> str:
+    """`text` without its leading and trailing whitespace-only lines and without
+    its final line ending. Every other byte is kept as written, the first kept
+    line's indentation and the last kept line's trailing spaces included."""
+    lines = text.split("\n")
+    first, last = 0, len(lines)
+    while first < last and not lines[first].strip():
+        first += 1
+    while last > first and not lines[last - 1].strip():
+        last -= 1
+    return "\n".join(lines[first:last])
+
+
+def _readback_reason(name: str, located: Located) -> str:
+    """Why the rebuilt file's `name` lookup failed, naming a line where one
+    exists. A duplicate, malformed or uncertain result carries its own reason.
+    A block found where the original had none names its first line in the
+    rebuilt file, as the other reasons do."""
+    if located.reason:
+        return located.reason
+    if located.spans:
+        return f"it has a {name} at line {located.spans[0][0] + 1} that the original did not have"
+    return f"its {name} is missing"
+
+
+def _plan_migration(content: str) -> tuple[str | None, str | None]:
+    """Plan the migration of `content` into the managed structure:
+    (new_content, refusal).
+
+    Both None: already migrated (the PACT_MANAGED pair is found). A refusal
+    names why the file is left alone: a managed, session or memory pair the
+    parser cannot place, a memory heading whose only copy is commented out, or
+    a rebuilt file that does not read back the way it must (see the end of
+    this function). Pure, so a file that is not valid UTF-8 gets the same plan
+    from its replace-decoded copy.
+
+    The user's text keeps every byte: only whitespace-only lines at its two
+    edges are trimmed, and a leading byte-order mark stays at byte 0 of the
+    rebuilt file, before PACT's marker.
+
+    Extracts the PACT-managed sections (session, memory) from the existing
+    content and reassembles them inside the new boundary markers. Any content
+    that falls outside the recognized PACT sections is preserved AFTER the
+    PACT_MANAGED_END marker as user-owned content. User content that appears
+    ABOVE the first memory section heading lands BELOW PACT_MANAGED_END.
+
+    Every marker and heading is located by the fence-aware parser. The session
+    block is extracted first, so a block anywhere in the file (inside the
+    memory block, before it, at the end) lands between the title and the
+    memory block. A found memory block's two marker rows are dropped before
+    the lines are classified: the rebuilt block writes its own pair.
     """
-    Transform old-format CLAUDE.md content into the new managed structure.
+    from .claude_md_markers import Cause, State, parse
 
-    Extracts the PACT-managed sections (routing, session, memory) from the
-    existing content and reassembles them inside the new boundary markers.
-    Any content that falls outside the recognized PACT sections is preserved
-    AFTER the PACT_MANAGED_END marker as user-owned content.
+    bom, content = _split_bom(content)
+    doc = parse(content)
+    managed = doc.find_block(MANAGED_START_MARKER, MANAGED_END_MARKER)
+    if managed.state is State.FOUND:
+        return None, None
+    if managed.state is not State.ABSENT:
+        return None, managed.reason
+    session = doc.find_block(SESSION_START_MARKER, SESSION_END_MARKER)
+    memory = doc.find_block(MEMORY_START_MARKER, MEMORY_END_MARKER)
+    for located in (session, memory):
+        if located.state not in (State.FOUND, State.ABSENT):
+            return None, located.reason
+    # A memory heading whose only copy is commented out refuses, rather than
+    # adopt or duplicate that section.
+    for pattern in _MEMORY_HEADING_RES.values():
+        section = doc.find_section(pattern, None)
+        if section.cause is Cause.COMMENTED:
+            return None, section.reason
 
-    This is a pure function (no I/O) for testability.
-
-    Idempotency guard: if the content already contains MANAGED_START_MARKER,
-    return it unchanged.
-
-    User content that appears ABOVE the first PACT-managed section heading
-    in the original file is classified as user_parts and lands BELOW
-    PACT_MANAGED_END after migration. The single-region layout keeps every
-    downstream parser fence-unaware.
-
-    Args:
-        content: The existing CLAUDE.md file content.
-
-    Returns:
-        The restructured content with PACT_MANAGED and PACT_MEMORY boundaries,
-        or the original content unchanged if already migrated.
-    """
-    # Idempotency guard: already migrated → no-op
-    if MANAGED_START_MARKER in content:
-        return content
-
-    # Extract session block if present (between markers)
+    # Cut the session block (from its start marker to its end marker, as it
+    # is placed) and the memory block's two marker rows out of the text.
     session_block = ""
-    content_sans_routing = content
-    content_sans_session = content_sans_routing
-    session_start = SESSION_START_MARKER
-    session_end = SESSION_END_MARKER
-    if session_start in content_sans_routing and session_end in content_sans_routing:
-        pattern = re.compile(
-            re.escape(session_start) + r".*?" + re.escape(session_end),
-            re.DOTALL,
-        )
-        match = pattern.search(content_sans_routing)
-        if match:
-            session_block = match.group(0)
-            content_sans_session = (
-                content_sans_routing[:match.start()]
-                + content_sans_routing[match.end():]
-            )
-
-    # What remains after extracting routing + session is candidate for
-    # memory sections and user content.
-    remaining = content_sans_session
+    cuts: list[tuple[int, int]] = []
+    if session.state is State.FOUND:
+        first, last = session.spans[0]
+        start, end = _marker_span(doc, first)[0], _marker_span(doc, last)[1]
+        session_block = content[start:end]
+        cuts.append((start, end))
+    if memory.state is State.FOUND:
+        for row in memory.spans[0]:
+            cuts.append((doc.row_start(row), doc.lines[row].end))
+    remaining = _drop_spans(content, cuts)
 
     # Remove the old top-level heading and description line
-    remaining = re.sub(
-        r"^# Project Memory\s*\n"
-        r"(?:\s*\n)*"
-        r"(?:This file contains project-specific memory managed by the PACT framework\.\s*\n)?",
-        "",
-        remaining,
-    )
+    header_end = _legacy_header_end(parse(remaining))
+    remaining = remaining[header_end:]
 
-    # Strip legacy template lines (e.g., stale orchestrator-loader line)
-    remaining = _strip_legacy_lines(remaining)
+    # Strip the stale template lines where the original file reads them as prose.
+    legacy = _legacy_spans_after_cuts(doc, cuts, header_end)
+    remaining = _drop_spans(remaining, legacy)
 
-    # Extract memory sections: Retrieved Context, Pinned Context, Working Memory
-    memory_headings = ["## Retrieved Context", "## Pinned Context", "## Working Memory"]
-    memory_parts = []
-    user_parts = []
-
-    lines = remaining.splitlines(keepends=True)
-    current_section: list[str] = []
-    in_memory_section = False
-    # Length-tracked fence state (PR #404): CommonMark §4.5 requires a
-    # closing fence to use the same character and run length >= the opening.
-    # A boolean toggle fails on tilde fences and 4+ backtick nesting. This
-    # mirrors the model in _strip_legacy_lines.
-    fence_open_len = 0  # 0 = not inside a fence
-    fence_char = ""     # "`" or "~" when inside a fence
-
-    for line in lines:
-        stripped = line.rstrip()
-        lstripped = stripped.lstrip()
-        if fence_open_len == 0:
-            # Not inside a fence — check for fence open
-            if lstripped.startswith("```"):
-                run_len = len(lstripped) - len(lstripped.lstrip("`"))
-                fence_open_len = run_len
-                fence_char = "`"
-                current_section.append(line)
-                continue
-            elif lstripped.startswith("~~~"):
-                run_len = len(lstripped) - len(lstripped.lstrip("~"))
-                fence_open_len = run_len
-                fence_char = "~"
-                current_section.append(line)
-                continue
-        else:
-            # Inside a fence — check for fence close (same char, run >= open)
-            if fence_char == "`" and lstripped.startswith("```"):
-                run_len = len(lstripped) - len(lstripped.lstrip("`"))
-                after_run = lstripped[run_len:].strip()
-                if run_len >= fence_open_len and not after_run:
-                    fence_open_len = 0
-                    fence_char = ""
-            elif fence_char == "~" and lstripped.startswith("~~~"):
-                run_len = len(lstripped) - len(lstripped.lstrip("~"))
-                after_run = lstripped[run_len:].strip()
-                if run_len >= fence_open_len and not after_run:
-                    fence_open_len = 0
-                    fence_char = ""
-            # Keep fence body verbatim regardless
-            current_section.append(line)
+    # Classify the rows. A memory heading opens a memory section; any other
+    # `# `/`## ` heading opens a user section. Headings are found only on prose
+    # rows, so fenced, code and uncertain rows stay in the section they are in.
+    #
+    # INDENT-TOLERANT ON PURPOSE, AND THE EXACT MEMORY-HEADING TEST IS NOT.
+    # THAT ASYMMETRY IS THE DESIGN AND NOT AN OVERSIGHT, SO DO NOT "FINISH"
+    # IT BY RELAXING THE MEMORY-HEADING PATTERNS.
+    #
+    # THE CAUSE IS THE FAILURE DIRECTION. The boundary pattern makes an
+    # indented heading a BOUNDARY, so the user text that follows it LEAVES the
+    # managed region and the plugin does not own it. Make the memory-heading
+    # test indent-tolerant as well and the plugin ADOPTS that text into a
+    # section it rewrites and prunes, on a file that git does not track. A
+    # boundary loses nothing. An adoption can lose the text.
+    #
+    # A heading inside a multi-row HTML comment is neither: the comment stays
+    # whole in the section it sits in.
+    rows = parse(remaining)
+    heading_at: dict[int, str] = {}
+    for heading, pattern in _MEMORY_HEADING_RES.items():
+        heading_at.update(
+            (row, heading) for row in rows.find_lines(pattern) if not rows.lines[row].in_html)
+    boundaries = {
+        row for row in rows.find_lines(_SECTION_BOUNDARY_RE) if not rows.lines[row].in_html}
+    user_rows: list[Line] = []
+    bodies: dict[str, list[list[Line]]] = {heading: [] for heading in _MEMORY_HEADING_RES}
+    current: list[Line] = user_rows
+    for line in rows.lines:
+        if line.row in heading_at:
+            current = []
+            bodies[heading_at[line.row]].append(current)
             continue
-        if any(stripped == h for h in memory_headings):
-            if current_section and not in_memory_section:
-                user_parts.extend(current_section)
-                current_section = []
-            elif current_section and in_memory_section:
-                memory_parts.extend(current_section)
-                current_section = []
-            in_memory_section = True
-            current_section.append(line)
-        # INDENT-TOLERANT ON PURPOSE, AND THE EXACT-MATCH TEST ABOVE IS NOT.
-        # THAT ASYMMETRY IS THE DESIGN AND NOT AN OVERSIGHT, SO DO NOT
-        # "FINISH" IT BY RELAXING THE TEST AT THE `if` ABOVE.
-        #
-        # THE CAUSE IS THE FAILURE DIRECTION. This branch makes an indented
-        # heading a BOUNDARY, so the user text that follows it LEAVES the
-        # managed region and the plugin does not own it. Make the exact-match
-        # test indent-tolerant as well and the plugin ADOPTS that text into a
-        # section it rewrites and prunes, on a file that git does not track.
-        # A boundary loses nothing. An adoption can lose the text.
-        elif lstripped.startswith("## ") or lstripped.startswith("# "):
-            if current_section:
-                if in_memory_section:
-                    memory_parts.extend(current_section)
-                else:
-                    user_parts.extend(current_section)
-                current_section = []
-            in_memory_section = False
-            current_section.append(line)
-        else:
-            current_section.append(line)
+        if line.row in boundaries:
+            current = user_rows
+        current.append(line)
 
-    if current_section:
-        if in_memory_section:
-            memory_parts.extend(current_section)
-        else:
-            user_parts.extend(current_section)
+    def text_of(lines: list[Line]) -> str:
+        return "".join(remaining[line.start:line.end] for line in lines)
 
-    memory_text = "".join(memory_parts).strip()
-    user_text = "".join(user_parts).strip()
-
-    # Split memory into {heading: body} dict — always emit all 3 headings.
-    memory_sections: dict[str, str] = {
-        "## Retrieved Context": "",
-        "## Pinned Context": "",
-        "## Working Memory": "",
-    }
-
-    def _append_body(heading: str, new_body: str) -> None:
-        existing = memory_sections[heading]
-        if existing and new_body:
-            memory_sections[heading] = existing + "\n" + new_body
-        elif new_body:
-            memory_sections[heading] = new_body
-
-    if memory_text:
-        current_heading: str | None = None
-        current_body: list[str] = []
-        for line in memory_text.splitlines(keepends=True):
-            stripped_line = line.rstrip()
-            if stripped_line in memory_sections:
-                if current_heading is not None:
-                    _append_body(current_heading, "".join(current_body).rstrip())
-                current_heading = stripped_line
-                current_body = []
-            elif current_heading is not None:
-                current_body.append(line)
-        if current_heading is not None:
-            _append_body(current_heading, "".join(current_body).rstrip())
+    # Each heading's sections, each without trailing blanks; empty ones dropped.
+    memory_sections: dict[str, list[tuple[list[Line], str]]] = {heading: [] for heading in bodies}
+    for heading, sections in bodies.items():
+        for lines in sections:
+            text = text_of(lines).rstrip()
+            if text:
+                memory_sections[heading].append((lines, text))
+    user_all = text_of(user_rows)
+    user_text = _trim_blank_edges(user_all)
 
     # Build the new structure — all content goes inside the managed block
     parts: list[str] = []
+    # Each carried piece of the old file: its rows, where its text starts in
+    # those rows' text, where it lands in the rebuilt file, and its length.
+    carried: list[tuple[list[Line], int, int, int]] = []
+
+    def carry(lines: list[Line], start: int, text: str) -> None:
+        carried.append((lines, start, len(bom) + sum(map(len, parts)), len(text)))
+        parts.append(text)
+
     parts.extend([MANAGED_START_MARKER, "\n", f"{MANAGED_TITLE}\n"])
 
     if session_block:
@@ -1623,40 +1639,107 @@ def _build_migrated_content(content: str) -> str:
         "## Retrieved Context": RETRIEVED_CONTEXT_COMMENT,
         "## Working Memory": WORKING_MEMORY_COMMENT,
     }
-    heading_chunks: list[str] = []
-    for heading in ("## Retrieved Context", "## Pinned Context", "## Working Memory"):
-        body = memory_sections[heading]
+    for index, heading in enumerate(("## Retrieved Context", "## Pinned Context", "## Working Memory")):
+        pieces = memory_sections[heading]
         comment = heading_comments.get(heading)
+        parts.append(f"\n{heading}\n" if index else f"{heading}\n")
         # ADD THE COMMENT ONLY WHEN THE SECTION ARRIVES WITHOUT ONE, and test
-        # for it ANYWHERE IN THE BODY rather than at the start.
+        # for it on EVERY ROW OF THE BODY rather than at the start.
         #
         # A PREFIX TEST GIVES A DUPLICATE ON THREE SHAPES A DOCUMENT REALLY
         # HAS: the comment after a blank line, the comment indented, and a
         # different comment first. Each one reads as absent to `startswith`,
         # so each one gains a second copy.
         #
-        # THE FAILURE DIRECTION OF THE WIDER TEST IS THE SAFE ONE. A document
-        # that quotes this comment deep inside an entry suppresses the add, and
-        # what it gets is the heading with no comment, which is what every such
-        # document gets today. A duplicate cannot be undone by a later pass. A
-        # missing comment is what the next writer supplies.
-        if comment and comment not in body:
-            body = f"{comment}\n{body}" if body else comment
-        if body:
-            heading_chunks.append(f"{heading}\n{body}\n")
-        else:
-            heading_chunks.append(f"{heading}\n")
-    parts.append("\n".join(heading_chunks))
-    if not parts[-1].endswith("\n"):
-        parts.append("\n")
+        # A row that holds only the comment counts. A quote of it inside a
+        # fence, in inline code or mid-line does not, so that body gains the
+        # comment.
+        if comment and not any(
+                rows.find_marker(comment, (section_line.row, section_line.row)).state is State.FOUND
+                for section_lines, _ in pieces for section_line in section_lines):
+            parts.append(f"{comment}\n")
+        for number, (lines, text) in enumerate(pieces):
+            if number:
+                parts.append("\n")
+            carry(lines, 0, text)
+        if pieces:
+            parts.append("\n")
     parts.extend([MEMORY_END_MARKER, "\n"])
 
     parts.extend(["\n", MANAGED_END_MARKER, "\n"])
 
     if user_text:
-        parts.extend(["\n", user_text, "\n"])
+        parts.append("\n")
+        # The trim drops only whole whitespace-only lines, so the user's text
+        # starts on the line of its first visible character.
+        first_visible = len(user_all) - len(user_all.lstrip())
+        carry(user_rows, user_all.rfind("\n", 0, first_visible) + 1, user_text)
+        parts.append("\n")
 
-    return "".join(parts)
+    new_content = bom + "".join(parts)
+    # The rebuilt file must read back as one managed block, one memory block,
+    # the session block exactly when one was extracted, no uncertain region the
+    # original did not have, and every other PACT marker as the original read
+    # it. A rebuild that fails any of these changed the user's text.
+    written = parse(new_content)
+    session_after = State.FOUND if session_block else State.ABSENT
+    for name, (start_marker, end_marker), wanted in (
+        ("managed block", (MANAGED_START_MARKER, MANAGED_END_MARKER), State.FOUND),
+        ("memory block", (MEMORY_START_MARKER, MEMORY_END_MARKER), State.FOUND),
+        ("Current Session block", (SESSION_START_MARKER, SESSION_END_MARKER), session_after),
+    ):
+        located = written.find_block(start_marker, end_marker)
+        if located.state is not wanted:
+            return None, (
+                "the migrated file did not read back as one managed block, one "
+                "memory block and the Current Session block it had: "
+                + _readback_reason(name, located)
+            )
+    if doc.boundary is None and written.boundary is not None:
+        return None, (
+            "the migrated file would leave a region PACT cannot read, which the "
+            "original did not have"
+        )
+    # State, cause AND the number of marker lines or blocks found. A line that
+    # held a marker as stray text and now holds it as a marker line reads
+    # MALFORMED both times, for a different cause. A marker that already reads
+    # DUPLICATE still does with one more live copy, on one more line.
+    def reading(located):
+        return located.state, located.cause, len(located.spans)
+
+    routing = (_ROUTING_START_PREFIX, _ROUTING_END_MARKER)
+    if reading(written.find_block(*routing)) != reading(doc.find_block(*routing)):
+        return None, "the migrated file would change how the routing block reads"
+    # Each routing literal on its own as well: an unpaired or nested block
+    # carries no lines, so only these count a copy of one of its markers.
+    for literal in (*_MIGRATION_CARRIED_MARKERS, *routing):
+        if reading(written.find_marker(literal)) != reading(doc.find_marker(literal)):
+            return None, f"the migrated file would change how {literal!r} reads"
+    # Every carried row reads as it did in the original file: the same kind,
+    # and hidden in an HTML block or not. A memory section moved above the
+    # user's text can end inside an HTML block that is never closed, and turn
+    # the user's fenced code into prose with no marker involved. The original
+    # file is the reference, not the text the sections were cut from: cutting
+    # out a session block that opens an HTML block uncovers what it covered.
+    def origin(offset: int) -> int:
+        return _offset_before_drop(_offset_before_drop(offset, legacy) + header_end, cuts)
+
+    original_at = {line.start: line for line in doc.lines}
+    written_at = {line.start: line for line in written.lines}
+    for source_rows, start, out_start, length in carried:
+        offset = 0
+        for source in source_rows:
+            before = original_at.get(origin(source.start))
+            # The row the session cut leaves behind is skipped when it starts
+            # mid-row in the original; the rows around it show any change.
+            if start <= offset < start + length and before is not None:
+                at = out_start + offset - start
+                after = written_at.get(at)
+                if after is None or (after.kind, after.in_html) != (before.kind, before.in_html):
+                    number = sum(1 for other in written.lines if other.start <= at)
+                    return None, f"the migrated file would change how line {number} reads"
+            offset += source.end - source.start
+    return new_content, None
 
 
 def match_project_claude_md(file_path_str: str) -> Path | None:
@@ -1708,3 +1791,84 @@ def match_project_claude_md(file_path_str: str) -> Path | None:
     if target != canonical:
         return None
     return canonical
+
+
+class GateTarget(NamedTuple):
+    """The project CLAUDE.md an Edit or Write lands on (`target`), the file the
+    resolver returns before the change (`before`, None when none resolves),
+    and the base directory the target resolved under."""
+
+    target: Path
+    before: Path | None
+    base: Path
+
+
+def gate_target(file_path: str) -> GateTarget | None:
+    """The project CLAUDE.md the pin-cap gate checks for this Edit or Write
+    `file_path`, or None when it checks none.
+
+    Gated: an absolute path whose name is `claude.md` in any case, which the
+    project resolver returns once the change exists. The resolver runs with
+    the target counted as present, so a Write that creates the file is gated,
+    and a Write to a file the resolver would not return (`./CLAUDE.md` while
+    `.claude/CLAUDE.md` exists) is not. `before` is what the resolver returns
+    now, which can be a different file from the target.
+
+    A relative path is not gated, and any failure while resolving returns
+    None: a path the gate is unsure of is allowed.
+    """
+    if not isinstance(file_path, str) or not file_path:
+        return None
+    target = Path(file_path)
+    if not target.is_absolute() or target.name.casefold() != "claude.md":
+        return None
+    try:
+        from staleness import _resolve_project_claude_md_with_base, same_path
+    except ImportError:
+        return None
+    try:
+        resolved, base = _resolve_project_claude_md_with_base(assume_present=target)
+        if resolved is None or base is None or not same_path(resolved, target):
+            return None
+        before = _resolve_project_claude_md_with_base()[0]
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return GateTarget(target, before, base)
+
+
+# What a team member is told when a change would add pins past the cap, in
+# place of the pin command it cannot run. The gate's count denial and the drift
+# report share this one copy.
+MEMBER_PIN_INSTRUCTION = "Do not change CLAUDE.md yourself, by any route; tell the team-lead."
+
+
+def gate_frame(input_data) -> str | None:
+    """Which kind of hook frame the pin-cap checks cover: "lead", "member" (a
+    frame whose session belongs to a PACT team: in-process teammates and
+    Agent-tool subagents share the lead's session), "specialist" (a PACT
+    specialist type in no team, such as a solo --agent session), or None for a
+    frame they do not cover (a plain session, a non-PACT --agent session).
+
+    The pin-cap gate and the CLAUDE.md drift checks share this one predicate.
+    Never raises: a failed role read means None, and a failed team read means
+    "not in a team". Both reads are imported here, not at module level, because
+    every hook loads this module.
+    """
+    try:
+        from .pact_context import is_lead, strip_pact_namespace
+
+        if is_lead(input_data):
+            return "lead"
+        agent_type = input_data.get("agent_type")
+        specialist = isinstance(agent_type, str) and strip_pact_namespace(agent_type).startswith("pact-")
+    except Exception:  # noqa: BLE001 — an unreadable frame is not covered
+        return None
+    try:
+        from .background_work import frame_team_and_name
+
+        team = frame_team_and_name(input_data)[0]
+    except Exception:  # noqa: BLE001 — a failed membership read covers nothing
+        team = ""
+    if team:
+        return "member"
+    return "specialist" if specialist else None

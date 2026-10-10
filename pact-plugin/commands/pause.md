@@ -31,7 +31,7 @@ TaskUpdate(taskId, owner="secretary")
 
 ### 2. Documentation Sync
 
-Run `/PACT:pin-memory` (no arguments): Reviews the session for pin-worthy context, pins what matters, and prunes stale entries.
+Run `/PACT:pin-memory` (no arguments): Reviews the session for pin-worthy context and pins what matters.
 
 ### 3. Orchestration Retrospective
 

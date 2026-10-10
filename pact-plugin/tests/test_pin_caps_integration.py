@@ -86,7 +86,7 @@ class TestCheckPinnedBlockSignal_EndToEnd:
         assert check_pinned_block_signal(claude_md) is None
 
     def test_parse_exception_fails_open(self, tmp_path, monkeypatch):
-        """parse_pins raising does NOT propagate — block signal returns None."""
+        """The pin read raising does NOT propagate — block signal returns None."""
         from staleness import check_pinned_block_signal
         import staleness as staleness_mod
         claude_md = tmp_path / "CLAUDE.md"
@@ -94,10 +94,10 @@ class TestCheckPinnedBlockSignal_EndToEnd:
             _build_pinned_claude_md(2, stale_indices={0, 1}), encoding="utf-8"
         )
 
-        def _boom(_content):
+        def _boom(*_args):
             raise RuntimeError("parse blew up")
 
-        monkeypatch.setattr(staleness_mod, "parse_pins", _boom)
+        monkeypatch.setattr(staleness_mod, "section_pins", _boom)
         assert check_pinned_block_signal(claude_md) is None
 
 
@@ -179,10 +179,10 @@ class TestCheckPinSlotStatus_SessionInit:
             "session_init._get_project_claude_md_path", lambda: claude_md
         )
 
-        def _boom(_pinned):
+        def _boom(_doc, _located):
             raise RuntimeError("nope")
 
-        monkeypatch.setattr(si, "parse_pins", _boom)
+        monkeypatch.setattr(si, "section_pins", _boom)
         assert check_pin_slot_status() is None
 
 
@@ -345,8 +345,12 @@ class TestPinMemoryCommand_Grammar:
         """Hook deny-reasons are enumerated so curators see the exact
         actionable next step without leaving the command text."""
         assert "Pin count cap reached" in pin_memory_content
-        assert "New pin body is" in pin_memory_content
-        assert "Embedded pin structure" in pin_memory_content
+        assert "Do not change CLAUDE.md yourself, by any route; tell the team-lead." in pin_memory_content
+        from pin_caps import DENY_REASON_SIZE, PIN_SIZE_CAP
+        # The size denial's opening, as the hook renders it.
+        opening = DENY_REASON_SIZE.format(pins="'P' is 1600 chars", cap=PIN_SIZE_CAP).split(": ")[0]
+        assert f"- **{opening}**: " in pin_memory_content
+        assert "is its own pin" in pin_memory_content
         assert "Override rationale malformed" in pin_memory_content
 
     def test_documents_rationale_120_char_limit(self, pin_memory_content):
@@ -449,12 +453,11 @@ class TestPruneMemoryCommand_Grammar:
         assert "Cancel" in prune_memory_content
         assert "unchanged" in prune_memory_content
 
-    def test_documents_net_worse_allows_evict(self, prune_memory_content):
-        """The hook ALLOWS the prune edit because count strictly
-        decreases (net-worse predicate). This must be called out so
-        curators understand why the same hook that denies adds allows
-        evicts."""
-        assert "net-worse" in prune_memory_content
+    def test_documents_why_the_hook_allows_a_prune(self, prune_memory_content):
+        """The hook ALLOWS the prune edit because the change adds no pin.
+        This must be called out so curators understand why the same hook
+        that denies adds allows evicts."""
+        assert "adds no pin" in prune_memory_content
         assert "pin_caps_gate" in prune_memory_content
 
     def test_documents_stale_preference(self, prune_memory_content):
@@ -639,7 +642,7 @@ class TestParsePinsVsDetectStaleEntries_Agreement:
         (5, {2}),
     ])
     def test_stale_marker_detection_agrees(self, n_pins, stale_indices):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         from helpers import make_pin_entry, make_pinned_section
         # Build content with explicit STALE markers — detect_stale_entries
         # skips already-marked entries, so our axis of comparison is
@@ -663,8 +666,10 @@ class TestParsePinsVsDetectStaleEntries_Agreement:
         # carrying a STALE marker, so on marked fixtures it MUST return the
         # empty list — both parsers agree "marked entries are finalized
         # stale, no further flagging needed."
+        from shared.claude_md_markers import parse
         from staleness import detect_stale_entries
-        assert len(detect_stale_entries(content)) == 0, (
+        doc = parse(content)
+        assert len(detect_stale_entries(doc, 0, len(doc.lines) - 1)) == 0, (
             "detect_stale_entries flagged marker-carrying entries; it "
             "should skip them to avoid double-marking"
         )
@@ -681,7 +686,7 @@ class TestLiveClaudeMdOverrideLine_RoundTrip:
     LIVE_RATIONALE = "verbatim dispatch form is load-bearing for LLM readers"
 
     def test_round_trip_preserves_rationale(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = f"{self.LIVE_LINE}\n### Canonical Task Form\nbody\n"
         pins = parse_pins(content)
         assert len(pins) == 1
@@ -689,7 +694,7 @@ class TestLiveClaudeMdOverrideLine_RoundTrip:
         assert pins[0].date_comment == self.LIVE_LINE
 
     def test_round_trip_inside_multi_pin_context(self):
-        from pin_caps import parse_pins
+        from fixtures.pin_helpers import parse_pins
         content = (
             "<!-- pinned: 2026-04-01 -->\n"
             "### Other Pin\n"

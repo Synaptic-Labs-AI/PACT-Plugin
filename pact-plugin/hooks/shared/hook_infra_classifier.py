@@ -44,6 +44,15 @@ miniature inert-ship false-negative at the classifier layer. The asymmetry
 favors closure: a false positive costs one L2 test; a false negative is the
 inert-ship class. The companion meta-test's oracle MUST also be AST
 relative-following, or it reproduces the blind spot.
+
+A package initialiser is followed only for the names it re-exports. `from
+shared import check_pr_state` is an edge to gh_helpers, the module
+shared/__init__.py imports that name from, because the hook calls into it. The
+initialiser's other imports are not edges, although Python runs them whenever
+any shared module loads: following them would put that file's whole closure
+into every hook that imports from shared. A closure therefore names the helpers
+whose code a hook can call, not the modules it loads at runtime. Module-load
+scope and import cost are pinned by their own tests.
 """
 
 from __future__ import annotations
@@ -86,6 +95,11 @@ SEAM_DEPENDENT_HOOKS: frozenset[str] = frozenset({
     # compaction each was and journaling the verdict. Its L2 test runs the real
     # hooks over a temporary projects tree.
     "postcompact_archive",
+    # pin_caps_gate: which frames it checks now reads the session context and
+    # the session registry (a frame whose session belongs to a PACT team), and
+    # it resolves the project CLAUDE.md. It denies a refused change (fail-loud)
+    # and allows on every failure, so it is L2-only.
+    "pin_caps_gate",
 })
 
 # Hooks confirmed to FAIL SILENTLY on a broken seam (a consequential effect that
@@ -172,11 +186,16 @@ L3_CANDIDATE_HOOKS: frozenset[str] = frozenset({
 _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
     "missed_wake_scan": frozenset({
         "background_launch", "background_work",
-        "constants", "intentional_wait", "pact_context",
-        "paths",
-        "session_journal", "session_registry", "session_state", "state_file",
+        "claude_md_drift", "claude_md_manager", "claude_md_markers",
+        "constants", "failure_cause", "git_helpers", "intentional_wait", "pact_context",
+        "paths", "pin_caps", "pin_growth", "project_scope",
+        "session_journal", "session_registry", "session_state", "staleness", "state_file",
         "task_utils",
     }),  # state_file reached via background_work's state-file reads and writes.
+         # claude_md_drift and the CLAUDE.md modules it reads through (the
+         # resolver in staleness, pin_caps, pin_growth, claude_md_manager and
+         # their own imports) reached via the drift advisory, imported inside
+         # a function.
     "teammate_idle": frozenset({
         "background_launch", "background_work",
         "constants", "error_output", "intentional_wait",
@@ -185,13 +204,17 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
     }),
     "track_files": frozenset({
         "background_launch", "background_work",
-        "claude_md_manager", "constants", "error_output",
-        "failure_cause", "git_helpers", "intentional_wait", "pact_context", "paths",
-        "pin_caps", "project_scope", "session_journal", "session_registry", "session_state",
-        "staleness", "state_file", "task_utils",
+        "claude_md_drift", "claude_md_manager", "claude_md_markers", "constants",
+        "error_output", "failure_cause", "git_helpers", "intentional_wait", "pact_context",
+        "paths", "pin_caps", "pin_growth", "project_scope", "session_journal",
+        "session_registry", "session_state", "staleness", "state_file", "task_utils",
     }),  # regenerated from the live derivation, not hand-listed: the Layer 1
          # fold adds background_work + intentional_wait, and the rest were
          # already reached through the pin-staleness clear this hook carries.
+         # claude_md_markers reached via claude_md_manager, whose managed-region,
+         # kernel and migration planners import the parser inside functions.
+         # claude_md_drift and pin_growth reached via the pin-growth report and
+         # record jobs, imported inside functions.
     "agent_handoff_emitter": frozenset({
         "agent_handoff_marker", "canonical_json", "constants",
         "pact_context", "paths",
@@ -201,16 +224,23 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # seam (emit_task_metadata_snapshot); its own transitive edges
          # (agent_handoff_marker, session_journal) were already here.
     "session_init": frozenset({
-        "backlog_store",
-        "claude_md_manager", "compaction_owner", "constants", "dispatch_helpers", "failure_cause",
-        "failure_log", "git_helpers", "handoff_schema", "marker_schema",
+        "background_launch", "background_work", "backlog_store",
+        "claude_md_manager", "claude_md_markers", "compaction_owner", "constants",
+        "dispatch_helpers", "failure_cause",
+        "failure_log", "gh_helpers", "git_helpers", "handoff_schema", "marker_schema",
         "merge_guard_common", "pact_config", "pact_context", "paths",
         "peer_context", "pin_caps", "plugin_manifest", "project_scope",
         "session_journal", "session_registry", "session_resume",
         "session_state", "stale_session", "staleness", "state_file", "symlinks",
-        "task_utils", "teammate_mode",
-    }),  # stale_session reached via session_resume's Current Session reader,
+        "intentional_wait", "task_utils", "teammate_mode",
+    }),  # background_launch, background_work and intentional_wait reached via
+         # claude_md_manager.gate_frame's function-level team read.
+         # stale_session reached via session_resume's Current Session reader,
          # which takes the Resume-line pattern from it.
+         # gh_helpers reached via session_resume's function-level
+         # `from shared import check_pr_state`, a name the package re-exports.
+         # claude_md_markers reached via session_resume and stale_session,
+         # which locate the Current Session block through the parser.
          # backlog_store reached via `from shared import backlog_store`, an edge
          # the oracle resolves since it reads modules named in the import alias.
          # pact_config reached via the SessionStart runtime-config injection
@@ -228,19 +258,21 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # That import runs on the compact branch only, with its output
          # captured, and a failure to load reads as no marker.
     "session_end": frozenset({
-        "constants", "error_output", "pact_context", "paths", "session_journal",
-        "session_registry", "session_state", "task_utils",
-    }),
+        "constants", "error_output", "gh_helpers", "pact_context", "paths",
+        "session_journal", "session_registry", "session_state", "task_utils",
+    }),  # gh_helpers reached via `from shared import check_pr_state`, a name
+         # the package re-exports from it.
     "postcompact_archive": frozenset({
         "compaction_owner", "constants", "error_output", "pact_context", "paths",
         "session_journal", "session_registry", "session_state",
     }),  # compaction_owner reached via staging and settling the summary;
          # session_journal via compaction_owner's compaction_attributed event.
     "dispatch_gate": frozenset({
-        "background_launch", "background_work", "constants",
-        "dispatch_helpers", "intentional_wait", "pact_config", "pact_context",
-        "paths", "session_journal", "session_registry", "session_state",
-        "stale_session", "state_file", "task_utils",
+        "background_launch", "background_work", "claude_md_manager", "claude_md_markers",
+        "constants", "dispatch_helpers", "failure_cause", "git_helpers",
+        "intentional_wait", "pact_config", "pact_context", "paths", "pin_caps",
+        "project_scope", "session_journal", "session_registry", "session_state",
+        "stale_session", "staleness", "state_file", "task_utils",
     }),  # pact_config reached here via the *_MODE resolver edge
          # (dispatch_gate -> shared.pact_config.get_enum for
          # PACT_DISPATCH_INLINE_MISSION_MODE); pact_config is stdlib-only, so it
@@ -248,6 +280,19 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # stale_session reached here via the deny-message self-diagnosis
          # (dispatch_gate -> shared.stale_session.detect_stale_session_block);
          # its own transitive pact_context edge was already in this closure.
+         # claude_md_markers and claude_md_manager reached via the imports
+         # inside stale_session's Current Session reader (the parser and the
+         # two SESSION marker constants). Nothing on this hook's module-load
+         # path imports the parser (session_resume, which shared/__init__
+         # loads, imports it inside its functions too), and the reader runs
+         # inside detect_stale_session_block's catch-all, so a parser that
+         # fails to import drops the stale-block note from the deny message
+         # and never fails this hook's fail-closed module load. The
+         # derivation also follows claude_md_manager's own imports:
+         # failure_cause at module level, and staleness inside functions,
+         # which brings pin_caps and project_scope (staleness's module-level
+         # imports) and git_helpers (project_scope's). Reading the two
+         # constants runs none of those functions.
          # background_work reached via rule ⑥'s registered-teammate check
          # (dispatch_gate -> shared.background_work.frame_team_and_name, imported
          # inside a function); background_launch, intentional_wait and
@@ -283,13 +328,19 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # staleness -> pin_caps) and are now gone from this closure.
          # bootstrap_marker_writer's OWN closure (below) is unchanged.
     "bootstrap_marker_writer": frozenset({
-        "compaction_owner", "claude_md_manager", "constants", "failure_cause", "git_helpers", "handoff_schema",
-        "marker_schema",
+        "background_launch", "background_work",
+        "compaction_owner", "claude_md_manager", "claude_md_markers", "constants", "failure_cause",
+        "gh_helpers", "git_helpers", "handoff_schema", "intentional_wait", "marker_schema",
         "pact_context", "paths", "pin_caps", "project_scope", "session_journal",
         "session_registry", "session_resume", "session_state", "stale_session",
-        "staleness", "state_file",
-    }),  # stale_session reached via session_resume, whose Current Session
-         # reader takes the Resume-line pattern from it; state_file via
+        "staleness", "state_file", "task_utils",
+    }),  # background_launch, background_work, intentional_wait and task_utils
+         # reached via claude_md_manager.gate_frame's function-level team read.
+         # gh_helpers reached via session_resume's function-level
+         # `from shared import check_pr_state`, a name the package re-exports.
+         # stale_session reached via session_resume, whose Current Session
+         # reader takes the Resume-line pattern from it; claude_md_markers via
+         # session_resume, which locates that block through the parser; state_file via
          # project_scope, which writes the worktree identity record.
          # handoff_schema reached TRANSITIVELY, via session_resume's
          # resolve_handoff_field on the resume-brief decision summary — this
@@ -344,6 +395,15 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "pact_context", "paths", "session_journal", "session_registry",
         "session_state", "state_file", "task_utils"
     }),
+    "pin_caps_gate": frozenset({
+        "background_launch", "background_work", "claude_md_manager",
+        "claude_md_markers", "constants", "edit_simulation", "failure_cause",
+        "failure_log", "git_helpers", "intentional_wait", "pact_context", "paths",
+        "pin_caps", "pin_growth", "project_scope", "session_journal",
+        "session_registry", "session_state", "staleness", "state_file", "task_utils",
+    }),  # from the live derivation: the team read (background_work), the
+         # resolver (claude_md_manager, staleness), the edit simulation
+         # (edit_simulation) and the decision (pin_growth).
 }
 
 # Every helper module (top-level OR shared) transitively reachable from at least

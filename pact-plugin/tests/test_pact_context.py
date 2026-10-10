@@ -159,8 +159,9 @@ class TestGetPactContext:
         assert result["project_dir"] == "/Users/example/project"
         assert result["started_at"] == "2026-01-01T00:00:00Z"
 
-    def test_returns_empty_strings_when_file_missing(self, monkeypatch, tmp_path):
-        """Should return empty strings for all keys when context file is missing."""
+    def test_returns_empty_strings_when_file_missing(self, monkeypatch, tmp_path, capsys):
+        """Should return empty strings for all keys when context file is
+        missing, and print nothing: a session with no PACT context has none."""
         import shared.pact_context as ctx_module
 
         monkeypatch.setattr(ctx_module, "_context_path", tmp_path / "nonexistent.json")
@@ -172,6 +173,7 @@ class TestGetPactContext:
         assert result["session_id"] == ""
         assert result["project_dir"] == ""
         assert result["started_at"] == ""
+        assert capsys.readouterr().err == ""
 
     def test_returns_empty_strings_on_invalid_json(self, monkeypatch, tmp_path):
         """Should return empty strings when context file contains invalid JSON."""
@@ -2953,3 +2955,31 @@ class TestDescribeContextFailure:
 
         result = ctx_module.describe_context_failure()
         assert "context file not found" in result
+
+
+class TestMissingContextFileIsSilent:
+    """A hook run in a session with no PACT context file writes nothing to
+    stderr about it. track_files runs after every Bash call, so a line there
+    would print on each one."""
+
+    def test_track_files_on_a_plain_bash_frame_writes_no_stderr(self, tmp_path):
+        import subprocess
+        import sys
+
+        hook = Path(__file__).resolve().parent.parent / "hooks" / "track_files.py"
+        project = tmp_path / "project"
+        project.mkdir()
+        (tmp_path / "home" / ".claude").mkdir(parents=True)
+        env = {**os.environ, "HOME": str(tmp_path / "home"),
+               "CLAUDE_CONFIG_DIR": str(tmp_path / "home" / ".claude"),
+               "CLAUDE_PROJECT_DIR": str(project)}
+        frame = {"hook_event_name": "PostToolUse", "session_id": "plain-session",
+                 "cwd": str(project), "tool_name": "Bash",
+                 "tool_input": {"command": "true"}, "tool_response": {}}
+
+        result = subprocess.run([sys.executable, str(hook)], input=json.dumps(frame),
+                                capture_output=True, text=True, env=env, cwd=project, timeout=120)
+
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"suppressOutput": True}
+        assert result.stderr == ""

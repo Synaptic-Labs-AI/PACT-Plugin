@@ -66,6 +66,12 @@ except ImportError:
         get_worktree_identity_from_session_record,
     )
 
+# The fence-aware parser that locates every PACT marker and section in a
+# CLAUDE.md. Importable here only AFTER the pact_session import above: the
+# production entry `cli.py` puts only the skill root on sys.path, and
+# pact_session's bootstrap is what adds hooks/.
+from shared.claude_md_markers import Document, Located, State, parse, uncertainty_added
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -76,6 +82,14 @@ logger = logging.getLogger(__name__)
 # from 5 to 3 entries to limit token overlap between the two systems while
 # retaining the structured format that auto-memory does not provide.
 WORKING_MEMORY_HEADER = "## Working Memory"
+# The Working Memory heading as an insertion anchor for the Retrieved Context
+# sync: a prefix match at column 0 on one row's content, as it has always been.
+_WORKING_MEMORY_ANCHOR = re.compile(r"^## Working Memory")
+# The section itself, for `Document.find_section`: the heading row, and the
+# rows that end the section. Each matches one row's content, which never holds
+# the line terminator.
+_WORKING_MEMORY_HEADING_ROW = re.compile(r"^## Working Memory\s*$")
+_WORKING_MEMORY_TERMINATOR = re.compile(r"#\s|##\s(?!Working Memory)|---")
 # THE COUNT CLAUSE WAS REMOVED BECAUSE IT WAS FALSE IN THE COMMON REGIME, NOT
 # BECAUSE IT WAS UNTIDY. `_apply_token_budget` never compresses `entries[0]`
 # and its drop loop is `while len(result) > 1`, so when the newest entry ALONE
@@ -113,7 +127,12 @@ MAX_WORKING_MEMORIES = 3
 # Constants for retrieved context section (searched/retrieved memories)
 RETRIEVED_CONTEXT_HEADER = "## Retrieved Context"
 RETRIEVED_CONTEXT_COMMENT = "<!-- Auto-managed by pact-memory skill. Last 3 retrieved memories shown. -->"
+_RETRIEVED_CONTEXT_HEADING_ROW = re.compile(r"^## Retrieved Context\s*$")
+_RETRIEVED_CONTEXT_TERMINATOR = re.compile(r"#\s|##\s(?!Retrieved Context)|---")
 MAX_RETRIEVED_MEMORIES = 3
+
+# The first row of each entry in either section.
+_ENTRY_ROW = re.compile(r"^### \d{4}-\d{2}-\d{2}")
 
 # Token budget constants.
 # Approximation: 1 token ~ 0.75 words, so word_count * 1.3 ~ token count.
@@ -167,18 +186,20 @@ COMPRESSED_ENTRY_TOKEN_CEILING = 128
 
 # The line prefix that carries the pointer to the durable record.
 #
-# NAMED BECAUSE FOUR EXECUTABLE SITES MUST AGREE, AND A RENAME AT SOME OF
+# NAMED BECAUSE FIVE EXECUTABLE SITES MUST AGREE, AND A RENAME AT SOME OF
 # THEM IS A SILENT DEFECT. Two sites WRITE the line
-# (`_format_memory_entry` and `_format_retrieved_entry`). Two sites READ it
-# by prefix: `_compress_memory_entry` keeps it, and
-# `_apply_entry_token_ceiling` holds it out of the cut.
+# (`_format_memory_entry` and `_format_retrieved_entry`). Three sites READ
+# it by prefix: `_compress_memory_entry` keeps it,
+# `_apply_entry_token_ceiling` holds it out of the cut, and
+# `_memory_id_line` finds it for the one-entry-per-memory rule of the
+# Retrieved Context sync.
 #
 # THAT EXCLUSION FROM THE CUT IS THE PROPERTY THE CUT RULE RESTS ON. This
 # design accepts truncation rather than refusal ONLY WHILE the recovery
-# pointer survives the cut. So a rename at the two writers without the two
+# pointer survives the cut. So a rename at the two writers without the
 # readers, or the opposite, makes the id line droppable again: THE
 # RECOVERY ROUTE GOES, nothing raises and nothing reddens. One name for
-# the four sites makes that silent rename not possible.
+# the five sites makes that silent rename not possible.
 #
 # THE VALUE CARRIES NO COLON, because the readers test a PREFIX and the
 # writers append `: ` and the value.
@@ -202,8 +223,8 @@ PIN_SIZE_CAP = 1500
 PIN_STALE_BLOCK_THRESHOLD = 2
 OVERRIDE_RATIONALE_MAX = 120
 
-# PACT-managed boundary marker prefixes. Used by _find_terminator_offset to
-# terminate section scans on any PACT boundary marker. The canonical
+# PACT-managed boundary marker prefixes. A marker line for any of them ends a
+# section (`_SECTION_STOP_PREFIXES` below). The canonical
 # definition lives in hooks/shared/claude_md_manager.py as
 # PACT_BOUNDARY_PREFIXES — importing it would require the sys.path bootstrap
 # pact_session.py in this directory carries, so the alternation is inlined
@@ -216,7 +237,8 @@ _PACT_BOUNDARY_ALT = "PACT_MEMORY_|PACT_MANAGED_|PACT_ROUTING_"
 # hooks/shared/claude_md_manager.py, a drift gate holds the copy above equal to
 # it, and the SESSION markers carry no PACT_ prefix. A SESSION member in a set
 # named for PACT_ prefixes makes the name incorrect about its own contents, so
-# the scans below embed this alternation WITH _PACT_BOUNDARY_ALT and not in it.
+# `_SECTION_STOP_PREFIXES` below takes this prefix WITH _PACT_BOUNDARY_ALT's
+# and not in it.
 #
 # WHAT IT DEFENDS, MEASURED. The session block sits in the managed region
 # ABOVE the memory markers. When the memory marker pair is absent, the window
@@ -234,6 +256,12 @@ _SESSION_BOUNDARY_ALT = "SESSION_"
 # branch keeps removing.
 _SESSION_END_MARKER = f"<!-- {_SESSION_BOUNDARY_ALT}END -->"
 
+# A marker line for any of these ends a Working Memory or Retrieved Context
+# section. Built from the two prefixes above, so their drift gates cover it.
+_SECTION_STOP_PREFIXES = tuple(
+    f"<!-- {prefix}" for prefix in (*_PACT_BOUNDARY_ALT.split("|"), _SESSION_BOUNDARY_ALT)
+)
+
 # Managed-region boundary markers. Twin copies of the canonical definitions
 # in hooks/shared/claude_md_manager.py (the import would require the sys.path
 # bootstrap pact_session.py in this directory carries; the drift-gated twin
@@ -242,19 +270,6 @@ _MANAGED_START_MARKER = "<!-- PACT_MANAGED_START: Managed by pact-plugin - do no
 _MANAGED_END_MARKER = "<!-- PACT_MANAGED_END -->"
 
 # The INNER memory-region boundary, nested in the managed region above.
-#
-# THESE TWO CARRY THE CANONICAL NAMES AND NOT THE LOCAL PRIVATE PREFIX, AND
-# THAT IS A DELIBERATE DEPARTURE FROM THE TWO LINES ABOVE. The prefix is a
-# choice made at some sites here and not at others: `MAX_WORKING_MEMORIES`
-# and `WORKING_MEMORY_TOKEN_BUDGET` carry none. `_narrow_to_memory_region`
-# below reads these two names IN ITS BODY, and its body is byte-compared
-# against the canonical copy by a drift gate. A prefix here puts a
-# difference in that body, and the gate would go RED ON ARRIVAL on a choice
-# somebody made rather than on divergence.
-#
-# `extract_managed_region` records the opposite call for its own twin, and
-# the difference is the GATE rather than the taste: that one is not
-# byte-compared, so its local names cost nothing.
 MEMORY_START_MARKER = "<!-- PACT_MEMORY_START -->"
 MEMORY_END_MARKER = "<!-- PACT_MEMORY_END -->"
 
@@ -880,77 +895,26 @@ def _atomic_write_text(target: Path, content: str, project_root: Path) -> None:
             pass
 
 
-def extract_managed_region(content: str) -> Optional[Tuple[str, int]]:
-    """
-    Extract the PACT-managed region from CLAUDE.md content.
+def _resolve_write_scope(doc: Document) -> tuple[int, int] | None:
+    """Resolve the rows a section write may search, or None to DECLINE.
 
-    ⚠️ THIS TWIN IS DELIBERATELY NOT BYTE-IDENTICAL, AND IS NOT DRIFT-GATED.
-    Its siblings (`file_lock`, `_atomic_write_text`) are pinned byte-for-byte;
-    this one cannot be, because two differences here are LOCAL CONVENTIONS
-    rather than divergence:
-
-      * `Optional[Tuple[str, int]]` here vs `tuple[str, int] | None` there
-      * `_MANAGED_START_MARKER` here vs `MANAGED_START_MARKER` there
-        (this module private-prefixes what that one exports)
-
-    The executable logic is otherwise identical. Do NOT "fix" either side
-    toward the other and do NOT add a byte-identity gate: it would go red on
-    arrival, on choices someone made, and a gate that is red on arrival gets
-    deleted rather than investigated. A NORMALISED gate — mapping the constant
-    names and the annotation syntax before comparing — is the real remedy and
-    is deliberately deferred rather than invented here.
-
-    Twin of hooks/shared/claude_md_manager.extract_managed_region — kept
-    local as a drift-gated twin; importing the canonical would require the
-    sys.path bootstrap pact_session.py in this directory carries.
-
-    Returns (region_text, start_offset) where start_offset is the absolute
-    position of the first character after MANAGED_START_MARKER. Returns None
-    if either marker is missing.
-    """
-    start_idx = content.find(_MANAGED_START_MARKER)
-    if start_idx == -1:
-        return None
-    region_start = start_idx + len(_MANAGED_START_MARKER)
-    end_idx = content.find(_MANAGED_END_MARKER, region_start)
-    if end_idx == -1:
-        return None
-    return content[region_start:end_idx], region_start
-
-
-def marker_line_span(text: str, literal: str) -> tuple[int, int] | None:
-    """Span of the first line of `text` that IS `literal`, else None.
-
-    TWIN OF `hooks/shared/pin_markers.marker_line_span`, kept local because
-    the production entry point does not put `hooks/` on `sys.path`. See
-    `_narrow_to_memory_region` for the measurement behind that sentence.
-
-    THE EXECUTABLE BODY MUST STAY BYTE-IDENTICAL TO THE CANONICAL COPY.
-    CHANGE THE TWO TOGETHER. Read the canonical docstring for why ONE
-    implementation of `the marker occupies a line` matters: a second,
-    independently-written predicate produced drift in this repository once,
-    and a document marked by one reading and unmarked by another is what
-    came out of it.
-    """
-    offset = 0
-    for line in text.splitlines(keepends=True):
-        if line.strip() == literal:
-            return offset, offset + len(line)
-        offset += len(line)
-    return None
-
-
-def _resolve_write_window(content: str) -> tuple[str, int] | None:
-    """Resolve the window a section write may search, or None to DECLINE.
-
-    THE THREE STEPS, IN ORDER.
-    STEP 1. The memory marker pair resolves: use the memory region.
-    STEP 2. ELSE, if the managed-end marker and the session-end marker each
-            resolve: use (end of the session block, managed end).
+    THE THREE STEPS, IN ORDER, each a lookup through the fence-aware parser.
+    STEP 1. The memory marker pair is FOUND inside the managed block: its
+            interior.
+    STEP 2. ELSE, if the memory pair is ABSENT and the session-end marker is
+            FOUND inside the managed block: (the row after the session-end
+            marker, the row before the managed-end marker).
     STEP 3. ELSE decline. The caller must NOT widen.
 
-    A document with NO managed region keeps today's whole-file window. That
-    is the pre-migration class and it is outside this rule.
+    A document with NO managed block keeps the whole-file window. That is the
+    pre-migration class and it is outside this rule.
+
+    A LOOKUP THE PARSER CANNOT ANSWER WITH CERTAINTY DECLINES. A managed block,
+    memory pair or session-end marker that is UNKNOWN (below an unclosed fence,
+    say), DUPLICATE or MALFORMED (a stray copy of the marker text) sends the
+    write to STEP 3, never to a wider window. A fenced copy of any of these
+    markers is an example, not a marker, so it neither anchors a window nor
+    blocks one.
 
     🔴 R3: ALL THREE STEPS SHARE ONE BLIND SPOT, AND STEP 1 IS NOT THE SAFE
     CASE. The bound defends against a forgery ABOVE the memory region and NOT
@@ -965,13 +929,20 @@ def _resolve_write_window(content: str) -> tuple[str, int] | None:
     measurement found a second load-bearing control, the label prefix, that
     the sanitizer does not touch. One half alone is not the honest statement.
     """
-    region_result = extract_managed_region(content)
-    if region_result is None:
-        return content, 0
+    managed = doc.find_block(_MANAGED_START_MARKER, _MANAGED_END_MARKER)
+    if managed.state is State.ABSENT:
+        return 0, len(doc.lines) - 1
+    if managed.state is not State.FOUND:
+        return None
+    managed_start, managed_end = managed.spans[0]
+    interior = (managed_start + 1, managed_end - 1)
 
-    narrowed = _narrow_to_memory_region(region_result[0], region_result[1])
-    if narrowed is not None:
-        return narrowed
+    memory = doc.find_block(MEMORY_START_MARKER, MEMORY_END_MARKER, interior)
+    if memory.state is State.FOUND:
+        memory_start, memory_end = memory.spans[0]
+        return memory_start + 1, memory_end - 1
+    if memory.state is not State.ABSENT:
+        return None
 
     # STEP 2, AND ITS CAUSE IS AVAILABILITY RATHER THAN SECURITY.
     #
@@ -996,62 +967,12 @@ def _resolve_write_window(content: str) -> tuple[str, int] | None:
     # a forged title has run against this document, so a widening there
     # rewards the attack. Such documents can be on disk today: the terminator
     # fix stops NEW ones entering that state and repairs NONE in it.
-    region_text, region_start = region_result
-    if _MANAGED_END_MARKER in content:
-        session_end = marker_line_span(region_text, _SESSION_END_MARKER)
-        if session_end is not None:
-            inner_start = session_end[1]
-            return region_text[inner_start:], region_start + inner_start
+    session_end = doc.find_marker(_SESSION_END_MARKER, interior)
+    if session_end.state is State.FOUND:
+        return session_end.spans[0][0] + 1, managed_end - 1
 
     # STEP 3.
     return None
-
-
-def _narrow_to_memory_region(
-    region_text: str, region_start: int
-) -> tuple[str, int] | None:
-    """Narrow an already-extracted managed region to the MEMORY region inside
-    it, or None when the memory marker pair is not there.
-
-    TWIN OF `hooks/shared/pin_markers._narrow_to_memory_region`. THE
-    EXECUTABLE BODY MUST STAY BYTE-IDENTICAL TO THE CANONICAL COPY, AND THE
-    TWO DOCSTRINGS DIFFER ON PURPOSE: this copy states only what is local.
-    CHANGE THE BODIES TOGETHER, and compare them with an extractor that
-    PARSES rather than one that counts leading lines. The signature above
-    spans several lines, so a line-counting extractor leaves the parameter
-    lines and then the docstring inside what it calls the body, and reports
-    a difference that is not a difference in logic.
-
-    WHY A TWIN RATHER THAN AN IMPORT, MEASURED RATHER THAN INHERITED. The
-    comments elsewhere in this module say the two trees are a different
-    package. That cause does not hold, because `hooks/__init__.py` and
-    `hooks/shared/__init__.py` each exist. THE OPERATIVE FACT IS A PATH
-    BOOTSTRAP DIVERGENCE: the production entry `cli.py` puts ONLY the skill
-    root on `sys.path`, and `tests/conftest.py` puts `hooks/` on it. So an
-    import here RESOLVES IN PYTEST AND RAISES FROM THE CLI. The failure
-    direction of that mistake is the dangerous one: green tests and a
-    broken shipped path.
-
-    WHY THE CALLERS NEED IT. `extract_managed_region` returns the WIDE
-    region, and the session block sits inside it ABOVE the memory markers
-    while it interpolates caller-influenced values. The two write-side
-    parsers below search their heading FIRST-MATCH in the window they are
-    given, and the offset of that match rebuilds the file. MEASURED on a
-    production-shaped document with a forged `## Working Memory` line in the
-    session block: the splice landed at 234 against a memory start marker at
-    274, so the write would have gone OUTSIDE the memory region.
-    """
-    start_span = marker_line_span(region_text, MEMORY_START_MARKER)
-    if start_span is None:
-        return None
-    # The END of the marker line, so the window begins on the NEXT line and
-    # `region_start` stays a line start for every offset computed below it.
-    inner_start = start_span[1]
-    tail = region_text[inner_start:]
-    end_span = marker_line_span(tail, MEMORY_END_MARKER)
-    if end_span is None:
-        return None
-    return tail[:end_span[0]], region_start + inner_start
 
 
 def _find_existing_claude_md(base: Path) -> Optional[Path]:
@@ -1904,143 +1825,87 @@ def _format_memory_entry(
     return "\n".join(lines)
 
 
-def _find_terminator_offset(
+def _parse_section(
     content: str,
-    start: int,
-    terminator_pattern: "re.Pattern[str]",
-) -> int:
+    heading: "re.Pattern[str]",
+    terminator: "re.Pattern[str]",
+    header: str,
+) -> tuple[str, str, str, list[str]] | str | None:
+    """Locate one section inside the write scope, with the fence-aware parser.
+
+    Returns one of:
+    - None: no write scope resolved; the caller DECLINES (see
+      `_resolve_write_scope`).
+    - a str: the parser cannot say where the section is (its only heading is
+      inside an HTML comment). It is the reason, naming the line; the caller
+      refuses and writes nothing.
+    - (before_section, header, after_section, existing_entries) when the
+      section is found. The section runs from its heading row to the row
+      before the first terminator row or PACT marker line. Entries start at
+      each `### YYYY-MM-DD` row; a fenced one is an example, not an entry.
+    - (before_section, "", after_section, []) when it is absent: the file split
+      where a writer inserts the section, at the start of the row that closes
+      the write scope (the memory or managed END marker), so the section lands
+      inside that block. Only a file with no managed block, whose scope is the
+      whole file, splits at the end of the file.
+
+    Slices are from the FULL content, for write-back.
     """
-    Find the absolute offset of the first line matching `terminator_pattern`.
+    doc = parse(content)
+    scope = _resolve_write_scope(doc)
+    if scope is None:
+        return None
+    section = doc.find_section(heading, terminator, scope, stop_prefixes=_SECTION_STOP_PREFIXES)
+    if section.state is State.UNKNOWN:
+        return section.reason
+    if section.state is not State.FOUND:
+        closing = scope[1] + 1
+        split = doc.lines[closing].start if closing < len(doc.lines) else len(content)
+        return content[:split], "", content[split:], []
+    first, last = section.spans[0]
+    start, end = doc.offsets(first, last)
+    starts = [doc.lines[row].start for row in doc.find_lines(_ENTRY_ROW, (first + 1, last))]
+    entries = [content[a:b].strip() for a, b in zip(starts, starts[1:] + [end])]
+    return content[:start], header, content[end:], entries
 
-    Simple line-by-line search — no fence tracking needed because callers
-    operate within the PACT-managed region (round 10 structural guarantee).
-    The managed region contains only plugin-generated content; user-authored
-    fenced code blocks live outside PACT_MANAGED_START/END.
 
-    Args:
-        content: Text to scan (typically the managed region extract, not
-            the full file).
-        start: Absolute offset in `content` where scanning begins.
-        terminator_pattern: Compiled regex matched against individual lines
-            via `.match`.
-
-    Returns:
-        Absolute offset of the first terminator line, or `len(content)` if
-        none found.
-    """
-    pos = start
-    while pos < len(content):
-        nl = content.find("\n", pos)
-        if nl == -1:
-            line = content[pos:]
-            line_end = len(content)
-        else:
-            line = content[pos:nl]
-            line_end = nl + 1
-
-        if terminator_pattern.match(line):
-            return pos
-
-        pos = line_end
-
-    return len(content)
+def _read_back(planned: Document, heading: "re.Pattern[str]", terminator: "re.Pattern[str]") -> Optional[Located]:
+    """The section a sync wrote, as the next sync will find it in `planned`:
+    FOUND in its write scope, or None. The caller checks that its heading sits
+    where the sync put it."""
+    scope = _resolve_write_scope(planned)
+    if scope is None:
+        return None
+    section = planned.find_section(heading, terminator, scope, stop_prefixes=_SECTION_STOP_PREFIXES)
+    return section if section.state is State.FOUND else None
 
 
 def _parse_working_memory_section(
-    content: str
-) -> Optional[Tuple[str, str, str, List[str]]]:
+    content: str,
+) -> tuple[str, str, str, list[str]] | str | None:
+    """Locate the Working Memory section. Returns what `_parse_section` does.
+
+    Bound to the MEMORY region, not to the managed region.
+
+    THE WINDOW AND THE TARGET MUST BE THE SAME REGION. The managed region
+    holds the SESSION BLOCK above the memory markers, and that block
+    interpolates caller-influenced values. The section lookup takes the FIRST
+    `## Working Memory` heading in the scope it is given, so a forged heading
+    in the session block would win over the genuine one, and the offset of
+    that match rebuilds the file.
+
+    MEASURED on a production-shaped document, with the boundary taken from
+    the production emitter rather than a literal: the splice landed at 234
+    against a memory start marker at 274, with the genuine heading at 350.
+    THE WRITE WOULD HAVE GONE OUTSIDE THE MEMORY REGION.
+
+    A DECLINE AND AN INSERT ARE OPPOSITE OUTCOMES. `None` means DECLINE and
+    must NOT become the absent tuple, because that sends the caller to its
+    insert branch.
     """
-    Parse CLAUDE.md content to extract working memory section.
-
-    Round 10 structural guarantee: the parser searches within the
-    PACT-managed region only. This region contains only plugin-generated
-    content (no user-authored fenced code blocks), so fence-aware scanning
-    is unnecessary. If the managed region is not present (pre-migration
-    file), falls back to scanning the full content. Returned slices
-    (before_section, after_section) are always from the FULL content for
-    correct write-back.
-
-    Args:
-        content: Full CLAUDE.md file content.
-
-    Returns:
-        Tuple of (before_section, section_header_with_comment, after_section, existing_entries)
-        where existing_entries is a list of individual memory entry strings.
-    """
-    # Bound to the MEMORY region, not to the managed region.
-    #
-    # THE WINDOW AND THE TARGET MUST BE THE SAME REGION. The managed region
-    # holds the SESSION BLOCK above the memory markers, and that block
-    # interpolates caller-influenced values. The first-match search below
-    # takes the FIRST `## Working Memory` line in the window it is given, so
-    # a forged heading in the session block wins over the genuine one, and
-    # the offset of that match rebuilds the file.
-    #
-    # MEASURED on a production-shaped document, with the boundary taken from
-    # the production emitter rather than a literal: the splice landed at 234
-    # against a memory start marker at 274, with the genuine heading at 350.
-    # THE WRITE WOULD HAVE GONE OUTSIDE THE MEMORY REGION.
-    # THE MISSING-PAIR DIRECTION IS SETTLED NOW, AND THE RESOLVER OWNS IT.
-    # `None` means DECLINE, and this function returns `None` to say so. It
-    # must NOT return the not-found tuple, because that sends the caller to
-    # its append-at-end branch, which writes the section OUTSIDE every marker.
-    # A decline and an append-at-end are one line apart and they are opposite
-    # outcomes. Read `_resolve_write_window` for the three steps.
-    window = _resolve_write_window(content)
-    if window is None:
-        return None
-    scan_text, offset = window
-
-    # Pattern to find the Working Memory section.
-    # Negative lookahead excludes the three plugin-managed boundary prefixes
-    # from being consumed as the auto-managed comment — otherwise an empty
-    # Working Memory section followed immediately by <!-- PACT_MEMORY_END -->
-    # would greedily swallow the marker (#404).
-    section_pattern = re.compile(
-        r'^(## Working Memory)\s*\n'
-        rf'(<!-- (?!(?:{_PACT_BOUNDARY_ALT}|{_SESSION_BOUNDARY_ALT}))'
-        r'[^>]*-->)?\s*\n?',
-        re.MULTILINE
+    return _parse_section(
+        content, _WORKING_MEMORY_HEADING_ROW, _WORKING_MEMORY_TERMINATOR, WORKING_MEMORY_HEADER
     )
-
-    match = section_pattern.search(scan_text)
-
-    if not match:
-        # Section doesn't exist
-        return content, "", "", []
-
-    section_start = match.start() + offset
-    section_header_end = match.end()
-
-    # Find where the next ## section starts (end of working memory section).
-    # No fence-awareness needed — managed region contains only plugin-generated
-    # content (round 10 structural guarantee).
-    next_section_pattern = re.compile(
-        rf'(#\s|##\s(?!Working Memory)|---|'
-        rf'<!-- (?:{_PACT_BOUNDARY_ALT}|{_SESSION_BOUNDARY_ALT}))',
-    )
-    section_end_rel = _find_terminator_offset(
-        scan_text, section_header_end, next_section_pattern
-    )
-    section_end = section_end_rel + offset
-
-    before_section = content[:section_start]
-    section_content = scan_text[section_header_end:section_end_rel].strip()
-    after_section = content[section_end:]
-
-    # Parse existing entries (each starts with ### YYYY-MM-DD)
-    entry_pattern = re.compile(r'^### \d{4}-\d{2}-\d{2}', re.MULTILINE)
-    entry_starts = [m.start() for m in entry_pattern.finditer(section_content)]
-
-    existing_entries = []
-    for i, start in enumerate(entry_starts):
-        if i + 1 < len(entry_starts):
-            entry = section_content[start:entry_starts[i + 1]].strip()
-        else:
-            entry = section_content[start:].strip()
-        existing_entries.append(entry)
-
-    return before_section, WORKING_MEMORY_HEADER, after_section, existing_entries
 
 
 def _project_root_of(claude_md_path: Path) -> Path:
@@ -2129,7 +1994,11 @@ class SyncResult:
     # AND NOT OF THIS ENUM, so it holds for each reason here rather than for
     # this one alone. Do not read the first sentence as covering the two
     # writers together.
-    NO_WINDOW = "no_window"      # no write window resolved; see _resolve_write_window
+    NO_WINDOW = "no_window"      # no write window resolved; see _resolve_write_scope
+    # The window resolved, but the parser cannot say with certainty where the
+    # section goes: its only heading is inside an HTML comment. The reason,
+    # naming the line, goes to the log.
+    UNCERTAIN = "uncertain"
 
     def __init__(self, reason: str) -> None:
         self.reason = reason
@@ -2687,6 +2556,9 @@ def sync_to_claude_md(
                 # alternative shape here, the not-found tuple, would append
                 # the section OUTSIDE every marker instead.
                 return SyncResult(SyncResult.NO_WINDOW)
+            if isinstance(parsed, str):
+                logger.warning("Not syncing memory to CLAUDE.md: %s", parsed)
+                return SyncResult(SyncResult.UNCERTAIN)
             before_section, section_header, after_section, existing_entries = parsed
 
             if entries is None:
@@ -2718,15 +2590,31 @@ def sync_to_claude_md(
 
             section_text = "\n".join(section_lines)
 
-            # Reconstruct file content
-            if section_header:
-                # Section existed, replace it
+            # Reconstruct file content. A missing section inside a block comes
+            # back split at the block's closing marker row, so `after_section`
+            # is non-empty, and it is written in the same shape as a found one:
+            # the next sync then finds it and rewrites it byte for byte. Only a
+            # file with no managed block splits at end of file, with nothing
+            # after.
+            if section_header or after_section:
+                written_at = len(before_section)
                 new_content = before_section + section_text + after_section
             else:
-                # Section didn't exist, append at end
-                if not content.endswith("\n"):
-                    content += "\n"
-                new_content = content + "\n" + section_text
+                # No managed block and no section: append at end
+                body = content if content.endswith("\n") else content + "\n"
+                written_at = len(body) + 1
+                new_content = body + "\n" + section_text
+
+            # Write nothing PACT could read less of, or that does not read back
+            # where it was written.
+            planned = parse(new_content)
+            refusal = uncertainty_added(parse(content), planned)
+            section = _read_back(planned, _WORKING_MEMORY_HEADING_ROW, _WORKING_MEMORY_TERMINATOR)
+            if refusal is None and (section is None or planned.offsets(*section.spans[0])[0] != written_at):
+                refusal = "the Working Memory section did not read back where it was written"
+            if refusal:
+                logger.warning("Not syncing memory to CLAUDE.md: %s", refusal)
+                return SyncResult(SyncResult.UNCERTAIN)
 
             # Write back to file (atomic: temp + rename, so a crash mid-write
             # cannot leave the always-loaded CLAUDE.md truncated)
@@ -2767,84 +2655,19 @@ def project_memories_to_claude_md(
 
 
 def _parse_retrieved_context_section(
-    content: str
-) -> Optional[Tuple[str, str, str, List[str]]]:
+    content: str,
+) -> tuple[str, str, str, list[str]] | str | None:
+    """Locate the Retrieved Context section. Returns what `_parse_section` does.
+
+    Same memory-region bound as `_parse_working_memory_section`, for the same
+    cause, including the decline. MEASURED at THIS site, on a
+    production-shaped document with a forged `## Retrieved Context` line in
+    the session block: the splice landed at 234 against a memory start marker
+    at 277.
     """
-    Parse CLAUDE.md content to extract retrieved context section.
-
-    Round 10 structural guarantee: same managed-region bounding as
-    _parse_working_memory_section — see that function's docstring.
-
-    Args:
-        content: Full CLAUDE.md file content.
-
-    Returns:
-        Tuple of (before_section, section_header, after_section, existing_entries)
-        where existing_entries is a list of individual memory entry strings.
-    """
-    # Bound to the MEMORY region, not to the managed region. Same bound as
-    # `_parse_working_memory_section` and for the same cause, including the
-    # missing-pair branch: read that function for both.
-    #
-    # MEASURED at THIS site, on a production-shaped document with a forged
-    # `## Retrieved Context` line in the session block: the splice landed at
-    # 234 against a memory start marker at 277.
-    # Same three-step window and the same DECLINE as the sibling above. `None`
-    # here means decline, and it must not be the not-found tuple, for the same
-    # cause: that tuple sends the caller to its append-at-end branch.
-    window = _resolve_write_window(content)
-    if window is None:
-        return None
-    scan_text, offset = window
-
-    # Pattern to find the Retrieved Context section.
-    # Negative lookahead narrows to the plugin-managed boundary prefixes
-    # — see _parse_working_memory_section for the full rationale (#404).
-    section_pattern = re.compile(
-        r'^(## Retrieved Context)\s*\n'
-        rf'(<!-- (?!(?:{_PACT_BOUNDARY_ALT}|{_SESSION_BOUNDARY_ALT}))'
-        r'[^>]*-->)?\s*\n?',
-        re.MULTILINE
+    return _parse_section(
+        content, _RETRIEVED_CONTEXT_HEADING_ROW, _RETRIEVED_CONTEXT_TERMINATOR, RETRIEVED_CONTEXT_HEADER
     )
-
-    match = section_pattern.search(scan_text)
-
-    if not match:
-        # Section doesn't exist
-        return content, "", "", []
-
-    section_start = match.start() + offset
-    section_header_end = match.end()
-
-    # Find where the next ## section starts (end of retrieved context section).
-    # No fence-awareness needed — managed region contains only plugin-generated
-    # content (round 10 structural guarantee).
-    next_section_pattern = re.compile(
-        rf'(#\s|##\s(?!Retrieved Context)|---|'
-        rf'<!-- (?:{_PACT_BOUNDARY_ALT}|{_SESSION_BOUNDARY_ALT}))',
-    )
-    section_end_rel = _find_terminator_offset(
-        scan_text, section_header_end, next_section_pattern
-    )
-    section_end = section_end_rel + offset
-
-    before_section = content[:section_start]
-    section_content = scan_text[section_header_end:section_end_rel].strip()
-    after_section = content[section_end:]
-
-    # Parse existing entries (each starts with ### YYYY-MM-DD)
-    entry_pattern = re.compile(r'^### \d{4}-\d{2}-\d{2}', re.MULTILINE)
-    entry_starts = [m.start() for m in entry_pattern.finditer(section_content)]
-
-    existing_entries = []
-    for i, start in enumerate(entry_starts):
-        if i + 1 < len(entry_starts):
-            entry = section_content[start:entry_starts[i + 1]].strip()
-        else:
-            entry = section_content[start:].strip()
-        existing_entries.append(entry)
-
-    return before_section, RETRIEVED_CONTEXT_HEADER, after_section, existing_entries
 
 
 def _format_retrieved_entry(
@@ -2931,6 +2754,14 @@ def _format_retrieved_entry(
     return "\n".join(lines)
 
 
+def _memory_id_line(entry: str) -> Optional[str]:
+    """The entry's `**Memory ID**` line as written, or None when it has none."""
+    for line in entry.split("\n"):
+        if line.startswith(_MEMORY_ID_LABEL):
+            return line
+    return None
+
+
 def sync_retrieved_to_claude_md(
     memories: List[Dict[str, Any]],
     query: str,
@@ -2943,7 +2774,8 @@ def sync_retrieved_to_claude_md(
 
     Maintains a rolling window of the last 3 retrieved memories. New entries
     are added at the top of the section, and entries beyond MAX_RETRIEVED_MEMORIES
-    are removed.
+    are removed. A memory already in the window moves to the top rather than
+    appearing twice.
 
     Args:
         memories: List of memory dictionaries that were retrieved.
@@ -3082,6 +2914,9 @@ def sync_retrieved_to_claude_md(
             if parsed is None:
                 # The same decline as the sibling writer, for the same cause.
                 return SyncResult(SyncResult.NO_WINDOW)
+            if isinstance(parsed, str):
+                logger.warning("Not syncing retrieved memories to CLAUDE.md: %s", parsed)
+                return SyncResult(SyncResult.UNCERTAIN)
             before_section, section_header, after_section, existing_entries = parsed
 
             # Format new entries (only the top result to avoid clutter)
@@ -3091,6 +2926,18 @@ def sync_retrieved_to_claude_md(
             memory_id = memory_ids[0] if memory_ids else None
             new_entry = _format_retrieved_entry(top_memory, query, score, memory_id)
             new_entries.append(new_entry)
+
+            # One entry per memory. A repeat moves to the top with its new
+            # header instead of adding a second copy, which would evict a
+            # distinct memory from the window. Entries are compared by their
+            # Memory ID line, not their body: the same memory found by another
+            # query is still one memory. With no id there is nothing to
+            # compare, so nothing is dropped.
+            id_line = _memory_id_line(new_entry)
+            if id_line is not None:
+                existing_entries = [
+                    entry for entry in existing_entries if _memory_id_line(entry) != id_line
+                ]
 
             # Build new entries list: new entry first, then existing (up to max - 1)
             all_entries = new_entries + existing_entries
@@ -3131,30 +2978,62 @@ def sync_retrieved_to_claude_md(
 
             section_text = "\n".join(section_lines)
 
-            # Reconstruct file content
-            if section_header:
-                # Section existed, replace it
-                # Ensure blank line before next section
+            # Reconstruct file content. A missing section goes above the first
+            # VISIBLE `## Working Memory` heading inside the same write window
+            # the parser above searched, so a fenced or commented-out copy, or
+            # one outside the memory block, is never the anchor.
+            insert_pos = None
+            if not section_header:
+                doc = parse(content)
+                scope = _resolve_write_scope(doc)
+                if scope is None:
+                    # Unreachable while the parser above declines first; a
+                    # None scope must never reach find_section, which would
+                    # read it as the whole file.
+                    return SyncResult(SyncResult.NO_WINDOW)
+                working_memory = doc.find_section(_WORKING_MEMORY_ANCHOR, None, scope)
+                if working_memory.state is State.UNKNOWN:
+                    logger.warning(
+                        "Not syncing retrieved memories to CLAUDE.md: %s",
+                        working_memory.reason,
+                    )
+                    return SyncResult(SyncResult.UNCERTAIN)
+                if working_memory.state is State.FOUND:
+                    insert_pos = doc.lines[working_memory.spans[0][0]].start
+
+            if insert_pos is not None:
+                # Insert before Working Memory with blank line
+                written_at = insert_pos
+                new_content = content[:insert_pos] + section_text + "\n" + content[insert_pos:]
+            elif section_header or after_section:
+                # The section exists, or it is missing inside a block, where the
+                # parser split at the block's closing marker row and
+                # `after_section` is non-empty. Both are written in one shape,
+                # so the next sync rewrites the section byte for byte. Only a
+                # file with no managed block splits at end of file, with
+                # nothing after. A blank line separates the section from what
+                # follows.
+                written_at = len(before_section)
                 if after_section and not after_section.startswith("\n"):
                     new_content = before_section + section_text + "\n" + after_section
                 else:
                     new_content = before_section + section_text + after_section
             else:
-                # Section didn't exist, insert before Working Memory if it exists
-                working_memory_match = re.search(
-                    r'^## Working Memory',
-                    content,
-                    re.MULTILINE
-                )
-                if working_memory_match:
-                    # Insert before Working Memory with blank line
-                    insert_pos = working_memory_match.start()
-                    new_content = content[:insert_pos] + section_text + "\n" + content[insert_pos:]
-                else:
-                    # Append at end
-                    if not content.endswith("\n"):
-                        content += "\n"
-                    new_content = content + "\n" + section_text
+                # No managed block, no section and no Working Memory: append
+                # at end
+                body = content if content.endswith("\n") else content + "\n"
+                written_at = len(body) + 1
+                new_content = body + "\n" + section_text
+
+            # The same two checks as the Working Memory sync.
+            planned = parse(new_content)
+            refusal = uncertainty_added(parse(content), planned)
+            section = _read_back(planned, _RETRIEVED_CONTEXT_HEADING_ROW, _RETRIEVED_CONTEXT_TERMINATOR)
+            if refusal is None and (section is None or planned.offsets(*section.spans[0])[0] != written_at):
+                refusal = "the Retrieved Context section did not read back where it was written"
+            if refusal:
+                logger.warning("Not syncing retrieved memories to CLAUDE.md: %s", refusal)
+                return SyncResult(SyncResult.UNCERTAIN)
 
             # Write back to file (atomic: temp + rename, so a crash mid-write
             # cannot leave the always-loaded CLAUDE.md truncated)

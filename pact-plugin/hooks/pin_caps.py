@@ -6,7 +6,7 @@ Location: pact-plugin/hooks/pin_caps.py
 Summary: Parses the Pinned Context section of CLAUDE.md and enforces
 per-session caps (count, per-pin size, stale-block threshold). Pure
 helpers — no I/O, no side effects. Invoked by three consumers:
-  - scripts/check_pin_caps.py: CLI for /PACT:pin-memory add-time enforcement
+  - scripts/check_pin_caps.py: advisory slot-status CLI for the pin commands
   - staleness.py: SessionStart stale-block signal emission
   - session_init.py: slot-count + stale-block directive surfacing
 
@@ -22,7 +22,8 @@ divergence.
 from __future__ import annotations
 
 import re
-from typing import List, Literal, NamedTuple, Optional
+from collections import Counter
+from typing import Dict, List, Literal, NamedTuple, Optional, Tuple
 
 # Hard cap on total pin count. Enforcement predicate is `len(existing) >= 12
 # → refuse add` (off-by-one hazard per plan risk row 1).
@@ -41,9 +42,11 @@ PIN_STALE_BLOCK_THRESHOLD = 2
 # rationale from itself becoming a back-channel for oversized pins.
 OVERRIDE_RATIONALE_MAX = 120
 
-# Single source for the pin-comment grammar. Both oracles below are built
-# from these four fragments, so the strip path and the attribution path
-# cannot drift apart on the shape of a comment.
+# Single source for the pin-comment grammar. The strike pattern
+# (`_DATE_COMMENT_RE`), the attribution row pattern (`_DATE_COMMENT_ROW`) and
+# the override reader's patterns are built from these four fragments, so the
+# strip path and the attribution path cannot drift apart on the shape of a
+# comment.
 #
 # `_COMMENT_CHAR` is one character of a comment interior: either a character
 # that is not `-`, or a `-` that does not start `-->`. A run of this class
@@ -56,33 +59,18 @@ OVERRIDE_RATIONALE_MAX = 120
 # comma delimits. It refuses the terminator too, so attribution cannot accept
 # a line whose override clause sits after an early `-->`.
 #
-# The property these fragments deliver is DOMINANCE: every line that
+# The property these fragments deliver is DOMINANCE: every row that
 # attribution accepts, the strip removes in full. The strip may remove more.
 # It must never remove less, because less is a charge against the neighbour.
-#
-# Every fragment is NON-CAPTURING. `OVERRIDE_COMMENT_RE.groups` must stay 1,
-# because `parse_pins` reads the rationale as `group(1)`.
 _COMMENT_CHAR = r'(?:[^-]|-(?!->))'
 _COMMENT_CHAR_NO_COMMA = r'(?:[^-,]|-(?!->))'
 _PIN_COMMENT_OPEN = r'<!--\s*pinned:\s*'
 _PIN_COMMENT_CLOSE = r'-->'
 
-# Strict regex for the combined pin date + size-override comment.
-# Live form:
-#   <!-- pinned: 2026-04-11, pin-size-override: verbatim dispatch form... -->
-# Capture group 1 = rationale text. Self-anchoring via \A...\Z plus a body
-# class that positively refuses `-->` closes both a latent-misuse vector
-# (Sec-M2) and call-convention drift (Sec-F5).
-OVERRIDE_COMMENT_RE = re.compile(
-    rf'\A{_PIN_COMMENT_OPEN}{_COMMENT_CHAR_NO_COMMA}+,\s*'
-    rf'pin-size-override:\s*({_COMMENT_CHAR}+?)\s*{_PIN_COMMENT_CLOSE}\Z',
-    re.IGNORECASE,
-)
-
 # Standalone <!-- pinned: YYYY-MM-DD[, ...] --> comment without override.
-# Unanchored BY DESIGN: `_extract_body_chars` runs it with `.sub` over a whole
-# pin body, so it cannot be anchored. Terminator refusal, not anchoring, is
-# what keeps it safe under every call convention (Sec-M2).
+# Unanchored BY DESIGN: `_charge` strikes it with `.sub` wherever it sits on a
+# row, so it cannot be anchored. Terminator refusal, not anchoring, is what
+# keeps it safe under every call convention (Sec-M2).
 _DATE_COMMENT_RE = re.compile(
     rf'{_PIN_COMMENT_OPEN}{_COMMENT_CHAR}+?{_PIN_COMMENT_CLOSE}',
     re.IGNORECASE,
@@ -94,11 +82,62 @@ _STALE_MARKER_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Pin heading anchor — "### " at start of line.
-_PIN_HEADING_RE = re.compile(r'^### ', re.MULTILINE)
+# The two plugin-managed comment kinds a body is not charged for, struck from a
+# row in one pass.
+_MANAGED_COMMENT_RE = re.compile(
+    f"{_DATE_COMMENT_RE.pattern}|{_STALE_MARKER_RE.pattern}", re.IGNORECASE
+)
+
+# Row patterns. The fence-aware parser (`shared.claude_md_markers`) splits a
+# text into rows, and these match ONE row's content, which never holds its line
+# terminator, through `Document.find_lines`, which reads PROSE rows only. So a
+# `### ` line or a pin comment inside a fenced code block is pin text, not
+# structure.
+#
+# A pin heading: `### ` at column 0.
+_PIN_HEADING_ROW = re.compile(r'### ')
+# A pin comment alone on its row. The `\s*` either side is the tolerance
+# attribution has always applied (it compared the stripped line).
+_DATE_COMMENT_ROW = re.compile(
+    rf'\s*{_PIN_COMMENT_OPEN}{_COMMENT_CHAR}+?{_PIN_COMMENT_CLOSE}\s*\Z',
+    re.IGNORECASE,
+)
+# A reconfirmation, wherever it sits in a pin comment. `check_pin_caps` dates
+# a pin from it and the override reader keeps it out of the rationale, so the
+# two read one shape.
+RECONFIRMED_DATE_RE = re.compile(r'reconfirmed:\s*(\d{4}-\d{2}-\d{2})', re.IGNORECASE)
+# A combined date and size-override comment. The override field starts at the
+# comment's first `, pin-size-override:`; before it sits the comma-free date,
+# alone or followed by a reconfirmation (a comma may lead that). The rationale
+# runs from the field name to the closing `-->`, less a reconfirmation written
+# after it, so either placement keeps the override:
+#   <!-- pinned: 2026-04-11, pin-size-override: verbatim dispatch form... -->
+#   <!-- pinned: 2026-04-11; reconfirmed: 2026-07-25 because R, pin-size-override: O -->
+#   <!-- pinned: 2026-04-11, pin-size-override: O (reconfirmed: 2026-07-25 because R) -->
+_PIN_COMMENT_START = re.compile(rf'\s*{_PIN_COMMENT_OPEN}', re.IGNORECASE)
+_WORD_CHAR = re.compile(r'\w')
+# The separators dropped before a reconfirmation when the rationale holds no
+# word character.
+_RECONFIRM_SEPARATORS = " \t\u00a0,;:/|(-\u2013\u2014"
+_OVERRIDE_FIELD = re.compile(r',\s*pin-size-override:', re.IGNORECASE)
+_OVERRIDE_DATE_PART = re.compile(
+    rf'{_COMMENT_CHAR_NO_COMMA}+?(?:,\s*)?{RECONFIRMED_DATE_RE.pattern}.*'
+    rf'|{_COMMENT_CHAR_NO_COMMA}+',
+    re.IGNORECASE | re.DOTALL,
+)
+# A row holding a STALE marker anywhere, which is where `is_stale` has always
+# looked for one.
+_STALE_MARKER_ANYWHERE_ROW = re.compile(rf'.*?{_STALE_MARKER_RE.pattern}', re.IGNORECASE)
+
+# Characters `str.splitlines()` breaks a line at that the parser does not. A
+# candidate comment row holding one is not attributed. Attribution used to split
+# lines with `splitlines()`, so such a row was never one comment, and an
+# override rationale carrying \v, \f or FS/GS/RS would pass the translate
+# below untouched.
+_SPLITLINES_ONLY_BREAKS = "\v\f\x1c\x1d\x1e\x85\u2028\u2029"
 
 # Sec-F5b / cycle-7: Line terminators that must not survive inside an
-# override rationale. Stripped via str.translate in parse_pins.
+# override rationale. Stripped via str.translate in `_override_rationale`.
 # U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR, U+0085 NEXT LINE,
 # U+000D CARRIAGE RETURN, U+000A LINE FEED (ASCII newline) — any of
 # these can span logical lines in some renderers or split a
@@ -107,20 +146,12 @@ _PIN_HEADING_RE = re.compile(r'^### ', re.MULTILINE)
 # the Sec residual added in cycle-7: the original table covered
 # Unicode variants but missed the most common terminator.
 #
-# Asymmetry note (post-#492 F1): Python's `str.splitlines()` recognizes
-# MORE codepoints than this table — adds \v (U+000B), \f (U+000C),
-# and FS/GS/RS (U+001C/U+001D/U+001E). That asymmetry is currently SAFE
-# because the parser and gate both use splitlines BEFORE this table's
-# translate runs; splitlines is the more inclusive filter and eats every
-# char this table would strip. The translate is defense-in-depth against
-# a future refactor that replaces splitlines with something narrower
-# (e.g., a single-pass regex that only matches the explicit table). If
-# that refactor lands WITHOUT widening this table first, rationales
-# containing the splitlines-only chars (\v, \f, FS, GS, RS) bypass the
-# sanitizer. The drift detector is
-# `test_splitlines_eats_forbidden_chars_before_validation` in
-# `test_pin_caps_gate_matrix.py` — it fails loudly the moment the
-# upstream-split invariant changes, forcing a review of this table.
+# This table is narrower than `str.splitlines()`, which also breaks at \v
+# (U+000B), \f (U+000C) and FS/GS/RS (U+001C/U+001D/U+001E). The parser splits
+# rows at \r\n, \r and \n only, so `_date_comment_row` closes the gap before
+# this translate runs: a candidate row holding any `_SPLITLINES_ONLY_BREAKS`
+# character is not attributed. The translate is defense-in-depth behind that
+# refusal; widen this table before relaxing it.
 _FORBIDDEN_TERMINATOR_TABLE = str.maketrans("", "", "\u2028\u2029\u0085\r\n")
 
 
@@ -133,273 +164,198 @@ class Pin(NamedTuple):
     date_comment: Optional[str]      # "<!-- pinned: YYYY-MM-DD[, ...] -->" preceding heading
     override_rationale: Optional[str]  # captured rationale; None if no override
     is_stale: bool                   # whether a STALE marker is present
+    # The body's non-blank rows as the size cap charges them: pin comments
+    # struck on prose rows, trailing blanks dropped. The per-pin size rule
+    # reads which text a pin holds from them.
+    lines: Tuple[str, ...] = ()
 
 
 class CapViolation(NamedTuple):
     """A cap-enforcement refusal result."""
 
-    kind: Literal["count", "size", "stale", "embedded_pin", "empty", "invalid_override"]
+    kind: Literal["count", "size", "stale", "empty", "invalid_override"]
     detail: str
     offending_pin_chars: Optional[int]
     current_count: Optional[int]
+    offending_pin_heading: Optional[str] = None  # set by the size violations
 
 
-def _extract_body_chars(body: str) -> int:
-    """Count body chars excluding auto-generated markers.
+def _charge(doc, first: int, last: int) -> int:
+    """Characters rows `first`..`last` of `doc` charge against the size cap.
 
-    The date comment and STALE marker are plugin-managed — they MUST NOT
-    count against the user's 1500-char budget.
+    On a PROSE row, the pin comments and STALE markers are plugin-managed and
+    cost nothing: they are struck from the row wherever they sit, a comment
+    sharing its row with prose included. A comment that spans two rows is not
+    struck (attribution never treats it as a comment either). Every other row
+    is charged in full: a CODE row, so a comment-shaped line inside a fenced
+    block is user text like the rest of the snippet, and an UNKNOWN row, which
+    then charges at least what the same row charges once it is known.
 
-    The date-comment strip runs PER LINE. `parse_pins` attributes a comment
-    only after `splitlines()`, so a comment that spans a line break is not a
-    comment to the attribution path. An unanchored strip across the whole body
-    does not share that discipline: it runs from an unterminated marker
-    forward to the next `-->`, which may belong to a different pin, and
-    removes real prose from the count. A lower charge is not a safe error —
-    `compute_deny_reason` compares PRE against POST, so an under-counted PRE
-    is a lower bar for POST to clear and DENIES an edit that repairs the file.
-    Splitting first gives the strip the same notion of a line the attribution
-    path already has.
+    Whitespace that changes nothing a reader sees is never charged: each row
+    loses its trailing spaces and tabs, and each line break counts as one
+    character whatever its terminator, so trailing blanks or a CRLF rewrite
+    cannot push a pin past the cap. The charge is a function of the rows alone,
+    so an unchanged pin is charged the same before and after any edit.
 
-    The rejoin is a single "\\n" ON PURPOSE, and it is a NORMALISATION rather
-    than a side effect. `splitlines()` recognises more separators than "\\n",
-    so the rejoin folds every one of them to a single newline. CRLF is the only
-    fold that changes the LENGTH, and the reason is structural rather than a
-    list to memorise: CRLF is the only separator that is TWO characters. Every
-    other separator `splitlines()` recognises is a single codepoint, so it is
-    one character before the fold and one character after. (The sibling comment
-    on `_FORBIDDEN_TERMINATOR_TABLE` above enumerates the set, and that is the
-    place to look it up — an enumeration repeated here would drift.)
-
-    THE CLAIM IS A DELTA, NOT A PAIR OF TOTALS, AND IT IS STATED THAT WAY SO
-    IT CAN BE RE-DERIVED. Take any body whose lines are joined once with LF
-    and once with CRLF — identical text, only the separator differs — and
-    measure the charge under each:
-
-        before (base)     CRLF minus LF  =  +1 PER LINE BREAK
-        after (shipped)   CRLF minus LF  =   0
-
-    On an eight-break body that is +8 and +0. The absolute totals depend
-    entirely on how long the filler happens to be, so they are not quoted
-    here: a reader who reproduces this with different prose gets different
-    totals and the SAME two deltas, which is the whole point.
-
-    READ THE COLUMNS, NOT THE ROWS. The claim is the LF-versus-CRLF difference
-    WITHIN a row: base charges a CRLF author one character more per line for
-    the same text, and the shipped code charges them the same as everyone
-    else. That difference IS the fold, and it is what the rejoin fixes.
-
-    THE ROW DELTA IS NOT THE FOLD, AND THE LABELS DELIBERATELY DO NOT CLAIM IT
-    IS. On a pure-LF body the split-and-rejoin is IDENTITY — splitting on
-    newlines and rejoining with a newline cannot change anything — so the
-    arity change contributes ZERO there. Any drop between the two rows comes
-    entirely from the widened body class stripping a comment the old class
-    could not — measurable by running the base class and the shipped class
-    over the same pure-LF body.
-    An earlier version of this table labelled its rows by mechanism and so
-    attributed that drop to the rejoin, which would tell a reader the join is
-    doing something it is not.
-
-    Do NOT "repair" this join to preserve the original separators: that would
-    restore the per-line-ending penalty the COLUMNS measure.
+    The strike reads a row only up to its last `-->`: no comment either pattern
+    strikes can end past it, so the result is the same, and a run of comment
+    openers with no close after them is not rescanned from each opener.
     """
+    return len("\n".join(_charged_rows(doc, first, last)).strip())
+
+
+def _charged_rows(doc, first: int, last: int) -> List[str]:
+    """Rows `first`..`last` of `doc` as `_charge` counts them."""
+    from shared.claude_md_markers import Kind
+
     kept = []
-    for line in body.splitlines():
-        kept.append(_DATE_COMMENT_RE.sub("", line))
-    stripped = "\n".join(kept)
-    stripped = _STALE_MARKER_RE.sub("", stripped)
-    return len(stripped.strip())
+    for line in doc.lines[first:last + 1]:
+        content = line.content
+        close = content.rfind(_PIN_COMMENT_CLOSE)
+        if line.kind is Kind.PROSE and close >= 0:
+            pieces, pos = [], 0
+            for match in _MANAGED_COMMENT_RE.finditer(line.content, 0, close + len(_PIN_COMMENT_CLOSE)):
+                pieces.append(content[pos:match.start()])
+                pos = match.end()
+            content = "".join(pieces) + content[pos:]
+        kept.append(content.rstrip(" \t"))
+    return kept
 
 
-def parse_pins(pinned_content: str) -> List[Pin]:
-    """Parse the Pinned Context section body into a list of Pin entries.
+def _date_comment_row(doc, floor: int, heading: int) -> Optional[int]:
+    """The row of the pin comment attributed to the pin headed at `heading`.
 
-    Fail-open: on any regex/structural anomaly, returns whatever pins
-    could be parsed cleanly. Never raises — caller-observable behavior is
-    degradation, not exception.
-
-    The pinned_content input MUST be the body AFTER the "## Pinned
-    Context\\n" heading (i.e., what _parse_pinned_section returns in its
-    third tuple slot). Managed-region bounding is the caller's
-    responsibility (#404 round-10 invariant).
+    Walk up from the heading over blank rows, no higher than `floor`; the
+    first other row is the pin's comment when it is a PROSE row holding only
+    a pin comment. A fenced comment-shaped line is not one, and neither is a
+    row holding a character `str.splitlines()` would break at
+    (`_SPLITLINES_ONLY_BREAKS`). None when there is no comment.
     """
-    if not pinned_content:
-        return []
+    row = heading - 1
+    while row >= floor and not doc.lines[row].content.strip():
+        row -= 1
+    if row < floor:
+        return None
+    content = doc.lines[row].content
+    if any(char in content for char in _SPLITLINES_ONLY_BREAKS):
+        return None
+    # An override comment is a date comment whose text starts with the
+    # override head (`override_rationale_text`), so this attributes both.
+    if doc.find_lines(_DATE_COMMENT_ROW, (row, row)):
+        return row
+    return None
 
-    try:
-        heading_starts = [m.start() for m in _PIN_HEADING_RE.finditer(pinned_content)]
-    except re.error:
-        return []
 
-    if not heading_starts:
-        return []
+def override_rationale_text(doc, row: int) -> Optional[str]:
+    """The rationale field of the override comment on row `row` of `doc`,
+    stripped, before any validity check; None when that row is not a PROSE
+    row holding only an override comment.
 
+    The row is one closed pin comment with an override field: its first
+    `, pin-size-override:`, with only the comma-free date, or the date and a
+    reconfirmation, before it. The rationale is the text from the field name
+    to the closing `-->`, less a reconfirmation written after it
+    (`RECONFIRMED_DATE_RE`, then the rest) and the run of non-word characters
+    before that. The pin-cap gate validates it; `_override_rationale` decides
+    with it.
+    """
+    from shared.claude_md_markers import Kind
+
+    line = doc.lines[row]
+    start = field = None
+    if line.kind is Kind.PROSE:
+        if _DATE_COMMENT_ROW.match(line.content):
+            start = _PIN_COMMENT_START.match(line.content)
+            field = _OVERRIDE_FIELD.search(line.content, start.end()) if start else None
+    if start is None or field is None:
+        return None
+    if not _OVERRIDE_DATE_PART.fullmatch(line.content, start.end(), field.start()):
+        return None
+    rationale = line.content.rstrip()[field.end():-len(_PIN_COMMENT_CLOSE)]
+    reconfirm = RECONFIRMED_DATE_RE.search(rationale)
+    if reconfirm is not None:
+        # Drop the reconfirmation and whatever separates it from the rationale:
+        # the run of non-word characters before it. A rationale with no word
+        # character (a symbol, an emoji) would be dropped with it, so it loses
+        # only the separator.
+        end = reconfirm.start()
+        while end and not _WORD_CHAR.match(rationale, end - 1):
+            end -= 1
+        if not end:
+            end = len(rationale[:reconfirm.start()].rstrip(_RECONFIRM_SEPARATORS))
+        rationale = rationale[:end]
+    return rationale.strip()
+
+
+def _override_rationale(doc, row: int) -> Optional[str]:
+    """The valid rationale of the override comment on `row`, or None."""
+    rationale = override_rationale_text(doc, row)
+    if rationale is None:
+        return None
+    # Defense-in-depth: `_date_comment_row` has already refused every row
+    # holding a line break this table lists.
+    rationale = rationale.translate(_FORBIDDEN_TERMINATOR_TABLE)
+    # Strict parser: empty rationale or > max → treat as no-override.
+    if rationale and len(rationale) <= OVERRIDE_RATIONALE_MAX:
+        return rationale
+    return None
+
+
+def pins_in_rows(doc, first: int, last: int) -> List[Pin]:
+    """The pins whose heading rows lie in rows `first`..`last` of `doc`.
+
+    A heading is a PROSE row starting `### `; a `### ` line inside a fenced
+    block belongs to the body of the pin above it. A body runs to the row
+    before the next heading, or to `last`, and is sliced from the original
+    text, so it keeps its line terminators. A pin's comment is looked for no
+    higher than `first`.
+    """
+    if first > last:
+        return []
+    headings = doc.find_lines(_PIN_HEADING_ROW, (first, last))
     pins: List[Pin] = []
-
-    for i, start in enumerate(heading_starts):
-        end = heading_starts[i + 1] if i + 1 < len(heading_starts) else len(pinned_content)
-        entry_text = pinned_content[start:end]
-
-        nl_pos = entry_text.find("\n")
-        if nl_pos == -1:
-            heading = entry_text
-            body = ""
-        else:
-            heading = entry_text[:nl_pos]
-            body = entry_text[nl_pos + 1:]
-
-        # Walk backward from the heading to find the preceding comment line
-        # (date comment, possibly with override). Between heading and the
-        # prior pin's body, only a date comment may appear — other content
-        # terminates the search.
-        preceding = pinned_content[:start]
-        date_comment: Optional[str] = None
-        override_rationale: Optional[str] = None
-
-        # Scan prior non-empty line(s) for an <!-- pinned: ... --> comment.
-        # Use splitlines() (not split("\n")) so Unicode line terminators
-        # (U+2028, U+2029, U+0085, \r, \v, \f, etc.) split lines the same
-        # way the gate extractor does. Prior split("\n") created an oracle
-        # asymmetry: a rationale embedding U+2028 was seen by the parser as
-        # one logical line (match succeeds, translate silently strips the
-        # char), but by the gate as two lines (no match, validator skipped).
-        # A curator could smuggle a laundered oversize rationale past the
-        # size-cap gate. Splitlines everywhere keeps both oracles strict.
-        prior_lines = preceding.rstrip("\n").splitlines()
-        # Walk backward over blank lines then inspect first non-blank.
-        idx = len(prior_lines) - 1
-        while idx >= 0 and not prior_lines[idx].strip():
-            idx -= 1
-        if idx >= 0:
-            candidate = prior_lines[idx].strip()
-            # Match override first (more specific), then fall back to plain
-            # date comment. Multi-override: first wins — override captured
-            # only from the line IMMEDIATELY preceding the heading.
-            override_match = OVERRIDE_COMMENT_RE.fullmatch(candidate)
-            if override_match:
-                date_comment = candidate
-                rationale = override_match.group(1).strip()
-                # Sec-F5b: strip Unicode line terminators (U+2028 LINE
-                # SEPARATOR, U+2029 PARAGRAPH SEPARATOR, U+0085 NEXT LINE,
-                # \r CARRIAGE RETURN) from the rationale before accepting
-                # it. These span logical lines in some renderers and are
-                # latent prompt-injection / comment-boundary-spoofing risks.
-                #
-                # Post-#492 F1 this translate is defense-in-depth. The
-                # preceding `preceding.rstrip("\n").splitlines()` at the
-                # line scan above splits on every codepoint in
-                # `_FORBIDDEN_TERMINATOR_TABLE`, so by the time a line
-                # reaches `OVERRIDE_COMMENT_RE.fullmatch` it is guaranteed
-                # terminator-free — this translate has no chars to strip
-                # under the current control flow. Retained for the same
-                # two load-bearing reasons the gate's parallel guard at
-                # `pin_caps_gate.py::_validate_override_rationale` is
-                # retained: (1) fail-loud on a future refactor that
-                # replaces splitlines with a single-pass regex over the
-                # whole section — the translate then becomes the only
-                # barrier and quietly keeps the strip; (2) symmetric
-                # anchor with the gate's `_FORBIDDEN_RATIONALE_CHARS`
-                # derivation so the twin-copy-drift test
-                # (`test_gate_forbidden_chars_derived_from_parser_table`)
-                # has a stable parser-side counterpart. Not "mitigation"
-                # — prevention via upstream split. Mirrors
-                # `pin_caps_gate.py:184-216`.
-                rationale = rationale.translate(_FORBIDDEN_TERMINATOR_TABLE)
-                # Strict parser: empty rationale or > max → treat as no-override.
-                if rationale and len(rationale) <= OVERRIDE_RATIONALE_MAX:
-                    override_rationale = rationale
-            elif _DATE_COMMENT_RE.fullmatch(candidate):
-                date_comment = candidate
-
-        is_stale = bool(_STALE_MARKER_RE.search(body))
-        body_chars = _extract_body_chars(body)
-
+    for index, heading in enumerate(headings):
+        body_last = headings[index + 1] - 1 if index + 1 < len(headings) else last
+        body_start = doc.lines[heading].end
+        body_end = doc.lines[body_last].end
+        comment_row = _date_comment_row(doc, first, heading)
+        date_comment = None
+        override_rationale = None
+        if comment_row is not None:
+            date_comment = doc.lines[comment_row].content.strip()
+            override_rationale = _override_rationale(doc, comment_row)
+        body_rows = (heading + 1, body_last)
+        rows = _charged_rows(doc, heading + 1, body_last)
         pins.append(Pin(
-            heading=heading,
-            body=body,
-            body_chars=body_chars,
+            heading=doc.lines[heading].content,
+            body=doc.text[body_start:body_end],
+            body_chars=len("\n".join(rows).strip()),
             date_comment=date_comment,
             override_rationale=override_rationale,
-            is_stale=is_stale,
+            is_stale=bool(doc.find_lines(_STALE_MARKER_ANYWHERE_ROW, body_rows)),
+            lines=tuple(row for row in rows if row.strip()),
         ))
-
     return pins
+
+
+def section_pins(doc, located) -> List[Pin]:
+    """The pins of a FOUND Pinned section, read from `doc`'s own rows.
+
+    `located` is a FOUND result whose span is (heading row, last body row),
+    as `staleness.locate_pinned` returns it; the pins are read from the rows
+    after the heading. ValueError for any other state.
+    """
+    from shared.claude_md_markers import State
+
+    if located.state is not State.FOUND:
+        raise ValueError(f"section_pins needs a FOUND section, not {located.state.value}")
+    heading, last = located.spans[0]
+    return pins_in_rows(doc, heading + 1, last)
 
 
 def has_size_override(pin: Pin) -> bool:
     """Return True if this pin carries a valid pin-size-override rationale."""
     return pin.override_rationale is not None
-
-
-def check_add_allowed(
-    existing: List[Pin],
-    new_body: str,
-    new_has_override: bool,
-) -> Optional[CapViolation]:
-    """Check whether a new pin may be added given current state.
-
-    Returns None if the add is allowed; a CapViolation otherwise. Count
-    cap is strict (predicate: `len(existing) >= PIN_COUNT_CAP`). Size cap
-    is strict unless new_has_override is True (override grants unlimited
-    size per curator discretion — user decision 2026-04-20, no sub-cap).
-
-    Args:
-        existing: Current parsed pins.
-        new_body: Body text of the proposed new pin (the text that would
-            follow the heading). Counted via _extract_body_chars so
-            date-comment + STALE markers do not inflate.
-        new_has_override: Whether the proposed pin carries a valid
-            override rationale. Caller is responsible for validating
-            rationale shape (via OVERRIDE_COMMENT_RE) before passing True.
-    """
-    current_count = len(existing)
-
-    if current_count >= PIN_COUNT_CAP:
-        return CapViolation(
-            kind="count",
-            detail=(
-                f"pin count cap reached ({current_count}/{PIN_COUNT_CAP}); "
-                f"evict a pin before adding"
-            ),
-            offending_pin_chars=None,
-            current_count=current_count,
-        )
-
-    new_chars = _extract_body_chars(new_body)
-    if new_chars > PIN_SIZE_CAP and not new_has_override:
-        return CapViolation(
-            kind="size",
-            detail=(
-                f"new pin body is {new_chars} chars (cap: {PIN_SIZE_CAP}); "
-                f"compress or add pin-size-override rationale"
-            ),
-            offending_pin_chars=new_chars,
-            current_count=current_count,
-        )
-
-    # Embedded-pin cap-bypass defense: a candidate body containing a
-    # level-3 heading (`### `) would be counted as an additional pin by
-    # parse_pins on reload, defeating the count cap. Detect by running
-    # the candidate body through parse_pins directly — any non-empty
-    # result means the body smuggles at least one pin structure (either
-    # a full `<!-- pinned:...-->\n### Heading` pair OR a lone heading,
-    # both of which parse_pins treats as a Pin on reload). Conservative
-    # by design: curators can structure pin bodies with H4+ (`#### `)
-    # or bold/italic instead of H3 — rejecting H3 in bodies closes the
-    # smuggle vector regardless of whether a date-comment accompanies it.
-    if parse_pins(new_body):
-        return CapViolation(
-            kind="embedded_pin",
-            detail=(
-                "candidate body contains an embedded pin structure "
-                "(a `### ` heading); would smuggle past the count cap "
-                "on reload. Use `#### ` or bold for in-body structure."
-            ),
-            offending_pin_chars=None,
-            current_count=current_count,
-        )
-
-    return None
 
 
 def check_stale_block(
@@ -431,16 +387,11 @@ def check_stale_block(
 # ---------------------------------------------------------------------------
 # Hook-primary cap enforcement helpers (cycle-8).
 #
-# These extend pin_caps's pure-helper surface with post-state predicates used
-# by the PreToolUse gate (pin_caps_gate.py). They are additive — nothing here
-# changes existing `check_add_allowed` semantics. Shared between the gate and
-# the advisory CLI (check_pin_caps.py) so deny-reason phrasing stays in one
-# place (Risk R9 — phrasing drift).
-#
-# Key semantic differences vs. `check_add_allowed`:
-#   - `>`  (strict), not `>=`  — this is a POST-state check, not a pre-add gate.
-#   - No new_body param at predicate layer — the post-state pin list already
-#     reflects any simulated add.
+# Post-state predicates used by the PreToolUse gate (pin_caps_gate.py), shared
+# with the advisory CLI (check_pin_caps.py) so deny-reason phrasing stays in
+# one place (Risk R9 — phrasing drift). They read the pin list after the
+# change, so the count predicate is `>` (strict): a state at the cap is not a
+# violation, only a pin past it is.
 # ---------------------------------------------------------------------------
 
 
@@ -461,16 +412,12 @@ DENY_REASON_COUNT = (
     "content is preserved rather than lost."
 )
 
+# `pins` names each pin over the cap with its size: `_size_reason` and
+# `_render_deny_reason` fill it.
 DENY_REASON_SIZE = (
-    "New pin body is {chars} chars (cap: {cap}). "
+    "Pin size cap ({cap} chars) exceeded: {pins}. "
     "Compress the body, or add a pin-size-override rationale "
     "if the content is verbatim load-bearing."
-)
-
-DENY_REASON_EMBEDDED_PIN = (
-    "Candidate body contains an embedded pin structure "
-    "(a `### ` heading). On reload this would be counted as an extra pin "
-    "and defeat the count cap. Use `#### ` or bold for in-body structure."
 )
 
 DENY_REASON_OVERRIDE_MISSING = (
@@ -484,17 +431,16 @@ def evaluate_full_state(pins: List[Pin]) -> Optional[CapViolation]:
 
     POST-state predicate: `>` (strict), not `>=`. A state at the cap
     exactly (e.g. 12/12) is NOT a violation here — only a strict
-    overshoot is. Compared to `check_add_allowed` which is pre-add
-    (`>=` refuses the 12th add), `evaluate_full_state` refuses only the
-    13th+ slot. The gate (pin_caps_gate.py) then layers a net-worse
-    predicate on top of this to prevent pre-malformed livelock.
+    overshoot is, so only the 13th+ slot counts. `compute_deny_reason`
+    layers a net-worse predicate on top of this to prevent pre-malformed
+    livelock.
 
     Checks, in order of precedence:
       1. count:   len(pins) > PIN_COUNT_CAP
       2. size:    any pin has body_chars > PIN_SIZE_CAP AND no valid override
 
     Embedded-pin smuggle is not re-checked here — by the time `pins`
-    exists, parse_pins has already visited the structure; the bypass
+    exists, `pins_in_rows` has already visited the structure; the bypass
     either inflated count (caught by 1) or is benign.
 
     Returns None when no violation, otherwise the first violation found.
@@ -531,6 +477,7 @@ def evaluate_full_state(pins: List[Pin]) -> Optional[CapViolation]:
             ),
             offending_pin_chars=worst.body_chars,
             current_count=count,
+            offending_pin_heading=worst.heading,
         )
 
     return None
@@ -561,30 +508,19 @@ def _violation_for_kind(pins: List[Pin], kind: str) -> Optional[CapViolation]:
                       start surfacing path; the cap-compare pipeline
                       does not ingest it here.
 
-    Post-parse-derivable from candidate new_body (not from post_pins):
-      - `"embedded_pin"` — constructed in `check_add_allowed`
-                      (`pin_caps.py:315`) when `parse_pins(new_body)`
-                      returns non-empty. Also rendered via the
-                      `compute_deny_reason` shortcut at `pin_caps.py:686-687`
-                      which returns `DENY_REASON_EMBEDDED_PIN` directly
-                      (no CapViolation constructor; the shortcut
-                      bypasses `_render_deny_reason`). Not derivable
-                      from a parsed pin list alone — requires the
-                      candidate body — so returns None here.
-
     Reserved-no-emitter (declared in the `CapViolation.kind` Literal
     but no constructor anywhere in the codebase):
       - `"empty"`            — reserved for a future empty-pin predicate.
       - `"invalid_override"` — intent was to represent an invalid
-                      override rationale, but the actual emitter path at
-                      `pin_caps_gate.py:293-295` returns a bare formatted
-                      string (`f"Pin cap violation (invalid override):
-                      {reason}"`) without constructing a CapViolation.
-                      A render branch at `pin_caps.py:821-825` remains
-                      but is unreachable under the current emitter
-                      graph. If a future refactor routes override
-                      failures through a CapViolation, the render
-                      branch + Literal entry become live simultaneously.
+                      override rationale, but the gate reports one with
+                      its own formatted string (`"Pin cap violation
+                      (invalid override): {reason}"`) without
+                      constructing a CapViolation. The render branch in
+                      `_render_deny_reason` remains but is unreachable
+                      under the current emitter graph. If a future
+                      refactor routes override failures through a
+                      CapViolation, the render branch + Literal entry
+                      become live simultaneously.
 
     For any kind outside {count, size}, returns None and the caller
     treats it as "not-present on this axis." When a future cap-axis is
@@ -627,99 +563,18 @@ def _violation_for_kind(pins: List[Pin], kind: str) -> Optional[CapViolation]:
                 ),
                 offending_pin_chars=worst.body_chars,
                 current_count=count,
+                offending_pin_heading=worst.heading,
             )
         return None
 
     return None
 
 
-def apply_edit_and_parse(current_content: str, tool_input: dict) -> List[Pin]:
-    """Simulate the post-tool CLAUDE.md state and return parsed pins.
-
-    For Edit:
-      Applies `old_string → new_string` via `str.replace(...)`. When
-      `replace_all` is true, Python's no-count str.replace matches the
-      tool's actual apply behavior (PREPARE task #41 confirmed byte-
-      identical). When `replace_all` is false, replaces only the first
-      occurrence (`count=1`), matching the tool's single-match semantics.
-
-    For Write:
-      Uses `tool_input['content']` directly as the full new file content.
-      `current_content` is ignored in that path — Write is a full-file
-      replacement.
-
-    After producing the simulated post-edit content, extracts the
-    Pinned Context section via `_parse_pinned_section` and returns
-    `parse_pins(pinned_content)`. Section-bounded by construction so
-    `### ` headings elsewhere (Working Memory, user prose) do NOT
-    inflate the count. If the post-edit content has no Pinned Context
-    section, returns [] (no pins → below every cap).
-
-    Raises on malformed tool_input (missing required keys, non-string
-    values). The caller (pin_caps_gate.main) is responsible for wrapping
-    the exception in the gate's outer fail-open. Embedding try/except
-    inside this helper would hide input corruption from the gate, which
-    needs to emit a failure_log entry on that path.
-    """
-    # Lazy import to avoid module-level coupling between pin_caps (pure
-    # helpers) and staleness (has CLAUDE.md resolution logic). The
-    # section-bounding contract lives in staleness._parse_pinned_section.
-    from staleness import _parse_pinned_section
-
-    if "content" in tool_input:
-        # Write path — full-file replacement.
-        new_content = tool_input["content"]
-        if not isinstance(new_content, str):
-            raise TypeError(
-                f"Write tool_input.content must be str, got "
-                f"{type(new_content).__name__}"
-            )
-        simulated = new_content
-    else:
-        # Edit path — old_string / new_string with replace_all.
-        old_string = tool_input.get("old_string")
-        new_string = tool_input.get("new_string")
-        if not isinstance(old_string, str) or not isinstance(new_string, str):
-            raise TypeError(
-                "Edit tool_input.old_string and .new_string must both be str"
-            )
-        if old_string == "":
-            # Empty old_string edge (blind-backend-coder-2 #492 F6):
-            # `str.replace(s, "", new)` interleaves `new` between every
-            # character (replace_all=True) or prepends it once (replace_all=
-            # False). Both outcomes produce gibberish that neither matches
-            # the Claude Code tool's actual apply behavior nor yields a
-            # parseable CLAUDE.md — `parse_pins` returns []; the gate sees
-            # "clean" post-state and allows. Treat the empty-old-string
-            # case as a no-op: return the PRE-state parse directly so the
-            # gate compares pre == post and applies the normal net-worse
-            # contract. Pre-malformed state never denies (F1 livelock
-            # precedent); honest simulation over misleading-clean from
-            # gibberish. The platform-level Edit tool's own validation of
-            # empty old_string is the primary defense — this branch just
-            # ensures the gate can't be weaponized into a silent bypass.
-            simulated = current_content
-        else:
-            replace_all = bool(tool_input.get("replace_all", False))
-            if replace_all:
-                simulated = current_content.replace(old_string, new_string)
-            else:
-                simulated = current_content.replace(old_string, new_string, 1)
-
-    parsed = _parse_pinned_section(simulated)
-    if parsed is None:
-        # No Pinned Context section in the post-edit state. Treat as
-        # "no pins" — caps cannot be violated when the section is absent.
-        return []
-
-    _, _, pinned_content = parsed
-    return parse_pins(pinned_content)
-
-
 def compute_deny_reason(
     pre_pins: List[Pin],
     post_pins: List[Pin],
-    new_body: str,
+    *,
+    growth: Optional[int] = None,
 ) -> Optional[str]:
     """Net-worse deny predicate: return a rendered deny-reason or None.
 
@@ -752,27 +607,29 @@ def compute_deny_reason(
       - Pre bad, post bad, NOT strictly worse
         on any axis                            -> allow.
 
-    Embedded-pin smuggle is a separate check — if `new_body` itself parses
-    as a pin structure, deny with DENY_REASON_EMBEDDED_PIN even when
-    post_pins look fine (the new pin may not have been added yet at the
-    Edit-simulation granularity).
+    WITH `growth` GIVEN, the count axis is decided by the growth alone. The
+    count is worse exactly when the post state is over the count cap AND
+    `growth > 0`; `len(pre_pins)` is never read, so a caller may put extra
+    pins in `pre_pins` to set the size axis's pre worst. The size axis is
+    unchanged: worse when post has a size violation that pre lacks or that
+    exceeds pre's worst. Strictly worse on either axis denies, the count
+    reason first.
+
+    There is no embedded-pin check here. A prose `### ` line smuggled into a
+    body is a pin, which the growth counts, so it is denied on the count
+    axis; a fenced one is not a pin.
 
     Args:
         pre_pins: Parsed pins from the pre-edit CLAUDE.md state.
         post_pins: Parsed pins from the simulated post-edit state.
-        new_body: The candidate body text that is about to be added,
-            for embedded-pin detection. "" when not applicable (Write
-            full-file replacement or refactor Edit).
+        growth: Pins the change added to the Pinned section, from the
+            pin-growth rule. None compares the two pin counts instead.
 
     Returns:
         Rendered deny-reason string if the edit should be denied, else None.
     """
-    # Embedded-pin smuggle: check the candidate body independently. A
-    # curator's new pin body containing `### ` would inflate count on
-    # next parse. Conservative check — rejects H3 in bodies regardless
-    # of whether the candidate has yet been added to post_pins.
-    if new_body and parse_pins(new_body):
-        return DENY_REASON_EMBEDDED_PIN
+    if growth is not None:
+        return _growth_deny_reason(pre_pins, post_pins, growth)
 
     pre_violation = evaluate_full_state(pre_pins)
     post_violation = evaluate_full_state(post_pins)
@@ -851,6 +708,204 @@ def compute_deny_reason(
     return _render_deny_reason(post_violation)
 
 
+# The per-pin size rule's share: a post pin joins a pre pin when it holds at
+# least this fraction of its own word pairs from it, and a pre pin has a
+# successor when a post pin holds this fraction of the pre pin's pairs. Lower
+# admits more renamed rewrites as the same pin; higher sends more of them to
+# orphan pairing.
+_DESCENT_SHARE = 0.5
+
+
+def _violates(pin: Pin) -> bool:
+    return pin.body_chars > PIN_SIZE_CAP and not has_size_override(pin)
+
+
+def _word_pairs(pin: Pin) -> Counter:
+    """The pin's text as a multiset of consecutive word pairs, the words of
+    all its lines run together; a pin of one word is that word alone."""
+    words = " ".join(pin.lines).split()
+    if len(words) < 2:
+        return Counter(words)
+    return Counter(f"{left} {right}" for left, right in zip(words, words[1:]))
+
+
+def size_violation(pre_pins: List[Pin], post_pins: List[Pin]) -> Optional[str]:
+    """The per-pin size rule: the deny text for the first pin over the size cap
+    that the change made new or grew, or None. For a Pinned section located
+    before the change.
+
+    A pin violates when its charged body is over the cap with no valid
+    override. Pins before and after the change are joined into components by
+    the same heading (one to one, in order), by shared word pairs, and by text
+    that moved between them; renames and moves stay the same pin. In a
+    component that held a violator before, no violator after may be larger
+    than its largest violator before, and the violators after may not add up
+    to more than those before. A violator after in a component that held none
+    before must take a violator before with no successor, at least as large,
+    that sits in a component with no violator after.
+    """
+    bad = [q for q, pin in enumerate(post_pins) if _violates(pin)]
+    if not bad:
+        return None
+    parent: Dict[tuple, tuple] = {}
+
+    def find(node):
+        while parent.get(node, node) != node:
+            node = parent[node]
+        return node
+
+    def join(a, b):
+        a, b = find(a), find(b)
+        if a != b:
+            parent[a] = b
+
+    def normal(heading):
+        return " ".join(heading.split()).casefold()
+
+    # `source` maps a post pin to the pre pin the deny text gives its size
+    # before: its heading partner, else the first pre pin it holds the share
+    # of word pairs from that is not already a source. Each pre pin is the
+    # source of one post pin at most, so a copy or a split's other half reads
+    # as new.
+    edges, descended, partnered, source = [], set(), set(), {}
+    for q, post in enumerate(post_pins):
+        for p, pre in enumerate(pre_pins):
+            if p not in partnered and normal(pre.heading) == normal(post.heading):
+                partnered.add(p)
+                edges.append((p, q))
+                descended.add(p)
+                source[q] = p
+                break
+    pre_pairs = [_word_pairs(pin) for pin in pre_pins]
+    post_pairs = [_word_pairs(pin) for pin in post_pins]
+    for q, mine in enumerate(post_pairs):
+        size = sum(mine.values())
+        if not size:
+            continue
+        for p, theirs in enumerate(pre_pairs):
+            shared = sum((mine & theirs).values())
+            if shared >= _DESCENT_SHARE * size:
+                edges.append((p, q))
+                if q not in source and p not in source.values():
+                    source[q] = p
+            if sum(theirs.values()) and shared >= _DESCENT_SHARE * sum(theirs.values()):
+                descended.add(p)
+    for p, q in edges:
+        join(("q", q), ("p", p))
+
+    # Text moved between components joins them, so a paragraph moved from one
+    # oversize pin into another leaves the pair one maximum and one sum.
+    post_lines = [Counter(pin.lines) for pin in post_pins]
+    kept_lines: Dict[tuple, Counter] = {}
+    for q, lines in enumerate(post_lines):
+        kept_lines.setdefault(find(("q", q)), Counter()).update(lines)
+    links = []
+    for p, pin in enumerate(pre_pins):
+        root = find(("p", p))
+        lost = Counter(pin.lines) - kept_lines.get(root, Counter())
+        if lost:
+            links.extend((p, q) for q, lines in enumerate(post_lines)
+                         if find(("q", q)) != root and lines & lost)
+    pairs_before: Dict[tuple, Counter] = {}
+    pairs_after: Dict[tuple, Counter] = {}
+    first_pre: Dict[tuple, int] = {}
+    for p, pairs in enumerate(pre_pairs):
+        root = find(("p", p))
+        pairs_before.setdefault(root, Counter()).update(pairs)
+        first_pre.setdefault(root, p)
+    for q, pairs in enumerate(post_pairs):
+        pairs_after.setdefault(find(("q", q)), Counter()).update(pairs)
+    lost_pairs = {root: pairs - pairs_after.get(root, Counter()) for root, pairs in pairs_before.items()}
+    for q, pairs in enumerate(post_pairs):
+        root = find(("q", q))
+        gained = pairs - pairs_before.get(root, Counter())
+        count = sum(gained.values())
+        if not count:
+            continue
+        for other, lost in lost_pairs.items():
+            if other != root and lost and 2 * sum((gained & lost).values()) >= count:
+                links.append((first_pre[other], q))
+    for p, q in links:
+        join(("q", q), ("p", p))
+
+    components: Dict[tuple, tuple] = {}
+    for p, pin in enumerate(pre_pins):
+        if _violates(pin):
+            components.setdefault(find(("p", p)), ([], []))[0].append(pin.body_chars)
+    for q in bad:
+        components.setdefault(find(("q", q)), ([], []))[1].append(q)
+    orphans = []
+    for before, after in components.values():
+        if not after:
+            continue
+        sizes = [post_pins[q].body_chars for q in after]
+        if not before:
+            orphans.extend(after)
+        elif max(sizes) > max(before) or sum(sizes) > sum(before):
+            return _size_reason(pre_pins, post_pins, source, after, before)
+    taken = {root for root, (_, after) in components.items() if after}
+    free = sorted(pin.body_chars for p, pin in enumerate(pre_pins)
+                  if _violates(pin) and p not in descended and find(("p", p)) not in taken)
+    for q in sorted(orphans, key=lambda q: post_pins[q].body_chars, reverse=True):
+        chars = post_pins[q].body_chars
+        fit = next((size for size in free if size >= chars), None)
+        if fit is None:
+            return _size_reason(pre_pins, post_pins, source, [q], [])
+        free.remove(fit)
+    return None
+
+
+def _pin_name(heading: str) -> str:
+    """A pin's heading as the deny text quotes it, without the `### `."""
+    return f"'{heading.strip().removeprefix('### ')}'"
+
+
+def _size_reason(pre_pins: List[Pin], post_pins: List[Pin], source: Dict[int, int],
+                 after: List[int], before: List[int]) -> str:
+    """The deny text for the violators `after` (indexes into `post_pins`) of
+    one component of the size rule, whose violators before the change had the
+    sizes `before`. A pin in `source` is named with its size before and after;
+    any other pin as new. With several violators, the text also gives the
+    comparison that failed: their sum, else the largest of them."""
+    def change(q: int, verb: bool) -> str:
+        pin = post_pins[q]
+        name = _pin_name(pin.heading)
+        if q not in source:
+            return f"new pin {name} ({pin.body_chars} chars)"
+        sizes = f"({pre_pins[source[q]].body_chars} -> {pin.body_chars} chars)"
+        if not verb:
+            return f"{name} {sizes}"
+        # A pin joined to its source violates without growing only when the
+        # source was over the cap with a valid override.
+        if pin.body_chars > pre_pins[source[q]].body_chars:
+            return f"{name} grew {sizes}"
+        return f"{name} no longer has a valid pin-size-override {sizes}"
+
+    if len(after) == 1:
+        pins = change(after[0], verb=True)
+    else:
+        sizes = [post_pins[q].body_chars for q in after]
+        listed = ", ".join(change(q, verb=False) for q in after[:-1])
+        listed += f" and {change(after[-1], verb=False)}"
+        if sum(sizes) > sum(before):
+            pins = f"{listed} grew together ({sum(before)} -> {sum(sizes)} chars)"
+        else:
+            pins = f"{listed}: the largest grew ({max(before)} -> {max(sizes)} chars)"
+    return DENY_REASON_SIZE.format(pins=pins, cap=PIN_SIZE_CAP)
+
+
+def _growth_deny_reason(
+    pre_pins: List[Pin],
+    post_pins: List[Pin],
+    growth: int,
+) -> Optional[str]:
+    """`compute_deny_reason` with the count axis decided by `growth`."""
+    post_count = _violation_for_kind(post_pins, "count")
+    if post_count is not None and growth > 0:
+        return _render_deny_reason(post_count)
+    return _pareto_other_axis_deny(pre_pins, post_pins, other="size")
+
+
 def _pareto_other_axis_deny(
     pre_pins: List[Pin],
     post_pins: List[Pin],
@@ -902,10 +957,11 @@ def _render_deny_reason(violation: CapViolation) -> str:
             cap=PIN_COUNT_CAP,
         )
     if violation.kind == "size":
+        # This comparison pairs no pins (largest after against largest
+        # before), so the pin is named with its size, not as new or grown.
+        name = _pin_name(violation.offending_pin_heading or "")
         chars = violation.offending_pin_chars or 0
-        return DENY_REASON_SIZE.format(chars=chars, cap=PIN_SIZE_CAP)
-    if violation.kind == "embedded_pin":
-        return DENY_REASON_EMBEDDED_PIN
+        return DENY_REASON_SIZE.format(pins=f"{name} is {chars} chars", cap=PIN_SIZE_CAP)
     if violation.kind == "invalid_override":
         return DENY_REASON_OVERRIDE_MISSING.format(
             chars=violation.offending_pin_chars or 0,
