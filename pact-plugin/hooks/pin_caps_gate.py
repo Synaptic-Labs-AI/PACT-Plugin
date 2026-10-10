@@ -145,7 +145,7 @@ def _row(content: str, rationale: str, pin: Optional[int]) -> _Row:
 
     field = _OVERRIDE_FIELD.search(content)
     reconfirm = RECONFIRMED_DATE_RE.search(content, field.end()) if field else None
-    written = _collapsed(content[field.end():reconfirm.start()]) if reconfirm else None
+    written = _collapsed(content[field.end():reconfirm.start()]) if field and reconfirm else None
     return _Row(rationale, _collapsed(rationale), written, pin)
 
 
@@ -183,7 +183,8 @@ def _kept(new: _Row, old: _Row) -> bool:
     same read, or a reconfirmation moved or removed (the match already needs
     the new read to begin the old written text), or a reconfirmation added
     after the old rationale left whole."""
-    return new.key == old.key or old.written is not None or new.written.startswith(old.key)
+    return (new.key == old.key or old.written is not None
+            or (new.written is not None and new.written.startswith(old.key)))
 
 
 class _Edges:
