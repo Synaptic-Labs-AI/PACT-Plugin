@@ -513,3 +513,105 @@ def test_pin_spans_and_section_pins_list_the_same_pins():
                 assert rows[0].strip() == pin.date_comment
         checked += 1
     assert checked >= 9
+
+
+# The override check's cost. Near-twins ('R' and 'R.' interleaved, every
+# 'R.' reconfirmed by appending) once sent the matching down long alternating
+# chains; it now spends a few steps of the pin cap's step budget per row, and
+# a check that passes the budget or the timer allows, never refuses.
+def _near_twins(n):
+    rows = [_comment(TWIN), _comment(TWIN + ".")] * (n // 2)
+    before = _doc("\n".join(f"{row}\n### Pin {i}\nbody {i}\n" for i, row in enumerate(rows)))
+    after = before.replace(f"{TWIN}. -->", f"{TWIN}., reconfirmed: 2026-10-10 because still cited -->")
+    return before, after
+
+
+def test_the_near_twin_shape_is_matched_in_steps_linear_in_its_rows(monkeypatch):
+    import pin_caps_gate
+    from shared import pin_growth
+
+    made = []
+
+    class Spy(pin_growth._Budget):
+        def __init__(self, limit):
+            super().__init__(limit)
+            made.append(self)
+
+    monkeypatch.setattr(pin_growth, "_Budget", Spy)
+    rows = 1000
+    reason, _revoked = pin_caps_gate._invalid_override(*_near_twins(rows))
+    assert reason is None
+    (budget,) = made
+    assert budget.spent <= 4 * rows, budget.spent
+
+
+def test_an_exhausted_step_budget_allows_with_the_stop_early_note(monkeypatch):
+    """The split pin's second copy of an invalid override is refused with the
+    budget (test_one_old_row_vouches_for_one_copy); with none left, the check
+    stops and the change is allowed with the pin cap's stop-early note."""
+    from shared import pin_growth
+
+    monkeypatch.setattr(pin_growth, "STEP_BUDGET", 0)
+    halves = _pin(1, body="first half", override=LONG) + "\n" + _pin(7, body="second half", override=LONG)
+    decision = gate_decision(SMALL, *_write(SMALL.replace(_pin(1, body="short body", override=LONG), halves)))
+    assert (decision.verdict, decision.cause) == ("ALLOW_ADVISORY", "size_bound"), decision
+    assert decision.reason == ("The pin cap check stopped early and allowed this change: "
+                               "the pin-growth rule passed its step budget of 0.")
+
+
+def test_the_timer_stopping_the_override_check_allows_with_the_stop_early_note(monkeypatch):
+    import pin_caps_gate
+    from shared.pin_growth import SizeBound
+
+    def stopped(before, after):
+        raise SizeBound("the pin cap check ran past 30 s")
+
+    monkeypatch.setattr(pin_caps_gate, "_invalid_override", stopped)
+    decision = gate_decision(SMALL, *_new_pin(override=LONG + "y"))
+    assert (decision.verdict, decision.cause) == ("ALLOW_ADVISORY", "size_bound"), decision
+    assert decision.reason == "The pin cap check stopped early and allowed this change: the pin cap check ran past 30 s."
+
+
+def _stands_for(new, old):
+    """The edge rule `_Edges` builds, written pair by pair."""
+    from pin_caps_gate import _trimmed
+
+    if new.key == old.key:
+        return True
+    if _trimmed(new.key) != _trimmed(old.key):
+        return False
+    return new.written is not None or (old.written is not None and old.written.startswith(new.key))
+
+
+def test_the_matching_covers_as_many_invalid_rows_as_any_matching_can():
+    """Over random small sets of near-duplicate rows: every pair `_match`
+    makes obeys the edge rule, and it leaves no more invalid rows unmatched
+    than a matching of the invalid rows alone, found by brute force."""
+    import itertools
+    import random
+
+    from pin_caps_gate import _match, _Row
+
+    base = "y" * 119
+    reads = [base, base + ".", base + "..", base + "!", base + "x"]
+    writtens = [None, ".,", "..,", ",", "!,"]
+    rng = random.Random(7)
+
+    def row(pin):
+        key = rng.choice(reads)
+        tail = rng.choice(writtens)
+        written = None if tail is None else key + tail
+        return _Row(key, key, written, pin)
+
+    for _ in range(400):
+        new = [row(i) for i in range(rng.randint(1, 5))]
+        old = [row(None) for _ in range(rng.randint(0, 5))]
+        matched = _match(new, old)
+        assert len(set(matched.values())) == len(matched)
+        assert all(_stands_for(new[i], old[j]) for i, j in matched.items())
+        invalid = [i for i, r in enumerate(new) if not r.valid]
+        best = max((k for k in range(len(invalid) + 1)
+                    for chosen in itertools.combinations(invalid, k)
+                    for olds in itertools.permutations(range(len(old)), k)
+                    if all(_stands_for(new[i], old[j]) for i, j in zip(chosen, olds))), default=0)
+        assert sum(1 for i in invalid if i in matched) == best, (new, old, matched)

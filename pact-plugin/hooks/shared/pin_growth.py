@@ -558,6 +558,13 @@ class PinDecision(NamedTuple):
     size_reason: str | None = None
 
 
+def stopped_early(bound: SizeBound) -> PinDecision:
+    """The verdict when the pin cap check passes its step budget or timer: the
+    change is allowed, with a note naming the bound."""
+    return PinDecision("ALLOW_ADVISORY", 0, 0, None, "size_bound",
+                       f"The pin cap check stopped early and allowed this change: {bound}.")
+
+
 def pin_spans(doc: Document, S: tuple[int, int]) -> list[tuple[int, int]]:
     """Each pin of the Pinned body S of `doc` as the rows it covers, from its
     comment row (or heading) to the row before the next pin's, in the order
@@ -633,8 +640,7 @@ def pin_cap_decision(before: str, after: str, *, use_timer: bool = True, trim: b
     try:
         return run_with_timer(lambda: _decide(before, after, trim, revoked), use_timer)
     except SizeBound as bound:
-        return PinDecision("ALLOW_ADVISORY", 0, 0, None, "size_bound",
-                           f"The pin cap check stopped early and allowed this change: {bound}.")
+        return stopped_early(bound)
     except Exception as error:  # an over-block is the worst outcome, so a failure allows
         return PinDecision("ALLOW_ADVISORY", 0, 0, None, "error",
                            f"PACT could not check the pin cap: {type(error).__name__}: {error}")

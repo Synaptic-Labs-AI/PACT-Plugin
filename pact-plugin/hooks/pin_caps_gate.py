@@ -47,6 +47,7 @@ Output: a deny (hookSpecificOutput.permissionDecision, exit 2), an allow with
 from __future__ import annotations
 
 # ─── stdlib first (used by _emit_load_failure_allow BEFORE wrapped imports) ─
+import bisect
 import json
 import sys
 from collections import defaultdict
@@ -177,21 +178,6 @@ def _rationales(doc) -> list:
     return found
 
 
-def _rank(new: _Row, old: _Row) -> Optional[int]:
-    """How the new row may stand for the old one: 0 the same row (read and
-    written text), 1 the same read, 2 the same read once a reconfirmation's cut
-    is allowed for, or None. The last needs both reads equal less their
-    trailing non-word characters, and the new row reconfirmed, or the old row
-    reconfirmed with written text that starts with the new read."""
-    if new.key == old.key:
-        return 0 if new.written == old.written else 1
-    if _trimmed(new.key) != _trimmed(old.key):
-        return None
-    if new.written is not None or (old.written is not None and old.written.startswith(new.key)):
-        return 2
-    return None
-
-
 def _kept(new: _Row, old: _Row) -> bool:
     """Whether a matched new row keeps the old row's text as written: the
     same read, or a reconfirmation moved or removed (the match already needs
@@ -200,24 +186,97 @@ def _kept(new: _Row, old: _Row) -> bool:
     return new.key == old.key or old.written is not None or new.written.startswith(old.key)
 
 
-def _augment(start: int, edges: dict, owner: dict, seen: set) -> bool:
+class _Edges:
+    """Which old rows a new row may stand for, without listing every pair.
+
+    Rows group by their read less its trailing non-word characters; edges
+    never leave a group. In it, a new row may stand for an old row with the
+    same read and written text (rank 0), with the same read (rank 1), or, by
+    the reconfirmation's cut (rank 2), for any old row when the new row is
+    reconfirmed, and otherwise for a reconfirmed old row whose written text
+    starts with the new read. Each kind of edge is one list of old rows in
+    their order, shared by every new row with that read or group: so a
+    reconfirmed new row stands for any old row in its group."""
+
+    def __init__(self, old: list):
+        self.trimmed = {}  # read -> trimmed read
+        self.groups = defaultdict(list)  # trimmed read -> old rows
+        self.same = defaultdict(list)  # read -> old rows
+        self.exact = defaultdict(list)  # (read, written) -> old rows
+        written = defaultdict(list)  # trimmed read -> (written, old row)
+        for j, row in enumerate(old):
+            group = self._group(row.key)
+            self.groups[group].append(j)
+            self.same[row.key].append(j)
+            self.exact[row.key, row.written].append(j)
+            if row.written is not None:
+                written[group].append((row.written, j))
+        self.written = {group: sorted(rows) for group, rows in written.items()}
+        self.prefixed = {}
+
+    def _group(self, read: str) -> str:
+        if read not in self.trimmed:
+            self.trimmed[read] = _trimmed(read)
+        return self.trimmed[read]
+
+    def lists(self, row: _Row, rank: Optional[int] = None) -> list:
+        """(name, old rows) for `row`'s edges of `rank`, or of every rank in
+        rank order; the name is shared by every new row with the same list."""
+        group = self._group(row.key)
+        out = []
+        if rank in (None, 0):
+            out.append((("exact", row.key, row.written), self.exact.get((row.key, row.written), ())))
+        if rank in (None, 1):
+            out.append((("same", row.key), self.same.get(row.key, ())))
+        if rank in (None, 2):
+            if row.written is not None:
+                out.append((("group", group), self.groups.get(group, ())))
+            else:
+                out.append((("prefix", row.key), self._prefixed(group, row.key)))
+        return out
+
+    def _prefixed(self, group: str, read: str) -> list:
+        """The reconfirmed old rows of `group` whose written text starts with
+        `read`, in row order. Kept once worked out: an old row's written text
+        has one prefix per character, so all of them together are no larger
+        than the text."""
+        if read not in self.prefixed:
+            rows = self.written.get(group, ())
+            found, k = [], bisect.bisect_left(rows, (read,))
+            while k < len(rows) and rows[k][0].startswith(read):
+                found.append(rows[k][1])
+                k += 1
+            self.prefixed[read] = sorted(found)
+        return self.prefixed[read]
+
+
+def _augment(start: int, owner: dict, seen: set, scan, free, budget) -> bool:
     """Kuhn's step: find an alternating path from new row `start` to an old row
     no new row holds, skipping old rows in `seen`, and flip it in `owner` (old
-    row -> new row). Iterative, so a long path cannot exhaust the stack."""
-    frames, via = [(start, iter(edges[start]))], []
+    row -> new row). Each row on the path first takes a free old row of any
+    rank (`free`) and only then descends through held ones in rank order
+    (`scan`), so a free row one step away is never reached through a long
+    chain. Iterative, so a long path cannot exhaust the stack. Each old row
+    looked at spends a step of `budget`."""
+    frames, via = [(start, scan(start))], []
     while frames:
         new, choices = frames[-1]
-        old = next((j for j in choices if j not in seen), None)
+        old = free(new)
         if old is None:
-            frames.pop()
-            if via:
-                via.pop()
+            for old in choices:
+                budget.spend(1)
+                if old not in seen:
+                    break
+            else:
+                frames.pop()
+                if via:
+                    via.pop()
+                continue
+            seen.add(old)
+            via.append(old)
+            frames.append((owner[old], scan(owner[old])))
             continue
-        seen.add(old)
         via.append(old)
-        if old in owner:
-            frames.append((owner[old], iter(edges[owner[old]])))
-            continue
         for (row, _choices), held in zip(frames, via):
             owner[held] = row
         return True
@@ -225,51 +284,61 @@ def _augment(start: int, edges: dict, owner: dict, seen: set) -> bool:
 
 
 def _match(new: list, old: list) -> dict:
-    """A maximum matching of the new rows to the old rows that `_rank` allows,
-    as {new index: old index}. Invalid new rows are matched first, and Kuhn's
+    """A maximum matching of the new rows to the old rows `_Edges` allows, as
+    {new index: old index}. Invalid new rows are matched first, and Kuhn's
     algorithm never unmatches a row, so as many invalid rows as any matching
-    can cover are covered. Each row takes a free old row of its best rank when
-    there is one, and otherwise searches its edges best rank first.
+    can cover are covered. The rows first take free old rows rank by rank,
+    every row the same row first, then the same read, then the cut, so no
+    row takes by a looser edge an old row another row holds by a closer one;
+    a row left over searches (`_augment`).
 
-    Rows with the same read and written text have the same edges, so the
-    edges are worked out once for each such group, which keeps a file of many
-    identical overrides cheap."""
-    groups = defaultdict(lambda: defaultdict(list))
-    for j, row in enumerate(old):
-        groups[_trimmed(row.key)][row.key, row.written].append(j)
-    ranked_for, edges = {}, {}
-    for i, row in enumerate(new):
-        group = (row.key, row.written)
-        if group not in ranked_for:
-            ranked = []
-            for rows in groups.get(_trimmed(row.key), {}).values():
-                rank = _rank(row, old[rows[0]])
-                if rank is not None:
-                    ranked.extend((rank, j) for j in rows)
-            ranked.sort()
-            ranked_for[group] = ([j for _r, j in ranked], [j for r, j in ranked if r == ranked[0][0]])
-        edges[i] = ranked_for[group][0]
-    # An old row once held is never freed, so each group's search for a free
-    # row of its best rank resumes where the last one stopped.
-    owner, cursor = {}, defaultdict(int)
-    for valid in (False, True):
-        pending = []
-        for i in (i for i, row in enumerate(new) if row.valid is valid):
-            group = (new[i].key, new[i].written)
-            rows, k = ranked_for[group][1], cursor[group]
+    Every walk over an edge list is shared by the rows that share the list:
+    an old row once held is never freed, so a search for a free row resumes
+    where the last one stopped, and within one search an old row seen once is
+    skipped by every row. The work spends steps of the pin-growth rule's
+    budget (`STEP_BUDGET`) and past it raises `SizeBound`."""
+    from shared import pin_growth
+
+    budget = pin_growth._Budget(pin_growth.STEP_BUDGET)
+    edges = _Edges(old)
+    owner, cursors, passes, seen = {}, {}, {}, set()
+
+    def first_free(i, rank):
+        for name, rows in edges.lists(new[i], rank):
+            k = cursors.get(name, 0)
             while k < len(rows) and rows[k] in owner:
+                budget.spend(1)
                 k += 1
-            cursor[group] = k
+            cursors[name] = k
             if k < len(rows):
-                owner[rows[k]] = i
-            else:
-                pending.append(i)
-        seen = set()
-        for i in pending:
-            # A failed search changes nothing, so the old rows it saw stay
-            # unreachable until a search succeeds.
-            if _augment(i, edges, owner, seen):
-                seen = set()
+                return rows[k]
+        return None
+
+    def scan(i):
+        for name, rows in edges.lists(new[i]):
+            if name not in passes:
+                passes[name] = iter(rows)
+            yield from passes[name]
+
+    held = set()
+    for valid in (False, True):
+        offered = [i for i, row in enumerate(new) if row.valid is valid]
+        for rank in (0, 1, 2):
+            for i in offered:
+                if i not in held:
+                    free = first_free(i, rank)
+                    if free is not None:
+                        owner[free] = i
+                        held.add(i)
+        for i in offered:
+            # A failed search changes nothing, so what it saw stays
+            # unreachable, and its passes stay valid, until a search succeeds.
+            if i not in held and _augment(i, owner, seen, scan, lambda row: first_free(row, None), budget):
+                held.add(i)
+                seen.clear()
+                passes.clear()
+        seen.clear()
+        passes.clear()
     return {i: j for j, i in owner.items()}
 
 
@@ -368,19 +437,29 @@ def gate_decision(before: str, tool_name: str, tool_input: dict):
     which the caller's fail-open catch allows. A change that leaves the text
     as it is allows. An invalid size override on a pin the change adds or
     edits denies, cause "override". Otherwise `pin_cap_decision` decides.
+    Both checks run under the pin cap's one timer, and the override check
+    under its step budget as well; either stopping them allows, as the pin
+    cap check does when it stops early, never refuses.
     """
     from shared.edit_simulation import simulate
-    from shared.pin_growth import PinDecision, pin_cap_decision
+    from shared.pin_growth import PinDecision, SizeBound, pin_cap_decision, run_with_timer, stopped_early
 
     after = simulate(before, tool_name, tool_input)
     if after is None:
         raise TypeError(f"{tool_name} tool_input is not a well-formed {tool_name} payload")
     if after == before:
         return PinDecision("ALLOW", 0, 0, None, None, None)
-    invalid, revoked = _invalid_override(before, after)
-    if invalid is not None:
-        return PinDecision("DENY", 0, 0, None, "override", f"Pin cap violation (invalid override): {invalid}")
-    return pin_cap_decision(before, after, revoked=revoked)
+
+    def decide():
+        invalid, revoked = _invalid_override(before, after)
+        if invalid is not None:
+            return PinDecision("DENY", 0, 0, None, "override", f"Pin cap violation (invalid override): {invalid}")
+        return pin_cap_decision(before, after, use_timer=False, revoked=revoked)
+
+    try:
+        return run_with_timer(decide)
+    except SizeBound as bound:
+        return stopped_early(bound)
 
 
 def _read_baseline(claude_md_path: Path) -> tuple[Optional[str], Optional[str]]:
