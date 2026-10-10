@@ -378,3 +378,138 @@ def test_an_edited_rationale_is_still_checked(name, before, call, length):
     assert (decision.verdict, decision.cause) == ("DENY", "override"), (name, decision)
     assert decision.reason == (f"Pin cap violation (invalid override): Override rationale is {length} chars "
                                f"(max: 120). Shorten it.")
+
+
+# Near-duplicate old overrides on two pins, 'R.' and 'R'. The rows are matched
+# as a whole, so neither pin takes the old row its neighbour needs, in either
+# order, in a batch reconfirm or in the second one that rewrites both rows.
+TWIN = "y" * 124
+BIG = _words("alpha", 1700)
+
+
+def _twins(row_a, row_b, body, swap=False):
+    pins = [f"{row_a}\n### Pin A\n{body}\n", f"{row_b}\n### Pin B\n{body}\n"]
+    return _doc("\n".join((pins[::-1] if swap else pins) + _rest(3)))
+
+
+def _comment(rationale, place="none", date="2026-10-10"):
+    reconfirm = f"reconfirmed: {date} because still cited"
+    if place == "after":
+        return f"<!-- pinned: 2026-05-26, pin-size-override: {rationale}, {reconfirm} -->"
+    if place == "date":
+        return f"<!-- pinned: 2026-05-26, {reconfirm}, pin-size-override: {rationale} -->"
+    return f"<!-- pinned: 2026-05-26, pin-size-override: {rationale} -->"
+
+
+@pytest.mark.parametrize("swap", [False, True], ids=["'R.' first", "'R' first"])
+def test_reconfirming_one_of_two_near_duplicate_overrides_is_allowed(swap):
+    before = _twins(_comment(TWIN + "."), _comment(TWIN), "short body", swap)
+    call = _edit(f"{TWIN}. -->", f"{TWIN}., reconfirmed: 2026-10-10 because still cited -->")
+    assert gate_decision(before, *call).verdict == "ALLOW"
+
+
+BATCHES = [
+    ("one appended and one in template order", ("none", "none"), ("after", "date")),
+    ("both appended, then both rewritten in template order", ("after", "after"), ("date", "date")),
+]
+
+
+@pytest.mark.parametrize("body", [BIG, "short body"], ids=["over the cap", "small"])
+@pytest.mark.parametrize("name, places_before, places_after", BATCHES, ids=[row[0] for row in BATCHES])
+def test_a_batch_reconfirm_of_near_duplicate_overrides_is_allowed(name, places_before, places_after, body):
+    before = _twins(_comment(TWIN + ".", places_before[0], "2026-07-01"),
+                    _comment(TWIN, places_before[1], "2026-07-01"), body)
+    after = _twins(_comment(TWIN + ".", places_after[0]), _comment(TWIN, places_after[1]), body)
+    assert gate_decision(before, *_write(after)).verdict == "ALLOW", name
+
+
+def test_an_old_row_two_new_rows_could_take_goes_to_the_invalid_one():
+    """The old reconfirmed row reads X. One edit adds a pin whose rationale is
+    X and removes the old pin's reconfirmation, so it reads 'X...' at 122.
+    Only the invalid one needs the old row; the new X is valid on its own."""
+    x = "x" * 119
+    before = _old(f"{x}..., {REC}")
+    call = _edit(f"<!-- pinned: 2026-05-26, pin-size-override: {x}..., {REC} -->",
+                 _pin(8, body="b", override=x) + f"\n<!-- pinned: 2026-05-26, pin-size-override: {x}... -->")
+    assert gate_decision(before, *call).verdict == "ALLOW"
+
+
+# An over-cap pin whose override was written 121 characters, so it reads 120
+# and exempts the pin only while a reconfirmation follows it. A
+# reconfirmation that moves leaves the override untouched, and the pin counts
+# as having no valid override on both sides: it may keep its size, as an
+# over-cap pin without one may, and may not grow.
+@pytest.mark.parametrize("ending", [".", ":"], ids=["a full stop", "a colon"])
+@pytest.mark.parametrize("move", ["rewritten in template order", "removed"])
+@pytest.mark.parametrize("grows", [False, True], ids=["same size", "grows"])
+def test_a_moved_reconfirmation_neither_grants_nor_keeps_an_exemption(ending, move, grows):
+    written = "x" * 120 + ending
+    row = f"<!-- pinned: 2026-05-26, pin-size-override: {written}, {REC} -->"
+    moved = (f"<!-- pinned: 2026-05-26, {REC}, pin-size-override: {written} -->" if move != "removed"
+             else f"<!-- pinned: 2026-05-26, pin-size-override: {written} -->")
+    before = _doc("\n".join([f"{row}\n### Pin 1\n{BIG}\n"] + _rest()))
+    after = before.replace(row, moved)
+    if grows:
+        after = after.replace(BIG, BIG + " more" * 24)
+    decision = gate_decision(before, *_write(after))
+    if grows:
+        assert (decision.verdict, decision.cause) == ("DENY", "size"), decision
+    else:
+        assert decision.verdict == "ALLOW", decision
+
+
+@pytest.mark.parametrize("grows", [False, True], ids=["same size", "grows"])
+def test_an_appended_reconfirmation_grants_no_exemption(grows):
+    """The override, written 121 characters, reads 120 once a reconfirmation
+    follows it; the pin had none before, so it gains none."""
+    written = "x" * 120 + "."
+    row = f"<!-- pinned: 2026-05-26, pin-size-override: {written} -->"
+    before = _doc("\n".join([f"{row}\n### Pin 1\n{BIG}\n"] + _rest()))
+    after = before.replace(row, f"<!-- pinned: 2026-05-26, pin-size-override: {written}, {REC} -->")
+    if grows:
+        after = after.replace(BIG, BIG + " more" * 24)
+    decision = gate_decision(before, *_write(after))
+    if grows:
+        assert (decision.verdict, decision.cause) == ("DENY", "size"), decision
+    else:
+        assert decision.verdict == "ALLOW", decision
+
+
+
+def test_an_override_edited_as_a_reconfirmation_is_appended_reads_on_its_own():
+    """The full stop is removed as the reconfirmation is appended, so the
+    rationale is edited: it reads 120 and exempts the pin, which may grow."""
+    written = "x" * 120 + "."
+    row = f"<!-- pinned: 2026-05-26, pin-size-override: {written} -->"
+    before = _doc("\n".join([f"{row}\n### Pin 1\n{BIG}\n"] + _rest()))
+    after = before.replace(row, f"<!-- pinned: 2026-05-26, pin-size-override: {'x' * 120}, {REC} -->")
+    after = after.replace(BIG, BIG + " more" * 24)
+    assert gate_decision(before, *_write(after)).verdict == "ALLOW"
+
+def test_pin_spans_and_section_pins_list_the_same_pins():
+    """The gate names a pin by its index among `pin_spans`; the size check
+    reads `section_pins`. Both must list the same pins in the same order."""
+    from pin_caps import section_pins
+    from shared.claude_md_markers import State, parse
+    from shared.pin_growth import locate_pinned, pin_spans
+
+    texts = [OVERSIZE, SMALL, VALID, EMPTY, UNCLOSED_ABOVE, FENCED_EXAMPLE, OVERRIDDEN, RECONFIRMED_OLD,
+             _twins(_comment(TWIN + ".", "after"), _comment(TWIN, "date"), BIG),
+             _doc("\n".join([_pin(1, body="text\n\n\n"), "### Pin with no comment\nbody\n"] + _rest()))]
+    checked = 0
+    for text in texts:
+        doc = parse(text)
+        located = locate_pinned(doc)
+        if located.state is not State.FOUND:
+            continue
+        heading, last = located.spans[0]
+        spans = pin_spans(doc, (heading + 1, last))
+        pins = section_pins(doc, located)
+        assert len(spans) == len(pins)
+        for (first, _end), pin in zip(spans, pins):
+            rows = [doc.lines[r].content for r in range(first, _end + 1)]
+            assert pin.heading in rows
+            if pin.date_comment is not None:
+                assert rows[0].strip() == pin.date_comment
+        checked += 1
+    assert checked >= 9

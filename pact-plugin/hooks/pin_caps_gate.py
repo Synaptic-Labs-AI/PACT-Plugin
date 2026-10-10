@@ -49,9 +49,9 @@ from __future__ import annotations
 # ─── stdlib first (used by _emit_load_failure_allow BEFORE wrapped imports) ─
 import json
 import sys
-from collections import Counter, defaultdict
+from collections import defaultdict
 from pathlib import Path
-from typing import NoReturn, Optional
+from typing import NamedTuple, NoReturn, Optional
 
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
@@ -122,54 +122,175 @@ def _trimmed(key: str) -> str:
     return key[:end]
 
 
-def _override_key(content: str, rationale: str) -> tuple[str, Optional[str]]:
-    """The rationale `override_rationale_text` read from the override comment
-    `content` and, when a reconfirmation follows the comment's override field
-    (the reader then cuts it from the rationale), the text written between the
-    field and that reconfirmation, else None; both whitespace collapsed."""
+class _Row(NamedTuple):
+    """An override comment as `_invalid_override` compares it."""
+
+    rationale: str  # what `override_rationale_text` reads
+    key: str  # that rationale, whitespace collapsed
+    # The text written between the override field and a reconfirmation after
+    # it, whitespace collapsed; None when no reconfirmation follows the field.
+    written: Optional[str]
+    pin: Optional[int]  # the index of the pin it heads in a located Pinned section
+
+    @property
+    def valid(self) -> bool:
+        return _validate_override_rationale(self.rationale) is None
+
+
+def _row(content: str, rationale: str, pin: Optional[int]) -> _Row:
+    """The `_Row` for the override comment `content`, whose rationale
+    `override_rationale_text` read as `rationale`."""
     from pin_caps import _OVERRIDE_FIELD, RECONFIRMED_DATE_RE
 
     field = _OVERRIDE_FIELD.search(content)
     reconfirm = RECONFIRMED_DATE_RE.search(content, field.end()) if field else None
     written = _collapsed(content[field.end():reconfirm.start()]) if reconfirm else None
-    return _collapsed(rationale), written
+    return _Row(rationale, _collapsed(rationale), written, pin)
 
 
-def _take(rows: Counter, prefix: Optional[str] = None) -> bool:
-    """Use up one old row of `rows` (written text: count); whether one was.
-    With `prefix`, only a reconfirmed row whose written text starts with it;
-    otherwise any, a row with no reconfirmation (None) first."""
-    for written in sorted(rows, key=lambda w: w is not None):
-        if rows[written] and (prefix is None or (written is not None and written.startswith(prefix))):
-            rows[written] -= 1
-            return True
-    return False
-
-
-def _rationales(doc) -> Counter:
-    """The override rationales in the parsed document `doc`, as
-    `_override_key` gives them, one for each row that holds only an override
-    comment, of any kind. A fenced row, or one past an unclosed fence, is read
-    as if it stood alone."""
+def _rationales(doc) -> list:
+    """The override comments in the parsed document `doc` as `_Row`s, one for
+    each row that holds only an override comment, of any kind. A fenced row,
+    or one past an unclosed fence, is read as if it stood alone. Only a pin's
+    own comment row in a located Pinned section names its pin."""
     from pin_caps import override_rationale_text
-    from shared.claude_md_markers import Kind, parse
+    from shared.claude_md_markers import Kind, State, parse
+    from shared.pin_growth import locate_pinned, pin_spans
 
-    found = Counter()
+    located = locate_pinned(doc)
+    pins = {}
+    if located.state is State.FOUND:
+        heading, last = located.spans[0]
+        pins = {first: index for index, (first, _end) in enumerate(pin_spans(doc, (heading + 1, last)))}
+    found = []
     for line in doc.lines:
         if "<!--" not in line.content or "-->" not in line.content:
             continue
         if line.kind is Kind.PROSE:
             rationale = override_rationale_text(doc, line.row)
+            pin = pins.get(line.row)
         else:
             rationale = override_rationale_text(parse(line.content.strip()), 0)
+            pin = None
         if rationale is not None:
-            found[_override_key(line.content, rationale)] += 1
+            found.append(_row(line.content, rationale, pin))
     return found
 
 
-def _invalid_override(before: str, after: str) -> Optional[str]:
+def _rank(new: _Row, old: _Row) -> Optional[int]:
+    """How the new row may stand for the old one: 0 the same row (read and
+    written text), 1 the same read, 2 the same read once a reconfirmation's cut
+    is allowed for, or None. The last needs both reads equal less their
+    trailing non-word characters, and the new row reconfirmed, or the old row
+    reconfirmed with written text that starts with the new read."""
+    if new.key == old.key:
+        return 0 if new.written == old.written else 1
+    if _trimmed(new.key) != _trimmed(old.key):
+        return None
+    if new.written is not None or (old.written is not None and old.written.startswith(new.key)):
+        return 2
+    return None
+
+
+def _kept(new: _Row, old: _Row) -> bool:
+    """Whether a matched new row keeps the old row's text as written: the
+    same read, or a reconfirmation moved or removed (the match already needs
+    the new read to begin the old written text), or a reconfirmation added
+    after the old rationale left whole."""
+    return new.key == old.key or old.written is not None or new.written.startswith(old.key)
+
+
+def _augment(start: int, edges: dict, owner: dict, seen: set) -> bool:
+    """Kuhn's step: find an alternating path from new row `start` to an old row
+    no new row holds, skipping old rows in `seen`, and flip it in `owner` (old
+    row -> new row). Iterative, so a long path cannot exhaust the stack."""
+    frames, via = [(start, iter(edges[start]))], []
+    while frames:
+        new, choices = frames[-1]
+        old = next((j for j in choices if j not in seen), None)
+        if old is None:
+            frames.pop()
+            if via:
+                via.pop()
+            continue
+        seen.add(old)
+        via.append(old)
+        if old in owner:
+            frames.append((owner[old], iter(edges[owner[old]])))
+            continue
+        for (row, _choices), held in zip(frames, via):
+            owner[held] = row
+        return True
+    return False
+
+
+def _match(new: list, old: list) -> dict:
+    """A maximum matching of the new rows to the old rows that `_rank` allows,
+    as {new index: old index}. Invalid new rows are matched first, and Kuhn's
+    algorithm never unmatches a row, so as many invalid rows as any matching
+    can cover are covered. Each row takes a free old row of its best rank when
+    there is one, and otherwise searches its edges best rank first.
+
+    Rows with the same read and written text have the same edges, so the
+    edges are worked out once for each such group, which keeps a file of many
+    identical overrides cheap."""
+    groups = defaultdict(lambda: defaultdict(list))
+    for j, row in enumerate(old):
+        groups[_trimmed(row.key)][row.key, row.written].append(j)
+    ranked_for, edges = {}, {}
+    for i, row in enumerate(new):
+        group = (row.key, row.written)
+        if group not in ranked_for:
+            ranked = []
+            for rows in groups.get(_trimmed(row.key), {}).values():
+                rank = _rank(row, old[rows[0]])
+                if rank is not None:
+                    ranked.extend((rank, j) for j in rows)
+            ranked.sort()
+            ranked_for[group] = ([j for _r, j in ranked], [j for r, j in ranked if r == ranked[0][0]])
+        edges[i] = ranked_for[group][0]
+    # An old row once held is never freed, so each group's search for a free
+    # row of its best rank resumes where the last one stopped.
+    owner, cursor = {}, defaultdict(int)
+    for valid in (False, True):
+        pending = []
+        for i in (i for i, row in enumerate(new) if row.valid is valid):
+            group = (new[i].key, new[i].written)
+            rows, k = ranked_for[group][1], cursor[group]
+            while k < len(rows) and rows[k] in owner:
+                k += 1
+            cursor[group] = k
+            if k < len(rows):
+                owner[rows[k]] = i
+            else:
+                pending.append(i)
+        seen = set()
+        for i in pending:
+            # A failed search changes nothing, so the old rows it saw stay
+            # unreachable until a search succeeds.
+            if _augment(i, edges, owner, seen):
+                seen = set()
+    return {i: j for j, i in owner.items()}
+
+
+def _spans_are_pins(doc) -> bool:
+    """Whether `pin_spans` gives as many pins for the Pinned section of `doc`
+    as `section_pins` reads, so a pin index names one pin to both."""
+    from pin_caps import section_pins
+    from shared.claude_md_markers import State
+    from shared.pin_growth import locate_pinned, pin_spans
+
+    located = locate_pinned(doc)
+    if located.state is not State.FOUND:
+        return False
+    heading, last = located.spans[0]
+    return len(pin_spans(doc, (heading + 1, last))) == len(section_pins(doc, located))
+
+
+def _invalid_override(before: str, after: str) -> tuple[Optional[str], tuple]:
     """The deny reason for an invalid size override on a pin the change adds
-    or edits, else None.
+    or edits, else None, and the pins whose override the size check must count
+    as none: (indices in the Pinned section before, indices after).
 
     Read from the fence-aware parse of the text after, on the one row the
     parser attributes to each pin as its comment (the first row `pin_spans`
@@ -179,28 +300,35 @@ def _invalid_override(before: str, after: str) -> Optional[str]:
     break `str.splitlines` breaks at is never attributed.
 
     An override is checked only when the change added it or edited its
-    rationale: the rationale, whitespace collapsed, is looked up among the
-    override comments on every row of the text before, of any kind (prose,
-    code or past an unclosed fence), and one found there is used up and not
-    checked. The rest of the row, the date, is not compared. So an untouched
-    old invalid override is not refused for an edit elsewhere in its pin, a
-    new date on its row, a rename, a move, a line-ending rewrite or a
-    fence-closing Write. Each old copy covers one copy after, so the change
-    cannot raise the number of invalid rationales, and an invalid one grants
-    no size exemption either way.
+    rationale: each one is matched to an override comment on a row of the
+    text before, of any kind (prose, code or past an unclosed fence), and a
+    matched one is not checked. Each old row stands for at most one row
+    after, so the change cannot raise the number of invalid rationales, and
+    an invalid one grants no size exemption either way. A new row may stand
+    for an old row with the same rationale, whitespace collapsed; the rest of
+    the row, the date, is not compared. So an untouched old invalid override
+    is not refused for an edit elsewhere in its pin, a new date on its row, a
+    rename, a move, a line-ending rewrite or a fence-closing Write.
 
     The reader cuts a reconfirmation written after the override field from
     the rationale together with the run of non-word characters before it, so
     adding, removing or moving one changes the rationale's trailing
-    punctuation without the curator touching it. So once the exact matches
-    are used up, a rationale not found is matched again with its trailing run
-    of non-word characters removed, against the old rationales left with
-    theirs removed, where it or the old row carries such a reconfirmation. A
-    reconfirmed rationale reads no longer than the old one it matches; one
-    without a reconfirmation matches only an old reconfirmed row whose written
-    text it begins, so it holds nothing the curator did not write. Where
-    neither row carries one, as when only the punctuation is edited, the
-    match stays exact.
+    punctuation without the curator touching it. So a new row may also stand
+    for an old row whose rationale is the same once both lose their trailing
+    run of non-word characters, where it or the old row carries such a
+    reconfirmation. A reconfirmed rationale reads no longer than the old one
+    it matches; one without a reconfirmation matches only an old reconfirmed
+    row whose written text it begins, so it holds nothing the curator did not
+    write. Where neither row carries one, as when only the punctuation is
+    edited, the match stays exact.
+
+    The rows are matched as a whole (`_match`), so one pin cannot take the old
+    row its neighbour needs. Where a matched old row was a pin's comment, the
+    new row keeps its text (`_kept`), and the two rationales disagree on
+    validity, both pins count as having no valid override, as each would if
+    read alike, so a reconfirmation that moves neither grants an exemption
+    nor takes one away. Only when the pins `pin_spans` lists before and after
+    are the ones `section_pins` reads.
     """
     from pin_caps import override_rationale_text
     from shared.claude_md_markers import State, parse
@@ -209,29 +337,25 @@ def _invalid_override(before: str, after: str) -> Optional[str]:
     doc = parse(after)
     located = locate_pinned(doc)
     if located.state is not State.FOUND:
-        return None
+        return None, ((), ())
     heading, last = located.spans[0]
-    old = defaultdict(Counter)
-    for (key, written), count in _rationales(parse(before)).items():
-        old[key][written] += count
-    edited = []
-    for first, _end in pin_spans(doc, (heading + 1, last)):
+    new = []
+    for index, (first, _end) in enumerate(pin_spans(doc, (heading + 1, last))):
         rationale = override_rationale_text(doc, first)
-        if rationale is None:
-            continue
-        key, written = _override_key(doc.lines[first].content, rationale)
-        if not _take(old[key]):
-            edited.append((key, written, rationale))
-    trimmed = defaultdict(Counter)
-    for key, rows in old.items():
-        trimmed[_trimmed(key)].update(rows)
-    for key, written, rationale in edited:
-        if _take(trimmed[_trimmed(key)], None if written is not None else key):
-            continue
-        reason = _validate_override_rationale(rationale)
+        if rationale is not None:
+            new.append(_row(doc.lines[first].content, rationale, index))
+    before_doc = parse(before)
+    old = _rationales(before_doc)
+    matched = _match(new, old)
+    for i, row in enumerate(new):
+        reason = None if i in matched else _validate_override_rationale(row.rationale)
         if reason is not None:
-            return reason
-    return None
+            return reason, ((), ())
+    revoked = [(old[j].pin, new[i].pin) for i, j in matched.items()
+               if old[j].pin is not None and old[j].valid != new[i].valid and _kept(new[i], old[j])]
+    if not revoked or not (_spans_are_pins(doc) and _spans_are_pins(before_doc)):
+        return None, ((), ())
+    return None, (frozenset(p for p, _ in revoked), frozenset(q for _, q in revoked))
 
 
 def gate_decision(before: str, tool_name: str, tool_input: dict):
@@ -253,10 +377,10 @@ def gate_decision(before: str, tool_name: str, tool_input: dict):
         raise TypeError(f"{tool_name} tool_input is not a well-formed {tool_name} payload")
     if after == before:
         return PinDecision("ALLOW", 0, 0, None, None, None)
-    invalid = _invalid_override(before, after)
+    invalid, revoked = _invalid_override(before, after)
     if invalid is not None:
         return PinDecision("DENY", 0, 0, None, "override", f"Pin cap violation (invalid override): {invalid}")
-    return pin_cap_decision(before, after)
+    return pin_cap_decision(before, after, revoked=revoked)
 
 
 def _read_baseline(claude_md_path: Path) -> tuple[Optional[str], Optional[str]]:

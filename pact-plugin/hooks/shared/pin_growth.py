@@ -621,13 +621,17 @@ def _not_found_text(located: Located) -> str:
             f"checked ({located.state.value}{detail}).")
 
 
-def pin_cap_decision(before: str, after: str, *, use_timer: bool = True, trim: bool = True) -> PinDecision:
+def pin_cap_decision(before: str, after: str, *, use_timer: bool = True, trim: bool = True,
+                     revoked: tuple = ((), ())) -> PinDecision:
     """The pin cap's verdict on a change from `before` to `after` (whole texts;
     `before` is "" when no file resolved). Never raises: the step budget or the
     timer, which covers the whole decision, allows with the size advisory, and
-    any other failure allows with an advisory, cause "error"."""
+    any other failure allows with an advisory, cause "error".
+
+    `revoked` holds the indices, among the pins of the Pinned section before
+    and after, of pins whose size override counts as none."""
     try:
-        return run_with_timer(lambda: _decide(before, after, trim), use_timer)
+        return run_with_timer(lambda: _decide(before, after, trim, revoked), use_timer)
     except SizeBound as bound:
         return PinDecision("ALLOW_ADVISORY", 0, 0, None, "size_bound",
                            f"The pin cap check stopped early and allowed this change: {bound}.")
@@ -636,7 +640,12 @@ def pin_cap_decision(before: str, after: str, *, use_timer: bool = True, trim: b
                            f"PACT could not check the pin cap: {type(error).__name__}: {error}")
 
 
-def _decide(before: str, after: str, trim: bool) -> PinDecision:
+def _revoke(pins: list[Pin], indices) -> list[Pin]:
+    """`pins` with no size override on the pins at `indices`."""
+    return [pin._replace(override_rationale=None) if index in indices else pin for index, pin in enumerate(pins)]
+
+
+def _decide(before: str, after: str, trim: bool, revoked: tuple = ((), ())) -> PinDecision:
     from staleness import locate_pinned as locate_any_pinned
 
     after_doc = parse(after)
@@ -648,14 +657,14 @@ def _decide(before: str, after: str, trim: bool) -> PinDecision:
             return PinDecision("ALLOW", 0, 0, None, None, None)
         return PinDecision("ALLOW_ADVISORY", 0, 0, None, "not_found", _not_found_text(located))
     before_doc = parse(before)
-    post_pins = section_pins(after_doc, located)
+    post_pins = _revoke(section_pins(after_doc, located), revoked[1])
     previous = locate_pinned(before_doc)
     found_before = previous.state is State.FOUND
     growth, detail = None, {}
     if len(post_pins) > PIN_COUNT_CAP or not found_before:
         growth = pin_growth(before_doc, after_doc, trim=trim, detail=detail)
     if found_before:
-        pre_pins = section_pins(before_doc, previous)
+        pre_pins = _revoke(section_pins(before_doc, previous), revoked[0])
         size_before, size_after = pre_pins, post_pins
         pins_before = len(pre_pins) if growth is None else len(post_pins) - growth
     else:
