@@ -444,6 +444,16 @@ class TestFormatSlotStatus_Idempotent:
         ]
         assert format_slot_status(pins) == "Pin slots: 12/12 used (FULL)"
 
+    def test_pins_past_the_cap_show_over_the_cap_not_full(self):
+        from pin_caps import Pin, format_slot_status
+        pins = [
+            Pin(heading=f"### P{i}", body="x", body_chars=10,
+                date_comment=None, override_rationale=None, is_stale=False)
+            for i in range(13)
+        ]
+        assert format_slot_status(pins) == "Pin slots: 13/12 used (over the cap)"
+        assert format_slot_status(pins[:12]) == "Pin slots: 12/12 used (FULL)"
+
     def test_partial_pins_shows_headroom(self):
         from pin_caps import Pin, format_slot_status
         pins = [

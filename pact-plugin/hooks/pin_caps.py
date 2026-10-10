@@ -999,6 +999,7 @@ def format_slot_status(pins: List[Pin]) -> str:
     Example outputs:
         "Pin slots: 11/12 used, 340 chars remaining on largest pin"
         "Pin slots: 12/12 used (FULL)"
+        "Pin slots: 13/12 used (over the cap)"
         "Pin slots: 0/12 used"
 
     Largest-pin headroom is computed only when at least one pin exists.
@@ -1009,7 +1010,9 @@ def format_slot_status(pins: List[Pin]) -> str:
     if count == 0:
         return f"Pin slots: 0/{PIN_COUNT_CAP} used"
 
-    if count >= PIN_COUNT_CAP:
+    if count > PIN_COUNT_CAP:
+        return f"Pin slots: {count}/{PIN_COUNT_CAP} used (over the cap)"
+    if count == PIN_COUNT_CAP:
         return f"Pin slots: {count}/{PIN_COUNT_CAP} used (FULL)"
 
     largest_chars = max(p.body_chars for p in pins)
