@@ -337,9 +337,11 @@ UNTOUCHED = [
            f"pinned: 2026-05-26, reconfirmed: 2026-11-10 because the template still cites it, "
            f"pin-size-override: {OLD}. -->")),
     ("a reconfirmation re-dated", RECONFIRMED_OLD, _edit("2026-10-10", "2026-11-10")),
-    # A new reconfirmed pin above the old one reads the old rationale less its
-    # full stop. The old row matches its exact copy first, so the new pin's
-    # rationale is checked on its own, and it is valid.
+    # A new pin above the old one whose rationale is, or reads as, the old one
+    # less its full stop. The old row matches its exact copy first, so the new
+    # pin's rationale is checked on its own, and it is valid.
+    ("a new pin above with the old rationale less its full stop", _old("x" * 120 + "."),
+     _edit("<!-- pinned: 2026-05-26,", _pin(8, body="b", override="x" * 120) + "\n<!-- pinned: 2026-05-26,")),
     ("a new reconfirmed pin above reading the old rationale less its full stop", _old("x" * 120 + "."),
      _edit("<!-- pinned: 2026-05-26,",
            _pin(8, body="b", override=f"{'x' * 120}, {REC}") + "\n<!-- pinned: 2026-05-26,")),
