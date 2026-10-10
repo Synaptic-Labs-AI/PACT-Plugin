@@ -203,12 +203,14 @@ class _Edges:
         self.groups = defaultdict(list)  # trimmed read -> old rows
         self.same = defaultdict(list)  # read -> old rows
         self.exact = defaultdict(list)  # (read, written) -> old rows
+        self.identical = defaultdict(list)  # (uncollapsed read, written) -> old rows
         written = defaultdict(list)  # trimmed read -> (written, old row)
         for j, row in enumerate(old):
             group = self._group(row.key)
             self.groups[group].append(j)
             self.same[row.key].append(j)
             self.exact[row.key, row.written].append(j)
+            self.identical[row.rationale, row.written].append(j)
             if row.written is not None:
                 written[group].append((row.written, j))
         self.written = {group: sorted(rows) for group, rows in written.items()}
@@ -285,12 +287,17 @@ def _augment(start: int, owner: dict, seen: set, scan, free, budget) -> bool:
 
 def _match(new: list, old: list) -> dict:
     """A maximum matching of the new rows to the old rows `_Edges` allows, as
-    {new index: old index}. Invalid new rows are matched first, and Kuhn's
-    algorithm never unmatches a row, so as many invalid rows as any matching
-    can cover are covered. The rows first take free old rows rank by rank,
-    every row the same row first, then the same read, then the cut, so no
-    row takes by a looser edge an old row another row holds by a closer one;
-    a row left over searches (`_augment`).
+    {new index: old index}.
+
+    A new row identical to an old one (the same read, whitespace and all, and
+    the same written text) is that row and takes it first; no other row may
+    claim it, so a copy of an old override, however close, is checked unless
+    an old row is left for it. Then invalid new rows are matched first, and
+    Kuhn's algorithm never unmatches a row, so as many invalid rows as any
+    matching can cover are covered. The rows first take free old rows rank by
+    rank, every row the same row first, then the same read, then the cut, so
+    no row takes by a looser edge an old row another row holds by a closer
+    one; a row left over searches (`_augment`).
 
     Every walk over an edge list is shared by the rows that share the list:
     an old row once held is never freed, so a search for a free row resumes
@@ -318,9 +325,21 @@ def _match(new: list, old: list) -> dict:
         for name, rows in edges.lists(new[i]):
             if name not in passes:
                 passes[name] = iter(rows)
-            yield from passes[name]
+            for j in passes[name]:
+                if j in frozen:
+                    budget.spend(1)
+                else:
+                    yield j
 
-    held = set()
+    held, frozen = set(), set()
+    for i, row in enumerate(new):
+        rows = edges.identical.get((row.rationale, row.written), ())
+        k = cursors.get(("identical", row.rationale, row.written), 0)
+        if k < len(rows):
+            owner[rows[k]] = i
+            held.add(i)
+            frozen.add(rows[k])
+            cursors["identical", row.rationale, row.written] = k + 1
     for valid in (False, True):
         offered = [i for i, row in enumerate(new) if row.valid is valid]
         for rank in (0, 1, 2):

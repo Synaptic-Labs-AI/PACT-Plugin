@@ -585,7 +585,8 @@ def _stands_for(new, old):
 
 def test_the_matching_covers_as_many_invalid_rows_as_any_matching_can():
     """Over random small sets of near-duplicate rows: every pair `_match`
-    makes obeys the edge rule, and it leaves no more invalid rows unmatched
+    makes obeys the edge rule, each new row identical to an old row left for
+    it takes one, and among the rest it leaves no more invalid rows unmatched
     than a matching of the invalid rows alone, found by brute force."""
     import itertools
     import random
@@ -609,9 +610,65 @@ def test_the_matching_covers_as_many_invalid_rows_as_any_matching_can():
         matched = _match(new, old)
         assert len(set(matched.values())) == len(matched)
         assert all(_stands_for(new[i], old[j]) for i, j in matched.items())
+        identical, used = set(), set()
+        for i, r in enumerate(new):
+            j = next((j for j in range(len(old)) if j not in used
+                      and (old[j].rationale, old[j].written) == (r.rationale, r.written)), None)
+            if j is not None:
+                used.add(j)
+                identical.add(i)
+                assert (old[matched[i]].rationale, old[matched[i]].written) == (r.rationale, r.written)
         invalid = [i for i, r in enumerate(new) if not r.valid]
-        best = max((k for k in range(len(invalid) + 1)
-                    for chosen in itertools.combinations(invalid, k)
-                    for olds in itertools.permutations(range(len(old)), k)
+        rest = [i for i in invalid if i not in identical]
+        free = [j for j in range(len(old)) if j not in used]
+        best = max((k for k in range(len(rest) + 1)
+                    for chosen in itertools.combinations(rest, k)
+                    for olds in itertools.permutations(free, k)
                     if all(_stands_for(new[i], old[j]) for i, j in zip(chosen, olds))), default=0)
-        assert sum(1 for i in invalid if i in matched) == best, (new, old, matched)
+        covered = sum(1 for i in invalid if i in matched)
+        assert covered == best + len(identical & set(invalid)), (new, old, matched)
+
+
+# An old override's own unchanged row is that row; a copy of it, even one a
+# whitespace change makes read the same, claims an old row only if one is
+# left for it.
+SPACED = "a " * 59 + "b"  # 119 characters, valid
+
+
+def _spaced_doc(*rationales):
+    return _doc("\n".join([_pin(i, body="short body", override=r) for i, r in enumerate(rationales, 1)]
+                          + _rest(len(rationales) + 1)))
+
+
+def test_a_new_pin_copying_an_old_override_with_extra_spaces_is_refused():
+    """The copy reads the same once whitespace is collapsed, but it is 121
+    characters; the untouched original keeps the old row, so the copy is
+    checked on its own."""
+    padded = SPACED.replace("a b", "a   b", 1)
+    assert len(padded) == 121 and " ".join(padded.split()) == SPACED
+    decision = gate_decision(_spaced_doc(SPACED), *_new_pin(override=padded))
+    assert (decision.verdict, decision.cause) == ("DENY", "override"), decision
+    assert decision.reason == "Pin cap violation (invalid override): Override rationale is 121 chars (max: 120). Shorten it."
+
+
+def test_a_whitespace_edit_to_the_only_copy_of_an_override_is_not_rechecked():
+    padded = SPACED.replace("a b", "a   b", 1)
+    decision = gate_decision(_spaced_doc(SPACED), *_edit(f"pin-size-override: {SPACED} -->",
+                                                        f"pin-size-override: {padded} -->"))
+    assert decision.verdict != "DENY", decision
+
+
+def test_a_padded_copy_beside_an_edited_original_is_allowed():
+    """With the original edited too (a reconfirmation appended), no new row is
+    identical to the old one, so the padded copy matches it by read and the
+    original is checked on its own, and is valid. The copy is not refused; an
+    invalid override exempts nothing."""
+    padded = SPACED.replace("a b", "a   b", 1)
+    call = _edit(f"pin-size-override: {SPACED} -->",
+                 f"pin-size-override: {SPACED}, {REC} -->\n### Pin copy\nb\n<!-- pinned: 2026-10-01, "
+                 f"pin-size-override: {padded} -->")
+    before = _spaced_doc(SPACED)
+    from shared.edit_simulation import simulate
+    after = simulate(before, *call)
+    assert after.count("pin-size-override:") == 2
+    assert gate_decision(before, *call).verdict == "ALLOW"
