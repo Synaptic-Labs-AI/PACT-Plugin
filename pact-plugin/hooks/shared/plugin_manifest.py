@@ -33,7 +33,7 @@ _PREFIX = "PACT plugin: "
 # bytes. Asymmetric strip sets across interpolation sinks become the
 # attacker's entry point (see security-engineer
 # patterns_symmetric_sanitization.md).
-_RENDER_STRIP_RE = re.compile(r"[\x00-\x1f\x7f  ]")
+_RENDER_STRIP_RE = re.compile(r"[\x00-\x1f\x7f\u0085\u2028\u2029]")
 
 
 def _sanitize(text: str) -> str:

@@ -3592,7 +3592,7 @@ class TestCanonicalSecretarySpawnAdversarial:
             "secretary\n",
             "secretary\t",
             "secretary\x00",
-            "secretary​",
+            "secretary\u200b",
             "secretari",
             "secretaries",
             "secretary-1",

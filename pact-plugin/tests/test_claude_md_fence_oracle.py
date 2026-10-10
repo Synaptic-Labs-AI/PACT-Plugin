@@ -194,7 +194,7 @@ _HTML_UNITS = (
 def _fence_row(rnd):
     indent = rnd.choice(["", "", "", " ", "  ", "   ", "    ", "\t"])
     run = rnd.choice("`~") * rnd.choice([3, 3, 3, 4, 5])
-    tail = rnd.choice(["", "", "", "bash", " md", "a`b", " ", "\t", " text", " ", "inline```"])
+    tail = rnd.choice(["", "", "", "bash", " md", "a`b", " ", "\t", " text", "\u2028", "inline```"])
     prefix = "" if rnd.random() < 0.85 else rnd.choice(
         ["- ", "-\t", "- \t", "* ", "1. ", "3) ", "> ", ">", "> \t", "> - ", ">> ", "-"])
     return prefix + indent + run + tail

@@ -325,7 +325,7 @@ def test_allows_name_at_64_char_boundary(tmp_path, monkeypatch, capsys):
         "(parens)",  # parens
         "with\nnewline",  # newline
         "наме",  # Cyrillic — fails regex even after NFKC
-        "​zero-width",  # zero-width-space prefix
+        "\u200bzero-width",  # zero-width-space prefix
     ],
     ids=[
         "uppercase",

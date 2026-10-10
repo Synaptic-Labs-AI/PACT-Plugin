@@ -177,7 +177,7 @@ def test_an_override_copied_from_a_fenced_example_is_not_refused_as_invalid():
     assert (decision.verdict, decision.cause) == ("DENY", "size"), decision
 
 
-@pytest.mark.parametrize("separator", [" ", "\x85"], ids=["line separator", "next line"])
+@pytest.mark.parametrize("separator", ["\u2028", "\x85"], ids=["line separator", "next line"])
 def test_a_rationale_holding_a_line_break_is_no_override_and_is_size_checked(separator):
     small = _new_pin(override=f"a{separator}b")
     assert gate_decision(SMALL, *small).verdict != "DENY"
