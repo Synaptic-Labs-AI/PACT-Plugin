@@ -21,7 +21,9 @@ divergence.
 
 from __future__ import annotations
 
+import json
 import re
+import unicodedata
 from collections import Counter
 from typing import Dict, List, Literal, NamedTuple, Optional, Tuple
 
@@ -177,7 +179,7 @@ class CapViolation(NamedTuple):
     detail: str
     offending_pin_chars: Optional[int]
     current_count: Optional[int]
-    offending_pin_heading: Optional[str] = None  # set by the size violations
+    offending_pin_label: Optional[str] = None  # `_pin_label`, set by the size violations
 
 
 def _charge(doc, first: int, last: int) -> int:
@@ -464,20 +466,19 @@ def evaluate_full_state(pins: List[Pin]) -> Optional[CapViolation]:
     # #492 F5 PoC). Max-violator scalar makes the size axis a well-defined
     # scalar: "the worst offending body_chars currently present."
     worst: Optional[Pin] = None
-    for pin in pins:
+    worst_at = 0
+    for index, pin in enumerate(pins):
         if pin.body_chars > PIN_SIZE_CAP and not has_size_override(pin):
             if worst is None or pin.body_chars > worst.body_chars:
-                worst = pin
+                worst, worst_at = pin, index
     if worst is not None:
+        label = _pin_label(worst_at + 1, worst.heading)
         return CapViolation(
             kind="size",
-            detail=(
-                f"pin '{worst.heading}' body is {worst.body_chars} chars "
-                f"(cap: {PIN_SIZE_CAP})"
-            ),
+            detail=f"{label} body is {worst.body_chars} chars (cap: {PIN_SIZE_CAP})",
             offending_pin_chars=worst.body_chars,
             current_count=count,
-            offending_pin_heading=worst.heading,
+            offending_pin_label=label,
         )
 
     return None
@@ -550,20 +551,19 @@ def _violation_for_kind(pins: List[Pin], kind: str) -> Optional[CapViolation]:
     if kind == "size":
         count = len(pins)
         worst: Optional[Pin] = None
-        for pin in pins:
+        worst_at = 0
+        for index, pin in enumerate(pins):
             if pin.body_chars > PIN_SIZE_CAP and not has_size_override(pin):
                 if worst is None or pin.body_chars > worst.body_chars:
-                    worst = pin
+                    worst, worst_at = pin, index
         if worst is not None:
+            label = _pin_label(worst_at + 1, worst.heading)
             return CapViolation(
                 kind="size",
-                detail=(
-                    f"pin '{worst.heading}' body is {worst.body_chars} chars "
-                    f"(cap: {PIN_SIZE_CAP})"
-                ),
+                detail=f"{label} body is {worst.body_chars} chars (cap: {PIN_SIZE_CAP})",
                 offending_pin_chars=worst.body_chars,
                 current_count=count,
-                offending_pin_heading=worst.heading,
+                offending_pin_label=label,
             )
         return None
 
@@ -855,9 +855,26 @@ def size_violation(pre_pins: List[Pin], post_pins: List[Pin]) -> Optional[str]:
     return None
 
 
-def _pin_name(heading: str) -> str:
-    """A pin's heading as the deny text quotes it, without the `### `."""
-    return f"'{heading.strip().removeprefix('### ')}'"
+# A deny text carries no pin text beyond each refused pin's label, and
+# lists at most _LISTED_PINS labels.
+_EXCERPT_CHARS = 40
+_LISTED_PINS = 5
+# Control, format (bidi overrides, zero-width), line and paragraph separator,
+# and surrogate characters never reach a label.
+_DROPPED_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Cs"})
+
+
+def _pin_label(position: int, heading: str) -> str:
+    """A pin as a deny text names it: `pin N ("excerpt")`, N its 1-based
+    position among the Pinned section's pins and the excerpt its heading
+    without the `### ` and the dropped characters, at most _EXCERPT_CHARS
+    characters with the ellipsis that marks a cut, JSON-quoted so nothing in
+    it ends the quote."""
+    text = "".join(c for c in heading if unicodedata.category(c) not in _DROPPED_CATEGORIES)
+    text = text.strip().removeprefix("### ")
+    if len(text) > _EXCERPT_CHARS:
+        text = text[:_EXCERPT_CHARS - 1] + "\u2026"
+    return f"pin {position} ({json.dumps(text, ensure_ascii=False)})"
 
 
 def _size_reason(pre_pins: List[Pin], post_pins: List[Pin], source: Dict[int, int],
@@ -869,9 +886,9 @@ def _size_reason(pre_pins: List[Pin], post_pins: List[Pin], source: Dict[int, in
     comparison that failed: their sum, else the largest of them."""
     def change(q: int, verb: bool) -> str:
         pin = post_pins[q]
-        name = _pin_name(pin.heading)
+        name = _pin_label(q + 1, pin.heading)
         if q not in source:
-            return f"new pin {name} ({pin.body_chars} chars)"
+            return f"new {name} ({pin.body_chars} chars)"
         sizes = f"({pre_pins[source[q]].body_chars} -> {pin.body_chars} chars)"
         if not verb:
             return f"{name} {sizes}"
@@ -885,8 +902,11 @@ def _size_reason(pre_pins: List[Pin], post_pins: List[Pin], source: Dict[int, in
         pins = change(after[0], verb=True)
     else:
         sizes = [post_pins[q].body_chars for q in after]
-        listed = ", ".join(change(q, verb=False) for q in after[:-1])
-        listed += f" and {change(after[-1], verb=False)}"
+        names = [change(q, verb=False) for q in after[:_LISTED_PINS]]
+        others = len(after) - len(names)
+        if others:
+            names.append(f"{others} other pin{'s' if others > 1 else ''}")
+        listed = ", ".join(names[:-1]) + f" and {names[-1]}"
         if sum(sizes) > sum(before):
             pins = f"{listed} grew together ({sum(before)} -> {sum(sizes)} chars)"
         else:
@@ -959,7 +979,7 @@ def _render_deny_reason(violation: CapViolation) -> str:
     if violation.kind == "size":
         # This comparison pairs no pins (largest after against largest
         # before), so the pin is named with its size, not as new or grown.
-        name = _pin_name(violation.offending_pin_heading or "")
+        name = violation.offending_pin_label or "a pin"
         chars = violation.offending_pin_chars or 0
         return DENY_REASON_SIZE.format(pins=f"{name} is {chars} chars", cap=PIN_SIZE_CAP)
     if violation.kind == "invalid_override":
