@@ -152,9 +152,21 @@ def test_a_quote_or_backslash_in_a_heading_cannot_end_its_label():
 
 
 def test_control_format_and_separator_characters_never_reach_a_label():
-    reason = _deny_with_heading("A\x07B C\x85D‮E​F G")
+    reason = _deny_with_heading("A\x07B\u2028C\x85D\u202eE\u200bF\u2029G")
     assert [json.loads(excerpt) for _, excerpt in _LABEL.findall(reason)] == ["ABCDEFG"]
     assert not [c for c in reason if unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp", "Cs")]
+
+
+def test_a_heading_of_only_dropped_characters_has_an_empty_excerpt():
+    """The heading marker never stands in for the text: a heading holding
+    nothing but dropped characters gives an empty excerpt, wherever they sit
+    around the marker, and other headings keep their excerpt as it is."""
+    from pin_caps import _pin_label
+
+    assert 'new pin 2 ("") (' in _deny_with_heading("\x07\u200b\u2028")
+    assert _pin_label(3, "\u200b\x07### \u2028") == 'pin 3 ("")'
+    assert _pin_label(3, "\u200b\x07### Notes") == 'pin 3 ("Notes")'
+    assert _pin_label(1, "###  X") == 'pin 1 (" X")'
 
 
 def test_a_denial_lists_at_most_five_pins_and_counts_the_rest():

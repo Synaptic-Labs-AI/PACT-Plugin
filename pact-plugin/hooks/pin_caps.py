@@ -871,7 +871,9 @@ def _pin_label(position: int, heading: str) -> str:
     characters with the ellipsis that marks a cut, JSON-quoted so nothing in
     it ends the quote."""
     text = "".join(c for c in heading if unicodedata.category(c) not in _DROPPED_CATEGORIES)
-    text = text.strip().removeprefix("### ")
+    text = text.strip()
+    # A heading of only dropped characters strips to the bare marker.
+    text = "" if text == "###" else text.removeprefix("### ")
     if len(text) > _EXCERPT_CHARS:
         text = text[:_EXCERPT_CHARS - 1] + "\u2026"
     return f"pin {position} ({json.dumps(text, ensure_ascii=False)})"
