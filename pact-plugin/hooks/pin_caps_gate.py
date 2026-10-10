@@ -209,10 +209,11 @@ def _read_baseline(claude_md_path: Path) -> tuple[Optional[str], Optional[str]]:
 
     The gate only reads, so it takes no lock: a writer holding it would delay
     the gate up to the lock timeout and then turn the read into a failure,
-    which refuses a Write.
+    which leaves the change unchecked.
 
     Returns (content, error_classification). On success: (text, None).
-    On I/O failure: (None, _FAIL_BASELINE_READ).
+    On I/O failure: (None, _FAIL_BASELINE_READ), and the caller allows the
+    Edit or Write with an advisory that the pin cap was not checked.
     """
     try:
         return claude_md_path.read_text(encoding="utf-8", errors="replace"), None
