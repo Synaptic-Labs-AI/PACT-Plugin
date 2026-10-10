@@ -346,7 +346,10 @@ class TestPinMemoryCommand_Grammar:
         actionable next step without leaving the command text."""
         assert "Pin count cap reached" in pin_memory_content
         assert "Do not change CLAUDE.md yourself, by any route; tell the team-lead." in pin_memory_content
-        assert "New pin body is" in pin_memory_content
+        from pin_caps import DENY_REASON_SIZE, PIN_SIZE_CAP
+        # The size denial's opening, as the hook renders it.
+        opening = DENY_REASON_SIZE.format(pins="'P' is 1600 chars", cap=PIN_SIZE_CAP).split(": ")[0]
+        assert f"- **{opening}**: " in pin_memory_content
         assert "is its own pin" in pin_memory_content
         assert "Override rationale malformed" in pin_memory_content
 

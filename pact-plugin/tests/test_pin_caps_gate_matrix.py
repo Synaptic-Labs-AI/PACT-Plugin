@@ -405,7 +405,7 @@ class TestPinCapsGate_Matrix_Edit:
             },
         })
         assert result is not None, f"{ord_hex}: a smuggled terminator unlocked the size cap"
-        assert "chars (cap: 1500)" in result, (ord_hex, result)
+        assert result.startswith("Pin size cap (1500 chars) exceeded: 'Pin0' grew"), (ord_hex, result)
 
     @pytest.mark.parametrize(
         "terminator,ord_hex",

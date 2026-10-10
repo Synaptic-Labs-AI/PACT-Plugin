@@ -79,6 +79,36 @@ def test_each_mutant_flips_its_row(name, switches, red, monkeypatch):
         assert _verdict(ROWS[key]) != ROWS[key].verdict, key
 
 
+DENY_TEXTS = [
+    ("new 1700 pin without override while an 1800 pin exists", "new pin 'Pin 9' (1697 chars)"),
+    ("grow the 1600 pin to 1700 while an 1800 pin exists", "'Pin 2' grew (1599 -> 1699 chars)"),
+    ("remove the override from a 1700 pin",
+     "'Pin 1' no longer has a valid pin-size-override (1697 -> 1697 chars)"),
+    # Lines moved from the larger pin into the smaller one with a bullet each:
+    # the pin that shrank and the pin that grew, and the sum that grew.
+    ("move the paragraph with each line bulleted",
+     "'Pin 1' (1659 -> 1977 chars) and 'Pin 2' (2054 -> 1746 chars) grew together (3713 -> 3723 chars)"),
+    ("split 3400 into halves, then grow one by 1000",
+     "'Pin 1' (3403 -> 1740 chars) and new pin 'Pin 100' (2662 chars) grew together (3403 -> 4402 chars)"),
+    ("copy the 1600 pin under the same heading",
+     "'Pin 2' (1602 -> 1602 chars) and new pin 'Pin 2' (1602 chars) grew together (1602 -> 3204 chars)"),
+    ("move a paragraph into the larger oversize pin, which grows past the largest before",
+     "'Pin 1' (2071 -> 2436 chars) and 'Pin 2' (1966 -> 1601 chars): the largest grew (2071 -> 2436 chars)"),
+]
+
+
+@pytest.mark.parametrize("name, pins", DENY_TEXTS, ids=[t[0] for t in DENY_TEXTS])
+def test_the_size_denial_names_each_pin_it_refuses_with_its_sizes(name, pins):
+    """The text names the violating pins, new or with their sizes before and
+    after, not the largest pin after the change."""
+    from pin_caps import DENY_REASON_SIZE, PIN_SIZE_CAP
+
+    row = ROWS[name]
+    decision = pin_growth.pin_cap_decision(row.before, row.after, use_timer=False)
+    assert (decision.verdict, decision.cause) == ("DENY", "size")
+    assert decision.reason == DENY_REASON_SIZE.format(pins=pins, cap=PIN_SIZE_CAP)
+
+
 def test_comparing_only_the_worst_pins_misses_the_three_growth_targets(monkeypatch):
     targets = ["new 1700 pin without override while an 1800 pin exists",
                "grow the 1600 pin to 1700 while an 1800 pin exists",

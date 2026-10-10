@@ -687,7 +687,7 @@ class TestComputeDenyReason_Smoke:
         post = [_make_pin(body_chars=PIN_SIZE_CAP + 50, override=False)]
         reason = compute_deny_reason(pre, post)
         assert reason is not None
-        assert "New pin body" in reason
+        assert f"Pin size cap ({PIN_SIZE_CAP} chars) exceeded: 'X' is {PIN_SIZE_CAP + 50} chars." in reason
 
     def test_multi_kind_pre_count_plus_size_reducing_count_allows(self):
         """Pre-state has BOTH count AND size violations; Edit reduces count
@@ -737,7 +737,7 @@ class TestComputeDenyReason_Smoke:
                                      override=False)]
         reason = compute_deny_reason(pre, post)
         assert reason is not None
-        assert "New pin body" in reason
+        assert f"exceeded: 'Huge' is {PIN_SIZE_CAP + 200} chars." in reason
 
     def test_multi_kind_pre_count_plus_size_same_kind_size_worsens_denies(self):
         """F4 Pareto positive: pre and post both have count violation
@@ -889,8 +889,8 @@ class TestDenyReasonTemplates_Constants:
 
     def test_size_template_renders(self):
         from pin_caps import DENY_REASON_SIZE, PIN_SIZE_CAP
-        rendered = DENY_REASON_SIZE.format(chars=PIN_SIZE_CAP + 100, cap=PIN_SIZE_CAP)
-        assert str(PIN_SIZE_CAP) in rendered
+        rendered = DENY_REASON_SIZE.format(pins="'P' is 1600 chars", cap=PIN_SIZE_CAP)
+        assert rendered.startswith(f"Pin size cap ({PIN_SIZE_CAP} chars) exceeded: 'P' is 1600 chars. ")
 
 
     def test_override_missing_template_renders(self):

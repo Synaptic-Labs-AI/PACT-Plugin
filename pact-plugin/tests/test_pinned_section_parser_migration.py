@@ -328,9 +328,11 @@ class TestTheGrowthDrivenDeny:
         big = self._pins_list(1, PIN_SIZE_CAP + 100)
         bigger = self._pins_list(1, PIN_SIZE_CAP + 200)
         assert compute_deny_reason(big, big, growth=0) is None
-        assert "New pin body" in (compute_deny_reason(big, bigger, growth=0) or "")
+        assert f"exceeded: 'P0' is {PIN_SIZE_CAP + 200} chars." in (
+            compute_deny_reason(big, bigger, growth=0) or "")
         assert compute_deny_reason(bigger + big, bigger, growth=0) is None
-        assert "New pin body" in (compute_deny_reason([], big, growth=0) or "")
+        assert f"exceeded: 'P0' is {PIN_SIZE_CAP + 100} chars." in (
+            compute_deny_reason([], big, growth=0) or "")
 
 
 # ---------------------------------------------------------------------------

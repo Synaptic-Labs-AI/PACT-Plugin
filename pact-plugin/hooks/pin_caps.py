@@ -177,6 +177,7 @@ class CapViolation(NamedTuple):
     detail: str
     offending_pin_chars: Optional[int]
     current_count: Optional[int]
+    offending_pin_heading: Optional[str] = None  # set by the size violations
 
 
 def _charge(doc, first: int, last: int) -> int:
@@ -411,8 +412,10 @@ DENY_REASON_COUNT = (
     "content is preserved rather than lost."
 )
 
+# `pins` names each pin over the cap with its size: `_size_reason` and
+# `_render_deny_reason` fill it.
 DENY_REASON_SIZE = (
-    "New pin body is {chars} chars (cap: {cap}). "
+    "Pin size cap ({cap} chars) exceeded: {pins}. "
     "Compress the body, or add a pin-size-override rationale "
     "if the content is verbatim load-bearing."
 )
@@ -474,6 +477,7 @@ def evaluate_full_state(pins: List[Pin]) -> Optional[CapViolation]:
             ),
             offending_pin_chars=worst.body_chars,
             current_count=count,
+            offending_pin_heading=worst.heading,
         )
 
     return None
@@ -559,6 +563,7 @@ def _violation_for_kind(pins: List[Pin], kind: str) -> Optional[CapViolation]:
                 ),
                 offending_pin_chars=worst.body_chars,
                 current_count=count,
+                offending_pin_heading=worst.heading,
             )
         return None
 
@@ -757,13 +762,19 @@ def size_violation(pre_pins: List[Pin], post_pins: List[Pin]) -> Optional[str]:
     def normal(heading):
         return " ".join(heading.split()).casefold()
 
-    edges, descended, partnered = [], set(), set()
+    # `source` maps a post pin to the pre pin the deny text gives its size
+    # before: its heading partner, else the first pre pin it holds the share
+    # of word pairs from that is not already a source. Each pre pin is the
+    # source of one post pin at most, so a copy or a split's other half reads
+    # as new.
+    edges, descended, partnered, source = [], set(), set(), {}
     for q, post in enumerate(post_pins):
         for p, pre in enumerate(pre_pins):
             if p not in partnered and normal(pre.heading) == normal(post.heading):
                 partnered.add(p)
                 edges.append((p, q))
                 descended.add(p)
+                source[q] = p
                 break
     pre_pairs = [_word_pairs(pin) for pin in pre_pins]
     post_pairs = [_word_pairs(pin) for pin in post_pins]
@@ -775,6 +786,8 @@ def size_violation(pre_pins: List[Pin], post_pins: List[Pin]) -> Optional[str]:
             shared = sum((mine & theirs).values())
             if shared >= _DESCENT_SHARE * size:
                 edges.append((p, q))
+                if q not in source and p not in source.values():
+                    source[q] = p
             if sum(theirs.values()) and shared >= _DESCENT_SHARE * sum(theirs.values()):
                 descended.add(p)
     for p, q in edges:
@@ -820,24 +833,65 @@ def size_violation(pre_pins: List[Pin], post_pins: List[Pin]) -> Optional[str]:
         if _violates(pin):
             components.setdefault(find(("p", p)), ([], []))[0].append(pin.body_chars)
     for q in bad:
-        components.setdefault(find(("q", q)), ([], []))[1].append(post_pins[q].body_chars)
+        components.setdefault(find(("q", q)), ([], []))[1].append(q)
     orphans = []
     for before, after in components.values():
         if not after:
             continue
+        sizes = [post_pins[q].body_chars for q in after]
         if not before:
             orphans.extend(after)
-        elif max(after) > max(before) or sum(after) > sum(before):
-            return DENY_REASON_SIZE.format(chars=max(after), cap=PIN_SIZE_CAP)
+        elif max(sizes) > max(before) or sum(sizes) > sum(before):
+            return _size_reason(pre_pins, post_pins, source, after, before)
     taken = {root for root, (_, after) in components.items() if after}
     free = sorted(pin.body_chars for p, pin in enumerate(pre_pins)
                   if _violates(pin) and p not in descended and find(("p", p)) not in taken)
-    for chars in sorted(orphans, reverse=True):
+    for q in sorted(orphans, key=lambda q: post_pins[q].body_chars, reverse=True):
+        chars = post_pins[q].body_chars
         fit = next((size for size in free if size >= chars), None)
         if fit is None:
-            return DENY_REASON_SIZE.format(chars=chars, cap=PIN_SIZE_CAP)
+            return _size_reason(pre_pins, post_pins, source, [q], [])
         free.remove(fit)
     return None
+
+
+def _pin_name(heading: str) -> str:
+    """A pin's heading as the deny text quotes it, without the `### `."""
+    return f"'{heading.strip().removeprefix('### ')}'"
+
+
+def _size_reason(pre_pins: List[Pin], post_pins: List[Pin], source: Dict[int, int],
+                 after: List[int], before: List[int]) -> str:
+    """The deny text for the violators `after` (indexes into `post_pins`) of
+    one component of the size rule, whose violators before the change had the
+    sizes `before`. A pin in `source` is named with its size before and after;
+    any other pin as new. With several violators, the text also gives the
+    comparison that failed: their sum, else the largest of them."""
+    def change(q: int, verb: bool) -> str:
+        pin = post_pins[q]
+        name = _pin_name(pin.heading)
+        if q not in source:
+            return f"new pin {name} ({pin.body_chars} chars)"
+        sizes = f"({pre_pins[source[q]].body_chars} -> {pin.body_chars} chars)"
+        if not verb:
+            return f"{name} {sizes}"
+        # A pin joined to its source violates without growing only when the
+        # source was over the cap with a valid override.
+        if pin.body_chars > pre_pins[source[q]].body_chars:
+            return f"{name} grew {sizes}"
+        return f"{name} no longer has a valid pin-size-override {sizes}"
+
+    if len(after) == 1:
+        pins = change(after[0], verb=True)
+    else:
+        sizes = [post_pins[q].body_chars for q in after]
+        listed = ", ".join(change(q, verb=False) for q in after[:-1])
+        listed += f" and {change(after[-1], verb=False)}"
+        if sum(sizes) > sum(before):
+            pins = f"{listed} grew together ({sum(before)} -> {sum(sizes)} chars)"
+        else:
+            pins = f"{listed}: the largest grew ({max(before)} -> {max(sizes)} chars)"
+    return DENY_REASON_SIZE.format(pins=pins, cap=PIN_SIZE_CAP)
 
 
 def _growth_deny_reason(
@@ -903,8 +957,11 @@ def _render_deny_reason(violation: CapViolation) -> str:
             cap=PIN_COUNT_CAP,
         )
     if violation.kind == "size":
+        # This comparison pairs no pins (largest after against largest
+        # before), so the pin is named with its size, not as new or grown.
+        name = _pin_name(violation.offending_pin_heading or "")
         chars = violation.offending_pin_chars or 0
-        return DENY_REASON_SIZE.format(chars=chars, cap=PIN_SIZE_CAP)
+        return DENY_REASON_SIZE.format(pins=f"{name} is {chars} chars", cap=PIN_SIZE_CAP)
     if violation.kind == "invalid_override":
         return DENY_REASON_OVERRIDE_MISSING.format(
             chars=violation.offending_pin_chars or 0,

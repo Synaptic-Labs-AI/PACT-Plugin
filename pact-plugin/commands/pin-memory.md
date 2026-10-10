@@ -66,7 +66,7 @@ If the pin_caps_gate hook denies the `Edit`/`Write`, the deny reason tells you w
 - **Pin count cap reached (N/12)**: Run `/PACT:prune-memory` to demote an existing pin to long-term memory, then retry the add. Demotion archives the pin to pact-memory before removing it, so the content is preserved rather than lost.
   - A teammate, or a subagent in a PACT team session, gets "Do not change CLAUDE.md yourself, by any route; tell the team-lead." instead. Do not write `CLAUDE.md` by any route, not only an `Edit` or a `Write`: do NOT run `/PACT:prune-memory`, and do NOT retry the edit. Send the pin's text to the team-lead: with `SendMessage`, or in your final report if you are a subagent.
   - As the team-lead, when you receive a pin that way, free a slot with the user via `/PACT:prune-memory`, then add the pin yourself.
-- **New pin body is N chars (cap: 1500)**: Compress the body, or add a `pin-size-override` rationale if the content is verbatim load-bearing.
+- **Pin size cap (1500 chars) exceeded**: Compress the body of each pin the reason names, or add a `pin-size-override` rationale if the content is verbatim load-bearing.
 - **A `### ` line in a pin body**: That line is its own pin and counts toward the count cap. For structure inside a body, use `#### `, bold, or a fenced code example. A fenced line is not a pin, but it counts toward the body size.
 - **Override rationale malformed**: The rationale is empty, exceeds 120 chars, or contains a line terminator (`\n`, `\r`, or a Unicode line separator). Fix the rationale and retry.
 
