@@ -185,7 +185,19 @@ _GROW_PIN_4 = ("python3 - <<'EOF'\nimport pathlib\np = pathlib.Path('CLAUDE.md')
 
 
 _PRUNE_STEP = "If the growth was not intended, run /PACT:prune-memory to demote pins."
+_UNCOUNTED_STEP = "To bring it under the cap, run /PACT:prune-memory to demote pins."
 _MEMBER_STEP = "Do not change CLAUDE.md yourself, by any route; tell the team-lead."
+
+
+def _legacy(count):
+    """A file from before PACT's markers: memory sections, no PACT_MANAGED block."""
+    return ("# Project Memory\n\n## Retrieved Context\n\n## Pinned Context\n\n"
+            + _pins(count) + "## Working Memory\n\n### 2026-01-02\nentry\n")
+
+
+# session_init's migration, run on the world's CLAUDE.md.
+_MIGRATE = (f"PYTHONPATH={HOOKS} python3 -c 'from shared.claude_md_manager import "
+            "migrate_to_managed_structure as m; print(m())'")
 
 
 def _count_report(w, step):
@@ -435,6 +447,7 @@ class TestDriftCheck:
         _edit(world, _doc(_pins(13)))
         advisory = _prompt(world)
         assert advisory is not None and "now holds 13 pins" in advisory and "held 12" in advisory
+        assert advisory.endswith(_PRUNE_STEP)
         assert _prompt(world) is None
 
     def test_a_gated_edit_that_lowers_an_over_cap_count_moves_the_baseline(self, world):
@@ -456,6 +469,7 @@ class TestDriftCheck:
         advisory = _prompt(world)
         assert advisory is not None and "now holds 13 pins" in advisory
         assert "PACT could not count them at the last check" in advisory and "held 0" not in advisory
+        assert advisory.endswith(_UNCOUNTED_STEP) and "growth" not in advisory
         assert "outside the pin-cap gate" not in advisory
         assert _prompt(world) is None
 
@@ -463,17 +477,14 @@ class TestDriftCheck:
         """A legacy file with 13 pins and no PACT markers: the first check
         cannot count them and says so; after PACT's own migration adds the
         markers, the count is reported as one PACT could not take before."""
-        legacy = ("# Project Memory\n\n## Retrieved Context\n\n## Pinned Context\n\n"
-                  + _pins(13) + "## Working Memory\n\n### 2026-01-02\nentry\n")
-        world.claude_md.write_text(legacy, encoding="utf-8")
+        world.claude_md.write_text(_legacy(13), encoding="utf-8")
         assert "cannot be counted" in (_prompt(world) or "")
-        migrate = ("python3 -c 'from shared.claude_md_manager import migrate_to_managed_structure as m; "
-                   "print(m())'")
-        assert _sh(world, f"PYTHONPATH={HOOKS} {migrate}") == 0
+        assert _sh(world, _MIGRATE) == 0
         assert MEMORY_START_MARKER in world.claude_md.read_text(encoding="utf-8")
         advisory = _prompt(world)
         assert advisory is not None and "now holds 13 pins" in advisory
         assert "PACT could not count them at the last check" in advisory and "held 0" not in advisory
+        assert advisory.endswith(_UNCOUNTED_STEP) and "growth" not in advisory
 
     def test_an_edit_on_the_not_found_path_leaves_the_baseline(self, world):
         self._baselined(world)
@@ -501,6 +512,34 @@ class TestDriftCheck:
         world.claude_md.write_text(_doc(_pins(14), markers=False), encoding="utf-8")
         assert _prompt(world) is None
         assert _prompt(world) is None
+
+    def test_a_session_start_before_a_refused_migration_leaves_the_advisory_to_the_first_prompt(
+            self, world):
+        """With no PACT_MANAGED block, a session start reports and records
+        nothing, since the migration beside it may add the markers; when the
+        migration leaves the file as it was, the first prompt says the markers
+        are missing."""
+        # A byte that is not UTF-8: the migration skips the file.
+        legacy = _legacy(13).encode("utf-8").replace(b"secret body 3", b"secret body \xff3")
+        world.claude_md.write_bytes(legacy)
+        assert _prompt(world, hook_event_name="SessionStart", source="startup") is None
+        assert not (world.project_dir / "claude-md-baseline.json").exists()
+        assert _sh(world, _MIGRATE) == 0
+        assert world.claude_md.read_bytes() == legacy
+        assert "cannot be counted" in (_prompt(world) or "")
+
+    def test_a_migration_after_the_session_start_gives_a_silent_first_baseline(self, world):
+        world.claude_md.write_text(_legacy(13), encoding="utf-8")
+        assert _prompt(world, hook_event_name="SessionStart", source="startup") is None
+        assert _sh(world, _MIGRATE) == 0
+        assert MANAGED_START_MARKER in world.claude_md.read_text(encoding="utf-8")
+        assert _prompt(world) is None
+        assert json.loads((world.project_dir / "claude-md-baseline.json").read_text())["count"] == 13
+
+    def test_a_session_start_warns_when_a_managed_file_lacks_the_memory_markers(self, world):
+        world.claude_md.write_text(_doc(_pins(13), markers=False), encoding="utf-8")
+        advisory = _prompt(world, hook_event_name="SessionStart", source="startup")
+        assert advisory is not None and "cannot be counted" in advisory
 
     def test_markers_removed_warn_once_then_stay_silent(self, world):
         self._baselined(world)

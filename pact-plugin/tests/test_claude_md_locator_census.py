@@ -620,6 +620,7 @@ WHOLE_TEXT_PARSES = frozenset({
     ("hooks/pin_staleness_gate.py", "_counts_show_an_add", "old_text"),
     ("hooks/session_init.py", "check_claude_md_refusals", "content"),
     ("hooks/session_init.py", "check_pin_slot_status", "content"),
+    ("hooks/shared/claude_md_drift.py", "_migration_pending", "text"),
     ("hooks/shared/claude_md_drift.py", "_pin_state", "text"),
     ("hooks/shared/claude_md_manager.py", "_plan_kernel_strip", "content"),
     ("hooks/shared/claude_md_manager.py", "_plan_kernel_strip", "new_content"),

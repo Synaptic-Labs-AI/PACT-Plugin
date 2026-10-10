@@ -91,7 +91,10 @@ def drift_advisory(frame: dict) -> str | None:
     """At a prompt or a session start (never a compaction's), in lead frames
     only: one advisory per growth past the pin cap since the baseline, and one
     when PACT's memory markers are missing so the pins cannot be counted.
-    Updates the baseline whenever the file changed. Never raises."""
+    Updates the baseline whenever the file changed, except at a session start
+    while the file has no PACT_MANAGED block: session_init's migration may be
+    adding the markers then, so nothing is reported or recorded and the next
+    prompt checks the file. Never raises."""
     try:
         return _drift_advisory(frame)
     except Exception:  # noqa: BLE001
@@ -199,6 +202,12 @@ def _drift_advisory(frame: dict) -> str | None:
         baseline = None
     if baseline is not None and baseline["hash"] == digest:
         return None  # unchanged: one read and one hash, nothing parsed
+    if frame.get("hook_event_name") == "SessionStart" and _migration_pending(text):
+        # session_init's migration runs beside this hook and may be adding the
+        # markers: a baseline taken now could record the file before it and
+        # report markers missing that the migration adds. The first prompt
+        # takes the baseline instead.
+        return None
     state, count = _pin_state(text)
     if baseline is None:
         _write_baseline(session_dir, base, path, digest, count, state)
@@ -209,12 +218,15 @@ def _drift_advisory(frame: dict) -> str | None:
         from pin_caps import PIN_COUNT_CAP
 
         if count > PIN_COUNT_CAP and (stored is None or count > stored):
-            then = ("PACT could not count them at the last check" if stored is None
-                    else f"it held {stored} at the last check")
+            if stored is None:  # no growth was measured
+                then = "PACT could not count them at the last check"
+                step = "To bring it under the cap, run /PACT:prune-memory to demote pins."
+            else:
+                then = f"it held {stored} at the last check"
+                step = "If the growth was not intended, run /PACT:prune-memory to demote pins."
             advisory = (
                 f"The project CLAUDE.md ({path}) now holds {_pin_count(count)}, over the cap "
-                f"of {PIN_COUNT_CAP}; {then}. Nothing was refused or changed. If the growth "
-                "was not intended, run /PACT:prune-memory to demote pins."
+                f"of {PIN_COUNT_CAP}; {then}. Nothing was refused or changed. {step}"
             )
         stored = count
     elif state == _NO_MARKERS and baseline.get("state") != _NO_MARKERS:
@@ -260,6 +272,14 @@ def _no_markers_advisory(path: Path) -> str:
         "markers are missing from it, so the pin cap does not apply to that file "
         "until they return. Nothing was refused or changed."
     )
+
+
+def _migration_pending(text: str) -> bool:
+    """Whether session_init's migration acts on this text: it does exactly
+    when the PACT_MANAGED pair is absent."""
+    from .claude_md_manager import MANAGED_END_MARKER, MANAGED_START_MARKER
+
+    return parse(text).find_block(MANAGED_START_MARKER, MANAGED_END_MARKER).state is State.ABSENT
 
 
 def _pin_state(text: str) -> tuple[str, int | None]:
