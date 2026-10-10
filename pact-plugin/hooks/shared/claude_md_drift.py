@@ -275,8 +275,9 @@ def _no_markers_advisory(path: Path) -> str:
 
 
 def _migration_pending(text: str) -> bool:
-    """Whether session_init's migration acts on this text: it does exactly
-    when the PACT_MANAGED pair is absent."""
+    """Whether session_init's migration attempts this text: it does exactly
+    when the PACT_MANAGED pair is absent. The attempt can still refuse and
+    leave the file unchanged."""
     from .claude_md_manager import MANAGED_END_MARKER, MANAGED_START_MARKER
 
     return parse(text).find_block(MANAGED_START_MARKER, MANAGED_END_MARKER).state is State.ABSENT
