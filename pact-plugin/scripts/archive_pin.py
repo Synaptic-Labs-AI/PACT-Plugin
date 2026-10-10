@@ -1046,9 +1046,17 @@ def archive_pin(index: int, db_path=None) -> dict:
 
     doc = parse(content)
     located = locate_pinned(doc)
-    body = _pinned_body(doc, located) if located.state is State.FOUND else None
-    if body is None:
+    if located.state is State.ABSENT:
         raise _Unevaluable("no Pinned Context section",
+                           claude_md_path=claude_md_path)
+    if located.state is not State.FOUND:
+        raise _Unevaluable(
+            f"pinned section unreadable: {located.reason or located.state.value}",
+            claude_md_path=claude_md_path,
+        )
+    body = _pinned_body(doc, located)
+    if body is None:
+        raise _Unevaluable("Pinned Context section has no pins",
                            claude_md_path=claude_md_path)
 
     first, last = body

@@ -2073,7 +2073,22 @@ class TestArchivePin_Unevaluable:
     def test_no_pinned_section(self, claude_md):
         claude_md("# Project\n\n## Working Memory\n\n")
         verdict = archive_pin.build_verdict(0, db_path=None)
-        assert verdict["outcome"] == "UNEVALUABLE"
+        assert (verdict["outcome"], verdict["reason"]) == ("UNEVALUABLE", "no Pinned Context section")
+
+    _MEMORY = "<!-- PACT_MEMORY_START -->\n{}<!-- PACT_MEMORY_END -->\n"
+
+    @pytest.mark.parametrize("text, reason", [
+        ("<!-- open\n" + _MEMORY.format("## Pinned Context\n\n### A\nx\n"),
+         "pinned section unreadable: line 1 starts an uncertain region: "
+         "an HTML block is ended only by a line that starts a comment"),
+        (_MEMORY.format("## Pinned Context\n\n### A\nx\n") + "\n" + _MEMORY.format("## Working Memory\n"),
+         "pinned section unreadable: 2 blocks, starting on lines 1, 8"),
+        (_MEMORY.format("## Pinned Context\n\n\n## Working Memory\n"), "Pinned Context section has no pins"),
+    ], ids=["unknown", "duplicate", "empty"])
+    def test_a_section_found_but_not_archivable_is_named_as_found(self, claude_md, text, reason):
+        claude_md(text)
+        verdict = archive_pin.build_verdict(0, db_path=None)
+        assert (verdict["outcome"], verdict["reason"]) == ("UNEVALUABLE", reason)
 
     def test_index_beyond_pin_count(self, claude_md):
         claude_md(_two_pin_file())

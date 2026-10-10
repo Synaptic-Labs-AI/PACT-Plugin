@@ -110,8 +110,8 @@ _OPEN_COMMENT_FILE = (
 def test_every_reader_declines_where_the_whole_file_cannot_read_the_section(
         tmp_path, monkeypatch):
     """The staleness markings write nothing and raise no block signal,
-    check_pin_caps reports the section unreadable, and the archive's index read
-    finds no section."""
+    check_pin_caps and the archive's index read report the section
+    unreadable."""
     text = _OPEN_COMMENT_FILE
     assert _found(text) is None
     claude_md = tmp_path / "CLAUDE.md"
@@ -130,7 +130,9 @@ def test_every_reader_declines_where_the_whole_file_cannot_read_the_section(
 
     monkeypatch.setattr(archive_pin, "_run_memory_cli", _stop)
     verdict = archive_pin.build_verdict(1, db_path=None)
-    assert (verdict["outcome"], verdict["reason"]) == ("UNEVALUABLE", "no Pinned Context section")
+    assert (verdict["outcome"], verdict["reason"]) == ("UNEVALUABLE", (
+        "pinned section unreadable: line 2 starts an uncertain region: "
+        "an HTML block is never closed"))
 
 
 def test_the_block_signal_counts_the_pins_section_pins_reads(tmp_path, monkeypatch):
