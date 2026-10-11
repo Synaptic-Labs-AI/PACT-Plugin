@@ -942,11 +942,15 @@ def test_a_symbol_only_rationale_stands_only_for_the_same_read(name, old, new, v
         assert decision.reason == f"Pin cap violation (invalid override): {reason}"
 
 
-# The pin keeping more of the old text continues it, so its own edited row
-# keeps the old row ahead of an exact copy on a pin keeping less, and the
-# copy is checked on its own. Where the copy's pin keeps as much, the exact
-# copy takes the old row, as it would with no continuation named.
+# The pin the mapping names as the old pin's continuation keeps its own
+# edited row's old row ahead of an exact copy on a pin keeping no more of the
+# old text, with a body unlike its own, and the copy is checked on its own.
+# A copy on a pin keeping more, or with the same body, takes the old row, as
+# it would with no continuation named; so do copies where the mapping names
+# none (equal shares under one heading).
 WEAKER2 = " ".join(_tokens("o", 14, 16) + _tokens("c", 0, 18))
+HALF, OTHER_HALF = " ".join(_tokens("o", 0, 11)), " ".join(_tokens("o", 9, 20))  # 10 of 19 old pairs each
+STRONGER = " ".join(_tokens("o", 4, 18) + _tokens("s", 0, 6))  # 13 of 19
 AHEAD = [
     ("the original rewritten, its own row padded, an exact copy above",
      [(_plain(SPACED), "Orig", WEAKER), (_plain(PADDED), "Orig", REWRITTEN)], "ALLOW"),
@@ -962,7 +966,24 @@ AHEAD = [
      [(_plain(SPACED), "Orig", TOKENS), (_plain(PADDED), "Orig", TOKENS)], "DENY"),
     ("one copy on a weaker pin, another under another heading keeping as much, the original's own row padded",
      [(_plain(SPACED), "Orig", WEAKER), (_plain(SPACED), "Echo", " ".join(_tokens("o", 12, 18) + _tokens("e", 0, 14))),
-      (_plain(PADDED), "Orig", REWRITTEN)], "DENY"),
+      (_plain(PADDED), "Orig", REWRITTEN)], "ALLOW"),
+    ("copies on a weaker pin and an equal one under another heading above, the original's half padded",
+     [(_plain(SPACED), "Weak", WEAKER), (_plain(SPACED), "Equal", OTHER_HALF), (_plain(PADDED), "Orig", HALF)], "ALLOW"),
+    ("the same, the copies below",
+     [(_plain(PADDED), "Orig", HALF), (_plain(SPACED), "Weak", WEAKER), (_plain(SPACED), "Equal", OTHER_HALF)], "ALLOW"),
+    ("the other half under another heading with an exact copy below, the original's half padded",
+     [(_plain(PADDED), "Orig", HALF), (_plain(SPACED), "Orig part two", OTHER_HALF)], "ALLOW"),
+    ("the other half under another heading with an exact copy above, the original's half padded",
+     [(_plain(SPACED), "Orig part two", OTHER_HALF), (_plain(PADDED), "Orig", HALF)], "ALLOW"),
+    ("both halves under the original's heading, the exact copy above",
+     [(_plain(SPACED), "Orig", OTHER_HALF), (_plain(PADDED), "Orig", HALF)], "DENY"),
+    ("both halves under the original's heading, the exact copy below",
+     [(_plain(PADDED), "Orig", HALF), (_plain(SPACED), "Orig", OTHER_HALF)], "DENY"),
+    ("the original rewritten entirely and padded, a copy under another heading keeping none either",
+     [(_plain(SPACED), "Other", " ".join(_tokens("b", 0, 20))), (_plain(PADDED), "Orig", " ".join(_tokens("a", 0, 20)))],
+     "ALLOW"),
+    ("copies on a weaker pin and one under another heading keeping more, the original's half padded",
+     [(_plain(SPACED), "Weak", WEAKER), (_plain(SPACED), "Strong", STRONGER), (_plain(PADDED), "Orig", HALF)], "DENY"),
 ]
 
 
@@ -1018,4 +1039,17 @@ def test_a_new_pin_above_taking_the_original_heading_cannot_take_its_untouched_r
     """A new pin inserted above takes the original's positional heading, and
     both keep all of its text; the original's untouched row is its old row."""
     decision = gate_decision(_positional(_plain(old_text)), *_write(_positional(_plain(new_text), _plain(old_text))))
+    assert decision.verdict == verdict, decision
+
+
+@pytest.mark.parametrize("old_text, new_text, verdict", [(PADDED, SPACED, "ALLOW"), (SPACED, PADDED, "DENY")],
+                         ids=["an old padded override kept, a valid copy above", "a padded copy above"])
+def test_a_new_pin_above_keeping_less_cannot_take_the_untouched_original_row(old_text, new_text, verdict):
+    """The new pin above takes 'Pin 1' with all but the last word of the
+    body; the untouched original, now 'Pin 2', keeps more of its text, so
+    its row is its old row although the heading names the new pin."""
+    near = " ".join(_tokens("o", 0, 19))
+    before = _doc(f"{_plain(old_text)}\n### Pin 1\n{TOKENS}\n\n" + "\n".join(_rest(2)))
+    after = _doc(f"{_plain(new_text)}\n### Pin 1\n{near}\n\n{_plain(old_text)}\n### Pin 2\n{TOKENS}\n\n" + "\n".join(_rest(3)))
+    decision = gate_decision(before, *_write(after))
     assert decision.verdict == verdict, decision

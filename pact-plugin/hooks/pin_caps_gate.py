@@ -439,6 +439,12 @@ def _word_pairs(text: str) -> Counter:
     return Counter(f"{left} {right}" for left, right in zip(words, words[1:]))
 
 
+def _share(mine: Counter, theirs: Counter, whole: int) -> float:
+    """The fraction of a before pin's word pairs `theirs` (`whole` in all)
+    that an after pin's word pairs `mine` keep."""
+    return sum((mine & theirs).values()) / whole if whole else 0
+
+
 def _sources(before: list, after: list, wanted, offered) -> dict:
     """{after pin index: before pin index} for the after pins `wanted` and
     the before pins `offered` (those carrying override rows), given each
@@ -471,7 +477,7 @@ def _sources(before: list, after: list, wanted, offered) -> dict:
 
     def share(q, p):
         budget.spend(len(mine[q]))
-        return sum((mine[q] & pairs[p]).values()) / wholes[p] if wholes[p] else 0
+        return _share(mine[q], pairs[p], wholes[p])
 
     bids = defaultdict(list)  # before pin -> [(score, after pin)]
     for q in wanted:
@@ -512,11 +518,14 @@ def _sources(before: list, after: list, wanted, offered) -> dict:
 def _ahead(new: list, old: list, own: dict, texts: list, old_texts: list) -> set:
     """The new rows (indices into `new`) that stand for their own pin's old
     row (`own`) without being identical to it, while another pin carries a
-    row identical to that old row, and whose pin keeps more of the old pin's
-    word pairs (given each pin's (heading, body) in `texts` and `old_texts`)
-    than every such pin. Each word pair compared spends a step of the
-    pin-growth rule's budget (`STEP_BUDGET`), and past it raises
-    `SizeBound`."""
+    row identical to that old row, and whose pin keeps at least as much of
+    the old pin's word pairs (`_share`, given each pin's (heading, body) in
+    `texts` and `old_texts`) as every such pin, each with a body unlike its
+    own (other word pairs). `own` names the pin the mapping continues, so
+    where shares are equal the mapping's heading decides, and identical
+    bodies are a tie whatever their headings. Each word pair compared spends
+    a step of the pin-growth rule's budget (`STEP_BUDGET`), and past it
+    raises `SizeBound`."""
     from shared import pin_growth
 
     pins_by_row = defaultdict(set)
@@ -539,13 +548,13 @@ def _ahead(new: list, old: list, own: dict, texts: list, old_texts: list) -> set
                 pairs[key] = _word_pairs(text)
         mine, theirs = pairs["after", q], pairs["before", p]
         budget.spend(len(mine) + len(theirs))
-        whole = sum(theirs.values())
-        return sum((mine & theirs).values()) / whole if whole else 0
+        return _share(mine, theirs, sum(theirs.values()))
 
     ahead = set()
     for i, p, rivals in contests:
         share = kept(new[i].pin, p)
-        if all(kept(q, p) < share for q in rivals):
+        if all((held := kept(q, p)) < share or (held == share and pairs["after", q] != pairs["after", new[i].pin])
+               for q in rivals):
             ahead.add(i)
     return ahead
 
