@@ -300,10 +300,12 @@ def _match(new: list, old: list, own: Optional[dict] = None) -> dict:
     {new index: old index}.
 
     A new row identical to an old one (the same read, whitespace and all, and
-    the same written text) is that row and takes it first; no other row may
-    claim it, so a copy of an old override, however close, is checked unless
-    an old row is left for it. Next each new row takes the old row of its own
-    pin (`own`: new index -> old index) when `_stands_for` allows it, and no
+    the same written text) is that row and takes it first, its own pin's old
+    row (`own`: new index -> old index) before any other identical one; no
+    other row may claim it, so a copy of an old override, however close, is
+    checked unless an old row is left for it, and an untouched pin cannot take
+    the old row of an edited pin whose override reads the same. Next each new
+    row takes the old row of its own pin when `_stands_for` allows it, and no
     other row may claim that either, so a copy on another pin cannot take an
     edited original's row. Then invalid new rows are matched first, and
     Kuhn's algorithm never unmatches a row, so as many invalid rows as any
@@ -345,14 +347,25 @@ def _match(new: list, old: list, own: Optional[dict] = None) -> dict:
                     yield j
 
     held, frozen = set(), set()
+    for i, j in (own or {}).items():
+        if (new[i].rationale, new[i].written) == (old[j].rationale, old[j].written):
+            owner[j] = i
+            held.add(i)
+            frozen.add(j)
     for i, row in enumerate(new):
+        if i in held:
+            continue
         rows = edges.identical.get((row.rationale, row.written), ())
         k = cursors.get(("identical", row.rationale, row.written), 0)
+        while k < len(rows) and rows[k] in owner:
+            budget.spend(1)
+            k += 1
         if k < len(rows):
             owner[rows[k]] = i
             held.add(i)
             frozen.add(rows[k])
-            cursors["identical", row.rationale, row.written] = k + 1
+            k += 1
+        cursors["identical", row.rationale, row.written] = k
     for i, j in (own or {}).items():
         if i not in held and j not in owner and _stands_for(new[i], old[j]):
             owner[j] = i
@@ -425,13 +438,20 @@ def _word_pairs(text: str) -> Counter:
 def _sources(before: list, after: list, wanted, offered) -> dict:
     """{after pin index: before pin index} for the after pins `wanted` and
     the before pins `offered` (those carrying override rows), given each
-    pin's (heading, body) from `_pin_texts`: the pin each continues. First by
-    content, a before pin holding at least half of the after pin's word pairs,
-    its heading partner tried first; then, for an after pin still without one,
-    its heading partner. A heading can be reused or renumbered by the change,
-    so content comes first. Each before pin is the source of one after pin at
-    most. Each comparison spends a step of the pin-growth rule's budget
-    (`STEP_BUDGET`), and past it raises `SizeBound`."""
+    pin's (heading, body) from `_pin_texts`: the pin each continues.
+
+    Every pair is scored: best, the heading partner that also holds at least
+    half of the after pin's word pairs; then a pin holding that share alone,
+    the larger share first; then the heading partner alone. A heading can be
+    reused or renumbered by the change, so content outranks it. Each before
+    pin goes to the after pin with its best score, and each after pin keeps
+    the best before pin it won; where two tie, neither is given, so a copy
+    as good as the original falls back to the cross-pin matching. A pin
+    holding the share alone is compared only with before pins no heading
+    partner holds the share of, since it cannot outrank one. Each word pair
+    compared, and each pin a word pair's index entry adds, spends a step of
+    the pin-growth rule's budget (`STEP_BUDGET`), and past it raises
+    `SizeBound`."""
     from pin_caps import _DESCENT_SHARE
     from shared import pin_growth
 
@@ -439,34 +459,47 @@ def _sources(before: list, after: list, wanted, offered) -> dict:
     by_heading = defaultdict(list)
     for p in offered:
         by_heading[before[p][0]].append(p)
-    pairs = {}
-    source, taken = {}, set()
+    pairs = {p: _word_pairs(before[p][1]) for p in offered}
+    mine = {q: _word_pairs(after[q][1]) for q in wanted}
 
-    def partner(q):
-        return next((p for p in by_heading.get(after[q][0], ()) if p not in taken), None)
+    def share(q, p):
+        budget.spend(len(mine[q]))
+        size = sum(mine[q].values())
+        return sum((mine[q] & pairs[p]).values()) / size if size else 0
 
+    bids = defaultdict(list)  # before pin -> [(score, after pin)]
     for q in wanted:
-        mine = _word_pairs(after[q][1])
-        size = sum(mine.values())
-        if not size:
-            continue
-        first = partner(q)
-        for p in ([first] if first is not None else []) + list(offered):
-            if p in taken:
-                continue
+        for p in by_heading.get(after[q][0], ()):
             budget.spend(1)
-            if p not in pairs:
-                pairs[p] = _word_pairs(before[p][1])
-            if sum((mine & pairs[p]).values()) >= _DESCENT_SHARE * size:
-                source[q] = p
-                taken.add(p)
-                break
+            held = share(q, p)
+            bids[p].append(((0, -held), q) if held >= _DESCENT_SHARE else ((2, 0), q))
+    holders = defaultdict(set)  # word pair -> before pins no partner holds the share of
+    for p in offered:
+        if all(score[0] for score, _q in bids.get(p, ())):
+            for pair in pairs[p]:
+                holders[pair].add(p)
     for q in wanted:
-        if q not in source:
-            p = partner(q)
-            if p is not None:
-                source[q] = p
-                taken.add(p)
+        near = set()
+        for pair in mine[q]:
+            found = holders.get(pair, ())
+            budget.spend(1 + len(found))
+            near.update(found)
+        for p in near.difference(by_heading.get(after[q][0], ())):
+            held = share(q, p)
+            if held >= _DESCENT_SHARE:
+                bids[p].append(((1, -held), q))
+    won = defaultdict(list)  # after pin -> [(score, before pin)]
+    for p, offers in bids.items():
+        best = min(score for score, _q in offers)
+        winners = [q for score, q in offers if score == best]
+        if len(winners) == 1:
+            won[winners[0]].append((best, p))
+    source = {}
+    for q, claims in won.items():
+        best = min(score for score, _p in claims)
+        kept = [p for score, p in claims if score == best]
+        if len(kept) == 1:
+            source[q] = kept[0]
     return source
 
 

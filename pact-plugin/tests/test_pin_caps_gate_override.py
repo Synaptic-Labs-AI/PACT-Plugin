@@ -677,10 +677,11 @@ def test_a_whitespace_edit_on_the_original_pin_beside_a_valid_copy_is_allowed():
 
 
 # Each pin's override stands for its own pin's old row first: the pin it
-# continues is found by content (half of its word pairs), its heading
-# partner tried first, then by heading. A copy on another pin, however its
-# heading reads, takes the original's row only if the original's own row
-# cannot.
+# continues is the old pin it matches best, by heading and content together,
+# then content (half of its word pairs, the larger share first), then
+# heading, wherever either pin sits. A copy on another pin, however its
+# heading or body reads, takes the original's row only if the original's own
+# row cannot.
 ORIG_BODY = "the dispatch template cites this verbatim form in every routing decision"
 NEW_BODY = "an unrelated note about something else entirely with other words"
 
@@ -711,6 +712,22 @@ COPIES = [
     ("positional headings: the new pin is 'Pin 1', the original becomes 'Pin 2'",
      [(_plain(SPACED), "Pin 1", ORIG_BODY)],
      [(_plain(PADDED), "Pin 1", NEW_BODY), (_plain(SPACED, True), "Pin 2", ORIG_BODY)]),
+    ("a new pin above repeating the original's body, the original reconfirmed",
+     [(_plain(SPACED), "Orig", ORIG_BODY)],
+     [(_plain(PADDED), "Echo", ORIG_BODY), (_plain(SPACED, True), "Orig", ORIG_BODY)]),
+    ("a new pin above holding the first two thirds of the original's body",
+     [(_plain(SPACED), "Orig", ORIG_BODY)],
+     [(_plain(PADDED), "Echo", " ".join(ORIG_BODY.split()[:8])), (_plain(SPACED, True), "Orig", ORIG_BODY)]),
+    ("a new pin below repeating the original's body, the original reconfirmed",
+     [(_plain(SPACED), "Orig", ORIG_BODY)],
+     [(_plain(SPACED, True), "Orig", ORIG_BODY), (_plain(PADDED), "Echo", ORIG_BODY)]),
+    ("a new pin above repeating an over-cap original's body",
+     [(_plain(SPACED), "Orig", BIG)],
+     [(_plain(PADDED), "Echo", BIG), (_plain(SPACED, True), "Orig", BIG)]),
+    ("a new pin above holding part of the original's body, the original extended",
+     [(_plain(SPACED), "Orig", ORIG_BODY)],
+     [(_plain(PADDED), "Echo", " ".join(ORIG_BODY.split()[:8])),
+      (_plain(SPACED, True), "Orig", ORIG_BODY + " and six more words added here")]),
 ]
 
 
@@ -757,6 +774,74 @@ FAITHFUL_PINS = [
 def test_an_old_invalid_override_is_untouched_wherever_its_pin_goes(name, after):
     decision = gate_decision(_named(*START), *_write(_named(*after)))
     assert decision.verdict == "ALLOW", (name, decision)
+
+
+def test_an_override_shared_by_two_pins_moved_from_one_to_a_new_pin_stands_for_its_old_row():
+    """The untouched pin keeps its own old row; the moved copy takes the one
+    left, not the untouched pin's."""
+    before = _named((_plain(INVALID), "Alpha pin", ORIG_BODY), (_plain(INVALID), "Beta pin", SECOND_BODY))
+    after = _named((_plain(INVALID), "Gamma pin", NEW_BODY), (_plain(INVALID), "Alpha pin", ORIG_BODY),
+                   ("<!-- pinned: 2026-05-26 -->", "Beta pin", SECOND_BODY))
+    assert gate_decision(before, *_write(after)).verdict == "ALLOW"
+
+
+@pytest.mark.parametrize("copy_above", [True, False], ids=["copy above", "copy below"])
+def test_a_copy_alike_in_heading_and_body_continues_the_original_no_better_than_it(copy_above):
+    """Two pins alike in heading and body continue the original equally, so
+    neither is given its pin: the padded row may stand for the old one, as
+    on a whitespace edit of the original, and the reconfirmed row is valid on
+    its own."""
+    pins = [(_plain(PADDED), "Orig", ORIG_BODY), (_plain(SPACED, True), "Orig", ORIG_BODY)]
+    after = _named(*(pins if copy_above else pins[::-1]))
+    decision = gate_decision(_named((_plain(SPACED), "Orig", ORIG_BODY)), *_write(after))
+    assert decision.verdict == "ALLOW", decision
+
+
+@pytest.mark.parametrize("move", ["rewritten in template order", "removed"])
+def test_one_pin_continuing_two_alike_old_pins_continues_neither(move):
+    """Of two over-cap pins alike in heading and body, the first is removed
+    and the second's reconfirmation moved. The pin left continues both
+    equally, so neither is its own: its row matches the second's old row as
+    any row may, and it keeps its size with no valid override on both sides."""
+    written = "x" * 120 + "."
+    moved = (f"<!-- pinned: 2026-05-26, {REC}, pin-size-override: {written} -->" if move != "removed"
+             else _plain(written))
+    before = _named((_plain(SPACED), "Orig", BIG), (_plain(written, True), "Orig", BIG))
+    assert gate_decision(before, *_write(_named((moved, "Orig", BIG)))).verdict == "ALLOW"
+
+
+# Two pins carrying the same override, written 121 characters so it reads 120
+# only while a reconfirmation follows it. Each pin's row takes its own pin's
+# old row first, so an untouched neighbour cannot take the edited pin's.
+WRITTEN = "x" * 120 + "."
+ALPHA, OMEGA = _words("alpha", 1700), _words("omega", 1700)
+CUT = _plain(WRITTEN, True)
+BARE = _plain(WRITTEN)
+TEMPLATE = f"<!-- pinned: 2026-05-26, {REC}, pin-size-override: {WRITTEN} -->"
+SHARED = [
+    ("the earlier pin rewritten into template order", (CUT, CUT), (TEMPLATE, ALPHA, CUT, OMEGA), None),
+    ("the earlier pin's reconfirmation removed", (CUT, CUT), (BARE, ALPHA, CUT, OMEGA), None),
+    ("the earlier pin's reconfirmation removed, the later pin grows", (CUT, CUT),
+     (BARE, ALPHA, CUT, OMEGA + " more" * 24), None),
+    ("the later pin's reconfirmation removed, the earlier pin grows", (CUT, CUT),
+     (CUT, ALPHA + " more" * 24, BARE, OMEGA), None),
+    ("the earlier pin's reconfirmation removed and it grows", (CUT, CUT),
+     (BARE, ALPHA + " more" * 24, CUT, OMEGA), "size"),
+    ("neither reconfirmed, the earlier pin reconfirmed by appending", (BARE, BARE), (CUT, ALPHA, BARE, OMEGA), None),
+    ("neither reconfirmed, the earlier pin reconfirmed by appending and grown", (BARE, BARE),
+     (CUT, ALPHA + " more" * 24, BARE, OMEGA), "size"),
+]
+
+
+@pytest.mark.parametrize("name, rows, after, cause", SHARED, ids=[row[0] for row in SHARED])
+def test_each_pin_keeps_its_own_old_row_beside_a_pin_with_the_same_override(name, rows, after, cause):
+    before = _named((rows[0], "Alpha pin", ALPHA), (rows[1], "Omega pin", OMEGA))
+    decision = gate_decision(before, *_write(_named((after[0], "Alpha pin", after[1]),
+                                                    (after[2], "Omega pin", after[3]))))
+    if cause:
+        assert (decision.verdict, decision.cause) == ("DENY", cause), (name, decision)
+    else:
+        assert decision.verdict == "ALLOW", (name, decision)
 
 
 # A read with no word character trims to nothing: it stands only for an old
