@@ -295,28 +295,26 @@ def _augment(start: int, owner: dict, seen: set, scan, free, budget) -> bool:
     return False
 
 
-def _match(new: list, old: list, own: Optional[dict] = None, ahead=()) -> dict:
+def _match(new: list, old: list, own: Optional[dict] = None, ahead: Optional[dict] = None) -> dict:
     """A maximum matching of the new rows to the old rows `_Edges` allows, as
     {new index: old index}.
 
-    A new row identical to an old one (the same read, whitespace and all, and
-    the same written text) is that row and takes it first, its own pin's old
-    row (`own`: new index -> old index) before any other identical one; no
-    other row may claim it, so a copy of an old override, however close, is
-    checked unless an old row is left for it, and an untouched pin cannot take
-    the old row of an edited pin whose override reads the same. A row in
-    `ahead` (`_ahead`) takes its own pin's old row in that first step too, so
-    an exact copy on a pin keeping less of the old text cannot take the row
-    the continuation's edited row stands for. Next each new row takes the old
-    row of its own pin when
+    Each row in `ahead` (`_contest`: new index -> old index) takes its old
+    row first, so no exact copy can take the row a continuation's edited row
+    stands for. Next a new row identical to an old one (the same read,
+    whitespace and all, and the same written text) is that row and takes it,
+    its own pin's old row (`own`: new index -> old index) before any other
+    identical one; no other row may claim it, so a copy of an old override,
+    however close, is checked unless an old row is left for it, and an
+    untouched pin cannot take the old row of an edited pin whose override
+    reads the same. Next each new row takes the old row of its own pin when
     `_stands_for` allows it, and no other row may claim that either, so a
     copy on another pin cannot take an edited original's row. Then invalid
-    new rows are matched first, and
-    Kuhn's algorithm never unmatches a row, so as many invalid rows as any
-    matching can cover are covered. The rows first take free old rows rank by
-    rank, every row the same row first, then the same read, then the cut, so
-    no row takes by a looser edge an old row another row holds by a closer
-    one; a row left over searches (`_augment`).
+    new rows are matched first, and Kuhn's algorithm never unmatches a row,
+    so as many invalid rows as any matching can cover are covered. The rows
+    first take free old rows rank by rank, every row the same row first, then
+    the same read, then the cut, so no row takes by a looser edge an old row
+    another row holds by a closer one; a row left over searches (`_augment`).
 
     Every walk over an edge list is shared by the rows that share the list:
     an old row once held is never freed, so a search for a free row resumes
@@ -351,8 +349,10 @@ def _match(new: list, old: list, own: Optional[dict] = None, ahead=()) -> dict:
                     yield j
 
     held, frozen = set(), set()
-    for i, j in (own or {}).items():
-        if i in ahead or (new[i].rationale, new[i].written) == (old[j].rationale, old[j].written):
+    ahead = ahead or {}
+    for i, j in [*ahead.items(), *(own or {}).items()]:
+        if i not in held and j not in owner and (
+                ahead.get(i) == j or (new[i].rationale, new[i].written) == (old[j].rationale, old[j].written)):
             owner[j] = i
             held.add(i)
             frozen.add(j)
@@ -515,47 +515,78 @@ def _sources(before: list, after: list, wanted, offered) -> dict:
     return source
 
 
-def _ahead(new: list, old: list, own: dict, texts: list, old_texts: list) -> set:
-    """The new rows (indices into `new`) that stand for their own pin's old
-    row (`own`) without being identical to it, while another pin carries a
-    row identical to that old row, and whose pin keeps at least as much of
-    the old pin's word pairs (`_share`, given each pin's (heading, body) in
-    `texts` and `old_texts`) as every such pin, each with a body unlike its
-    own (other word pairs). `own` names the pin the mapping continues, so
-    where shares are equal the mapping's heading decides, and identical
-    bodies are a tie whatever their headings. Each word pair compared spends
-    a step of the pin-growth rule's budget (`STEP_BUDGET`), and past it
-    raises `SizeBound`."""
+def _contest(new: list, old: list, source: dict, texts: list, old_texts: list) -> dict:
+    """{new index: old index}: for each old pin's row that one new row copies
+    exactly while another stands for it edited, the edited row of the pin
+    that continues it, which takes it ahead of every copy. The pins whose
+    rows stand for the old row compete: the one keeping the most of the old
+    pin's word pairs (`_share`, given each pin's (heading, body) in `texts`
+    and `old_texts`) continues it; on an equal share, the pin `source` maps
+    to the old pin does, unless another leader's body reads the same
+    (whitespace collapsed), which is a tie that names none. A pin `source`
+    maps to another old pin continues none here. The pins that may lead are
+    those holding a word pair of the old pin's body and the pin `source`
+    maps to it; where none of them keeps any, every row standing for the
+    old row leads. Each row and word pair examined spends a step of the
+    pin-growth rule's budget (`STEP_BUDGET`), and past it raises
+    `SizeBound`."""
     from shared import pin_growth
 
-    pins_by_row = defaultdict(set)
-    for row in new:
-        pins_by_row[row.rationale, row.written].add(row.pin)
-    contests = []
-    for i, j in own.items():
-        key = (old[j].rationale, old[j].written)
-        rivals = pins_by_row.get(key, set()) - {new[i].pin}
-        if rivals and (new[i].rationale, new[i].written) != key and _stands_for(new[i], old[j]):
-            contests.append((i, old[j].pin, rivals))
-    if not contests:
-        return set()
+    exact, row_at = defaultdict(list), {}
+    for i, row in enumerate(new):
+        exact[row.rationale, row.written].append(i)
+        row_at[row.pin] = i
+    copied = [j for j, row in enumerate(old) if row.pin is not None and (row.rationale, row.written) in exact]
+    if not copied:
+        return {}
     budget = pin_growth._Budget(pin_growth.STEP_BUDGET)
-    pairs = {}
+    pairs, holders = {}, defaultdict(set)  # word pair -> after pins with an override row holding it
+
+    def word_pairs(side, k, text):
+        if (side, k) not in pairs:
+            pairs[side, k] = _word_pairs(text)
+            budget.spend(len(pairs[side, k]))
+        return pairs[side, k]
+
+    for q in row_at:
+        for pair in word_pairs("after", q, texts[q][1]):
+            holders[pair].add(q)
 
     def kept(q, p):
-        for key, text in ((("after", q), texts[q][1]), (("before", p), old_texts[p][1])):
-            if key not in pairs:
-                pairs[key] = _word_pairs(text)
-        mine, theirs = pairs["after", q], pairs["before", p]
-        budget.spend(len(mine) + len(theirs))
+        mine, theirs = word_pairs("after", q, texts[q][1]), word_pairs("before", p, old_texts[p][1])
+        budget.spend(len(mine))
         return _share(mine, theirs, sum(theirs.values()))
 
-    ahead = set()
-    for i, p, rivals in contests:
-        share = kept(new[i].pin, p)
-        if all((held := kept(q, p)) < share or (held == share and pairs["after", q] != pairs["after", new[i].pin])
-               for q in rivals):
-            ahead.add(i)
+    def body(q):
+        return " ".join(texts[q][1].split())
+
+    mapped = {p: q for q, p in source.items()}
+    ahead = {}
+    for j in copied:
+        row, p = old[j], old[j].pin
+        same = (row.rationale, row.written)
+        near = {mapped[p]} & row_at.keys() if p in mapped else set()
+        for pair in word_pairs("before", p, old_texts[p][1]):
+            found = holders.get(pair, ())
+            budget.spend(1 + len(found))
+            near.update(found)
+        claims = [row_at[q] for q in near if _stands_for(new[row_at[q]], row)]
+        if all((new[i].rationale, new[i].written) == same for i in claims):
+            continue
+        shares = {i: kept(new[i].pin, p) for i in claims}
+        top = max(shares.values())
+        leaders = [i for i in claims if shares[i] == top]
+        if top == 0:
+            budget.spend(len(new))
+            leaders = [i for i in range(len(new)) if _stands_for(new[i], row)]
+        if len(leaders) > 1:
+            named = [i for i in leaders if new[i].pin == mapped.get(p)]
+            if not named or any(body(new[i].pin) == body(new[named[0]].pin) for i in leaders if i not in named):
+                continue
+            leaders = named
+        i = leaders[0]
+        if (new[i].rationale, new[i].written) != same and source.get(new[i].pin, p) == p:
+            ahead.setdefault(i, j)
     return ahead
 
 
@@ -595,10 +626,11 @@ def _invalid_override(before: str, after: str) -> tuple[Optional[str], tuple]:
     edited, the match stays exact.
 
     The rows are matched as a whole (`_match`), each pin's row first to its
-    own pin's old row (`_sources`), so one pin cannot take the old row its
-    neighbour needs. Where a matched old row was a pin's comment, the new row
-    keeps its text (`_kept`), the two rationales disagree on validity, and the
-    two pins continue each other (or neither continues anything else), both
+    own pin's old row (`_sources`, or `_contest` where an exact copy competes
+    with an edited row), so one pin cannot take the old row its neighbour
+    needs. Where a matched old row was a pin's comment, the new row keeps its
+    text (`_kept`), the two rationales disagree on validity, and the two pins
+    continue each other (or neither continues anything else), both
     pins count as having no valid override, as each would if read alike, so a
     reconfirmation that moves neither grants an exemption nor takes one away.
     Only when the pins `pin_spans` lists before and after are the ones
@@ -623,23 +655,23 @@ def _invalid_override(before: str, after: str) -> tuple[Optional[str], tuple]:
     before_spans = _spans(before_doc, before_located)
     old = _rationales(before_doc, before_spans)
     row_of = {row.pin: j for j, row in enumerate(old) if row.pin is not None}
-    source, own, ahead = {}, {}, set()
+    source, own, ahead = {}, {}, {}
     if new and row_of:
         texts, old_texts = _pin_texts(doc, spans), _pin_texts(before_doc, before_spans)
         source = _sources(old_texts, texts, sorted({row.pin for row in new}), sorted(row_of))
         own = {i: row_of[source[row.pin]] for i, row in enumerate(new) if row.pin in source}
-        ahead = _ahead(new, old, own, texts, old_texts)
+        ahead = _contest(new, old, source, texts, old_texts)
     matched = _match(new, old, own, ahead)
     for i, row in enumerate(new):
         reason = None if i in matched else _validate_override_rationale(row.rationale)
         if reason is not None:
             return reason, ((), ())
-    # A carry lands only on a pair of pins that continue each other, or that
-    # neither continues anything else.
+    # A carry lands only on a pair of pins that continue each other (as mapped,
+    # or as the contest decided), or that neither continues anything else.
     continued = set(source.values())
     revoked = [(old[j].pin, new[i].pin) for i, j in matched.items()
                if old[j].pin is not None and old[j].valid != new[i].valid and _kept(new[i], old[j])
-               and (source.get(new[i].pin) == old[j].pin
+               and (source.get(new[i].pin) == old[j].pin or ahead.get(i) == j
                     or (new[i].pin not in source and old[j].pin not in continued))]
     if not revoked or not (_spans_are_pins(doc, located, spans)
                            and _spans_are_pins(before_doc, before_located, before_spans)):

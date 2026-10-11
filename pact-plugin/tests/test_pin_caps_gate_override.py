@@ -541,7 +541,7 @@ def test_the_near_twin_shape_is_matched_in_steps_linear_in_its_rows(monkeypatch)
     rows = 1000
     reason, _revoked = pin_caps_gate._invalid_override(*_near_twins(rows))
     assert reason is None
-    assert len(made) == 2  # the pin mapping's and the matching's
+    assert len(made) == 3  # the pin mapping's, the contest's and the matching's
     assert all(budget.spent <= 4 * rows for budget in made), [budget.spent for budget in made]
 
 
@@ -1053,3 +1053,71 @@ def test_a_new_pin_above_keeping_less_cannot_take_the_untouched_original_row(old
     after = _doc(f"{_plain(new_text)}\n### Pin 1\n{near}\n\n{_plain(old_text)}\n### Pin 2\n{TOKENS}\n\n" + "\n".join(_rest(3)))
     decision = gate_decision(before, *_write(after))
     assert decision.verdict == verdict, decision
+
+
+# The pin keeping the most of the old text continues it whatever the mapping
+# names; on an equal share the mapping's choice does, unless the texts read
+# the same once whitespace is collapsed. Two sentences that start and end on
+# the same words keep their word pairs when swapped, yet read differently.
+SENTENCES = "Always run lint then first. Always run tests then first."
+SWAPPED = "Always run tests then first. Always run lint then first."
+OTHER_SWAP = "Never push tests before review. Always run lint then first."
+CONTINUATIONS = [
+    ("a copy with the sentences swapped above, the original's own row padded",
+     SENTENCES, [(_plain(SPACED), "Orig variant", SWAPPED), (_plain(PADDED), "Orig", SENTENCES)], "ALLOW"),
+    ("a copy with the sentences swapped below, the original's own row padded",
+     SENTENCES, [(_plain(PADDED), "Orig", SENTENCES), (_plain(SPACED), "Orig variant", SWAPPED)], "ALLOW"),
+    ("a copy reading the same above, the original's own row padded",
+     SENTENCES, [(_plain(SPACED), "Orig variant", SENTENCES), (_plain(PADDED), "Orig", SENTENCES)], "DENY"),
+    ("a copy with other sentences swapped above, the original's own row padded",
+     "Always run lint then first. Never push tests before review.",
+     [(_plain(SPACED), "Orig variant", OTHER_SWAP),
+      (_plain(PADDED), "Orig", "Always run lint then first. Never push tests before review.")], "ALLOW"),
+]
+
+
+@pytest.mark.parametrize("name, old_body, after, verdict", CONTINUATIONS, ids=[row[0] for row in CONTINUATIONS])
+def test_the_pin_keeping_most_of_the_old_text_keeps_its_row_ahead_of_an_exact_copy(name, old_body, after, verdict):
+    decision = gate_decision(_named((_plain(SPACED), "Orig", old_body)), *_write(_named(*after)))
+    assert decision.verdict == verdict, (name, decision)
+
+
+@pytest.mark.parametrize("kept", [19, 11], ids=["all but one word", "about half"])
+def test_a_new_pin_above_taking_the_heading_with_an_exact_copy_leaves_the_original_its_row(kept):
+    """The new pin above takes 'Pin 1' and part of the body with an exact
+    copy; the original, now 'Pin 2', keeps all of it and pads its own row,
+    which keeps the old row; the copy is checked on its own."""
+    part = " ".join(_tokens("o", 0, kept))
+    before = _doc(f"{_plain(SPACED)}\n### Pin 1\n{TOKENS}\n\n" + "\n".join(_rest(2)))
+    after = _doc(f"{_plain(SPACED)}\n### Pin 1\n{part}\n\n{_plain(PADDED)}\n### Pin 2\n{TOKENS}\n\n" + "\n".join(_rest(3)))
+    assert gate_decision(before, *_write(after)).verdict == "ALLOW"
+
+
+@pytest.mark.parametrize("grows", [False, True], ids=["same size", "grows"])
+def test_an_over_cap_original_keeping_its_row_ahead_of_a_heading_copy_keeps_its_size(grows):
+    """As above with an over-cap body: the original's padded row reads invalid
+    and its old row valid, so the original counts as having no valid
+    override on both sides; it may keep its size, and not grow."""
+    words = [f"o{k}" + "w" * 80 for k in range(20)]
+    body = " ".join(words)
+    after_body = body + " " + " ".join(_tokens("g", 0, 40)) if grows else body
+    before = _doc(f"{_plain(SPACED)}\n### Pin 1\n{body}\n\n" + "\n".join(_rest(2)))
+    after = _doc(f"{_plain(SPACED)}\n### Pin 1\n{' '.join(words[:19])}\n\n{_plain(PADDED)}\n### Pin 2\n{after_body}\n\n"
+                 + "\n".join(_rest(3)))
+    decision = gate_decision(before, *_write(after))
+    if grows:
+        assert (decision.verdict, decision.cause) == ("DENY", "size"), decision
+    else:
+        assert decision.verdict == "ALLOW", decision
+
+
+def test_an_exact_copy_of_an_invalid_override_losing_the_heading_tiebreak_is_refused():
+    """The copy keeps as much of the old text (its sentences swapped) but the
+    original keeps the heading, so the original's reconfirmed row keeps the
+    old row and the copy of the invalid override is checked on its own."""
+    before = _named((BARE, "Orig", SENTENCES))
+    after = _named((BARE, "Orig variant", SWAPPED), (_plain(WRITTEN, True), "Orig", SENTENCES))
+    decision = gate_decision(before, *_write(after))
+    assert (decision.verdict, decision.cause) == ("DENY", "override"), decision
+    assert decision.reason == ("Pin cap violation (invalid override): Override rationale is 121 chars "
+                               "(max: 120). Shorten it.")
