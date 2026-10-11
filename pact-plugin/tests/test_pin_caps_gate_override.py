@@ -541,8 +541,8 @@ def test_the_near_twin_shape_is_matched_in_steps_linear_in_its_rows(monkeypatch)
     rows = 1000
     reason, _revoked = pin_caps_gate._invalid_override(*_near_twins(rows))
     assert reason is None
-    (budget,) = made
-    assert budget.spent <= 4 * rows, budget.spent
+    assert len(made) == 2  # the pin mapping's and the matching's
+    assert all(budget.spent <= 4 * rows for budget in made), [budget.spent for budget in made]
 
 
 def test_an_exhausted_step_budget_allows_with_the_stop_early_note(monkeypatch):
@@ -658,11 +658,12 @@ def test_a_whitespace_edit_to_the_only_copy_of_an_override_is_not_rechecked():
     assert decision.verdict != "DENY", decision
 
 
-def test_a_padded_copy_beside_an_edited_original_is_allowed():
-    """With the original edited too (a reconfirmation appended), no new row is
-    identical to the old one, so the padded copy matches it by read and the
-    original is checked on its own, and is valid. The copy is not refused; an
-    invalid override exempts nothing."""
+def test_a_whitespace_edit_on_the_original_pin_beside_a_valid_copy_is_allowed():
+    """The edit leaves the padded text on the original pin (its heading and
+    body) and puts the reconfirmed original text on a new pin above it. The
+    original pin's own row reads the same once whitespace is collapsed, so it
+    stands for its old row; the new pin's copy is checked on its own and is
+    valid."""
     padded = SPACED.replace("a b", "a   b", 1)
     call = _edit(f"pin-size-override: {SPACED} -->",
                  f"pin-size-override: {SPACED}, {REC} -->\n### Pin copy\nb\n<!-- pinned: 2026-10-01, "
@@ -672,3 +673,108 @@ def test_a_padded_copy_beside_an_edited_original_is_allowed():
     after = simulate(before, *call)
     assert after.count("pin-size-override:") == 2
     assert gate_decision(before, *call).verdict == "ALLOW"
+
+
+
+# Each pin's override stands for its own pin's old row first: the pin it
+# continues is found by content (half of its word pairs), its heading
+# partner tried first, then by heading. A copy on another pin, however its
+# heading reads, takes the original's row only if the original's own row
+# cannot.
+ORIG_BODY = "the dispatch template cites this verbatim form in every routing decision"
+NEW_BODY = "an unrelated note about something else entirely with other words"
+
+
+def _named(*pins):
+    return _doc("\n".join(f"{row}\n### {heading}\n{body}\n" for row, heading, body in pins) + "\n" + "\n".join(_rest(6, 9)))
+
+
+def _plain(rationale, reconfirmed=False):
+    tail = f", {REC}" if reconfirmed else ""
+    return f"<!-- pinned: 2026-05-26, pin-size-override: {rationale}{tail} -->"
+
+
+PADDED = SPACED.replace("a b", "a   b", 1)
+COPIES = [
+    ("a new pin above with a padded copy, the original reconfirmed",
+     [(_plain(SPACED), "Orig", ORIG_BODY)],
+     [(_plain(PADDED), "Newcomer", NEW_BODY), (_plain(SPACED, True), "Orig", ORIG_BODY)]),
+    ("a new pin below with a padded copy, the original reconfirmed",
+     [(_plain(SPACED), "Orig", ORIG_BODY)],
+     [(_plain(SPACED, True), "Orig", ORIG_BODY), (_plain(PADDED), "Newcomer", NEW_BODY)]),
+    ("the new pin takes the original's heading, the original renamed and reconfirmed",
+     [(_plain(SPACED), "Orig", ORIG_BODY)],
+     [(_plain(PADDED), "Orig", NEW_BODY), (_plain(SPACED, True), "Orig two", ORIG_BODY)]),
+    ("both pins headed like the original",
+     [(_plain(SPACED), "Orig", ORIG_BODY)],
+     [(_plain(PADDED), "Orig", NEW_BODY), (_plain(SPACED, True), "Orig", ORIG_BODY)]),
+    ("positional headings: the new pin is 'Pin 1', the original becomes 'Pin 2'",
+     [(_plain(SPACED), "Pin 1", ORIG_BODY)],
+     [(_plain(PADDED), "Pin 1", NEW_BODY), (_plain(SPACED, True), "Pin 2", ORIG_BODY)]),
+]
+
+
+@pytest.mark.parametrize("name, before, after", COPIES, ids=[row[0] for row in COPIES])
+def test_an_invalid_copy_beside_an_edited_original_is_refused(name, before, after):
+    decision = gate_decision(_named(*before), *_write(_named(*after)))
+    assert (decision.verdict, decision.cause) == ("DENY", "override"), (name, decision)
+    assert decision.reason == "Pin cap violation (invalid override): Override rationale is 121 chars (max: 120). Shorten it."
+
+
+# Faithful edits around an old invalid override (124 characters) on two pins:
+# each still stands for its old row, through its own pin or, where the
+# mapping cannot place the pin, through any old row it may stand for.
+INVALID = "y" * 124
+OTHER = "z" * 124
+SECOND_BODY = "a second pin about a different matter with its own words"
+START = [(_plain(INVALID), "Alpha pin", ORIG_BODY), (_plain(OTHER), "Beta pin", SECOND_BODY)]
+FAITHFUL_PINS = [
+    ("the body rewritten, the override row untouched",
+     [(_plain(INVALID), "Alpha pin", ORIG_BODY[::-1]), START[1]]),
+    ("the pin replaced by different text, its override row kept",
+     [(_plain(INVALID), "Gamma pin", NEW_BODY), START[1]]),
+    ("the two pins swapped",
+     [START[1], START[0]]),
+    ("the pin renamed",
+     [(_plain(INVALID), "Alpha pin renamed", ORIG_BODY), START[1]]),
+    ("the pin renamed, rewritten and moved below the other",
+     [START[1], (_plain(INVALID), "Completely new title", ORIG_BODY[::-1])]),
+    ("a pure split with the override on the first half",
+     [(_plain(INVALID), "Alpha pin", ORIG_BODY[:30]), ("<!-- pinned: 2026-05-26 -->", "Alpha part two", ORIG_BODY[30:]),
+      START[1]]),
+    ("a reconfirmation appended on a renamed and rewritten pin",
+     [(_plain(INVALID, True), "New name", ORIG_BODY[::-1]), START[1]]),
+    ("the override comment moved to the other pin",
+     [("<!-- pinned: 2026-05-26 -->", "Alpha pin", ORIG_BODY), (_plain(INVALID), "Beta pin", SECOND_BODY)]),
+    ("the pin replaced by different text, its override reconfirmed",
+     [(_plain(INVALID, True), "Gamma pin", NEW_BODY), START[1]]),
+    ("the pin renamed, rewritten and moved, its override reconfirmed",
+     [START[1], (_plain(INVALID, True), "Completely new title", ORIG_BODY[::-1])]),
+]
+
+
+@pytest.mark.parametrize("name, after", FAITHFUL_PINS, ids=[row[0] for row in FAITHFUL_PINS])
+def test_an_old_invalid_override_is_untouched_wherever_its_pin_goes(name, after):
+    decision = gate_decision(_named(*START), *_write(_named(*after)))
+    assert decision.verdict == "ALLOW", (name, decision)
+
+
+# A read with no word character trims to nothing: it stands only for an old
+# row with the same read. The reader keeps a symbol-only rationale before a
+# reconfirmation, but reads separator text alone there as empty.
+LOCK = "\U0001f512"
+SYMBOLS = [
+    ("a lock emoji rewritten as 200 with a reconfirmation", LOCK, f"{LOCK * 200}, {REC}", "DENY",
+     "Override rationale is 200 chars (max: 120). Shorten it."),
+    ("a separator-only rationale given a reconfirmation", "--", f"--, {REC}", "DENY",
+     "Override rationale is empty \u2014 provide a non-empty reason."),
+    ("a lock emoji given a reconfirmation", LOCK, f"{LOCK}, {REC}", "ALLOW", None),
+]
+
+
+@pytest.mark.parametrize("name, old, new, verdict, reason", SYMBOLS, ids=[row[0] for row in SYMBOLS])
+def test_a_symbol_only_rationale_stands_only_for_the_same_read(name, old, new, verdict, reason):
+    decision = gate_decision(_spaced_doc(old), *_edit(f"pin-size-override: {old} -->", f"pin-size-override: {new} -->"))
+    assert decision.verdict == verdict, (name, decision)
+    if reason:
+        assert decision.reason == f"Pin cap violation (invalid override): {reason}"

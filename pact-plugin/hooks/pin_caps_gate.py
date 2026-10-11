@@ -50,7 +50,7 @@ from __future__ import annotations
 import bisect
 import json
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import NamedTuple, NoReturn, Optional
 
@@ -149,20 +149,15 @@ def _row(content: str, rationale: str, pin: Optional[int]) -> _Row:
     return _Row(rationale, _collapsed(rationale), written, pin)
 
 
-def _rationales(doc) -> list:
+def _rationales(doc, spans: list) -> list:
     """The override comments in the parsed document `doc` as `_Row`s, one for
     each row that holds only an override comment, of any kind. A fenced row,
     or one past an unclosed fence, is read as if it stood alone. Only a pin's
-    own comment row in a located Pinned section names its pin."""
+    own comment row (the first row of its span in `spans`) names its pin."""
     from pin_caps import override_rationale_text
-    from shared.claude_md_markers import Kind, State, parse
-    from shared.pin_growth import locate_pinned, pin_spans
+    from shared.claude_md_markers import Kind, parse
 
-    located = locate_pinned(doc)
-    pins = {}
-    if located.state is State.FOUND:
-        heading, last = located.spans[0]
-        pins = {first: index for index, (first, _end) in enumerate(pin_spans(doc, (heading + 1, last)))}
+    pins = {first: index for index, (first, _end) in enumerate(spans)}
     found = []
     for line in doc.lines:
         if "<!--" not in line.content or "-->" not in line.content:
@@ -187,6 +182,18 @@ def _kept(new: _Row, old: _Row) -> bool:
             or (new.written is not None and new.written.startswith(old.key)))
 
 
+def _stands_for(new: _Row, old: _Row) -> bool:
+    """Whether the new row may stand for the old one under the rule `_Edges`
+    lists: the same read, or the reconfirmation's cut within one group of
+    reads that keep a word character."""
+    if new.key == old.key:
+        return True
+    group = _trimmed(new.key)
+    if not group or group != _trimmed(old.key):
+        return False
+    return new.written is not None or (old.written is not None and old.written.startswith(new.key))
+
+
 class _Edges:
     """Which old rows a new row may stand for, without listing every pair.
 
@@ -195,9 +202,11 @@ class _Edges:
     same read and written text (rank 0), with the same read (rank 1), or, by
     the reconfirmation's cut (rank 2), for any old row when the new row is
     reconfirmed, and otherwise for a reconfirmed old row whose written text
-    starts with the new read. Each kind of edge is one list of old rows in
-    their order, shared by every new row with that read or group: so a
-    reconfirmed new row stands for any old row in its group."""
+    starts with the new read. A read with no word character trims to nothing
+    and has no cut edge: it stands only for an old row with the same read.
+    Each kind of edge is one list of old rows in their order, shared by every
+    new row with that read or group: so a reconfirmed new row stands for any
+    old row in its group."""
 
     def __init__(self, old: list):
         self.trimmed = {}  # read -> trimmed read
@@ -231,7 +240,7 @@ class _Edges:
             out.append((("exact", row.key, row.written), self.exact.get((row.key, row.written), ())))
         if rank in (None, 1):
             out.append((("same", row.key), self.same.get(row.key, ())))
-        if rank in (None, 2):
+        if rank in (None, 2) and group:
             if row.written is not None:
                 out.append((("group", group), self.groups.get(group, ())))
             else:
@@ -286,14 +295,17 @@ def _augment(start: int, owner: dict, seen: set, scan, free, budget) -> bool:
     return False
 
 
-def _match(new: list, old: list) -> dict:
+def _match(new: list, old: list, own: Optional[dict] = None) -> dict:
     """A maximum matching of the new rows to the old rows `_Edges` allows, as
     {new index: old index}.
 
     A new row identical to an old one (the same read, whitespace and all, and
     the same written text) is that row and takes it first; no other row may
     claim it, so a copy of an old override, however close, is checked unless
-    an old row is left for it. Then invalid new rows are matched first, and
+    an old row is left for it. Next each new row takes the old row of its own
+    pin (`own`: new index -> old index) when `_stands_for` allows it, and no
+    other row may claim that either, so a copy on another pin cannot take an
+    edited original's row. Then invalid new rows are matched first, and
     Kuhn's algorithm never unmatches a row, so as many invalid rows as any
     matching can cover are covered. The rows first take free old rows rank by
     rank, every row the same row first, then the same read, then the cut, so
@@ -341,6 +353,11 @@ def _match(new: list, old: list) -> dict:
             held.add(i)
             frozen.add(rows[k])
             cursors["identical", row.rationale, row.written] = k + 1
+    for i, j in (own or {}).items():
+        if i not in held and j not in owner and _stands_for(new[i], old[j]):
+            owner[j] = i
+            held.add(i)
+            frozen.add(j)
     for valid in (False, True):
         offered = [i for i, row in enumerate(new) if row.valid is valid]
         for rank in (0, 1, 2):
@@ -362,18 +379,95 @@ def _match(new: list, old: list) -> dict:
     return {i: j for j, i in owner.items()}
 
 
-def _spans_are_pins(doc) -> bool:
-    """Whether `pin_spans` gives as many pins for the Pinned section of `doc`
-    as `section_pins` reads, so a pin index names one pin to both."""
-    from pin_caps import section_pins
+def _spans(doc, located) -> list:
+    """The pin spans of the Pinned section `located` in `doc` (`pin_spans`),
+    or none when it is not located."""
     from shared.claude_md_markers import State
-    from shared.pin_growth import locate_pinned, pin_spans
+    from shared.pin_growth import pin_spans
 
-    located = locate_pinned(doc)
     if located.state is not State.FOUND:
-        return False
+        return []
     heading, last = located.spans[0]
-    return len(pin_spans(doc, (heading + 1, last))) == len(section_pins(doc, located))
+    return pin_spans(doc, (heading + 1, last))
+
+
+def _spans_are_pins(doc, located, spans: list) -> bool:
+    """Whether `section_pins` reads as many pins as `spans` lists, so a pin
+    index names one pin to both."""
+    from pin_caps import section_pins
+
+    return bool(spans) and len(section_pins(doc, located)) == len(spans)
+
+
+def _pin_texts(doc, spans: list) -> list:
+    """(heading, body) for each pin span: the heading row whitespace-collapsed
+    and casefolded, and the rows under it as written."""
+    from shared.claude_md_markers import Kind
+    from shared.pin_growth import _is_head
+
+    texts = []
+    for first, end in spans:
+        row = next(j for j in range(first, end + 1)
+                   if doc.lines[j].kind is Kind.PROSE and _is_head(doc.lines[j].content))
+        texts.append((" ".join(doc.lines[row].content.split()).casefold(),
+                      " ".join(doc.lines[j].content for j in range(row + 1, end + 1))))
+    return texts
+
+
+def _word_pairs(text: str) -> Counter:
+    """`text` as a multiset of consecutive word pairs; one word is itself."""
+    words = text.split()
+    if len(words) < 2:
+        return Counter(words)
+    return Counter(f"{left} {right}" for left, right in zip(words, words[1:]))
+
+
+def _sources(before: list, after: list, wanted, offered) -> dict:
+    """{after pin index: before pin index} for the after pins `wanted` and
+    the before pins `offered` (those carrying override rows), given each
+    pin's (heading, body) from `_pin_texts`: the pin each continues. First by
+    content, a before pin holding at least half of the after pin's word pairs,
+    its heading partner tried first; then, for an after pin still without one,
+    its heading partner. A heading can be reused or renumbered by the change,
+    so content comes first. Each before pin is the source of one after pin at
+    most. Each comparison spends a step of the pin-growth rule's budget
+    (`STEP_BUDGET`), and past it raises `SizeBound`."""
+    from pin_caps import _DESCENT_SHARE
+    from shared import pin_growth
+
+    budget = pin_growth._Budget(pin_growth.STEP_BUDGET)
+    by_heading = defaultdict(list)
+    for p in offered:
+        by_heading[before[p][0]].append(p)
+    pairs = {}
+    source, taken = {}, set()
+
+    def partner(q):
+        return next((p for p in by_heading.get(after[q][0], ()) if p not in taken), None)
+
+    for q in wanted:
+        mine = _word_pairs(after[q][1])
+        size = sum(mine.values())
+        if not size:
+            continue
+        first = partner(q)
+        for p in ([first] if first is not None else []) + list(offered):
+            if p in taken:
+                continue
+            budget.spend(1)
+            if p not in pairs:
+                pairs[p] = _word_pairs(before[p][1])
+            if sum((mine & pairs[p]).values()) >= _DESCENT_SHARE * size:
+                source[q] = p
+                taken.add(p)
+                break
+    for q in wanted:
+        if q not in source:
+            p = partner(q)
+            if p is not None:
+                source[q] = p
+                taken.add(p)
+    return source
 
 
 def _invalid_override(before: str, after: str) -> tuple[Optional[str], tuple]:
@@ -411,38 +505,54 @@ def _invalid_override(before: str, after: str) -> tuple[Optional[str], tuple]:
     write. Where neither row carries one, as when only the punctuation is
     edited, the match stays exact.
 
-    The rows are matched as a whole (`_match`), so one pin cannot take the old
-    row its neighbour needs. Where a matched old row was a pin's comment, the
-    new row keeps its text (`_kept`), and the two rationales disagree on
-    validity, both pins count as having no valid override, as each would if
-    read alike, so a reconfirmation that moves neither grants an exemption
-    nor takes one away. Only when the pins `pin_spans` lists before and after
-    are the ones `section_pins` reads.
+    The rows are matched as a whole (`_match`), each pin's row first to its
+    own pin's old row (`_sources`), so one pin cannot take the old row its
+    neighbour needs. Where a matched old row was a pin's comment, the new row
+    keeps its text (`_kept`), the two rationales disagree on validity, and the
+    two pins continue each other (or neither continues anything else), both
+    pins count as having no valid override, as each would if read alike, so a
+    reconfirmation that moves neither grants an exemption nor takes one away.
+    Only when the pins `pin_spans` lists before and after are the ones
+    `section_pins` reads.
     """
     from pin_caps import override_rationale_text
     from shared.claude_md_markers import State, parse
-    from shared.pin_growth import locate_pinned, pin_spans
+    from shared.pin_growth import locate_pinned
 
     doc = parse(after)
     located = locate_pinned(doc)
     if located.state is not State.FOUND:
         return None, ((), ())
-    heading, last = located.spans[0]
+    spans = _spans(doc, located)
     new = []
-    for index, (first, _end) in enumerate(pin_spans(doc, (heading + 1, last))):
+    for index, (first, _end) in enumerate(spans):
         rationale = override_rationale_text(doc, first)
         if rationale is not None:
             new.append(_row(doc.lines[first].content, rationale, index))
     before_doc = parse(before)
-    old = _rationales(before_doc)
-    matched = _match(new, old)
+    before_located = locate_pinned(before_doc)
+    before_spans = _spans(before_doc, before_located)
+    old = _rationales(before_doc, before_spans)
+    row_of = {row.pin: j for j, row in enumerate(old) if row.pin is not None}
+    source, own = {}, {}
+    if new and row_of:
+        source = _sources(_pin_texts(before_doc, before_spans), _pin_texts(doc, spans),
+                          sorted({row.pin for row in new}), sorted(row_of))
+        own = {i: row_of[source[row.pin]] for i, row in enumerate(new) if row.pin in source}
+    matched = _match(new, old, own)
     for i, row in enumerate(new):
         reason = None if i in matched else _validate_override_rationale(row.rationale)
         if reason is not None:
             return reason, ((), ())
+    # A carry lands only on a pair of pins that continue each other, or that
+    # neither continues anything else.
+    continued = set(source.values())
     revoked = [(old[j].pin, new[i].pin) for i, j in matched.items()
-               if old[j].pin is not None and old[j].valid != new[i].valid and _kept(new[i], old[j])]
-    if not revoked or not (_spans_are_pins(doc) and _spans_are_pins(before_doc)):
+               if old[j].pin is not None and old[j].valid != new[i].valid and _kept(new[i], old[j])
+               and (source.get(new[i].pin) == old[j].pin
+                    or (new[i].pin not in source and old[j].pin not in continued))]
+    if not revoked or not (_spans_are_pins(doc, located, spans)
+                           and _spans_are_pins(before_doc, before_located, before_spans)):
         return None, ((), ())
     return None, (frozenset(p for p, _ in revoked), frozenset(q for _, q in revoked))
 
