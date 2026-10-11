@@ -440,18 +440,20 @@ def _sources(before: list, after: list, wanted, offered) -> dict:
     the before pins `offered` (those carrying override rows), given each
     pin's (heading, body) from `_pin_texts`: the pin each continues.
 
-    Every pair is scored: best, the heading partner that also holds at least
-    half of the after pin's word pairs; then a pin holding that share alone,
-    the larger share first; then the heading partner alone. A heading can be
-    reused or renumbered by the change, so content outranks it. Each before
-    pin goes to the after pin with its best score, and each after pin keeps
-    the best before pin it won; where two tie, neither is given, so a copy
-    as good as the original falls back to the cross-pin matching. A pin
-    holding the share alone is compared only with before pins no heading
-    partner holds the share of, since it cannot outrank one. Each word pair
-    compared, and each pin a word pair's index entry adds, spends a step of
-    the pin-growth rule's budget (`STEP_BUDGET`), and past it raises
-    `SizeBound`."""
+    A pair's share is the fraction of the before pin's word pairs that the
+    after pin keeps, so the pin keeping more of the old text continues it and
+    a short fragment of it does not. Every pair is scored: best, the heading
+    partner with a share of at least half; then a pin with that share alone;
+    then the heading partner alone; within each, the larger share first. A
+    heading can be reused or renumbered by the change, so content outranks
+    it. Each before pin goes to the after pin with its best score, and each
+    after pin keeps the best before pin it won; where two tie, neither is
+    given, so a copy as good as the original falls back to the cross-pin
+    matching. A pin with that share alone is compared only with before pins
+    no heading partner reaches it with, since it cannot outrank one. Each
+    word pair compared, and each pin a word pair's index entry adds, spends
+    a step of the pin-growth rule's budget (`STEP_BUDGET`), and past it
+    raises `SizeBound`."""
     from pin_caps import _DESCENT_SHARE
     from shared import pin_growth
 
@@ -460,20 +462,20 @@ def _sources(before: list, after: list, wanted, offered) -> dict:
     for p in offered:
         by_heading[before[p][0]].append(p)
     pairs = {p: _word_pairs(before[p][1]) for p in offered}
+    wholes = {p: sum(pairs[p].values()) for p in offered}
     mine = {q: _word_pairs(after[q][1]) for q in wanted}
 
     def share(q, p):
         budget.spend(len(mine[q]))
-        size = sum(mine[q].values())
-        return sum((mine[q] & pairs[p]).values()) / size if size else 0
+        return sum((mine[q] & pairs[p]).values()) / wholes[p] if wholes[p] else 0
 
     bids = defaultdict(list)  # before pin -> [(score, after pin)]
     for q in wanted:
         for p in by_heading.get(after[q][0], ()):
             budget.spend(1)
             held = share(q, p)
-            bids[p].append(((0, -held), q) if held >= _DESCENT_SHARE else ((2, 0), q))
-    holders = defaultdict(set)  # word pair -> before pins no partner holds the share of
+            bids[p].append(((0 if held >= _DESCENT_SHARE else 2, -held), q))
+    holders = defaultdict(set)  # word pair -> before pins no partner reaches half with
     for p in offered:
         if all(score[0] for score, _q in bids.get(p, ())):
             for pair in pairs[p]:

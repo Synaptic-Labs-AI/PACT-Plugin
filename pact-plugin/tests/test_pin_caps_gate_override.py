@@ -678,10 +678,10 @@ def test_a_whitespace_edit_on_the_original_pin_beside_a_valid_copy_is_allowed():
 
 # Each pin's override stands for its own pin's old row first: the pin it
 # continues is the old pin it matches best, by heading and content together,
-# then content (half of its word pairs, the larger share first), then
-# heading, wherever either pin sits. A copy on another pin, however its
-# heading or body reads, takes the original's row only if the original's own
-# row cannot.
+# then content (half of the old pin's word pairs kept), then heading, the
+# larger share first in each, wherever either pin sits. A copy on another pin,
+# however its heading or body reads, takes the original's row only if the
+# original's own row cannot.
 ORIG_BODY = "the dispatch template cites this verbatim form in every routing decision"
 NEW_BODY = "an unrelated note about something else entirely with other words"
 
@@ -696,6 +696,20 @@ def _plain(rationale, reconfirmed=False):
 
 
 PADDED = SPACED.replace("a b", "a   b", 1)
+
+
+def _tokens(tag, start, stop):
+    return [f"{tag}{k}" for k in range(start, stop)]
+
+
+# Bodies of distinct words, so each share is exact: the original holds 19
+# word pairs, of which the rewrite keeps 5, the weaker pin 1, the fragment 4
+# and the grown body all 19, among 60 new words.
+TOKENS = " ".join(_tokens("o", 0, 20))
+REWRITTEN = " ".join(_tokens("o", 0, 6) + _tokens("a", 0, 14))
+WEAKER = " ".join(_tokens("o", 10, 12) + _tokens("b", 0, 18))
+FRAGMENT = " ".join(_tokens("o", 10, 15))
+GROWN = " ".join(_tokens("o", 0, 20) + _tokens("n", 0, 60))
 COPIES = [
     ("a new pin above with a padded copy, the original reconfirmed",
      [(_plain(SPACED), "Orig", ORIG_BODY)],
@@ -728,6 +742,27 @@ COPIES = [
      [(_plain(SPACED), "Orig", ORIG_BODY)],
      [(_plain(PADDED), "Echo", " ".join(ORIG_BODY.split()[:8])),
       (_plain(SPACED, True), "Orig", ORIG_BODY + " and six more words added here")]),
+    ("the original rewritten under its heading, a new pin above under it keeping less of the old text",
+     [(_plain(SPACED), "Orig", TOKENS)],
+     [(_plain(PADDED), "Orig", WEAKER), (_plain(SPACED, True), "Orig", REWRITTEN)]),
+    ("the original rewritten under its heading, a new pin below under it keeping less of the old text",
+     [(_plain(SPACED), "Orig", TOKENS)],
+     [(_plain(SPACED, True), "Orig", REWRITTEN), (_plain(PADDED), "Orig", WEAKER)]),
+    ("a new pin above under the original's heading holding a fragment of its body",
+     [(_plain(SPACED), "Orig", TOKENS)],
+     [(_plain(PADDED), "Orig", FRAGMENT), (_plain(SPACED, True), "Orig", REWRITTEN)]),
+    ("a new pin below under the original's heading holding a fragment of its body",
+     [(_plain(SPACED), "Orig", TOKENS)],
+     [(_plain(SPACED, True), "Orig", REWRITTEN), (_plain(PADDED), "Orig", FRAGMENT)]),
+    ("a new pin above under another heading holding a fragment of the original's body",
+     [(_plain(SPACED), "Orig", TOKENS)],
+     [(_plain(PADDED), "Echo", FRAGMENT), (_plain(SPACED, True), "Orig", REWRITTEN)]),
+    ("the original grown under its heading, a new pin above under it holding a fragment of its body",
+     [(_plain(SPACED), "Orig", TOKENS)],
+     [(_plain(PADDED), "Orig", FRAGMENT), (_plain(SPACED, True), "Orig", GROWN)]),
+    ("the original grown and renamed, a new pin above under its old heading holding a fragment of its body",
+     [(_plain(SPACED), "Orig", TOKENS)],
+     [(_plain(PADDED), "Orig", FRAGMENT), (_plain(SPACED, True), "Renamed", GROWN)]),
 ]
 
 
@@ -795,6 +830,48 @@ def test_a_copy_alike_in_heading_and_body_continues_the_original_no_better_than_
     after = _named(*(pins if copy_above else pins[::-1]))
     decision = gate_decision(_named((_plain(SPACED), "Orig", ORIG_BODY)), *_write(after))
     assert decision.verdict == "ALLOW", decision
+
+
+KEEPING_ALL = [
+    ("a new pin above under the heading holding all the old text and more, the original rewritten",
+     [(_plain(PADDED), "Orig", GROWN), (_plain(SPACED, True), "Orig", REWRITTEN)]),
+    ("a new pin above under another heading holding all the old text and more, the original rewritten",
+     [(_plain(PADDED), "Echo", GROWN), (_plain(SPACED, True), "Orig", REWRITTEN)]),
+    ("a new pin above under the heading holding all the old text and more, the original unchanged",
+     [(_plain(PADDED), "Orig", GROWN), (_plain(SPACED, True), "Orig", TOKENS)]),
+    ("a new pin below under the heading holding all the old text and more, the original unchanged",
+     [(_plain(SPACED, True), "Orig", TOKENS), (_plain(PADDED), "Orig", GROWN)]),
+]
+
+
+@pytest.mark.parametrize("name, after", KEEPING_ALL, ids=[row[0] for row in KEEPING_ALL])
+def test_a_pin_keeping_all_of_the_old_text_continues_it(name, after):
+    """The pin keeping the larger share of the old text continues it, however
+    much text it adds, and a whitespace pad on its override reads as the old
+    row; where both pins keep all of it they tie and the rows match as any
+    rows may."""
+    decision = gate_decision(_named((_plain(SPACED), "Orig", TOKENS)), *_write(_named(*after)))
+    assert decision.verdict == "ALLOW", (name, decision)
+
+
+EQUAL = [
+    ("the copy above", True, True, "ALLOW"),
+    ("the copy below", False, True, "ALLOW"),
+    ("the copy above, the original's override untouched", True, False, "DENY"),
+]
+
+
+@pytest.mark.parametrize("name, copy_above, reconfirmed, verdict", EQUAL, ids=[row[0] for row in EQUAL])
+def test_pins_under_one_heading_keeping_none_of_the_old_text_continue_it_equally(name, copy_above, reconfirmed, verdict):
+    """The original is rewritten entirely and a new pin under its heading has
+    new text too: both keep none of the old text, so neither is given its
+    pin and the padded row may stand for the old one. An untouched original
+    override is that old row, so the copy is then checked on its own."""
+    pins = [(_plain(PADDED), "Orig", " ".join(_tokens("b", 0, 20))),
+            (_plain(SPACED, reconfirmed), "Orig", " ".join(_tokens("a", 0, 20)))]
+    after = _named(*(pins if copy_above else pins[::-1]))
+    decision = gate_decision(_named((_plain(SPACED), "Orig", TOKENS)), *_write(after))
+    assert decision.verdict == verdict, (name, decision)
 
 
 @pytest.mark.parametrize("move", ["rewritten in template order", "removed"])
