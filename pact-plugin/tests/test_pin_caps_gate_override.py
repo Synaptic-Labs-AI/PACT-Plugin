@@ -940,3 +940,82 @@ def test_a_symbol_only_rationale_stands_only_for_the_same_read(name, old, new, v
     assert decision.verdict == verdict, (name, decision)
     if reason:
         assert decision.reason == f"Pin cap violation (invalid override): {reason}"
+
+
+# The pin keeping more of the old text continues it, so its own edited row
+# keeps the old row ahead of an exact copy on a pin keeping less, and the
+# copy is checked on its own. Where the copy's pin keeps as much, the exact
+# copy takes the old row, as it would with no continuation named.
+WEAKER2 = " ".join(_tokens("o", 14, 16) + _tokens("c", 0, 18))
+AHEAD = [
+    ("the original rewritten, its own row padded, an exact copy above",
+     [(_plain(SPACED), "Orig", WEAKER), (_plain(PADDED), "Orig", REWRITTEN)], "ALLOW"),
+    ("the original rewritten, its own row padded, an exact copy below",
+     [(_plain(PADDED), "Orig", REWRITTEN), (_plain(SPACED), "Orig", WEAKER)], "ALLOW"),
+    ("the original keeping all its text, its own row padded, an exact copy above",
+     [(_plain(SPACED), "Orig", WEAKER), (_plain(PADDED), "Orig", TOKENS)], "ALLOW"),
+    ("two weaker pins each with an exact copy, the original's own row padded",
+     [(_plain(SPACED), "Orig", WEAKER), (_plain(SPACED), "Orig", WEAKER2), (_plain(PADDED), "Orig", REWRITTEN)], "ALLOW"),
+    ("the original's own row padded, no copy",
+     [(_plain(PADDED), "Orig", REWRITTEN)], "ALLOW"),
+    ("the copy's pin keeping as much of the old text as the original, the original's own row padded",
+     [(_plain(SPACED), "Orig", TOKENS), (_plain(PADDED), "Orig", TOKENS)], "DENY"),
+    ("one copy on a weaker pin, another under another heading keeping as much, the original's own row padded",
+     [(_plain(SPACED), "Orig", WEAKER), (_plain(SPACED), "Echo", " ".join(_tokens("o", 12, 18) + _tokens("e", 0, 14))),
+      (_plain(PADDED), "Orig", REWRITTEN)], "DENY"),
+]
+
+
+@pytest.mark.parametrize("name, after, verdict", AHEAD, ids=[row[0] for row in AHEAD])
+def test_the_continuation_keeps_its_old_row_ahead_of_an_exact_copy_on_a_pin_keeping_less(name, after, verdict):
+    decision = gate_decision(_named((_plain(SPACED), "Orig", TOKENS)), *_write(_named(*after)))
+    assert decision.verdict == verdict, (name, decision)
+
+
+INVALID_SPACED = "a " * 61 + "bc"  # 124 characters, invalid
+INVERSE = [
+    ("the original appends a reconfirmation to an override written 121 characters, an exact copy of it below",
+     BARE, [(_plain(WRITTEN, True), "Orig", REWRITTEN), (BARE, "Orig", WEAKER)], 121),
+    ("the same, the exact copy above",
+     BARE, [(BARE, "Orig", WEAKER), (_plain(WRITTEN, True), "Orig", REWRITTEN)], 121),
+    ("the original pads an invalid override, an exact copy of it above",
+     _plain(INVALID_SPACED), [(_plain(INVALID_SPACED), "Orig", WEAKER),
+                              (_plain(INVALID_SPACED.replace("a a", "a   a", 1)), "Orig", REWRITTEN)], 124),
+]
+
+
+@pytest.mark.parametrize("name, old_row, after, length", INVERSE, ids=[row[0] for row in INVERSE])
+def test_an_exact_copy_of_an_invalid_override_on_a_pin_keeping_less_is_refused(name, old_row, after, length):
+    decision = gate_decision(_named((old_row, "Orig", TOKENS)), *_write(_named(*after)))
+    assert (decision.verdict, decision.cause) == ("DENY", "override"), (name, decision)
+    assert decision.reason == (f"Pin cap violation (invalid override): Override rationale is {length} chars "
+                               f"(max: 120). Shorten it.")
+
+
+@pytest.mark.parametrize("grows", [False, True], ids=["same size", "grows"])
+def test_an_over_cap_continuation_with_a_padded_row_beside_an_exact_copy_keeps_its_size(grows):
+    """The padded row reads invalid and its old row valid, so the pin counts
+    as having no valid override on both sides: it may keep its size, and not
+    grow."""
+    body = " ".join(_tokens("big", 0, 300))
+    grown = body + " " + " ".join(_tokens("g", 0, 40)) if grows else body
+    after = _named((_plain(SPACED), "Orig", " ".join(_tokens("big", 100, 102) + _tokens("c", 0, 18))),
+                   (_plain(PADDED), "Orig", grown))
+    decision = gate_decision(_named((_plain(SPACED), "Orig", body)), *_write(after))
+    if grows:
+        assert (decision.verdict, decision.cause) == ("DENY", "size"), decision
+    else:
+        assert decision.verdict == "ALLOW", decision
+
+
+def _positional(*rows):
+    return _doc("\n".join([f"{row}\n### Pin {i}\nshort body\n" for i, row in enumerate(rows, 1)] + _rest(len(rows) + 1)))
+
+
+@pytest.mark.parametrize("old_text, new_text, verdict", [(PADDED, SPACED, "ALLOW"), (SPACED, PADDED, "DENY")],
+                         ids=["an old padded override kept, a valid copy above", "a padded copy above"])
+def test_a_new_pin_above_taking_the_original_heading_cannot_take_its_untouched_row(old_text, new_text, verdict):
+    """A new pin inserted above takes the original's positional heading, and
+    both keep all of its text; the original's untouched row is its old row."""
+    decision = gate_decision(_positional(_plain(old_text)), *_write(_positional(_plain(new_text), _plain(old_text))))
+    assert decision.verdict == verdict, decision

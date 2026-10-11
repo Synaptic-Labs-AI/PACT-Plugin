@@ -295,7 +295,7 @@ def _augment(start: int, owner: dict, seen: set, scan, free, budget) -> bool:
     return False
 
 
-def _match(new: list, old: list, own: Optional[dict] = None) -> dict:
+def _match(new: list, old: list, own: Optional[dict] = None, ahead=()) -> dict:
     """A maximum matching of the new rows to the old rows `_Edges` allows, as
     {new index: old index}.
 
@@ -304,10 +304,14 @@ def _match(new: list, old: list, own: Optional[dict] = None) -> dict:
     row (`own`: new index -> old index) before any other identical one; no
     other row may claim it, so a copy of an old override, however close, is
     checked unless an old row is left for it, and an untouched pin cannot take
-    the old row of an edited pin whose override reads the same. Next each new
-    row takes the old row of its own pin when `_stands_for` allows it, and no
-    other row may claim that either, so a copy on another pin cannot take an
-    edited original's row. Then invalid new rows are matched first, and
+    the old row of an edited pin whose override reads the same. A row in
+    `ahead` (`_ahead`) takes its own pin's old row in that first step too, so
+    an exact copy on a pin keeping less of the old text cannot take the row
+    the continuation's edited row stands for. Next each new row takes the old
+    row of its own pin when
+    `_stands_for` allows it, and no other row may claim that either, so a
+    copy on another pin cannot take an edited original's row. Then invalid
+    new rows are matched first, and
     Kuhn's algorithm never unmatches a row, so as many invalid rows as any
     matching can cover are covered. The rows first take free old rows rank by
     rank, every row the same row first, then the same read, then the cut, so
@@ -348,7 +352,7 @@ def _match(new: list, old: list, own: Optional[dict] = None) -> dict:
 
     held, frozen = set(), set()
     for i, j in (own or {}).items():
-        if (new[i].rationale, new[i].written) == (old[j].rationale, old[j].written):
+        if i in ahead or (new[i].rationale, new[i].written) == (old[j].rationale, old[j].written):
             owner[j] = i
             held.add(i)
             frozen.add(j)
@@ -505,6 +509,47 @@ def _sources(before: list, after: list, wanted, offered) -> dict:
     return source
 
 
+def _ahead(new: list, old: list, own: dict, texts: list, old_texts: list) -> set:
+    """The new rows (indices into `new`) that stand for their own pin's old
+    row (`own`) without being identical to it, while another pin carries a
+    row identical to that old row, and whose pin keeps more of the old pin's
+    word pairs (given each pin's (heading, body) in `texts` and `old_texts`)
+    than every such pin. Each word pair compared spends a step of the
+    pin-growth rule's budget (`STEP_BUDGET`), and past it raises
+    `SizeBound`."""
+    from shared import pin_growth
+
+    pins_by_row = defaultdict(set)
+    for row in new:
+        pins_by_row[row.rationale, row.written].add(row.pin)
+    contests = []
+    for i, j in own.items():
+        key = (old[j].rationale, old[j].written)
+        rivals = pins_by_row.get(key, set()) - {new[i].pin}
+        if rivals and (new[i].rationale, new[i].written) != key and _stands_for(new[i], old[j]):
+            contests.append((i, old[j].pin, rivals))
+    if not contests:
+        return set()
+    budget = pin_growth._Budget(pin_growth.STEP_BUDGET)
+    pairs = {}
+
+    def kept(q, p):
+        for key, text in ((("after", q), texts[q][1]), (("before", p), old_texts[p][1])):
+            if key not in pairs:
+                pairs[key] = _word_pairs(text)
+        mine, theirs = pairs["after", q], pairs["before", p]
+        budget.spend(len(mine) + len(theirs))
+        whole = sum(theirs.values())
+        return sum((mine & theirs).values()) / whole if whole else 0
+
+    ahead = set()
+    for i, p, rivals in contests:
+        share = kept(new[i].pin, p)
+        if all(kept(q, p) < share for q in rivals):
+            ahead.add(i)
+    return ahead
+
+
 def _invalid_override(before: str, after: str) -> tuple[Optional[str], tuple]:
     """The deny reason for an invalid size override on a pin the change adds
     or edits, else None, and the pins whose override the size check must count
@@ -569,12 +614,13 @@ def _invalid_override(before: str, after: str) -> tuple[Optional[str], tuple]:
     before_spans = _spans(before_doc, before_located)
     old = _rationales(before_doc, before_spans)
     row_of = {row.pin: j for j, row in enumerate(old) if row.pin is not None}
-    source, own = {}, {}
+    source, own, ahead = {}, {}, set()
     if new and row_of:
-        source = _sources(_pin_texts(before_doc, before_spans), _pin_texts(doc, spans),
-                          sorted({row.pin for row in new}), sorted(row_of))
+        texts, old_texts = _pin_texts(doc, spans), _pin_texts(before_doc, before_spans)
+        source = _sources(old_texts, texts, sorted({row.pin for row in new}), sorted(row_of))
         own = {i: row_of[source[row.pin]] for i, row in enumerate(new) if row.pin in source}
-    matched = _match(new, old, own)
+        ahead = _ahead(new, old, own, texts, old_texts)
+    matched = _match(new, old, own, ahead)
     for i, row in enumerate(new):
         reason = None if i in matched else _validate_override_rationale(row.rationale)
         if reason is not None:
