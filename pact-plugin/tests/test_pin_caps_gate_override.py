@@ -1121,3 +1121,41 @@ def test_an_exact_copy_of_an_invalid_override_losing_the_heading_tiebreak_is_ref
     assert (decision.verdict, decision.cause) == ("DENY", "override"), decision
     assert decision.reason == ("Pin cap violation (invalid override): Override rationale is 121 chars "
                                "(max: 120). Shorten it.")
+
+
+# With no exact copy the same rule decides: the pin keeping the most of the
+# old text keeps its own edited row's old row, and on an equal share the
+# mapping's choice does, unless the texts read the same.
+MOVED_ALL = TOKENS + " m0 m1 m2 m3"
+NO_COPY = [
+    ("the heading's pin keeping half padded, another keeping all reconfirmed",
+     [(_plain(PADDED), "Orig", HALF), (_plain(SPACED, True), "Moved", MOVED_ALL)], "DENY"),
+    ("the heading's pin keeping half reconfirmed, another keeping all padded",
+     [(_plain(SPACED, True), "Orig", HALF), (_plain(PADDED), "Moved", MOVED_ALL)], "ALLOW"),
+    ("equal halves reading differently, the heading's pin padded",
+     [(_plain(PADDED), "Orig", HALF), (_plain(SPACED, True), "Moved", OTHER_HALF)], "ALLOW"),
+    ("equal halves reading differently, the other pin padded",
+     [(_plain(SPACED, True), "Orig", HALF), (_plain(PADDED), "Moved", OTHER_HALF)], "DENY"),
+    ("equal halves reading the same, the heading's pin padded",
+     [(_plain(PADDED), "Orig", HALF), (_plain(SPACED, True), "Moved", HALF)], "ALLOW"),
+    ("equal halves reading the same, the other pin padded",
+     [(_plain(SPACED, True), "Orig", HALF), (_plain(PADDED), "Moved", HALF)], "DENY"),
+]
+
+
+@pytest.mark.parametrize("name, after, verdict", NO_COPY, ids=[row[0] for row in NO_COPY])
+def test_with_no_exact_copy_the_pin_keeping_most_of_the_old_text_keeps_its_row(name, after, verdict):
+    decision = gate_decision(_named((_plain(SPACED), "Orig", TOKENS)), *_write(_named(*after)))
+    assert decision.verdict == verdict, (name, decision)
+
+
+def test_a_lone_padded_copy_on_a_new_over_cap_pin_is_no_contest():
+    """The original keeps its body under a different valid override, and a new
+    over-cap pin carries the only row standing for the old one, padded. With
+    one row standing for it there is no contest, so the new pin gains no
+    carry and is refused as a new over-cap pin without a valid override."""
+    body = " ".join(f"o{k}" + "w" * 80 for k in range(20))
+    after = _named((_plain("another rationale entirely, still within the cap"), "Orig", body + " extra words"),
+                   (_plain(PADDED), "Copy", body))
+    decision = gate_decision(_named((_plain(SPACED), "Orig", body)), *_write(after))
+    assert (decision.verdict, decision.cause) == ("DENY", "size"), decision

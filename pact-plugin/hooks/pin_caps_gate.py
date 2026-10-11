@@ -516,19 +516,22 @@ def _sources(before: list, after: list, wanted, offered) -> dict:
 
 
 def _contest(new: list, old: list, source: dict, texts: list, old_texts: list) -> dict:
-    """{new index: old index}: for each old pin's row that one new row copies
-    exactly while another stands for it edited, the edited row of the pin
-    that continues it, which takes it ahead of every copy. The pins whose
-    rows stand for the old row compete: the one keeping the most of the old
-    pin's word pairs (`_share`, given each pin's (heading, body) in `texts`
-    and `old_texts`) continues it; on an equal share, the pin `source` maps
-    to the old pin does, unless another leader's body reads the same
+    """{new index: old index}: for each old pin's row that two or more new
+    rows stand for, one of them edited, the edited row of the pin that
+    continues it, which takes it ahead of every other. The pins whose rows
+    stand for the old row compete: the one keeping the most of the old pin's
+    word pairs (`_share`, given each pin's (heading, body) in `texts` and
+    `old_texts`) continues it; on an equal share, the pin `source` maps to
+    the old pin does, unless another leader's body reads the same
     (whitespace collapsed), which is a tie that names none. A pin `source`
-    maps to another old pin continues none here. The pins that may lead are
-    those holding a word pair of the old pin's body and the pin `source`
-    maps to it; where none of them keeps any, every row standing for the
-    old row leads. Each row and word pair examined spends a step of the
-    pin-growth rule's budget (`STEP_BUDGET`), and past it raises
+    maps to another old pin continues none here. Where no new row copies the
+    old row exactly, the pin `source` maps to it takes the old row next
+    anyway, so only another continuation is given a place, and an old row
+    whose mapped pin keeps all of its word pairs is not contested. The pins
+    that may lead are those holding a word pair of the old pin's body and
+    the pin `source` maps to it; where none of them keeps any, every row
+    standing for the old row leads. Each row and word pair examined spends a
+    step of the pin-growth rule's budget (`STEP_BUDGET`), and past it raises
     `SizeBound`."""
     from shared import pin_growth
 
@@ -536,8 +539,8 @@ def _contest(new: list, old: list, source: dict, texts: list, old_texts: list) -
     for i, row in enumerate(new):
         exact[row.rationale, row.written].append(i)
         row_at[row.pin] = i
-    copied = [j for j, row in enumerate(old) if row.pin is not None and (row.rationale, row.written) in exact]
-    if not copied:
+    pinned = [j for j, row in enumerate(old) if row.pin is not None]
+    if not pinned:
         return {}
     budget = pin_growth._Budget(pin_growth.STEP_BUDGET)
     pairs, holders = {}, defaultdict(set)  # word pair -> after pins with an override row holding it
@@ -562,9 +565,13 @@ def _contest(new: list, old: list, source: dict, texts: list, old_texts: list) -
 
     mapped = {p: q for q, p in source.items()}
     ahead = {}
-    for j in copied:
+    for j in pinned:
         row, p = old[j], old[j].pin
         same = (row.rationale, row.written)
+        copied = same in exact
+        mine = row_at.get(mapped.get(p))
+        if not copied and mine is not None and _stands_for(new[mine], row) and kept(new[mine].pin, p) == 1:
+            continue
         near = {mapped[p]} & row_at.keys() if p in mapped else set()
         for pair in word_pairs("before", p, old_texts[p][1]):
             found = holders.get(pair, ())
@@ -577,6 +584,8 @@ def _contest(new: list, old: list, source: dict, texts: list, old_texts: list) -
         top = max(shares.values())
         leaders = [i for i in claims if shares[i] == top]
         if top == 0:
+            if not copied:
+                continue
             budget.spend(len(new))
             leaders = [i for i in range(len(new)) if _stands_for(new[i], row)]
         if len(leaders) > 1:
@@ -585,8 +594,16 @@ def _contest(new: list, old: list, source: dict, texts: list, old_texts: list) -
                 continue
             leaders = named
         i = leaders[0]
-        if (new[i].rationale, new[i].written) != same and source.get(new[i].pin, p) == p:
-            ahead.setdefault(i, j)
+        if (new[i].rationale, new[i].written) == same or source.get(new[i].pin, p) != p:
+            continue
+        if not copied:
+            if new[i].pin == mapped.get(p):
+                continue
+            if len(claims) < 2:
+                budget.spend(len(new))
+                if not any(k != i and _stands_for(new[k], row) for k in range(len(new))):
+                    continue
+        ahead.setdefault(i, j)
     return ahead
 
 
