@@ -213,24 +213,27 @@ class _Edges:
     reconfirmed, and otherwise for a reconfirmed old row whose written text
     starts with the new read. A read with no word character trims to nothing
     and has no cut edge: it stands only for an old row with the same read.
-    Each kind of edge is one list of old rows in their order, shared by every
-    new row with that read or group: so a reconfirmed new row stands for any
-    old row in its group."""
+    Each kind of edge is one list of old rows in `order` (row order when none
+    is given), shared by every new row with that read or group: so a
+    reconfirmed new row stands for any old row in its group."""
 
-    def __init__(self, old: list):
+    def __init__(self, old: list, order=None):
+        order = range(len(old)) if order is None else order
+        self.rank = {j: n for n, j in enumerate(order)}
         self.groups = defaultdict(list)  # trimmed read -> old rows
         self.same = defaultdict(list)  # read -> old rows
         self.exact = defaultdict(list)  # (read, written) -> old rows
         self.identical = defaultdict(list)  # (uncollapsed read, written) -> old rows
-        written = defaultdict(list)  # trimmed read -> (written, old row)
-        for j, row in enumerate(old):
+        written = defaultdict(list)  # trimmed read -> (written, rank, old row)
+        for j in order:
+            row = old[j]
             group = row.group
             self.groups[group].append(j)
             self.same[row.key].append(j)
             self.exact[row.key, row.written].append(j)
             self.identical[row.rationale, row.written].append(j)
             if row.written is not None:
-                written[group].append((row.written, j))
+                written[group].append((row.written, self.rank[j], j))
         self.written = {group: sorted(rows) for group, rows in written.items()}
         self.prefixed = {}
 
@@ -252,16 +255,16 @@ class _Edges:
 
     def _prefixed(self, group: str, read: str) -> list:
         """The reconfirmed old rows of `group` whose written text starts with
-        `read`, in row order. Kept once worked out: an old row's written text
+        `read`, in the edges' order. Kept once worked out: an old row's written text
         has one prefix per character, so all of them together are no larger
         than the text."""
         if read not in self.prefixed:
             rows = self.written.get(group, ())
             found, k = [], bisect.bisect_left(rows, (read,))
             while k < len(rows) and rows[k][0].startswith(read):
-                found.append(rows[k][1])
+                found.append(rows[k][2])
                 k += 1
-            self.prefixed[read] = sorted(found)
+            self.prefixed[read] = sorted(found, key=self.rank.__getitem__)
         return self.prefixed[read]
 
 
@@ -298,7 +301,8 @@ def _augment(start: int, owner: dict, seen: set, scan, free, budget) -> bool:
     return False
 
 
-def _match(new: list, old: list, own: Optional[dict] = None, ahead: Optional[dict] = None, budget=None) -> dict:
+def _match(new: list, old: list, own: Optional[dict] = None, ahead: Optional[dict] = None, budget=None,
+           order=None) -> dict:
     """A maximum matching of the new rows to the old rows `_Edges` allows, as
     {new index: old index}.
 
@@ -322,13 +326,16 @@ def _match(new: list, old: list, own: Optional[dict] = None, ahead: Optional[dic
     Every walk over an edge list is shared by the rows that share the list:
     an old row once held is never freed, so a search for a free row resumes
     where the last one stopped, and within one search an old row seen once is
-    skipped by every row. The work spends steps of `budget`, the override
-    matching's own when none is given, and past it raises `SizeBound`."""
+    skipped by every row. Wherever rows could take one of several old rows,
+    they look at the old rows in `order` (`_old_order`), so which of two old
+    rows alike in all but position a row holds does not follow the text. The
+    work spends steps of `budget`, the override matching's own when none is
+    given, and past it raises `SizeBound`."""
     from shared import pin_growth
 
     if budget is None:
         budget = pin_growth._Budget(part=pin_growth.MATCHING)
-    edges = _Edges(old)
+    edges = _Edges(old, order)
     owner, cursors, passes, seen = {}, {}, {}, set()
 
     def first_free(i, rank):
@@ -421,8 +428,10 @@ def _spans_are_pins(doc, located, spans: list) -> bool:
 
 
 def _pin_texts(doc, spans: list) -> list:
-    """(heading, body) for each pin span: the heading row whitespace-collapsed
-    and casefolded, and the rows under it as written."""
+    """(heading, body, raw) for each pin span: the heading row whitespace-
+    collapsed and casefolded, the rows under it joined by spaces, and raw:
+    the heading row, the span's first row (the pin's comment row) and the
+    rows under the heading, each as written."""
     from shared.claude_md_markers import Kind
     from shared.pin_growth import _is_head
 
@@ -430,8 +439,9 @@ def _pin_texts(doc, spans: list) -> list:
     for first, end in spans:
         row = next(j for j in range(first, end + 1)
                    if doc.lines[j].kind is Kind.PROSE and _is_head(doc.lines[j].content))
-        texts.append((" ".join(doc.lines[row].content.split()).casefold(),
-                      " ".join(doc.lines[j].content for j in range(row + 1, end + 1))))
+        under = [doc.lines[j].content for j in range(row + 1, end + 1)]
+        texts.append((" ".join(doc.lines[row].content.split()).casefold(), " ".join(under),
+                      (doc.lines[row].content, doc.lines[first].content, "\n".join(under))))
     return texts
 
 
@@ -518,6 +528,23 @@ def _sources(before: list, after: list, wanted, offered) -> dict:
     return source
 
 
+def _old_key(row: _Row, old_texts: list) -> tuple:
+    """The content an old row sorts by where position must not decide: its
+    pin's heading and body as `_pin_texts` reads them, its rationale and
+    written text, then its pin's heading row, comment row and body exactly as
+    written. An old row heading no pin sorts after every pin's, by its own
+    rationale and written text."""
+    if row.pin is None:
+        return (1, "", "", row.rationale, row.written or "", "", "", "")
+    heading, body, raw = old_texts[row.pin]
+    return (0, heading, body, row.rationale, row.written or "", *raw)
+
+
+def _old_order(old: list, old_texts: list) -> list:
+    """The old rows' indices in `_old_key` order."""
+    return sorted(range(len(old)), key=lambda j: _old_key(old[j], old_texts))
+
+
 def _contest(new: list, old: list, source: dict, texts: list, old_texts: list) -> dict:
     """{new index: old index}: for each old pin's row that two or more new
     rows stand for, one of them edited, the edited row of the pin that
@@ -545,8 +572,8 @@ def _contest(new: list, old: list, source: dict, texts: list, old_texts: list) -
     that row to an exact copy on a pin keeping strictly less of the old pin
     (on an equal share the copy, being the old row, takes it). A row leading
     two or more old rows takes the one whose old pin it keeps the most of,
-    and on an equal share the one whose old pin's content sorts first, so
-    the order of the pins decides nothing. Each row and word pair examined
+    and on an equal share the one whose old pin's content sorts first
+    (`_old_key`), so the order of the pins decides nothing. Each row and word pair examined
     spends a step of the override contest's budget, and past it raises
     `SizeBound`."""
     from shared import pin_growth
@@ -648,7 +675,7 @@ def _contest(new: list, old: list, source: dict, texts: list, old_texts: list) -
                     continue
         placed[i].append((shares.get(i, 0), j))
     def content(j):
-        return (*old_texts[old[j].pin], old[j].rationale, old[j].written or "")
+        return _old_key(old[j], old_texts)
 
     ahead = {}
     for i, leads in placed.items():
@@ -734,8 +761,10 @@ def _invalid_override(before: str, after: str) -> tuple[Optional[str], tuple]:
         source = _sources(old_texts, texts, sorted({row.pin for row in new}), sorted(row_of))
         own = {i: row_of[source[row.pin]] for i, row in enumerate(new) if row.pin in source}
         ahead = _contest(new, old, source, texts, old_texts)
+    if new and row_of and not old_texts:
+        old_texts = _pin_texts(before_doc, before_spans)
     budget = pin_growth._Budget(part=pin_growth.MATCHING)
-    matched = _match(new, old, own, ahead, budget)
+    matched = _match(new, old, own, ahead, budget, _old_order(old, old_texts) if new else None)
     for i, row in enumerate(new):
         reason = None if i in matched else _validate_override_rationale(row.rationale)
         if reason is not None:

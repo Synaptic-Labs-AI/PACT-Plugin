@@ -1454,3 +1454,93 @@ def test_a_pin_keeping_none_of_its_mapped_pins_text_still_competes_for_another_o
              (_plain(GUIDE), "Second", " ".join(second[1:])),
              (_plain(HANDBOOK), "Copy", " ".join(third[:2]))]
     assert _every_order(before, after) == {"ALLOW"}
+
+
+# Old pins alike in every way the contest compares but their raw text: which
+# of them a row holds, where the contest places it, and the carry, follow the
+# pins' text, never their order in the file.
+def _raw_doc(pins):
+    return _doc("\n".join(f"{row}\n{heading}\n{body}\n" for row, heading, body in pins))
+
+
+def _held(before, after):
+    """{new pin's raw comment row and heading: old pin's raw text held} after
+    the matching, plus the contest's placements and the carry, by raw text."""
+    import pin_caps_gate
+    from shared.claude_md_markers import parse
+    from shared.pin_growth import locate_pinned
+
+    def raw(text):
+        doc = parse(text)
+        return [t[2] for t in pin_caps_gate._pin_texts(doc, pin_caps_gate._spans(doc, locate_pinned(doc)))]
+
+    old_raw, new_raw = raw(before), raw(after)
+    seen = {}
+    match, contest = pin_caps_gate._match, pin_caps_gate._contest
+
+    def traced_match(new, old, *args, **kwargs):
+        result = match(new, old, *args, **kwargs)
+        seen["held"] = sorted((new_raw[new[i].pin], old_raw[old[j].pin]) for i, j in result.items()
+                              if old[j].pin is not None)
+        return result
+
+    def traced_contest(new, old, *args):
+        result = contest(new, old, *args)
+        seen["placed"] = sorted((new_raw[new[i].pin], old_raw[old[j].pin]) for i, j in result.items())
+        return result
+
+    pin_caps_gate._match, pin_caps_gate._contest = traced_match, traced_contest
+    try:
+        _reason, (revoked_old, revoked_new) = pin_caps_gate._invalid_override(before, after)
+    finally:
+        pin_caps_gate._match, pin_caps_gate._contest = match, contest
+    carry = (sorted(old_raw[p] for p in revoked_old), sorted(new_raw[q] for q in revoked_new))
+    return seen.get("held"), seen.get("placed"), carry
+
+
+def _twin_row(rationale, date="2026-05-26", lead="<!-- "):
+    return f"{lead}pinned: {date}, pin-size-override: {rationale} -->"
+
+
+_NFC, _NFD = "Café", "Café"
+TWINS = [
+    ("byte-identical", (_twin_row(SPACED), "### Guide"), (_twin_row(SPACED), "### Guide")),
+    ("dates differ", (_twin_row(SPACED), "### Guide"), (_twin_row(SPACED, "2026-07-01"), "### Guide")),
+    ("heading case differs", (_twin_row(SPACED), "### Guide"), (_twin_row(SPACED), "### GUIDE")),
+    ("heading spacing differs", (_twin_row(SPACED), "### Guide"), (_twin_row(SPACED), "###   Guide")),
+    ("comment-row spacing differs", (_twin_row(SPACED), "### Guide"), (_twin_row(SPACED, lead="<!--   "), "### Guide")),
+    ("NFC and NFD headings", (_twin_row(SPACED), f"### {_NFC}"), (_twin_row(SPACED), f"### {_NFD}")),
+]
+
+
+@pytest.mark.parametrize("name, first, second", TWINS, ids=[row[0] for row in TWINS])
+def test_which_twin_a_merged_pin_holds_follows_their_text_not_their_order(name, first, second):
+    """Two old pins alike but for their raw text are merged into a new pin,
+    which pads the override; a pin under the first twin's heading keeps half
+    the text, padded. In every order of the pins before and after, the
+    verdict, the reason, the old pin each row holds, the contest's placement
+    and the carry are the same."""
+    import itertools
+
+    body = " ".join(_tokens("t", 0, 20))
+    before = [(first[0], first[1], body), (second[0], second[1], body)]
+    after = [(_twin_row(PADDED), "### Merged", body), (_twin_row(PADDED), first[1], " ".join(_tokens("t", 0, 11)))]
+    outcomes = set()
+    for b in itertools.permutations(before):
+        for a in itertools.permutations(after):
+            decision = gate_decision(_raw_doc(b), *_write(_raw_doc(a)))
+            held = _held(_raw_doc(b), _raw_doc(a))
+            outcomes.add((decision.verdict, decision.reason, repr(held)))
+    assert len(outcomes) == 1, (name, outcomes)
+
+
+@pytest.mark.parametrize("name, first, second", TWINS[1:], ids=[row[0] for row in TWINS[1:]])
+def test_a_lone_padded_row_standing_for_two_twins_holds_the_same_one_in_either_order(name, first, second):
+    """A lone padded row, on a new pin keeping none of either twin's text,
+    stands for both twins' old rows and holds one of them; which one follows
+    the twins' text, whichever comes first in the file."""
+    body = " ".join(_tokens("t", 0, 20))
+    before = [(first[0], first[1], body), (second[0], second[1], body)]
+    after = [(_twin_row(PADDED), "### Lone", "lone body")]
+    held = {repr(_held(_raw_doc(b), _raw_doc(after))) for b in (before, before[::-1])}
+    assert len(held) == 1, (name, held)
