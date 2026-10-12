@@ -629,8 +629,7 @@ def test_the_carry_compares_the_merged_pins_texts_in_the_matchings_budget(monkey
 def test_the_trimmed_read_drops_exactly_the_trailing_run_the_reader_drops(key):
     """`_trimmed` ends the read at its last character `pin_caps._WORD_CHAR`
     matches, as the reader's cut does."""
-    from pin_caps import _WORD_CHAR
-    from pin_caps_gate import _trimmed
+    from pin_caps import _WORD_CHAR, _trimmed
 
     end = len(key)
     while end and not _WORD_CHAR.match(key, end - 1):
@@ -687,7 +686,7 @@ def test_the_timer_stopping_the_override_check_allows_with_the_stop_early_note(m
 
 def _stands_for(new, old):
     """The edge rule `_Edges` builds, written pair by pair."""
-    from pin_caps_gate import _trimmed
+    from pin_caps import _trimmed
 
     if new.key == old.key:
         return True
@@ -704,7 +703,8 @@ def test_the_matching_covers_as_many_invalid_rows_as_any_matching_can():
     import itertools
     import random
 
-    from pin_caps_gate import _match, _Row, _trimmed
+    from pin_caps import _trimmed
+    from pin_caps_gate import _match, _Row
 
     base = "y" * 119
     reads = [base, base + ".", base + "..", base + "!", base + "x"]

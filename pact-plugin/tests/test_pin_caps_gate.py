@@ -628,3 +628,24 @@ class TestPinCapsGate_RealHook:
         message = json.loads(result.stdout)["systemMessage"]
         assert "not checking pin caps" in message and "ModuleNotFoundError" in message
         assert "not checking pin caps" in result.stderr
+
+    @pytest.mark.parametrize("pin_caps, error", [
+        (None, "No module named 'pin_caps'"),
+        ('raise ImportError("pin_caps is broken")\n', "pin_caps is broken"),
+    ], ids=["pin_caps missing", "pin_caps raising"])
+    def test_a_pin_caps_load_failure_allows_and_says_so(self, tmp_path, pin_caps, error):
+        """With shared/ beside it but pin_caps missing or raising on import,
+        the gate allows the call and names the failure: it imports pin_caps
+        only inside its guarded imports or inside a function."""
+        lonely = tmp_path / "lonely"
+        shutil.copytree(HOOK.parent / "shared", lonely / "shared", ignore=shutil.ignore_patterns("__pycache__"))
+        hook = lonely / "pin_caps_gate.py"
+        shutil.copy(HOOK, hook)
+        if pin_caps is not None:
+            (lonely / "pin_caps.py").write_text(pin_caps, encoding="utf-8")
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text(_pins(12), encoding="utf-8")
+        result = _run_hook(tmp_path, _frame(claude_md, *_write(_pins(14))), hook=hook)
+        assert result.returncode == 0, result
+        message = json.loads(result.stdout)["systemMessage"]
+        assert "not checking pin caps" in message and error in message, message

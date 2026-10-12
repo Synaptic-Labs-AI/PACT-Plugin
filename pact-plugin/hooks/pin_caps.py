@@ -119,6 +119,8 @@ RECONFIRMED_DATE_RE = re.compile(r'reconfirmed:\s*(\d{4}-\d{2}-\d{2})', re.IGNOR
 #   <!-- pinned: 2026-04-11, pin-size-override: O (reconfirmed: 2026-07-25 because R) -->
 _PIN_COMMENT_START = re.compile(rf'\s*{_PIN_COMMENT_OPEN}', re.IGNORECASE)
 _WORD_CHAR = re.compile(r'\w')
+# A run of characters `_WORD_CHAR` does not match.
+_NON_WORD_RUN = re.compile(r'\W*')
 # The separators dropped before a reconfirmation when the rationale holds no
 # word character.
 _RECONFIRM_SEPARATORS = " \t\u00a0,;:/|(-\u2013\u2014"
@@ -249,6 +251,15 @@ def _date_comment_row(doc, floor: int, heading: int) -> Optional[int]:
     return None
 
 
+def _trimmed(text: str) -> str:
+    """`text` less its trailing run of non-word characters: one match from
+    the end of the reversed text. `override_rationale_text` drops this run
+    before a reconfirmation, and the pin-cap gate groups override rows by
+    it."""
+    run = _NON_WORD_RUN.match(text[::-1])  # always a match, empty when the text ends in a word character
+    return text[:len(text) - run.end()] if run else text
+
+
 def override_rationale_text(doc, row: int) -> Optional[str]:
     """The rationale field of the override comment on row `row` of `doc`,
     stripped, before any validity check; None when that row is not a PROSE
@@ -281,12 +292,8 @@ def override_rationale_text(doc, row: int) -> Optional[str]:
         # the run of non-word characters before it. A rationale with no word
         # character (a symbol, an emoji) would be dropped with it, so it loses
         # only the separator.
-        end = reconfirm.start()
-        while end and not _WORD_CHAR.match(rationale, end - 1):
-            end -= 1
-        if not end:
-            end = len(rationale[:reconfirm.start()].rstrip(_RECONFIRM_SEPARATORS))
-        rationale = rationale[:end]
+        head = rationale[:reconfirm.start()]
+        rationale = _trimmed(head) or head.rstrip(_RECONFIRM_SEPARATORS)
     return rationale.strip()
 
 

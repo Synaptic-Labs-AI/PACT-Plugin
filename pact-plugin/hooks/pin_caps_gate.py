@@ -49,7 +49,6 @@ from __future__ import annotations
 # ─── stdlib first (used by _emit_load_failure_allow BEFORE wrapped imports) ─
 import bisect
 import json
-import re
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -113,18 +112,6 @@ def _collapsed(content: str) -> str:
     return " ".join(content.split())
 
 
-# A run of characters `pin_caps._WORD_CHAR` (\w) does not match.
-_NON_WORD_RUN = re.compile(r"\W*")
-
-
-def _trimmed(key: str) -> str:
-    """`key` less its trailing run of non-word characters, the run
-    `override_rationale_text` drops before a reconfirmation: one match from
-    the end of the reversed read."""
-    run = _NON_WORD_RUN.match(key[::-1])  # always a match, empty when the read ends in a word character
-    return key[:len(key) - run.end()] if run else key
-
-
 class _Row(NamedTuple):
     """An override comment as `_invalid_override` compares it."""
 
@@ -134,7 +121,7 @@ class _Row(NamedTuple):
     # it, whitespace collapsed; None when no reconfirmation follows the field.
     written: Optional[str]
     pin: Optional[int]  # the index of the pin it heads in a located Pinned section
-    group: str  # the read less its trailing non-word run (`_trimmed`)
+    group: str  # the read less its trailing non-word run (`pin_caps._trimmed`)
 
     @property
     def valid(self) -> bool:
@@ -144,7 +131,7 @@ class _Row(NamedTuple):
 def _row(content: str, rationale: str, pin: Optional[int]) -> _Row:
     """The `_Row` for the override comment `content`, whose rationale
     `override_rationale_text` read as `rationale`."""
-    from pin_caps import _OVERRIDE_FIELD, RECONFIRMED_DATE_RE
+    from pin_caps import _OVERRIDE_FIELD, RECONFIRMED_DATE_RE, _trimmed
 
     field = _OVERRIDE_FIELD.search(content)
     reconfirm = RECONFIRMED_DATE_RE.search(content, field.end()) if field else None
