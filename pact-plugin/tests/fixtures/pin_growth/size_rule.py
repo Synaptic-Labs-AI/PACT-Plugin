@@ -13,7 +13,7 @@ from pin_caps import _size_reason, _violates, _word_pairs
 def size_rule(*, share=0.5, heading_edges=True, content_edges=True, max_check=True, sum_check=True,
               orphan_pairing=True, line_links=True, pair_links=True, pair_share=True,
               free_needs_empty_component=True, free_needs_no_successor=True):
-    def rule(pre_pins, post_pins):
+    def rule(pre_pins, post_pins, budget=None):  # the copy counts no steps
         bad = [q for q, pin in enumerate(post_pins) if _violates(pin)]
         if not bad:
             return None

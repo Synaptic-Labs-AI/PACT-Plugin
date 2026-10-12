@@ -17,7 +17,7 @@ change and not from a difference in the copy.
 
 import collections
 import copy
-from typing import Callable, NamedTuple, Tuple
+from typing import Callable, List, NamedTuple, Optional, Tuple
 
 import pytest
 
@@ -238,7 +238,7 @@ def test_each_mutant_flips_its_red_rows(mutant, monkeypatch):
         ran.append(current[0])
         return replacement(*args, **kwargs)
 
-    current = [None]
+    current: List[Optional[str]] = [None]
     monkeypatch.setattr(pin_growth, mutant.replaces, spy)
     survivors = []
     for row in rows:
@@ -254,7 +254,7 @@ def test_every_clause_function_has_a_mutant():
     names = {n for n in dir(pin_growth) if n.startswith("clause_") and callable(getattr(pin_growth, n))}
     assert names == set(CLAUSES), names
     covered = {m.replaces for m in MUTANTS}
-    assert set(CLAUSES) <= covered, set(CLAUSES) - covered
+    assert set(CLAUSES) <= covered, set[str](CLAUSES) - covered
 
 
 def test_every_red_row_exists_and_every_mutant_has_one():
@@ -282,7 +282,7 @@ def test_each_replacement_base_decides_as_the_clause_it_stands_in_for():
              + H.items_from_cases(G.layout_stream(1, 300))
              + H.items_from_cases(G.commented_stream(G.layout_stream(1, 150))))
     calls, mismatches = collections.Counter(), collections.defaultdict(list)
-    current = [None]
+    current: List[Optional[str]] = [None]
 
     def compare(name, original, base):
         def wrapper(*args):
@@ -336,8 +336,8 @@ def test_the_moved_block_search_charges_one_step_per_line_its_run_check_compares
     spent = []
 
     class Recording(pin_growth._Budget):
-        def __init__(self, limit):
-            super().__init__(limit)
+        def __init__(self, limit=None, part=pin_growth.GROWTH_RULE):
+            super().__init__(limit, part)
             spent.append(self)
 
     monkeypatch.setattr(pin_growth, "_Budget", Recording)

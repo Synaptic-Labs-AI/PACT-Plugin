@@ -38,8 +38,8 @@ def test_each_size_row_gets_its_verdict(row):
 def test_the_copy_with_every_part_on_decides_as_the_shipped_rule(monkeypatch):
     shipped, copy, calls, differ = pin_growth.size_violation, size_rule(), [], []
 
-    def compare(pre_pins, post_pins):
-        result = shipped(pre_pins, post_pins)
+    def compare(pre_pins, post_pins, budget=None):
+        result = shipped(pre_pins, post_pins, budget)
         calls.append(1)
         if copy(pre_pins, post_pins) != result:
             differ.append(result)
@@ -128,7 +128,7 @@ def _deny_with_heading(heading):
     before = S.doc(S.pin(1))
     new_pin = S.pin(2, body=S.words("beta", 1600)).replace("### Pin 2\n", f"### {heading}\n")
     decision = pin_growth.pin_cap_decision(before, S.doc(S.pin(1) + "\n" + new_pin), use_timer=False)
-    assert (decision.verdict, decision.cause) == ("DENY", "size")
+    assert (decision.verdict, decision.cause) == ("DENY", "size") and decision.reason is not None
     return decision.reason
 
 
@@ -178,7 +178,7 @@ def test_a_denial_lists_at_most_five_pins_and_counts_the_rest():
     after = S.doc("\n".join(S.pin(1 if i == 0 else 100 + i, body=chunk + "\none more line")
                             for i, chunk in enumerate(chunks)))
     decision = pin_growth.pin_cap_decision(before, after, use_timer=False)
-    assert (decision.verdict, decision.cause) == ("DENY", "size")
+    assert (decision.verdict, decision.cause) == ("DENY", "size") and decision.reason is not None
     assert [position for position, _ in _LABEL.findall(decision.reason)] == ["1", "2", "3", "4", "5"]
     assert " and 2 other pins grew together (" in decision.reason
 
@@ -188,5 +188,5 @@ def test_comparing_only_the_worst_pins_misses_the_three_growth_targets(monkeypat
                "grow the 1600 pin to 1700 while an 1800 pin exists",
                "grow a 1400 pin to 1600 while an 1800 pin exists"]
     assert all(_verdict(ROWS[key]) == "DENY" for key in targets)
-    monkeypatch.setattr(pin_growth, "size_violation", lambda pre, post: compute_deny_reason(pre, post, growth=0))
+    monkeypatch.setattr(pin_growth, "size_violation", lambda pre, post, budget=None: compute_deny_reason(pre, post, growth=0))
     assert all(_verdict(ROWS[key]) == "ALLOW" for key in targets)

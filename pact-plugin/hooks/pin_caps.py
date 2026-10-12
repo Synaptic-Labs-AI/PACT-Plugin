@@ -21,6 +21,7 @@ divergence.
 
 from __future__ import annotations
 
+import bisect
 import json
 import re
 import unicodedata
@@ -729,7 +730,7 @@ def _word_pairs(pin: Pin) -> Counter:
     return Counter(f"{left} {right}" for left, right in zip(words, words[1:]))
 
 
-def size_violation(pre_pins: List[Pin], post_pins: List[Pin]) -> Optional[str]:
+def size_violation(pre_pins: List[Pin], post_pins: List[Pin], budget=None) -> Optional[str]:
     """The per-pin size rule: the deny text for the first pin over the size cap
     that the change made new or grew, or None. For a Pinned section located
     before the change.
@@ -743,7 +744,16 @@ def size_violation(pre_pins: List[Pin], post_pins: List[Pin]) -> Optional[str]:
     to more than those before. A violator after in a component that held none
     before must take a violator before with no successor, at least as large,
     that sits in a component with no violator after.
+
+    The work spends steps of `budget` when one is given (the decision gives
+    the pin-size rule's, which raises `SizeBound` past its limit): one per
+    pin, word pair and line read, and one per pin an index entry offers. The
+    indexes reach exactly the pins a comparison of every pair would find
+    sharing a word pair or a line, in the same order, so they decide as that
+    would.
     """
+    spend = budget.spend if budget is not None else (lambda steps: None)
+    spend(len(post_pins))
     bad = [q for q, pin in enumerate(post_pins) if _violates(pin)]
     if not bad:
         return None
@@ -762,34 +772,66 @@ def size_violation(pre_pins: List[Pin], post_pins: List[Pin]) -> Optional[str]:
     def normal(heading):
         return " ".join(heading.split()).casefold()
 
+    def holding(counters):
+        """item -> [(index, count)] over `counters`, in index order."""
+        index: Dict[str, list] = {}
+        for k, counter in enumerate(counters):
+            spend(len(counter) + 1)
+            for item, count in counter.items():
+                index.setdefault(item, []).append((k, count))
+        return index
+
+    def overlaps(mine, index):
+        """{index: the summed smaller count of each item both hold}."""
+        shared: Dict[int, int] = {}
+        for item, count in mine.items():
+            holders = index.get(item, ())
+            spend(1 + len(holders))
+            for k, theirs in holders:
+                shared[k] = shared.get(k, 0) + min(count, theirs)
+        return shared
+
     # `source` maps a post pin to the pre pin the deny text gives its size
     # before: its heading partner, else the first pre pin it holds the share
     # of word pairs from that is not already a source. Each pre pin is the
     # source of one post pin at most, so a copy or a split's other half reads
     # as new.
-    edges, descended, partnered, source = [], set(), set(), {}
+    edges, descended, source, sourced = [], set(), {}, set()
+    spend(len(pre_pins) + len(post_pins))
+    by_heading: Dict[str, list] = {}
+    for p, pre in enumerate(pre_pins):
+        by_heading.setdefault(normal(pre.heading), []).append(p)
+    taken_heading: Dict[str, int] = {}
     for q, post in enumerate(post_pins):
-        for p, pre in enumerate(pre_pins):
-            if p not in partnered and normal(pre.heading) == normal(post.heading):
-                partnered.add(p)
-                edges.append((p, q))
-                descended.add(p)
-                source[q] = p
-                break
+        key = normal(post.heading)
+        partners, k = by_heading.get(key, ()), taken_heading.get(key, 0)
+        if k < len(partners):
+            p = partners[k]
+            taken_heading[key] = k + 1
+            edges.append((p, q))
+            descended.add(p)
+            source[q] = p
+            sourced.add(p)
     pre_pairs = [_word_pairs(pin) for pin in pre_pins]
     post_pairs = [_word_pairs(pin) for pin in post_pins]
+    pre_wholes = [sum(pairs.values()) for pairs in pre_pairs]
+    pair_holders = holding(pre_pairs)
     for q, mine in enumerate(post_pairs):
         size = sum(mine.values())
         if not size:
             continue
-        for p, theirs in enumerate(pre_pairs):
-            shared = sum((mine & theirs).values())
+        shares = overlaps(mine, pair_holders)
+        spend(len(shares))
+        for p in sorted(shares):
+            shared = shares[p]
             if shared >= _DESCENT_SHARE * size:
                 edges.append((p, q))
-                if q not in source and p not in source.values():
+                if q not in source and p not in sourced:
                     source[q] = p
-            if sum(theirs.values()) and shared >= _DESCENT_SHARE * sum(theirs.values()):
+                    sourced.add(p)
+            if pre_wholes[p] and shared >= _DESCENT_SHARE * pre_wholes[p]:
                 descended.add(p)
+    spend(len(edges))
     for p, q in edges:
         join(("q", q), ("p", p))
 
@@ -798,37 +840,50 @@ def size_violation(pre_pins: List[Pin], post_pins: List[Pin]) -> Optional[str]:
     post_lines = [Counter(pin.lines) for pin in post_pins]
     kept_lines: Dict[tuple, Counter] = {}
     for q, lines in enumerate(post_lines):
+        spend(len(lines) + 1)
         kept_lines.setdefault(find(("q", q)), Counter()).update(lines)
+    line_holders = holding(post_lines)
     links = []
     for p, pin in enumerate(pre_pins):
         root = find(("p", p))
+        spend(len(pin.lines) + 1)
         lost = Counter(pin.lines) - kept_lines.get(root, Counter())
         if lost:
-            links.extend((p, q) for q, lines in enumerate(post_lines)
-                         if find(("q", q)) != root and lines & lost)
+            near = overlaps(lost, line_holders)
+            spend(len(near))
+            links.extend((p, q) for q in sorted(near) if find(("q", q)) != root)
     pairs_before: Dict[tuple, Counter] = {}
     pairs_after: Dict[tuple, Counter] = {}
     first_pre: Dict[tuple, int] = {}
     for p, pairs in enumerate(pre_pairs):
+        spend(len(pairs) + 1)
         root = find(("p", p))
         pairs_before.setdefault(root, Counter()).update(pairs)
         first_pre.setdefault(root, p)
     for q, pairs in enumerate(post_pairs):
+        spend(len(pairs) + 1)
         pairs_after.setdefault(find(("q", q)), Counter()).update(pairs)
     lost_pairs = {root: pairs - pairs_after.get(root, Counter()) for root, pairs in pairs_before.items()}
+    roots = list(lost_pairs)  # in the order a comparison of every component would visit them
+    lost_holders = holding([lost_pairs[root] for root in roots])
     for q, pairs in enumerate(post_pairs):
         root = find(("q", q))
+        spend(len(pairs) + 1)
         gained = pairs - pairs_before.get(root, Counter())
         count = sum(gained.values())
         if not count:
             continue
-        for other, lost in lost_pairs.items():
-            if other != root and lost and 2 * sum((gained & lost).values()) >= count:
-                links.append((first_pre[other], q))
+        common = overlaps(gained, lost_holders)
+        spend(len(common))
+        for k in sorted(common):
+            if roots[k] != root and 2 * common[k] >= count:
+                links.append((first_pre[roots[k]], q))
+    spend(len(links))
     for p, q in links:
         join(("q", q), ("p", p))
 
     components: Dict[tuple, tuple] = {}
+    spend(len(pre_pins) + len(bad))
     for p, pin in enumerate(pre_pins):
         if _violates(pin):
             components.setdefault(find(("p", p)), ([], []))[0].append(pin.body_chars)
@@ -846,12 +901,12 @@ def size_violation(pre_pins: List[Pin], post_pins: List[Pin]) -> Optional[str]:
     taken = {root for root, (_, after) in components.items() if after}
     free = sorted(pin.body_chars for p, pin in enumerate(pre_pins)
                   if _violates(pin) and p not in descended and find(("p", p)) not in taken)
+    spend(len(orphans) + len(free))
     for q in sorted(orphans, key=lambda q: post_pins[q].body_chars, reverse=True):
-        chars = post_pins[q].body_chars
-        fit = next((size for size in free if size >= chars), None)
-        if fit is None:
+        at = bisect.bisect_left(free, post_pins[q].body_chars)  # the smallest free size that fits
+        if at == len(free):
             return _size_reason(pre_pins, post_pins, source, [q], [])
-        free.remove(fit)
+        del free[at]
     return None
 
 

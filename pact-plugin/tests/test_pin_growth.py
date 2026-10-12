@@ -569,8 +569,8 @@ def _alternating(lines, flip, repeat="x"):
 class _SpyBudget(pin_growth._Budget):
     made = []
 
-    def __init__(self, limit):
-        super().__init__(limit)
+    def __init__(self, limit=None, part=pin_growth.GROWTH_RULE):
+        super().__init__(limit, part)
         _SpyBudget.made.append(self)
 
 

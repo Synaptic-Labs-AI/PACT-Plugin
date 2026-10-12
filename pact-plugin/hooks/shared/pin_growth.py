@@ -35,10 +35,20 @@ Each clause is a module-level function, called by its bare name at call time,
 so a mutation test can replace one by monkeypatching this module.
 
 THE BOUND. The alignment runs through `CountedMatcher`, which counts one step
-per outer row and per inner step of `find_longest_match`; the moved-block and
-edited-in-place searches count one step per line they compare. Past
-`STEP_BUDGET` steps the rule raises `SizeBound`, and the caller allows with the
-size advisory. A bound only ever allows.
+per outer row and per inner step of `find_longest_match`; the moved-block,
+re-fenced and edited-in-place searches count one step per line they compare,
+and the row passes one step per row. Past `STEP_BUDGET` steps the rule raises
+`SizeBound`, and the caller allows with the size advisory. A bound only ever
+allows.
+
+THE LIMITS. Every part of the pin-cap decision counts its work in a `_Budget`
+named for the part, and stops at its own limit in `LIMITS`: this rule, the
+per-pin size rule, and the pin-cap gate's override mapping, contest and
+matching. The limits are sized by what a step of each part costs, so that all
+of them together are spent well inside `TIMER_SECONDS` on a slow machine, and a
+large file stops at the same step on any machine. A text pair over `MAX_CHARS`
+characters stops before it is parsed (`check_size`). The timer stays as a
+backstop.
 
 THE DECISION. `pin_cap_decision` is the one verdict for the gate and the Bash
 report: no Pinned section anywhere after the change allows plainly, and one
@@ -47,7 +57,8 @@ the cap's pins after it denies on count; with a located section before, the
 size axis checks each new or grown pin's size on its own
 (`pin_caps.size_violation`) and allows when either the section's pins or the
 pins over R allow, and with none it compares the worst pins before and after;
-the budget, the timer and any failure allow with an advisory. It never raises.
+the size check, the budgets, the timer and any failure allow with an advisory.
+It never raises.
 """
 
 from __future__ import annotations
@@ -62,8 +73,30 @@ from pin_caps import PIN_COUNT_CAP, Pin, _charge, compute_deny_reason, pins_in_r
 from .claude_md_manager import MEMORY_END_MARKER, MEMORY_START_MARKER
 from .claude_md_markers import Document, Kind, Located, State, _closes, _opener, parse
 
-STEP_BUDGET = 70_000_000
 TIMER_SECONDS = 30
+
+# The parts of the pin-cap decision, as a stop note names them.
+GROWTH_RULE = "the pin-growth rule"
+SIZE_RULE = "the pin-size rule"
+MAPPING = "the pin mapping"
+CONTEST = "the override contest"
+MATCHING = "the override matching"
+
+# Each part's step limit. A step of the override check or the size rule costs
+# several of the alignment's, so their limits are smaller: all five together
+# take about 7 s on the slowest CI runner, under a quarter of the timer, and
+# each is hundreds of times what any ordinary edit of a real file spends.
+STEP_BUDGET = 12_000_000
+LIMITS = {
+    GROWTH_RULE: STEP_BUDGET,
+    SIZE_RULE: 1_400_000,
+    MAPPING: 1_500_000,
+    CONTEST: 1_500_000,
+    MATCHING: 1_000_000,
+}
+
+# Before plus after, in characters: past it the decision stops before parsing.
+MAX_CHARS = 1_000_000
 
 PACT_SECTIONS = ("## Working Memory", "## Retrieved Context")
 _PACT_SECTION_ROW = re.compile("(?:" + "|".join(map(re.escape, PACT_SECTIONS)) + r")[ \t]*$")
@@ -99,16 +132,29 @@ class Claims(NamedTuple):
 
 
 class _Budget:
-    __slots__ = ("limit", "spent")
+    """The steps one part of the decision may spend: `limit`, else the part's
+    own limit in `LIMITS`. Past it, `spend` raises `SizeBound` naming the part."""
 
-    def __init__(self, limit: int):
-        self.limit = limit
+    __slots__ = ("limit", "part", "spent")
+
+    def __init__(self, limit: int | None = None, part: str = GROWTH_RULE):
+        self.limit = LIMITS[part] if limit is None else limit
+        self.part = part
         self.spent = 0
 
     def spend(self, steps: int) -> None:
         self.spent += steps
         if self.spent > self.limit:
-            raise SizeBound(f"the pin-growth rule passed its step budget of {self.limit}")
+            raise SizeBound(f"{self.part} passed its step budget of {self.limit}")
+
+
+def check_size(before: str, after: str) -> None:
+    """Raise `SizeBound` when the two texts hold more than `MAX_CHARS`
+    characters together, before anything parses them."""
+    chars = len(before) + len(after)
+    if chars > MAX_CHARS:
+        raise SizeBound(f"the file is too large for the pin cap check ({chars} characters "
+                        f"before and after the change, over {MAX_CHARS})")
 
 
 class CountedMatcher(difflib.SequenceMatcher):
@@ -326,6 +372,7 @@ def clause_past_stray_heading(t: Texts, R: tuple[int, int]) -> tuple[int, int]:
         if not pre.find_lines(_PINNED_TERMINATOR, (row, row)) or pre.find_lines(_PACT_SECTION_ROW, (row, row)):
             break
         heading = re.compile(re.escape(pre.lines[row].content) + r"\s*$")
+        t.budget.spend(end - row + 1)
         section = pre.find_section(heading, _PINNED_TERMINATOR, (row, end), stop_prefixes=_PINNED_STOP_PREFIXES)
         if section.state is not State.FOUND or section.spans[0][0] != row:
             break
@@ -352,6 +399,7 @@ def clause_refenced(t: Texts, i: int, j: int) -> bool:
     lo, hi = i - (j - opener), i + (closer - j)
     if lo < 0 or hi >= len(t.a):
         return False
+    t.budget.spend(closer - opener + 1)
     if t.b[opener:closer + 1] == t.a[lo:hi + 1]:
         return True
     return (bool(_FENCE_SHAPE.match(t.pre.lines[lo].content))
@@ -502,6 +550,7 @@ def pin_growth(before: Document, after: Document, *, budget: int | None = None,
     a = [line.content.rstrip(" \t") for line in before.lines]
     b = [line.content.rstrip(" \t") for line in after.lines]
     steps = _Budget(STEP_BUDGET if budget is None else budget)
+    steps.spend(len(a) + len(b))  # one step per row for the row passes over both texts
     p2q, q2p = _align(a, b, steps, trim, _memory_range(before, after))
     t = Texts(before, after, a, b, p2q, q2p, S, steps, _fence_pairs(after), {})
     previous = locate_pinned(before)
@@ -603,14 +652,22 @@ def _size_pins(t: Texts, R: tuple[int, int], post_pins: list[Pin]) -> tuple[list
     """
     kept = []
     for span, pin in zip(pin_spans(t.post, t.S), post_pins):
+        t.budget.spend(span[1] - span[0] + 1)
         aligned = [t.q2p[j] for j in range(span[0], span[1] + 1)
                    if j in t.q2p and R[0] <= t.q2p[j] <= R[1] and t.b[j].strip()]
         if aligned:
             kept.append((pin, min(aligned), max(aligned)))
+    # later[index]: the first R row of every pin after `index`, at its least
+    later: list[int | None] = [None] * len(kept)
+    least: int | None = None
+    for index in range(len(kept) - 1, -1, -1):
+        later[index] = least
+        first = kept[index][1]
+        least = first if least is None else min(least, first)
     stretches, top = [], R[0] - 1
     for index, (_, _, last) in enumerate(kept):
-        later = [first for _, first, _ in kept[index + 1:]]
-        upper = max(last, (min(later) if later else R[1] + 1) - 1)
+        bound = later[index]
+        upper = max(last, (bound if bound is not None else R[1] + 1) - 1)
         stretches.append((top + 1, upper))
         top = max(top, last)
     if stretches and max(upper for _, upper in stretches) < R[1]:
@@ -631,9 +688,9 @@ def _not_found_text(located: Located) -> str:
 def pin_cap_decision(before: str, after: str, *, use_timer: bool = True, trim: bool = True,
                      revoked: tuple = ((), ())) -> PinDecision:
     """The pin cap's verdict on a change from `before` to `after` (whole texts;
-    `before` is "" when no file resolved). Never raises: the step budget or the
-    timer, which covers the whole decision, allows with the size advisory, and
-    any other failure allows with an advisory, cause "error".
+    `before` is "" when no file resolved). Never raises: the size check, a step
+    budget or the timer, which covers the whole decision, allows with the size
+    advisory, and any other failure allows with an advisory, cause "error".
 
     `revoked` holds the indices, among the pins of the Pinned section before
     and after, of pins whose size override counts as none."""
@@ -654,6 +711,7 @@ def _revoke(pins: list[Pin], indices) -> list[Pin]:
 def _decide(before: str, after: str, trim: bool, revoked: tuple = ((), ())) -> PinDecision:
     from staleness import locate_pinned as locate_any_pinned
 
+    check_size(before, after)
     after_doc = parse(after)
     located = locate_pinned(after_doc)
     if located.state is not State.FOUND:
@@ -680,10 +738,12 @@ def _decide(before: str, after: str, trim: bool, revoked: tuple = ((), ())) -> P
         else:
             size_before, size_after = _size_pins(t, R, post_pins)
         pins_before = len(post_pins) - (growth or 0)
+    # Both size_violation calls spend from one budget.
+    size_budget = _Budget(part=SIZE_RULE) if found_before else None
     if found_before:
         # Each new or grown pin's size on its own, renames and moves kept as
         # the same pin.
-        size_reason = size_violation(size_before, size_after)
+        size_reason = size_violation(size_before, size_after, size_budget)
     else:
         size_reason = compute_deny_reason(size_before, size_after, growth=0)
     if size_reason is not None and found_before:
@@ -694,7 +754,7 @@ def _decide(before: str, after: str, trim: bool, revoked: tuple = ((), ())) -> P
         if growth is None:
             growth = pin_growth(before_doc, after_doc, trim=trim, detail=detail)
             pins_before = len(post_pins) - (growth or 0)
-        if size_violation(pins_in_rows(before_doc, *detail["region"]), size_after) is None:
+        if size_violation(pins_in_rows(before_doc, *detail["region"]), size_after, size_budget) is None:
             size_reason = None
     growth = growth or 0
     if growth > 0 and len(post_pins) > PIN_COUNT_CAP:
