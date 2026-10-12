@@ -49,6 +49,7 @@ from __future__ import annotations
 # ─── stdlib first (used by _emit_load_failure_allow BEFORE wrapped imports) ─
 import bisect
 import json
+import re
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -112,15 +113,16 @@ def _collapsed(content: str) -> str:
     return " ".join(content.split())
 
 
+# A run of characters `pin_caps._WORD_CHAR` (\w) does not match.
+_NON_WORD_RUN = re.compile(r"\W*")
+
+
 def _trimmed(key: str) -> str:
     """`key` less its trailing run of non-word characters, the run
-    `override_rationale_text` drops before a reconfirmation."""
-    from pin_caps import _WORD_CHAR
-
-    end = len(key)
-    while end and not _WORD_CHAR.match(key, end - 1):
-        end -= 1
-    return key[:end]
+    `override_rationale_text` drops before a reconfirmation: one match from
+    the end of the reversed read."""
+    run = _NON_WORD_RUN.match(key[::-1])  # always a match, empty when the read ends in a word character
+    return key[:len(key) - run.end()] if run else key
 
 
 class _Row(NamedTuple):
@@ -132,6 +134,7 @@ class _Row(NamedTuple):
     # it, whitespace collapsed; None when no reconfirmation follows the field.
     written: Optional[str]
     pin: Optional[int]  # the index of the pin it heads in a located Pinned section
+    group: str  # the read less its trailing non-word run (`_trimmed`)
 
     @property
     def valid(self) -> bool:
@@ -146,7 +149,8 @@ def _row(content: str, rationale: str, pin: Optional[int]) -> _Row:
     field = _OVERRIDE_FIELD.search(content)
     reconfirm = RECONFIRMED_DATE_RE.search(content, field.end()) if field else None
     written = _collapsed(content[field.end():reconfirm.start()]) if field and reconfirm else None
-    return _Row(rationale, _collapsed(rationale), written, pin)
+    key = _collapsed(rationale)
+    return _Row(rationale, key, written, pin, _trimmed(key))
 
 
 def _rationales(doc, spans: list) -> list:
@@ -188,10 +192,15 @@ def _stands_for(new: _Row, old: _Row) -> bool:
     reads that keep a word character."""
     if new.key == old.key:
         return True
-    group = _trimmed(new.key)
-    if not group or group != _trimmed(old.key):
+    if not new.group or new.group != old.group:
         return False
     return new.written is not None or (old.written is not None and old.written.startswith(new.key))
+
+
+def _bucket(row: _Row):
+    """The rows `row` may stand for, or that may stand for it, share this:
+    its group, or, when its read trims to nothing, the read itself."""
+    return row.group or ("", row.key)
 
 
 class _Edges:
@@ -209,14 +218,13 @@ class _Edges:
     old row in its group."""
 
     def __init__(self, old: list):
-        self.trimmed = {}  # read -> trimmed read
         self.groups = defaultdict(list)  # trimmed read -> old rows
         self.same = defaultdict(list)  # read -> old rows
         self.exact = defaultdict(list)  # (read, written) -> old rows
         self.identical = defaultdict(list)  # (uncollapsed read, written) -> old rows
         written = defaultdict(list)  # trimmed read -> (written, old row)
         for j, row in enumerate(old):
-            group = self._group(row.key)
+            group = row.group
             self.groups[group].append(j)
             self.same[row.key].append(j)
             self.exact[row.key, row.written].append(j)
@@ -226,15 +234,10 @@ class _Edges:
         self.written = {group: sorted(rows) for group, rows in written.items()}
         self.prefixed = {}
 
-    def _group(self, read: str) -> str:
-        if read not in self.trimmed:
-            self.trimmed[read] = _trimmed(read)
-        return self.trimmed[read]
-
     def lists(self, row: _Row, rank: Optional[int] = None) -> list:
         """(name, old rows) for `row`'s edges of `rank`, or of every rank in
         rank order; the name is shared by every new row with the same list."""
-        group = self._group(row.key)
+        group = row.group
         out = []
         if rank in (None, 0):
             out.append((("exact", row.key, row.written), self.exact.get((row.key, row.written), ())))
@@ -295,7 +298,7 @@ def _augment(start: int, owner: dict, seen: set, scan, free, budget) -> bool:
     return False
 
 
-def _match(new: list, old: list, own: Optional[dict] = None, ahead: Optional[dict] = None) -> dict:
+def _match(new: list, old: list, own: Optional[dict] = None, ahead: Optional[dict] = None, budget=None) -> dict:
     """A maximum matching of the new rows to the old rows `_Edges` allows, as
     {new index: old index}.
 
@@ -319,11 +322,12 @@ def _match(new: list, old: list, own: Optional[dict] = None, ahead: Optional[dic
     Every walk over an edge list is shared by the rows that share the list:
     an old row once held is never freed, so a search for a free row resumes
     where the last one stopped, and within one search an old row seen once is
-    skipped by every row. The work spends steps of the pin-growth rule's
-    budget (`STEP_BUDGET`) and past it raises `SizeBound`."""
+    skipped by every row. The work spends steps of `budget`, the override
+    matching's own when none is given, and past it raises `SizeBound`."""
     from shared import pin_growth
 
-    budget = pin_growth._Budget(pin_growth.STEP_BUDGET)
+    if budget is None:
+        budget = pin_growth._Budget(part=pin_growth.MATCHING)
     edges = _Edges(old)
     owner, cursors, passes, seen = {}, {}, {}, set()
 
@@ -462,12 +466,11 @@ def _sources(before: list, after: list, wanted, offered) -> dict:
     matching. A pin with that share alone is compared only with before pins
     no heading partner reaches it with, since it cannot outrank one. Each
     word pair compared, and each pin a word pair's index entry adds, spends
-    a step of the pin-growth rule's budget (`STEP_BUDGET`), and past it
-    raises `SizeBound`."""
+    a step of the pin mapping's budget, and past it raises `SizeBound`."""
     from pin_caps import _DESCENT_SHARE
     from shared import pin_growth
 
-    budget = pin_growth._Budget(pin_growth.STEP_BUDGET)
+    budget = pin_growth._Budget(part=pin_growth.MAPPING)
     by_heading = defaultdict(list)
     for p in offered:
         by_heading[before[p][0]].append(p)
@@ -532,19 +535,21 @@ def _contest(new: list, old: list, source: dict, texts: list, old_texts: list) -
     of its word pairs is not contested. The pins
     that may lead are those holding a word pair of the old pin's body and
     the pin `source` maps to it; where none of them keeps any, every row
-    standing for the old row leads. Each row and word pair examined spends a
-    step of the pin-growth rule's budget (`STEP_BUDGET`), and past it raises
-    `SizeBound`."""
+    standing for the old row leads. A row may stand only for an old row of
+    its group (`_bucket`), so a search for every row standing for an old row
+    looks only there. Each row and word pair examined spends a step of the
+    override contest's budget, and past it raises `SizeBound`."""
     from shared import pin_growth
 
-    exact, row_at = defaultdict(list), {}
+    exact, row_at, buckets = defaultdict(list), {}, defaultdict(list)
     for i, row in enumerate(new):
         exact[row.rationale, row.written].append(i)
         row_at[row.pin] = i
+        buckets[_bucket(row)].append(i)
     pinned = [j for j, row in enumerate(old) if row.pin is not None]
     if not pinned:
         return {}
-    budget = pin_growth._Budget(pin_growth.STEP_BUDGET)
+    budget = pin_growth._Budget(part=pin_growth.CONTEST)
     pairs, holders = {}, defaultdict(set)  # word pair -> after pins with an override row holding it
 
     def word_pairs(side, k, text):
@@ -588,8 +593,9 @@ def _contest(new: list, old: list, source: dict, texts: list, old_texts: list) -
         if top == 0:
             if not copied:
                 continue
-            budget.spend(len(new))
-            leaders = [i for i in range(len(new)) if _stands_for(new[i], row)]
+            group = buckets.get(_bucket(row), ())
+            budget.spend(len(group))
+            leaders = [i for i in group if _stands_for(new[i], row)]
         if len(leaders) > 1:
             named = [i for i in leaders if new[i].pin == mapped.get(p)]
             if not named or any(body(new[i].pin) == body(new[named[0]].pin) for i in leaders if i not in named):
@@ -602,8 +608,9 @@ def _contest(new: list, old: list, source: dict, texts: list, old_texts: list) -
             if new[i].pin == mapped.get(p):
                 continue
             if len(claims) < 2:
-                budget.spend(len(new))
-                if not any(k != i and _stands_for(new[k], row) for k in range(len(new))):
+                group = buckets.get(_bucket(row), ())
+                budget.spend(len(group))
+                if not any(k != i and _stands_for(new[k], row) for k in group):
                     continue
         ahead.setdefault(i, j)
     return ahead
@@ -654,9 +661,11 @@ def _invalid_override(before: str, after: str) -> tuple[Optional[str], tuple]:
     as having no valid override, as each would if read alike, so a
     reconfirmation that moves neither grants an exemption nor takes one away.
     Only when the pins `pin_spans` lists before and after are the ones
-    `section_pins` reads.
+    `section_pins` reads. Comparing the two pins' texts for that spends steps
+    of the override matching's budget.
     """
     from pin_caps import override_rationale_text
+    from shared import pin_growth
     from shared.claude_md_markers import State, parse
     from shared.pin_growth import locate_pinned
 
@@ -681,7 +690,8 @@ def _invalid_override(before: str, after: str) -> tuple[Optional[str], tuple]:
         source = _sources(old_texts, texts, sorted({row.pin for row in new}), sorted(row_of))
         own = {i: row_of[source[row.pin]] for i, row in enumerate(new) if row.pin in source}
         ahead = _contest(new, old, source, texts, old_texts)
-    matched = _match(new, old, own, ahead)
+    budget = pin_growth._Budget(part=pin_growth.MATCHING)
+    matched = _match(new, old, own, ahead, budget)
     for i, row in enumerate(new):
         reason = None if i in matched else _validate_override_rationale(row.rationale)
         if reason is not None:
@@ -690,12 +700,17 @@ def _invalid_override(before: str, after: str) -> tuple[Optional[str], tuple]:
     # or as the contest decided), or whose old pin no pin continues and whose
     # new pin is mapped to nothing or keeps some of the old pin's text.
     continued = set(source.values())
+
+    def keeps(q, p):
+        mine, theirs = _word_pairs(texts[q][1]), _word_pairs(old_texts[p][1])
+        budget.spend(len(mine) + len(theirs))
+        return bool(mine & theirs)
+
     revoked = [(old[j].pin, new[i].pin) for i, j in matched.items()
                if old[j].pin is not None and old[j].valid != new[i].valid and _kept(new[i], old[j])
                and (source.get(new[i].pin) == old[j].pin or ahead.get(i) == j
                     or (old[j].pin not in continued
-                        and (new[i].pin not in source
-                             or _word_pairs(texts[new[i].pin][1]) & _word_pairs(old_texts[old[j].pin][1]))))]
+                        and (new[i].pin not in source or keeps(new[i].pin, old[j].pin))))]
     if not revoked or not (_spans_are_pins(doc, located, spans)
                            and _spans_are_pins(before_doc, before_located, before_spans)):
         return None, ((), ())
@@ -713,11 +728,12 @@ def gate_decision(before: str, tool_name: str, tool_input: dict):
     as it is allows. An invalid size override on a pin the change adds or
     edits denies, cause "override". Otherwise `pin_cap_decision` decides.
     Both checks run under the pin cap's one timer, and the override check
-    under its step budget as well; either stopping them allows, as the pin
-    cap check does when it stops early, never refuses.
+    under its parts' step budgets as well; either stopping them allows, as
+    the pin cap check does when it stops early, never refuses. Texts too
+    large for the check (`check_size`) stop it before either reads them.
     """
     from shared.edit_simulation import simulate
-    from shared.pin_growth import PinDecision, SizeBound, pin_cap_decision, run_with_timer, stopped_early
+    from shared.pin_growth import PinDecision, SizeBound, check_size, pin_cap_decision, run_with_timer, stopped_early
 
     after = simulate(before, tool_name, tool_input)
     if after is None:
@@ -726,6 +742,7 @@ def gate_decision(before: str, tool_name: str, tool_input: dict):
         return PinDecision("ALLOW", 0, 0, None, None, None)
 
     def decide():
+        check_size(before, after)
         invalid, revoked = _invalid_override(before, after)
         if invalid is not None:
             return PinDecision("DENY", 0, 0, None, "override", f"Pin cap violation (invalid override): {invalid}")

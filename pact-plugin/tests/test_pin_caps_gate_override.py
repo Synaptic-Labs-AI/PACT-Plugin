@@ -533,8 +533,8 @@ def test_the_near_twin_shape_is_matched_in_steps_linear_in_its_rows(monkeypatch)
     made = []
 
     class Spy(pin_growth._Budget):
-        def __init__(self, limit):
-            super().__init__(limit)
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
             made.append(self)
 
     monkeypatch.setattr(pin_growth, "_Budget", Spy)
@@ -545,18 +545,130 @@ def test_the_near_twin_shape_is_matched_in_steps_linear_in_its_rows(monkeypatch)
     assert all(budget.spent <= 4 * rows for budget in made), [budget.spent for budget in made]
 
 
-def test_an_exhausted_step_budget_allows_with_the_stop_early_note(monkeypatch):
-    """The split pin's second copy of an invalid override is refused with the
-    budget (test_one_old_row_vouches_for_one_copy); with none left, the check
-    stops and the change is allowed with the pin cap's stop-early note."""
+def _spent_by_part(monkeypatch):
+    """A spy on every budget made: {part: steps spent}, summed per part."""
+    from collections import Counter
+
     from shared import pin_growth
 
-    monkeypatch.setattr(pin_growth, "STEP_BUDGET", 0)
+    made = []
+
+    class Spy(pin_growth._Budget):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            made.append(self)
+
+    monkeypatch.setattr(pin_growth, "_Budget", Spy)
+
+    def spent():
+        out = Counter()
+        for budget in made:
+            out[budget.part] += budget.spent
+        return out
+    return spent
+
+
+def _rewritten_beside_copies(n):
+    """Each pin, with its own override, rewritten entirely with its row
+    padded, beside a new pin carrying an exact copy of the row."""
+    ratios = [f"rationale number {k} for the verbatim form" for k in range(n)]
+    before = _doc("\n".join(f"{_plain(r)}\n### Pin {k}\n{' '.join(_tokens(f'o{k}x', 0, 4))}\n"
+                            for k, r in enumerate(ratios)))
+    after = _doc("\n".join(f"{_plain(r.replace(' ', '   ', 1))}\n### Pin {k}\n{' '.join(_tokens(f'n{k}x', 0, 4))}\n"
+                           f"\n{_plain(r)}\n### Copy {k}\ncopy {k}\n" for k, r in enumerate(ratios)))
+    return before, after
+
+
+def _split_padded_part_keeping_under_half(n):
+    """Each pin, with its own override, split: the part under its heading
+    keeps 10 of its 19 word pairs and no override, the other keeps 9 with the
+    row padded."""
+    ratios = [f"rationale number {k} for the verbatim form" for k in range(n)]
+    words = [_tokens(f"t{k}x", 0, 20) for k in range(n)]
+    before = _doc("\n".join(f"{_plain(r)}\n### Pin {k}\n{' '.join(w)}\n" for k, (r, w) in enumerate(zip(ratios, words))))
+    after = _doc("\n".join(f"<!-- pinned: 2026-05-26 -->\n### Pin {k}\n{' '.join(w[:11])}\n"
+                           f"\n{_plain(r.replace(' ', '   ', 1))}\n### Part {k}\n{' '.join(w[10:])}\n"
+                           for k, (r, w) in enumerate(zip(ratios, words))))
+    return before, after
+
+
+@pytest.mark.parametrize("shape", [_rewritten_beside_copies, _split_padded_part_keeping_under_half],
+                         ids=["rewritten beside an exact copy", "split, the padded part keeping under half"])
+def test_the_contest_searches_only_an_old_rows_group_for_rows_standing_for_it(monkeypatch, shape):
+    """Every pin carries a different override, so each group holds one pin's
+    rows: the contest's search for every row standing for an old row, or for
+    a second one, reads only that group, and its steps are linear in the
+    rows. Every padded row stands for its pin's old row, so all are allowed."""
+    import pin_caps_gate
+
+    spent = _spent_by_part(monkeypatch)
+    rows = 300
+    reason, _revoked = pin_caps_gate._invalid_override(*shape(rows))
+    assert reason is None
+    from shared import pin_growth
+
+    assert spent()[pin_growth.CONTEST] <= 100 * rows, spent()  # 15 and 66 a row; 365 and more a row scanning every row
+
+
+def test_the_carry_compares_the_merged_pins_texts_in_the_matchings_budget(monkeypatch):
+    """The merged pin's lone row reads valid where Orig's old one did not, and
+    no pin continues Orig: whether the merged pin keeps some of Orig's text
+    is read from both pins' word pairs, each spending a step of the override
+    matching's budget."""
+    import pin_caps_gate
+    from shared import pin_growth
+
+    spent = _spent_by_part(monkeypatch)
+    before, after = _merge(BARE, (NO_OVERRIDE, CUT), True, False)
+    pin_caps_gate._invalid_override(before, after)
+    orig, merged = 19, 19 + 1 + 19  # Second's 19 pairs, the pair across the join, Orig's 19
+    assert spent()[pin_growth.MATCHING] >= orig + merged, spent()
+
+
+@pytest.mark.parametrize("key", ["plain", "plain.", "plain.,!? ", "x_", "x_.", "é—", "…", "", "a\u0301.", "九.", "a1!", "🔒🔒"])
+def test_the_trimmed_read_drops_exactly_the_trailing_run_the_reader_drops(key):
+    """`_trimmed` ends the read at its last character `pin_caps._WORD_CHAR`
+    matches, as the reader's cut does."""
+    from pin_caps import _WORD_CHAR
+    from pin_caps_gate import _trimmed
+
+    end = len(key)
+    while end and not _WORD_CHAR.match(key, end - 1):
+        end -= 1
+    assert _trimmed(key) == key[:end]
+
+
+@pytest.mark.parametrize("part", ["MAPPING", "CONTEST", "MATCHING"])
+def test_an_exhausted_step_budget_allows_with_a_stop_early_note_naming_its_part(monkeypatch, part):
+    """The split pin's second copy of an invalid override is refused with the
+    budget (test_one_old_row_vouches_for_one_copy); with none left in one part
+    of the override check, the check stops there and the change is allowed
+    with the pin cap's stop-early note, naming that part."""
+    from shared import pin_growth
+
+    name = getattr(pin_growth, part)
+    monkeypatch.setitem(pin_growth.LIMITS, name, 0)
     halves = _pin(1, body="first half", override=LONG) + "\n" + _pin(7, body="second half", override=LONG)
     decision = gate_decision(SMALL, *_write(SMALL.replace(_pin(1, body="short body", override=LONG), halves)))
     assert (decision.verdict, decision.cause) == ("ALLOW_ADVISORY", "size_bound"), decision
     assert decision.reason == ("The pin cap check stopped early and allowed this change: "
-                               "the pin-growth rule passed its step budget of 0.")
+                               f"{name} passed its step budget of 0.")
+
+
+def test_texts_too_large_for_the_check_stop_it_before_the_override_check_reads_them(monkeypatch):
+    import pin_caps_gate
+    from shared import pin_growth
+
+    def unread(before, after):
+        raise AssertionError("the override check read texts too large for the check")
+
+    monkeypatch.setattr(pin_caps_gate, "_invalid_override", unread)
+    half = pin_growth.MAX_CHARS // 2
+    before = SMALL.replace("short body", "x" * half)
+    decision = gate_decision(before, *_write(before.replace("x" * half, "y" * half)))
+    assert (decision.verdict, decision.cause) == ("ALLOW_ADVISORY", "size_bound"), decision
+    assert (decision.reason or "").startswith("The pin cap check stopped early and allowed this change: "
+                                              "the file is too large for the pin cap check"), decision
 
 
 def test_the_timer_stopping_the_override_check_allows_with_the_stop_early_note(monkeypatch):
@@ -591,7 +703,7 @@ def test_the_matching_covers_as_many_invalid_rows_as_any_matching_can():
     import itertools
     import random
 
-    from pin_caps_gate import _match, _Row
+    from pin_caps_gate import _match, _Row, _trimmed
 
     base = "y" * 119
     reads = [base, base + ".", base + "..", base + "!", base + "x"]
@@ -602,7 +714,7 @@ def test_the_matching_covers_as_many_invalid_rows_as_any_matching_can():
         key = rng.choice(reads)
         tail = rng.choice(writtens)
         written = None if tail is None else key + tail
-        return _Row(key, key, written, pin)
+        return _Row(key, key, written, pin, _trimmed(key))
 
     for _ in range(400):
         new = [row(i) for i in range(rng.randint(1, 5))]
