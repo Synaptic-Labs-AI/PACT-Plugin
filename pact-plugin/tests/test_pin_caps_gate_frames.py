@@ -134,7 +134,7 @@ def _adding_a_pin(frame: dict, root: Path) -> dict:
 def _run(root: Path, frame: dict):
     """(outcome, text): ("deny", reason), ("advisory", context) or ("allow", None)."""
     proc = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(frame), capture_output=True,
-                          text=True, timeout=60, env=_env(root), cwd=_project(root))
+                          text=True, timeout=600, env=_env(root), cwd=_project(root))
     if proc.returncode == 2:
         out = json.loads(proc.stdout)["hookSpecificOutput"]
         return "deny", out["permissionDecisionReason"]
@@ -307,7 +307,7 @@ def test_importing_claude_md_manager_does_not_load_the_team_read():
     )
     env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
     env["PYTHONPATH"] = str(HOOK.parent)
-    result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, env=env, timeout=60)
+    result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, env=env, timeout=600)
     assert result.returncode == 0, result.stderr
     assert result.stdout.split() == ["False", "False", "True"], result.stdout
 

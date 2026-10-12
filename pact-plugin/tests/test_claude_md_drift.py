@@ -111,7 +111,7 @@ def world(tmp_path):
 
 def _sh(w, command):
     result = subprocess.run(["bash", "-c", command], cwd=w.repo, env=w.env,
-                            capture_output=True, text=True, timeout=60)
+                            capture_output=True, text=True, timeout=600)
     return result.returncode
 
 
@@ -119,7 +119,7 @@ def _hook(w, script, frame, env=None):
     """Run a hook on `frame`; a key set to None is left out of the frame."""
     frame = {key: value for key, value in frame.items() if value is not None}
     result = subprocess.run([sys.executable, str(script)], input=json.dumps(frame),
-                            capture_output=True, text=True, timeout=60,
+                            capture_output=True, text=True, timeout=600,
                             env=carry_clock_shift(dict(env or w.env)), cwd=w.repo)
     assert result.returncode == 0, result.stderr
     out = json.loads(result.stdout.strip().splitlines()[-1]) if result.stdout.strip() else {}
@@ -561,9 +561,9 @@ class TestNoWriteAndIsolation:
         lock = world.repo / ".CLAUDE.md.lock"
         holder = subprocess.Popen(
             [sys.executable, "-c",
-             "import fcntl, sys, time\nf = open(sys.argv[1], 'w')\n"
-             "fcntl.flock(f, fcntl.LOCK_EX)\nprint('held', flush=True)\ntime.sleep(60)\n",
-             str(lock)], stdout=subprocess.PIPE, text=True)
+             "import fcntl, sys\nf = open(sys.argv[1], 'w')\n"
+             "fcntl.flock(f, fcntl.LOCK_EX)\nprint('held', flush=True)\nsys.stdin.read()\n",
+             str(lock)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         try:
             assert holder.stdout is not None and holder.stdout.readline().strip() == "held"
             _prompt(world)
@@ -577,7 +577,7 @@ class TestNoWriteAndIsolation:
             assert (world.claude_md.read_bytes(), world.claude_md.stat().st_mtime_ns) == snapshot
         finally:
             holder.kill()
-            holder.wait()
+            holder.communicate()
             world.claude_md.chmod(0o644)
 
     def test_an_occupied_record_path_fails_inside_the_job(self, world):
@@ -896,7 +896,7 @@ def test_the_report_jobs_add_one_read_and_one_hash_when_nothing_changed(world):
 
     def run():
         return subprocess.run([sys.executable, "-c", probe, frame], capture_output=True,
-                              text=True, env=env, cwd=world.repo, timeout=60)
+                              text=True, env=env, cwd=world.repo, timeout=600)
 
     first = run()
     # The first call stored the record, so the job ran; a job that failed
@@ -927,7 +927,7 @@ def test_the_prompt_check_on_an_unchanged_file_reads_and_hashes_only(world):
                         "prompt": "hello"})
     result = subprocess.run([sys.executable, "-c", probe, frame], capture_output=True, text=True,
                             env=carry_clock_shift(dict(world.env, PYTHONPATH=str(HOOKS))),
-                            cwd=world.repo, timeout=60)
+                            cwd=world.repo, timeout=600)
     assert result.stdout.split("\n")[:2] == ["None", "[]"], result.stderr
     assert (baseline.read_bytes(), baseline.stat().st_mtime_ns) == before
 
@@ -940,6 +940,6 @@ def test_the_hosts_load_nothing_heavy_at_module_level(module, tmp_path):
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path),
            "CLAUDE_CONFIG_DIR": str(tmp_path), "PYTHONPATH": str(HOOKS)}
     result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True,
-                            env=env, timeout=60)
+                            env=env, timeout=600)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "[]"

@@ -869,17 +869,38 @@ def test_an_undated_pin_renamed_at_the_cap_is_allowed_and_a_smuggled_heading_is_
     assert (smuggled.verdict, smuggled.cause) == ("DENY", "count")
 
 
+class _OfferedSpans:
+    """The strike's pattern, recording each row `finditer` is given and how
+    many of its characters it is offered."""
+
+    def __init__(self, pattern):
+        self.pattern, self.calls = pattern, []
+
+    def finditer(self, string, pos=0, endpos=sys.maxsize):
+        self.calls.append((string, min(endpos, len(string)) - pos))
+        return self.pattern.finditer(string, pos, endpos)
+
+    def __getattr__(self, name):
+        return getattr(self.pattern, name)
+
+
 @pytest.mark.parametrize("head, struck", [("see ", 0), ("see <!-- pinned: 2026-04-11 --> ", 27)],
                          ids=["no close at all", "one closed comment first"])
-def test_a_row_of_comment_openers_with_no_close_after_them_decides_at_once(head, struck):
+def test_a_row_of_comment_openers_with_no_close_after_them_decides_at_once(monkeypatch, head, struck):
     # 60 KB of pin-comment openers with no `-->` after them, mid-row so the row
     # opens no HTML block. The strike reads a row only up to its last `-->`, so
-    # none of those openers is scanned.
+    # none of those openers is scanned: it is offered the row up to the end of
+    # the head's `-->`, or nothing when the row holds no `-->`.
+    import pin_caps
+
+    spy = _OfferedSpans(pin_caps._MANAGED_COMMENT_RE)
+    monkeypatch.setattr(pin_caps, "_MANAGED_COMMENT_RE", spy)
     row = head + "<!-- pinned: " * 4_700
     before = claude_md(pins(5))
-    started = time.perf_counter()
     decision = pin_growth.pin_cap_decision(before, sub(before, "body 3\n", f"body 3\n{row}\n"))
-    assert time.perf_counter() - started < 1.0
+    assert spy.calls  # the pins' own comment rows are struck through the spy
+    assert {span for string, span in spy.calls if string == row} == (
+        {head.rfind("-->") + len("-->")} if "-->" in head else set())
     assert (decision.verdict, decision.cause) == ("DENY", "size")
     assert decision.reason is not None
     assert f"{len('body 3') + 1 + len(row.rstrip()) - struck} chars" in decision.reason
@@ -915,7 +936,7 @@ def test_processor_time_past_the_timer_ends_the_check(monkeypatch):
     original = pin_growth.section_pins
 
     def busy(doc, located):
-        start, deadline = time.process_time(), time.monotonic() + 60
+        start, deadline = time.process_time(), time.monotonic() + 600
         while time.process_time() - start < 2 and time.monotonic() < deadline:
             pass
         return original(doc, located)

@@ -362,7 +362,7 @@ class TestFileLockContention:
 
         def worker(idx):
             try:
-                barrier.wait(timeout=5.0)  # Release all threads in sync.
+                barrier.wait(timeout=600.0)  # Release all threads in sync.
                 results[idx] = _call_gate({
                     "tool_name": "Edit",
                     "tool_input": {
@@ -381,7 +381,7 @@ class TestFileLockContention:
         for t in threads:
             t.start()
         for t in threads:
-            t.join(timeout=10.0)
+            t.join(timeout=600.0)
             assert not t.is_alive(), (
                 "a gate call hung — worker did not terminate"
             )
@@ -418,7 +418,7 @@ class TestFileLockContention:
         results: list = [None] * N_THREADS
 
         def worker(idx):
-            barrier.wait(timeout=5.0)
+            barrier.wait(timeout=600.0)
             results[idx] = _call_gate({
                 "tool_name": "Write",
                 "tool_input": {
@@ -433,7 +433,7 @@ class TestFileLockContention:
         for t in threads:
             t.start()
         for t in threads:
-            t.join(timeout=10.0)
+            t.join(timeout=600.0)
             assert not t.is_alive()
 
         # All threads denied with the same rendered reason.

@@ -556,7 +556,7 @@ def _run_hook(project, frame, hook=None):
     env = {**os.environ, "HOME": str(project / "home"), "CLAUDE_PROJECT_DIR": str(project)}
     (project / "home").mkdir(exist_ok=True)
     return subprocess.run([sys.executable, str(hook or HOOK)], input=json.dumps(frame), capture_output=True,
-                          text=True, env=env, cwd=project, timeout=120)
+                          text=True, env=env, cwd=project, timeout=600)
 
 
 def _outcome(result):

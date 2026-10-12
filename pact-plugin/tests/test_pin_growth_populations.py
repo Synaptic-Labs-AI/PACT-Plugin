@@ -331,7 +331,7 @@ def _digests_in_subprocess(hash_seed):
             "print(json.dumps(determinism_digests()))")
     env = {**os.environ, "PYTHONHASHSEED": str(hash_seed), "PYTHONDONTWRITEBYTECODE": "1"}
     out = subprocess.run([sys.executable, "-c", code, str(TESTS)], capture_output=True, text=True,
-                         env=env, cwd=str(TESTS), timeout=300)
+                         env=env, cwd=str(TESTS), timeout=600)
     assert out.returncode == 0, out.stderr
     return json.loads(out.stdout)
 

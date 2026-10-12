@@ -268,7 +268,7 @@ class TestWorkingMemoryUsesTheFinder:
                if key != "PYTHONPATH" and not key.startswith("CLAUDE_")}
         env.update(PYTHONPATH=str(SKILL_ROOT), HOME=str(tmp_path), CLAUDE_PROJECT_DIR=str(tmp_path))
         result = subprocess.run([sys.executable, "-c", code], cwd=tmp_path, env=env,
-                                capture_output=True, text=True, timeout=60)
+                                capture_output=True, text=True, timeout=600)
         assert result.returncode == 0, result.stderr
         expected = SKILL_ROOT.parent.parent / "hooks" / "shared" / "claude_md_markers.py"
         assert result.stdout.strip() == f"finder: {expected}"

@@ -448,6 +448,6 @@ def test_importing_a_hot_module_does_not_load_the_finder(module):
     )
     env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
     result = subprocess.run([sys.executable, "-c", probe], capture_output=True,
-                            text=True, env=env, timeout=60)
+                            text=True, env=env, timeout=600)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "False"

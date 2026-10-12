@@ -236,10 +236,11 @@ class TestOverrideRationaleText_PublicReader:
 
         for tail in (" x", " --> x"):
             row = "<!-- pinned: d" + ", pin-size-override: a" * 2000 + tail
-            started = time.perf_counter()
+            # Processor time, which a busy machine does not advance.
+            started = time.process_time()
             assert self._read(f"{row}\n### Entry\nBody.\n") is None
             assert parse_pins(f"{row}\n### Entry\nBody.\n")[0].date_comment is None
-            assert time.perf_counter() - started < 2.0, tail
+            assert time.process_time() - started < 2.0, tail
 
 
 class TestPinsInRows_PublicReader:

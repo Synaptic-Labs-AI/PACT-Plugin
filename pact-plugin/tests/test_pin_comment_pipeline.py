@@ -887,15 +887,16 @@ class TestPinCommentBacktracking_Pipeline:
         line = prefix + " " * length + tail
         assert line.strip() == line
 
-        started = time.perf_counter()
+        # Processor time, which a busy machine does not advance.
+        started = time.process_time()
         _OVERRIDE_DATE_PART.fullmatch(" " * length + tail)
         override_rationale_text(parse(line + "\n"), 0)
-        elapsed = time.perf_counter() - started
+        elapsed = time.process_time() - started
 
         assert elapsed < self.BUDGET_SECONDS, (
-            f"a {len(line)}-char line took {elapsed:.3f}s. The date field is a "
-            f"quantified alternation, so check whether its branches have "
-            f"stopped being disjoint."
+            f"a {len(line)}-char line took {elapsed:.3f}s of processor time. "
+            f"The date field is a quantified alternation, so check whether its "
+            f"branches have stopped being disjoint."
         )
 
     def test_many_unterminated_openers_stay_within_budget(self):

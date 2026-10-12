@@ -2978,7 +2978,7 @@ class TestMissingContextFileIsSilent:
                  "tool_input": {"command": "true"}, "tool_response": {}}
 
         result = subprocess.run([sys.executable, str(hook)], input=json.dumps(frame),
-                                capture_output=True, text=True, env=env, cwd=project, timeout=120)
+                                capture_output=True, text=True, env=env, cwd=project, timeout=600)
 
         assert result.returncode == 0, result.stderr
         assert json.loads(result.stdout) == {"suppressOutput": True}

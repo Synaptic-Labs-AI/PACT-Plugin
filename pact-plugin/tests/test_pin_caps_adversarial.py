@@ -259,10 +259,11 @@ class TestPinCapsAdversarial_RegexSafety:
             "### Entry\nbody\n"
         )
         import time
-        t0 = time.monotonic()
+        # Processor time, which a busy machine does not advance.
+        t0 = time.process_time()
         pins = parse_pins(content)
-        elapsed = time.monotonic() - t0
-        assert elapsed < 1.0, f"parse_pins took {elapsed}s on 10k chars"
+        elapsed = time.process_time() - t0
+        assert elapsed < 1.0, f"parse_pins took {elapsed}s of processor time on 10k chars"
         # Rationale should be rejected (either too long or not captured).
         assert pins[0].override_rationale is None
 
@@ -271,10 +272,11 @@ class TestPinCapsAdversarial_RegexSafety:
         # 1000 pins → parser must be linear.
         content = "\n".join(f"### Pin {i}\nbody\n" for i in range(1000))
         import time
-        t0 = time.monotonic()
+        # Processor time, which a busy machine does not advance.
+        t0 = time.process_time()
         pins = parse_pins(content)
-        elapsed = time.monotonic() - t0
-        assert elapsed < 1.0, f"parse_pins took {elapsed}s on 1000 pins"
+        elapsed = time.process_time() - t0
+        assert elapsed < 1.0, f"parse_pins took {elapsed}s of processor time on 1000 pins"
         assert len(pins) == 1000
 
 

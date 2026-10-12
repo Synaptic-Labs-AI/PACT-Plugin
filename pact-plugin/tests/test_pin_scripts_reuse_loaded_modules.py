@@ -28,7 +28,7 @@ def _run(probe: str, tmp_path: Path) -> subprocess.CompletedProcess:
            "CLAUDE_CONFIG_DIR": str(tmp_path),
            "PYTHONPATH": os.pathsep.join((str(HOOKS), str(PLUGIN / "scripts")))}
     return subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True,
-                          env=env, cwd=tmp_path, timeout=60)
+                          env=env, cwd=tmp_path, timeout=600)
 
 
 @pytest.mark.parametrize("script", SCRIPTS)

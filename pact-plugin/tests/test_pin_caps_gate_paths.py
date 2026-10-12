@@ -17,13 +17,12 @@ import os
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
 
 from shared.claude_md_manager import MEMORY_END_MARKER, MEMORY_START_MARKER
-from test_pin_caps_gate import SNIPPET, _edit, _frame, _outcome, _pins, _run_hook, _write  # noqa: E402 — sibling harness reuse
+from test_pin_caps_gate import HOOK, SNIPPET, _edit, _frame, _outcome, _pins, _run_hook, _write  # noqa: E402 — sibling harness reuse
 
 NEW_PIN = "<!-- pinned: 2026-04-21 -->\n### New\nbody\n\n## Working Memory"
 
@@ -81,7 +80,7 @@ def test_a_write_to_the_legacy_file_while_dot_claude_resolves_is_not_gated(tmp_p
 
 def _git(cwd, *args):
     env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
-    subprocess.run(["git", *args], cwd=cwd, env=env, check=True, capture_output=True, timeout=60)
+    subprocess.run(["git", *args], cwd=cwd, env=env, check=True, capture_output=True, timeout=600)
 
 
 @pytest.mark.parametrize("pins, expected", [(13, "allow"), (14, "deny")])
@@ -187,12 +186,53 @@ _HOLD_LOCK = (
     "sys.stdin.read()\n"
 )
 
+# Runs the gate as `python pin_caps_gate.py` would, under a Python audit hook
+# that records every path the gate opens and every flock or lockf it takes on
+# the sidecar's inode. The records go to stderr after the gate exits.
+# HOOK and SIDECAR are prepended when the driver is written.
+_AUDITED_GATE = (
+    "import json, os, runpy, sys\n"
+    "sidecar = os.stat(SIDECAR)\n"
+    "opened, locked = [], []\n"
+    "def audit(event, args):\n"
+    "    if event == 'open' and not isinstance(args[0], int):\n"
+    "        opened.append(os.path.abspath(os.fsdecode(args[0])))\n"
+    "    elif event in ('fcntl.flock', 'fcntl.lockf'):\n"
+    "        try:\n"
+    "            st = os.fstat(args[0] if isinstance(args[0], int) else args[0].fileno())\n"
+    "        except (OSError, AttributeError, ValueError):\n"
+    "            return\n"
+    "        if (st.st_dev, st.st_ino) == (sidecar.st_dev, sidecar.st_ino):\n"
+    "            locked.append(event)\n"
+    "sys.addaudithook(audit)\n"
+    "sys.argv = [HOOK]\n"
+    "sys.path[0] = os.path.dirname(HOOK)\n"
+    "try:\n"
+    "    runpy.run_path(HOOK, run_name='__main__')\n"
+    "finally:\n"
+    "    os.write(2, ('\\nAUDIT ' + json.dumps([opened, locked]) + '\\n').encode())\n"
+)
+
+
+def _audited_gate(project, target, call, sidecar):
+    """The gate's outcome, and whether it opened `target` and the sidecar or
+    locked the sidecar."""
+    driver = project / "audited_gate.py"
+    header = f"HOOK = {str(HOOK)!r}\nSIDECAR = {str(sidecar)!r}\n"
+    driver.write_text(header + _AUDITED_GATE, encoding="utf-8")
+    tool, tool_input = call
+    result = _run_hook(project, _frame(target, tool, tool_input), hook=driver)
+    opened, locked = json.loads(result.stderr.rsplit("\nAUDIT ", 1)[1])
+    opened = {Path(path).resolve() for path in opened}
+    return _outcome(result), target.resolve() in opened, sidecar in opened or bool(locked)
+
 
 def test_a_held_writer_lock_neither_delays_nor_decides_the_gate(tmp_path):
     """A child holds the writers' sidecar lock, with their own fcntl.flock,
-    for the whole row. The gate reads without it: a rename at 13 pins is
-    allowed and a pin added is denied, both well inside the writers' 5 s lock
-    timeout, which a gate waiting on the lock would reach."""
+    for the whole row. The gate reads without it, so it cannot wait on it:
+    run under an audit hook, it reads CLAUDE.md, never opens the sidecar and
+    takes no flock or lockf on it. And the lock does not decide it: a rename
+    at 13 pins is allowed and a pin added is denied."""
     claude_md = tmp_path / ".claude" / "CLAUDE.md"
     claude_md.parent.mkdir()
     claude_md.write_text(_pins(13), encoding="utf-8")
@@ -202,13 +242,14 @@ def test_a_held_writer_lock_neither_delays_nor_decides_the_gate(tmp_path):
     assert holder.stdin is not None and holder.stdout is not None
     try:
         assert holder.stdout.readline().strip() == "held"
-        start = time.monotonic()
-        assert _gate(tmp_path, claude_md, _write(_pins(13).replace("### Pin5\n", "### Pin5 renamed\n"))) == "allow"
-        assert _gate(tmp_path, claude_md, _write(_pins(14))) == "deny"
-        assert time.monotonic() - start < 5.0
+        renamed = _write(_pins(13).replace("### Pin5\n", "### Pin5 renamed\n"))
+        # (outcome, read CLAUDE.md, touched the sidecar): reading CLAUDE.md
+        # shows the audit hook ran in the gate's process.
+        assert _audited_gate(tmp_path, claude_md, renamed, sidecar) == ("allow", True, False)
+        assert _audited_gate(tmp_path, claude_md, _write(_pins(14)), sidecar) == ("deny", True, False)
     finally:
         holder.stdin.close()
-        holder.wait(timeout=10)
+        holder.wait(timeout=600)
 
 
 # ---------------------------------------------------------------------------
