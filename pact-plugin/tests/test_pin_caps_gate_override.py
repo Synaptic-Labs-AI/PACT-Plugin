@@ -1338,3 +1338,119 @@ def test_an_over_cap_pin_whose_padded_override_moves_to_a_pin_keeping_none_of_it
     decision = gate_decision(before, *_write(after))
     assert (decision.verdict, decision.cause) == ("DENY", "size"), decision
     assert "no longer has a valid pin-size-override" in (decision.reason or ""), decision
+
+
+# Own row first. Guide's and Handbook's overrides read alike once Handbook's,
+# written with a trailing '.', is reconfirmed: the reader then drops the '.'.
+GUIDE = "a " * 59 + "bc"  # 120 characters, valid
+HANDBOOK = GUIDE + "."  # 121 characters, valid only once a reconfirmation follows it
+
+
+def _guide_into_handbook(guide_old, handbook_old, guide_new, extra=(), handbook_first=False, merged_first=False):
+    """Guide is merged into Handbook, which keeps its own text and all of
+    Guide's and reconfirms its own override; Guide keeps 10 of its 19 word
+    pairs under `guide_new`."""
+    words, own = _tokens("g", 0, 20), _tokens("h", 0, 20)
+    before = [(_plain(guide_old), "Guide", " ".join(words)), (_plain(handbook_old), "Handbook", " ".join(own))]
+    after = [(guide_new, "Guide", " ".join(words[:11])), (_plain(HANDBOOK, True), "Handbook", " ".join(own + words))]
+    return (_named(*(before[::-1] if handbook_first else before)),
+            _named(*(after[::-1] if merged_first else after), *extra))
+
+
+@pytest.mark.parametrize("merged_first", [False, True], ids=["Guide first after", "Handbook first after"])
+@pytest.mark.parametrize("handbook_first", [False, True], ids=["Guide first before", "Handbook first before"])
+def test_a_row_standing_for_its_own_pins_old_row_takes_it_and_competes_for_no_other(handbook_first, merged_first):
+    """Handbook's reconfirmed row stands for its own old row and, reading like
+    Guide's, for Guide's too, and Handbook keeps all of Guide's text. It takes
+    its own row, so Guide's padded row is the whitespace edit of Guide's."""
+    padded = _plain(GUIDE.replace("a a", "a   a", 1))
+    before, after = _guide_into_handbook(GUIDE, HANDBOOK, padded, (), handbook_first, merged_first)
+    assert gate_decision(before, *_write(after)).verdict == "ALLOW"
+
+
+@pytest.mark.parametrize("handbook_first", [False, True], ids=["Guide first before", "Handbook first before"])
+def test_an_untouched_invalid_override_beside_a_merged_pin_and_a_copy_is_allowed_in_either_order(handbook_first):
+    """Guide's old override is the invalid one and stays as it was; Handbook's
+    reconfirmed row takes Handbook's own old row, and a copy of Handbook's
+    old override sits on a third pin. The order of the pins decides nothing."""
+    extra = [(_plain(GUIDE), "Extra", "extra body text")]
+    before, after = _guide_into_handbook(HANDBOOK, GUIDE, _plain(HANDBOOK), extra, handbook_first)
+    assert gate_decision(before, *_write(after)).verdict == "ALLOW"
+
+
+@pytest.mark.parametrize("merged_first", [False, True], ids=["Alpha first before", "Beta first before"])
+def test_a_row_leading_two_old_rows_takes_the_one_whose_pin_it_keeps_most_of(merged_first):
+    """Merged keeps all of Alpha's text and most of Beta's, and its reconfirmed
+    row stands for both old rows. It takes Alpha's, whichever comes first:
+    Alpha's padded copy, on a pin keeping half, is checked on its own, and
+    Beta's untouched row keeps its own old row."""
+    alpha, beta = _tokens("a", 0, 20), _tokens("b", 0, 20)
+    before = [(_plain(GUIDE), "Alpha", " ".join(alpha)), (_plain(HANDBOOK), "Beta", " ".join(beta))]
+    after = _named((_plain(GUIDE.replace("a a", "a   a", 1)), "Alpha", " ".join(alpha[:11])),
+                   (_plain(HANDBOOK), "Beta", " ".join(beta[:11])),
+                   (_plain(HANDBOOK, True), "Merged", " ".join(alpha + beta[:16])))
+    decision = gate_decision(_named(*(before[::-1] if merged_first else before)), *_write(after))
+    assert (decision.verdict, decision.cause) == ("DENY", "override"), decision
+    assert decision.reason == ("Pin cap violation (invalid override): Override rationale is 122 chars "
+                               "(max: 120). Shorten it.")
+
+
+def test_a_pin_keeping_one_word_pair_of_a_removed_pin_takes_no_carry_from_it():
+    """Handbook drops two of its own words for one word pair of Guide, which is
+    removed, and carries Guide's override padded in place of its own. Keeping
+    under half of Guide's text, it does not continue Guide and takes no carry,
+    so over the cap it no longer has a valid override."""
+    guide = [f"g{k}" + "w" * 80 for k in range(20)]
+    own = [f"h{k}" + "w" * 80 for k in range(20)]
+    before = _named((_plain(SPACED), "Guide", " ".join(guide)), (_plain(SECOND_OWN), "Handbook", " ".join(own)))
+    after = _named((_plain(PADDED), "Handbook", " ".join(own[2:] + guide[:2])))
+    decision = gate_decision(before, *_write(after))
+    assert (decision.verdict, decision.cause) == ("DENY", "size"), decision
+    assert "no longer has a valid pin-size-override" in (decision.reason or ""), decision
+
+
+def _every_order(before_pins, after_pins):
+    """The verdicts over every order of the pins before and after."""
+    import itertools
+
+    return {gate_decision(_named(*b), *_write(_named(*a))).verdict
+            for b in itertools.permutations(before_pins) for a in itertools.permutations(after_pins)}
+
+
+def test_a_row_leading_two_old_rows_on_an_equal_share_takes_the_one_whose_pin_sorts_first():
+    """Merged keeps all of Alpha's and Beta's text, whose overrides read the
+    same, and pads the override: it leads both old rows equally and takes
+    the one whose pin's content sorts first, so exact copies of the override
+    on two pins keeping none of the text take what is left, in every order."""
+    alpha, beta = " ".join(_tokens("a", 0, 20)), " ".join(_tokens("b", 0, 20))
+    before = [(_plain(SPACED), "Alpha", alpha), (_plain(SPACED), "Beta", beta)]
+    after = [(_plain(PADDED), "Merged", alpha + " " + beta),
+             (_plain(SPACED), "Copy one", "copy one"), (_plain(SPACED), "Copy two", "copy two")]
+    assert _every_order(before, after) == {"ALLOW"}
+
+
+def test_a_row_keeps_its_own_pins_old_row_from_an_exact_copy_on_a_pin_keeping_less():
+    """A row never loses its own mapped old row to an exact copy on a pin that
+    keeps strictly less of that old pin; on an equal share the copy, being
+    the old row, takes it. Alpha's padded row and Twin's reconfirmed row keep
+    all of Alpha's text alike, so the contest names neither; the exact copy
+    on Copy keeps none of it, so Alpha keeps its own row in every order."""
+    alpha, beta = " ".join(_tokens("a", 0, 20)), " ".join(_tokens("b", 0, 20))
+    before = [(_plain(SPACED), "Alpha", alpha), (_plain(SPACED), "Beta", beta)]
+    after = [(_plain(PADDED), "Alpha", alpha), (_plain(SPACED, True), "Twin", alpha),
+             (_plain(SPACED), "Beta", beta), (_plain(SPACED), "Copy", "copy body")]
+    assert _every_order(before, after) == {"ALLOW"}
+
+
+def test_a_pin_keeping_none_of_its_mapped_pins_text_still_competes_for_another_old_row():
+    """Third's heading keeps it mapped to Third, but it holds none of Third's
+    text and all of Second's, and pads Third's override, which also stands
+    for Second's reconfirmed one. Keeping none of Third's text, it does not
+    take Third's row first; it continues Second and takes Second's row, and
+    an exact copy of Third's override takes Third's, in every order."""
+    second, third = _tokens("s", 0, 8), _tokens("t", 0, 9)
+    before = [(_plain(HANDBOOK, True), "Second", " ".join(second)), (_plain(HANDBOOK), "Third", " ".join(third))]
+    after = [(_plain(HANDBOOK.replace("a a", "a   a", 1)), "Third", " ".join(second)),
+             (_plain(GUIDE), "Second", " ".join(second[1:])),
+             (_plain(HANDBOOK), "Copy", " ".join(third[:2]))]
+    assert _every_order(before, after) == {"ALLOW"}

@@ -537,8 +537,18 @@ def _contest(new: list, old: list, source: dict, texts: list, old_texts: list) -
     the pin `source` maps to it; where none of them keeps any, every row
     standing for the old row leads. A row may stand only for an old row of
     its group (`_bucket`), so a search for every row standing for an old row
-    looks only there. Each row and word pair examined spends a step of the
-    override contest's budget, and past it raises `SizeBound`."""
+    looks only there.
+
+    A row that stands for the old row of the pin `source` maps its own pin
+    to, on a pin keeping some of that old pin's word pairs, takes that row:
+    it competes for no other old row, and it never loses
+    that row to an exact copy on a pin keeping strictly less of the old pin
+    (on an equal share the copy, being the old row, takes it). A row leading
+    two or more old rows takes the one whose old pin it keeps the most of,
+    and on an equal share the one whose old pin's content sorts first, so
+    the order of the pins decides nothing. Each row and word pair examined
+    spends a step of the override contest's budget, and past it raises
+    `SizeBound`."""
     from shared import pin_growth
 
     exact, row_at, buckets = defaultdict(list), {}, defaultdict(list)
@@ -550,6 +560,14 @@ def _contest(new: list, old: list, source: dict, texts: list, old_texts: list) -
     if not pinned:
         return {}
     budget = pin_growth._Budget(part=pin_growth.CONTEST)
+    row_of = {old[j].pin: j for j in pinned}
+    standing = {}  # new row -> the old row of its own mapped pin, which it stands for
+    for i, row in enumerate(new):
+        j = row_of.get(source.get(row.pin))
+        if j is not None and _stands_for(row, old[j]):
+            standing[i] = j
+    standing_on = {j: i for i, j in standing.items()}
+    keeps_own = {}
     pairs, holders = {}, defaultdict(set)  # word pair -> after pins with an override row holding it
 
     def word_pairs(side, k, text):
@@ -570,8 +588,19 @@ def _contest(new: list, old: list, source: dict, texts: list, old_texts: list) -
     def body(q):
         return " ".join(texts[q][1].split())
 
+    def settled_elsewhere(i, j):
+        """Whether row i takes its own pin's old row, other than j: it stands
+        for it and its pin keeps some of that old pin's word pairs."""
+        own = standing.get(i)
+        if own is None or own == j:
+            return False
+        if i not in keeps_own:
+            keeps_own[i] = kept(new[i].pin, old[own].pin) > 0
+        return keeps_own[i]
+
     mapped = {p: q for q, p in source.items()}
-    ahead = {}
+    placed = defaultdict(list)  # new row -> [(share it keeps, old row it leads)]
+    kept_own = {}  # old row -> its own pin's row, keeping more of the old pin than any exact copy of it
     for j in pinned:
         row, p = old[j], old[j].pin
         same = (row.rationale, row.written)
@@ -584,10 +613,15 @@ def _contest(new: list, old: list, source: dict, texts: list, old_texts: list) -
             found = holders.get(pair, ())
             budget.spend(1 + len(found))
             near.update(found)
-        claims = [row_at[q] for q in near if _stands_for(new[row_at[q]], row)]
+        claims = [row_at[q] for q in near if _stands_for(new[row_at[q]], row) and not settled_elsewhere(row_at[q], j)]
         if all((new[i].rationale, new[i].written) == same for i in claims):
             continue
         shares = {i: kept(new[i].pin, p) for i in claims}
+        own = standing_on.get(j)
+        if copied and own is not None and own in shares and (new[own].rationale, new[own].written) != same:
+            copies = [kept(q, p) for q in near if (new[row_at[q]].rationale, new[row_at[q]].written) == same]
+            if shares[own] > max(copies, default=0):
+                kept_own[j] = own
         top = max(shares.values())
         leaders = [i for i in claims if shares[i] == top]
         if top == 0:
@@ -595,7 +629,7 @@ def _contest(new: list, old: list, source: dict, texts: list, old_texts: list) -
                 continue
             group = buckets.get(_bucket(row), ())
             budget.spend(len(group))
-            leaders = [i for i in group if _stands_for(new[i], row)]
+            leaders = [i for i in group if _stands_for(new[i], row) and not settled_elsewhere(i, j)]
         if len(leaders) > 1:
             named = [i for i in leaders if new[i].pin == mapped.get(p)]
             if not named or any(body(new[i].pin) == body(new[named[0]].pin) for i in leaders if i not in named):
@@ -612,7 +646,17 @@ def _contest(new: list, old: list, source: dict, texts: list, old_texts: list) -
                 budget.spend(len(group))
                 if not any(k != i and _stands_for(new[k], row) for k in group):
                     continue
-        ahead.setdefault(i, j)
+        placed[i].append((shares.get(i, 0), j))
+    def content(j):
+        return (*old_texts[old[j].pin], old[j].rationale, old[j].written or "")
+
+    ahead = {}
+    for i, leads in placed.items():
+        most = max(share for share, _j in leads)
+        ahead[i] = min((j for share, j in leads if share == most), key=content)
+    for j, i in kept_own.items():
+        if j not in ahead.values():
+            ahead[i] = j
     return ahead
 
 
@@ -657,14 +701,14 @@ def _invalid_override(before: str, after: str) -> tuple[Optional[str], tuple]:
     needs. Where a matched old row was a pin's comment, the new row keeps its
     text (`_kept`), the two rationales disagree on validity, and the two pins
     continue each other (or no pin continues the old one and the new one is
-    mapped to nothing or keeps some of the old one's text), both pins count
+    mapped to nothing or keeps half of the old one's text), both pins count
     as having no valid override, as each would if read alike, so a
     reconfirmation that moves neither grants an exemption nor takes one away.
     Only when the pins `pin_spans` lists before and after are the ones
     `section_pins` reads. Comparing the two pins' texts for that spends steps
     of the override matching's budget.
     """
-    from pin_caps import override_rationale_text
+    from pin_caps import _DESCENT_SHARE, override_rationale_text
     from shared import pin_growth
     from shared.claude_md_markers import State, parse
     from shared.pin_growth import locate_pinned
@@ -698,13 +742,14 @@ def _invalid_override(before: str, after: str) -> tuple[Optional[str], tuple]:
             return reason, ((), ())
     # A carry lands only on a pair of pins that continue each other (as mapped,
     # or as the contest decided), or whose old pin no pin continues and whose
-    # new pin is mapped to nothing or keeps some of the old pin's text.
+    # new pin is mapped to nothing or keeps at least half of the old pin's
+    # word pairs, the share the mapping itself asks of a continuation.
     continued = set(source.values())
 
     def keeps(q, p):
         mine, theirs = _word_pairs(texts[q][1]), _word_pairs(old_texts[p][1])
         budget.spend(len(mine) + len(theirs))
-        return bool(mine & theirs)
+        return _share(mine, theirs, sum(theirs.values())) >= _DESCENT_SHARE
 
     revoked = [(old[j].pin, new[i].pin) for i, j in matched.items()
                if old[j].pin is not None and old[j].valid != new[i].valid and _kept(new[i], old[j])
