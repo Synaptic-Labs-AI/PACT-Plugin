@@ -648,50 +648,81 @@ def test_the_moved_block_run_check_spends_steps_for_each_compare():
     assert any(frame.name == "_run_gone" for frame in __import__("traceback").extract_tb(raised.tb))
 
 
-# ---------------------------------------------------------------- the timer
+# --------------------------------------------------------------- the timers
 
-def _trip_after_first_alignment(monkeypatch):
+def _trip_after_first_alignment(monkeypatch, signum=None):
     real_align = pin_growth._align
 
     def align(*args):
         result = real_align(*args)
-        signal.raise_signal(signal.SIGALRM)
+        signal.raise_signal(signal.SIGPROF if signum is None else signum)
         return result
 
     monkeypatch.setattr(pin_growth, "_align", align)
 
 
-@pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="no interval timer on this platform")
-def test_the_timer_raises_size_bound_and_restores_the_previous_handler(monkeypatch):
-    fired = []
+class _Sentinels:
+    """A recording handler on both timer signals, put back by `restore`."""
 
-    def sentinel(signum, frame):
-        fired.append(signum)
+    def __init__(self):
+        self.fired = []
+        self.previous = {sig: signal.signal(sig, self.handler) for sig in (signal.SIGPROF, signal.SIGALRM)}
 
-    previous = signal.signal(signal.SIGALRM, sentinel)
-    try:
-        _trip_after_first_alignment(monkeypatch)
-        with pytest.raises(pin_growth.SizeBound):
-            pin_growth.run_with_timer(lambda: pin_growth.pin_growth(parse(B13), parse(sub(B13, "body 5\n", "b5\n"))))
-        assert fired == []  # the rule's own handler was installed
-        assert signal.getsignal(signal.SIGALRM) is sentinel
+    def handler(self, signum, frame):
+        self.fired.append(signum)
+
+    def assert_back_and_disarmed(self):
+        assert self.fired == []  # the check's own handlers were installed
+        assert signal.getsignal(signal.SIGPROF) == self.handler
+        assert signal.getsignal(signal.SIGALRM) == self.handler
+        assert signal.getitimer(signal.ITIMER_PROF) == (0.0, 0.0)
         assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
-    finally:
-        signal.signal(signal.SIGALRM, previous)
+
+    def restore(self):
+        for sig, handler in self.previous.items():
+            signal.signal(sig, handler)
 
 
 @pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="no interval timer on this platform")
-def test_the_normal_path_restores_the_handler_and_disarms_the_timer():
-    def sentinel(signum, frame):
-        pass
+@pytest.mark.parametrize("signum, note", [
+    (getattr(signal, "SIGPROF", None),
+     f"the pin cap check used more than {pin_growth.TIMER_SECONDS} s of processor time"),
+    (getattr(signal, "SIGALRM", None), f"the pin cap check ran for more than {pin_growth.WALL_SECONDS} s"),
+], ids=["processor time", "wall time"])
+def test_each_timer_raises_size_bound_and_restores_both_handlers(monkeypatch, signum, note):
+    sentinels = _Sentinels()
+    try:
+        _trip_after_first_alignment(monkeypatch, signum)
+        with pytest.raises(pin_growth.SizeBound, match=f"^{note}$"):
+            pin_growth.run_with_timer(lambda: pin_growth.pin_growth(parse(B13), parse(sub(B13, "body 5\n", "b5\n"))))
+        sentinels.assert_back_and_disarmed()
+    finally:
+        sentinels.restore()
 
-    previous = signal.signal(signal.SIGALRM, sentinel)
+
+@pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="no interval timer on this platform")
+def test_the_normal_path_restores_both_handlers_and_disarms_both_timers():
+    sentinels = _Sentinels()
     try:
         assert pin_growth.run_with_timer(lambda: 7) == 7
-        assert signal.getsignal(signal.SIGALRM) is sentinel
-        assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+        sentinels.assert_back_and_disarmed()
     finally:
-        signal.signal(signal.SIGALRM, previous)
+        sentinels.restore()
+
+
+@pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="no interval timer on this platform")
+@pytest.mark.parametrize("which", ["SIGPROF", "SIGALRM"])
+def test_a_stop_disarms_both_timers_before_it_raises(which):
+    """A stop that lands as the work ends can skip the restore, so the
+    handler itself leaves no timer armed."""
+    def work():
+        handler = signal.getsignal(getattr(signal, which))
+        assert callable(handler)
+        with pytest.raises(pin_growth.SizeBound):
+            handler(getattr(signal, which), None)
+        return signal.getitimer(signal.ITIMER_PROF), signal.getitimer(signal.ITIMER_REAL)
+
+    assert pin_growth.run_with_timer(work) == ((0.0, 0.0), (0.0, 0.0))
 
 
 def test_without_setitimer_the_work_runs_without_a_timer(monkeypatch):
@@ -855,20 +886,48 @@ def test_a_row_of_comment_openers_with_no_close_after_them_decides_at_once(head,
 
 
 @pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="no interval timer on this platform")
-def test_the_timer_covers_the_whole_decision(monkeypatch):
-    # Past the timer outside the alignment: reading the pins sleeps past it.
+def test_a_wait_that_uses_no_processor_time_ends_at_the_wall_backstop(monkeypatch):
+    """Reading the pins sleeps past both timers. A sleep uses no processor
+    time, so the processor-time timer, though the shorter, cannot end it:
+    the wall backstop does, outside the alignment, with its own note."""
     original = pin_growth.section_pins
 
     def slow(doc, located):
-        time.sleep(2)
+        time.sleep(3)
         return original(doc, located)
 
     monkeypatch.setattr(pin_growth, "TIMER_SECONDS", 0.2)
+    monkeypatch.setattr(pin_growth, "WALL_SECONDS", 1)
     monkeypatch.setattr(pin_growth, "section_pins", slow)
     decision = pin_growth.pin_cap_decision(B12, sub(B12, pin(12), pin(12) + NEW))
     assert decision == pin_growth.PinDecision(
         "ALLOW_ADVISORY", 0, 0, None, "size_bound",
-        "The pin cap check stopped early and allowed this change: the pin cap check ran past 0.2 s.")
+        "The pin cap check stopped early and allowed this change: the pin cap check ran for more than 1 s.")
+    assert signal.getitimer(signal.ITIMER_PROF) == (0.0, 0.0)
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+
+
+@pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="no interval timer on this platform")
+def test_processor_time_past_the_timer_ends_the_check(monkeypatch):
+    """Reading the pins spins until this process has used 2 s of processor
+    time; the processor-time timer ends it at 0.2 s, outside the alignment.
+    The wall deadline only stops the spin if that timer never fires."""
+    original = pin_growth.section_pins
+
+    def busy(doc, located):
+        start, deadline = time.process_time(), time.monotonic() + 60
+        while time.process_time() - start < 2 and time.monotonic() < deadline:
+            pass
+        return original(doc, located)
+
+    monkeypatch.setattr(pin_growth, "TIMER_SECONDS", 0.2)
+    monkeypatch.setattr(pin_growth, "section_pins", busy)
+    decision = pin_growth.pin_cap_decision(B12, sub(B12, pin(12), pin(12) + NEW))
+    assert decision == pin_growth.PinDecision(
+        "ALLOW_ADVISORY", 0, 0, None, "size_bound",
+        "The pin cap check stopped early and allowed this change: "
+        "the pin cap check used more than 0.2 s of processor time.")
+    assert signal.getitimer(signal.ITIMER_PROF) == (0.0, 0.0)
     assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
 
 
@@ -880,22 +939,15 @@ def test_the_budget_allows_with_the_size_advisory(monkeypatch):
 
 
 @pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="no interval timer on this platform")
-def test_the_timer_allows_with_the_size_advisory_and_restores_the_handler(monkeypatch):
-    fired = []
-
-    def sentinel(signum, frame):
-        fired.append(signum)
-
-    previous = signal.signal(signal.SIGALRM, sentinel)
+def test_the_timer_allows_with_the_size_advisory_and_restores_the_handlers(monkeypatch):
+    sentinels = _Sentinels()
     try:
         _trip_after_first_alignment(monkeypatch)
         decision = pin_growth.pin_cap_decision(B13, sub(B13, pin(13), pin(13) + NEW))
         assert (decision.verdict, decision.cause) == ("ALLOW_ADVISORY", "size_bound")
-        assert fired == []
-        assert signal.getsignal(signal.SIGALRM) is sentinel
-        assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+        sentinels.assert_back_and_disarmed()
     finally:
-        signal.signal(signal.SIGALRM, previous)
+        sentinels.restore()
 
 
 def test_without_setitimer_or_off_the_main_thread_the_decision_is_unchanged(monkeypatch):

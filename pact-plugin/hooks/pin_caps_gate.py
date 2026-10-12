@@ -32,7 +32,7 @@ FAIL-OPEN. An over-block is the worst outcome, so every failure allows:
   - any exception while deciding is recorded with failure_log.append_failure
     and allows;
   - the decision itself allows with an advisory when the Pinned section cannot
-    be located, when the check runs past its step budget or timer, or when it
+    be located, when the check runs past its step budget or a timer, or when it
     fails;
   - an Edit or a Write over a CLAUDE.md that exists but cannot be read is
     allowed with an advisory: without the text before, the change cannot be
@@ -801,7 +801,7 @@ def gate_decision(before: str, tool_name: str, tool_input: dict):
     which the caller's fail-open catch allows. A change that leaves the text
     as it is allows. An invalid size override on a pin the change adds or
     edits denies, cause "override". Otherwise `pin_cap_decision` decides.
-    Both checks run under the pin cap's one timer, and the override check
+    Both checks run under the pin cap's timers, and the override check
     under its parts' step budgets as well; either stopping them allows, as
     the pin cap check does when it stops early, never refuses. Texts too
     large for the check (`check_size`) stop it before either reads them.

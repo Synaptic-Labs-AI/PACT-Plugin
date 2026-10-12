@@ -121,7 +121,8 @@
           },
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/pin_caps_gate.py\""
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/pin_caps_gate.py\"",
+            "timeout": 600
           }
         ]
       },

@@ -47,8 +47,11 @@ per-pin size rule, and the pin-cap gate's override mapping, contest and
 matching. The limits are sized by what a step of each part costs, so that all
 of them together are spent well inside `TIMER_SECONDS` on a slow machine, and a
 large file stops at the same step on any machine. A text pair over `MAX_CHARS`
-characters stops before it is parsed (`check_size`). The timer stays as a
-backstop.
+characters stops before it is parsed (`check_size`). Two timers stay as
+backstops (`run_with_timer`): `TIMER_SECONDS` of this process's own processor
+time, which other work on the machine cannot use up, and `WALL_SECONDS` of
+wall time, which ends a wait that uses no processor time before the hook's
+own timeout in hooks.json.
 
 THE DECISION. `pin_cap_decision` is the one verdict for the gate and the Bash
 report: no Pinned section anywhere after the change allows plainly, and one
@@ -57,7 +60,7 @@ the cap's pins after it denies on count; with a located section before, the
 size axis checks each new or grown pin's size on its own
 (`pin_caps.size_violation`) and allows when either the section's pins or the
 pins over R allow, and with none it compares the worst pins before and after;
-the size check, the budgets, the timer and any failure allow with an advisory.
+the size check, the budgets, the timers and any failure allow with an advisory.
 It never raises.
 """
 
@@ -73,7 +76,8 @@ from pin_caps import PIN_COUNT_CAP, Pin, _charge, compute_deny_reason, pins_in_r
 from .claude_md_manager import MEMORY_END_MARKER, MEMORY_START_MARKER
 from .claude_md_markers import Document, Kind, Located, State, _closes, _opener, parse
 
-TIMER_SECONDS = 30
+TIMER_SECONDS = 30  # of this process's processor time
+WALL_SECONDS = 540  # of wall time; under the pin-cap gate's timeout in hooks.json
 
 # The parts of the pin-cap decision, as a stop note names them.
 GROWTH_RULE = "the pin-growth rule"
@@ -105,7 +109,7 @@ _FENCE_SHAPE = re.compile(r" {0,3}(`{3,}|~{3,})")
 
 
 class SizeBound(Exception):
-    """The rule ran past its step budget, or the timer fired."""
+    """The rule ran past its step budget, or a timer fired."""
 
 
 class Texts(NamedTuple):
@@ -569,26 +573,43 @@ def pin_growth(before: Document, after: Document, *, budget: int | None = None,
 
 
 def run_with_timer(work, use_timer: bool = True):
-    """Run `work()` under an interrupting timer that raises SizeBound after
-    TIMER_SECONDS. No timer where `signal.setitimer` is missing or off the main
-    thread, where a handler cannot be set: decide without it, never refuse
-    because of it. The previous handler is restored and the timer disarmed."""
+    """Run `work()` under two interrupting timers, either raising SizeBound:
+    TIMER_SECONDS of this process's own processor time (SIGPROF), which a busy
+    machine cannot use up for it, and WALL_SECONDS of wall time (SIGALRM), which
+    ends a wait that uses no processor time. No timers where `signal.setitimer`
+    is missing or off the main thread, where a handler cannot be set: decide
+    without them, never refuse because of them. Both timers are disarmed and
+    the previous handlers restored."""
     if not use_timer or not hasattr(signal, "setitimer"):
         return work()
 
-    def on_alarm(signum, frame):
-        raise SizeBound(f"the pin cap check ran past {TIMER_SECONDS} s")
+    def stop(note):
+        # Disarm both timers before raising: a stop that lands as the work ends
+        # can skip the restore below, and must leave no timer armed.
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.setitimer(signal.ITIMER_PROF, 0)
+        raise SizeBound(note)
+
+    def on_processor_time(signum, frame):
+        stop(f"the pin cap check used more than {TIMER_SECONDS} s of processor time")
+
+    def on_wall_time(signum, frame):
+        stop(f"the pin cap check ran for more than {WALL_SECONDS} s")
 
     try:
-        previous = signal.signal(signal.SIGALRM, on_alarm)
+        previous_processor = signal.signal(signal.SIGPROF, on_processor_time)
     except ValueError:
         return work()
+    previous_wall = signal.signal(signal.SIGALRM, on_wall_time)
     try:
-        signal.setitimer(signal.ITIMER_REAL, TIMER_SECONDS)
+        signal.setitimer(signal.ITIMER_PROF, TIMER_SECONDS)
+        signal.setitimer(signal.ITIMER_REAL, WALL_SECONDS)
         return work()
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, signal.SIG_DFL if previous is None else previous)
+        signal.setitimer(signal.ITIMER_PROF, 0)
+        signal.signal(signal.SIGALRM, signal.SIG_DFL if previous_wall is None else previous_wall)
+        signal.signal(signal.SIGPROF, signal.SIG_DFL if previous_processor is None else previous_processor)
 
 
 class PinDecision(NamedTuple):

@@ -676,12 +676,13 @@ def test_the_timer_stopping_the_override_check_allows_with_the_stop_early_note(m
     from shared.pin_growth import SizeBound
 
     def stopped(before, after):
-        raise SizeBound("the pin cap check ran past 30 s")
+        raise SizeBound("the pin cap check used more than 30 s of processor time")
 
     monkeypatch.setattr(pin_caps_gate, "_invalid_override", stopped)
     decision = gate_decision(SMALL, *_new_pin(override=LONG + "y"))
     assert (decision.verdict, decision.cause) == ("ALLOW_ADVISORY", "size_bound"), decision
-    assert decision.reason == "The pin cap check stopped early and allowed this change: the pin cap check ran past 30 s."
+    assert decision.reason == ("The pin cap check stopped early and allowed this change: "
+                               "the pin cap check used more than 30 s of processor time.")
 
 
 def _stands_for(new, old):
