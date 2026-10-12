@@ -137,6 +137,7 @@ def test_a_new_date_beside_an_old_invalid_override_is_allowed(name, call):
     from shared.edit_simulation import simulate
 
     after = simulate(SMALL, *call)
+    assert after is not None, name
     assert SMALL_ROW not in after and f"pin-size-override: {LONG} -->" in after, name
     decision = gate_decision(SMALL, *call)
     assert decision.verdict == "ALLOW", (name, decision)
@@ -784,6 +785,7 @@ def test_a_whitespace_edit_on_the_original_pin_beside_a_valid_copy_is_allowed():
     before = _spaced_doc(SPACED)
     from shared.edit_simulation import simulate
     after = simulate(before, *call)
+    assert after is not None
     assert after.count("pin-size-override:") == 2
     assert gate_decision(before, *call).verdict == "ALLOW"
 
