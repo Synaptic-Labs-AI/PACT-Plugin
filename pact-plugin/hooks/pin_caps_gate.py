@@ -524,10 +524,12 @@ def _contest(new: list, old: list, source: dict, texts: list, old_texts: list) -
     `old_texts`) continues it; on an equal share, the pin `source` maps to
     the old pin does, unless another leader's body reads the same
     (whitespace collapsed), which is a tie that names none. A pin `source`
-    maps to another old pin continues none here. Where no new row copies the
-    old row exactly, the pin `source` maps to it takes the old row next
-    anyway, so only another continuation is given a place, and an old row
-    whose mapped pin keeps all of its word pairs is not contested. The pins
+    maps to another old pin, as a merged pin is, continues this one as well
+    when it alone keeps the most, and none where no pin keeps any of the old
+    pin's word pairs. Where no new row copies the old row exactly, the pin
+    `source` maps to it takes the old row next anyway, so only another
+    continuation is given a place, and an old row whose mapped pin keeps all
+    of its word pairs is not contested. The pins
     that may lead are those holding a word pair of the old pin's body and
     the pin `source` maps to it; where none of them keeps any, every row
     standing for the old row leads. Each row and word pair examined spends a
@@ -594,7 +596,7 @@ def _contest(new: list, old: list, source: dict, texts: list, old_texts: list) -
                 continue
             leaders = named
         i = leaders[0]
-        if (new[i].rationale, new[i].written) == same or source.get(new[i].pin, p) != p:
+        if (new[i].rationale, new[i].written) == same or (top == 0 and source.get(new[i].pin, p) != p):
             continue
         if not copied:
             if new[i].pin == mapped.get(p):
@@ -643,12 +645,13 @@ def _invalid_override(before: str, after: str) -> tuple[Optional[str], tuple]:
     edited, the match stays exact.
 
     The rows are matched as a whole (`_match`), each pin's row first to its
-    own pin's old row (`_sources`, or `_contest` where an exact copy competes
-    with an edited row), so one pin cannot take the old row its neighbour
+    own pin's old row (`_sources`, or `_contest` where two or more rows
+    compete for an old row), so one pin cannot take the old row its neighbour
     needs. Where a matched old row was a pin's comment, the new row keeps its
     text (`_kept`), the two rationales disagree on validity, and the two pins
-    continue each other (or neither continues anything else), both
-    pins count as having no valid override, as each would if read alike, so a
+    continue each other (or no pin continues the old one and the new one is
+    mapped to nothing or keeps some of the old one's text), both pins count
+    as having no valid override, as each would if read alike, so a
     reconfirmation that moves neither grants an exemption nor takes one away.
     Only when the pins `pin_spans` lists before and after are the ones
     `section_pins` reads.
@@ -672,7 +675,7 @@ def _invalid_override(before: str, after: str) -> tuple[Optional[str], tuple]:
     before_spans = _spans(before_doc, before_located)
     old = _rationales(before_doc, before_spans)
     row_of = {row.pin: j for j, row in enumerate(old) if row.pin is not None}
-    source, own, ahead = {}, {}, {}
+    source, own, ahead, texts, old_texts = {}, {}, {}, [], []
     if new and row_of:
         texts, old_texts = _pin_texts(doc, spans), _pin_texts(before_doc, before_spans)
         source = _sources(old_texts, texts, sorted({row.pin for row in new}), sorted(row_of))
@@ -684,12 +687,15 @@ def _invalid_override(before: str, after: str) -> tuple[Optional[str], tuple]:
         if reason is not None:
             return reason, ((), ())
     # A carry lands only on a pair of pins that continue each other (as mapped,
-    # or as the contest decided), or that neither continues anything else.
+    # or as the contest decided), or whose old pin no pin continues and whose
+    # new pin is mapped to nothing or keeps some of the old pin's text.
     continued = set(source.values())
     revoked = [(old[j].pin, new[i].pin) for i, j in matched.items()
                if old[j].pin is not None and old[j].valid != new[i].valid and _kept(new[i], old[j])
                and (source.get(new[i].pin) == old[j].pin or ahead.get(i) == j
-                    or (new[i].pin not in source and old[j].pin not in continued))]
+                    or (old[j].pin not in continued
+                        and (new[i].pin not in source
+                             or _word_pairs(texts[new[i].pin][1]) & _word_pairs(old_texts[old[j].pin][1]))))]
     if not revoked or not (_spans_are_pins(doc, located, spans)
                            and _spans_are_pins(before_doc, before_located, before_spans)):
         return None, ((), ())

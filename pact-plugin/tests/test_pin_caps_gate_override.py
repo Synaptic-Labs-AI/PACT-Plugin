@@ -1159,3 +1159,70 @@ def test_a_lone_padded_copy_on_a_new_over_cap_pin_is_no_contest():
                    (_plain(PADDED), "Copy", body))
     decision = gate_decision(_named((_plain(SPACED), "Orig", body)), *_write(after))
     assert (decision.verdict, decision.cause) == ("DENY", "size"), decision
+
+
+# A pin merged from two continues both. 'Orig' is merged into 'Second', which
+# keeps its own body and all of Orig's and carries Orig's override in place of
+# its own; Orig keeps about half of its text. Over the cap, Orig's body runs
+# past it and the merged pin grows.
+SECOND_OWN = "the second pin's own rationale, well within the cap"
+NO_OVERRIDE = "<!-- pinned: 2026-05-26 -->"
+
+
+def _merge(old_row, rows, over_cap, merged_first):
+    words = [f"o{k}" + "w" * (80 if over_cap else 0) for k in range(20)]
+    second = " ".join(_tokens("s", 0, 20))
+    before = _named((old_row, "Orig", " ".join(words)), (_plain(SECOND_OWN), "Second", second))
+    pins = [(rows[0], "Orig", " ".join(words[:11])), (rows[1], "Second", second + " " + " ".join(words))]
+    return before, _named(*(pins[::-1] if merged_first else pins))
+
+
+MERGES = [
+    ("Orig reconfirmed, the merged pin padded", (_plain(SPACED, True), _plain(PADDED)), ("ALLOW", None), ("DENY", "size")),
+    ("Orig padded, the merged pin reconfirmed", (_plain(PADDED), _plain(SPACED, True)),
+     ("DENY", "override"), ("DENY", "override")),
+    ("Orig keeping no override, the merged pin padded", (NO_OVERRIDE, _plain(PADDED)), ("ALLOW", None), ("DENY", "size")),
+    ("Orig padded, the merged pin keeping its own override", (_plain(PADDED), _plain(SECOND_OWN)),
+     ("ALLOW", None), ("ALLOW", None)),
+]
+
+
+@pytest.mark.parametrize("merged_first", [False, True], ids=["Orig first", "merged pin first"])
+@pytest.mark.parametrize("over_cap", [False, True], ids=["small", "over cap"])
+@pytest.mark.parametrize("name, rows, small, over", MERGES, ids=[row[0] for row in MERGES])
+def test_a_merged_pin_continues_the_old_pin_whose_text_it_keeps_most_of(name, rows, small, over, over_cap, merged_first):
+    """The merged pin keeps the most of Orig's text, so it continues Orig as
+    well as Second: its edited row takes Orig's old row ahead of Orig's own,
+    and a padded copy on Orig is checked on its own. A merged pin that has
+    grown past the cap with no valid override is refused on size."""
+    before, after = _merge(_plain(SPACED), rows, over_cap, merged_first)
+    decision = gate_decision(before, *_write(after))
+    verdict, cause = over if over_cap else small
+    assert decision.verdict == verdict, (name, decision)
+    if cause:
+        assert decision.cause == cause, (name, decision)
+
+
+@pytest.mark.parametrize("orig_row", [CUT, NO_OVERRIDE], ids=["Orig keeping half reconfirmed", "Orig keeping no override"])
+def test_an_over_cap_merged_pin_gains_no_exemption_by_reconfirming_an_invalid_override(orig_row):
+    """Orig's old override reads 121 characters, and 120 once a reconfirmation
+    follows it. The merged pin carries it reconfirmed: its row reads valid
+    where the old one did not, so both pins count as having no valid
+    override, and the merged pin, grown past the cap, is refused."""
+    before, after = _merge(BARE, (orig_row, CUT), True, False)
+    decision = gate_decision(before, *_write(after))
+    assert (decision.verdict, decision.cause) == ("DENY", "size"), decision
+
+
+def test_an_over_cap_pin_whose_padded_override_moves_to_a_pin_keeping_none_of_its_text_loses_its_exemption():
+    """Orig keeps all of its over-cap body and loses its override row, which
+    moves, padded, onto Second. Second keeps none of Orig's text, so it does
+    not continue Orig and takes no carry from it: Orig is refused for no
+    longer having a valid override."""
+    body = " ".join(f"o{k}" + "w" * 80 for k in range(20))
+    second = " ".join(_tokens("s", 0, 20))
+    before = _named((_plain(SPACED), "Orig", body), (_plain(SECOND_OWN), "Second", second))
+    after = _named((NO_OVERRIDE, "Orig", body), (_plain(PADDED), "Second", second))
+    decision = gate_decision(before, *_write(after))
+    assert (decision.verdict, decision.cause) == ("DENY", "size"), decision
+    assert "no longer has a valid pin-size-override" in (decision.reason or ""), decision
