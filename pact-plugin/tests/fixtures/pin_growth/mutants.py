@@ -413,13 +413,18 @@ def past_end_marker(*, off=False, any_row=False, blanks=False, no_continuation=F
     return clause
 
 
-def unindented(*, off=False, aligned_too=False, any_gap=False, same_text_only=False):
+def unindented(*, off=False, aligned_too=False, any_gap=False, same_text_only=False, no_cap=False,
+               no_moves=False):
     """`clause_unindented_heads`: unaligned PROSE heads of S pair one to one with
     unaligned PROSE rows of R that become that head once their leading spaces
     and tabs go (keys in `exclude` left out), first by the same text, then in
-    place: the same gap of the alignment, in row order. `off` pairs nothing;
-    `aligned_too` lets aligned rows pair; `any_gap` pairs in place across gaps;
-    `same_text_only` drops the in-place pairing."""
+    place: the same gap of the alignment, in row order, at most as many in a
+    gap as the heads of S still unpaired there less the unaligned heads of R
+    there (fenced or not), where an unaligned head of R and an unpaired head of
+    S with the same text are one heading moved and count on neither side.
+    `off` pairs nothing; `aligned_too` lets aligned rows pair; `any_gap` pairs
+    in place across gaps; `same_text_only` drops the in-place pairing;
+    `no_cap` drops the cap; `no_moves` counts a moved heading on both sides."""
     def key_of(line):
         key = line.content.strip(" \t")
         return key if line.kind is Kind.PROSE and not _is_head(line.content) and _is_head(key) else None
@@ -447,12 +452,32 @@ def unindented(*, off=False, aligned_too=False, any_gap=False, same_text_only=Fa
                 pairs += 1
         if same_text_only:
             return pairs
+
+        def post_gap(j):
+            return gap(t.q2p, j, lambda r: None if r is None else t.q2p[r])
+
+        def pre_gap(i):
+            return gap(t.p2q, i, lambda r: r)
+
+        lost = [i for i in range(R[0], R[1] + 1) if i not in t.p2q and _is_head(t.pre.lines[i].content.rstrip(" \t"))]
+        counted = []
         for j in left:
-            wanted = gap(t.q2p, j, lambda r: None if r is None else t.q2p[r])
-            match = next((i for i in pre if i not in used and (any_gap or gap(t.p2q, i, lambda r: r) == wanted)),
-                         None)
+            twin = None if no_moves else next((i for i in lost if t.pre.lines[i].content.rstrip(" \t") == t.b[j]), None)
+            if twin is None:
+                counted.append(j)
+            else:
+                lost.remove(twin)
+        paired_in = collections.Counter()
+        for j in counted:
+            wanted = post_gap(j)
+            cap = (sum(1 for k in counted if post_gap(k) == wanted) - sum(1 for i in lost if pre_gap(i) == wanted)
+                   - paired_in[wanted])
+            if not no_cap and not any_gap and cap <= 0:
+                continue
+            match = next((i for i in pre if i not in used and (any_gap or pre_gap(i) == wanted)), None)
             if match is not None:
                 used.add(match)
+                paired_in[wanted] += 1
                 pairs += 1
         return pairs
     return clause

@@ -529,8 +529,13 @@ def clause_unindented_heads(t: Texts, R: tuple[int, int], exclude=frozenset()) -
     (`_indented_key`) and whose key is not in `exclude`. First by the same
     text; then a remaining head with a remaining row in the same gap of the
     alignment (the aligned rows on either side map to each other), in row
-    order, which reads a heading un-indented and retitled in place. Fenced rows
-    never pair. Returns the number of pairs."""
+    order, which reads a heading un-indented and retitled in place. An
+    unaligned head of R, fenced or not, and a remaining head of S with the
+    same text are one heading moved, in row order, and neither counts
+    below. Every other head of R that left a gap stands for a remaining head
+    of S there first, as a rename, so a gap pairs in place at most its
+    remaining heads less the heads it lost. Fenced rows never pair. Returns
+    the number of pairs."""
     s, e = t.S
     t.budget.spend(R[1] - R[0] + 1 + e - s + 1)
     by_key: dict[str, list[int]] = {}
@@ -561,15 +566,32 @@ def clause_unindented_heads(t: Texts, R: tuple[int, int], exclude=frozenset()) -
         at = bisect.bisect_left(rows, k)
         return (rows[at - 1] if at else None), (rows[at] if at < len(rows) else None)
 
-    gaps: dict[tuple, int] = {}
-    for i in remaining:
-        gap = bounds(pre_aligned, i)
-        gaps[gap] = gaps.get(gap, 0) + 1
-    for j in left:
+    def post_gap(j):
         lo, hi = bounds(post_aligned, j)
-        gap = (None if lo is None else t.q2p[lo], None if hi is None else t.q2p[hi])
-        if gaps.get(gap):
-            gaps[gap] -= 1
+        return (None if lo is None else t.q2p[lo]), (None if hi is None else t.q2p[hi])
+
+    lost: dict[str, list[int]] = {}
+    t.budget.spend(R[1] - R[0] + 1)
+    for i in range(R[0], R[1] + 1):
+        if i not in t.p2q and _is_head(t.a[i]):
+            lost.setdefault(t.a[i], []).append(i)
+    stay = []
+    for j in left:
+        rows = lost.get(t.b[j])
+        if rows:
+            rows.pop(0)
+        else:
+            stay.append(j)
+    rows_in: Counter = Counter(bounds(pre_aligned, i) for i in remaining)
+    room: Counter = Counter(post_gap(j) for j in stay)
+    for rows in lost.values():
+        for i in rows:
+            room[bounds(pre_aligned, i)] -= 1
+    for j in stay:
+        gap = post_gap(j)
+        if rows_in[gap] > 0 and room[gap] > 0:
+            rows_in[gap] -= 1
+            room[gap] -= 1
             pairs += 1
     return pairs
 

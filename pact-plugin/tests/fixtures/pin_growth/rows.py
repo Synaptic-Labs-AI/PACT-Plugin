@@ -333,6 +333,11 @@ POSTC = managed(pins(over=BASE_CLOSED), wm=WM)      # the same, closed
 PRE_F = POSTC                                       # a located file before the change
 
 
+def _one_day(t):
+    """`t` with every pin marker dated as NEWPIN is, so marker lines repeat."""
+    return re.sub(r"<!-- pinned: \d{4}-\d{2}-\d{2} -->", "<!-- pinned: 2026-10-01 -->", t)
+
+
 def sub(t, a, b, n=1):
     assert t.count(a) >= 1, a
     return t.replace(a, b, n)
@@ -1030,6 +1035,50 @@ def _indented_heading_rows(S) -> None:
       sub(u12, P(12), P(12) + "<!-- pinned: 2026-10-01 -->\n### Sub heading\nx\n\n"))
     S("delete an indented heading line and add a pin elsewhere, at 12 pins", "DENY", u12,
       sub(sub(u12, "  ### Sub heading\n", ""), P(12), P(12) + NEWPIN))
+    rewrite = managed(pins(12, over={4: "body 4\n  ### Sub heading\nsub body"}), wm=WM)
+    S("rewrite pin 4 whole and promote its indented heading, retitled, at 12 pins", "ALLOW", rewrite,
+      sub(rewrite, P(4, body="body 4\n  ### Sub heading\nsub body"),
+          P(4, title="Pin four rewritten", body="new body four\n### Sub heading fixed\nsub body rewritten")))
+    # A pin's own renamed heading must not stand in for an un-indented line: these
+    # add a pin past the cap while a rewrite drops an indented heading.
+    ex = "body 1\n    ### Example heading\nafter example."
+    e12 = managed(pins(12, over={1: ex}), wm=WM)
+    rewritten = P(1, title="Subject 1", body="rewritten 1 body.")
+    S("rewrite pin 1 dropping its indented heading and add a pin at the end, at 12 pins", "DENY", e12,
+      sub(sub(e12, P(1, body=ex), rewritten), P(12), P(12) + NEWPIN))
+    plain12 = managed(pins(12), wm=WM)
+    S("rewrite pin 1 and add a pin at the end, at 12 pins, no indented heading", "DENY", plain12,
+      sub(sub(plain12, P(1), rewritten), P(12), P(12) + NEWPIN))
+    six = e12
+    for k in range(1, 7):
+        six = sub(six, P(k, body=ex if k == 1 else None), P(k, title=f"Subject {k}", body=f"rewritten {k} body."))
+    six_last = P(6, title="Subject 6", body="rewritten 6 body.")
+    S("rewrite pins 1 to 6, dropping pin 1's indented heading, and add a pin after pin 6", "DENY", e12,
+      sub(six, six_last, six_last + NEWPIN))
+    ab = "body 1\n  ### A heading\n  ### B heading\nafter."
+    a12 = managed(pins(12, over={1: ab}), wm=WM)
+    S("rewrite pin 1 keeping one indented heading un-indented, drop the other, and add a pin at the end", "DENY",
+      a12, sub(sub(a12, P(1, body=ab), P(1, title="Subject 1", body="new body one\n### A heading\nnew after.")),
+               P(12), P(12) + NEWPIN))
+    snip = managed(pins(12, over={4: "body 4\n```\n### step\n```\n  ### Sub heading\nsub body"}), wm=WM)
+    S("delete a snippet holding a ### line, un-indent and retitle a heading beside it, and add a pin", "DENY", snip,
+      sub(sub(snip, "```\n### step\n```\n  ### Sub heading\n", "### Sub heading fixed\n"), P(12), P(12) + NEWPIN))
+    # A pin moved elsewhere takes its heading with it: it neither fills nor
+    # empties the gap it left or the one it lands in.
+    last = managed(pins(12, over={4: "body 4\n  ### Sub heading"}), wm=WM)
+    fixed = sub(last, "  ### Sub heading\n", "### Sub heading fixed\n")
+    S("un-indent and retitle pin 4's last line and move pin 5 to the end, at 12 pins", "ALLOW", last,
+      sub(sub(fixed, P(5), ""), P(12), P(12) + P(5)))
+    S("un-indent and retitle pin 4's last line and move pin 5 to the top, at 12 pins", "ALLOW", last,
+      sub(sub(fixed, P(5), ""), P(1), P(5) + P(1)))
+    renamed = sub(fixed, "### Real pin 4\n", "### Real pin four\n")
+    S("rename pin 4, un-indent and retitle its last line, and move pin 5 to the end", "ALLOW", last,
+      sub(sub(renamed, P(5), ""), P(12), P(12) + P(5)))
+    nine = "body 9\n    ### Example heading"
+    one_day = _one_day(managed(pins(12, over={9: nine}), wm=WM))
+    S("add a pin before pin 8, rewrite pin 8, and rename and rewrite pin 9 dropping its indented heading, one date",
+      "DENY", one_day, sub(one_day, _one_day(P(8) + P(9, body=nine)),
+                           NEWPIN + _one_day(P(8, body="r8") + P(9, title="Real pin 9 renamed", body="see above"))))
     o5 = managed(pins(5, over={2: "body 2\n  ### Big sub\n" + BIG}), wm=WM)
     S("un-indent a heading inside an oversize pin, a pure split", "ALLOW", o5,
       sub(o5, "  ### Big sub\n", "### Big sub\n"))

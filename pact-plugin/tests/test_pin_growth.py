@@ -1143,6 +1143,46 @@ def _decide_with(before, after, credit):
     return pin_growth.pin_cap_decision(before, after, use_timer=False, credit=credit)
 
 
+def _section_edit(before, after):
+    """`after` as one Edit replacing the whole Pinned section's text of `before`."""
+    def span(text):
+        start = text.index("## Pinned Context\n\n") + len("## Pinned Context\n\n")
+        return start, text.index("\n## Working Memory")
+    (s0, e0), (s1, e1) = span(before), span(after)
+    return {"file_path": "/x/CLAUDE.md", "old_string": before[s0:e0], "new_string": after[s1:e1]}
+
+
+_EXAMPLE = "body 1\n    ### Example heading\nafter example."
+_EXAMPLE_12 = FR.managed(FR.pins(12, over={1: _EXAMPLE}), wm=FR.WM)
+_SUBJECT_1 = FR.P(1, title="Subject 1", body="rewritten 1 body.")
+
+
+@pytest.mark.parametrize("before, after", [
+    (_EXAMPLE_12, sub(sub(_EXAMPLE_12, FR.P(1, body=_EXAMPLE), _SUBJECT_1), FR.P(12), FR.P(12) + FR.NEWPIN)),
+    (FR.managed(FR.pins(12), wm=FR.WM),
+     sub(sub(FR.managed(FR.pins(12), wm=FR.WM), FR.P(1), _SUBJECT_1), FR.P(12), FR.P(12) + FR.NEWPIN)),
+], ids=["an indented heading dropped by the rewrite", "no indented heading"])
+def test_a_rewritten_pins_own_heading_does_not_pay_for_a_new_pin_elsewhere(before, after):
+    """Rewriting pin 1's title and body and adding a pin at the end, at 12
+    pins: the renamed heading stands for pin 1's old heading, not for the
+    indented line the rewrite dropped, so the new pin counts, as a Write and as
+    an Edit."""
+    from pin_caps_gate import gate_decision
+
+    assert gate_decision(before, "Write", {"file_path": "/x/CLAUDE.md", "content": after}).verdict == "DENY"
+    assert gate_decision(before, "Edit", _section_edit(before, after)).verdict == "DENY"
+
+
+def test_a_new_pin_beside_a_rewritten_pin_that_dropped_an_indented_heading_is_allowed():
+    """Signed off with the in-place replacement: a new pin in the same stretch of
+    changed rows as a rewritten pin whose indented heading went cannot be told
+    from that heading un-indented and retitled beside a renamed pin, which is
+    an ordinary edit, so refusing it would over-block that edit. The lead is
+    told at the next prompt."""
+    after = sub(_EXAMPLE_12, FR.P(1, body=_EXAMPLE), _SUBJECT_1 + FR.NEWPIN)
+    assert _decide_with(_EXAMPLE_12, after, None).verdict == "ALLOW"
+
+
 def test_growing_a_revealed_oversize_pin_is_refused_on_size():
     """A pin a reveal brings into the section was there before on the size
     axis too, at its old size: revealing it is allowed, growing it is not."""
