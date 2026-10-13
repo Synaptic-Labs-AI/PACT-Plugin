@@ -98,6 +98,26 @@ def test_a_worktree_write_is_compared_with_the_repository_roots_file(tmp_path, p
     assert _gate(worktree, worktree / ".claude" / "CLAUDE.md", _write(_pins(pins))) == expected
 
 
+@pytest.mark.parametrize("call, expected", [
+    (_write(_pins(13)), "deny"),
+    (_edit("", _pins(13)), "deny"),
+    (_write(_pins(12)), "allow"),
+], ids=["Write of 13 pins", "Edit creating 13 pins", "Write of 12 pins"])
+def test_a_first_change_is_not_compared_with_another_repositorys_file(tmp_path, call, expected):
+    """The project holds no CLAUDE.md and the hook runs in another repository,
+    whose root file the resolver falls back to. That file is not the text
+    before, so the change is counted by its own pins."""
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    project, other = tmp_path / "project", tmp_path / "other"
+    project.mkdir()
+    other.mkdir()
+    _git(other, "init", "-q")
+    (other / "CLAUDE.md").write_text(_pins(13), encoding="utf-8")
+    result = _run_hook(project, _frame(project / ".claude" / "CLAUDE.md", *call), cwd=other)
+    assert _outcome(result) == expected
+
+
 @pytest.mark.parametrize("call", [_write(_pins(14)), _edit("## Working Memory", NEW_PIN)], ids=["Write", "Edit"])
 def test_a_change_through_a_case_variant_spelling_is_gated(tmp_path, call):
     _skip_unless_case_insensitive(tmp_path)

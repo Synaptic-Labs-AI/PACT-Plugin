@@ -1812,7 +1812,12 @@ def gate_target(file_path: str) -> GateTarget | None:
     the target counted as present, so a Write that creates the file is gated,
     and a Write to a file the resolver would not return (`./CLAUDE.md` while
     `.claude/CLAUDE.md` exists) is not. `before` is what the resolver returns
-    now, which can be a different file from the target.
+    now, which can be a different file from the target: the other location
+    under the target's base (`./CLAUDE.md` before a Write creates
+    `.claude/CLAUDE.md`), or the main checkout's file for a worktree that has
+    none. A file the resolver finds outside the target's repository (the
+    working directory's repository, when that is another one) is never
+    `before`: the target itself is, or None when it does not exist.
 
     A relative path is not gated, and any failure while resolving returns
     None: a path the gate is unsure of is allowed.
@@ -1830,7 +1835,12 @@ def gate_target(file_path: str) -> GateTarget | None:
         resolved, base = _resolve_project_claude_md_with_base(assume_present=target)
         if resolved is None or base is None or not same_path(resolved, target):
             return None
-        before = _resolve_project_claude_md_with_base()[0]
+        before, before_base = _resolve_project_claude_md_with_base()
+        if before_base is not None and not same_path(before_base, base):
+            from .project_scope import same_repository
+
+            if not same_repository(base, before_base):
+                before = target if target.is_file() else None
     except (OSError, RuntimeError, ValueError):
         return None
     return GateTarget(target, before, base)
