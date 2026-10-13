@@ -10,12 +10,18 @@ Matrix: marker absence/present × CLAUDE.md path match/miss × teammate/team-lea
 """
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
 from helpers import make_claude_md_with_pins, make_pin_entry  # noqa: E402
+
+# Text an exception raised after the gate reads CLAUDE.md could carry. No
+# fail-open report may repeat it.
+SENTINEL = "### a pin title read from CLAUDE.md"
 
 
 @pytest.fixture
@@ -1109,7 +1115,7 @@ class TestPinStalenessGate_FailOpenIsReported:
         import pin_caps
 
         def _raise(*_args):
-            raise RuntimeError("rv2test count defect")
+            raise RuntimeError(SENTINEL)
 
         monkeypatch.setattr(pin_caps, "pins_in_rows", _raise)
         result = _count("<!-- pinned: 2026-04-20 -->\n### X\nb")
@@ -1119,7 +1125,7 @@ class TestPinStalenessGate_FailOpenIsReported:
             "the pin-count catch failed open in SILENCE. Restore the "
             f"_report_fail_open call at that catch. stderr was: {err!r}"
         )
-        assert "RuntimeError" in err and "rv2test count defect" in err
+        assert "RuntimeError" in err and SENTINEL not in err
 
     def test_shape_site_reports_when_the_simulation_raises(
         self, gate_env, monkeypatch, capsys
@@ -1135,7 +1141,7 @@ class TestPinStalenessGate_FailOpenIsReported:
         import pin_staleness_gate
 
         def _raise(*_args, **_kwargs):
-            raise NameError("rv2test shape defect")
+            raise NameError(SENTINEL)
 
         monkeypatch.setattr(
             pin_staleness_gate, "_simulate_post_edit_document", _raise
@@ -1154,7 +1160,7 @@ class TestPinStalenessGate_FailOpenIsReported:
             "that swallowed a NameError and killed the whole Edit path. "
             f"stderr was: {err!r}"
         )
-        assert "NameError" in err and "rv2test shape defect" in err
+        assert "NameError" in err and SENTINEL not in err
 
     def test_decision_site_reports_when_the_gate_raises(
         self, monkeypatch, capsys
@@ -1165,7 +1171,7 @@ class TestPinStalenessGate_FailOpenIsReported:
         import pin_staleness_gate
 
         def _raise(_input_data):
-            raise RuntimeError("rv2test decision defect")
+            raise RuntimeError(SENTINEL)
 
         monkeypatch.setattr(pin_staleness_gate, "_check_tool_allowed", _raise)
         monkeypatch.setattr(
@@ -1181,10 +1187,39 @@ class TestPinStalenessGate_FailOpenIsReported:
             "the outermost catch failed open in SILENCE. Restore the "
             f"_report_fail_open call in main. stderr was: {captured.err!r}"
         )
-        assert "RuntimeError" in captured.err
+        assert "RuntimeError" in captured.err and SENTINEL not in captured.err
         assert "suppressOutput" in captured.out, (
             "the hook protocol line must stay on stdout"
         )
+
+    def test_loading_the_gate_module_reads_no_claude_md(self, tmp_path):
+        """The load-failure deny keeps the exception's text: it runs while the
+        module loads, and loading reads no CLAUDE.md, so that text cannot
+        hold CLAUDE.md text. A read added at load time fails here."""
+        import pin_staleness_gate
+
+        (tmp_path / ".claude").mkdir()
+        for path in (tmp_path / "CLAUDE.md", tmp_path / ".claude" / "CLAUDE.md"):
+            path.write_text("# notes\n", encoding="utf-8")
+        script = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            "opened = []\n"
+            "sys.addaudithook(lambda event, args: opened.append(str(args[0])) "
+            "if event == 'open' and args and isinstance(args[0], (str, bytes)) else None)\n"
+            "import pin_staleness_gate\n"
+            "loading = sum(Path(p).name.casefold() == 'claude.md' for p in opened)\n"
+            "count = len(opened)\n"
+            f"Path({str(tmp_path / 'CLAUDE.md')!r}).read_text()\n"
+            "print(loading, sum(Path(p).name.casefold() == 'claude.md' for p in opened[count:]))\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, cwd=tmp_path, timeout=600,
+            env={**os.environ, "CLAUDE_PROJECT_DIR": str(tmp_path),
+                 "PYTHONPATH": str(Path(pin_staleness_gate.__file__).parent)},
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split() == ["0", "1"], result.stdout  # none while loading; one read, the control
 
 
 class TestPinStalenessGate_SimulationEditEdges:

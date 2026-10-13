@@ -110,12 +110,13 @@ def _report_fail_open(stage: str, error: BaseException) -> None:
 
     STDERR IS THE CHANNEL because stdout carries the hook protocol. This
     function never raises: an emit that fails must not become the fault it
-    reports.
+    reports. It names the exception by its type only: every caller runs after
+    CLAUDE.md is read, so the exception's text can hold CLAUDE.md text.
     """
     try:
         print(
             f"PACT pin_staleness_gate fail-open at {stage}: "
-            f"{type(error).__name__}: {error}",
+            f"{type(error).__name__}",
             file=sys.stderr,
         )
     except Exception:  # noqa: BLE001 - the report must not become the fault
