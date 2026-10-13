@@ -22,6 +22,8 @@ import sys
 import threading
 import time
 from pathlib import Path
+from dataclasses import dataclass
+from typing import NamedTuple
 
 import pytest
 
@@ -1091,8 +1093,191 @@ def test_the_module_imports_nothing_heavy_at_load():
     assert not loaded & {"staleness", "dataclasses", "subprocess", "datetime"}, loaded
 
 
-def test_clause_functions_are_the_eight_named_seams():
+def test_clause_functions_are_the_ten_named_seams():
     names = {name for name in dir(pin_growth) if name.startswith("clause_")}
     assert names == {"clause_region_r", "clause_intact", "clause_refenced", "clause_guarded_pairing",
                      "clause_moved_block", "clause_edited_in_place", "clause_no_leaving_credit",
-                     "clause_past_stray_heading"}
+                     "clause_past_stray_heading", "clause_past_end_marker", "clause_unindented_heads"}
+
+
+# ------------------------------------------ reveals, credit and the demote count
+#
+# The un-indent and end-marker rows live in the fixture rows' reveal group (the
+# populations and the clause mutants read them there). These rows pass `credit`,
+# which the fixture rows never do: an object with `count`, `removed` and
+# `exclude` (`indented`, `below`), as the pin-cap gate builds it from this
+# agent's chain of allowed changes.
+
+from fixtures.pin_growth import rows as FR  # noqa: E402
+
+
+class _Exclusions(NamedTuple):
+    indented: frozenset
+    below: frozenset
+
+
+@dataclass(frozen=True)
+class _Credit:
+    count: int
+    removed: tuple
+    exclude: _Exclusions
+
+
+_NO_EXCLUSION = _Exclusions(frozenset(), frozenset())
+_INDENTED_12 = FR.managed(FR.pins(12, over={4: "body 4\n  ### Sub heading\nsub body"}), wm=FR.WM)
+_BELOW_12 = FR.paired(FR.pins(12), below=FR.P(50))
+_TWO_BELOW_12 = FR.paired(FR.pins(12), below=FR.P(50) + FR.P(51))
+
+
+def _credit(count=0, removed=(), indented=(), below=()):
+    return _Credit(count, tuple(removed), _Exclusions(frozenset(indented), frozenset(below)))
+
+
+def _pins_named(text, title):
+    doc = parse(text)
+    from pin_caps import section_pins
+    return tuple(p for p in section_pins(doc, pin_growth.locate_pinned(doc)) if p.heading == f"### {title}")
+
+
+def _decide_with(before, after, credit):
+    return pin_growth.pin_cap_decision(before, after, use_timer=False, credit=credit)
+
+
+def test_growing_a_revealed_oversize_pin_is_refused_on_size():
+    """A pin a reveal brings into the section was there before on the size
+    axis too, at its old size: revealing it is allowed, growing it is not."""
+    split = FR.managed(FR.pins(5, over={2: "body 2\n  ### Big sub\n" + FR.BIG}), wm=FR.WM)
+    moved = FR.paired(FR.pins(5), below=FR.P(51, body=FR.BIG))
+    rows = [
+        (split, sub(split, "  ### Big sub\n", "### Big sub\n"), "ALLOW"),
+        (split, sub(split, "  ### Big sub\n" + FR.BIG, "### Big sub\n" + FR.BIG + "\n- one more line of text"), "DENY"),
+        (moved, sub(moved, FR.PINNED_END + FR.P(51, body=FR.BIG), FR.P(51, body=FR.BIG) + FR.PINNED_END), "ALLOW"),
+        (moved, sub(moved, FR.PINNED_END + FR.P(51, body=FR.BIG),
+                    FR.P(51, body=FR.BIG + "\n- grown line here") + FR.PINNED_END), "DENY"),
+    ]
+    for before, after, verdict in rows:
+        d = _decide_with(before, after, None)
+        assert d.verdict == verdict and (verdict == "ALLOW" or d.cause == "size"), d
+
+
+def test_an_indented_line_replaced_in_place_by_a_new_heading_reads_as_un_indented_and_retitled():
+    """Signed off: the replacement cannot be told from the line un-indented and
+    retitled in one change, so it counts as already there."""
+    after = sub(_INDENTED_12, "  ### Sub heading\nsub body\n", "### New pin text\nnew body\n")
+    assert _decide_with(_INDENTED_12, after, None).verdict == "ALLOW"
+
+
+_EXCLUDED_ROWS = [
+    ("an excluded indented line un-indented", _INDENTED_12,
+     sub(_INDENTED_12, "  ### Sub heading\n", "### Sub heading\n"), ({"### Sub heading"}, ()), 1),
+    ("an excluded indented line un-indented and retitled in place", _INDENTED_12,
+     sub(_INDENTED_12, "  ### Sub heading\n", "### Sub heading fixed\n"), ({"### Sub heading"}, ()), 1),
+    ("an excluded pin below the end marker revealed", _BELOW_12,
+     sub(_BELOW_12, FR.PINNED_END + FR.P(50), FR.P(50) + FR.PINNED_END), ((), {"### Real pin 50"}), 1),
+    ("an excluded and a kept pin below the end marker revealed together", _TWO_BELOW_12,
+     sub(_TWO_BELOW_12, FR.PINNED_END + FR.P(50) + FR.P(51), FR.P(50) + FR.P(51) + FR.PINNED_END),
+     ((), {"### Real pin 50"}), 1),
+]
+
+
+@pytest.mark.parametrize("name, before, after, exclude, growth", _EXCLUDED_ROWS, ids=[r[0] for r in _EXCLUDED_ROWS])
+def test_a_revealed_line_this_agents_changes_added_counts_as_new(name, before, after, exclude, growth):
+    plain = _decide_with(before, after, None)
+    assert plain.verdict == "ALLOW", (name, plain)
+    d = _decide_with(before, after, _credit(indented=exclude[0], below=exclude[1]))
+    assert (d.verdict, d.cause, d.growth) == ("DENY", "count", growth), (name, d)
+
+
+def test_exclusions_for_lines_no_change_reveals_change_nothing():
+    after = sub(_BELOW_12, FR.PINNED_END + FR.P(50), FR.P(50) + FR.PINNED_END)
+    d = _decide_with(_BELOW_12, after, _credit(indented={"### Real pin 50"}, below={"### Other"}))
+    assert (d.verdict, d.growth) == ("ALLOW", 0), d
+
+
+_B13 = FR.paired(FR.pins(13))
+_MOVED_13 = sub(_B13, FR.P(3), "")
+_B6 = FR.paired(FR.pins(5) + FR.P(9, body=FR.BIG))
+_MOVED_6 = sub(_B6, FR.P(9, body=FR.BIG), "")
+_BACK_6 = sub(_MOVED_6, FR.P(1), FR.P(9, body=FR.BIG) + FR.P(1))
+_OTHER = "\n".join(f"- other {k} " + "text " * 15 for k in range(19))   # a different body, no larger
+
+
+_CREDIT_ROWS = [
+    ("re-add the removed pin at 13 with credit 1", _MOVED_13,
+     sub(_MOVED_13, FR.P(13), FR.P(13) + FR.P(3)), 1, "Real pin 3", "ALLOW"),
+    ("add a different pin at 13 with credit 1", _MOVED_13,
+     sub(_MOVED_13, FR.P(13), FR.P(13) + FR.NEWPIN), 1, "Real pin 3", "ALLOW"),
+    ("add two pins at 13 with credit 1", _MOVED_13,
+     sub(_MOVED_13, FR.P(13), FR.P(13) + FR.P(3) + FR.NEWPIN), 1, "Real pin 3", "DENY"),
+    ("re-add the removed pin at 13 with no credit", _MOVED_13,
+     sub(_MOVED_13, FR.P(13), FR.P(13) + FR.P(3)), 0, None, "DENY"),
+    ("re-add a removed oversize pin unchanged", _MOVED_6, _BACK_6, 1, "Real pin 9", "ALLOW"),
+    ("re-add a removed oversize pin grown", _MOVED_6,
+     sub(_MOVED_6, FR.P(1), FR.P(9, body=FR.BIG + "\n- grown") + FR.P(1)), 1, "Real pin 9", "DENY"),
+    ("add a different oversize pin no larger than the removed one", _MOVED_6,
+     sub(_MOVED_6, FR.P(1), FR.P(70, body=_OTHER) + FR.P(1)), 1, "Real pin 9", "ALLOW"),
+    ("copy the re-added oversize pin while its removal is still offered", _BACK_6,
+     sub(_BACK_6, FR.P(2), FR.P(2) + FR.P(19, body=FR.BIG)), 1, "Real pin 9", "DENY"),
+    ("re-add a removed oversize pin unchanged with no snapshot", _MOVED_6, _BACK_6, 1, None, "DENY"),
+]
+
+
+@pytest.mark.parametrize("name, before, after, count, removed, verdict", _CREDIT_ROWS, ids=[r[0] for r in _CREDIT_ROWS])
+def test_credit_along_the_chain(name, before, after, count, removed, verdict):
+    """A credit lets a change add as many pins past the cap as the chain removed,
+    and offers the removed pins to the size rule as pins before; a pin already
+    back stands for its removal, so a copy of it is still new."""
+    snapshots = _pins_named(_B13 if before is _MOVED_13 else _B6, removed) if removed else ()
+    d = _decide_with(before, after, _credit(count=count, removed=snapshots))
+    assert d.verdict == verdict, (name, d)
+
+
+@pytest.mark.parametrize("before, after, credit, demote", [
+    (_B13, sub(_B13, FR.P(13), FR.P(13) + FR.NEWPIN), None, "1 pin"),
+    (FR.paired(FR.pins(12)), sub(FR.paired(FR.pins(12)), FR.P(12), FR.P(12) + FR.P(81) + FR.P(82) + FR.P(83)), None,
+     "3 pins"),
+    (_MOVED_13, sub(_MOVED_13, FR.P(13), FR.P(13) + FR.P(3) + FR.NEWPIN), 1, "1 pin"),
+], ids=["13 pins plus 1", "a Write adding 3 at 12", "growth 2 with credit 1"])
+def test_the_count_refusal_names_how_many_pins_to_demote(before, after, credit, demote):
+    d = _decide_with(before, after, None if credit is None else _credit(count=credit))
+    assert d.cause == "count" and d.reason is not None, d
+    assert d.reason.startswith("Pin count cap reached (")
+    assert f"Run /PACT:prune-memory to demote {demote} to long-term memory, then retry the add" in d.reason, d.reason
+
+
+def test_a_zero_credit_decides_as_none_and_a_credit_only_ever_allows():
+    rows = FR.FIXED_ROWS + FR.REVEAL_ROWS
+    zero, big = _credit(), _credit(count=3)
+    for row in rows:
+        plain = _decide_with(row.pre or "", row.post, None)
+        assert _decide_with(row.pre or "", row.post, zero) == plain, row.key
+        if plain.verdict != "DENY":
+            assert _decide_with(row.pre or "", row.post, big).verdict == plain.verdict, row.key
+
+
+def test_the_decision_fills_detail_with_what_it_read():
+    after = sub(_B13, FR.P(13), FR.P(13) + FR.NEWPIN)
+    detail = {}
+    d = pin_growth.pin_cap_decision(_B13, after, use_timer=False, detail=detail)
+    assert d.verdict == "DENY"
+    assert {"before_doc", "after_doc", "before_located", "after_located", "pins_before", "pins_after", "growth",
+            "region", "texts"} <= set(detail)
+    assert detail["growth"] == 1 and len(detail["pins_before"]) == 13 and len(detail["pins_after"]) == 14
+    assert detail["before_located"].state is State.FOUND and detail["after_located"].state is State.FOUND
+    small = FR.paired(FR.pins(3))
+    detail = {}
+    pin_growth.pin_cap_decision(small, sub(small, FR.P(3), FR.P(3) + FR.NEWPIN), use_timer=False, detail=detail)
+    assert detail["growth"] is None and "region" not in detail  # at or under the cap the rule does not run
+    first = {}
+    pin_growth.pin_cap_decision("", small, use_timer=False, detail=first)
+    assert first["pins_before"] is None and first["growth"] == 3
+
+
+def test_reveal_candidates_keys_the_lines_a_reveal_can_turn_into_pins():
+    text = FR.paired(FR.pins(3, over={2: "body 2\n  ### Sub heading\n\t### Tabbed  \n### not indented"}),
+                     below=FR.P(50) + "## My notes\n### idea one\ntext\n\n")
+    doc = parse(text)
+    indented, below = pin_growth.reveal_candidates(doc, pin_growth.locate_pinned(doc))
+    assert dict(indented) == {"### Sub heading": 1, "### Tabbed": 1}
+    assert dict(below) == {"### Real pin 50": 1, "### idea one": 1}
+    assert pin_growth.reveal_candidates(parse("no memory block"), pin_growth.locate_pinned(parse("x"))) == ({}, {})

@@ -873,10 +873,14 @@ class TestDenyReasonTemplates_Constants:
     """Deny-reason templates are shared; test they render with expected shape."""
 
     def test_count_template_renders(self):
-        from pin_caps import DENY_REASON_COUNT, PIN_COUNT_CAP
-        rendered = DENY_REASON_COUNT.format(count=PIN_COUNT_CAP + 1, cap=PIN_COUNT_CAP)
-        assert str(PIN_COUNT_CAP) in rendered
-        assert "prune-memory" in rendered
+        from pin_caps import DENY_REASON_COUNT, PIN_COUNT_CAP, demote_text
+        rendered = DENY_REASON_COUNT.format(count=PIN_COUNT_CAP + 3, cap=PIN_COUNT_CAP, demote=demote_text(3))
+        assert rendered.startswith(f"Pin count cap reached ({PIN_COUNT_CAP + 3}/{PIN_COUNT_CAP}). ")
+        assert "Run /PACT:prune-memory to demote 3 pins to long-term memory, then retry the add" in rendered
+
+    def test_demote_text_names_one_pin_or_many(self):
+        from pin_caps import demote_text
+        assert (demote_text(1), demote_text(2), demote_text(12)) == ("1 pin", "2 pins", "12 pins")
 
     def test_count_template_frames_removal_as_demotion_not_deletion(self):
         """AC-B3: the cap deny is where a curator decides whether to give up
@@ -889,7 +893,7 @@ class TestDenyReasonTemplates_Constants:
         """
         from pin_caps import DENY_REASON_COUNT, PIN_COUNT_CAP
         rendered = DENY_REASON_COUNT.format(
-            count=PIN_COUNT_CAP + 1, cap=PIN_COUNT_CAP
+            count=PIN_COUNT_CAP + 1, cap=PIN_COUNT_CAP, demote="1 pin"
         ).lower()
         assert "demote" in rendered or "demotion" in rendered
         assert "long-term memory" in rendered
@@ -910,3 +914,30 @@ class TestDenyReasonTemplates_Constants:
             chars=PIN_SIZE_CAP + 10, cap=PIN_SIZE_CAP
         )
         assert "pin-size-override" in rendered
+
+
+class TestContinues:
+    """`continues(a, b)`: the size rule's own reading of a rename, a move or a
+    continuation, for a pin taken out and a pin that may stand for it."""
+
+    @staticmethod
+    def _pin(heading, *lines):
+        from pin_caps import Pin
+        body = "\n".join(lines)
+        return Pin(heading=heading, body=body, body_chars=len(body), date_comment=None,
+                   override_rationale=None, is_stale=False, lines=tuple(lines))
+
+    def test_the_same_heading_in_any_spacing_or_case_continues(self):
+        from pin_caps import continues
+        assert continues(self._pin("### Deploy  Notes", "a b"), self._pin("###   deploy notes", "x y"))
+
+    def test_half_of_the_word_pairs_continues_and_less_does_not(self):
+        from pin_caps import continues
+        old = self._pin("### Old", "one two three four five")         # four word pairs
+        assert continues(old, self._pin("### New", "one two three", "other words here"))  # holds two of four
+        assert not continues(old, self._pin("### New", "one two", "other words here"))   # holds one of four
+
+    def test_a_pin_with_no_words_continues_only_by_heading(self):
+        from pin_caps import continues
+        assert not continues(self._pin("### Empty"), self._pin("### Other"))
+        assert continues(self._pin("### Empty"), self._pin("### empty"))

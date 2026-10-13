@@ -330,20 +330,25 @@ def net_growth(original, locate):
     return pin_growth
 
 
-def past_stray_heading(*, off=False):
-    """`clause_past_stray_heading`, or with `off` R left where the locator ends it."""
+def past_stray_heading(*, off=False, blanks=False):
+    """`clause_past_stray_heading`: R grows past a `#`/`##` line that ends it while
+    the section that line starts has a non-blank row aligned into S; with `off`
+    R stays where the locator ends it, and with `blanks` an aligned blank row
+    passes the test.
+    `end` is the last row the search reads, the Pinned locator's scope end when
+    None."""
     import re
 
     from shared import pin_growth as g
     from shared.claude_md_markers import State
     from staleness import _PINNED_STOP_PREFIXES, _PINNED_TERMINATOR
 
-    def clause(t, R):
+    def clause(t, R, end=None):
         if off:
             return R
         pre, (s, e) = t.pre, t.S
         first, last = R
-        end = g._pinned_scope_end(pre)
+        end = g._pinned_scope_end(pre) if end is None else end
         while last < end:
             row = last + 1
             if not pre.find_lines(_PINNED_TERMINATOR, (row, row)) or pre.find_lines(g._PACT_SECTION_ROW, (row, row)):
@@ -353,8 +358,101 @@ def past_stray_heading(*, off=False):
             if section.state is not State.FOUND or section.spans[0][0] != row:
                 break
             below = section.spans[0][1]
-            if not any(s <= t.p2q.get(k, -1) <= e for k in range(row + 1, below + 1)):
+            if not any(s <= t.p2q.get(k, -1) <= e and (blanks or t.a[k].strip()) for k in range(row + 1, below + 1)):
                 break
             last = below
         return first, last
+    return clause
+
+
+def past_end_marker(*, off=False, any_row=False, blanks=False, no_continuation=False, whole_run=False):
+    """`clause_past_end_marker`: when R ends on the row before the pinned pair's
+    end marker, R takes in the run below the marker (to the row before a `#`/`##`
+    line, a PACT marker line or the memory block's end) through its last
+    non-blank row aligned into S and the blank rows after it, then continues
+    past stray headings to the memory block's end; heads of the extension in `exclude` are withheld. `off`
+    never extends; `any_row` takes the whole run without the alignment test;
+    `blanks` lets an aligned blank row count; `no_continuation` stops at the
+    run; `whole_run` takes the whole run once a row of it is aligned."""
+    from shared import pin_growth as g
+    from staleness import PINNED_END_MARKER, PINNED_START_MARKER, _PINNED_STOP_PREFIXES, _PINNED_TERMINATOR
+
+    def clause(t, R, exclude=frozenset()):
+        if off:
+            return R, 0
+        pre, (s, e) = t.pre, t.S
+        memory = pre.find_block(g.MEMORY_START_MARKER, g.MEMORY_END_MARKER)
+        if memory.state is not State.FOUND:
+            return R, 0
+        top, bottom = memory.spans[0]
+        pair = pre.find_block(PINNED_START_MARKER, PINNED_END_MARKER, (top + 1, bottom - 1))
+        if pair.state is not State.FOUND or R[1] != pair.spans[0][1] - 1:
+            return R, 0
+        marker = pair.spans[0][1]
+        run = []
+        for row in range(marker + 1, bottom):
+            line = pre.lines[row]
+            if ((line.kind is Kind.PROSE and _PINNED_TERMINATOR.match(line.content))
+                    or any(pre.marker_rows(prefix, (row, row)) for prefix in _PINNED_STOP_PREFIXES)):
+                break
+            run.append(row)
+        if not run:
+            return R, 0
+        aligned = [k for k in run if s <= t.p2q.get(k, -1) <= e and (blanks or t.a[k].strip())]
+        if not any_row and not aligned:
+            return R, 0
+        reach = run[-1] if any_row or whole_run else aligned[-1]
+        while reach < run[-1] and not t.a[reach + 1].strip():
+            reach += 1
+        extended = (R[0], reach)
+        if not no_continuation:
+            extended = g.clause_past_stray_heading(t, extended, bottom - 1)
+        withheld = sum(1 for k in range(marker + 1, extended[1] + 1)
+                       if _is_head(pre.lines[k].content) and pre.lines[k].content.rstrip(" \t") in exclude)
+        return extended, withheld
+    return clause
+
+
+def unindented(*, off=False, aligned_too=False, any_gap=False, same_text_only=False):
+    """`clause_unindented_heads`: unaligned PROSE heads of S pair one to one with
+    unaligned PROSE rows of R that become that head once their leading spaces
+    and tabs go (keys in `exclude` left out), first by the same text, then in
+    place: the same gap of the alignment, in row order. `off` pairs nothing;
+    `aligned_too` lets aligned rows pair; `any_gap` pairs in place across gaps;
+    `same_text_only` drops the in-place pairing."""
+    def key_of(line):
+        key = line.content.strip(" \t")
+        return key if line.kind is Kind.PROSE and not _is_head(line.content) and _is_head(key) else None
+
+    def gap(aligned, row, to_pre):
+        below = max((r for r in aligned if r < row), default=None)
+        above = min((r for r in aligned if r > row), default=None)
+        return to_pre(below), to_pre(above)
+
+    def clause(t, R, exclude=frozenset()):
+        if off:
+            return 0
+        s, e = t.S
+        pre = [i for i in range(R[0], R[1] + 1)
+               if (aligned_too or i not in t.p2q) and key_of(t.pre.lines[i]) not in (None, *exclude)]
+        heads = [j for j in range(s, e + 1)
+                 if (aligned_too or j not in t.q2p) and t.post.lines[j].kind is Kind.PROSE and _is_head(t.b[j])]
+        used, pairs, left = set(), 0, []
+        for j in heads:
+            match = next((i for i in pre if i not in used and key_of(t.pre.lines[i]) == t.b[j]), None)
+            if match is None:
+                left.append(j)
+            else:
+                used.add(match)
+                pairs += 1
+        if same_text_only:
+            return pairs
+        for j in left:
+            wanted = gap(t.q2p, j, lambda r: None if r is None else t.q2p[r])
+            match = next((i for i in pre if i not in used and (any_gap or gap(t.p2q, i, lambda r: r) == wanted)),
+                         None)
+            if match is not None:
+                used.add(match)
+                pairs += 1
+        return pairs
     return clause

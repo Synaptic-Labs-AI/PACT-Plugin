@@ -6,7 +6,8 @@ Summary: The pin-growth rule. Two CLAUDE.md texts in, how many pins the
 change ADDED to the Pinned section out. Pure: no I/O. The pin-cap gate
 refuses a change only when it adds pins past the cap, so a rename, a move, a
 fenced snippet that holds `### ` lines, or a reveal of a pin hidden by a stray
-fence is never counted as growth.
+fence, an indented heading or PACT's pinned end marker is never counted as
+growth.
 
 Used by: pin_caps_gate (lazily, on the CLAUDE.md path only) and
 claude_md_drift (lazily, when a file's hash changed), both through
@@ -16,14 +17,22 @@ only when a writer's planned text would add rows PACT cannot read.
 
 THE RULE. S is the Pinned body after the change, from the one Pinned locator.
 R is the matching region before: the Pinned body when the text before has one,
-extended by `clause_past_stray_heading` over pins a fixed stray heading reveals,
+extended by `clause_past_stray_heading` over pins a fixed stray heading reveals
+and by `clause_past_end_marker` over pins a moved pinned end marker reveals,
 otherwise `clause_region_r`. The two texts are aligned line by line, once, over
 the memory block only (the whole text when either side's block is not
 FOUND), with shared leading and trailing lines trimmed first.
 
     growth = (`### ` lines in S) - (`### ` lines in R)      both fence-blind
+             + withheld
              - (fenced `### ` lines in S that no clause pairs with R)
+             - clause_unindented_heads
              + clause_no_leaving_credit
+
+A `### ` line in S whose indentation the change removed is not new
+(`clause_unindented_heads`). `exclude` names the candidate lines this agent's
+own changes added (`reveal_candidates`): an excluded indented line earns no
+pairing, and an excluded head below the end marker counts as `withheld`.
 
 A fenced `### ` line in S is not new when a clause pairs it with R: it is
 intact in place, re-fenced, a guarded aligned pairing, part of a moved block,
@@ -56,22 +65,28 @@ own timeout in hooks.json.
 THE DECISION. `pin_cap_decision` is the one verdict for the gate and the Bash
 report: no Pinned section anywhere after the change allows plainly, and one
 PACT cannot locate allows with an advisory; growth above zero with more than
-the cap's pins after it denies on count; with a located section before, the
-size axis checks each new or grown pin's size on its own
-(`pin_caps.size_violation`) and allows when either the section's pins or the
-pins over R allow, and with none it compares the worst pins before and after;
-the size check, the budgets, the timers and any failure allow with an advisory.
-It never raises.
+the cap's pins after it denies on count, unless `credit.count` covers it; with
+a located section before, the size axis checks each new or grown pin's size
+on its own (`pin_caps.size_violation`) and allows when the section's pins, the
+pins over R, or the section's pins plus `credit.removed`'s pins that none of
+them continues allow, and with none it compares the worst pins before and
+after; the size check, the budgets, the timers and any failure allow with an
+advisory. It never raises. `credit` (count, removed, exclude) holds what this
+agent's earlier allowed changes removed and added; it can only turn a refusal
+into an allow, and None gives none.
 """
 
 from __future__ import annotations
 
+import bisect
 import difflib
 import re
 import signal
+from collections import Counter
 from typing import NamedTuple
 
-from pin_caps import PIN_COUNT_CAP, Pin, _charge, compute_deny_reason, pins_in_rows, section_pins, size_violation
+from pin_caps import (PIN_COUNT_CAP, Pin, _charge, compute_deny_reason, continues, pins_in_rows, section_pins,
+                      size_violation)
 
 from .claude_md_manager import MEMORY_END_MARKER, MEMORY_START_MARKER
 from .claude_md_markers import Document, Kind, Located, State, _closes, _opener, parse
@@ -360,17 +375,19 @@ def _pinned_scope_end(doc: Document) -> int:
     return last - 1
 
 
-def clause_past_stray_heading(t: Texts, R: tuple[int, int]) -> tuple[int, int]:
+def clause_past_stray_heading(t: Texts, R: tuple[int, int], end: int | None = None) -> tuple[int, int]:
     """R, the Pinned body before, extended past each `#` or `##` line that ends
     it, other than PACT's own section headings, while the section that line
-    starts has a row aligned into S. Demoting, deleting or fencing a stray
-    heading below Pinned reveals the pins under it, and they were there before.
-    A marker line or a PACT section heading always ends R."""
+    starts has a non-blank row aligned into S (`_holds_a_row_of_s`). Demoting,
+    deleting or fencing a stray heading below Pinned reveals the pins under
+    it, and they were there before. A marker line or a PACT section heading
+    always ends R. The search stops at row `end`, the Pinned locator's scope
+    end when None."""
     from staleness import _PINNED_STOP_PREFIXES, _PINNED_TERMINATOR
 
     pre, (s, e) = t.pre, t.S
     first, last = R
-    end = _pinned_scope_end(pre)
+    end = _pinned_scope_end(pre) if end is None else end
     while last < end:
         row = last + 1
         if not pre.find_lines(_PINNED_TERMINATOR, (row, row)) or pre.find_lines(_PACT_SECTION_ROW, (row, row)):
@@ -381,10 +398,180 @@ def clause_past_stray_heading(t: Texts, R: tuple[int, int]) -> tuple[int, int]:
         if section.state is not State.FOUND or section.spans[0][0] != row:
             break
         below = section.spans[0][1]
-        if not any(s <= t.p2q.get(k, -1) <= e for k in range(row + 1, below + 1)):
+        if not _holds_a_row_of_s(t, row + 1, below):
             break
         last = below
     return first, last
+
+
+def _last_row_of_s(t: Texts, first: int, last: int) -> int | None:
+    """The last non-blank pre row from `first` to `last` aligned into S, or
+    None. A blank line carries no identity, so blanks alone never show that a
+    run's lines are still there."""
+    s, e = t.S
+    for k in range(last, first - 1, -1):
+        if s <= t.p2q.get(k, -1) <= e and t.a[k].strip():
+            return k
+    return None
+
+
+def _holds_a_row_of_s(t: Texts, first: int, last: int) -> bool:
+    """A non-blank pre row from `first` to `last` is aligned into S."""
+    return _last_row_of_s(t, first, last) is not None
+
+
+def _pinned_pair(doc: Document) -> tuple[int, int] | None:
+    """The pinned pair's end marker row and the memory block's last interior
+    row, when both are FOUND in `doc`; None otherwise."""
+    from staleness import PINNED_END_MARKER, PINNED_START_MARKER
+
+    memory = doc.find_block(MEMORY_START_MARKER, MEMORY_END_MARKER)
+    if memory.state is not State.FOUND:
+        return None
+    first, last = memory.spans[0]
+    pair = doc.find_block(PINNED_START_MARKER, PINNED_END_MARKER, (first + 1, last - 1))
+    if pair.state is not State.FOUND:
+        return None
+    return pair.spans[0][1], last - 1
+
+
+def clause_past_end_marker(t: Texts, R: tuple[int, int],
+                           exclude=frozenset()) -> tuple[tuple[int, int], int]:
+    """R extended past PACT's pinned end marker, and the heads of the extension
+    `exclude` withholds. When R ends on the row before the pair's end marker,
+    the run below the marker, up to the row before the first `#`/`##` line, PACT
+    marker line or the memory block's end, joins R through its last non-blank
+    row aligned into S (`_last_row_of_s`) and the blank rows after it: moving
+    the marker down past pins reveals them, and they were there before, while
+    the rows the marker still stands above stay out. When R reaches the run's
+    end, `clause_past_stray_heading` continues to the memory block's end. A
+    head of the extension whose text is in `exclude`, a line this agent's own
+    changes put below the marker, is withheld: it counts as new."""
+    pre = t.pre
+    first, last = R
+    pair = _pinned_pair(pre)
+    if pair is None or last != pair[0] - 1:
+        return R, 0
+    marker, scope_end = pair
+    run_end = _below_marker(pre, marker, scope_end, budget=t.budget)
+    reach = _last_row_of_s(t, marker + 1, run_end)
+    if reach is None:
+        return R, 0
+    while reach < run_end and not t.a[reach + 1].strip():
+        reach += 1
+    extended = clause_past_stray_heading(t, (first, reach), scope_end)
+    t.budget.spend(extended[1] - marker)
+    withheld = sum(1 for k in range(marker + 1, extended[1] + 1)
+                   if _is_head(pre.lines[k].content) and t.a[k] in exclude)
+    return extended, withheld
+
+
+def _below_marker(doc: Document, marker: int, scope_end: int, *, past_stray_headings: bool = False,
+                  budget: _Budget | None = None) -> int:
+    """The last row of the run below the end marker on row `marker`, `marker`
+    when the run is empty: the row before the first later `#`/`##` line or
+    PACT marker line, as the Pinned locator ends a section, or with
+    `past_stray_headings` the row before the first PACT section heading or
+    PACT marker line; else `scope_end`."""
+    from staleness import _PINNED_STOP_PREFIXES, _PINNED_TERMINATOR
+
+    if budget is not None:
+        budget.spend(scope_end - marker + 1)
+    terminator = _PACT_SECTION_ROW if past_stray_headings else _PINNED_TERMINATOR
+    heading = re.compile(re.escape(doc.lines[marker].content) + r"\s*$")
+    section = doc.find_section(heading, terminator, (marker, scope_end), stop_prefixes=_PINNED_STOP_PREFIXES)
+    if section.state is not State.FOUND or section.spans[0][0] != marker:
+        return marker
+    return section.spans[0][1]
+
+
+def _indented_key(line) -> str | None:
+    """The head an indented PROSE line becomes once its leading spaces and
+    tabs go, or None when the line is a head already or would not be one."""
+    key = line.content.strip(" \t")
+    if line.kind is Kind.PROSE and not _is_head(line.content) and _is_head(key):
+        return key
+    return None
+
+
+def reveal_candidates(doc: Document, located: Located) -> tuple[Counter, Counter]:
+    """The lines of `doc` a reveal can turn into pins, as multisets of keys:
+    (indented, below). `indented`: PROSE rows of the Pinned body `located`
+    finds that are not heads but become one without their leading spaces and
+    tabs (`_indented_key`). `below`: head rows below the pinned pair's end
+    marker, as far as `clause_past_end_marker` can reach (up to a PACT section
+    heading, a PACT marker line or the memory block's end), keyed by their
+    content less trailing spaces and tabs. The keys are what
+    `clause_unindented_heads` and `clause_past_end_marker` compare with
+    `exclude`."""
+    indented, below = Counter(), Counter()
+    if located.state is State.FOUND:
+        heading, last = located.spans[0]
+        for row in range(heading + 1, last + 1):
+            key = _indented_key(doc.lines[row])
+            if key is not None:
+                indented[key] += 1
+    pair = _pinned_pair(doc)
+    if pair is not None:
+        marker, scope_end = pair
+        reach = _below_marker(doc, marker, scope_end, past_stray_headings=True)
+        for row in range(marker + 1, reach + 1):
+            content = doc.lines[row].content
+            if _is_head(content):
+                below[content.rstrip(" \t")] += 1
+    return indented, below
+
+
+def clause_unindented_heads(t: Texts, R: tuple[int, int], exclude=frozenset()) -> int:
+    """Heads of S that were already in R as indented lines: an unaligned PROSE
+    head row of S pairs, one to one, with an unaligned PROSE row of R that is
+    not a head but becomes this one without its leading spaces and tabs
+    (`_indented_key`) and whose key is not in `exclude`. First by the same
+    text; then a remaining head with a remaining row in the same gap of the
+    alignment (the aligned rows on either side map to each other), in row
+    order, which reads a heading un-indented and retitled in place. Fenced rows
+    never pair. Returns the number of pairs."""
+    s, e = t.S
+    t.budget.spend(R[1] - R[0] + 1 + e - s + 1)
+    by_key: dict[str, list[int]] = {}
+    for i in range(R[0], R[1] + 1):
+        if i not in t.p2q:
+            key = _indented_key(t.pre.lines[i])
+            if key is not None and key not in exclude:
+                by_key.setdefault(key, []).append(i)
+    if not by_key:
+        return 0
+    heads = [j for j in range(s, e + 1)
+             if j not in t.q2p and t.post.lines[j].kind is Kind.PROSE and _is_head(t.b[j])]
+    pairs, used, left = 0, set(), []
+    for j in heads:
+        rows = by_key.get(t.b[j])
+        if rows:
+            used.add(rows.pop(0))
+            pairs += 1
+        else:
+            left.append(j)
+    remaining = sorted(i for rows in by_key.values() for i in rows if i not in used)
+    if not left or not remaining:
+        return pairs
+    pre_aligned, post_aligned = sorted(t.p2q), sorted(t.q2p)
+    t.budget.spend(len(pre_aligned) + len(post_aligned) + len(remaining) + len(left))
+
+    def bounds(rows, k):
+        at = bisect.bisect_left(rows, k)
+        return (rows[at - 1] if at else None), (rows[at] if at < len(rows) else None)
+
+    gaps: dict[tuple, int] = {}
+    for i in remaining:
+        gap = bounds(pre_aligned, i)
+        gaps[gap] = gaps.get(gap, 0) + 1
+    for j in left:
+        lo, hi = bounds(post_aligned, j)
+        gap = (None if lo is None else t.q2p[lo], None if hi is None else t.q2p[hi])
+        if gaps.get(gap):
+            gaps[gap] -= 1
+            pairs += 1
+    return pairs
 
 
 def clause_intact(t: Texts, R: tuple[int, int], i: int, j: int) -> bool:
@@ -540,12 +727,14 @@ def fenced_line_is_new(t: Texts, R: tuple[int, int], j: int, claims: Claims) -> 
 
 
 def pin_growth(before: Document, after: Document, *, budget: int | None = None,
-               trim: bool = True, detail: dict | None = None) -> int | None:
+               trim: bool = True, detail: dict | None = None, exclude=None) -> int | None:
     """How many pins the change from `before` to `after` added to the Pinned
     section; zero or less when it added none. None when the Pinned section
     after the change is not FOUND. Raises SizeBound past `budget` steps
     (STEP_BUDGET, read at call time, when None). A `detail` dict receives the
-    call's `Texts` and R, which `pin_cap_decision`'s size axis reads."""
+    call's `Texts` and R, which `pin_cap_decision`'s size axis reads.
+    `exclude` (indented, below), sets of `reveal_candidates` keys, names the
+    lines whose reveal counts as new; None excludes none."""
     located = locate_pinned(after)
     if located.state is not State.FOUND:
         return None
@@ -557,9 +746,12 @@ def pin_growth(before: Document, after: Document, *, budget: int | None = None,
     steps.spend(len(a) + len(b))  # one step per row for the row passes over both texts
     p2q, q2p = _align(a, b, steps, trim, _memory_range(before, after))
     t = Texts(before, after, a, b, p2q, q2p, S, steps, _fence_pairs(after), {})
+    indented, below = (frozenset(), frozenset()) if exclude is None else (exclude.indented, exclude.below)
     previous = locate_pinned(before)
+    withheld = 0
     if previous.state is State.FOUND:
         R = clause_past_stray_heading(t, (previous.spans[0][0] + 1, previous.spans[0][1]))
+        R, withheld = clause_past_end_marker(t, R, below)
     else:
         R = clause_region_r(t)
     raw_after = sum(_is_head(after.lines[j].content) for j in range(S[0], S[1] + 1))
@@ -569,7 +761,8 @@ def pin_growth(before: Document, after: Document, *, budget: int | None = None,
     claims = Claims(set(), set(), set())
     new_fenced = sum(fenced_line_is_new(t, R, j, claims) for j in range(S[0], S[1] + 1)
                      if _is_head(after.lines[j].content) and after.lines[j].kind is not Kind.PROSE)
-    return raw_after - raw_before - new_fenced + clause_no_leaving_credit(t, R)
+    return (raw_after - raw_before + withheld - new_fenced - clause_unindented_heads(t, R, indented)
+            + clause_no_leaving_credit(t, R))
 
 
 def run_with_timer(work, use_timer: bool = True):
@@ -707,16 +900,25 @@ def _not_found_text(located: Located) -> str:
 
 
 def pin_cap_decision(before: str, after: str, *, use_timer: bool = True, trim: bool = True,
-                     revoked: tuple = ((), ())) -> PinDecision:
+                     revoked: tuple = ((), ()), credit=None, detail: dict | None = None) -> PinDecision:
     """The pin cap's verdict on a change from `before` to `after` (whole texts;
     `before` is "" when no file resolved). Never raises: the size check, a step
     budget or the timer, which covers the whole decision, allows with the size
     advisory, and any other failure allows with an advisory, cause "error".
 
     `revoked` holds the indices, among the pins of the Pinned section before
-    and after, of pins whose size override counts as none."""
+    and after, of pins whose size override counts as none. `credit` (count,
+    removed, exclude) is what this agent's earlier allowed changes along one
+    chain removed and added: `count` pins it may add past the cap, `removed`
+    the pins it took out (`Pin`s), `exclude` the `reveal_candidates` keys of
+    lines it put in (indented, below). None gives no credit and no exclusion.
+    A `detail` dict, once the decision has read both sections, receives
+    "before_doc", "after_doc", "before_located", "after_located",
+    "pins_before" and "pins_after" (None for a side not located), "growth"
+    (the rule's growth before credit, None when it did not run), and with
+    the rule, "region" and "texts"."""
     try:
-        return run_with_timer(lambda: _decide(before, after, trim, revoked), use_timer)
+        return run_with_timer(lambda: _decide(before, after, trim, revoked, credit, detail), use_timer)
     except SizeBound as bound:
         return stopped_early(bound)
     except Exception as error:  # an over-block is the worst outcome, so a failure allows
@@ -729,7 +931,25 @@ def _revoke(pins: list[Pin], indices) -> list[Pin]:
     return [pin._replace(override_rationale=None) if index in indices else pin for index, pin in enumerate(pins)]
 
 
-def _decide(before: str, after: str, trim: bool, revoked: tuple = ((), ())) -> PinDecision:
+def _live_removed(removed, pins_before: list[Pin], budget: _Budget | None) -> list[Pin]:
+    """The removed pins that no pin before continues (`pin_caps.continues`):
+    a pin back in the section already stands for its removal, so one removal
+    is never spent twice. One step of `budget` per character the comparisons
+    read."""
+    spend = budget.spend if budget is not None else (lambda steps: None)
+    live = []
+    for pin in removed:
+        for before_pin in pins_before:
+            spend(1 + pin.body_chars + before_pin.body_chars)
+            if continues(pin, before_pin):
+                break
+        else:
+            live.append(pin)
+    return live
+
+
+def _decide(before: str, after: str, trim: bool, revoked: tuple = ((), ()), credit=None,
+            detail: dict | None = None) -> PinDecision:
     from staleness import locate_pinned as locate_any_pinned
 
     check_size(before, after)
@@ -745,15 +965,17 @@ def _decide(before: str, after: str, trim: bool, revoked: tuple = ((), ())) -> P
     post_pins = _revoke(section_pins(after_doc, located), revoked[1])
     previous = locate_pinned(before_doc)
     found_before = previous.state is State.FOUND
-    growth, detail = None, {}
+    exclude = None if credit is None else credit.exclude
+    growth, rule = None, {}
     if len(post_pins) > PIN_COUNT_CAP or not found_before:
-        growth = pin_growth(before_doc, after_doc, trim=trim, detail=detail)
+        growth = pin_growth(before_doc, after_doc, trim=trim, detail=rule, exclude=exclude)
+    pre_pins = None
     if found_before:
         pre_pins = _revoke(section_pins(before_doc, previous), revoked[0])
         size_before, size_after = pre_pins, post_pins
         pins_before = len(pre_pins) if growth is None else len(post_pins) - growth
     else:
-        t, R = detail["texts"], detail["region"]
+        t, R = rule["texts"], rule["region"]
         if R[0] > R[1]:  # nothing before to compare with: a first Write
             size_before, size_after = [], post_pins
         else:
@@ -773,13 +995,27 @@ def _decide(before: str, after: str, trim: bool, revoked: tuple = ((), ())) -> P
         # and allow when either reading allows. The rule is not monotone in
         # the pins before, so a wider reading alone could refuse.
         if growth is None:
-            growth = pin_growth(before_doc, after_doc, trim=trim, detail=detail)
+            growth = pin_growth(before_doc, after_doc, trim=trim, detail=rule, exclude=exclude)
             pins_before = len(post_pins) - (growth or 0)
-        if size_violation(pins_in_rows(before_doc, *detail["region"]), size_after, size_budget) is None:
+        if size_violation(pins_in_rows(before_doc, *rule["region"]), size_after, size_budget) is None:
             size_reason = None
+    if size_reason is not None and found_before and credit is not None and credit.removed:
+        # A pin this agent removed earlier in the chain was there before on
+        # the size axis too: read it among the pins before, and allow when
+        # that reading allows. When it refuses as well, its reason names the
+        # pin as grown against its removed self rather than as new.
+        live = _live_removed(credit.removed, size_before, size_budget)
+        if live:
+            size_reason = size_violation(list(size_before) + live, size_after, size_budget)
+    if detail is not None:
+        detail.update(before_doc=before_doc, after_doc=after_doc, before_located=previous, after_located=located,
+                      pins_before=pre_pins, pins_after=post_pins, growth=growth)
+        if rule:
+            detail.update(region=rule["region"], texts=rule["texts"])
     growth = growth or 0
-    if growth > 0 and len(post_pins) > PIN_COUNT_CAP:
-        reason = compute_deny_reason(size_before, post_pins, growth=growth)
+    demote = growth - (0 if credit is None else credit.count)
+    if growth > 0 and len(post_pins) > PIN_COUNT_CAP and demote > 0:
+        reason = compute_deny_reason(size_before, post_pins, growth=growth, demote=demote)
         cause = "count"
     else:
         reason, size_reason = size_reason, None

@@ -414,13 +414,19 @@ def check_stale_block(
 # the destination (long-term memory) rather than the act (evict) is the whole
 # point: /PACT:prune-memory archives the pin's content to pact-memory and
 # verifies it arrived BEFORE removing it, so the content survives the removal.
-# "Evict" described only the deletion half and read as loss.
+# "Evict" described only the deletion half and read as loss. `demote` names
+# how many (`demote_text`): demoting that many and retrying the add passes.
 DENY_REASON_COUNT = (
     "Pin count cap reached ({count}/{cap}). "
-    "Run /PACT:prune-memory to demote a pin to long-term memory before "
-    "adding — demotion archives the pin to pact-memory first, so the "
+    "Run /PACT:prune-memory to demote {demote} to long-term memory, then "
+    "retry the add — demotion archives each pin to pact-memory first, so the "
     "content is preserved rather than lost."
 )
+
+
+def demote_text(count: int) -> str:
+    """How many pins a count refusal asks to demote: "1 pin" or "N pins"."""
+    return "1 pin" if count == 1 else f"{count} pins"
 
 # `pins` names each pin over the cap with its size: `_size_reason` and
 # `_render_deny_reason` fill it.
@@ -583,6 +589,7 @@ def compute_deny_reason(
     post_pins: List[Pin],
     *,
     growth: Optional[int] = None,
+    demote: int = 1,
 ) -> Optional[str]:
     """Net-worse deny predicate: return a rendered deny-reason or None.
 
@@ -632,12 +639,13 @@ def compute_deny_reason(
         post_pins: Parsed pins from the simulated post-edit state.
         growth: Pins the change added to the Pinned section, from the
             pin-growth rule. None compares the two pin counts instead.
+        demote: How many pins a count refusal asks to demote.
 
     Returns:
         Rendered deny-reason string if the edit should be denied, else None.
     """
     if growth is not None:
-        return _growth_deny_reason(pre_pins, post_pins, growth)
+        return _growth_deny_reason(pre_pins, post_pins, growth, demote)
 
     pre_violation = evaluate_full_state(pre_pins)
     post_violation = evaluate_full_state(post_pins)
@@ -728,6 +736,23 @@ def _violates(pin: Pin) -> bool:
     return pin.body_chars > PIN_SIZE_CAP and not has_size_override(pin)
 
 
+def _heading_key(heading: str) -> str:
+    """A heading as the size rule matches pins by heading: whitespace runs
+    collapsed, case folded."""
+    return " ".join(heading.split()).casefold()
+
+
+def continues(a: Pin, b: Pin) -> bool:
+    """`b` continues `a` as the size rule reads a rename, a move or a
+    continuation: the same heading (`_heading_key`), or `b` holds at least
+    `_DESCENT_SHARE` of `a`'s word pairs."""
+    if _heading_key(a.heading) == _heading_key(b.heading):
+        return True
+    mine = _word_pairs(a)
+    whole = sum(mine.values())
+    return bool(whole) and sum((mine & _word_pairs(b)).values()) >= _DESCENT_SHARE * whole
+
+
 def _word_pairs(pin: Pin) -> Counter:
     """The pin's text as a multiset of consecutive word pairs, the words of
     all its lines run together; a pin of one word is that word alone."""
@@ -776,9 +801,6 @@ def size_violation(pre_pins: List[Pin], post_pins: List[Pin], budget=None) -> Op
         if a != b:
             parent[a] = b
 
-    def normal(heading):
-        return " ".join(heading.split()).casefold()
-
     def holding(counters):
         """item -> [(index, count)] over `counters`, in index order."""
         index: Dict[str, list] = {}
@@ -807,10 +829,10 @@ def size_violation(pre_pins: List[Pin], post_pins: List[Pin], budget=None) -> Op
     spend(len(pre_pins) + len(post_pins))
     by_heading: Dict[str, list] = {}
     for p, pre in enumerate(pre_pins):
-        by_heading.setdefault(normal(pre.heading), []).append(p)
+        by_heading.setdefault(_heading_key(pre.heading), []).append(p)
     taken_heading: Dict[str, int] = {}
     for q, post in enumerate(post_pins):
-        key = normal(post.heading)
+        key = _heading_key(post.heading)
         partners, k = by_heading.get(key, ()), taken_heading.get(key, 0)
         if k < len(partners):
             p = partners[k]
@@ -982,11 +1004,12 @@ def _growth_deny_reason(
     pre_pins: List[Pin],
     post_pins: List[Pin],
     growth: int,
+    demote: int = 1,
 ) -> Optional[str]:
     """`compute_deny_reason` with the count axis decided by `growth`."""
     post_count = _violation_for_kind(post_pins, "count")
     if post_count is not None and growth > 0:
-        return _render_deny_reason(post_count)
+        return _render_deny_reason(post_count, demote)
     return _pareto_other_axis_deny(pre_pins, post_pins, other="size")
 
 
@@ -1033,12 +1056,14 @@ def _pareto_other_axis_deny(
     return None
 
 
-def _render_deny_reason(violation: CapViolation) -> str:
-    """Render a CapViolation into a curator-facing deny-reason string."""
+def _render_deny_reason(violation: CapViolation, demote: int = 1) -> str:
+    """Render a CapViolation into a curator-facing deny-reason string; a
+    count refusal asks to demote `demote` pins."""
     if violation.kind == "count":
         return DENY_REASON_COUNT.format(
             count=violation.current_count or 0,
             cap=PIN_COUNT_CAP,
+            demote=demote_text(demote),
         )
     if violation.kind == "size":
         # This comparison pairs no pins (largest after against largest

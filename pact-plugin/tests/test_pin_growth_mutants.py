@@ -31,7 +31,8 @@ from fixtures.pin_growth import rows as R
 ROWS = {r.key: r for r in (R.FIXED_ROWS + R.COMMENTED_ROWS + R.CONTENT_FENCE_ROWS + R.REMOVAL_ROWS + R.CEILING_ROWS
                            + R.REVEAL_ROWS)}
 CLAUSES = ("clause_region_r", "clause_intact", "clause_refenced", "clause_guarded_pairing",
-           "clause_moved_block", "clause_edited_in_place", "clause_no_leaving_credit", "clause_past_stray_heading")
+           "clause_moved_block", "clause_edited_in_place", "clause_no_leaving_credit", "clause_past_stray_heading",
+           "clause_past_end_marker", "clause_unindented_heads")
 NOT_A_DECISION = ("size_bound", "not_found", "unreadable", "error")
 
 
@@ -46,7 +47,40 @@ def _locate(m):
     return m.locate_pinned
 
 
+UNINDENT = "reveal:un-indent-a-heading-inside-pin-4-at-12-pins-"
 MUTANTS = (
+    Mutant("R never passes the pinned end marker", "clause_past_end_marker",
+           lambda m: MU.past_end_marker(off=True),
+           ("reveal:move-the-pinned-end-marker-down-past-one-pin-at-12-pins",
+            "reveal:move-the-pinned-end-marker-down-past-two-pins-at-12-pins",
+            "reveal:move-the-pinned-end-marker-down-past-an-oversize-pin")),
+    Mutant("R passes the end marker with no row of the run aligned into S", "clause_past_end_marker",
+           lambda m: MU.past_end_marker(any_row=True),
+           ("reveal:delete-the-pin-below-the-end-marker-move-the-marker-and-add-a-new-pin-in-its-place",)),
+    Mutant("an aligned blank row lets R pass the end marker", "clause_past_end_marker",
+           lambda m: MU.past_end_marker(blanks=True),
+           ("reveal:replace-the-pin-below-the-end-marker-by-a-new-pin-keeping-the-blank-lines-and-move-the-marker",)),
+    Mutant("R takes the whole run below the end marker", "clause_past_end_marker",
+           lambda m: MU.past_end_marker(whole_run=True),
+           ("reveal:move-the-pinned-end-marker-down-past-one-of-two-pins-and-add-a-pin-at-12-pins",)),
+    Mutant("R stops at the run below the end marker", "clause_past_end_marker",
+           lambda m: MU.past_end_marker(no_continuation=True),
+           ("reveal:move-the-end-marker-past-a-pin-and-a-user-heading-below-it-deleting-that-heading-12-to-14",)),
+    Mutant("no un-indented heading pairs", "clause_unindented_heads",
+           lambda m: MU.unindented(off=True),
+           (UNINDENT + "2-spaces", UNINDENT + "4-spaces", UNINDENT + "a-tab")),
+    Mutant("aligned rows pair as un-indented heads too", "clause_unindented_heads",
+           lambda m: MU.unindented(aligned_too=True),
+           ("reveal:add-a-pin-titled-like-an-indented-line-that-stays-at-12-pins",)),
+    Mutant("in-place pairing across any gap of the alignment", "clause_unindented_heads",
+           lambda m: MU.unindented(any_gap=True),
+           ("reveal:delete-an-indented-heading-line-and-add-a-pin-elsewhere-at-12-pins",)),
+    Mutant("un-indented heads pair by the same text only", "clause_unindented_heads",
+           lambda m: MU.unindented(same_text_only=True),
+           ("reveal:un-indent-and-retitle-a-heading-in-place-at-12-pins",)),
+    Mutant("an aligned blank row lets R pass a stray heading", "clause_past_stray_heading",
+           lambda m: MU.past_stray_heading(blanks=True),
+           ("reveal:delete-a-stray-heading-and-replace-the-pin-it-hid-by-a-new-pin-keeping-the-blank-lines",)),
     Mutant("R ends where the locator ends the Pinned section", "clause_past_stray_heading",
            lambda m: MU.past_stray_heading(off=True),
            ("reveal:demote-a-stray-heading-that-hides-pins-7-to-13-13-pins-6-counted",
@@ -273,6 +307,8 @@ BASES = {
     "clause_edited_in_place": lambda m: MU.edited_in_place(),
     "clause_no_leaving_credit": lambda m: MU.leaving_credit(_locate(m)),
     "clause_past_stray_heading": lambda m: MU.past_stray_heading(),
+    "clause_past_end_marker": lambda m: MU.past_end_marker(),
+    "clause_unindented_heads": lambda m: MU.unindented(),
 }
 
 

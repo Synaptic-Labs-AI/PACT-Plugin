@@ -297,6 +297,18 @@ def managed(pins, wm="", head="# User notes\n\nsome text\n\n"):
             "<!-- PACT_MEMORY_END -->\n\n<!-- PACT_MANAGED_END -->\n")
 
 
+def paired(pins, below=""):
+    """`managed` with PACT's pinned pair around the Pinned section and `below`
+    between the pair's end marker and Working Memory."""
+    return ("<!-- PACT_MANAGED_START: Managed by pact-plugin - do not edit this block -->\n"
+            "# PACT Framework and Managed Project Memory\n\n"
+            "<!-- PACT_MEMORY_START -->\n## Retrieved Context\n\n"
+            "<!-- PACT_MEMORY_PINNED_START -->\n## Pinned Context\n\n" + pins +
+            "<!-- PACT_MEMORY_PINNED_END -->\n" + below + "\n## Working Memory\n" + WM +
+            "<!-- PACT_MEMORY_END -->\n\n<!-- PACT_MANAGED_END -->\n")
+
+
+PINNED_END = "<!-- PACT_MEMORY_PINNED_END -->\n"
 NEWPIN = "<!-- pinned: 2026-10-01 -->\n### New pin\nnew body\n\n"
 WM = "### 2026-09-28 09:32\nwm entry one\n\n### 2026-09-27 10:00\nwm entry two\n\n"
 SNIP3 = "body 3\n```markdown\n### step one\n### step two\n```\n"   # a closed snippet with ### lines
@@ -989,7 +1001,66 @@ def build_reveal_rows() -> tuple:
     w12 = managed(pins(12), wm=WM)
     S("delete the Working Memory heading, so its two entries join the pins", "DENY", w12, sub(w12, "\n## Working Memory\n", "\n"))
     S("fix a typo in a pin while a stray heading hides pins 7 to 13", "ALLOW", s13, sub(s13, "body 3\n", "body three\n"))
+    hid = managed(pins(12) + "## Notes\n" + P(50) + "\n\n", wm=WM)
+    S("delete a stray heading and replace the pin it hid by a new pin, keeping the blank lines", "DENY", hid,
+      sub(hid, "## Notes\n" + P(50) + "\n\n", NEWPIN + "\n\n"))
+    _indented_heading_rows(S)
+    _end_marker_rows(S)
     return tuple(b.rows)
+
+
+BIG = "\n".join(f"- line {k} " + "word " * 15 for k in range(20))   # 1,689 chars as a body: over the size cap
+
+
+def _indented_heading_rows(S) -> None:
+    """Removing a `### ` line's indentation turns it into a pin, and it was
+    there before (`clause_unindented_heads`)."""
+    for name, indent in (("2 spaces", "  "), ("4 spaces", "    "), ("a tab", "\t")):
+        u12 = managed(pins(12, over={4: f"body 4\n{indent}### Sub heading\nsub body"}), wm=WM)
+        S(f"un-indent a heading inside pin 4 at 12 pins ({name})", "ALLOW", u12,
+          sub(u12, f"{indent}### Sub heading\n", "### Sub heading\n"))
+    u12 = managed(pins(12, over={4: "body 4\n  ### Sub heading\nsub body"}), wm=WM)
+    unindented = sub(u12, "  ### Sub heading\n", "### Sub heading\n")
+    S("un-indent and retitle a heading in place at 12 pins", "ALLOW", u12,
+      sub(u12, "  ### Sub heading\n", "### Sub heading fixed\n"))
+    S("un-indent a heading at 12 pins and add a pin", "DENY", u12, sub(unindented, P(12), P(12) + NEWPIN))
+    S("un-indent and retitle a heading in place at 12 pins and add a pin", "DENY", u12,
+      sub(sub(u12, "  ### Sub heading\n", "### Sub heading fixed\n"), P(12), P(12) + NEWPIN))
+    S("add a pin titled like an indented line that stays, at 12 pins", "DENY", u12,
+      sub(u12, P(12), P(12) + "<!-- pinned: 2026-10-01 -->\n### Sub heading\nx\n\n"))
+    S("delete an indented heading line and add a pin elsewhere, at 12 pins", "DENY", u12,
+      sub(sub(u12, "  ### Sub heading\n", ""), P(12), P(12) + NEWPIN))
+    o5 = managed(pins(5, over={2: "body 2\n  ### Big sub\n" + BIG}), wm=WM)
+    S("un-indent a heading inside an oversize pin, a pure split", "ALLOW", o5,
+      sub(o5, "  ### Big sub\n", "### Big sub\n"))
+
+
+def _end_marker_rows(S) -> None:
+    """Moving PACT's pinned end marker down past pins brings them into the
+    section, and they were there before (`clause_past_end_marker`)."""
+    m12 = paired(pins(12), below=P(50))
+    S("move the pinned end marker down past one pin at 12 pins", "ALLOW", m12,
+      sub(m12, PINNED_END + P(50), P(50) + PINNED_END))
+    S("move the pinned end marker down past one pin and add a pin, at 12 pins", "DENY", m12,
+      sub(m12, PINNED_END + P(50), P(50) + NEWPIN + PINNED_END))
+    S("delete the pin below the end marker, move the marker and add a new pin in its place", "DENY", m12,
+      sub(m12, PINNED_END + P(50), NEWPIN + PINNED_END))
+    blanks = paired(pins(12), below=P(50) + "\n\n")
+    S("replace the pin below the end marker by a new pin, keeping the blank lines, and move the marker", "DENY",
+      blanks, sub(blanks, PINNED_END + P(50) + "\n\n", NEWPIN + "\n\n" + PINNED_END))
+    two = paired(pins(12), below=P(50) + P(51))
+    S("move the pinned end marker down past two pins at 12 pins", "ALLOW", two,
+      sub(two, PINNED_END + P(50) + P(51), P(50) + P(51) + PINNED_END))
+    S("move the pinned end marker down past one of two pins at 12 pins", "ALLOW", two,
+      sub(two, PINNED_END + P(50), P(50) + PINNED_END))
+    S("move the pinned end marker down past one of two pins and add a pin, at 12 pins", "DENY", two,
+      sub(two, PINNED_END + P(50), P(50) + NEWPIN + PINNED_END))
+    noted = paired(pins(12), below=P(50) + "## My notes\n### idea one\ntext\n\n")
+    S("move the end marker past a pin and a user heading below it, deleting that heading (12 to 14)", "ALLOW", noted,
+      sub(noted, PINNED_END + P(50) + "## My notes\n### idea one\ntext\n", P(50) + "### idea one\ntext\n" + PINNED_END))
+    o5 = paired(pins(5), below=P(51, body=BIG))
+    S("move the pinned end marker down past an oversize pin", "ALLOW", o5,
+      sub(o5, PINNED_END + P(51, body=BIG), P(51, body=BIG) + PINNED_END))
 
 
 def build_fixed_rows() -> tuple:
