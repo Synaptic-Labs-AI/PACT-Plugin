@@ -552,11 +552,11 @@ def _frame(claude_md, tool, tool_input):
     }
 
 
-def _run_hook(project, frame, hook=None):
+def _run_hook(project, frame, hook=None, cwd=None):
     env = {**os.environ, "HOME": str(project / "home"), "CLAUDE_PROJECT_DIR": str(project)}
     (project / "home").mkdir(exist_ok=True)
     return subprocess.run([sys.executable, str(hook or HOOK)], input=json.dumps(frame), capture_output=True,
-                          text=True, env=env, cwd=project, timeout=600)
+                          text=True, env=env, cwd=cwd or project, timeout=600)
 
 
 def _outcome(result):
@@ -629,14 +629,15 @@ class TestPinCapsGate_RealHook:
         assert "not checking pin caps" in message and "ModuleNotFoundError" in message
         assert "not checking pin caps" in result.stderr
 
-    @pytest.mark.parametrize("pin_caps, error", [
-        (None, "No module named 'pin_caps'"),
-        ('raise ImportError("pin_caps is broken")\n', "pin_caps is broken"),
+    @pytest.mark.parametrize("pin_caps, kind, error", [
+        (None, "ModuleNotFoundError", "No module named 'pin_caps'"),
+        ('raise ImportError("pin_caps is broken")\n', "ImportError", "pin_caps is broken"),
     ], ids=["pin_caps missing", "pin_caps raising"])
-    def test_a_pin_caps_load_failure_allows_and_says_so(self, tmp_path, pin_caps, error):
+    def test_a_pin_caps_load_failure_allows_and_says_so(self, tmp_path, pin_caps, kind, error):
         """With shared/ beside it but pin_caps missing or raising on import,
         the gate allows the call and names the failure: it imports pin_caps
-        only inside its guarded imports or inside a function."""
+        only inside its guarded imports or inside a function. The message
+        names the exception type; stderr also carries its text."""
         lonely = tmp_path / "lonely"
         shutil.copytree(HOOK.parent / "shared", lonely / "shared", ignore=shutil.ignore_patterns("__pycache__"))
         hook = lonely / "pin_caps_gate.py"
@@ -648,4 +649,5 @@ class TestPinCapsGate_RealHook:
         result = _run_hook(tmp_path, _frame(claude_md, *_write(_pins(14))), hook=hook)
         assert result.returncode == 0, result
         message = json.loads(result.stdout)["systemMessage"]
-        assert "not checking pin caps" in message and error in message, message
+        assert "not checking pin caps" in message and message.endswith(kind) and error not in message, message
+        assert error in result.stderr, result.stderr

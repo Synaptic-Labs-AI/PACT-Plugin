@@ -68,13 +68,16 @@ _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 def _emit_load_failure_allow(stage: str, error: BaseException) -> NoReturn:
     """Stdlib-only fail-open for a module-load failure: a broken install must
     not refuse every Edit and Write of every file, so it allows them and says
-    on each one that pin caps are not being checked."""
+    on each one that pin caps are not being checked. The message names the
+    exception type only; stderr adds its text, which cannot hold CLAUDE.md
+    text because this runs while the module loads, before the hook reads any
+    CLAUDE.md."""
     message = (
         f"PACT pin_caps_gate could not load and is not checking pin caps "
-        f"({stage}): {type(error).__name__}: {error}"
+        f"({stage}): {type(error).__name__}"
     )
     print(json.dumps({"systemMessage": message}))
-    print(message, file=sys.stderr)
+    print(f"{message}: {error}", file=sys.stderr)
     sys.exit(0)
 
 
@@ -963,7 +966,7 @@ def main():
         try:
             append_failure(
                 classification=_FAIL_UNEXPECTED,
-                error=f"{type(exc).__name__}: {exc}",
+                error=type(exc).__name__,
                 source=str(input_data.get("tool_name", "")),
             )
         except Exception:  # noqa: BLE001 — logging must never cascade

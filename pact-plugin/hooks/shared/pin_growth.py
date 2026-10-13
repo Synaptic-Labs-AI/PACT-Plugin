@@ -947,7 +947,7 @@ def pin_cap_decision(before: str, after: str, *, use_timer: bool = True, trim: b
         return stopped_early(bound)
     except Exception as error:  # an over-block is the worst outcome, so a failure allows
         return PinDecision("ALLOW_ADVISORY", 0, 0, None, "error",
-                           f"PACT could not check the pin cap: {type(error).__name__}: {error}")
+                           f"PACT could not check the pin cap: {type(error).__name__}")
 
 
 def _revoke(pins: list[Pin], indices) -> list[Pin]:

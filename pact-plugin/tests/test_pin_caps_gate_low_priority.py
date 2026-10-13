@@ -17,7 +17,11 @@ covered in test_prune_memory_integration.py.
 """
 
 import json
+import os
+import subprocess
+import sys
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -61,6 +65,11 @@ def gate_with_captured_failures(tmp_path, monkeypatch, pact_context):
     monkeypatch.setattr(pin_caps_gate, "append_failure", _capture)
 
     return {"claude_md": claude_md, "failures": failures}
+
+
+# Text an exception raised while reading a CLAUDE.md could carry. No hook
+# message or failure record may repeat it.
+SENTINEL = "### a pin title read from CLAUDE.md"
 
 
 def _call_gate(input_data):
@@ -136,7 +145,7 @@ class TestFailureLogClassification:
         from shared import pin_growth
 
         def raising_growth(*args, **kwargs):
-            raise RuntimeError("synthetic decision failure")
+            raise RuntimeError(SENTINEL)
 
         monkeypatch.setattr(pin_growth, "pin_growth", raising_growth)
         result = _call_gate({
@@ -150,6 +159,7 @@ class TestFailureLogClassification:
         ]
         assert len(decision_failures) == 1
         assert "RuntimeError" in decision_failures[0]["error"]
+        assert SENTINEL not in decision_failures[0]["error"]
 
     def test_malformed_tool_input_allows_and_records_classification(
         self, gate_with_captured_failures, monkeypatch
@@ -207,9 +217,7 @@ class TestFailureLogClassification:
         monkeypatch.setattr(
             pin_caps_gate,
             "_gate",
-            lambda _: (_ for _ in ()).throw(
-                RuntimeError("synthetic unexpected failure")
-            ),
+            lambda _: (_ for _ in ()).throw(RuntimeError(SENTINEL)),
         )
 
         import io
@@ -233,9 +241,9 @@ class TestFailureLogClassification:
         assert len(unexpected_failures) == 1
         # Source carries the tool_name for post-hoc correlation.
         assert unexpected_failures[0]["source"] == "Edit"
-        # Error carries the exception type + message.
-        assert "RuntimeError" in unexpected_failures[0]["error"]
-        assert "synthetic unexpected failure" in unexpected_failures[0]["error"]
+        # Error carries the exception type only: an exception's text can hold
+        # CLAUDE.md text, which no PACT record or message may carry.
+        assert unexpected_failures[0]["error"] == "RuntimeError"
 
     def test_a_write_over_an_unreadable_file_records_classification(
         self, gate_with_captured_failures
@@ -316,6 +324,62 @@ class TestFailureLogClassification:
             "tool_input": {"file_path": str(env["claude_md"]), "content": under_cap_content},
         })
         assert result is None
+
+
+class TestExceptionTextStaysOut:
+    """A hook message names an exception by its type, never by its text, which
+    can hold CLAUDE.md text."""
+
+    def test_the_decision_error_advisory_names_the_type_only(self, monkeypatch):
+        from shared import pin_growth
+
+        def raising_growth(*args, **kwargs):
+            raise RuntimeError(SENTINEL)
+
+        monkeypatch.setattr(pin_growth, "pin_growth", raising_growth)
+        before = _build_over_cap()
+        decision = pin_growth.pin_cap_decision(before, before, use_timer=False)
+        assert decision.verdict == "ALLOW_ADVISORY" and decision.cause == "error", decision
+        assert decision.reason == "PACT could not check the pin cap: RuntimeError"
+
+    def test_the_load_failure_message_names_the_type_only(self, capsys):
+        """stderr keeps the exception's text for a broken install: the module
+        loads before the hook reads any CLAUDE.md (pinned below)."""
+        import pin_caps_gate
+
+        with pytest.raises(SystemExit) as exc_info:
+            pin_caps_gate._emit_load_failure_allow("module imports", ImportError(SENTINEL))
+        assert exc_info.value.code == 0
+        out, err = capsys.readouterr()
+        message = json.loads(out)["systemMessage"]
+        assert message.endswith("(module imports): ImportError") and SENTINEL not in message
+        assert err.strip() == f"{message}: {SENTINEL}"
+
+    def test_loading_the_gate_module_reads_no_claude_md(self, tmp_path):
+        """The load-failure handler runs while the module loads, so its
+        exception cannot hold CLAUDE.md text as long as loading reads none."""
+        import pin_caps_gate
+
+        (tmp_path / ".claude").mkdir()
+        for path in (tmp_path / "CLAUDE.md", tmp_path / ".claude" / "CLAUDE.md"):
+            path.write_text(_build_over_cap(), encoding="utf-8")
+        script = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            "opened = []\n"
+            "sys.addaudithook(lambda event, args: opened.append(str(args[0])) "
+            "if event == 'open' and args and isinstance(args[0], (str, bytes)) else None)\n"
+            "import pin_caps_gate\n"
+            "loading = sum(Path(p).name.casefold() == 'claude.md' for p in opened)\n"
+            "count = len(opened)\n"
+            f"pin_caps_gate._read_baseline(Path({str(tmp_path / 'CLAUDE.md')!r}))\n"
+            "print(loading, sum(Path(p).name.casefold() == 'claude.md' for p in opened[count:]))\n"
+        )
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, cwd=tmp_path,
+                                env={**os.environ, "CLAUDE_PROJECT_DIR": str(tmp_path),
+                                     "PYTHONPATH": str(Path(pin_caps_gate.__file__).parent)}, timeout=600)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split() == ["0", "1"], result.stdout  # none while loading; one read, the control
 
 
 # ---------------------------------------------------------------------------
