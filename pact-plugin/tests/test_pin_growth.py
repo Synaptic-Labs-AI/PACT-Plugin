@@ -1265,12 +1265,33 @@ def test_the_decision_fills_detail_with_what_it_read():
     assert detail["growth"] == 1 and len(detail["pins_before"]) == 13 and len(detail["pins_after"]) == 14
     assert detail["before_located"].state is State.FOUND and detail["after_located"].state is State.FOUND
     small = FR.paired(FR.pins(3))
+    added = sub(small, FR.P(3), FR.P(3) + FR.NEWPIN)
     detail = {}
-    pin_growth.pin_cap_decision(small, sub(small, FR.P(3), FR.P(3) + FR.NEWPIN), use_timer=False, detail=detail)
-    assert detail["growth"] is None and "region" not in detail  # at or under the cap the rule does not run
+    d = pin_growth.pin_cap_decision(small, added, use_timer=False, detail=detail)
+    assert d == pin_growth.pin_cap_decision(small, added, use_timer=False)  # measuring for detail changes nothing
+    assert detail["growth"] == 1 and "region" in detail  # measured under the cap too
+    indented = FR.paired(FR.pins(3, over={2: "body 2\n  ### Sub heading\nsub body"}))
+    detail = {}
+    pin_growth.pin_cap_decision(indented, sub(indented, "  ### Sub heading\n", "### Sub heading\n"), use_timer=False,
+                                detail=detail)
+    assert detail["growth"] == 0  # a reveal under the cap measures no growth
     first = {}
     pin_growth.pin_cap_decision("", small, use_timer=False, detail=first)
     assert first["pins_before"] is None and first["growth"] == 3
+
+
+def test_a_stop_while_measuring_growth_for_detail_alone_changes_no_decision(monkeypatch):
+    small = FR.paired(FR.pins(3))
+    added = sub(small, FR.P(3), FR.P(3) + FR.NEWPIN)
+    plain = pin_growth.pin_cap_decision(small, added, use_timer=False)
+
+    def stopped(*args, **kwargs):
+        raise pin_growth.SizeBound("the pin-growth rule passed its step budget of 0")
+
+    monkeypatch.setattr(pin_growth, "pin_growth", stopped)  # under the cap only the measure for detail runs the rule
+    detail = {}
+    assert pin_growth.pin_cap_decision(small, added, use_timer=False, detail=detail) == plain
+    assert detail["growth"] is None and detail["pins_after"] is not None
 
 
 def test_reveal_candidates_keys_the_lines_a_reveal_can_turn_into_pins():

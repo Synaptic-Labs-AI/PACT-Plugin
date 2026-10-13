@@ -369,3 +369,55 @@ def test_a_change_too_large_to_compare_records_nothing(store):
     many = [pin(i) for i in range(60)]
     assert _decide(LEAD, base, doc(many), doc(many[:59])).verdict == "ALLOW"
     assert not (session_dir / "claude-md-pin-credit").exists()
+
+
+# ---------------------------------------------------------------------------
+# The credit moves by the growth rule's count in every case
+# ---------------------------------------------------------------------------
+
+B12 = doc(P13[:12]).replace("body 4\n", "body 4\n  ### Sub heading\n")
+
+
+def test_remove_reveal_re_add_under_the_cap_is_allowed(store):
+    """A reveal is growth 0, so at and under the cap it spends nothing the
+    re-add needs; one Edit doing all three is allowed too."""
+    _, base = store
+    removed = B12.replace(P13[2], "")
+    revealed = removed.replace("  ### Sub heading\n", "### Sub heading\n")
+    readded = revealed.replace(P13[11], P13[11] + P13[2])
+    assert _decide(LEAD, base, B12, readded).verdict == "ALLOW"  # one Edit doing all three
+    assert _decide(LEAD, base, B12, removed).verdict == "ALLOW"
+    assert _decide(LEAD, base, removed, revealed).verdict == "ALLOW"
+    assert pin_credit.read(LEAD, "lead", base, _digest(revealed)).count == 1
+    assert _decide(LEAD, base, revealed, readded).verdict == "ALLOW"
+
+
+@pytest.mark.parametrize("stop", ["step budget", "timer"])
+def test_a_stop_in_the_detail_only_growth_changes_no_decision_field(monkeypatch, stop):
+    """At the cap the decision does not run the rule, so `detail` alone runs
+    it. A stop there, from the step budget or a timer, leaves the decision
+    field for field as it is without `detail`, and the growth unknown."""
+    import signal
+
+    from shared import pin_growth
+
+    before, after = B12, B12.replace("body 7\n", "body seven\n")
+    plain = pin_growth.pin_cap_decision(before, after)
+    assert plain.verdict == "ALLOW"
+    if stop == "step budget":
+        monkeypatch.setattr(pin_growth, "STEP_BUDGET", 1)
+    else:
+        if not hasattr(signal, "setitimer"):
+            pytest.skip("no interval timer on this platform")
+        real = pin_growth.pin_growth
+
+        def timed_out(*args, **kwargs):
+            signal.raise_signal(signal.SIGPROF)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(pin_growth, "pin_growth", timed_out)
+    detail: dict = {}
+    assert pin_growth.pin_cap_decision(before, after, detail=detail) == plain
+    assert detail["growth"] is None
+    if hasattr(signal, "getitimer"):
+        assert signal.getitimer(signal.ITIMER_PROF) == (0.0, 0.0)

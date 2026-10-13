@@ -102,8 +102,10 @@ def record(input_data: dict, frame_kind: str, base: Path, before_digest: str,
 
     Called after an ALLOW only. `detail` holds the gate's text after (`after`),
     both parses, both located sections, both sections' pins and the rule's
-    growth before credit; a missing key records nothing. Writes nothing when
-    the new state would carry nothing and the text before had no state."""
+    growth before credit, the one measure the remaining credit is updated by;
+    a missing key, or growth the rule could not measure, records nothing.
+    Writes nothing when the new state would carry nothing and the text before
+    had no state."""
     try:
         location = _location(input_data, frame_kind)
         if location is None or decision.verdict != "ALLOW":
@@ -266,7 +268,8 @@ def _entry(detail: dict, decision, credit: Credit) -> dict | None:
     if not all(name in detail for name in needed) or detail["pins_after"] is None:
         return None
     growth = detail.get("growth")
-    delta = growth if growth is not None else decision.pins_after - decision.pins_before
+    if growth is None:  # the rule could not measure the change: the chain breaks
+        return None
     pins_before, pins_after = detail["pins_before"] or [], detail["pins_after"]
     if (len(credit.removed) + len(pins_before)) * len(pins_after) > _MAX_COMPARISONS:
         return None
@@ -278,9 +281,8 @@ def _entry(detail: dict, decision, credit: Credit) -> dict | None:
     indented_before, below_before = reveal_candidates(detail["before_doc"], detail["before_located"])
     indented_after, below_after = reveal_candidates(detail["after_doc"], detail["after_located"])
     return {
-        "credit": max(0, credit.count - delta),
-        "credited": bool(growth is not None and growth > 0 and decision.pins_after > PIN_COUNT_CAP
-                         and growth <= credit.count),
+        "credit": max(0, credit.count - growth),
+        "credited": growth > 0 and decision.pins_after > PIN_COUNT_CAP and growth <= credit.count,
         "removed": _bounded_snapshots([_snapshot(p) for p in removed]),
         "added_indented": list((Counter(indented_after) - Counter(indented_before)).elements())[-_MAX_KEYS:],
         "added_below": list((Counter(below_after) - Counter(below_before)).elements())[-_MAX_KEYS:],

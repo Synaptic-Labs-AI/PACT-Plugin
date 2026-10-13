@@ -31,12 +31,15 @@ READD_3 = {"old_string": PIN_12, "new_string": PIN_12 + PIN_3}
 
 
 def _frame(w, tool_input, event, frame):
+    if "content" in tool_input:
+        return {"hook_event_name": event, "tool_name": "Write", "session_id": SID, "agent_type": LEAD,
+                "tool_input": {"file_path": str(w.claude_md), **tool_input}, **frame}
     return {"hook_event_name": event, "tool_name": "Edit", "session_id": SID, "agent_type": LEAD,
             "tool_input": {"file_path": str(w.claude_md), "replace_all": False, **tool_input}, **frame}
 
 
 def _gate(w, tool_input, **frame):
-    """The gate's verdict on an Edit of the world's CLAUDE.md."""
+    """The gate's verdict on an Edit or a Write (`content`) of the world's CLAUDE.md."""
     result = subprocess.run([sys.executable, str(GATE)], input=json.dumps(_frame(w, tool_input, "PreToolUse", frame)),
                             capture_output=True, text=True, env=carry_clock_shift(dict(w.env)), cwd=w.repo,
                             timeout=600)
@@ -52,8 +55,12 @@ def _edit(w, tool_input, **frame):
     verdict = _gate(w, tool_input, **frame)
     if verdict != "deny":
         text = w.claude_md.read_text(encoding="utf-8")
-        assert text.count(tool_input["old_string"]) == 1
-        w.claude_md.write_text(text.replace(tool_input["old_string"], tool_input["new_string"]), encoding="utf-8")
+        if "content" in tool_input:
+            text = tool_input["content"]
+        else:
+            assert text.count(tool_input["old_string"]) == 1
+            text = text.replace(tool_input["old_string"], tool_input["new_string"])
+        w.claude_md.write_text(text, encoding="utf-8")
         _hook(w, TRACK, _frame(w, tool_input, "PostToolUse", frame))
     return verdict
 
@@ -156,3 +163,103 @@ def test_the_lead_advisory_still_reports_growth_the_gate_never_saw(at_13):
     text = at_13.claude_md.read_text(encoding="utf-8")
     at_13.claude_md.write_text(text.replace(PIN_12, PIN_12 + PIN_3.replace("Pin 3", "Pin 30")), encoding="utf-8")
     assert "14 pins" in (_prompt(at_13) or "")
+
+
+# ---------------------------------------------------------------------------
+# The credit moves by the growth rule's count, so a chain of Edits gets the
+# verdict one Edit doing the same gets: a revealed pin (an indented heading
+# un-indented, a fenced one unfenced) spends nothing, and a fenced heading
+# deleted frees a slot, at and under the cap as above it
+# ---------------------------------------------------------------------------
+
+PIN_2 = "<!-- pinned: 2026-04-21 -->\n### Pin 2\nsecret body 2\n\n"
+PIN_30 = "<!-- pinned: 2026-04-21 -->\n### Pin 30\nsecret body 30\n\n"
+INDENTED, REVEALED = "  ### Sub heading\n", "### Sub heading\n"
+FENCED, UNFENCED = "```\n### Fenced\n```\n", "### Fenced\n"
+
+
+def _last_pin(count):
+    return f"<!-- pinned: 2026-04-21 -->\n### Pin {count - 1}\nsecret body {count - 1}\n\n"
+
+
+def _start(world, count, line):
+    """The world's CLAUDE.md at `count` pins with `line` in Pin 4's body,
+    written outside any tool before the chain starts, baseline recorded."""
+    text = _doc(_pins(count)).replace("secret body 4\n", "secret body 4\n" + line)
+    world.claude_md.write_text(text, encoding="utf-8")
+    _prompt(world)
+    return text
+
+
+def _add_after_last(count, block):
+    return {"old_string": _last_pin(count), "new_string": _last_pin(count) + block}
+
+
+def _one_call(world, start, *steps):
+    """The gate's verdict on one Write doing every step of a chain from
+    `start`, the file left as it is."""
+    text = start
+    for old, new in steps:
+        assert text.count(old) == 1
+        text = text.replace(old, new)
+    return _gate(world, {"content": text})
+
+
+def test_remove_reveal_re_add_under_the_cap_is_allowed_as_one_edit_is(world):
+    start = _start(world, 12, INDENTED)
+    steps = [(PIN_2, ""), (INDENTED, REVEALED), (_last_pin(12), _last_pin(12) + PIN_2)]
+    assert _one_call(world, start, *steps) == "allow"
+    assert [_edit(world, {"old_string": old, "new_string": new}) for old, new in steps] == ["allow"] * 3
+
+
+def test_remove_reveal_add_over_the_cap_gets_the_one_edit_verdict(world):
+    start = _start(world, 13, INDENTED)
+    steps = [(PIN_2, ""), (INDENTED, REVEALED), (_last_pin(13), _last_pin(13) + PIN_30)]
+    one = _one_call(world, start, *steps)
+    assert [_edit(world, {"old_string": old, "new_string": new}) for old, new in steps] == ["allow", "allow", one]
+    assert one == "allow"
+
+
+def _credit_here(world):
+    from shared.claude_md_drift import _digest
+
+    record = world.session_dir / "claude-md-pin-credit" / "lead.json"
+    if not record.exists():
+        return None
+    state = json.loads(record.read_text(encoding="utf-8"))["states"].get(
+        _digest(world.claude_md.read_text(encoding="utf-8")))
+    return None if state is None else state["credit"]
+
+
+def test_a_reveal_neither_spends_credit_nor_creates_it(world):
+    _start(world, 12, INDENTED)
+    assert _edit(world, {"old_string": INDENTED, "new_string": REVEALED}) == "allow"
+    assert _credit_here(world) in (None, 0)
+    _start(world, 12, INDENTED)
+    assert _edit(world, {"old_string": PIN_2, "new_string": ""}) == "allow"
+    assert _credit_here(world) == 1
+    assert _edit(world, {"old_string": INDENTED, "new_string": REVEALED}) == "allow"
+    assert _credit_here(world) == 1
+
+
+def test_a_removal_then_a_reveal_and_an_add_in_one_edit_gets_the_one_edit_verdict(world):
+    start = _start(world, 12, INDENTED)
+    one = _one_call(world, start, (PIN_2, ""), (INDENTED, REVEALED), (_last_pin(12), _last_pin(12) + PIN_30))
+    assert _edit(world, {"old_string": PIN_2, "new_string": ""}) == "allow"
+    second = world.claude_md.read_text(encoding="utf-8").replace(INDENTED, REVEALED).replace(
+        _last_pin(12), _last_pin(12) + PIN_30)
+    assert _edit(world, {"content": second}) == one == "allow"
+
+
+def test_remove_unfence_re_add_under_the_cap_is_allowed_as_one_edit_is(world):
+    start = _start(world, 12, FENCED)
+    steps = [(PIN_2, ""), (FENCED, UNFENCED), (_last_pin(12), _last_pin(12) + PIN_2)]
+    assert _one_call(world, start, *steps) == "allow"
+    assert [_edit(world, {"old_string": old, "new_string": new}) for old, new in steps] == ["allow"] * 3
+
+
+def test_a_fenced_heading_deleted_frees_a_slot_as_in_one_edit(world):
+    start = _start(world, 12, FENCED)
+    steps = [(UNFENCED, ""), (_last_pin(12), _last_pin(12) + PIN_30)]
+    assert _one_call(world, start, *steps) == "allow"
+    assert [_edit(world, {"old_string": old, "new_string": new}) for old, new in steps] == ["allow"] * 2

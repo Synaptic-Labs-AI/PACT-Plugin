@@ -915,8 +915,10 @@ def pin_cap_decision(before: str, after: str, *, use_timer: bool = True, trim: b
     A `detail` dict, once the decision has read both sections, receives
     "before_doc", "after_doc", "before_located", "after_located",
     "pins_before" and "pins_after" (None for a side not located), "growth"
-    (the rule's growth before credit, None when it did not run), and with
-    the rule, "region" and "texts"."""
+    (the rule's growth before credit, measured whenever both sections are
+    located even where the decision did not need it; None when the rule could
+    not measure it), and with the rule, "region" and "texts". Measuring growth
+    for `detail` alone never changes the decision."""
     try:
         return run_with_timer(lambda: _decide(before, after, trim, revoked, credit, detail), use_timer)
     except SizeBound as bound:
@@ -1007,11 +1009,7 @@ def _decide(before: str, after: str, trim: bool, revoked: tuple = ((), ()), cred
         live = _live_removed(credit.removed, size_before, size_budget)
         if live:
             size_reason = size_violation(list(size_before) + live, size_after, size_budget)
-    if detail is not None:
-        detail.update(before_doc=before_doc, after_doc=after_doc, before_located=previous, after_located=located,
-                      pins_before=pre_pins, pins_after=post_pins, growth=growth)
-        if rule:
-            detail.update(region=rule["region"], texts=rule["texts"])
+    measured = growth
     growth = growth or 0
     demote = growth - (0 if credit is None else credit.count)
     if growth > 0 and len(post_pins) > PIN_COUNT_CAP and demote > 0:
@@ -1020,6 +1018,19 @@ def _decide(before: str, after: str, trim: bool, revoked: tuple = ((), ()), cred
     else:
         reason, size_reason = size_reason, None
         cause = "size"
+    if detail is not None:
+        if measured is None and found_before:
+            # The credit record reads the rule's growth on every allowed change, so it is
+            # measured here, after the verdict, for `detail` alone: a stop or a failure
+            # inside it leaves the verdict as it is and the growth unknown.
+            try:
+                measured = pin_growth(before_doc, after_doc, trim=trim, detail=rule, exclude=exclude)
+            except Exception:  # noqa: BLE001 — a measure for `detail` alone never changes the decision
+                measured = None
+        detail.update(before_doc=before_doc, after_doc=after_doc, before_located=previous, after_located=located,
+                      pins_before=pre_pins, pins_after=post_pins, growth=measured)
+        if rule:
+            detail.update(region=rule["region"], texts=rule["texts"])
     if reason is None:
         return PinDecision("ALLOW", pins_before, len(post_pins), growth, None, None)
     return PinDecision("DENY", pins_before, len(post_pins), growth, cause, reason, size_reason)
