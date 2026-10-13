@@ -16,7 +16,7 @@ Cap violations are denied by `hooks/pin_caps_gate.py` when the `Edit`/`Write` to
 - **Size**: Each pin body is at most 1500 characters unless the pin carries a valid `pin-size-override`. A pin that is already over 1500 characters must not grow. The `<!-- pinned: ... -->` and `<!-- STALE: ... -->` markers do not count toward the size; a fenced code example inside the body does, and trailing spaces and tabs do not.
 - **Override**: verbatim load-bearing content MAY carry a `pin-size-override` rationale (≤ 120 chars, single line) — see [Size Override](#size-override). The hook validates the rationale in-band.
 
-At the cap, renaming, moving, reordering or rewriting pins is allowed. The count cap refuses only a change that adds a pin; the size cap applies to each pin the change adds or grows.
+At the cap, renaming, moving, reordering or rewriting pins is allowed. The count cap refuses only a change that adds a pin; the size cap applies to each pin the change adds or grows. To move a pin with two `Edit` calls, remove it first, then add it where it belongs, with no other change to CLAUDE.md in between.
 
 Make every pin change with `Edit`. Do not change pins through `Bash`.
 
@@ -63,7 +63,7 @@ If the hook allows an edit with a note that it could not locate the Pinned secti
 
 If the pin_caps_gate hook denies the `Edit`/`Write`, the deny reason tells you which cap fired. You MUST NOT bypass.
 
-- **Pin count cap reached (N/12)**: Run `/PACT:prune-memory` to demote an existing pin to long-term memory, then retry the add. Demotion archives the pin to pact-memory before removing it, so the content is preserved rather than lost.
+- **Pin count cap reached (N/12)**: Run `/PACT:prune-memory` to demote the number of pins the reason names to long-term memory, then retry the add. Demotion archives each pin to pact-memory before removing it, so the content is preserved rather than lost.
   - A teammate, or a subagent in a PACT team session, gets "Do not change CLAUDE.md yourself, by any route; tell the team-lead." instead. Do not write `CLAUDE.md` by any route, not only an `Edit` or a `Write`: do NOT run `/PACT:prune-memory`, and do NOT retry the edit. Send the pin's text to the team-lead: with `SendMessage`, or in your final report if you are a subagent.
   - As the team-lead, when you receive a pin that way, free a slot with the user via `/PACT:prune-memory`, then add the pin yourself.
 - **Pin size cap (1500 chars) exceeded**: Compress the body of each pin the reason names, or add a `pin-size-override` rationale if the content is verbatim load-bearing.

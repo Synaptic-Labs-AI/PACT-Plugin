@@ -13,6 +13,12 @@ with the file after it. This hook builds the text after (`gate_decision`),
 checks the size override of every pin the change adds or edits, and prints
 the verdict.
 
+A pin this agent removed earlier, in a chain of its own allowed changes that
+nothing else has touched, is credited (`shared.pin_credit`), so a pin moved by
+two Edits is not counted as added. `_decide` reads the credit for the file
+before the change and, after an ALLOW, records the state for the file the
+change produces. The record lives in the session dir, never in CLAUDE.md.
+
 Gate fires when ALL hold:
   1. Tool is Edit or Write (enforced by hooks.json matcher)
   2. `claude_md_manager.gate_frame` names the frame: the lead, a PACT
@@ -36,7 +42,9 @@ FAIL-OPEN. An over-block is the worst outcome, so every failure allows:
     fails;
   - an Edit or a Write over a CLAUDE.md that exists but cannot be read is
     allowed with an advisory: without the text before, the change cannot be
-    compared with it.
+    compared with it;
+  - a missing or unreadable credit record gives no credit, and a credit record
+    that cannot be written records nothing.
 
 Input: JSON from stdin with tool_name, tool_input, session_id, etc.
 Output: a deny (hookSpecificOutput.permissionDecision, exit 2), an allow with
@@ -778,9 +786,13 @@ def _invalid_override(before: str, after: str) -> tuple[Optional[str], tuple]:
     return None, (frozenset(p for p, _ in revoked), frozenset(q for _, q in revoked))
 
 
-def gate_decision(before: str, tool_name: str, tool_input: dict):
+def gate_decision(before: str, tool_name: str, tool_input: dict, *, credit=None, detail=None):
     """The verdict on an Edit or Write of the project CLAUDE.md whose text is
     `before` ("" when no readable file). Pure: no I/O.
+
+    `credit` is this agent's chain credit (`shared.pin_credit.Credit`), None
+    for none. A `detail` dict receives the text after (`after`) and what
+    `pin_cap_decision` read, for recording the chain's next state.
 
     The text after is `shared.edit_simulation.simulate`'s, the edit the tool
     will make: an empty old_string creates or fills a blank file, and a curly
@@ -799,6 +811,8 @@ def gate_decision(before: str, tool_name: str, tool_input: dict):
     after = simulate(before, tool_name, tool_input)
     if after is None:
         raise TypeError(f"{tool_name} tool_input is not a well-formed {tool_name} payload")
+    if detail is not None:
+        detail["after"] = after
     if after == before:
         return PinDecision("ALLOW", 0, 0, None, None, None)
 
@@ -807,7 +821,7 @@ def gate_decision(before: str, tool_name: str, tool_input: dict):
         invalid, revoked = _invalid_override(before, after)
         if invalid is not None:
             return PinDecision("DENY", 0, 0, None, "override", f"Pin cap violation (invalid override): {invalid}")
-        return pin_cap_decision(before, after, use_timer=False, revoked=revoked)
+        return pin_cap_decision(before, after, use_timer=False, revoked=revoked, credit=credit, detail=detail)
 
     try:
         return run_with_timer(decide)
@@ -880,13 +894,17 @@ def _gate(input_data: dict):
     target = gate_target(file_path)
     if target is None:
         return None
-    decision = _decide(target, tool_name, tool_input)
+    decision = _decide(target, tool_name, tool_input, input_data, frame)
     return _member_reason(decision) if frame == "member" else decision
 
 
-def _decide(target, tool_name: str, tool_input: dict):
+def _decide(target, tool_name: str, tool_input: dict, input_data: Optional[dict] = None,
+            frame: Optional[str] = None):
     """The decision on a change to `target`, compared with the file that
-    resolves before it, or with empty text when none does."""
+    resolves before it, or with empty text when none does.
+
+    With the hook frame, the decision spends this agent's chain credit for the
+    text before, and an ALLOW records the chain's state for the text after."""
     before = ""
     if target.before is not None:
         before, read_error = _read_baseline(target.before)
@@ -898,10 +916,30 @@ def _decide(target, tool_name: str, tool_input: dict):
             )
             return _unreadable_decision(target.before, tool_name, tool_input)
 
-    decision = gate_decision(before, tool_name, tool_input)
+    credit_store, before_digest, credit = _read_credit(input_data, frame, target.base, before)
+    detail: dict = {}
+    decision = gate_decision(before, tool_name, tool_input, credit=credit, detail=detail)
     if decision.cause == "error":
         append_failure(classification=_FAIL_DECISION, error=decision.reason or "", source=tool_name)
+    if decision.verdict == "ALLOW" and credit_store is not None:
+        credit_store.record(input_data, frame, target.base, before_digest, detail, decision, credit)
     return decision
+
+
+def _read_credit(input_data: Optional[dict], frame: Optional[str], base, before: str):
+    """(the credit store, the hash of `before`, this agent's credit for it),
+    or (None, None, None) with no frame or when the store cannot load, which
+    decides with no credit and records nothing."""
+    if input_data is None or frame is None:
+        return None, None, None
+    try:
+        from shared import pin_credit
+        from shared.claude_md_drift import _digest
+
+        before_digest = _digest(before)
+        return pin_credit, before_digest, pin_credit.read(input_data, frame, base, before_digest)
+    except Exception:  # noqa: BLE001 — no credit store, no credit
+        return None, None, None
 
 
 def _check_tool_allowed(input_data: dict) -> Optional[str]:

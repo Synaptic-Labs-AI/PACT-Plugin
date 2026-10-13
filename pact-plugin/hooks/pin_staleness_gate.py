@@ -436,8 +436,14 @@ def _count_pin_comments(doc, first: int, last: int) -> int:
         return 0
 
 
-def _counts_show_an_add(old_text: str, new_text: str) -> bool:
+def _counts_show_an_add(old_text: str, new_text: str, credit=None) -> bool:
     """Compare the two sides of ONE decision across ONE slice.
+
+    WITH `credit` (a `shared.pin_credit.Credit`, from the hook path), a step-0
+    add is re-checked against the pin-cap rule: it stays an add only when
+    `pin_growth` less the credit is above zero, so a revealed pin or a pin
+    this lead moved by two Edits is not an add. The re-check can only turn an
+    add into not an add, and any failure in it keeps the count's answer.
 
     RULE 1, AND IT IS THE WHOLE REASON THIS FUNCTION EXISTS. A difference taken
     across two DIFFERENT slices is not a comparison. The counter used to pick
@@ -543,10 +549,11 @@ def _counts_show_an_add(old_text: str, new_text: str) -> bool:
     if State.UNKNOWN in (old_pinned.state, new_pinned.state):
         return False
     if old_pinned.state is State.FOUND and new_pinned.state is State.FOUND:
-        return (
+        added = (
             _count_pin_comments(new_doc, new_pinned.spans[0][0] + 1, new_pinned.spans[0][1])
             > _count_pin_comments(old_doc, old_pinned.spans[0][0] + 1, old_pinned.spans[0][1])
         )
+        return added and (credit is None or _grows_past_credit(old_doc, new_doc, credit))
 
     old_managed = old_doc.find_block(MANAGED_START_MARKER, MANAGED_END_MARKER)
     new_managed = new_doc.find_block(MANAGED_START_MARKER, MANAGED_END_MARKER)
@@ -561,6 +568,34 @@ def _counts_show_an_add(old_text: str, new_text: str) -> bool:
         new_rows = (0, len(new_doc.lines) - 1)
 
     return _count_pin_comments(new_doc, *new_rows) > _count_pin_comments(old_doc, *old_rows)
+
+
+def _grows_past_credit(old_doc, new_doc, credit) -> bool:
+    """Whether the pin-cap rule counts pins added past `credit`; True, the
+    count's answer, when the rule cannot say."""
+    try:
+        from shared.pin_growth import pin_growth
+
+        growth = pin_growth(old_doc, new_doc, exclude=credit.exclude)
+        return growth is None or growth - credit.count > 0
+    except Exception:  # noqa: BLE001 — the count's answer stands
+        return True
+
+
+def _chain_credit(input_data: dict, file_path: str, current: str):
+    """This lead's pin-cap credit for the file text `current`, or None when the
+    credit store cannot load."""
+    try:
+        from shared import pin_credit
+        from shared.claude_md_drift import _digest
+        from shared.claude_md_manager import gate_target
+
+        target = gate_target(file_path)
+        if target is None:
+            return pin_credit.Credit.none()
+        return pin_credit.read(input_data, "lead", target.base, _digest(current))
+    except Exception:  # noqa: BLE001 — no credit store: the count decides
+        return None
 
 
 def _simulate_post_edit_document(
@@ -609,7 +644,7 @@ def _simulate_post_edit_document(
 
 
 def _is_add_shaped_edit(
-    tool_input: dict, claude_md_path: Path, tool_name: str = ""
+    tool_input: dict, claude_md_path: Path, tool_name: str = "", input_data: dict | None = None
 ) -> bool:
     """Return True if the Edit/Write adds a net-new pin comment.
 
@@ -679,7 +714,9 @@ def _is_add_shaped_edit(
             # The payload cannot be read as an edit. Fail-open.
             return False
 
-        return _counts_show_an_add(current, simulated)
+        credit = None if input_data is None else _chain_credit(
+            input_data, tool_input.get("file_path", ""), current)
+        return _counts_show_an_add(current, simulated, credit)
     except Exception as exc:  # noqa: BLE001 — SACROSANCT fail-open
         # THIS IS THE CATCH THAT SWALLOWED A NameError AND KILLED THE WHOLE
         # EDIT PATH IN SILENCE. It keeps its direction and loses its silence.
@@ -732,7 +769,7 @@ def _check_tool_allowed(input_data: dict) -> str | None:
     # are allowed so the user can resolve the stale-pins condition by
     # running /PACT:pin-memory within the same session. Fix for #492
     # F1 marker livelock.
-    if not _is_add_shaped_edit(tool_input, claude_md_path, tool_name):
+    if not _is_add_shaped_edit(tool_input, claude_md_path, tool_name, input_data):
         return None
 
     return _DENY_REASON

@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -106,6 +107,7 @@ STATE_WRITER_MODULES = (
     "teammate_idle.py",
     "track_files.py",
     "file_tracker.py",
+    "shared/pin_credit.py",
 )
 
 
@@ -257,6 +259,49 @@ def test_a_no_op_update_on_an_absent_file_creates_nothing(tmp_path):
     result = state_file.locked_update(target, lambda text: (text, False, "untouched"), tmp_path / "teams")
     assert result == "untouched"
     assert not (tmp_path / "teams").exists()
+
+
+def _hold_sidecar(target: Path) -> int:
+    """An exclusive lock on `target`'s sidecar through a descriptor of its own,
+    which flock treats apart from any other open of the same file."""
+    fd = os.open(str(target.with_name(target.name + ".lock")), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def test_a_lock_held_past_the_timeout_raises_and_writes_nothing(tmp_path):
+    """With a timeout, a sidecar another writer holds raises TimeoutError, an
+    OSError, without running `apply`; the file keeps its content."""
+    target = tmp_path / "teams" / "t" / "state.json"
+    target.parent.mkdir(parents=True)
+    target.write_text('{"n": 0}', encoding="utf-8")
+    applied = []
+    holder = _hold_sidecar(target)
+    try:
+        with pytest.raises(TimeoutError) as raised:
+            state_file.locked_update(target, lambda text: applied.append(text) or ('{"n": 1}', True, None),
+                                     tmp_path / "teams", timeout=0.1)
+    finally:
+        os.close(holder)
+    assert isinstance(raised.value, OSError)
+    assert applied == []
+    assert json.loads(target.read_text(encoding="utf-8")) == {"n": 0}
+
+
+def test_a_lock_freed_within_the_timeout_is_taken_and_the_update_written(tmp_path):
+    """A writer polling with a timeout takes the lock once its holder lets go."""
+    target = tmp_path / "teams" / "t" / "state.json"
+    target.parent.mkdir(parents=True)
+    target.write_text('{"n": 0}', encoding="utf-8")
+    holder = _hold_sidecar(target)
+    results = []
+    writer = threading.Thread(target=lambda: results.append(state_file.locked_update(
+        target, lambda text: ('{"n": 1}', True, "written"), tmp_path / "teams", timeout=600)))
+    writer.start()
+    os.close(holder)
+    writer.join(timeout=600)
+    assert results == ["written"]
+    assert json.loads(target.read_text(encoding="utf-8")) == {"n": 1}
 
 
 # ---------------------------------------------------------------------------

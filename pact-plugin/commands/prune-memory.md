@@ -8,8 +8,8 @@ Presents the curator with the current evictable-pin list, asks which
 one (or none) to remove, **archives the selected pin to long-term memory
 and verifies the archive before removing anything**, then removes it.
 Useful after `/PACT:pin-memory` is denied by the count cap: use
-`/PACT:prune-memory` to demote an existing pin to long-term memory, then
-retry the add.
+`/PACT:prune-memory` to demote the number of pins the count refusal names
+to long-term memory, then retry the add.
 
 Demotion is not deletion. A pin leaves `## Pinned Context` only once its
 content is provably somewhere else — see [Step 3](#step-3--archive-the-selected-pin).

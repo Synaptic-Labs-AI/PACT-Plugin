@@ -31,6 +31,11 @@ THREE RECORDS.
   path, the hash, the fence-aware pin count (None when the pins could not be
   counted) and the Pinned section's state.
 
+After an Edit or Write the gate checked, this module also confirms the write in
+the agent's pin-cap credit record (`pin_credit.confirm`), and a lead write the
+gate credited as a pin moved by two Edits moves the baseline rather than being
+reported as growth.
+
 Keying on the base directory rather than the file makes a move from
 `./CLAUDE.md` to `.claude/CLAUDE.md` compare with the old text.
 """
@@ -162,6 +167,7 @@ def _record_after_write(frame: dict) -> None:
     digest = _digest(text)
     _write_json(session_dir / _LAST_SEEN_DIR / f"{key}.json",
                 {"base": str(base), "path": str(path), "hash": digest, "text": text})
+    credit_state = _confirm_credit(session_dir, key, base, digest)
     if not pact_context.is_lead(frame):
         return
     state, count = _pin_state(text)
@@ -174,12 +180,25 @@ def _record_after_write(frame: dict) -> None:
     baseline = _read_json(session_dir.parent / _BASELINE)
     if count > PIN_COUNT_CAP and baseline is not None and _valid_baseline(baseline, base):
         stored = baseline["count"]
-        if stored is None or stored < count:
+        credited = credit_state is not None and credit_state["credited"]
+        if (stored is None or stored < count) and not credited:
             # Growth past the cap that the gate allowed (a revealed pin, a
             # Write over a file it could not read): leave the baseline, so the
-            # next prompt reports it once.
+            # next prompt reports it once. A pin this agent moved by two Edits,
+            # which the gate credited, is not growth.
             return
     _write_baseline(session_dir, base, path, digest, count, state)
+
+
+def _confirm_credit(session_dir: Path, key: str, base: Path, digest: str) -> dict | None:
+    """Mark in this agent's pin-cap credit record that the text hashed `digest`
+    reached the file, and return that text's credit state, or None."""
+    try:
+        from . import pin_credit
+    except Exception:  # noqa: BLE001 — no credit store: nothing to confirm
+        return None
+    pin_credit.confirm(session_dir, key, base, digest)
+    return pin_credit.state(session_dir, key, base, digest)
 
 
 def _drift_advisory(frame: dict) -> str | None:

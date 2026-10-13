@@ -4,7 +4,8 @@ Summary: The one write path for PACT's small JSON state files: a sidecar lock,
          a temp file, fsync, and an atomic replace. Readers take no lock.
          Every read and write must stay inside a caller-supplied root.
 Used by: shared/background_work.py (the background-work registry and the
-         unflagged idle counter).
+         unflagged idle counter), shared/claude_md_drift.py (the CLAUDE.md
+         drift records) and shared/pin_credit.py (the pin-cap credit record).
 
 UNIX-ONLY, like the rest of PACT. `fcntl` is imported with no fallback, so no
 state file is ever written without a lock.
@@ -37,6 +38,7 @@ from __future__ import annotations
 
 import fcntl  # Unix-only; PACT supports macOS/Linux.
 import os
+import time
 from pathlib import Path
 from typing import Any, Callable, Tuple
 
@@ -46,6 +48,7 @@ DIR_MODE = 0o700
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
 _LOCK_FLAGS = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
 _TEMP_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+_LOCK_POLL_SECONDS = 0.02
 
 
 def _contained_directory(path: Path, root: Path) -> Path:
@@ -115,10 +118,29 @@ def _replace(path: Path, text: str) -> None:
         raise
 
 
+def _acquire(lock_fd: int, timeout: float | None) -> None:
+    """Take the exclusive lock on `lock_fd`. With no timeout, wait as long as
+    another writer holds it. With one, poll without blocking and raise
+    TimeoutError, an OSError, once `timeout` seconds pass."""
+    if timeout is None:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        return
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"state file lock not acquired within {timeout} s") from None
+            time.sleep(_LOCK_POLL_SECONDS)
+
+
 def locked_update(
     path: Path,
     apply: Callable[[str], Tuple[str, bool, Any]],
     root: Path,
+    timeout: float | None = None,
 ) -> Any:
     """Read-modify-write one state file under its sidecar lock. Raises OSError;
     callers catch it and fail open.
@@ -137,6 +159,10 @@ def locked_update(
     Creates missing directories with mode 0o700 and files with mode 0o600,
     because records carry command text. A symlink at the path raises OSError
     on the read, so it is never followed and its target is never written.
+
+    `timeout` bounds the wait for the sidecar lock, in seconds: past it the
+    update raises TimeoutError, an OSError, and writes nothing. None waits for
+    as long as another writer holds the lock.
     """
     path = Path(path)
     if not os.path.lexists(path):
@@ -147,7 +173,7 @@ def locked_update(
     target = _contained_directory(path, root) / path.name
     lock_fd = os.open(str(target.with_name(target.name + ".lock")), _LOCK_FLAGS, FILE_MODE)
     try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        _acquire(lock_fd, timeout)
         try:
             new_text, changed, result = apply(_current_text(target))
             if changed:

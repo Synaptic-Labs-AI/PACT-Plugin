@@ -1543,3 +1543,93 @@ class TestPinStalenessGate_UncertainPinnedSection:
         before, after = self._doc(opener), self._doc(opener, self.EXAMPLE + self.NEW_PIN)
         assert self._pinned_state(after) is State.UNKNOWN
         assert pin_staleness_gate._counts_show_an_add(before, after) is False
+
+
+class TestPinStalenessGate_CreditAndReveals:
+    """With the marker set, an edit the pin-cap rule does not count as adding
+    pins is not an add: a pin this lead removed earlier in an unbroken chain
+    of its own allowed changes, added back, and a pin revealed by
+    un-indenting a heading. A new pin is still refused, and the count's own
+    answer stands when the credit store cannot load."""
+
+    @staticmethod
+    def _doc(pins):
+        from shared.claude_md_manager import (MANAGED_END_MARKER, MANAGED_START_MARKER, MEMORY_END_MARKER,
+                                              MEMORY_START_MARKER)
+
+        return (f"{MANAGED_START_MARKER}\n# Project Memory\n\n{MEMORY_START_MARKER}\n## Retrieved Context\n\n"
+                f"## Pinned Context\n\n{''.join(pins)}## Working Memory\n{MEMORY_END_MARKER}\n{MANAGED_END_MARKER}\n")
+
+    @staticmethod
+    def _pin(i, body=None):
+        return f"<!-- pinned: 2026-04-21 -->\n### Pin {i}\n{body or f'body {i}'}\n\n"
+
+    @pytest.fixture
+    def armed(self, gate_env, monkeypatch, tmp_path):
+        """The marker set, in a session dir under the config root, where the
+        credit record can be written."""
+        import shared.pact_context as ctx_module
+        from pin_staleness_gate import PIN_STALENESS_MARKER_NAME
+        from shared.paths import get_claude_config_dir
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        paths = gate_env(marker_present=False)
+        session_dir = get_claude_config_dir() / "pact-sessions" / "project" / "session-abc"
+        session_dir.mkdir(parents=True)
+        (session_dir / PIN_STALENESS_MARKER_NAME).touch()
+        monkeypatch.setattr(ctx_module, "get_session_dir", lambda: str(session_dir))
+        return {**paths, "session_dir": session_dir}
+
+    def _edit(self, paths, old, new):
+        return _call_gate({"tool_name": "Edit", "session_id": "session-abc",
+                           "tool_input": {"file_path": str(paths["claude_md"]), "old_string": old,
+                                          "new_string": new}})
+
+    def _removal_allowed_by_the_cap_gate(self, paths, before, after):
+        """The pin-cap gate's sequence for this lead's removal: it records the
+        chain's credit for the text after."""
+        from pin_caps_gate import gate_decision
+        from shared import pin_credit
+        from shared.claude_md_drift import _digest
+        from shared.claude_md_manager import gate_target
+
+        frame = {"agent_type": "pact-orchestrator", "session_id": "session-abc"}
+        target = gate_target(str(paths["claude_md"]))
+        assert target is not None
+        base = target.base
+        h0, detail = _digest(before), {}
+        credit = pin_credit.read(frame, "lead", base, h0)
+        decision = gate_decision(before, "Write", {"content": after}, credit=credit, detail=detail)
+        assert decision.verdict == "ALLOW"
+        pin_credit.record(frame, "lead", base, h0, detail, decision, credit)
+
+    def test_a_pin_removed_and_added_back_in_the_leads_chain_is_not_an_add(self, armed):
+        pins = [self._pin(i) for i in range(5)]
+        before, removed = self._doc(pins), self._doc(pins[:3] + pins[4:])
+        self._removal_allowed_by_the_cap_gate(armed, before, removed)
+        armed["claude_md"].write_text(removed, encoding="utf-8")
+        assert self._edit(armed, pins[4], pins[4] + pins[3]) is None
+
+    def test_the_same_add_back_with_no_chain_is_refused(self, armed):
+        pins = [self._pin(i) for i in range(5)]
+        armed["claude_md"].write_text(self._doc(pins[:3] + pins[4:]), encoding="utf-8")
+        assert self._edit(armed, pins[4], pins[4] + pins[3]) is not None
+
+    def test_a_heading_un_indented_into_a_pin_is_not_an_add(self, armed):
+        pins = [self._pin(i, "intro\n  ### Sub heading\nsub body" if i == 2 else None) for i in range(5)]
+        armed["claude_md"].write_text(self._doc(pins), encoding="utf-8")
+        assert self._edit(armed, "  ### Sub heading\n", "### Sub heading\n") is None
+
+    def test_a_new_pin_is_still_refused(self, armed):
+        pins = [self._pin(i) for i in range(5)]
+        armed["claude_md"].write_text(self._doc(pins), encoding="utf-8")
+        assert self._edit(armed, pins[4], pins[4] + self._pin(9)) is not None
+
+    def test_when_the_credit_store_cannot_load_the_count_decides(self, armed, monkeypatch):
+        pins = [self._pin(i, "intro\n  ### Sub heading\nsub body" if i == 2 else None) for i in range(5)]
+        armed["claude_md"].write_text(self._doc(pins), encoding="utf-8")
+        import shared
+
+        monkeypatch.setitem(sys.modules, "shared.pin_credit", None)
+        monkeypatch.delattr(shared, "pin_credit", raising=False)
+        assert self._edit(armed, "  ### Sub heading\n", "### Sub heading\n") is not None
