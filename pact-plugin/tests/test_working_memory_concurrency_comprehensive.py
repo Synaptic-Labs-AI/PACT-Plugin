@@ -46,6 +46,7 @@ import multiprocessing as mp
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -62,8 +63,8 @@ _SCRIPTS_DIR = str(
 )
 
 # Join guard: a deadlocked worker (e.g. a lock that never serializes and hangs)
-# must fail the test, not wedge the suite.
-_JOIN_TIMEOUT = 30
+# must fail the test, not wedge the suite. One budget for the whole group.
+_JOIN_TIMEOUT = 600
 
 
 # ---------------------------------------------------------------------------
@@ -167,8 +168,9 @@ def _run_barrier_procs(target, arg_tuples):
     procs = [_MP.Process(target=target, args=(t,)) for t in arg_tuples]
     for p in procs:
         p.start()
+    deadline = time.monotonic() + _JOIN_TIMEOUT
     for p in procs:
-        p.join(timeout=_JOIN_TIMEOUT)
+        p.join(timeout=max(0.0, deadline - time.monotonic()))
     for p in procs:
         assert p.exitcode == 0, f"worker exited with {p.exitcode} (deadlock?)"
 

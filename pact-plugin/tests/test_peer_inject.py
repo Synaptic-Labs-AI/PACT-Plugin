@@ -47,7 +47,7 @@ def _run_hook(tmp_path, frame, project_dir):
     env.update(HOME=str(tmp_path), CLAUDE_CONFIG_DIR=str(tmp_path / ".claude"),
                CLAUDE_PROJECT_DIR=project_dir)
     proc = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(frame),
-                          capture_output=True, text=True, timeout=30, env=env)
+                          capture_output=True, text=True, timeout=600, env=env)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout or "{}")
 

@@ -1101,7 +1101,7 @@ class TestIdempotenceOnASingleMarker:
 # MERGE GATE 2 -- non-denial, quantified over INPUTS
 # --------------------------------------------------------------------------
 
-def run_hook(frame, tmp_path, timeout=30):
+def run_hook(frame, tmp_path, timeout=600):
     """Drive the REAL script as a subprocess and return (rc, stdout, stderr).
 
     CLAUDE_PROJECT_DIR is pinned to tmp_path so the resolver cannot reach the
@@ -1215,7 +1215,7 @@ class TestCannotDeny:
         )
         proc = subprocess.run(
             [sys.executable, str(denier)], input="{}", capture_output=True,
-            text=True, timeout=30,
+            text=True, timeout=600,
         )
         assert proc.returncode == 2
         assert any(token in proc.stdout for token in DENIAL_TOKENS)

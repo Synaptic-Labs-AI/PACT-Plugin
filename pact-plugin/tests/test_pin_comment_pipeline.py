@@ -904,11 +904,12 @@ class TestPinCommentBacktracking_Pipeline:
 
         body = ("<!-- pinned: a > b " * 400) + ("word " * 40)
 
-        started = time.perf_counter()
+        # Processor time, which a busy machine does not advance.
+        started = time.process_time()
         _DATE_COMMENT_RE.sub("", body)
-        elapsed = time.perf_counter() - started
+        elapsed = time.process_time() - started
 
         assert elapsed < self.BUDGET_SECONDS, (
-            f"a {len(body)}-char body took {elapsed:.3f}s to strip. Each "
-            f"unterminated opener is a fresh start position for the scan."
+            f"a {len(body)}-char body took {elapsed:.3f}s of processor time to strip. "
+            f"Each unterminated opener is a fresh start position for the scan."
         )

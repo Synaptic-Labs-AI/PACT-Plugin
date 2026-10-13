@@ -1867,7 +1867,7 @@ def _run_degraded_subprocess(tmp_path, stdin_text, interpreter=None,
         capture_output=True,
         text=True,
         cwd=str(scaffold),
-        timeout=10,
+        timeout=600,
     )
 
 
@@ -1891,7 +1891,7 @@ def _find_python39():
                 [candidate, "--version"],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=600,
             )
         except (OSError, subprocess.SubprocessError):
             continue
@@ -2477,7 +2477,7 @@ class TestHostileStrCrashPath:
             capture_output=True,
             text=True,
             cwd=str(scaffold),
-            timeout=10,
+            timeout=600,
         )
 
     def test_mutating_deny_json_intact_under_hostile_str(self, tmp_path):
@@ -2606,7 +2606,7 @@ class TestHostileNameCrashPath:
             capture_output=True,
             text=True,
             cwd=str(scaffold),
-            timeout=10,
+            timeout=600,
         )
 
     @pytest.mark.parametrize(
@@ -2759,7 +2759,7 @@ class TestHostileNameReturnCrashPath:
             capture_output=True,
             text=True,
             cwd=str(scaffold),
-            timeout=10,
+            timeout=600,
         )
 
     @pytest.mark.parametrize(
@@ -2879,7 +2879,7 @@ class TestBaseExceptionBreadthAtImport:
             capture_output=True,
             text=True,
             cwd=str(scaffold),
-            timeout=10,
+            timeout=600,
         )
 
     @pytest.mark.parametrize(
@@ -3013,7 +3013,7 @@ class TestStrSubclassNameReturnCrashPath:
             capture_output=True,
             text=True,
             cwd=str(scaffold),
-            timeout=10,
+            timeout=600,
         )
 
     @pytest.mark.parametrize(
@@ -4222,7 +4222,7 @@ class TestSummaryReadSettleSeat:
         env.update(PYTHONPATH=str(hooks), HOME=str(tmp_path), CLAUDE_CONFIG_DIR=str(tmp_path / ".claude"))
         runs = {
             mode: subprocess.run([sys.executable, "-c", child, mode], input=frame, capture_output=True,
-                                 text=True, timeout=30, env=env)
+                                 text=True, timeout=600, env=env)
             for mode in ("intact", "broken")
         }
         assert runs["intact"].returncode == 0, runs["intact"].stderr

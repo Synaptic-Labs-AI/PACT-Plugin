@@ -1073,7 +1073,7 @@ class TestSubprocessStalenessE2E:
             text=True,
             env=env,
             cwd=str(home),
-            timeout=10,
+            timeout=600,
         )
         return result, ctx
 

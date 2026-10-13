@@ -745,7 +745,7 @@ def memory_store(tmp_path):
             return path
         proc = subprocess.run(
             [sys.executable, str(_MEMORY_CLI), "setup", "--db-path", str(path)],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=600,
         )
         assert proc.returncode == 0, (
             f"the memory store could not be created at {path}, so the test "

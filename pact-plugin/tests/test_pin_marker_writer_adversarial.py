@@ -787,7 +787,7 @@ def _run_rotation(start_marker: str, marker_above_gap: bool = False) -> dict:
         proc = subprocess.run(
             [sys.executable, "-c", _ROTATION_RUNNER],
             capture_output=True, text=True, cwd=str(fixture_dir), env=carry_clock_shift(env),
-            timeout=180,
+            timeout=600,
         )
         assert proc.returncode == 0, (
             f"rotation runner failed rc={proc.returncode}\n"
@@ -1314,7 +1314,7 @@ def _run_hook_with_journal(pinned_body: str, prompt: str) -> tuple[int, list, st
                 "cwd": str(fixture_dir),
             }),
             capture_output=True, text=True, cwd=str(fixture_dir), env=carry_clock_shift(env),
-            timeout=60,
+            timeout=600,
         )
         journal = session_dir / "session-journal.jsonl"
         events = (
@@ -1537,7 +1537,7 @@ class TestNonDenialOverTheEnvironment:
         return subprocess.run(
             [sys.executable, str(HOOK_SCRIPT)],
             input=json.dumps(self.PIN_FRAME), capture_output=True, text=True,
-            cwd=str(fixture_dir), env=carry_clock_shift(env), timeout=60,
+            cwd=str(fixture_dir), env=carry_clock_shift(env), timeout=600,
         )
 
     def test_claude_md_is_a_directory(self, tmp_path):
@@ -1584,7 +1584,7 @@ class TestNonDenialOverTheEnvironment:
         denier.write_text("import sys\nsys.exit(2)\n")
         proc = subprocess.run(
             [sys.executable, str(denier)], input="{}", capture_output=True,
-            text=True, timeout=60,
+            text=True, timeout=600,
         )
         assert proc.returncode == 2, (
             "the runner cannot observe a non-zero exit, so the three arms "

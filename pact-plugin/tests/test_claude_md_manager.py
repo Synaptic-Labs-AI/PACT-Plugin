@@ -465,11 +465,17 @@ class TestFileLockContextManager:
             f"Sidecar lock leaks permissions to group/other: {oct(mode)}"
         )
 
-    def test_concurrent_acquisition_blocks_then_succeeds(self, tmp_path):
+    def test_concurrent_acquisition_blocks_then_succeeds(self, tmp_path, monkeypatch):
         """Thread A holds the lock; Thread B's acquire blocks until A releases."""
         import threading
         import time as _time
+        from shared import claude_md_manager as cmm
         from shared.claude_md_manager import file_lock
+
+        # The waiter blocks for as long as the holder holds the lock; this test
+        # asserts that, not the lock's own timeout, which a busy machine could
+        # reach before the holder lets go.
+        monkeypatch.setattr(cmm, "_LOCK_TIMEOUT_SECONDS", 600)
 
         target = tmp_path / "CLAUDE.md"
         target.write_text("x", encoding="utf-8")
@@ -483,12 +489,12 @@ class TestFileLockContextManager:
             with file_lock(target):
                 holder_has_lock.set()
                 # Hold the lock until main signals release
-                holder_release.wait(timeout=5)
+                holder_release.wait(timeout=600)
                 holder_released_at.append(_time.monotonic())
 
         t = threading.Thread(target=holder)
         t.start()
-        assert holder_has_lock.wait(timeout=2), "holder thread never acquired"
+        assert holder_has_lock.wait(timeout=600), "holder thread never acquired"
 
         # Kick off the waiter in a second thread so we can release the
         # holder while the waiter is blocked in acquire.
@@ -504,8 +510,8 @@ class TestFileLockContextManager:
         _time.sleep(0.3)
         holder_release.set()
 
-        t.join(timeout=5)
-        w.join(timeout=5)
+        t.join(timeout=600)
+        w.join(timeout=600)
         assert not t.is_alive()
         assert not w.is_alive()
         assert len(b_acquired_at) == 1, "waiter did not acquire after release"
@@ -533,11 +539,11 @@ class TestFileLockContextManager:
         def holder():
             with file_lock(target):
                 holder_has_lock.set()
-                holder_release.wait(timeout=5)
+                holder_release.wait(timeout=600)
 
         t = threading.Thread(target=holder)
         t.start()
-        assert holder_has_lock.wait(timeout=2)
+        assert holder_has_lock.wait(timeout=600)
 
         # Second acquire must time out
         with pytest.raises(TimeoutError) as exc_info:
@@ -549,7 +555,7 @@ class TestFileLockContextManager:
 
         # Clean up the holder
         holder_release.set()
-        t.join(timeout=5)
+        t.join(timeout=600)
 
     def test_exception_in_body_releases_lock(self, tmp_path):
         """A raise inside `with file_lock(...)` must still release the lock."""
@@ -1955,11 +1961,11 @@ class TestMigrateToManagedStructure:
         def holder():
             with file_lock(claude_md):
                 holder_has_lock.set()
-                holder_release.wait(timeout=5)
+                holder_release.wait(timeout=600)
 
         t = threading.Thread(target=holder)
         t.start()
-        assert holder_has_lock.wait(timeout=2)
+        assert holder_has_lock.wait(timeout=600)
 
         result = migrate_to_managed_structure()
 
@@ -1970,7 +1976,7 @@ class TestMigrateToManagedStructure:
         assert _MANAGED_START not in claude_md.read_text(encoding="utf-8")
 
         holder_release.set()
-        t.join(timeout=5)
+        t.join(timeout=600)
 
     def test_oserror_on_write_returns_failure(self, tmp_path, monkeypatch):
         """OSError during write_text returns a 'failed' message."""

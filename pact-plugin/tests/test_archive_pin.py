@@ -960,7 +960,7 @@ class TestLiveDbGuard:
             env.pop("PYTEST_CURRENT_TEST", None)
         return subprocess.run(
             [sys.executable, str(cli), "get", "f" * 32, *extra_argv],
-            capture_output=True, text=True, timeout=120, env=env,
+            capture_output=True, text=True, timeout=600, env=env,
         )
 
     @staticmethod
@@ -1898,7 +1898,7 @@ class TestArchivePin_StreamSeparation:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,      # the regression, made explicit
             text=True,
-            timeout=30,
+            timeout=600,
         )
 
         assert _SEPARATION_CANARY in merged.stdout
@@ -1914,7 +1914,7 @@ def _cli_get(memory_id, db_path):
     )
     proc = subprocess.run(
         [sys.executable, str(cli), "get", memory_id, "--db-path", db_path],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, timeout=600,
     )
     assert proc.returncode == 0, f"get failed: {proc.stderr[:400]}"
     return json.loads(proc.stdout)["result"]

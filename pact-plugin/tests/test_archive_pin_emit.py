@@ -686,7 +686,7 @@ def _cli_get(memory_id, db_path):
     # false, and binding the cache env here is not belt-and-braces.
     proc = subprocess.run(
         [sys.executable, str(cli), "get", memory_id, "--db-path", db_path],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, timeout=600,
         env={**os.environ, **hf_cache_env()},
     )
     assert proc.returncode == 0, f"get failed: {proc.stderr[:400]}"

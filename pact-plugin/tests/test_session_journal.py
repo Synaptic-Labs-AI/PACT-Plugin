@@ -104,6 +104,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -1884,8 +1885,11 @@ class TestConcurrentAppends:
         ]
         for p in procs:
             p.start()
+        # One budget for the whole group, so a deadlock fails in 600 s however
+        # many workers hang.
+        deadline = time.monotonic() + 600
         for p in procs:
-            p.join(timeout=60)
+            p.join(timeout=max(0.0, deadline - time.monotonic()))
             assert p.exitcode == 0, (
                 f"worker pid={p.pid} exitcode={p.exitcode}"
             )

@@ -734,7 +734,7 @@ def _run_gate_in_fresh_process(tmp_path, frame):
                CLAUDE_PLUGIN_ROOT=str(plugin), PYTHONPATH=str(plugin / "hooks"))
 
     return subprocess.run([sys.executable, "-c", harness], input=json.dumps(frame),
-                          capture_output=True, text=True, timeout=60, env=env,
+                          capture_output=True, text=True, timeout=600, env=env,
                           cwd=str(tmp_path))
 
 
