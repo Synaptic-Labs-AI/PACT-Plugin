@@ -1219,7 +1219,11 @@ class TestPinStalenessGate_FailOpenIsReported:
                  "PYTHONPATH": str(Path(pin_staleness_gate.__file__).parent)},
         )
         assert result.returncode == 0, result.stderr
-        assert result.stdout.split() == ["0", "1"], result.stdout  # none while loading; one read, the control
+        loading, control = (int(count) for count in result.stdout.split())
+        # None while loading. The control only shows the hook sees a read: on
+        # Python 3.9 one read_text is two open events (io.open, then os.open
+        # through pathlib's opener), so it is at least one, not exactly one.
+        assert loading == 0 and control >= 1, result.stdout
 
 
 class TestPinStalenessGate_SimulationEditEdges:
