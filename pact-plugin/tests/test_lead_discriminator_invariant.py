@@ -318,6 +318,26 @@ def _parse(path: Path) -> ast.AST:
     return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 
 
+def _calls(tree: ast.AST, name: str) -> bool:
+    """Whether `tree` holds a real Call of `name`, bare or as an attribute."""
+    return any(
+        isinstance(n, ast.Call)
+        and (
+            (isinstance(n.func, ast.Name) and n.func.id == name)
+            or (isinstance(n.func, ast.Attribute) and n.func.attr == name)
+        )
+        for n in ast.walk(tree)
+    )
+
+
+# A migrated hook may route its role decision through one shared predicate,
+# keyed hook filename -> (module under hooks/, function). The hook must call
+# that function, and that function must call is_lead.
+_DELEGATED_ROLE_DECISIONS: dict[str, tuple[str, str]] = {
+    "pin_caps_gate.py": ("shared/claude_md_manager.py", "gate_frame"),
+}
+
+
 # ===========================================================================
 # POSITIVE leg
 # ===========================================================================
@@ -337,15 +357,14 @@ class TestPositiveLeg:
         path = HOOKS_DIR / hook_name
         assert path.exists(), f"Migrated hook {hook_name} not found at {path}"
         tree = _parse(path)
-        calls_is_lead = any(
-            isinstance(n, ast.Call)
-            and (
-                (isinstance(n.func, ast.Name) and n.func.id == "is_lead")
-                or (isinstance(n.func, ast.Attribute) and n.func.attr == "is_lead")
+        if hook_name in _DELEGATED_ROLE_DECISIONS:
+            module, function = _DELEGATED_ROLE_DECISIONS[hook_name]
+            assert _calls(tree, function), f"{hook_name} no longer calls {function}()"
+            tree = next(
+                n for n in ast.walk(_parse(HOOKS_DIR / module))
+                if isinstance(n, ast.FunctionDef) and n.name == function
             )
-            for n in ast.walk(tree)
-        )
-        assert calls_is_lead, (
+        assert _calls(tree, "is_lead"), (
             f"{hook_name} makes a lead/teammate role decision but does NOT "
             f"call is_lead(). If this hook regressed to the old "
             f"resolve_agent_name heuristic (or any non-is_lead discriminator), "

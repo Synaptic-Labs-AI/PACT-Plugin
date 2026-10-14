@@ -27,7 +27,7 @@ from unittest.mock import patch
 
 import pytest
 
-from helpers import make_claude_md_with_pins, make_pin_entry  # noqa: E402
+from helpers import make_claude_md_with_pins, make_pin_entry, point_resolver_at  # noqa: E402
 
 
 @pytest.fixture
@@ -47,20 +47,10 @@ def curator_env(tmp_path, monkeypatch, pact_context):
         project_dir=str(tmp_path),
     )
 
-    # Wire BOTH the hook's path resolver and the CLI's path resolver to
-    # our tmp CLAUDE.md. IMPORTANT: import `check_pin_caps` FIRST — it
-    # calls `_load_hook_module("staleness")` which REPLACES
-    # `sys.modules['staleness']` with a fresh module instance. If we
-    # monkeypatch staleness before check_pin_caps is imported, the patch
-    # lives on the old module object and the CLI's reload silently
-    # overwrites it. Patching AFTER ensures both the hook's staleness
-    # reference (resolved at hook-call time) AND the CLI's local
-    # get_project_claude_md_path symbol point at the same tmp path.
-    import check_pin_caps  # triggers _load_hook_module side effects first
-    import staleness
-    monkeypatch.setattr(
-        staleness, "get_project_claude_md_path", lambda: claude_md
-    )
+    # The hook resolves the project CLAUDE.md as it does in a session; the
+    # CLI's own path resolver is patched to the same file.
+    point_resolver_at(monkeypatch, tmp_path)
+    import check_pin_caps
     monkeypatch.setattr(
         check_pin_caps, "get_project_claude_md_path", lambda: claude_md
     )

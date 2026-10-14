@@ -742,9 +742,11 @@ def test_xi_stale_block_and_working_recovery_coexist_scoped(tmp_path,
     prev_sid = "11112222-3333-4444-8555-666677778888"
     (project_dir / ".claude" / "CLAUDE.md").write_text(
         "# PACT Framework and Managed Project Memory\n\n"
+        "<!-- SESSION_START -->\n"
         "## Current Session\n"
         f"- Resume: `claude --resume {prev_sid}`\n"
-        f"- Team: `session-11112222`\n",
+        f"- Team: `session-11112222`\n"
+        "<!-- SESSION_END -->\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))

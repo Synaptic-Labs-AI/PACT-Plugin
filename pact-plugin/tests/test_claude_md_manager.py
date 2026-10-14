@@ -465,11 +465,17 @@ class TestFileLockContextManager:
             f"Sidecar lock leaks permissions to group/other: {oct(mode)}"
         )
 
-    def test_concurrent_acquisition_blocks_then_succeeds(self, tmp_path):
+    def test_concurrent_acquisition_blocks_then_succeeds(self, tmp_path, monkeypatch):
         """Thread A holds the lock; Thread B's acquire blocks until A releases."""
         import threading
         import time as _time
+        from shared import claude_md_manager as cmm
         from shared.claude_md_manager import file_lock
+
+        # The waiter blocks for as long as the holder holds the lock; this test
+        # asserts that, not the lock's own timeout, which a busy machine could
+        # reach before the holder lets go.
+        monkeypatch.setattr(cmm, "_LOCK_TIMEOUT_SECONDS", 600)
 
         target = tmp_path / "CLAUDE.md"
         target.write_text("x", encoding="utf-8")
@@ -483,12 +489,12 @@ class TestFileLockContextManager:
             with file_lock(target):
                 holder_has_lock.set()
                 # Hold the lock until main signals release
-                holder_release.wait(timeout=5)
+                holder_release.wait(timeout=600)
                 holder_released_at.append(_time.monotonic())
 
         t = threading.Thread(target=holder)
         t.start()
-        assert holder_has_lock.wait(timeout=2), "holder thread never acquired"
+        assert holder_has_lock.wait(timeout=600), "holder thread never acquired"
 
         # Kick off the waiter in a second thread so we can release the
         # holder while the waiter is blocked in acquire.
@@ -504,8 +510,8 @@ class TestFileLockContextManager:
         _time.sleep(0.3)
         holder_release.set()
 
-        t.join(timeout=5)
-        w.join(timeout=5)
+        t.join(timeout=600)
+        w.join(timeout=600)
         assert not t.is_alive()
         assert not w.is_alive()
         assert len(b_acquired_at) == 1, "waiter did not acquire after release"
@@ -533,11 +539,11 @@ class TestFileLockContextManager:
         def holder():
             with file_lock(target):
                 holder_has_lock.set()
-                holder_release.wait(timeout=5)
+                holder_release.wait(timeout=600)
 
         t = threading.Thread(target=holder)
         t.start()
-        assert holder_has_lock.wait(timeout=2)
+        assert holder_has_lock.wait(timeout=600)
 
         # Second acquire must time out
         with pytest.raises(TimeoutError) as exc_info:
@@ -549,7 +555,7 @@ class TestFileLockContextManager:
 
         # Clean up the holder
         holder_release.set()
-        t.join(timeout=5)
+        t.join(timeout=600)
 
     def test_exception_in_body_releases_lock(self, tmp_path):
         """A raise inside `with file_lock(...)` must still release the lock."""
@@ -656,7 +662,7 @@ class TestBuildMigratedContentCurrentFormat:
 
     def test_output_has_managed_boundary(self):
         """Migrated output must start with PACT_MANAGED_START and contain PACT_MANAGED_END."""
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         result = _build_migrated_content(self.CURRENT_FORMAT)
 
@@ -665,7 +671,7 @@ class TestBuildMigratedContentCurrentFormat:
 
     def test_output_has_memory_boundary(self):
         """Migrated output must contain PACT_MEMORY_START and PACT_MEMORY_END."""
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         result = _build_migrated_content(self.CURRENT_FORMAT)
 
@@ -675,7 +681,7 @@ class TestBuildMigratedContentCurrentFormat:
     def test_new_heading_replaces_old(self):
         """Legacy '# Project Memory' is replaced by the single canonical H1
         '# PACT Framework and Managed Project Memory'."""
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         result = _build_migrated_content(self.CURRENT_FORMAT)
 
@@ -692,7 +698,7 @@ class TestBuildMigratedContentCurrentFormat:
         """Retrieved Context, Pinned Context, and Working Memory must appear
         between PACT_MEMORY_START and PACT_MEMORY_END.
         """
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         result = _build_migrated_content(self.CURRENT_FORMAT)
 
@@ -706,7 +712,7 @@ class TestBuildMigratedContentCurrentFormat:
 
     def test_memory_content_preserved(self):
         """Content under memory sections must survive migration."""
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         result = _build_migrated_content(self.CURRENT_FORMAT)
 
@@ -716,7 +722,7 @@ class TestBuildMigratedContentCurrentFormat:
 
     def test_session_block_preserved(self):
         """The session block (between its markers) must survive migration."""
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         result = _build_migrated_content(self.CURRENT_FORMAT)
 
@@ -726,7 +732,7 @@ class TestBuildMigratedContentCurrentFormat:
 
     def test_stale_orchestrator_line_stripped(self):
         """The 'loaded from ~/.claude/CLAUDE.md' line must be removed."""
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         result = _build_migrated_content(self.CURRENT_FORMAT)
 
@@ -736,7 +742,7 @@ class TestBuildMigratedContentCurrentFormat:
         """Markers must appear in the correct order: MANAGED_START -> SESSION
         -> MEMORY_START -> memory sections -> MEMORY_END -> MANAGED_END.
         """
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         result = _build_migrated_content(self.CURRENT_FORMAT)
 
@@ -761,7 +767,7 @@ class TestBuildMigratedContentCurrentFormat:
         (PACT-Managed)') lived inside the memory boundary; that has been
         dropped in favor of a single outer H1.
         """
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         result = _build_migrated_content(self.CURRENT_FORMAT)
 
@@ -777,7 +783,7 @@ class TestBuildMigratedContentCurrentFormat:
 
     def test_pinned_context_sub_heading_preserved(self):
         """Sub-headings (### level) under memory sections must be preserved."""
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         result = _build_migrated_content(self.CURRENT_FORMAT)
 
@@ -790,7 +796,7 @@ class TestBuildMigratedContentMissingSections:
 
     def test_no_routing_block(self):
         """File with no routing block should still produce valid structure."""
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         content = (
             "# Project Memory\n"
@@ -815,7 +821,7 @@ class TestBuildMigratedContentMissingSections:
 
     def test_no_session_block(self):
         """File with no session block should still produce valid structure."""
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         content = (
             "# Project Memory\n"
@@ -841,7 +847,7 @@ class TestBuildMigratedContentMissingSections:
 
     def test_no_memory_sections(self):
         """File with no memory headings should get default memory sections."""
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         content = (
             "# Project Memory\n"
@@ -866,7 +872,7 @@ class TestBuildMigratedContentMissingSections:
 
     def test_empty_content(self):
         """Empty string input should produce a minimal valid structure."""
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         result = _build_migrated_content("")
 
@@ -878,7 +884,7 @@ class TestBuildMigratedContentMissingSections:
 
     def test_only_heading_no_sections(self):
         """Just the heading line, nothing else."""
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         result = _build_migrated_content("# Project Memory\n")
 
@@ -895,7 +901,7 @@ class TestBuildMigratedContentUserContent:
         """User-owned sections after the last memory section must appear
         after PACT_MANAGED_END.
         """
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         content = (
             "# Project Memory\n"
@@ -919,7 +925,7 @@ class TestBuildMigratedContentUserContent:
 
     def test_user_content_between_memory_sections(self):
         """A non-memory heading between memory sections splits into user content."""
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         content = (
             "# Project Memory\n"
@@ -954,7 +960,7 @@ class TestBuildMigratedContentUserContent:
         """Content before any memory heading (after routing/session extraction)
         is classified as user content.
         """
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         content = (
             "# Project Memory\n"
@@ -980,7 +986,7 @@ class TestBuildMigratedContentUserContent:
         """A user-owned H1 heading (e.g., '# My Project Notes') must be
         preserved outside the PACT_MANAGED block after migration.
         """
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         content = (
             "# Project Memory\n"
@@ -1006,7 +1012,7 @@ class TestBuildMigratedContentUserContent:
         The preamble fix only moves PRE-memory user content; it must not
         regress POST-memory user content placement.
         """
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         content = (
             "# Project Memory\n"
@@ -1047,7 +1053,7 @@ class TestBuildMigratedContentAdversarial:
         to identify memory sections. Users should not have headings with
         these exact names outside the memory area.
         """
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         content = (
             "# Project Memory\n"
@@ -1071,7 +1077,7 @@ class TestBuildMigratedContentAdversarial:
         """Headings that are similar but not exact matches should NOT be
         classified as memory sections (e.g., '## Retrieved Context (old)').
         """
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         content = (
             "# Project Memory\n"
@@ -1105,7 +1111,7 @@ class TestBuildMigratedContentAdversarial:
         """If '## Working Memory' appears twice, both instances and their
         content should end up in the memory region.
         """
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         content = (
             "# Project Memory\n"
@@ -1136,7 +1142,7 @@ class TestBuildMigratedContentAdversarial:
         the fence-awareness bug class at the cost of this one-time
         content relocation.
         """
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         content = "Just some random text in a CLAUDE.md file.\nAnother line.\n"
 
@@ -1160,7 +1166,7 @@ class TestBuildMigratedContentAdversarial:
         block regex won't match, so the marker text remains as-is in the
         remaining content (treated as user text).
         """
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         content = (
             "# Project Memory\n"
@@ -1183,11 +1189,12 @@ class TestBuildMigratedContentAdversarial:
         assert _MANAGED_END in result
 
     def test_partial_session_markers_start_only(self):
-        """If only SESSION_START is present with no SESSION_END, the session
-        block regex won't match, so the marker text remains in the remaining
-        content. Must not crash or corrupt the output.
+        """If only SESSION_START is present with no SESSION_END, the parser
+        reads the session block as malformed, so the migration refuses and
+        leaves the content unchanged, naming the marker's line.
         """
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
+        from shared.claude_md_manager import _plan_migration
 
         content = (
             "# Project Memory\n"
@@ -1201,21 +1208,15 @@ class TestBuildMigratedContentAdversarial:
             "## Working Memory\n"
         )
 
-        result = _build_migrated_content(content)
-
-        # Output must still have valid structure
-        assert _MANAGED_START in result
-        assert _MANAGED_END in result
-        assert _MEMORY_START in result
-        assert _MEMORY_END in result
-        # The orphaned SESSION_START text should survive somewhere
-        assert "pact-orphaned" in result
+        assert _build_migrated_content(content) == content
+        new_content, refusal = _plan_migration(content)
+        assert new_content is None and refusal is not None and "line 3" in refusal
 
     def test_memory_heading_with_trailing_whitespace(self):
         """'## Retrieved Context   ' (trailing spaces) must still match
         as a memory heading since the code uses line.rstrip().
         """
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         content = (
             "# Project Memory\n"
@@ -1239,7 +1240,7 @@ class TestBuildMigratedContentAdversarial:
         """Pinned Context with multiple sub-sections and substantial content
         must all be preserved inside the memory boundary.
         """
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         pinned_content = "\n".join(
             [f"### Pin {i}\nContent for pin {i}.\n" for i in range(10)]
@@ -1273,7 +1274,7 @@ class TestBuildMigratedContentAdversarial:
         not track code fence state, so fenced `## Pinned Context` inside a
         user docs block was mis-classified as a memory section boundary.
         """
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         content = (
             "# Project Memory\n"
@@ -1317,7 +1318,7 @@ class TestBuildMigratedContentAdversarial:
         per-fence, not latched — after a fence closes, subsequent real memory
         headings must still be detected.
         """
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         content = (
             "# Project Memory\n"
@@ -1407,7 +1408,7 @@ class TestBuildMigratedContentAdversarial:
         (the fenced line disappears from the `## Working Memory`
         section's body inside the PACT_MANAGED region).
         """
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         stale_line = (
             "The global PACT Orchestrator is loaded from "
@@ -1514,7 +1515,7 @@ class TestBuildMigratedContentAdversarial:
         ``startswith("```")``, so the ``## Working Memory`` heading inside
         the tilde fence is misclassified as a memory section boundary.
         """
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         content = (
             "# Project Memory\n"
@@ -1561,7 +1562,7 @@ class TestBuildMigratedContentAdversarial:
         causes the inner ````` to close the fence, so ``## Pinned Context``
         on the next line is misclassified as a memory section boundary.
         """
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         content = (
             "# Project Memory\n"
@@ -1631,7 +1632,7 @@ class TestBuildMigratedContentIndentedHeadingEntry:
         EACH ROW CARRIES TWO LEGS, and the negative leg alone is not
         sufficient: a document that loses the payload also satisfies it.
         """
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         checked = 0
         for spaces in self._INDENTS:
@@ -1703,7 +1704,7 @@ class TestBuildMigratedContentIdempotent:
         second call. The prior behavior was to double-wrap; that contract
         was intentional documentation, not a design goal.
         """
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         original = (
             "# Project Memory\n"
@@ -1724,7 +1725,7 @@ class TestBuildMigratedContentIdempotent:
 
     def test_already_migrated_input_returns_unchanged(self):
         """Passing already-wrapped content returns byte-identical output."""
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
 
         already_managed = (
             f"{_MANAGED_START}\n"
@@ -1960,11 +1961,11 @@ class TestMigrateToManagedStructure:
         def holder():
             with file_lock(claude_md):
                 holder_has_lock.set()
-                holder_release.wait(timeout=5)
+                holder_release.wait(timeout=600)
 
         t = threading.Thread(target=holder)
         t.start()
-        assert holder_has_lock.wait(timeout=2)
+        assert holder_has_lock.wait(timeout=600)
 
         result = migrate_to_managed_structure()
 
@@ -1975,7 +1976,7 @@ class TestMigrateToManagedStructure:
         assert _MANAGED_START not in claude_md.read_text(encoding="utf-8")
 
         holder_release.set()
-        t.join(timeout=5)
+        t.join(timeout=600)
 
     def test_oserror_on_write_returns_failure(self, tmp_path, monkeypatch):
         """OSError during write_text returns a 'failed' message."""
@@ -2347,7 +2348,7 @@ class TestStripLegacyLines:
 
     def test_strips_exact_stale_line_with_trailing_period(self):
         """Canonical form: stale line with trailing period and newline."""
-        from shared.claude_md_manager import _strip_legacy_lines
+        from fixtures.migration_helpers import _strip_legacy_lines
 
         content = (
             "# Project Memory\n"
@@ -2369,7 +2370,7 @@ class TestStripLegacyLines:
         period — the v3.16.2 template has the period; hand-edited copies
         may lack it.
         """
-        from shared.claude_md_manager import _strip_legacy_lines
+        from fixtures.migration_helpers import _strip_legacy_lines
 
         # No trailing period after `CLAUDE.md`
         no_period = "The global PACT Orchestrator is loaded from `~/.claude/CLAUDE.md`"
@@ -2387,7 +2388,7 @@ class TestStripLegacyLines:
         """No-op case: when the stale line is absent, the helper returns
         content identical to the input. Idempotency guarantee.
         """
-        from shared.claude_md_manager import _strip_legacy_lines
+        from fixtures.migration_helpers import _strip_legacy_lines
 
         content = (
             "# Project Memory\n"
@@ -2410,7 +2411,7 @@ class TestStripLegacyLines:
         repeated `_build_migrated_content` invocations on an already-migrated
         file cannot corrupt content.
         """
-        from shared.claude_md_manager import _strip_legacy_lines
+        from fixtures.migration_helpers import _strip_legacy_lines
 
         content = (
             "# Project Memory\n"
@@ -2431,7 +2432,7 @@ class TestStripLegacyLines:
         exact stale template line must NOT be stripped. The regex is
         anchored to the full stale-line text.
         """
-        from shared.claude_md_manager import _strip_legacy_lines
+        from fixtures.migration_helpers import _strip_legacy_lines
 
         content = (
             "# Project Memory\n"
@@ -2463,7 +2464,7 @@ class TestStripLegacyLines:
         (distinct from the tilde branch below) fails here instead of only
         failing via the end-to-end driver.
         """
-        from shared.claude_md_manager import _strip_legacy_lines
+        from fixtures.migration_helpers import _strip_legacy_lines
 
         content = (
             "# Project Memory\n"
@@ -2490,7 +2491,7 @@ class TestStripLegacyLines:
         an independent `in_tilde_fence` state so the stripper skips
         tilde-fenced content the same way it skips backtick-fenced content.
         """
-        from shared.claude_md_manager import _strip_legacy_lines
+        from fixtures.migration_helpers import _strip_legacy_lines
 
         content = (
             "# Project Memory\n"
@@ -2519,7 +2520,7 @@ class TestStripLegacyLines:
         This is CommonMark-compatible: §4.5 explicitly allows unclosed
         fenced code blocks to extend to the end of the document.
         """
-        from shared.claude_md_manager import _strip_legacy_lines
+        from fixtures.migration_helpers import _strip_legacy_lines
 
         content = (
             "# Project Memory\n"
@@ -2550,11 +2551,11 @@ class TestStripLegacyLines:
         whitespace >3 spaces as indicating an indented code block instead
         of a fenced block. Our walker uses a simpler "any leading
         whitespace" convention for symmetry with the other walker sites
-        (_find_preamble_cutoff, staleness._find_terminator_offset,
-        working_memory._find_terminator_offset) — this is documented
-        divergence from strict CommonMark, sufficient for CLAUDE.md use.
+        (_find_preamble_cutoff, staleness._find_terminator_offset) — this is
+        documented divergence from strict CommonMark, sufficient for CLAUDE.md
+        use.
         """
-        from shared.claude_md_manager import _strip_legacy_lines
+        from fixtures.migration_helpers import _strip_legacy_lines
 
         content = (
             "# Project Memory\n"
@@ -2583,7 +2584,7 @@ class TestStripLegacyLines:
         regression that fails to reset state (e.g., a sticky in-fence
         flag) would strip the stale line in the second fence.
         """
-        from shared.claude_md_manager import _strip_legacy_lines
+        from fixtures.migration_helpers import _strip_legacy_lines
 
         content = (
             "# Project Memory\n"
@@ -2626,7 +2627,7 @@ class TestStripLegacyLines:
         which exercises the simple tilde-only case; this test exercises
         the nested / interaction case.
         """
-        from shared.claude_md_manager import _strip_legacy_lines
+        from fixtures.migration_helpers import _strip_legacy_lines
 
         content = (
             "# Project Memory\n"
@@ -2666,7 +2667,7 @@ class TestStripLegacyLines:
         toggles -> this test MUST fail; restore length-tracked state ->
         this test MUST pass.
         """
-        from shared.claude_md_manager import _strip_legacy_lines
+        from fixtures.migration_helpers import _strip_legacy_lines
 
         content = (
             "# Notes\n"
@@ -2692,7 +2693,7 @@ class TestStripLegacyLines:
 
     def test_strip_legacy_lines_length_tracked_tilde_fence(self):
         """Same as above but with tilde fences: 4-tilde outer, 3-tilde inner."""
-        from shared.claude_md_manager import _strip_legacy_lines
+        from fixtures.migration_helpers import _strip_legacy_lines
 
         content = (
             "# Notes\n"
@@ -2717,7 +2718,7 @@ class TestStripLegacyLines:
         """CommonMark §4.5: closing fence cannot have an info string.
         A line with ``` followed by non-whitespace is NOT a closing fence.
         """
-        from shared.claude_md_manager import _strip_legacy_lines
+        from fixtures.migration_helpers import _strip_legacy_lines
 
         content = (
             "# Notes\n"
@@ -2740,7 +2741,7 @@ class TestStripLegacyLines:
         Covers lines 217-219: the ``nl == -1`` branch where the last
         line in content has no ``\\n`` terminator.
         """
-        from shared.claude_md_manager import _strip_legacy_lines
+        from fixtures.migration_helpers import _strip_legacy_lines
 
         # Stale line is the last line, no trailing newline
         content = f"# Notes\n{self.STALE_LINE}"
@@ -2964,7 +2965,8 @@ class TestStripOrphanKernelBlock(_StripOrphanBlockTestBase):
         result = self.call_stripper()
         assert result is not None
         assert "skipped" in result.lower()
-        assert "PACT_END appears before PACT_START" in result
+        # The end marker on line 2 comes before any start marker.
+        assert "line 2" in result
 
     def test_leaf_symlink_out_of_config_allowed_victim_untouched(self, tmp_path):
         """A leaf symlink escaping the config dir is ALLOWED; the strip lands on

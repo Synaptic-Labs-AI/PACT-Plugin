@@ -101,13 +101,22 @@ if str(_HOOKS_DIR) not in sys.path:
 
 
 def _load_hook_module(name: str):
-    """Load a module from hooks/ by explicit file path.
+    """Load a module from hooks/ by explicit file path, or return it when
+    that file is already loaded.
 
     Registers the loaded module in sys.modules under `name` before
     executing so that other modules loaded via this same helper can
     resolve `from {name} import ...` against the already-loaded object.
     """
     module_path = _HOOKS_DIR / f"{name}.py"
+    # Reuse the module when this same file is already loaded (a test process
+    # imports pin_caps before a script): a second copy would leave the earlier
+    # importers bound to the first one, so a patch to one copy misses the
+    # other. A different file under the same name is not reused.
+    loaded = sys.modules.get(name)
+    loaded_file = getattr(loaded, "__file__", None)
+    if loaded is not None and loaded_file and Path(loaded_file).resolve() == module_path.resolve():
+        return loaded
     spec = importlib.util.spec_from_file_location(name, str(module_path))
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load {name} from {module_path}")
@@ -121,8 +130,8 @@ _pin_caps = _load_hook_module("pin_caps")
 _staleness = _load_hook_module("staleness")
 
 format_slot_status = _pin_caps.format_slot_status
-parse_pins = _pin_caps.parse_pins
-_parse_pinned_section = _staleness._parse_pinned_section
+section_pins = _pin_caps.section_pins
+locate_pinned = _staleness.locate_pinned
 get_project_claude_md_path = _staleness.get_project_claude_md_path
 
 # Age-threshold source. staleness.py owns PINNED_STALENESS_DAYS; this module
@@ -132,20 +141,19 @@ get_project_claude_md_path = _staleness.get_project_claude_md_path
 PINNED_STALENESS_DAYS = _staleness.PINNED_STALENESS_DAYS
 
 # Date extraction from a parsed Pin.date_comment. The comment's own shape is
-# already validated upstream by pin_caps._DATE_COMMENT_RE / OVERRIDE_COMMENT_RE
-# (`<!-- pinned: ... -->`, optionally carrying a trailing clause); these two
-# patterns only pull the dates back out of a comment that already matched.
+# already validated upstream by `section_pins` (`<!-- pinned: ... -->`, optionally
+# carrying a trailing clause), so these only pull the dates back out of a
+# comment that already matched.
 #
-# Both are `search`, not `fullmatch`, because the comment legitimately carries
-# trailing content after the date — a size-override rationale
-# (`, pin-size-override: ...`) or a re-confirmation clause
-# (`, reconfirmed: YYYY-MM-DD because ...`). The upstream body class refuses
-# the `-->` terminator and nothing else, so that trailing content reaches
-# these two patterns intact and parses with no regex change anywhere.
-_PINNED_DATE_RE = re.compile(r"pinned:\s*(\d{4}-\d{2}-\d{2})", re.IGNORECASE)
-_RECONFIRMED_DATE_RE = re.compile(
-    r"reconfirmed:\s*(\d{4}-\d{2}-\d{2})", re.IGNORECASE
-)
+# The pinned date is the field after the comment's first colon, which follows
+# `pinned`: `<!--` and the whitespace before the keyword hold none. The
+# re-confirmation date is a `search`, not a `fullmatch`, because it sits in a
+# clause after the date or the override rationale. The upstream body class
+# refuses the `-->` terminator and nothing else, so that content reaches these
+# patterns intact. The reconfirmation is pin_caps' own definition, which the
+# override reader cuts out of a rationale, so the two readers agree on it.
+_LEADING_DATE_RE = re.compile(r"\s*(\d{4}-\d{2}-\d{2})")
+_RECONFIRMED_DATE_RE = _pin_caps.RECONFIRMED_DATE_RE
 
 
 def _parse_iso_date(value):
@@ -165,7 +173,7 @@ def _parse_iso_date(value):
 def _pin_age_days(date_comment, now=None):
     """Return the pin's age in whole days, or None when it cannot be known.
 
-    Reads the `<!-- pinned: ... -->` comment that parse_pins already captured
+    Reads the `<!-- pinned: ... -->` comment that section_pins already captured
     on the Pin. RE-CONFIRMATION RESETS THE CLOCK: when a `reconfirmed:` date
     is present the age computes from THAT date, because the curator has
     re-attested the pin more recently than they first wrote it. That is the
@@ -190,7 +198,7 @@ def _pin_age_days(date_comment, now=None):
     # Re-confirmation wins over the original pinned date when present.
     match = _RECONFIRMED_DATE_RE.search(date_comment)
     if match is None:
-        match = _PINNED_DATE_RE.search(date_comment)
+        match = _LEADING_DATE_RE.match(date_comment.partition(":")[2])
     if match is None:
         return None
 
@@ -255,13 +263,20 @@ def _resolve_pins():
     except (IOError, OSError):
         return [], "claude.md unreadable"
 
-    parsed = _parse_pinned_section(content)
-    if parsed is None:
-        return [], "no pinned section"
-
-    _, _, pinned_content = parsed
     try:
-        pins = parse_pins(pinned_content)
+        from shared.claude_md_markers import State, parse
+
+        doc = parse(content)
+        located = locate_pinned(doc)
+        if located.state is State.ABSENT:
+            return [], "no pinned section"
+        if located.state is not State.FOUND:
+            # The section cannot be told from an example: say why, naming the
+            # line, rather than report a section that is not there.
+            return [], (
+                f"pinned section unreadable: {located.reason or located.state.value}"
+            )
+        pins = section_pins(doc, located)
     except Exception:  # noqa: BLE001 — fail-open by construction
         return [], "parse error"
 

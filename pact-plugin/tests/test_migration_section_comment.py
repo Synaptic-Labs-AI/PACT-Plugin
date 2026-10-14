@@ -39,8 +39,8 @@ from shared.claude_md_manager import (  # noqa: E402
     MANAGED_START_MARKER,
     RETRIEVED_CONTEXT_COMMENT,
     WORKING_MEMORY_COMMENT,
-    _build_migrated_content,
 )
+from fixtures.migration_helpers import _build_migrated_content  # noqa: E402
 
 _MANAGER_SOURCE = _PLUGIN_ROOT / "hooks" / "shared" / "claude_md_manager.py"
 

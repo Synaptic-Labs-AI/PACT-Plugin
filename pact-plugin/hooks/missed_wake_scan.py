@@ -687,6 +687,19 @@ def run_surface(input_data: dict, now: "datetime | None" = None) -> "str | None"
     return surface
 
 
+def _drift_advisory(input_data: dict) -> "str | None":
+    """The project CLAUDE.md's pin-drift advisory (`shared.claude_md_drift`):
+    lead frames only, never on a compaction's SessionStart (both checked
+    inside). A job of its own, so a failure in it changes nothing else this
+    hook emits."""
+    try:
+        from shared.claude_md_drift import drift_advisory
+
+        return drift_advisory(input_data)
+    except Exception:
+        return None
+
+
 def main() -> None:
     # Outer catch-all preserves the exit-0 contract against any unexpected
     # exception. The bare `except Exception` is deliberate — livelock-safety via
@@ -705,7 +718,16 @@ def main() -> None:
             print(_SUPPRESS_OUTPUT)
             sys.exit(0)
         pact_context.init(input_data)
-        surface = run_surface(input_data)
+        # TWO JOBS THAT FAIL APART. The pin-drift advisory runs first and
+        # catches its own failures; a failure in the task-list alarms below
+        # (which run outside any try) loses their surface but not the drift
+        # advisory, and the reverse.
+        drift = _drift_advisory(input_data)
+        try:
+            surface = run_surface(input_data)
+        except Exception:
+            surface = None
+        surface = "\n\n".join(part for part in (surface, drift) if part)
         if surface:
             # Echo the firing event's name back per the additionalContext
             # contract (hookSpecificOutput.hookEventName MUST match the event —

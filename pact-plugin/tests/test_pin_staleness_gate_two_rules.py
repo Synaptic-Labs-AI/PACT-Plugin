@@ -137,7 +137,16 @@ def verdict_by_slice(gate, old, new, slice_name):
         new_body = extract_managed_region(new)[0]
     else:
         old_body, new_body = old, new
-    return gate._count_pin_comments(new_body) > gate._count_pin_comments(old_body)
+    return _count(gate, new_body) > _count(gate, old_body)
+
+
+def _count(gate, text):
+    """The gate's pin count over every row of `text` parsed on its own: the
+    tests below count a chosen slice, which the gate itself never does."""
+    from shared.claude_md_markers import parse
+
+    doc = parse(text)
+    return gate._count_pin_comments(doc, 0, len(doc.lines) - 1)
 
 
 def fires(gate, old, new, tool="Edit", tmp_path=None, document=None):
@@ -222,8 +231,8 @@ class TestTheStraddleFixturesCanBite:
         """The fixture separates the two branches. Measured, not assumed."""
         doc = managed([PIN_A], outside=OUT_OF_REGION)
         from shared.claude_md_manager import extract_managed_region
-        whole = gate._count_pin_comments(doc)
-        region = gate._count_pin_comments(extract_managed_region(doc)[0])
+        whole = _count(gate, doc)
+        region = _count(gate, extract_managed_region(doc)[0])
         assert whole != region, (
             f"whole-text count {whole} equals managed-region count {region}, "
             f"so this fixture cannot exhibit a straddle"
@@ -418,8 +427,8 @@ class TestEachEditGroupRecordsWhatWasCompared:
             "the span bound and the pinned group is counting a wider slice than "
             "its arms claim"
         )
-        assert gate._count_pin_comments(current_span[2]) == 0
-        assert gate._count_pin_comments(post_span[2]) == 1, (
+        assert _count(gate, current_span[2]) == 0
+        assert _count(gate, post_span[2]) == 1, (
             "the added pin is not inside the counted span, so an arm in the "
             "pinned group would be quiet for the span bound rather than for "
             "the verdict it names"
@@ -454,10 +463,10 @@ class TestEachEditGroupRecordsWhatWasCompared:
             "the memory entry is not inside the managed region, so it is not "
             "in the slice the count reads"
         )
-        assert gate._count_pin_comments(region[0]) == 0
+        assert _count(gate, region[0]) == 0
 
         monkeypatch.setattr(gate, "_is_memory_entry", lambda pin: False)
-        assert gate._count_pin_comments(region[0]) == 1, (
+        assert _count(gate, region[0]) == 1, (
             "the SAME slice counts the same with the conjunction removed, so "
             "the conjunction is not what holds this document quiet and the "
             "ablation below cannot measure it"
@@ -662,7 +671,7 @@ class TestTheClassMovingPopulationCanMove:
 
     @pytest.mark.parametrize("title", _TITLES, ids=_TITLE_IDS)
     def test_the_shipped_rule_counts_this_title_as_a_pin(self, gate, title):
-        assert gate._count_pin_comments(f"{title}\nbody\n") == 1, (
+        assert _count(gate, f"{title}\nbody\n") == 1, (
             f"the shipped rule does NOT count {title!r} as a pin, so it cannot "
             f"move class and each arm built on it says nothing about the rule"
         )
@@ -898,7 +907,7 @@ class TestAblationEachRuleEarnsItsPlace:
 
         # POSITIVE CONTROL: the ablation took effect. Without this a green
         # result can mean the patch never landed.
-        assert gate._count_pin_comments(MEM_1) == 1, (
+        assert _count(gate, MEM_1) == 1, (
             "the ablation did not reach the counter, so the result below "
             "says nothing about what Rule 2 contributes"
         )
@@ -929,7 +938,7 @@ class TestAblationEachRuleEarnsItsPlace:
 
             def one(text):
                 got = extract_managed_region(text)
-                return gate._count_pin_comments(got[0] if got else text)
+                return _count(gate, got[0] if got else text)
 
             return one(new_text) > one(old_text)
 

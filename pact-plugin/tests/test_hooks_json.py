@@ -29,6 +29,7 @@ VALID_HOOK_EVENTS = {
     "PostCompact",
     "PreToolUse",
     "PostToolUse",
+    "PostToolUseFailure",
     "UserPromptSubmit",
     "SubagentStart",
     "SubagentStop",
@@ -197,6 +198,22 @@ class TestAsyncFlags:
             assert status[script] is True, (
                 f"{script} should be async:true — it is fire-and-forget"
             )
+
+
+class TestPinCapsGateTimeout:
+    def test_the_pin_cap_gate_timeout_outlasts_its_wall_backstop(self, hooks_config):
+        """The platform cancels a PreToolUse hook at its timeout and lets the
+        call through with no word; the gate's own wall backstop must fire
+        first, with room left for the hook's start-up and file reads, so a
+        stop always says why it allowed."""
+        from shared.pin_growth import WALL_SECONDS
+
+        timeouts = [hook.get("timeout")
+                    for entry in hooks_config["hooks"].get("PreToolUse", [])
+                    for hook in entry.get("hooks", [])
+                    if "pin_caps_gate.py" in hook.get("command", "")]
+        assert len(timeouts) == 1, timeouts
+        assert isinstance(timeouts[0], int) and timeouts[0] - WALL_SECONDS >= 60, (timeouts[0], WALL_SECONDS)
 
 
 class TestNewSDKOptimizationEntries:

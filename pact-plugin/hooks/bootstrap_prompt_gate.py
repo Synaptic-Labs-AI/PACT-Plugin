@@ -344,15 +344,18 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
     _MAX_TRANSIENT_ATTEMPTS). A failure that says the path is unusable records
     the lead at once, with the failure shown. In order:
 
-    1. If the project CLAUDE.md holds a Current Session block (both markers),
-       read it. When the block names another session, read that session's
-       pause or refresh claim. Then replace the block with this session's
-       values (every field can be stale: the session id, the team, or the
-       Session dir of a project that moved). A file with no block, and a
-       missing file, are left alone: this never creates or migrates CLAUDE.md.
-       A file that is not valid UTF-8 is left alone too, and the skip is
-       reported after the session values. A skip like that one, which the
-       next prompt would meet again, still records the lead.
+    1. If the project CLAUDE.md holds a Current Session block the parser
+       finds, read it. When the block names another session, read that
+       session's pause or refresh claim. Then replace the block with this
+       session's values (every field can be stale: the session id, the team,
+       or the Session dir of a project that moved). A file with no block (a
+       copy in a fenced example is not one), and a missing file, are left
+       alone: this never creates or migrates CLAUDE.md. A block the parser
+       cannot place (a duplicate, a stray marker, an uncertain region) is not
+       read and not rewritten; the rewrite's refusal, naming the line, is
+       reported after the session values. A file that is not valid UTF-8 is
+       left alone too, and the skip is reported the same way. A skip like
+       these, which the next prompt would meet again, still records the lead.
     2. Record the worktree identity, as session_init does for a lead.
     3. Append session_start (source "prompt") and, when a claim was read,
        session_resumption_surfaced. Both follow every read above. When the
@@ -386,12 +389,14 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
             RESUMPTION_MARKER_MISSING_DIRECTIVE,
             TransientSessionInfoFailure,
             _extract_prev_session_dir,
+            _session_block_refusal,
             check_resume_state,
             format_session_substitutions,
             session_info_failure,
             update_session_info,
         )
-        from shared.stale_session import _RESUME_LINE_RE
+        from shared.claude_md_markers import State, parse
+        from shared.stale_session import recorded_session_id
 
         session_id = str(input_data["session_id"])
         team = pact_context.get_team_name()
@@ -413,12 +418,20 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
                     "" if source == "new_default"
                     else claude_md.read_text(encoding="utf-8", errors="replace")
                 )
-                if SESSION_START_MARKER in content and SESSION_END_MARKER in content:
-                    recorded = _RESUME_LINE_RE.search(content)
-                    if recorded is None or recorded.group(1) != session_id:
-                        claim = check_resume_state(
-                            _extract_prev_session_dir(env_project_dir)
-                        )
+                block = parse(content).find_block(
+                    SESSION_START_MARKER, SESSION_END_MARKER
+                )
+                if block.state is State.FOUND and (
+                    recorded_session_id(content) != session_id
+                ):
+                    claim = check_resume_state(
+                        _extract_prev_session_dir(env_project_dir)
+                    )
+                if block.state not in (State.FOUND, State.ABSENT):
+                    # Not read and not rewritten, and nothing is locked or
+                    # written: the refusal names the line, after the values.
+                    block_status = _session_block_refusal(block.reason)
+                elif block.state is State.FOUND:
                     # NOTHING AFTER THIS REWRITE MAY RAISE. The claim above
                     # was read from the block this call replaces. A raise
                     # after it returns "" and drops the claim, and the retry

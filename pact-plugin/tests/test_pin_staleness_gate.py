@@ -10,12 +10,18 @@ Matrix: marker absence/present × CLAUDE.md path match/miss × teammate/team-lea
 """
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
 from helpers import make_claude_md_with_pins, make_pin_entry  # noqa: E402
+
+# Text an exception raised after the gate reads CLAUDE.md could carry. No
+# fail-open report may repeat it.
+SENTINEL = "### a pin title read from CLAUDE.md"
 
 
 @pytest.fixture
@@ -69,6 +75,16 @@ def gate_env(tmp_path, monkeypatch, pact_context):
         }
 
     return _setup
+
+
+def _count(text):
+    """The gate's pin count over every row of `text` parsed on its own (the
+    gate counts rows of a whole-file parse; these rows pin the counter)."""
+    import pin_staleness_gate
+    from shared.claude_md_markers import parse
+
+    doc = parse(text)
+    return pin_staleness_gate._count_pin_comments(doc, 0, len(doc.lines) - 1)
 
 
 def _call_gate(input_data):
@@ -758,27 +774,14 @@ class TestPinStalenessGate_DecoyBypass:
     def test_edit_fragment_without_markers_uses_full_text_count(
         self, gate_env
     ):
-        """Edit fragment (no markers) falls through to full-text count.
+        """A bare heading and a dated heading each count as one pin.
 
-        Edit.old_string and Edit.new_string are typically raw fragments
-        that do not carry the PACT_MANAGED_START/END markers — they are
-        structurally INSIDE the managed region by virtue of the section
-        being edited. `_count_pin_comments` must fall through to full-text
-        parse_pins on these, otherwise a net-new pin added via Edit would
-        be invisible (extract_managed_region returns None → bounded count
-        fails → else-branch must cover it).
-
-        Post-symmetric-oracle: fragment counts now use
-        `len(parse_pins(text))` directly. Since parse_pins treats bare
-        `### Heading` as a Pin, `### Existing\\nbody\\n` parses as 1
-        pin (not 0). The gate still denies net-new adds because the
-        OLD fragment and NEW fragment both parse consistently: a fragment
-        with ONLY a bare `### Existing` counts 1; a fragment with a
-        `<!-- pinned: -->\\n### New` ALSO counts 1 (comment + heading
-        form one Pin). Adding a net-new heading anywhere raises the
-        count symmetrically.
+        The counter reads pins with `pin_caps.pins_in_rows`, which treats a
+        bare `### Heading` as a Pin, so `### Existing\\nbody\\n` counts 1
+        pin (not 0), and `<!-- pinned: -->\\n### New` ALSO counts 1
+        (comment + heading form one Pin). Adding a net-new heading anywhere
+        raises the count symmetrically.
         """
-        import pin_staleness_gate
         gate_env(marker_present=True)
         old_fragment = "### Existing\nbody\n"
         new_fragment = "<!-- pinned: 2026-04-20 -->\n### New\nbody\n"
@@ -786,25 +789,23 @@ class TestPinStalenessGate_DecoyBypass:
         from shared.claude_md_manager import MANAGED_START_MARKER
         assert MANAGED_START_MARKER not in old_fragment
         assert MANAGED_START_MARKER not in new_fragment
-        # Fall-through to full-text parse_pins MUST return the parse_pins
-        # count on the fragment. Both fragments parse as 1 pin: a bare
-        # `### Heading` and a `<!-- pinned: -->\n### Heading` are both
-        # valid Pin shapes under parse_pins (this is the symmetric-oracle
-        # property — BareHeadingBypass and WhitespaceVariant tests below
-        # exercise the cross-fragment delta that matters for the gate).
-        assert pin_staleness_gate._count_pin_comments(old_fragment) == 1
-        assert pin_staleness_gate._count_pin_comments(new_fragment) == 1
+        # Both fragments count as 1 pin: a bare `### Heading` and a
+        # `<!-- pinned: -->\n### Heading` are both valid Pin shapes under
+        # `pins_in_rows` (this is the symmetric-oracle property —
+        # BareHeadingBypass and WhitespaceVariant tests below exercise the
+        # cross-fragment delta that matters for the gate).
+        assert _count(old_fragment) == 1
+        assert _count(new_fragment) == 1
 
 
 class TestPinStalenessGate_CaseInsensitivity:
     """`_count_pin_comments` must match pin-comment markers case-insensitively.
 
-    Asymmetry guard: `pin_caps.OVERRIDE_COMMENT_RE` and the sibling
-    pin-comment regexes in pin_caps.py use `re.IGNORECASE`, so
-    `parse_pins` treats `<!-- PINNED:`, `<!-- Pinned:`, and
-    `<!-- pInNeD:` as valid pin comments. A case-sensitive
-    `.count("<!-- pinned:")` in the gate under-counts against what
-    parse_pins produces, letting a user slip past the gate with an
+    Asymmetry guard: the pin-comment patterns in pin_caps.py use
+    `re.IGNORECASE`, so `pin_caps.pins_in_rows` treats `<!-- PINNED:`,
+    `<!-- Pinned:`, and `<!-- pInNeD:` as valid pin comments. A
+    case-sensitive `.count("<!-- pinned:")` in the gate under-counts
+    against what `pins_in_rows` produces, letting a user slip past the gate with an
     upper-case marker while the cap check still sees the pin.
 
     Counter-test-by-revert: reverting the case-insensitive count in
@@ -815,31 +816,27 @@ class TestPinStalenessGate_CaseInsensitivity:
 
     def test_count_pin_comments_matches_uppercase_marker(self):
         """`<!-- PINNED:` in a fragment → counted as 1."""
-        import pin_staleness_gate
         fragment = "<!-- PINNED: 2026-04-20 -->\n### X\nbody\n"
-        assert pin_staleness_gate._count_pin_comments(fragment) == 1
+        assert _count(fragment) == 1
 
     def test_count_pin_comments_matches_titlecase_marker(self):
         """`<!-- Pinned:` in a fragment → counted as 1."""
-        import pin_staleness_gate
         fragment = "<!-- Pinned: 2026-04-20 -->\n### X\nbody\n"
-        assert pin_staleness_gate._count_pin_comments(fragment) == 1
+        assert _count(fragment) == 1
 
     def test_count_pin_comments_matches_mixed_case_marker(self):
         """`<!-- pInNeD:` (alternating case) → counted as 1."""
-        import pin_staleness_gate
         fragment = "<!-- pInNeD: 2026-04-20 -->\n### X\nbody\n"
-        assert pin_staleness_gate._count_pin_comments(fragment) == 1
+        assert _count(fragment) == 1
 
     def test_count_pin_comments_sums_mixed_case_markers(self):
         """Lowercase + uppercase + mixed in one text → counted as 3."""
-        import pin_staleness_gate
         fragment = (
             "<!-- pinned: 2026-01-01 -->\n### A\n"
             "<!-- PINNED: 2026-02-01 -->\n### B\n"
             "<!-- pInNeD: 2026-03-01 -->\n### C\n"
         )
-        assert pin_staleness_gate._count_pin_comments(fragment) == 3
+        assert _count(fragment) == 3
 
     def test_gate_denies_write_adding_uppercase_pin(self, gate_env):
         """End-to-end: Write adding an uppercase `<!-- PINNED:` → deny.
@@ -868,7 +865,7 @@ class TestPinStalenessGate_CaseInsensitivity:
         assert result is not None, (
             "Upper-case `<!-- PINNED:` slipped past the gate — the "
             "case-sensitive `.count(\"<!-- pinned:\")` under-counts "
-            "vs parse_pins (which is IGNORECASE). Fix in "
+            "vs pins_in_rows (which is IGNORECASE). Fix in "
             "pin_staleness_gate.py:_count_pin_comments."
         )
         assert "stale pins" in result
@@ -879,16 +876,16 @@ class TestPinStalenessGate_BareHeadingBypass:
     adds with no preceding date comment MUST DENY.
 
     Before that fix, `_count_pin_comments` used a regex substring count
-    of `<!-- pinned:` tokens. This was asymmetric with `parse_pins`,
-    which recognizes a bare `### Heading` (no preceding date comment)
-    as a Pin. An adversarial ADD of a level-3 heading-only pin landed
-    as a parse_pins-visible pin on reload — yet the gate saw zero
+    of `<!-- pinned:` tokens. This was asymmetric with the cap check's
+    pin reader, which recognizes a bare `### Heading` (no preceding date
+    comment) as a Pin. An adversarial ADD of a level-3 heading-only pin
+    landed as a pin the cap check counts on reload — yet the gate saw zero
     `<!-- pinned:` tokens and let the ADD through while the cap-check
     CLI simultaneously counted the pin against the 12-pin quota.
 
-    Fix: `_count_pin_comments` now calls `parse_pins` directly, so the
-    gate and the cap-check share one oracle. ADDing a bare `### Heading`
-    raises the parse_pins count by 1 → gate denies.
+    Fix: `_count_pin_comments` reads pins with `pin_caps.pins_in_rows`, the
+    cap check's reader, so the gate and the cap-check share one oracle.
+    ADDing a bare `### Heading` raises that count by 1 → gate denies.
 
     Counter-test-by-revert: reverting the symmetric-oracle fix (restoring the regex
     substring count) MUST cause these tests to FAIL. A revert that
@@ -897,7 +894,7 @@ class TestPinStalenessGate_BareHeadingBypass:
 
     def test_edit_adding_bare_heading_without_comment_denied(self, gate_env):
         """Edit: old_string has no pin comment, new_string adds bare `### Smuggled`
-        with body → gate DENIES (parse_pins sees +1 pin).
+        with body → gate DENIES (the pin reader sees +1 pin).
 
         This is the load-bearing bypass: a curator with the
         stale-pins-pending marker armed could previously smuggle a
@@ -924,7 +921,7 @@ class TestPinStalenessGate_BareHeadingBypass:
 
     def test_write_adding_bare_heading_without_comment_denied(self, gate_env):
         """Write: full-file replacement adds a bare `### Smuggled` in the
-        managed region → gate DENIES (parse_pins sees +1 pin).
+        managed region → gate DENIES (the pin reader sees +1 pin).
 
         Write-path twin of the Edit case above. Exercises the same
         asymmetry via the Write-shape branch of `_is_add_shaped_edit`.
@@ -958,10 +955,9 @@ class TestPinStalenessGate_BareHeadingBypass:
         gate decision path. If this assertion fails, the test above will
         fail too (cause vs. effect); this test isolates the cause.
         """
-        import pin_staleness_gate
         fragment = "### Smuggled\nbody\n"
-        assert pin_staleness_gate._count_pin_comments(fragment) == 1, (
-            "parse_pins treats a bare `### Heading` as a Pin; "
+        assert _count(fragment) == 1, (
+            "pins_in_rows treats a bare `### Heading` as a Pin; "
             "_count_pin_comments must agree (symmetric oracle). Under "
             "the pre-symmetric-oracle regex substring count, this returned 0."
         )
@@ -970,18 +966,18 @@ class TestPinStalenessGate_BareHeadingBypass:
 class TestPinStalenessGate_WhitespaceVariant:
     """Symmetric-oracle defense: whitespace-tolerant
     pin markers (`<!--  pinned:` with double-space, tabs, leading spaces)
-    MUST count toward the gate as parse_pins counts them.
+    MUST count toward the gate as the cap check's pin reader counts them.
 
     Before that fix, `_count_pin_comments` used a literal substring
     count of `<!-- pinned:` (case-insensitive via regex flag, but with
-    EXACTLY one space before `pinned:`). parse_pins tolerates
+    EXACTLY one space before `pinned:`). The pin reader tolerates
     `<!--\\s*pinned:` — two spaces, a tab, any whitespace run. A
     curator smuggling a pin with `<!--  pinned: 2026-04-20 -->` (double
-    space) landed as a parse_pins-visible pin on reload but was invisible
+    space) landed as a pin the cap check counts on reload but was invisible
     to the substring-count gate.
 
-    Fix: _count_pin_comments delegates to parse_pins, which uses the
-    whitespace-tolerant regex. Gate + cap-check now agree.
+    Fix: _count_pin_comments reads pins with `pin_caps.pins_in_rows`, whose
+    comment patterns are whitespace-tolerant. Gate + cap-check now agree.
 
     Counter-test-by-revert: reverting the symmetric-oracle fix MUST cause these tests
     to FAIL. If they pass after a revert, the defense is phantom-green.
@@ -990,7 +986,7 @@ class TestPinStalenessGate_WhitespaceVariant:
     def test_edit_adding_double_space_marker_denied(self, gate_env):
         """Edit: adding `<!--  pinned:` (double space) → DENIES.
 
-        parse_pins matches `<!--\\s*pinned:` → 1 new pin. Old substring
+        The pin reader matches `<!--\\s*pinned:` → 1 new pin. Old substring
         count of `<!-- pinned:` (single space) → 0 new pins → bypass.
         """
         env = gate_env(marker_present=True)
@@ -1044,25 +1040,24 @@ class TestPinStalenessGate_WhitespaceVariant:
     def test_count_pin_comments_counts_whitespace_variants(self):
         """Direct oracle assertion: whitespace-variant markers count as pins.
 
-        Isolates the cause from the effect: if parse_pins tolerates
+        Isolates the cause from the effect: if the pin reader tolerates
         `<!--  pinned:`, `<!--\\tpinned:` and so on, the gate must see
         the same count. Independent of the gate decision path.
         """
-        import pin_staleness_gate
         # Double-space preceding `pinned:`
         double_space = "<!--  pinned: 2026-04-20 -->\n### X\nbody\n"
-        assert pin_staleness_gate._count_pin_comments(double_space) == 1, (
+        assert _count(double_space) == 1, (
             "Double-space `<!--  pinned:` did not count. "
             "Pre-symmetric-oracle substring count required exactly one space."
         )
         # Tab after `<!--`
         tab_sep = "<!--\tpinned: 2026-04-20 -->\n### Y\nbody\n"
-        assert pin_staleness_gate._count_pin_comments(tab_sep) == 1, (
+        assert _count(tab_sep) == 1, (
             "Tab-separated `<!--\\tpinned:` did not count."
         )
-        # No space at all (parse_pins \s* permits zero whitespace too)
+        # No space at all (the pin reader's \s* permits zero whitespace too)
         no_space = "<!--pinned: 2026-04-20 -->\n### Z\nbody\n"
-        assert pin_staleness_gate._count_pin_comments(no_space) == 1, (
+        assert _count(no_space) == 1, (
             "Zero-space `<!--pinned:` did not count."
         )
 
@@ -1117,20 +1112,20 @@ class TestPinStalenessGate_FailOpenIsReported:
 
     def test_count_site_reports_when_the_oracle_raises(self, monkeypatch, capsys):
         """SITE 1, object driven = `_count_pin_comments`, fail-open value 0."""
-        import pin_staleness_gate
+        import pin_caps
 
-        def _raise(_text):
-            raise RuntimeError("rv2test count defect")
+        def _raise(*_args):
+            raise RuntimeError(SENTINEL)
 
-        monkeypatch.setattr(pin_staleness_gate, "parse_pins", _raise)
-        result = pin_staleness_gate._count_pin_comments("<!-- pinned: 2026-04-20 -->\n### X\nb")
+        monkeypatch.setattr(pin_caps, "pins_in_rows", _raise)
+        result = _count("<!-- pinned: 2026-04-20 -->\n### X\nb")
         assert result == 0, "the count site must keep its fail-open value"
         err = capsys.readouterr().err
         assert "pin count" in err, (
             "the pin-count catch failed open in SILENCE. Restore the "
             f"_report_fail_open call at that catch. stderr was: {err!r}"
         )
-        assert "RuntimeError" in err and "rv2test count defect" in err
+        assert "RuntimeError" in err and SENTINEL not in err
 
     def test_shape_site_reports_when_the_simulation_raises(
         self, gate_env, monkeypatch, capsys
@@ -1146,7 +1141,7 @@ class TestPinStalenessGate_FailOpenIsReported:
         import pin_staleness_gate
 
         def _raise(*_args, **_kwargs):
-            raise NameError("rv2test shape defect")
+            raise NameError(SENTINEL)
 
         monkeypatch.setattr(
             pin_staleness_gate, "_simulate_post_edit_document", _raise
@@ -1165,7 +1160,7 @@ class TestPinStalenessGate_FailOpenIsReported:
             "that swallowed a NameError and killed the whole Edit path. "
             f"stderr was: {err!r}"
         )
-        assert "NameError" in err and "rv2test shape defect" in err
+        assert "NameError" in err and SENTINEL not in err
 
     def test_decision_site_reports_when_the_gate_raises(
         self, monkeypatch, capsys
@@ -1176,7 +1171,7 @@ class TestPinStalenessGate_FailOpenIsReported:
         import pin_staleness_gate
 
         def _raise(_input_data):
-            raise RuntimeError("rv2test decision defect")
+            raise RuntimeError(SENTINEL)
 
         monkeypatch.setattr(pin_staleness_gate, "_check_tool_allowed", _raise)
         monkeypatch.setattr(
@@ -1192,21 +1187,54 @@ class TestPinStalenessGate_FailOpenIsReported:
             "the outermost catch failed open in SILENCE. Restore the "
             f"_report_fail_open call in main. stderr was: {captured.err!r}"
         )
-        assert "RuntimeError" in captured.err
+        assert "RuntimeError" in captured.err and SENTINEL not in captured.err
         assert "suppressOutput" in captured.out, (
             "the hook protocol line must stay on stdout"
         )
 
+    def test_loading_the_gate_module_reads_no_claude_md(self, tmp_path):
+        """The load-failure deny keeps the exception's text: it runs while the
+        module loads, and loading reads no CLAUDE.md, so that text cannot
+        hold CLAUDE.md text. A read added at load time fails here."""
+        import pin_staleness_gate
+
+        (tmp_path / ".claude").mkdir()
+        for path in (tmp_path / "CLAUDE.md", tmp_path / ".claude" / "CLAUDE.md"):
+            path.write_text("# notes\n", encoding="utf-8")
+        script = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            "opened = []\n"
+            "sys.addaudithook(lambda event, args: opened.append(str(args[0])) "
+            "if event == 'open' and args and isinstance(args[0], (str, bytes)) else None)\n"
+            "import pin_staleness_gate\n"
+            "loading = sum(Path(p).name.casefold() == 'claude.md' for p in opened)\n"
+            "count = len(opened)\n"
+            f"Path({str(tmp_path / 'CLAUDE.md')!r}).read_text()\n"
+            "print(loading, sum(Path(p).name.casefold() == 'claude.md' for p in opened[count:]))\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, cwd=tmp_path, timeout=600,
+            env={**os.environ, "CLAUDE_PROJECT_DIR": str(tmp_path),
+                 "PYTHONPATH": str(Path(pin_staleness_gate.__file__).parent)},
+        )
+        assert result.returncode == 0, result.stderr
+        loading, control = (int(count) for count in result.stdout.split())
+        # None while loading. The control only shows the hook sees a read: on
+        # Python 3.9 one read_text is two open events (io.open, then os.open
+        # through pathlib's opener), so it is at least one, not exactly one.
+        assert loading == 0 and control >= 1, result.stdout
+
 
 class TestPinStalenessGate_SimulationEditEdges:
-    """THE THREE DECLARED EDIT EDGES OF `_simulate_post_edit_document`.
+    """THE EDIT EDGES OF `_simulate_post_edit_document`.
 
-    Its docstring enumerates exactly three edges ported from
-    `pin_caps.build_simulated_pins`:
+    It reads the shared simulation, `shared.edit_simulation.simulate`:
       `replace_all` TRUE  -> replace each occurrence.
       `replace_all` FALSE -> replace the first occurrence.
-      an EMPTY `old_string` -> return the PRE-state.
-    The middle one was armed. The other two were not.
+      an EMPTY `old_string` on a file that holds text -> return the PRE-state,
+        because the tool refuses that edit. (On a blank file it creates or
+        fills the file; see `TestPinStalenessGate_SharedSimulation`.)
 
     WHY THESE ARMS READ THE SIMULATION DIRECTLY RATHER THAN THE VERDICT.
     Driven through the whole decision, an empty-`old_string` arm can pass
@@ -1218,13 +1246,13 @@ class TestPinStalenessGate_SimulationEditEdges:
     the unit these arms drive.
     """
 
-    def test_an_empty_old_string_returns_the_pre_state_unchanged(self):
-        """The malformed-payload guard, held by identity against the input.
+    def test_an_empty_old_string_on_a_file_with_text_returns_the_pre_state(self):
+        """The edit the tool refuses, held by identity against the input.
 
-        `str.replace` with an empty needle puts the replacement BETWEEN each
-        character, which is a document the tool never produces. The guard
-        returns the pre-state so the caller compares pre against pre and the
-        normal contract applies.
+        The Edit tool refuses an empty `old_string` on a file that holds text,
+        so the file is unchanged and the caller compares pre against pre.
+        `str.replace` with an empty needle would instead put the replacement
+        BETWEEN each character, a document the tool never produces.
 
         NON-VACUITY: identity with `current` is a strong oracle here, because
         the mutated form produces a document that is longer than the input by
@@ -1244,9 +1272,9 @@ class TestPinStalenessGate_SimulationEditEdges:
             "AN EMPTY `old_string` DID NOT RETURN THE PRE-STATE. "
             "`str.replace` with an empty needle interleaves the replacement "
             "between every character, so the gate would then compare the "
-            "pre-state against a document the tool cannot produce. The stated "
-            "reason for this edge is that a malformed payload must not become "
-            "a silent bypass, and that reason is now unheld.\n"
+            "pre-state against a document the tool cannot produce. The tool "
+            "refuses this edit on a file that holds text, so the gate must "
+            "judge the file unchanged.\n"
             f"  length in: {len(current)}   length out: {len(simulated or '')}"
         )
 
@@ -1323,9 +1351,324 @@ class TestPinStalenessGate_SimulationEditEdges:
         )
 
         assert verdict is False, (
-            "A MALFORMED EDIT PAYLOAD READ AS AN ADD. The empty `old_string` "
-            "guard returns the PRE-state, so the gate compares pre against "
-            "pre and must stay quiet. A True here means the caller counted "
-            "something other than the simulated document, which is the "
-            "silent bypass the guard exists to stop"
+            "AN EDIT THE TOOL REFUSES READ AS AN ADD. An empty `old_string` "
+            "on a file that holds text leaves it unchanged, so the gate "
+            "compares pre against pre and must stay quiet. A True here means "
+            "the caller counted something other than the simulated document"
         )
+
+
+class TestPinStalenessGate_SharedSimulation:
+    """The staleness gate judges the document the cap gate judges.
+
+    `_simulate_post_edit_document` reads `shared.edit_simulation.simulate`,
+    so each Edit shape the cap gate decides as the tool applies it (an empty
+    `old_string` on a blank file, a curly quote matched by its straight form,
+    `replace_all` through that match) reaches this gate as the same document.
+    The equality rows hold the shared call; the verdict rows, with the marker
+    present, hold the add the gate refuses and the refused edit it allows. A
+    fill of a blank file is allowed: see `TestPinStalenessGate_BlankFile`.
+    """
+
+    PIN = "<!-- pinned: 2026-02-02 -->\n### B\ny\n"
+    CURLY = "# P\n\n## Pinned Context\n\n<!-- pinned: 2026-01-01 -->\n### A\nsay “hi”\n"
+
+    @pytest.mark.parametrize("current, tool_input", [
+        ("", {"old_string": "", "new_string": PIN}),
+        ("\n  \n", {"old_string": "", "new_string": PIN}),
+        (CURLY, {"old_string": "", "new_string": PIN}),
+        (CURLY, {"old_string": "say \"hi\"", "new_string": "say \"hi\"\n\n" + PIN}),
+        (CURLY, {"old_string": "say “hi”", "new_string": "say \"hi\"\n\n" + PIN}),
+        (CURLY.replace("“hi”", "\"hi\""),
+         {"old_string": "say “hi”", "new_string": "say \"hi\"\n\n" + PIN}),
+        (CURLY + "say “hi”\n",
+         {"old_string": "say \"hi\"", "new_string": "x", "replace_all": True}),
+    ], ids=["create", "fill whitespace", "empty old_string on text", "straight on curly",
+            "exact curly", "curly on straight", "replace_all through the fold"])
+    def test_the_gate_reads_the_shared_simulation(self, current, tool_input):
+        import pin_staleness_gate
+        from shared.edit_simulation import simulate
+
+        expected = simulate(current, "Edit", tool_input)
+        assert expected != current or tool_input["old_string"] == ""
+        assert pin_staleness_gate._simulate_post_edit_document(tool_input, current, "Edit") == expected
+
+    def test_an_empty_old_string_on_a_file_with_text_is_allowed(self, gate_env):
+        paths = gate_env(marker_present=True)
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {"file_path": str(paths["claude_md"]), "old_string": "", "new_string": self.PIN},
+        })
+        assert result is None
+
+    @pytest.mark.parametrize("file_text, old_string", [
+        (CURLY, "say \"hi\""),
+        (CURLY, "say “hi”"),
+        (CURLY.replace("“hi”", "\"hi\""), "say “hi”"),
+    ], ids=["straight on curly", "exact curly", "curly on straight"])
+    def test_a_pin_added_through_a_quote_match_is_an_add(self, gate_env, file_text, old_string):
+        paths = gate_env(marker_present=True)
+        paths["claude_md"].write_text(file_text, encoding="utf-8")
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {"file_path": str(paths["claude_md"]), "old_string": old_string,
+                           "new_string": "say \"hi\"\n\n" + self.PIN},
+        })
+        assert result is not None
+
+
+class TestPinStalenessGate_BlankFile:
+    """A file that is blank before the change holds no stale pins, so the
+    marker does not refuse a change to it, by Edit or by Write. A file that
+    holds pins is still refused on an add while the marker is set."""
+
+    PIN = "<!-- pinned: 2026-02-02 -->\n### B\ny\n"
+
+    BLANKS = ["", "\n  \t\n", "\ufeff", "\ufeff\n", "\u00a0"]
+    BLANK_IDS = ["empty", "whitespace only", "byte-order mark", "byte-order mark and newline",
+                 "no-break space"]
+
+    @pytest.mark.parametrize("blank", BLANKS, ids=BLANK_IDS)
+    def test_an_edit_that_fills_a_blank_file_is_allowed(self, gate_env, blank):
+        paths = gate_env(marker_present=True)
+        paths["claude_md"].write_text(blank, encoding="utf-8")
+        result = _call_gate({
+            "tool_name": "Edit",
+            "tool_input": {"file_path": str(paths["claude_md"]), "old_string": "", "new_string": self.PIN},
+        })
+        assert result is None
+
+    @pytest.mark.parametrize("blank", BLANKS, ids=BLANK_IDS)
+    def test_a_write_of_pins_to_a_blank_file_is_allowed(self, gate_env, blank):
+        paths = gate_env(marker_present=True)
+        paths["claude_md"].write_text(blank, encoding="utf-8")
+        result = _call_gate({
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(paths["claude_md"]), "content": self.PIN},
+        })
+        assert result is None
+
+    def test_a_write_of_pins_to_a_next_line_only_file_is_refused(self, gate_env):
+        """U+0085 is not blank to the Edit tool, so the file is not blank."""
+        paths = gate_env(marker_present=True)
+        paths["claude_md"].write_text("\x85", encoding="utf-8")
+        result = _call_gate({
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(paths["claude_md"]), "content": self.PIN},
+        })
+        assert result is not None
+
+    def test_an_add_to_a_file_that_holds_pins_is_still_refused(self, gate_env):
+        paths = gate_env(marker_present=True)
+        current = paths["claude_md"].read_text(encoding="utf-8")
+        assert current.strip()
+        result = _call_gate({
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(paths["claude_md"]),
+                           "content": current.replace("## Working Memory", self.PIN + "\n## Working Memory")},
+        })
+        assert result is not None
+
+
+class TestPinStalenessGate_WholeFileCount:
+    """The add count reads rows of one parse of each whole document, the parse
+    the pin-cap gate reads."""
+
+    def test_the_count_of_a_located_section_is_the_cap_parsers(self):
+        """On every corpus file whose Pinned section is located, the gate counts
+        the pins `section_pins` reads, less memory entries."""
+        import pin_caps
+        import pin_staleness_gate
+        from shared.claude_md_markers import State, parse
+        from staleness import locate_pinned
+
+        checked = 0
+        for path in sorted((Path(__file__).parent / "fixtures" / "claude_md_corpus").glob("*.md")):
+            doc = parse(path.read_text(encoding="utf-8", errors="replace"))
+            located = locate_pinned(doc)
+            if located.state is not State.FOUND:
+                continue
+            heading, last = located.spans[0]
+            expected = sum(1 for pin in pin_caps.section_pins(doc, located)
+                           if not pin_staleness_gate._is_memory_entry(pin))
+            assert pin_staleness_gate._count_pin_comments(doc, heading + 1, last) == expected, path.name
+            checked += 1
+        assert checked >= 10, f"only {checked} corpus files locate a Pinned section"
+
+
+class TestPinStalenessGate_UncertainPinnedSection:
+    """Where the parser cannot say which rows of the Pinned section are pins,
+    on either side of the change, the change is not an add. An HTML opener
+    left open above the section makes the rows below it uncertain once it
+    covers a fence."""
+
+    EXAMPLE = "```\n### example heading\n```\n"
+    NEW_PIN = "\n### Pin C\nBody C.\n"
+    OPENERS = ["<!-- note\n", "<pre>\n", '<?xml version="1.0"\n']
+    OPENER_IDS = ["comment", "pre", "processing instruction"]
+    CLOSED = {"<!-- note\n": "<!-- note -->\n", "<pre>\n": "<pre></pre>\n",
+              '<?xml version="1.0"\n': '<?xml version="1.0" ?>\n'}
+
+    @staticmethod
+    def _doc(opener, pin_a_extra=""):
+        return ("# Project\n" + opener + "## Pinned Context\n\n### Pin A\nBody A.\n" + pin_a_extra
+                + "\n### Pin B\nBody B.\n\n## Notes\nnotes\n")
+
+    @staticmethod
+    def _pinned_state(text):
+        from shared.claude_md_markers import parse
+        from staleness import locate_pinned
+        return locate_pinned(parse(text)).state
+
+    def test_adding_a_fenced_example_under_an_open_comment_is_allowed(self, gate_env, monkeypatch, capsys):
+        """No PACT markers and no pin date comments, so nothing below the open
+        comment closes it. Through `main()`, with the stale marker set."""
+        from io import StringIO
+        import pin_staleness_gate
+        from shared.claude_md_markers import State
+
+        paths = gate_env(marker_present=True)
+        before = self._doc("<!-- note\n")
+        paths["claude_md"].write_text(before, encoding="utf-8")
+        assert self._pinned_state(self._doc("<!-- note\n", self.EXAMPLE)) is State.UNKNOWN
+        monkeypatch.setattr(sys, "stdin", StringIO(json.dumps({
+            "tool_name": "Edit",
+            "agent_type": "pact-orchestrator",
+            "tool_input": {"file_path": str(paths["claude_md"]),
+                           "old_string": "Body A.\n", "new_string": "Body A.\n" + self.EXAMPLE},
+        })))
+        with pytest.raises(SystemExit) as exc_info:
+            pin_staleness_gate.main()
+        captured = capsys.readouterr()
+        assert exc_info.value.code == 0
+        assert json.loads(captured.out) == {"suppressOutput": True}
+        assert captured.err == ""
+
+    @pytest.mark.parametrize("opener", OPENERS, ids=OPENER_IDS)
+    def test_deleting_a_stray_opener_above_a_fenced_example_is_not_an_add(self, opener):
+        import pin_staleness_gate
+        from shared.claude_md_markers import State
+
+        before, after = self._doc(opener, self.EXAMPLE), self._doc("", self.EXAMPLE)
+        assert self._pinned_state(before) is State.UNKNOWN
+        assert self._pinned_state(after) is State.FOUND
+        assert pin_staleness_gate._counts_show_an_add(before, after) is False
+
+    @pytest.mark.parametrize("opener", OPENERS, ids=OPENER_IDS)
+    def test_closing_a_stray_opener_at_the_row_edge_is_not_an_add(self, opener):
+        import pin_staleness_gate
+        from shared.claude_md_markers import State
+
+        before, after = self._doc(opener, self.EXAMPLE), self._doc(self.CLOSED[opener], self.EXAMPLE)
+        assert self._pinned_state(before) is State.UNKNOWN
+        assert self._pinned_state(after) is State.FOUND
+        assert pin_staleness_gate._counts_show_an_add(before, after) is False
+
+    def test_adding_a_real_pin_to_a_certain_file_is_an_add(self):
+        import pin_staleness_gate
+        from shared.claude_md_markers import State
+
+        before, after = self._doc(""), self._doc("", self.NEW_PIN)
+        assert self._pinned_state(after) is State.FOUND
+        assert pin_staleness_gate._counts_show_an_add(before, after) is True
+
+    @pytest.mark.parametrize("opener", OPENERS, ids=OPENER_IDS)
+    def test_a_real_pin_added_with_a_fenced_example_under_an_open_opener_is_not_an_add(self, opener):
+        """The add the staleness gate does not refuse. The pin-cap gate still
+        answers the same edit."""
+        import pin_staleness_gate
+        from shared.claude_md_markers import State
+
+        before, after = self._doc(opener), self._doc(opener, self.EXAMPLE + self.NEW_PIN)
+        assert self._pinned_state(after) is State.UNKNOWN
+        assert pin_staleness_gate._counts_show_an_add(before, after) is False
+
+
+class TestPinStalenessGate_CreditAndReveals:
+    """With the marker set, an edit the pin-cap rule does not count as adding
+    pins is not an add: a pin this lead removed earlier in an unbroken chain
+    of its own allowed changes, added back, and a pin revealed by
+    un-indenting a heading. A new pin is still refused, and the count's own
+    answer stands when the credit store cannot load."""
+
+    @staticmethod
+    def _doc(pins):
+        from shared.claude_md_manager import (MANAGED_END_MARKER, MANAGED_START_MARKER, MEMORY_END_MARKER,
+                                              MEMORY_START_MARKER)
+
+        return (f"{MANAGED_START_MARKER}\n# Project Memory\n\n{MEMORY_START_MARKER}\n## Retrieved Context\n\n"
+                f"## Pinned Context\n\n{''.join(pins)}## Working Memory\n{MEMORY_END_MARKER}\n{MANAGED_END_MARKER}\n")
+
+    @staticmethod
+    def _pin(i, body=None):
+        return f"<!-- pinned: 2026-04-21 -->\n### Pin {i}\n{body or f'body {i}'}\n\n"
+
+    @pytest.fixture
+    def armed(self, gate_env, monkeypatch, tmp_path):
+        """The marker set, in a session dir under the config root, where the
+        credit record can be written."""
+        import shared.pact_context as ctx_module
+        from pin_staleness_gate import PIN_STALENESS_MARKER_NAME
+        from shared.paths import get_claude_config_dir
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        paths = gate_env(marker_present=False)
+        session_dir = get_claude_config_dir() / "pact-sessions" / "project" / "session-abc"
+        session_dir.mkdir(parents=True)
+        (session_dir / PIN_STALENESS_MARKER_NAME).touch()
+        monkeypatch.setattr(ctx_module, "get_session_dir", lambda: str(session_dir))
+        return {**paths, "session_dir": session_dir}
+
+    def _edit(self, paths, old, new):
+        return _call_gate({"tool_name": "Edit", "session_id": "session-abc",
+                           "tool_input": {"file_path": str(paths["claude_md"]), "old_string": old,
+                                          "new_string": new}})
+
+    def _removal_allowed_by_the_cap_gate(self, paths, before, after):
+        """The pin-cap gate's sequence for this lead's removal: it records the
+        chain's credit for the text after."""
+        from pin_caps_gate import gate_decision
+        from shared import pin_credit
+        from shared.claude_md_drift import _digest
+        from shared.claude_md_manager import gate_target
+
+        frame = {"agent_type": "pact-orchestrator", "session_id": "session-abc"}
+        target = gate_target(str(paths["claude_md"]))
+        assert target is not None
+        base = target.base
+        h0, detail = _digest(before), {}
+        credit = pin_credit.read(frame, "lead", base, h0)
+        decision = gate_decision(before, "Write", {"content": after}, credit=credit, detail=detail)
+        assert decision.verdict == "ALLOW"
+        pin_credit.record(frame, "lead", base, h0, detail, decision, credit)
+
+    def test_a_pin_removed_and_added_back_in_the_leads_chain_is_not_an_add(self, armed):
+        pins = [self._pin(i) for i in range(5)]
+        before, removed = self._doc(pins), self._doc(pins[:3] + pins[4:])
+        self._removal_allowed_by_the_cap_gate(armed, before, removed)
+        armed["claude_md"].write_text(removed, encoding="utf-8")
+        assert self._edit(armed, pins[4], pins[4] + pins[3]) is None
+
+    def test_the_same_add_back_with_no_chain_is_refused(self, armed):
+        pins = [self._pin(i) for i in range(5)]
+        armed["claude_md"].write_text(self._doc(pins[:3] + pins[4:]), encoding="utf-8")
+        assert self._edit(armed, pins[4], pins[4] + pins[3]) is not None
+
+    def test_a_heading_un_indented_into_a_pin_is_not_an_add(self, armed):
+        pins = [self._pin(i, "intro\n  ### Sub heading\nsub body" if i == 2 else None) for i in range(5)]
+        armed["claude_md"].write_text(self._doc(pins), encoding="utf-8")
+        assert self._edit(armed, "  ### Sub heading\n", "### Sub heading\n") is None
+
+    def test_a_new_pin_is_still_refused(self, armed):
+        pins = [self._pin(i) for i in range(5)]
+        armed["claude_md"].write_text(self._doc(pins), encoding="utf-8")
+        assert self._edit(armed, pins[4], pins[4] + self._pin(9)) is not None
+
+    def test_when_the_credit_store_cannot_load_the_count_decides(self, armed, monkeypatch):
+        pins = [self._pin(i, "intro\n  ### Sub heading\nsub body" if i == 2 else None) for i in range(5)]
+        armed["claude_md"].write_text(self._doc(pins), encoding="utf-8")
+        import shared
+
+        monkeypatch.setitem(sys.modules, "shared.pin_credit", None)
+        monkeypatch.delattr(shared, "pin_credit", raising=False)
+        assert self._edit(armed, "  ### Sub heading\n", "### Sub heading\n") is not None

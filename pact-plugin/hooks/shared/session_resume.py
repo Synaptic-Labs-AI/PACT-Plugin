@@ -25,7 +25,7 @@ import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from shared.claude_md_manager import (
     MANAGED_END_MARKER,
@@ -48,13 +48,18 @@ from shared.failure_cause import failure_cause
 from shared.handoff_schema import resolve_handoff_field
 from shared.pact_context import _build_session_path, project_slug
 from shared.paths import get_claude_config_dir
-from shared.stale_session import _RESUME_LINE_RE
+from shared.stale_session import recorded_session_id, session_block_rows
 from shared.session_journal import (
     _parse_ts,
     _ts_supersedes,
     read_events_from,
     read_last_event_from,
 )
+
+# The finder is imported inside the functions that use it: shared/__init__.py
+# imports this module, so a module-level import would load it in every hook.
+if TYPE_CHECKING:
+    from shared.claude_md_markers import Document
 
 # Maximum characters for decision summaries in journal resume output
 _DECISION_TRUNCATION_LIMIT = 80
@@ -140,56 +145,42 @@ def session_info_failure(e: BaseException) -> str:
     return TransientSessionInfoFailure(status)
 
 
-def update_session_info(
+# Case 2's legacy anchor, used only in a file with no memory block: the
+# heading row itself, at column 0. A mention mid-line, a fenced or indented
+# copy and a commented-out heading are not it.
+_RETRIEVED_CONTEXT_HEADING = re.compile(r"## Retrieved Context\s*$")
+# The previous session's directory line, and its value on a row already found.
+_SESSION_DIR_ROW_RE = re.compile(r"- Session dir:\s*`[^`]+`")
+_BACKTICK_VALUE_RE = re.compile(r"`([^`]+)`")
+
+
+def _content_span(doc: Document, first: int, last: int) -> tuple[int, int]:
+    """(start, end) in the original text of rows first..last, without the
+    last row's terminator, which stays put. Document.offsets() would take the
+    U+FEFF and the terminator with the rows."""
+    return doc.row_start(first), doc.row_start(last) + len(doc.lines[last].content)
+
+
+def _session_block_refusal(reason: str) -> str:
+    """The status for a file whose Current Session block PACT will not rewrite.
+    The word `skipped` routes it to the user-visible surface (see the routing
+    note in update_session_info)."""
+    return (
+        f"Session info skipped: {reason}. The Current Session block in "
+        "CLAUDE.md was left unchanged and is now stale."
+    )
+
+
+def _session_block_text(
     session_id: str,
     team_name: str,
-    session_dir: str | None = None,
-    plugin_root: str | None = None,
-    started: str | None = None,
-) -> str | None:
-    """
-    Write the Current Session section to the project's CLAUDE.md.
-
-    Inserts (or overwrites) a managed section containing the session resume
-    command, team name, session directory, plugin root, and start timestamp.
-    Uses <!-- SESSION_START --> / <!-- SESSION_END --> comment markers for
-    reliable replacement across sessions.
-
-    Args:
-        session_id: Full session UUID (e.g. "93cf3da0-c792-4daa-888e-...")
-        team_name: Generated team name (e.g. "PACT-93cf3da0")
-        session_dir: Absolute path to the session directory (optional).
-            When provided, written as "- Session dir:" line for next-session
-            journal access.
-        plugin_root: Absolute path to the installed plugin directory (optional).
-            When provided, written as "- Plugin root:" line so the orchestrator
-            can locate hook scripts without symlink traversal.
-        started: The "Started" value to write; None writes now. A compaction is
-            not a session start, so session_init passes the value already there.
-
-    Returns:
-        Status message or None if no action taken. A failure that may clear on
-        its own returns a TransientSessionInfoFailure.
-    """
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    if not project_dir:
-        return None
-
-    # Honor both supported project CLAUDE.md locations.
-    # Existing files take precedence (.claude/CLAUDE.md > legacy ./CLAUDE.md);
-    # if neither exists, the resolver returns the new default
-    # ($project_dir/.claude/CLAUDE.md) so we create at the preferred path.
-    target_file, _source = resolve_project_claude_md_path(project_dir)
-
-    # From the canonical pair in claude_md_manager, NOT re-spelled here. The
-    # scan terminator that stops a section body at these markers is DERIVED
-    # from the same two names, so a rename carries to the readers.
-    SESSION_START = SESSION_START_MARKER
-    SESSION_END = SESSION_END_MARKER
-    session_pattern = re.escape(SESSION_START) + r".*?" + re.escape(SESSION_END)
-
-    timestamp = started or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-
+    session_dir: str | None,
+    plugin_root: str | None,
+    timestamp: str,
+) -> str:
+    """The Current Session block, markers included, for these values. The one
+    place the block's text is spelled: the file-creation path and the planner
+    both call it."""
     # Build session dir line. MUST be written as an absolute path — command
     # files read this value via bash single-quoted expansion which does NOT
     # perform tilde expansion, and `session_journal._validate_cli_session_dir`
@@ -231,8 +222,8 @@ def update_session_info(
     cleaned_session_id = _sanitize_prompt_field(str(session_id))
     cleaned_team_name = _sanitize_prompt_field(str(team_name))
 
-    session_block = (
-        f"{SESSION_START}\n"
+    return (
+        f"{SESSION_START_MARKER}\n"
         f"## Current Session\n"
         f"<!-- Auto-managed by session_init hook. Overwritten each session. -->\n"
         f"- Resume: `claude --agent PACT:pact-orchestrator --resume {cleaned_session_id}`\n"
@@ -240,8 +231,149 @@ def update_session_info(
         f"{session_dir_line}"
         f"{plugin_root_line}"
         f"- Started: {timestamp}\n"
-        f"{SESSION_END}"
+        f"{SESSION_END_MARKER}"
     )
+
+
+def _plan_session_block(
+    content: str,
+    session_id: str,
+    team_name: str,
+    session_dir: str | None,
+    plugin_root: str | None,
+    timestamp: str,
+) -> tuple[str | None, str | None]:
+    """Plan the Current Session write for `content`: (new_content, status).
+
+    Pure, so a file that is not valid UTF-8 gets the same plan from its
+    replace-decoded copy. new_content is None when nothing is written: the
+    block already holds these values (status None), or the file is left
+    alone and status says why. Every location comes from the parser, so a
+    fenced, indented or quoted copy of a marker or heading is never written.
+    """
+    from shared.claude_md_markers import State, parse
+
+    session_block = _session_block_text(
+        session_id, team_name, session_dir, plugin_root, timestamp
+    )
+    doc = parse(content)
+    block = doc.find_block(SESSION_START_MARKER, SESSION_END_MARKER)
+    if block.state is State.FOUND:
+        start, end = _content_span(doc, *block.spans[0])
+        new_content = content[:start] + session_block + content[end:]
+        if new_content == content:
+            return None, None
+        status = "Session info updated in project CLAUDE.md"
+    elif block.state is State.ABSENT:
+        at, refusal = _session_block_insertion(doc)
+        if refusal is not None:
+            return None, _session_block_refusal(refusal)
+        if at is None:
+            # No anchor: append at end of file.
+            base = content if content.endswith("\n") else content + "\n"
+            start = len(base) + 1
+            new_content = base + "\n" + session_block + "\n"
+        else:
+            start = at
+            new_content = content[:at] + session_block + "\n\n" + content[at:]
+        status = "Session info added to project CLAUDE.md"
+    else:
+        return None, _session_block_refusal(block.reason)
+    # The write must read back as one block, exactly where it was put.
+    written = parse(new_content)
+    check = written.find_block(SESSION_START_MARKER, SESSION_END_MARKER)
+    if check.state is State.FOUND and (
+        _content_span(written, *check.spans[0]) == (start, start + len(session_block))
+    ):
+        return new_content, status
+    written_line = sum(1 for line in written.lines if line.start <= start)
+    if check.reason:
+        where = check.reason
+    elif check.state is State.FOUND:
+        where = (f"it reads back at line {check.spans[0][0] + 1}, "
+                 f"not line {written_line} where it was written")
+    else:
+        where = f"no block reads back at line {written_line}, where it was written"
+    return None, _session_block_refusal(
+        "the rewritten Current Session block did not read back as one block "
+        f"where it was written: {where}")
+
+
+def _session_block_insertion(doc: Document) -> tuple[int | None, str | None]:
+    """Where a new Current Session block goes: (offset or None for end of file,
+    refusal reason or None).
+
+    The block is never inside PACT_MEMORY. (a) With the managed and memory
+    start markers found, it goes before the memory start marker's row. (b) A
+    memory block with no managed region: before its start row. (c) No memory
+    block, the legacy shape: before a column-0 `## Retrieved Context`
+    heading. (d) Otherwise, at end of file. A marker or heading the parser
+    cannot place makes the writer refuse.
+    """
+    from shared.claude_md_markers import State
+
+    managed = doc.find_marker(MANAGED_START_MARKER)
+    memory_start = doc.find_marker(MEMORY_START_MARKER)
+    for located in (managed, memory_start):
+        if located.state in (State.DUPLICATE, State.MALFORMED):
+            return None, located.reason
+    if managed.state is State.FOUND and memory_start.state is State.FOUND:
+        return doc.row_start(memory_start.spans[0][0]), None
+    memory = doc.find_block(MEMORY_START_MARKER, MEMORY_END_MARKER)
+    if memory.state is State.FOUND:
+        return doc.row_start(memory.spans[0][0]), None
+    if memory.state is not State.ABSENT:
+        return None, memory.reason
+    heading = doc.find_section(_RETRIEVED_CONTEXT_HEADING, None)
+    if heading.state is State.FOUND:
+        return doc.row_start(heading.spans[0][0]), None
+    if heading.state is State.ABSENT:
+        return None, None
+    return None, heading.reason
+
+
+def update_session_info(
+    session_id: str,
+    team_name: str,
+    session_dir: str | None = None,
+    plugin_root: str | None = None,
+    started: str | None = None,
+) -> str | None:
+    """
+    Write the Current Session section to the project's CLAUDE.md.
+
+    Inserts (or overwrites) a managed section containing the session resume
+    command, team name, session directory, plugin root, and start timestamp.
+    Uses <!-- SESSION_START --> / <!-- SESSION_END --> comment markers for
+    reliable replacement across sessions.
+
+    Args:
+        session_id: Full session UUID (e.g. "93cf3da0-c792-4daa-888e-...")
+        team_name: Generated team name (e.g. "PACT-93cf3da0")
+        session_dir: Absolute path to the session directory (optional).
+            When provided, written as "- Session dir:" line for next-session
+            journal access.
+        plugin_root: Absolute path to the installed plugin directory (optional).
+            When provided, written as "- Plugin root:" line so the orchestrator
+            can locate hook scripts without symlink traversal.
+        started: The "Started" value to write; None writes now. A compaction is
+            not a session start, so session_init passes the value already there.
+
+    Returns:
+        Status message or None if no action taken. A failure that may clear on
+        its own returns a TransientSessionInfoFailure.
+    """
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    if not project_dir:
+        return None
+
+    # Honor both supported project CLAUDE.md locations.
+    # Existing files take precedence (.claude/CLAUDE.md > legacy ./CLAUDE.md);
+    # if neither exists, the resolver returns the new default
+    # ($project_dir/.claude/CLAUDE.md) so we create at the preferred path.
+    target_file, _source = resolve_project_claude_md_path(project_dir)
+
+    timestamp = started or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     # Create the `.claude/` parent directory (with 0o700) BEFORE acquiring
     # the file lock. `file_lock` internally creates the target's parent
@@ -276,6 +408,9 @@ def update_session_info(
                 # block, PACT_MEMORY with three default section headings, all
                 # wrapped by the PACT_MANAGED outer boundary.
                 if not target_file.exists():
+                    session_block = _session_block_text(
+                        session_id, team_name, session_dir, plugin_root, timestamp
+                    )
                     new_content = (
                         f"{MANAGED_START_MARKER}\n"
                         f"{MANAGED_TITLE}\n"
@@ -299,111 +434,19 @@ def update_session_info(
 
                 content = target_file.read_text(encoding="utf-8")
 
-                # Case 1: Markers already exist -- replace the block.
-                # Structural guarantee (round 10): SESSION markers are always
-                # inside the PACT_MANAGED region (placed by template in both
-                # ensure_project_memory_md and update_session_info Case 0).
-                # The re.DOTALL regex below scans the full file, but the
-                # markers can only appear in plugin-generated content — no
-                # user-authored fenced code blocks can contain real SESSION
-                # markers, so fence-aware scanning is unnecessary.
-                if SESSION_START in content and SESSION_END in content:
-                    # A CALLABLE REPLACEMENT, BECAUSE THE STRING FORM IS AN
-                    # ESCAPE GRAMMAR EVALUATED OVER CALLER-INFLUENCED DATA.
-                    # `re.sub` expands its replacement grammar in a replacement
-                    # STRING. It does NOT expand the RETURN VALUE of a
-                    # replacement CALLABLE, which is substituted literally.
-                    # `session_block` interpolates a session dir, a plugin
-                    # root, a session id and a team name, and a directory name
-                    # may legally contain a backslash, so two of those carriers
-                    # reach this call WITH NO ATTACKER.
-                    #
-                    # THE SANITIZE ABOVE DOES NOT COVER THIS.
-                    # `_PROMPT_CONTROL_CHARS_RE` strips control characters and
-                    # backslash is not one, so the guard removes a newline and
-                    # a string replacement PUTS IT BACK. Three productions,
-                    # each measured against this pattern and these flags:
-                    #   `\n`    re-materialises a newline. Inline code does not
-                    #           span a line break, so the value leaves its
-                    #           backtick span and lands a HEADING of its own in
-                    #           the PACT-managed region.
-                    #   `\d`    raises `re.error`, which the handler below
-                    #           catches and returns as a failure string. NOT a
-                    #           crash, and that is what makes it survivable:
-                    #           every later pass fails identically, so the
-                    #           session block FREEZES at first-pass content
-                    #           while the directory name persists, and state
-                    #           recovery then reads a stale pointer.
-                    #   `\g<0>` is a group reference and splices the ENTIRE
-                    #           matched block back inside itself.
-                    #
-                    # DO NOT ANSWER THIS BY ADDING BACKSLASH TO THE SANITIZE
-                    # CLASS. That is the wrong layer: the substitution
-                    # re-materialises anything else the grammar spells, so a
-                    # character-class fix closes ONE production and leaves the
-                    # grammar. The callable takes the grammar off the path.
-                    new_content = re.sub(
-                        session_pattern,
-                        lambda _match: session_block,
-                        content,
-                        count=1,
-                        flags=re.DOTALL,
-                    )
-                    if new_content != content:
-                        _atomic_write_text(target_file, new_content, Path(project_dir))
-                        return "Session info updated in project CLAUDE.md"
-                    return None
-
-                # Case 2: No SESSION markers. Insertion order matters because
-                # the session block must be a SIBLING of PACT_MEMORY inside
-                # PACT_MANAGED — never placed inside PACT_MEMORY where it
-                # would pollute the memory region and violate the
-                # "Current Session is outside PACT_MEMORY" invariant.
-                #
-                # Ordered preference:
-                #   (a) Post-migration file (PACT_MANAGED present): insert
-                #       BEFORE MEMORY_START_MARKER so the block stays inside
-                #       PACT_MANAGED but outside PACT_MEMORY. This is the
-                #       round-4 Item-1 fix — the prior behavior anchored on
-                #       "## Retrieved Context" which, after migration, lives
-                #       INSIDE PACT_MEMORY.
-                #       Structural guarantee (round 10): MEMORY_START_MARKER
-                #       is always inside PACT_MANAGED, so the .replace()
-                #       below lands the session block in plugin-generated
-                #       content — no fence-awareness needed.
-                #   (b) Legacy pre-migration file (no PACT_MANAGED): keep
-                #       the historical anchor on "## Retrieved Context"
-                #       since memory sections were top-level in that shape.
-                #   (c) Neither: append at end of file.
-                # Both markers are checked (not just MANAGED_START) because a
-                # partially-written migration output is theoretically possible
-                # under crash: the managed-open marker could be present while
-                # memory markers are not yet written. The AND check treats such
-                # partial states as pre-migration, routing to the legacy
-                # fallback (branch b) rather than attempting a .replace() that
-                # would be a no-op producing silent data loss (round 5, item 8).
-                if MANAGED_START_MARKER in content and MEMORY_START_MARKER in content:
-                    new_content = content.replace(
-                        MEMORY_START_MARKER,
-                        session_block + "\n\n" + MEMORY_START_MARKER,
-                        1,
-                    )
-                else:
-                    insert_marker = "## Retrieved Context"
-                    if insert_marker in content:
-                        new_content = content.replace(
-                            insert_marker,
-                            session_block + "\n\n" + insert_marker,
-                            1,
-                        )
-                    else:
-                        # Fallback: append at end
-                        if not content.endswith("\n"):
-                            content += "\n"
-                        new_content = content + "\n" + session_block + "\n"
-
-                _atomic_write_text(target_file, new_content, Path(project_dir))
-                return "Session info added to project CLAUDE.md"
+                # Cases 1 and 2: the planner locates the block, and its
+                # insertion point, through the fence-aware parser. FOUND is
+                # replaced by plain string slicing, so nothing in session_block
+                # is interpreted: a backslash in a directory name stays a
+                # backslash. ABSENT gets one fresh block. A block the parser
+                # cannot place (a duplicate, a stray marker, an uncertain
+                # region) is left alone and the status names the line.
+                new_content, status = _plan_session_block(
+                    content, session_id, team_name, session_dir, plugin_root, timestamp
+                )
+                if new_content is not None:
+                    _atomic_write_text(target_file, new_content, Path(project_dir))
+                return status
 
             except ContainmentError:
                 # Opaque skip, matching the removed is_symlink guard's message.
@@ -411,13 +454,15 @@ def update_session_info(
             except UnicodeDecodeError:
                 # The file is rewritten here, so it is decoded strictly and
                 # left untouched, never rewritten with replacement characters.
-                # Case 1's no-op, a block already equal to this one (a
-                # compaction) or no START..END span, is no skip to report.
-                replaced = _read_replaced(target_file)
-                if SESSION_START in replaced and SESSION_END in replaced:
-                    match = re.search(session_pattern, replaced, flags=re.DOTALL)
-                    if match is None or match.group(0) == session_block:
-                        return None
+                # The planner runs on the replace-decoded copy: a plan that
+                # writes nothing (the block already equals this one, as on a
+                # compaction) is no skip to report.
+                new_content, status = _plan_session_block(
+                    _read_replaced(target_file), session_id, team_name,
+                    session_dir, plugin_root, timestamp,
+                )
+                if new_content is None and status is None:
+                    return None
                 return (
                     "Session info skipped: the project CLAUDE.md is not valid "
                     "UTF-8, so it was left unchanged. The Current Session block "
@@ -428,20 +473,19 @@ def update_session_info(
                 # CAUSES WAS REMOVED AND A HANDLER THAT LOOKS THE SAME AFTER
                 # ITS CAUSE GOES IS THE SHAPE THAT ROTS.
                 #
-                # IT USED TO CATCH `re.error` FROM THE SUBSTITUTION ABOVE,
+                # IT USED TO CATCH `re.error` FROM A REGEX SUBSTITUTION,
                 # raised when a caller-influenced value spelled an invalid
-                # escape such as `\d`. THAT CAUSE IS GONE: the replacement is
-                # a callable, its return value is not escape-processed, and
-                # the pattern is two `re.escape`'d literal constants, so
-                # neither side of that call can raise on any input.
+                # escape such as `\d`. THAT CAUSE IS GONE: the block is now
+                # spliced by string slicing, and the parser never raises on a
+                # str.
                 #
                 # IT IS NOT DEAD COVER. WHAT REMAINS UNDER IT IS THE FILE
                 # LAYER, on the read path and the write path inside the lock:
                 # `Path.exists` and `read_text` (OSError, and
                 # UnicodeDecodeError for a CLAUDE.md that is not valid UTF-8),
                 # and `_atomic_write_text` (OSError, UnicodeEncodeError).
-                # `ContainmentError` is handled above and does not reach here,
-                # and `str.replace` cannot raise. So this stays a fail-open
+                # `ContainmentError` is handled above and does not reach here.
+                # So this stays a fail-open
                 # I/O backstop: one unreadable or unwritable file degrades the
                 # session block, and it does not take down SessionStart.
                 #
@@ -577,8 +621,15 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
         # the returned path is validated below.
         content = claude_md.read_text(encoding="utf-8", errors="replace")
 
-        # Primary: match "- Session dir: `<path>`" in the Current Session block.
-        match = re.search(r'- Session dir:\s*`([^`]+)`', content)
+        # Both lines are read only inside the Current Session block, through
+        # the parser: no block, an uncertain one, or a copy in a fenced
+        # example names no previous session.
+        dir_rows = session_block_rows(content, _SESSION_DIR_ROW_RE)
+        if dir_rows is None:
+            return None
+
+        # Primary: the "- Session dir: `<path>`" line.
+        match = _BACKTICK_VALUE_RE.search(dir_rows[0]) if dir_rows else None
         if match:
             raw = match.group(1)
             # Expand ~ to actual home directory
@@ -607,11 +658,10 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
             )
 
         # Fallback: derive from Resume line session_id + project root basename.
-        # _RESUME_LINE_RE reads both the current line and one written before
-        # the `--agent` flag was added.
-        resume_match = _RESUME_LINE_RE.search(content)
-        if resume_match:
-            session_id = resume_match.group(1)
+        # The Resume pattern reads both the current line and one written
+        # before the `--agent` flag was added.
+        session_id = recorded_session_id(content)
+        if session_id:
             # Same slug derivation and sanitisation as every session path,
             # so the fallback lands on the directory the writers used.
             derived = str(
@@ -1183,7 +1233,8 @@ def check_resume_state(
     refresh_msg = (
         _interpret_refreshed_event(refreshed) if refreshed is not None else None
     )
-    if paused_msg and refresh_msg:
+    # Each message exists only when its event does; the None checks say so.
+    if paused is not None and refreshed is not None and paused_msg and refresh_msg:
         return _arbitrate(paused, paused_msg, refreshed, refresh_msg)
     return refresh_msg or paused_msg
 

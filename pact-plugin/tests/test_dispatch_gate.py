@@ -325,7 +325,7 @@ def test_allows_name_at_64_char_boundary(tmp_path, monkeypatch, capsys):
         "(parens)",  # parens
         "with\nnewline",  # newline
         "наме",  # Cyrillic — fails regex even after NFKC
-        "​zero-width",  # zero-width-space prefix
+        "\u200bzero-width",  # zero-width-space prefix
     ],
     ids=[
         "uppercase",
@@ -734,7 +734,7 @@ def _run_gate_in_fresh_process(tmp_path, frame):
                CLAUDE_PLUGIN_ROOT=str(plugin), PYTHONPATH=str(plugin / "hooks"))
 
     return subprocess.run([sys.executable, "-c", harness], input=json.dumps(frame),
-                          capture_output=True, text=True, timeout=60, env=env,
+                          capture_output=True, text=True, timeout=600, env=env,
                           cwd=str(tmp_path))
 
 

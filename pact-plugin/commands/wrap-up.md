@@ -28,7 +28,7 @@ This is the deep-clean pass. Pass 1 (workflow-level HANDOFF review) is the prima
 
 ## 2. Documentation Sync
 
-1. **Run `/PACT:pin-memory`** (no arguments): Reviews the session for pin-worthy context, pins what matters, and prunes stale entries. This handles both CLAUDE.md updates and pinned content maintenance in one invocation.
+1. **Run `/PACT:pin-memory`** (no arguments): Reviews the session for pin-worthy context and pins what matters.
 2. **Verify docs**: Confirm that `docs/<feature>/preparation/` and `docs/<feature>/architecture/` are up-to-date with the implementation. Archive obsolete documentation to `docs/archive/`.
 
 ## 3. Workspace Cleanup

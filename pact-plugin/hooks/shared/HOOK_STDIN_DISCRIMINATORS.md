@@ -41,6 +41,16 @@ Fixture: `tests/fixtures/role_frames.py` ::
 `captured_posttooluse_teammate_inprocess_bash_background` (real key set,
 synthetic values).
 
+**The same holds on `PreToolUse`, captured 2026-10-05 on Claude Code 2.1.289.**
+A live in-process teammate's `PreToolUse` `Edit` frame carried the member's
+name in `agent_type` (no `pact-` prefix), an `agent_id` with no `@`, and no
+`agent_name`. Its keys: `agent_id`, `agent_type`, `cwd`, `effort`,
+`hook_event_name`, `permission_mode`, `prompt_id`, `scratchpad_dir`,
+`session_id`, `tool_input` (`file_path`, `new_string`, `old_string`,
+`replace_all` as a bool), `tool_name`, `tool_use_id`, `transcript_path`. Fixture:
+`tests/fixtures/role_frames.py` :: `captured_pretooluse_teammate_inprocess_edit`
+(real key set and value types, synthetic values).
+
 Consequences, because code in this repo reasons on the old premise:
 
 - **Role classification is unaffected.** Both resolvers test membership in
@@ -95,7 +105,8 @@ Values below are grounded in verbatim stdin captured under tmux (Claude Code
 2.1.167) for **SessionStart, UserPromptSubmit, PostToolUse, and TaskCompleted**,
 and under Claude Code 2.1.177 for **PreToolUse** (three real frames: a tmux
 teammate, a lead, and an in-process subagent — confirming `agent_type` is stamped
-on `PreToolUse` in both topologies). **PostCompact** was captured live on
+on `PreToolUse` in both topologies), plus an in-process teammate's **PreToolUse**
+`Edit` frame on Claude Code 2.1.289 (2026-10-05). **PostCompact** was captured live on
 2026-08-26 (#1504 step 0): a lead manual `/compact` in an in-process session —
 `agent_type` carries the qualified lead spelling as the matrix inferred, and the
 frame also carries `session_id`, `trigger`, `prompt_id`, and a non-empty
@@ -110,8 +121,8 @@ empty.
 |---|---|---|---|---|---|---|
 | SessionStart | `agent_type` (an in-process teammate's `source: compact` frame carries the lead's value, so no field marks it as a teammate; absent for a lead resumed or forked without `--agent`) | lead spelling; absent for a lead resumed or forked without `--agent` | `pact-<specialist>`; an in-process teammate's `source: compact` frame carries the lead spelling | absent | no | lead: yes (persists context) · in-process: yes (the lead's journal) · separate-process: no |
 | UserPromptSubmit | `agent_type` | lead spelling | *(no teammate fire path — see note)* | absent | no | lead: yes |
-| PreToolUse | `agent_type` | lead spelling | `pact-<specialist>` | — | **no** | lead: yes · teammate: no |
-| PostToolUse (incl. `TaskCreate` / `TaskUpdate`) | `agent_type` | lead spelling | `pact-<specialist>` | — | **no** | lead: yes · teammate: no |
+| PreToolUse | `agent_type` | lead spelling | separate-process: `pact-<specialist>` · in-process: the member's name, with an `agent_id` | — | **no** | lead: yes · teammate: no |
+| PostToolUse (incl. `TaskCreate` / `TaskUpdate`) | `agent_type` | lead spelling | separate-process: `pact-<specialist>` · in-process: the member's name | — | **no** | lead: yes · teammate: no |
 | TaskCompleted | `agent_type` | lead spelling | `pact-<specialist>` | — | lead: **no** · teammate: **yes** (also `teammate_name`) | lead: yes · teammate: no |
 | PreCompact | `agent_type` (an in-process teammate's frame carries the lead's value, so no field marks it as a teammate) | lead spelling | in-process: lead spelling · separate-process: `pact-<specialist>` (inferred) | — | no | not read |
 | PostCompact | `agent_type` (an in-process teammate's frame carries the lead's value, so no field marks it as a teammate) | lead spelling | in-process: lead spelling · separate-process: `pact-<specialist>` (inferred) | — | no | lead: yes · in-process: yes (the lead's journal) · separate-process: no |
@@ -143,6 +154,19 @@ including `TaskCreate` / `TaskUpdate`), the `Edit` / `Write` pin gates, and the
 `is_lead`). `TaskCreate` has no PreToolUse-matched hook — its only
 task-lifecycle observer is the PostToolUse-matched `task_lifecycle_gate` (the
 row above).
+
+### PostToolUseFailure carries `error`, not `tool_response`
+
+A failed tool call fires `PostToolUseFailure`, not `PostToolUse`. Its keys,
+captured 2026-10-05 on Claude Code 2.1.289 from a headless primary session on
+`ls /nonexistent-probe-path` (exit 1): `agent_type`, `cwd`, `duration_ms`,
+`effort`, `error`, `hook_event_name`, `is_interrupt`, `permission_mode`,
+`prompt_id`, `session_id`, `tool_input`, `tool_name`, `tool_use_id`,
+`transcript_path`. It carries no `tool_response`. A hook's `additionalContext`
+on this event reached the model. Only the key set was recorded, not the value
+types, and no teammate's failure frame was captured, so whether one carries
+`agent_id` is unmeasured. Fixture: `tests/fixtures/role_frames.py` ::
+`captured_posttoolusefailure_bash_headless`.
 
 ### UserPromptSubmit has no teammate fire path
 

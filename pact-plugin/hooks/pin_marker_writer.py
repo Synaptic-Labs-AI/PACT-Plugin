@@ -229,17 +229,10 @@ def _plan_and_write() -> str:
             _atomic_write_text,
             file_lock,
         )
-        from shared.claude_md_manager import (
-            PINNED_END_MARKER,
-            PINNED_START_MARKER,
-        )
         from shared.pin_markers import (
-            END_LINE,
-            START_LINE,
-            SkipReason,
+            Insertion,
             apply_insertion,
             certify_expel_nothing,
-            marker_line_present,
             plan_insertion,
         )
         from staleness import _resolve_project_claude_md_with_base
@@ -256,51 +249,19 @@ def _plan_and_write() -> str:
         # below needs a strict re-read under the lock to equal it.
         content = path.read_text(encoding="utf-8", errors="replace")
         planned = plan_insertion(content)
-        if isinstance(planned, SkipReason):
+        if not isinstance(planned, Insertion):
+            # A decline (SkipReason) or a refusal that names the line the
+            # parser could not read with certainty (Refusal). Either way the
+            # file is not touched.
             return planned.value
 
         new_content = apply_insertion(content, planned)
-        # `collision` is computed for the LABEL ONLY -- the certificate already
-        # refuses a document carrying a marker line, and does so explicitly
-        # rather than by the byte accident that failed on CRLF. Re-testing it
-        # here as a refusal condition would be unreachable code.
-        # EITHER marker counts. A document already carrying the END on a line
-        # of its own is as much a collision as one carrying the START.
-        collision = (
-            marker_line_present(content, PINNED_START_MARKER)
-            or marker_line_present(content, PINNED_END_MARKER)
-        )
         if not certify_expel_nothing(content, new_content, planned):
-            # EITHER the document already carries a marker, OR the composition
-            # could not be proven byte-identical to the original plus the
-            # marker line. Refusing is the safe direction for both and there is
-            # no repair attempt.
-            #
-            # THE TWO REASONS ARE REPORTED SEPARATELY, because they call for
-            # opposite responses. Reporting both as one outcome is what let the
-            # collision hide under a success-shaped label before the detector
-            # was narrowed.
-            #
-            # COLLISION -- the document already carries the marker on a line of
-            # its own under any terminator, or carries START_LINE, which also
-            # covers a marker at the END of a line of prose. Either way it is a
-            # copy the writer did not put there: expected, benign, and worth
-            # counting.
-            #
-            # NEITHER TEST IS THE BARE MARKER, and that is the load-bearing
-            # part. A mid-line mention neither occupies a line nor puts
-            # START_LINE in the document, so prose discussing the marker is not
-            # a collision. Testing for the bare marker would label a genuine
-            # assembly defect as a benign collision on any document that merely
-            # names the marker in running text.
-            #
-            # ASSEMBLY DEFECT -- anything else. Reachable only when the
-            # certificate refuses a document that carries no marker at all,
-            # which means apply_insertion assembled something wrong. It is
-            # defensive, not dead: deleting it means arguing that
-            # apply_insertion cannot be wrong.
-            if collision or START_LINE in content or END_LINE in content:
-                return SkipReason.MARKER_COLLISION.value
+            # The planner has already refused every document that carries a
+            # marker, so a refusal here means the composition could not be
+            # proven to be the original plus the two marker lines: an
+            # assembly defect. Refusing is the safe direction, with no repair
+            # attempt.
             return "certificate_failed"
 
         with file_lock(path):
@@ -338,7 +299,6 @@ def _journal(frame, route: str, command: str, outcome: str) -> None:
     """
     try:
         import shared.pact_context as pact_context
-        from shared.pin_markers import SkipReason
         from shared.session_journal import append_event, make_event
 
         pact_context.init(frame)
@@ -349,28 +309,6 @@ def _journal(frame, route: str, command: str, outcome: str) -> None:
             outcome=outcome,
         ))
 
-        # CENSUS EVENT. A fenced pinned body is the one shape this write
-        # refuses on a property of the FILE rather than on its own state, and
-        # its real frequency is unknown -- it has been counted on a single
-        # disk, by people who also chose the predicate, which is a
-        # self-applied control over one population. This event turns that into
-        # a live count across every consumer, and it lands BEFORE anything
-        # decides to trust the declared boundary.
-        #
-        # IT RECORDS A DECISION THAT WAS DECLINED. It deliberately does NOT
-        # carry, or compute, what the boundary "would have been": the only
-        # mechanism available to compute that is the fence tracker measured to
-        # be wrong on real shapes, so such a figure would be a fabricated
-        # measurement -- worse than none, because it would read as data.
-        #
-        # Carries no file content, no path and no body: the route, the command
-        # and the fact of the skip.
-        if outcome == SkipReason.FENCED_BODY.value:
-            append_event(make_event(
-                "fenced_body_skipped",
-                route=route,
-                command=command,
-            ))
     except BaseException:  # noqa: BLE001 -- observability must not deny
         return
 

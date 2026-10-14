@@ -1,462 +1,956 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/pin_caps_gate.py
-Summary: PreToolUse hook that enforces pin count / size / embedded-pin / override
-         caps on Edit and Write tool calls targeting the project CLAUDE.md.
+Summary: PreToolUse hook that refuses an Edit or Write of the project CLAUDE.md
+         only when it adds pins past the cap, grows a pin past the size cap
+         without an override, or carries an invalid size override.
 Used by: hooks.json PreToolUse with matcher "Edit|Write" (registered after
          pin_staleness_gate.py so stale-block deny takes precedence).
 
-Cycle-8 re-architecture (#492): this hook is the primary cap enforcement path.
-The CLI (scripts/check_pin_caps.py) is demoted to advisory status (--status,
---list-evictable) in a later commit. Before cycle-8, cap enforcement lived in
-the CLI, invoked via a bash heredoc from /PACT:pin-memory — that surface had
-shell-scaffolding hardening churn for 7 cycles. Moving enforcement to a hook
-eliminates ~60% of that surface by construction.
+The verdict comes from `shared.pin_growth.pin_cap_decision`, the one decision
+the gate and the Bash report share: it compares the file before the change
+with the file after it. This hook builds the text after (`gate_decision`),
+checks the size override of every pin the change adds or edits, and prints
+the verdict.
+
+A pin this agent removed earlier, in a chain of its own allowed changes that
+nothing else has touched, is credited (`shared.pin_credit`), so a pin moved by
+two Edits is not counted as added. `_decide` reads the credit for the file
+before the change and, after an ALLOW, records the state for the file the
+change produces. The record lives in the session dir, never in CLAUDE.md.
 
 Gate fires when ALL hold:
   1. Tool is Edit or Write (enforced by hooks.json matcher)
-  2. Target file path resolves to the project CLAUDE.md
-  3. Not a teammate session (parity with pin_staleness_gate — teammates do
-     not edit the project CLAUDE.md per worktree scope rule)
-  4. Simulated post-edit state is strictly worse than pre-edit state
-     (net-worse predicate — prevents pre-malformed livelock)
-  5. OR the candidate body embeds a `### ` heading (count-cap bypass)
-  6. OR the override rationale on a new pin is malformed / oversize /
-     contains forbidden line terminators
+  2. `claude_md_manager.gate_frame` names the frame: the lead, a PACT
+     specialist type, or any frame whose session belongs to a PACT team
+     (in-process teammates and Agent-tool subagents share the lead's session).
+     A plain session and a non-PACT --agent session are not gated. A team
+     member's count denial tells it not to change CLAUDE.md by any route and
+     to tell the team-lead, instead of naming the pin command.
+  3. `claude_md_manager.gate_target` returns a target: the project CLAUDE.md
+     the resolver returns once the change exists, so a Write that creates it
+     is gated too. The text before is the file the resolver returns now, or
+     empty when none resolves.
 
-SACROSANCT fail-open contract (exception):
-  Normal rule: every raisable path → exit 0 with suppressOutput. A gate bug
-  must never block a tool call. failure_log.append_failure writes an entry
-  so fail-open bypasses are observable post-hoc (Sec N1).
-
-  ASYMMETRIC EXCEPTION — Write-baseline fail-CLOSED (Sec N7):
-    If the tool is Write AND the baseline read of current CLAUDE.md fails
-    (file missing, unreadable, or unparseable markers), treat it as a
-    fresh-start baseline (empty pin list). Do NOT fail-open to "allow the
-    Write blindly" — a corrupted or symlinked-away CLAUDE.md unlocking the
-    cap is strictly worse than a legitimate Write being blocked. The user
-    sees a deny-reason pointing at the corruption and can remediate.
-
-Cap predicates (all via hooks/pin_caps.py pure helpers, symmetric oracle):
-  - count:         post-state len(pins) > PIN_COUNT_CAP
-  - size:          any pin.body_chars > PIN_SIZE_CAP without override
-  - embedded_pin:  candidate new_body parses as a Pin structure
-  - invalid_override: override rationale fails regex / length /
-                      line-terminator validation
+FAIL-OPEN. An over-block is the worst outcome, so every failure allows:
+  - a module-load failure prints a systemMessage saying the gate is not
+    checking pin caps, and exits 0;
+  - any exception while deciding is recorded with failure_log.append_failure
+    and allows;
+  - the decision itself allows with an advisory when the Pinned section cannot
+    be located, when the check runs past its step budget or a timer, or when it
+    fails;
+  - an Edit or a Write over a CLAUDE.md that exists but cannot be read is
+    allowed with an advisory: without the text before, the change cannot be
+    compared with it;
+  - a missing or unreadable credit record gives no credit, and a credit record
+    that cannot be written records nothing.
 
 Input: JSON from stdin with tool_name, tool_input, session_id, etc.
-Output: JSON with hookSpecificOutput.permissionDecision (deny case)
-        or {"suppressOutput": true} (allow / passthrough)
+Output: a deny (hookSpecificOutput.permissionDecision, exit 2), an allow with
+        an advisory (hookSpecificOutput.additionalContext, no permissionDecision),
+        or {"suppressOutput": true}.
 """
 
 from __future__ import annotations
 
-# ─── stdlib first (used by _emit_load_failure_deny BEFORE wrapped imports) ─
+# ─── stdlib first (used by _emit_load_failure_allow BEFORE wrapped imports) ─
+import bisect
 import json
 import sys
+from collections import Counter, defaultdict
 from pathlib import Path
-from typing import NoReturn, Optional
+from typing import NamedTuple, NoReturn, Optional
 
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
 
 
-def _emit_load_failure_deny(stage: str, error: BaseException) -> NoReturn:
-    """Stdlib-only fail-closed deny for module-load failure. Mirrors the
-    ``dispatch_gate`` / ``bootstrap_gate`` analogue.
-
-    Without this, a raise from the cross-package imports below would crash the
-    hook (exit 1), which the platform treats as a NON-blocking PreToolUse hook
-    — the Edit/Write tool would PROCEED and the pin-caps gate would silently
-    FAIL-OPEN. Emitting a deny + exit 2 keeps the gate fail-CLOSED.
-    hookEventName MUST be present.
-    """
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": (
-                f"PACT pin_caps_gate {stage} failure — blocking for safety. "
-                f"{type(error).__name__}: {error}. Check hook installation "
-                "and shared module availability."
-            ),
-        }
-    }))
-    print(
-        f"Hook load error (pin_caps_gate / {stage}): {error}",
-        file=sys.stderr,
+def _emit_load_failure_allow(stage: str, error: BaseException) -> NoReturn:
+    """Stdlib-only fail-open for a module-load failure: a broken install must
+    not refuse every Edit and Write of every file, so it allows them and says
+    on each one that pin caps are not being checked. The message names the
+    exception type only; stderr adds its text, which cannot hold CLAUDE.md
+    text because this runs while the module loads, before the hook reads any
+    CLAUDE.md."""
+    message = (
+        f"PACT pin_caps_gate could not load and is not checking pin caps "
+        f"({stage}): {type(error).__name__}"
     )
-    sys.exit(2)
+    print(json.dumps({"systemMessage": message}))
+    print(f"{message}: {error}", file=sys.stderr)
+    sys.exit(0)
 
 
-# ─── fail-closed wrapper on cross-package imports ──────────────────────────
+# ─── fail-open wrapper on cross-package imports ────────────────────────────
 try:
     import shared.pact_context as pact_context
-    from shared import (
-        file_lock,
-        match_project_claude_md,
-    )
+    from shared.claude_md_manager import MEMBER_PIN_INSTRUCTION
     from shared.failure_log import append_failure
-    import pin_caps
-    from pin_caps import (
-        OVERRIDE_COMMENT_RE,
-        OVERRIDE_RATIONALE_MAX,
-        apply_edit_and_parse,
-        compute_deny_reason,
-        evaluate_full_state,
-        parse_pins,
-    )
-except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
-    _emit_load_failure_deny("module imports", _module_load_error)
+    from pin_caps import OVERRIDE_RATIONALE_MAX
+except BaseException as _module_load_error:  # noqa: BLE001 — fail-open catch-all
+    _emit_load_failure_allow("module imports", _module_load_error)
 
 _GATED_TOOLS = frozenset({"Edit", "Write"})
 
-# Line-terminator chars refused in an override rationale. DERIVED from
-# pin_caps._FORBIDDEN_TERMINATOR_TABLE (the parser-side strip table) at
-# module load — single source of truth, cannot drift. Plan invariant #5:
-# parser / CLI / hook char sets MUST match; hand-maintained triple-twin
-# copies defeat the existing drift-guard test (test_staleness.py:1182)
-# which compares parser vs CLI only. A str.maketrans table maps
-# ordinal → None (delete-translate shape); chr() on each key recovers
-# the single-char string, and join() produces a membership-check string
-# compatible with `any(c in rationale for c in _FORBIDDEN_RATIONALE_CHARS)`.
-_FORBIDDEN_RATIONALE_CHARS = "".join(
-    chr(ordinal) for ordinal in pin_caps._FORBIDDEN_TERMINATOR_TABLE.keys()
-)
-
 _FAIL_BASELINE_READ = "pin_caps_gate_baseline_read"
-_FAIL_BASELINE_PARSE = "pin_caps_gate_baseline_parse"
-_FAIL_SIMULATE = "pin_caps_gate_simulate"
+_FAIL_DECISION = "pin_caps_gate_decision"
 _FAIL_UNEXPECTED = "pin_caps_gate_unexpected"
-
-_WRITE_BASELINE_DENY_REASON = (
-    "Refusing Write: could not read or parse the current CLAUDE.md to "
-    "compare caps (treated as fresh-start baseline). Fix the file manually "
-    "or restore from git, then retry. This is the one asymmetric "
-    "fail-CLOSED path — a corrupt CLAUDE.md must not silently unlock the cap."
-)
-
-
-def _extract_override_rationale(new_fragment: str) -> Optional[str]:
-    """Find a pin-size-override rationale in a candidate new-pin fragment.
-
-    Scans each line of `new_fragment` for a full override comment shape
-    (`<!-- pinned: DATE, pin-size-override: RATIONALE -->`). Returns the
-    captured rationale text, or None if no override comment is present on
-    any line. Matches OVERRIDE_COMMENT_RE.fullmatch semantics used by
-    parse_pins, so the gate's detection and the parser's detection stay
-    symmetric.
-
-    Returns the rationale STRING (post-strip of whitespace) on match, so
-    the caller can validate length and forbidden chars. Returns None if
-    no override line is present — caller then treats this as "no override
-    claimed" rather than "invalid override."
-    """
-    if not isinstance(new_fragment, str):
-        return None
-    for line in new_fragment.splitlines():
-        candidate = line.strip()
-        m = OVERRIDE_COMMENT_RE.fullmatch(candidate)
-        if m:
-            return m.group(1).strip()
-    return None
 
 
 def _validate_override_rationale(rationale: Optional[str]) -> Optional[str]:
     """Return a deny-reason string if the rationale is invalid, else None.
 
     A present-but-invalid rationale denies. A None rationale (no override
-    line in the fragment at all) returns None — the SIZE predicate will
-    still catch a too-large pin body downstream.
+    line at all) returns None — the SIZE predicate will still catch a
+    too-large pin body downstream.
     """
     if rationale is None:
         return None
     if not rationale:
-        return (
-            "Override rationale is empty — provide a non-empty reason "
-            "or compress the pin body."
-        )
+        return "Override rationale is empty — provide a non-empty reason."
     if len(rationale) > OVERRIDE_RATIONALE_MAX:
         return (
             f"Override rationale is {len(rationale)} chars "
-            f"(max: {OVERRIDE_RATIONALE_MAX}). Shorten it or compress "
-            "the pin body."
-        )
-    # Unreached at runtime under the current call graph: both the gate's
-    # `_extract_override_rationale` AND the parser's `parse_pins` use
-    # str.splitlines() (pin_caps.py:191, post-#492-F1). splitlines()
-    # recognizes \n, \r, U+2028, U+2029, U+0085 (and VT, FF, FS, GS, RS)
-    # as line boundaries, so any rationale containing one of those chars
-    # is split before OVERRIDE_COMMENT_RE.fullmatch sees it — fullmatch
-    # fails, extraction returns None, this validator is called with None
-    # and short-circuits at line 135 before reaching this check.
-    #
-    # Retained for two load-bearing reasons. NOT "defense-in-depth" on
-    # the terminator path — that claim is false under the current control
-    # flow (see test_splitlines_eats_forbidden_chars_before_validation in
-    # test_pin_caps_gate_matrix.py). The real reasons:
-    #
-    # (1) Fail-loud on future refactor drift. If a future change to
-    #     `_extract_override_rationale` replaces splitlines() with a
-    #     single-pass regex over the whole fragment, this guard becomes
-    #     runtime-live and the gate fails closed on terminator-embedded
-    #     rationales instead of silently allowing them. Test
-    #     `test_splitlines_eats_forbidden_chars_before_validation` is
-    #     the drift detector — it will fail the moment the upstream
-    #     invariant breaks, forcing a refactor-time review of THIS block.
-    #
-    # (2) Derivation anchor for twin-copy drift. `_FORBIDDEN_RATIONALE_CHARS`
-    #     is built at module load from `pin_caps._FORBIDDEN_TERMINATOR_TABLE`
-    #     so the two char sets never drift (enforced by
-    #     test_gate_forbidden_chars_derived_from_parser_table). Removing
-    #     the consumer here would require restructuring the anchor; the
-    #     net maintenance cost is strictly higher.
-    if any(c in rationale for c in _FORBIDDEN_RATIONALE_CHARS):
-        return (
-            "Override rationale contains a line terminator "
-            "(newline, carriage return, or Unicode line separator). "
-            "Remove the terminator and retry."
+            f"(max: {OVERRIDE_RATIONALE_MAX}). Shorten it."
         )
     return None
 
 
-def _candidate_new_fragment(tool_input: dict) -> str:
-    """Return the text to scan for an override-comment line + embedded pin.
+def _collapsed(content: str) -> str:
+    """`content` with each whitespace run made one space and the ends
+    stripped, so a re-indent, a trailing space or a line-ending rewrite leaves
+    it the same."""
+    return " ".join(content.split())
 
-    For Write: full content. For Edit: new_string (ignored if non-str).
+
+class _Row(NamedTuple):
+    """An override comment as `_invalid_override` compares it."""
+
+    rationale: str  # what `override_rationale_text` reads
+    key: str  # that rationale, whitespace collapsed
+    # The text written between the override field and a reconfirmation after
+    # it, whitespace collapsed; None when no reconfirmation follows the field.
+    written: Optional[str]
+    pin: Optional[int]  # the index of the pin it heads in a located Pinned section
+    group: str  # the read less its trailing non-word run (`pin_caps._trimmed`)
+
+    @property
+    def valid(self) -> bool:
+        return _validate_override_rationale(self.rationale) is None
+
+
+def _row(content: str, rationale: str, pin: Optional[int]) -> _Row:
+    """The `_Row` for the override comment `content`, whose rationale
+    `override_rationale_text` read as `rationale`."""
+    from pin_caps import _OVERRIDE_FIELD, RECONFIRMED_DATE_RE, _trimmed
+
+    field = _OVERRIDE_FIELD.search(content)
+    reconfirm = RECONFIRMED_DATE_RE.search(content, field.end()) if field else None
+    written = _collapsed(content[field.end():reconfirm.start()]) if field and reconfirm else None
+    key = _collapsed(rationale)
+    return _Row(rationale, key, written, pin, _trimmed(key))
+
+
+def _rationales(doc, spans: list) -> list:
+    """The override comments in the parsed document `doc` as `_Row`s, one for
+    each row that holds only an override comment, of any kind. A fenced row,
+    or one past an unclosed fence, is read as if it stood alone. Only a pin's
+    own comment row (the first row of its span in `spans`) names its pin."""
+    from pin_caps import override_rationale_text
+    from shared.claude_md_markers import Kind, parse
+
+    pins = {first: index for index, (first, _end) in enumerate(spans)}
+    found = []
+    for line in doc.lines:
+        if "<!--" not in line.content or "-->" not in line.content:
+            continue
+        if line.kind is Kind.PROSE:
+            rationale = override_rationale_text(doc, line.row)
+            pin = pins.get(line.row)
+        else:
+            rationale = override_rationale_text(parse(line.content.strip()), 0)
+            pin = None
+        if rationale is not None:
+            found.append(_row(line.content, rationale, pin))
+    return found
+
+
+def _kept(new: _Row, old: _Row) -> bool:
+    """Whether a matched new row keeps the old row's text as written: the
+    same read, or a reconfirmation moved or removed (the match already needs
+    the new read to begin the old written text), or a reconfirmation added
+    after the old rationale left whole."""
+    return (new.key == old.key or old.written is not None
+            or (new.written is not None and new.written.startswith(old.key)))
+
+
+def _stands_for(new: _Row, old: _Row) -> bool:
+    """Whether the new row may stand for the old one under the rule `_Edges`
+    lists: the same read, or the reconfirmation's cut within one group of
+    reads that keep a word character."""
+    if new.key == old.key:
+        return True
+    if not new.group or new.group != old.group:
+        return False
+    return new.written is not None or (old.written is not None and old.written.startswith(new.key))
+
+
+def _bucket(row: _Row):
+    """The rows `row` may stand for, or that may stand for it, share this:
+    its group, or, when its read trims to nothing, the read itself."""
+    return row.group or ("", row.key)
+
+
+class _Edges:
+    """Which old rows a new row may stand for, without listing every pair.
+
+    Rows group by their read less its trailing non-word characters; edges
+    never leave a group. In it, a new row may stand for an old row with the
+    same read and written text (rank 0), with the same read (rank 1), or, by
+    the reconfirmation's cut (rank 2), for any old row when the new row is
+    reconfirmed, and otherwise for a reconfirmed old row whose written text
+    starts with the new read. A read with no word character trims to nothing
+    and has no cut edge: it stands only for an old row with the same read.
+    Each kind of edge is one list of old rows in `order` (row order when none
+    is given), shared by every new row with that read or group: so a
+    reconfirmed new row stands for any old row in its group."""
+
+    def __init__(self, old: list, order=None):
+        order = range(len(old)) if order is None else order
+        self.rank = {j: n for n, j in enumerate(order)}
+        self.groups = defaultdict(list)  # trimmed read -> old rows
+        self.same = defaultdict(list)  # read -> old rows
+        self.exact = defaultdict(list)  # (read, written) -> old rows
+        self.identical = defaultdict(list)  # (uncollapsed read, written) -> old rows
+        written = defaultdict(list)  # trimmed read -> (written, rank, old row)
+        for j in order:
+            row = old[j]
+            group = row.group
+            self.groups[group].append(j)
+            self.same[row.key].append(j)
+            self.exact[row.key, row.written].append(j)
+            self.identical[row.rationale, row.written].append(j)
+            if row.written is not None:
+                written[group].append((row.written, self.rank[j], j))
+        self.written = {group: sorted(rows) for group, rows in written.items()}
+        self.prefixed = {}
+
+    def lists(self, row: _Row, rank: Optional[int] = None) -> list:
+        """(name, old rows) for `row`'s edges of `rank`, or of every rank in
+        rank order; the name is shared by every new row with the same list."""
+        group = row.group
+        out = []
+        if rank in (None, 0):
+            out.append((("exact", row.key, row.written), self.exact.get((row.key, row.written), ())))
+        if rank in (None, 1):
+            out.append((("same", row.key), self.same.get(row.key, ())))
+        if rank in (None, 2) and group:
+            if row.written is not None:
+                out.append((("group", group), self.groups.get(group, ())))
+            else:
+                out.append((("prefix", row.key), self._prefixed(group, row.key)))
+        return out
+
+    def _prefixed(self, group: str, read: str) -> list:
+        """The reconfirmed old rows of `group` whose written text starts with
+        `read`, in the edges' order. Kept once worked out: an old row's written text
+        has one prefix per character, so all of them together are no larger
+        than the text."""
+        if read not in self.prefixed:
+            rows = self.written.get(group, ())
+            found, k = [], bisect.bisect_left(rows, (read,))
+            while k < len(rows) and rows[k][0].startswith(read):
+                found.append(rows[k][2])
+                k += 1
+            self.prefixed[read] = sorted(found, key=self.rank.__getitem__)
+        return self.prefixed[read]
+
+
+def _augment(start: int, owner: dict, seen: set, scan, free, budget) -> bool:
+    """Kuhn's step: find an alternating path from new row `start` to an old row
+    no new row holds, skipping old rows in `seen`, and flip it in `owner` (old
+    row -> new row). Each row on the path first takes a free old row of any
+    rank (`free`) and only then descends through held ones in rank order
+    (`scan`), so a free row one step away is never reached through a long
+    chain. Iterative, so a long path cannot exhaust the stack. Each old row
+    looked at spends a step of `budget`."""
+    frames, via = [(start, scan(start))], []
+    while frames:
+        new, choices = frames[-1]
+        old = free(new)
+        if old is None:
+            for old in choices:
+                budget.spend(1)
+                if old not in seen:
+                    break
+            else:
+                frames.pop()
+                if via:
+                    via.pop()
+                continue
+            seen.add(old)
+            via.append(old)
+            frames.append((owner[old], scan(owner[old])))
+            continue
+        via.append(old)
+        for (row, _choices), held in zip(frames, via):
+            owner[held] = row
+        return True
+    return False
+
+
+def _match(new: list, old: list, own: Optional[dict] = None, ahead: Optional[dict] = None, budget=None,
+           order=None) -> dict:
+    """A maximum matching of the new rows to the old rows `_Edges` allows, as
+    {new index: old index}.
+
+    Each row in `ahead` (`_contest`: new index -> old index) takes its old
+    row first, so no exact copy can take the row a continuation's edited row
+    stands for. Next a new row identical to an old one (the same read,
+    whitespace and all, and the same written text) is that row and takes it,
+    its own pin's old row (`own`: new index -> old index) before any other
+    identical one; no other row may claim it, so a copy of an old override,
+    however close, is checked unless an old row is left for it, and an
+    untouched pin cannot take the old row of an edited pin whose override
+    reads the same. Next each new row takes the old row of its own pin when
+    `_stands_for` allows it, and no other row may claim that either, so a
+    copy on another pin cannot take an edited original's row. Then invalid
+    new rows are matched first, and Kuhn's algorithm never unmatches a row,
+    so as many invalid rows as any matching can cover are covered. The rows
+    first take free old rows rank by rank, every row the same row first, then
+    the same read, then the cut, so no row takes by a looser edge an old row
+    another row holds by a closer one; a row left over searches (`_augment`).
+
+    Every walk over an edge list is shared by the rows that share the list:
+    an old row once held is never freed, so a search for a free row resumes
+    where the last one stopped, and within one search an old row seen once is
+    skipped by every row. Wherever rows could take one of several old rows,
+    they look at the old rows in `order` (`_old_order`), so which of two old
+    rows alike in all but position a row holds does not follow the text. The
+    work spends steps of `budget`, the override matching's own when none is
+    given, and past it raises `SizeBound`."""
+    from shared import pin_growth
+
+    if budget is None:
+        budget = pin_growth._Budget(part=pin_growth.MATCHING)
+    edges = _Edges(old, order)
+    owner, cursors, passes, seen = {}, {}, {}, set()
+
+    def first_free(i, rank):
+        for name, rows in edges.lists(new[i], rank):
+            k = cursors.get(name, 0)
+            while k < len(rows) and rows[k] in owner:
+                budget.spend(1)
+                k += 1
+            cursors[name] = k
+            if k < len(rows):
+                return rows[k]
+        return None
+
+    def scan(i):
+        for name, rows in edges.lists(new[i]):
+            if name not in passes:
+                passes[name] = iter(rows)
+            for j in passes[name]:
+                if j in frozen:
+                    budget.spend(1)
+                else:
+                    yield j
+
+    held, frozen = set(), set()
+    ahead = ahead or {}
+    for i, j in [*ahead.items(), *(own or {}).items()]:
+        if i not in held and j not in owner and (
+                ahead.get(i) == j or (new[i].rationale, new[i].written) == (old[j].rationale, old[j].written)):
+            owner[j] = i
+            held.add(i)
+            frozen.add(j)
+    for i, row in enumerate(new):
+        if i in held:
+            continue
+        rows = edges.identical.get((row.rationale, row.written), ())
+        k = cursors.get(("identical", row.rationale, row.written), 0)
+        while k < len(rows) and rows[k] in owner:
+            budget.spend(1)
+            k += 1
+        if k < len(rows):
+            owner[rows[k]] = i
+            held.add(i)
+            frozen.add(rows[k])
+            k += 1
+        cursors["identical", row.rationale, row.written] = k
+    for i, j in (own or {}).items():
+        if i not in held and j not in owner and _stands_for(new[i], old[j]):
+            owner[j] = i
+            held.add(i)
+            frozen.add(j)
+    for valid in (False, True):
+        offered = [i for i, row in enumerate(new) if row.valid is valid]
+        for rank in (0, 1, 2):
+            for i in offered:
+                if i not in held:
+                    free = first_free(i, rank)
+                    if free is not None:
+                        owner[free] = i
+                        held.add(i)
+        for i in offered:
+            # A failed search changes nothing, so what it saw stays
+            # unreachable, and its passes stay valid, until a search succeeds.
+            if i not in held and _augment(i, owner, seen, scan, lambda row: first_free(row, None), budget):
+                held.add(i)
+                seen.clear()
+                passes.clear()
+        seen.clear()
+        passes.clear()
+    return {i: j for j, i in owner.items()}
+
+
+def _spans(doc, located) -> list:
+    """The pin spans of the Pinned section `located` in `doc` (`pin_spans`),
+    or none when it is not located."""
+    from shared.claude_md_markers import State
+    from shared.pin_growth import pin_spans
+
+    if located.state is not State.FOUND:
+        return []
+    heading, last = located.spans[0]
+    return pin_spans(doc, (heading + 1, last))
+
+
+def _spans_are_pins(doc, located, spans: list) -> bool:
+    """Whether `section_pins` reads as many pins as `spans` lists, so a pin
+    index names one pin to both."""
+    from pin_caps import section_pins
+
+    return bool(spans) and len(section_pins(doc, located)) == len(spans)
+
+
+def _pin_texts(doc, spans: list) -> list:
+    """(heading, body, raw) for each pin span: the heading row whitespace-
+    collapsed and casefolded, the rows under it joined by spaces, and raw:
+    the heading row, the span's first row (the pin's comment row) and the
+    rows under the heading, each as written."""
+    from shared.claude_md_markers import Kind
+    from shared.pin_growth import _is_head
+
+    texts = []
+    for first, end in spans:
+        row = next(j for j in range(first, end + 1)
+                   if doc.lines[j].kind is Kind.PROSE and _is_head(doc.lines[j].content))
+        under = [doc.lines[j].content for j in range(row + 1, end + 1)]
+        texts.append((" ".join(doc.lines[row].content.split()).casefold(), " ".join(under),
+                      (doc.lines[row].content, doc.lines[first].content, "\n".join(under))))
+    return texts
+
+
+def _word_pairs(text: str) -> Counter:
+    """`text` as a multiset of consecutive word pairs; one word is itself."""
+    words = text.split()
+    if len(words) < 2:
+        return Counter(words)
+    return Counter(f"{left} {right}" for left, right in zip(words, words[1:]))
+
+
+def _share(mine: Counter, theirs: Counter, whole: int) -> float:
+    """The fraction of a before pin's word pairs `theirs` (`whole` in all)
+    that an after pin's word pairs `mine` keep."""
+    return sum((mine & theirs).values()) / whole if whole else 0
+
+
+def _sources(before: list, after: list, wanted, offered) -> dict:
+    """{after pin index: before pin index} for the after pins `wanted` and
+    the before pins `offered` (those carrying override rows), given each
+    pin's (heading, body) from `_pin_texts`: the pin each continues.
+
+    A pair's share is the fraction of the before pin's word pairs that the
+    after pin keeps, so the pin keeping more of the old text continues it and
+    a short fragment of it does not. Every pair is scored: best, the heading
+    partner with a share of at least half; then a pin with that share alone;
+    then the heading partner alone; within each, the larger share first. A
+    heading can be reused or renumbered by the change, so content outranks
+    it. Each before pin goes to the after pin with its best score, and each
+    after pin keeps the best before pin it won; where two tie, neither is
+    given, so a copy as good as the original falls back to the cross-pin
+    matching. A pin with that share alone is compared only with before pins
+    no heading partner reaches it with, since it cannot outrank one. Each
+    word pair compared, and each pin a word pair's index entry adds, spends
+    a step of the pin mapping's budget, and past it raises `SizeBound`."""
+    from pin_caps import _DESCENT_SHARE
+    from shared import pin_growth
+
+    budget = pin_growth._Budget(part=pin_growth.MAPPING)
+    by_heading = defaultdict(list)
+    for p in offered:
+        by_heading[before[p][0]].append(p)
+    pairs = {p: _word_pairs(before[p][1]) for p in offered}
+    wholes = {p: sum(pairs[p].values()) for p in offered}
+    mine = {q: _word_pairs(after[q][1]) for q in wanted}
+
+    def share(q, p):
+        budget.spend(len(mine[q]))
+        return _share(mine[q], pairs[p], wholes[p])
+
+    bids = defaultdict(list)  # before pin -> [(score, after pin)]
+    for q in wanted:
+        for p in by_heading.get(after[q][0], ()):
+            budget.spend(1)
+            held = share(q, p)
+            bids[p].append(((0 if held >= _DESCENT_SHARE else 2, -held), q))
+    holders = defaultdict(set)  # word pair -> before pins no partner reaches half with
+    for p in offered:
+        if all(score[0] for score, _q in bids.get(p, ())):
+            for pair in pairs[p]:
+                holders[pair].add(p)
+    for q in wanted:
+        near = set()
+        for pair in mine[q]:
+            found = holders.get(pair, ())
+            budget.spend(1 + len(found))
+            near.update(found)
+        for p in near.difference(by_heading.get(after[q][0], ())):
+            held = share(q, p)
+            if held >= _DESCENT_SHARE:
+                bids[p].append(((1, -held), q))
+    won = defaultdict(list)  # after pin -> [(score, before pin)]
+    for p, offers in bids.items():
+        best = min(score for score, _q in offers)
+        winners = [q for score, q in offers if score == best]
+        if len(winners) == 1:
+            won[winners[0]].append((best, p))
+    source = {}
+    for q, claims in won.items():
+        best = min(score for score, _p in claims)
+        kept = [p for score, p in claims if score == best]
+        if len(kept) == 1:
+            source[q] = kept[0]
+    return source
+
+
+def _old_key(row: _Row, old_texts: list) -> tuple:
+    """The content an old row sorts by where position must not decide: its
+    pin's heading and body as `_pin_texts` reads them, its rationale and
+    written text, then its pin's heading row, comment row and body exactly as
+    written. An old row heading no pin sorts after every pin's, by its own
+    rationale and written text."""
+    if row.pin is None:
+        return (1, "", "", row.rationale, row.written or "", "", "", "")
+    heading, body, raw = old_texts[row.pin]
+    return (0, heading, body, row.rationale, row.written or "", *raw)
+
+
+def _old_order(old: list, old_texts: list) -> list:
+    """The old rows' indices in `_old_key` order."""
+    return sorted(range(len(old)), key=lambda j: _old_key(old[j], old_texts))
+
+
+def _contest(new: list, old: list, source: dict, texts: list, old_texts: list) -> dict:
+    """{new index: old index}: for each old pin's row that two or more new
+    rows stand for, one of them edited, the edited row of the pin that
+    continues it, which takes it ahead of every other. The pins whose rows
+    stand for the old row compete: the one keeping the most of the old pin's
+    word pairs (`_share`, given each pin's (heading, body) in `texts` and
+    `old_texts`) continues it; on an equal share, the pin `source` maps to
+    the old pin does, unless another leader's body reads the same
+    (whitespace collapsed), which is a tie that names none. A pin `source`
+    maps to another old pin, as a merged pin is, continues this one as well
+    when it alone keeps the most, and none where no pin keeps any of the old
+    pin's word pairs. Where no new row copies the old row exactly, the pin
+    `source` maps to it takes the old row next anyway, so only another
+    continuation is given a place, and an old row whose mapped pin keeps all
+    of its word pairs is not contested. The pins
+    that may lead are those holding a word pair of the old pin's body and
+    the pin `source` maps to it; where none of them keeps any, every row
+    standing for the old row leads. A row may stand only for an old row of
+    its group (`_bucket`), so a search for every row standing for an old row
+    looks only there.
+
+    A row that stands for the old row of the pin `source` maps its own pin
+    to, on a pin keeping some of that old pin's word pairs, takes that row:
+    it competes for no other old row, and it never loses
+    that row to an exact copy on a pin keeping strictly less of the old pin
+    (on an equal share the copy, being the old row, takes it). A row leading
+    two or more old rows takes the one whose old pin it keeps the most of,
+    and on an equal share the one whose old pin's content sorts first
+    (`_old_key`), so the order of the pins decides nothing. Each row and word pair examined
+    spends a step of the override contest's budget, and past it raises
+    `SizeBound`."""
+    from shared import pin_growth
+
+    exact, row_at, buckets = defaultdict(list), {}, defaultdict(list)
+    for i, row in enumerate(new):
+        exact[row.rationale, row.written].append(i)
+        row_at[row.pin] = i
+        buckets[_bucket(row)].append(i)
+    pinned = [j for j, row in enumerate(old) if row.pin is not None]
+    if not pinned:
+        return {}
+    budget = pin_growth._Budget(part=pin_growth.CONTEST)
+    row_of = {old[j].pin: j for j in pinned}
+    standing = {}  # new row -> the old row of its own mapped pin, which it stands for
+    for i, row in enumerate(new):
+        j = row_of.get(source.get(row.pin))
+        if j is not None and _stands_for(row, old[j]):
+            standing[i] = j
+    standing_on = {j: i for i, j in standing.items()}
+    keeps_own = {}
+    pairs, holders = {}, defaultdict(set)  # word pair -> after pins with an override row holding it
+
+    def word_pairs(side, k, text):
+        if (side, k) not in pairs:
+            pairs[side, k] = _word_pairs(text)
+            budget.spend(len(pairs[side, k]))
+        return pairs[side, k]
+
+    for q in row_at:
+        for pair in word_pairs("after", q, texts[q][1]):
+            holders[pair].add(q)
+
+    def kept(q, p):
+        mine, theirs = word_pairs("after", q, texts[q][1]), word_pairs("before", p, old_texts[p][1])
+        budget.spend(len(mine))
+        return _share(mine, theirs, sum(theirs.values()))
+
+    def body(q):
+        return " ".join(texts[q][1].split())
+
+    def settled_elsewhere(i, j):
+        """Whether row i takes its own pin's old row, other than j: it stands
+        for it and its pin keeps some of that old pin's word pairs."""
+        own = standing.get(i)
+        if own is None or own == j:
+            return False
+        if i not in keeps_own:
+            keeps_own[i] = kept(new[i].pin, old[own].pin) > 0
+        return keeps_own[i]
+
+    mapped = {p: q for q, p in source.items()}
+    placed = defaultdict(list)  # new row -> [(share it keeps, old row it leads)]
+    kept_own = {}  # old row -> its own pin's row, keeping more of the old pin than any exact copy of it
+    for j in pinned:
+        row, p = old[j], old[j].pin
+        same = (row.rationale, row.written)
+        copied = same in exact
+        mine = row_at.get(mapped.get(p))
+        if not copied and mine is not None and _stands_for(new[mine], row) and kept(new[mine].pin, p) == 1:
+            continue
+        near = {mapped[p]} & row_at.keys() if p in mapped else set()
+        for pair in word_pairs("before", p, old_texts[p][1]):
+            found = holders.get(pair, ())
+            budget.spend(1 + len(found))
+            near.update(found)
+        claims = [row_at[q] for q in near if _stands_for(new[row_at[q]], row) and not settled_elsewhere(row_at[q], j)]
+        if all((new[i].rationale, new[i].written) == same for i in claims):
+            continue
+        shares = {i: kept(new[i].pin, p) for i in claims}
+        own = standing_on.get(j)
+        if copied and own is not None and own in shares and (new[own].rationale, new[own].written) != same:
+            copies = [kept(q, p) for q in near if (new[row_at[q]].rationale, new[row_at[q]].written) == same]
+            if shares[own] > max(copies, default=0):
+                kept_own[j] = own
+        top = max(shares.values())
+        leaders = [i for i in claims if shares[i] == top]
+        if top == 0:
+            if not copied:
+                continue
+            group = buckets.get(_bucket(row), ())
+            budget.spend(len(group))
+            leaders = [i for i in group if _stands_for(new[i], row) and not settled_elsewhere(i, j)]
+        if len(leaders) > 1:
+            named = [i for i in leaders if new[i].pin == mapped.get(p)]
+            if not named or any(body(new[i].pin) == body(new[named[0]].pin) for i in leaders if i not in named):
+                continue
+            leaders = named
+        i = leaders[0]
+        if (new[i].rationale, new[i].written) == same or (top == 0 and source.get(new[i].pin, p) != p):
+            continue
+        if not copied:
+            if new[i].pin == mapped.get(p):
+                continue
+            if len(claims) < 2:
+                group = buckets.get(_bucket(row), ())
+                budget.spend(len(group))
+                if not any(k != i and _stands_for(new[k], row) for k in group):
+                    continue
+        placed[i].append((shares.get(i, 0), j))
+    def content(j):
+        return _old_key(old[j], old_texts)
+
+    ahead = {}
+    for i, leads in placed.items():
+        most = max(share for share, _j in leads)
+        ahead[i] = min((j for share, j in leads if share == most), key=content)
+    for j, i in kept_own.items():
+        if j not in ahead.values():
+            ahead[i] = j
+    return ahead
+
+
+def _invalid_override(before: str, after: str) -> tuple[Optional[str], tuple]:
+    """The deny reason for an invalid size override on a pin the change adds
+    or edits, else None, and the pins whose override the size check must count
+    as none: (indices in the Pinned section before, indices after).
+
+    Read from the fence-aware parse of the text after, on the one row the
+    parser attributes to each pin as its comment (the first row `pin_spans`
+    gives it), through `pin_caps.override_rationale_text`, so the gate and the
+    parser read the same override. An override-shaped row elsewhere in a body,
+    or in a fenced example, is body text for both, and a row holding a line
+    break `str.splitlines` breaks at is never attributed.
+
+    An override is checked only when the change added it or edited its
+    rationale: each one is matched to an override comment on a row of the
+    text before, of any kind (prose, code or past an unclosed fence), and a
+    matched one is not checked. Each old row stands for at most one row
+    after, so the change cannot raise the number of invalid rationales, and
+    an invalid one grants no size exemption either way. A new row may stand
+    for an old row with the same rationale, whitespace collapsed; the rest of
+    the row, the date, is not compared. So an untouched old invalid override
+    is not refused for an edit elsewhere in its pin, a new date on its row, a
+    rename, a move, a line-ending rewrite or a fence-closing Write.
+
+    The reader cuts a reconfirmation written after the override field from
+    the rationale together with the run of non-word characters before it, so
+    adding, removing or moving one changes the rationale's trailing
+    punctuation without the curator touching it. So a new row may also stand
+    for an old row whose rationale is the same once both lose their trailing
+    run of non-word characters, where it or the old row carries such a
+    reconfirmation. A reconfirmed rationale reads no longer than the old one
+    it matches; one without a reconfirmation matches only an old reconfirmed
+    row whose written text it begins, so it holds nothing the curator did not
+    write. Where neither row carries one, as when only the punctuation is
+    edited, the match stays exact.
+
+    The rows are matched as a whole (`_match`), each pin's row first to its
+    own pin's old row (`_sources`, or `_contest` where two or more rows
+    compete for an old row), so one pin cannot take the old row its neighbour
+    needs. Where a matched old row was a pin's comment, the new row keeps its
+    text (`_kept`), the two rationales disagree on validity, and the two pins
+    continue each other (or no pin continues the old one and the new one is
+    mapped to nothing or keeps half of the old one's text), both pins count
+    as having no valid override, as each would if read alike, so a
+    reconfirmation that moves neither grants an exemption nor takes one away.
+    Only when the pins `pin_spans` lists before and after are the ones
+    `section_pins` reads. Comparing the two pins' texts for that spends steps
+    of the override matching's budget.
     """
-    if "content" in tool_input:
-        content = tool_input.get("content", "")
-        return content if isinstance(content, str) else ""
-    new_string = tool_input.get("new_string", "")
-    return new_string if isinstance(new_string, str) else ""
+    from pin_caps import _DESCENT_SHARE, override_rationale_text
+    from shared import pin_growth
+    from shared.claude_md_markers import State, parse
+    from shared.pin_growth import locate_pinned
+
+    doc = parse(after)
+    located = locate_pinned(doc)
+    if located.state is not State.FOUND:
+        return None, ((), ())
+    spans = _spans(doc, located)
+    new = []
+    for index, (first, _end) in enumerate(spans):
+        rationale = override_rationale_text(doc, first)
+        if rationale is not None:
+            new.append(_row(doc.lines[first].content, rationale, index))
+    before_doc = parse(before)
+    before_located = locate_pinned(before_doc)
+    before_spans = _spans(before_doc, before_located)
+    old = _rationales(before_doc, before_spans)
+    row_of = {row.pin: j for j, row in enumerate(old) if row.pin is not None}
+    source, own, ahead, texts, old_texts = {}, {}, {}, [], []
+    if new and row_of:
+        texts, old_texts = _pin_texts(doc, spans), _pin_texts(before_doc, before_spans)
+        source = _sources(old_texts, texts, sorted({row.pin for row in new}), sorted(row_of))
+        own = {i: row_of[source[row.pin]] for i, row in enumerate(new) if row.pin in source}
+        ahead = _contest(new, old, source, texts, old_texts)
+    if new and row_of and not old_texts:
+        old_texts = _pin_texts(before_doc, before_spans)
+    budget = pin_growth._Budget(part=pin_growth.MATCHING)
+    matched = _match(new, old, own, ahead, budget, _old_order(old, old_texts) if new else None)
+    for i, row in enumerate(new):
+        reason = None if i in matched else _validate_override_rationale(row.rationale)
+        if reason is not None:
+            return reason, ((), ())
+    # A carry lands only on a pair of pins that continue each other (as mapped,
+    # or as the contest decided), or whose old pin no pin continues and whose
+    # new pin is mapped to nothing or keeps at least half of the old pin's
+    # word pairs, the share the mapping itself asks of a continuation.
+    continued = set(source.values())
+
+    def keeps(q, p):
+        mine, theirs = _word_pairs(texts[q][1]), _word_pairs(old_texts[p][1])
+        budget.spend(len(mine) + len(theirs))
+        return _share(mine, theirs, sum(theirs.values())) >= _DESCENT_SHARE
+
+    revoked = [(old[j].pin, new[i].pin) for i, j in matched.items()
+               if old[j].pin is not None and old[j].valid != new[i].valid and _kept(new[i], old[j])
+               and (source.get(new[i].pin) == old[j].pin or ahead.get(i) == j
+                    or (old[j].pin not in continued
+                        and (new[i].pin not in source or keeps(new[i].pin, old[j].pin))))]
+    if not revoked or not (_spans_are_pins(doc, located, spans)
+                           and _spans_are_pins(before_doc, before_located, before_spans)):
+        return None, ((), ())
+    return None, (frozenset(p for p, _ in revoked), frozenset(q for _, q in revoked))
+
+
+def gate_decision(before: str, tool_name: str, tool_input: dict, *, credit=None, detail=None):
+    """The verdict on an Edit or Write of the project CLAUDE.md whose text is
+    `before` ("" when no readable file). Pure: no I/O.
+
+    `credit` is this agent's chain credit (`shared.pin_credit.Credit`), None
+    for none. A `detail` dict receives the text after (`after`) and what
+    `pin_cap_decision` read, for recording the chain's next state.
+
+    The text after is `shared.edit_simulation.simulate`'s, the edit the tool
+    will make: an empty old_string creates or fills a blank file, and a curly
+    quote matches its straight form. A malformed payload raises TypeError,
+    which the caller's fail-open catch allows. A change that leaves the text
+    as it is allows. An invalid size override on a pin the change adds or
+    edits denies, cause "override". Otherwise `pin_cap_decision` decides.
+    Both checks run under the pin cap's timers, and the override check
+    under its parts' step budgets as well; either stopping them allows, as
+    the pin cap check does when it stops early, never refuses. Texts too
+    large for the check (`check_size`) stop it before either reads them.
+    """
+    from shared.edit_simulation import simulate
+    from shared.pin_growth import PinDecision, SizeBound, check_size, pin_cap_decision, run_with_timer, stopped_early
+
+    after = simulate(before, tool_name, tool_input)
+    if after is None:
+        raise TypeError(f"{tool_name} tool_input is not a well-formed {tool_name} payload")
+    if detail is not None:
+        detail["after"] = after
+    if after == before:
+        return PinDecision("ALLOW", 0, 0, None, None, None)
+
+    def decide():
+        check_size(before, after)
+        invalid, revoked = _invalid_override(before, after)
+        if invalid is not None:
+            return PinDecision("DENY", 0, 0, None, "override", f"Pin cap violation (invalid override): {invalid}")
+        return pin_cap_decision(before, after, use_timer=False, revoked=revoked, credit=credit, detail=detail)
+
+    try:
+        return run_with_timer(decide)
+    except SizeBound as bound:
+        return stopped_early(bound)
 
 
 def _read_baseline(claude_md_path: Path) -> tuple[Optional[str], Optional[str]]:
-    """Read current CLAUDE.md under file_lock for TOCTOU defense.
+    """Read the CLAUDE.md before the change, without the writers' lock, with
+    undecodable bytes replaced.
+
+    The gate only reads, so it takes no lock: a writer holding it would delay
+    the gate up to the lock timeout and then turn the read into a failure,
+    which leaves the change unchecked.
 
     Returns (content, error_classification). On success: (text, None).
-    On I/O failure: (None, _FAIL_BASELINE_READ). file_lock timeout or
-    permission error also returns the error branch; the caller decides
-    fail-open vs fail-CLOSED based on tool type (Sec N7 asymmetric rule).
+    On I/O failure: (None, _FAIL_BASELINE_READ), and the caller allows the
+    Edit or Write with an advisory that the pin cap was not checked.
     """
     try:
-        with file_lock(claude_md_path):
-            content = claude_md_path.read_text(encoding="utf-8", errors="replace")
-        return content, None
-    except (IOError, OSError, TimeoutError, UnicodeDecodeError):
+        return claude_md_path.read_text(encoding="utf-8", errors="replace"), None
+    except OSError:
         return None, _FAIL_BASELINE_READ
 
 
-def _check_tool_allowed(input_data: dict) -> Optional[str]:
-    """Determine whether the tool call should be denied.
+def _unreadable_decision(claude_md_path: Path, tool_name: str, tool_input: dict):
+    """The decision when the project CLAUDE.md exists but cannot be read: an
+    Edit or a Write is allowed with an advisory, because the change cannot be
+    compared with a text the hook cannot read."""
+    from shared.pin_growth import PinDecision
 
-    Returns the deny reason string if blocked, or None to allow.
-    Contract: inner helpers may raise; the outer main() wraps all of
-    this in try/except with failure_log + fail-open (except Write-
-    baseline parse failure, which is asymmetric fail-CLOSED).
-    """
+    return PinDecision(
+        "ALLOW_ADVISORY", 0, 0, None, "unreadable",
+        f"PACT could not read {claude_md_path}, so the pin cap was not checked for this {tool_name}.",
+    )
+
+
+def _member_reason(decision):
+    """A team member's denial: a count denial keeps its violation line and asks
+    the team-lead instead of naming the pin command; others are unchanged."""
+    if decision.verdict != "DENY" or decision.cause != "count" or not decision.reason:
+        return decision
+    violation = decision.reason.split(". ", 1)[0].rstrip(".")
+    return decision._replace(reason=f"{violation}. {MEMBER_PIN_INSTRUCTION}")
+
+
+def _gate(input_data: dict):
+    """The decision for a frame the gate checks, or None for one it does not."""
     tool_name = input_data.get("tool_name", "")
     if tool_name not in _GATED_TOOLS:
-        return None
-
-    pact_context.init(input_data)
-
-    # Lead-role gate (#878, DENY-gate enforcement RESTORATION) — mirror
-    # pin_staleness_gate. Teammates do not edit the project CLAUDE.md; only the
-    # team-lead is gated. The team-lead carries a POSITIVE lead agent_type
-    # (`PACT:pact-orchestrator` / `pact-orchestrator`) — NOT an empty
-    # agent_name; the prior "empty agent_name" assumption was the bug
-    # (resolve_agent_name returned non-empty for both lead spellings, so the
-    # lead took this bypass branch and the DENY gate was silently DEAD for it).
-    # is_lead keys on the harness-set agent_type directly; it is total (never
-    # raises), preserving the caller's existing exception posture — which for
-    # this gate is fail-OPEN (the SACROSANCT default at main()'s except), with
-    # the narrow asymmetric Write-baseline-over-cap fail-CLOSED exception
-    # (Sec N7). A raising predicate would have perturbed that posture.
-    if not pact_context.is_lead(input_data):
         return None
 
     tool_input = input_data.get("tool_input", {})
     if not isinstance(tool_input, dict):
         return None
 
-    file_path_str = tool_input.get("file_path", "")
-    claude_md_path = match_project_claude_md(file_path_str)
-    if claude_md_path is None:
+    # The basename test comes first, so no frame or resolver work runs for any
+    # other file.
+    file_path = tool_input.get("file_path", "")
+    if not isinstance(file_path, str) or Path(file_path).name.casefold() != "claude.md":
         return None
 
-    # Override validation on the candidate — done before cap eval so an
-    # invalid-override deny surfaces a more actionable message than a
-    # plain size-deny on the same pin.
-    new_fragment = _candidate_new_fragment(tool_input)
-    rationale = _extract_override_rationale(new_fragment)
-    invalid_override = _validate_override_rationale(rationale)
-    if invalid_override is not None:
-        return f"Pin cap violation (invalid override): {invalid_override}"
+    pact_context.init(input_data)
+    from shared.claude_md_manager import gate_frame, gate_target
 
-    # Baseline read + pre-pin parse. Under file_lock for TOCTOU (Sec N3).
-    is_write = "content" in tool_input
-    baseline_content, baseline_err = _read_baseline(claude_md_path)
-
-    # Early return on baseline read failure — makes the Optional[str]→str
-    # narrowing explicit to static analyzers (Pyright) and to human readers.
-    # Asymmetric fail-CLOSED (Sec N7): corrupt CLAUDE.md on Write must not
-    # unlock the cap. Edit with unreadable baseline fail-opens (can't
-    # simulate against nothing).
-    if baseline_err is not None or baseline_content is None:
-        append_failure(
-            classification=baseline_err or _FAIL_BASELINE_READ,
-            error=f"read failed for {claude_md_path}",
-            source=tool_name,
-        )
-        return _evaluate_write_as_fresh_start(tool_input) if is_write else None
-
-    # baseline_content is now known to be `str` (narrowed above). Parse
-    # pre-state pins from the baseline.
-    try:
-        pre_pins = _parse_baseline(baseline_content)
-    except Exception:  # noqa: BLE001 — bounded fail-open per contract
-        append_failure(
-            classification=_FAIL_BASELINE_PARSE,
-            error=f"parse failed for {claude_md_path}",
-            source=tool_name,
-        )
-        return _evaluate_write_as_fresh_start(tool_input) if is_write else None
-
-    # Simulate post-edit state. Helper raises on malformed tool_input;
-    # caller (main) catches and fail-opens.
-    try:
-        post_pins = apply_edit_and_parse(baseline_content, tool_input)
-    except Exception:  # noqa: BLE001 — bounded fail-open per contract
-        append_failure(
-            classification=_FAIL_SIMULATE,
-            error=f"simulate failed for {claude_md_path}",
-            source=tool_name,
-        )
+    frame = gate_frame(input_data)
+    if frame is None:
         return None
 
-    # Net-worse predicate over pre/post pins + embedded-pin check on body.
-    # _extract_new_body uses pre/post_pins (when available) to synthesize
-    # a smuggle-heading body identically for Write and Edit (#529); see
-    # its docstring for the fallback hierarchy.
-    new_body = _extract_new_body(
-        tool_input, pre_pins=pre_pins, post_pins=post_pins
-    )
-    return compute_deny_reason(pre_pins, post_pins, new_body=new_body)
-
-
-def _parse_baseline(content: str):
-    """Parse the current CLAUDE.md into a pin list via the bounded parser.
-
-    Section-bounded via staleness._parse_pinned_section so Working Memory
-    `### ` subheadings do NOT inflate the count (backend-coder-6 R3).
-    """
-    from staleness import _parse_pinned_section
-
-    parsed = _parse_pinned_section(content)
-    if parsed is None:
-        return []
-    _, _, pinned_content = parsed
-    return parse_pins(pinned_content)
-
-
-def _evaluate_write_as_fresh_start(tool_input: dict) -> Optional[str]:
-    """Asymmetric fail-CLOSED path for Write with unreadable baseline.
-
-    With no readable baseline, we cannot compute net-worse. Instead we
-    evaluate the Write's content against an empty pre-state and apply
-    the strict post-state predicate. If the Write itself over-caps, we
-    deny; if it's clean, we allow (nothing to compare against).
-    """
-    try:
-        # Best-effort simulation against an empty baseline. If apply_edit
-        # raises (malformed tool_input), we cannot evaluate → return the
-        # generic Write-baseline deny-reason so the user sees why.
-        post_pins = apply_edit_and_parse(current_content="", tool_input=tool_input)
-    except Exception:  # noqa: BLE001 — bounded
-        return _WRITE_BASELINE_DENY_REASON
-
-    violation = evaluate_full_state(post_pins)
-    if violation is None:
-        # Write produces a state within caps — allow despite the
-        # baseline read failure. (The failure_log entry already recorded
-        # the read error; no need to block a clean Write.)
+    target = gate_target(file_path)
+    if target is None:
         return None
+    decision = _decide(target, tool_name, tool_input, input_data, frame)
+    return _member_reason(decision) if frame == "member" else decision
 
-    # Over-cap Write with no baseline → fail-CLOSED with explicit reason.
-    return _WRITE_BASELINE_DENY_REASON
+
+def _decide(target, tool_name: str, tool_input: dict, input_data: Optional[dict] = None,
+            frame: Optional[str] = None):
+    """The decision on a change to `target`, compared with the file that
+    resolves before it, or with empty text when none does.
+
+    With the hook frame, the decision spends this agent's chain credit for the
+    text before, and an ALLOW records the chain's state for the text after."""
+    before = ""
+    if target.before is not None:
+        before, read_error = _read_baseline(target.before)
+        if before is None:
+            append_failure(
+                classification=read_error or _FAIL_BASELINE_READ,
+                error=f"read failed for {target.before}",
+                source=tool_name,
+            )
+            return _unreadable_decision(target.before, tool_name, tool_input)
+
+    credit_store, before_digest, credit = _read_credit(input_data, frame, target.base, before)
+    detail: dict = {}
+    decision = gate_decision(before, tool_name, tool_input, credit=credit, detail=detail)
+    if decision.cause == "error":
+        append_failure(classification=_FAIL_DECISION, error=decision.reason or "", source=tool_name)
+    if decision.verdict == "ALLOW" and credit_store is not None:
+        credit_store.record(input_data, frame, target.base, before_digest, detail, decision, credit)
+    return decision
 
 
-def _extract_new_body(
-    tool_input: dict,
-    pre_pins: Optional[list] = None,
-    post_pins: Optional[list] = None,
-) -> str:
-    """Return the candidate body text for embedded-pin smuggle detection.
+def _read_credit(input_data: Optional[dict], frame: Optional[str], base, before: str):
+    """(the credit store, the hash of `before`, this agent's credit for it),
+    or (None, None, None) with no frame or when the store cannot load, which
+    decides with no credit and records nothing."""
+    if input_data is None or frame is None:
+        return None, None, None
+    try:
+        from shared import pin_credit
+        from shared.claude_md_drift import _digest
 
-    Semantics note: the embedded-pin check exists to catch a new or
-    mutated pin whose BODY contains a `### ` heading (smuggling an extra
-    pin past the count cap on reload).
+        before_digest = _digest(before)
+        return pin_credit, before_digest, pin_credit.read(input_data, frame, base, before_digest)
+    except Exception:  # noqa: BLE001 — no credit store, no credit
+        return None, None, None
 
-    Both Write (full-file replacement, #492 F7 — security-engineer-1
-    MEDIUM) and Edit (#529) use the SAME pre-vs-post heading diff on
-    parsed pins when pre_pins and post_pins are both available.
-    Legitimate CLAUDE.md content contains pin headings by construction,
-    so scanning the raw payload (Write: full content; Edit: new_string)
-    would reject every legitimate add. The defense operates at the
-    PARSED post_pins level:
 
-    Synthesize a synthetic "### H" heading line for each post_pin that
-    BOTH (1) is not present in pre_pins by heading AND (2) lacks a
-    `date_comment` (i.e., has no `<!-- pinned: ... -->` marker
-    immediately preceding its heading). Such pins are the signature of
-    a smuggle: parse_pins splits on every `### ` it sees, so an embedded
-    `### Smuggled` heading inside another pin's body materializes as a
-    separate post_pin but has `date_comment=None` because no dated
-    marker preceded it. Legitimately added pins always carry a date
-    comment (per PACT pin grammar).
-
-    Concatenating these synthetic headings produces a new_body that
-    `compute_deny_reason`'s embedded-pin check (`parse_pins(new_body)`)
-    will flag as a pin structure, denying with DENY_REASON_EMBEDDED_PIN.
-
-    Pre-existing smuggled pins (pre_pins containing a `date_comment=None`
-    pin from a prior manual edit) are excluded via the heading-in-pre
-    check — pre-malformed state never denies (F1 livelock precedent).
-
-    Fallback contract — signature-level defense only. No production path
-    reaches the helper with `pre_pins=None` or `post_pins=None`: the sole
-    caller `_check_tool_allowed` computes both via `_parse_baseline` and
-    `apply_edit_and_parse`, each of which either returns a list or raises
-    an exception the caller catches with an early `return None` before
-    reaching this helper. The `Optional[list] = None` defaults exist so
-    a future direct test probe that omits pins gets a safe, deterministic
-    result rather than a TypeError:
-      - Edit fallback: fall through to naive `new_string`-as-body check
-        (pre-#529 conservative deny shape).
-      - Write fallback: return "" (scanning full content with naive logic
-        would reject every Write by construction).
-    """
-    if pre_pins is not None and post_pins is not None:
-        pre_headings = {p.heading for p in pre_pins}
-        # A smuggle signal: post pin whose heading is NEW AND carries no
-        # date-comment marker. Surface it by synthesizing the heading line
-        # so compute_deny_reason's parse_pins(new_body) check registers it
-        # as an embedded pin structure.
-        smuggle_headings = [
-            p.heading
-            for p in post_pins
-            if p.heading not in pre_headings and p.date_comment is None
-        ]
-        if not smuggle_headings:
-            return ""
-        # Join with newlines so parse_pins treats each as its own line.
-        return "\n".join(f"{h}\nsmuggled body marker\n" for h in smuggle_headings)
-
-    if "content" in tool_input:
-        return ""
-    new_string = tool_input.get("new_string", "")
-    return new_string if isinstance(new_string, str) else ""
+def _check_tool_allowed(input_data: dict) -> Optional[str]:
+    """The deny reason when the gate refuses the call, else None."""
+    decision = _gate(input_data)
+    if decision is not None and decision.verdict == "DENY":
+        return decision.reason
+    return None
 
 
 def main():
@@ -467,16 +961,12 @@ def main():
         sys.exit(0)
 
     try:
-        deny_reason = _check_tool_allowed(input_data)
+        decision = _gate(input_data)
     except Exception as exc:  # noqa: BLE001 — SACROSANCT fail-open
-        # Unexpected fault → record for post-hoc observability then allow.
-        # Note: Write-baseline fail-CLOSED is handled INSIDE _check_tool_allowed
-        # as an explicit return, not via this catch-all. Anything reaching
-        # this except is truly unexpected and the fail-open is justified.
         try:
             append_failure(
                 classification=_FAIL_UNEXPECTED,
-                error=f"{type(exc).__name__}: {exc}",
+                error=type(exc).__name__,
                 source=str(input_data.get("tool_name", "")),
             )
         except Exception:  # noqa: BLE001 — logging must never cascade
@@ -484,17 +974,25 @@ def main():
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)
 
-    if deny_reason:
+    if decision is not None and decision.verdict == "DENY":
         # hookEventName is required by the harness; missing it silently fails open
-        output = {
+        print(json.dumps({
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "deny",
-                "permissionDecisionReason": deny_reason,
+                "permissionDecisionReason": decision.reason,
             }
-        }
-        print(json.dumps(output))
+        }))
         sys.exit(2)
+
+    if decision is not None and decision.verdict == "ALLOW_ADVISORY" and decision.reason:
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "additionalContext": decision.reason,
+            }
+        }))
+        sys.exit(0)
 
     print(_SUPPRESS_OUTPUT)
     sys.exit(0)

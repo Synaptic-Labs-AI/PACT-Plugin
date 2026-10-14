@@ -41,7 +41,7 @@ Population: tests/**/*.py plus skills-adjacent test files
 
 Keep-set provenance (enumerated from the tree, not inherited from plan
 text): 5 module-level carriers, 2 function-level (spawn-worker) carriers,
-12 codegen-string carriers. Plan-level expectations counted pre-deletion
+15 codegen-string carriers. Plan-level expectations counted pre-deletion
 category memberships (16 spawn/subprocess + 8 top-level-scripts importers);
 the 8 top-level-scripts importers retain no inserts at all once scripts/ is
 conftest-owned, so they do not appear here.
@@ -84,7 +84,10 @@ _KEEP_SET = _MODULE_ALLOWLIST | {
     "tests/test_memory_store_isolation.py",
     "tests/test_merge_guard.py",
     "tests/test_pact_session_config_dir_parity.py",
+    "tests/test_pin_growth.py",
+    "tests/test_pin_growth_populations.py",
     "tests/test_pin_marker_writer_adversarial.py",
+    "tests/test_pinned_section_parser_migration.py",
     "tests/test_project_dir_resolution.py",
     "tests/test_sync_result_contract.py",
 }

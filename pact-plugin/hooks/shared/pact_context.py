@@ -331,7 +331,10 @@ def get_pact_context() -> dict:
 
     Returns dict with keys: team_name, session_id, project_dir, plugin_root, started_at.
     All values are strings. Returns empty strings for all keys on any error
-    (file missing, malformed JSON, permission denied).
+    (file missing, malformed JSON, permission denied). A missing file is the
+    normal state of a session with no PACT context (a plain session, or a
+    teammate in its own process), so it prints nothing; every other read
+    failure prints one line to stderr.
 
     Caching: Result is cached in a module-level variable after first read.
     The file is write-once/read-many, so caching is safe within a single
@@ -377,6 +380,9 @@ def get_pact_context() -> dict:
             "plugin_root": str(data.get("plugin_root", "")),
             "started_at": str(data.get("started_at", "")),
         }
+        return _cache
+    except FileNotFoundError:
+        _cache = dict(_EMPTY_CONTEXT)
         return _cache
     except (OSError, json.JSONDecodeError, ValueError, TypeError, AttributeError) as e:
         print(

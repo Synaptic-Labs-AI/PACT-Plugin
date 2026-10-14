@@ -95,7 +95,6 @@ from pin_caps import (  # noqa: E402
     PIN_SIZE_CAP,
     PIN_STALE_BLOCK_THRESHOLD,
     OVERRIDE_RATIONALE_MAX,
-    OVERRIDE_COMMENT_RE,
 )
 
 # Bootstrap gate marker — the session-scoped file whose presence signals that
@@ -171,7 +170,6 @@ __all__ = [
     "PIN_SIZE_CAP",
     "PIN_STALE_BLOCK_THRESHOLD",
     "OVERRIDE_RATIONALE_MAX",
-    "OVERRIDE_COMMENT_RE",
     "BOOTSTRAP_MARKER_NAME",
     "build_session_path",
     "project_slug",

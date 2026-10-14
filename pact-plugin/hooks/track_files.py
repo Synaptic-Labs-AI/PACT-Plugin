@@ -1,19 +1,28 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/track_files.py
-Summary: PostToolUse hook with TWO jobs. It records the files that an Edit or a
-         Write modified, and it clears the pin-staleness marker once the
-         condition that raised that marker is clear.
-Used by: pact-plugin/hooks/hooks.json, PostToolUse, matcher `Edit|Write|Bash`.
-         The registration lives in that file and not in settings.json.
+Summary: PostToolUse hook. It records the files that an Edit or a Write
+         modified, it clears the pin-staleness marker once the condition that
+         raised that marker is clear, it records a teammate's background Bash
+         launch, and it reports pin growth in the project CLAUDE.md that the
+         pin-cap gate does not see (`shared.claude_md_drift`).
+Used by: pact-plugin/hooks/hooks.json: PostToolUse, matcher `Edit|Write|Bash`,
+         and PostToolUseFailure, matcher `Bash`. The registrations live in
+         that file and not in settings.json.
 
 Extracts file paths from Edit and Write tool usage and records them
-for the memory system's graph network. The `Bash` leg serves the marker
-clear alone: the archive command writes the managed file through a script,
-so it emits no Edit and no Write event.
+for the memory system's graph network. The archive command writes the managed
+file through a script, so it emits no Edit and no Write event: the `Bash` leg
+serves the marker clear for it.
 
-Input: JSON from stdin with tool_name, tool_input, tool_response
-Output: None (writes to tracking file for later memory association)
+On PostToolUseFailure (a failed Bash call) only two jobs run: the marker clear,
+because a failing compound command can still archive, and the pin-growth
+report, because it can still write. There is no Edit/Write tracking and no
+background-launch record.
+
+Input: JSON from stdin with hook_event_name, tool_name, tool_input, tool_response
+Output: a pin-growth report as hookSpecificOutput.additionalContext, else
+        nothing (suppressOutput). Never a permission decision.
 """
 
 from __future__ import annotations
@@ -31,6 +40,10 @@ from shared import state_file
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
+
+# The events this hook is registered on. A report echoes the firing one.
+_FAILURE_EVENT = "PostToolUseFailure"
+_EVENTS = ("PostToolUse", _FAILURE_EVENT)
 
 # Directory for tracking data. Accessor (B1) — resolves $CLAUDE_CONFIG_DIR at
 # CALL time via the shared resolver, so a non-default config dir is honored and
@@ -300,84 +313,32 @@ def clear_pin_staleness_marker_if_resolved(
         # decision and stops.
         #
         # CASE A, CORRECT BY DETERMINACY, AT TWO RETURN POINTS RATHER THAN ONE.
-        # `_parse_pinned_section` returns None when no `## Pinned Context` title
-        # resolves in the scan text, and again when a title resolves with EMPTY
-        # content, because this caller takes the default
-        # `allow_empty_section=False`. EACH GIVES ZERO PINS, SO ZERO STALE PINS.
+        # `check_pinned_block_signal` returns None when no `## Pinned Context`
+        # title resolves in the file, and again when a title resolves with an
+        # EMPTY body. EACH GIVES ZERO PINS, SO ZERO STALE PINS.
         # CLEARED is a reading of the document at those two points rather than a
         # fallback from ambiguity, so the routing is correct and no repair
         # applies.
         #
         # CASE B, THE PIN PARSE DECLINES, IS A RESIDUAL OF THE CANNOT-TELL
-        # CLASS. The section resolved, `parse_pins` raised, its own handler
+        # CLASS. The section resolved, `section_pins` raised, its own handler
         # returned None, and the stale count is unknown. The marker then drops
         # on an unknown state, with the session-long durability described above.
         #
-        # WHAT WAS MEASURED FOR CASE B, 2026-08-13, PATH BY PATH, because one
-        # label hides which path earned which evidence. The raise surface came
-        # from an AST walk over `parse_pins` and its in-module callee
-        # `_extract_body_chars`, rather than from a grep for `raise`, which
-        # returns three hits in this module and misses each operation that
-        # raises without the keyword.
-        #   GUARDED OR STRUCTURALLY INCAPABLE, the STRONG result:
-        #     `_PIN_HEADING_RE.finditer` sits under `except re.error: return []`.
-        #     `override_match.group(1)` cannot fail on input, because group 1 is
-        #       present in the pattern by construction.
-        #     `rationale.translate` takes a `str.maketrans("", "", ...)` table,
-        #       which is delete-only and cannot raise on a `str`.
-        #     `Pin(...)` is a NamedTuple with no validator.
-        #     The rest are `len`, `bool`, `enumerate`, and `str` and `list`
-        #       methods, none of which raises on a `str`.
-        #   CLOSED AGAINST `re.error` BY MODULE-SCOPE COMPILE. The premise sits
-        #     IN this label rather than below it, because a label travels where
-        #     its body does not. AN EARLIER REVISION FILED THESE FIVE PATHS AS
-        #     `OPEN AND UNREACHED, the WEAKER result`, and that label undersold
-        #     the argument in its own body. The five are the compiled patterns
-        #     applied at match time: `OVERRIDE_COMMENT_RE.fullmatch`,
-        #     `_DATE_COMMENT_RE.fullmatch` and `.sub`, and `_STALE_MARKER_RE`
-        #     `.search` and `.sub`. `re.error` belongs to COMPILE time, and the
-        #     four patterns in `pin_caps` compile at MODULE scope, so a document
-        #     does not produce that raise here.
-        #     THE LABEL IS SCOPED TO THE RAISE TYPE AND NOT TO ALL RAISES. The
-        #     residual is resource exhaustion, which is a property of input SIZE
-        #     against available memory rather than of document SHAPE.
-        #     THE EDIT THAT INVERTS THIS LABEL, NAMED BECAUSE A CLOSED LABEL
-        #     STOPS A READER AND NOTHING DOWNSTREAM RE-OPENS IT: a `re.compile`
-        #     MOVED INSIDE A FUNCTION in `pin_caps`. That converts `re.error`
-        #     from an import-time event into a per-document one, and this label
-        #     goes false with no test red and no reader alerted. Two more edits
-        #     reach the same place: a pattern built from document-derived text,
-        #     and a new in-module callee with no handler of its own.
-        #     WHY THAT HAZARD IS LIVE RATHER THAN CAUTION, and this figure is
-        #     what makes the premise falsifiable. MEASURED 2026-08-14: 4 of 4
-        #     `re.compile` calls in `pin_caps.py` sit at MODULE scope, and 10 of
-        #     91 `re.compile` calls across `hooks/` sit INSIDE a function.
-        #     COUNTING RULE: an AST walk over each `hooks/**/*.py`, one count
-        #     for each `re.compile` call, with scope taken from the innermost
-        #     enclosing function. THE 10 IS THE CONTROL. A zero from a detector
-        #     that cannot see a function scope reads the same as a zero from one
-        #     that can, so the 10 is what makes the 4 of 4 a measurement. The
-        #     property VARIES in this codebase, so a refactor can take it away.
-        #     It is not a law.
-        #   SO NOTHING IS GENUINELY OPEN ON DOCUMENT SHAPE.
-        #   THE CORPUS CORROBORATES AND DOES NOT CARRY THE RESULT: 18 documents,
-        #     8 of them shapes only a machine writer produces, aimed at those
-        #     paths. COUNTING RULE: one document for each shape, driven straight
-        #     into `parse_pins`, one alarm of five seconds for each. RESULT: 0
-        #     raised, 0 timed out. The structural argument above is what closes
-        #     the five paths. These shapes agree with it.
-        #   THREE CONTROLS ON THE CORPUS, FOR THREE WAYS TO BE WRONG: 16 shapes
-        #     returned a non-zero pin count, so the parse ran; an injected raise
-        #     was reported by the same harness, so the detector is not blind;
-        #     and the corpus gave 4 distinct results, so it is not one shape
-        #     repeated.
+        # WHY CASE B IS NOT REACHED ON DOCUMENT SHAPE TODAY. `section_pins` reads
+        # rows of the whole-file parse, and `parse` never raises on a str.
+        # Every pattern it applies is compiled at MODULE scope in `pin_caps`, so
+        # a document cannot produce `re.error`. Its one slice that could raise,
+        # the comma that starts an override rationale, runs only on a row whose
+        # override pattern matched, and that pattern requires the comma. What
+        # remains is resource exhaustion, a property of input SIZE, not shape.
         #
-        # TWO THINGS THE MEASUREMENT DOES NOT COVER, each a hole a later reader
-        # falls into. A LATER EDIT that adds a raise path to `parse_pins`
-        # retires this whole result. AND A HANG IS NOT A RAISE: a catastrophic
-        # backtrack spins rather than raises, and the probe reports it as
-        # neither outcome. The alarm bounds that hazard for these 18 shapes and
-        # for no others.
+        # THE EDITS THAT REOPEN CASE B, named because nothing downstream would
+        # flag them: a `re.compile` moved inside a function in `pin_caps` (it
+        # turns `re.error` into a per-document event), a pattern built from
+        # document text, and a new callee in `section_pins` with no handler of its
+        # own. A HANG IS NOT A RAISE: a catastrophic backtrack spins, and
+        # neither branch above sees it.
         #
         # AND ONE SHAPE STAYS UNMEASURED, WITH TWO OPEN TERMS RATHER THAN ONE.
         # A document that lacks the title TRANSIENTLY, mid-write from a
@@ -403,8 +364,41 @@ def clear_pin_staleness_marker_if_resolved(
         return
 
 
+def _report_pin_growth(input_data: dict) -> str | None:
+    """The pin-growth report for a Bash call, in a try of its own: a failure
+    in the report job changes nothing else this hook does."""
+    try:
+        from shared.claude_md_drift import report_after_bash
+
+        return report_after_bash(input_data)
+    except Exception:  # noqa: BLE001 - the report is best-effort
+        return None
+
+
+def _record_pin_baseline(input_data: dict) -> None:
+    """After an Edit or Write, update the pin-growth records, in a try of its
+    own."""
+    try:
+        from shared.claude_md_drift import record_after_write
+
+        record_after_write(input_data)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _finish(event: str, report: str | None) -> None:
+    """Print the report for the firing event, or suppress output, and exit 0."""
+    if report:
+        print(json.dumps({
+            "hookSpecificOutput": {"hookEventName": event, "additionalContext": report}
+        }))
+    else:
+        print(_SUPPRESS_OUTPUT)
+    sys.exit(0)
+
+
 def main():
-    """Main entry point for the PostToolUse hook."""
+    """Main entry point for the PostToolUse and PostToolUseFailure hook."""
     try:
         try:
             input_data = json.load(sys.stdin)
@@ -415,10 +409,20 @@ def main():
         pact_context.init(input_data)
         tool_name = input_data.get("tool_name", "")
         tool_input = input_data.get("tool_input", {})
+        event = input_data.get("hook_event_name")
+        if event not in _EVENTS:
+            event = "PostToolUse"
 
         # THE CLEAR RUNS BEFORE THE TRACKING GATE, because it serves `Bash`
         # too and the gate below drops every tool that is not Edit or Write.
+        # It runs on a failed Bash call as well: a compound command whose
+        # archive step succeeded and whose last step failed has still cleared
+        # the staleness signal, and keeping the marker would keep the
+        # staleness gate refusing the user's edits.
         clear_pin_staleness_marker_if_resolved(tool_name, tool_input)
+
+        if event == _FAILURE_EVENT:
+            _finish(event, _report_pin_growth(input_data) if tool_name == "Bash" else None)
 
         # ANOTHER JOB: record a teammate's background Bash launch — a frame
         # carrying the harness `run_in_background` flag, or a command ending
@@ -438,6 +442,7 @@ def main():
                 record_background_launch(input_data)
             except Exception:
                 pass
+            _finish(event, _report_pin_growth(input_data))
 
         # Only track Edit and Write tools
         if tool_name not in ("Edit", "Write"):
@@ -448,6 +453,7 @@ def main():
         file_path = extract_file_path(tool_input)
         if file_path:
             track_file(file_path, tool_name)
+        _record_pin_baseline(input_data)
 
         print(_SUPPRESS_OUTPUT)
         sys.exit(0)

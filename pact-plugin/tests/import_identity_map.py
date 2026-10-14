@@ -10,14 +10,18 @@ functions below (name-based hook discovery picks up imported callables), so
 every run rooted at or below pact-plugin/ carries the capture. Emission is
 gated on PACT_IDENTITY_MAP_OUT; normal gate runs write nothing.
 
-Regenerate the baseline (pre/post-restructure diff halves alike):
+Around a restructure, capture both halves into temporary paths, one before
+the change and one after it, each from the full suite so every test file is
+collected:
 
     cd pact-plugin
-    PACT_IDENTITY_MAP_OUT=tests/import_identity_baseline.json \\
+    PACT_IDENTITY_MAP_OUT=/tmp/identity-before.json \\
         python3 -m pytest -q        # full suite, no path argument
 
-Compare with diff_maps(baseline, current, renames=<codemod's bare->package
-list>). An empty diff after rename normalization = no precedence flip.
+Compare with diff_maps(before["map"], after["map"], renames=<the change's
+bare->package list>). An empty diff after rename normalization = no
+precedence flip. Keep both maps out of the repository: a stored map goes
+stale with every change to a test's imports.
 
 Prototype-era fallback, if conftest registration is ever bypassed:
 

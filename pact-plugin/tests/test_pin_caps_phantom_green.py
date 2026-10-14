@@ -21,7 +21,7 @@ from unittest.mock import patch
 
 import pytest
 
-from helpers import make_claude_md_with_pins, make_pin_entry  # noqa: E402
+from helpers import make_claude_md_with_pins, make_pin_entry, point_resolver_at  # noqa: E402
 
 
 @pytest.fixture
@@ -34,10 +34,7 @@ def loaded_gate_env(tmp_path, monkeypatch, pact_context):
         project_dir=str(tmp_path),
     )
 
-    import staleness
-    monkeypatch.setattr(
-        staleness, "get_project_claude_md_path", lambda: claude_md
-    )
+    point_resolver_at(monkeypatch, tmp_path)
 
     entries = [make_pin_entry(title=f"Pin{i}", body_chars=4) for i in range(3)]
     claude_md.write_text(make_claude_md_with_pins(entries), encoding="utf-8")

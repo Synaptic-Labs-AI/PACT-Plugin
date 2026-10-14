@@ -110,12 +110,13 @@ def _report_fail_open(stage: str, error: BaseException) -> None:
 
     STDERR IS THE CHANNEL because stdout carries the hook protocol. This
     function never raises: an emit that fails must not become the fault it
-    reports.
+    reports. It names the exception by its type only: every caller runs after
+    CLAUDE.md is read, so the exception's text can hold CLAUDE.md text.
     """
     try:
         print(
             f"PACT pin_staleness_gate fail-open at {stage}: "
-            f"{type(error).__name__}: {error}",
+            f"{type(error).__name__}",
             file=sys.stderr,
         )
     except Exception:  # noqa: BLE001 - the report must not become the fault
@@ -127,7 +128,6 @@ try:
     import shared.pact_context as pact_context
     from shared import match_project_claude_md
     from shared.constants import PIN_STALENESS_MARKER_NAME
-    from pin_caps import parse_pins
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_deny("module imports", _module_load_error)
 
@@ -346,8 +346,8 @@ def _is_memory_entry(pin) -> bool:
     and 0 that are date-led AND unmarked, so the R2 trigger population is
     EMPTY. COUNTING RULE: bound the region with
     `staleness._parse_pinned_section`, count `^### ` and `^<!-- pinned:` at
-    column 0, and judge with `_is_memory_entry` over `parse_pins`, the oracle
-    of this guard. CONTROLS: an impossible pattern returned 0, and
+    column 0, and judge with `_is_memory_entry` over the pins the cap's parser
+    reads, the oracle of this guard. CONTROLS: an impossible pattern returned 0, and
     `_is_memory_entry` returned True on a synthetic bare-date unmarked
     heading, so the 0 means EMPTY rather than an inert predicate. RE-RUN IT.
 
@@ -366,12 +366,13 @@ def _is_memory_entry(pin) -> bool:
     return pin.date_comment is None
 
 
-def _count_pin_comments(text: str) -> int:
-    """Count pins using `parse_pins` as the canonical oracle.
+def _count_pin_comments(doc, first: int, last: int) -> int:
+    """Count the pins in rows `first`..`last` of the whole-file parse `doc`,
+    with `pin_caps.pins_in_rows` as the canonical oracle.
 
     Symmetric-oracle invariant (closes 2 HIGH bypasses): the gate MUST
-    count pins using the same parser that enforces the count cap at
-    add-time (`pin_caps.parse_pins`).
+    count pins using the same parser that enforces the count cap
+    (`pin_caps.pins_in_rows`, the reader behind `section_pins`).
 
     🔴 AND THE SAME PARSER IS NOT ENOUGH. IT MUST READ THE SAME KIND OF
     OBJECT. The invariant said PARSER alone, and measured, the two gates
@@ -385,14 +386,19 @@ def _count_pin_comments(text: str) -> int:
     satisfies clause one and breaks clause two.
 
     A regex substring count of
-    `<!-- pinned:` is asymmetric with `parse_pins`, which:
+    `<!-- pinned:` is asymmetric with the parser, which:
       (a) recognizes a bare `### Heading` (no date comment) as a Pin,
       (b) tolerates arbitrary whitespace between `<!--` and `pinned:`
           via its `\\s*` patterns (e.g. `<!--  pinned:` double-space),
       (c) matches case-insensitively.
     Substring counts undercount (a) and (b), letting an adversarial ADD
     slip past the ADD-shape gate while still landing in CLAUDE.md as a
-    parse_pins-visible pin.
+    pin the parser counts.
+
+    AND THE ROWS COME FROM ONE PARSE OF THE WHOLE FILE. Text cut out of a file
+    and parsed on its own starts in a state the whole file does not have (an
+    HTML block or a fence opened above the cut), so its pins can differ from
+    the file's. The caller parses each document once and passes rows of it.
 
     THIS FUNCTION DOES NOT CHOOSE A SLICE, AND IT USED TO. It counted the
     managed region when the markers were present and the whole text when they
@@ -404,25 +410,26 @@ def _count_pin_comments(text: str) -> int:
 
     THE SLICE NOW BELONGS TO THE DECISION, in `_counts_show_an_add`, which is
     the only place that can see the two sides at one time. This function counts
-    across the body its caller supplies and nothing else. (`_is_add_shaped_edit`
+    across the rows its caller supplies and nothing else. (`_is_add_shaped_edit`
     chooses WHICH SIMULATION runs, the Write one or the Edit one. It does not
     choose the slice, and it no longer chooses between two comparisons either,
     because there is ONE comparison over two documents.)
 
-    THE COUNT PREDICATE, WHICH IS THE OTHER HALF OF THE PAIR. `parse_pins`
+    THE COUNT PREDICATE, WHICH IS THE OTHER HALF OF THE PAIR. The parser
     stays the oracle, so the symmetric-oracle invariant above holds. One class
     is then dropped from the result: a heading that is date-led AND carries no
     `<!-- pinned: -->` marker is a memory entry rather than a pin. See
     `_is_memory_entry` for the residual this predicate carries and for the
     population a user ruling declares empty.
 
-    Fail-open: non-str input returns 0. Any parse_pins failure (should
-    not raise by its own contract, but defense-in-depth) returns 0.
+    Fail-open: any failure (the reader should not raise by its own contract,
+    but defense-in-depth) returns 0. The import sits here, inside that catch,
+    and not under the module's fail-closed load wrapper.
     """
-    if not isinstance(text, str):
-        return 0
     try:
-        return sum(1 for pin in parse_pins(text) if not _is_memory_entry(pin))
+        from pin_caps import pins_in_rows
+
+        return sum(1 for pin in pins_in_rows(doc, first, last) if not _is_memory_entry(pin))
     except Exception as exc:  # noqa: BLE001 — fail-open
         # BROAD CATCH, SO IT EMITS. A parse fault here is a defect rather
         # than an expected state of the data.
@@ -430,8 +437,14 @@ def _count_pin_comments(text: str) -> int:
         return 0
 
 
-def _counts_show_an_add(old_text: str, new_text: str) -> bool:
+def _counts_show_an_add(old_text: str, new_text: str, credit=None) -> bool:
     """Compare the two sides of ONE decision across ONE slice.
+
+    WITH `credit` (a `shared.pin_credit.Credit`, from the hook path), a step-0
+    add is re-checked against the pin-cap rule: it stays an add only when
+    `pin_growth` less the credit is above zero, so a revealed pin or a pin
+    this lead moved by two Edits is not an add. The re-check can only turn an
+    add into not an add, and any failure in it keeps the count's answer.
 
     RULE 1, AND IT IS THE WHOLE REASON THIS FUNCTION EXISTS. A difference taken
     across two DIFFERENT slices is not a comparison. The counter used to pick
@@ -440,9 +453,10 @@ def _counts_show_an_add(old_text: str, new_text: str) -> bool:
     one straddle over-blocked when no pin moved, and one MISSED a true add of
     four pins to five.
 
-    THE SELECTION, and it is a TOTAL function with no decline arm:
+    THE SELECTION, and it is a TOTAL function with one decline arm:
       0. THE COUNT SLICE FIRST. Ask each side for its `## Pinned Context`
-         span. If BOTH
+         span. If EITHER side's section is uncertain, the change is not an
+         add. If BOTH
          sides resolve one, that section is the slice for the two.
       1. Otherwise, ask each side whether it carries the managed markers.
       2. If the two agree, use that branch for the two.
@@ -485,7 +499,7 @@ def _counts_show_an_add(old_text: str, new_text: str) -> bool:
     SET. It covers the shapes step 0 cannot REACH, which are the documents
     where no pinned span resolves. It does NOT cover the shapes INSIDE the
     bounded slice. Measured example: a `### ` line added to a PIN BODY, fenced
-    or bare, sits within the span, and `parse_pins` counts it, so the two sides
+    or bare, sits within the span, and the parser counts it, so the two sides
     differ by one and the verdict is an add. That verdict is the same before
     and after this bound, so the bound neither opened it nor closed it.
 
@@ -509,41 +523,80 @@ def _counts_show_an_add(old_text: str, new_text: str) -> bool:
     arms that the caller declares SACROSANCT stay where they are.
     """
     # THESE IMPORTS ARE FUNCTION-LOCAL AND THAT IS THE EXCEPTION POSTURE, NOT A
-    # STYLE CHOICE. A raise from either one lands inside the caller's
+    # STYLE CHOICE. A raise from any of them lands inside the caller's
     # SACROSANCT fail-open catch, so an unresolvable import ALLOWS the edit.
     # That is the correct direction for this gate and it is the direction the
-    # module-load block at the top deliberately does NOT take. Moving either
-    # import to module scope would put it under the fail-CLOSED load wrapper
+    # module-load block at the top deliberately does NOT take. Moving any of
+    # them to module scope would put it under the fail-CLOSED load wrapper
     # and turn a missing dependency into a DENY of the user's own edit.
-    from shared.claude_md_manager import extract_managed_region
-    from staleness import _parse_pinned_section
+    from shared.claude_md_manager import MANAGED_END_MARKER, MANAGED_START_MARKER
+    from shared.claude_md_markers import State, parse
+    from staleness import locate_pinned
 
-    # STEP 0, THE COUNT BOUND. `allow_empty_section=True` is what makes an
-    # EMPTY pinned section resolve. Without it an empty section is
-    # indistinguishable from an absent one, this step declines, and the empty
-    # side falls back to a wider slice while the other side does not. That is
-    # the straddle again, in a new place.
-    old_pinned = _parse_pinned_section(old_text, allow_empty_section=True)
-    new_pinned = _parse_pinned_section(new_text, allow_empty_section=True)
-    if old_pinned is not None and new_pinned is not None:
-        return (
-            _count_pin_comments(new_pinned[2])
-            > _count_pin_comments(old_pinned[2])
+    # Each side is parsed once, whole, and every count below reads a row range
+    # of that parse.
+    old_doc, new_doc = parse(old_text), parse(new_text)
+
+    # STEP 0, THE COUNT BOUND. An EMPTY pinned section is FOUND too, as rows
+    # (heading + 1, heading), which count 0. Were it read as absent, this step
+    # would decline and the empty side would fall back to a wider slice while
+    # the other side does not. That is the straddle again, in a new place.
+    old_pinned, new_pinned = locate_pinned(old_doc), locate_pinned(new_doc)
+    # AN UNCERTAIN PINNED SECTION ON EITHER SIDE IS NOT AN ADD. The parser reads
+    # no pins on uncertain rows, so a side that is uncertain counts low: an edit
+    # that removes a stray opener above the section reveals the pins already
+    # there and would read as an add. The pin-cap gate does not count an
+    # uncertain section either.
+    if State.UNKNOWN in (old_pinned.state, new_pinned.state):
+        return False
+    if old_pinned.state is State.FOUND and new_pinned.state is State.FOUND:
+        added = (
+            _count_pin_comments(new_doc, new_pinned.spans[0][0] + 1, new_pinned.spans[0][1])
+            > _count_pin_comments(old_doc, old_pinned.spans[0][0] + 1, old_pinned.spans[0][1])
         )
+        return added and (credit is None or _grows_past_credit(old_doc, new_doc, credit))
 
-    old_is_managed = extract_managed_region(old_text) is not None
-    new_is_managed = extract_managed_region(new_text) is not None
+    old_managed = old_doc.find_block(MANAGED_START_MARKER, MANAGED_END_MARKER)
+    new_managed = new_doc.find_block(MANAGED_START_MARKER, MANAGED_END_MARKER)
 
-    if old_is_managed and new_is_managed:
-        old_slice = extract_managed_region(old_text)[0]
-        new_slice = extract_managed_region(new_text)[0]
+    if old_managed.state is State.FOUND and new_managed.state is State.FOUND:
+        old_rows = (old_managed.spans[0][0] + 1, old_managed.spans[0][1] - 1)
+        new_rows = (new_managed.spans[0][0] + 1, new_managed.spans[0][1] - 1)
     else:
         # Either the two sides agree that no managed region is present, or they
         # DISAGREE and the whole text is the slice the two can always carry.
-        old_slice = old_text
-        new_slice = new_text
+        old_rows = (0, len(old_doc.lines) - 1)
+        new_rows = (0, len(new_doc.lines) - 1)
 
-    return _count_pin_comments(new_slice) > _count_pin_comments(old_slice)
+    return _count_pin_comments(new_doc, *new_rows) > _count_pin_comments(old_doc, *old_rows)
+
+
+def _grows_past_credit(old_doc, new_doc, credit) -> bool:
+    """Whether the pin-cap rule counts pins added past `credit`; True, the
+    count's answer, when the rule cannot say."""
+    try:
+        from shared.pin_growth import pin_growth
+
+        growth = pin_growth(old_doc, new_doc, exclude=credit.exclude)
+        return growth is None or growth - credit.count > 0
+    except Exception:  # noqa: BLE001 — the count's answer stands
+        return True
+
+
+def _chain_credit(input_data: dict, file_path: str, current: str):
+    """This lead's pin-cap credit for the file text `current`, or None when the
+    credit store cannot load."""
+    try:
+        from shared import pin_credit
+        from shared.claude_md_drift import _digest
+        from shared.claude_md_manager import gate_target
+
+        target = gate_target(file_path)
+        if target is None:
+            return pin_credit.Credit.none()
+        return pin_credit.read(input_data, "lead", target.base, _digest(current))
+    except Exception:  # noqa: BLE001 — no credit store: the count decides
+        return None
 
 
 def _simulate_post_edit_document(
@@ -560,22 +613,19 @@ def _simulate_post_edit_document(
     MOVES IT: with a post-edit document there is no fragment, no anchor and
     no locus to bound.
 
-    THE SHAPE IS PORTED FROM `pin_caps.build_simulated_pins`, WHICH DOES THIS
-    FOR THE CAP GATE, so the two gates now read the same KIND of object. Its
-    three Edit edges are reproduced here:
-      `replace_all` TRUE  -> replace each occurrence.
-      `replace_all` FALSE -> replace the first occurrence.
-      an EMPTY `old_string` -> return the PRE-state. `str.replace` with an
-        empty needle puts the replacement between each character, which is a
-        document the tool never produces. Returning the pre-state makes the
-        caller compare pre against pre, so the normal contract applies and a
-        malformed payload cannot become a silent bypass.
+    THE SIMULATION IS THE CAP GATE'S OWN, `shared.edit_simulation.simulate`,
+    so the two gates read the same document for the same payload: an empty
+    `old_string` creates or fills a blank file and is refused on any other,
+    and a curly quote in `old_string` matches its straight form, as the tool
+    does.
 
-    WHERE I DIVERGE FROM THE PRECEDENT, AND WHY. `pin_caps` RAISES on a
-    non-string payload and leaves the fail-open to its caller. This returns
+    WHERE THIS DIVERGES FROM THE CAP GATE, AND WHY. The cap gate RAISES on a
+    malformed payload and leaves the fail-open to its caller. This returns
     None instead, because the caller here is a SACROSANCT fail-open gate that
     must not depend on an exception arriving at the correct handler. None and
     a raise reach the same verdict, and None reaches it without a handler.
+    The import sits here, inside the caller's fail-open catch, and not at
+    module level, where the load wrapper fails closed.
 
     THE KNOWN LIMIT OF THE SIMULATION, STATED RATHER THAN HIDDEN. For a
     NON-UNIQUE `old_string` with `replace_all` FALSE, this replaces the first
@@ -587,31 +637,15 @@ def _simulate_post_edit_document(
     Returns the post-edit document, or None when the payload cannot be read
     as an edit at all.
     """
-    if tool_name:
-        is_write = tool_name == "Write"
-    else:
-        is_write = "content" in tool_input
+    from shared.edit_simulation import simulate
 
-    if is_write:
-        # A Write IS the post-edit document. No simulation is necessary.
-        new_content = tool_input.get("content", "")
-        if not isinstance(new_content, str):
-            return None
-        return new_content
-
-    old_string = tool_input.get("old_string", "")
-    new_string = tool_input.get("new_string", "")
-    if not isinstance(old_string, str) or not isinstance(new_string, str):
-        return None
-    if old_string == "":
-        return current
-    if bool(tool_input.get("replace_all", False)):
-        return current.replace(old_string, new_string)
-    return current.replace(old_string, new_string, 1)
+    if not tool_name:
+        tool_name = "Write" if "content" in tool_input else "Edit"
+    return simulate(current, tool_name, tool_input)
 
 
 def _is_add_shaped_edit(
-    tool_input: dict, claude_md_path: Path, tool_name: str = ""
+    tool_input: dict, claude_md_path: Path, tool_name: str = "", input_data: dict | None = None
 ) -> bool:
     """Return True if the Edit/Write adds a net-new pin comment.
 
@@ -620,6 +654,13 @@ def _is_add_shaped_edit(
     Archival edits (old_string contains `<!-- pinned:`, new_string does
     not, or count strictly decreases) and refactor edits (pin count
     unchanged) are allowed.
+
+    A FILE THAT IS BLANK BEFORE THE CHANGE IS NEVER REFUSED, blank as the
+    Edit tool reads it (`shared.edit_simulation.is_blank`). It holds no
+    pins, so it cannot hold the stale pins the marker reports, and refusing a
+    Write or an Edit that fills it would refuse a file with nothing stale in
+    it. The marker can outlive the pins it was raised for when the file is
+    emptied outside any tool, and the clear runs only after a tool call.
 
     THERE IS ONE COMPARISON AND IT IS OVER TWO DOCUMENTS. The tool name selects
     WHICH SIMULATION builds the post-edit document. It does not select a
@@ -664,13 +705,19 @@ def _is_add_shaped_edit(
             # Cannot read the pre-state, so there is nothing to compare
             # against. Fail-open.
             return False
+        from shared.edit_simulation import is_blank
+
+        if is_blank(current):
+            return False
 
         simulated = _simulate_post_edit_document(tool_input, current, tool_name)
         if simulated is None:
             # The payload cannot be read as an edit. Fail-open.
             return False
 
-        return _counts_show_an_add(current, simulated)
+        credit = None if input_data is None else _chain_credit(
+            input_data, tool_input.get("file_path", ""), current)
+        return _counts_show_an_add(current, simulated, credit)
     except Exception as exc:  # noqa: BLE001 — SACROSANCT fail-open
         # THIS IS THE CATCH THAT SWALLOWED A NameError AND KILLED THE WHOLE
         # EDIT PATH IN SILENCE. It keeps its direction and loses its silence.
@@ -723,7 +770,7 @@ def _check_tool_allowed(input_data: dict) -> str | None:
     # are allowed so the user can resolve the stale-pins condition by
     # running /PACT:pin-memory within the same session. Fix for #492
     # F1 marker livelock.
-    if not _is_add_shaped_edit(tool_input, claude_md_path, tool_name):
+    if not _is_add_shaped_edit(tool_input, claude_md_path, tool_name, input_data):
         return None
 
     return _DENY_REASON

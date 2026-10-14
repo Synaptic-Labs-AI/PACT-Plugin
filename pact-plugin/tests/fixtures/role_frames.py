@@ -25,6 +25,13 @@ This module serves TWO frame sets, kept deliberately separate by provenance:
    (``agent_type`` / ``session_id`` / ``team_name`` / ``teammate_name``) are
    preserved verbatim because they are the point.
 
+3. ONE CONSTRUCTED frame (``constructed_pretooluse_teammate_inprocess``) - an
+   in-process teammate's PreToolUse Edit or Write. Its key set is the captured
+   in-process teammate PreToolUse Edit's (``captured_pretooluse_teammate_inprocess_edit``,
+   CC 2.1.289), and its ``_meta`` says it is constructed and NOT captured. It
+   stays for the Write variant, which no capture covers, and as a second frame
+   the gate's in-process rows run on.
+
 These captured frames are the committed source of ground truth for the
 discriminator tests and the #917 marker-poisoning regression - the raw capture
 JSONL lives under the (gitignored) ``docs/`` tree, so promoting the frames here
@@ -422,6 +429,8 @@ _CAPTURED_FRAMES_JSON = r'''
   "compaction_teammate_postcompact": {"_meta": {"capture_method": "live hook heartbeat, capture lead started with --agent PACT:pact-orchestrator, in-process teammates, 2026-09-14", "note": "An in-process haiku teammate auto-compacted. Its frames are lead-shaped: the lead agent_type, session_id and transcript_path, and no agent_id, agent_name or agent_transcript_path. Paths and prompt_id are placeholders; compact_summary is a synthetic stand-in of the same shape, not the captured text."}, "agent_type": "PACT:pact-orchestrator", "cwd": "<cwd>", "prompt_id": "<prompt_id>", "scratchpad_dir": "<scratchpad_dir>", "session_id": "4ec31948-bbe5-4ef4-841c-631d1ef31e61", "transcript_path": "<transcript_path>", "compact_summary": "<analysis>\nThe conversation so far: a file-reading task.\n</analysis>\n\n<summary>\n1. Primary Request and Intent: the teammate was asked to read three short text files in a scratch project and report their line counts to the team-lead.\n2. Key Technical Concepts: reading files, counting lines, reporting through SendMessage.\n3. Current Work: the three counts were gathered and sent.\n4. Pending Tasks: none.\n</summary>", "hook_event_name": "PostCompact", "trigger": "auto"},
   "compaction_lead_precompact": {"_meta": {"capture_method": "live hook heartbeat, capture lead started with --agent PACT:pact-orchestrator, in-process teammates, 2026-09-14", "note": "The capture lead ran /compact. Its frames carry the same key set as the teammate compaction frames. Paths and prompt_id are placeholders; compact_summary is a synthetic stand-in of the same shape, not the captured text."}, "agent_type": "PACT:pact-orchestrator", "cwd": "<cwd>", "prompt_id": "<prompt_id>", "scratchpad_dir": "<scratchpad_dir>", "session_id": "4ec31948-bbe5-4ef4-841c-631d1ef31e61", "transcript_path": "<transcript_path>", "custom_instructions": null, "hook_event_name": "PreCompact", "trigger": "manual"},
   "compaction_lead_sessionstart": {"_meta": {"capture_method": "live hook heartbeat, capture lead started with --agent PACT:pact-orchestrator, in-process teammates, 2026-09-14", "note": "The capture lead ran /compact. Its frames carry the same key set as the teammate compaction frames. Paths and prompt_id are placeholders; compact_summary is a synthetic stand-in of the same shape, not the captured text."}, "agent_type": "PACT:pact-orchestrator", "cwd": "<cwd>", "prompt_id": "<prompt_id>", "scratchpad_dir": "<scratchpad_dir>", "session_id": "4ec31948-bbe5-4ef4-841c-631d1ef31e61", "transcript_path": "<transcript_path>", "hook_event_name": "SessionStart", "model": "claude-opus-5[1m]", "source": "compact"},
+  "pretooluse_teammate_inprocess_edit": {"_meta": {"capture_method": "live in-process Agent-Teams TEAMMATE PreToolUse Edit, captured 2026-10-05 on Claude Code 2.1.289 by a pass-through shim on the registered pin_caps_gate, in an authorized, hash-verified, reverted patch of the INSTALLED plugin. KEY SET AND VALUE TYPES ARE REAL. EVERY VALUE IS SYNTHETIC.", "authority": "The key set, the value types, and four recorded facts: agent_id is present and contains no '@'; agent_type is present and carries the member's NAME, with no pact- prefix; agent_name is absent. The capture recorded shapes and those facts only, never values.", "synthetic_values": "agent_id follows the in-process teammate shape the member check reads ('a' + agent_type + '-' + 16 hex); the capture did not record it. session_id is the lead's captured value, per the in-process collapse captured on the subagent PreToolUse frame (CC 2.1.177); it was not measured on this frame."}, "agent_id": "afr-backend-0123456789abcdef", "agent_type": "fr-backend", "cwd": "<cwd>", "effort": {"level": "<synthetic>"}, "hook_event_name": "PreToolUse", "permission_mode": "<synthetic>", "prompt_id": "<synthetic>", "scratchpad_dir": "<scratchpad_dir>", "session_id": "9d820be0-7a77-48fb-972f-a130c5a375cc", "tool_input": {"file_path": "<abs path>", "new_string": "<s>", "old_string": "<s>", "replace_all": false}, "tool_name": "Edit", "tool_use_id": "toolu_<synthetic>", "transcript_path": "<transcript_path>"},
+  "posttoolusefailure_bash_headless": {"_meta": {"capture_method": "live PostToolUseFailure Bash frame from a headless primary session on Claude Code 2.1.289, captured 2026-10-05 by a project-local hook on `ls /nonexistent-probe-path` (exit 1). Plugin untouched. THE KEY SET IS REAL. VALUE TYPES WERE NOT RECORDED. EVERY VALUE IS SYNTHETIC.", "authority": "The key set only. A failure frame carries `error`, `is_interrupt` and `duration_ms`, and no `tool_response`. A teammate's PostToolUseFailure frame was not captured, so whether it carries agent_id is unmeasured."}, "agent_type": "PACT:pact-orchestrator", "cwd": "<cwd>", "duration_ms": 0, "effort": {"level": "<synthetic>"}, "error": "<synthetic>", "hook_event_name": "PostToolUseFailure", "is_interrupt": false, "permission_mode": "<synthetic>", "prompt_id": "<synthetic>", "session_id": "9d820be0-7a77-48fb-972f-a130c5a375cc", "tool_input": {"command": "<synthetic>"}, "tool_name": "Bash", "tool_use_id": "toolu_<synthetic>", "transcript_path": "<transcript_path>"},
   "compaction_lead_postcompact": {"_meta": {"capture_method": "live hook heartbeat, capture lead started with --agent PACT:pact-orchestrator, in-process teammates, 2026-09-14", "note": "The capture lead ran /compact. Its frames carry the same key set as the teammate compaction frames. Paths and prompt_id are placeholders; compact_summary is a synthetic stand-in of the same shape, not the captured text."}, "agent_type": "PACT:pact-orchestrator", "cwd": "<cwd>", "prompt_id": "<prompt_id>", "scratchpad_dir": "<scratchpad_dir>", "session_id": "4ec31948-bbe5-4ef4-841c-631d1ef31e61", "transcript_path": "<transcript_path>", "compact_summary": "<analysis>\nThe conversation so far: coordinating one teammate.\n</analysis>\n\n<summary>\n1. Primary Request and Intent: the orchestrator spawned one teammate to read three short text files in a scratch project and waited for its report.\n2. Key Technical Concepts: teammate dispatch, task tracking, compaction.\n3. Current Work: the report arrived and the task was completed.\n4. Pending Tasks: none.\n</summary>", "hook_event_name": "PostCompact", "trigger": "manual"}
 }
 '''
@@ -587,3 +596,63 @@ def captured_posttooluse_teammate_inprocess_bash_background():
     exists to document.
     """
     return captured_frame("posttooluse_teammate_inprocess_bash_background")
+
+
+
+def captured_pretooluse_teammate_inprocess_edit():
+    """Real in-process Agent-Teams TEAMMATE PreToolUse Edit (CC 2.1.289).
+
+    The key set and value types are real; every value is synthetic. Recorded
+    facts: `agent_type` is the member's NAME (no `pact-` prefix), `agent_id` is
+    present with no `@`, `agent_name` is absent. Unlike the subagent PreToolUse
+    capture it carries `prompt_id` and `scratchpad_dir`.
+    """
+    return captured_frame("pretooluse_teammate_inprocess_edit")
+
+
+def captured_posttoolusefailure_bash_headless():
+    """Real PostToolUseFailure Bash KEY SET (headless primary, CC 2.1.289).
+
+    Only the key set is real: the capture recorded keys, not value types. A
+    failure frame carries `error`, `is_interrupt` and `duration_ms`, and no
+    `tool_response`.
+    """
+    return captured_frame("posttoolusefailure_bash_headless")
+
+_CONSTRUCTED_PRETOOLUSE_TEAMMATE_INPROCESS = {
+    "_meta": {
+        "capture_method": (
+            "constructed: the key set of the captured in-process teammate "
+            "PreToolUse Edit (CC 2.1.289, 2026-10-05) with other synthetic "
+            "values; NOT captured. It also gives the Write variant, which no "
+            "capture covers"
+        ),
+    },
+    "agent_id": "afr-backend-0123456789abcdef",
+    "agent_type": "fr-backend",
+    "cwd": "<cwd>",
+    "effort": {"level": "<synthetic>"},
+    "hook_event_name": "PreToolUse",
+    "permission_mode": "<synthetic>",
+    "prompt_id": "<synthetic>",
+    "scratchpad_dir": "<scratchpad_dir>",
+    # The in-process collapse: a teammate shares the lead's session.
+    "session_id": _CAPTURED_FRAMES["pretooluse_lead_inprocess"]["session_id"],
+    "tool_input": {"file_path": "<abs path>", "old_string": "<s>", "new_string": "<s>", "replace_all": False},
+    "tool_name": "Edit",
+    "tool_use_id": "toolu_<synthetic>",
+    "transcript_path": "<transcript_path>",
+}
+
+
+def constructed_pretooluse_teammate_inprocess(tool_name="Edit"):
+    """An in-process teammate's PreToolUse frame, CONSTRUCTED, not captured.
+
+    `agent_type` is the teammate's own name (no `pact-` prefix), `agent_id` is
+    hex with no `@`, and `session_id` is the lead's. `tool_name="Write"` gives
+    the Write variant, with `tool_input` holding `file_path` and `content`.
+    """
+    frame = copy.deepcopy(_CONSTRUCTED_PRETOOLUSE_TEAMMATE_INPROCESS)
+    if tool_name == "Write":
+        frame.update(tool_name="Write", tool_input={"file_path": "<abs path>", "content": "<content>"})
+    return frame

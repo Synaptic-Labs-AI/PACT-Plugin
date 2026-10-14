@@ -121,7 +121,8 @@
           },
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/pin_caps_gate.py\""
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/pin_caps_gate.py\"",
+            "timeout": 600
           }
         ]
       },
@@ -259,6 +260,17 @@
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/pin_marker_writer.py\"",
             "async": true
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/track_files.py\""
           }
         ]
       }

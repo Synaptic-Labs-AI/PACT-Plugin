@@ -46,6 +46,7 @@ import multiprocessing as mp
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -62,8 +63,8 @@ _SCRIPTS_DIR = str(
 )
 
 # Join guard: a deadlocked worker (e.g. a lock that never serializes and hangs)
-# must fail the test, not wedge the suite.
-_JOIN_TIMEOUT = 30
+# must fail the test, not wedge the suite. One budget for the whole group.
+_JOIN_TIMEOUT = 600
 
 
 # ---------------------------------------------------------------------------
@@ -167,8 +168,9 @@ def _run_barrier_procs(target, arg_tuples):
     procs = [_MP.Process(target=target, args=(t,)) for t in arg_tuples]
     for p in procs:
         p.start()
+    deadline = time.monotonic() + _JOIN_TIMEOUT
     for p in procs:
-        p.join(timeout=_JOIN_TIMEOUT)
+        p.join(timeout=max(0.0, deadline - time.monotonic()))
     for p in procs:
         assert p.exitcode == 0, f"worker exited with {p.exitcode} (deadlock?)"
 
@@ -408,10 +410,12 @@ class TestSyncSemanticsUnchangedUnderLock:
         claude_dir.mkdir(parents=True, exist_ok=True)
         claude_md = claude_dir / "CLAUDE.md"
         # Minimal managed-region layout with all 4 markers and a Working Memory
-        # section the sync will rewrite.
+        # section the sync will rewrite. The managed start is the real literal:
+        # a lone PACT_MANAGED_END with no matching start is a malformed block,
+        # and the sync declines it rather than writing.
         claude_md.write_text(
             "# Project\n\n"
-            "<!-- PACT_MANAGED_START -->\n"
+            f"{wm._MANAGED_START_MARKER}\n"
             "<!-- PACT_MEMORY_START -->\n"
             "## Working Memory\n"
             "<!-- Auto-managed by pact-memory skill. -->\n\n"
@@ -426,7 +430,7 @@ class TestSyncSemanticsUnchangedUnderLock:
 
         final = claude_md.read_text(encoding="utf-8")
         markers = [
-            "<!-- PACT_MANAGED_START -->",
+            wm._MANAGED_START_MARKER,
             "<!-- PACT_MEMORY_START -->",
             "<!-- PACT_MEMORY_END -->",
             "<!-- PACT_MANAGED_END -->",

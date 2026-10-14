@@ -286,7 +286,7 @@ class TestMigrationSyncPipeline:
         comment group would greedily swallow ``<!-- PACT_MEMORY_END -->``
         unless the (?!PACT_) negative lookahead blocks it.
         """
-        from shared.claude_md_manager import _build_migrated_content
+        from fixtures.migration_helpers import _build_migrated_content
         from scripts.working_memory import sync_to_claude_md
 
         project_dir = tmp_path / "project"
@@ -683,67 +683,3 @@ class TestPACTBoundaryAltTwinDriftDetection:
             "the unrelated-name case no longer derives an empty prefix, so "
             "the import guard in claude_md_manager guards nothing"
         )
-
-
-class TestExtractManagedRegionTwinDriftDetection:
-    """PR #404 round 12 item 3: drift-detection test for the
-    ``extract_managed_region`` twin in working_memory.py.
-
-    Both hooks/shared/claude_md_manager.py and
-    skills/pact-memory/scripts/working_memory.py carry copies of
-    ``extract_managed_region`` due to the package boundary. This test
-    exercises both copies with identical input and asserts identical output.
-    """
-
-    def test_both_copies_return_identical_output_when_markers_present(self):
-        from scripts.working_memory import (
-            extract_managed_region as wm_extract,
-        )
-        from shared.claude_md_manager import (
-            extract_managed_region as cm_extract,
-        )
-
-        content = (
-            "user preamble\n"
-            f"{_MANAGED_START}\n"
-            "managed body here\n"
-            f"{_MANAGED_END}\n"
-            "user epilogue\n"
-        )
-
-        wm_result = wm_extract(content)
-        cm_result = cm_extract(content)
-
-        assert wm_result is not None
-        assert cm_result is not None
-        assert wm_result == cm_result, (
-            f"extract_managed_region twins returned different results.\n"
-            f"working_memory.py: {wm_result!r}\n"
-            f"claude_md_manager.py: {cm_result!r}"
-        )
-
-    def test_both_copies_return_none_when_markers_missing(self):
-        from scripts.working_memory import (
-            extract_managed_region as wm_extract,
-        )
-        from shared.claude_md_manager import (
-            extract_managed_region as cm_extract,
-        )
-
-        content = "no markers at all\n"
-
-        assert wm_extract(content) is None
-        assert cm_extract(content) is None
-
-    def test_both_copies_return_none_when_only_start_marker(self):
-        from scripts.working_memory import (
-            extract_managed_region as wm_extract,
-        )
-        from shared.claude_md_manager import (
-            extract_managed_region as cm_extract,
-        )
-
-        content = f"preamble\n{_MANAGED_START}\norphan body\n"
-
-        assert wm_extract(content) is None
-        assert cm_extract(content) is None

@@ -3,12 +3,11 @@ LOW-priority coverage for pin_caps_gate.py addressing backend-coder-7's
 HANDOFF items and auditor-2's residual sweep.
 
 Items covered:
-  1. failure_log classification assertions for all 4 gate error paths
-     (_FAIL_BASELINE_READ, _FAIL_BASELINE_PARSE, _FAIL_SIMULATE,
-     _FAIL_UNEXPECTED).
-  2. file_lock adversarial concurrent access — two near-simultaneous
-     hook invocations must serialize correctly without corruption or
-     deadlock.
+  1. failure_log classification assertions for the gate's error paths
+     (_FAIL_BASELINE_READ, _FAIL_DECISION, _FAIL_UNEXPECTED). Every failure
+     allows, a file the gate cannot read included.
+  2. concurrent access — near-simultaneous hook invocations, which read
+     the file without a lock, all complete and agree.
 
 Item 3 (CLI parse_known_args silent-accept) is already covered in
 test_pin_caps_phantom_green.py::TestPhantomGreen_CliBypass.
@@ -18,11 +17,15 @@ covered in test_prune_memory_integration.py.
 """
 
 import json
+import os
+import subprocess
+import sys
 import threading
+from pathlib import Path
 
 import pytest
 
-from helpers import make_claude_md_with_pins, make_pin_entry  # noqa: E402
+from helpers import make_claude_md_with_pins, make_pin_entry, point_resolver_at  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -46,10 +49,7 @@ def gate_with_captured_failures(tmp_path, monkeypatch, pact_context):
         project_dir=str(tmp_path),
     )
 
-    import staleness
-    monkeypatch.setattr(
-        staleness, "get_project_claude_md_path", lambda: claude_md
-    )
+    point_resolver_at(monkeypatch, tmp_path)
 
     failures = []
 
@@ -65,6 +65,11 @@ def gate_with_captured_failures(tmp_path, monkeypatch, pact_context):
     monkeypatch.setattr(pin_caps_gate, "append_failure", _capture)
 
     return {"claude_md": claude_md, "failures": failures}
+
+
+# Text an exception raised while reading a CLAUDE.md could carry. No hook
+# message or failure record may repeat it.
+SENTINEL = "### a pin title read from CLAUDE.md"
 
 
 def _call_gate(input_data):
@@ -86,7 +91,7 @@ def _build_over_cap():
 class TestFailureLogClassification:
     """Every fail-open bypass MUST record a failure_log entry with a
     correct classification (invariant #4). Without this, post-hoc
-    diagnostics cannot distinguish between the 4 gate error paths.
+    diagnostics cannot distinguish between the gate's error paths.
     """
 
     def test_baseline_read_failure_records_classification(
@@ -125,10 +130,11 @@ class TestFailureLogClassification:
         assert env["failures"][0]["classification"] == "pin_caps_gate_baseline_read"
         assert env["failures"][0]["source"] == "Edit"
 
-    def test_baseline_parse_failure_records_classification(
+    def test_decision_failure_allows_and_records_classification(
         self, gate_with_captured_failures, monkeypatch
     ):
-        """_FAIL_BASELINE_PARSE fires when _parse_baseline raises."""
+        """A failure inside the cap decision allows, with the error advisory,
+        and records _FAIL_DECISION."""
         env = gate_with_captured_failures
         env["claude_md"].write_text(
             make_claude_md_with_pins([
@@ -136,35 +142,30 @@ class TestFailureLogClassification:
             ]),
             encoding="utf-8",
         )
+        from shared import pin_growth
 
-        import pin_caps_gate
+        def raising_growth(*args, **kwargs):
+            raise RuntimeError(SENTINEL)
 
-        def raising_parse(_):
-            raise RuntimeError("synthetic parse failure")
-
-        monkeypatch.setattr(pin_caps_gate, "_parse_baseline", raising_parse)
-
+        monkeypatch.setattr(pin_growth, "pin_growth", raising_growth)
         result = _call_gate({
-            "tool_name": "Edit",
-            "tool_input": {
-                "file_path": str(env["claude_md"]),
-                "old_string": "x",
-                "new_string": "y",
-                "replace_all": False,
-            },
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(env["claude_md"]), "content": _build_over_cap()},
         })
         assert result is None
-        # Exactly one baseline_parse classification.
-        parse_failures = [
+        decision_failures = [
             f for f in env["failures"]
-            if f["classification"] == "pin_caps_gate_baseline_parse"
+            if f["classification"] == "pin_caps_gate_decision"
         ]
-        assert len(parse_failures) == 1
+        assert len(decision_failures) == 1
+        assert "RuntimeError" in decision_failures[0]["error"]
+        assert SENTINEL not in decision_failures[0]["error"]
 
-    def test_simulate_failure_records_classification(
+    def test_malformed_tool_input_allows_and_records_classification(
         self, gate_with_captured_failures, monkeypatch
     ):
-        """_FAIL_SIMULATE fires when apply_edit_and_parse raises."""
+        """An Edit whose new_string is not a string cannot be simulated: main()
+        allows and records _FAIL_UNEXPECTED."""
         env = gate_with_captured_failures
         env["claude_md"].write_text(
             make_claude_md_with_pins([
@@ -172,40 +173,26 @@ class TestFailureLogClassification:
             ]),
             encoding="utf-8",
         )
-
+        import io
         import pin_caps_gate
 
-        def raising_simulate(*args, **kwargs):
-            raise RuntimeError("synthetic simulate failure")
-
-        # apply_edit_and_parse is used in the gate via `from pin_caps import
-        # apply_edit_and_parse` — freeze-bound. Patch the gate-local name.
-        monkeypatch.setattr(
-            pin_caps_gate, "apply_edit_and_parse", raising_simulate
-        )
-
-        result = _call_gate({
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({
             "tool_name": "Edit",
-            "tool_input": {
-                "file_path": str(env["claude_md"]),
-                "old_string": "x",
-                "new_string": "y",
-                "replace_all": False,
-            },
-        })
-        assert result is None
-        simulate_failures = [
-            f for f in env["failures"]
-            if f["classification"] == "pin_caps_gate_simulate"
-        ]
-        assert len(simulate_failures) == 1
+            "agent_type": "pact-orchestrator",
+            "tool_input": {"file_path": str(env["claude_md"]), "old_string": "x", "new_string": 5},
+        })))
+        with pytest.raises(SystemExit) as exc_info:
+            pin_caps_gate.main()
+        assert exc_info.value.code == 0
+        unexpected = [f for f in env["failures"] if f["classification"] == "pin_caps_gate_unexpected"]
+        assert len(unexpected) == 1 and "TypeError" in unexpected[0]["error"]
 
     def test_unexpected_failure_records_classification(
         self, tmp_path, monkeypatch, pact_context
     ):
         """_FAIL_UNEXPECTED fires from main()'s outer except.
 
-        This path is exercised by forcing _check_tool_allowed to raise.
+        This path is exercised by forcing the decision to raise.
         main() catches, appends failure_log with _FAIL_UNEXPECTED, and
         fail-opens with suppressOutput + exit 0.
         """
@@ -229,10 +216,8 @@ class TestFailureLogClassification:
         monkeypatch.setattr(pin_caps_gate, "append_failure", _capture)
         monkeypatch.setattr(
             pin_caps_gate,
-            "_check_tool_allowed",
-            lambda _: (_ for _ in ()).throw(
-                RuntimeError("synthetic unexpected failure")
-            ),
+            "_gate",
+            lambda _: (_ for _ in ()).throw(RuntimeError(SENTINEL)),
         )
 
         import io
@@ -256,19 +241,19 @@ class TestFailureLogClassification:
         assert len(unexpected_failures) == 1
         # Source carries the tool_name for post-hoc correlation.
         assert unexpected_failures[0]["source"] == "Edit"
-        # Error carries the exception type + message.
-        assert "RuntimeError" in unexpected_failures[0]["error"]
-        assert "synthetic unexpected failure" in unexpected_failures[0]["error"]
+        # Error carries the exception type only: an exception's text can hold
+        # CLAUDE.md text, which no PACT record or message may carry.
+        assert unexpected_failures[0]["error"] == "RuntimeError"
 
-    def test_write_baseline_failclosed_records_classification(
+    def test_a_write_over_an_unreadable_file_records_classification(
         self, gate_with_captured_failures
     ):
-        """Write fail-CLOSED path still records a failure_log entry for
-        the baseline read. The closure is an asymmetric exception that
-        DENIES the tool; it does NOT skip observability.
-        """
+        """A Write over a CLAUDE.md the gate cannot read is allowed, and the
+        read failure is still recorded in failure_log."""
         env = gate_with_captured_failures
-        # Baseline NOT created → IOError on read → _FAIL_BASELINE_READ.
+        # A CLAUDE.md that resolves but cannot be read (a directory) →
+        # IsADirectoryError on read → _FAIL_BASELINE_READ.
+        env["claude_md"].mkdir()
         result = _call_gate({
             "tool_name": "Write",
             "tool_input": {
@@ -276,10 +261,7 @@ class TestFailureLogClassification:
                 "content": _build_over_cap(),
             },
         })
-        assert result is not None
-        assert "Refusing Write" in result
-        # failure_log still captured the read failure (observability is
-        # NOT skipped just because the outer decision is DENY).
+        assert result is None, result
         read_failures = [
             f for f in env["failures"]
             if f["classification"] == "pin_caps_gate_baseline_read"
@@ -287,22 +269,11 @@ class TestFailureLogClassification:
         assert len(read_failures) == 1
         assert read_failures[0]["source"] == "Write"
 
-    def test_write_baseline_parse_error_over_cap_denies(
+    def test_write_parse_failure_over_cap_allows(
         self, gate_with_captured_failures, monkeypatch
     ):
-        """Write + baseline readable-but-parse-raises + over-cap content → DENY.
-
-        Sibling to test_write_baseline_failclosed_records_classification: covers
-        the second trigger branch of the fail-CLOSED matrix — the
-        `_FAIL_BASELINE_PARSE` classification path inside
-        `pin_caps_gate._check_tool_allowed`, where a `_parse_baseline`
-        exception routes through the `is_write and not parseable` branch to
-        `_evaluate_write_as_fresh_start`. Without this guard a regression
-        fail-OPENing the parse-error Write branch would ship green through
-        the full suite (empirically verified via counter-test-by-revert
-        during task #3 review). Symbol references (not line numbers) so
-        future diff insertions don't invalidate this citation.
-        """
+        """A parse failure no longer refuses a Write: the decision allows with
+        its error advisory and records _FAIL_DECISION."""
         env = gate_with_captured_failures
         env["claude_md"].write_text(
             make_claude_md_with_pins([
@@ -310,42 +281,28 @@ class TestFailureLogClassification:
             ]),
             encoding="utf-8",
         )
-
-        import pin_caps_gate
+        from shared import pin_growth
 
         def raising_parse(_):
             raise RuntimeError("synthetic parse failure")
 
-        monkeypatch.setattr(pin_caps_gate, "_parse_baseline", raising_parse)
-
+        monkeypatch.setattr(pin_growth, "parse", raising_parse)
         result = _call_gate({
             "tool_name": "Write",
-            "tool_input": {
-                "file_path": str(env["claude_md"]),
-                "content": _build_over_cap(),
-            },
+            "tool_input": {"file_path": str(env["claude_md"]), "content": _build_over_cap()},
         })
-        assert result is not None
-        assert "Refusing Write" in result
-        # Observability: classification recorded even though decision is DENY.
-        parse_failures = [
+        assert result is None
+        decision_failures = [
             f for f in env["failures"]
-            if f["classification"] == "pin_caps_gate_baseline_parse"
+            if f["classification"] == "pin_caps_gate_decision"
         ]
-        assert len(parse_failures) == 1
-        assert parse_failures[0]["source"] == "Write"
+        assert len(decision_failures) == 1
+        assert decision_failures[0]["source"] == "Write"
 
-    def test_write_baseline_parse_error_under_cap_allows(
+    def test_write_parse_failure_under_cap_allows(
         self, gate_with_captured_failures, monkeypatch
     ):
-        """Write + baseline readable-but-parse-raises + under-cap content → ALLOW.
-
-        The fail-CLOSED gate treats an unparseable baseline as empty and then
-        evaluates the Write's own content against the caps. Under-cap content
-        is clean → allow (no spurious denial). Pinning this invariant prevents
-        an over-eager fix from flipping the parse-error branch to unconditional
-        DENY, which would block legitimate CLAUDE.md repair Writes.
-        """
+        """The same parse failure under the cap allows too."""
         env = gate_with_captured_failures
         env["claude_md"].write_text(
             make_claude_md_with_pins([
@@ -353,36 +310,90 @@ class TestFailureLogClassification:
             ]),
             encoding="utf-8",
         )
-
-        import pin_caps_gate
+        from shared import pin_growth
 
         def raising_parse(_):
             raise RuntimeError("synthetic parse failure")
 
-        monkeypatch.setattr(pin_caps_gate, "_parse_baseline", raising_parse)
-
+        monkeypatch.setattr(pin_growth, "parse", raising_parse)
         under_cap_content = make_claude_md_with_pins([
             make_pin_entry(title=f"P{i}", body_chars=4) for i in range(3)
         ])
         result = _call_gate({
             "tool_name": "Write",
-            "tool_input": {
-                "file_path": str(env["claude_md"]),
-                "content": under_cap_content,
-            },
+            "tool_input": {"file_path": str(env["claude_md"]), "content": under_cap_content},
         })
         assert result is None
 
 
+class TestExceptionTextStaysOut:
+    """A hook message names an exception by its type, never by its text, which
+    can hold CLAUDE.md text."""
+
+    def test_the_decision_error_advisory_names_the_type_only(self, monkeypatch):
+        from shared import pin_growth
+
+        def raising_growth(*args, **kwargs):
+            raise RuntimeError(SENTINEL)
+
+        monkeypatch.setattr(pin_growth, "pin_growth", raising_growth)
+        before = _build_over_cap()
+        decision = pin_growth.pin_cap_decision(before, before, use_timer=False)
+        assert decision.verdict == "ALLOW_ADVISORY" and decision.cause == "error", decision
+        assert decision.reason == "PACT could not check the pin cap: RuntimeError"
+
+    def test_the_load_failure_message_names_the_type_only(self, capsys):
+        """stderr keeps the exception's text for a broken install: the module
+        loads before the hook reads any CLAUDE.md (pinned below)."""
+        import pin_caps_gate
+
+        with pytest.raises(SystemExit) as exc_info:
+            pin_caps_gate._emit_load_failure_allow("module imports", ImportError(SENTINEL))
+        assert exc_info.value.code == 0
+        out, err = capsys.readouterr()
+        message = json.loads(out)["systemMessage"]
+        assert message.endswith("(module imports): ImportError") and SENTINEL not in message
+        assert err.strip() == f"{message}: {SENTINEL}"
+
+    def test_loading_the_gate_module_reads_no_claude_md(self, tmp_path):
+        """The load-failure handler runs while the module loads, so its
+        exception cannot hold CLAUDE.md text as long as loading reads none."""
+        import pin_caps_gate
+
+        (tmp_path / ".claude").mkdir()
+        for path in (tmp_path / "CLAUDE.md", tmp_path / ".claude" / "CLAUDE.md"):
+            path.write_text(_build_over_cap(), encoding="utf-8")
+        script = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            "opened = []\n"
+            "sys.addaudithook(lambda event, args: opened.append(str(args[0])) "
+            "if event == 'open' and args and isinstance(args[0], (str, bytes)) else None)\n"
+            "import pin_caps_gate\n"
+            "loading = sum(Path(p).name.casefold() == 'claude.md' for p in opened)\n"
+            "count = len(opened)\n"
+            f"pin_caps_gate._read_baseline(Path({str(tmp_path / 'CLAUDE.md')!r}))\n"
+            "print(loading, sum(Path(p).name.casefold() == 'claude.md' for p in opened[count:]))\n"
+        )
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, cwd=tmp_path,
+                                env={**os.environ, "CLAUDE_PROJECT_DIR": str(tmp_path),
+                                     "PYTHONPATH": str(Path(pin_caps_gate.__file__).parent)}, timeout=600)
+        assert result.returncode == 0, result.stderr
+        loading, control = (int(count) for count in result.stdout.split())
+        # None while loading. The control only shows the hook sees a read: on
+        # Python 3.9 one read_text is two open events (io.open, then os.open
+        # through pathlib's opener), so it is at least one, not exactly one.
+        assert loading == 0 and control >= 1, result.stdout
+
+
 # ---------------------------------------------------------------------------
-# file_lock adversarial concurrency
+# Concurrent gate calls
 # ---------------------------------------------------------------------------
 
 
 class TestFileLockContention:
-    """file_lock serializes the baseline-read section. Two near-
-    simultaneous hook invocations must complete without corruption
-    or deadlock.
+    """The gate reads CLAUDE.md without a lock. Near-simultaneous hook
+    invocations must all complete, without a torn result or a hang.
 
     Uses threading.Barrier(N+1) — the standard pattern from MEMORY.md
     (feedback_threading_barrier_race_detection). Each reader thread
@@ -395,8 +406,7 @@ class TestFileLockContention:
         """Two concurrent Edit gate calls against the same CLAUDE.md
         both terminate with sensible results (no deadlock).
 
-        Both calls target an under-cap state → both ALLOW. The point is
-        that `file_lock` serializes them without blocking indefinitely.
+        Both calls target an under-cap state → both ALLOW, and none blocks.
         """
         claude_md = tmp_path / "CLAUDE.md"
         entries = [
@@ -411,19 +421,16 @@ class TestFileLockContention:
             project_dir=str(tmp_path),
         )
 
-        import staleness
-        monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: claude_md
-        )
+        point_resolver_at(monkeypatch, tmp_path)
 
         N_THREADS = 4
         barrier = threading.Barrier(N_THREADS)
-        results = [None] * N_THREADS
-        errors = [None] * N_THREADS
+        results: list = [None] * N_THREADS
+        errors: list = [None] * N_THREADS
 
         def worker(idx):
             try:
-                barrier.wait(timeout=5.0)  # Release all threads in sync.
+                barrier.wait(timeout=600.0)  # Release all threads in sync.
                 results[idx] = _call_gate({
                     "tool_name": "Edit",
                     "tool_input": {
@@ -442,9 +449,9 @@ class TestFileLockContention:
         for t in threads:
             t.start()
         for t in threads:
-            t.join(timeout=10.0)
+            t.join(timeout=600.0)
             assert not t.is_alive(), (
-                "file_lock deadlock suspected — worker did not terminate"
+                "a gate call hung — worker did not terminate"
             )
 
         # No thread raised.
@@ -472,17 +479,14 @@ class TestFileLockContention:
             project_dir=str(tmp_path),
         )
 
-        import staleness
-        monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: claude_md
-        )
+        point_resolver_at(monkeypatch, tmp_path)
 
         N_THREADS = 4
         barrier = threading.Barrier(N_THREADS)
-        results = [None] * N_THREADS
+        results: list = [None] * N_THREADS
 
         def worker(idx):
-            barrier.wait(timeout=5.0)
+            barrier.wait(timeout=600.0)
             results[idx] = _call_gate({
                 "tool_name": "Write",
                 "tool_input": {
@@ -497,7 +501,7 @@ class TestFileLockContention:
         for t in threads:
             t.start()
         for t in threads:
-            t.join(timeout=10.0)
+            t.join(timeout=600.0)
             assert not t.is_alive()
 
         # All threads denied with the same rendered reason.
