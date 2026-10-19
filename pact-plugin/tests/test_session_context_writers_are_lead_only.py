@@ -83,12 +83,15 @@ _WRITE_METHODS = frozenset({"write_text", "write_bytes", "touch"})
 _OPEN_MODE = re.compile(r"[rwxabt+]{1,4}")
 
 # (file, enclosing function, write API referenced): count. The three
-# lead-gated writers, plus write_context itself, which is persist_context
-# behind a path builder.
+# lead-gated writers, the realign command, plus write_context itself, which
+# is persist_context behind a path builder.
 KNOWN_WRITE_CALLS = Counter({
     ("hooks/session_init.py", "main", "persist_context"): 1,
     ("hooks/shared/pact_context.py", "heal_context_if_missing", "write_context"): 1,
     ("hooks/bootstrap_marker_writer.py", "_write_back_aligned_team_name", "write_context"): 1,
+    # The realign command: refuses unless a lead context already exists for
+    # $CLAUDE_CODE_SESSION_ID, so it only rewrites a lead's own file.
+    ("hooks/shared/realign_team.py", "realign_team", "write_context"): 1,
     ("hooks/shared/pact_context.py", "write_context", "persist_context"): 1,
 })
 
