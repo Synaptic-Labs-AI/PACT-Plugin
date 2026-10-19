@@ -151,6 +151,7 @@ from shared.session_resume import (
     check_resumption_context,
     check_resume_state,
     has_unspent_refresh,
+    record_team_realign,
 )
 from shared.stale_session import session_block_rows
 
@@ -660,6 +661,33 @@ def _saved_context(session_id: str, project_dir: str) -> dict:
     except Exception:
         pass
     return saved
+
+
+def _record_launch_realign(
+    previous_team: str | None, session_id: str, project_dir: str,
+) -> str | None:
+    """Record a team move this launch made and return the lead notice, or None.
+
+    previous_team is the record as it stood before this run's persist. The
+    team compared against it is read back from the context file, so a persist
+    that did not land records nothing. A move counts only when the new team
+    has a config: a launch that falls back to a stale computed name is not a
+    move to the team the platform is using. The prompt-time write-back then
+    finds the record aligned and records nothing more. Never raises.
+    """
+    try:
+        current_team = _saved_context(session_id, project_dir).get("team_name")
+        if not previous_team or not current_team:
+            return None
+        previous_team, current_team = previous_team.lower(), current_team.lower()
+        if previous_team == current_team:
+            return None
+        if not (get_claude_config_dir() / "teams" / current_team / "config.json").exists():
+            return None
+        return record_team_realign(previous_team, current_team)
+    except Exception as e:
+        print(f"session_init: could not record the team realign: {e}", file=sys.stderr)
+        return None
 
 
 # Render-hostile characters that, present anywhere in a session_id, render
@@ -2281,6 +2309,23 @@ def main():
                 ))
             if frame_role is None:
                 context_parts.insert(1, _UNRESOLVED_ROLE_CUE)
+
+        # A resume or compaction that moved the recorded team records the move
+        # here, once: by the next prompt the record already names the new team,
+        # so the prompt-time write-back sees no move. A clear re-derives the
+        # team and records nothing. No field of this frame separates the lead
+        # from an in-process teammate's compaction, so the notice goes to
+        # whichever compaction moved the record.
+        if (
+            frame_is_lead
+            and not session_id_was_missing
+            and source in ("resume", "compact")
+        ):
+            _realign = _record_launch_realign(
+                saved.get("team_name"), session_id, project_dir
+            )
+            if _realign:
+                context_parts.append(_realign)
 
         # On a launch, a recorded team whose config is gone and that the
         # census could not replace is named, with each live candidate team.

@@ -55,6 +55,8 @@ from shared.task_utils import iter_team_task_jsons
 from shared.session_journal import (
     _parse_ts,
     _ts_supersedes,
+    append_event,
+    make_event,
     read_events_from,
     read_last_event_from,
 )
@@ -723,6 +725,29 @@ def restore_last_session(
         return None
 
     return _build_journal_resume(prev_session_dir)
+
+
+def record_team_realign(old_team: str, new_team: str) -> str:
+    """Record a move of this session's team and return the lead notice.
+
+    Appends team_realigned {from, to} to this session's journal. Both places
+    that move the recorded team call it: the prompt-time write-back and
+    session_init when a launch realigns. The notice names both teams and the
+    in-progress tasks left in the old team's store.
+    """
+    append_event(make_event("team_realigned", **{"from": old_team, "to": new_team}))
+    # Task ids come from task files: sanitised as the resume claim's are.
+    ids = ", ".join(
+        clean for clean in map(_sanitize_prompt_field, in_progress_task_ids(old_team))
+        if clean
+    ) or "none"
+    return (
+        f"PACT moved this session from team `{old_team}` to `{new_team}`, "
+        f"the team the platform is using. `TaskList` shows only `{new_team}`. "
+        f"In-progress tasks still in `tasks/{old_team}/`: {ids}. "
+        f"Follow the team-split recovery in `pact-state-recovery.md` "
+        f"before spawning."
+    )
 
 
 def in_progress_task_ids(team_name: str) -> list[str]:

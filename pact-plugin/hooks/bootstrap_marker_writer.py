@@ -181,16 +181,8 @@ try:
         MARKER_SCHEMA_VERSION,
         expected_marker_signature,
     )
-    from shared.session_journal import (
-        append_event,
-        make_event,
-        read_last_event_from,
-    )
-    from shared.session_resume import (
-        _sanitize_prompt_field,
-        in_progress_task_ids,
-        update_session_info,
-    )
+    from shared.session_journal import read_last_event_from
+    from shared.session_resume import record_team_realign, update_session_info
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_advisory("module imports", _module_load_error)
 
@@ -225,22 +217,6 @@ def _emit_output(event_name: str, notice: str | None) -> str:
             "additionalContext": notice,
         },
     })
-
-
-def _realign_notice(old_team: str, new_team: str) -> str:
-    """The lead notice for a write-back that moved the session's team."""
-    # Task ids come from task files: sanitised as the resume claim's are.
-    ids = ", ".join(
-        clean for clean in map(_sanitize_prompt_field, in_progress_task_ids(old_team))
-        if clean
-    ) or "none"
-    return (
-        f"PACT moved this session from team `{old_team}` to `{new_team}`, "
-        f"the team the platform is using. `TaskList` shows only `{new_team}`. "
-        f"In-progress tasks still in `tasks/{old_team}/`: {ids}. "
-        f"Follow the team-split recovery in `pact-state-recovery.md` "
-        f"before spawning."
-    )
 
 
 _SECRETARY_NAME = "secretary"
@@ -540,10 +516,7 @@ def _realign_team(input_data: dict) -> str | None:
         after = pact_context.get_pact_context().get("team_name", "").lower()
         if not before or not after or before == after:
             return None
-        append_event(
-            make_event("team_realigned", **{"from": before, "to": after})
-        )
-        return _realign_notice(before, after)
+        return record_team_realign(before, after)
     except Exception as e:
         print(
             f"bootstrap_marker_writer: team realign report failed: {e}",
