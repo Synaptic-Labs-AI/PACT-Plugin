@@ -394,17 +394,23 @@ def test_1509_idle_config_less_branch2_unstarved(tmp_path, monkeypatch,
 
 def test_ii_two_candidates_stale_default_and_new_remedy(tmp_path, monkeypatch,
                                                         capsys):
-    """CELL ii — two live candidates (two simultaneous broken resumes) ->
-    AMBIGUOUS -> the stale default stands and the gate DENIES with
-    no_task_assigned. The deny carries the enumeration's cause-(2) remedy
-    naming the MEASURED recovery (edit pact-session-context.json); none of the
-    falsified inert 'bootstrap ritual' phrases may appear (this leg has no
-    CLAUDE.md, so the stale block is silent and the enumeration is the sole
+    """CELL ii — two live candidates that BOTH corroborate as this session's
+    (two simultaneous broken resumes of the same project) -> AMBIGUOUS -> the
+    stale default stands and the gate DENIES with no_task_assigned. Both
+    candidates carry the full corroboration fields: the census corroborates
+    before it counts, so a candidate that does not corroborate would not make
+    the census ambiguous at all. The deny carries the enumeration's cause-(2)
+    remedy naming the MEASURED recovery (edit pact-session-context.json); none
+    of the falsified inert 'bootstrap ritual' phrases may appear (this leg has
+    no CLAUDE.md, so the stale block is silent and the enumeration is the sole
     appended diagnosis)."""
     _seed_census_world(monkeypatch, tmp_path, live_team=NEW_TEAM_ID8,
                        live_lead_sid=NEW_SID, tasks=())  # stale store: no task
     _seed_team_store(tmp_path / ".claude", team_name=AMBIG_TEAM,
-                     lead_session_id=AMBIG_SID, members=(), tasks=())
+                     lead_session_id=AMBIG_SID, members=(), tasks=(),
+                     corroborate=True, lead_cwd=str(tmp_path / "project"))
+    import shared.pact_context as ctx_module
+    assert ctx_module.get_team_name() == OLD_TEAM
     code, out = _run_dispatch(_make_spawn(), capsys)
     assert code == 2, "ambiguous census must fail safe to a deny"
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
@@ -730,11 +736,15 @@ def test_xi_stale_block_and_working_recovery_coexist_scoped(tmp_path,
     one remedy path per record-type, not two competing instructions. Fixture:
     CLAUDE.md records a PREVIOUS session's id while the acting frame carries
     the current one (the session_init-crash overlap world where the detector
-    was designed to fire) on top of the ambiguous-census stale world."""
+    was designed to fire) on top of the ambiguous-census stale world (both
+    candidates corroborate, so the census decides nothing)."""
     _seed_census_world(monkeypatch, tmp_path, live_team=NEW_TEAM_ID8,
                        live_lead_sid=NEW_SID, tasks=())
     _seed_team_store(tmp_path / ".claude", team_name=AMBIG_TEAM,
-                     lead_session_id=AMBIG_SID, members=(), tasks=())
+                     lead_session_id=AMBIG_SID, members=(), tasks=(),
+                     corroborate=True, lead_cwd=str(tmp_path / "project"))
+    import shared.pact_context as ctx_module
+    assert ctx_module.get_team_name() == OLD_TEAM
     # The stale-block trigger: project CLAUDE.md whose Resume line records a
     # PREVIOUS session id, with the acting frame carrying a different one.
     project_dir = tmp_path / "project"

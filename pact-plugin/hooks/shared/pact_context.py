@@ -593,36 +593,31 @@ def _own_tasks_store_fresh(teams_root: Path, session_id: str) -> bool:
         return False
 
 
-def _resume_census_unique_candidate(teams_root: Path, session_id: str) -> str | None:
-    """Branch-3 census (#1507): the single LIVE re-provisioned team, if
-    unambiguous AND corroborated as this session's own.
+def _resume_census_candidates(
+    teams_root: Path, session_id: str
+) -> list[tuple[str, bool, dict]]:
+    """Branch-3 census input: every LIVE re-provisioned team, each with its
+    corroboration result.
 
     Enumerates teams/*/config.json. A dir is a CANDIDATE iff its
     config.json carries a REAL string leadSessionId DIFFERENT from this
     session's id (a config missing/null on the field is malformed and
     never counts) AND its sibling tasks/<dir>/ store mtime falls within
-    RESUME_CENSUS_RECENCY_SECONDS of now (the "live team" signal). Returns
-    the dir name only when EXACTLY ONE candidate survives AND that
-    candidate corroborates as this session's team (see
-    _resume_census_candidate_corroborated — F1: uniqueness is an
-    environmental accident, never an ownership proof). None on zero, on
-    >= 2 (two simultaneous broken resumes -> stale default), on an
-    UNCORROBORATED unique candidate (pre-birth window / foreign sibling ->
-    fail-safe suppression), or on any error.
+    RESUME_CENSUS_RECENCY_SECONDS of now (the "live team" signal) AND its
+    dir name is a safe path component. Each candidate is returned as
+    ``(name, corroborated, config)``, with ``corroborated`` computed once
+    here by _resume_census_candidate_corroborated, so the census decision
+    (_resume_census_unique_candidate) and the diagnostics that explain it
+    read the same list and cannot disagree.
 
-    The corroboration lives HERE, inside the get_team_name resolution path,
-    so the marker-writer write-back (which calls get_team_name) can never
-    persist an uncorroborated winner.
-
-    Pure / FS-read-only / NEVER raises — same contract as the resolver that
-    calls it. The tasks root is derived as the SIBLING of teams_root
-    (teams_root.parent / "tasks") so a teams_dir override relocates the
-    tasks probe with it.
+    Pure / FS-read-only / NEVER raises: [] on any outer error. The tasks
+    root is derived as the SIBLING of teams_root (teams_root.parent /
+    "tasks") so a teams_dir override relocates the tasks probe with it.
     """
     try:
         tasks_root = teams_root.parent / "tasks"
         cutoff = time.time() - RESUME_CENSUS_RECENCY_SECONDS
-        candidates: list[tuple[str, dict]] = []
+        candidates: list[tuple[str, bool, dict]] = []
         for entry in sorted(teams_root.iterdir()):
             try:
                 if not entry.is_dir():
@@ -648,24 +643,53 @@ def _resume_census_unique_candidate(teams_root: Path, session_id: str) -> str | 
                 # candidate (mirrors the identity-match loop's tamper guard).
                 if not is_safe_path_component(entry.name):
                     continue
-                candidates.append((entry.name, data))
+                candidates.append((
+                    entry.name,
+                    _resume_census_candidate_corroborated(entry.name, data),
+                    data,
+                ))
             except (OSError, json.JSONDecodeError, ValueError, TypeError,
                     AttributeError):
                 # Unreadable / malformed sibling — skip it, keep scanning.
                 continue
-        if len(candidates) != 1:
-            # Zero or >= 2: ambiguous -> fail-safe stale default.
-            return None
-        winner_name, winner_config = candidates[0]
-        if not _resume_census_candidate_corroborated(winner_name, winner_config):
-            # Unique but UNBOUND to this session (pre-birth window / foreign
-            # sibling): suppress — never return a uniqueness-only winner.
-            return None
-        return winner_name
+        return candidates
     except Exception:
         # Total fail-safe: the census is an upgrade path, never a new raise
-        # source. Any unexpected error -> "no candidate" -> stale default.
-        return None
+        # source. Any unexpected error -> no candidates -> stale default.
+        return []
+
+
+def _resume_census_unique_candidate(teams_root: Path, session_id: str) -> str | None:
+    """Branch-3 census: the single LIVE re-provisioned team that
+    corroborates as this session's own, if exactly one does.
+
+    Corroboration runs BEFORE the count: candidates that fail
+    _resume_census_candidate_corroborated (a foreign live session in
+    another directory, a pre-birth window) never count, so one foreign
+    live team cannot suppress this session's own. Returns the dir name only
+    when EXACTLY ONE corroborated candidate exists. None on zero, on >= 2
+    corroborated (two simultaneous broken resumes of the same project ->
+    stale default, never a guess), or on any error.
+
+    Residual admitted by counting only corroborated candidates: a same-dir
+    sibling session born after this session's end marker is itself
+    corroborated, and wins when it is the only corroborated live
+    candidate. That is the same hole documented on
+    _resume_census_candidate_corroborated.
+
+    The corroboration lives inside the get_team_name resolution path, so
+    the marker-writer write-back (which calls get_team_name) can never
+    persist an uncorroborated winner.
+
+    Pure / FS-read-only / NEVER raises — same contract as the resolver that
+    calls it.
+    """
+    corroborated = [
+        name
+        for name, is_corroborated, _ in _resume_census_candidates(teams_root, session_id)
+        if is_corroborated
+    ]
+    return corroborated[0] if len(corroborated) == 1 else None
 
 
 def _resolve_aligned_team_name(

@@ -1172,13 +1172,18 @@ class TestBranch3ResumeCensus:
         assert resolved == STALE_TEAM
 
     def test_two_candidates_fail_safe(self, ctx, monkeypatch, tmp_path):
-        """Two live re-provisioned candidates (two simultaneous broken
-        resumes) -> AMBIGUOUS -> stale default, never a coin flip."""
+        """Two live re-provisioned candidates that BOTH corroborate (two
+        simultaneous broken resumes of the same project) -> AMBIGUOUS ->
+        stale default, never a coin flip. Both bind via the project dir: the
+        census corroborates before it counts, so unbound candidates would
+        leave zero, not two."""
         ctx_module, teams_root = ctx
-        _seed_census_candidate(teams_root, dir_name=NEW_UUID_DIR)
+        _seed_census_candidate(teams_root, dir_name=NEW_UUID_DIR,
+                               lead_cwd=str(tmp_path / "project"))
         _seed_census_candidate(
             teams_root, dir_name="session-beefbeef",
             lead_session_id="beefbeef-1111-4222-8333-444455556666",
+            lead_cwd=str(tmp_path / "project"),
         )
         _write_context_file(monkeypatch, ctx_module, tmp_path,
                             team_name=STALE_TEAM, session_id=LEAD_SID)
