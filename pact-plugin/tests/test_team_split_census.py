@@ -329,9 +329,13 @@ _AFTER_END = "2026-10-19T15:44:20Z"
 _AN_HOUR_LATER = "2026-10-19T16:34:20Z"
 _FOUR_SECONDS_LATER = "2026-10-19T15:34:24Z"
 _ELEVEN_SECONDS_AFTER_END = "2026-10-19T15:34:30Z"
-# Another leader of this project, whose team also corroborates.
+# A live session of this project born by a startup.
 NEAR_SID = "dddd0000-1111-4222-8333-444455556666"
-NEAR_TEAM = "session-dddd0000"
+# A third leader of this project, whose team also corroborates.
+THIRD_SID = "eeee0000-1111-4222-8333-444455556666"
+THIRD_TEAM = "session-eeee0000"
+# An unrelated session of this project whose dir sorts before SECOND_SID's.
+UNRELATED_SID = "00000000-1111-4222-8333-444455556666"
 
 
 def _keyless_sibling_clear(world, *, ended_at=_ONE_SECOND_EARLIER,
@@ -397,10 +401,12 @@ def test_a_clear_birth_just_outside_the_window_is_not_a_successor(
     assert _team_name() == SECOND_TEAM
 
 
-def _own_keyless_clear(world, *, own_born="clear"):
+def _own_keyless_clear(world, *, own_born="clear",
+                       sibling_born_at=_FOUR_SECONDS_LATER):
     """This session was born by a keyless /clear one second after its
     predecessor (SECOND_SID, which leads SECOND_TEAM) ended; a sibling's
-    /clear started another keyless session 5 s after that end."""
+    /clear started another keyless session at ``sibling_born_at`` (default
+    5 s after that end)."""
     _set_own_key(world, "")
     write_journal(world.session_dir, [
         {"type": "session_start", "session_id": OLD_SID, "ts": _CLEAR_AT,
@@ -410,15 +416,14 @@ def _own_keyless_clear(world, *, own_born="clear"):
     _pact_session(world, SECOND_SID, team=SECOND_TEAM, ended=True,
                   ended_at=_ONE_SECOND_EARLIER)
     _pact_session(world, SIBLING_CLEAR_SID, team="session-b2b2b2b2",
-                  born="clear", born_at=_FOUR_SECONDS_LATER)
+                  born="clear", born_at=sibling_born_at)
 
 
 def test_our_keyless_clear_keeps_our_predecessor_s_team_beside_a_sibling(
         tmp_path, monkeypatch):
-    """The predecessor's end is nearest our own clear birth (1 s) and is
-    matched to it, so the sibling's clear 5 s from that end cannot take it:
-    the team is ours, the census picks it and the realign command accepts
-    it."""
+    """Our own clear birth (1 s) is strictly nearer the predecessor's end
+    than the sibling's (5 s), so the predecessor is ours: the census picks
+    its team and the realign command accepts it."""
     world = _aged_sibling_world(tmp_path, monkeypatch)
     _own_keyless_clear(world)
     assert _team_name() == SECOND_TEAM
@@ -437,22 +442,78 @@ def test_without_our_clear_birth_the_sibling_takes_the_ended_team(
     assert _verb_refusal(monkeypatch, SECOND_TEAM) == _OWNED
 
 
-def test_one_clear_birth_links_to_one_end(tmp_path, monkeypatch):
-    """Two leaders ended near one sibling's clear birth: the birth links to
-    the nearer end only, so the farther leader's team is free."""
+def _unrelated_end_beside_a_keyless_sibling(world, *, unrelated_end):
+    """reviewer-sec's tie and near arms: an unrelated session of the project
+    (its dir sorts before the sibling leader's) ended at ``unrelated_end``,
+    beside the keyless sibling /clear of _keyless_sibling_clear."""
+    _pact_session(world, UNRELATED_SID, team="session-00000000", ended=True,
+                  ended_at=unrelated_end)
+    _keyless_sibling_clear(world, ended_at=unrelated_end, born_at=unrelated_end)
+
+
+def test_an_unrelated_end_in_the_same_second_never_frees_the_team(
+        tmp_path, monkeypatch):
+    """The unrelated end, the sibling leader's end and the successor's
+    birth share one second: the successor still holds the leader's team."""
     world = _aged_sibling_world(tmp_path, monkeypatch)
-    _set_own_key(world, OWN_KEY)
-    from fixtures.team_split import seed_team
-    seed_team(world.root, NEAR_TEAM, lead_sid=NEAR_SID,
-              lead_cwd=str(world.project_dir))
-    _pact_session(world, NEAR_SID, team=NEAR_TEAM, ended=True,
+    _unrelated_end_beside_a_keyless_sibling(world, unrelated_end=_CLEAR_AT)
+    assert _team_name() == OLD_TEAM
+    assert _verb_refusal(monkeypatch, SECOND_TEAM) == _OWNED
+
+
+def test_an_unrelated_end_nearer_the_birth_never_frees_the_team(
+        tmp_path, monkeypatch):
+    """The unrelated end is 1 s nearer the successor's birth than the
+    sibling leader's end: the team stays the sibling's."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _pact_session(world, UNRELATED_SID, team="session-00000000", ended=True,
                   ended_at=_CLEAR_AT)
+    _keyless_sibling_clear(world, ended_at=_ONE_SECOND_EARLIER,
+                           born_at=_CLEAR_AT)
+    assert _team_name() == OLD_TEAM
+    assert _verb_refusal(monkeypatch, SECOND_TEAM) == _OWNED
+
+
+def test_a_foreign_birth_tied_with_ours_keeps_the_team_excluded(
+        tmp_path, monkeypatch):
+    """Our own clear birth and a sibling's are the same distance from our
+    predecessor's end: whole-second timestamps cannot tell them apart, so
+    the team stays excluded (the fail-safe cost of a same-second /clear)."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _own_keyless_clear(world, sibling_born_at=_CLEAR_AT)
+    assert _team_name() == OLD_TEAM
+    assert _verb_refusal(monkeypatch, SECOND_TEAM) == _OWNED
+
+
+def test_a_foreign_birth_nearer_than_ours_keeps_the_team_excluded(
+        tmp_path, monkeypatch):
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _own_keyless_clear(world, sibling_born_at=_ONE_SECOND_EARLIER)
+    assert _team_name() == OLD_TEAM
+
+
+def test_the_clear_births_are_read_once_per_census(tmp_path, monkeypatch):
+    """Two candidate teams, each led by an ended session: the census builds
+    the clear births once and checks both teams' owners against them."""
+    import shared.pact_context as ctx_module
+    from fixtures.team_split import seed_team
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    seed_team(world.root, THIRD_TEAM, lead_sid=THIRD_SID,
+              lead_cwd=str(world.project_dir))
     _pact_session(world, SECOND_SID, team=SECOND_TEAM, ended=True,
-                  ended_at=_FOUR_SECONDS_LATER)
-    _pact_session(world, SIBLING_CLEAR_SID, team="session-b2b2b2b2",
-                  born="clear", born_at=_CLEAR_AT)
-    assert _owned(NEAR_TEAM) is True
-    assert _owned(SECOND_TEAM) is False
+                  ended_at=_ONE_SECOND_EARLIER)
+    _pact_session(world, THIRD_SID, team=THIRD_TEAM, ended=True,
+                  ended_at=_ONE_SECOND_EARLIER)
+    calls = []
+    real = ctx_module._clear_births
+    monkeypatch.setattr(ctx_module, "_clear_births",
+                        lambda *a: calls.append(a) or real(*a))
+    reset_context_module()
+    ctx_module.init({"session_id": OLD_SID})
+    names = {name for name, _, _ in ctx_module._resume_census_candidates(
+        world.root / "teams", OLD_SID)}
+    assert {SECOND_TEAM, THIRD_TEAM} <= names
+    assert len(calls) == 1
 
 
 def test_a_journal_with_no_clear_birth_is_never_tail_read(tmp_path,
