@@ -331,6 +331,8 @@ _FOUR_SECONDS_LATER = "2026-10-19T15:34:24Z"
 _ELEVEN_SECONDS_AFTER_END = "2026-10-19T15:34:30Z"
 # A live session of this project born by a startup.
 NEAR_SID = "dddd0000-1111-4222-8333-444455556666"
+# This process's first clear-born life, before the /clear that began ours.
+FIRST_LIFE_SID = "a1a1a1a1-1111-4222-8333-444455556666"
 # A third leader of this project, whose team also corroborates.
 THIRD_SID = "eeee0000-1111-4222-8333-444455556666"
 THIRD_TEAM = "session-eeee0000"
@@ -490,6 +492,47 @@ def test_a_foreign_birth_nearer_than_ours_keeps_the_team_excluded(
     world = _aged_sibling_world(tmp_path, monkeypatch)
     _own_keyless_clear(world, sibling_born_at=_ONE_SECOND_EARLIER)
     assert _team_name() == OLD_TEAM
+
+
+def _second_clear_beside_a_sibling(world, *, sibling_successor=True):
+    """Two /clears in this process: the first clear-born life (same key)
+    was born 0 s from the keyless sibling leader's end and ended at our
+    own clear an hour later. The sibling's keyless successor was born 4 s
+    from that end and is live (when ``sibling_successor``)."""
+    _set_own_key(world, OWN_KEY)
+    write_journal(world.session_dir, [
+        {"type": "session_start", "session_id": OLD_SID, "ts": _AN_HOUR_LATER,
+         "project_dir": str(world.project_dir), "source": "clear"},
+        "task_metadata_snapshot",
+    ])
+    _pact_session(world, FIRST_LIFE_SID, team="session-a1a1a1a1", key=OWN_KEY,
+                  born="clear", born_at=_CLEAR_AT, ended=True,
+                  ended_at=_AN_HOUR_LATER)
+    _pact_session(world, SECOND_SID, team=SECOND_TEAM, ended=True,
+                  ended_at=_CLEAR_AT)
+    if sibling_successor:
+        _pact_session(world, SIBLING_CLEAR_SID, team="session-b2b2b2b2",
+                      born="clear", born_at=_FOUR_SECONDS_LATER)
+
+
+def test_an_ended_earlier_life_is_never_our_birth(tmp_path, monkeypatch):
+    """Our first clear-born life is ended and is not our own dir, so its
+    birth, though nearest the sibling leader's end, never claims that
+    leader as our predecessor: the live sibling successor holds the team."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _second_clear_beside_a_sibling(world)
+    assert _team_name() == OLD_TEAM
+    assert _verb_refusal(monkeypatch, SECOND_TEAM) == _OWNED
+
+
+def test_without_the_sibling_successor_the_ended_leader_s_team_is_free(
+        tmp_path, monkeypatch):
+    """Control: the same two /clears with no live sibling successor; nothing
+    holds the ended leader's team, so the census picks it."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _second_clear_beside_a_sibling(world, sibling_successor=False)
+    assert _team_name() == SECOND_TEAM
+    assert _verb_refusal(monkeypatch, SECOND_TEAM) == ""
 
 
 def test_the_clear_births_are_read_once_per_census(tmp_path, monkeypatch):
