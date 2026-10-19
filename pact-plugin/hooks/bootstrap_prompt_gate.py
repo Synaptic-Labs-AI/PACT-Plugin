@@ -425,7 +425,8 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
                     recorded_session_id(content) != session_id
                 ):
                     claim = check_resume_state(
-                        _extract_prev_session_dir(env_project_dir)
+                        _extract_prev_session_dir(env_project_dir),
+                        launch=True,
                     )
                 if block.state not in (State.FOUND, State.ABSENT):
                     # Not read and not rewritten, and nothing is locked or

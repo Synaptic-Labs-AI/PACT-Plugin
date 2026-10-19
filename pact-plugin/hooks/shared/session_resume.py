@@ -20,6 +20,7 @@ Manages:
 from __future__ import annotations
 
 import errno
+import json
 import os
 import re
 import sys
@@ -48,6 +49,7 @@ from shared.failure_cause import failure_cause
 from shared.handoff_schema import resolve_handoff_field
 from shared.pact_context import _build_session_path, project_slug
 from shared.paths import get_claude_config_dir
+from shared.session_state import is_safe_path_component
 from shared.stale_session import recorded_session_id, session_block_rows
 from shared.task_utils import iter_team_task_jsons
 from shared.session_journal import (
@@ -1208,15 +1210,127 @@ RESUMPTION_MARKER_MISSING_DIRECTIVE = (
 )
 
 
+def _same_dir(a: str | None, b: str | None) -> bool:
+    """True when both paths are set and name the same directory once each
+    is resolved (a ``~`` prefix, a trailing slash or a symlinked parent
+    spells one directory several ways). Never raises."""
+    try:
+        if not a or not b:
+            return False
+        return os.path.realpath(os.path.expanduser(a)) == os.path.realpath(
+            os.path.expanduser(b)
+        )
+    except Exception:
+        return False
+
+
+def open_workflow_phases(session_dir: str) -> list[str]:
+    """The workflow phases a session left started and unfinished.
+
+    Reads the phase_transition events after the journal's last
+    session_consolidated, keeps each phase's last status, and returns the
+    phases whose last status is ``started``, in the order they first
+    appeared. Pure; ``[]`` on any error.
+    """
+    try:
+        last_status: dict[str, str] = {}
+        for event in read_events_from(session_dir):
+            kind = event.get("type")
+            if kind == "session_consolidated":
+                last_status = {}
+            elif kind == "phase_transition":
+                phase = event.get("phase")
+                if isinstance(phase, str) and phase:
+                    last_status[phase] = event.get("status")
+        return [p for p, s in last_status.items() if s == "started"]
+    except Exception:
+        return []
+
+
+def _saved_team_of(session_dir: str) -> str:
+    """The team_name in session_dir's context file when it is a safe path
+    component, else ``""``. Never raises."""
+    try:
+        data = json.loads(
+            (Path(session_dir) / "pact-session-context.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        team = data.get("team_name") if isinstance(data, dict) else None
+        return team if is_safe_path_component(team) else ""
+    except Exception:
+        return ""
+
+
+def _session_ended(session_dir: str) -> bool:
+    """True when session_dir's journal holds a session_end after its last
+    session_start. Never raises."""
+    try:
+        ended = False
+        for event in read_events_from(session_dir):
+            kind = event.get("type")
+            if kind == "session_start":
+                ended = False
+            elif kind == "session_end":
+                ended = True
+        return ended
+    except Exception:
+        return False
+
+
+def _in_flight_prompt(
+    claim_dir: str,
+    own_session_dir: str | None,
+    own_saved_team: str | None,
+) -> str | None:
+    """The resume prompt for work a session left in flight, or None.
+
+    The team is the claim dir's recorded team, read before this launch
+    rewrites it: for this session's own dir that is ``own_saved_team``, the
+    value the caller read first. Another session's dir counts only once that
+    session has ended, so a live parallel session is never read as this
+    one's predecessor.
+    """
+    own = _same_dir(claim_dir, own_session_dir)
+    if not own and not _session_ended(claim_dir):
+        return None
+    team = (own_saved_team or "") if own else _saved_team_of(claim_dir)
+    if not is_safe_path_component(team):
+        team = ""
+    phases = open_workflow_phases(claim_dir)
+    ids = in_progress_task_ids(team) if team else []
+    if not phases and not ids:
+        return None
+    phase_text = ", ".join(_sanitize_prompt_field(p) for p in phases) or "none"
+    id_text = ", ".join(_sanitize_prompt_field(i) for i in ids) or "none"
+    team_text = _sanitize_prompt_field(team) if team else "none"
+    return (
+        f"Work was in progress when this session last ran: phases "
+        f"{phase_text}; in-progress tasks {id_text} in `tasks/{team_text}/`. "
+        f"Treat this as a resume."
+    )
+
+
 def check_resume_state(
     prev_session_dir: str | None = None,
+    *,
+    launch: bool = False,
+    own_session_dir: str | None = None,
+    own_saved_team: str | None = None,
 ) -> str | None:
-    """Unified resume-claim resolver over {session_paused, session_refreshed}.
+    """Unified resume-claim resolver over {session_paused, session_refreshed},
+    plus work left in flight on a launch.
 
     Single public seam: session_init step 8 calls THIS (and only this).
     Single-dir signature is sufficient for all three paths: post-compact and
     same-session --resume, prev_session_dir self-resolves to the CURRENT
     session dir; the quit path reads one hop back.
+
+    On a launch (``launch`` True: a startup or a resume, never a compaction
+    or a clear), when neither claim survives, a third arm with the lowest
+    precedence reports work left in flight: phases started and unfinished,
+    or in-progress tasks in the claim dir's recorded team. It returns None
+    when there is none.
 
     The two per-event-type interpreters stay SEPARATE functions because
     their fail directions are opposite and must never share a predicate:
@@ -1228,17 +1342,22 @@ def check_resume_state(
 
     Args:
         prev_session_dir: Previous session's directory path (from CLAUDE.md).
+        launch: True on a startup or resume; enables the third arm.
+        own_session_dir: This session's directory.
+        own_saved_team: This session's recorded team, read before this
+            launch rewrote it.
 
     Returns:
         The winning resume prompt, or None when no claim survives.
     """
     if not prev_session_dir:
         return None
-    paused = read_last_event_from(prev_session_dir, "session_paused")
-    refreshed = read_last_event_from(prev_session_dir, "session_refreshed")
-    if refreshed is not None and _refresh_is_spent(prev_session_dir, refreshed):
+    claim_dir = prev_session_dir
+    paused = read_last_event_from(claim_dir, "session_paused")
+    refreshed = read_last_event_from(claim_dir, "session_refreshed")
+    if refreshed is not None and _refresh_is_spent(claim_dir, refreshed):
         refreshed = None
-    if paused is not None and _pause_is_spent(prev_session_dir, paused):
+    if paused is not None and _pause_is_spent(claim_dir, paused):
         paused = None
     paused_msg = (
         _interpret_paused_event(paused) if paused is not None else None
@@ -1249,7 +1368,11 @@ def check_resume_state(
     # Each message exists only when its event does; the None checks say so.
     if paused is not None and refreshed is not None and paused_msg and refresh_msg:
         return _arbitrate(paused, paused_msg, refreshed, refresh_msg)
-    return refresh_msg or paused_msg
+    if refresh_msg or paused_msg:
+        return refresh_msg or paused_msg
+    if not launch:
+        return None
+    return _in_flight_prompt(claim_dir, own_session_dir, own_saved_team)
 
 
 def _sanitize_prompt_field(

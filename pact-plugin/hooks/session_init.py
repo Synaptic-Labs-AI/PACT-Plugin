@@ -2337,7 +2337,14 @@ def main():
         # frame must not receive the lead's resume prompt. Gate the check
         # itself so a non-lead frame does no journal read either.
         if frame_is_lead:
-            resume_msg = check_resume_state(prev_session_dir=prev_session_dir)
+            # A launch also reports work the previous run left in flight. Its
+            # team is the one recorded before this run rewrote the record.
+            resume_msg = check_resume_state(
+                prev_session_dir=prev_session_dir,
+                launch=source in ("startup", "resume"),
+                own_session_dir=session_dir,
+                own_saved_team=saved.get("team_name"),
+            )
             if resume_msg:
                 context_parts.append(resume_msg)
                 # Record that a resumption claim SURFACED, in THIS session's

@@ -276,7 +276,8 @@ class TestMainPausedStateIntegration:
                 main()
 
         assert exc_info.value.code == 0
-        mock_paused.assert_called_once_with(prev_session_dir=None)
+        mock_paused.assert_called_once()
+        assert mock_paused.call_args.kwargs["prev_session_dir"] is None
 
         output = json.loads(mock_stdout.getvalue())
         additional = output["hookSpecificOutput"]["additionalContext"]
@@ -553,9 +554,11 @@ class TestMainPrevSessionDirOrdering:
             restore_calls.append(prev_session_dir)
             return real_restore_last_session(prev_session_dir=prev_session_dir)
 
-        def spy_check_resume_state(prev_session_dir=None):
+        def spy_check_resume_state(prev_session_dir=None, **kwargs):
             resume_calls.append(prev_session_dir)
-            return real_check_resume_state(prev_session_dir=prev_session_dir)
+            return real_check_resume_state(
+                prev_session_dir=prev_session_dir, **kwargs
+            )
 
         # Patch boundary side effects that are unrelated to the ordering invariant:
         #   - setup_plugin_symlinks / remove_stale_kernel_block / update_pact_routing /
