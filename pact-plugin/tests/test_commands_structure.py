@@ -1385,10 +1385,12 @@ class TestBootstrapPauseConsumptionClauses:
 
     THE STRUCTURAL ONE NEEDS NO EVENT. `session_init` writes the marker into
     the CURRENT session's journal via the implicit `append_event`, while
-    `check_resume_state` reads the claim from `prev_session_dir`, and
-    `_journal_path_from` joins the directory it is handed with no ancestor
-    resolution. So a single freeze cannot outlive its own session, and a claim
-    is visible one hop back and no further — with or without any consumption.
+    `check_resume_state` reads the claim from the directory `_claim_dir`
+    returns: `prev_session_dir`, or an earlier session when every session in
+    between did nothing (each event in its journal is one a zero-turn launch
+    writes), at most three back. So a single freeze cannot outlive its own
+    session, and a claim is visible only across sessions that did nothing —
+    with or without any consumption.
 
     THE EVENT'S OWN BOUND IS REAL AND PATH-DEPENDENT. It retires the claim, so
     it decides whether the prompt re-surfaces AND whether a NEW freeze is minted
@@ -1397,8 +1399,10 @@ class TestBootstrapPauseConsumptionClauses:
     and same-session `--resume` case: measured, a later session reading that
     journal one hop back surfaces nothing and does not freeze, where without the
     consumption it surfaces and freezes. On the quit-then-new-session path the
-    consumption lands in the NEW session's journal and retires nothing; there
-    the one-hop bound alone ends it.
+    consumption lands in the NEW session's journal and retires nothing in the
+    claim's own journal; it ends the claim anyway, because a consumption event
+    is not one a zero-turn launch writes, so it stops every later walk at the
+    session that holds it and the claim behind it is never reached again.
 
     THAT BOUND IS PER CLAIM, AND CLAIMS ARE MINTED PER SESSION — do not read
     it as a bound on what a user experiences. `wrap-up` branch C writes a
