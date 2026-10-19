@@ -13,13 +13,16 @@ decide, or nothing is wrong, nothing is said.
 Real path derivations throughout (tests/fixtures/team_split.py); the hooks'
 main() runs in process with nothing stubbed.
 
-Counter-tests, measured by source-only revert of each mechanism in a scratch
-copy (cardinality of this file's 11-case run): dropping session_init's
-emission -> 2 failed; dropping the explanation's one-match silence, its
-team-activity check or its config-present check -> 1 failed each; dropping
-the dispatch gate's diagnosis arm, or its config-absent condition -> 1
-failed each; dropping the ambiguity notice -> 1 failed; dropping the
-ambiguity notice's team-activity check -> 1 failed.
+Counter-tests, measured by source-only mutation in a scratch copy
+(cardinality of this file's run, 13 cases):
+  drop session_init's line -> 2 failed
+  the describer: drop its team-activity check -> 3 failed; its
+    config-present check -> 1 failed; its one-match silence -> 1 failed;
+    the zero-candidate instruction -> 1 failed
+  drop the ambiguity notice -> 1 failed
+  the dispatch denial: an empty detail -> 1 failed (each part of the
+    explanation is asserted on its own); no bare-sentence fallback ->
+    1 failed; the diagnosis on a team whose config exists -> 1 failed
 """
 
 import io
@@ -143,24 +146,59 @@ def test_the_explanation_is_empty_while_one_team_matches(tmp_path, monkeypatch):
     reset_context_module()
     ctx_module.init({"session_id": OLD_SID})
     assert ctx_module.get_pact_context()["team_name"] == OLD_TEAM
-    assert ctx_module.describe_team_alignment() == ""
+    result = ctx_module.describe_team_alignment()
+    assert (result.state, result.text) == ("resolved", "")
+
+
+def test_no_live_candidate_gets_the_recovery_instruction(tmp_path, monkeypatch):
+    """The recorded team's config is gone and no live team exists at all:
+    the explanation says so and tells the lead what to do, rather than
+    leaving the state with no instruction."""
+    import shared.pact_context as ctx_module
+    split_world(tmp_path, monkeypatch, live_team=None)
+    reset_context_module()
+    ctx_module.init({"session_id": OLD_SID})
+    result = ctx_module.describe_team_alignment()
+    assert result.state == "no_candidates"
+    assert _NO_CONFIG in result.text and "No live candidate teams" in result.text
+    assert "team-split recovery" in result.text
 
 
 # -- dispatch denial ----------------------------------------------------------
 
 
+_FALLBACK = f"teams/{OLD_TEAM}/config.json` is absent."
+
+
 def test_a_denial_for_a_team_without_config_says_so(tmp_path, monkeypatch):
     """Two live teams match, so the gate stays on the recorded team and
-    denies: the denial names the absent config before the generic causes,
-    while the journaled reason stays the base text."""
+    denies. The denial explains it before the generic causes: the recorded
+    team has no config, and each live candidate team is named. The bare
+    fallback sentence is not used when there is an explanation. The
+    journaled reason stays the base text."""
     world = split_world(tmp_path, monkeypatch, second_corroborated=True)
     reason = _deny_reason(monkeypatch, world)
+    head = reason[:reason.find("KNOWN CAUSES")]
     assert "no Task assigned" in reason
-    assert _NO_CONFIG in reason or f"teams/{OLD_TEAM}/config.json` is absent" in reason
-    assert reason.find(OLD_TEAM) < reason.find("KNOWN CAUSES")
+    assert _NO_CONFIG in head
+    assert NEW_TEAM in head and SECOND_TEAM in head
+    assert _FALLBACK not in reason
     decisions = [e for e in read_journal(world.session_dir)
                  if e.get("type") == "dispatch_decision"]
     assert decisions and _NO_CONFIG not in json.dumps(decisions[-1])
+
+
+def test_a_denial_with_nothing_to_explain_still_names_the_absent_config(
+        tmp_path, monkeypatch):
+    """The recorded team's config is gone but the session never lived as a
+    team, so there is no explanation to give: the denial still says the
+    config is absent, in one bare sentence."""
+    world = split_world(tmp_path, monkeypatch, second_corroborated=True,
+                        journal=("variety_assessed",))
+    reason = _deny_reason(monkeypatch, world)
+    assert "no Task assigned" in reason
+    assert _FALLBACK in reason[:reason.find("KNOWN CAUSES")]
+    assert _NO_CONFIG not in reason
 
 
 def test_a_denial_for_a_team_with_config_adds_nothing(tmp_path, monkeypatch):

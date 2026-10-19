@@ -182,7 +182,12 @@ try:
         expected_marker_signature,
     )
     from shared.session_journal import read_last_event_from
-    from shared.session_resume import record_team_realign, update_session_info
+    from shared.session_resume import (
+        read_session_started,
+        record_team_realign,
+        recorded_team_of,
+        update_session_info,
+    )
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_advisory("module imports", _module_load_error)
 
@@ -455,8 +460,11 @@ def _write_back_aligned_team_name(input_data: dict) -> None:
         # record (the context file) already correct — the worst residual is a
         # stale cosmetic CLAUDE.md line, self-healed on the next prompt. So the
         # non-atomicity is safe by construction, not an accepted risk.
+        # A realign is not a session start: keep the recorded start in both
+        # the context file and the CLAUDE.md Started line.
         pact_context.write_context(
-            aligned, session_id, pact_context.get_project_dir(), plugin_root
+            aligned, session_id, pact_context.get_project_dir(), plugin_root,
+            started_at=pact_context.get_pact_context().get("started_at") or None,
         )
 
         # CLAUDE.md write-back: exists()-guard BEFORE update_session_info so we
@@ -492,7 +500,10 @@ def _write_back_aligned_team_name(input_data: dict) -> None:
             return
         # Present: rewrite the whole managed session block with the aligned
         # team name + the full correct tuple.
-        update_session_info(session_id, aligned, session_dir, plugin_root)
+        update_session_info(
+            session_id, aligned, session_dir, plugin_root,
+            started=read_session_started(project_dir),
+        )
     except Exception as e:
         print(
             f"bootstrap_marker_writer: team-name write-back failed: {e}",
@@ -504,16 +515,17 @@ def _realign_team(input_data: dict) -> str | None:
     """Run the team write-back and report a move, for a lead frame.
 
     Reads the recorded team before and after _write_back_aligned_team_name.
-    When it moved from one team to another, appends team_realigned and returns
-    the lead notice; otherwise returns None. write_context refreshes the
-    context cache, so the second read sees the new value.
+    When it moved from one team to another, records the move and returns the
+    lead notice; otherwise returns None. The second read is from the context
+    file, not the cache: write_context updates the cache even when its write
+    to disk fails, and a move the disk does not show is no move.
 
     Never raises: the marker write after it is the load-bearing action.
     """
     try:
         before = pact_context.get_pact_context().get("team_name", "").lower()
         _write_back_aligned_team_name(input_data)
-        after = pact_context.get_pact_context().get("team_name", "").lower()
+        after = recorded_team_of(pact_context.get_session_dir()).lower()
         if not before or not after or before == after:
             return None
         return record_team_realign(before, after)
@@ -528,36 +540,13 @@ def _realign_team(input_data: dict) -> str | None:
 def _ambiguity_notice() -> str | None:
     """The lead notice for a team the census cannot decide, or None.
 
-    Fires when the recorded team is still the resolved one (nothing
-    realigned), its config is absent, this session's journal shows team
-    activity (the census trigger), and two or more live teams corroborate as
-    this session's. Zero or one corroborated candidate emits nothing. Never
+    The text is the shared describer's when it finds two or more live teams
+    that match this session; every other state emits nothing here. Never
     raises.
     """
     try:
-        team = pact_context.get_pact_context().get("team_name", "").lower()
-        if not team or pact_context.get_team_name() != team:
-            return None
-        teams_root = pact_context.get_claude_config_dir() / "teams"
-        if (teams_root / team / "config.json").exists():
-            return None
-        if not pact_context._journal_has_team_activity():
-            return None
-        names = [
-            name
-            for name, is_corroborated, _ in pact_context._resume_census_candidates(
-                teams_root, pact_context.get_session_id()
-            )
-            if is_corroborated
-        ]
-        if len(names) < 2:
-            return None
-        listed = ", ".join(f"`{name}`" for name in names)
-        return (
-            f"PACT cannot tell which team is this session's: {listed}. "
-            f"Do not spawn. Follow the team-split recovery in "
-            f"`pact-state-recovery.md`."
-        )
+        alignment = pact_context.describe_team_alignment()
+        return alignment.text if alignment.state == "ambiguous" else None
     except Exception:
         return None
 

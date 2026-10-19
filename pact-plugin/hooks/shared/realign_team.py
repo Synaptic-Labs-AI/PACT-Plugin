@@ -3,9 +3,17 @@ Location: pact-plugin/hooks/shared/realign_team.py
 Summary: The lead-run team realign. Records a named team as this session's
          team (the session context file, the project CLAUDE.md ``- Team:``
          line, and a ``team_realigned`` journal event) after corroborating it
-         as this session's, or refuses with exit code 2.
-Used by: the lead, from the team-split step in state recovery:
+         as this session's, or refuses with exit code 3.
+Used by: the lead, from the team-split recovery in state recovery:
          cd "{plugin_root}/hooks" && python3 -m shared.realign_team --team <name>
+
+Exit codes: 0 done (including a team that was already recorded), 2 a usage
+error (argparse), 3 a refusal (reason on stderr, nothing written).
+
+Lead only. An in-process teammate runs inside the lead's process, so its
+environment is the lead's: $CLAUDE_CODE_SESSION_ID, $CLAUDE_PID and
+$CLAUDE_CODE_AGENT are all the lead's values, and no check here can tell the
+two apart. The refusal and help texts say so instead.
 
 No hook imports this module, and it must stay that way: it imports
 claude_md_manager, session_journal and session_resume, and any module that
@@ -34,19 +42,23 @@ from shared import (
     session_state,
 )
 
+EXIT_REFUSED = 3
+LEAD_ONLY = "Only the lead runs this command; a teammate never does."
+
 
 def refusal_reason(team_name: str) -> str:
     """The reason to refuse ``team_name``, or '' to accept it.
 
     Corroborates the named team as this session's at write time, because
     every later keep (a compaction) trusts the recorded team without
-    re-checking it: a lead context must exist for $CLAUDE_CODE_SESSION_ID
-    (a session check: an in-process teammate shares that id and passes it
-    too); the name must be one path segment; teams/<name>/config.json must
-    parse; its leadAgentId must end in "@<name>" and name a member; and that
-    member's cwd must equal the recorded project_dir after os.path.realpath
-    on both sides. The live cwd is not an anchor: the command runs from the
-    plugin's hooks dir, which is never a lead's cwd.
+    re-checking it: a lead context must exist for $CLAUDE_CODE_SESSION_ID;
+    the name must be one path segment; no team config may name this session
+    as its lead unless it is this team; no other PACT session may own the
+    team; teams/<name>/config.json must parse; its leadAgentId must end in
+    "@<name>" and name a member; and that member's cwd must equal the
+    recorded project_dir after os.path.realpath on both sides. The live cwd
+    is not an anchor: the command runs from the plugin's hooks dir, which is
+    never a lead's cwd.
     """
     sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
     pact_context.init({"session_id": sid})
@@ -55,6 +67,11 @@ def refusal_reason(team_name: str) -> str:
         return "no PACT lead context for this session"
     if not session_state.is_safe_path_component(team_name):
         return "unsafe team name"
+    own_team = pact_context.identity_matched_team(sid)
+    if own_team and own_team.casefold() != team_name.casefold():
+        return f"this session leads team {own_team}"
+    if pact_context.team_owned_by_other_pact_session(team_name, sid):
+        return "another PACT session owns this team"
     try:
         config = json.loads(
             (paths.get_claude_config_dir() / "teams" / team_name / "config.json")
@@ -83,60 +100,82 @@ def refusal_reason(team_name: str) -> str:
     return ""
 
 
-def realign_team(team_name: str) -> int:
-    """Record ``team_name`` as this session's team and return the exit code:
-    2 on a refusal (reason on stderr, nothing written), 0 otherwise.
-
-    Writes the context file, then the project CLAUDE.md ``- Team:`` line,
-    then appends ``team_realigned`` when the team changed. The CLAUDE.md
-    write follows the same two preconditions as the per-prompt write-back in
+def _write_team_line(session_id: str, team_name: str, session_dir: str,
+                     plugin_root: str) -> None:
+    """Write the project CLAUDE.md ``- Team:`` line, keeping its Started
+    value. Follows the same two preconditions as the per-prompt write-back in
     bootstrap_marker_writer: the file must already exist (update_session_info
     creates one when it is absent), and the journal must already hold a
-    session_start (until then bootstrap_prompt_gate owns the block).
+    session_start (until then bootstrap_prompt_gate owns the block)."""
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    if not project_dir or not session_dir:
+        return
+    target_file, _source = claude_md_manager.resolve_project_claude_md_path(
+        project_dir
+    )
+    if (target_file.exists()
+            and session_journal.read_last_event_from(
+                session_dir, "session_start") is not None):
+        session_resume.update_session_info(
+            session_id, team_name, session_dir, plugin_root,
+            started=session_resume.read_session_started(project_dir),
+        )
+
+
+def realign_team(team_name: str) -> int:
+    """Record ``team_name`` as this session's team and return the exit code:
+    3 on a refusal (reason on stderr, nothing written), 0 otherwise.
+
+    Writes the context file (keeping its started_at), then the project
+    CLAUDE.md ``- Team:`` line, then the ``team_realigned`` event when the
+    team changed. Names compare casefolded. A team that is already recorded
+    still gets its CLAUDE.md line written, which repairs a line an earlier
+    run could not write.
     """
     reason = refusal_reason(team_name)
     if reason:
-        print(f"realign refused: {reason}", file=sys.stderr)
-        return 2
+        print(f"realign refused: {reason}. {LEAD_ONLY}", file=sys.stderr)
+        return EXIT_REFUSED
     context = pact_context.get_pact_context()
     previous = context.get("team_name", "")
-    if previous == team_name:
-        print(f"realign: team is already {team_name}")
-        return 0
     session_id = context["session_id"]
     plugin_root = context.get("plugin_root", "")
-    pact_context.write_context(
-        team_name, session_id, context.get("project_dir", ""), plugin_root
-    )
-    session_dir = pact_context.get_session_dir()
-
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    if project_dir and session_dir:
-        target_file, _source = claude_md_manager.resolve_project_claude_md_path(
-            project_dir
+    unchanged = previous.casefold() == team_name.casefold()
+    if unchanged:
+        team_name = previous
+    else:
+        # No process_key: the file keeps the key a lead hook frame recorded.
+        # This command's parent is a shell, which has no key of its own.
+        pact_context.write_context(
+            team_name, session_id, context.get("project_dir", ""), plugin_root,
+            started_at=context.get("started_at") or None,
         )
-        if (target_file.exists()
-                and session_journal.read_last_event_from(
-                    session_dir, "session_start") is not None):
-            session_resume.update_session_info(
-                session_id, team_name, session_dir, plugin_root
-            )
-    if not session_journal.append_event(
-        session_journal.make_event(
-            "team_realigned", **{"from": previous, "to": team_name}
-        ),
-        session_dir=session_dir or None,
-    ):
-        print("realign: team_realigned journal event was not recorded", file=sys.stderr)
+    session_dir = pact_context.get_session_dir()
+    _write_team_line(session_id, team_name, session_dir, plugin_root)
+    if unchanged:
+        print(f"realign: team is already {team_name}")
+        return 0
+    outcome = session_resume.append_team_realigned(
+        previous, team_name, session_dir=session_dir or None
+    )
     print(f"realign: team is now {team_name} (was {previous or 'unset'})")
+    if outcome == session_resume.REALIGN_NOT_A_SPLIT:
+        print(f"realign: {previous or 'the earlier team'} never existed; "
+              "there is nothing to carry across")
+    elif outcome == session_resume.REALIGN_FAILED:
+        print(f"realign: team_realigned was not recorded; the earlier team "
+              f"is {previous}", file=sys.stderr)
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python3 -m shared.realign_team",
-        description="Record the team this PACT session belongs to.",
+        description=(
+            "Record the team this PACT session belongs to. " + LEAD_ONLY
+        ),
         epilog=(
+            "exit codes: 0 done, 2 usage error, 3 refused. "
             'example: cd "<plugin_root>/hooks" && '
             "python3 -m shared.realign_team --team session-1a2b3c4d"
         ),

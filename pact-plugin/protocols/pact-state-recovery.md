@@ -98,20 +98,21 @@ Events are JSONL entries with common fields `v` (schema version), `type`, and `t
 2. `TaskList` → task summaries (status, blocking, ownership)
 3. The task file on disk (`cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team_name}/{taskId}.json" | jq .metadata.<key>`) → metadata if task files still exist; `TaskGet` does NOT surface it
 4. Journal is authoritative when task metadata is unavailable
-5. If the journal's latest `team_realigned` event names a `from` store whose in-flight tasks you have not re-created, run the team-split recovery below from its step 2. Skip tasks already re-created: their description cites the old id.
+5. If the journal's latest `team_realigned` event names a `from` store whose in-flight tasks you have not re-created, run the team-split recovery below from its step 3. Skip tasks already re-created: their description cites the old id.
 
 **In-flight work detection** (via `check_resume_state`, on a new or resumed session when no paused or refreshed prompt surfaced):
 
 1. Read the open workflow phases (a `phase_transition` started and not completed since the last `session_consolidated`) and the in-progress tasks in the previous session's team store
 2. Either present → return a prompt naming them; treat it as a resume
 
-**Team-split recovery** (when a realign notice says PACT moved this session to another team, or an ambiguity notice says PACT cannot tell which team is this session's):
+**Team-split recovery** (when a notice, a SessionStart line or a refused spawn says PACT moved this session to another team, says PACT cannot tell which team is this session's, or says PACT's recorded team has no config):
 
-1. Ambiguity notice: do not spawn. Put the named teams to the user with `AskUserQuestion`, then run `cd "{plugin_root}/hooks" && python3 -m shared.realign_team --team <chosen team>`. On a nonzero exit, report its reason to the user and do not spawn.
-2. Read the latest `team_realigned` event: `python3 "{plugin_root}/hooks/shared/session_journal.py" read --session-dir '{session_dir}' --type team_realigned`. Its `from` is the earlier team. Its `to` is this session's team: use it as `{team_name}` from here on, in place of any team name the SessionStart context gave.
-3. `TaskList` shows only `{team_name}`'s tasks. Read the in-progress tasks in `{config_dir}/tasks/{from}/` (the realign notice lists their ids), and re-create in `{team_name}` with `TaskCreate` each one whose work is still in flight, carrying its subject, description, owner and, on a work task, its `variety` stamp, and citing its `tasks/{from}/` id in the new description. Reference a submitted teachback or handoff you still need by its old task-file path. Do not edit or delete the files in `tasks/{from}/`.
-4. When you re-create a teachback task and the work task it gates, link them again: `TaskUpdate(<teachback id>, addBlocks=[<work id>])` and `TaskUpdate(<work id>, addBlockedBy=[<teachback id>])`. Finish steps 3 and 4 for every in-flight task before you spawn a specialist for any of them.
-5. At the next harvest, tell the secretary the journal holds a `team_realigned` event; the harvest reads `tasks/{from}/` as well.
+1. Recorded team without a config, and no live candidate team that matches this session: run bootstrap Step 2's `TaskCreate` and `TaskUpdate` for the secretary, then spawn it. That `TaskCreate` creates the platform team's task store, and PACT resolves the team from it. If a realign notice follows, continue from step 3; otherwise the recovery is done. If the spawn is refused, report the refusal to the user and stop.
+2. Ambiguity notice: do not spawn. Put the named teams to the user with `AskUserQuestion`, then run `cd "{plugin_root}/hooks" && python3 -m shared.realign_team --team <chosen team>`. Only the lead runs this command; a teammate never does. On a nonzero exit, report its reason to the user and do not spawn. If it reports nothing to carry across, the recovery is done.
+3. Read the latest `team_realigned` event: `python3 "{plugin_root}/hooks/shared/session_journal.py" read --session-dir '{session_dir}' --type team_realigned`. Its `from` is the earlier team. Its `to` is this session's team: use it as `{team_name}` from here on, in place of any team name the SessionStart context gave.
+4. `TaskList` shows only `{team_name}`'s tasks. Read the in-progress tasks in `{config_dir}/tasks/{from}/` (the realign notice lists their ids), and re-create in `{team_name}` with `TaskCreate` each one whose work is still in flight, carrying its subject, description, owner and, on a work task, its `variety` stamp, and citing its `tasks/{from}/` id in the new description. Reference a submitted teachback or handoff you still need by its old task-file path. Do not edit or delete the files in `tasks/{from}/`.
+5. When you re-create a teachback task and the work task it gates, link them again: `TaskUpdate(<teachback id>, addBlocks=[<work id>])` and `TaskUpdate(<work id>, addBlockedBy=[<teachback id>])`. Finish steps 4 and 5 for every in-flight task before you spawn a specialist for any of them.
+6. At the next harvest, tell the secretary the journal holds a `team_realigned` event; the harvest reads `tasks/{from}/` as well.
 
 ### Crash Recovery
 

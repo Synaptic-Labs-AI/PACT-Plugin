@@ -818,10 +818,13 @@ def _compose_deny_diagnosis(
     arguments alone.
 
     On rule ⑧ it also calls ``_team_alignment_diagnosis``: one ``exists()``
-    on the session team's config and, only when that config is absent, the
-    journal read and the ``teams/`` listing of ``describe_team_alignment``.
-    Every read is bounded (one journal, one directory listing) and never
-    raises, so it cannot become a fail-open hang. Writing "no I/O" here
+    on the session team's config and, only when that config is absent,
+    ``describe_team_alignment``. That lists ``teams/``, reads one
+    ``config.json`` per team dir, and reads this session's journal: once for
+    the team-activity witness and again for each candidate whose lead ran in
+    this project. Each read is of a file that already exists and nothing
+    raises out of it, so it cannot become a fail-open hang; a long journal
+    makes the deny slower, not open. Writing "no I/O" here
     would be false, and would invite a future author to relocate this call
     somewhere a read is unsafe.
 
@@ -871,9 +874,10 @@ def _team_alignment_diagnosis() -> str:
     deny, or ``""``.
 
     Empty unless ``teams/<session team>/config.json`` is absent. Then it is
-    ``describe_team_alignment()`` (the recorded team and each live candidate
-    with its verdict), or a bare statement that the config is absent when
-    that returns nothing. Never raises: ``""`` on any error.
+    the shared describer's text (the recorded team, each live candidate with
+    its verdict, and what to do), or a bare statement that the config is
+    absent when the describer has nothing to explain. Never raises: ``""``
+    on any error.
     """
     try:
         team = pact_context.get_team_name()
@@ -881,7 +885,7 @@ def _team_alignment_diagnosis() -> str:
             return ""
         if (get_claude_config_dir() / "teams" / team / "config.json").exists():
             return ""
-        detail = pact_context.describe_team_alignment()
+        detail = pact_context.describe_team_alignment().text
         return "\n\n" + (detail or f"`teams/{team}/config.json` is absent.")
     except Exception:
         return ""

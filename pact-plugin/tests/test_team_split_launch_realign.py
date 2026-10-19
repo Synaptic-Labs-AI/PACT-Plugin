@@ -18,14 +18,18 @@ session_init.main() and bootstrap_marker_writer.main() run in process over
 the real path derivations (tests/fixtures/team_split.py), with nothing
 stubbed except where a cell names the seam it removes.
 
-Counter-tests, measured by source-only mutation of session_init.py
+Counter-tests, measured by source-only mutation in a scratch copy
 (cardinality of this file's run, 13 cases):
   remove the launch record -> 6 failed (both resume arms, the first-prompt
     and second-launch arms, both compaction arms)
-  record on every source, clear included -> 1 failed (the clear control)
   drop the config check on the new team -> 1 failed (the stale fallback)
   compare against the in-memory team instead of the persisted one ->
     1 failed (the persist that did not land)
+  drop the /clear carry-over -> 1 failed (the clear cell's precondition)
+  record on every source -> 0 failed: EQUIVALENT on every reachable shape.
+    Only a resume or a compaction keeps the session id, and both already
+    record; startup, clear and fork get a new id with no saved record, so
+    the source gate never changes the outcome.
 """
 
 import io
@@ -48,6 +52,9 @@ from fixtures.team_split import (
     OLD_TEAM,
     read_journal,
     reset_context_module,
+    clear_frame,
+    clear_world,
+    recorded_team,
     saved_team_name,
     split_world,
 )
@@ -171,6 +178,9 @@ def test_a_second_launch_on_the_aligned_record_records_nothing_more(
 def test_a_compaction_whose_recorded_team_is_gone_records_the_move(
         tmp_path, monkeypatch, shape):
     world = _split(tmp_path, monkeypatch, saved_team=GONE_TEAM)
+    # The vanished team left its task store behind, as a real split does: a
+    # team with neither a config nor a store is not one the session ran in.
+    (world.tasks / GONE_TEAM).mkdir(parents=True, exist_ok=True)
     context = _run_session_init(
         monkeypatch, world, _launch_frame(world, "compact", shape=shape))
     _assert_recorded(world, context, GONE_TEAM)
@@ -197,12 +207,21 @@ def test_a_resume_on_an_aligned_record_records_nothing(tmp_path, monkeypatch):
     assert "PACT moved this session" not in context
 
 
-def test_a_clear_records_nothing_even_when_the_team_changes(
-        tmp_path, monkeypatch):
-    world = _split(tmp_path, monkeypatch)
-    context = _run_session_init(monkeypatch, world, _launch_frame(world, "clear"))
-    assert saved_team_name(world) == NEW_TEAM, "precondition: the clear moved the record"
-    assert _realigned_events(world) == []
+def test_a_clear_that_carries_the_team_records_nothing(tmp_path, monkeypatch):
+    """A /clear in the measured shape: a new session id and session dir, the
+    earlier session in the same process recorded the platform's team. The new
+    session's record names that team (carried), and no move is journaled or
+    announced, in either session's journal: keeping a team is not a move. A
+    clear has no record of its own to move, so restricting which sources
+    record cannot change this outcome; the source gate has no reachable kill."""
+    world = clear_world(tmp_path, monkeypatch, prev_team=NEW_TEAM)
+    context = _run_session_init(monkeypatch, world,
+                                clear_frame(world, captured_lead_sessionstart_qualified))
+    assert recorded_team(world.clear_dir) == NEW_TEAM, (
+        "precondition: the clear carried the team")
+    moves = [e for d in (world.session_dir, world.clear_dir)
+             for e in read_journal(d) if e.get("type") == "team_realigned"]
+    assert moves == []
     assert "PACT moved this session" not in context
 
 

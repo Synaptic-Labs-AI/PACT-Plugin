@@ -14,14 +14,17 @@ that is still live is never read as finished work.
 session_init.main() runs in process over the real path derivations
 (tests/fixtures/team_split.py); the marker is read back from the journal.
 
-Counter-tests, measured by source-only revert of each mechanism in a scratch
-copy (cardinality of this file's 13-case run): removing the in-flight arm ->
-5 failed; comparing the own dir by raw string -> 1 failed; applying it on every source -> 2 failed (compact, clear); dropping
-the ended-predecessor check -> 1 failed; reading the recorded team after
-this launch rewrote it -> 1 failed; letting the in-flight claim outrank a
-refresh claim -> 1 failed; ignoring unfinished phases -> 2 failed; not
-resetting open phases at a consolidation -> 1 failed; calling the first-prompt
-check without launch=True -> 1 failed.
+Counter-tests, measured by source-only mutation in a scratch copy
+(cardinality of this file's run, 14 cases):
+  remove the in-flight arm -> 7 failed
+  treat a /clear as a launch -> 1 failed (the measured clear shape)
+  drop the ended-predecessor check -> 1 failed
+  read the recorded team after this launch rewrote it -> 1 failed
+  let the in-flight claim outrank a refresh claim -> 1 failed
+  ignore unfinished phases -> 3 failed
+  keep open phases across a consolidation -> 1 failed
+  compare the own dir by raw string -> 1 failed
+  call the first-prompt check without launch=True -> 1 failed
 """
 
 import io
@@ -36,6 +39,8 @@ from fixtures.team_split import (
     NEW_TEAM,
     OLD_SID,
     OLD_TEAM,
+    clear_frame,
+    clear_world,
     read_journal,
     reset_context_module,
     saved_team_name,
@@ -194,14 +199,28 @@ def test_a_resume_with_no_work_in_flight_surfaces_nothing(tmp_path,
     assert _surfaced(world.session_dir) == []
 
 
-@pytest.mark.parametrize("source", ["compact", "clear"])
-def test_a_context_reset_never_surfaces_the_claim(tmp_path, monkeypatch,
-                                                  source):
+def test_a_compaction_never_surfaces_the_claim(tmp_path, monkeypatch):
     """Work in flight, but the session did not launch: no claim."""
     world = _world(tmp_path, monkeypatch, old_tasks=_IN_FLIGHT)
-    context = _run(monkeypatch, world, _frame(world, source))
+    context = _run(monkeypatch, world, _frame(world, "compact"))
     assert _CLAIM not in context
     assert _surfaced(world.session_dir) == []
+
+
+@pytest.mark.parametrize("source,claimed", [("clear", False), ("startup", True)])
+def test_a_clear_never_surfaces_the_work_of_the_session_it_replaced(
+        tmp_path, monkeypatch, source, claimed):
+    """The measured clear shape: a new session id and dir, after a session
+    that ended with tasks in flight in its recorded team's store. A /clear
+    is not a launch, so it claims nothing; a startup in the same place does
+    (the control)."""
+    world = clear_world(tmp_path, monkeypatch, prev_team=OLD_TEAM,
+                        old_tasks=_IN_FLIGHT, live_store_aged=True)
+    frame = clear_frame(world, captured_compaction_lead_sessionstart)
+    frame["source"] = source
+    context = _run(monkeypatch, world, frame)
+    assert (_CLAIM in context) is claimed
+    assert (len(_surfaced(world.clear_dir)) == 1) is claimed
 
 
 def test_the_claim_reads_the_team_recorded_before_this_launch(tmp_path,

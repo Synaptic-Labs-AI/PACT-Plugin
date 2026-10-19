@@ -19,22 +19,27 @@ session_init.main() runs in process over the real path derivations
 cells call that hook's own evaluators, which read the real context file and
 task store.
 
-Counter-tests, measured by source-only revert in a scratch copy (cardinality
-of this file's run, 21 cases):
-  revert session_init.py to the base tree -> 11 failed, 10 passed
-  apply the keep to every source -> 3 failed (resume, startup, clear)
+Counter-tests, measured by source-only mutation in a scratch copy
+(cardinality of this file's run, 22 cases):
+  revert the compaction default to the computed pre-resume name -> 8 failed
+    (both keep cells in both frames, the vanished-and-undecided keep, the
+    no-cwd boundary, the handoff-ordering completion, the wiring deny)
+  apply the keep to every source -> 2 failed (resume, startup)
   keep the recorded team without consulting the resolver -> 1 failed
-  drop the context-module init before the resolve -> 3 failed (the census
-    never runs at SessionStart: neither launch realigns and a vanished
-    recorded team is kept)
+  drop the context-module init before the resolve -> 3 failed (both launch
+    realigns and the vanished-team census winner)
   drop the census's team-activity witness -> 2 failed (the launch control)
   initialise the context module for a rejected session id -> 2 failed
   revert persist_context to always write -> 3 failed (the no-write cells
     and the no-split control)
+  drop the /clear carry-over -> 1 failed (the same-process clear)
+Cells that write a live task before the compaction re-age the live store:
+a fresh store lets the census realign the record and the keep goes untested.
 """
 
 import io
 import json
+import os
 from unittest.mock import patch
 
 import pytest
@@ -44,10 +49,14 @@ from fixtures.role_frames import (
     captured_compaction_teammate_sessionstart,
 )
 from fixtures.team_split import (
+    AGED_MTIME,
     FOREIGN_TEAM,
     NEW_TEAM,
     OLD_SID,
     OLD_TEAM,
+    clear_frame,
+    clear_world,
+    recorded_team,
     reset_context_module,
     saved_team_name,
     split_world,
@@ -86,6 +95,12 @@ def _run_session_init(monkeypatch, world, frame):
         "additionalContext", "")
 
 
+def _age_live_store(world):
+    """Writing a task freshens the live store; age it again, or the census
+    would realign a stale record and the compaction keep would go untested."""
+    os.utime(world.tasks / NEW_TEAM, (AGED_MTIME, AGED_MTIME))
+
+
 def _realigned_world(tmp_path, monkeypatch, **overrides):
     """The record already names the realigned team; its store is idle past
     the recency window, and another project's session is live."""
@@ -120,7 +135,7 @@ def test_a_compaction_that_keeps_the_team_writes_nothing(tmp_path, monkeypatch,
     assert stat_snapshot(world.context_path, world.claude_md) == before
 
 
-@pytest.mark.parametrize("source", ["resume", "startup", "clear"])
+@pytest.mark.parametrize("source", ["resume", "startup"])
 def test_other_sources_re_derive_the_team_as_before(tmp_path, monkeypatch,
                                                      source):
     """Boundary pin of today's launch and clear behaviour in the aged-store
@@ -129,12 +144,31 @@ def test_other_sources_re_derive_the_team_as_before(tmp_path, monkeypatch,
     and re-deriving lands on the pre-resume name. Only a compaction keeps; the
     realign returns through the prompt-time write-back once the live store is
     written again. With a fresh live store a launch realigns instead (the two
-    launch cells below). The clear cell keeps the session id, a shape only:
-    a live /clear gives the frames a NEW session id, and that case is pinned
-    in test_team_split_clear_carryover.py."""
+    launch cells below). A /clear is the cell after this one."""
     world = _realigned_world(tmp_path, monkeypatch)
     _run_session_init(monkeypatch, world, _frame(world, source))
     assert saved_team_name(world) == OLD_TEAM
+
+
+@pytest.mark.parametrize("same_process", [True, False],
+                         ids=["same-process", "another-process"])
+def test_a_clear_takes_its_team_from_the_session_it_replaced(
+        tmp_path, monkeypatch, same_process):
+    """A /clear starts a new session id with no record of its own, so the
+    compaction keep has nothing to keep. In the same claude process the new
+    session takes the team the session it replaced recorded (the platform
+    keeps the team across a clear), and the earlier session's record is not
+    touched. A session left by another process is not adopted: the new
+    session falls back to its computed name."""
+    world = clear_world(tmp_path, monkeypatch, prev_team=NEW_TEAM,
+                        live_store_aged=True, foreign="foreign-cwd",
+                        same_process=same_process)
+    before = stat_snapshot(world.context_path)
+    _run_session_init(monkeypatch, world,
+                      clear_frame(world, captured_compaction_lead_sessionstart))
+    expected = NEW_TEAM if same_process else "session-c1ea0000"
+    assert recorded_team(world.clear_dir) == expected
+    assert stat_snapshot(world.context_path) == before
 
 
 @pytest.mark.parametrize("source", ["startup", "resume"])
@@ -223,6 +257,7 @@ def test_completing_a_task_after_a_compaction_reads_the_realigned_store(
     old_store.mkdir(parents=True, exist_ok=True)
     write_task(old_store, {"id": "20", "owner": "reviewer",
                            "status": "in_progress", "subject": "reviewer: old"})
+    _age_live_store(world)
     _run_session_init(monkeypatch, world, _frame(world, "compact"))
 
     import handoff_ordering_gate
@@ -293,6 +328,7 @@ def test_wiring_an_unstamped_task_after_a_compaction_is_denied(tmp_path,
     _add_specialist_member(world, NEW_TEAM)
     write_task(world.tasks / NEW_TEAM, {
         "id": "30", "status": "pending", "subject": "architect: design"})
+    _age_live_store(world)
     _run_session_init(monkeypatch, world, _frame(world, "compact"))
     reset_context_module()
     verdict = handoff_ordering_gate._evaluate_dispatch_variety(_wiring_frame())

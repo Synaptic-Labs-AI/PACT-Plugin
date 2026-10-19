@@ -450,4 +450,4 @@ def test_a_realign_adds_no_field_to_the_session_context(tmp_path, monkeypatch):
     context = json.loads(world.context_path.read_text(encoding="utf-8"))
     assert context["team_name"] == NEW_TEAM
     assert set(context) == {"team_name", "session_id", "project_dir",
-                            "plugin_root", "started_at"}
+                            "plugin_root", "started_at", "process_key"}

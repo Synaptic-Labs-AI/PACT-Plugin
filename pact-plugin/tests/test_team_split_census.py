@@ -26,9 +26,11 @@ import pytest
 
 from fixtures.team_split import (
     FOREIGN_TEAM,
+    NEW_SID,
     NEW_TEAM,
     OLD_SID,
     OLD_TEAM,
+    SECOND_SID,
     SECOND_TEAM,
     reset_context_module,
     split_world,
@@ -118,3 +120,151 @@ def test_the_second_corroborating_team_sorts_after_the_first(tmp_path):
     so that a take-the-first resolver would return the live team, which the
     cell's recorded-team assertion then rejects."""
     assert sorted([NEW_TEAM, SECOND_TEAM])[0] == NEW_TEAM
+
+
+# -- a team another PACT session owns is never a candidate ---------------------
+
+
+def _give_session_a_pact_dir(world, session_id, slug="other-project"):
+    """A PACT session context for ``session_id``: that session ran PACT."""
+    session_dir = world.root / "pact-sessions" / slug / session_id
+    session_dir.mkdir(parents=True)
+    (session_dir / "pact-session-context.json").write_text(
+        json.dumps({"team_name": "x", "session_id": session_id}),
+        encoding="utf-8")
+
+
+def test_a_sibling_owned_team_never_wins_when_this_sessions_store_idles(
+        tmp_path, monkeypatch):
+    """After a resume, a same-project sibling session's team corroborates
+    beside this session's own re-provisioned team. Once this session's own
+    store idles past the recency window, the sibling's would be the only
+    candidate. The sibling ran PACT, so its team is never a candidate, and
+    the recorded team stands rather than the sibling's."""
+    world = split_world(tmp_path, monkeypatch, live_store_aged=True,
+                        second_corroborated=True)
+    _give_session_a_pact_dir(world, SECOND_SID)
+    assert _team_name() == OLD_TEAM
+
+
+def test_without_its_pact_dir_the_lone_sibling_is_still_picked(
+        tmp_path, monkeypatch):
+    """Control for the cell above: the exclusion is keyed on the sibling's
+    PACT session dir. Without one, the lone corroborating sibling wins."""
+    split_world(tmp_path, monkeypatch, live_store_aged=True,
+                second_corroborated=True)
+    assert _team_name() == SECOND_TEAM
+
+
+def test_a_sibling_owned_team_does_not_make_the_census_ambiguous(
+        tmp_path, monkeypatch):
+    """This session's own re-provisioned team and a sibling's both
+    corroborate. The sibling's leadSessionId owns a PACT session dir, so only
+    the own team is a candidate and the census realigns to it."""
+    world = split_world(tmp_path, monkeypatch, second_corroborated=True)
+    _give_session_a_pact_dir(world, SECOND_SID)
+    assert _team_name() == NEW_TEAM
+
+
+def test_team_ownership_names_only_another_pact_session(tmp_path,
+                                                        monkeypatch):
+    import shared.pact_context as ctx_module
+    world = split_world(tmp_path, monkeypatch, second_corroborated=True)
+    _give_session_a_pact_dir(world, SECOND_SID)
+    reset_context_module()
+    ctx_module.init({"session_id": OLD_SID})
+    owned = ctx_module.team_owned_by_other_pact_session
+    assert owned(SECOND_TEAM) is True
+    # The re-provisioned own team: its lead id never ran PACT.
+    assert owned(NEW_TEAM) is False
+    # A team whose lead is the asking session itself.
+    assert owned(SECOND_TEAM, session_id=SECOND_SID) is False
+    assert owned("../escape") is False
+    assert owned("session-absent0") is False
+
+
+# -- the one description of an undecided team ----------------------------------
+
+
+def _alignment():
+    import shared.pact_context as ctx_module
+    reset_context_module()
+    ctx_module.init({"session_id": OLD_SID})
+    return ctx_module.describe_team_alignment()
+
+
+def test_two_matching_teams_are_described_as_ambiguous(tmp_path, monkeypatch):
+    split_world(tmp_path, monkeypatch, second_corroborated=True)
+    alignment = _alignment()
+    assert alignment.state == "ambiguous"
+    assert alignment.candidates == ((NEW_TEAM, True), (SECOND_TEAM, True))
+    assert f"recorded team `{OLD_TEAM}` has no config" in alignment.text
+    assert "cannot tell which team is this session's" in alignment.text
+    assert "Do not spawn" in alignment.text
+
+
+def test_only_a_foreign_team_is_described_as_unresolved(tmp_path, monkeypatch):
+    split_world(tmp_path, monkeypatch, live_team=None, foreign="foreign-cwd")
+    alignment = _alignment()
+    assert alignment.state == "unresolved"
+    assert alignment.candidates == ((FOREIGN_TEAM, False),)
+    assert f"`{FOREIGN_TEAM}` (does not match)" in alignment.text
+    assert "team-split recovery" in alignment.text
+    assert "Do not spawn" not in alignment.text
+
+
+def test_two_teams_that_both_fail_to_match_are_unresolved_not_ambiguous(
+        tmp_path, monkeypatch):
+    from fixtures.team_split import FOREIGN_CWD, seed_team
+    world = split_world(tmp_path, monkeypatch, live_team=None,
+                        foreign="foreign-cwd")
+    seed_team(world.root, "session-dddd0000",
+              lead_sid="dddd0000-1111-4222-8333-444455556666",
+              lead_cwd=FOREIGN_CWD)
+    alignment = _alignment()
+    assert alignment.state == "unresolved"
+    assert [matches for _, matches in alignment.candidates] == [False, False]
+    assert "cannot tell" not in alignment.text
+
+
+def test_no_live_team_is_described_with_its_recovery(tmp_path, monkeypatch):
+    split_world(tmp_path, monkeypatch, live_team=None)
+    alignment = _alignment()
+    assert alignment.state == "no_candidates"
+    assert alignment.candidates == ()
+    assert "No live candidate teams." in alignment.text
+    assert "team-split recovery in `pact-state-recovery.md`" in alignment.text
+
+
+def test_a_decided_census_is_described_as_resolved(tmp_path, monkeypatch):
+    split_world(tmp_path, monkeypatch)
+    assert _alignment() == ("resolved", (), "")
+
+
+def test_a_sibling_owned_team_is_left_out_of_the_description(tmp_path,
+                                                              monkeypatch):
+    """The description reads the census's own list, so a team another PACT
+    session owns appears in neither."""
+    world = split_world(tmp_path, monkeypatch, live_team=None,
+                        second_corroborated=True)
+    _give_session_a_pact_dir(world, SECOND_SID)
+    alignment = _alignment()
+    assert alignment.state == "no_candidates"
+    assert SECOND_TEAM not in alignment.text
+
+
+# -- the census anchors on the project dir -------------------------------------
+
+
+def test_a_lead_running_in_the_hooks_cwd_but_not_the_project_is_refused(
+        tmp_path, monkeypatch):
+    """The census corroborates a lead by this session's project dir only: a
+    team whose lead cwd is merely the hook process's working directory is
+    not this session's."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    world = split_world(tmp_path, monkeypatch, live_team=None)
+    from fixtures.team_split import seed_team
+    seed_team(world.root, NEW_TEAM, lead_sid=NEW_SID, lead_cwd=str(elsewhere))
+    monkeypatch.chdir(elsewhere)
+    assert _team_name() == OLD_TEAM

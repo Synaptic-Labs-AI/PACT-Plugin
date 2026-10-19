@@ -992,29 +992,29 @@ def test_f2_witness_exact_set_positive_arms(tmp_path, monkeypatch, capsys,
     assert ctx_module.get_team_name() == NEW_TEAM_ID8
 
 
-@pytest.mark.parametrize(
-    "lead_cwd_choice,mode",
-    [("live-cwd", "cross-directory-resume"),
-     ("project-dir", "persisted-project")],
-)
-def test_f1_cross_directory_resume_either_match(tmp_path, monkeypatch, capsys,
-                                                lead_cwd_choice, mode):
-    """ROUTED CELL (resolver-coder #35, backend ruling 4) — the subject
-    anchor's EITHER-MATCH design: the lead's cwd RAW-matches the hook
-    process's LIVE os.getcwd() OR the persisted project_dir. A resume
-    launched from a DIFFERENT working directory than the original project
-    still binds via the live-cwd leg; the normal in-project resume binds
-    via the persisted leg. Both legs corroborate and the census realigns —
-    pinning the design so a future narrowing to a single leg flips this
-    cell."""
-    live_cwd = os.getcwd()  # RAW compare — seed exactly what the hook sees
+def test_f1_persisted_project_dir_corroborates(tmp_path, monkeypatch, capsys):
+    """The subject anchor: the lead's cwd RAW-matches this session's
+    persisted project_dir, so the census corroborates and realigns."""
     _seed_census_world(
         monkeypatch, tmp_path, live_team=NEW_TEAM_ID8, live_lead_sid=NEW_SID,
-        live_lead_cwd=(live_cwd if lead_cwd_choice == "live-cwd"
-                       else str(tmp_path / "project")),
+        live_lead_cwd=str(tmp_path / "project"),
     )
     code, out = _run_dispatch(_make_spawn(), capsys)
-    assert code == 0, f"{mode} leg must corroborate (either-match)"
+    assert code == 0, "the persisted project_dir leg must corroborate"
+
+
+def test_f1_hook_cwd_alone_does_not_corroborate(tmp_path, monkeypatch, capsys):
+    """The hook process's own cwd is not an anchor: a lead whose cwd equals
+    it but not this session's project_dir does not corroborate, so the
+    census leaves the recorded team in place and the spawn is denied."""
+    live_cwd = os.getcwd()  # RAW compare — seed exactly what the hook sees
+    assert live_cwd != str(tmp_path / "project")
+    _seed_census_world(
+        monkeypatch, tmp_path, live_team=NEW_TEAM_ID8, live_lead_sid=NEW_SID,
+        live_lead_cwd=live_cwd,
+    )
+    code, out = _run_dispatch(_make_spawn(), capsys)
+    assert code == 2, "the hook cwd must not corroborate on its own"
 
 
 def test_1514_prefix_colliding_leadagentid_not_corroborated(tmp_path,

@@ -1694,7 +1694,7 @@ class TestConcurrentTwoHealerRace:
         content = json.loads(ctx.read_text(encoding="utf-8"))
         assert set(content.keys()) == {
             "team_name", "session_id", "project_dir", "plugin_root",
-            "started_at",
+            "started_at", "process_key",
         }
         assert content["team_name"] == "session-deadbeef"
         assert content["session_id"] == session_id

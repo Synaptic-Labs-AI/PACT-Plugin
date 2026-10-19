@@ -382,7 +382,7 @@ def _lead_context_exists_for(sid: str) -> bool:
             return False
         sessions_root = (_config_root() / "pact-sessions").resolve()
         return any(sessions_root.glob(f"*/{sid}/pact-session-context.json"))
-    except (TypeError, ValueError, OSError):
+    except Exception:  # Path.home() raises RuntimeError with no home dir
         return False
 
 

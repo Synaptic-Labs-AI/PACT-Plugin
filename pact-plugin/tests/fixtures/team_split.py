@@ -36,6 +36,9 @@ SECOND_SID = "beefbeef-1111-4222-8333-444455556666"
 SECOND_TEAM = "session-beefbeef"
 # A tmux teammate's own session id.
 TMUX_SID = "ffff8888-bbbb-4ccc-9ddd-eeeeeeeeeeee"
+# The session a /clear starts: a new id and a new session dir.
+CLEAR_SID = "c1ea0000-1111-4222-8333-444455556666"
+OTHER_PROCESS_KEY = "99999:Thu Jan  1 00:00:00 1970"
 
 # Journal timestamps and the lead joinedAt values relative to them.
 JOURNAL_TS = "2026-08-24T00:00:00Z"            # 1787529600 s
@@ -158,15 +161,17 @@ def reset_context_module():
 
 
 def write_context_file(session_id, team_name, project_dir, plugin_root,
-                       started_at="2026-10-19T07:00:00+00:00"):
+                       started_at="2026-10-19T07:00:00+00:00", process_key=None):
     """Persist the session context through the production writer halves, so
     its bytes are exactly what ``session_init`` would write for the same
-    values. Returns the file path."""
+    values. ``process_key`` records the claude process the session ran in
+    (None leaves the writer's default). Returns the file path."""
     import shared.pact_context as ctx_module
     ctx_module.reset_for_tests()
+    extra = {} if process_key is None else {"process_key": process_key}
     target, context = ctx_module.build_context_cache(
         team_name, session_id, str(project_dir), str(plugin_root),
-        started_at=started_at,
+        started_at=started_at, **extra,
     )
     ctx_module.persist_context(target, context)
     ctx_module.reset_for_tests()
@@ -270,3 +275,54 @@ def split_world(tmp_path, monkeypatch, *, saved_team=OLD_TEAM,
 def saved_team_name(world) -> str:
     """The team_name the context file on disk currently records."""
     return json.loads(world.context_path.read_text(encoding="utf-8"))["team_name"]
+
+
+def clear_world(tmp_path, monkeypatch, *, prev_team=NEW_TEAM,
+                same_process=True, prev_journal=None, **split_kw):
+    """A /clear in the measured shape. The session that ran before it (id
+    OLD_SID) recorded ``prev_team`` and the claude process it ran in; the
+    clear starts a NEW session (id CLEAR_SID) with a new, empty session dir,
+    in the same process unless ``same_process`` is False. The CLAUDE.md
+    block names the earlier session, and the platform keeps the team.
+
+    The process key is this test process's own, computed by the production
+    helper with CLAUDE_PID set to the real parent, so a SessionStart run in
+    process computes the same key with no claude process involved. Returns
+    split_world's namespace plus clear_sid, clear_dir and process_key."""
+    import shared.pact_context as ctx_module
+
+    monkeypatch.setenv("CLAUDE_PID", str(os.getppid()))
+    ctx_module.reset_for_tests()
+    key = ctx_module.current_process_key()
+    assert key, "precondition: this process has a computable process key"
+    if prev_journal is None:
+        prev_journal = (
+            {"type": "session_start", "session_id": OLD_SID,
+             "project_dir": str(tmp_path / "project"), "source": "startup"},
+            "task_metadata_snapshot", "session_end")
+    world = split_world(tmp_path, monkeypatch, saved_team=prev_team,
+                        journal=prev_journal, claude_md=True, **split_kw)
+    write_context_file(OLD_SID, prev_team, world.project_dir, world.plugin_root,
+                       process_key=key if same_process else OTHER_PROCESS_KEY)
+    ctx_module.reset_for_tests()
+    world.clear_sid = CLEAR_SID
+    world.clear_dir = world.session_dir.parent / CLEAR_SID
+    world.process_key = key
+    return world
+
+
+def clear_frame(world, factory):
+    """A lead SessionStart(source=clear) frame for the session the clear
+    starts, built from a captured lead frame ``factory``."""
+    frame = factory()
+    frame.update(session_id=world.clear_sid, cwd=str(world.project_dir),
+                 source="clear")
+    return frame
+
+
+def recorded_team(session_dir) -> str:
+    """team_name in a session dir's context file ('' when absent)."""
+    path = Path(session_dir) / "pact-session-context.json"
+    if not path.exists():
+        return ""
+    return json.loads(path.read_text(encoding="utf-8")).get("team_name", "")

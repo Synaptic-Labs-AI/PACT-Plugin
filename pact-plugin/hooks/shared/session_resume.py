@@ -20,6 +20,7 @@ Manages:
 from __future__ import annotations
 
 import errno
+import fcntl  # Unix-only; PACT supports macOS/Linux.
 import json
 import os
 import re
@@ -47,7 +48,7 @@ from shared.claude_md_manager import (
 )
 from shared.failure_cause import failure_cause
 from shared.handoff_schema import resolve_handoff_field
-from shared.pact_context import _build_session_path, project_slug
+from shared.pact_context import _build_session_path, get_session_dir, project_slug
 from shared.paths import get_claude_config_dir
 from shared.session_state import is_safe_path_component
 from shared.stale_session import recorded_session_id, session_block_rows
@@ -538,6 +539,40 @@ def update_session_info(
         return TransientSessionInfoFailure(status)
 
 
+# The "Started" line update_session_info writes, in its exact timestamp shape,
+# and its value on a row already found.
+_SESSION_STARTED_RE = re.compile(
+    r"^- Started: (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC)$", re.MULTILINE
+)
+_STARTED_VALUE_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$")
+
+
+def read_session_started(project_dir: str) -> str | None:
+    """The "Started" value in the project CLAUDE.md's Current Session block.
+
+    Pass it as update_session_info's ``started`` to rewrite the block without
+    moving the session's start. None when there is no CLAUDE.md, it cannot be
+    read, or the line is not in a Current Session block the parser finds (a
+    copy in a fenced example is not read). Only the exact shape
+    update_session_info writes is returned. Read without the sidecar lock:
+    every writer replaces the file whole. Never raises.
+    """
+    try:
+        if not project_dir:
+            return None
+        claude_md, source = resolve_project_claude_md_path(project_dir)
+        if source == "new_default":
+            return None
+        # Read-only, and the pattern takes ASCII digits only, so a replaced
+        # byte cannot reach the block.
+        content = claude_md.read_text(encoding="utf-8", errors="replace")
+        rows = session_block_rows(content, _SESSION_STARTED_RE)
+        match = _STARTED_VALUE_RE.search(rows[0]) if rows else None
+        return match.group(0) if match else None
+    except Exception:
+        return None
+
+
 def _validate_under_pact_sessions(path: str) -> str | None:
     """Reject extracted session paths that escape the pact-sessions root.
 
@@ -727,15 +762,103 @@ def restore_last_session(
     return _build_journal_resume(prev_session_dir)
 
 
-def record_team_realign(old_team: str, new_team: str) -> str:
+# Outcomes of append_team_realigned.
+REALIGN_RECORDED = "recorded"
+REALIGN_ALREADY_RECORDED = "already-recorded"
+REALIGN_NOT_A_SPLIT = "not-a-split"
+REALIGN_FAILED = "failed"
+
+_REALIGN_LOCK_NAME = ".team-realigned.lock"
+
+
+def _team_existed(team: str) -> bool:
+    """True when the team has a config or a task store. A split's old team
+    keeps its task store after the platform deletes its config; a name the
+    platform never created has neither. Never raises."""
+    try:
+        if not is_safe_path_component(team):
+            return False
+        root = get_claude_config_dir()
+        return (root / "teams" / team / "config.json").exists() or (
+            root / "tasks" / team
+        ).is_dir()
+    except Exception:
+        return False
+
+
+def append_team_realigned(
+    old_team: str, new_team: str, *, session_dir: str | None = None,
+) -> str:
+    """Append team_realigned {from, to} for a move of this session's team.
+
+    Returns REALIGN_RECORDED when the event was appended,
+    REALIGN_ALREADY_RECORDED when the journal's latest team_realigned already
+    holds this move, REALIGN_NOT_A_SPLIT when the old team never existed (a
+    computed name the platform did not use), or REALIGN_FAILED when the
+    append did not land.
+
+    Two processes can make the same move at once (a lead prompt and a
+    teammate's compaction both read the old record before either writes).
+    The check and the append run under an flock in the session dir, so only
+    one of them appends; a later move back and forth still differs from the
+    latest event and is recorded. A lock that cannot be taken is skipped and
+    the append proceeds. Never raises.
+    """
+    try:
+        if not _team_existed(old_team):
+            return REALIGN_NOT_A_SPLIT
+        target_dir = session_dir or get_session_dir()
+        if not target_dir:
+            return REALIGN_FAILED
+        lock = None
+        try:
+            Path(target_dir).mkdir(parents=True, exist_ok=True, mode=0o700)
+            lock = open(Path(target_dir) / _REALIGN_LOCK_NAME, "a")
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        except OSError:
+            pass  # fail open: the append below still runs
+        try:
+            latest = read_last_event_from(target_dir, "team_realigned")
+            if latest and latest.get("from") == old_team and latest.get("to") == new_team:
+                return REALIGN_ALREADY_RECORDED
+            event = make_event("team_realigned", **{"from": old_team, "to": new_team})
+            if append_event(event, session_dir=target_dir):
+                return REALIGN_RECORDED
+            return REALIGN_FAILED
+        finally:
+            if lock is not None:
+                lock.close()  # closing releases the flock
+    except Exception:
+        return REALIGN_FAILED
+
+
+def record_team_realign(
+    old_team: str, new_team: str, *, session_dir: str | None = None,
+) -> str | None:
     """Record a move of this session's team and return the lead notice.
 
-    Appends team_realigned {from, to} to this session's journal. Both places
-    that move the recorded team call it: the prompt-time write-back and
-    session_init when a launch realigns. The notice names both teams and the
-    in-progress tasks left in the old team's store.
+    Both hooks that move the recorded team call it: the prompt-time
+    write-back and session_init when a launch realigns. Returns None when the
+    old team never existed, so there is no split to recover from. When the
+    journal cannot take the event, the notice says so and names the old
+    team, which recovery would otherwise read from that event. Never raises.
     """
-    append_event(make_event("team_realigned", **{"from": old_team, "to": new_team}))
+    outcome = append_team_realigned(old_team, new_team, session_dir=session_dir)
+    if outcome == REALIGN_NOT_A_SPLIT:
+        return None
+    if outcome == REALIGN_FAILED:
+        print(
+            "session_resume: could not record team_realigned "
+            f"{old_team} -> {new_team} in the session journal",
+            file=sys.stderr,
+        )
+        return (
+            f"PACT moved this session's team from `{old_team}` to `{new_team}` "
+            f"but could not record the move in the session journal. "
+            f"`TaskList` shows only `{new_team}`; in-progress tasks may remain in "
+            f"`tasks/{old_team}/`. Use `{old_team}` as the earlier team in the "
+            f"team-split recovery."
+        )
     # Task ids come from task files: sanitised as the resume claim's are.
     ids = ", ".join(
         clean for clean in map(_sanitize_prompt_field, in_progress_task_ids(old_team))
@@ -746,7 +869,7 @@ def record_team_realign(old_team: str, new_team: str) -> str:
         f"the team the platform is using. `TaskList` shows only `{new_team}`. "
         f"In-progress tasks still in `tasks/{old_team}/`: {ids}. "
         f"Follow the team-split recovery in `pact-state-recovery.md` "
-        f"before spawning."
+        f"before spawning any specialist."
     )
 
 
@@ -1282,12 +1405,17 @@ def _recorded_predecessor(session_dir: str) -> str | None:
         return None
 
 
-def _claim_dir(prev_session_dir: str | None) -> str | None:
+def _claim_dir(
+    prev_session_dir: str | None, own_session_dir: str | None = None,
+) -> str | None:
     """The session dir to read resume claims from.
 
     prev_session_dir, or, while that session did nothing, the predecessor it
-    recorded, at most CLAIM_WALK_MAX_HOPS steps back. A cycle or a missing or
-    invalid predecessor ends the walk at the current dir. Never raises: on
+    recorded, at most CLAIM_WALK_MAX_HOPS steps back. Another session's dir
+    is walked past only once that session has ended: a concurrent session
+    that has just launched has done nothing YET, and the claim behind it is
+    its to surface. This session's own dir needs no end. A cycle or a missing
+    or invalid predecessor ends the walk at the current dir. Never raises: on
     any error it returns the dir reached so far.
     """
     current = prev_session_dir
@@ -1295,6 +1423,8 @@ def _claim_dir(prev_session_dir: str | None) -> str | None:
         seen = {prev_session_dir}
         for _ in range(CLAIM_WALK_MAX_HOPS):
             if not current or not _session_did_nothing(current):
+                return current
+            if not _same_dir(current, own_session_dir) and not _session_ended(current):
                 return current
             nxt = _recorded_predecessor(current)
             if not nxt or nxt in seen:
@@ -1356,6 +1486,14 @@ def _saved_team_of(session_dir: str) -> str:
         return team if is_safe_path_component(team) else ""
     except Exception:
         return ""
+
+
+def recorded_team_of(session_dir: str) -> str:
+    """The team session_dir's context file records on disk, or ``""``.
+
+    Read from the file, never from a cache, so a caller can tell a write that
+    landed from one that did not. Never raises."""
+    return _saved_team_of(session_dir) if session_dir else ""
 
 
 def _session_ended(session_dir: str) -> bool:
@@ -1420,9 +1558,9 @@ def check_resume_state(
     Single public seam: session_init step 8 calls THIS (and only this).
     Post-compact and same-session --resume, prev_session_dir self-resolves to
     the CURRENT session dir; on the quit path it names the previous session.
-    Every arm reads its claim from _claim_dir(prev_session_dir): that dir, or
-    an earlier one when the sessions in between did nothing, at most
-    CLAIM_WALK_MAX_HOPS back.
+    Every arm reads its claim from _claim_dir(prev_session_dir,
+    own_session_dir): that dir, or an earlier one when the sessions in
+    between did nothing and have ended, at most CLAIM_WALK_MAX_HOPS back.
 
     On a launch (``launch`` True: a startup or a resume, never a compaction
     or a clear), when neither claim survives, a third arm with the lowest
@@ -1450,7 +1588,7 @@ def check_resume_state(
     """
     if not prev_session_dir:
         return None
-    claim_dir = _claim_dir(prev_session_dir)
+    claim_dir = _claim_dir(prev_session_dir, own_session_dir)
     paused = read_last_event_from(claim_dir, "session_paused")
     refreshed = read_last_event_from(claim_dir, "session_refreshed")
     if refreshed is not None and _refresh_is_spent(claim_dir, refreshed):

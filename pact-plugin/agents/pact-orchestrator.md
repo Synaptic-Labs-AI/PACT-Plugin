@@ -182,7 +182,7 @@ Reconstruct state:
 
 1. `git worktree list` — identify active feature work
 2. Read session journal (`{session_dir}/session-journal.jsonl`) — durable record of HANDOFFs, phase transitions, variety scores, and commits
-   - Normally `TaskList` holds this session's work. If a realign or ambiguity notice names a team split, follow the team-split recovery in `pact-state-recovery.md` before step 3: the earlier team's in-progress tasks are not in `TaskList`. After a compaction, do the same when the journal's latest `team_realigned` event names a `from` store whose in-flight tasks you have not re-created.
+   - Normally `TaskList` holds this session's work. If a notice, a SessionStart line or a refused spawn says PACT moved this session to another team, cannot tell which team is this session's, or has a recorded team with no config, follow the team-split recovery in `pact-state-recovery.md` before step 3: the earlier team's in-progress tasks are not in `TaskList`. After a compaction, do the same when the journal's latest `team_realigned` event names a `from` store whose in-flight tasks you have not re-created.
 3. `TaskList` — tasks, status, owners, blockers (summaries survive compaction, but task files with full metadata may be GC'd)
 4. `TaskGet` on priority tasks for status and blocking: in-progress first, then recent completed. For METADATA not yet in the journal, `TaskGet` is blind — read the task file: `cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team_name}/{taskId}.json" | jq .metadata.<key>`
 5. Next action: blocker → imPACT; in-progress phase → continue that workflow (see below); all complete → peer-review; PR open → check status; no tasks → check `gh pr list` or await user

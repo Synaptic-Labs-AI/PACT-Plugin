@@ -421,14 +421,17 @@ COVERED_L2 = {
     # PACT team membership. Its non-mocked L2 test runs the real hook against a
     # real team config, session context and session registry.
     "pin_caps_gate": "test_pin_caps_gate_frames.py",
-    # task_claim_gate and handoff_ordering_gate joined SEAM_DEPENDENT_HOOKS when
-    # the lead-session check began reading the session context beside the team
-    # config. Their non-mocked L2 tests run the real hooks in a split-team world:
-    # an in-process teammate frame under the lead's session id (task_claim_gate)
-    # and a lead completion after a compaction that kept the recorded team
-    # (handoff_ordering_gate).
-    "task_claim_gate": "test_team_split_lead_session.py",
-    "handoff_ordering_gate": "test_team_split_compact_keep.py",
+    # task_claim_gate, handoff_ordering_gate, bootstrap_marker_writer and
+    # bootstrap_prompt_gate read the team store through the session's recorded
+    # team. Their non-mocked L2 test runs each hook script as its own child
+    # process in a split-team world, against a scratch config root and project:
+    # a resume, the first lead prompt and an in-process teammate's call in
+    # sequence; a lead completion after a compaction; and a first prompt that
+    # surfaces the predecessor's in-flight work.
+    "task_claim_gate": "test_team_split_hook_processes.py",
+    "handoff_ordering_gate": "test_team_split_hook_processes.py",
+    "bootstrap_marker_writer": "test_team_split_hook_processes.py",
+    "bootstrap_prompt_gate": "test_team_split_hook_processes.py",
 }
 
 # Documented forward-only BACKLOG: seam hooks whose non-mocked L2 test is a named
@@ -436,15 +439,13 @@ COVERED_L2 = {
 # this list is the auditable record of the known gaps (promote on touch).
 #   - task_lifecycle_gate: heavy unit coverage; L3 real-session probe is the
 #     documented follow-up. Its L2 seam test is fast-follow.
-#   - bootstrap_marker_writer: iter_team_task_jsons readers.
 #   - file_tracker / peer_inject: L2-only (held), watch-list per the classifier.
 # (validate_handoff promoted to COVERED_L2 when its degrade telemetry gained
 #  the real-seam composition test — the hook was touched, so the gap closed.
 #  bootstrap_gate was promoted when its settle seat gained a child-process seam
 #  test; that test does not exercise its iter_team_task_jsons reads.)
 BACKLOG_L2 = frozenset({
-    "task_lifecycle_gate", "bootstrap_marker_writer",
-    "file_tracker", "peer_inject",
+    "task_lifecycle_gate", "file_tracker", "peer_inject",
 })
 
 
@@ -461,6 +462,29 @@ def test_bootstrap_gate_is_covered_by_a_seam_file_that_runs_it_as_a_child_proces
                  and isinstance(call.func.value, ast.Name) and call.func.value.id == "subprocess"
                  for call in calls)
     assert hands_over and spawns
+
+
+_PROCESS_SEAM_HOOKS = ("task_claim_gate", "handoff_ordering_gate",
+                       "bootstrap_marker_writer", "bootstrap_prompt_gate")
+
+
+def test_the_split_team_hooks_are_covered_by_a_file_that_runs_them_as_child_processes():
+    """The mapped file starts each of these hook scripts with subprocess.run
+    and names each one in a call, so its seam is exercised in a real process,
+    not in the test's own interpreter."""
+    for hook in _PROCESS_SEAM_HOOKS:
+        assert COVERED_L2.get(hook) == "test_team_split_hook_processes.py", hook
+        assert hook not in BACKLOG_L2, hook
+    tree = ast.parse((TESTS_DIR / "test_team_split_hook_processes.py")
+                     .read_text(encoding="utf-8"))
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    named = {arg.value for call in calls for arg in call.args
+             if isinstance(arg, ast.Constant) and isinstance(arg.value, str)}
+    spawns = any(isinstance(call.func, ast.Attribute) and call.func.attr == "run"
+                 and isinstance(call.func.value, ast.Name)
+                 and call.func.value.id == "subprocess" for call in calls)
+    assert spawns
+    assert set(_PROCESS_SEAM_HOOKS) <= named, set(_PROCESS_SEAM_HOOKS) - named
 
 
 class TestSeamHookL2Presence:

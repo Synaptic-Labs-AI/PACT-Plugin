@@ -101,6 +101,7 @@ from shared.pact_context import (
     _resolve_aligned_team_name,
     build_context_cache,
     classify_session_role,
+    current_process_key,
     describe_team_alignment,
     generate_team_name,
     get_session_dir,
@@ -1894,16 +1895,16 @@ def main():
                 saved.get("team_name") or team_name
                 if source == "compact" else team_name
             )
-            # A /clear starts a new session id on the same platform team: the
-            # resolver follows the previous session's record (step 5a's
-            # prev_session_dir, read here before anything rewrites the block).
+            # Only a lead frame records (and so can match) its claude
+            # process's key. A /clear starts a new session id in the same
+            # process on the same platform team: the resolver adopts the team
+            # the newest earlier session of this process recorded.
+            process_key = current_process_key() if frame_is_lead else ""
             team_name = _resolve_aligned_team_name(
                 session_id,
                 default=default,
-                clear_predecessor=(
-                    _extract_prev_session_dir(project_dir)
-                    if source == "clear" else None
-                ),
+                clear_start=(source == "clear"),
+                process_key=process_key,
             )
 
         if not session_id_was_missing:
@@ -1931,6 +1932,7 @@ def main():
                         saved.get("started_at")
                         if source == "compact" else None
                     ),
+                    process_key=process_key if frame_is_lead else None,
                 )
                 if frame_is_lead and _ctx_result is not None:
                     persist_context(*_ctx_result)
@@ -2341,7 +2343,7 @@ def main():
         # census could not replace is named, with each live candidate team.
         # Empty whenever the census decided, so it adds nothing otherwise.
         if frame_is_lead and source in ("startup", "resume"):
-            _alignment = describe_team_alignment()
+            _alignment = describe_team_alignment().text
             if _alignment:
                 context_parts.append(_alignment)
 

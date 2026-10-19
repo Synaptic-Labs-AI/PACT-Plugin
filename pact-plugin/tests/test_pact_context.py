@@ -2983,3 +2983,109 @@ class TestMissingContextFileIsSilent:
         assert result.returncode == 0, result.stderr
         assert json.loads(result.stdout) == {"suppressOutput": True}
         assert result.stderr == ""
+
+
+class TestProcessKey:
+    """current_process_key(): the hook's real parent plus its start time,
+    only when CLAUDE_PID agrees with that parent."""
+
+    def test_a_matching_claude_pid_gives_the_parent_and_its_start_time(
+            self, monkeypatch):
+        import subprocess
+        import shared.pact_context as ctx
+        monkeypatch.setenv("CLAUDE_PID", str(os.getppid()))
+        ctx.reset_for_tests()
+        started = " ".join(subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(os.getppid())],
+            capture_output=True, text=True, env={**os.environ, "LC_ALL": "C"},
+        ).stdout.split())
+        assert ctx.current_process_key() == f"{os.getppid()}:{started}"
+
+    def test_a_claude_pid_naming_another_process_gives_no_key(
+            self, monkeypatch):
+        import shared.pact_context as ctx
+        monkeypatch.setenv("CLAUDE_PID", str(os.getpid()))
+        ctx.reset_for_tests()
+        assert ctx.current_process_key() == ""
+
+    def test_no_claude_pid_gives_no_key(self, monkeypatch):
+        import shared.pact_context as ctx
+        monkeypatch.delenv("CLAUDE_PID", raising=False)
+        ctx.reset_for_tests()
+        assert ctx.current_process_key() == ""
+
+
+class TestContextProcessKeyCarry:
+    """A writer that computes no process key keeps the one the file records
+    for the same session, so a write from outside a hook never drops it."""
+
+    def test_a_write_without_a_key_keeps_the_recorded_one(self, tmp_path,
+                                                          monkeypatch):
+        import shared.pact_context as ctx
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        project = str(tmp_path / "proj")
+        ctx.reset_for_tests()
+        ctx.write_context("session-aaaa0000", "aaaa0000-sid", project, "",
+                          process_key="123:Mon Jan  5 09:00:00 2026")
+        ctx.reset_for_tests()
+        ctx.write_context("session-bbbb0000", "aaaa0000-sid", project, "")
+        target = ctx._build_session_path(ctx.project_slug(project),
+                                         "aaaa0000-sid")
+        data = json.loads((target / "pact-session-context.json").read_text())
+        assert data["team_name"] == "session-bbbb0000"
+        assert data["process_key"] == "123:Mon Jan  5 09:00:00 2026"
+
+    def test_the_started_at_pass_through_is_recorded(self, tmp_path,
+                                                     monkeypatch):
+        import shared.pact_context as ctx
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        project = str(tmp_path / "proj")
+        ctx.reset_for_tests()
+        ctx.write_context("session-aaaa0000", "aaaa0000-sid", project, "",
+                          started_at="2026-01-01T00:00:00+00:00")
+        target = ctx._build_session_path(ctx.project_slug(project),
+                                         "aaaa0000-sid")
+        data = json.loads((target / "pact-session-context.json").read_text())
+        assert data["started_at"] == "2026-01-01T00:00:00+00:00"
+
+
+class TestIdenticalWriteTightensMode:
+    def test_an_identical_write_keeps_the_inode_and_tightens_the_mode(
+            self, tmp_path):
+        import shared.pact_context as ctx
+        target = tmp_path / "ctx.json"
+        context = {"team_name": "t", "session_id": "s"}
+        ctx.persist_context(target, context)
+        os.chmod(target, 0o644)
+        inode = target.stat().st_ino
+        ctx.persist_context(target, context)
+        assert target.stat().st_ino == inode
+        assert target.stat().st_mode & 0o777 == 0o600
+
+
+class TestJournalReadOnce:
+    def test_an_unchanged_journal_is_read_once_per_process(self, tmp_path,
+                                                          monkeypatch):
+        import shared.pact_context as ctx
+        import shared.session_journal as journal
+        session_dir = tmp_path / "s"
+        session_dir.mkdir()
+        path = session_dir / "session-journal.jsonl"
+        path.write_text(json.dumps(
+            {"v": 1, "type": "session_end", "ts": "2026-01-01T00:00:00Z"}
+        ) + "\n")
+        reads = []
+        real = journal.read_events_from
+        monkeypatch.setattr(journal, "read_events_from",
+                            lambda d, *a, **k: reads.append(d) or real(d, *a, **k))
+        ctx.reset_for_tests()
+        first = ctx._journal_events(str(session_dir))
+        second = ctx._journal_events(str(session_dir))
+        assert first == second and len(first) == 1
+        assert len(reads) == 1
+        with path.open("a") as f:
+            f.write(json.dumps(
+                {"v": 1, "type": "session_end", "ts": "2026-01-02T00:00:00Z"}
+            ) + "\n")
+        assert len(ctx._journal_events(str(session_dir))) == 2
+        assert len(reads) == 2

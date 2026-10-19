@@ -17,10 +17,11 @@ ABSENCE PINS. The one-hop wording the claim walk made false must not survive
 in any instruction surface, where an agent would act on it.
 
 Counter-test, measured by source-only revert in a scratch copy: restoring the
-five instruction surfaces to the base tree -> 38 failed, 3 passed of 41. The
-three that stay green are the surface-walk control, the NORM clause (it
-predates this change and must survive it), and the absence of the realign
-command's retired form (it never shipped).
+five instruction surfaces to the base tree -> 46 failed, 4 passed of 50. The
+four that stay green are the surface-walk control, the NORM clause (it
+predates this change and must survive it), and the absence of two forms that
+never shipped on the base tree: the realign command's retired form and the
+secretary exception to the spawn rule.
 """
 
 from pathlib import Path
@@ -48,17 +49,36 @@ PINS = [
     # The team-split step, in the extract and its SSOT region.
     (RECOVERY, "**Team-split recovery**", 1),
     (PROTOCOLS, "**Team-split recovery**", 1),
-    (RECOVERY, "(when a realign notice says PACT moved this session to another "
-               "team, or an ambiguity notice says PACT cannot tell which team "
-               "is this session's)", 1),
-    (PROTOCOLS, "(when a realign notice says PACT moved this session to another "
-                "team, or an ambiguity notice says PACT cannot tell which team "
-                "is this session's)", 1),
+    (RECOVERY, "(when a notice, a SessionStart line or a refused spawn says "
+               "PACT moved this session to another team, says PACT cannot tell "
+               "which team is this session's, or says PACT's recorded team has "
+               "no config)", 1),
+    (PROTOCOLS, "(when a notice, a SessionStart line or a refused spawn says "
+                "PACT moved this session to another team, says PACT cannot tell "
+                "which team is this session's, or says PACT's recorded team has "
+                "no config)", 1),
     # The sanctioned recovery command when the census cannot decide.
     (RECOVERY, 'cd "{plugin_root}/hooks" && python3 -m shared.realign_team '
                "--team <chosen team>", 1),
     (PROTOCOLS, 'cd "{plugin_root}/hooks" && python3 -m shared.realign_team '
                 "--team <chosen team>", 1),
+    # Only the lead runs the realign command.
+    (RECOVERY, "Only the lead runs this command; a teammate never does.", 1),
+    (PROTOCOLS, "Only the lead runs this command; a teammate never does.", 1),
+    # The state with no live candidate team has its own first step.
+    (RECOVERY, "1. Recorded team without a config, and no live candidate team "
+               "that matches this session: run bootstrap Step 2's `TaskCreate` "
+               "and `TaskUpdate` for the secretary, then spawn it.", 1),
+    (PROTOCOLS, "1. Recorded team without a config, and no live candidate team "
+                "that matches this session: run bootstrap Step 2's `TaskCreate` "
+                "and `TaskUpdate` for the secretary, then spawn it.", 1),
+    # A realign from a team that never existed leaves nothing to carry.
+    (RECOVERY, "If it reports nothing to carry across, the recovery is done.", 1),
+    (PROTOCOLS, "If it reports nothing to carry across, the recovery is done.", 1),
+    (RECOVERY, "If a realign notice follows, continue from step 3; otherwise "
+               "the recovery is done.", 1),
+    (PROTOCOLS, "If a realign notice follows, continue from step 3; otherwise "
+                "the recovery is done.", 1),
     # Carry-across.
     (RECOVERY, "re-create in `{team_name}` with `TaskCreate` each one whose "
                "work is still in flight", 1),
@@ -72,11 +92,11 @@ PINS = [
     # After a compaction, the recovery re-runs for tasks not yet re-created.
     (RECOVERY, "If the journal's latest `team_realigned` event names a `from` "
                "store whose in-flight tasks you have not re-created, run the "
-               "team-split recovery below from its step 2. Skip tasks already "
+               "team-split recovery below from its step 3. Skip tasks already "
                "re-created: their description cites the old id.", 1),
     (PROTOCOLS, "If the journal's latest `team_realigned` event names a `from` "
                 "store whose in-flight tasks you have not re-created, run the "
-                "team-split recovery below from its step 2. Skip tasks already "
+                "team-split recovery below from its step 3. Skip tasks already "
                 "re-created: their description cites the old id.", 1),
     (PERSONA, "After a compaction, do the same when the journal's latest "
               "`team_realigned` event names a `from` store whose in-flight "
@@ -92,9 +112,9 @@ PINS = [
                "`TaskUpdate(<work id>, addBlockedBy=[<teachback id>])`", 1),
     (PROTOCOLS, "`TaskUpdate(<teachback id>, addBlocks=[<work id>])` and "
                 "`TaskUpdate(<work id>, addBlockedBy=[<teachback id>])`", 1),
-    (RECOVERY, "Finish steps 3 and 4 for every in-flight task before you spawn "
+    (RECOVERY, "Finish steps 4 and 5 for every in-flight task before you spawn "
                "a specialist for any of them.", 1),
-    (PROTOCOLS, "Finish steps 3 and 4 for every in-flight task before you spawn "
+    (PROTOCOLS, "Finish steps 4 and 5 for every in-flight task before you spawn "
                 "a specialist for any of them.", 1),
     # The quit-path consumption write, as a deviation clause.
     (BOOTSTRAP, "Normally a consumption write follows a confirmed resumption, "
@@ -104,15 +124,21 @@ PINS = [
               "(`--type team_realigned`)", 1),
     (HARVEST, "Those task ids belong to team `{from}`, not to your team", 1),
     # The bootstrap exception, beside the rule it qualifies.
-    (BOOTSTRAP, "The exception: when a realign or ambiguity notice names a team "
-                "split, follow the team-split recovery in "
-                "`pact-state-recovery.md` before spawning anyone but the "
-                "secretary.", 1),
+    # The spawn rule: no specialist before the recovery; no one at all while
+    # PACT cannot tell which team is this session's.
+    (BOOTSTRAP, "The exception: when a notice, a SessionStart line or a refused "
+                "spawn names a team split, follow the team-split recovery in "
+                "`pact-state-recovery.md` before spawning any specialist, and "
+                "when it says PACT cannot tell which team is this session's, "
+                "spawn no one, the secretary included, until that recovery's "
+                "realign command succeeds.", 1),
     (BOOTSTRAP, "An ABSENT config is the NORM", 1),
     # The persona's deviation line.
-    (PERSONA, "Normally `TaskList` holds this session's work. If a realign or "
-              "ambiguity notice names a team split, follow the team-split "
-              "recovery in `pact-state-recovery.md` before step 3", 1),
+    (PERSONA, "Normally `TaskList` holds this session's work. If a notice, a "
+              "SessionStart line or a refused spawn says PACT moved this session "
+              "to another team, cannot tell which team is this session's, or has "
+              "a recorded team with no config, follow the team-split recovery in "
+              "`pact-state-recovery.md` before step 3", 1),
     # Claims read past sessions that did nothing.
     (RECOVERY, "or from an earlier one when the sessions in between did "
                "nothing (at most three back)", 1),
@@ -156,6 +182,7 @@ def test_the_instruction_surfaces_are_found():
     "python3 -m shared.pact_context realign",
     "Why it is keyed that way",
     "What this write does and does not bound",
+    "before spawning anyone but the secretary",
 ])
 def test_a_retired_phrase_is_in_no_instruction_surface(phrase):
     hits = [p.relative_to(PLUGIN).as_posix() for p in _instruction_surfaces()

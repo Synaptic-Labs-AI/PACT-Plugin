@@ -48,7 +48,7 @@ from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -1753,6 +1753,7 @@ class TestWriteContextIntegration:
             "/Users/example/Sites/test-project",
             "",  # plugin_root: CLAUDE_PLUGIN_ROOT not set in this test
             started_at=None,  # a startup records now; only a compaction keeps the value on disk
+            process_key=ANY,
         )
 
     def test_missing_session_id_falls_back_to_unknown_and_warns(self, monkeypatch, tmp_path, capsys):
@@ -3135,6 +3136,7 @@ class TestPluginRootEnvWiring:
             str(tmp_path / "proj"),
             plugin_root_value,
             started_at=None,
+            process_key=ANY,
         )
 
     def test_plugin_root_env_flows_to_update_session_info(

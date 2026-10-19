@@ -109,6 +109,11 @@ SEAM_DEPENDENT_HOOKS: frozenset[str] = frozenset({
     # non-mocked L2 test observes directly; handoff_ordering_gate is assessed in
     # L3_CANDIDATE_HOOKS below.
     "task_claim_gate", "handoff_ordering_gate",
+    # bootstrap_prompt_gate: on a lead launch it reads the previous session's
+    # team store through check_resume_state to surface in-flight work, and it
+    # records the session's predecessor in session_start. Held at L2-only, in
+    # L3_CANDIDATE_HOOKS below.
+    "bootstrap_prompt_gate",
 })
 
 # Hooks confirmed to FAIL SILENTLY on a broken seam (a consequential effect that
@@ -156,10 +161,14 @@ L3_LIVE_PROBE_HOOKS: frozenset[str] = frozenset({
 #   - handoff_ordering_gate: its deny is synchronous and decided on the lead
 #                      frame, which is the same in both teammateModes; the silent
 #                      bypasses (no team, no task) are disk-state, observed by L2.
+#   - bootstrap_prompt_gate: it runs on lead prompts only, which are the same
+#                      in both teammateModes; a missing launch claim on a broken
+#                      task-store seam is disk-state, observed by L2.
 # (validate_handoff was held here until its turn-end background block made it
 #  fail silently on a broken seam; it is now in L3_LIVE_PROBE_HOOKS.)
 L3_CANDIDATE_HOOKS: frozenset[str] = frozenset({
     "file_tracker", "peer_inject", "handoff_ordering_gate",
+    "bootstrap_prompt_gate",
 })  # assessed, held at L2-only
 
 # dispatch_gate is fail-CLOSED (its decision-domain uncertainty path is exit(2)
@@ -429,6 +438,15 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "pact_context", "paths", "session_journal", "session_registry",
         "session_state", "task_utils", "teachback_schema", "variety_scorer",
     }),  # from the live derivation.
+    "bootstrap_prompt_gate": frozenset({
+        "background_launch", "background_work", "claude_md_manager",
+        "claude_md_markers", "compaction_owner", "constants", "failure_cause",
+        "gh_helpers", "git_helpers", "handoff_schema", "intentional_wait",
+        "marker_schema", "pact_context", "paths", "pin_caps", "project_scope",
+        "session_journal", "session_registry", "session_resume", "session_state",
+        "stale_session", "staleness", "state_file", "task_utils",
+    }),  # from the live derivation: session_resume's check_resume_state and
+         # session_start record, and what they import.
 }
 
 # Every helper module (top-level OR shared) transitively reachable from at least

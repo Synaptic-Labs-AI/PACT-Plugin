@@ -5,23 +5,30 @@ When the census cannot decide (two live teams both match), the sanctioned
 recovery is a lead-run command:
 ``cd <plugin>/hooks && python3 -m shared.realign_team --team <name>``.
 It writes the context file and the project CLAUDE.md ``- Team:`` line, and
-journals the move. It refuses, with exit code 2 and a reason on stderr and
+journals the move. It refuses, with exit code 3 and a reason on stderr and
 without writing anything, any team it cannot corroborate as this session's:
-no lead context for the calling session, a path-unsafe name, no config, a
-lead entry that is not this team's, or a lead that runs somewhere else.
+no lead context for the calling session, a path-unsafe name, a config that
+names this session as the lead of another team, a team another PACT session
+owns, no config, a lead entry that is not this team's, or a lead that runs
+somewhere else. A usage error exits 2, which argparse owns.
 
 Each cell runs the command as a real subprocess against a tmp config root.
 Each refusal cell is built so that only its own check can refuse: the other
 checks would all pass.
 
 Counter-tests, measured by source-only revert of each check in a scratch copy
-(cardinality of this file's 19-case run): removing the lead-context check,
-the path-safety check, the lead-entry suffix check, or the members-is-a-list
-check -> 1 failed each; removing the cwd check -> 2 failed; comparing the
-cwd without realpath -> 1 failed (the symlink cell); restoring the command's
-own cwd as an accepted anchor -> 1 failed; skipping the CLAUDE.md write, or
-its session_start precondition -> 1 failed each; skipping the journal event
--> 1 failed; rewriting on a no-op realign -> 1 failed.
+(cardinality of this file's 29-case run): removing the lead-context check,
+the path-safety check, the lead-entry suffix check, the members-is-a-list
+check, the identity-match check, or the other-session ownership check -> 1
+failed each; removing the cwd check -> 2 failed; comparing the cwd without
+realpath -> 1 failed (the symlink cell); skipping the CLAUDE.md write -> 3
+failed; dropping its session_start precondition -> 1 failed; comparing names
+raw -> 1 failed; returning before the CLAUDE.md write on the 'already' path
+-> 1 failed; dropping the kept started_at -> 1 failed; dropping the kept
+Started line -> 2 failed; writing a process key from this command -> 1
+failed; replacing the journal append with a fixed outcome -> 2 failed;
+a refusal exiting 2 -> 18 failed; dropping the lead-only sentence -> 19
+failed.
 """
 
 import json
@@ -34,6 +41,7 @@ import pytest
 
 from fixtures.team_split import (
     FOREIGN_TEAM,
+    NEW_SID,
     NEW_TEAM,
     OLD_SID,
     OLD_TEAM,
@@ -104,7 +112,10 @@ def test_realigning_to_the_recorded_team_changes_nothing(tmp_path,
 
 def test_realign_writes_the_record_the_team_line_and_the_journal(
         tmp_path, monkeypatch):
-    world = _undecided(tmp_path, monkeypatch)
+    """The earlier team left a task store, so the move is a split: the event
+    names both teams."""
+    world = _undecided(tmp_path, monkeypatch,
+                       old_tasks=({"id": "7", "status": "in_progress"},))
     result = _realign(world, NEW_TEAM)
     assert result.returncode == 0, result.stderr
     assert saved_team_name(world) == NEW_TEAM
@@ -131,8 +142,9 @@ def test_realign_accepts_a_lead_cwd_reached_through_a_symlink(tmp_path,
 def _refusal(world, team, **kw):
     before = stat_snapshot(world.context_path, world.claude_md)
     result = _realign(world, team, **kw)
-    assert result.returncode == 2, (result.returncode, result.stderr)
+    assert result.returncode == 3, (result.returncode, result.stderr)
     assert result.stderr.strip().startswith("realign refused: "), result.stderr
+    assert "Only the lead runs this command" in result.stderr, result.stderr
     assert stat_snapshot(world.context_path, world.claude_md) == before
     assert [e for e in read_journal(world.session_dir)
             if e.get("type") == "team_realigned"] == []
@@ -221,3 +233,170 @@ def test_realign_refuses_a_team_whose_lead_runs_elsewhere(tmp_path,
     world = split_world(tmp_path, monkeypatch, second_corroborated=True,
                         foreign="foreign-cwd", claude_md=True)
     _refusal(world, FOREIGN_TEAM)
+
+
+# --- Exit codes, casefolded names, the CLAUDE.md repair, the kept start ----
+
+
+def test_a_usage_error_exits_2_and_a_refusal_exits_3(tmp_path, monkeypatch):
+    """A missing --team is argparse's usage error (2); a refused team is 3.
+    The two codes must differ so the caller can tell a typo from a refusal."""
+    world = _undecided(tmp_path, monkeypatch)
+    env = dict(os.environ, HOME=str(world.tmp), CLAUDE_CONFIG_DIR=str(world.root),
+               CLAUDE_PROJECT_DIR=str(world.project_dir),
+               CLAUDE_CODE_SESSION_ID=OLD_SID)
+    usage = subprocess.run(
+        [sys.executable, "-m", "shared.realign_team"],
+        cwd=str(_HOOKS), env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert usage.returncode == 2, usage.stderr
+    assert "realign refused" not in usage.stderr
+    _refusal(world, "session-nocfg000")
+
+
+def test_the_help_text_says_lead_only(tmp_path, monkeypatch):
+    world = _undecided(tmp_path, monkeypatch)
+    env = dict(os.environ, HOME=str(world.tmp), CLAUDE_CONFIG_DIR=str(world.root))
+    result = subprocess.run(
+        [sys.executable, "-m", "shared.realign_team", "--help"],
+        cwd=str(_HOOKS), env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Only the lead runs this command" in " ".join(result.stdout.split())
+
+
+def test_a_recorded_name_differing_only_in_case_is_already_recorded(
+        tmp_path, monkeypatch):
+    """The record names the requested team in other case: nothing moves and
+    no team_realigned is journalled. Kill: compare raw -> a spurious move."""
+    world = _undecided(tmp_path, monkeypatch, saved_team=NEW_TEAM.upper())
+    result = _realign(world, NEW_TEAM)
+    assert result.returncode == 0, result.stderr
+    assert "already" in result.stdout
+    assert saved_team_name(world) == NEW_TEAM.upper()
+    assert [e for e in read_journal(world.session_dir)
+            if e.get("type") == "team_realigned"] == []
+
+
+def _set_team_line(claude_md, team):
+    text = claude_md.read_text(encoding="utf-8")
+    lines = [f"- Team: `{team}`" if line.startswith("- Team:") else line
+             for line in text.splitlines()]
+    claude_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+_EARLIER_START = "- Started: 2026-10-19 07:00:00 UTC"
+
+
+def _set_started_line(claude_md):
+    """Put the Started line in the past, so a rewrite to now cannot match it
+    by landing in the same second."""
+    text = claude_md.read_text(encoding="utf-8")
+    lines = [_EARLIER_START if line.startswith("- Started:") else line
+             for line in text.splitlines()]
+    claude_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _started_line(claude_md):
+    return next(line for line in claude_md.read_text(encoding="utf-8").splitlines()
+                if line.startswith("- Started:"))
+
+
+def test_an_already_recorded_team_repairs_a_stale_team_line(tmp_path,
+                                                            monkeypatch):
+    """The record already names the team but the CLAUDE.md line is stale (an
+    earlier run wrote the record before the journal held a session_start).
+    A rerun writes the line, keeps the Started line, and journals no move.
+    Kill: return before the CLAUDE.md write on the 'already' path."""
+    world = _undecided(tmp_path, monkeypatch, saved_team=NEW_TEAM)
+    _set_team_line(world.claude_md, OLD_TEAM)
+    _set_started_line(world.claude_md)
+    started = _started_line(world.claude_md)
+    assert started == _EARLIER_START
+    result = _realign(world, NEW_TEAM)
+    assert result.returncode == 0, result.stderr
+    assert team_line(world.claude_md) == f"- Team: `{NEW_TEAM}`"
+    assert _started_line(world.claude_md) == started
+    assert [e for e in read_journal(world.session_dir)
+            if e.get("type") == "team_realigned"] == []
+
+
+def test_a_realign_keeps_the_session_start(tmp_path, monkeypatch):
+    """A move keeps the context's started_at and the CLAUDE.md Started line.
+    Kill: build the context without started_at, or update the block without
+    the read Started value -> both reset to now."""
+    world = _undecided(tmp_path, monkeypatch)
+    started_at = json.loads(world.context_path.read_text(encoding="utf-8"))["started_at"]
+    _set_started_line(world.claude_md)
+    started = _started_line(world.claude_md)
+    assert started == _EARLIER_START
+    result = _realign(world, NEW_TEAM)
+    assert result.returncode == 0, result.stderr
+    assert team_line(world.claude_md) == f"- Team: `{NEW_TEAM}`"
+    assert json.loads(world.context_path.read_text(encoding="utf-8"))["started_at"] == started_at
+    assert _started_line(world.claude_md) == started
+
+
+# --- A team this session does not own ---------------------------------------
+
+
+def test_realign_refuses_a_team_while_this_session_leads_another(
+        tmp_path, monkeypatch):
+    """A team config names this session as its lead (identity match), so the
+    session's team is that one: any other team is refused, even one that
+    corroborates in every other respect."""
+    world = _undecided(tmp_path, monkeypatch, old_config=True)
+    result = _refusal(world, NEW_TEAM)
+    assert OLD_TEAM in result.stderr
+
+
+def test_realign_accepts_the_team_this_session_leads(tmp_path, monkeypatch):
+    """Control: the team identity match names is accepted."""
+    world = _undecided(tmp_path, monkeypatch, old_config=True,
+                       saved_team=NEW_TEAM)
+    result = _realign(world, OLD_TEAM)
+    assert result.returncode == 0, result.stderr
+    assert saved_team_name(world) == OLD_TEAM
+
+
+def test_a_move_from_a_team_that_never_existed_journals_nothing(
+        tmp_path, monkeypatch):
+    """The recorded team has neither a config nor a task store: the record
+    moves, no team_realigned is journalled, and the command says there is
+    nothing to carry across. Control for the split case above."""
+    world = _undecided(tmp_path, monkeypatch)
+    result = _realign(world, NEW_TEAM)
+    assert result.returncode == 0, result.stderr
+    assert saved_team_name(world) == NEW_TEAM
+    assert "nothing to carry across" in result.stdout
+    assert [e for e in read_journal(world.session_dir)
+            if e.get("type") == "team_realigned"] == []
+
+
+def test_realign_refuses_a_team_another_pact_session_owns(tmp_path,
+                                                          monkeypatch):
+    """The requested team's lead session has its own PACT context: that team
+    is the other session's, however well it corroborates. Kill: drop the
+    ownership check -> the move lands. Control: the move above, where the
+    team's lead session has no PACT context."""
+    world = _undecided(tmp_path, monkeypatch)
+    other = world.session_dir.parent / NEW_SID / "pact-session-context.json"
+    other.parent.mkdir(parents=True)
+    other.write_text(json.dumps({"session_id": NEW_SID}), encoding="utf-8")
+    result = _refusal(world, NEW_TEAM)
+    assert "another PACT session" in result.stderr
+
+
+def test_a_realign_keeps_the_recorded_process_key(tmp_path, monkeypatch):
+    """The command runs from a shell, which has no claude process key of its
+    own: the key a lead hook frame recorded survives the move. Kill: pass a
+    computed or empty key to the context write."""
+    world = _undecided(tmp_path, monkeypatch)
+    context = json.loads(world.context_path.read_text(encoding="utf-8"))
+    context["process_key"] = "1262:Mon Oct 19 18:36:20 2026"
+    world.context_path.write_text(json.dumps(context), encoding="utf-8")
+    result = _realign(world, NEW_TEAM)
+    assert result.returncode == 0, result.stderr
+    after = json.loads(world.context_path.read_text(encoding="utf-8"))
+    assert after["team_name"] == NEW_TEAM
+    assert after["process_key"] == "1262:Mon Oct 19 18:36:20 2026"
