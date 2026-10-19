@@ -421,6 +421,14 @@ COVERED_L2 = {
     # PACT team membership. Its non-mocked L2 test runs the real hook against a
     # real team config, session context and session registry.
     "pin_caps_gate": "test_pin_caps_gate_frames.py",
+    # task_claim_gate and handoff_ordering_gate joined SEAM_DEPENDENT_HOOKS when
+    # the lead-session check began reading the session context beside the team
+    # config. Their non-mocked L2 tests run the real hooks in a split-team world:
+    # an in-process teammate frame under the lead's session id (task_claim_gate)
+    # and a lead completion after a compaction that kept the recorded team
+    # (handoff_ordering_gate).
+    "task_claim_gate": "test_team_split_lead_session.py",
+    "handoff_ordering_gate": "test_team_split_compact_keep.py",
 }
 
 # Documented forward-only BACKLOG: seam hooks whose non-mocked L2 test is a named
