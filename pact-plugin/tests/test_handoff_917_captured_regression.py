@@ -288,12 +288,13 @@ class TestBothModesCaptured:
         frame is SUPPRESSED, while the lead spelling on the same frame EMITS
         (positive control).
 
-        THE SUPPRESSION IS NARROWER THAN IT LOOKS. This frame DOES carry a
-        session_id equal to LEAD_SESSION, so it supplies the frame half of the
-        topology leg. It is suppressed only because no team config carrying a
-        leadSessionId is seeded, so _read_lead_session_id returns the empty
-        string and the leg answers False. Seed that config and this same
-        teammate spelling EMITS, because it is then the in-process teammate.
+        THE SUPPRESSION IS NARROWER THAN IT LOOKS. Both frames carry
+        TEAMMATE_SESSION, a session id other than the one the lead context
+        records, so neither topology leg places them in the lead's session:
+        the lead-context leg sees a different id, and no team config carrying
+        a leadSessionId is seeded. Give the teammate frame LEAD_SESSION and it
+        EMITS, because a frame carrying the session id the lead context
+        records is an in-process teammate.
 
         Frame STRUCTURE is the captured lead PostToolUse(TaskUpdate, completed);
         only agent_type is varied — the captured-grounded analog of
@@ -306,10 +307,12 @@ class TestBothModesCaptured:
         teammate_spelling = captured_teammate_taskcompleted()["agent_type"]
         subject = captured_teammate_taskcompleted()["task_subject"]
 
-        # teammate spelling + no leadSessionId config → frame gate False → b2 skips
+        # teammate spelling + a session id outside the lead's session → frame
+        # gate False → b2 skips
         suppressed = captured_lead_posttooluse_taskupdate_completed()
         suppressed["tool_input"]["taskId"] = TASK_ID
         suppressed["agent_type"] = teammate_spelling
+        suppressed["session_id"] = TEAMMATE_SESSION
         sup_calls: list = []
         _run_b2(suppressed, _task_data(subject), sup_calls, monkeypatch)
         assert sup_calls == [], (
@@ -320,6 +323,7 @@ class TestBothModesCaptured:
         # positive control: lead spelling on the same frame → emits
         lead = captured_lead_posttooluse_taskupdate_completed()
         lead["tool_input"]["taskId"] = TASK_ID
+        lead["session_id"] = TEAMMATE_SESSION
         lead_calls: list = []
         _run_b2(lead, _task_data(subject), lead_calls, monkeypatch)
         assert len(lead_calls) == 1, (

@@ -1242,14 +1242,17 @@ def resolve_agent_name(
 
     # Step 3.5: own session_id → self-registration registry. Recovers a tmux
     # teammate's friendly name@team, which is ABSENT from tmux hook stdin (no
-    # agent_name / agent_id), by self-looking-up its OWN session_id. Gated
-    # behind Steps 1-3 (all early returns / the in-process common case never
-    # reaches here), so this file read fires ONLY for the tmux-degraded frame
-    # that needs it. resolve() is fail-safe (None on any miss/error, never
-    # raises); on None we fall through to Step 4 (current behavior). The value
-    # is name@team — return the name half, matching Step 2's split("@")[0] shape.
+    # agent_name / agent_id), by self-looking-up its OWN session_id. Skipped
+    # for any frame in the lead's session (is_lead_context_frame): an
+    # in-process teammate's Bash/Edit frame carries neither agent_name nor
+    # agent_id and reaches this step, and every in-process teammate shares the
+    # lead's session_id, so a registry row under that id names whichever
+    # teammate registered last, never the actor. Such frames fall to Step 4.
+    # resolve() is fail-safe (None on any miss/error, never raises); on None
+    # we fall through to Step 4. The value is name@team — return the name
+    # half, matching Step 2's split("@")[0] shape.
     session_id = input_data.get("session_id")
-    if session_id:
+    if session_id and not is_lead_context_frame(input_data):
         resolved = _registry_resolve(str(session_id))
         if resolved and "@" in resolved:
             return resolved.split("@")[0]
@@ -1442,23 +1445,83 @@ def _read_lead_session_id(team_name: str, teams_dir: str | None = None) -> str:
     return lead_session_id if isinstance(lead_session_id, str) else ""
 
 
+def is_lead_context_frame(input_data: dict) -> bool:
+    """True iff this frame's stdin ``session_id`` is the session a PACT lead
+    context file was written for: the lead's own frame, or an in-process
+    teammate's frame (it shares the lead's session id and project dir).
+
+    The context file lives under the stdin session id, and only a lead frame
+    persists it, so a non-empty context ``session_id`` equal to the frame's
+    id places the frame in the lead's session. That holds after a resume
+    into a re-provisioned team, where the team config's ``leadSessionId``
+    names an id no hook frame carries, because the stdin id never changes.
+    A tmux teammate has its own session id and no context file at that
+    path, so it reads False.
+
+    Calls ``init(input_data)`` itself (a no-op once the context path is
+    set). Never raises: False on any error.
+    """
+    try:
+        sid = input_data.get("session_id")
+        if not (isinstance(sid, str) and sid):
+            return False
+        init(input_data)
+        context_sid = get_pact_context().get("session_id", "")
+        return bool(context_sid) and sid == context_sid
+    except Exception:
+        return False
+
+
+def is_lead_session_frame(input_data: dict, team_name: str) -> bool:
+    """True iff this frame runs in the lead's session: the lead-context leg
+    (``is_lead_context_frame``) or the frame's ``session_id`` equals
+    ``team_name``'s config ``leadSessionId``.
+
+    The caller passes the team. Resolving it here through
+    ``get_team_name()`` would make the config leg dead, because that
+    resolver returns "" whenever the context is empty, which is exactly
+    the frame the config leg exists for (a lead frame before its context
+    is persisted). Never raises: False on any error.
+    """
+    try:
+        if is_lead_context_frame(input_data):
+            return True
+        sid = input_data.get("session_id")
+        if not (isinstance(sid, str) and sid):
+            return False
+        lead_session_id = _read_lead_session_id(team_name)
+        return bool(lead_session_id) and sid == lead_session_id
+    except Exception:
+        return False
+
+
 def is_canonical_journal_frame(input_data: dict) -> bool:
     """True iff THIS process's journal writes land in the canonical
     (lead-session) journal: the lead frame in either teammateMode, or an
-    in-process teammate frame (session_id == leadSessionId — one process,
-    one session). False for a tmux teammate frame (distinct session_id)
-    and on ANY resolution failure of the topology leg (unreadable team
-    config, missing session_id): skipping defers durability to the
-    completion-time seams — never worse than the shipped baseline — while
-    emitting from a misclassified frame could silo the event AND poison
-    the shared content-hash marker namespace, suppressing a later
-    canonical emit. On an empty-team frame the teammate-completion seams
-    starve by construction (no team namespace to read task state from),
-    so the effective deferral target is the lead-completion seam, whose
-    snapshot substrate dedups under the session-dir marker root when the
-    team is empty. The is_lead leg is independent of config readability,
-    so lead-written keys keep full both-modes coverage even when the
-    topology leg cannot resolve. Never raises.
+    in-process teammate frame. False for a tmux teammate frame (distinct
+    session_id) and on ANY resolution failure of the topology leg: skipping
+    defers durability to the completion-time seams — never worse than the
+    shipped baseline — while emitting from a misclassified frame could silo
+    the event AND poison the shared content-hash marker namespace,
+    suppressing a later canonical emit. The is_lead leg is independent of
+    config readability, so lead-written keys keep full both-modes coverage
+    even when the topology leg cannot resolve. Never raises.
+
+    The topology leg (non-lead frames) admits the lead's session by either
+    id: the config's leadSessionId, or the session id the lead context
+    records (is_lead_context_frame), which stays true after a resume into a
+    re-provisioned team whose leadSessionId no frame carries. It does so
+    ONLY while the config of the RAW persisted team_name is readable. That
+    is the team whose store the per-write emit legs read
+    (tasks/<persisted team>/) and whose marker namespace they claim. When
+    that config is gone, the persisted name is the stale one, and a task
+    file with the same id there belongs to the old team, so emitting would
+    journal the old team's content; skipping is a deliberate safety rule
+    there, deferring to the lead's completion seam. The persisted name is
+    used, not get_team_name(): the resolver can upgrade to the new team
+    through the census while the emit still reads the old store. An empty
+    persisted team (the "team unknown -> refuse" signal) fails closed by
+    the same conjunct.
     """
     try:
         if is_lead(input_data):
@@ -1468,30 +1531,12 @@ def is_canonical_journal_frame(input_data: dict) -> bool:
             # Missing/non-string session_id: topology unresolvable — skip
             # before paying the config read.
             return False
-        # Team resolution goes through this module's own identity-matched
-        # resolver (fail-closed empty on an unknown team, which routes the
-        # helper to its "" return and this leg to False).
-        #
-        # DELIBERATE SPLIT — do not unify with the callers' team resolution.
-        # The per-write emit legs (task_lifecycle_gate) resolve their
-        # team_name ONCE from the persisted ctx SSOT
-        # (get_pact_context()["team_name"]) and use it for task reads +
-        # marker namespacing, because the dedup namespace must stay
-        # internally CONSISTENT across every seam that shares those markers
-        # (all gate seams use the same persisted value). THIS predicate
-        # instead answers a session-topology question — "does my session_id
-        # match the REAL platform team's leadSessionId?" — which requires
-        # the identity-ALIGNED resolver: after a resume-divergence the
-        # persisted name can point at a config whose leadSessionId is
-        # stale/wrong, flipping the topology answer. Re-pointing the emit
-        # path to the aligned resolver would fragment the marker namespace
-        # against the pre-existing seams (duplicate events); re-pointing
-        # this predicate to the persisted value would mis-answer topology
-        # after divergence. Divergent outcomes are bounded (skip or
-        # duplicate emit — bias-to-preservation, never a lost canonical
-        # emit), which is why the split is safe as well as intentional.
-        lead_session_id = _read_lead_session_id(get_team_name())
-        return bool(lead_session_id) and sid == lead_session_id
+        init(input_data)
+        persisted_team = get_pact_context().get("team_name", "")
+        lead_session_id = _read_lead_session_id(persisted_team)
+        return bool(lead_session_id) and (
+            sid == lead_session_id or is_lead_context_frame(input_data)
+        )
     except Exception:
         return False
 

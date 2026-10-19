@@ -258,7 +258,13 @@ class TestFramePredicateControl:
         cfg = teams_dir / "config.json"
         cfg.write_text(json.dumps({"leadSessionId": SESSION_ID}), encoding="utf-8")
         monkeypatch.setattr(pc, "get_claude_config_dir", lambda: tmp_path)
-        monkeypatch.setattr(pc, "get_team_name", lambda: TEAM)
+        # The topology leg reads the RAW persisted team (the store the emit
+        # legs read). The recorded session_id is empty so the lead-context
+        # leg stays out of this config-half control.
+        monkeypatch.setattr(pc, "get_pact_context", lambda: {
+            "team_name": TEAM, "session_id": "", "project_dir": "",
+            "plugin_root": "", "started_at": "",
+        })
 
         both = {"session_id": SESSION_ID}
         assert pc.is_canonical_journal_frame(both) is True, (

@@ -212,8 +212,10 @@ class TestPerWriteFrameMatrix:
         land: ZERO journal files anywhere under the test HOME and ZERO
         content-hash markers claimed. A silo'd emit or a poisoned shared
         marker (suppressing a later canonical emit) is the hazard the
-        frame gate exists to exclude."""
-        pact_context(team_name=TEAM, session_id=TMUX_SID)
+        frame gate exists to exclude. The context records the LEAD's
+        session id: only a lead frame persists one, so a tmux teammate's
+        own id never has a context of its own."""
+        pact_context(team_name=TEAM, session_id=LEAD_SID)
         _seed_team_config(home)  # leadSessionId=LEAD_SID != TMUX_SID
         _seed_task(
             home,
@@ -575,8 +577,9 @@ class TestPerWriteTaskCreateLeg:
     ):
         """The create leg carries its own frame gate: a tmux teammate frame
         (session_id != leadSessionId) writes nothing anywhere and claims no
-        marker."""
-        pact_context(team_name=TEAM, session_id=TMUX_SID)
+        marker. The context records the lead's session id, never the tmux
+        teammate's own."""
+        pact_context(team_name=TEAM, session_id=LEAD_SID)
         _seed_team_config(home)
         _seed_task(
             home,

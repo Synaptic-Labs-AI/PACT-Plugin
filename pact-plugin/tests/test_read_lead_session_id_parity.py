@@ -172,3 +172,88 @@ class TestKnownSegmentGuardBoundary:
         assert sr == _LEAD_SID
         assert tcg == ""
         # Both still satisfy the fail-safe contract (never raise; tcg fails safe).
+
+
+# ── _lead_context_exists_for: the leaf's glob vs pact_context's writer path ──
+#
+# session_registry._lead_context_exists_for globs
+# <config root>/pact-sessions/*/<sid>/pact-session-context.json. The file it
+# looks for is the one pact_context writes, at
+# _build_session_path(project_slug(project_dir), sid) / "pact-session-context.json".
+# These cases build the context path THROUGH pact_context's own builder, so a
+# change to either side's layout turns them red. Revert check: delete the
+# `_lead_context_exists_for(sid)` skip in register() ->
+# test_register_skips_a_sid_with_a_lead_context fails (1 failed); widen the glob
+# to `*/*/` -> the decoy row and the register-writes control fail (2 failed).
+
+from shared import session_registry as _sr  # noqa: E402
+from shared.pact_context import _build_session_path, project_slug  # noqa: E402
+
+
+def _write_lead_context(project_dir, sid):
+    """Write a context file where pact_context's writer puts it for (project_dir, sid)."""
+    path = _build_session_path(project_slug(project_dir), sid) / "pact-session-context.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"session_id": sid}), encoding="utf-8")
+    return path
+
+
+def _registry_rows():
+    path = _sr.get_registry_path()
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+class TestLeadContextExistsForParity:
+    def test_finds_the_file_pact_context_writes(self, parity_env, tmp_path):
+        """POSITIVE CONTROL: the leaf finds the writer's file for that sid."""
+        _write_lead_context(str(tmp_path / "proj-a"), _LEAD_SID)
+        assert _sr._lead_context_exists_for(_LEAD_SID) is True
+
+    def test_finds_it_under_a_slug_other_than_the_live_project(
+        self, parity_env, tmp_path, monkeypatch
+    ):
+        """The glob spans every project slug, not CLAUDE_PROJECT_DIR's alone."""
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "proj-live"))
+        _write_lead_context(str(tmp_path / "proj-other"), _LEAD_SID)
+        assert _sr._lead_context_exists_for(_LEAD_SID) is True
+
+    def test_decoy_under_another_sid_is_not_a_hit(self, parity_env, tmp_path):
+        _write_lead_context(str(tmp_path / "proj-a"), "some-other-sid")
+        assert _sr._lead_context_exists_for(_LEAD_SID) is False
+
+    def test_no_context_at_all_is_not_a_hit(self, parity_env):
+        assert _sr._lead_context_exists_for(_LEAD_SID) is False
+
+    @pytest.mark.parametrize("sid", ["", "*", "lead*", "a/b", "..", "[x]", "a b", None])
+    def test_sid_outside_the_writer_charset_is_not_a_hit(self, parity_env, tmp_path, sid):
+        """A glob metacharacter or path character never reaches the pattern: with
+        a context under some sid on disk, `*` would otherwise match it."""
+        _write_lead_context(str(tmp_path / "proj-a"), _LEAD_SID)
+        assert _sr._lead_context_exists_for(sid) is False
+
+    def test_register_skips_a_sid_with_a_lead_context(self, parity_env, tmp_path, monkeypatch):
+        """In-process teammate in a split world: the team config names a
+        different leadSessionId, but the lead's context file sits under the sid
+        -> no registry row."""
+        parity_env.write_config(
+            "pact-new", {"members": [{"name": "alice"}], "leadSessionId": "someone-else"}
+        )
+        _write_lead_context(str(tmp_path / "proj-a"), _LEAD_SID)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", _LEAD_SID)
+        _sr.register("alice@pact-new")
+        assert _registry_rows() == []
+
+    def test_register_writes_for_a_sid_without_one(self, parity_env, tmp_path, monkeypatch):
+        """Control: a tmux teammate (own sid, no context) still registers, with a
+        decoy context under another sid on disk."""
+        parity_env.write_config(
+            "pact-new", {"members": [{"name": "alice"}], "leadSessionId": _LEAD_SID}
+        )
+        _write_lead_context(str(tmp_path / "proj-a"), _LEAD_SID)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "tmux-teammate-sid")
+        _sr.register("alice@pact-new")
+        assert _registry_rows() == [
+            {"session_id": "tmux-teammate-sid", "value": "alice@pact-new"}
+        ]
