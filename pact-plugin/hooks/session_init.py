@@ -104,12 +104,14 @@ from shared.pact_context import (
     generate_team_name,
     get_session_dir,
     get_session_id,
+    init,
     is_lead,
     persist_context,
     strip_pact_namespace,
 )
 from shared.dispatch_helpers import is_registered_pact_specialist
 from shared.session_journal import append_event, make_event
+from shared.session_state import is_safe_path_component
 from shared.failure_log import append_failure
 from shared.plugin_manifest import format_plugin_banner
 from shared.pact_config import llm_options
@@ -627,21 +629,35 @@ def _extract_session_started(project_dir: str) -> str | None:
     return match.group(0) if match else None
 
 
-def _kept_started_at(session_id: str, project_dir: str) -> str | None:
-    """The started_at already in this session's context file, or None.
+def _saved_context(session_id: str, project_dir: str) -> dict:
+    """The fields this module reuses from this session's context file.
 
-    Reads the file build_context_cache writes. None when it is missing,
-    unreadable, or not a timezone-aware ISO-8601 time.
+    Reads the file build_context_cache writes, before this run rewrites it.
+    Returns {} when it is missing or unreadable. Each field is kept only when
+    valid: ``team_name`` when it is a safe path component, ``started_at``
+    when it is a timezone-aware ISO-8601 time.
     """
     try:
         path = (
             build_session_path(project_slug(project_dir), str(session_id))
             / "pact-session-context.json"
         )
-        value = json.loads(path.read_text(encoding="utf-8")).get("started_at")
-        return value if datetime.fromisoformat(value).tzinfo else None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {}
     except Exception:
-        return None
+        return {}
+    saved: dict = {}
+    team_name = data.get("team_name")
+    if is_safe_path_component(team_name):
+        saved["team_name"] = team_name
+    started_at = data.get("started_at")
+    try:
+        if datetime.fromisoformat(started_at).tzinfo:
+            saved["started_at"] = started_at
+    except Exception:
+        pass
+    return saved
 
 
 # Render-hostile characters that, present anywhere in a session_id, render
@@ -1830,8 +1846,25 @@ def main():
         # skips all persistence anyway). Once the dir is born, a later
         # SessionStart (or the marker writer) resolves the aligned name and
         # both writers agree → the per-prompt write-back becomes a true no-op.
+        #
+        # A compaction keeps the team this session recorded: the computed name
+        # is always the pre-resume one, so passing it here would write a stale
+        # team back over a realigned record. The resolver still replaces the
+        # kept team when its config is absent. Every other source re-derives.
+        saved = (
+            {} if session_id_was_missing
+            else _saved_context(session_id, project_dir)
+        )
         if not session_id_was_missing:
-            team_name = _resolve_aligned_team_name(session_id, default=team_name)
+            # The resolver's census reads this session's journal through
+            # get_session_dir(), which is empty until the context module is
+            # initialised. Never on the sentinel path: it must not touch disk.
+            init(input_data)
+            default = (
+                saved.get("team_name") or team_name
+                if source == "compact" else team_name
+            )
+            team_name = _resolve_aligned_team_name(session_id, default=default)
 
         if not session_id_was_missing:
             _record_worktree_identity(session_id, project_dir)
@@ -1855,7 +1888,7 @@ def main():
                 _ctx_result = build_context_cache(
                     team_name, session_id, project_dir, plugin_root,
                     started_at=(
-                        _kept_started_at(session_id, project_dir)
+                        saved.get("started_at")
                         if source == "compact" else None
                     ),
                 )

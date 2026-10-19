@@ -126,7 +126,7 @@ KNOWN_MODULE_PATH_USES = Counter({
 KNOWN_NAME_SITES = Counter({
     ("hooks/dispatch_gate.py", "<module>"): 2,                   # message text
     ("hooks/dispatch_gate.py", "evaluate_dispatch"): 3,          # message text
-    ("hooks/session_init.py", "_kept_started_at"): 1,            # read
+    ("hooks/session_init.py", "_saved_context"): 1,              # read
     ("hooks/session_init.py", "_lead_context_persisted"): 1,     # existence read
     ("hooks/shared/pact_context.py", "build_context_cache"): 1,  # the writers' path
     ("hooks/shared/pact_context.py", "init"): 1,                 # read path
