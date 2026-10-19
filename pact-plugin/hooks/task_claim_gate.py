@@ -441,7 +441,9 @@ def _evaluate(stdin: dict) -> str | None:
         # attribution-free nudge is warranted. The extra suppression on the
         # unknown path is intentional, not an oversight.
         return None  # unknown topology → fail-safe total NO-OP (no advisory)
-    in_process = pact_context.is_lead_session_frame(stdin, team_name)
+    in_process = pact_context.is_lead_session_frame(
+        stdin, team_name, lead_session_id=lead_session_id
+    )
 
     # ── Step 4: load the team task set ONCE (also feeds the unblocked predicate) ─
     tasks = list(iter_team_task_jsons(team_name))

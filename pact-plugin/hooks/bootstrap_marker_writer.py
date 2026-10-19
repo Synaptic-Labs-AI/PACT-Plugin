@@ -528,7 +528,9 @@ def _realign_team(input_data: dict) -> str | None:
         after = recorded_team_of(pact_context.get_session_dir()).lower()
         if not before or not after or before == after:
             return None
-        return record_team_realign(before, after)
+        # The lead's own write-back keeps its notice even when a racing
+        # compaction recorded the move first.
+        return record_team_realign(before, after, notify_if_already_recorded=True)
     except Exception as e:
         print(
             f"bootstrap_marker_writer: team realign report failed: {e}",

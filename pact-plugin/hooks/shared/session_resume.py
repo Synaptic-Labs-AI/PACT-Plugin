@@ -813,7 +813,13 @@ def append_team_realigned(
         lock = None
         try:
             Path(target_dir).mkdir(parents=True, exist_ok=True, mode=0o700)
-            lock = open(Path(target_dir) / _REALIGN_LOCK_NAME, "a")
+            # O_NOFOLLOW: a symlink at the lock path is refused (ELOOP), never
+            # followed to create or open its target.
+            lock = os.open(
+                Path(target_dir) / _REALIGN_LOCK_NAME,
+                os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW,
+                0o600,
+            )
             fcntl.flock(lock, fcntl.LOCK_EX)
         except OSError:
             pass  # fail open: the append below still runs
@@ -827,13 +833,17 @@ def append_team_realigned(
             return REALIGN_FAILED
         finally:
             if lock is not None:
-                lock.close()  # closing releases the flock
+                os.close(lock)  # closing releases the flock
     except Exception:
         return REALIGN_FAILED
 
 
 def record_team_realign(
-    old_team: str, new_team: str, *, session_dir: str | None = None,
+    old_team: str,
+    new_team: str,
+    *,
+    session_dir: str | None = None,
+    notify_if_already_recorded: bool = False,
 ) -> str | None:
     """Record a move of this session's team and return the lead notice.
 
@@ -841,10 +851,18 @@ def record_team_realign(
     write-back and session_init when a launch realigns. Returns None when the
     old team never existed, so there is no split to recover from. When the
     journal cannot take the event, the notice says so and names the old
-    team, which recovery would otherwise read from that event. Never raises.
+    team, which recovery would otherwise read from that event.
+
+    When another process already recorded this move (a teammate's compaction
+    racing the lead's prompt), only a caller passing
+    notify_if_already_recorded gets the notice. The lead's prompt-time
+    write-back passes it, so the lead keeps its notice; a SessionStart that
+    lost the race gets none. Never raises.
     """
     outcome = append_team_realigned(old_team, new_team, session_dir=session_dir)
     if outcome == REALIGN_NOT_A_SPLIT:
+        return None
+    if outcome == REALIGN_ALREADY_RECORDED and not notify_if_already_recorded:
         return None
     if outcome == REALIGN_FAILED:
         print(

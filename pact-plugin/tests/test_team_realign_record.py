@@ -196,7 +196,28 @@ def test_the_same_move_twice_is_recorded_once(tmp_path, monkeypatch):
             == session_resume.REALIGN_RECORDED)
     assert (session_resume.append_team_realigned(OLD_TEAM, NEW_TEAM)
             == session_resume.REALIGN_ALREADY_RECORDED)
-    notice = session_resume.record_team_realign(OLD_TEAM, NEW_TEAM)
+    assert _moves(world) == [(OLD_TEAM, NEW_TEAM)]
+
+
+def test_a_launch_that_loses_the_race_gets_no_notice(tmp_path, monkeypatch):
+    """A SessionStart caller (the default) whose move another process already
+    recorded shows nothing: the notice went to the process that recorded."""
+    world = _world(tmp_path, monkeypatch)
+    _init(world)
+    session_resume.append_team_realigned(OLD_TEAM, NEW_TEAM)
+    assert session_resume.record_team_realign(OLD_TEAM, NEW_TEAM) is None
+    assert _moves(world) == [(OLD_TEAM, NEW_TEAM)]
+
+
+def test_a_lead_prompt_that_loses_the_race_keeps_its_notice(
+        tmp_path, monkeypatch):
+    """A teammate's compaction recorded the move first; the lead's prompt
+    write-back still tells the lead, and no second event is written."""
+    world = _world(tmp_path, monkeypatch)
+    _init(world)
+    session_resume.append_team_realigned(OLD_TEAM, NEW_TEAM)
+    notice = _prompt(monkeypatch, world)
+    assert saved_team_name(world) == NEW_TEAM, "precondition: the prompt moved it"
     assert f"from team `{OLD_TEAM}` to `{NEW_TEAM}`" in notice
     assert _moves(world) == [(OLD_TEAM, NEW_TEAM)]
 
@@ -267,6 +288,20 @@ def test_a_lock_that_cannot_be_taken_still_records(tmp_path, monkeypatch):
     (world.session_dir / ".team-realigned.lock").mkdir()
     assert (session_resume.append_team_realigned(OLD_TEAM, NEW_TEAM)
             == session_resume.REALIGN_RECORDED)
+    assert _moves(world) == [(OLD_TEAM, NEW_TEAM)]
+
+
+def test_a_symlinked_lock_path_is_never_followed(tmp_path, monkeypatch):
+    world = _world(tmp_path, monkeypatch)
+    _init(world)
+    target = tmp_path / "elsewhere" / "planted"
+    target.parent.mkdir()
+    link = world.session_dir / ".team-realigned.lock"
+    link.symlink_to(target)
+    assert (session_resume.append_team_realigned(OLD_TEAM, NEW_TEAM)
+            == session_resume.REALIGN_RECORDED)
+    assert not target.exists()
+    assert link.is_symlink()
     assert _moves(world) == [(OLD_TEAM, NEW_TEAM)]
 
 

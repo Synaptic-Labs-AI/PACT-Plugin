@@ -726,6 +726,26 @@ def test_T11_removal_is_lead_guard_inverts_lead_noop(tmp_path, monkeypatch):
     assert gate._evaluate(lead_frame) is not None             # neutered: INVERTS
 
 
+def test_the_topology_step_reads_the_team_config_once(tmp_path, monkeypatch):
+    """A tmux frame reaches the topology step and is classified from one read
+    of teams/<team>/config.json: the value the gate already read is passed to
+    the shared lead-session predicate rather than read again."""
+    _seed_config(tmp_path)
+    _mock_registry(monkeypatch, f"{DEVOPS}@{TEAM}")
+    config = tmp_path / ".claude" / "teams" / TEAM / "config.json"
+    reads = []
+    real_read_text = Path.read_text
+
+    def counting_read_text(self, *args, **kwargs):
+        if self == config:
+            reads.append(self)
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counting_read_text)
+    gate._evaluate(_payload(session_id=TMUX_SID, agent_type=DEVOPS))
+    assert len(reads) == 1, reads
+
+
 def test_T11_inversion_topology_compare_inverts_in_process_no_flip(tmp_path, monkeypatch):
     """INVERSION (the calibration case): the topology compare green-lights the
     wrong-flip it exists to prevent if inverted. An IN-PROCESS frame must NEVER
@@ -742,7 +762,8 @@ def test_T11_inversion_topology_compare_inverts_in_process_no_flip(tmp_path, mon
     assert gate._evaluate(in_process_frame) == gate._GENERIC_CLAIM_NUDGE
     assert _read_task(tmp_path, "B")["status"] == "pending"
     # neuter: the lead-session predicate says no → in_process=False
-    monkeypatch.setattr(gate.pact_context, "is_lead_session_frame", lambda stdin, team: False)
+    monkeypatch.setattr(gate.pact_context, "is_lead_session_frame",
+                        lambda stdin, team, **_: False)
     advisory = gate._evaluate(in_process_frame)
     assert "Auto-claimed" in advisory                          # INVERTS to a wrong-flip
     assert _read_task(tmp_path, "B")["status"] == "in_progress"

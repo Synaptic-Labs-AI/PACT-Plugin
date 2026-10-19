@@ -1932,7 +1932,9 @@ def main():
                         saved.get("started_at")
                         if source == "compact" else None
                     ),
-                    process_key=process_key if frame_is_lead else None,
+                    # An empty key (CLAUDE_PID not this hook's parent) is no
+                    # reading: None keeps the key this session recorded.
+                    process_key=(process_key or None) if frame_is_lead else None,
                 )
                 if frame_is_lead and _ctx_result is not None:
                     persist_context(*_ctx_result)

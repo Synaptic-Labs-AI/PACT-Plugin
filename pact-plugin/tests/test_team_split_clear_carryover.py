@@ -62,7 +62,7 @@ def _start_time(pid):
     """The process start time exactly as current_process_key() reads it."""
     out = subprocess.run(
         ["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True,
-        text=True, env={**os.environ, "LC_ALL": "C"}, check=True,
+        text=True, env={**os.environ, "LC_ALL": "C", "TZ": "UTC"}, check=True,
     ).stdout
     return " ".join(out.split())
 
@@ -345,6 +345,115 @@ def test_a_teammate_frame_never_binds_to_the_lead_s_process(tmp_path,
             pass
     assert ctx_module.get_pact_context()["team_name"] == COMPUTED_TEAM
     assert not (world.sessions / CLEAR_SID / "pact-session-context.json").exists()
+
+
+# -- a key that cannot be read keeps the recorded one --------------------------
+
+
+def test_a_compaction_that_reads_no_key_keeps_the_recorded_one(tmp_path,
+                                                               monkeypatch):
+    """A lead-shaped compaction whose CLAUDE_PID is not the hook's parent
+    computes no key. It keeps the key the session recorded, so the next
+    /clear of the same process still carries the team."""
+    world = _clear_world(tmp_path, monkeypatch)
+    key = _key_of(os.getppid())
+    monkeypatch.setenv("CLAUDE_PID", str(os.getpid()))
+    _start(monkeypatch, world, sid=PREV_SID, source="compact")
+    assert _recorded(world, PREV_SID)["process_key"] == key
+    monkeypatch.setenv("CLAUDE_PID", str(os.getppid()))
+    _start(monkeypatch, world)
+    assert _recorded(world)["team_name"] == PREV_TEAM
+
+
+# -- a /clear that read no key: recovery onto the session's own team ------------
+
+
+def _end_predecessor(world):
+    """The SessionEnd a /clear journals in the session it replaces."""
+    write_journal(world.prev_dir, [
+        {"type": "session_start", "session_id": PREV_SID,
+         "project_dir": str(world.project), "source": "startup"},
+        "task_metadata_snapshot",
+        "session_end",
+    ])
+
+
+def _keyless_clear(monkeypatch, world):
+    monkeypatch.delenv("CLAUDE_PID")
+    _start(monkeypatch, world)
+    assert _recorded(world)["team_name"] == COMPUTED_TEAM
+
+
+def _own_team_view(monkeypatch):
+    """(census candidate names, owned-by-other, verb refusal) for PREV_TEAM
+    as this clear-born session sees it."""
+    import shared.pact_context as ctx_module
+    from shared import realign_team
+    reset_context_module()
+    ctx_module.init({"session_id": CLEAR_SID})
+    names = [name for name, corroborated, _ in
+             ctx_module._resume_census_candidates(
+                 config_root(Path.home()) / "teams", CLEAR_SID)
+             if corroborated]
+    owned = ctx_module.team_owned_by_other_pact_session(PREV_TEAM, CLEAR_SID)
+    reset_context_module()
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", CLEAR_SID)
+    refusal = realign_team.refusal_reason(PREV_TEAM)
+    reset_context_module()
+    return names, owned, refusal
+
+
+def test_after_a_keyless_clear_the_ended_predecessor_s_team_is_ours(
+        tmp_path, monkeypatch):
+    """The predecessor ended at the /clear and leads the team this process
+    is on. No live session owns it, so the census counts it and the realign
+    verb accepts it."""
+    world = _clear_world(tmp_path, monkeypatch)
+    _end_predecessor(world)
+    _keyless_clear(monkeypatch, world)
+    assert _own_team_view(monkeypatch) == ([PREV_TEAM], False, "")
+
+
+def test_after_a_keyless_clear_a_live_predecessor_s_team_is_refused(
+        tmp_path, monkeypatch):
+    """Control for the cell above: with no session_end the predecessor
+    reads as live, and with no key it cannot be told from another session,
+    so its team stays excluded."""
+    world = _clear_world(tmp_path, monkeypatch)
+    _keyless_clear(monkeypatch, world)
+    assert _own_team_view(monkeypatch) == (
+        [], True, "another PACT session owns this team")
+
+
+# -- an explicit realign outranks the carry-over ---------------------------------
+
+
+REALIGNED_TEAM = "session-7e7e7e7e"
+
+
+def test_a_realign_after_a_clear_is_never_reverted_by_the_carry_over(
+        tmp_path, monkeypatch):
+    """A clear-born session carries the predecessor's team, then the lead
+    realigns it to another live team with the verb. The next prompt's
+    write-back keeps the realigned team: the carry-over runs only while the
+    recorded team has no config."""
+    world = _clear_world(tmp_path, monkeypatch)
+    _start(monkeypatch, world)
+    assert _recorded(world)["team_name"] == PREV_TEAM
+    seed_team(world.root, REALIGNED_TEAM,
+              lead_sid="7e7e7e7e-1111-4222-8333-444455556666",
+              lead_cwd=str(world.project))
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
+    env.update(HOME=str(world.tmp), CLAUDE_PROJECT_DIR=str(world.project),
+               CLAUDE_CODE_SESSION_ID=CLEAR_SID)
+    proc = subprocess.run(
+        [sys.executable, "-m", "shared.realign_team", "--team", REALIGNED_TEAM],
+        capture_output=True, text=True, env=env, cwd=str(_HOOKS), timeout=60,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert _recorded(world)["team_name"] == REALIGNED_TEAM
+    _prompt(monkeypatch, world)
+    assert _recorded(world)["team_name"] == REALIGNED_TEAM
 
 
 # -- through real processes ---------------------------------------------------

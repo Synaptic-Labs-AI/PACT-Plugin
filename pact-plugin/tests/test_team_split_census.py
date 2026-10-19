@@ -34,6 +34,7 @@ from fixtures.team_split import (
     SECOND_TEAM,
     reset_context_module,
     split_world,
+    write_journal,
 )
 
 _OWNER = "tester"
@@ -122,62 +123,168 @@ def test_the_second_corroborating_team_sorts_after_the_first(tmp_path):
     assert sorted([NEW_TEAM, SECOND_TEAM])[0] == NEW_TEAM
 
 
-# -- a team another PACT session owns is never a candidate ---------------------
+# -- a team another live PACT session owns is never a candidate ---------------
+
+# A sibling session that /clear started in the sibling's own claude process.
+SIBLING_CLEAR_SID = "b2b2b2b2-1111-4222-8333-444455556666"
+OWN_KEY = "4242:Mon Oct 19 15:00:00 2026"
 
 
-def _give_session_a_pact_dir(world, session_id, slug="other-project"):
-    """A PACT session context for ``session_id``: that session ran PACT."""
-    session_dir = world.root / "pact-sessions" / slug / session_id
+def _pact_session(world, session_id, *, team="x", key="", ended=False,
+                  resumed=False):
+    """A PACT session of this project: its context records ``team`` and
+    ``key``; its journal ends in a session_end when ``ended``, then a new
+    session_start when ``resumed``."""
+    session_dir = world.session_dir.parent / session_id
     session_dir.mkdir(parents=True)
-    (session_dir / "pact-session-context.json").write_text(
-        json.dumps({"team_name": "x", "session_id": session_id}),
+    (session_dir / "pact-session-context.json").write_text(json.dumps(
+        {"team_name": team, "session_id": session_id, "process_key": key}),
         encoding="utf-8")
+    events = [{"type": "session_start", "session_id": session_id,
+               "project_dir": str(world.project_dir), "source": "startup"}]
+    if ended:
+        events.append("session_end")
+    if resumed:
+        events.append(dict(events[0], source="resume"))
+    write_journal(session_dir, events)
 
 
-def test_a_sibling_owned_team_never_wins_when_this_sessions_store_idles(
+def _set_own_key(world, key):
+    data = json.loads(world.context_path.read_text(encoding="utf-8"))
+    data["process_key"] = key
+    world.context_path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def _owned(team):
+    import shared.pact_context as ctx_module
+    reset_context_module()
+    ctx_module.init({"session_id": OLD_SID})
+    return ctx_module.team_owned_by_other_pact_session(team)
+
+
+def _aged_sibling_world(tmp_path, monkeypatch):
+    """After a resume, this session's own re-provisioned store has idled
+    past the recency window, so a corroborating sibling team is the only
+    census candidate unless the ownership rule excludes it."""
+    return split_world(tmp_path, monkeypatch, live_store_aged=True,
+                       second_corroborated=True)
+
+
+def test_a_team_a_live_sibling_records_stays_excluded_after_its_lead_ended(
         tmp_path, monkeypatch):
-    """After a resume, a same-project sibling session's team corroborates
-    beside this session's own re-provisioned team. Once this session's own
-    store idles past the recency window, the sibling's would be the only
-    candidate. The sibling ran PACT, so its team is never a candidate, and
-    the recorded team stands rather than the sibling's."""
-    world = split_world(tmp_path, monkeypatch, live_store_aged=True,
-                        second_corroborated=True)
-    _give_session_a_pact_dir(world, SECOND_SID)
+    """The sibling's lead session ended in a /clear and the session the
+    clear started records the team and is live: the team is still that
+    sibling's, so the recorded team stands."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _pact_session(world, SECOND_SID, team=SECOND_TEAM, key="7:sib", ended=True)
+    _pact_session(world, SIBLING_CLEAR_SID, team=SECOND_TEAM, key="7:sib")
     assert _team_name() == OLD_TEAM
+    assert _owned(SECOND_TEAM) is True
 
 
-def test_without_its_pact_dir_the_lone_sibling_is_still_picked(
+def test_a_team_whose_every_session_ended_is_a_candidate_again(
         tmp_path, monkeypatch):
-    """Control for the cell above: the exclusion is keyed on the sibling's
-    PACT session dir. Without one, the lone corroborating sibling wins."""
-    split_world(tmp_path, monkeypatch, live_store_aged=True,
-                second_corroborated=True)
+    """Control for the cell above: once the session that records the team
+    has ended too, no live session owns it and the census picks it."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _pact_session(world, SECOND_SID, team=SECOND_TEAM, key="7:sib", ended=True)
+    _pact_session(world, SIBLING_CLEAR_SID, team=SECOND_TEAM, key="7:sib",
+                  ended=True)
+    assert _team_name() == SECOND_TEAM
+    assert _owned(SECOND_TEAM) is False
+
+
+def test_a_sibling_resumed_after_it_ended_is_live_again(tmp_path,
+                                                        monkeypatch):
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _pact_session(world, SECOND_SID, team=SECOND_TEAM, ended=True,
+                  resumed=True)
+    assert _team_name() == OLD_TEAM
+    assert _owned(SECOND_TEAM) is True
+
+
+def test_a_live_lead_that_records_another_team_still_owns_the_one_it_leads(
+        tmp_path, monkeypatch):
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _pact_session(world, SECOND_SID, team="session-unrelated0")
+    assert _team_name() == OLD_TEAM
+    assert _owned(SECOND_TEAM) is True
+
+
+def test_an_empty_key_on_both_sides_never_makes_a_sibling_ours(
+        tmp_path, monkeypatch):
+    """This session and a live sibling both record no process key: an
+    empty key equals nothing, so the sibling's team stays excluded."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _set_own_key(world, "")
+    _pact_session(world, SECOND_SID, team=SECOND_TEAM, key="")
+    assert _team_name() == OLD_TEAM
+    assert _owned(SECOND_TEAM) is True
+
+
+def test_a_live_sibling_with_a_different_key_is_not_ours(tmp_path,
+                                                         monkeypatch):
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _set_own_key(world, OWN_KEY)
+    _pact_session(world, SECOND_SID, team=SECOND_TEAM, key="7:sib")
+    assert _team_name() == OLD_TEAM
+    assert _owned(SECOND_TEAM) is True
+
+
+def test_an_earlier_life_of_this_process_with_the_same_key_is_ours(
+        tmp_path, monkeypatch):
+    """Control for the two cells above: a live session recording this
+    session's own non-empty key is an earlier life of this claude process,
+    so its team is this session's and the census picks it."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _set_own_key(world, OWN_KEY)
+    _pact_session(world, SECOND_SID, team=SECOND_TEAM, key=OWN_KEY)
+    assert _team_name() == SECOND_TEAM
+    assert _owned(SECOND_TEAM) is False
+
+
+def test_without_any_owning_session_the_lone_sibling_is_still_picked(
+        tmp_path, monkeypatch):
+    """Control: with no PACT session leading or recording it, the lone
+    corroborating sibling team wins."""
+    _aged_sibling_world(tmp_path, monkeypatch)
+    assert _team_name() == SECOND_TEAM
+
+
+def test_a_session_of_another_project_is_outside_the_ownership_scan(
+        tmp_path, monkeypatch):
+    """The scan reads this project's session dirs only: a live session
+    under another project's slug that leads the sibling team does not
+    exclude it."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    other = world.session_dir.parent.parent / "other-project" / SECOND_SID
+    other.mkdir(parents=True)
+    (other / "pact-session-context.json").write_text(json.dumps(
+        {"team_name": SECOND_TEAM, "session_id": SECOND_SID}), encoding="utf-8")
     assert _team_name() == SECOND_TEAM
 
 
 def test_a_sibling_owned_team_does_not_make_the_census_ambiguous(
         tmp_path, monkeypatch):
-    """This session's own re-provisioned team and a sibling's both
-    corroborate. The sibling's leadSessionId owns a PACT session dir, so only
-    the own team is a candidate and the census realigns to it."""
+    """This session's own re-provisioned team and a live sibling's both
+    corroborate. Only the own team is a candidate, so the census realigns
+    to it."""
     world = split_world(tmp_path, monkeypatch, second_corroborated=True)
-    _give_session_a_pact_dir(world, SECOND_SID)
+    _pact_session(world, SECOND_SID, team=SECOND_TEAM)
     assert _team_name() == NEW_TEAM
 
 
-def test_team_ownership_names_only_another_pact_session(tmp_path,
-                                                        monkeypatch):
-    import shared.pact_context as ctx_module
+def test_team_ownership_rejects_unsafe_and_unknown_teams(tmp_path,
+                                                         monkeypatch):
     world = split_world(tmp_path, monkeypatch, second_corroborated=True)
-    _give_session_a_pact_dir(world, SECOND_SID)
+    _pact_session(world, SECOND_SID, team=SECOND_TEAM)
+    import shared.pact_context as ctx_module
     reset_context_module()
     ctx_module.init({"session_id": OLD_SID})
     owned = ctx_module.team_owned_by_other_pact_session
-    assert owned(SECOND_TEAM) is True
-    # The re-provisioned own team: its lead id never ran PACT.
+    # The re-provisioned own team: no PACT session leads or records it.
     assert owned(NEW_TEAM) is False
-    # A team whose lead is the asking session itself.
+    # The asking session itself leads and records it.
     assert owned(SECOND_TEAM, session_id=SECOND_SID) is False
     assert owned("../escape") is False
     assert owned("session-absent0") is False
@@ -243,11 +350,11 @@ def test_a_decided_census_is_described_as_resolved(tmp_path, monkeypatch):
 
 def test_a_sibling_owned_team_is_left_out_of_the_description(tmp_path,
                                                               monkeypatch):
-    """The description reads the census's own list, so a team another PACT
-    session owns appears in neither."""
+    """The description reads the census's own list, so a team another live
+    PACT session owns appears in neither."""
     world = split_world(tmp_path, monkeypatch, live_team=None,
                         second_corroborated=True)
-    _give_session_a_pact_dir(world, SECOND_SID)
+    _pact_session(world, SECOND_SID, team=SECOND_TEAM)
     alignment = _alignment()
     assert alignment.state == "no_candidates"
     assert SECOND_TEAM not in alignment.text

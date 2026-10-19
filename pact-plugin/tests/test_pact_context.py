@@ -2997,9 +2997,21 @@ class TestProcessKey:
         ctx.reset_for_tests()
         started = " ".join(subprocess.run(
             ["ps", "-o", "lstart=", "-p", str(os.getppid())],
-            capture_output=True, text=True, env={**os.environ, "LC_ALL": "C"},
+            capture_output=True, text=True,
+            env={**os.environ, "LC_ALL": "C", "TZ": "UTC"},
         ).stdout.split())
         assert ctx.current_process_key() == f"{os.getppid()}:{started}"
+
+    def test_the_key_does_not_depend_on_the_callers_time_zone(
+            self, monkeypatch):
+        import shared.pact_context as ctx
+        monkeypatch.setenv("CLAUDE_PID", str(os.getppid()))
+        keys = []
+        for zone in ("America/New_York", "Asia/Tokyo"):
+            monkeypatch.setenv("TZ", zone)
+            ctx.reset_for_tests()
+            keys.append(ctx.current_process_key())
+        assert keys[0] and keys[0] == keys[1]
 
     def test_a_claude_pid_naming_another_process_gives_no_key(
             self, monkeypatch):
@@ -3013,6 +3025,37 @@ class TestProcessKey:
         monkeypatch.delenv("CLAUDE_PID", raising=False)
         ctx.reset_for_tests()
         assert ctx.current_process_key() == ""
+
+
+class TestLeadSessionFrameGivenLeadId:
+    """is_lead_session_frame(..., lead_session_id=): a caller that already
+    read the team config passes its lead id; None reads the config."""
+
+    def _team(self, tmp_path, monkeypatch, lead):
+        import shared.pact_context as ctx
+        teams = tmp_path / ".claude" / "teams" / "team-x"
+        teams.mkdir(parents=True)
+        (teams / "config.json").write_text(json.dumps({"leadSessionId": lead}))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        ctx.reset_for_tests()
+        return ctx
+
+    def test_a_given_lead_id_wins_over_the_config(self, tmp_path, monkeypatch):
+        ctx = self._team(tmp_path, monkeypatch, "config-lead")
+        frame = {"session_id": "given-lead"}
+        assert ctx.is_lead_session_frame(frame, "team-x",
+                                         lead_session_id="given-lead")
+        assert not ctx.is_lead_session_frame({"session_id": "config-lead"},
+                                             "team-x",
+                                             lead_session_id="given-lead")
+
+    def test_none_reads_the_config(self, tmp_path, monkeypatch):
+        ctx = self._team(tmp_path, monkeypatch, "config-lead")
+        assert ctx.is_lead_session_frame({"session_id": "config-lead"},
+                                         "team-x", lead_session_id=None)
+        assert not ctx.is_lead_session_frame({"session_id": "other"},
+                                             "team-x")
 
 
 class TestContextProcessKeyCarry:
