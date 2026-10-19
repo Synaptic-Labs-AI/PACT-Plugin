@@ -17,11 +17,12 @@ ABSENCE PINS. The one-hop wording the claim walk made false must not survive
 in any instruction surface, where an agent would act on it.
 
 Counter-test, measured by source-only revert in a scratch copy: restoring the
-five instruction surfaces to the base tree -> 46 failed, 4 passed of 50. The
-four that stay green are the surface-walk control, the NORM clause (it
-predates this change and must survive it), and the absence of two forms that
-never shipped on the base tree: the realign command's retired form and the
-secretary exception to the spawn rule.
+five instruction surfaces to the base tree -> 50 failed, 6 passed of 56. The
+six that stay green are the surface-walk control, the NORM clause (it
+predates this change and must survive it), and the absence of four forms that
+never shipped on the base tree: the realign command's retired form, the
+secretary exception to the spawn rule, and the two step-1 sentences the
+refused-spawn route replaced.
 """
 
 from pathlib import Path
@@ -62,6 +63,23 @@ PINS = [
                "--team <chosen team>", 1),
     (PROTOCOLS, 'cd "{plugin_root}/hooks" && python3 -m shared.realign_team '
                 "--team <chosen team>", 1),
+    # A refused secretary spawn leads to the realign command, not a stop.
+    (RECOVERY, "If the spawn is refused, find the team that holds the "
+               "secretary's task: the most recently modified directory under "
+               "`{config_dir}/tasks/` whose `<id>.json`, for the id `TaskCreate` "
+               "returned, carries that task's subject.", 1),
+    (PROTOCOLS, "If the spawn is refused, find the team that holds the "
+                "secretary's task: the most recently modified directory under "
+                "`{config_dir}/tasks/` whose `<id>.json`, for the id `TaskCreate` "
+                "returned, carries that task's subject.", 1),
+    (RECOVERY, "Run the realign command in step 2 with that team; on a nonzero "
+               "exit, report its reason to the user and stop. Otherwise spawn "
+               "the secretary, then continue from step 3 unless the command "
+               "reported nothing to carry across.", 1),
+    (PROTOCOLS, "Run the realign command in step 2 with that team; on a nonzero "
+                "exit, report its reason to the user and stop. Otherwise spawn "
+                "the secretary, then continue from step 3 unless the command "
+                "reported nothing to carry across.", 1),
     # Only the lead runs the realign command.
     (RECOVERY, "Only the lead runs this command; a teammate never does.", 1),
     (PROTOCOLS, "Only the lead runs this command; a teammate never does.", 1),
@@ -183,6 +201,8 @@ def test_the_instruction_surfaces_are_found():
     "Why it is keyed that way",
     "What this write does and does not bound",
     "before spawning anyone but the secretary",
+    "and PACT resolves the team from it",
+    "If the spawn is refused, report the refusal to the user and stop",
 ])
 def test_a_retired_phrase_is_in_no_instruction_surface(phrase):
     hits = [p.relative_to(PLUGIN).as_posix() for p in _instruction_surfaces()
