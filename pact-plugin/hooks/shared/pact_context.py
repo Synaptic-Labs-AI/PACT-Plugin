@@ -78,6 +78,22 @@ _process_key_cache: str | None = None
 # hook run reads each journal once while it is unchanged.
 _journal_cache: dict[str, tuple[tuple[int, int], list]] = {}
 
+# Per-process session lifecycle marks: {journal path: ((mtime_ns, size),
+# (first session_start, last session_start-or-session_end))}.
+_marks_cache: dict[str, tuple[tuple[int, int], tuple]] = {}
+
+# Per-process scans of a project's session contexts: {slug dir: (mtime_ns,
+# records)}. A new session dir changes the slug dir's mtime.
+_records_cache: dict[str, tuple[int, list]] = {}
+
+# How far apart a session's session_end and the first session_start of the
+# session its /clear started may be, in seconds, on either side (SessionEnd is
+# async). Probe journals measured 0 to 1 s; the margin only widens exclusion.
+CLEAR_SUCCESSOR_WINDOW_SECONDS = 60
+
+# Bytes read per step when scanning a journal backwards from its end.
+_TAIL_BLOCK_BYTES = 65536
+
 # Default context dict returned on any error
 _EMPTY_CONTEXT = {
     "team_name": "",
@@ -135,6 +151,8 @@ def reset_for_tests() -> None:
     _aligned_cache = None
     _process_key_cache = None
     _journal_cache.clear()
+    _marks_cache.clear()
+    _records_cache.clear()
 
 
 def _build_session_path(slug: str, session_id: str) -> Path:
@@ -600,28 +618,95 @@ def _project_dir() -> str:
     return get_project_dir() or os.environ.get("CLAUDE_PROJECT_DIR", "")
 
 
-def _session_is_live(session_dir: str) -> bool:
-    """True unless the session's journal shows a session_end after its last
-    session_start. A journal with neither event, or no journal, reads as
-    live: when liveness is unknown, the team stays another session's (the
-    fail-safe side). Never raises (True on error)."""
+def _lifecycle_event(line: bytes) -> dict | None:
+    """The event on ``line`` when it is a session_start or session_end."""
+    if b"session_" not in line:
+        return None
     try:
-        live = True
-        for event in _journal_events(session_dir):
-            event_type = event.get("type")
-            if event_type == "session_start":
-                live = True
-            elif event_type == "session_end":
-                live = False
-        return live
+        event = json.loads(line)
+    except ValueError:
+        return None
+    if isinstance(event, dict) and event.get("type") in (
+        "session_start", "session_end"
+    ):
+        return event
+    return None
+
+
+def _last_lifecycle_event(journal: Path) -> dict | None:
+    """The journal's last session_start or session_end, read backwards from
+    the end of the file in blocks, so a long journal is not parsed whole."""
+    with journal.open("rb") as handle:
+        position = handle.seek(0, os.SEEK_END)
+        carry = b""
+        while position > 0:
+            step = min(_TAIL_BLOCK_BYTES, position)
+            position -= step
+            handle.seek(position)
+            lines = (handle.read(step) + carry).split(b"\n")
+            # The first piece may continue a line that starts earlier.
+            carry = lines.pop(0) if position > 0 else b""
+            for line in reversed(lines):
+                event = _lifecycle_event(line)
+                if event is not None:
+                    return event
+    return None
+
+
+def _first_session_start(journal: Path) -> dict | None:
+    """The journal's first session_start: the session's birth."""
+    with journal.open("rb") as handle:
+        for line in handle:
+            event = _lifecycle_event(line)
+            if event is not None and event.get("type") == "session_start":
+                return event
+    return None
+
+
+def _session_marks(session_dir: str) -> tuple[dict | None, dict | None]:
+    """(first session_start, last session_start or session_end) of the
+    session's journal, each None when absent; (None, None) when the journal
+    is absent or unreadable. Memoized per process while the file is
+    unchanged. Never raises."""
+    try:
+        journal = Path(session_dir) / "session-journal.jsonl"
+        stat = journal.stat()
+        stamp = (stat.st_mtime_ns, stat.st_size)
+        cached = _marks_cache.get(str(journal))
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        marks = (_first_session_start(journal), _last_lifecycle_event(journal))
+        _marks_cache[str(journal)] = (stamp, marks)
+        return marks
     except Exception:
-        return True
+        return (None, None)
+
+
+def _is_live(marks: tuple[dict | None, dict | None]) -> bool:
+    """True unless the last lifecycle event is a session_end. No event, or
+    no journal, reads as live: when liveness is unknown, the team stays
+    another session's (the fail-safe side)."""
+    last = marks[1]
+    return last is None or last.get("type") != "session_end"
+
+
+def _event_time(event: dict | None) -> float | None:
+    """The event's ``ts`` as epoch seconds (UTC when unzoned), else None."""
+    try:
+        moment = datetime.fromisoformat(
+            str((event or {}).get("ts", "")).replace("Z", "+00:00"))
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        return moment.timestamp()
+    except (ValueError, TypeError, OverflowError):
+        return None
 
 
 def _project_session_records(sessions_root: Path) -> list[tuple[Path, dict]]:
     """(session dir, its context) for every PACT session dir of this
-    project's slug under ``sessions_root``, contained in it. [] on error.
-    Never raises."""
+    project's slug under ``sessions_root``, contained in it, newest context
+    first. Memoized per process while the slug dir is unchanged. [] on
+    error. Never raises."""
     try:
         project_dir = _project_dir()
         if not project_dir:
@@ -631,21 +716,55 @@ def _project_session_records(sessions_root: Path) -> list[tuple[Path, dict]]:
             "_", project_slug(project_dir))).resolve()
         if root not in slug_dir.parents or not slug_dir.is_dir():
             return []
-        records = []
+        stamp = slug_dir.stat().st_mtime_ns
+        cached = _records_cache.get(str(slug_dir))
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        dated = []
         for entry in sorted(slug_dir.iterdir()):
             try:
                 resolved = entry.resolve()
                 if resolved.parent != slug_dir or not resolved.is_dir():
                     continue
-                data = json.loads((resolved / "pact-session-context.json")
-                                  .read_text(encoding="utf-8"))
+                context_file = resolved / "pact-session-context.json"
+                data = json.loads(context_file.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
-                    records.append((resolved, data))
+                    dated.append((context_file.stat().st_mtime_ns,
+                                  resolved, data))
             except (OSError, ValueError, TypeError, AttributeError):
                 continue
+        dated.sort(key=lambda item: item[0], reverse=True)
+        records = [(resolved, data) for _, resolved, data in dated]
+        _records_cache[str(slug_dir)] = (stamp, records)
         return records
     except Exception:
         return []
+
+
+def _has_clear_successor(
+    others: list[tuple[Path, dict]], ended_dir: Path, end_event: dict | None
+) -> bool:
+    """True iff a live session in ``others`` other than ``ended_dir`` was born
+    by a /clear (its FIRST session_start has source 'clear'; a later
+    compaction adds starts) within CLEAR_SUCCESSOR_WINDOW_SECONDS of
+    ``end_event``, on either side: the session the ended one's /clear
+    started, which holds its team whether or not it recorded it. No end
+    event, or one without a readable ts, links nothing."""
+    ended_at = _event_time(end_event)
+    if ended_at is None:
+        return False
+    for session_dir, _ in others:
+        if session_dir == ended_dir:
+            continue
+        marks = _session_marks(str(session_dir))
+        birth = marks[0]
+        if not (birth and birth.get("source") == "clear" and _is_live(marks)):
+            continue
+        born_at = _event_time(birth)
+        if (born_at is not None
+                and abs(born_at - ended_at) <= CLEAR_SUCCESSOR_WINDOW_SECONDS):
+            return True
+    return False
 
 
 def _owned_by_other_live_session(
@@ -654,23 +773,38 @@ def _owned_by_other_live_session(
     lead_session_id: str,
     own_session_id: str,
     own_process_key: str,
+    clear_successors: bool = False,
 ) -> bool:
     """True iff some LIVE session in ``records`` that is not ours leads
     ``team_name`` (its session id is the team's leadSessionId) or records it
     (its context's team_name). Ours: this session id, or a session whose
     recorded process_key equals ours with both non-empty (an earlier life of
-    this claude process before a /clear); an empty key matches nothing."""
+    this claude process before a /clear); an empty key matches nothing.
+
+    With ``clear_successors`` (the census), an ENDED session that leads or
+    records the team still owns it while a live session that is not ours
+    was born by a /clear around its end (_has_clear_successor): a keyless
+    /clear successor records a computed team, not the one it is on."""
     own_dir_name = _UNSAFE_SLUG_CHARS_RE.sub("_", own_session_id or "")
+    others = []
     for session_dir, data in records:
         recorded_sid = str(data.get("session_id", "")) or session_dir.name
         if session_dir.name == own_dir_name or recorded_sid == own_session_id:
             continue
+        if own_process_key and data.get("process_key") == own_process_key:
+            continue
+        others.append((session_dir, data))
+    for session_dir, data in others:
+        recorded_sid = str(data.get("session_id", "")) or session_dir.name
         leads = bool(lead_session_id) and recorded_sid == lead_session_id
         if not leads and data.get("team_name") != team_name:
             continue
-        if own_process_key and data.get("process_key") == own_process_key:
-            continue
-        if _session_is_live(str(session_dir)):
+        marks = _session_marks(str(session_dir))
+        if _is_live(marks):
+            return True
+        if clear_successors and _has_clear_successor(
+            others, session_dir, marks[1]
+        ):
             return True
     return False
 
@@ -787,7 +921,8 @@ def _resume_census_candidates(
                 if candidate_lead_sid == session_id:
                     continue  # this session's own team — identity-match owns it
                 if _owned_by_other_live_session(
-                    records, entry.name, candidate_lead_sid, session_id, own_key
+                    records, entry.name, candidate_lead_sid, session_id,
+                    own_key, clear_successors=True,
                 ):
                     continue  # another live PACT session's team
                 tasks_dir = tasks_root / entry.name

@@ -20,6 +20,7 @@ test_team_name_detect_align.py (its focused resolver cells).
 
 import io
 import json
+import os
 from unittest.mock import patch
 
 import pytest
@@ -131,21 +132,30 @@ OWN_KEY = "4242:Mon Oct 19 15:00:00 2026"
 
 
 def _pact_session(world, session_id, *, team="x", key="", ended=False,
-                  resumed=False):
+                  resumed=False, born="startup", born_at=None, ended_at=None,
+                  compacted=False):
     """A PACT session of this project: its context records ``team`` and
-    ``key``; its journal ends in a session_end when ``ended``, then a new
-    session_start when ``resumed``."""
+    ``key``; its first session_start has source ``born`` (at ``born_at``);
+    its journal ends in a session_end (at ``ended_at``) when ``ended``, then
+    a new session_start when ``resumed``; ``compacted`` adds a compaction's
+    session_start after the birth."""
     session_dir = world.session_dir.parent / session_id
     session_dir.mkdir(parents=True)
     (session_dir / "pact-session-context.json").write_text(json.dumps(
         {"team_name": team, "session_id": session_id, "process_key": key}),
         encoding="utf-8")
-    events = [{"type": "session_start", "session_id": session_id,
-               "project_dir": str(world.project_dir), "source": "startup"}]
+    birth = {"type": "session_start", "session_id": session_id,
+             "project_dir": str(world.project_dir), "source": born}
+    if born_at:
+        birth["ts"] = born_at
+    events = [birth]
+    if compacted:
+        events.append(dict(birth, source="compact", ts=_AFTER_END))
     if ended:
-        events.append("session_end")
+        events.append({"type": "session_end", "ts": ended_at}
+                      if ended_at else "session_end")
     if resumed:
-        events.append(dict(events[0], source="resume"))
+        events.append(dict(birth, source="resume"))
     write_journal(session_dir, events)
 
 
@@ -288,6 +298,136 @@ def test_team_ownership_rejects_unsafe_and_unknown_teams(tmp_path,
     assert owned(SECOND_TEAM, session_id=SECOND_SID) is False
     assert owned("../escape") is False
     assert owned("session-absent0") is False
+
+
+# -- a keyless /clear successor still holds its predecessor's team --------------
+
+_CLEAR_AT = "2026-10-19T15:34:20Z"
+_ONE_SECOND_EARLIER = "2026-10-19T15:34:19Z"
+_ONE_SECOND_LATER = "2026-10-19T15:34:21Z"
+_AFTER_END = "2026-10-19T15:44:20Z"
+_AN_HOUR_LATER = "2026-10-19T16:34:20Z"
+
+
+def _keyless_sibling_clear(world, *, ended_at=_ONE_SECOND_EARLIER,
+                           born_at=_CLEAR_AT, compacted=False):
+    """Sibling B led SECOND_TEAM and ended in a /clear; the keyless session
+    the clear started is live and records only its own computed team."""
+    _set_own_key(world, OWN_KEY)
+    _pact_session(world, SECOND_SID, team=SECOND_TEAM, ended=True,
+                  ended_at=ended_at)
+    _pact_session(world, SIBLING_CLEAR_SID, team="session-b2b2b2b2",
+                  born="clear", born_at=born_at, compacted=compacted)
+
+
+def test_a_keyless_clear_successor_keeps_its_predecessor_s_team(
+        tmp_path, monkeypatch):
+    """The leader ended and nothing live records its team, but a live
+    session was born by a /clear one second after that end: the team is
+    still that sibling's, so the census does not adopt it. The realign
+    command's ownership check does not apply this rule."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _keyless_sibling_clear(world)
+    assert _team_name() == OLD_TEAM
+    assert _owned(SECOND_TEAM) is False
+
+
+def test_a_successor_that_compacted_after_its_clear_still_holds_the_team(
+        tmp_path, monkeypatch):
+    """The successor's latest start is a compaction; its birth is what
+    links it."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _keyless_sibling_clear(world, compacted=True)
+    assert _team_name() == OLD_TEAM
+
+
+def test_an_end_journalled_after_the_successor_s_start_still_links(
+        tmp_path, monkeypatch):
+    """SessionEnd is async and can land after the clear's SessionStart."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _keyless_sibling_clear(world, ended_at=_ONE_SECOND_LATER)
+    assert _team_name() == OLD_TEAM
+
+
+def test_a_clear_born_session_far_from_the_end_is_not_a_successor(
+        tmp_path, monkeypatch):
+    """Control: the live session's clear came an hour after the leader
+    ended, so nothing holds the team and the census picks it."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _keyless_sibling_clear(world, born_at=_AN_HOUR_LATER)
+    assert _team_name() == SECOND_TEAM
+
+
+def test_an_ended_clear_born_session_is_not_a_successor(tmp_path,
+                                                       monkeypatch):
+    """Control: the session the /clear started has ended too, so nothing
+    live holds the team and the census picks it."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _set_own_key(world, OWN_KEY)
+    _pact_session(world, SECOND_SID, team=SECOND_TEAM, ended=True,
+                  ended_at=_ONE_SECOND_EARLIER)
+    _pact_session(world, SIBLING_CLEAR_SID, team="session-b2b2b2b2",
+                  born="clear", born_at=_CLEAR_AT, ended=True,
+                  ended_at=_AN_HOUR_LATER)
+    assert _team_name() == SECOND_TEAM
+
+
+def test_this_session_s_own_clear_birth_is_never_a_successor(tmp_path,
+                                                             monkeypatch):
+    """Control: this session itself was born by a /clear one second after
+    the leader ended; it is ours, so it never holds the leader's team."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    write_journal(world.session_dir, [
+        {"type": "session_start", "session_id": OLD_SID, "ts": _CLEAR_AT,
+         "project_dir": str(world.project_dir), "source": "clear"},
+        "task_metadata_snapshot",
+    ])
+    _pact_session(world, SECOND_SID, team=SECOND_TEAM, ended=True,
+                  ended_at=_ONE_SECOND_EARLIER)
+    assert _team_name() == SECOND_TEAM
+
+
+# -- a lead that reads no key resolves with the key it recorded -----------------
+
+
+def _compact(monkeypatch, world):
+    import session_init
+    from fixtures.role_frames import captured_compaction_lead_sessionstart
+    frame = captured_compaction_lead_sessionstart()
+    frame.update(session_id=OLD_SID, source="compact",
+                 cwd=str(world.project_dir))
+    monkeypatch.setenv("CLAUDE_PID", str(os.getpid()))
+    monkeypatch.chdir(world.project_dir)
+    reset_context_module()
+    with patch("sys.stdin", io.StringIO(json.dumps(frame))), \
+         patch("sys.stdout", new_callable=io.StringIO):
+        with pytest.raises(SystemExit):
+            session_init.main()
+    reset_context_module()
+    return json.loads(world.context_path.read_text(encoding="utf-8"))
+
+
+def test_a_keyless_compaction_resolves_with_the_recorded_key(tmp_path,
+                                                            monkeypatch):
+    """A compaction whose CLAUDE_PID is not the hook's parent computes no
+    key. The resolver uses the key this session recorded, so a live earlier
+    life of the same process stays ours and its team is adopted."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _set_own_key(world, OWN_KEY)
+    _pact_session(world, SECOND_SID, team=SECOND_TEAM, key=OWN_KEY)
+    record = _compact(monkeypatch, world)
+    assert record["team_name"] == SECOND_TEAM
+    assert record["process_key"] == OWN_KEY
+
+
+def test_a_keyless_compaction_with_another_recorded_key_keeps_its_team(
+        tmp_path, monkeypatch):
+    """Control: the live session records a different key, so it is not
+    ours and its team stays excluded."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _set_own_key(world, OWN_KEY)
+    _pact_session(world, SECOND_SID, team=SECOND_TEAM, key="7:sib")
+    assert _compact(monkeypatch, world)["team_name"] == OLD_TEAM
 
 
 # -- the one description of an undecided team ----------------------------------

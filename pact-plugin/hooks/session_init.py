@@ -1898,8 +1898,10 @@ def main():
             # Only a lead frame records (and so can match) its claude
             # process's key. A /clear starts a new session id in the same
             # process on the same platform team: the resolver adopts the team
-            # the newest earlier session of this process recorded.
-            process_key = current_process_key() if frame_is_lead else ""
+            # the newest earlier session of this process recorded. A lead
+            # frame that reads no key passes None, so the resolver and the
+            # context both use the key this session recorded.
+            process_key = (current_process_key() or None) if frame_is_lead else ""
             team_name = _resolve_aligned_team_name(
                 session_id,
                 default=default,

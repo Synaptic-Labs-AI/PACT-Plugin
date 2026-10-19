@@ -3058,6 +3058,103 @@ class TestLeadSessionFrameGivenLeadId:
                                              "team-x")
 
 
+class TestSessionMarksReadTheEnds:
+    """_session_marks: a session's birth and its last start or end, read
+    from the two ends of its journal rather than by parsing it whole."""
+
+    def _journal(self, tmp_path, *types):
+        session_dir = tmp_path / "s"
+        session_dir.mkdir()
+        lines = [json.dumps({"type": t, "ts": "2026-01-01T00:00:00Z",
+                             "source": "startup", "pad": "x" * 40})
+                 for t in types]
+        (session_dir / "session-journal.jsonl").write_text(
+            "\n".join(lines) + "\n")
+        return str(session_dir)
+
+    def test_the_last_start_or_end_decides_across_short_blocks(
+            self, tmp_path, monkeypatch):
+        import shared.pact_context as ctx
+        monkeypatch.setattr(ctx, "_TAIL_BLOCK_BYTES", 16)
+        ended = self._journal(tmp_path, "session_start", "session_end",
+                              *["task_created"] * 5)
+        assert ctx._session_marks(ended)[1]["type"] == "session_end"
+        assert not ctx._is_live(ctx._session_marks(ended))
+
+    def test_a_start_after_an_end_is_live(self, tmp_path):
+        import shared.pact_context as ctx
+        resumed = self._journal(tmp_path, "session_start", "session_end",
+                                "session_start", "task_created")
+        assert ctx._is_live(ctx._session_marks(resumed))
+
+    def test_no_lifecycle_event_or_no_journal_reads_as_live(self, tmp_path):
+        import shared.pact_context as ctx
+        assert ctx._is_live(ctx._session_marks(
+            self._journal(tmp_path, "task_created")))
+        assert ctx._is_live(ctx._session_marks(str(tmp_path / "absent")))
+
+    def test_the_birth_is_the_first_start(self, tmp_path):
+        import shared.pact_context as ctx
+        session_dir = tmp_path / "s"
+        session_dir.mkdir()
+        (session_dir / "session-journal.jsonl").write_text("\n".join(
+            json.dumps({"type": "session_start", "source": source})
+            for source in ("clear", "compact")) + "\n")
+        first, last = ctx._session_marks(str(session_dir))
+        assert (first["source"], last["source"]) == ("clear", "compact")
+
+    def test_the_whole_journal_is_never_parsed(self, tmp_path, monkeypatch):
+        import shared.pact_context as ctx
+        import shared.session_journal as journal
+        reads = []
+        monkeypatch.setattr(journal, "read_events_from",
+                            lambda *a, **k: reads.append(a) or [])
+        ctx._session_marks(self._journal(tmp_path, "session_start",
+                                         "session_end"))
+        assert reads == []
+
+
+class TestProjectSessionRecordsMemo:
+    def _project(self, tmp_path, monkeypatch):
+        import shared.pact_context as ctx
+        project = tmp_path / "proj"
+        project.mkdir()
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+        slug_dir = tmp_path / "pact-sessions" / ctx.project_slug(str(project))
+        ctx.reset_for_tests()
+        return ctx, slug_dir
+
+    def _session(self, slug_dir, sid):
+        (slug_dir / sid).mkdir(parents=True)
+        (slug_dir / sid / "pact-session-context.json").write_text(
+            json.dumps({"session_id": sid, "team_name": "t"}))
+
+    def test_an_unchanged_project_is_scanned_once_per_process(
+            self, tmp_path, monkeypatch):
+        ctx, slug_dir = self._project(tmp_path, monkeypatch)
+        self._session(slug_dir, "a")
+        reads = []
+        real = Path.read_text
+        monkeypatch.setattr(Path, "read_text",
+                            lambda self, *a, **k: reads.append(self.name)
+                            or real(self, *a, **k))
+        root = tmp_path / "pact-sessions"
+        first = ctx._project_session_records(root)
+        second = ctx._project_session_records(root)
+        assert reads == ["pact-session-context.json"]
+        assert first == second and len(first) == 1
+
+    def test_a_new_session_dir_is_seen_by_the_next_scan(self, tmp_path,
+                                                         monkeypatch):
+        ctx, slug_dir = self._project(tmp_path, monkeypatch)
+        self._session(slug_dir, "a")
+        root = tmp_path / "pact-sessions"
+        assert len(ctx._project_session_records(root)) == 1
+        self._session(slug_dir, "b")
+        os.utime(slug_dir, ns=(1, slug_dir.stat().st_mtime_ns + 10**9))
+        assert len(ctx._project_session_records(root)) == 2
+
+
 class TestContextProcessKeyCarry:
     """A writer that computes no process key keeps the one the file records
     for the same session, so a write from outside a hook never drops it."""
