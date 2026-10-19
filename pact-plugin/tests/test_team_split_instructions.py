@@ -68,8 +68,9 @@ PINS = [
     (RECOVERY, "adding to the task's description the line `pact-recovery: "
                "<session id>-<UTC time as YYYYMMDDTHHMMSS>`, where the session id "
                "is the last part of `{session_dir}`.", 1),
-    (RECOVERY, "If the spawn is refused, run `grep -lF '<that line>' "
-               "{config_dir}/tasks/*/*.json`. When nothing matches, or the matches "
+    (RECOVERY, "If the spawn is refused, run `grep -rlF --include='*.json' "
+               "'<that line>' {config_dir}/tasks/`. Each match is a task file, and "
+               "its parent directory is a team. When nothing matches, or the matches "
                "sit in more than one directory, report that to the user and stop.", 1),
     (RECOVERY, "Otherwise run the realign command in step 2 with the name of the "
                "one matching directory; on a nonzero exit, report its reason to the "
@@ -78,8 +79,9 @@ PINS = [
     (PROTOCOLS, "adding to the task's description the line `pact-recovery: "
                 "<session id>-<UTC time as YYYYMMDDTHHMMSS>`, where the session id "
                 "is the last part of `{session_dir}`.", 1),
-    (PROTOCOLS, "If the spawn is refused, run `grep -lF '<that line>' "
-                "{config_dir}/tasks/*/*.json`. When nothing matches, or the matches "
+    (PROTOCOLS, "If the spawn is refused, run `grep -rlF --include='*.json' "
+                "'<that line>' {config_dir}/tasks/`. Each match is a task file, and "
+                "its parent directory is a team. When nothing matches, or the matches "
                 "sit in more than one directory, report that to the user and stop.", 1),
     (PROTOCOLS, "Otherwise run the realign command in step 2 with the name of the "
                 "one matching directory; on a nonzero exit, report its reason to the "
@@ -209,6 +211,7 @@ def test_the_instruction_surfaces_are_found():
     "and PACT resolves the team from it",
     "If the spawn is refused, report the refusal to the user and stop",
     "the most recently modified directory",
+    "{config_dir}/tasks/*/*.json",
 ])
 def test_a_retired_phrase_is_in_no_instruction_surface(phrase):
     hits = [p.relative_to(PLUGIN).as_posix() for p in _instruction_surfaces()
