@@ -78,18 +78,22 @@ _process_key_cache: str | None = None
 # hook run reads each journal once while it is unchanged.
 _journal_cache: dict[str, tuple[tuple[int, int], list]] = {}
 
-# Per-process session lifecycle marks: {journal path: ((mtime_ns, size),
-# (first session_start, last session_start-or-session_end))}.
-_marks_cache: dict[str, tuple[tuple[int, int], tuple]] = {}
+# Per-process lifecycle reads, each {journal path: ((mtime_ns, size), event)}:
+# the last session_start-or-session_end (a tail read) and the first
+# session_start (a head read).
+_marks_cache: dict[str, tuple[tuple[int, int], dict | None]] = {}
+_births_cache: dict[str, tuple[tuple[int, int], dict | None]] = {}
 
 # Per-process scans of a project's session contexts: {slug dir: (mtime_ns,
-# records)}. A new session dir changes the slug dir's mtime.
+# records)}. A new session dir changes the slug dir's mtime; a context
+# rewritten inside an existing dir, or written after a scan saw its dir
+# without one, is not seen until the next process.
 _records_cache: dict[str, tuple[int, list]] = {}
 
 # How far apart a session's session_end and the first session_start of the
 # session its /clear started may be, in seconds, on either side (SessionEnd is
-# async). Probe journals measured 0 to 1 s; the margin only widens exclusion.
-CLEAR_SUCCESSOR_WINDOW_SECONDS = 60
+# async). Probe journals measured 0 to 1 s.
+CLEAR_SUCCESSOR_WINDOW_SECONDS = 10
 
 # Bytes read per step when scanning a journal backwards from its end.
 _TAIL_BLOCK_BYTES = 65536
@@ -152,6 +156,7 @@ def reset_for_tests() -> None:
     _process_key_cache = None
     _journal_cache.clear()
     _marks_cache.clear()
+    _births_cache.clear()
     _records_cache.clear()
 
 
@@ -623,7 +628,7 @@ def _lifecycle_event(line: bytes) -> dict | None:
     if b"session_" not in line:
         return None
     try:
-        event = json.loads(line)
+        event = json.loads(line.decode("utf-8", "replace"))
     except ValueError:
         return None
     if isinstance(event, dict) and event.get("type") in (
@@ -663,30 +668,38 @@ def _first_session_start(journal: Path) -> dict | None:
     return None
 
 
-def _session_marks(session_dir: str) -> tuple[dict | None, dict | None]:
-    """(first session_start, last session_start or session_end) of the
-    session's journal, each None when absent; (None, None) when the journal
-    is absent or unreadable. Memoized per process while the file is
-    unchanged. Never raises."""
+def _cached_journal_read(cache: dict, session_dir: str, reader) -> dict | None:
+    """``reader(journal)`` for the session's journal, memoized in ``cache``
+    per process while the file is unchanged. None when the journal is
+    absent or unreadable. Never raises."""
     try:
         journal = Path(session_dir) / "session-journal.jsonl"
         stat = journal.stat()
         stamp = (stat.st_mtime_ns, stat.st_size)
-        cached = _marks_cache.get(str(journal))
+        cached = cache.get(str(journal))
         if cached is not None and cached[0] == stamp:
             return cached[1]
-        marks = (_first_session_start(journal), _last_lifecycle_event(journal))
-        _marks_cache[str(journal)] = (stamp, marks)
-        return marks
+        event = reader(journal)
+        cache[str(journal)] = (stamp, event)
+        return event
     except Exception:
-        return (None, None)
+        return None
 
 
-def _is_live(marks: tuple[dict | None, dict | None]) -> bool:
+def _session_last(session_dir: str) -> dict | None:
+    """The session's last session_start or session_end (a tail read)."""
+    return _cached_journal_read(_marks_cache, session_dir, _last_lifecycle_event)
+
+
+def _session_birth(session_dir: str) -> dict | None:
+    """The session's first session_start (a head read)."""
+    return _cached_journal_read(_births_cache, session_dir, _first_session_start)
+
+
+def _is_live(last: dict | None) -> bool:
     """True unless the last lifecycle event is a session_end. No event, or
     no journal, reads as live: when liveness is unknown, the team stays
     another session's (the fail-safe side)."""
-    last = marks[1]
     return last is None or last.get("type") != "session_end"
 
 
@@ -702,19 +715,31 @@ def _event_time(event: dict | None) -> float | None:
         return None
 
 
+def _project_slug_dir(sessions_root: Path) -> Path | None:
+    """This project's session dir under ``sessions_root``, contained in it,
+    or None. Never raises."""
+    try:
+        project_dir = _project_dir()
+        if not project_dir:
+            return None
+        root = sessions_root.resolve()
+        slug_dir = (root / _UNSAFE_SLUG_CHARS_RE.sub(
+            "_", project_slug(project_dir))).resolve()
+        if root not in slug_dir.parents or not slug_dir.is_dir():
+            return None
+        return slug_dir
+    except Exception:
+        return None
+
+
 def _project_session_records(sessions_root: Path) -> list[tuple[Path, dict]]:
     """(session dir, its context) for every PACT session dir of this
     project's slug under ``sessions_root``, contained in it, newest context
     first. Memoized per process while the slug dir is unchanged. [] on
     error. Never raises."""
     try:
-        project_dir = _project_dir()
-        if not project_dir:
-            return []
-        root = sessions_root.resolve()
-        slug_dir = (root / _UNSAFE_SLUG_CHARS_RE.sub(
-            "_", project_slug(project_dir))).resolve()
-        if root not in slug_dir.parents or not slug_dir.is_dir():
+        slug_dir = _project_slug_dir(sessions_root)
+        if slug_dir is None:
             return []
         stamp = slug_dir.stat().st_mtime_ns
         cached = _records_cache.get(str(slug_dir))
@@ -741,80 +766,159 @@ def _project_session_records(sessions_root: Path) -> list[tuple[Path, dict]]:
         return []
 
 
-def _has_clear_successor(
-    others: list[tuple[Path, dict]], ended_dir: Path, end_event: dict | None
-) -> bool:
-    """True iff a live session in ``others`` other than ``ended_dir`` was born
-    by a /clear (its FIRST session_start has source 'clear'; a later
-    compaction adds starts) within CLEAR_SUCCESSOR_WINDOW_SECONDS of
-    ``end_event``, on either side: the session the ended one's /clear
-    started, which holds its team whether or not it recorded it. No end
-    event, or one without a readable ts, links nothing."""
-    ended_at = _event_time(end_event)
-    if ended_at is None:
-        return False
-    for session_dir, _ in others:
-        if session_dir == ended_dir:
-            continue
-        marks = _session_marks(str(session_dir))
-        birth = marks[0]
-        if not (birth and birth.get("source") == "clear" and _is_live(marks)):
+def _journal_mtime(session_dir: Path) -> float | None:
+    try:
+        return (session_dir / "session-journal.jsonl").stat().st_mtime
+    except OSError:
+        return None
+
+
+def _clear_births_near(
+    sessions: list[tuple[Path, bool]], ends: list[float]
+) -> list[tuple[float, Path, bool]]:
+    """(birth time, session dir, ours) of each session in ``sessions`` that
+    was born by a /clear (its FIRST session_start has source 'clear'; a
+    later compaction adds starts) within CLEAR_SUCCESSOR_WINDOW_SECONDS of
+    one of ``ends``, and is live. Ours (the bool in ``sessions``) counts as
+    live: it is the session asking. The birth, a head read, is checked
+    before liveness, a tail read."""
+    births = []
+    for session_dir, ours in sessions:
+        birth = _session_birth(str(session_dir))
+        if not (birth and birth.get("source") == "clear"):
             continue
         born_at = _event_time(birth)
-        if (born_at is not None
-                and abs(born_at - ended_at) <= CLEAR_SUCCESSOR_WINDOW_SECONDS):
-            return True
-    return False
+        if born_at is None or not any(
+                abs(born_at - ended_at) <= CLEAR_SUCCESSOR_WINDOW_SECONDS
+                for ended_at in ends):
+            continue
+        if ours or _is_live(_session_last(str(session_dir))):
+            births.append((born_at, session_dir, ours))
+    return births
+
+
+def _competing_ends(
+    sessions: list[Path], births: list[tuple[float, Path, bool]]
+) -> list[tuple[float, Path]]:
+    """(end time, session dir) of each ended session in ``sessions`` whose
+    end could fall within the window of one of ``births``, so the matching
+    can give a birth to a nearer end. A session_end is the journal's last
+    write, so only a journal last written within twice the window of the
+    births, by a session born no later than the last of them plus the
+    window, is tail-read. An end this skips can only leave a birth to a
+    team's owner, which keeps that team another session's (the fail-safe
+    side)."""
+    window = CLEAR_SUCCESSOR_WINDOW_SECONDS
+    earliest = min(born_at for born_at, _, _ in births) - window
+    latest = max(born_at for born_at, _, _ in births) + window
+    ends = []
+    for session_dir in sessions:
+        written_at = _journal_mtime(session_dir)
+        if (written_at is None or written_at < earliest
+                or written_at > latest + window):
+            continue
+        born_at = _event_time(_session_birth(str(session_dir)))
+        if born_at is not None and born_at > latest:
+            continue
+        last = _session_last(str(session_dir))
+        ended_at = _event_time(last)
+        if not _is_live(last) and ended_at is not None:
+            ends.append((ended_at, session_dir))
+    return ends
+
+
+def _match_ends_to_births(
+    ends: list[tuple[float, Path]], births: list[tuple[float, Path, bool]]
+) -> dict[Path, tuple[Path, bool]]:
+    """{ended session dir: (birth session dir, ours)}: each end linked to the
+    nearest clear birth within the window, one to one, nearest pairs first
+    (ties by dir name)."""
+    pairs = sorted(
+        (abs(born_at - ended_at), str(end_dir), str(birth_dir),
+         end_dir, birth_dir, ours)
+        for ended_at, end_dir in ends
+        for born_at, birth_dir, ours in births
+        if end_dir != birth_dir
+        and abs(born_at - ended_at) <= CLEAR_SUCCESSOR_WINDOW_SECONDS
+    )
+    matched: dict[Path, tuple[Path, bool]] = {}
+    taken: set[Path] = set()
+    for _, _, _, end_dir, birth_dir, ours in pairs:
+        if end_dir in matched or birth_dir in taken:
+            continue
+        matched[end_dir] = (birth_dir, ours)
+        taken.add(birth_dir)
+    return matched
 
 
 def _owned_by_other_live_session(
-    records: list[tuple[Path, dict]],
+    sessions_root: Path,
     team_name: str,
     lead_session_id: str,
     own_session_id: str,
     own_process_key: str,
-    clear_successors: bool = False,
 ) -> bool:
-    """True iff some LIVE session in ``records`` that is not ours leads
-    ``team_name`` (its session id is the team's leadSessionId) or records it
-    (its context's team_name). Ours: this session id, or a session whose
-    recorded process_key equals ours with both non-empty (an earlier life of
-    this claude process before a /clear); an empty key matches nothing.
+    """True iff ``team_name`` belongs to a session of this project that is
+    not ours: one that leads it (its session id is the team's
+    leadSessionId) or records it (its context's team_name) and is LIVE, or
+    has ENDED and its end is matched to a live session born by a /clear
+    that is not ours (_match_ends_to_births): its successor, which holds
+    the team whether or not it recorded it. An end matched to OUR clear
+    birth is our predecessor, so its team is ours.
 
-    With ``clear_successors`` (the census), an ENDED session that leads or
-    records the team still owns it while a live session that is not ours
-    was born by a /clear around its end (_has_clear_successor): a keyless
-    /clear successor records a computed team, not the one it is on."""
+    Ours: this session id, or a session whose recorded process_key equals
+    ours with both non-empty (an earlier life of this claude process); an
+    empty key matches nothing."""
+    slug_dir = _project_slug_dir(sessions_root)
+    if slug_dir is None:
+        return False
     own_dir_name = _UNSAFE_SLUG_CHARS_RE.sub("_", own_session_id or "")
-    others = []
-    for session_dir, data in records:
+    own_dir = slug_dir / own_dir_name if own_dir_name else None
+
+    def is_ours(session_dir: Path, data: dict) -> bool:
         recorded_sid = str(data.get("session_id", "")) or session_dir.name
-        if session_dir.name == own_dir_name or recorded_sid == own_session_id:
-            continue
-        if own_process_key and data.get("process_key") == own_process_key:
-            continue
-        others.append((session_dir, data))
+        return (session_dir == own_dir or recorded_sid == own_session_id
+                or bool(own_process_key)
+                and data.get("process_key") == own_process_key)
+
+    records = _project_session_records(sessions_root)
+    others = [(d, data) for d, data in records if not is_ours(d, data)]
+    owner_ends = []
     for session_dir, data in others:
         recorded_sid = str(data.get("session_id", "")) or session_dir.name
         leads = bool(lead_session_id) and recorded_sid == lead_session_id
         if not leads and data.get("team_name") != team_name:
             continue
-        marks = _session_marks(str(session_dir))
-        if _is_live(marks):
+        last = _session_last(str(session_dir))
+        if _is_live(last):
             return True
-        if clear_successors and _has_clear_successor(
-            others, session_dir, marks[1]
-        ):
-            return True
-    return False
+        ended_at = _event_time(last)
+        if ended_at is not None:
+            owner_ends.append((ended_at, session_dir))
+    if not owner_ends:
+        return False
+    sessions = [(d, is_ours(d, data)) for d, data in records]
+    if own_dir is not None and all(d != own_dir for d, _ in sessions):
+        sessions.append((own_dir, True))
+    births = _clear_births_near(sessions, [t for t, _ in owner_ends])
+    if not births:
+        return False
+    owners = {d for _, d in owner_ends}
+    ends = owner_ends + _competing_ends(
+        [d for d, _ in sessions if d not in owners and d != own_dir], births)
+    matched = _match_ends_to_births(ends, births)
+    return any(
+        not matched[d][1] for _, d in owner_ends if d in matched
+    )
 
 
 def team_owned_by_other_pact_session(
     team_name: str, session_id: str = "", process_key: str | None = None
 ) -> bool:
-    """True iff ``team_name`` belongs to another PACT session: some LIVE
-    PACT session of this project that is not ours leads the team (its
-    config's leadSessionId) or records it (its context's team_name).
+    """True iff ``team_name`` belongs to another PACT session of this
+    project (_owned_by_other_live_session: a live session that is not ours
+    leads or records it, or an ended one does and its /clear successor is
+    live and not ours). The census applies the same rule.
 
     Ours means ``session_id`` (default: this context's session id), or a
     session whose recorded process key equals ``process_key`` (default: the
@@ -838,7 +942,7 @@ def team_owned_by_other_pact_session(
         own_key = (process_key if process_key is not None
                    else context.get("process_key", ""))
         return _owned_by_other_live_session(
-            _project_session_records(get_claude_config_dir() / "pact-sessions"),
+            get_claude_config_dir() / "pact-sessions",
             team_name, _read_lead_session_id(team_name), own_sid, own_key,
         )
     except Exception:
@@ -880,8 +984,8 @@ def _resume_census_candidates(
     Enumerates teams/*/config.json. A dir is a CANDIDATE iff its
     config.json carries a REAL string leadSessionId DIFFERENT from this
     session's id (a config missing/null on the field is malformed and
-    never counts) AND no live PACT session of this project that is not ours
-    leads or records it (_owned_by_other_live_session; ``process_key``,
+    never counts) AND no other PACT session of this project owns it
+    (_owned_by_other_live_session, the realign verb's rule too; ``process_key``,
     default this context's recorded key, tells this process's earlier lives
     apart from other sessions) AND its
     sibling tasks/<dir>/ store mtime falls within
@@ -899,7 +1003,7 @@ def _resume_census_candidates(
     """
     try:
         tasks_root = teams_root.parent / "tasks"
-        records = _project_session_records(teams_root.parent / "pact-sessions")
+        sessions_root = teams_root.parent / "pact-sessions"
         own_key = (process_key if process_key is not None
                    else get_pact_context().get("process_key", ""))
         cutoff = time.time() - RESUME_CENSUS_RECENCY_SECONDS
@@ -921,8 +1025,8 @@ def _resume_census_candidates(
                 if candidate_lead_sid == session_id:
                     continue  # this session's own team — identity-match owns it
                 if _owned_by_other_live_session(
-                    records, entry.name, candidate_lead_sid, session_id,
-                    own_key, clear_successors=True,
+                    sessions_root, entry.name, candidate_lead_sid, session_id,
+                    own_key,
                 ):
                     continue  # another live PACT session's team
                 tasks_dir = tasks_root / entry.name

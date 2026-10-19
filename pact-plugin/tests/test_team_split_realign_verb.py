@@ -17,7 +17,7 @@ Each refusal cell is built so that only its own check can refuse: the other
 checks would all pass.
 
 Counter-tests, measured by source-only revert of each check in a scratch copy
-(cardinality of this file's 29-case run): removing the lead-context check,
+(cardinality of this file's 31-case run): removing the lead-context check,
 the path-safety check, the lead-entry suffix check, the members-is-a-list
 check, the identity-match check, or the other-session ownership check -> 1
 failed each; removing the cwd check -> 2 failed; comparing the cwd without
@@ -28,7 +28,8 @@ raw -> 1 failed; returning before the CLAUDE.md write on the 'already' path
 Started line -> 2 failed; writing a process key from this command -> 1
 failed; replacing the journal append with a fixed outcome -> 2 failed;
 a refusal exiting 2 -> 18 failed; dropping the lead-only sentence -> 19
-failed.
+failed; restoring pact_context.py to the version without the /clear
+successor rule -> 1 failed (the keyless-sibling refusal).
 """
 
 import json
@@ -45,6 +46,8 @@ from fixtures.team_split import (
     NEW_TEAM,
     OLD_SID,
     OLD_TEAM,
+    SECOND_SID,
+    SECOND_TEAM,
     TMUX_SID,
     read_journal,
     saved_team_name,
@@ -52,6 +55,8 @@ from fixtures.team_split import (
     split_world,
     stat_snapshot,
     team_line,
+    write_context_file,
+    write_journal,
 )
 
 _HOOKS = Path(__file__).resolve().parent.parent / "hooks"
@@ -400,3 +405,57 @@ def test_a_realign_keeps_the_recorded_process_key(tmp_path, monkeypatch):
     after = json.loads(world.context_path.read_text(encoding="utf-8"))
     assert after["team_name"] == NEW_TEAM
     assert after["process_key"] == "1262:Mon Oct 19 18:36:20 2026"
+
+
+# --- A team whose leader ended in another session's /clear ------------------
+
+_SIBLING_CLEAR_SID = "b2b2b2b2-1111-4222-8333-444455556666"
+
+
+def _keyless_sibling_clear(tmp_path, monkeypatch, *, born_at):
+    """SECOND_TEAM's leader ended at 15:34:19; a keyless session born by a
+    /clear at ``born_at`` is live and records only its own computed team.
+    This session has a process key, so that clear was not this session's."""
+    world = split_world(tmp_path, monkeypatch, live_store_aged=True,
+                        second_corroborated=True)
+    write_context_file(OLD_SID, OLD_TEAM, world.project_dir, world.plugin_root,
+                       process_key="4242:Mon Oct 19 15:00:00 2026")
+    slug_dir = world.session_dir.parent
+    for sid, team, events in (
+        (SECOND_SID, SECOND_TEAM, [
+            {"type": "session_start", "session_id": SECOND_SID,
+             "project_dir": str(world.project_dir), "source": "startup",
+             "ts": "2026-10-19T15:00:00Z"},
+            {"type": "session_end", "ts": "2026-10-19T15:34:19Z"}]),
+        (_SIBLING_CLEAR_SID, "session-b2b2b2b2", [
+            {"type": "session_start", "session_id": _SIBLING_CLEAR_SID,
+             "project_dir": str(world.project_dir), "source": "clear",
+             "ts": born_at}]),
+    ):
+        write_context_file(sid, team, world.project_dir, world.plugin_root,
+                           process_key="")
+        write_journal(slug_dir / sid, events)
+    return world
+
+
+def test_realign_refuses_a_team_whose_leader_ended_in_another_session_s_clear(
+        tmp_path, monkeypatch):
+    """The leader ended one second before a live keyless session was born by
+    a /clear: that successor still holds the team, so it is not this
+    session's. Kill: drop the successor rule from the ownership check -> the
+    move lands."""
+    world = _keyless_sibling_clear(tmp_path, monkeypatch,
+                                   born_at="2026-10-19T15:34:20Z")
+    result = _refusal(world, SECOND_TEAM)
+    assert "another PACT session owns this team" in result.stderr
+
+
+def test_realign_accepts_that_team_when_the_clear_came_long_after(
+        tmp_path, monkeypatch):
+    """Control: the live session's /clear came an hour after the leader
+    ended, so it is not the leader's successor and the team is free."""
+    world = _keyless_sibling_clear(tmp_path, monkeypatch,
+                                   born_at="2026-10-19T16:34:20Z")
+    result = _realign(world, SECOND_TEAM)
+    assert result.returncode == 0, result.stderr
+    assert saved_team_name(world) == SECOND_TEAM

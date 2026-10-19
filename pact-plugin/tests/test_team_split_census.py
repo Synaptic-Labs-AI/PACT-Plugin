@@ -21,6 +21,7 @@ test_team_name_detect_align.py (its focused resolver cells).
 import io
 import json
 import os
+from datetime import datetime
 from unittest.mock import patch
 
 import pytest
@@ -156,7 +157,11 @@ def _pact_session(world, session_id, *, team="x", key="", ended=False,
                       if ended_at else "session_end")
     if resumed:
         events.append(dict(birth, source="resume"))
-    write_journal(session_dir, events)
+    journal = write_journal(session_dir, events)
+    if ended and ended_at and not resumed:
+        # The session_end was the journal's last write.
+        written = datetime.fromisoformat(ended_at.replace("Z", "+00:00"))
+        os.utime(journal, (written.timestamp(), written.timestamp()))
 
 
 def _set_own_key(world, key):
@@ -170,6 +175,21 @@ def _owned(team):
     reset_context_module()
     ctx_module.init({"session_id": OLD_SID})
     return ctx_module.team_owned_by_other_pact_session(team)
+
+
+_OWNED = "another PACT session owns this team"
+
+
+def _verb_refusal(monkeypatch, team):
+    """The realign command's refusal for ``team`` as this session ('' to
+    accept)."""
+    from shared import realign_team
+    reset_context_module()
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", OLD_SID)
+    try:
+        return realign_team.refusal_reason(team)
+    finally:
+        reset_context_module()
 
 
 def _aged_sibling_world(tmp_path, monkeypatch):
@@ -307,6 +327,11 @@ _ONE_SECOND_EARLIER = "2026-10-19T15:34:19Z"
 _ONE_SECOND_LATER = "2026-10-19T15:34:21Z"
 _AFTER_END = "2026-10-19T15:44:20Z"
 _AN_HOUR_LATER = "2026-10-19T16:34:20Z"
+_FOUR_SECONDS_LATER = "2026-10-19T15:34:24Z"
+_ELEVEN_SECONDS_AFTER_END = "2026-10-19T15:34:30Z"
+# Another leader of this project, whose team also corroborates.
+NEAR_SID = "dddd0000-1111-4222-8333-444455556666"
+NEAR_TEAM = "session-dddd0000"
 
 
 def _keyless_sibling_clear(world, *, ended_at=_ONE_SECOND_EARLIER,
@@ -324,12 +349,13 @@ def test_a_keyless_clear_successor_keeps_its_predecessor_s_team(
         tmp_path, monkeypatch):
     """The leader ended and nothing live records its team, but a live
     session was born by a /clear one second after that end: the team is
-    still that sibling's, so the census does not adopt it. The realign
-    command's ownership check does not apply this rule."""
+    still that sibling's, so the census does not adopt it and the realign
+    command refuses it."""
     world = _aged_sibling_world(tmp_path, monkeypatch)
     _keyless_sibling_clear(world)
     assert _team_name() == OLD_TEAM
-    assert _owned(SECOND_TEAM) is False
+    assert _owned(SECOND_TEAM) is True
+    assert _verb_refusal(monkeypatch, SECOND_TEAM) == _OWNED
 
 
 def test_a_successor_that_compacted_after_its_clear_still_holds_the_team(
@@ -339,6 +365,7 @@ def test_a_successor_that_compacted_after_its_clear_still_holds_the_team(
     world = _aged_sibling_world(tmp_path, monkeypatch)
     _keyless_sibling_clear(world, compacted=True)
     assert _team_name() == OLD_TEAM
+    assert _verb_refusal(monkeypatch, SECOND_TEAM) == _OWNED
 
 
 def test_an_end_journalled_after_the_successor_s_start_still_links(
@@ -347,15 +374,107 @@ def test_an_end_journalled_after_the_successor_s_start_still_links(
     world = _aged_sibling_world(tmp_path, monkeypatch)
     _keyless_sibling_clear(world, ended_at=_ONE_SECOND_LATER)
     assert _team_name() == OLD_TEAM
+    assert _verb_refusal(monkeypatch, SECOND_TEAM) == _OWNED
 
 
 def test_a_clear_born_session_far_from_the_end_is_not_a_successor(
         tmp_path, monkeypatch):
     """Control: the live session's clear came an hour after the leader
-    ended, so nothing holds the team and the census picks it."""
+    ended, so nothing holds the team: the census picks it and the realign
+    command accepts it."""
     world = _aged_sibling_world(tmp_path, monkeypatch)
     _keyless_sibling_clear(world, born_at=_AN_HOUR_LATER)
     assert _team_name() == SECOND_TEAM
+    assert _verb_refusal(monkeypatch, SECOND_TEAM) == ""
+
+
+def test_a_clear_birth_just_outside_the_window_is_not_a_successor(
+        tmp_path, monkeypatch):
+    """Control at the window's edge: a clear 11 s after the end does not
+    link; 10 s is the window."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _keyless_sibling_clear(world, born_at=_ELEVEN_SECONDS_AFTER_END)
+    assert _team_name() == SECOND_TEAM
+
+
+def _own_keyless_clear(world, *, own_born="clear"):
+    """This session was born by a keyless /clear one second after its
+    predecessor (SECOND_SID, which leads SECOND_TEAM) ended; a sibling's
+    /clear started another keyless session 5 s after that end."""
+    _set_own_key(world, "")
+    write_journal(world.session_dir, [
+        {"type": "session_start", "session_id": OLD_SID, "ts": _CLEAR_AT,
+         "project_dir": str(world.project_dir), "source": own_born},
+        "task_metadata_snapshot",
+    ])
+    _pact_session(world, SECOND_SID, team=SECOND_TEAM, ended=True,
+                  ended_at=_ONE_SECOND_EARLIER)
+    _pact_session(world, SIBLING_CLEAR_SID, team="session-b2b2b2b2",
+                  born="clear", born_at=_FOUR_SECONDS_LATER)
+
+
+def test_our_keyless_clear_keeps_our_predecessor_s_team_beside_a_sibling(
+        tmp_path, monkeypatch):
+    """The predecessor's end is nearest our own clear birth (1 s) and is
+    matched to it, so the sibling's clear 5 s from that end cannot take it:
+    the team is ours, the census picks it and the realign command accepts
+    it."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _own_keyless_clear(world)
+    assert _team_name() == SECOND_TEAM
+    assert _owned(SECOND_TEAM) is False
+    assert _verb_refusal(monkeypatch, SECOND_TEAM) == ""
+
+
+def test_without_our_clear_birth_the_sibling_takes_the_ended_team(
+        tmp_path, monkeypatch):
+    """Control: this session was not born by a /clear, so the nearest live
+    clear birth to the predecessor's end is the sibling's, and the team is
+    the sibling's."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _own_keyless_clear(world, own_born="startup")
+    assert _team_name() == OLD_TEAM
+    assert _verb_refusal(monkeypatch, SECOND_TEAM) == _OWNED
+
+
+def test_one_clear_birth_links_to_one_end(tmp_path, monkeypatch):
+    """Two leaders ended near one sibling's clear birth: the birth links to
+    the nearer end only, so the farther leader's team is free."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _set_own_key(world, OWN_KEY)
+    from fixtures.team_split import seed_team
+    seed_team(world.root, NEAR_TEAM, lead_sid=NEAR_SID,
+              lead_cwd=str(world.project_dir))
+    _pact_session(world, NEAR_SID, team=NEAR_TEAM, ended=True,
+                  ended_at=_CLEAR_AT)
+    _pact_session(world, SECOND_SID, team=SECOND_TEAM, ended=True,
+                  ended_at=_FOUR_SECONDS_LATER)
+    _pact_session(world, SIBLING_CLEAR_SID, team="session-b2b2b2b2",
+                  born="clear", born_at=_CLEAR_AT)
+    assert _owned(NEAR_TEAM) is True
+    assert _owned(SECOND_TEAM) is False
+
+
+def test_a_journal_with_no_clear_birth_is_never_tail_read(tmp_path,
+                                                          monkeypatch):
+    """With an ended leader, a live session born by a startup is decided by
+    its first line alone; a clear-born one within the window needs its
+    liveness, a tail read."""
+    import shared.pact_context as ctx_module
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _pact_session(world, SECOND_SID, team=SECOND_TEAM, ended=True,
+                  ended_at=_ONE_SECOND_EARLIER)
+    _pact_session(world, NEAR_SID, team="x", born="startup", born_at=_CLEAR_AT)
+    _pact_session(world, SIBLING_CLEAR_SID, team="x", born="clear",
+                  born_at=_CLEAR_AT)
+    tail_reads = []
+    real = ctx_module._last_lifecycle_event
+    monkeypatch.setattr(ctx_module, "_last_lifecycle_event",
+                        lambda journal: tail_reads.append(journal.parent.name)
+                        or real(journal))
+    assert _owned(SECOND_TEAM) is True
+    assert NEAR_SID not in tail_reads
+    assert SIBLING_CLEAR_SID in tail_reads
 
 
 def test_an_ended_clear_born_session_is_not_a_successor(tmp_path,

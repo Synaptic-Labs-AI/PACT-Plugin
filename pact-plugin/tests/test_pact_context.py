@@ -3059,8 +3059,9 @@ class TestLeadSessionFrameGivenLeadId:
 
 
 class TestSessionMarksReadTheEnds:
-    """_session_marks: a session's birth and its last start or end, read
-    from the two ends of its journal rather than by parsing it whole."""
+    """A session's birth (its first session_start) and its last start or
+    end, read from the two ends of its journal rather than by parsing it
+    whole."""
 
     def _journal(self, tmp_path, *types):
         session_dir = tmp_path / "s"
@@ -3078,20 +3079,41 @@ class TestSessionMarksReadTheEnds:
         monkeypatch.setattr(ctx, "_TAIL_BLOCK_BYTES", 16)
         ended = self._journal(tmp_path, "session_start", "session_end",
                               *["task_created"] * 5)
-        assert ctx._session_marks(ended)[1]["type"] == "session_end"
-        assert not ctx._is_live(ctx._session_marks(ended))
+        last = ctx._session_last(ended)
+        assert last is not None and last["type"] == "session_end"
+        assert not ctx._is_live(last)
 
     def test_a_start_after_an_end_is_live(self, tmp_path):
         import shared.pact_context as ctx
         resumed = self._journal(tmp_path, "session_start", "session_end",
                                 "session_start", "task_created")
-        assert ctx._is_live(ctx._session_marks(resumed))
+        assert ctx._is_live(ctx._session_last(resumed))
 
     def test_no_lifecycle_event_or_no_journal_reads_as_live(self, tmp_path):
         import shared.pact_context as ctx
-        assert ctx._is_live(ctx._session_marks(
+        assert ctx._is_live(ctx._session_last(
             self._journal(tmp_path, "task_created")))
-        assert ctx._is_live(ctx._session_marks(str(tmp_path / "absent")))
+        assert ctx._is_live(ctx._session_last(str(tmp_path / "absent")))
+
+    def test_an_end_holding_invalid_bytes_still_reads_as_ended(self,
+                                                               tmp_path):
+        import shared.pact_context as ctx
+        session_dir = tmp_path / "s"
+        session_dir.mkdir()
+        (session_dir / "session-journal.jsonl").write_bytes(
+            b'{"type": "session_start", "source": "startup"}\n'
+            b'{"type": "session_end", "note": "\xff\xfe"}\n')
+        assert not ctx._is_live(ctx._session_last(str(session_dir)))
+
+    def test_a_valid_end_reads_as_ended(self, tmp_path):
+        """Control for the cell above: the same journal with clean bytes."""
+        import shared.pact_context as ctx
+        session_dir = tmp_path / "s"
+        session_dir.mkdir()
+        (session_dir / "session-journal.jsonl").write_bytes(
+            b'{"type": "session_start", "source": "startup"}\n'
+            b'{"type": "session_end", "note": "ok"}\n')
+        assert not ctx._is_live(ctx._session_last(str(session_dir)))
 
     def test_the_birth_is_the_first_start(self, tmp_path):
         import shared.pact_context as ctx
@@ -3100,8 +3122,8 @@ class TestSessionMarksReadTheEnds:
         (session_dir / "session-journal.jsonl").write_text("\n".join(
             json.dumps({"type": "session_start", "source": source})
             for source in ("clear", "compact")) + "\n")
-        first, last = ctx._session_marks(str(session_dir))
-        assert (first["source"], last["source"]) == ("clear", "compact")
+        assert ctx._session_birth(str(session_dir))["source"] == "clear"
+        assert ctx._session_last(str(session_dir))["source"] == "compact"
 
     def test_the_whole_journal_is_never_parsed(self, tmp_path, monkeypatch):
         import shared.pact_context as ctx
@@ -3109,8 +3131,9 @@ class TestSessionMarksReadTheEnds:
         reads = []
         monkeypatch.setattr(journal, "read_events_from",
                             lambda *a, **k: reads.append(a) or [])
-        ctx._session_marks(self._journal(tmp_path, "session_start",
-                                         "session_end"))
+        session_dir = self._journal(tmp_path, "session_start", "session_end")
+        ctx._session_last(session_dir)
+        ctx._session_birth(session_dir)
         assert reads == []
 
 
