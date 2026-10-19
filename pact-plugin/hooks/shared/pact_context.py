@@ -398,7 +398,7 @@ def get_pact_context() -> dict:
 # "now" to count as LIVE. RESUME_CENSUS_RECENCY_SECONDS = 900 (15 minutes)
 # — minutes-scale so a resume followed by a delayed dispatch still lands
 # inside the window, while aged stores fall out. The window is a NARROWING
-# parameter only: zero or >= 2 surviving candidates always fail safe to the
+# parameter only: zero or >= 2 corroborated candidates always fail safe to the
 # persisted default, so a mis-tuned window can only suppress the census,
 # never mis-align.
 RESUME_CENSUS_RECENCY_SECONDS = 900
@@ -499,8 +499,9 @@ def _resume_census_candidate_corroborated(
 
     Set-uniqueness alone proves nothing (a sibling session's fresh store can
     be the unique candidate whenever this session's own team is unborn), so
-    the unique candidate must additionally corroborate as THIS session's
-    team, by mechanism:
+    every candidate is corroborated FIRST, and only corroborated candidates
+    are counted (_resume_census_unique_candidate). A candidate corroborates
+    as THIS session's team by mechanism:
 
       * LEAD ENTRY: the config's members[] entry whose agentId EQUALS the
         config's leadAgentId (the platform's first-class key — NOT a
@@ -722,18 +723,18 @@ def _resolve_aligned_team_name(
     the inline branch-2 comment) both miss, a RESUMED session
     (clean end-session reaped the old team config; a new team + task store
     was provisioned under a new id while hook frames still carry the OLD
-    session id) can still be realigned: census the teams root for the
-    single LIVE re-provisioned team (config leadSessionId != this session's
-    id, tasks store mtime within RESUME_CENSUS_RECENCY_SECONDS), and return
-    it only if it CORROBORATES as this session's team (lead member cwd
-    anchor + birth order — see _resume_census_candidate_corroborated; F1:
-    uniqueness alone is not an ownership proof). Gated by a journal
+    session id) can still be realigned: census the teams root for LIVE
+    re-provisioned teams (config leadSessionId != this session's id, tasks
+    store mtime within RESUME_CENSUS_RECENCY_SECONDS), keep those that
+    CORROBORATE as this session's team (lead member cwd anchor + birth
+    order — see _resume_census_candidate_corroborated; F1: uniqueness alone
+    is not an ownership proof), and return the one that remains. Gated by a journal
     lived-session witness (prior team activity in THIS session's journal —
     kills cold-start concurrent-session cross-alignment) and by the
     fallback team's config being ABSENT (post-convergence the census goes
-    inert). UNAMBIGUOUS-only: exactly one candidate wins; zero, >= 2, or an
-    uncorroborated unique candidate fall to the fail-safe default. See the
-    inline branch-3 comment.
+    inert). UNAMBIGUOUS-only: exactly one corroborated candidate wins; zero
+    or >= 2 corroborated candidates fall to the fail-safe default, and an
+    uncorroborated candidate never counts. See the inline branch-3 comment.
 
     FAIL-SAFE DEFAULT: on no identity match (the team dir is half-formed —
     ``inboxes/`` present but ``config.json`` not yet written — or simply
@@ -855,7 +856,7 @@ def _resolve_aligned_team_name(
         # default, never the dead dir). The census is consulted ONLY when
         # the witness holds and the own store is stale, and _resume_census_
         # unique_candidate already enforces the cycle-1 corroboration — an
-        # uncorroborated unique candidate returns None and CANNOT preempt,
+        # uncorroborated candidate never counts and CANNOT preempt,
         # so the F1 hole cannot reopen through this path. In every
         # census-empty world (including every #989 fixture with an empty
         # teams root) this is byte-identical to the pre-guard branch-2.
@@ -909,8 +910,8 @@ def _resolve_aligned_team_name(
         #     cold-start concurrent-session cross-alignment: a fresh
         #     session's journal has no prior activity, so its census never
         #     fires even when another live session is the sole candidate.
-        # UNAMBIGUOUS-only: zero or >= 2 candidates -> fall through to the
-        # fail-safe default, byte-identical to today.
+        # UNAMBIGUOUS-only: zero or >= 2 corroborated candidates -> fall
+        # through to the fail-safe default.
         if (
             fallback
             and is_safe_path_component(fallback)
@@ -1664,12 +1665,22 @@ def persist_context(target: Path, context: dict) -> None:
     and degrading the lead to empty strings. ``target`` / ``context`` are exactly
     the pair returned by ``build_context_cache``.
 
+    When ``target`` already holds exactly the bytes this write would produce,
+    the file is left untouched (inode and mtime preserved), so a SessionStart
+    that re-derives the same context writes nothing.
+
     Args:
         target: The resolved session-context file path (from build_context_cache).
         context: The context dict to serialize (from build_context_cache).
     """
     context_dir = target.parent
     try:
+        serialized = json.dumps(context)
+        try:
+            if target.read_bytes() == serialized.encode("utf-8"):
+                return
+        except OSError:
+            pass  # absent or unreadable: write it
         context_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         # Write to temp file in the same directory (required for atomic rename)
@@ -1680,7 +1691,7 @@ def persist_context(target: Path, context: dict) -> None:
         )
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(context, f)
+                f.write(serialized)
             os.chmod(tmp_path, 0o600)
             os.rename(tmp_path, str(target))
         except Exception:
