@@ -101,6 +101,7 @@ from shared.pact_context import (
     _resolve_aligned_team_name,
     build_context_cache,
     classify_session_role,
+    describe_team_alignment,
     generate_team_name,
     get_session_dir,
     get_session_id,
@@ -2264,6 +2265,14 @@ def main():
                 ))
             if frame_role is None:
                 context_parts.insert(1, _UNRESOLVED_ROLE_CUE)
+
+        # On a launch, a recorded team whose config is gone and that the
+        # census could not replace is named, with each live candidate team.
+        # Empty whenever the census decided, so it adds nothing otherwise.
+        if frame_is_lead and source in ("startup", "resume"):
+            _alignment = describe_team_alignment()
+            if _alignment:
+                context_parts.append(_alignment)
 
         # 5a. Capture the PREVIOUS session's dir from project CLAUDE.md
         # before step 5b overwrites the Current Session block with THIS

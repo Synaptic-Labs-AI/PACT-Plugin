@@ -1829,6 +1829,46 @@ def describe_context_failure() -> str:
     return ""
 
 
+def describe_team_alignment() -> str:
+    """One-line diagnosis of why the session's team cannot be decided, for
+    SessionStart context and dispatch_gate deny messages. Returns '' unless
+    the persisted team_name is non-empty, its teams/<team>/config.json is
+    absent, the journal shows prior team activity (the census trigger), and
+    the census did NOT find exactly one corroborated candidate. Otherwise it
+    names the recorded team and every live candidate with its corroboration
+    result, read from the same _resume_census_candidates list the census
+    decides on, so the explanation cannot disagree with the decision.
+
+    Team names are interpolated only after is_safe_path_component (the
+    recorded name here; every candidate inside the census), whose allowlist
+    admits no whitespace, controls or backticks. Never raises: '' on error.
+    """
+    try:
+        team = get_pact_context().get("team_name", "")
+        if not team or not is_safe_path_component(team):
+            return ""
+        teams_root = get_claude_config_dir() / "teams"
+        if (teams_root / team / "config.json").exists():
+            return ""
+        if not _journal_has_team_activity():
+            return ""
+        candidates = _resume_census_candidates(teams_root, get_session_id())
+        if sum(1 for _, is_corroborated, _ in candidates if is_corroborated) == 1:
+            return ""
+        head = f"PACT's recorded team `{team}` has no config."
+        if not candidates:
+            return f"{head} No live candidate teams."
+        listed = ", ".join(
+            f"`{name}` ("
+            + ("matches this session" if is_corroborated else "does not match")
+            + ")"
+            for name, is_corroborated, _ in candidates
+        )
+        return f"{head} Live candidate teams: {listed}."
+    except Exception:
+        return ""
+
+
 def heal_context_if_missing(input_data: dict) -> bool:
     """Re-create a missing pact-session-context.json from the same inputs
     session_init would use (stdin session_id, CLAUDE_PROJECT_DIR,

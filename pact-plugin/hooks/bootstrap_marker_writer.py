@@ -26,7 +26,9 @@ user message, checks:
   - Not a lead frame → suppressOutput
   - Lead frame → realign the recorded team to the platform's (every run, so
     a team that moves after bootstrap is still followed); a move appends
-    team_realigned and emits a lead notice as additionalContext
+    team_realigned and emits a lead notice as additionalContext; a recorded
+    team with no config that two or more live teams claim emits an ambiguity
+    notice instead
   - Marker already exists (valid stamp) → no marker write (idempotent fast path)
   - Team config absent OR secretary not in members[] → suppressOutput
     (verify-and-refuse: pre-conditions unmet, sibling bootstrap_prompt_gate
@@ -184,7 +186,11 @@ try:
         make_event,
         read_last_event_from,
     )
-    from shared.session_resume import in_progress_task_ids, update_session_info
+    from shared.session_resume import (
+        _sanitize_prompt_field,
+        in_progress_task_ids,
+        update_session_info,
+    )
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_advisory("module imports", _module_load_error)
 
@@ -223,10 +229,14 @@ def _emit_output(event_name: str, notice: str | None) -> str:
 
 def _realign_notice(old_team: str, new_team: str) -> str:
     """The lead notice for a write-back that moved the session's team."""
-    ids = ", ".join(in_progress_task_ids(old_team)) or "none"
+    # Task ids come from task files: sanitised as the resume claim's are.
+    ids = ", ".join(
+        clean for clean in map(_sanitize_prompt_field, in_progress_task_ids(old_team))
+        if clean
+    ) or "none"
     return (
         f"PACT moved this session from team `{old_team}` to `{new_team}`, "
-        f"the team the platform is using. TaskList shows only `{new_team}`. "
+        f"the team the platform is using. `TaskList` shows only `{new_team}`. "
         f"In-progress tasks still in `tasks/{old_team}/`: {ids}. "
         f"Follow the team-split recovery in `pact-state-recovery.md` "
         f"before spawning."
@@ -542,6 +552,43 @@ def _realign_team(input_data: dict) -> str | None:
         return None
 
 
+def _ambiguity_notice() -> str | None:
+    """The lead notice for a team the census cannot decide, or None.
+
+    Fires when the recorded team is still the resolved one (nothing
+    realigned), its config is absent, this session's journal shows team
+    activity (the census trigger), and two or more live teams corroborate as
+    this session's. Zero or one corroborated candidate emits nothing. Never
+    raises.
+    """
+    try:
+        team = pact_context.get_pact_context().get("team_name", "").lower()
+        if not team or pact_context.get_team_name() != team:
+            return None
+        teams_root = pact_context.get_claude_config_dir() / "teams"
+        if (teams_root / team / "config.json").exists():
+            return None
+        if not pact_context._journal_has_team_activity():
+            return None
+        names = [
+            name
+            for name, is_corroborated, _ in pact_context._resume_census_candidates(
+                teams_root, pact_context.get_session_id()
+            )
+            if is_corroborated
+        ]
+        if len(names) < 2:
+            return None
+        listed = ", ".join(f"`{name}`" for name in names)
+        return (
+            f"PACT cannot tell which team is this session's: {listed}. "
+            f"Do not spawn. Follow the team-split recovery in "
+            f"`pact-state-recovery.md`."
+        )
+    except Exception:
+        return None
+
+
 def _try_write_marker(input_data: dict) -> str | None:
     """Realign the session's team, then write the marker if its pre-conditions
     are met. Returns a lead notice to emit, or None.
@@ -588,7 +635,8 @@ def _try_write_marker(input_data: dict) -> str | None:
     # on every lead prompt and Agent spawn, before the marker fast path: a
     # resume keeps the marker, and the team it names can move after it. Done
     # BEFORE the secretary check so the check reads the aligned team.
-    notice = _realign_team(input_data)
+    # A team that did not move but cannot be decided gets its own notice.
+    notice = _realign_team(input_data) or _ambiguity_notice()
 
     # Idempotent fast path: marker already valid → no marker write. Uses the
     # same is_marker_set predicate the gate uses, so producer and verifier
