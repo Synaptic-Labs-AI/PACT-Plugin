@@ -62,7 +62,7 @@ The ritual is per-session and idempotent — the marker survives compaction. Re-
 - The session has just resumed with `claude --resume` and the team-existence assumption needs re-verification.
 - The team config (`{config_dir}/teams/{team_name}/config.json`) is missing, or its `members[]` no longer contains a `secretary` entry. The bootstrap ritual is the only path that re-establishes the `secretary` entry (the platform re-provisions the team config itself on the next spawn). This holds right after a compaction too, even though the post-compaction message says not to invoke bootstrap again.
 
-Steady-state marker absences self-heal automatically: the `bootstrap_marker_writer` UserPromptSubmit hook re-creates the marker on the next prompt whenever team config + secretary are still on disk. `/clear` removes only the marker (see `session_init._clear_bootstrap_marker`); the team config persists, so `/clear` falls into the self-healing path and does NOT require manual re-invocation.
+Steady-state marker absences self-heal automatically: the `bootstrap_marker_writer` UserPromptSubmit hook re-creates the marker on the next prompt whenever team config + secretary are still on disk. `/clear` starts a new session id and session dir with no marker, while the team config persists and the session keeps its team, so `/clear` falls into the self-healing path and does NOT require manual re-invocation.
 
 For full detail, `Read(file_path="../commands/bootstrap.md")` when you need the full Session Placeholder Variables table, source-precedence rules, or per-field fallback behavior — those mechanics live in the command file, not in this persona body.
 

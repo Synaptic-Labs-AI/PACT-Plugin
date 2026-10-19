@@ -693,10 +693,118 @@ def _resume_census_unique_candidate(teams_root: Path, session_id: str) -> str | 
     return corroborated[0] if len(corroborated) == 1 else None
 
 
+# How many sessions back a /clear carry-over follows the chain of clears.
+CLEAR_CHAIN_MAX_HOPS = 3
+
+
+def _session_dir_under_pact_sessions(path: str | None) -> Path | None:
+    """``path`` resolved, when it is an existing directory strictly under the
+    resolved pact-sessions root; None otherwise. Never raises."""
+    try:
+        if not path:
+            return None
+        root = (get_claude_config_dir() / "pact-sessions").resolve()
+        resolved = Path(path).resolve()
+        if root in resolved.parents and resolved.is_dir():
+            return resolved
+    except Exception:
+        pass
+    return None
+
+
+def _clear_predecessor_of(session_dir: str) -> str | None:
+    """The prev_session_dir recorded by the last session_start in
+    ``session_dir`` whose source is "clear", or None. Never raises."""
+    try:
+        from .session_journal import read_events_from
+
+        found = None
+        for event in read_events_from(session_dir, "session_start"):
+            if event.get("source") != "clear":
+                continue
+            value = event.get("prev_session_dir")
+            found = value if isinstance(value, str) and value else None
+        return found
+    except Exception:
+        return None
+
+
+def _recorded_identity(session_dir: Path) -> tuple[str, str]:
+    """(session_id, team_name) from a session dir's context file; raises on
+    a missing or unreadable file (callers catch)."""
+    data = json.loads(
+        (session_dir / "pact-session-context.json").read_text(encoding="utf-8")
+    )
+    return str(data.get("session_id", "")), str(data.get("team_name", ""))
+
+
+def _clear_carryover_team(
+    teams_root: Path, clear_predecessor: str | None
+) -> str | None:
+    """The team a /clear predecessor was on, when identity says it is still
+    this session's team; None otherwise. Never raises.
+
+    The predecessor is ``clear_predecessor`` (session_init passes it on a
+    clear SessionStart, before this session's journal exists) or else the
+    prev_session_dir of this session's own clear-sourced session_start. Its
+    recorded team T is adopted only when teams/T/config.json is readable
+    and, walking back through the chain of clears (at most
+    CLEAR_CHAIN_MAX_HOPS sessions, each of which must have recorded T):
+      * T's leadSessionId equals the session id one of them recorded (the
+        platform bound T to that session), or
+      * that session's journal holds a team_realigned event whose ``to``
+        is T (PACT corroborated the move to T when it made it).
+    Anything else (no predecessor, a path outside pact-sessions, a missing
+    or unreadable context or config, a different team on the chain, a
+    cycle, the hop cap) returns None, and the caller keeps its default.
+    """
+    try:
+        from .session_journal import read_events_from
+
+        start = clear_predecessor
+        if start is None:
+            own_dir = get_session_dir()
+            start = _clear_predecessor_of(own_dir) if own_dir else None
+        current = _session_dir_under_pact_sessions(start)
+        if current is None:
+            return None
+        _, team = _recorded_identity(current)
+        if not team or not is_safe_path_component(team):
+            return None
+        config = json.loads(
+            (teams_root / team / "config.json").read_text(encoding="utf-8")
+        )
+        lead_session_id = config.get("leadSessionId")
+        if not isinstance(lead_session_id, str) or not lead_session_id:
+            return None
+        seen: set[Path] = set()
+        for _ in range(CLEAR_CHAIN_MAX_HOPS):
+            if current is None or current in seen:
+                return None
+            seen.add(current)
+            recorded_sid, recorded_team = _recorded_identity(current)
+            if recorded_team != team:
+                return None
+            if recorded_sid == lead_session_id:
+                return team
+            if any(
+                event.get("to") == team
+                for event in read_events_from(str(current), "team_realigned")
+            ):
+                return team
+            current = _session_dir_under_pact_sessions(
+                _clear_predecessor_of(str(current))
+            )
+        return None
+    except Exception:
+        return None
+
+
 def _resolve_aligned_team_name(
     session_id: str,
     teams_dir: str | None = None,
     default: str | None = None,
+    clear_predecessor: str | None = None,
 ) -> str:
     """Resolve the REAL platform team name for ``session_id`` by IDENTITY MATCH.
 
@@ -735,6 +843,11 @@ def _resolve_aligned_team_name(
     inert). UNAMBIGUOUS-only: exactly one corroborated candidate wins; zero
     or >= 2 corroborated candidates fall to the fail-safe default, and an
     uncorroborated candidate never counts. See the inline branch-3 comment.
+
+    CLEAR CARRY-OVER: /clear re-keys the hook session id while the platform
+    keeps the session on its team. When the fallback names no live team, the
+    team the /clear predecessor recorded is returned if identity binds it to
+    the chain of clears (see _clear_carryover_team), before the census.
 
     FAIL-SAFE DEFAULT: on no identity match (the team dir is half-formed —
     ``inboxes/`` present but ``config.json`` not yet written — or simply
@@ -794,6 +907,10 @@ def _resolve_aligned_team_name(
             ``<claude-config-dir>/teams``.
         default: Fail-safe return on no match / error. Defaults to the
             persisted-context team_name when None.
+        clear_predecessor: On a /clear SessionStart, the previous session's
+            dir (this session's journal does not record it yet). None reads
+            it from this session's clear-sourced session_start. Used only by
+            the clear carry-over (_clear_carryover_team).
 
     Returns:
         The identity-matched team dir name, else ``default`` (or the
@@ -888,6 +1005,21 @@ def _resolve_aligned_team_name(
                     )
             if census_winner is None:
                 return session_id
+        # Clear carry-over. /clear gives the hook frames a NEW session id while
+        # the platform keeps the session on its existing team, whose config
+        # still carries the PREVIOUS session's id, so identity match misses
+        # and the census's lived-session witness is empty. The predecessor's
+        # own record names the team; it is adopted only through identity
+        # (see _clear_carryover_team). Runs only while the fallback names no
+        # live team, so a record that already points at a real team stays.
+        if not (
+            fallback
+            and is_safe_path_component(fallback)
+            and (teams_root / fallback / "config.json").exists()
+        ):
+            carried = _clear_carryover_team(teams_root, clear_predecessor)
+            if carried is not None:
+                return carried
         # Branch-3: resume census (#1507). After a clean end-session, resume
         # provisions a NEW team + task store under a new id while every hook
         # frame still carries the OLD session id. Identity-match (branch-1)

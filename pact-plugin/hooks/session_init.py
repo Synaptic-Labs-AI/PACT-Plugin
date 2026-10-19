@@ -1894,7 +1894,17 @@ def main():
                 saved.get("team_name") or team_name
                 if source == "compact" else team_name
             )
-            team_name = _resolve_aligned_team_name(session_id, default=default)
+            # A /clear starts a new session id on the same platform team: the
+            # resolver follows the previous session's record (step 5a's
+            # prev_session_dir, read here before anything rewrites the block).
+            team_name = _resolve_aligned_team_name(
+                session_id,
+                default=default,
+                clear_predecessor=(
+                    _extract_prev_session_dir(project_dir)
+                    if source == "clear" else None
+                ),
+            )
 
         if not session_id_was_missing:
             _record_worktree_identity(session_id, project_dir)

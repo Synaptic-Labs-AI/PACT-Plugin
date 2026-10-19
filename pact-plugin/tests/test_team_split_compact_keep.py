@@ -129,7 +129,9 @@ def test_other_sources_re_derive_the_team_as_before(tmp_path, monkeypatch,
     and re-deriving lands on the pre-resume name. Only a compaction keeps; the
     realign returns through the prompt-time write-back once the live store is
     written again. With a fresh live store a launch realigns instead (the two
-    launch cells below)."""
+    launch cells below). The clear cell keeps the session id, a shape only:
+    a live /clear gives the frames a NEW session id, and that case is pinned
+    in test_team_split_clear_carryover.py."""
     world = _realigned_world(tmp_path, monkeypatch)
     _run_session_init(monkeypatch, world, _frame(world, source))
     assert saved_team_name(world) == OLD_TEAM

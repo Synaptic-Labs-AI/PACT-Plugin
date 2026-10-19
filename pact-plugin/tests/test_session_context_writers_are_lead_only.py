@@ -133,6 +133,7 @@ KNOWN_NAME_SITES = Counter({
     ("hooks/session_init.py", "_lead_context_persisted"): 1,     # existence read
     ("hooks/shared/pact_context.py", "build_context_cache"): 1,  # the writers' path
     ("hooks/shared/pact_context.py", "init"): 1,                 # read path
+    ("hooks/shared/pact_context.py", "_recorded_identity"): 1,   # read
     ("hooks/shared/pact_harvest.py", "main"): 2,                 # CLI help text
     ("hooks/shared/session_registry.py", "_lead_context_exists_for"): 1,  # existence read
     ("hooks/shared/session_resume.py", "_saved_team_of"): 1,         # read
