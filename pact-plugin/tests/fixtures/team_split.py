@@ -18,6 +18,7 @@ test_resume_team_realign_1507.py and test_team_name_detect_align.py.
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -277,6 +278,49 @@ def saved_team_name(world) -> str:
     return json.loads(world.context_path.read_text(encoding="utf-8"))["team_name"]
 
 
+HOOKS_DIR = Path(__file__).resolve().parents[2] / "hooks"
+
+
+def hook_env(world, **extra):
+    """The environment a hook child of this test process runs under: this
+    test's environment (the conftest scrubs and the world's variables), its
+    home at the world's scratch root, and CLAUDE_PID naming this test
+    process, which is the child's real parent and alive for as long as the
+    test runs, whoever launched pytest."""
+    env = dict(os.environ)
+    env.pop("CLAUDE_CONFIG_DIR", None)
+    env.update(HOME=str(world.tmp), CLAUDE_PID=str(os.getpid()))
+    env.update(extra)
+    return env
+
+
+def run_hook(world, hook, frame):
+    """Run hooks/<hook>.py as a child of this test process and return the
+    additionalContext it printed ('' when none)."""
+    import subprocess
+    proc = subprocess.run([sys.executable, str(HOOKS_DIR / f"{hook}.py")],
+                          input=json.dumps(frame), capture_output=True,
+                          text=True, check=False, env=hook_env(world),
+                          cwd=str(world.project_dir), timeout=120)
+    assert proc.returncode == 0, (hook, proc.returncode, proc.stderr[-2000:])
+    out = json.loads(proc.stdout) if proc.stdout.strip() else {}
+    return out.get("hookSpecificOutput", {}).get("additionalContext", "")
+
+
+def child_process_key(world):
+    """The process key a hook run by run_hook computes: this test process's
+    pid and start time, read by the production helper in a child whose
+    parent is this process."""
+    import subprocess
+    env = hook_env(world, PYTHONPATH=str(HOOKS_DIR))
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         "import shared.pact_context as c; print(c.current_process_key())"],
+        capture_output=True, text=True, check=False, env=env,
+        cwd=str(HOOKS_DIR), timeout=60)
+    return proc.stdout.strip()
+
+
 def clear_world(tmp_path, monkeypatch, *, prev_team=NEW_TEAM,
                 same_process=True, prev_journal=None, **split_kw):
     """A /clear in the measured shape. The session that ran before it (id
@@ -285,16 +329,12 @@ def clear_world(tmp_path, monkeypatch, *, prev_team=NEW_TEAM,
     in the same process unless ``same_process`` is False. The CLAUDE.md
     block names the earlier session, and the platform keeps the team.
 
-    The process key is this test process's own, computed by the production
-    helper with CLAUDE_PID set to the real parent, so a SessionStart run in
-    process computes the same key with no claude process involved. Returns
-    split_world's namespace plus clear_sid, clear_dir and process_key."""
+    Run the clear's hooks through run_hook: the claude process they see is
+    this test process (their real parent), so the key does not depend on
+    who launched pytest. Returns split_world's namespace plus
+    clear_sid, clear_dir and process_key."""
     import shared.pact_context as ctx_module
 
-    monkeypatch.setenv("CLAUDE_PID", str(os.getppid()))
-    ctx_module.reset_for_tests()
-    key = ctx_module.current_process_key()
-    assert key, "precondition: this process has a computable process key"
     if prev_journal is None:
         prev_journal = (
             {"type": "session_start", "session_id": OLD_SID,
@@ -302,6 +342,8 @@ def clear_world(tmp_path, monkeypatch, *, prev_team=NEW_TEAM,
             "task_metadata_snapshot", "session_end")
     world = split_world(tmp_path, monkeypatch, saved_team=prev_team,
                         journal=prev_journal, claude_md=True, **split_kw)
+    key = child_process_key(world)
+    assert key, "precondition: a hook child of this process computes a key"
     write_context_file(OLD_SID, prev_team, world.project_dir, world.plugin_root,
                        process_key=key if same_process else OTHER_PROCESS_KEY)
     ctx_module.reset_for_tests()

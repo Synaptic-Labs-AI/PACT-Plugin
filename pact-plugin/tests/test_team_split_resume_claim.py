@@ -29,6 +29,7 @@ Counter-tests, measured by source-only mutation in a scratch copy
 
 import io
 import json
+import re
 from datetime import datetime, timezone
 from unittest.mock import patch
 
@@ -43,6 +44,7 @@ from fixtures.team_split import (
     clear_world,
     read_journal,
     reset_context_module,
+    run_hook,
     saved_team_name,
     split_world,
 )
@@ -83,6 +85,13 @@ def _run(monkeypatch, world, frame):
         "additionalContext", "")
 
 
+def _claimed_ids(context):
+    """The task ids the claim names, read from its own clause: a bare
+    substring check also matches the digits in the test's tmp paths."""
+    found = re.search(r"in-progress tasks ([\d, ]+) in `tasks/", context)
+    return set(found.group(1).split(", ")) if found else set()
+
+
 def _surfaced(session_dir):
     return [e for e in read_journal(session_dir)
             if e.get("type") == "session_resumption_surfaced"]
@@ -105,7 +114,7 @@ def test_a_resume_with_in_progress_tasks_surfaces_a_claim(tmp_path,
     world = _world(tmp_path, monkeypatch, old_tasks=_IN_FLIGHT)
     context = _run(monkeypatch, world, _frame(world, "resume"))
     assert _CLAIM in context
-    assert "202" in context and "215" in context and "201" not in context
+    assert _claimed_ids(context) == {"202", "215"}
     assert len(_surfaced(world.session_dir)) == 1
 
 
@@ -218,7 +227,7 @@ def test_a_clear_never_surfaces_the_work_of_the_session_it_replaced(
                         old_tasks=_IN_FLIGHT, live_store_aged=True)
     frame = clear_frame(world, captured_compaction_lead_sessionstart)
     frame["source"] = source
-    context = _run(monkeypatch, world, frame)
+    context = run_hook(world, "session_init", frame)
     assert (_CLAIM in context) is claimed
     assert (len(_surfaced(world.clear_dir)) == 1) is claimed
 
@@ -234,7 +243,7 @@ def test_the_claim_reads_the_team_recorded_before_this_launch(tmp_path,
     context = _run(monkeypatch, world, _frame(world, "resume"))
     assert saved_team_name(world) == NEW_TEAM, (
         "precondition: this launch realigned the record")
-    assert _CLAIM in context and "202" in context
+    assert _CLAIM in context and _claimed_ids(context) == {"202", "215"}
 
 
 def test_a_refresh_claim_wins_over_work_in_flight(tmp_path, monkeypatch):

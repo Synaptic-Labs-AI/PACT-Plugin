@@ -55,6 +55,7 @@ from fixtures.team_split import (
     clear_frame,
     clear_world,
     recorded_team,
+    run_hook,
     saved_team_name,
     split_world,
 )
@@ -215,8 +216,8 @@ def test_a_clear_that_carries_the_team_records_nothing(tmp_path, monkeypatch):
     clear has no record of its own to move, so restricting which sources
     record cannot change this outcome; the source gate has no reachable kill."""
     world = clear_world(tmp_path, monkeypatch, prev_team=NEW_TEAM)
-    context = _run_session_init(monkeypatch, world,
-                                clear_frame(world, captured_lead_sessionstart_qualified))
+    context = run_hook(world, "session_init",
+                       clear_frame(world, captured_lead_sessionstart_qualified))
     assert recorded_team(world.clear_dir) == NEW_TEAM, (
         "precondition: the clear carried the team")
     moves = [e for d in (world.session_dir, world.clear_dir)

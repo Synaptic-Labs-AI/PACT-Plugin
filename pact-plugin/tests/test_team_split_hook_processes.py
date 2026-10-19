@@ -212,7 +212,7 @@ def test_a_first_prompt_without_a_recorded_start_surfaces_the_predecessors_work(
     output = _run(world, "bootstrap_prompt_gate", frame)
     text = json.dumps(output)
     assert "Work was in progress" in text
-    assert "202" in text and f"tasks/{OLD_TEAM}/" in text
+    assert f"in-progress tasks 202 in `tasks/{OLD_TEAM}/`" in text
     own = world.session_dir.parent / _FIRST_PROMPT_SID
     assert [e for e in read_journal(own)
             if e.get("type") == "session_resumption_surfaced"], text[:400]

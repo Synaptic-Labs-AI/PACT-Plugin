@@ -120,8 +120,7 @@ def _assert_realigned(world, output):
     assert events[0]["from"] == OLD_TEAM and events[0]["to"] == NEW_TEAM
     notice = output.get("hookSpecificOutput", {}).get("additionalContext", "")
     assert OLD_TEAM in notice and NEW_TEAM in notice
-    assert "202, 215" in notice
-    assert "201" not in notice
+    assert f"In-progress tasks still in `tasks/{OLD_TEAM}/`: 202, 215. " in notice
 
 
 def test_a_lead_prompt_realigns_the_team_and_reports_the_move(tmp_path,

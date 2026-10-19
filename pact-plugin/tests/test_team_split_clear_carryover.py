@@ -11,10 +11,11 @@ adopt the team recorded by the newest other session dir of the project that
 records the same key, when that team's config is readable. Anything else keeps
 the computed default.
 
-In-process rows run the hooks' main() with nothing stubbed: CLAUDE_PID is set
-to this test process's real parent pid, so the cross-check and ps run for
-real. Only the PID-reuse row writes a made-up start time. The subprocess row
-runs the hooks as direct children of this test process.
+The hooks run as direct children of this test process with nothing stubbed:
+CLAUDE_PID names this process, which is their real parent whoever launched
+pytest, so the cross-check and ps run for real. Only the PID-reuse row writes
+a made-up start time. The teammate row runs session_init in process, since a
+non-lead frame computes no key.
 """
 
 import io
@@ -31,7 +32,9 @@ from fixtures.role_frames import (
     captured_lead_userpromptsubmit_qualified,
 )
 from fixtures.team_split import (
+    HOOKS_DIR,
     config_root,
+    hook_env,
     reset_context_module,
     seed_plugin,
     seed_team,
@@ -55,7 +58,8 @@ CONCURRENT_TEAM = "session-c0c0c0c0"
 # predecessor's.
 OLDER_SID = "ffff0000-1111-4222-8333-444455556666"
 
-_HOOKS = Path(__file__).resolve().parent.parent / "hooks"
+# A pid that is never a hook's parent here (launchd / init).
+_NOT_THE_PARENT = "1"
 
 
 def _start_time(pid):
@@ -80,8 +84,8 @@ def _record_key(session_dir, key):
 
 
 def _clear_world(tmp_path, monkeypatch, *, prev_key=None, team_config=True):
-    """The measured world just before a /clear, in a process whose key is
-    the test process's parent's: the previous session recorded PREV_TEAM and
+    """The measured world just before a /clear, in a claude process that is
+    this test process: the previous session recorded PREV_TEAM and
     ``prev_key`` (default: this process's key)."""
     root = config_root(tmp_path)
     project = tmp_path / "project"
@@ -92,7 +96,6 @@ def _clear_world(tmp_path, monkeypatch, *, prev_key=None, team_config=True):
         json.dumps({"version": "9.9.9"}), encoding="utf-8")
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin))
-    monkeypatch.setenv("CLAUDE_PID", str(os.getppid()))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     (root / "teams").mkdir(parents=True, exist_ok=True)
     (root / "tasks").mkdir(parents=True, exist_ok=True)
@@ -103,7 +106,7 @@ def _clear_world(tmp_path, monkeypatch, *, prev_key=None, team_config=True):
         PREV_SID, PREV_TEAM, project, plugin,
         started_at="2026-10-19T15:00:00+00:00",
     ).parent
-    _record_key(prev_dir, _key_of(os.getppid()) if prev_key is None else prev_key)
+    _record_key(prev_dir, _key_of(os.getpid()) if prev_key is None else prev_key)
     write_journal(prev_dir, [
         {"type": "session_start", "session_id": PREV_SID,
          "project_dir": str(project), "source": "startup"},
@@ -112,36 +115,41 @@ def _clear_world(tmp_path, monkeypatch, *, prev_key=None, team_config=True):
     write_session_block(PREV_SID, PREV_TEAM, prev_dir, plugin)
     reset_context_module()
     return SimpleNamespace(
-        tmp=tmp_path, root=root, project=project, plugin=plugin,
+        tmp=tmp_path, root=root, project=project, project_dir=project,
+        plugin=plugin,
         prev_dir=prev_dir, sessions=prev_dir.parent,
         claude_md=project / ".claude" / "CLAUDE.md",
     )
 
 
-def _run_main(monkeypatch, world, module, frame):
-    monkeypatch.chdir(world.project)
-    reset_context_module()
-    with patch("sys.stdin", io.StringIO(json.dumps(frame))), \
-         patch("sys.stdout", new_callable=io.StringIO):
-        try:
-            module.main()
-        except SystemExit:
-            pass
-    reset_context_module()
+def _run_hook(world, hook, frame, **env):
+    """Run hooks/<hook>.py as a child of this test process (hook_env: its
+    CLAUDE_PID names this process). ``env`` overrides variables; None
+    removes one."""
+    child_env = hook_env(world)
+    for name, value in env.items():
+        if value is None:
+            child_env.pop(name, None)
+        else:
+            child_env[name] = value
+    proc = subprocess.run(
+        [sys.executable, str(HOOKS_DIR / f"{hook}.py")],
+        input=json.dumps(frame), capture_output=True, text=True,
+        env=child_env, cwd=str(world.project), timeout=120,
+    )
+    assert proc.returncode == 0, (hook, proc.stderr[-2000:])
 
 
-def _start(monkeypatch, world, sid=CLEAR_SID, source="clear"):
-    import session_init
+def _start(world, sid=CLEAR_SID, source="clear", **env):
     frame = captured_compaction_lead_sessionstart()
     frame.update(session_id=sid, source=source, cwd=str(world.project))
-    _run_main(monkeypatch, world, session_init, frame)
+    _run_hook(world, "session_init", frame, **env)
 
 
-def _prompt(monkeypatch, world, sid=CLEAR_SID):
-    import bootstrap_marker_writer
+def _prompt(world, sid=CLEAR_SID):
     frame = captured_lead_userpromptsubmit_qualified()
     frame.update(session_id=sid, cwd=str(world.project))
-    _run_main(monkeypatch, world, bootstrap_marker_writer, frame)
+    _run_hook(world, "bootstrap_marker_writer", frame)
 
 
 def _recorded(world, sid=CLEAR_SID):
@@ -156,18 +164,18 @@ def _recorded(world, sid=CLEAR_SID):
 
 def test_a_clear_records_the_team_its_process_was_on(tmp_path, monkeypatch):
     world = _clear_world(tmp_path, monkeypatch)
-    _start(monkeypatch, world)
+    _start(world)
     record = _recorded(world)
     assert record["team_name"] == PREV_TEAM
-    assert record["process_key"] == _key_of(os.getppid())
+    assert record["process_key"] == _key_of(os.getpid())
     assert team_line(world.claude_md) == f"- Team: `{PREV_TEAM}`"
 
 
 def test_the_first_prompt_after_a_clear_keeps_the_team_and_writes_the_marker(
         tmp_path, monkeypatch):
     world = _clear_world(tmp_path, monkeypatch)
-    _start(monkeypatch, world)
-    _prompt(monkeypatch, world)
+    _start(world)
+    _prompt(world)
     assert _recorded(world)["team_name"] == PREV_TEAM
     assert (world.sessions / CLEAR_SID / "bootstrap-complete").is_file()
 
@@ -182,16 +190,16 @@ def test_a_prompt_repairs_a_clear_record_that_names_the_computed_team(
     clear_dir = write_context_file(
         CLEAR_SID, COMPUTED_TEAM, world.project, world.plugin,
         started_at="2026-10-19T15:30:00+00:00").parent
-    _record_key(clear_dir, _key_of(os.getppid()))
+    _record_key(clear_dir, _key_of(os.getpid()))
     write_journal(clear_dir, [{
         "type": "session_start", "session_id": CLEAR_SID,
         "project_dir": str(world.project), "source": "clear",
     }])
-    _prompt(monkeypatch, world)
+    _prompt(world)
     record = _recorded(world)
     assert record["team_name"] == PREV_TEAM
     # The write-back keeps the key the session recorded.
-    assert record["process_key"] == _key_of(os.getppid())
+    assert record["process_key"] == _key_of(os.getpid())
 
 
 def test_the_newest_earlier_session_of_the_process_wins(tmp_path,
@@ -206,8 +214,8 @@ def test_the_newest_earlier_session_of_the_process_wins(tmp_path,
         OLDER_SID, CONCURRENT_TEAM, world.project, world.plugin,
         started_at="2026-10-19T09:00:00+00:00",
     ).parent
-    _record_key(older_dir, _key_of(os.getppid()))
-    _start(monkeypatch, world)
+    _record_key(older_dir, _key_of(os.getpid()))
+    _start(world)
     assert _recorded(world)["team_name"] == PREV_TEAM
 
 
@@ -216,7 +224,7 @@ def test_five_clears_in_one_process_all_keep_the_team(tmp_path, monkeypatch):
     sids = [f"{n}{n}{n}{n}{n}{n}{n}{n}-0000-4000-8000-00000000000{n}"
             for n in range(1, 6)]
     for sid in sids:
-        _start(monkeypatch, world, sid=sid)
+        _start(world, sid=sid)
         assert _recorded(world, sid)["team_name"] == PREV_TEAM, sid
     assert team_line(world.claude_md) == f"- Team: `{PREV_TEAM}`"
 
@@ -230,7 +238,7 @@ def test_a_concurrent_session_of_the_same_project_is_never_adopted(
     even though it is the newest session dir of the project and its team
     config is readable."""
     world = _clear_world(tmp_path, monkeypatch, prev_key="424242:Mon Jan  5 09:00:00 2026")
-    _start(monkeypatch, world)
+    _start(world)
     assert _recorded(world)["team_name"] == COMPUTED_TEAM
 
 
@@ -247,7 +255,7 @@ def test_a_newer_concurrent_session_never_outranks_this_process_s_own(
         started_at="2026-10-19T16:00:00+00:00",
     ).parent
     _record_key(concurrent_dir, "424242:Mon Jan  5 09:00:00 2026")
-    _start(monkeypatch, world)
+    _start(world)
     assert _recorded(world)["team_name"] == PREV_TEAM
 
 
@@ -257,16 +265,15 @@ def test_a_reused_pid_with_another_start_time_is_never_adopted(
     that held the pid. The start time here is written, not measured."""
     world = _clear_world(
         tmp_path, monkeypatch,
-        prev_key=f"{os.getppid()}:Thu Jan  1 00:00:00 1970",
+        prev_key=f"{os.getpid()}:Thu Jan  1 00:00:00 1970",
     )
-    _start(monkeypatch, world)
+    _start(world)
     assert _recorded(world)["team_name"] == COMPUTED_TEAM
 
 
 def test_a_missing_claude_pid_keeps_the_default(tmp_path, monkeypatch):
     world = _clear_world(tmp_path, monkeypatch)
-    monkeypatch.delenv("CLAUDE_PID")
-    _start(monkeypatch, world)
+    _start(world, CLAUDE_PID=None)
     record = _recorded(world)
     assert record["team_name"] == COMPUTED_TEAM
     assert record["process_key"] == ""
@@ -277,15 +284,14 @@ def test_a_claude_pid_that_is_not_the_parent_keeps_the_default(
     """A teammate's hook env has been measured carrying another process's
     CLAUDE_PID: the key needs it to agree with the hook's real parent."""
     world = _clear_world(tmp_path, monkeypatch)
-    monkeypatch.setenv("CLAUDE_PID", str(os.getpid()))
-    _start(monkeypatch, world)
+    _start(world, CLAUDE_PID=_NOT_THE_PARENT)
     assert _recorded(world)["team_name"] == COMPUTED_TEAM
 
 
 def test_a_predecessor_team_without_config_keeps_the_default(tmp_path,
                                                             monkeypatch):
     world = _clear_world(tmp_path, monkeypatch, team_config=False)
-    _start(monkeypatch, world)
+    _start(world)
     assert _recorded(world)["team_name"] == COMPUTED_TEAM
 
 
@@ -298,7 +304,7 @@ def test_a_predecessor_dir_outside_pact_sessions_is_refused(tmp_path,
     outside.parent.mkdir()
     world.prev_dir.rename(outside)
     (world.sessions / PREV_SID).symlink_to(outside, target_is_directory=True)
-    _start(monkeypatch, world)
+    _start(world)
     assert _recorded(world)["team_name"] == COMPUTED_TEAM
 
 
@@ -308,30 +314,35 @@ def test_a_resume_start_disarms_the_carry_over(tmp_path, monkeypatch):
     world = _clear_world(tmp_path, monkeypatch)
     clear_dir = write_context_file(
         CLEAR_SID, COMPUTED_TEAM, world.project, world.plugin).parent
-    _record_key(clear_dir, _key_of(os.getppid()))
+    _record_key(clear_dir, _key_of(os.getpid()))
     write_journal(clear_dir, [
         {"type": "session_start", "session_id": CLEAR_SID,
          "project_dir": str(world.project), "source": "clear"},
         {"type": "session_start", "session_id": CLEAR_SID,
          "project_dir": str(world.project), "source": "resume"},
     ])
-    _prompt(monkeypatch, world)
+    _prompt(world)
     assert _recorded(world)["team_name"] == COMPUTED_TEAM
 
 
 def test_a_startup_never_follows_the_process_key(tmp_path, monkeypatch):
     world = _clear_world(tmp_path, monkeypatch)
-    _start(monkeypatch, world, source="startup")
+    _start(world, source="startup")
     assert _recorded(world)["team_name"] == COMPUTED_TEAM
 
 
 def test_a_teammate_frame_never_binds_to_the_lead_s_process(tmp_path,
                                                            monkeypatch):
     """A non-lead SessionStart computes no key, so even with the lead's
-    process key on record it resolves the computed team."""
+    process key on record it resolves the computed team. It runs in process
+    to read the frame's in-memory context, with this test process standing
+    in as the hook's parent, so a lead frame here would compute the
+    recorded key however pytest was launched."""
     import session_init
     import shared.pact_context as ctx_module
     world = _clear_world(tmp_path, monkeypatch)
+    monkeypatch.setattr(ctx_module.os, "getppid", os.getpid)
+    monkeypatch.setenv("CLAUDE_PID", str(os.getpid()))
     frame = captured_compaction_lead_sessionstart()
     frame.update(session_id=CLEAR_SID, source="clear", cwd=str(world.project),
                  agent_type="pact-backend-coder")
@@ -356,12 +367,10 @@ def test_a_compaction_that_reads_no_key_keeps_the_recorded_one(tmp_path,
     computes no key. It keeps the key the session recorded, so the next
     /clear of the same process still carries the team."""
     world = _clear_world(tmp_path, monkeypatch)
-    key = _key_of(os.getppid())
-    monkeypatch.setenv("CLAUDE_PID", str(os.getpid()))
-    _start(monkeypatch, world, sid=PREV_SID, source="compact")
+    key = _key_of(os.getpid())
+    _start(world, sid=PREV_SID, source="compact", CLAUDE_PID=_NOT_THE_PARENT)
     assert _recorded(world, PREV_SID)["process_key"] == key
-    monkeypatch.setenv("CLAUDE_PID", str(os.getppid()))
-    _start(monkeypatch, world)
+    _start(world)
     assert _recorded(world)["team_name"] == PREV_TEAM
 
 
@@ -379,8 +388,7 @@ def _end_predecessor(world):
 
 
 def _keyless_clear(monkeypatch, world):
-    monkeypatch.delenv("CLAUDE_PID")
-    _start(monkeypatch, world)
+    _start(world, CLAUDE_PID=None)
     assert _recorded(world)["team_name"] == COMPUTED_TEAM
 
 
@@ -438,7 +446,7 @@ def test_a_realign_after_a_clear_is_never_reverted_by_the_carry_over(
     write-back keeps the realigned team: the carry-over runs only while the
     recorded team has no config."""
     world = _clear_world(tmp_path, monkeypatch)
-    _start(monkeypatch, world)
+    _start(world)
     assert _recorded(world)["team_name"] == PREV_TEAM
     seed_team(world.root, REALIGNED_TEAM,
               lead_sid="7e7e7e7e-1111-4222-8333-444455556666",
@@ -448,39 +456,9 @@ def test_a_realign_after_a_clear_is_never_reverted_by_the_carry_over(
                CLAUDE_CODE_SESSION_ID=CLEAR_SID)
     proc = subprocess.run(
         [sys.executable, "-m", "shared.realign_team", "--team", REALIGNED_TEAM],
-        capture_output=True, text=True, env=env, cwd=str(_HOOKS), timeout=60,
+        capture_output=True, text=True, env=env, cwd=str(HOOKS_DIR), timeout=60,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert _recorded(world)["team_name"] == REALIGNED_TEAM
-    _prompt(monkeypatch, world)
+    _prompt(world)
     assert _recorded(world)["team_name"] == REALIGNED_TEAM
-
-
-# -- through real processes ---------------------------------------------------
-
-
-def test_a_clear_carries_the_team_through_real_hook_processes(tmp_path,
-                                                             monkeypatch):
-    """The hooks run as direct children of this test process, which is the
-    process the key names."""
-    world = _clear_world(tmp_path, monkeypatch, prev_key=_key_of(os.getpid()))
-    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
-    env.update(HOME=str(world.tmp), CLAUDE_PROJECT_DIR=str(world.project),
-               CLAUDE_PLUGIN_ROOT=str(world.plugin), CLAUDE_PID=str(os.getpid()))
-    start = captured_compaction_lead_sessionstart()
-    start.update(session_id=CLEAR_SID, source="clear", cwd=str(world.project))
-    prompt = captured_lead_userpromptsubmit_qualified()
-    prompt.update(session_id=CLEAR_SID, cwd=str(world.project))
-    for hook, frame in (("session_init.py", start),
-                        ("bootstrap_marker_writer.py", prompt)):
-        proc = subprocess.run(
-            [sys.executable, str(_HOOKS / hook)], input=json.dumps(frame),
-            capture_output=True, text=True, env=env, cwd=str(world.project),
-            timeout=60,
-        )
-        assert proc.returncode == 0, proc.stderr
-    record = _recorded(world)
-    assert record["team_name"] == PREV_TEAM
-    assert record["process_key"] == _key_of(os.getpid())
-    assert team_line(world.claude_md) == f"- Team: `{PREV_TEAM}`"
-    assert (world.sessions / CLEAR_SID / "bootstrap-complete").is_file()

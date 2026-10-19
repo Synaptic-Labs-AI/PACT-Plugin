@@ -58,6 +58,7 @@ from fixtures.team_split import (
     clear_world,
     recorded_team,
     reset_context_module,
+    run_hook,
     saved_team_name,
     split_world,
     stat_snapshot,
@@ -164,8 +165,8 @@ def test_a_clear_takes_its_team_from_the_session_it_replaced(
                         live_store_aged=True, foreign="foreign-cwd",
                         same_process=same_process)
     before = stat_snapshot(world.context_path)
-    _run_session_init(monkeypatch, world,
-                      clear_frame(world, captured_compaction_lead_sessionstart))
+    run_hook(world, "session_init",
+             clear_frame(world, captured_compaction_lead_sessionstart))
     expected = NEW_TEAM if same_process else "session-c1ea0000"
     assert recorded_team(world.clear_dir) == expected
     assert stat_snapshot(world.context_path) == before
