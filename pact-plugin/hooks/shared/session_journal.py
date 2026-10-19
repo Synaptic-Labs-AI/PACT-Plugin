@@ -329,6 +329,11 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # unknown-type short-circuit, matching session_end / cleanup_summary /
     # session_consolidated.
     "session_resumption_surfaced": {},
+    # hooks/bootstrap_marker_writer.py (_try_write_marker) writes team_realigned
+    # when its write-back moved the session's recorded team. from and to are
+    # the old and new team dir names. The harvest reads `from` to find the
+    # HANDOFFs left in the old team's task store.
+    "team_realigned": {"from": str, "to": str},
     # hooks/session_end.py writes session_end with NO required fields — one
     # writer passes an optional `warning` (line 119), the other passes
     # nothing (line 316). commands/wrap-up.md CLI also writes session_end

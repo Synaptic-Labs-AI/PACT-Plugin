@@ -3555,6 +3555,7 @@ class TestValidateEventSchemaPerType:
         },
         "compaction_attributed": {"verdict": "teammate", "basis": "content"},
         "compaction_summary_dropped": {"cause": "no_free_stamp"},
+        "team_realigned": {"from": "session-old", "to": "session-new"},
         "variety_assessed": {
             "task_id": "42",
             "variety": {"novelty": 1, "scope": 1, "uncertainty": 1, "risk": 1, "total": 4},

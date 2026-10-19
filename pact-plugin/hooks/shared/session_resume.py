@@ -49,6 +49,7 @@ from shared.handoff_schema import resolve_handoff_field
 from shared.pact_context import _build_session_path, project_slug
 from shared.paths import get_claude_config_dir
 from shared.stale_session import recorded_session_id, session_block_rows
+from shared.task_utils import iter_team_task_jsons
 from shared.session_journal import (
     _parse_ts,
     _ts_supersedes,
@@ -720,6 +721,18 @@ def restore_last_session(
         return None
 
     return _build_journal_resume(prev_session_dir)
+
+
+def in_progress_task_ids(team_name: str) -> list[str]:
+    """Ids of the in-progress tasks in tasks/<team_name>/, shortest first so
+    numeric ids sort numerically. Empty on any error or an unsafe name.
+    """
+    ids = [
+        str(task.get("id"))
+        for task in iter_team_task_jsons(team_name)
+        if task.get("status") == "in_progress" and task.get("id") is not None
+    ]
+    return sorted(ids, key=lambda i: (len(i), i))
 
 
 def _coerce_decision_summary(decisions: Any) -> str:
