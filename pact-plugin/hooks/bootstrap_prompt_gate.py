@@ -216,14 +216,21 @@ def _may_retry_recording(session_dir: str) -> bool:
     return attempts < _MAX_TRANSIENT_ATTEMPTS
 
 
-def _append_session_start(input_data: dict, session_dir: str) -> bool:
+def _append_session_start(
+    input_data: dict, session_dir: str, prev_session_dir: str | None = None,
+) -> bool:
     """Append this lead's session_start (source "prompt"); True when it
-    landed. Never raises."""
+    landed. Records prev_session_dir when it is set and is not this
+    session's own dir. Never raises."""
     try:
         import os
 
         from shared.session_journal import append_event, make_event
+        from shared.session_resume import _same_dir
 
+        extra = {}
+        if prev_session_dir and not _same_dir(prev_session_dir, session_dir):
+            extra["prev_session_dir"] = prev_session_dir
         return append_event(
             make_event(
                 "session_start",
@@ -232,6 +239,7 @@ def _append_session_start(input_data: dict, session_dir: str) -> bool:
                 project_dir=os.environ.get("CLAUDE_PROJECT_DIR", "") or os.getcwd(),
                 worktree="",
                 source="prompt",
+                **extra,
             ),
             session_dir=session_dir,
         )
@@ -407,6 +415,7 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
         project_dir = env_project_dir or os.getcwd()
 
         claim = None
+        prev_session_dir = None
         block_status = None
         try:
             if env_project_dir:
@@ -424,10 +433,8 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
                 if block.state is State.FOUND and (
                     recorded_session_id(content) != session_id
                 ):
-                    claim = check_resume_state(
-                        _extract_prev_session_dir(env_project_dir),
-                        launch=True,
-                    )
+                    prev_session_dir = _extract_prev_session_dir(env_project_dir)
+                    claim = check_resume_state(prev_session_dir, launch=True)
                 if block.state not in (State.FOUND, State.ABSENT):
                     # Not read and not rewritten, and nothing is locked or
                     # written: the refusal names the line, after the values.
@@ -460,7 +467,7 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
             )
             return ""
         _record_worktree_identity(session_id, project_dir)
-        if not _append_session_start(input_data, session_dir):
+        if not _append_session_start(input_data, session_dir, prev_session_dir):
             # The journal is not writable: the flag stands in for
             # session_start, so this note and rewrite are not repeated.
             try:

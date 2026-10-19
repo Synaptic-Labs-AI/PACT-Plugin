@@ -1675,16 +1675,17 @@ class TestPausedPromptCarriesItsConsumptionKey:
     TWO BOUNDS OPERATE ON THE WORKING MEMORY FREEZE AND THEY ARE DIFFERENT.
     The structural one needs no event: `session_init` writes the marker into
     the CURRENT session's journal while `check_resume_state` reads the claim
-    from `prev_session_dir`, and `_journal_path_from` does no ancestor
-    resolution, so a single freeze cannot outlive its session and a claim is
-    visible one hop back and no further. The key's own bound is narrower and
+    from `prev_session_dir` (or from an earlier session when the sessions in
+    between did nothing, at most CLAIM_WALK_MAX_HOPS back), so a single freeze
+    cannot outlive its session. The key's own bound is narrower and
     real: retiring the claim decides whether a NEW freeze is minted from it in
     the next session, and that works only where the consumption lands in the
     SAME journal as the claim — the `/compact` and same-session `--resume`
     case. Measured: with it, the next session surfaces nothing and does not
     freeze; without it, that session surfaces and freezes. On the
-    quit-then-new-session path the consumption is an orphan in the new
-    journal and the one-hop bound alone ends it.
+    quit-then-new-session path the consumption lands in the new session's
+    journal; that event is not one an idle launch writes, so a later
+    session's walk stops at that session and never reaches the claim.
 
     THAT BOUND IS PER CLAIM, NOT PER USER. `wrap-up` branch C mints a fresh
     `session_paused` event every time a session ends with the PR still open,

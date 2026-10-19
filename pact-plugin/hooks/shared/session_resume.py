@@ -1210,6 +1210,77 @@ RESUMPTION_MARKER_MISSING_DIRECTIVE = (
 )
 
 
+# How many sessions that did nothing a claim read walks past. Past three
+# consecutive idle launches a remaining claim is taken as abandoned.
+CLAIM_WALK_MAX_HOPS = 3
+
+# The only event types a launch that took no turn writes. A session whose
+# journal holds nothing else did nothing; any other type, including one added
+# later, stops the walk.
+_IDLE_LAUNCH_EVENT_TYPES = frozenset(
+    {"session_start", "session_resumption_surfaced", "session_end", "cleanup_summary"}
+)
+
+
+def _session_did_nothing(session_dir: str) -> bool:
+    """True when session_dir's journal records a launch and nothing but the
+    events a launch with no turn writes. Never raises (False)."""
+    try:
+        events = read_events_from(session_dir)
+        return (
+            bool(events)
+            and any(e.get("type") == "session_start" for e in events)
+            and all(e.get("type") in _IDLE_LAUNCH_EVENT_TYPES for e in events)
+        )
+    except Exception:
+        return False
+
+
+def _recorded_predecessor(session_dir: str) -> str | None:
+    """The previous session dir session_dir's last session_start recorded:
+    the prev_session_dir of the last session_start whose value is not
+    session_dir itself, when it lies under pact-sessions and exists. None
+    otherwise. Never raises."""
+    try:
+        recorded = None
+        for event in read_events_from(session_dir, "session_start"):
+            value = event.get("prev_session_dir")
+            if isinstance(value, str) and value and not _same_dir(value, session_dir):
+                recorded = value
+        if recorded is None:
+            return None
+        validated = _validate_under_pact_sessions(recorded)
+        if validated is None or not Path(validated).is_dir():
+            return None
+        return validated
+    except Exception:
+        return None
+
+
+def _claim_dir(prev_session_dir: str | None) -> str | None:
+    """The session dir to read resume claims from.
+
+    prev_session_dir, or, while that session did nothing, the predecessor it
+    recorded, at most CLAIM_WALK_MAX_HOPS steps back. A cycle or a missing or
+    invalid predecessor ends the walk at the current dir. Never raises: on
+    any error it returns the dir reached so far.
+    """
+    current = prev_session_dir
+    try:
+        seen = {prev_session_dir}
+        for _ in range(CLAIM_WALK_MAX_HOPS):
+            if not current or not _session_did_nothing(current):
+                return current
+            nxt = _recorded_predecessor(current)
+            if not nxt or nxt in seen:
+                return current
+            seen.add(nxt)
+            current = nxt
+        return current
+    except Exception:
+        return current
+
+
 def _same_dir(a: str | None, b: str | None) -> bool:
     """True when both paths are set and name the same directory once each
     is resolved (a ``~`` prefix, a trailing slash or a symlinked parent
@@ -1322,9 +1393,11 @@ def check_resume_state(
     plus work left in flight on a launch.
 
     Single public seam: session_init step 8 calls THIS (and only this).
-    Single-dir signature is sufficient for all three paths: post-compact and
-    same-session --resume, prev_session_dir self-resolves to the CURRENT
-    session dir; the quit path reads one hop back.
+    Post-compact and same-session --resume, prev_session_dir self-resolves to
+    the CURRENT session dir; on the quit path it names the previous session.
+    Every arm reads its claim from _claim_dir(prev_session_dir): that dir, or
+    an earlier one when the sessions in between did nothing, at most
+    CLAIM_WALK_MAX_HOPS back.
 
     On a launch (``launch`` True: a startup or a resume, never a compaction
     or a clear), when neither claim survives, a third arm with the lowest
@@ -1352,7 +1425,7 @@ def check_resume_state(
     """
     if not prev_session_dir:
         return None
-    claim_dir = prev_session_dir
+    claim_dir = _claim_dir(prev_session_dir)
     paused = read_last_event_from(claim_dir, "session_paused")
     refreshed = read_last_event_from(claim_dir, "session_refreshed")
     if refreshed is not None and _refresh_is_spent(claim_dir, refreshed):
@@ -1587,8 +1660,9 @@ def _refresh_is_spent(session_dir: str, refreshed: dict) -> bool:
     arc's own conclusions to the agents whose value is judging it
     independently, which is the defect this mechanism exists to prevent,
     while an unrebuilt block is recoverable and does not outlive its session
-    (the marker is written to the CURRENT session dir, the claim is read
-    from the PREVIOUS one, so no marker can freeze two sessions). Weigh both
+    (the marker is written to the CURRENT session dir, so one marker freezes
+    one session; an unspent claim freezes each session that surfaces it,
+    and is read at most CLAIM_WALK_MAX_HOPS idle sessions back). Weigh both
     costs before narrowing this predicate, not just the prompt.
     """
     ts = refreshed.get("ts")

@@ -463,8 +463,11 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # ("startup" when stdin has none) and "unknown" for any other value,
     # including a non-str one; hooks/bootstrap_prompt_gate.py writes "prompt".
     # This schema contract catches any future writer that bypasses those
-    # paths and emits a non-str source.
-    "session_start": {"source": str},
+    # paths and emits a non-str source. Both writers add `prev_session_dir`,
+    # the session dir the project CLAUDE.md named before this one, when there
+    # is one and it is not this session's own; session_resume walks it to
+    # reach a claim behind sessions that did nothing.
+    "session_start": {"source": str, "prev_session_dir": str},
     # hooks/session_end.py writes session_end with an optional `warning`
     # string when check_unpaused_pr detects an open PR that was NOT
     # paused (no memory consolidation). The empty-dict registration in

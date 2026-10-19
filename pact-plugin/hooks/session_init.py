@@ -143,6 +143,7 @@ from shared.merge_guard_common import (
 from shared.session_resume import (
     RESUMPTION_MARKER_MISSING_DIRECTIVE,
     _extract_prev_session_dir,
+    _same_dir,
     _validate_under_pact_sessions,  # noqa: F401  # re-export: tests import it from session_init
     format_session_substitutions,
     update_session_info,
@@ -1926,6 +1927,17 @@ def main():
             else ""
         )
 
+        # 5a. Capture the PREVIOUS session's dir from project CLAUDE.md
+        # before step 5b overwrites the Current Session block with THIS
+        # session's info, and before session_start, which records it so a
+        # later session can walk past this one if it does nothing.
+        # READ-BEFORE-WRITE invariant: _extract_prev_session_dir must run
+        # before update_session_info (the only writer of that block),
+        # otherwise it reads back the just-written current session dir and
+        # silently breaks cross-session resume (step 7) and paused/refreshed-
+        # work detection (step 8).
+        prev_session_dir = _extract_prev_session_dir(project_dir)
+
         if not session_id_was_missing:
             # Write session_start event to journal (after build_context_cache so
             # path is available). Lead-only (#877): the journal session_start anchor is a
@@ -1937,6 +1949,9 @@ def main():
             # marker-wipe and other source-conditioned behavior, instead of
             # forcing triangulation from timing clusters (#414 R2).
             if frame_is_lead:
+                _start_fields = {}
+                if prev_session_dir and not _same_dir(prev_session_dir, session_dir):
+                    _start_fields["prev_session_dir"] = prev_session_dir
                 append_event(
                     make_event(
                         "session_start",
@@ -1945,6 +1960,7 @@ def main():
                         project_dir=project_dir,
                         worktree="",  # Not yet created at this point
                         source=source,
+                        **_start_fields,
                     ),
                 )
 
@@ -2274,13 +2290,8 @@ def main():
             if _alignment:
                 context_parts.append(_alignment)
 
-        # 5a. Capture the PREVIOUS session's dir from project CLAUDE.md
-        # before step 5b overwrites the Current Session block with THIS
-        # session's info. READ-BEFORE-WRITE invariant: _extract_prev_session_dir
-        # must run before update_session_info, otherwise it reads back the
-        # just-written current session dir and silently breaks cross-session
-        # resume (step 7) and paused/refreshed-work detection (step 8).
-        prev_session_dir = _extract_prev_session_dir(project_dir)
+        # (prev_session_dir was captured at step 5a, above the session_start
+        # append.)
 
         # 5b. Write session resume info to project CLAUDE.md
         # (session_dir already resolved above for substitution instructions)
