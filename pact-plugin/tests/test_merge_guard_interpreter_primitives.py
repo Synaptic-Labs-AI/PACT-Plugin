@@ -147,3 +147,30 @@ VERSIONED_HEADS = [
 def test_versioned_interpreter_heads(head, executing, inert):
     assert is_dangerous_command(_sq(head, executing.format(d=D))) is True
     assert is_dangerous_command(_sq(head, inert.format(d=D))) is False
+
+
+# Other runtimes that run code given on their command line, each with its own exec route.
+# `deno eval` is deno's one-liner subcommand: the token `eval` there is not a primitive.
+RUNTIME_HEADS = [
+    ("pypy3", "pypy3 -c", 'import os; os.system("{d}")', 'print("{d}")'),
+    ("pypy", "pypy -c", 'import subprocess; subprocess.run("{d}", shell=True)', 'print("{d}")'),
+    ("bun spawn", "bun -e", 'Bun.spawn(["sh", "-c", "{d}"])', 'console.log("{d}")'),
+    ("bun $", "bun -e", "await Bun.$`{d}`", 'console.log("{d}")'),
+    ("deno run", "deno eval", 'Deno.run({{cmd: ["sh", "-c", "{d}"]}})', 'console.log("{d}")'),
+    ("deno Command", "deno eval", 'new Deno.Command("sh", {{args: ["-c", "{d}"]}}).outputSync()',
+     'console.log("{d}")'),
+    ("php-cgi", "php-cgi -r", 'echo system("{d}");', 'echo "{d}";'),
+    ("lua execute", "lua -e", 'os.execute("{d}")', 'print("{d}")'),
+    ("lua popen", "lua5.4 -e", 'io.popen("{d}")', 'print("{d}")'),
+    ("luajit", "luajit -e", 'os.execute("{d}")', 'print("{d}")'),
+    ("Rscript", "Rscript -e", 'system("{d}")', 'print("{d}")'),
+    ("R system2", "R -e", 'system2("sh", c("-c", "{d}"))', 'print("{d}")'),
+    ("R pipe", "Rscript -e", 'readLines(pipe("{d}"))', 'cat("{d}")'),
+    ("osascript", "osascript -e", 'do shell script "{d}"', 'display dialog "{d}"'),
+]
+
+
+@pytest.mark.parametrize("label,head,executing,inert", RUNTIME_HEADS, ids=[r[0] for r in RUNTIME_HEADS])
+def test_runtime_heads(label, head, executing, inert):
+    assert is_dangerous_command(_sq(head, executing.format(d=D))) is True
+    assert is_dangerous_command(_sq(head, inert.format(d=D))) is False

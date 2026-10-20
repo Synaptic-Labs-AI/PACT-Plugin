@@ -4408,9 +4408,11 @@ _SHELL_STRING_EXECUTORS = re.compile(
 # case-insensitive substring anywhere in the leg): a false match preserves, the over-block-safe
 # direction. Same per-FAMILY anchoring as _SHELL_STRING_EXECUTORS (python-config is no head);
 # a versioned or suffixed binary (php8.2, php82, perl5.36, node18, python3.12) is the same
-# interpreter.
+# interpreter. pypy, php-cgi, bun, deno, lua/luajit, R/Rscript and osascript run code given
+# on their command line the same way.
 _INTERPRETER_HEADS = re.compile(
-    r"^(?:python[0-9.]*|perl[0-9.]*|ruby[0-9.]*|nodejs[0-9.]*|node[0-9.]*|php[0-9.]*"
+    r"^(?:python[0-9.]*|pypy[0-9.]*|perl[0-9.]*|ruby[0-9.]*|nodejs[0-9.]*|node[0-9.]*"
+    r"|php[0-9.]*(?:-cgi)?|bun|deno|lua[0-9.]*|luajit|R|Rscript|osascript"
     r"|awk|gawk|mawk|nawk)$"
 )
 # Every non-obfuscated route to a process from each interpreter names one of these:
@@ -4421,6 +4423,11 @@ _INTERPRETER_HEADS = re.compile(
 #   node    child_process (exec/execSync/spawn/fork/execFile), process.binding
 #   php     system, exec, shell_exec, passthru, popen, proc_open, pcntl_exec, backticks
 #   awk     system(), print | "cmd", "cmd" | getline, |& coprocesses
+#   bun     Bun.spawn/spawnSync, Bun.$`cmd` (a backtick template), child_process
+#   deno    Deno.run, new Deno.Command
+#   lua     os.execute, io.popen
+#   R       system, system2, pipe()
+#   osascript  do shell script
 # The reflective entries (eval, getattr, import_module, ...) catch an honest dynamic call.
 # A primitive name built at runtime (string arithmetic inside a reflective call) is not
 # matched: that needs deliberate obfuscation, an accepted adversarial-only residual.
@@ -4429,7 +4436,8 @@ _INTERPRETER_EXEC_PRIMITIVES = (
     "passthru", "proc_open", "pty", "fork", "readpipe", "ipc::", "binding",
     "commands.get", "eval", "getattr", "__import__", "import_module", "compile", "vars",
     "globals", "locals", "__dict__", "builtins", "methodcaller", ".send(", "public_send",
-    "call_user_func", "core::", "`", "qx", "%x", "|",
+    "call_user_func", "core::", "`", "qx", "%x", "|", "deno.run", "deno.command", "pipe(",
+    "shell script",
 )
 _INTERPRETER_EXEC_PRIMITIVE_RE = re.compile(
     "|".join(re.escape(p) for p in _INTERPRETER_EXEC_PRIMITIVES), re.IGNORECASE
@@ -4936,7 +4944,16 @@ def _leg_command_word(leg: str) -> "str | None":
     return None                                          # only assignments/redirects → no command
 
 
-_PHP_HEAD_RE = re.compile(r"^php[0-9.]*$")
+def _interpreter_names_primitive(leg: str, head: str, tokens: list) -> bool:
+    """True iff an interpreter leg names an exec primitive. `deno eval` is deno's
+    one-liner SUBCOMMAND, not a call to eval, so that one token is not searched."""
+    text = leg
+    if head == "deno" and len(tokens) > 1 and tokens[1] == "eval":
+        text = re.sub(r"(?<![\w./-])deno\s+eval(?=\s|$)", "deno", leg, count=1)
+    return bool(_INTERPRETER_EXEC_PRIMITIVE_RE.search(text))
+
+
+_PHP_HEAD_RE = re.compile(r"^php[0-9.]*(?:-cgi)?$")
 
 
 def _is_php_exec_leg(leg: str, _depth: int = 0) -> bool:
@@ -5019,7 +5036,7 @@ def _is_preserve_leg(leg: str, _depth: int = 0) -> bool:
             if head in _TOOL_HEADS:                      # (d2) git/gh → defer to carriers 5/7/8/9
                 return True
             if _INTERPRETER_HEADS.match(head):           # (a') interpreter
-                if _INTERPRETER_EXEC_PRIMITIVE_RE.search(leg):
+                if _interpreter_names_primitive(leg, head, tokens):
                     return True
             elif _SHELL_STRING_EXECUTORS.match(head):    # (a) shell / string runner
                 return True
