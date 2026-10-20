@@ -318,3 +318,30 @@ class TestWorkflowChain:
             for a in earlier:
                 for b in later:
                     assert b.split(":")[1] in graph[a.split(":")[1]], (a, b, graph)
+
+
+# ---------------------------------------------------------------------------
+# imPACT returns to its caller
+# ---------------------------------------------------------------------------
+
+class TestImpactReturnsToCaller:
+    def test_every_outcome_resumes_the_invoking_workflow(self):
+        """Reddens when the paragraph after imPACT's Outcomes table stops
+        resuming the blocked workflow, or allows starting a new one. Mutation:
+        delete the **Return to the caller** paragraph."""
+        text = _text("imPACT.md")
+        after_table = _section(text, "## Outcomes", "**When to consider rePACT**")
+        paras = [p for p in after_table.split("\n\n") if p.startswith("**Return to the caller**")]
+        assert len(paras) == 1, paras
+        rule = paras[0]
+        assert "After the chosen outcome" in rule, rule
+        assert "resume the workflow whose task the blocker blocked" in rule, rule
+        assert "Never start a new workflow from imPACT" in rule, rule
+
+    def test_retry_continues_the_invoking_workflow(self):
+        """Reddens when the retry step stops sending the lead back into the
+        invoking workflow. Mutation: drop the appended clause."""
+        lines = [ln for ln in _text("imPACT.md").splitlines()
+                 if "**Retry the current phase**" in ln]
+        assert len(lines) == 1, lines
+        assert lines[0].rstrip().endswith("then continue the invoking workflow from that phase"), lines[0]
