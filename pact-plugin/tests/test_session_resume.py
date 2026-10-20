@@ -1722,6 +1722,16 @@ class TestPausedPromptCarriesItsConsumptionKey:
         assert "has been merged" in result
         assert "pause_ts=2026-07-10T12:00:00Z" in result
 
+    def test_merged_branch_names_wrap_up_and_closed_does_not(self, frozen_clock):
+        """A paused PR merged since the pause needs /PACT:wrap-up; a closed
+        one does not."""
+        event = _paused_event(ts="2026-07-10T12:00:00Z")
+
+        assert "Run /PACT:wrap-up" in self._interpret(event, pr_state="MERGED")
+        closed = self._interpret(event, pr_state="CLOSED")
+        assert "has been closed" in closed
+        assert "/PACT:wrap-up" not in closed
+
     def test_stale_branch_carries_the_key(self, frozen_clock):
         """The 14-day-TTL branch. Uses a ts old enough to trip the TTL."""
         result = self._interpret(_paused_event(ts="2020-01-01T00:00:00Z"))

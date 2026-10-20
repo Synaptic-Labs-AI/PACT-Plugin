@@ -17,11 +17,10 @@ T23 regression (session 9097e100 scenario):
  2. /PACT:pause with consolidation → no warning (pause-path symmetry)
  3. Multiple /PACT:wrap-up runs in one session (idempotent, N events) → no warning
 
-Adversarial D5 ordering invariants:
- 4. Stale session_consolidated (ts < review_dispatch ts) still short-circuits
-    — architect's design is pure existence, not timestamp comparison
- 5. session_consolidated with no ts field still short-circuits
- 6. Multiple review_dispatch events + one session_consolidated → no warning
+Ordering invariants:
+ 4. A consolidation older than the latest review_dispatch covers an earlier
+    PR, not this one, so it does not short-circuit
+ 6. Multiple review_dispatch events + one later session_consolidated → no warning
 
 AC#4 (no-network) end-to-end guarantee:
  7. When session_consolidated is present, check_pr_state MUST NOT be called
@@ -29,7 +28,9 @@ AC#4 (no-network) end-to-end guarantee:
     fixture PR number)
 
 AC#2 end-to-end (Fix A defense-in-depth):
- 8. review_dispatch present, no session_consolidated, gh reports MERGED → no warning
+ 8. review_dispatch present, no session_consolidated, gh reports MERGED → warns
+    that /PACT:wrap-up did not run, unless a wrap-up session_end (source
+    "wrap-up") at or after the latest review_dispatch covers it
  9. review_dispatch present, no session_consolidated, gh reports CLOSED → no warning
 10. review_dispatch present, no session_consolidated, gh reports OPEN → warning fires
 
@@ -38,12 +39,15 @@ AC#3 true-positive preservation:
 12. Legacy pause-covers-review path still works with no session_consolidated event
 """
 
+import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from clock_shift.clock_shift_env import carry_clock_shift
 
 # Absolute path to session_journal.py for subprocess-level bash tests. Computed
 # here so the bash-template tests (TestPauseBashConditionalEmission,
@@ -213,28 +217,20 @@ class TestSessionConsolidatedRegression:
 
 
 class TestSessionConsolidatedOrderingInvariants:
-    """Pin that the Fix B short-circuit is pure existence, not timestamp-based.
+    """Pin that the Fix B short-circuit is scoped to the latest PR.
 
-    D5 ordering in the architect's design: the short-circuit fires on
-    the MERE EXISTENCE of any session_consolidated event. If a future
-    refactor "optimizes" this by adding a timestamp comparison (e.g.
-    "only short-circuit if session_consolidated is newer than
-    review_dispatch"), these tests will fail — caught before the
-    regression ships.
+    A consolidation short-circuits only when it is at or after the latest
+    review_dispatch (or when no PR was dispatched for review at all). An
+    earlier wrap-up's consolidation says nothing about a PR dispatched
+    after it.
     """
 
-    def test_stale_session_consolidated_still_short_circuits(self, session_dir):
-        """Adversarial: session_consolidated ts < review_dispatch ts → still no warning.
+    def test_stale_session_consolidated_does_not_short_circuit(self, session_dir):
+        """session_consolidated ts < review_dispatch ts → the new PR still warns.
 
         Simulates a session where an earlier wrap-up ran (leaving a
         stale session_consolidated event), and a later review_dispatch
-        fired for a new PR. Under pure-existence semantics, the
-        detector MUST short-circuit.
-
-        If a regression added a timestamp guard (e.g. `last_consolidated
-        >= last_review`), this test would surface a warning. The
-        architect's D5 rationale explicitly chose pure existence to
-        avoid this failure mode.
+        fired for a new PR that was never paused or wrapped up.
         """
         from session_end import check_unpaused_pr
 
@@ -255,10 +251,23 @@ class TestSessionConsolidatedOrderingInvariants:
 
         warning = check_unpaused_pr(tasks=None, project_slug="test-project")
 
-        assert warning is None, (
-            f"Stale session_consolidated must still short-circuit "
-            f"(pure existence, not timestamp). Got: {warning!r}"
+        assert warning is not None and "PR #555" in warning, (
+            f"A consolidation older than the latest review must not cover "
+            f"it. Got: {warning!r}"
         )
+
+    def test_a_consolidation_with_no_review_dispatch_short_circuits(self, session_dir):
+        """SE9: no review_dispatch, any session_consolidated → None, even
+        for a merged PR found through task metadata."""
+        from session_end import check_unpaused_pr
+
+        _write_event("session_consolidated", **{"pass": 2})
+        tasks = [{"metadata": {"pr_number": 812}}]
+
+        with patch("session_end.check_pr_state", return_value="MERGED"):
+            warning = check_unpaused_pr(tasks=tasks, project_slug="test-project")
+
+        assert warning is None
 
     def test_multiple_review_dispatches_with_one_consolidated(self, session_dir):
         """Multiple review_dispatch events + one session_consolidated → no warning.
@@ -373,8 +382,9 @@ class TestLivePrStateFixAEndToEnd:
     gh call must make the correct decision.
     """
 
-    def test_merged_pr_no_consolidation_short_circuits(self, session_dir):
-        """AC#2: review dispatched, no consolidation, gh says MERGED → no warning."""
+    def test_merged_pr_no_wrap_up_warns(self, session_dir):
+        """SE1: review dispatched, no consolidation, no wrap-up, gh says
+        MERGED (e.g. merged on the web UI) → warns that wrap-up did not run."""
         from session_end import check_unpaused_pr
 
         _write_event(
@@ -390,6 +400,85 @@ class TestLivePrStateFixAEndToEnd:
                 tasks=None,
                 project_slug="test-project",
             )
+
+        assert warning is not None
+        assert "PR #447 was merged" in warning
+        assert "/PACT:wrap-up" in warning
+
+    @pytest.mark.parametrize("session_end_ts,source,warns", [
+        pytest.param("2026-04-17T13:00:00Z", "wrap-up", False, id="SE2-wrap-up-after-review"),
+        pytest.param("2026-04-17T12:00:00Z", "wrap-up", False, id="SE2-wrap-up-same-second"),
+        pytest.param("2026-04-17T11:00:00Z", "wrap-up", True, id="SE3-wrap-up-before-review"),
+        pytest.param("2026-04-17T13:00:00Z", None, True, id="SE10-hook-session-end-no-source"),
+    ])
+    def test_merged_pr_and_a_session_end(self, session_dir, session_end_ts, source, warns):
+        """Only a session_end with source "wrap-up", at or after the latest
+        review_dispatch, proves wrap-up ran for the merged PR."""
+        from session_end import check_unpaused_pr
+
+        _write_event(
+            "review_dispatch",
+            ts="2026-04-17T12:00:00Z",
+            pr_number=450,
+            pr_url="https://github.com/org/repo/pull/450",
+            reviewers=["backend-coder"],
+        )
+        fields = {"source": source} if source else {}
+        _write_event("session_end", ts=session_end_ts, **fields)
+
+        with patch("session_end.check_pr_state", return_value="MERGED"):
+            warning = check_unpaused_pr(tasks=None, project_slug="test-project")
+
+        if warns:
+            assert warning is not None and "PR #450 was merged" in warning
+        else:
+            assert warning is None
+
+    @pytest.mark.parametrize("wrap_up,warns", [
+        pytest.param(False, True, id="SE8-no-wrap-up-warns"),
+        pytest.param(True, False, id="SE8-wrap-up-silences"),
+    ])
+    def test_merged_pr_with_no_review_dispatch(self, session_dir, wrap_up, warns):
+        """SE8: the PR is found through task metadata, no review_dispatch."""
+        from session_end import check_unpaused_pr
+
+        if wrap_up:
+            _write_event("session_end", source="wrap-up")
+        tasks = [{"metadata": {"pr_number": 451}}]
+
+        with patch("session_end.check_pr_state", return_value="MERGED"):
+            warning = check_unpaused_pr(tasks=tasks, project_slug="test-project")
+
+        if warns:
+            assert warning is not None and "PR #451 was merged" in warning
+        else:
+            assert warning is None
+
+    def test_a_pause_after_review_silences_a_later_merge(self, session_dir):
+        """A pause after the review owns the PR into the next session: a
+        web-UI merge after it does not warn here (session_resume names
+        /PACT:wrap-up when the paused PR turns out merged)."""
+        from session_end import check_unpaused_pr
+
+        _write_event(
+            "review_dispatch",
+            ts="2026-04-17T12:00:00Z",
+            pr_number=452,
+            pr_url="https://github.com/org/repo/pull/452",
+            reviewers=["backend-coder"],
+        )
+        _write_event(
+            "session_paused",
+            ts="2026-04-17T13:00:00Z",
+            pr_number=452,
+            pr_url="https://github.com/org/repo/pull/452",
+            branch="feat/test",
+            worktree_path="/tmp/wt",
+            consolidation_completed=False,
+        )
+
+        with patch("session_end.check_pr_state", return_value="MERGED"):
+            warning = check_unpaused_pr(tasks=None, project_slug="test-project")
 
         assert warning is None
 
@@ -457,6 +546,78 @@ class TestLivePrStateFixAEndToEnd:
 
         assert warning is not None
         assert "PR #500" in warning
+
+
+class TestMergedPrRealHook:
+    """The real SessionEnd hook and the real journal CLI, as subprocesses.
+
+    The only double is `gh`: a script on PATH that prints MERGED. The
+    wrap-up arm writes its session_end through the CLI the way wrap-up
+    step 5 does, so the hook reads the event exactly as wrap-up writes it."""
+
+    SID = "merged-sid"
+    PROJECT = "/merged/project"
+
+    def _world(self, tmp_path):
+        from shared.pact_context import project_slug
+
+        sd = tmp_path / "pact-sessions" / project_slug(self.PROJECT) / self.SID
+        sd.mkdir(parents=True)
+        (sd / "pact-session-context.json").write_text(json.dumps({
+            "session_id": self.SID, "project_dir": self.PROJECT, "team_name": "session-merged",
+        }))
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        gh = bindir / "gh"
+        gh.write_text("#!/bin/sh\necho MERGED\n")
+        gh.chmod(0o755)
+        env = carry_clock_shift({
+            "PATH": f"{bindir}:/usr/bin:/bin",
+            "HOME": str(tmp_path),
+            "CLAUDE_CONFIG_DIR": str(tmp_path),
+            "CLAUDE_PROJECT_DIR": self.PROJECT,
+        })
+        return sd, env
+
+    def _journal(self, sd, env, event_type, payload):
+        result = subprocess.run(
+            [sys.executable, _SESSION_JOURNAL_PY, "write", "--type", event_type,
+             "--session-dir", str(sd), "--stdin"],
+            input=json.dumps(payload), capture_output=True, text=True, env=env,
+            timeout=30, check=False,
+        )
+        assert result.returncode == 0 and not result.stderr, result.stderr
+
+    def _session_end_warning(self, sd, env):
+        result = subprocess.run(
+            [sys.executable, str(_PACT_PLUGIN_DIR / "hooks" / "session_end.py")],
+            input=json.dumps({"hook_event_name": "SessionEnd", "session_id": self.SID,
+                              "cwd": self.PROJECT, "reason": "exit"}),
+            capture_output=True, text=True, env=env, timeout=60, check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        events = [json.loads(line) for line in
+                  (sd / "session-journal.jsonl").read_text().splitlines()]
+        hook_ends = [e for e in events if e["type"] == "session_end" and "source" not in e]
+        assert len(hook_ends) == 1, events
+        return hook_ends[0].get("warning")
+
+    def test_a_merge_with_no_wrap_up_warns(self, tmp_path):
+        sd, env = self._world(tmp_path)
+        self._journal(sd, env, "review_dispatch", {
+            "pr_number": 42, "pr_url": "https://github.com/o/r/pull/42", "reviewers": ["x"]})
+
+        warning = self._session_end_warning(sd, env)
+
+        assert warning is not None and "PR #42 was merged" in warning
+
+    def test_a_wrap_up_session_end_silences_the_merge_warning(self, tmp_path):
+        sd, env = self._world(tmp_path)
+        self._journal(sd, env, "review_dispatch", {
+            "pr_number": 42, "pr_url": "https://github.com/o/r/pull/42", "reviewers": ["x"]})
+        self._journal(sd, env, "session_end", {"source": "wrap-up"})
+
+        assert self._session_end_warning(sd, env) is None
 
 
 # ---------------------------------------------------------------------------
@@ -793,6 +954,16 @@ class TestPauseBashConditionalEmission:
 # ---------------------------------------------------------------------------
 
 
+# The session_end write in wrap-up.md step 5, after its `write \` line. The
+# helper below runs it and TestWrapUpSessionEndSource pins it against the
+# command file, so the two cannot drift apart silently.
+_WRAP_UP_SESSION_END_ARGS = (
+    "  --type session_end --session-dir '{session_dir}' --stdin <<'JSON'\n"
+    '{{"source": "wrap-up"}}\n'
+    "JSON"
+)
+
+
 def _run_wrap_up_bash(session_dir, *, consolidation_ran):
     """Execute the wrap-up.md step-5 bash template against a tmp session_dir.
 
@@ -810,7 +981,7 @@ def _run_wrap_up_bash(session_dir, *, consolidation_ran):
     template = f"""set -e
 trap 'rc=$?; echo "[JOURNAL WRITE FAILED] wrap-up.md (bash line $LINENO): \\"${{BASH_COMMAND%%$'\\''\\n'\\''*}}\\" exit=$rc" >&2; exit $rc' ERR
 python3 "{_SESSION_JOURNAL_PY}" write \\
-  --type session_end --session-dir '{session_dir}'
+{_WRAP_UP_SESSION_END_ARGS.format(session_dir=session_dir)}
 case '{consolidation_ran}' in
   true)
     python3 "{_SESSION_JOURNAL_PY}" write \\
@@ -936,6 +1107,27 @@ class TestWrapUpBashConditionalEmission:
         types = [line.split('"type":"', 1)[1].split('"', 1)[0] for line in lines if line.strip()]
         assert "session_consolidated" not in types, (
             f"invalid branch MUST NOT emit session_consolidated. Got types: {types}"
+        )
+
+
+class TestWrapUpSessionEndSource:
+    """wrap-up's session_end carries source "wrap-up": the SessionEnd hook
+    reads it to tell that a merged PR got its wrap-up."""
+
+    def test_the_step_5_write_records_source_wrap_up(self, tmp_path):
+        result = _run_wrap_up_bash(str(tmp_path), consolidation_ran="false")
+
+        assert result.returncode == 0, result.stderr
+        events = [json.loads(line) for line in
+                  (tmp_path / "session-journal.jsonl").read_text().splitlines()]
+        assert [e.get("source") for e in events if e["type"] == "session_end"] == ["wrap-up"]
+
+    def test_wrap_up_md_carries_the_same_write(self):
+        text = (_PACT_PLUGIN_DIR / "commands" / "wrap-up.md").read_text(encoding="utf-8")
+        snippet = _WRAP_UP_SESSION_END_ARGS.format(session_dir="{session_dir}")
+        assert text.count(snippet) == 1, (
+            "wrap-up.md step 5 no longer carries the session_end write this "
+            "file runs; update both together"
         )
 
 

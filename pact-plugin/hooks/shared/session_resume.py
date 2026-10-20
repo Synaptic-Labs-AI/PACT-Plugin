@@ -1339,7 +1339,12 @@ def _interpret_paused_event(event: dict) -> str | None:
 
     # Active PR validation
     pr_state = _check_pr_state(pr_number)
-    if pr_state in ("MERGED", "CLOSED"):
+    if pr_state == "MERGED":
+        return (
+            f"Previously paused PR #{pr_number} has been merged. "
+            f"Run /PACT:wrap-up to close it out.{pause_key}"
+        )
+    if pr_state == "CLOSED":
         return (
             f"Previously paused PR #{pr_number} has been "
             f"{pr_state.lower()}.{pause_key}"
