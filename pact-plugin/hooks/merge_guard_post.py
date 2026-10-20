@@ -1088,14 +1088,13 @@ def main():
                 print(_SUPPRESS_OUTPUT)
                 sys.exit(0)
 
-            # Block 2 — Platform-level success signal (dict-shape +
-            # non-interrupted). PostToolUse only fires on tool-call
-            # success at the platform layer (failed Bash routes to
-            # PostToolUseFailure per Agent SDK); the dict-shape vs
-            # non-dict asymmetry is a structural success boundary.
-            if not isinstance(tool_response, dict):
-                print(_SUPPRESS_OUTPUT)
-                sys.exit(0)
+            # Block 2 — Platform-level success signal (non-interrupted).
+            # PostToolUse only fires on tool-call success at the platform
+            # layer (failed Bash routes to PostToolUseFailure per Agent
+            # SDK). extract_tool_response always returns a dict: a
+            # non-dict or absent response arrives here as {}, carries no
+            # stdout, and so retires only if Block 3's state check
+            # confirms the PR's final state.
             if tool_response.get("interrupted") is True:
                 print(_SUPPRESS_OUTPUT)
                 sys.exit(0)
