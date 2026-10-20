@@ -192,6 +192,12 @@ def register(name_at_team: str) -> None:
         # every uncertain case — over-writing in-process is a harmless collided
         # entry, but under-writing in tmux would blind name-recovery. Silent
         # no-op, matching register's other skip-paths (labeling-only; no notice).
+        # The context-file leg comes first: after a resume the platform moves
+        # the session to a new team whose config may not name this sid, so the
+        # compare below misses while the lead's own context file still sits
+        # under the sid.
+        if _lead_context_exists_for(sid):
+            return
         if sid == _read_lead_session_id(team):
             return  # confirmed in-process → skip the un-recoverable write
 
@@ -346,6 +352,37 @@ def _name_is_team_member(name: str, team: str) -> bool:
         }
         return _sanitize_agent_name(name) in member_names
     except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+# The characters pact_context._build_session_path keeps in a session id when it
+# names the session directory; it rewrites every other character to "_". The
+# same set excludes the glob metacharacters, so a sid that matches can be put
+# into a glob pattern literally.
+_SAFE_SESSION_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _lead_context_exists_for(sid: str) -> bool:
+    """Return True iff a lead context file exists for ``sid`` under any project
+    slug: ``<config root>/pact-sessions/*/<sid>/pact-session-context.json``.
+
+    Only a lead frame persists that file, and an in-process teammate shares the
+    lead's sid, so a hit means ``sid`` is the lead's session and a registry row
+    under it cannot recover the teammate. A tmux teammate has its own sid and no
+    file under it. INLINED (not imported from pact_context) to keep this module a
+    self-contained leaf; the path layout is pinned against pact_context's writer
+    by tests/test_read_lead_session_id_parity.py.
+
+    False on a sid outside the writer's character set (the writer would have
+    named the directory differently) and on any error, so ``register()`` writes
+    as it did before this check. Never raises.
+    """
+    try:
+        if not isinstance(sid, str) or not _SAFE_SESSION_ID_RE.fullmatch(sid):
+            return False
+        sessions_root = (_config_root() / "pact-sessions").resolve()
+        return any(sessions_root.glob(f"*/{sid}/pact-session-context.json"))
+    except Exception:  # Path.home() raises RuntimeError with no home dir
         return False
 
 

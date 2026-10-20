@@ -101,15 +101,19 @@ from shared.pact_context import (
     _resolve_aligned_team_name,
     build_context_cache,
     classify_session_role,
+    current_process_key,
+    describe_team_alignment,
     generate_team_name,
     get_session_dir,
     get_session_id,
+    init,
     is_lead,
     persist_context,
     strip_pact_namespace,
 )
 from shared.dispatch_helpers import is_registered_pact_specialist
 from shared.session_journal import append_event, make_event
+from shared.session_state import is_safe_path_component
 from shared.failure_log import append_failure
 from shared.plugin_manifest import format_plugin_banner
 from shared.pact_config import llm_options
@@ -140,6 +144,7 @@ from shared.merge_guard_common import (
 from shared.session_resume import (
     RESUMPTION_MARKER_MISSING_DIRECTIVE,
     _extract_prev_session_dir,
+    _same_dir,
     _validate_under_pact_sessions,  # noqa: F401  # re-export: tests import it from session_init
     format_session_substitutions,
     update_session_info,
@@ -147,6 +152,7 @@ from shared.session_resume import (
     check_resumption_context,
     check_resume_state,
     has_unspent_refresh,
+    record_team_realign,
 )
 from shared.stale_session import session_block_rows
 
@@ -627,20 +633,61 @@ def _extract_session_started(project_dir: str) -> str | None:
     return match.group(0) if match else None
 
 
-def _kept_started_at(session_id: str, project_dir: str) -> str | None:
-    """The started_at already in this session's context file, or None.
+def _saved_context(session_id: str, project_dir: str) -> dict:
+    """The fields this module reuses from this session's context file.
 
-    Reads the file build_context_cache writes. None when it is missing,
-    unreadable, or not a timezone-aware ISO-8601 time.
+    Reads the file build_context_cache writes, before this run rewrites it.
+    Returns {} when it is missing or unreadable. Each field is kept only when
+    valid: ``team_name`` when it is a safe path component, ``started_at``
+    when it is a timezone-aware ISO-8601 time.
     """
     try:
         path = (
             build_session_path(project_slug(project_dir), str(session_id))
             / "pact-session-context.json"
         )
-        value = json.loads(path.read_text(encoding="utf-8")).get("started_at")
-        return value if datetime.fromisoformat(value).tzinfo else None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {}
     except Exception:
+        return {}
+    saved: dict = {}
+    team_name = data.get("team_name")
+    if is_safe_path_component(team_name):
+        saved["team_name"] = team_name
+    started_at = data.get("started_at")
+    try:
+        if datetime.fromisoformat(started_at).tzinfo:
+            saved["started_at"] = started_at
+    except Exception:
+        pass
+    return saved
+
+
+def _record_launch_realign(
+    previous_team: str | None, session_id: str, project_dir: str,
+) -> str | None:
+    """Record a team move this launch made and return the lead notice, or None.
+
+    previous_team is the record as it stood before this run's persist. The
+    team compared against it is read back from the context file, so a persist
+    that did not land records nothing. A move counts only when the new team
+    has a config: a launch that falls back to a stale computed name is not a
+    move to the team the platform is using. The prompt-time write-back then
+    finds the record aligned and records nothing more. Never raises.
+    """
+    try:
+        current_team = _saved_context(session_id, project_dir).get("team_name")
+        if not previous_team or not current_team:
+            return None
+        previous_team, current_team = previous_team.lower(), current_team.lower()
+        if previous_team == current_team:
+            return None
+        if not (get_claude_config_dir() / "teams" / current_team / "config.json").exists():
+            return None
+        return record_team_realign(previous_team, current_team)
+    except Exception as e:
+        print(f"session_init: could not record the team realign: {e}", file=sys.stderr)
         return None
 
 
@@ -1830,8 +1877,37 @@ def main():
         # skips all persistence anyway). Once the dir is born, a later
         # SessionStart (or the marker writer) resolves the aligned name and
         # both writers agree → the per-prompt write-back becomes a true no-op.
+        #
+        # A compaction keeps the team this session recorded: the computed name
+        # is always the pre-resume one, so passing it here would write a stale
+        # team back over a realigned record. The resolver still replaces the
+        # kept team when its config is absent. Every other source re-derives.
+        saved = (
+            {} if session_id_was_missing
+            else _saved_context(session_id, project_dir)
+        )
         if not session_id_was_missing:
-            team_name = _resolve_aligned_team_name(session_id, default=team_name)
+            # The resolver's census reads this session's journal through
+            # get_session_dir(), which is empty until the context module is
+            # initialised. Never on the sentinel path: it must not touch disk.
+            init(input_data)
+            default = (
+                saved.get("team_name") or team_name
+                if source == "compact" else team_name
+            )
+            # Only a lead frame records (and so can match) its claude
+            # process's key. A /clear starts a new session id in the same
+            # process on the same platform team: the resolver adopts the team
+            # the newest earlier session of this process recorded. A lead
+            # frame that reads no key passes None, so the resolver and the
+            # context both use the key this session recorded.
+            process_key = (current_process_key() or None) if frame_is_lead else ""
+            team_name = _resolve_aligned_team_name(
+                session_id,
+                default=default,
+                clear_start=(source == "clear"),
+                process_key=process_key,
+            )
 
         if not session_id_was_missing:
             _record_worktree_identity(session_id, project_dir)
@@ -1855,9 +1931,12 @@ def main():
                 _ctx_result = build_context_cache(
                     team_name, session_id, project_dir, plugin_root,
                     started_at=(
-                        _kept_started_at(session_id, project_dir)
+                        saved.get("started_at")
                         if source == "compact" else None
                     ),
+                    # An empty key (CLAUDE_PID not this hook's parent) is no
+                    # reading: None keeps the key this session recorded.
+                    process_key=(process_key or None) if frame_is_lead else None,
                 )
                 if frame_is_lead and _ctx_result is not None:
                     persist_context(*_ctx_result)
@@ -1892,6 +1971,17 @@ def main():
             else ""
         )
 
+        # 5a. Capture the PREVIOUS session's dir from project CLAUDE.md
+        # before step 5b overwrites the Current Session block with THIS
+        # session's info, and before session_start, which records it so a
+        # later session can walk past this one if it does nothing.
+        # READ-BEFORE-WRITE invariant: _extract_prev_session_dir must run
+        # before update_session_info (the only writer of that block),
+        # otherwise it reads back the just-written current session dir and
+        # silently breaks cross-session resume (step 7) and paused/refreshed-
+        # work detection (step 8).
+        prev_session_dir = _extract_prev_session_dir(project_dir)
+
         if not session_id_was_missing:
             # Write session_start event to journal (after build_context_cache so
             # path is available). Lead-only (#877): the journal session_start anchor is a
@@ -1903,6 +1993,9 @@ def main():
             # marker-wipe and other source-conditioned behavior, instead of
             # forcing triangulation from timing clusters (#414 R2).
             if frame_is_lead:
+                _start_fields = {}
+                if prev_session_dir and not _same_dir(prev_session_dir, session_dir):
+                    _start_fields["prev_session_dir"] = prev_session_dir
                 append_event(
                     make_event(
                         "session_start",
@@ -1911,6 +2004,7 @@ def main():
                         project_dir=project_dir,
                         worktree="",  # Not yet created at this point
                         source=source,
+                        **_start_fields,
                     ),
                 )
 
@@ -2232,13 +2326,33 @@ def main():
             if frame_role is None:
                 context_parts.insert(1, _UNRESOLVED_ROLE_CUE)
 
-        # 5a. Capture the PREVIOUS session's dir from project CLAUDE.md
-        # before step 5b overwrites the Current Session block with THIS
-        # session's info. READ-BEFORE-WRITE invariant: _extract_prev_session_dir
-        # must run before update_session_info, otherwise it reads back the
-        # just-written current session dir and silently breaks cross-session
-        # resume (step 7) and paused/refreshed-work detection (step 8).
-        prev_session_dir = _extract_prev_session_dir(project_dir)
+        # A resume or compaction that moved the recorded team records the move
+        # here, once: by the next prompt the record already names the new team,
+        # so the prompt-time write-back sees no move. A clear re-derives the
+        # team and records nothing. No field of this frame separates the lead
+        # from an in-process teammate's compaction, so the notice goes to
+        # whichever compaction moved the record.
+        if (
+            frame_is_lead
+            and not session_id_was_missing
+            and source in ("resume", "compact")
+        ):
+            _realign = _record_launch_realign(
+                saved.get("team_name"), session_id, project_dir
+            )
+            if _realign:
+                context_parts.append(_realign)
+
+        # On a launch, a recorded team whose config is gone and that the
+        # census could not replace is named, with each live candidate team.
+        # Empty whenever the census decided, so it adds nothing otherwise.
+        if frame_is_lead and source in ("startup", "resume"):
+            _alignment = describe_team_alignment().text
+            if _alignment:
+                context_parts.append(_alignment)
+
+        # (prev_session_dir was captured at step 5a, above the session_start
+        # append.)
 
         # 5b. Write session resume info to project CLAUDE.md
         # (session_dir already resolved above for substitution instructions)
@@ -2295,7 +2409,14 @@ def main():
         # frame must not receive the lead's resume prompt. Gate the check
         # itself so a non-lead frame does no journal read either.
         if frame_is_lead:
-            resume_msg = check_resume_state(prev_session_dir=prev_session_dir)
+            # A launch also reports work the previous run left in flight. Its
+            # team is the one recorded before this run rewrote the record.
+            resume_msg = check_resume_state(
+                prev_session_dir=prev_session_dir,
+                launch=source in ("startup", "resume"),
+                own_session_dir=session_dir,
+                own_saved_team=saved.get("team_name"),
+            )
             if resume_msg:
                 context_parts.append(resume_msg)
                 # Record that a resumption claim SURFACED, in THIS session's

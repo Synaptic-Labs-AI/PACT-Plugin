@@ -17,6 +17,10 @@ import os
 
 import pytest
 
+import merge_guard_post
+import merge_guard_pre
+import session_init
+import shared.merge_guard_common as common
 from shared.paths import get_claude_config_dir
 
 # Read at IMPORT time — collection runs before any function-scoped autouse
@@ -187,3 +191,23 @@ class TestAutouseProjectDirScrubPinned:
             )
         finally:
             ctx.reset_for_tests()
+
+
+class TestAutouseMergeTokenDirIsolationPinned:
+    """Pin the autouse ``_isolate_merge_token_dir_to_tmp`` fixture.
+
+    ``TOKEN_DIR`` is bound at import, before any autouse fixture runs, so the
+    ``Path.home`` redirect never reaches it. The hook modules are imported
+    here at collection time, which is when they bind the real config root.
+    """
+
+    def test_every_hook_copy_of_the_token_dir_lands_under_tmp(self, tmp_path):
+        """An in-process ``session_init.main()`` cleans orphan merge tokens in
+        its module's ``TOKEN_DIR``. Each hook's copy must be the test's tmp
+        config root. Disabling the fixture leaves them all at the real
+        ``~/.claude``, and this fails."""
+        for module in (common, session_init, merge_guard_pre, merge_guard_post):
+            assert module.TOKEN_DIR == tmp_path / ".claude", (
+                f"{module.__name__}.TOKEN_DIR is {module.TOKEN_DIR!r}, not the "
+                "test's tmp config root: a hook run in process would glob and "
+                "unlink merge tokens in the operator's real config root.")

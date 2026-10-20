@@ -463,6 +463,25 @@ def _isolate_config_root_to_tmp(tmp_path, monkeypatch):
         os.environ["CLAUDE_CONFIG_DIR"] = original_cfg
 
 
+@pytest.fixture(autouse=True)
+def _isolate_merge_token_dir_to_tmp(tmp_path, monkeypatch):
+    """Redirect the merge-guard token dir to the per-test config root.
+
+    ``shared.merge_guard_common.TOKEN_DIR`` is computed once, at import, from
+    the real config root, so the ``Path.home`` redirect above never reaches
+    it; and every hook that imported it holds its own copy. Without this, an
+    in-process ``session_init.main()`` globs the operator's real ``~/.claude``
+    for orphan merge tokens and unlinks the stale ones. Every loaded hook
+    module's ``TOKEN_DIR`` is pointed at ``tmp_path/.claude``; a test that
+    patches ``TOKEN_DIR`` itself overrides this, and a module first imported
+    later reads the patched value or resolves through the redirected home."""
+    hooks_dir = str(Path(__file__).resolve().parent.parent / "hooks")
+    for module in list(sys.modules.values()):
+        if (isinstance(getattr(module, "TOKEN_DIR", None), Path)
+                and (getattr(module, "__file__", None) or "").startswith(hooks_dir)):
+            monkeypatch.setattr(module, "TOKEN_DIR", tmp_path / ".claude")
+
+
 # (module, test) pairs whose bodies INSPECT the writer's identity and therefore
 # need it unwrapped. Measured, not censused: see the fixture below.
 _UNWRAPPED_WRITER_TESTS = frozenset({

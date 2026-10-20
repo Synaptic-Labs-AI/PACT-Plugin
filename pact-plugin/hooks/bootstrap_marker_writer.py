@@ -22,8 +22,14 @@ Used by: hooks.json — registered under TWO events, both running this same
 
 Layer in the four-layer bootstrap gate enforcement (#401, #664). On each
 user message, checks:
-  - Marker already exists (valid stamp) → suppressOutput (idempotent fast path)
   - No session dir → suppressOutput (non-PACT session)
+  - Not a lead frame → suppressOutput
+  - Lead frame → realign the recorded team to the platform's (every run, so
+    a team that moves after bootstrap is still followed); a move appends
+    team_realigned and emits a lead notice as additionalContext; a recorded
+    team with no config that two or more live teams claim emits an ambiguity
+    notice instead
+  - Marker already exists (valid stamp) → no marker write (idempotent fast path)
   - Team config absent OR secretary not in members[] → suppressOutput
     (verify-and-refuse: pre-conditions unmet, sibling bootstrap_prompt_gate
     owns the user-visible advisory)
@@ -51,8 +57,9 @@ Runtime exceptions in writer logic suppressOutput at exit 0 — the gate
 this hook silently fails, the next prompt retries.
 
 Input: JSON from stdin with hook_event_name, session_id, prompt, etc.
-Output: JSON with hookSpecificOutput.additionalContext (load-failure case)
-        or {"suppressOutput": true} (every other path). Every emit path carries
+Output: JSON with hookSpecificOutput.additionalContext (load-failure case,
+        or a lead notice after a team realign) or {"suppressOutput": true}
+        (every other path). Every emit path carries
         hookSpecificOutput.hookEventName echoing the ACTUAL firing event
         (resolved from the frame's `hook_event_name` via _resolve_event_name);
         a VALID safe default ("UserPromptSubmit") is used only when the frame
@@ -175,7 +182,12 @@ try:
         expected_marker_signature,
     )
     from shared.session_journal import read_last_event_from
-    from shared.session_resume import update_session_info
+    from shared.session_resume import (
+        read_session_started,
+        record_team_realign,
+        recorded_team_of,
+        update_session_info,
+    )
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_advisory("module imports", _module_load_error)
 
@@ -194,6 +206,21 @@ def _suppress_output(event_name: str) -> str:
     return json.dumps({
         "suppressOutput": True,
         "hookSpecificOutput": {"hookEventName": event_name},
+    })
+
+
+def _emit_output(event_name: str, notice: str | None) -> str:
+    """Return the run's output: the notice as additionalContext when one is
+    pending, otherwise the suppressOutput envelope. Both carry the firing
+    event's name.
+    """
+    if not notice:
+        return _suppress_output(event_name)
+    return json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": event_name,
+            "additionalContext": notice,
+        },
     })
 
 
@@ -433,8 +460,11 @@ def _write_back_aligned_team_name(input_data: dict) -> None:
         # record (the context file) already correct — the worst residual is a
         # stale cosmetic CLAUDE.md line, self-healed on the next prompt. So the
         # non-atomicity is safe by construction, not an accepted risk.
+        # A realign is not a session start: keep the recorded start in both
+        # the context file and the CLAUDE.md Started line.
         pact_context.write_context(
-            aligned, session_id, pact_context.get_project_dir(), plugin_root
+            aligned, session_id, pact_context.get_project_dir(), plugin_root,
+            started_at=pact_context.get_pact_context().get("started_at") or None,
         )
 
         # CLAUDE.md write-back: exists()-guard BEFORE update_session_info so we
@@ -470,7 +500,10 @@ def _write_back_aligned_team_name(input_data: dict) -> None:
             return
         # Present: rewrite the whole managed session block with the aligned
         # team name + the full correct tuple.
-        update_session_info(session_id, aligned, session_dir, plugin_root)
+        update_session_info(
+            session_id, aligned, session_dir, plugin_root,
+            started=read_session_started(project_dir),
+        )
     except Exception as e:
         print(
             f"bootstrap_marker_writer: team-name write-back failed: {e}",
@@ -478,8 +511,51 @@ def _write_back_aligned_team_name(input_data: dict) -> None:
         )
 
 
-def _try_write_marker(input_data: dict) -> None:
-    """Verify pre-conditions and write marker if all are met.
+def _realign_team(input_data: dict) -> str | None:
+    """Run the team write-back and report a move, for a lead frame.
+
+    Reads the recorded team before and after _write_back_aligned_team_name.
+    When it moved from one team to another, records the move and returns the
+    lead notice; otherwise returns None. The second read is from the context
+    file, not the cache: write_context updates the cache even when its write
+    to disk fails, and a move the disk does not show is no move.
+
+    Never raises: the marker write after it is the load-bearing action.
+    """
+    try:
+        before = pact_context.get_pact_context().get("team_name", "").lower()
+        _write_back_aligned_team_name(input_data)
+        after = recorded_team_of(pact_context.get_session_dir()).lower()
+        if not before or not after or before == after:
+            return None
+        # The lead's own write-back keeps its notice even when a racing
+        # compaction recorded the move first.
+        return record_team_realign(before, after, notify_if_already_recorded=True)
+    except Exception as e:
+        print(
+            f"bootstrap_marker_writer: team realign report failed: {e}",
+            file=sys.stderr,
+        )
+        return None
+
+
+def _ambiguity_notice() -> str | None:
+    """The lead notice for a team the census cannot decide, or None.
+
+    The text is the shared describer's when it finds two or more live teams
+    that match this session; every other state emits nothing here. Never
+    raises.
+    """
+    try:
+        alignment = pact_context.describe_team_alignment()
+        return alignment.text if alignment.state == "ambiguous" else None
+    except Exception:
+        return None
+
+
+def _try_write_marker(input_data: dict) -> str | None:
+    """Realign the session's team, then write the marker if its pre-conditions
+    are met. Returns a lead notice to emit, or None.
 
     Silent on every refuse path — the sibling bootstrap_prompt_gate owns
     the user-visible "bootstrap required" advisory.
@@ -500,19 +576,13 @@ def _try_write_marker(input_data: dict) -> None:
     # operations (mkstemp/os.replace) operate within that vetted directory.
     session_dir_str = pact_context.get_session_dir()
     if not session_dir_str:
-        return
+        return None
 
     session_dir = Path(session_dir_str)
 
-    # Idempotent fast path: marker already valid → no-op. Uses the same
-    # is_marker_set predicate the gate uses, so producer and verifier
-    # observe identical content invariants.
-    if is_marker_set(session_dir):
-        return
-
-    # Lead-role gate (#878): only the team-lead drives bootstrap (writes the
-    # marker). This is NOT a teammate discriminator: an Agent-spawned team
-    # teammate has no UserPromptSubmit-fire path (it wakes via inbox/SendMessage,
+    # Lead-role gate (#878): only the team-lead realigns the team and drives
+    # bootstrap (writes the marker). This is NOT a teammate discriminator: an
+    # Agent-spawned team teammate has no UserPromptSubmit-fire path (it wakes via inbox/SendMessage,
     # which is not hookable), so this event never carries a teammate frame
     # (empirically confirmed by the discriminator audit). The guard ensures a
     # plain / non-PACT primary frame (agent_type absent → is_lead False) does
@@ -522,13 +592,21 @@ def _try_write_marker(input_data: dict) -> None:
     # under tmux — to the positive is_lead predicate keyed on the harness-set
     # agent_type.
     if not pact_context.is_lead(input_data):
-        return
+        return None
 
-    # Self-heal the persisted team name to the identity-matched one (#989),
-    # lead-gated like the marker write below. No-op when they already match
-    # (the normal CLI case). Never raises. Done BEFORE the secretary check so
-    # the check (and the marker's session_id) read the aligned team.
-    _write_back_aligned_team_name(input_data)
+    # Self-heal the persisted team name to the identity-matched one (#989).
+    # No-op when they already match (the normal CLI case). Never raises. Runs
+    # on every lead prompt and Agent spawn, before the marker fast path: a
+    # resume keeps the marker, and the team it names can move after it. Done
+    # BEFORE the secretary check so the check reads the aligned team.
+    # A team that did not move but cannot be decided gets its own notice.
+    notice = _realign_team(input_data) or _ambiguity_notice()
+
+    # Idempotent fast path: marker already valid → no marker write. Uses the
+    # same is_marker_set predicate the gate uses, so producer and verifier
+    # observe identical content invariants.
+    if is_marker_set(session_dir):
+        return notice
 
     # Pre-condition: team config + secretary member exist on disk.
     team_name = pact_context.get_team_name()
@@ -539,15 +617,16 @@ def _try_write_marker(input_data: dict) -> None:
         # signal IFF the derived team dir is absent AND a sibling session-* dir
         # exists. Never raises, never alters this already-decided refuse.
         _debug_log_if_derived_team_dir_missing(team_name)
-        return
+        return notice
 
     plugin_root = pact_context.get_plugin_root()
     plugin_version = _read_plugin_version(plugin_root)
     if not plugin_root or not plugin_version:
-        return
+        return notice
 
     session_id = session_dir.name
     _write_marker(session_dir, session_id, plugin_root, plugin_version)
+    return notice
 
 
 def main() -> None:
@@ -566,7 +645,7 @@ def main() -> None:
     event = _resolve_event_name(input_data)
 
     try:
-        _try_write_marker(input_data)
+        notice = _try_write_marker(input_data)
     except Exception:
         # Runtime fail-OPEN: the gate's deny path is the user-visible
         # failure surface. If this hook silently fails, the next prompt
@@ -576,7 +655,7 @@ def main() -> None:
         print(_suppress_output(event))
         sys.exit(0)
 
-    print(_suppress_output(event))
+    print(_emit_output(event, notice))
     sys.exit(0)
 
 

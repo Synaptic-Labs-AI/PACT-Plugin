@@ -83,12 +83,15 @@ _WRITE_METHODS = frozenset({"write_text", "write_bytes", "touch"})
 _OPEN_MODE = re.compile(r"[rwxabt+]{1,4}")
 
 # (file, enclosing function, write API referenced): count. The three
-# lead-gated writers, plus write_context itself, which is persist_context
-# behind a path builder.
+# lead-gated writers, the realign command, plus write_context itself, which
+# is persist_context behind a path builder.
 KNOWN_WRITE_CALLS = Counter({
     ("hooks/session_init.py", "main", "persist_context"): 1,
     ("hooks/shared/pact_context.py", "heal_context_if_missing", "write_context"): 1,
     ("hooks/bootstrap_marker_writer.py", "_write_back_aligned_team_name", "write_context"): 1,
+    # The realign command: refuses unless a lead context already exists for
+    # $CLAUDE_CODE_SESSION_ID, so it only rewrites a lead's own file.
+    ("hooks/shared/realign_team.py", "realign_team", "write_context"): 1,
     ("hooks/shared/pact_context.py", "write_context", "persist_context"): 1,
 })
 
@@ -126,11 +129,15 @@ KNOWN_MODULE_PATH_USES = Counter({
 KNOWN_NAME_SITES = Counter({
     ("hooks/dispatch_gate.py", "<module>"): 2,                   # message text
     ("hooks/dispatch_gate.py", "evaluate_dispatch"): 3,          # message text
-    ("hooks/session_init.py", "_kept_started_at"): 1,            # read
+    ("hooks/session_init.py", "_saved_context"): 1,              # read
     ("hooks/session_init.py", "_lead_context_persisted"): 1,     # existence read
     ("hooks/shared/pact_context.py", "build_context_cache"): 1,  # the writers' path
     ("hooks/shared/pact_context.py", "init"): 1,                 # read path
+    ("hooks/shared/pact_context.py", "_clear_carryover_team"): 1,  # read (earlier sessions' contexts)
+    ("hooks/shared/pact_context.py", "_project_session_records"): 1,  # read (this project's session contexts)
     ("hooks/shared/pact_harvest.py", "main"): 2,                 # CLI help text
+    ("hooks/shared/session_registry.py", "_lead_context_exists_for"): 1,  # existence read
+    ("hooks/shared/session_resume.py", "_saved_team_of"): 1,         # read
     ("skills/pact-memory/scripts/pact_session.py", "_context_file_path"): 1,       # read
     ("skills/pact-memory/scripts/pact_session.py", "_context_record_on_disk"): 1,  # read
 })

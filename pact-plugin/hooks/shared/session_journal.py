@@ -329,6 +329,14 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # unknown-type short-circuit, matching session_end / cleanup_summary /
     # session_consolidated.
     "session_resumption_surfaced": {},
+    # shared/session_resume.py (append_team_realigned) writes team_realigned
+    # when a move of the session's recorded team leaves an old team that
+    # existed. Its callers: bootstrap_marker_writer's prompt-time write-back
+    # and session_init's launch realign, through record_team_realign, and the
+    # realign_team command. from and to are the old and new team dir names.
+    # The harvest reads `from` to find the HANDOFFs left in the old team's
+    # task store.
+    "team_realigned": {"from": str, "to": str},
     # hooks/session_end.py writes session_end with NO required fields — one
     # writer passes an optional `warning` (line 119), the other passes
     # nothing (line 316). commands/wrap-up.md CLI also writes session_end
@@ -458,8 +466,11 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # ("startup" when stdin has none) and "unknown" for any other value,
     # including a non-str one; hooks/bootstrap_prompt_gate.py writes "prompt".
     # This schema contract catches any future writer that bypasses those
-    # paths and emits a non-str source.
-    "session_start": {"source": str},
+    # paths and emits a non-str source. Both writers add `prev_session_dir`,
+    # the session dir the project CLAUDE.md named before this one, when there
+    # is one and it is not this session's own; session_resume walks it to
+    # reach a claim behind sessions that did nothing.
+    "session_start": {"source": str, "prev_session_dir": str},
     # hooks/session_end.py writes session_end with an optional `warning`
     # string when check_unpaused_pr detects an open PR that was NOT
     # paused (no memory consolidation). The empty-dict registration in

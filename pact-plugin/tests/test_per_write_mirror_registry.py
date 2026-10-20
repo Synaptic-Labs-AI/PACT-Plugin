@@ -46,6 +46,9 @@ from shared.task_metadata_snapshot import (
 
 LEAD_SESSION = "lead-session-0001"
 TEAMMATE_SESSION = "teammate-session-0002"
+# A context session id that differs from the frame's, so the lead-context
+# leg cannot place the frame and the config leg alone decides.
+OTHER_CONTEXT_SESSION = "context-session-0003"
 
 
 class TestPerWriteMirrorKeysRegistry:
@@ -153,9 +156,11 @@ class TestReadLeadSessionId:
 
 class TestIsCanonicalJournalFrame:
     """Both-modes topology rows for the frame predicate. Structural signals
-    only: agent_type for the role leg, session_id vs the team config's
-    leadSessionId for the topology leg. False must be the answer on every
-    resolution failure (skip defers durability to the completion-time seams;
+    only: agent_type for the role leg; for the topology leg, session_id vs
+    the session id the lead context records, or vs the team config's
+    leadSessionId. The config-leg rows seed a context recording a DIFFERENT
+    session id, so the lead-context leg cannot answer for them. False must
+    be the answer on every resolution failure (skip defers durability to the completion-time seams;
     a misclassified emit could silo the event and poison the shared
     content-hash marker namespace)."""
 
@@ -178,9 +183,19 @@ class TestIsCanonicalJournalFrame:
             {"agent_type": "pact-backend-coder", "session_id": LEAD_SESSION}
         )
 
+    def test_config_leg_alone_true(self, teams_root, pact_context):
+        """Positive control for the config-leg failure rows below: with a
+        context recording another session id, the frame is placed in the
+        lead's session by the config's leadSessionId alone."""
+        pact_context(team_name="test-team", session_id=OTHER_CONTEXT_SESSION)
+        _seed_config(teams_root)
+        assert ctx_module.is_canonical_journal_frame(
+            {"agent_type": "pact-backend-coder", "session_id": LEAD_SESSION}
+        )
+
     def test_tmux_teammate_frame_false(self, teams_root, pact_context):
         """A distinct session_id is the tmux teammate signature — skip."""
-        pact_context(team_name="test-team", session_id=TEAMMATE_SESSION)
+        pact_context(team_name="test-team", session_id=LEAD_SESSION)
         _seed_config(teams_root)
         assert not ctx_module.is_canonical_journal_frame(
             {
@@ -204,13 +219,13 @@ class TestIsCanonicalJournalFrame:
         )
 
     def test_missing_config_false(self, teams_root, pact_context):
-        pact_context(team_name="test-team", session_id=LEAD_SESSION)
+        pact_context(team_name="test-team", session_id=OTHER_CONTEXT_SESSION)
         assert not ctx_module.is_canonical_journal_frame(
             {"agent_type": "pact-backend-coder", "session_id": LEAD_SESSION}
         )
 
     def test_malformed_config_false(self, teams_root, pact_context):
-        pact_context(team_name="test-team", session_id=LEAD_SESSION)
+        pact_context(team_name="test-team", session_id=OTHER_CONTEXT_SESSION)
         team_dir = teams_root / "test-team"
         team_dir.mkdir()
         (team_dir / "config.json").write_text("{not json", encoding="utf-8")
@@ -219,7 +234,7 @@ class TestIsCanonicalJournalFrame:
         )
 
     def test_non_string_lead_session_id_false(self, teams_root, pact_context):
-        pact_context(team_name="test-team", session_id=LEAD_SESSION)
+        pact_context(team_name="test-team", session_id=OTHER_CONTEXT_SESSION)
         _seed_config(teams_root, lead_session_id=42)
         assert not ctx_module.is_canonical_journal_frame(
             {"agent_type": "pact-backend-coder", "session_id": LEAD_SESSION}

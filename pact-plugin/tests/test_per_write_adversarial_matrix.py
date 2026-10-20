@@ -164,6 +164,19 @@ def _marker_files(home):
     ]
 
 
+def _assert_one_emit_in_the_lead_journal(home):
+    """Exactly one snapshot, every journal under HOME is the lead's own, and
+    every content-hash marker sits in the canonical team namespace."""
+    assert len(_snapshots()) == 1
+    lead_journal = (home / ".claude" / "pact-sessions" / "project" / LEAD_SID
+                    / "session-journal.jsonl")
+    assert list(home.rglob("*.jsonl")) == [lead_journal]
+    canonical = home / ".claude" / "teams" / TEAM / tms.SNAPSHOT_MARKER_NAMESPACE
+    markers = [p for p in home.rglob("*")
+               if p.is_file() and p.parent.name == tms.SNAPSHOT_MARKER_NAMESPACE]
+    assert markers and all(p.parent == canonical for p in markers)
+
+
 def _is_marker_shape(value):
     """Reader-side marker recognition (the harvest consumer's view)."""
     return isinstance(value, dict) and value.get("_truncated") is True
@@ -538,13 +551,13 @@ class TestLeadSessionIdStalenessProbe:
     """The topology compare's documented currency dependency: certify the
     blast radius is never worse than the shipped baseline."""
 
-    def test_stale_mismatched_config_downgrades_to_skip(self, home):
-        """An in-process teammate whose live session_id no longer matches a
-        STALE leadSessionId (config not refreshed after a resume) is
-        misclassified as tmux → SKIP. Blast radius: a skipped in-process
-        emit — baseline durability (completion seams) — with no crash and
-        no marker claim. This is the accepted direction; the durability
-        loss is bounded, the marker namespace stays clean."""
+    def test_stale_mismatched_config_still_emits_to_the_lead_journal(self, home):
+        """An in-process teammate whose session_id no longer matches a STALE
+        leadSessionId (the platform re-provisioned the team on a resume;
+        the stdin session id never changes) is still the lead's session:
+        the lead context records its session id. The emit lands exactly
+        once, in the lead's own journal and nowhere else, and its marker
+        sits only in the canonical namespace. No crash."""
         _seed_team_config(home, lead_session_id="stale-pre-resume-sid")
         _seed_task(home, "54", owner="backend-coder",
                    subject="backend-coder: TEACHBACK gate")
@@ -553,8 +566,7 @@ class TestLeadSessionIdStalenessProbe:
                         agent_type=TEAMMATE, session_id=LEAD_SID)
         )
         assert isinstance(advisories, list)
-        assert _snapshots() == []
-        assert _marker_files(home) == []
+        _assert_one_emit_in_the_lead_journal(home)
 
     def test_stale_equal_admit_lands_in_own_resolvable_journal(self, home):
         """The admit direction: whatever frame carries session_id ==
@@ -580,9 +592,13 @@ class TestLeadSessionIdStalenessProbe:
         assert len(_snapshots()) == 1
 
     def test_config_drained_mid_arc_skips_no_crash(self, home):
-        """teams/config.json deleted between dispatch and write (the drain
-        class this feature exists to survive): topology unresolvable →
-        fail-closed skip, no crash."""
+        """teams/config.json of the persisted team deleted between dispatch
+        and write: the in-process teammate frame SKIPS, no crash. This skip
+        is a deliberate safety rule, not a tolerated loss. With the
+        persisted team's config gone the persisted name is the stale one,
+        and the emit legs read tasks/<persisted team>/, where a task with
+        the same id belongs to the old team; emitting would journal that
+        old task's content. The lead's completion seam carries it instead."""
         _seed_task(home, "56", owner="backend-coder",
                    subject="backend-coder: TEACHBACK gate")
         advisories = tlg.evaluate_lifecycle(
@@ -592,6 +608,36 @@ class TestLeadSessionIdStalenessProbe:
         assert isinstance(advisories, list)
         assert _snapshots() == []
         assert _marker_files(home) == []
+
+    def test_absent_persisted_config_skips_even_when_census_finds_the_new_team(
+            self, tmp_path, monkeypatch):
+        """The persisted team's config is absent and a fresh, corroborated
+        new team is live, so get_team_name() would upgrade to the new team
+        through the census. The emit legs still read tasks/<persisted
+        team>/, whose same-id task is the OLD team's, so an in-process
+        teammate frame must emit nothing: the frame gate keys on the
+        persisted team's config, not on the resolver's answer."""
+        from fixtures.team_split import NEW_TEAM, OLD_SID, read_journal, split_world
+        import shared.pact_context as ctx_module
+
+        old_task = {"id": "91", "subject": "old: work", "owner": "backend-coder",
+                    "status": "in_progress", "metadata": {}}
+        world = split_world(tmp_path, monkeypatch, old_tasks=(old_task,))
+        monkeypatch.chdir(world.project_dir)
+        ctx_module.init({"session_id": OLD_SID})
+        assert ctx_module.get_team_name() == NEW_TEAM  # the census upgrades
+        ctx_module.reset_for_tests()
+        before = [e for e in read_journal(world.session_dir)
+                  if e.get("type") == "task_metadata_snapshot"]
+
+        tlg.evaluate_lifecycle(
+            _open_write("91", {"teachback_submit": {"understanding": "u"}},
+                        agent_type=TEAMMATE, session_id=OLD_SID)
+        )
+
+        after = [e for e in read_journal(world.session_dir)
+                 if e.get("type") == "task_metadata_snapshot"]
+        assert after == before
 
 
 class TestCompletingWriteDisjointnessBoundary:
@@ -741,10 +787,12 @@ class TestPerWriteSubprocessDepth:
         marker_dir = _sub_marker_dir(home)
         assert marker_dir.exists() and len(list(marker_dir.iterdir())) == 1
 
-    def test_stale_config_mismatch_real_process_skips(self, tmp_path):
-        """Staleness probe through the real binary: a teammate frame whose
-        live session_id mismatches the on-disk (stale) leadSessionId skips
-        — zero snapshot events anywhere under HOME, zero markers, exit 0."""
+    def test_stale_config_mismatch_real_process_emits_once(self, tmp_path):
+        """Staleness probe through the real binary: an in-process teammate
+        frame (it carries the session id the lead context records) whose
+        on-disk leadSessionId is stale emits exactly once, into the lead's
+        journal and no other, with every marker in the canonical
+        namespace; exit 0."""
         home, _session_dir, tasks_dir = _sub_seed_home(tmp_path)
         team_dir = home / ".claude" / "teams" / SUB_TEAM
         team_dir.mkdir(parents=True)
@@ -761,9 +809,13 @@ class TestPerWriteSubprocessDepth:
             home,
         )
         assert result.returncode == 0, result.stderr
-        assert _sub_snapshots(home) == []
+        assert len(_sub_snapshots(home)) == 1
+        journals = list(home.rglob("*.jsonl"))
+        assert journals == [_session_dir / "session-journal.jsonl"]
         marker_dir = _sub_marker_dir(home)
-        assert not marker_dir.exists() or not any(marker_dir.iterdir())
+        markers = [p for p in home.rglob("*") if p.is_file()
+                   and p.parent.name == marker_dir.name]
+        assert markers and all(p.parent == marker_dir for p in markers)
 
     def test_hostile_task_id_real_process_contained(self, tmp_path):
         """Traversal task_id through the real binary: exit 0, sanitized

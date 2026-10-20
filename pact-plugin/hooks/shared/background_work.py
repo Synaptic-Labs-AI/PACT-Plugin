@@ -1267,7 +1267,7 @@ def teammate_launch_name(input_data: Any, team_name: str) -> str:
     """
     if not isinstance(input_data, dict) or not isinstance(team_name, str) or not team_name:
         return ""
-    from .pact_context import LEAD_AGENT_TYPES, _read_lead_session_id
+    from .pact_context import LEAD_AGENT_TYPES, is_lead_session_frame
     from .session_registry import resolve as registry_resolve
 
     agent_type = input_data.get("agent_type")
@@ -1286,7 +1286,7 @@ def teammate_launch_name(input_data: Any, team_name: str) -> str:
     session_id = input_data.get("session_id")
     if not isinstance(session_id, str) or not session_id:
         return ""
-    if session_id == _read_lead_session_id(team_name):
+    if is_lead_session_frame(input_data, team_name):
         return ""
     name, _, registry_team = (registry_resolve(session_id) or "").partition("@")
     return name if name and registry_team.lower() == team_name.lower() else ""

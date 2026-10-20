@@ -21,6 +21,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 from .session_state import SESSION_ID_CONTROL_CHARS_RE, is_safe_path_component
 # One-directional import: session_registry is a self-contained leaf (imports
@@ -70,6 +71,33 @@ _cache: dict | None = None
 # "not-yet-resolved" sentinel; "" is a legitimate resolved-empty value.
 _aligned_cache: str | None = None
 
+# Per-process memo of current_process_key(); None until first computed.
+_process_key_cache: str | None = None
+
+# Per-process journal reads: {journal path: ((mtime_ns, size), events)}. A
+# hook run reads each journal once while it is unchanged.
+_journal_cache: dict[str, tuple[tuple[int, int], list]] = {}
+
+# Per-process lifecycle reads, each {journal path: ((mtime_ns, size), event)}:
+# the last session_start-or-session_end (a tail read) and the first
+# session_start (a head read).
+_marks_cache: dict[str, tuple[tuple[int, int], dict | None]] = {}
+_births_cache: dict[str, tuple[tuple[int, int], dict | None]] = {}
+
+# Per-process scans of a project's session contexts: {slug dir: (mtime_ns,
+# records)}. A new session dir changes the slug dir's mtime; a context
+# rewritten inside an existing dir, or written after a scan saw its dir
+# without one, is not seen until the next process.
+_records_cache: dict[str, tuple[int, list]] = {}
+
+# How far apart a session's session_end and the first session_start of the
+# session its /clear started may be, in seconds, on either side (SessionEnd is
+# async). Probe journals measured 0 to 1 s.
+CLEAR_SUCCESSOR_WINDOW_SECONDS = 10
+
+# Bytes read per step when scanning a journal backwards from its end.
+_TAIL_BLOCK_BYTES = 65536
+
 # Default context dict returned on any error
 _EMPTY_CONTEXT = {
     "team_name": "",
@@ -77,6 +105,7 @@ _EMPTY_CONTEXT = {
     "project_dir": "",
     "plugin_root": "",
     "started_at": "",
+    "process_key": "",
 }
 
 # Read-boundary path-safety guard for team_name. The persisted value is minted
@@ -120,10 +149,15 @@ def reset_for_tests() -> None:
     ADDITIVE: production caching behavior and all existing callers are
     unchanged; this is invoked only by tests.
     """
-    global _cache, _context_path, _aligned_cache
+    global _cache, _context_path, _aligned_cache, _process_key_cache
     _cache = None
     _context_path = None
     _aligned_cache = None
+    _process_key_cache = None
+    _journal_cache.clear()
+    _marks_cache.clear()
+    _births_cache.clear()
+    _records_cache.clear()
 
 
 def _build_session_path(slug: str, session_id: str) -> Path:
@@ -379,6 +413,7 @@ def get_pact_context() -> dict:
             "project_dir": str(data.get("project_dir", "")),
             "plugin_root": str(data.get("plugin_root", "")),
             "started_at": str(data.get("started_at", "")),
+            "process_key": str(data.get("process_key", "")),
         }
         return _cache
     except FileNotFoundError:
@@ -397,10 +432,11 @@ def get_pact_context() -> dict:
 # candidate team's tasks/<dir>/ store mtime must be within this window of
 # "now" to count as LIVE. RESUME_CENSUS_RECENCY_SECONDS = 900 (15 minutes)
 # — minutes-scale so a resume followed by a delayed dispatch still lands
-# inside the window, while aged stores fall out. The window is a NARROWING
-# parameter only: zero or >= 2 surviving candidates always fail safe to the
-# persisted default, so a mis-tuned window can only suppress the census,
-# never mis-align.
+# inside the window, while aged stores fall out. The window changes WHICH
+# teams are candidates, so it can turn an ambiguous census into a unique one
+# (this session's own store idles out of the window while a sibling's stays
+# fresh). That is why a team a live PACT session of this project leads or
+# records never counts (_owned_by_other_live_session): it is that session's.
 RESUME_CENSUS_RECENCY_SECONDS = 900
 
 # Journal event types proving prior TEAM ACTIVITY for the branch-3 census
@@ -414,6 +450,28 @@ RESUME_CENSUS_RECENCY_SECONDS = 900
 _RESUME_CENSUS_ACTIVITY_EXACT_TYPES = frozenset(
     {"session_end", "session_consolidated"}
 )
+
+
+def _journal_events(session_dir: str) -> list:
+    """Every event in ``session_dir``'s journal, read at most once per process
+    while the file is unchanged (keyed on its path, mtime and size). [] when
+    the journal is absent or unreadable. Never raises."""
+    try:
+        if not session_dir:
+            return []
+        journal = Path(session_dir) / "session-journal.jsonl"
+        stat = journal.stat()
+        stamp = (stat.st_mtime_ns, stat.st_size)
+        cached = _journal_cache.get(str(journal))
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        from .session_journal import read_events_from
+
+        events = read_events_from(session_dir)
+        _journal_cache[str(journal)] = (stamp, events)
+        return events
+    except Exception:
+        return []
 
 
 def _journal_has_team_activity() -> bool:
@@ -438,12 +496,7 @@ def _journal_has_team_activity() -> bool:
     reader loaded only on the census path.
     """
     try:
-        session_dir = get_session_dir()
-        if not session_dir:
-            return False
-        from .session_journal import read_events_from
-
-        for event in read_events_from(session_dir):
+        for event in _journal_events(get_session_dir()):
             event_type = str(event.get("type", ""))
             if (
                 event_type.startswith("task_")
@@ -468,13 +521,8 @@ def _own_journal_last_end_marker_ts() -> float | None:
     strengthening is then skipped, never fatal). Never raises.
     """
     try:
-        session_dir = get_session_dir()
-        if not session_dir:
-            return None
-        from .session_journal import read_events_from
-
         last_ts: float | None = None
-        for event in read_events_from(session_dir):
+        for event in _journal_events(get_session_dir()):
             if str(event.get("type", "")) not in ("session_end",
                                                   "session_consolidated"):
                 continue
@@ -495,12 +543,13 @@ def _own_journal_last_end_marker_ts() -> float | None:
 def _resume_census_candidate_corroborated(
     team_dir_name: str, config_data: dict
 ) -> bool:
-    """Bind a census candidate to THIS session's platform identity (#1507 F1).
+    """Bind a census candidate to THIS session's platform identity (#1507).
 
     Set-uniqueness alone proves nothing (a sibling session's fresh store can
     be the unique candidate whenever this session's own team is unborn), so
-    the unique candidate must additionally corroborate as THIS session's
-    team, by mechanism:
+    every candidate is corroborated FIRST, and only corroborated candidates
+    are counted (_resume_census_unique_candidate). A candidate corroborates
+    as THIS session's team by mechanism:
 
       * LEAD ENTRY: the config's members[] entry whose agentId EQUALS the
         config's leadAgentId (the platform's first-class key — NOT a
@@ -511,10 +560,11 @@ def _resume_census_candidate_corroborated(
         another team's dir — or from a longer-named team into a
         prefix-named dir — fails this; #1514).
       * SUBJECT ANCHOR: the lead entry's cwd must RAW-match (no resolve —
-        an unresolved mismatch only ever fails safe) the hook process's
-        LIVE cwd OR the persisted project_dir — the re-provisioned team's
-        lead lives where THIS session lives; a sibling in another project
-        or worktree does not.
+        an unresolved mismatch only ever fails safe) this session's
+        project_dir (the persisted one, or CLAUDE_PROJECT_DIR before it is
+        persisted) — the re-provisioned team's lead lives where THIS
+        session lives; a sibling in another project or worktree does not.
+        The hook's own cwd is not an anchor.
       * BIRTH ORDER (strengthening): when the journal has an end-of-life
         marker, the lead's joinedAt (epoch MILLIS, platform-verified) must
         sit strictly AFTER it — the own re-provisioned team is born after
@@ -522,7 +572,7 @@ def _resume_census_candidate_corroborated(
         Skipped (not fatal) when no marker or an unparseable ts.
 
     TRUST BOUNDARY (documented residual, mirrors the Backend-F2 pattern):
-    this defeats ACCIDENTAL/environmental cross-alignment (the F1 class).
+    this defeats ACCIDENTAL/environmental cross-alignment.
     A same-user MIRRORING adversary that reads this session's journal and
     context can also rewrite the plugin hooks themselves — every pure-read
     control here sits inside that same boundary, so mirroring-resistance
@@ -553,7 +603,7 @@ def _resume_census_candidate_corroborated(
         lead_cwd = str(lead_entry.get("cwd", ""))
         if not lead_cwd:
             return False
-        if lead_cwd not in (os.getcwd(), get_project_dir()):
+        if lead_cwd != _project_dir():
             return False
         end_marker_ts = _own_journal_last_end_marker_ts()
         if end_marker_ts is not None:
@@ -563,6 +613,285 @@ def _resume_census_candidate_corroborated(
             if (joined_at / 1000.0) <= end_marker_ts:
                 return False
         return True
+    except Exception:
+        return False
+
+
+def _project_dir() -> str:
+    """This session's project dir: the persisted one, else CLAUDE_PROJECT_DIR
+    (a SessionStart resolves before the context is persisted)."""
+    return get_project_dir() or os.environ.get("CLAUDE_PROJECT_DIR", "")
+
+
+def _lifecycle_event(line: bytes) -> dict | None:
+    """The event on ``line`` when it is a session_start or session_end."""
+    if b"session_" not in line:
+        return None
+    try:
+        event = json.loads(line.decode("utf-8", "replace"))
+    except ValueError:
+        return None
+    if isinstance(event, dict) and event.get("type") in (
+        "session_start", "session_end"
+    ):
+        return event
+    return None
+
+
+def _last_lifecycle_event(journal: Path) -> dict | None:
+    """The journal's last session_start or session_end, read backwards from
+    the end of the file in blocks, so a long journal is not parsed whole."""
+    with journal.open("rb") as handle:
+        position = handle.seek(0, os.SEEK_END)
+        carry = b""
+        while position > 0:
+            step = min(_TAIL_BLOCK_BYTES, position)
+            position -= step
+            handle.seek(position)
+            lines = (handle.read(step) + carry).split(b"\n")
+            # The first piece may continue a line that starts earlier.
+            carry = lines.pop(0) if position > 0 else b""
+            for line in reversed(lines):
+                event = _lifecycle_event(line)
+                if event is not None:
+                    return event
+    return None
+
+
+def _first_session_start(journal: Path) -> dict | None:
+    """The journal's first session_start: the session's birth."""
+    with journal.open("rb") as handle:
+        for line in handle:
+            event = _lifecycle_event(line)
+            if event is not None and event.get("type") == "session_start":
+                return event
+    return None
+
+
+def _cached_journal_read(cache: dict, session_dir: str, reader) -> dict | None:
+    """``reader(journal)`` for the session's journal, memoized in ``cache``
+    per process while the file is unchanged. None when the journal is
+    absent or unreadable. Never raises."""
+    try:
+        journal = Path(session_dir) / "session-journal.jsonl"
+        stat = journal.stat()
+        stamp = (stat.st_mtime_ns, stat.st_size)
+        cached = cache.get(str(journal))
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        event = reader(journal)
+        cache[str(journal)] = (stamp, event)
+        return event
+    except Exception:
+        return None
+
+
+def _session_last(session_dir: str) -> dict | None:
+    """The session's last session_start or session_end (a tail read)."""
+    return _cached_journal_read(_marks_cache, session_dir, _last_lifecycle_event)
+
+
+def _session_birth(session_dir: str) -> dict | None:
+    """The session's first session_start (a head read)."""
+    return _cached_journal_read(_births_cache, session_dir, _first_session_start)
+
+
+def _is_live(last: dict | None) -> bool:
+    """True unless the last lifecycle event is a session_end. No event, or
+    no journal, reads as live: when liveness is unknown, the team stays
+    another session's (the fail-safe side)."""
+    return last is None or last.get("type") != "session_end"
+
+
+def _event_time(event: dict | None) -> float | None:
+    """The event's ``ts`` as epoch seconds (UTC when unzoned), else None."""
+    try:
+        moment = datetime.fromisoformat(
+            str((event or {}).get("ts", "")).replace("Z", "+00:00"))
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        return moment.timestamp()
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _project_slug_dir(sessions_root: Path) -> Path | None:
+    """This project's session dir under ``sessions_root``, contained in it,
+    or None. Never raises."""
+    try:
+        project_dir = _project_dir()
+        if not project_dir:
+            return None
+        root = sessions_root.resolve()
+        slug_dir = (root / _UNSAFE_SLUG_CHARS_RE.sub(
+            "_", project_slug(project_dir))).resolve()
+        if root not in slug_dir.parents or not slug_dir.is_dir():
+            return None
+        return slug_dir
+    except Exception:
+        return None
+
+
+def _project_session_records(sessions_root: Path) -> list[tuple[Path, dict]]:
+    """(session dir, its context) for every PACT session dir of this
+    project's slug under ``sessions_root``, contained in it, newest context
+    first. Memoized per process while the slug dir is unchanged. [] on
+    error. Never raises."""
+    try:
+        slug_dir = _project_slug_dir(sessions_root)
+        if slug_dir is None:
+            return []
+        stamp = slug_dir.stat().st_mtime_ns
+        cached = _records_cache.get(str(slug_dir))
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        dated = []
+        for entry in sorted(slug_dir.iterdir()):
+            try:
+                resolved = entry.resolve()
+                if resolved.parent != slug_dir or not resolved.is_dir():
+                    continue
+                context_file = resolved / "pact-session-context.json"
+                data = json.loads(context_file.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    dated.append((context_file.stat().st_mtime_ns,
+                                  resolved, data))
+            except (OSError, ValueError, TypeError, AttributeError):
+                continue
+        dated.sort(key=lambda item: item[0], reverse=True)
+        records = [(resolved, data) for _, resolved, data in dated]
+        _records_cache[str(slug_dir)] = (stamp, records)
+        return records
+    except Exception:
+        return []
+
+
+def _is_own_session(
+    session_dir: Path, data: dict, own_session_id: str, own_process_key: str
+) -> bool:
+    """Ours: this session's dir or id, or a session whose recorded
+    process_key equals ours with both non-empty (an earlier life of this
+    claude process); an empty key matches nothing."""
+    recorded_sid = str(data.get("session_id", "")) or session_dir.name
+    own_dir_name = _UNSAFE_SLUG_CHARS_RE.sub("_", own_session_id or "")
+    return (session_dir.name == own_dir_name or recorded_sid == own_session_id
+            or bool(own_process_key)
+            and data.get("process_key") == own_process_key)
+
+
+def _clear_births(
+    sessions_root: Path, own_session_id: str, own_process_key: str
+) -> list[tuple[float, Path]]:
+    """(birth time, session dir) of each session of this project that is not
+    ours (_is_own_session) and was born by a /clear: its FIRST session_start
+    (a head read) has source 'clear' (a later compaction adds starts).
+    Liveness is not read here. Built once per census and passed to each
+    ownership check. [] on error. Never raises."""
+    try:
+        births = []
+        for session_dir, data in _project_session_records(sessions_root):
+            if _is_own_session(session_dir, data, own_session_id,
+                               own_process_key):
+                continue
+            birth = _session_birth(str(session_dir))
+            if not (birth and birth.get("source") == "clear"):
+                continue
+            born_at = _event_time(birth)
+            if born_at is not None:
+                births.append((born_at, session_dir))
+        return births
+    except Exception:
+        return []
+
+
+def _held_by_clear_successor(
+    ended_at: float, owner_dir: Path, births: list[tuple[float, Path]]
+) -> bool:
+    """True iff a live session in ``births`` (not ours), born by a /clear
+    within CLEAR_SUCCESSOR_WINDOW_SECONDS of ``ended_at`` on either side,
+    may be the ended owner's successor and so still holds its team. Our own
+    birth never counts, so a foreign /clear near our predecessor's end also
+    excludes our own team (the fail-safe side). Liveness (a tail read) is
+    read only for a birth inside the window."""
+    for born_at, session_dir in births:
+        if (session_dir != owner_dir
+                and abs(born_at - ended_at) <= CLEAR_SUCCESSOR_WINDOW_SECONDS
+                and _is_live(_session_last(str(session_dir)))):
+            return True
+    return False
+
+
+def _owned_by_other_live_session(
+    sessions_root: Path,
+    team_name: str,
+    lead_session_id: str,
+    own_session_id: str,
+    own_process_key: str,
+    births: list[tuple[float, Path]] | None = None,
+) -> bool:
+    """True iff ``team_name`` belongs to a session of this project that is
+    not ours (_is_own_session): one that leads it (its session id is the
+    team's leadSessionId) or records it (its context's team_name) and is
+    LIVE, or has ENDED while a live session that is not ours, born by a
+    /clear near its end, may be its successor (_held_by_clear_successor),
+    which holds the team whether or not it recorded it. ``births`` is
+    _clear_births for this session (None builds it)."""
+    ended_owners = []
+    for session_dir, data in _project_session_records(sessions_root):
+        if _is_own_session(session_dir, data, own_session_id, own_process_key):
+            continue
+        recorded_sid = str(data.get("session_id", "")) or session_dir.name
+        leads = bool(lead_session_id) and recorded_sid == lead_session_id
+        if not leads and data.get("team_name") != team_name:
+            continue
+        last = _session_last(str(session_dir))
+        if _is_live(last):
+            return True
+        ended_at = _event_time(last)
+        if ended_at is not None:
+            ended_owners.append((ended_at, session_dir))
+    if not ended_owners:
+        return False
+    if births is None:
+        births = _clear_births(sessions_root, own_session_id, own_process_key)
+    return any(_held_by_clear_successor(ended_at, session_dir, births)
+               for ended_at, session_dir in ended_owners)
+
+
+def team_owned_by_other_pact_session(
+    team_name: str, session_id: str = "", process_key: str | None = None
+) -> bool:
+    """True iff ``team_name`` belongs to another PACT session of this
+    project (_owned_by_other_live_session: a live session that is not ours
+    leads or records it, or an ended one does while a live session that is
+    not ours was born by a /clear near its end). The census applies the
+    same rule.
+
+    Ours means ``session_id`` (default: this context's session id), or a
+    session whose recorded process key equals ``process_key`` (default: the
+    key this context records), both non-empty: the earlier lives of this
+    claude process before a /clear. Live means no session_end after the
+    session's last session_start; a session whose liveness is unknown counts
+    as live. The scan covers this project's session dirs only: a census
+    candidate already needs its lead's cwd to equal this project dir, so a
+    session that leads or records such a team runs in this project.
+
+    A team the platform re-provisioned for THIS session after a resume has a
+    leadSessionId no hook frame carries and is recorded by no other live
+    session, so it is never reported as another session's. False on any
+    error. Never raises.
+    """
+    try:
+        if not is_safe_path_component(team_name):
+            return False
+        context = get_pact_context()
+        own_sid = session_id or context.get("session_id", "")
+        own_key = (process_key if process_key is not None
+                   else context.get("process_key", ""))
+        return _owned_by_other_live_session(
+            get_claude_config_dir() / "pact-sessions",
+            team_name, _read_lead_session_id(team_name), own_sid, own_key,
+        )
     except Exception:
         return False
 
@@ -593,36 +922,40 @@ def _own_tasks_store_fresh(teams_root: Path, session_id: str) -> bool:
         return False
 
 
-def _resume_census_unique_candidate(teams_root: Path, session_id: str) -> str | None:
-    """Branch-3 census (#1507): the single LIVE re-provisioned team, if
-    unambiguous AND corroborated as this session's own.
+def _resume_census_candidates(
+    teams_root: Path, session_id: str, process_key: str | None = None
+) -> list[tuple[str, bool, dict]]:
+    """Branch-3 census input: every LIVE re-provisioned team, each with its
+    corroboration result.
 
     Enumerates teams/*/config.json. A dir is a CANDIDATE iff its
     config.json carries a REAL string leadSessionId DIFFERENT from this
     session's id (a config missing/null on the field is malformed and
-    never counts) AND its sibling tasks/<dir>/ store mtime falls within
-    RESUME_CENSUS_RECENCY_SECONDS of now (the "live team" signal). Returns
-    the dir name only when EXACTLY ONE candidate survives AND that
-    candidate corroborates as this session's team (see
-    _resume_census_candidate_corroborated — F1: uniqueness is an
-    environmental accident, never an ownership proof). None on zero, on
-    >= 2 (two simultaneous broken resumes -> stale default), on an
-    UNCORROBORATED unique candidate (pre-birth window / foreign sibling ->
-    fail-safe suppression), or on any error.
+    never counts) AND no other PACT session of this project owns it
+    (_owned_by_other_live_session, the realign verb's rule too; ``process_key``,
+    default this context's recorded key, tells this process's earlier lives
+    apart from other sessions) AND its
+    sibling tasks/<dir>/ store mtime falls within
+    RESUME_CENSUS_RECENCY_SECONDS of now (the "live team" signal) AND its
+    dir name is a safe path component. Each candidate is returned as
+    ``(name, corroborated, config)``, with ``corroborated`` computed once
+    here by _resume_census_candidate_corroborated, so the census decision
+    (_resume_census_unique_candidate) and the diagnostics that explain it
+    read the same list and cannot disagree.
 
-    The corroboration lives HERE, inside the get_team_name resolution path,
-    so the marker-writer write-back (which calls get_team_name) can never
-    persist an uncorroborated winner.
-
-    Pure / FS-read-only / NEVER raises — same contract as the resolver that
-    calls it. The tasks root is derived as the SIBLING of teams_root
-    (teams_root.parent / "tasks") so a teams_dir override relocates the
-    tasks probe with it.
+    Pure / FS-read-only / NEVER raises: [] on any outer error. The tasks
+    root is derived as the SIBLING of teams_root (teams_root.parent /
+    "tasks") so a teams_dir override relocates the tasks probe with it; the
+    pact-sessions root the ownership scan reads is derived the same way.
     """
     try:
         tasks_root = teams_root.parent / "tasks"
+        sessions_root = teams_root.parent / "pact-sessions"
+        own_key = (process_key if process_key is not None
+                   else get_pact_context().get("process_key", ""))
+        births = _clear_births(sessions_root, session_id, own_key)
         cutoff = time.time() - RESUME_CENSUS_RECENCY_SECONDS
-        candidates: list[tuple[str, dict]] = []
+        candidates: list[tuple[str, bool, dict]] = []
         for entry in sorted(teams_root.iterdir()):
             try:
                 if not entry.is_dir():
@@ -639,6 +972,11 @@ def _resume_census_unique_candidate(teams_root: Path, session_id: str) -> str | 
                     continue
                 if candidate_lead_sid == session_id:
                     continue  # this session's own team — identity-match owns it
+                if _owned_by_other_live_session(
+                    sessions_root, entry.name, candidate_lead_sid, session_id,
+                    own_key, births,
+                ):
+                    continue  # another live PACT session's team
                 tasks_dir = tasks_root / entry.name
                 if not tasks_dir.is_dir():
                     continue  # no live task store under this name
@@ -648,30 +986,214 @@ def _resume_census_unique_candidate(teams_root: Path, session_id: str) -> str | 
                 # candidate (mirrors the identity-match loop's tamper guard).
                 if not is_safe_path_component(entry.name):
                     continue
-                candidates.append((entry.name, data))
+                candidates.append((
+                    entry.name,
+                    _resume_census_candidate_corroborated(entry.name, data),
+                    data,
+                ))
             except (OSError, json.JSONDecodeError, ValueError, TypeError,
                     AttributeError):
                 # Unreadable / malformed sibling — skip it, keep scanning.
                 continue
-        if len(candidates) != 1:
-            # Zero or >= 2: ambiguous -> fail-safe stale default.
-            return None
-        winner_name, winner_config = candidates[0]
-        if not _resume_census_candidate_corroborated(winner_name, winner_config):
-            # Unique but UNBOUND to this session (pre-birth window / foreign
-            # sibling): suppress — never return a uniqueness-only winner.
-            return None
-        return winner_name
+        return candidates
     except Exception:
         # Total fail-safe: the census is an upgrade path, never a new raise
-        # source. Any unexpected error -> "no candidate" -> stale default.
+        # source. Any unexpected error -> no candidates -> stale default.
+        return []
+
+
+def _resume_census_unique_candidate(
+    teams_root: Path, session_id: str, process_key: str | None = None
+) -> str | None:
+    """Branch-3 census: the single LIVE re-provisioned team that
+    corroborates as this session's own, if exactly one does.
+
+    Corroboration runs BEFORE the count: candidates that fail
+    _resume_census_candidate_corroborated (a foreign live session in
+    another directory, a pre-birth window) never count, so one foreign
+    live team cannot suppress this session's own. Returns the dir name only
+    when EXACTLY ONE corroborated candidate exists. None on zero, on >= 2
+    corroborated (two simultaneous broken resumes of the same project ->
+    stale default, never a guess), or on any error.
+
+    Residual admitted by counting only corroborated candidates: a same-dir
+    sibling session born after this session's end marker is itself
+    corroborated, and wins when it is the only corroborated live
+    candidate. That is the same hole documented on
+    _resume_census_candidate_corroborated.
+
+    The corroboration lives inside the get_team_name resolution path, so
+    the marker-writer write-back (which calls get_team_name) can never
+    persist an uncorroborated winner.
+
+    Pure / FS-read-only / NEVER raises — same contract as the resolver that
+    calls it.
+    """
+    corroborated = [
+        name
+        for name, is_corroborated, _ in _resume_census_candidates(
+            teams_root, session_id, process_key
+        )
+        if is_corroborated
+    ]
+    return corroborated[0] if len(corroborated) == 1 else None
+
+
+def current_process_key() -> str:
+    """This hook's claude process, as '<pid>:<start time>'; '' when unknown.
+
+    The pid is the hook's REAL parent (os.getppid()), which for a hook the
+    platform launches is the claude process itself. CLAUDE_PID must be set
+    and agree with it; anything else (a missing variable, a hook launched
+    through a shell, a teammate whose env carries another process's pid)
+    gives ''. The start time (``ps -o lstart=``, read in UTC so a time-zone
+    change inside the process cannot change it) tells a reused pid apart
+    from the process that held it before, to the second. Memoized per
+    process. Never raises.
+    """
+    global _process_key_cache
+    if _process_key_cache is not None:
+        return _process_key_cache
+    key = ""
+    try:
+        parent = os.getppid()
+        if parent > 1 and os.environ.get("CLAUDE_PID", "").strip() == str(parent):
+            import subprocess
+
+            completed = subprocess.run(
+                ["ps", "-o", "lstart=", "-p", str(parent)],
+                capture_output=True, text=True, timeout=5,
+                env={**os.environ, "LC_ALL": "C", "TZ": "UTC"},
+            )
+            started = " ".join(completed.stdout.split())
+            if completed.returncode == 0 and started:
+                key = f"{parent}:{started}"
+    except Exception:
+        key = ""
+    _process_key_cache = key
+    return key
+
+
+def _latest_start_is_clear(session_dir: str) -> bool:
+    """True iff the last session_start in ``session_dir``'s journal has
+    source "clear". Never raises."""
+    latest = None
+    for event in _journal_events(session_dir):
+        if event.get("type") == "session_start":
+            latest = event
+    return latest is not None and latest.get("source") == "clear"
+
+
+def _clear_carryover_team(
+    teams_root: Path,
+    session_id: str,
+    clear_start: bool | None,
+    process_key: str | None,
+) -> str | None:
+    """The team this session's claude process was on before a /clear, or None.
+
+    /clear gives the hook frames a NEW session id and a new session dir in
+    the same claude process, while the platform keeps the session on its
+    team. The predecessor is the newest OTHER session dir of this project,
+    contained in the pact-sessions root, whose context records the same
+    process key as this session; its recorded team is adopted when
+    teams/<team>/config.json is readable. The process key is the binding:
+    a concurrent session, or a later process reusing the pid, records a
+    different key.
+
+    Applies only to a clear-born life: ``clear_start`` (session_init passes
+    whether this SessionStart is a clear, since the journal is not yet
+    written) or, when None, the latest session_start in this session's
+    journal is a clear (a later resume start disarms it). ``process_key``
+    is this session's key (session_init passes the computed one; when None,
+    the key this session's context recorded). An empty key, no predecessor,
+    an unreadable context or config, or any error returns None.
+    """
+    try:
+        if clear_start is None:
+            clear_start = _latest_start_is_clear(get_session_dir())
+        if not clear_start:
+            return None
+        key = process_key if process_key is not None else (
+            get_pact_context().get("process_key", "")
+        )
+        project_dir = _project_dir()
+        if not key or not project_dir:
+            return None
+        root = (get_claude_config_dir() / "pact-sessions").resolve()
+        slug_dir = (root / _UNSAFE_SLUG_CHARS_RE.sub(
+            "_", project_slug(project_dir))).resolve()
+        if root not in slug_dir.parents or not slug_dir.is_dir():
+            return None
+        own_name = _UNSAFE_SLUG_CHARS_RE.sub("_", session_id)
+        newest: tuple[tuple[str, float, str], str] | None = None
+        for entry in slug_dir.iterdir():
+            try:
+                if entry.name == own_name:
+                    continue
+                resolved = entry.resolve()
+                if resolved.parent != slug_dir or not resolved.is_dir():
+                    continue
+                context_file = resolved / "pact-session-context.json"
+                data = json.loads(context_file.read_text(encoding="utf-8"))
+                if data.get("process_key") != key:
+                    continue
+                order = (str(data.get("started_at", "")),
+                         context_file.stat().st_mtime, entry.name)
+                if newest is None or order > newest[0]:
+                    newest = (order, str(data.get("team_name", "")))
+            except (OSError, ValueError, TypeError, AttributeError):
+                continue
+        if newest is None:
+            return None
+        team = newest[1]
+        if not is_safe_path_component(team):
+            return None
+        if not (teams_root / team / "config.json").is_file():
+            return None
+        return team
+    except Exception:
         return None
+
+
+def identity_matched_team(session_id: str, teams_dir: str | None = None) -> str:
+    """The team dir whose config.json leadSessionId equals ``session_id``;
+    '' when none, for an empty id, or on any error. Sorted scan, so two dirs
+    claiming the same id resolve deterministically; a path-unsafe dir name
+    is skipped. Never raises."""
+    try:
+        if not session_id:
+            return ""
+        teams_root = (
+            Path(teams_dir) if teams_dir is not None
+            else get_claude_config_dir() / "teams"
+        )
+        for entry in sorted(teams_root.iterdir()):
+            try:
+                if not entry.is_dir():
+                    continue
+                data = json.loads(
+                    (entry / "config.json").read_text(encoding="utf-8")
+                )
+                if data.get("leadSessionId") != session_id:
+                    continue
+                if not is_safe_path_component(entry.name):
+                    continue
+                return entry.name
+            except (OSError, json.JSONDecodeError, ValueError, TypeError,
+                    AttributeError):
+                continue
+        return ""
+    except Exception:
+        return ""
 
 
 def _resolve_aligned_team_name(
     session_id: str,
     teams_dir: str | None = None,
     default: str | None = None,
+    clear_start: bool | None = None,
+    process_key: str | None = None,
 ) -> str:
     """Resolve the REAL platform team name for ``session_id`` by IDENTITY MATCH.
 
@@ -698,18 +1220,24 @@ def _resolve_aligned_team_name(
     the inline branch-2 comment) both miss, a RESUMED session
     (clean end-session reaped the old team config; a new team + task store
     was provisioned under a new id while hook frames still carry the OLD
-    session id) can still be realigned: census the teams root for the
-    single LIVE re-provisioned team (config leadSessionId != this session's
-    id, tasks store mtime within RESUME_CENSUS_RECENCY_SECONDS), and return
-    it only if it CORROBORATES as this session's team (lead member cwd
-    anchor + birth order — see _resume_census_candidate_corroborated; F1:
-    uniqueness alone is not an ownership proof). Gated by a journal
+    session id) can still be realigned: census the teams root for LIVE
+    re-provisioned teams (config leadSessionId != this session's id, tasks
+    store mtime within RESUME_CENSUS_RECENCY_SECONDS), keep those that
+    CORROBORATE as this session's team (lead member cwd anchor + birth
+    order — see _resume_census_candidate_corroborated; uniqueness alone
+    is not an ownership proof), and return the one that remains. Gated by a journal
     lived-session witness (prior team activity in THIS session's journal —
     kills cold-start concurrent-session cross-alignment) and by the
     fallback team's config being ABSENT (post-convergence the census goes
-    inert). UNAMBIGUOUS-only: exactly one candidate wins; zero, >= 2, or an
-    uncorroborated unique candidate fall to the fail-safe default. See the
-    inline branch-3 comment.
+    inert). UNAMBIGUOUS-only: exactly one corroborated candidate wins; zero
+    or >= 2 corroborated candidates fall to the fail-safe default, and an
+    uncorroborated candidate never counts. See the inline branch-3 comment.
+
+    CLEAR CARRY-OVER: /clear re-keys the hook session id while the platform
+    keeps the session on its team. In a clear-born life, while the fallback
+    names no live team, the team recorded by the newest earlier session of
+    the same claude process (same process key) is returned when its config
+    is readable (see _clear_carryover_team), before the census.
 
     FAIL-SAFE DEFAULT: on no identity match (the team dir is half-formed —
     ``inboxes/`` present but ``config.json`` not yet written — or simply
@@ -769,6 +1297,14 @@ def _resolve_aligned_team_name(
             ``<claude-config-dir>/teams``.
         default: Fail-safe return on no match / error. Defaults to the
             persisted-context team_name when None.
+        clear_start: Whether this is a /clear SessionStart (session_init
+            passes it; the journal is not yet written). None reads it from
+            this session's latest session_start. Used only by the clear
+            carry-over (_clear_carryover_team).
+        process_key: This session's process key (session_init passes the
+            computed one, or '' for a non-lead frame). None reads the key
+            this session's context recorded. Used by the clear carry-over
+            and by the census's ownership check.
 
     Returns:
         The identity-matched team dir name, else ``default`` (or the
@@ -787,27 +1323,11 @@ def _resolve_aligned_team_name(
             teams_root = Path(teams_dir)
         else:
             teams_root = get_claude_config_dir() / "teams"
-        # Sorted iteration -> deterministic resolution if (pathologically)
-        # two dirs claimed the same leadSessionId.
-        for entry in sorted(teams_root.iterdir()):
-            try:
-                if not entry.is_dir():
-                    continue
-                config_path = entry / "config.json"
-                data = json.loads(config_path.read_text(encoding="utf-8"))
-                if data.get("leadSessionId") != session_id:
-                    continue
-                # Path-safety the matched dir name BEFORE returning it — a
-                # tampered config could name a path-unsafe dir. On failure,
-                # skip this entry and keep scanning (do not abort the search).
-                name = entry.name
-                if not is_safe_path_component(name):
-                    continue
-                return name
-            except (OSError, json.JSONDecodeError, ValueError, TypeError, AttributeError):
-                # This dir is unreadable / malformed — skip it, keep scanning
-                # the rest. A single bad sibling must not abort detection.
-                continue
+        # Branch-1: identity match (sorted, path-safe; a bad sibling is
+        # skipped, never aborts the scan).
+        matched = identity_matched_team(session_id, teams_dir)
+        if matched:
+            return matched
         # Branch-2: config-less full-UUID divergence (Desktop child / older-CLI
         # / print). The identity-match loop above missed because no team dir
         # carries a config.json with this leadSessionId — but the platform may
@@ -831,8 +1351,8 @@ def _resolve_aligned_team_name(
         # default, never the dead dir). The census is consulted ONLY when
         # the witness holds and the own store is stale, and _resume_census_
         # unique_candidate already enforces the cycle-1 corroboration — an
-        # uncorroborated unique candidate returns None and CANNOT preempt,
-        # so the F1 hole cannot reopen through this path. In every
+        # uncorroborated candidate never counts and CANNOT preempt,
+        # so the cross-alignment hole cannot reopen through this path. In every
         # census-empty world (including every #989 fixture with an empty
         # teams root) this is byte-identical to the pre-guard branch-2.
         # Preemption additionally requires an END MARKER in this session's
@@ -859,10 +1379,28 @@ def _resolve_aligned_team_name(
                 # missing (it does not rely on branch-3's witness).
                 if _own_journal_last_end_marker_ts() is not None:
                     census_winner = _resume_census_unique_candidate(
-                        teams_root, session_id
+                        teams_root, session_id, process_key
                     )
             if census_winner is None:
                 return session_id
+        # Clear carry-over. /clear gives the hook frames a NEW session id in
+        # the same claude process while the platform keeps the session on its
+        # team, whose config still names the PREVIOUS session's id, so
+        # identity match misses and the census's lived-session witness is
+        # empty. The earlier session of the same process (same process key)
+        # recorded the team (see _clear_carryover_team). Runs only while the
+        # fallback names no live team, so a record that already points at a
+        # real team stays.
+        if not (
+            fallback
+            and is_safe_path_component(fallback)
+            and (teams_root / fallback / "config.json").exists()
+        ):
+            carried = _clear_carryover_team(
+                teams_root, session_id, clear_start, process_key
+            )
+            if carried is not None:
+                return carried
         # Branch-3: resume census (#1507). After a clean end-session, resume
         # provisions a NEW team + task store under a new id while every hook
         # frame still carries the OLD session id. Identity-match (branch-1)
@@ -885,8 +1423,8 @@ def _resolve_aligned_team_name(
         #     cold-start concurrent-session cross-alignment: a fresh
         #     session's journal has no prior activity, so its census never
         #     fires even when another live session is the sole candidate.
-        # UNAMBIGUOUS-only: zero or >= 2 candidates -> fall through to the
-        # fail-safe default, byte-identical to today.
+        # UNAMBIGUOUS-only: zero or >= 2 corroborated candidates -> fall
+        # through to the fail-safe default.
         if (
             fallback
             and is_safe_path_component(fallback)
@@ -898,7 +1436,7 @@ def _resolve_aligned_team_name(
             # when branch-2 never ran it.
             if census_winner is None:
                 census_winner = _resume_census_unique_candidate(
-                    teams_root, session_id
+                    teams_root, session_id, process_key
                 )
             if census_winner is not None:
                 return census_winner
@@ -1217,14 +1755,17 @@ def resolve_agent_name(
 
     # Step 3.5: own session_id → self-registration registry. Recovers a tmux
     # teammate's friendly name@team, which is ABSENT from tmux hook stdin (no
-    # agent_name / agent_id), by self-looking-up its OWN session_id. Gated
-    # behind Steps 1-3 (all early returns / the in-process common case never
-    # reaches here), so this file read fires ONLY for the tmux-degraded frame
-    # that needs it. resolve() is fail-safe (None on any miss/error, never
-    # raises); on None we fall through to Step 4 (current behavior). The value
-    # is name@team — return the name half, matching Step 2's split("@")[0] shape.
+    # agent_name / agent_id), by self-looking-up its OWN session_id. Skipped
+    # for any frame in the lead's session (is_lead_context_frame): an
+    # in-process teammate's Bash/Edit frame carries neither agent_name nor
+    # agent_id and reaches this step, and every in-process teammate shares the
+    # lead's session_id, so a registry row under that id names whichever
+    # teammate registered last, never the actor. Such frames fall to Step 4.
+    # resolve() is fail-safe (None on any miss/error, never raises); on None
+    # we fall through to Step 4. The value is name@team — return the name
+    # half, matching Step 2's split("@")[0] shape.
     session_id = input_data.get("session_id")
-    if session_id:
+    if session_id and not is_lead_context_frame(input_data):
         resolved = _registry_resolve(str(session_id))
         if resolved and "@" in resolved:
             return resolved.split("@")[0]
@@ -1417,23 +1958,87 @@ def _read_lead_session_id(team_name: str, teams_dir: str | None = None) -> str:
     return lead_session_id if isinstance(lead_session_id, str) else ""
 
 
+def is_lead_context_frame(input_data: dict) -> bool:
+    """True iff this frame's stdin ``session_id`` is the session a PACT lead
+    context file was written for: the lead's own frame, or an in-process
+    teammate's frame (it shares the lead's session id and project dir).
+
+    The context file lives under the stdin session id, and only a lead frame
+    persists it, so a non-empty context ``session_id`` equal to the frame's
+    id places the frame in the lead's session. That holds after a resume
+    into a re-provisioned team, where the team config's ``leadSessionId``
+    names an id no hook frame carries, because the stdin id never changes.
+    A tmux teammate has its own session id and no context file at that
+    path, so it reads False.
+
+    Calls ``init(input_data)`` itself (a no-op once the context path is
+    set). Never raises: False on any error.
+    """
+    try:
+        sid = input_data.get("session_id")
+        if not (isinstance(sid, str) and sid):
+            return False
+        init(input_data)
+        context_sid = get_pact_context().get("session_id", "")
+        return bool(context_sid) and sid == context_sid
+    except Exception:
+        return False
+
+
+def is_lead_session_frame(
+    input_data: dict, team_name: str, lead_session_id: str | None = None
+) -> bool:
+    """True iff this frame runs in the lead's session: the lead-context leg
+    (``is_lead_context_frame``) or the frame's ``session_id`` equals
+    ``team_name``'s config ``leadSessionId``. A caller that has already read
+    that config passes its ``lead_session_id`` (None reads the config).
+
+    The caller passes the team. Resolving it here through
+    ``get_team_name()`` would make the config leg dead, because that
+    resolver returns "" whenever the context is empty, which is exactly
+    the frame the config leg exists for (a lead frame before its context
+    is persisted). Never raises: False on any error.
+    """
+    try:
+        if is_lead_context_frame(input_data):
+            return True
+        sid = input_data.get("session_id")
+        if not (isinstance(sid, str) and sid):
+            return False
+        if lead_session_id is None:
+            lead_session_id = _read_lead_session_id(team_name)
+        return bool(lead_session_id) and sid == lead_session_id
+    except Exception:
+        return False
+
+
 def is_canonical_journal_frame(input_data: dict) -> bool:
     """True iff THIS process's journal writes land in the canonical
     (lead-session) journal: the lead frame in either teammateMode, or an
-    in-process teammate frame (session_id == leadSessionId — one process,
-    one session). False for a tmux teammate frame (distinct session_id)
-    and on ANY resolution failure of the topology leg (unreadable team
-    config, missing session_id): skipping defers durability to the
-    completion-time seams — never worse than the shipped baseline — while
-    emitting from a misclassified frame could silo the event AND poison
-    the shared content-hash marker namespace, suppressing a later
-    canonical emit. On an empty-team frame the teammate-completion seams
-    starve by construction (no team namespace to read task state from),
-    so the effective deferral target is the lead-completion seam, whose
-    snapshot substrate dedups under the session-dir marker root when the
-    team is empty. The is_lead leg is independent of config readability,
-    so lead-written keys keep full both-modes coverage even when the
-    topology leg cannot resolve. Never raises.
+    in-process teammate frame. False for a tmux teammate frame (distinct
+    session_id) and on ANY resolution failure of the topology leg: skipping
+    defers durability to the completion-time seams — never worse than the
+    shipped baseline — while emitting from a misclassified frame could silo
+    the event AND poison the shared content-hash marker namespace,
+    suppressing a later canonical emit. The is_lead leg is independent of
+    config readability, so lead-written keys keep full both-modes coverage
+    even when the topology leg cannot resolve. Never raises.
+
+    The topology leg (non-lead frames) admits the lead's session by either
+    id: the config's leadSessionId, or the session id the lead context
+    records (is_lead_context_frame), which stays true after a resume into a
+    re-provisioned team whose leadSessionId no frame carries. It does so
+    ONLY while the config of the RAW persisted team_name is readable. That
+    is the team whose store the per-write emit legs read
+    (tasks/<persisted team>/) and whose marker namespace they claim. When
+    that config is gone, the persisted name is the stale one, and a task
+    file with the same id there belongs to the old team, so emitting would
+    journal the old team's content; skipping is a deliberate safety rule
+    there, deferring to the lead's completion seam. The persisted name is
+    used, not get_team_name(): the resolver can upgrade to the new team
+    through the census while the emit still reads the old store. An empty
+    persisted team (the "team unknown -> refuse" signal) fails closed by
+    the same conjunct.
     """
     try:
         if is_lead(input_data):
@@ -1443,30 +2048,12 @@ def is_canonical_journal_frame(input_data: dict) -> bool:
             # Missing/non-string session_id: topology unresolvable — skip
             # before paying the config read.
             return False
-        # Team resolution goes through this module's own identity-matched
-        # resolver (fail-closed empty on an unknown team, which routes the
-        # helper to its "" return and this leg to False).
-        #
-        # DELIBERATE SPLIT — do not unify with the callers' team resolution.
-        # The per-write emit legs (task_lifecycle_gate) resolve their
-        # team_name ONCE from the persisted ctx SSOT
-        # (get_pact_context()["team_name"]) and use it for task reads +
-        # marker namespacing, because the dedup namespace must stay
-        # internally CONSISTENT across every seam that shares those markers
-        # (all gate seams use the same persisted value). THIS predicate
-        # instead answers a session-topology question — "does my session_id
-        # match the REAL platform team's leadSessionId?" — which requires
-        # the identity-ALIGNED resolver: after a resume-divergence the
-        # persisted name can point at a config whose leadSessionId is
-        # stale/wrong, flipping the topology answer. Re-pointing the emit
-        # path to the aligned resolver would fragment the marker namespace
-        # against the pre-existing seams (duplicate events); re-pointing
-        # this predicate to the persisted value would mis-answer topology
-        # after divergence. Divergent outcomes are bounded (skip or
-        # duplicate emit — bias-to-preservation, never a lost canonical
-        # emit), which is why the split is safe as well as intentional.
-        lead_session_id = _read_lead_session_id(get_team_name())
-        return bool(lead_session_id) and sid == lead_session_id
+        init(input_data)
+        persisted_team = get_pact_context().get("team_name", "")
+        lead_session_id = _read_lead_session_id(persisted_team)
+        return bool(lead_session_id) and (
+            sid == lead_session_id or is_lead_context_frame(input_data)
+        )
     except Exception:
         return False
 
@@ -1550,14 +2137,16 @@ def build_context_cache(
     project_dir: str,
     plugin_root: str = "",
     started_at: str | None = None,
+    process_key: str | None = None,
 ) -> tuple[Path, dict] | None:
     """Build the session context dict + path and populate the in-process cache.
 
-    PURE of disk I/O: this is the cache-half of the session-context write. It
+    The cache-half of the session-context write: it never WRITES disk. It
     builds the ``context`` dict, resolves the session-scoped ``target`` path,
     and populates the module-level ``_cache`` / ``_context_path`` so same-process
     readers (``get_session_dir()`` and ``append_event()``'s implicit
-    path-resolution) work immediately — but it NEVER touches disk.
+    path-resolution) work immediately. Its one disk read: when ``process_key``
+    is None it reads ``target`` to carry forward the key recorded there.
 
     Returns ``(target, context)`` so a caller can pass them straight to
     ``persist_context()``; returns ``None`` when the session-scoped path cannot
@@ -1581,6 +2170,11 @@ def build_context_cache(
         plugin_root: CLAUDE_PLUGIN_ROOT value (path to installed plugin directory)
         started_at: The value to record; None records now. A compaction is not
             a session start, so session_init passes the value already on disk.
+        process_key: This session's claude process key
+            (current_process_key()). Only a lead hook frame computes one;
+            None keeps the key the file already records for this session, so
+            a writer running outside a hook (the realign verb's shell) never
+            replaces it.
 
     Returns:
         ``(target, context)`` on success, or ``None`` if the path is uncomputable.
@@ -1593,6 +2187,7 @@ def build_context_cache(
         "project_dir": project_dir,
         "plugin_root": plugin_root,
         "started_at": started_at or datetime.now(timezone.utc).isoformat(),
+        "process_key": "",
     }
 
     # Use _context_path if already set (from init() or test fixture),
@@ -1612,6 +2207,15 @@ def build_context_cache(
             file=sys.stderr,
         )
         return None
+
+    if process_key is None:
+        try:
+            recorded = json.loads(target.read_text(encoding="utf-8"))
+            if recorded.get("session_id") == session_id:
+                process_key = str(recorded.get("process_key", ""))
+        except (OSError, ValueError, TypeError, AttributeError):
+            process_key = ""
+    context["process_key"] = process_key or ""
 
     # Populate the in-process cache UNCONDITIONALLY (Option A). The cache is the
     # process's own working truth; disk persistence is an independent side-effect.
@@ -1640,12 +2244,25 @@ def persist_context(target: Path, context: dict) -> None:
     and degrading the lead to empty strings. ``target`` / ``context`` are exactly
     the pair returned by ``build_context_cache``.
 
+    When ``target`` already holds exactly the bytes this write would produce,
+    the file is left untouched (inode and mtime preserved), so a SessionStart
+    that re-derives the same context writes nothing; a mode looser than 0o600
+    is still tightened.
+
     Args:
         target: The resolved session-context file path (from build_context_cache).
         context: The context dict to serialize (from build_context_cache).
     """
     context_dir = target.parent
     try:
+        serialized = json.dumps(context)
+        try:
+            if target.read_bytes() == serialized.encode("utf-8"):
+                if target.stat().st_mode & 0o077:
+                    os.chmod(target, 0o600)
+                return
+        except OSError:
+            pass  # absent or unreadable: write it
         context_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         # Write to temp file in the same directory (required for atomic rename)
@@ -1656,7 +2273,7 @@ def persist_context(target: Path, context: dict) -> None:
         )
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(context, f)
+                f.write(serialized)
             os.chmod(tmp_path, 0o600)
             os.rename(tmp_path, str(target))
         except Exception:
@@ -1678,6 +2295,8 @@ def write_context(
     session_id: str,
     project_dir: str,
     plugin_root: str = "",
+    started_at: str | None = None,
+    process_key: str | None = None,
 ) -> None:
     """
     Write the session context file (full op: build + cache + persist to disk).
@@ -1707,8 +2326,14 @@ def write_context(
         session_id: Session ID from stdin JSON or env var
         project_dir: CLAUDE_PROJECT_DIR value
         plugin_root: CLAUDE_PLUGIN_ROOT value (path to installed plugin directory)
+        started_at: Passed to build_context_cache (None records now).
+        process_key: Passed to build_context_cache (None keeps the key the
+            file records).
     """
-    result = build_context_cache(team_name, session_id, project_dir, plugin_root)
+    result = build_context_cache(
+        team_name, session_id, project_dir, plugin_root,
+        started_at=started_at, process_key=process_key,
+    )
     if result is not None:
         persist_context(*result)
 
@@ -1747,6 +2372,88 @@ def describe_context_failure() -> str:
             "self-heal, or run /PACT:bootstrap"
         )
     return ""
+
+
+class TeamAlignment(NamedTuple):
+    """describe_team_alignment's result.
+
+    state: 'resolved' (nothing to explain), 'no_candidates', 'unresolved'
+    (live candidates, none matches this session) or 'ambiguous' (two or
+    more match). candidates: (team dir, matches this session) per live
+    candidate, the list the census decides on. text: '' when resolved,
+    else one line naming the recorded team, the candidates and what to do.
+    """
+
+    state: str
+    candidates: tuple[tuple[str, bool], ...]
+    text: str
+
+
+_ALIGNMENT_RESOLVED = TeamAlignment("resolved", (), "")
+_ALIGNMENT_RECOVERY = (
+    "Follow the team-split recovery in `pact-state-recovery.md`."
+)
+
+
+def describe_team_alignment() -> TeamAlignment:
+    """The one description of a session whose team cannot be decided, for
+    SessionStart context, the ambiguity notice and dispatch_gate's denial.
+
+    'resolved' unless the persisted team_name is non-empty, its
+    teams/<team>/config.json is absent, the journal shows prior team
+    activity (the census trigger), and the census did NOT find exactly one
+    corroborated candidate. The candidates come from the same
+    _resume_census_candidates list the census decides on, so the
+    description cannot disagree with the decision.
+
+    Team names are interpolated only after is_safe_path_component (the
+    recorded name here; every candidate inside the census), whose allowlist
+    admits no whitespace, controls or backticks. Never raises: 'resolved'
+    on error.
+    """
+    try:
+        team = get_pact_context().get("team_name", "")
+        if not team or not is_safe_path_component(team):
+            return _ALIGNMENT_RESOLVED
+        teams_root = get_claude_config_dir() / "teams"
+        if (teams_root / team / "config.json").exists():
+            return _ALIGNMENT_RESOLVED
+        if not _journal_has_team_activity():
+            return _ALIGNMENT_RESOLVED
+        candidates = tuple(
+            (name, bool(is_corroborated))
+            for name, is_corroborated, _ in _resume_census_candidates(
+                teams_root, get_session_id()
+            )
+        )
+        matching = sum(1 for _, is_corroborated in candidates if is_corroborated)
+        if matching == 1:
+            return _ALIGNMENT_RESOLVED
+        head = f"PACT's recorded team `{team}` has no config."
+        if not candidates:
+            return TeamAlignment(
+                "no_candidates", candidates,
+                f"{head} No live candidate teams. {_ALIGNMENT_RECOVERY}",
+            )
+        listed = ", ".join(
+            f"`{name}` ("
+            + ("matches this session" if is_corroborated else "does not match")
+            + ")"
+            for name, is_corroborated in candidates
+        )
+        if matching >= 2:
+            return TeamAlignment(
+                "ambiguous", candidates,
+                f"{head} Live candidate teams: {listed}. PACT cannot tell "
+                f"which team is this session's. Do not spawn. "
+                f"{_ALIGNMENT_RECOVERY}",
+            )
+        return TeamAlignment(
+            "unresolved", candidates,
+            f"{head} Live candidate teams: {listed}. {_ALIGNMENT_RECOVERY}",
+        )
+    except Exception:
+        return _ALIGNMENT_RESOLVED
 
 
 def heal_context_if_missing(input_data: dict) -> bool:
@@ -1835,6 +2542,7 @@ def heal_context_if_missing(input_data: dict) -> bool:
             str(raw_id),
             os.environ.get("CLAUDE_PROJECT_DIR", ""),
             os.environ.get("CLAUDE_PLUGIN_ROOT", ""),
+            process_key=current_process_key(),
         )
         # write_context's persist half is fail-open (errors swallowed to
         # stderr) — verify on disk so the contract "True iff healed" holds.

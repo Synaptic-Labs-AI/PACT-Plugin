@@ -245,7 +245,7 @@ def _stop_role(input_data: dict) -> "tuple[str, str, str]":
         return ROLE_LEAD, "", team
     # Nothing else in the lead's own process ends on Stop, so the lead session
     # is the lead whatever its agent_type spelling.
-    if _is_text(session_id) and session_id == pact_context._read_lead_session_id(team):
+    if _is_text(session_id) and pact_context.is_lead_session_frame(input_data, team):
         return ROLE_LEAD, "", team
     if _is_member(frame_name, team):
         return ROLE_TEAMMATE, frame_name, team

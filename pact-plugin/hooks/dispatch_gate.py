@@ -793,8 +793,9 @@ def _compose_deny_diagnosis(
     rule: str | None, message: str | None, input_data: dict,
 ) -> str:
     """Return the user-facing deny text: either rule-⑥ non-lead refusal
-    verbatim, ELSE the incumbent stale-team diagnosis if it fired, ELSE the cause
-    enumeration on rule ⑧, ELSE ``message`` unchanged.
+    verbatim, ELSE the incumbent stale-team diagnosis if it fired, ELSE on
+    rule ⑧ the team-alignment diagnosis (only when the session team's config
+    is absent) followed by the cause enumeration, ELSE ``message`` unchanged.
 
     A-xor-B BY CONSTRUCTION — the two blocks are mutually exclusive, and the
     precedence lives HERE, in one dispatcher, rather than as a call-order
@@ -816,12 +817,16 @@ def _compose_deny_diagnosis(
     CLAUDE.md. The return value therefore depends on disk contents, not on the
     arguments alone.
 
-    The true and load-bearing claim is ZERO **NEW** I/O: that read is
-    PRE-EXISTING on exactly this path, so this change adds no filesystem work
-    and cannot introduce the fail-open hang that a new unbounded read would.
-    Writing "no I/O" instead would be false, and would invite a future author
-    to relocate this call somewhere the read WOULD be new — which is precisely
-    the safety case this gate rests on.
+    On rule ⑧ it also calls ``_team_alignment_diagnosis``: one ``exists()``
+    on the session team's config and, only when that config is absent,
+    ``describe_team_alignment``. That lists ``teams/``, reads one
+    ``config.json`` per team dir, and reads this session's journal: once for
+    the team-activity witness and again for each candidate whose lead ran in
+    this project. Each read is of a file that already exists and nothing
+    raises out of it, so it cannot become a fail-open hang; a long journal
+    makes the deny slower, not open. Writing "no I/O" here
+    would be false, and would invite a future author to relocate this call
+    somewhere a read is unsafe.
 
     It is called strictly AFTER ``_journal_decision`` has recorded the
     canonical reason, so the journal keeps the un-augmented text regardless of
@@ -860,8 +865,30 @@ def _compose_deny_diagnosis(
     if augmented != message:
         return augmented
     if rule == "no_task_assigned":
-        return message + _CAUSE_ENUMERATION
+        return message + _team_alignment_diagnosis() + _CAUSE_ENUMERATION
     return message
+
+
+def _team_alignment_diagnosis() -> str:
+    """A paragraph naming why the session's team is in doubt, for the rule ⑧
+    deny, or ``""``.
+
+    Empty unless ``teams/<session team>/config.json`` is absent. Then it is
+    the shared describer's text (the recorded team, each live candidate with
+    its verdict, and what to do), or a bare statement that the config is
+    absent when the describer has nothing to explain. Never raises: ``""``
+    on any error.
+    """
+    try:
+        team = pact_context.get_team_name()
+        if not team:
+            return ""
+        if (get_claude_config_dir() / "teams" / team / "config.json").exists():
+            return ""
+        detail = pact_context.describe_team_alignment().text
+        return "\n\n" + (detail or f"`teams/{team}/config.json` is absent.")
+    except Exception:
+        return ""
 
 
 def main() -> None:

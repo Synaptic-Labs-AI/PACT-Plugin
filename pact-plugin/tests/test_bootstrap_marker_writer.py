@@ -23,7 +23,8 @@ Pre-condition gating — verify-and-refuse (P0 — architect §8.3):
 10. Team config exists, members[] has members but NO secretary → no
     marker written, exit 0  (LOAD-BEARING name lookup)
 11. Team config exists, secretary in members[] → marker written
-12. Marker already present and valid → no-op fast path (byte unchanged)
+12. Marker already present and valid → fast path skips the marker write
+    (byte unchanged); the team write-back still runs before it
 13. Teammate session (resolve_agent_name returns non-empty) → no-op
 
 Producer/verifier coupling (P0 — architect §8.4):
@@ -383,7 +384,8 @@ class TestVerifyAndRefuse:
         self, monkeypatch, tmp_path, capsys,
     ):
         """Architect §6 fast-path contract: when is_marker_set returns True,
-        _write_marker MUST NOT be called. Spying on _write_marker pins the
+        _write_marker MUST NOT be called. The fast path skips the marker write
+        only; the team write-back runs before it. Spying on _write_marker pins the
         early-return semantic directly. The prior bytes-equality form was
         a false-pin: the digest is deterministic over identical inputs, so
         a revert of the `if is_marker_set(...): return` early-out would
@@ -1692,7 +1694,7 @@ class TestConcurrentTwoHealerRace:
         content = json.loads(ctx.read_text(encoding="utf-8"))
         assert set(content.keys()) == {
             "team_name", "session_id", "project_dir", "plugin_root",
-            "started_at",
+            "started_at", "process_key",
         }
         assert content["team_name"] == "session-deadbeef"
         assert content["session_id"] == session_id
@@ -2043,8 +2045,9 @@ class TestPostToolUseIdempotency:
     """§10.4 — IDEMPOTENCY.
 
     A second PostToolUse(Agent) fire with the marker already valid hits the
-    is_marker_set fast-path and no-ops: _write_marker is NOT called, the marker
-    bytes are unchanged, exit 0. After the bootstrapping turn every subsequent
+    is_marker_set fast-path, which skips the marker write: _write_marker is NOT
+    called, the marker bytes are unchanged, exit 0. The team write-back still
+    runs before the fast path. After the bootstrapping turn every subsequent
     Agent spawn hits this fast-path (design §3b — the general Agent matcher is
     cheap because of this no-op)."""
 

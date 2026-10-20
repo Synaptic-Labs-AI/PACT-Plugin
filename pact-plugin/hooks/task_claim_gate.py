@@ -422,15 +422,13 @@ def _evaluate(stdin: dict) -> str | None:
         return None  # cannot locate config → fail-safe NO-OP
 
     # ── Step 3: topology discriminator (the final D3 signal — a config read) ──
-    # CURRENCY (this gate's blast-radius bound; the generic currency note lives
-    # on the shared helper): the compare below assumes config.leadSessionId is
-    # CURRENT. A stale value (e.g. after a session resume) can misclassify an
-    # in-process frame as tmux or vice-versa — bounded and benign HERE: the
-    # worst outcome is a benign pending→in_progress auto-flip of the teammate's
-    # OWN owned-unblocked-pending task (the very action it was supposed to
-    # take) or a missed nudge. The owner == confident_name conjunction bounds
-    # it to the resolved teammate's task; no wrong-teammate flip, no
-    # escalation.
+    # CURRENCY: config.leadSessionId alone is not current. After a resume
+    # into a re-provisioned team it names a session no hook frame carries, so
+    # comparing against it alone classifies an in-process frame as tmux. The
+    # tmux path then resolves the owner from registry rows recorded under the
+    # lead's session id and can flip ANOTHER teammate's pending task. So the
+    # in-process verdict below also takes the lead-context leg, through the
+    # shared lead-session predicate.
     lead_session_id = _read_lead_session_id(team_name)
     if not lead_session_id:
         # ASYMMETRY (design note): an UNKNOWN topology (config unreadable / no
@@ -443,7 +441,9 @@ def _evaluate(stdin: dict) -> str | None:
         # attribution-free nudge is warranted. The extra suppression on the
         # unknown path is intentional, not an oversight.
         return None  # unknown topology → fail-safe total NO-OP (no advisory)
-    in_process = session_id == lead_session_id
+    in_process = pact_context.is_lead_session_frame(
+        stdin, team_name, lead_session_id=lead_session_id
+    )
 
     # ── Step 4: load the team task set ONCE (also feeds the unblocked predicate) ─
     tasks = list(iter_team_task_jsons(team_name))

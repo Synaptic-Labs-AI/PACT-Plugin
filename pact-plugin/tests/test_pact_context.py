@@ -2983,3 +2983,352 @@ class TestMissingContextFileIsSilent:
         assert result.returncode == 0, result.stderr
         assert json.loads(result.stdout) == {"suppressOutput": True}
         assert result.stderr == ""
+
+
+class TestProcessKey:
+    """current_process_key(): the hook's real parent plus its start time,
+    only when CLAUDE_PID agrees with that parent."""
+
+    @pytest.fixture
+    def parent_is_this_process(self, monkeypatch):
+        # pytest's own parent may have exited (ppid 1, which the key
+        # refuses); stand this live process in as the hook's parent.
+        parent = os.getpid()
+        monkeypatch.setattr(os, "getppid", lambda: parent)
+
+    def test_a_matching_claude_pid_gives_the_parent_and_its_start_time(
+            self, monkeypatch, parent_is_this_process):
+        import subprocess
+        import shared.pact_context as ctx
+        monkeypatch.setenv("CLAUDE_PID", str(os.getppid()))
+        ctx.reset_for_tests()
+        started = " ".join(subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(os.getppid())],
+            capture_output=True, text=True,
+            env={**os.environ, "LC_ALL": "C", "TZ": "UTC"},
+        ).stdout.split())
+        assert started
+        assert ctx.current_process_key() == f"{os.getppid()}:{started}"
+
+    def test_the_key_does_not_depend_on_the_callers_time_zone(
+            self, monkeypatch, parent_is_this_process):
+        import shared.pact_context as ctx
+        monkeypatch.setenv("CLAUDE_PID", str(os.getppid()))
+        keys = []
+        for zone in ("America/New_York", "Asia/Tokyo"):
+            monkeypatch.setenv("TZ", zone)
+            ctx.reset_for_tests()
+            keys.append(ctx.current_process_key())
+        assert keys[0] and keys[0] == keys[1]
+
+    def test_a_claude_pid_naming_another_process_gives_no_key(
+            self, monkeypatch):
+        import shared.pact_context as ctx
+        monkeypatch.setenv("CLAUDE_PID", str(os.getpid()))
+        ctx.reset_for_tests()
+        assert ctx.current_process_key() == ""
+
+    def test_a_failed_ps_gives_no_key(self, monkeypatch,
+                                      parent_is_this_process):
+        import subprocess
+        import shared.pact_context as ctx
+        monkeypatch.setenv("CLAUDE_PID", str(os.getppid()))
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k:
+                            subprocess.CompletedProcess(
+                                a[0], 1, stdout="Mon Jan  5 09:00:00 2026\n",
+                                stderr=""))
+        ctx.reset_for_tests()
+        assert ctx.current_process_key() == ""
+
+    def test_an_orphaned_hook_whose_parent_is_init_gives_no_key(
+            self, monkeypatch):
+        import shared.pact_context as ctx
+        monkeypatch.setattr(os, "getppid", lambda: 1)
+        monkeypatch.setenv("CLAUDE_PID", "1")
+        ctx.reset_for_tests()
+        assert ctx.current_process_key() == ""
+
+    def test_no_claude_pid_gives_no_key(self, monkeypatch):
+        import shared.pact_context as ctx
+        monkeypatch.delenv("CLAUDE_PID", raising=False)
+        ctx.reset_for_tests()
+        assert ctx.current_process_key() == ""
+
+
+class TestLeadSessionFrameGivenLeadId:
+    """is_lead_session_frame(..., lead_session_id=): a caller that already
+    read the team config passes its lead id; None reads the config."""
+
+    def _team(self, tmp_path, monkeypatch, lead):
+        import shared.pact_context as ctx
+        teams = tmp_path / ".claude" / "teams" / "team-x"
+        teams.mkdir(parents=True)
+        (teams / "config.json").write_text(json.dumps({"leadSessionId": lead}))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        ctx.reset_for_tests()
+        return ctx
+
+    def test_a_given_lead_id_wins_over_the_config(self, tmp_path, monkeypatch):
+        ctx = self._team(tmp_path, monkeypatch, "config-lead")
+        frame = {"session_id": "given-lead"}
+        assert ctx.is_lead_session_frame(frame, "team-x",
+                                         lead_session_id="given-lead")
+        assert not ctx.is_lead_session_frame({"session_id": "config-lead"},
+                                             "team-x",
+                                             lead_session_id="given-lead")
+
+    def test_none_reads_the_config(self, tmp_path, monkeypatch):
+        ctx = self._team(tmp_path, monkeypatch, "config-lead")
+        assert ctx.is_lead_session_frame({"session_id": "config-lead"},
+                                         "team-x", lead_session_id=None)
+        assert not ctx.is_lead_session_frame({"session_id": "other"},
+                                             "team-x")
+
+
+class TestSessionMarksReadTheEnds:
+    """A session's birth (its first session_start) and its last start or
+    end, read from the two ends of its journal rather than by parsing it
+    whole."""
+
+    def _journal(self, tmp_path, *types):
+        session_dir = tmp_path / "s"
+        session_dir.mkdir()
+        lines = [json.dumps({"type": t, "ts": "2026-01-01T00:00:00Z",
+                             "source": "startup", "pad": "x" * 40})
+                 for t in types]
+        (session_dir / "session-journal.jsonl").write_text(
+            "\n".join(lines) + "\n")
+        return str(session_dir)
+
+    def test_the_last_start_or_end_decides_across_short_blocks(
+            self, tmp_path, monkeypatch):
+        import shared.pact_context as ctx
+        monkeypatch.setattr(ctx, "_TAIL_BLOCK_BYTES", 16)
+        ended = self._journal(tmp_path, "session_start", "session_end",
+                              *["task_created"] * 5)
+        last = ctx._session_last(ended)
+        assert last is not None and last["type"] == "session_end"
+        assert not ctx._is_live(last)
+
+    def test_an_unzoned_ts_reads_as_utc_in_any_local_zone(self, monkeypatch):
+        import time
+        import shared.pact_context as ctx
+        monkeypatch.setenv("TZ", "Asia/Tokyo")
+        time.tzset()
+        try:
+            assert ctx._event_time({"ts": "2026-01-01T00:00:00"}) == \
+                ctx._event_time({"ts": "2026-01-01T00:00:00Z"})
+        finally:
+            monkeypatch.undo()
+            time.tzset()
+
+    def test_a_journal_appended_after_a_read_is_read_again(self, tmp_path):
+        import shared.pact_context as ctx
+        ctx.reset_for_tests()
+        live = self._journal(tmp_path, "session_start")
+        assert ctx._is_live(ctx._session_last(live))
+        with open(Path(live) / "session-journal.jsonl", "a") as handle:
+            handle.write(json.dumps({"type": "session_end",
+                                     "ts": "2026-01-01T00:00:01Z"}) + "\n")
+        assert not ctx._is_live(ctx._session_last(live))
+
+    def test_a_start_after_an_end_is_live(self, tmp_path):
+        import shared.pact_context as ctx
+        resumed = self._journal(tmp_path, "session_start", "session_end",
+                                "session_start", "task_created")
+        assert ctx._is_live(ctx._session_last(resumed))
+
+    def test_no_lifecycle_event_or_no_journal_reads_as_live(self, tmp_path):
+        import shared.pact_context as ctx
+        assert ctx._is_live(ctx._session_last(
+            self._journal(tmp_path, "task_created")))
+        assert ctx._is_live(ctx._session_last(str(tmp_path / "absent")))
+
+    def test_an_end_holding_invalid_bytes_still_reads_as_ended(self,
+                                                               tmp_path):
+        import shared.pact_context as ctx
+        session_dir = tmp_path / "s"
+        session_dir.mkdir()
+        (session_dir / "session-journal.jsonl").write_bytes(
+            b'{"type": "session_start", "source": "startup"}\n'
+            b'{"type": "session_end", "note": "\xff\xfe"}\n')
+        assert not ctx._is_live(ctx._session_last(str(session_dir)))
+
+    def test_a_valid_end_reads_as_ended(self, tmp_path):
+        """Control for the cell above: the same journal with clean bytes."""
+        import shared.pact_context as ctx
+        session_dir = tmp_path / "s"
+        session_dir.mkdir()
+        (session_dir / "session-journal.jsonl").write_bytes(
+            b'{"type": "session_start", "source": "startup"}\n'
+            b'{"type": "session_end", "note": "ok"}\n')
+        assert not ctx._is_live(ctx._session_last(str(session_dir)))
+
+    def test_the_birth_is_the_first_start(self, tmp_path):
+        import shared.pact_context as ctx
+        session_dir = tmp_path / "s"
+        session_dir.mkdir()
+        (session_dir / "session-journal.jsonl").write_text("\n".join(
+            json.dumps({"type": "session_start", "source": source})
+            for source in ("clear", "compact")) + "\n")
+        assert ctx._session_birth(str(session_dir))["source"] == "clear"
+        assert ctx._session_last(str(session_dir))["source"] == "compact"
+
+    def test_the_whole_journal_is_never_parsed(self, tmp_path, monkeypatch):
+        import shared.pact_context as ctx
+        import shared.session_journal as journal
+        reads = []
+        monkeypatch.setattr(journal, "read_events_from",
+                            lambda *a, **k: reads.append(a) or [])
+        session_dir = self._journal(tmp_path, "session_start", "session_end")
+        ctx._session_last(session_dir)
+        ctx._session_birth(session_dir)
+        assert reads == []
+
+
+class TestProjectSessionRecordsMemo:
+    def _project(self, tmp_path, monkeypatch):
+        import shared.pact_context as ctx
+        project = tmp_path / "proj"
+        project.mkdir()
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+        slug_dir = tmp_path / "pact-sessions" / ctx.project_slug(str(project))
+        ctx.reset_for_tests()
+        return ctx, slug_dir
+
+    def _session(self, slug_dir, sid):
+        (slug_dir / sid).mkdir(parents=True)
+        (slug_dir / sid / "pact-session-context.json").write_text(
+            json.dumps({"session_id": sid, "team_name": "t"}))
+
+    def test_an_unchanged_project_is_scanned_once_per_process(
+            self, tmp_path, monkeypatch):
+        ctx, slug_dir = self._project(tmp_path, monkeypatch)
+        self._session(slug_dir, "a")
+        reads = []
+        real = Path.read_text
+        monkeypatch.setattr(Path, "read_text",
+                            lambda self, *a, **k: reads.append(self.name)
+                            or real(self, *a, **k))
+        root = tmp_path / "pact-sessions"
+        first = ctx._project_session_records(root)
+        second = ctx._project_session_records(root)
+        assert reads == ["pact-session-context.json"]
+        assert first == second and len(first) == 1
+
+    def test_a_new_session_dir_is_seen_by_the_next_scan(self, tmp_path,
+                                                         monkeypatch):
+        ctx, slug_dir = self._project(tmp_path, monkeypatch)
+        self._session(slug_dir, "a")
+        root = tmp_path / "pact-sessions"
+        assert len(ctx._project_session_records(root)) == 1
+        self._session(slug_dir, "b")
+        os.utime(slug_dir, ns=(1, slug_dir.stat().st_mtime_ns + 10**9))
+        assert len(ctx._project_session_records(root)) == 2
+
+    def test_reset_for_tests_drops_the_records_memo(self, tmp_path,
+                                                    monkeypatch):
+        ctx, slug_dir = self._project(tmp_path, monkeypatch)
+        self._session(slug_dir, "a")
+        root = tmp_path / "pact-sessions"
+        assert len(ctx._project_session_records(root)) == 1
+        stamp = slug_dir.stat().st_mtime_ns
+        (slug_dir / "a" / "pact-session-context.json").write_text(
+            json.dumps({"session_id": "a", "team_name": "u"}))
+        os.utime(slug_dir, ns=(1, stamp))
+        ctx.reset_for_tests()
+        assert ctx._project_session_records(root)[0][1]["team_name"] == "u"
+
+
+class TestContextProcessKeyCarry:
+    """A writer that computes no process key keeps the one the file records
+    for the same session, so a write from outside a hook never drops it."""
+
+    def test_a_write_without_a_key_keeps_the_recorded_one(self, tmp_path,
+                                                          monkeypatch):
+        import shared.pact_context as ctx
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        project = str(tmp_path / "proj")
+        ctx.reset_for_tests()
+        ctx.write_context("session-aaaa0000", "aaaa0000-sid", project, "",
+                          process_key="123:Mon Jan  5 09:00:00 2026")
+        ctx.reset_for_tests()
+        ctx.write_context("session-bbbb0000", "aaaa0000-sid", project, "")
+        target = ctx._build_session_path(ctx.project_slug(project),
+                                         "aaaa0000-sid")
+        data = json.loads((target / "pact-session-context.json").read_text())
+        assert data["team_name"] == "session-bbbb0000"
+        assert data["process_key"] == "123:Mon Jan  5 09:00:00 2026"
+
+    def test_a_key_recorded_for_another_session_is_never_carried(
+            self, tmp_path, monkeypatch):
+        import shared.pact_context as ctx
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        project = str(tmp_path / "proj")
+        ctx.reset_for_tests()
+        target = ctx._build_session_path(ctx.project_slug(project),
+                                         "aaaa0000-sid")
+        target.mkdir(parents=True)
+        (target / "pact-session-context.json").write_text(json.dumps({
+            "session_id": "other-sid",
+            "process_key": "123:Mon Jan  5 09:00:00 2026"}))
+        ctx.write_context("session-bbbb0000", "aaaa0000-sid", project, "")
+        data = json.loads((target / "pact-session-context.json").read_text())
+        assert data["session_id"] == "aaaa0000-sid"
+        assert data["process_key"] == ""
+
+    def test_the_started_at_pass_through_is_recorded(self, tmp_path,
+                                                     monkeypatch):
+        import shared.pact_context as ctx
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        project = str(tmp_path / "proj")
+        ctx.reset_for_tests()
+        ctx.write_context("session-aaaa0000", "aaaa0000-sid", project, "",
+                          started_at="2026-01-01T00:00:00+00:00")
+        target = ctx._build_session_path(ctx.project_slug(project),
+                                         "aaaa0000-sid")
+        data = json.loads((target / "pact-session-context.json").read_text())
+        assert data["started_at"] == "2026-01-01T00:00:00+00:00"
+
+
+class TestIdenticalWriteTightensMode:
+    def test_an_identical_write_keeps_the_inode_and_tightens_the_mode(
+            self, tmp_path):
+        import shared.pact_context as ctx
+        target = tmp_path / "ctx.json"
+        context = {"team_name": "t", "session_id": "s"}
+        ctx.persist_context(target, context)
+        os.chmod(target, 0o644)
+        inode = target.stat().st_ino
+        ctx.persist_context(target, context)
+        assert target.stat().st_ino == inode
+        assert target.stat().st_mode & 0o777 == 0o600
+
+
+class TestJournalReadOnce:
+    def test_an_unchanged_journal_is_read_once_per_process(self, tmp_path,
+                                                          monkeypatch):
+        import shared.pact_context as ctx
+        import shared.session_journal as journal
+        session_dir = tmp_path / "s"
+        session_dir.mkdir()
+        path = session_dir / "session-journal.jsonl"
+        path.write_text(json.dumps(
+            {"v": 1, "type": "session_end", "ts": "2026-01-01T00:00:00Z"}
+        ) + "\n")
+        reads = []
+        real = journal.read_events_from
+        monkeypatch.setattr(journal, "read_events_from",
+                            lambda d, *a, **k: reads.append(d) or real(d, *a, **k))
+        ctx.reset_for_tests()
+        first = ctx._journal_events(str(session_dir))
+        second = ctx._journal_events(str(session_dir))
+        assert first == second and len(first) == 1
+        assert len(reads) == 1
+        with path.open("a") as f:
+            f.write(json.dumps(
+                {"v": 1, "type": "session_end", "ts": "2026-01-02T00:00:00Z"}
+            ) + "\n")
+        assert len(ctx._journal_events(str(session_dir))) == 2
+        assert len(reads) == 2

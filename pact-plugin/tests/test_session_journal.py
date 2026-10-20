@@ -3555,6 +3555,7 @@ class TestValidateEventSchemaPerType:
         },
         "compaction_attributed": {"verdict": "teammate", "basis": "content"},
         "compaction_summary_dropped": {"cause": "no_free_stamp"},
+        "team_realigned": {"from": "session-old", "to": "session-new"},
         "variety_assessed": {
             "task_id": "42",
             "variety": {"novelty": 1, "scope": 1, "uncertainty": 1, "risk": 1, "total": 4},
@@ -4142,15 +4143,29 @@ class TestValidateOptionalFieldTypes:
                 assert isinstance(expected_type, type)
 
     def test_session_start_source_declared_optional(self):
-        """session_start has `source: str` in _OPTIONAL_FIELDS_BY_TYPE.
+        """session_start has `source: str` and `prev_session_dir: str` in
+        _OPTIONAL_FIELDS_BY_TYPE.
 
         Pins the canonical case — the isinstance guard in session_init.py
         clamps `source` at runtime; this schema entry pins the contract
-        at the journal boundary.
+        at the journal boundary. A prev_session_dir that is not a string is
+        rejected rather than landing on disk.
         """
-        from shared.session_journal import _OPTIONAL_FIELDS_BY_TYPE
+        from shared.session_journal import (
+            _OPTIONAL_FIELDS_BY_TYPE,
+            _validate_event_schema,
+            make_event,
+        )
 
-        assert _OPTIONAL_FIELDS_BY_TYPE.get("session_start") == {"source": str}
+        assert _OPTIONAL_FIELDS_BY_TYPE.get("session_start") == {
+            "source": str,
+            "prev_session_dir": str,
+        }
+        base = {"session_id": "s", "project_dir": "/tmp/proj"}
+        assert _validate_event_schema(make_event(
+            "session_start", prev_session_dir="/tmp/prev", **base))[0]
+        assert not _validate_event_schema(make_event(
+            "session_start", prev_session_dir=7, **base))[0]
 
     def test_compaction_attributed_latency_declared_optional(self):
         """compaction_attributed has `latency_s: float`, the seconds from staging

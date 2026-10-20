@@ -48,7 +48,7 @@ from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -276,7 +276,8 @@ class TestMainPausedStateIntegration:
                 main()
 
         assert exc_info.value.code == 0
-        mock_paused.assert_called_once_with(prev_session_dir=None)
+        mock_paused.assert_called_once()
+        assert mock_paused.call_args.kwargs["prev_session_dir"] is None
 
         output = json.loads(mock_stdout.getvalue())
         additional = output["hookSpecificOutput"]["additionalContext"]
@@ -553,9 +554,11 @@ class TestMainPrevSessionDirOrdering:
             restore_calls.append(prev_session_dir)
             return real_restore_last_session(prev_session_dir=prev_session_dir)
 
-        def spy_check_resume_state(prev_session_dir=None):
+        def spy_check_resume_state(prev_session_dir=None, **kwargs):
             resume_calls.append(prev_session_dir)
-            return real_check_resume_state(prev_session_dir=prev_session_dir)
+            return real_check_resume_state(
+                prev_session_dir=prev_session_dir, **kwargs
+            )
 
         # Patch boundary side effects that are unrelated to the ordering invariant:
         #   - setup_plugin_symlinks / remove_stale_kernel_block / update_pact_routing /
@@ -1750,6 +1753,7 @@ class TestWriteContextIntegration:
             "/Users/example/Sites/test-project",
             "",  # plugin_root: CLAUDE_PLUGIN_ROOT not set in this test
             started_at=None,  # a startup records now; only a compaction keeps the value on disk
+            process_key=ANY,
         )
 
     def test_missing_session_id_falls_back_to_unknown_and_warns(self, monkeypatch, tmp_path, capsys):
@@ -3132,6 +3136,7 @@ class TestPluginRootEnvWiring:
             str(tmp_path / "proj"),
             plugin_root_value,
             started_at=None,
+            process_key=ANY,
         )
 
     def test_plugin_root_env_flows_to_update_session_info(

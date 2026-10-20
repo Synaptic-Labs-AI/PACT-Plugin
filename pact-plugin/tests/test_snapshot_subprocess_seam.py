@@ -67,6 +67,8 @@ HOOKS_DIR = Path(__file__).parent.parent / "hooks"
 
 TEAM = "session-subproc"
 SID = "bbbbbbbb-2222-3333-4444-555555555555"
+# A tmux teammate's own session id: never the lead context's.
+TMUX_SID = "cccccccc-3333-4444-5555-666666666666"
 SLUG = "subproc-project"
 
 VALID_HANDOFF = {
@@ -388,10 +390,12 @@ class TestSeamASubprocess:
         assert "handoff" not in snapshots[0]["metadata"]
 
     def test_teammate_frame_no_snapshot_in_real_journal(self, tmp_path):
-        # Both-modes: the same frame under a teammate agent_type must not
-        # fire the lead-completion seam. The frame gate answers False here
-        # because no leadSessionId team config is seeded, so the topology
-        # leg cannot resolve.
+        # Both-modes: the same frame under a teammate agent_type, carrying
+        # the session id the lead context records, with no team config for
+        # the persisted team. The frame gate answers False, a deliberate
+        # safety rule: with that config gone the persisted name is stale,
+        # and a same-id task in its store belongs to the old team, so a
+        # teammate-time emit could journal the old team's content.
         home, session_dir, tasks_dir = _seed_home(tmp_path)
         _write_task(tasks_dir, "42", status="completed",
                     metadata=dict(SIBLINGS))
@@ -527,8 +531,10 @@ class TestPerWriteSubprocess:
 
     def test_tmux_teammate_frame_no_event_no_marker_real_process(
             self, tmp_path):
-        # The silo row through a real process: a distinct session_id must
-        # produce NO journal write and NO marker claim anywhere on disk.
+        # The silo row through a real process: a tmux teammate frame carries
+        # its OWN session id, distinct from the one the lead context records
+        # (and from the team config's leadSessionId), and must produce NO
+        # journal write and NO marker claim anywhere on disk.
         home, session_dir, tasks_dir = _seed_home(tmp_path)
         _seed_team_config(home, lead_session_id="another-lead-session")
         _write_task(tasks_dir, "82", status="in_progress", metadata={})
@@ -539,6 +545,7 @@ class TestPerWriteSubprocess:
                 "82",
                 {"teachback_submit": {"understanding": "u"}},
                 agent_type="pact-backend-coder",
+                session_id=TMUX_SID,
             ),
             home,
         )

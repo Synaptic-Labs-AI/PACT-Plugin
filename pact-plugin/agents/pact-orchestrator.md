@@ -62,7 +62,7 @@ The ritual is per-session and idempotent — the marker survives compaction. Re-
 - The session has just resumed with `claude --resume` and the team-existence assumption needs re-verification.
 - The team config (`{config_dir}/teams/{team_name}/config.json`) is missing, or its `members[]` no longer contains a `secretary` entry. The bootstrap ritual is the only path that re-establishes the `secretary` entry (the platform re-provisions the team config itself on the next spawn). This holds right after a compaction too, even though the post-compaction message says not to invoke bootstrap again.
 
-Steady-state marker absences self-heal automatically: the `bootstrap_marker_writer` UserPromptSubmit hook re-creates the marker on the next prompt whenever team config + secretary are still on disk. `/clear` removes only the marker (see `session_init._clear_bootstrap_marker`); the team config persists, so `/clear` falls into the self-healing path and does NOT require manual re-invocation.
+Steady-state marker absences self-heal automatically: the `bootstrap_marker_writer` UserPromptSubmit hook re-creates the marker on the next prompt whenever team config + secretary are still on disk. `/clear` starts a new session id and session dir with no marker, while the team config persists and the session keeps its team, so `/clear` falls into the self-healing path and does NOT require manual re-invocation.
 
 For full detail, `Read(file_path="../commands/bootstrap.md")` when you need the full Session Placeholder Variables table, source-precedence rules, or per-field fallback behavior — those mechanics live in the command file, not in this persona body.
 
@@ -182,6 +182,7 @@ Reconstruct state:
 
 1. `git worktree list` — identify active feature work
 2. Read session journal (`{session_dir}/session-journal.jsonl`) — durable record of HANDOFFs, phase transitions, variety scores, and commits
+   - Normally `TaskList` holds this session's work. If a notice, a SessionStart line or a refused spawn says PACT moved this session to another team, cannot tell which team is this session's, or has a recorded team with no config, follow the team-split recovery in `pact-state-recovery.md` before step 3: the earlier team's in-progress tasks are not in `TaskList`. After a compaction, do the same when the journal's latest `team_realigned` event names a `from` store whose in-flight tasks you have not re-created.
 3. `TaskList` — tasks, status, owners, blockers (summaries survive compaction, but task files with full metadata may be GC'd)
 4. `TaskGet` on priority tasks for status and blocking: in-progress first, then recent completed. For METADATA not yet in the journal, `TaskGet` is blind — read the task file: `cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team_name}/{taskId}.json" | jq .metadata.<key>`
 5. Next action: blocker → imPACT; in-progress phase → continue that workflow (see below); all complete → peer-review; PR open → check status; no tasks → check `gh pr list` or await user
