@@ -68,6 +68,11 @@ def _fenced_lines(section):
     return [m.group(1).strip()] if m else []
 
 
+def _last_bullet(section):
+    bullets = [ln.strip()[2:] for ln in section.splitlines() if ln.lstrip().startswith("- ")]
+    return bullets[-1:]
+
+
 # (file, anchor, end, extractor, terminal phrases accepted at this site).
 # Terminal phrases are accepted only where the chain ends: wrap-up's session
 # decision hands the session back to the user or ends it.
@@ -86,7 +91,13 @@ CHECKPOINTS = (
     ("protocols/pact-workflows.md",
      '**Next steps** — After commit, use `AskUserQuestion` to ask: "Work committed. What next?"',
      "**If blocker reported**", _arrow_clauses, ()),
+    ("plan-mode.md", "4. Once all decision-requiring questions are resolved:",
+     "**Do NOT exit plan mode**", _last_bullet, ()),
 )
+
+# Checkpoints whose clause is text the USER runs ("Resume with `/PACT:x`"),
+# not a hand-off the lead performs. The hand-off verb pin skips them.
+USER_FACING = {"pause.md", "refresh.md", "plan-mode.md"}
 
 # Every other command, with the reason it has no end-of-flow checkpoint.
 EXEMPT = {
@@ -95,7 +106,6 @@ EXEMPT = {
     "next.md": "backlog report; the user's decision is recorded, no workflow follows",
     "orchestrate.md": "ends by invoking `/PACT:peer-review`, not at a user checkpoint",
     "pin-memory.md": "utility; edits pinned memory and returns",
-    "plan-mode.md": "produces a plan; the user starts a workflow from it",
     "prune-memory.md": "utility; prunes pins and returns",
     "rePACT.md": "nested cycle; returns to the parent workflow",
     "telegram-setup.md": "utility; configures notifications and returns",
@@ -241,6 +251,57 @@ class TestShutdownOwner:
         assert not hits, hits
 
 
+# A teammate-lifecycle verb whose end point is the merge alone: "Teammates
+# persist until after user-authorized merge", "Shut down after ... user merge
+# decision". Scanned per sentence and per table cell. "merge-ready" is a task
+# state, not an end point.
+_LIFECYCLE_KEYED_ON_MERGE_RE = re.compile(
+    r"\b(?:shut(?:s|ting)?\s+(?:\w+\s+){0,3}?down|shutdown|persist(?:s|ed)?|"
+    r"(?:keep|kept|stay|stays)\s+alive)\b"
+    r"[^.|\n]*?\b(?:after|until|following)\b[^.|\n]*?\bmerge\b(?!-)",
+    re.IGNORECASE,
+)
+
+
+def _sentences(text):
+    return [s for s in re.split(r"(?<=[.!?])\s+|\|", text) if s.strip()]
+
+
+class TestTeammateLifecycleNotKeyedOnMerge:
+    def test_the_pattern_matches_both_retired_shapes(self):
+        """Non-vacuity control: the two sentences this pin retired, verbatim
+        from the reference tree, must each match; the persist-state and
+        merge-ready phrasings on the live tree must not."""
+        for retired in (
+            "Teammates persist until after user-authorized merge.",
+            ("Shut down after all remediation complete + user merge decision "
+             "(via `AskUserQuestion`)."),
+        ):
+            assert _LIFECYCLE_KEYED_ON_MERGE_RE.search(retired), retired
+        for kept in (
+            "Review task: in_progress (persists until merge-ready)",
+            "Consolidate memory, persist state, shut down teammates",
+        ):
+            assert not _LIFECYCLE_KEYED_ON_MERGE_RE.search(kept), kept
+
+    def test_no_llm_loaded_sentence_ends_teammates_at_the_merge(self):
+        """Reddens when any LLM-loaded sentence or table cell shuts down, keeps
+        alive or persists teammates until a merge without naming
+        `/PACT:wrap-up` as the owner. Mutation: restore peer-review's "Teammates
+        persist until after user-authorized merge."."""
+        files = [p for g in _LLM_LOADED_GLOBS for p in sorted(PLUGIN.glob(g))]
+        assert files, "no LLM-loaded files found"
+        hits = []
+        for path in files:
+            for sentence in _sentences(path.read_text(encoding="utf-8")):
+                if "/PACT:wrap-up" in sentence:
+                    continue
+                m = _LIFECYCLE_KEYED_ON_MERGE_RE.search(sentence)
+                if m:
+                    hits.append((str(path.relative_to(PLUGIN)), m.group(0)))
+        assert not hits, hits
+
+
 # ---------------------------------------------------------------------------
 # The workflow chain
 # ---------------------------------------------------------------------------
@@ -318,6 +379,66 @@ class TestWorkflowChain:
             for a in earlier:
                 for b in later:
                     assert b.split(":")[1] in graph[a.split(":")[1]], (a, b, graph)
+
+
+# A verb other than "invoke" placed directly before a `/PACT:` command: the
+# successor graph above counts only "invoke", so a hand-off worded this way
+# drops its edge without reddening anything.
+_OTHER_HANDOFF_VERB_RE = re.compile(
+    r"\b(?:run|use|execute|call|start|launch|trigger|begin|switch\s+to|go\s+to|"
+    r"proceed\s+(?:to|with)|continue\s+with|hand\s+off\s+to)\*{0,2}\s+`?/PACT:",
+    re.IGNORECASE,
+)
+
+# The lead's own end-of-flow hand-offs outside CHECKPOINTS: orchestrate ends by
+# invoking peer-review.
+_LEAD_HANDOFF_STEPS = (
+    ("orchestrate.md", "6. **Invoke `/PACT:peer-review`**", "\n"),
+)
+
+
+def _lead_handoff_clauses():
+    out = []
+    for name, anchor, end, extract, _terminal in CHECKPOINTS:
+        if name in USER_FACING:
+            continue
+        for clause in extract(_section(_text(name), anchor, end)):
+            out.append((name, clause))
+    for name, anchor, end in _LEAD_HANDOFF_STEPS:
+        out.append((name, _section(_text(name), anchor, end)))
+    return out
+
+
+class TestHandOffsUseInvoke:
+    def test_the_pattern_matches_the_dropped_shapes(self):
+        """Non-vacuity control: the shapes that would drop an edge match; the
+        counted shape and a plain mention do not."""
+        for dropped in ("Run `/PACT:peer-review`", "**Run `/PACT:peer-review`**",
+                        "use `/PACT:pause`", "proceed to `/PACT:wrap-up`"):
+            assert _OTHER_HANDOFF_VERB_RE.search(dropped), dropped
+        for kept in ("Invoke `/PACT:peer-review`", "more work may follow via `/PACT:comPACT`"):
+            assert not _OTHER_HANDOFF_VERB_RE.search(kept), kept
+
+    def test_every_lead_handoff_clause_is_checked(self):
+        """Non-vacuity control: reddens when the lead-facing set shrinks below
+        one clause per lead-facing checkpoint plus orchestrate's final step."""
+        names = {n for n, _ in _lead_handoff_clauses()}
+        expected = {c[0] for c in CHECKPOINTS if c[0] not in USER_FACING} | {
+            s[0] for s in _LEAD_HANDOFF_STEPS}
+        assert names == expected, sorted(names ^ expected)
+
+    def test_end_of_flow_handoffs_are_introduced_with_invoke(self):
+        """Reddens when a lead-facing end-of-flow hand-off names its successor
+        with a verb other than "invoke", which the successor graph would not
+        count. Mutation: change peer-review's "invoke `/PACT:pause`" option to
+        "run `/PACT:pause`"."""
+        bad = [(n, c) for n, c in _lead_handoff_clauses() if _OTHER_HANDOFF_VERB_RE.search(c)]
+        assert not bad, bad
+        # Every lead-facing clause that names a successor at all names one edge.
+        no_edge = [(n, c) for n, c in _lead_handoff_clauses()
+                   if _PACT_COMMAND_RE.search(c) and not _EDGE_RE.search(c)
+                   and not _EXPLICIT_RETURN_RE.search(c)]
+        assert not no_edge, no_edge
 
 
 # ---------------------------------------------------------------------------
