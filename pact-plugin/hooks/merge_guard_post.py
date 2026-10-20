@@ -773,14 +773,26 @@ _LITERAL_CD_RE = re.compile(
 _GH_PR_OP_RE = re.compile(r"\bgh\s+pr\s+(?:merge|close)\b")
 
 
-def _state_check_dir(command: str) -> tuple[bool, str | None]:
-    """Where the PR state check may run for this command: (True, None) for the
-    hook's own directory, (True, <dir>) after a single literal absolute `cd`,
-    and (False, None) when the command may target another repo."""
+def _state_check_dir(
+    command: str, frame_cwd: object = None
+) -> tuple[bool, str | None]:
+    """Where the PR state check may run for this command: (True, <dir>) for the
+    session's directory (the hook frame's `cwd`, when it is an absolute existing
+    directory), (True, None) for the hook's own directory when the frame names
+    none, (True, <dir>) after a single literal absolute `cd`, and (False, None)
+    when the command may target another repo."""
     if _REPO_REDIRECT_RE.search(command):
         return False, None
     cd_count = len(_CD_WORD_RE.findall(command))
     if cd_count == 0:
+        # The command ran in the session's shell directory, which an earlier
+        # Bash call may have changed; the hook's own directory may differ.
+        if (
+            isinstance(frame_cwd, str)
+            and os.path.isabs(frame_cwd)
+            and os.path.isdir(frame_cwd)
+        ):
+            return True, frame_cwd
         return True, None
     literal = _LITERAL_CD_RE.search(command)
     gh_leg = _GH_PR_OP_RE.search(command)
@@ -794,14 +806,14 @@ def _state_check_dir(command: str) -> tuple[bool, str | None]:
     return True, path
 
 
-def _pr_state_confirms(command: str, op_type: str) -> bool:
+def _pr_state_confirms(command: str, op_type: str, frame_cwd: object = None) -> bool:
     """True only when GitHub reports the PR the command named in the state the
     command produces. Any doubt is False, which keeps the token (the TTL and
     MAX_USES bound still apply): a URL, branch or implicit target, an -R/--repo
     target, a directory change or repo env assignment other than one literal
     absolute `cd`, an unreachable or slow gh, or any exception."""
     try:
-        followable, cwd = _state_check_dir(command)
+        followable, cwd = _state_check_dir(command, frame_cwd)
         if not followable:
             return False
         ctx = extract_command_context(_extraction_surface(command))
@@ -1110,7 +1122,7 @@ def main():
                     # for the PR's state; any doubt there keeps the token.
                     confirmed = (
                         expected_substring.lower() in stdout_text.lower()
-                        or _pr_state_confirms(command, op_type)
+                        or _pr_state_confirms(command, op_type, input_data.get("cwd"))
                     )
                 else:
                     confirmed = expected_substring in stdout_text

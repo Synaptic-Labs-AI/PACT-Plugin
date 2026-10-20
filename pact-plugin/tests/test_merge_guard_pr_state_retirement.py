@@ -8,6 +8,7 @@ Any doubt keeps the token: a URL, branch or implicit target, an -R/--repo
 target, a directory change or repo env assignment in the command, and an
 unreachable or slow gh. One directory change is followed instead: a single
 `cd <literal absolute existing dir> &&` before the gh leg, where the check runs.
+With no cd, the check runs in the session's directory, the hook frame's `cwd`.
 
 Every arm runs the REAL merge_guard_post.py as a subprocess, with a fake `gh`
 first on an explicitly built PATH and an isolated CLAUDE_CONFIG_DIR. The fake
@@ -75,13 +76,15 @@ def _mint(rig, command):
     assert write_token(ctx, token_dir=rig["config"])
 
 
-def _post(rig, command, stdout, **env_kw):
+def _post(rig, command, stdout, frame_cwd=None, **env_kw):
     payload = {
         "hook_event_name": "PostToolUse",
         "tool_name": "Bash",
         "tool_input": {"command": command},
         "tool_response": {"stdout": stdout, "stderr": "", "interrupted": False},
     }
+    if frame_cwd is not None:
+        payload["cwd"] = frame_cwd
     started = time.monotonic()
     proc = subprocess.run(
         [sys.executable, str(_HOOK)],
@@ -257,6 +260,38 @@ class TestLiteralAbsoluteCd:
         _mint(rig, cmd)
         _post(rig, cmd, "", state="MERGED")
         assert _gh_cwds(rig) == [os.path.realpath(rig["tmp"])]
+
+    def test_no_cd_runs_in_frame_cwd(self, rig):
+        """The command ran in the session's shell directory, which the hook frame
+        reports as `cwd`; an earlier Bash call may have moved it away from the
+        hook's own directory."""
+        session = rig["tmp"] / "session"
+        session.mkdir()
+        cmd = f"{_MERGE} 1656 --squash"
+        _mint(rig, cmd)
+        _post(rig, cmd, "", frame_cwd=str(session), state="MERGED")
+        assert _gh_cwds(rig) == [os.path.realpath(session)]
+        assert _retired(rig)
+
+    @pytest.mark.parametrize("frame_cwd", ["missing", "rel", ""])
+    def test_unusable_frame_cwd_runs_in_hook_dir(self, rig, frame_cwd):
+        (rig["tmp"] / "rel").mkdir()  # exists relative to the hook's dir, still refused
+        if frame_cwd == "missing":
+            frame_cwd = str(rig["tmp"] / "missing")
+        cmd = f"{_MERGE} 1656 --squash"
+        _mint(rig, cmd)
+        _post(rig, cmd, "", frame_cwd=frame_cwd, state="MERGED")
+        assert _gh_cwds(rig) == [os.path.realpath(rig["tmp"])]
+
+    def test_literal_cd_overrides_frame_cwd(self, rig):
+        repo = rig["tmp"] / "repo"
+        session = rig["tmp"] / "session"
+        repo.mkdir()
+        session.mkdir()
+        cmd = f"cd {repo} && {_MERGE} 1656 --squash"
+        _mint(rig, f"{_MERGE} 1656 --squash")
+        _post(rig, cmd, "", frame_cwd=str(session), state="MERGED")
+        assert _gh_cwds(rig) == [os.path.realpath(repo)]
 
     def test_missing_dir_is_doubt_before_gh(self, rig):
         """A missing directory is doubt in the hook itself, not only through gh
