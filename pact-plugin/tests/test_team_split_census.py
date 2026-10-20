@@ -324,6 +324,48 @@ def test_team_ownership_rejects_unsafe_and_unknown_teams(tmp_path,
     assert owned("session-absent0") is False
 
 
+def test_an_unsafe_team_name_is_never_owned(tmp_path, monkeypatch):
+    """A live session's context records a path-unsafe team name: the name is
+    refused before any scan."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _pact_session(world, SECOND_SID, team="../escape")
+    assert _owned("../escape") is False
+
+
+def test_a_live_session_recording_the_team_owns_it(tmp_path, monkeypatch):
+    """Control for the two symlink cells below: the same live session, in
+    this project's session dir, owns the team it records."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _pact_session(world, UNRELATED_SID, team=SECOND_TEAM)
+    assert _owned(SECOND_TEAM) is True
+
+
+def test_a_session_dir_symlinked_from_outside_the_project_never_owns(
+        tmp_path, monkeypatch):
+    """The live session recording the team is reached only through a symlink
+    in this project's session dir that points outside it: it is not read."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _pact_session(world, UNRELATED_SID, team=SECOND_TEAM)
+    linked = world.session_dir.parent / UNRELATED_SID
+    outside = tmp_path / "outside-session"
+    linked.rename(outside)
+    linked.symlink_to(outside, target_is_directory=True)
+    assert _owned(SECOND_TEAM) is False
+
+
+def test_a_project_session_dir_outside_pact_sessions_is_never_read(
+        tmp_path, monkeypatch):
+    """This project's session dir is itself a symlink out of the
+    pact-sessions tree: no session in it is read."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _pact_session(world, UNRELATED_SID, team=SECOND_TEAM)
+    slug = world.session_dir.parent
+    outside = tmp_path / "outside-slug"
+    slug.rename(outside)
+    slug.symlink_to(outside, target_is_directory=True)
+    assert _owned(SECOND_TEAM) is False
+
+
 # -- a keyless /clear successor still holds its predecessor's team --------------
 
 _CLEAR_AT = "2026-10-19T15:34:20Z"
@@ -693,6 +735,57 @@ def test_a_keyless_compaction_with_another_recorded_key_keeps_its_team(
     _set_own_key(world, OWN_KEY)
     _pact_session(world, SECOND_SID, team=SECOND_TEAM, key="7:sib")
     assert _compact(monkeypatch, world)["team_name"] == OLD_TEAM
+
+
+# -- after a resume, only this process's live key is ours -----------------------
+
+NEW_PROCESS_KEY = "5151:Tue Oct 20 09:00:00 2026"
+
+
+def _resume(monkeypatch, world, key):
+    """A resume SessionStart whose lead frame reads ``key`` as this claude
+    process's key."""
+    import session_init
+    from fixtures.role_frames import captured_lead_sessionstart_qualified
+    frame = captured_lead_sessionstart_qualified()
+    frame.update(session_id=OLD_SID, source="resume",
+                 cwd=str(world.project_dir))
+    monkeypatch.setattr(session_init, "current_process_key", lambda: key)
+    monkeypatch.chdir(world.project_dir)
+    reset_context_module()
+    with patch("sys.stdin", io.StringIO(json.dumps(frame))), \
+         patch("sys.stdout", new_callable=io.StringIO):
+        with pytest.raises(SystemExit):
+            session_init.main()
+    reset_context_module()
+    return json.loads(world.context_path.read_text(encoding="utf-8"))
+
+
+def test_a_crashed_life_of_the_resumed_process_is_another_session(
+        tmp_path, monkeypatch):
+    """Before the resume, an earlier /clear life of this lineage recorded
+    the old process's key, leads the sibling team and never journalled an
+    end. The resumed process has a new key, so that life is not ours: it
+    reads as live and its team stays excluded. The context then records the
+    new key."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _set_own_key(world, OWN_KEY)
+    _pact_session(world, SECOND_SID, team=SECOND_TEAM, key=OWN_KEY,
+                  born="clear")
+    record = _resume(monkeypatch, world, NEW_PROCESS_KEY)
+    assert record["team_name"] == OLD_TEAM
+    assert record["process_key"] == NEW_PROCESS_KEY
+
+
+def test_a_resume_that_reads_the_recorded_key_adopts_that_life_s_team(
+        tmp_path, monkeypatch):
+    """Control: a resume whose process key equals the recorded one treats
+    the same life as an earlier life of this process and adopts its team."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _set_own_key(world, OWN_KEY)
+    _pact_session(world, SECOND_SID, team=SECOND_TEAM, key=OWN_KEY,
+                  born="clear")
+    assert _resume(monkeypatch, world, OWN_KEY)["team_name"] == SECOND_TEAM
 
 
 # -- the one description of an undecided team ----------------------------------

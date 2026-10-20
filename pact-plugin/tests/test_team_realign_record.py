@@ -232,6 +232,19 @@ def test_a_move_back_and_forth_is_recorded_each_time(tmp_path, monkeypatch):
                              (OLD_TEAM, NEW_TEAM)]
 
 
+def test_a_move_from_another_team_to_the_same_one_is_recorded(
+        tmp_path, monkeypatch):
+    """The latest event moved into NEW_TEAM from a different team: a move
+    from OLD_TEAM into NEW_TEAM is a different move and is recorded."""
+    world = _world(tmp_path, monkeypatch)
+    _init(world)
+    (world.root / "tasks" / "session-cccc3333").mkdir(parents=True)
+    session_resume.append_team_realigned("session-cccc3333", NEW_TEAM)
+    session_resume.append_team_realigned(OLD_TEAM, NEW_TEAM)
+    assert _moves(world) == [("session-cccc3333", NEW_TEAM),
+                             (OLD_TEAM, NEW_TEAM)]
+
+
 # One racer: a separate python3 process that waits for the shared start file,
 # then records the move. Separate processes, not threads or a fork, so each
 # one takes its own flock exactly as two hook processes would.

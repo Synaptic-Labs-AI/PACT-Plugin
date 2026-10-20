@@ -2989,8 +2989,15 @@ class TestProcessKey:
     """current_process_key(): the hook's real parent plus its start time,
     only when CLAUDE_PID agrees with that parent."""
 
+    @pytest.fixture
+    def parent_is_this_process(self, monkeypatch):
+        # pytest's own parent may have exited (ppid 1, which the key
+        # refuses); stand this live process in as the hook's parent.
+        parent = os.getpid()
+        monkeypatch.setattr(os, "getppid", lambda: parent)
+
     def test_a_matching_claude_pid_gives_the_parent_and_its_start_time(
-            self, monkeypatch):
+            self, monkeypatch, parent_is_this_process):
         import subprocess
         import shared.pact_context as ctx
         monkeypatch.setenv("CLAUDE_PID", str(os.getppid()))
@@ -3000,10 +3007,11 @@ class TestProcessKey:
             capture_output=True, text=True,
             env={**os.environ, "LC_ALL": "C", "TZ": "UTC"},
         ).stdout.split())
+        assert started
         assert ctx.current_process_key() == f"{os.getppid()}:{started}"
 
     def test_the_key_does_not_depend_on_the_callers_time_zone(
-            self, monkeypatch):
+            self, monkeypatch, parent_is_this_process):
         import shared.pact_context as ctx
         monkeypatch.setenv("CLAUDE_PID", str(os.getppid()))
         keys = []
@@ -3017,6 +3025,26 @@ class TestProcessKey:
             self, monkeypatch):
         import shared.pact_context as ctx
         monkeypatch.setenv("CLAUDE_PID", str(os.getpid()))
+        ctx.reset_for_tests()
+        assert ctx.current_process_key() == ""
+
+    def test_a_failed_ps_gives_no_key(self, monkeypatch,
+                                      parent_is_this_process):
+        import subprocess
+        import shared.pact_context as ctx
+        monkeypatch.setenv("CLAUDE_PID", str(os.getppid()))
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k:
+                            subprocess.CompletedProcess(
+                                a[0], 1, stdout="Mon Jan  5 09:00:00 2026\n",
+                                stderr=""))
+        ctx.reset_for_tests()
+        assert ctx.current_process_key() == ""
+
+    def test_an_orphaned_hook_whose_parent_is_init_gives_no_key(
+            self, monkeypatch):
+        import shared.pact_context as ctx
+        monkeypatch.setattr(os, "getppid", lambda: 1)
+        monkeypatch.setenv("CLAUDE_PID", "1")
         ctx.reset_for_tests()
         assert ctx.current_process_key() == ""
 
@@ -3082,6 +3110,28 @@ class TestSessionMarksReadTheEnds:
         last = ctx._session_last(ended)
         assert last is not None and last["type"] == "session_end"
         assert not ctx._is_live(last)
+
+    def test_an_unzoned_ts_reads_as_utc_in_any_local_zone(self, monkeypatch):
+        import time
+        import shared.pact_context as ctx
+        monkeypatch.setenv("TZ", "Asia/Tokyo")
+        time.tzset()
+        try:
+            assert ctx._event_time({"ts": "2026-01-01T00:00:00"}) == \
+                ctx._event_time({"ts": "2026-01-01T00:00:00Z"})
+        finally:
+            monkeypatch.undo()
+            time.tzset()
+
+    def test_a_journal_appended_after_a_read_is_read_again(self, tmp_path):
+        import shared.pact_context as ctx
+        ctx.reset_for_tests()
+        live = self._journal(tmp_path, "session_start")
+        assert ctx._is_live(ctx._session_last(live))
+        with open(Path(live) / "session-journal.jsonl", "a") as handle:
+            handle.write(json.dumps({"type": "session_end",
+                                     "ts": "2026-01-01T00:00:01Z"}) + "\n")
+        assert not ctx._is_live(ctx._session_last(live))
 
     def test_a_start_after_an_end_is_live(self, tmp_path):
         import shared.pact_context as ctx
@@ -3177,6 +3227,19 @@ class TestProjectSessionRecordsMemo:
         os.utime(slug_dir, ns=(1, slug_dir.stat().st_mtime_ns + 10**9))
         assert len(ctx._project_session_records(root)) == 2
 
+    def test_reset_for_tests_drops_the_records_memo(self, tmp_path,
+                                                    monkeypatch):
+        ctx, slug_dir = self._project(tmp_path, monkeypatch)
+        self._session(slug_dir, "a")
+        root = tmp_path / "pact-sessions"
+        assert len(ctx._project_session_records(root)) == 1
+        stamp = slug_dir.stat().st_mtime_ns
+        (slug_dir / "a" / "pact-session-context.json").write_text(
+            json.dumps({"session_id": "a", "team_name": "u"}))
+        os.utime(slug_dir, ns=(1, stamp))
+        ctx.reset_for_tests()
+        assert ctx._project_session_records(root)[0][1]["team_name"] == "u"
+
 
 class TestContextProcessKeyCarry:
     """A writer that computes no process key keeps the one the file records
@@ -3197,6 +3260,23 @@ class TestContextProcessKeyCarry:
         data = json.loads((target / "pact-session-context.json").read_text())
         assert data["team_name"] == "session-bbbb0000"
         assert data["process_key"] == "123:Mon Jan  5 09:00:00 2026"
+
+    def test_a_key_recorded_for_another_session_is_never_carried(
+            self, tmp_path, monkeypatch):
+        import shared.pact_context as ctx
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        project = str(tmp_path / "proj")
+        ctx.reset_for_tests()
+        target = ctx._build_session_path(ctx.project_slug(project),
+                                         "aaaa0000-sid")
+        target.mkdir(parents=True)
+        (target / "pact-session-context.json").write_text(json.dumps({
+            "session_id": "other-sid",
+            "process_key": "123:Mon Jan  5 09:00:00 2026"}))
+        ctx.write_context("session-bbbb0000", "aaaa0000-sid", project, "")
+        data = json.loads((target / "pact-session-context.json").read_text())
+        assert data["session_id"] == "aaaa0000-sid"
+        assert data["process_key"] == ""
 
     def test_the_started_at_pass_through_is_recorded(self, tmp_path,
                                                      monkeypatch):

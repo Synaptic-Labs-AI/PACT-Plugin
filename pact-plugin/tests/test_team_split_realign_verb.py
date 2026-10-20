@@ -130,6 +130,24 @@ def test_realign_writes_the_record_the_team_line_and_the_journal(
     assert [(m["from"], m["to"]) for m in moves] == [(OLD_TEAM, NEW_TEAM)]
 
 
+def test_a_realign_whose_event_cannot_be_journalled_names_the_earlier_team(
+        tmp_path, monkeypatch):
+    """The journal cannot take the event (its path is a directory): the
+    record still moves, and stderr names the earlier team, which recovery
+    would otherwise read from that event."""
+    world = _undecided(tmp_path, monkeypatch,
+                       old_tasks=({"id": "7", "status": "in_progress"},))
+    journal = world.session_dir / "session-journal.jsonl"
+    if journal.exists():
+        journal.unlink()
+    journal.mkdir(parents=True)
+    result = _realign(world, NEW_TEAM)
+    assert result.returncode == 0, result.stderr
+    assert saved_team_name(world) == NEW_TEAM
+    assert (f"team_realigned was not recorded; the earlier team is {OLD_TEAM}"
+            in result.stderr), result.stderr
+
+
 def test_realign_accepts_a_lead_cwd_reached_through_a_symlink(tmp_path,
                                                               monkeypatch):
     """The lead's recorded cwd is a symlink to the project dir: both sides
@@ -362,6 +380,18 @@ def test_realign_accepts_the_team_this_session_leads(tmp_path, monkeypatch):
     result = _realign(world, OLD_TEAM)
     assert result.returncode == 0, result.stderr
     assert saved_team_name(world) == OLD_TEAM
+
+
+def test_the_led_team_named_in_another_case_is_not_refused_as_another(
+        tmp_path, monkeypatch):
+    """Team names compare casefolded: the team this session leads, named in
+    upper case, is never refused as a different team. (Whether the config
+    then reads depends on the filesystem's case rule, so only the identity
+    refusal is asserted absent.)"""
+    world = _undecided(tmp_path, monkeypatch, old_config=True,
+                       saved_team=NEW_TEAM)
+    result = _realign(world, OLD_TEAM.upper())
+    assert "this session leads team" not in result.stderr, result.stderr
 
 
 def test_a_move_from_a_team_that_never_existed_journals_nothing(

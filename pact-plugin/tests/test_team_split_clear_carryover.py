@@ -308,6 +308,18 @@ def test_a_predecessor_dir_outside_pact_sessions_is_refused(tmp_path,
     assert _recorded(world)["team_name"] == COMPUTED_TEAM
 
 
+def test_a_project_session_dir_outside_pact_sessions_is_refused(
+        tmp_path, monkeypatch):
+    """This project's session dir is itself a symlink to a dir outside the
+    pact-sessions tree: no predecessor in it is read."""
+    world = _clear_world(tmp_path, monkeypatch)
+    outside = tmp_path / "elsewhere-slug"
+    world.sessions.rename(outside)
+    world.sessions.symlink_to(outside, target_is_directory=True)
+    _start(world)
+    assert _recorded(world)["team_name"] == COMPUTED_TEAM
+
+
 def test_a_resume_start_disarms_the_carry_over(tmp_path, monkeypatch):
     """A clear-born dir later resumed (a new process, a resume start): its
     write-back no longer follows the clear."""

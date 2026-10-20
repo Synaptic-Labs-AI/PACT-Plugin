@@ -1329,6 +1329,42 @@ class TestGuardedBranchTwoOverride:
         )
         assert resolved == NEW_UUID_DIR  # live team — never LEAD_SID (dead dir)
 
+    @pytest.mark.parametrize("passed_key, expected", [
+        ("5151:Tue Oct 20 09:00:00 2026", LEAD_SID),
+        ("4242:Mon Oct 19 15:00:00 2026", NEW_UUID_DIR),
+    ], ids=["new-process-key", "recorded-key"])
+    def test_the_preempting_census_takes_ours_from_the_passed_key(
+            self, ctx, monkeypatch, tmp_path, passed_key, expected):
+        """The candidate's lead is a live session of this project that
+        recorded this session's OLD process key, as a pre-resume life of
+        the same lineage would. After a resume the passed key is the new
+        process's, so that session is not ours and its team cannot preempt
+        the substrate; passing the recorded key makes it ours."""
+        ctx_module, teams_root = ctx
+        _seed_dead_own_substrate(teams_root)
+        _seed_census_candidate(teams_root, lead_cwd=str(tmp_path / "project"))
+        ctx_path = _write_context_file(monkeypatch, ctx_module, tmp_path,
+                                       team_name=STALE_TEAM,
+                                       session_id=LEAD_SID)
+        recorded = json.loads(ctx_path.read_text(encoding="utf-8"))
+        recorded["process_key"] = "4242:Mon Oct 19 15:00:00 2026"
+        ctx_path.write_text(json.dumps(recorded), encoding="utf-8")
+        _seed_session_journal(ctx_module,
+                              ["session_end", "task_metadata_snapshot"])
+        slug_dir = (teams_root.parent / "pact-sessions"
+                    / ctx_module.project_slug(str(tmp_path / "project")))
+        lead_dir = slug_dir / NEW_SID
+        lead_dir.mkdir(parents=True)
+        (lead_dir / "pact-session-context.json").write_text(json.dumps({
+            "team_name": NEW_UUID_DIR, "session_id": NEW_SID,
+            "process_key": "4242:Mon Oct 19 15:00:00 2026"}),
+            encoding="utf-8")
+        resolved = ctx_module._resolve_aligned_team_name(
+            LEAD_SID, teams_dir=str(teams_root), default=STALE_TEAM,
+            process_key=passed_key,
+        )
+        assert resolved == expected
+
     def test_census_empty_does_not_preempt_idle_substrate(self, ctx,
                                                           monkeypatch,
                                                           tmp_path):
