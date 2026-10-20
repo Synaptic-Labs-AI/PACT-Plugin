@@ -12,14 +12,16 @@ PLUGIN = Path(__file__).parent.parent
 COMMANDS_DIR = PLUGIN / "commands"
 PERSONA = PLUGIN / "agents" / "pact-orchestrator.md"
 
-_PACT_COMMAND_RE = re.compile(r"/PACT:[a-z][a-z-]*")
+_PACT_COMMAND_RE = re.compile(r"/PACT:[A-Za-z][A-Za-z-]*")
 _EXPLICIT_RETURN_RE = re.compile(r"return to step \d+|stay in this workflow", re.IGNORECASE)
 _OPTION_BULLET_RE = re.compile(r"^\s*- \*\*\"[^\"]+\"\*\*.*?On selection:(.*)$", re.MULTILINE)
 _TOP_LEVEL_STEP_RE = re.compile(r"^(\d+)\. \*\*(.+?)\*\*", re.MULTILINE)
 
 
 def _text(name):
-    return (COMMANDS_DIR / name).read_text(encoding="utf-8")
+    """A bare file name is a command; a path is relative to the plugin root."""
+    base = PLUGIN if "/" in name else COMMANDS_DIR
+    return (base / name).read_text(encoding="utf-8")
 
 
 def _section(text, anchor, end):
@@ -81,6 +83,9 @@ CHECKPOINTS = (
      ('Report "Ready for next task."', "then report.")),
     ("pause.md", "### 7. Report", "If Telegram", _fenced_lines, ()),
     ("refresh.md", "### 6. STANDBY", "Until bootstrap runs", _fenced_lines, ()),
+    ("protocols/pact-workflows.md",
+     '**Next steps** — After commit, use `AskUserQuestion` to ask: "Work committed. What next?"',
+     "**If blocker reported**", _arrow_clauses, ()),
 )
 
 # Every other command, with the reason it has no end-of-flow checkpoint.
@@ -106,7 +111,7 @@ class TestEndOfFlowCheckpoints:
         """Reddens when a command file is added without being listed in
         CHECKPOINTS or EXEMPT, or when one is listed in both."""
         on_disk = {p.name for p in COMMANDS_DIR.glob("*.md")}
-        checked = {c[0] for c in CHECKPOINTS}
+        checked = {c[0] for c in CHECKPOINTS if "/" not in c[0]}
         assert not checked & set(EXEMPT), sorted(checked & set(EXEMPT))
         assert on_disk == checked | set(EXEMPT), (
             sorted(on_disk - checked - set(EXEMPT)),
@@ -234,3 +239,82 @@ class TestShutdownOwner:
             for m in _MERGE_OR_WRAP_UP_RE.finditer(text):
                 hits.append((str(path.relative_to(PLUGIN)), text[:m.start()].count("\n") + 1, m.group(0)))
         assert not hits, hits
+
+
+# ---------------------------------------------------------------------------
+# The workflow chain
+# ---------------------------------------------------------------------------
+
+# An imperative hand-off: "invoke `/PACT:x`" or "**Invoke `/PACT:x`**". A
+# mention ("happens during `/PACT:wrap-up`") or a "Run `/PACT:x`" is not an edge.
+_EDGE_RE = re.compile(r"\b[Ii]nvoke\*{0,2}\s+`/PACT:([A-Za-z][A-Za-z-]*)`")
+_WORKFLOWS = PLUGIN / "protocols" / "pact-workflows.md"
+_CHAIN_RE = re.compile(r"^\*\*Chain\*\*: (.+?)\.(?: |$)", re.MULTILINE)
+
+
+def _successor_graph():
+    """{command stem: set of command stems it imperatively invokes}. A target
+    that is a skill rather than a command (worktree-setup) is not a node."""
+    stems = {p.stem for p in COMMANDS_DIR.glob("*.md")}
+    graph = {}
+    for path in COMMANDS_DIR.glob("*.md"):
+        targets = set(_EDGE_RE.findall(path.read_text(encoding="utf-8")))
+        graph[path.stem] = targets & stems
+    return graph
+
+
+def _reaches(graph, start, goal, avoiding=frozenset()):
+    seen, todo = set(), [start]
+    while todo:
+        node = todo.pop()
+        if node == goal:
+            return True
+        if node in seen or node in avoiding:
+            continue
+        seen.add(node)
+        todo.extend(graph.get(node, ()))
+    return False
+
+
+class TestWorkflowChain:
+    def test_every_named_successor_exists(self):
+        """Reddens when a command invokes `/PACT:x` and x is neither a command
+        nor a skill. Mutation: rename a target to `/PACT:wrapup`."""
+        stems = {p.stem for p in COMMANDS_DIR.glob("*.md")}
+        skills = {p.name for p in (PLUGIN / "skills").iterdir() if p.is_dir()}
+        missing = []
+        for path in COMMANDS_DIR.glob("*.md"):
+            for target in _EDGE_RE.findall(path.read_text(encoding="utf-8")):
+                if target not in stems | skills:
+                    missing.append((path.name, target))
+        assert not missing, missing
+
+    def test_work_workflows_reach_wrap_up_only_through_peer_review(self):
+        """Reddens when orchestrate or comPACT stops invoking peer-review,
+        invokes wrap-up directly, or when peer-review stops invoking wrap-up.
+        Mutation: change orchestrate's "**Invoke `/PACT:peer-review`**" to
+        "**Run `/PACT:peer-review`**"."""
+        graph = _successor_graph()
+        assert "wrap-up" in graph["peer-review"], graph["peer-review"]
+        for start in ("orchestrate", "comPACT"):
+            assert "peer-review" in graph[start], (start, graph[start])
+            assert _reaches(graph, start, "wrap-up"), (start, graph)
+            assert not _reaches(graph, start, "wrap-up", avoiding={"peer-review"}), (
+                start, graph)
+
+    def test_the_chain_line_states_the_derived_chain(self):
+        """Reddens when pact-workflows has no **Chain** line, or when the line's
+        `/PACT:` sequence disagrees with the successor graph. Mutation: delete
+        the Chain line, or swap peer-review and wrap-up in it."""
+        matches = _CHAIN_RE.findall(_WORKFLOWS.read_text(encoding="utf-8"))
+        assert len(matches) == 1, matches
+        stages = [s.strip() for s in matches[0].split("→")]
+        named = [_PACT_COMMAND_RE.findall(s) for s in stages]
+        assert [n for n in named if n] == [
+            ["/PACT:orchestrate", "/PACT:comPACT"], ["/PACT:peer-review"], ["/PACT:wrap-up"],
+        ], named
+        graph = _successor_graph()
+        for earlier, later in zip([n for n in named if n], [n for n in named if n][1:]):
+            for a in earlier:
+                for b in later:
+                    assert b.split(":")[1] in graph[a.split(":")[1]], (a, b, graph)
