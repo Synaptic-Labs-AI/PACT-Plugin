@@ -169,6 +169,9 @@ COMPOSED_CLOSURES = [
     ("1181-grep-positional", "git grep '%s'" % M5),
     ("1181-pr-list-search", "gh pr list --search '%s'" % M5),
     ("1155-find-name", "find . -name '%s'" % M5),
+    # An interpreter leg without an exec primitive is inert: an awk pattern-print
+    # program cannot run its text, so this former residual now closes.
+    ("awk-residual", "awk '/%s/ {print}' f" % M5),
 ]
 COMPOSED_RETENTION = [
     ("1181-glued-separator", "git log --grep=foo&&%s" % M5),
@@ -176,7 +179,7 @@ COMPOSED_RETENTION = [
     ("1155-find-exec", "find . -name '%s' -exec cat {} \\;" % M5),
     ("bare-merge", M5),
     ("bare-force-push", PF),
-    ("awk-residual", "awk '/%s/ {print}' f" % M5),
+    ("awk-system", "awk 'BEGIN{system(\"%s\")}'" % M5),
 ]
 
 

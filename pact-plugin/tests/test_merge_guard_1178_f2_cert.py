@@ -98,6 +98,9 @@ class TestF2Closures:
         ("rlwrap -Oregexp mycmd",   'rlwrap -Oregexp mycmd "%s"' % BD),
         # compound leg-locality: the inert busybox leg frees while the compound survives.
         ("compound inert busybox free leg", 'echo ok && busybox mycmd "%s"' % BD),
+        # An interpreter leg without an exec primitive is inert: an awk program that is only
+        # the danger text cannot run it, so the busybox applet recursion reaches an inert leg.
+        ("busybox awk",             'busybox awk "%s"' % BD),
     ])
     def test_closure(self, label, cmd):
         _closure(cmd)
@@ -118,7 +121,7 @@ class TestF2Retentions:
         ("busybox lash -c", 'busybox lash -c "%s"' % BD),
         ("busybox msh -c",  'busybox msh -c "%s"' % BD),
         ("busybox dash -c", 'busybox dash -c "%s"' % BD),
-        ("busybox awk",     'busybox awk "%s"' % BD),
+        ("busybox awk system", "busybox awk 'BEGIN{system(\"%s\")}'" % BD),
         # stdbuf value-flag retentions (attached / separated / long).
         ("stdbuf -oL bash -c",        'stdbuf -oL bash -c "%s"' % BD),
         ("stdbuf -o L bash -c",       'stdbuf -o L bash -c "%s"' % BD),

@@ -3246,12 +3246,19 @@ def _strip_non_executable_content(command: str) -> str:
             transformed = _preserve_substitution_spans(m.group(0))
             return m.group(0) if transformed is None else transformed
 
+        echo_text = result
+
         def _strip_echo_span(span_match: re.Match) -> str:
             # Strip every quoted arg within the echo/printf span. dq FIRST, then sq, so a dq
             # value's embedded `'` is consumed before the sq pass runs (no cross-contamination);
             # sq -> bareword STRIPPED (sq $() is literal). The verb + flags sit OUTSIDE these
             # inner subs and stay intact.
             span = span_match.group(0)
+            # An `echo` inside an interpreter's program code is that language's statement,
+            # not the shell builtin: `php -r 'echo shell_exec("…");'` RUNS its argument.
+            # Leave such a span whole for the interpreter clause of carrier 10 to judge.
+            if _in_interpreter_exec_code(echo_text, span_match.start()):
+                return span
             span = re.sub(r'"(?:[^"\\]|\\.)*"', _strip_echo_dq_arg, span)
             span = re.sub(r"'[^']*'", "STRIPPED", span)
             return span
@@ -4390,8 +4397,36 @@ _SHELL_STRING_EXECUTORS = re.compile(
     r"|hush|lash|msh"                                   # busybox exec-shell applets (run a -c string)
     r"|eval|expect|watch"                               # string runners
     r"|ssh|rsh|remsh|slogin|su"                         # remote / user-switch (-c / a command)
-    r"|python[0-9.]*|perl|ruby[0-9.]*|nodejs|node|php|awk|gawk"  # interpreters (-c/-e/-r)
     r")$"
+)
+
+# (a') Interpreters run their quoted text as program code, and that code reaches a shell only
+# through an exec primitive of its language. A leg headed by one preserves its quoted values
+# only when the leg text carries a primitive; without one, -c/-e code, a script's or -m
+# module's argv and an awk program are inert. The primitive list is deliberately over-wide (a
+# case-insensitive substring anywhere in the leg): a false match preserves, the over-block-safe
+# direction. Same per-FAMILY anchoring as _SHELL_STRING_EXECUTORS (python-config is no head).
+_INTERPRETER_HEADS = re.compile(r"^(?:python[0-9.]*|perl|ruby[0-9.]*|nodejs|node|php|awk|gawk)$")
+# Every non-obfuscated route to a process from each interpreter names one of these:
+#   python  os.system/popen, os.exec*/spawn*/posix_spawn*, subprocess (also asyncio's
+#           create_subprocess_*), pty.spawn, commands.get*, os.fork
+#   ruby    system, exec, spawn, backticks, %x, IO.popen, Open3, PTY.spawn, open("|cmd")
+#   perl    system, exec, qx, backticks, readpipe, IPC::Open2/Open3/Run, open with a pipe
+#   node    child_process (exec/execSync/spawn/fork/execFile), process.binding
+#   php     system, exec, shell_exec, passthru, popen, proc_open, pcntl_exec, backticks
+#   awk     system(), print | "cmd", "cmd" | getline, |& coprocesses
+# The reflective entries (eval, getattr, import_module, ...) catch an honest dynamic call.
+# A primitive name built at runtime (string arithmetic inside a reflective call) is not
+# matched: that needs deliberate obfuscation, an accepted adversarial-only residual.
+_INTERPRETER_EXEC_PRIMITIVES = (
+    "system", "exec", "spawn", "popen", "subprocess", "child_process", "open3", "open2",
+    "passthru", "proc_open", "pty", "fork", "readpipe", "ipc::", "binding",
+    "commands.get", "eval", "getattr", "__import__", "import_module", "compile", "vars",
+    "globals", "locals", "__dict__", "builtins", "methodcaller", ".send(", "public_send",
+    "call_user_func", "core::", "`", "qx", "%x", "|",
+)
+_INTERPRETER_EXEC_PRIMITIVE_RE = re.compile(
+    "|".join(re.escape(p) for p in _INTERPRETER_EXEC_PRIMITIVES), re.IGNORECASE
 )
 
 # (a) Modeled exec-WRAPPERS whose (possibly nested) executor's quoted arg executes. Split by
@@ -4491,9 +4526,10 @@ _TOOL_HEADS = frozenset({"git", "gh"})
 #     "never list a boolean" (`--invert-grep`, `--all-match`, `-w/--web`,
 #     `--draft`, shortlog `-e/--email` MUST NOT appear — listing an arity-0
 #     flag would consume the next real token). Ambiguous arity → exclude
-#     (fail-toward-preserve). `--format`/`--pretty` (git) and
-#     `--json`/`--jq`/`--template` (gh) stay OUT of every flag_arm (smallest
-#     certified vocabulary; preserved = status quo).
+#     (fail-toward-preserve). `--format`/`--pretty` (git) stay OUT of every
+#     flag_arm (smallest certified vocabulary; preserved = status quo), and
+#     `--json`/`--jq`/`--template` (gh) are in the flag_arm of `gh pr view` and
+#     `gh issue view` only: those two verbs never execute a value.
 #   - deny_re: an EXECUTING flag anywhere in the leg's shlex tokens preserves
 #     the WHOLE leg (fail-toward-preserve). git grep `-O[<pager>]` /
 #     `--open-files-in-pager[=…]` EXECUTES its attached value (`-Ovim` runs
@@ -4559,6 +4595,16 @@ _READ_VERB_SPECS: "dict[tuple[str, ...], _ReadVerbSpec]" = {
             r"|--mention|--type|--state|--limit|--repo)\s+"
             r"|(?<!\S)-[SAalmsLR]\s*)"
         ),
+        None, False,
+    ),
+    # gh pr view / gh issue view never execute a value: --jq is a jq filter and --template a
+    # Go template. The booleans -c/--comments and -w/--web are omitted; positionals stay.
+    ("gh", "pr", "view"): _ReadVerbSpec(
+        re.compile(r"((?<!\S)(?:--json|--jq|--template|--repo)\s+|(?<!\S)-[qtR]\s*)"),
+        None, False,
+    ),
+    ("gh", "issue", "view"): _ReadVerbSpec(
+        re.compile(r"((?<!\S)(?:--json|--jq|--template|--repo)\s+|(?<!\S)-[qtR]\s*)"),
         None, False,
     ),
     ("gh", "pr", "list"): _ReadVerbSpec(
@@ -4884,6 +4930,36 @@ def _leg_command_word(leg: str) -> "str | None":
     return None                                          # only assignments/redirects → no command
 
 
+def _is_interpreter_exec_leg(leg: str, _depth: int = 0) -> bool:
+    """True iff this leg's command word, through any modeled wrapper, is an interpreter
+    and the leg names an exec primitive: its quoted code can run a shell command."""
+    if not _INTERPRETER_EXEC_PRIMITIVE_RE.search(leg):
+        return False
+    cmd_leg = _leg_command_word(leg)
+    tokens = _shell_tokenize(cmd_leg) if cmd_leg is not None else None
+    if not tokens:
+        return False
+    head = os.path.basename(tokens[0])
+    if _INTERPRETER_HEADS.match(head):
+        return True
+    if head in _EXEC_WRAPPERS_RECURSE and _depth < _MAX_WRAPPER_DEPTH:
+        nested = _wrapper_nested_command(cmd_leg, head)
+        return nested is not None and _is_interpreter_exec_leg(nested, _depth + 1)
+    return False
+
+
+def _in_interpreter_exec_code(text: str, pos: int) -> bool:
+    """True iff offset `pos` of `text` sits inside a quoted span of a leg that
+    _is_interpreter_exec_leg accepts, i.e. inside program code that can run a shell."""
+    masked = _mask_shell_quotes(text)
+    if masked[pos] != " " or text[pos] == " ":
+        return False                                     # not inside a quoted span
+    before = [m.end() for m in re.finditer(r"[;&|\n]", masked[:pos])]
+    after = re.search(r"[;&|\n]", masked[pos:])
+    leg = text[before[-1] if before else 0: pos + after.start() if after else len(text)]
+    return _is_interpreter_exec_leg(leg)
+
+
 def _is_preserve_leg(leg: str, _depth: int = 0) -> bool:
     """True iff this single leg's quoted-arg values must be PRESERVED (not stripped) by the
     #1178 general inert-default strip — see the catalog block above for clauses (a)/(b)/(c).
@@ -4914,7 +4990,10 @@ def _is_preserve_leg(leg: str, _depth: int = 0) -> bool:
             head = os.path.basename(tokens[0])
             if head in _TOOL_HEADS:                      # (d2) git/gh → defer to carriers 5/7/8/9
                 return True
-            if _SHELL_STRING_EXECUTORS.match(head):      # (a) executor / interpreter
+            if _INTERPRETER_HEADS.match(head):           # (a') interpreter
+                if _INTERPRETER_EXEC_PRIMITIVE_RE.search(leg):
+                    return True
+            elif _SHELL_STRING_EXECUTORS.match(head):    # (a) shell / string runner
                 return True
             if head in _HTTP_CLIENT_HEADS:               # (b) curl/wget (quoted head via shlex)
                 return True

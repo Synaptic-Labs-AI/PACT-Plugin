@@ -110,15 +110,20 @@ FIND_RETENTION = [
     # _VERB_MSG_BODY stops at the unquoted | — the executing tail stays outside.
     ("find-pipe-tail", "find . -name '%s' | sh" % M5),
 ]
-DECLARED_RESIDUALS = [
-    # masked-danger-scan trap pins: these EXECUTE their strings; no view-based fix
-    # may free them (proven base-True->False under the naive masked scan).
+# The awk and python -c rows were declared residuals here on the reading that an
+# interpreter executes its whole argument. An interpreter leg without an exec primitive
+# is inert (its code reaches a shell only through a primitive of its language), so the
+# print/pattern forms now CLOSE, and the same forms with a primitive stay caught.
+# NOTE: `find -iname` was also a declared residual at commit-2 time; #1195 OBS-A2
+# broadened the find carrier to -iname/-ipath/-regex/-iregex, so it now CLOSES
+# (certified in test_merge_guard_obs_cert.py).
+INTERPRETER_CLOSURES = [
     ("awk-residual", "awk '/%s/ {print}' f" % M5),
     ("python-c-residual", "python -c \"print('%s')\"" % M5),
-    # NOTE: `find -iname` was a declared residual here at commit-2 time; #1195 OBS-A2
-    # broadened the find carrier to -iname/-ipath/-regex/-iregex (all inert match
-    # patterns), so it now CLOSES. The closure is certified in test_merge_guard_obs_cert.py
-    # (OBS-A2). awk/python -c stay residuals — they EXECUTE their string.
+]
+INTERPRETER_RETENTION = [
+    ("awk-system", "awk 'BEGIN{system(\"%s\")}'" % M5),
+    ("python-c-system", "python -c \"import os; os.system('%s')\"" % M5),
 ]
 GREP_CLASS_REGRESSION = [
     # closed upstream (positional over-block class) — must STAY closed (False on both).
@@ -139,11 +144,18 @@ class TestFindCarrierAndResiduals:
         assert D(cmd) is True, "fix opened an under-block on an executing find form"
 
     @pytest.mark.parametrize(
-        "label,cmd", DECLARED_RESIDUALS, ids=[r[0] for r in DECLARED_RESIDUALS]
+        "label,cmd", INTERPRETER_CLOSURES, ids=[r[0] for r in INTERPRETER_CLOSURES]
     )
-    def test_declared_residuals_unchanged(self, label, cmd):
+    def test_interpreter_without_primitive_closed(self, label, cmd):
+        assert load_baseline().is_dangerous_command(cmd) is True, "not a genuine over-block at base"
+        assert D(cmd) is False, "inert interpreter click still gated at HEAD"
+
+    @pytest.mark.parametrize(
+        "label,cmd", INTERPRETER_RETENTION, ids=[r[0] for r in INTERPRETER_RETENTION]
+    )
+    def test_interpreter_with_primitive_stays_caught(self, label, cmd):
         assert load_baseline().is_dangerous_command(cmd) is True
-        assert D(cmd) is True, "a declared residual was freed — no view/strip fix may touch it"
+        assert D(cmd) is True, "an interpreter running the text through a primitive was freed"
 
     @pytest.mark.parametrize(
         "label,cmd", GREP_CLASS_REGRESSION, ids=[r[0] for r in GREP_CLASS_REGRESSION]
