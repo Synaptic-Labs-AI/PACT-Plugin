@@ -21,12 +21,15 @@ test_team_name_detect_align.py (its focused resolver cells).
 import io
 import json
 import os
+import subprocess
+import sys
 from datetime import datetime
 from unittest.mock import patch
 
 import pytest
 
 from fixtures.team_split import (
+    HOOKS_DIR,
     FOREIGN_TEAM,
     NEW_SID,
     NEW_TEAM,
@@ -34,6 +37,7 @@ from fixtures.team_split import (
     OLD_TEAM,
     SECOND_SID,
     SECOND_TEAM,
+    hook_env,
     reset_context_module,
     split_world,
     write_journal,
@@ -328,6 +332,7 @@ _ONE_SECOND_LATER = "2026-10-19T15:34:21Z"
 _AFTER_END = "2026-10-19T15:44:20Z"
 _AN_HOUR_LATER = "2026-10-19T16:34:20Z"
 _FOUR_SECONDS_LATER = "2026-10-19T15:34:24Z"
+_TWO_SECONDS_EARLIER = "2026-10-19T15:34:18Z"
 _ELEVEN_SECONDS_AFTER_END = "2026-10-19T15:34:30Z"
 # A live session of this project born by a startup.
 NEAR_SID = "dddd0000-1111-4222-8333-444455556666"
@@ -403,16 +408,14 @@ def test_a_clear_birth_just_outside_the_window_is_not_a_successor(
     assert _team_name() == SECOND_TEAM
 
 
-def _own_keyless_clear(world, *, own_born="clear",
-                       sibling_born_at=_FOUR_SECONDS_LATER):
+def _own_keyless_clear(world, *, sibling_born_at):
     """This session was born by a keyless /clear one second after its
     predecessor (SECOND_SID, which leads SECOND_TEAM) ended; a sibling's
-    /clear started another keyless session at ``sibling_born_at`` (default
-    5 s after that end)."""
+    /clear started another keyless session at ``sibling_born_at``."""
     _set_own_key(world, "")
     write_journal(world.session_dir, [
         {"type": "session_start", "session_id": OLD_SID, "ts": _CLEAR_AT,
-         "project_dir": str(world.project_dir), "source": own_born},
+         "project_dir": str(world.project_dir), "source": "clear"},
         "task_metadata_snapshot",
     ])
     _pact_session(world, SECOND_SID, team=SECOND_TEAM, ended=True,
@@ -421,27 +424,65 @@ def _own_keyless_clear(world, *, own_born="clear",
                   born="clear", born_at=sibling_born_at)
 
 
-def test_our_keyless_clear_keeps_our_predecessor_s_team_beside_a_sibling(
-        tmp_path, monkeypatch):
-    """Our own clear birth (1 s) is strictly nearer the predecessor's end
-    than the sibling's (5 s), so the predecessor is ours: the census picks
-    its team and the realign command accepts it."""
+@pytest.mark.parametrize("sibling_born_at", [
+    _FOUR_SECONDS_LATER, _CLEAR_AT, _ONE_SECOND_EARLIER,
+], ids=["ours-nearer", "tie", "sibling-nearer"])
+def test_a_sibling_clear_near_our_predecessor_s_end_excludes_our_team(
+        tmp_path, monkeypatch, sibling_born_at):
+    """Our own clear birth never counts: a live sibling born by a /clear
+    within the window of our predecessor's end may be that predecessor's
+    successor, so the census keeps the recorded team and the realign
+    command refuses, however near our own birth is (the fail-safe cost of
+    keyless clears close together)."""
     world = _aged_sibling_world(tmp_path, monkeypatch)
-    _own_keyless_clear(world)
+    _own_keyless_clear(world, sibling_born_at=sibling_born_at)
+    assert _team_name() == OLD_TEAM
+    assert _owned(SECOND_TEAM) is True
+    assert _verb_refusal(monkeypatch, SECOND_TEAM) == _OWNED
+
+
+def test_without_a_sibling_clear_near_its_end_our_predecessor_s_team_is_ours(
+        tmp_path, monkeypatch):
+    """Control: the sibling's clear came an hour later, so nothing but us
+    follows our predecessor: the census picks its team and the realign
+    command accepts it."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _own_keyless_clear(world, sibling_born_at=_AN_HOUR_LATER)
     assert _team_name() == SECOND_TEAM
-    assert _owned(SECOND_TEAM) is False
     assert _verb_refusal(monkeypatch, SECOND_TEAM) == ""
 
 
-def test_without_our_clear_birth_the_sibling_takes_the_ended_team(
-        tmp_path, monkeypatch):
-    """Control: this session was not born by a /clear, so the nearest live
-    clear birth to the predecessor's end is the sibling's, and the team is
-    the sibling's."""
+def test_two_keyless_clears_together_exclude_both_teams(tmp_path,
+                                                        monkeypatch):
+    """Two keyless leads of the project /clear within a few seconds: our
+    predecessor (leader of NEW_TEAM) ended 2 s before our clear birth, and
+    the sibling leader (SECOND_TEAM) ended at it, its successor born 1 s
+    later. Neither team is taken: both stay excluded, and the realign
+    command run for the sibling's team exits 3."""
     world = _aged_sibling_world(tmp_path, monkeypatch)
-    _own_keyless_clear(world, own_born="startup")
+    _set_own_key(world, "")
+    write_journal(world.session_dir, [
+        {"type": "session_start", "session_id": OLD_SID, "ts": _CLEAR_AT,
+         "project_dir": str(world.project_dir), "source": "clear"},
+        "task_metadata_snapshot",
+    ])
+    _pact_session(world, NEW_SID, team=NEW_TEAM, ended=True,
+                  ended_at=_TWO_SECONDS_EARLIER)
+    _pact_session(world, SECOND_SID, team=SECOND_TEAM, ended=True,
+                  ended_at=_CLEAR_AT)
+    _pact_session(world, SIBLING_CLEAR_SID, team="session-b2b2b2b2",
+                  born="clear", born_at=_ONE_SECOND_LATER)
     assert _team_name() == OLD_TEAM
-    assert _verb_refusal(monkeypatch, SECOND_TEAM) == _OWNED
+    assert _owned(NEW_TEAM) is True
+    assert _owned(SECOND_TEAM) is True
+    proc = subprocess.run(
+        [sys.executable, "-m", "shared.realign_team", "--team", SECOND_TEAM],
+        capture_output=True, text=True, cwd=str(HOOKS_DIR), timeout=60,
+        env=hook_env(world, PYTHONPATH=str(HOOKS_DIR),
+                     CLAUDE_CODE_SESSION_ID=OLD_SID),
+    )
+    assert proc.returncode == 3, proc.stdout + proc.stderr
+    assert _OWNED in proc.stdout + proc.stderr
 
 
 def _unrelated_end_beside_a_keyless_sibling(world, *, unrelated_end):
@@ -474,24 +515,6 @@ def test_an_unrelated_end_nearer_the_birth_never_frees_the_team(
                            born_at=_CLEAR_AT)
     assert _team_name() == OLD_TEAM
     assert _verb_refusal(monkeypatch, SECOND_TEAM) == _OWNED
-
-
-def test_a_foreign_birth_tied_with_ours_keeps_the_team_excluded(
-        tmp_path, monkeypatch):
-    """Our own clear birth and a sibling's are the same distance from our
-    predecessor's end: whole-second timestamps cannot tell them apart, so
-    the team stays excluded (the fail-safe cost of a same-second /clear)."""
-    world = _aged_sibling_world(tmp_path, monkeypatch)
-    _own_keyless_clear(world, sibling_born_at=_CLEAR_AT)
-    assert _team_name() == OLD_TEAM
-    assert _verb_refusal(monkeypatch, SECOND_TEAM) == _OWNED
-
-
-def test_a_foreign_birth_nearer_than_ours_keeps_the_team_excluded(
-        tmp_path, monkeypatch):
-    world = _aged_sibling_world(tmp_path, monkeypatch)
-    _own_keyless_clear(world, sibling_born_at=_ONE_SECOND_EARLIER)
-    assert _team_name() == OLD_TEAM
 
 
 def _second_clear_beside_a_sibling(world, *, sibling_successor=True):
@@ -533,6 +556,25 @@ def test_without_the_sibling_successor_the_ended_leader_s_team_is_free(
     _second_clear_beside_a_sibling(world, sibling_successor=False)
     assert _team_name() == SECOND_TEAM
     assert _verb_refusal(monkeypatch, SECOND_TEAM) == ""
+
+
+@pytest.mark.parametrize("life_key, held", [
+    (OWN_KEY, False), ("7:another", True),
+], ids=["same-key", "other-key"])
+def test_a_live_same_key_life_is_never_a_successor(tmp_path, monkeypatch,
+                                                   life_key, held):
+    """A live clear-born session recording this session's key is an
+    earlier life of this process (its SessionEnd lost): it is ours, so it
+    never holds the ended sibling leader's team. With another key it is a
+    foreign birth and does."""
+    world = _aged_sibling_world(tmp_path, monkeypatch)
+    _set_own_key(world, OWN_KEY)
+    _pact_session(world, SECOND_SID, team=SECOND_TEAM, ended=True,
+                  ended_at=_ONE_SECOND_EARLIER)
+    _pact_session(world, FIRST_LIFE_SID, team="session-a1a1a1a1",
+                  key=life_key, born="clear", born_at=_CLEAR_AT)
+    assert _owned(SECOND_TEAM) is held
+    assert _team_name() == (OLD_TEAM if held else SECOND_TEAM)
 
 
 def test_the_clear_births_are_read_once_per_census(tmp_path, monkeypatch):

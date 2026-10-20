@@ -766,62 +766,57 @@ def _project_session_records(sessions_root: Path) -> list[tuple[Path, dict]]:
         return []
 
 
+def _is_own_session(
+    session_dir: Path, data: dict, own_session_id: str, own_process_key: str
+) -> bool:
+    """Ours: this session's dir or id, or a session whose recorded
+    process_key equals ours with both non-empty (an earlier life of this
+    claude process); an empty key matches nothing."""
+    recorded_sid = str(data.get("session_id", "")) or session_dir.name
+    own_dir_name = _UNSAFE_SLUG_CHARS_RE.sub("_", own_session_id or "")
+    return (session_dir.name == own_dir_name or recorded_sid == own_session_id
+            or bool(own_process_key)
+            and data.get("process_key") == own_process_key)
+
+
 def _clear_births(
-    sessions_root: Path, own_session_id: str
-) -> list[tuple[float, Path, bool]]:
-    """(birth time, session dir, ours) of each session of this project born
-    by a /clear: its FIRST session_start (a head read) has source 'clear'
-    (a later compaction adds starts). Our own dir is included even without
-    a context file, and is the only one marked ours. Liveness is not read
-    here. Built once per census and passed to each ownership check. [] on
-    error. Never raises."""
+    sessions_root: Path, own_session_id: str, own_process_key: str
+) -> list[tuple[float, Path]]:
+    """(birth time, session dir) of each session of this project that is not
+    ours (_is_own_session) and was born by a /clear: its FIRST session_start
+    (a head read) has source 'clear' (a later compaction adds starts).
+    Liveness is not read here. Built once per census and passed to each
+    ownership check. [] on error. Never raises."""
     try:
-        slug_dir = _project_slug_dir(sessions_root)
-        if slug_dir is None:
-            return []
-        own_dir_name = _UNSAFE_SLUG_CHARS_RE.sub("_", own_session_id or "")
-        own_dir = slug_dir / own_dir_name if own_dir_name else None
-        dirs = [d for d, _ in _project_session_records(sessions_root)]
-        if own_dir is not None and own_dir not in dirs:
-            dirs.append(own_dir)
         births = []
-        for session_dir in dirs:
+        for session_dir, data in _project_session_records(sessions_root):
+            if _is_own_session(session_dir, data, own_session_id,
+                               own_process_key):
+                continue
             birth = _session_birth(str(session_dir))
             if not (birth and birth.get("source") == "clear"):
                 continue
             born_at = _event_time(birth)
             if born_at is not None:
-                births.append((born_at, session_dir, session_dir == own_dir))
+                births.append((born_at, session_dir))
         return births
     except Exception:
         return []
 
 
 def _held_by_clear_successor(
-    ended_at: float, owner_dir: Path, births: list[tuple[float, Path, bool]]
+    ended_at: float, owner_dir: Path, births: list[tuple[float, Path]]
 ) -> bool:
-    """True iff a live session that is not ours, born by a /clear within
-    CLEAR_SUCCESSOR_WINDOW_SECONDS of ``ended_at`` on either side, may be
-    the ended owner's successor and so still holds its team. Our own clear
-    birth claims the owner as our predecessor only when it is STRICTLY
-    nearer the end than every such birth: a tie (timestamps are whole
-    seconds) or a nearer foreign birth keeps the team another session's,
-    the fail-safe side. Liveness (a tail read) is read only for a foreign
-    birth inside the window, nearest first."""
-    window = CLEAR_SUCCESSOR_WINDOW_SECONDS
-    own_gaps = [abs(born_at - ended_at) for born_at, _, ours in births
-                if ours and abs(born_at - ended_at) <= window]
-    nearest_own = min(own_gaps) if own_gaps else None
-    foreign = sorted(
-        (abs(born_at - ended_at), str(session_dir), session_dir)
-        for born_at, session_dir, ours in births
-        if not ours and session_dir != owner_dir
-        and abs(born_at - ended_at) <= window
-    )
-    for gap, _, session_dir in foreign:
-        if nearest_own is not None and nearest_own < gap:
-            return False
-        if _is_live(_session_last(str(session_dir))):
+    """True iff a live session in ``births`` (not ours), born by a /clear
+    within CLEAR_SUCCESSOR_WINDOW_SECONDS of ``ended_at`` on either side,
+    may be the ended owner's successor and so still holds its team. Our own
+    birth never counts, so a foreign /clear near our predecessor's end also
+    excludes our own team (the fail-safe side). Liveness (a tail read) is
+    read only for a birth inside the window."""
+    for born_at, session_dir in births:
+        if (session_dir != owner_dir
+                and abs(born_at - ended_at) <= CLEAR_SUCCESSOR_WINDOW_SECONDS
+                and _is_live(_session_last(str(session_dir)))):
             return True
     return False
 
@@ -832,30 +827,20 @@ def _owned_by_other_live_session(
     lead_session_id: str,
     own_session_id: str,
     own_process_key: str,
-    births: list[tuple[float, Path, bool]] | None = None,
+    births: list[tuple[float, Path]] | None = None,
 ) -> bool:
     """True iff ``team_name`` belongs to a session of this project that is
-    not ours: one that leads it (its session id is the team's
-    leadSessionId) or records it (its context's team_name) and is LIVE, or
-    has ENDED while a live session born by a /clear near its end may be its
-    successor (_held_by_clear_successor), which holds the team whether or
-    not it recorded it. ``births`` is _clear_births for this session (None
-    builds it).
-
-    Ours: this session id, or a session whose recorded process_key equals
-    ours with both non-empty (an earlier life of this claude process); an
-    empty key matches nothing."""
-    slug_dir = _project_slug_dir(sessions_root)
-    if slug_dir is None:
-        return False
-    own_dir_name = _UNSAFE_SLUG_CHARS_RE.sub("_", own_session_id or "")
+    not ours (_is_own_session): one that leads it (its session id is the
+    team's leadSessionId) or records it (its context's team_name) and is
+    LIVE, or has ENDED while a live session that is not ours, born by a
+    /clear near its end, may be its successor (_held_by_clear_successor),
+    which holds the team whether or not it recorded it. ``births`` is
+    _clear_births for this session (None builds it)."""
     ended_owners = []
     for session_dir, data in _project_session_records(sessions_root):
+        if _is_own_session(session_dir, data, own_session_id, own_process_key):
+            continue
         recorded_sid = str(data.get("session_id", "")) or session_dir.name
-        if session_dir.name == own_dir_name or recorded_sid == own_session_id:
-            continue
-        if own_process_key and data.get("process_key") == own_process_key:
-            continue
         leads = bool(lead_session_id) and recorded_sid == lead_session_id
         if not leads and data.get("team_name") != team_name:
             continue
@@ -868,7 +853,7 @@ def _owned_by_other_live_session(
     if not ended_owners:
         return False
     if births is None:
-        births = _clear_births(sessions_root, own_session_id)
+        births = _clear_births(sessions_root, own_session_id, own_process_key)
     return any(_held_by_clear_successor(ended_at, session_dir, births)
                for ended_at, session_dir in ended_owners)
 
@@ -878,8 +863,9 @@ def team_owned_by_other_pact_session(
 ) -> bool:
     """True iff ``team_name`` belongs to another PACT session of this
     project (_owned_by_other_live_session: a live session that is not ours
-    leads or records it, or an ended one does and its /clear successor is
-    live and not ours). The census applies the same rule.
+    leads or records it, or an ended one does while a live session that is
+    not ours was born by a /clear near its end). The census applies the
+    same rule.
 
     Ours means ``session_id`` (default: this context's session id), or a
     session whose recorded process key equals ``process_key`` (default: the
@@ -965,9 +951,9 @@ def _resume_census_candidates(
     try:
         tasks_root = teams_root.parent / "tasks"
         sessions_root = teams_root.parent / "pact-sessions"
-        births = _clear_births(sessions_root, session_id)
         own_key = (process_key if process_key is not None
                    else get_pact_context().get("process_key", ""))
+        births = _clear_births(sessions_root, session_id, own_key)
         cutoff = time.time() - RESUME_CENSUS_RECENCY_SECONDS
         candidates: list[tuple[str, bool, dict]] = []
         for entry in sorted(teams_root.iterdir()):
