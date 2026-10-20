@@ -2812,6 +2812,28 @@ def _stdin_fed_code(command: str) -> list[tuple[str, str]]:
     return code
 
 
+_CODE_ARG_RE = re.compile(
+    _STDIN_INTERPRETER + r"(?P<code>'[^']*'|\"(?:[^\"\\]|\\.)*\")"
+)
+_INLINE_CODE_FLAGS = frozenset({"-c", "-e", "-E", "-r", "--eval", "--command"})
+
+
+def _code_arg_programs(command: str) -> list[tuple[str, str]]:
+    """(interpreter head, program text) for each program given as a -c/-e/-r argument."""
+    out = []
+    for m in _CODE_ARG_RE.finditer(command):
+        flags = m.group("flags").split()
+        if not flags or flags[-1] not in _INLINE_CODE_FLAGS:
+            continue
+        code = m.group("code")
+        if code[0] == '"':
+            code = re.sub(r'\\(["\\$`])', r"\1", code[1:-1])
+        else:
+            code = code[1:-1]
+        out.append((m.group("head"), code))
+    return out
+
+
 def _unquote_literal(text: str) -> str:
     return text[1:-1] if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"" else text
 
@@ -2839,27 +2861,48 @@ def _mask_string_literals(code: str) -> str:
     return _QUOTED_LITERAL_RE.sub(lambda m: m.group(0)[0] + " " * (len(m.group(0)) - 2) + m.group(0)[-1], code)
 
 
+def _literal_list_at(text: str, i: int) -> tuple[list[str], int] | None:
+    """The string literals of a `[…]` list literal starting at text[i], and the offset
+    after it; None when an element is not a string literal."""
+    if text[i:i + 1] != "[":
+        return None
+    items, i = [], i + 1
+    while True:
+        i += re.match(r"\s*", text[i:]).end()
+        if text[i:i + 1] == "]":
+            return items, i + 1
+        lit = _STRING_LITERAL_RE.match(text, i)
+        if not lit:
+            return None
+        items.append(lit.group(0)[1:-1])
+        i = lit.end() + re.match(r"\s*,?", text[lit.end():]).end()
+
+
 def _first_argument_command(code: str, pos: int) -> str | None:
-    """The command a call's first argument spells when it is a literal: a string literal's
-    content, or a list literal of string literals joined as argv. None otherwise."""
-    rest = code[pos:]
-    lit = _STRING_LITERAL_RE.match(rest)
-    if lit:
-        return lit.group(0)[1:-1]
-    if rest[:1] == "[":
-        items, i = [], 1
-        while True:
-            m = re.match(r"\s*", rest[i:]); i += m.end()
-            lit = _STRING_LITERAL_RE.match(rest, i)
-            if not lit:
+    """The command a call's leading literal arguments spell: one string literal alone is
+    a shell command line; otherwise the consecutive string and list literals are argv,
+    joined (`system('gh', 'pr', 'merge', '5')`, `spawnSync('gh', ['pr', 'merge'])`,
+    `run(['gh', 'pr', 'merge', '5'])`). Stops at the first non-literal argument. None
+    when the first argument is not a literal."""
+    argv, strings, i = [], 0, pos
+    while True:
+        lit = _STRING_LITERAL_RE.match(code, i)
+        if lit:
+            argv.append(lit.group(0)[1:-1]); strings += 1; i = lit.end()
+        else:
+            lst = _literal_list_at(code, i)
+            if lst is None:
                 break
-            items.append(lit.group(0)[1:-1]); i = lit.end()
-            m = re.match(r"\s*,", rest[i:])
-            if not m:
-                break
-            i += m.end()
-        return shlex.join(items) if items else None
-    return None
+            argv += lst[0]; i = lst[1]
+        sep = re.match(r"\s*,\s*", code[i:])
+        if not sep:
+            break
+        i += sep.end()
+    if not argv:
+        return None
+    if strings == 1 and len(argv) == 1:
+        return argv[0]
+    return shlex.join(argv)
 
 
 def _code_runs_guarded_directly(head: str, code: str, _depth: int = 0) -> bool:
@@ -5515,7 +5558,8 @@ def _is_dangerous_at_depth(command: str, depth: int) -> bool:
     # Code an interpreter reads from stdin (heredoc, here-string, pipe) is that
     # interpreter's program: it is refused when it passes a guarded command directly
     # to an exec primitive. The carriers below see it only as inert text.
-    if any(_code_runs_guarded_directly(head, code, depth) for head, code in _stdin_fed_code(command)):
+    if any(_code_runs_guarded_directly(head, code, depth)
+           for head, code in _stdin_fed_code(command) + _code_arg_programs(command)):
         return True
 
     # Normalize bash line continuations (\<newline>) via the shared P0 SSOT before

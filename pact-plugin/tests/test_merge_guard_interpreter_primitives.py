@@ -174,3 +174,44 @@ RUNTIME_HEADS = [
 def test_runtime_heads(label, head, executing, inert):
     assert is_dangerous_command(_sq(head, executing.format(d=D))) is True
     assert is_dangerous_command(_sq(head, inert.format(d=D))) is False
+
+
+# Code given as a -c/-e argument follows the same direct-call rule as code fed on stdin:
+# a primitive call whose leading literal arguments spell a guarded command is refused,
+# including the list and separate-argument forms the text scan cannot read as one line.
+DIRECT_CALL_ARG_FORMS = [
+    ("py -c run list", "python3 -c \"import subprocess; subprocess.run(['gh', 'pr', 'merge', '5'])\"",
+     "python3 -c \"print(['gh', 'pr', 'merge', '5'])\""),
+    ("py -c run list sq", "python3 -c 'import subprocess; subprocess.run([\"gh\",\"pr\",\"merge\",\"5\"])'",
+     "python3 -c 'print([\"gh\",\"pr\",\"merge\",\"5\"])'"),
+    ("py -c Popen push list",
+     "python3 -c \"import subprocess as s; s.Popen(['git', 'push', '--force', 'origin', 'main'])\"",
+     "python3 -c \"print(['git', 'push', '--force', 'origin', 'main'])\""),
+    ("py -c run list escaped dq",
+     'python3 -c "import subprocess; subprocess.run([\\"gh\\", \\"pr\\", \\"merge\\", \\"5\\"])"',
+     'python3 -c "print([\\"gh\\", \\"pr\\", \\"merge\\", \\"5\\"])"'),
+    ("node -e spawnSync args", "node -e \"require('child_process').spawnSync('gh', ['pr', 'merge', '5'])\"",
+     "node -e \"console.log('gh', ['pr', 'merge', '5'])\""),
+    ("ruby -e system args", "ruby -e \"system('gh', 'pr', 'merge', '5')\"",
+     "ruby -e \"p ['gh', 'pr', 'merge', '5']\""),
+]
+
+
+@pytest.mark.parametrize("label,executing,inert", DIRECT_CALL_ARG_FORMS,
+                         ids=[r[0] for r in DIRECT_CALL_ARG_FORMS])
+def test_code_argument_direct_call_forms(label, executing, inert):
+    assert is_dangerous_command(executing) is True
+    assert is_dangerous_command(inert) is False
+
+
+def test_direct_call_rule_reads_a_later_argument_as_data():
+    """The direct-call rule refuses only the command a primitive runs: a probe given
+    guarded text as an argument runs `python3 probe.py`. (The whole -c leg is still
+    refused by the older primitive-plus-guarded-text rule, a known over-block whose
+    route is a script file.)"""
+    from shared.merge_guard_common import _code_runs_guarded_directly
+
+    code = "import subprocess; subprocess.run(['python3', 'probe.py', '" + D + "'])"
+    assert _code_runs_guarded_directly("python3", code) is False
+    direct = "import subprocess; subprocess.run(['gh', 'pr', 'merge', '5'])"
+    assert _code_runs_guarded_directly("python3", direct) is True
