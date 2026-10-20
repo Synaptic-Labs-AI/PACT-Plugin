@@ -15,7 +15,7 @@ Review the current work: $ARGUMENTS
 Create a review Task hierarchy:
 
 ```
-1. `TaskCreate`: Review task "Review: {feature}"
+1. `TaskCreate`: Review task "Review: {feature} ({branch})", where {branch} is the output of git branch --show-current
 2. `TaskUpdate`: Review task status = "in_progress"
 3. Analyze PR: Which reviewers needed?
 4. `TaskCreate`: Reviewer agent tasks (architect, test-engineer, domain specialists)
@@ -49,7 +49,7 @@ Create a review Task hierarchy:
 
 **Example structure:**
 ```
-[Review] "Review: user authentication"
+[Review] "Review: user authentication (feature/user-auth)"
 ├── [Agent] "architect: design review"
 ├── [Agent] "test-engineer: coverage review"
 ├── [Agent] "backend-coder: implementation review"

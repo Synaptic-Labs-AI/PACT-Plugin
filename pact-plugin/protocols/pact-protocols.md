@@ -1233,7 +1233,7 @@ See the [Concurrent Audit Protocol](pact-audit.md) for full details.
 4. **Create atomic commit(s)** — stage and commit before proceeding
 5. **Calibration** — The secretary gathers calibration metrics during HANDOFF processing. When asked, provide a brief difficulty assessment: was actual difficulty higher, lower, or about the same as predicted? Which dimensions surprised you?
 
-If `TaskList` shows an `in_progress` Review task, this comPACT is fixing review findings: skip the question below and return to that `/PACT:peer-review` at its verify-only re-review.
+If `TaskList` shows an `in_progress` Review task whose subject ends with `({branch})`, where {branch} is the output of `git branch --show-current`, this comPACT is fixing review findings: skip the question below and return to that `/PACT:peer-review` at its verify-only re-review.
 
 **Next steps** — After commit, use `AskUserQuestion` to ask: "Work committed. What next?"
 - Yes, create PR (Recommended) → invoke `/PACT:peer-review`

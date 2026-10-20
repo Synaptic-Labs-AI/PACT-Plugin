@@ -457,7 +457,7 @@ JSON
 
 > ⚠️ **Do NOT shut down specialists until the user decides the next step.** Ask first, then act.
 
-If `TaskList` shows an `in_progress` Review task, this comPACT is fixing review findings: skip the question below and return to that `/PACT:peer-review` at its verify-only re-review.
+If `TaskList` shows an `in_progress` Review task whose subject ends with `({branch})`, where {branch} is the output of `git branch --show-current`, this comPACT is fixing review findings: skip the question below and return to that `/PACT:peer-review` at its verify-only re-review.
 
 **Next steps** — After commit, use `AskUserQuestion` to ask: "Work committed. What next?"
 

@@ -1009,5 +1009,5 @@ After you resolve a blocker, message the teammate by name. Spawn fresh if the te
    python3 "{plugin_root}/hooks/shared/backlog.py" set <item-id> --status done
    ```
    Report what you wrote. If the write is refused, report the refusal and carry on.
-5. **Return to a calling review**: if `TaskList` shows an `in_progress` Review task, this orchestrate is fixing review findings. Return to that `/PACT:peer-review` at its verify-only re-review, and stop here.
+5. **Return to a calling review**: if `TaskList` shows an `in_progress` Review task whose subject ends with `({branch})`, where {branch} is the output of `git branch --show-current`, this orchestrate is fixing review findings. Return to that `/PACT:peer-review` at its verify-only re-review, and stop here.
 6. **Invoke `/PACT:peer-review`** to create the PR and run the multi-agent review. Peer-review holds the merge checkpoint and names the next command: `/PACT:wrap-up` after a merge, `/PACT:pause` on a pause.

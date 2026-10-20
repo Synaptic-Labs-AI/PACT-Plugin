@@ -373,3 +373,60 @@ class TestFailedCycleRule:
                  if "**Termination**:" in ln]
         assert len(lines) == 1, lines
         assert "After 2 failed cycles (see **Failed cycle** above)" in lines[0], lines[0]
+
+
+# ---------------------------------------------------------------------------
+# A caller check returns only to the review of the current branch
+# ---------------------------------------------------------------------------
+
+_CALLER_CHECK_SITES = (
+    "commands/orchestrate.md",
+    "commands/comPACT.md",
+    "protocols/pact-workflows.md",
+    "protocols/pact-protocols.md",
+)
+_CURRENT_REVIEW = (
+    "an `in_progress` Review task whose subject ends with `({branch})`, where "
+    "{branch} is the output of `git branch --show-current`"
+)
+
+
+def _caller_checks(text):
+    return [ln for ln in text.splitlines()
+            if "Review task" in ln and "fixing review findings" in ln]
+
+
+class TestCallerCheckNamesTheCurrentReview:
+    def test_review_subject_carries_the_branch(self):
+        """Reddens when peer-review's Review task subject stops naming the
+        branch the caller checks match on. Mutation: restore the subject
+        "Review: {feature}"."""
+        block = _section(_text("peer-review.md"), "## Task Hierarchy", "\n## ")
+        items = [ln for ln in block.splitlines() if "`TaskCreate`: Review task" in ln]
+        assert len(items) == 1, items
+        assert '"Review: {feature} ({branch})"' in items[0], items[0]
+        assert "git branch --show-current" in items[0], items[0]
+
+    def test_every_caller_check_names_the_current_branch_review(self):
+        """Reddens when a site that returns to a calling review accepts any
+        `in_progress` Review task, or when a site's check disappears.
+        Mutation: replace "whose subject ends with `({branch})`" with "whose
+        subject names the branch" at any one site."""
+        bad = []
+        for rel in _CALLER_CHECK_SITES:
+            checks = _caller_checks(_text(rel))
+            if len(checks) != 1:
+                bad.append((rel, f"{len(checks)} caller checks"))
+            elif _CURRENT_REVIEW not in checks[0]:
+                bad.append((rel, checks[0]))
+        assert not bad, bad
+
+    def test_no_other_file_carries_a_caller_check(self):
+        """Reddens when a caller check appears outside the listed sites, so
+        the per-site arm above cannot miss a new one."""
+        found = set()
+        for g in _LLM_LOADED_GLOBS:
+            for path in PLUGIN.glob(g):
+                if _caller_checks(path.read_text(encoding="utf-8")):
+                    found.add(str(path.relative_to(PLUGIN)))
+        assert found == set(_CALLER_CHECK_SITES), sorted(found ^ set(_CALLER_CHECK_SITES))
