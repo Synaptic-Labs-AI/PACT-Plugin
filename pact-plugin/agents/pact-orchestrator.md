@@ -185,7 +185,7 @@ Reconstruct state:
    - Normally `TaskList` holds this session's work. If a notice, a SessionStart line or a refused spawn says PACT moved this session to another team, cannot tell which team is this session's, or has a recorded team with no config, follow the team-split recovery in `pact-state-recovery.md` before step 3: the earlier team's in-progress tasks are not in `TaskList`. After a compaction, do the same when the journal's latest `team_realigned` event names a `from` store whose in-flight tasks you have not re-created.
 3. `TaskList` — tasks, status, owners, blockers (summaries survive compaction, but task files with full metadata may be GC'd)
 4. `TaskGet` on priority tasks for status and blocking: in-progress first, then recent completed. For METADATA not yet in the journal, `TaskGet` is blind — read the task file: `cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team_name}/{taskId}.json" | jq .metadata.<key>`
-5. Next action: blocker → imPACT; in-progress phase → continue that workflow (see below); all complete → peer-review; PR open → check status; no tasks → check `gh pr list` or await user
+5. Next action: blocker → imPACT; in-progress phase → continue that workflow (see below); a pending "Invoke /PACT:wrap-up" task, or a merged PR with no `session_consolidated` event in the journal → `/PACT:wrap-up`; all complete → peer-review; PR open → check status; no tasks → check `gh pr list` or await user
 
 Do not invoke an in-progress workflow's command again: that starts the workflow over. If its re-attached copy is cut short or missing after a compaction, read `{plugin_root}/commands/<name>.md` in full with `Read` before you continue, where `PACT:<name>` is that workflow, and page through it if `Read` returns a partial view. Your context window doesn't survive compaction — the *session journal* does.
 
@@ -742,6 +742,7 @@ Use these commands to trigger PACT workflows for delegating tasks:
 - `/PACT:rePACT`: Recursive nested PACT cycle for complex sub-tasks (single or multi-domain)
 - `/PACT:imPACT`: Triage when blocked (Redo prior phase? Additional agents needed?)
 - `/PACT:peer-review`: Peer review of current work (commit, create PR, multi-agent review)
+- `/PACT:wrap-up`: Retrospective, memory consolidation and cleanup; invoke after every merge
 
 For full detail, `Read(file_path="../protocols/pact-workflows.md")` when selecting or sequencing PACT workflows.
 
@@ -769,7 +770,7 @@ Within each phase, invoke **multiple specialists concurrently** for non-conflict
 
 > ⚠️ **Single domain ≠ single agent, and comPACT is not limited to a single domain.** "Backend domain" with 3 bugs = 3 backend-coders in parallel. Independent tasks across domains can also run concurrently. Default to concurrent dispatch unless tasks share files or have dependencies.
 
-**After all phases complete**: Run `/PACT:peer-review` to create a PR.
+**After all phases complete**: Run `/PACT:peer-review` to create a PR. After a merge, invoke `/PACT:wrap-up`.
 
 ### PR Review Workflow
 
@@ -792,6 +793,7 @@ After agent reviews completed:
 
 - Synthesize findings and recommendations in `docs/review/` (note agreements and conflicts)
 - Execute `/PACT:pin-memory`
+- Hold the merge checkpoint; after a merge, invoke `/PACT:wrap-up`
 
 ### Recommended Agent Prompting Structure
 
