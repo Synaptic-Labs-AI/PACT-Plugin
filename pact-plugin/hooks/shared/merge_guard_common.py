@@ -2775,7 +2775,7 @@ def _has_pipe_to_shell(command: str) -> bool:
 # two to the same set.
 _STDIN_INTERPRETER = (
     r"(?<![\w./-])(?:[^\s|;&<>()]*/)?"
-    r"(?P<head>python[0-9.]*|pypy[0-9.]*|perl[0-9.]*|ruby[0-9.]*|nodejs[0-9.]*|node[0-9.]*"
+    r"(?P<head>python[0-9.]*t?|pypy[0-9.]*t?|perl[0-9.]*|ruby[0-9.]*|nodejs[0-9.]*|node[0-9.]*"
     r"|php[0-9.]*(?:-cgi)?|bun|deno|lua[0-9.]*|luajit|R|Rscript|osascript|tclsh[0-9.]*|wish[0-9.]*"
     r"|awk|gawk|mawk|nawk)"
     r"(?P<sub>[ \t]+(?:eval|run)(?=[ \t]))?"         # deno's eval / run subcommand
@@ -2816,26 +2816,21 @@ def _stdin_fed_code(command: str) -> list[tuple[str, str]]:
     return code
 
 
-_CODE_ARG_RE = re.compile(
-    _STDIN_INTERPRETER + r"(?P<code>'[^']*'|\"(?:[^\"\\]|\\.)*\")"
-)
-_INLINE_CODE_FLAGS = frozenset({"-c", "-e", "-E", "-r", "--eval", "--command"})
-
-
 def _code_arg_programs(command: str) -> list[tuple[str, str]]:
-    """(interpreter head, program text) for each program given as a -c/-e/-r argument."""
+    """(interpreter head, program text) for each program given on an interpreter's
+    command line (-c / -e / -r / deno eval / an awk program), wherever the interpreter
+    sits in the command (after sudo, env, uv run, …). Quoted text is never read as a head."""
     out = []
-    for m in _CODE_ARG_RE.finditer(command):
-        flags = m.group("flags").split()
-        sub = (m.group("sub") or "").strip()
-        if sub == "run" or (sub != "eval" and (not flags or flags[-1] not in _INLINE_CODE_FLAGS)):
+    view = _leg_slicing_view(command)
+    for m in _INTERPRETER_WORD_RE.finditer(view):
+        end = _COMPOUND_OPS_RE.search(view, m.end())
+        tokens = _shell_tokenize(command[m.start():end.start() if end else len(command)])
+        if not tokens:
             continue
-        code = m.group("code")
-        if code[0] == '"':
-            code = re.sub(r'\\(["\\$`])', r"\1", code[1:-1])
-        else:
-            code = code[1:-1]
-        out.append((m.group("head"), code))
+        head = os.path.basename(tokens[0])
+        program = _program_from_tokens(head, tokens)
+        if program:
+            out.append((head, program))
     return out
 
 
@@ -2939,6 +2934,176 @@ def _first_argument_command(code: str, pos: int) -> str | None:
     return shlex.join(argv)
 
 
+# An interpreter's head word anywhere in a (quote-masked) command.
+_INTERPRETER_WORD_RE = re.compile(
+    r"(?<![\w./-])(?:[^\s|;&<>()]*/)?"
+    r"(?:python[0-9.]*t?|pypy[0-9.]*t?|perl[0-9.]*|ruby[0-9.]*|nodejs[0-9.]*|node[0-9.]*"
+    r"|php[0-9.]*(?:-cgi)?|bun|deno|lua[0-9.]*|luajit|R|Rscript|osascript|tclsh[0-9.]*|wish[0-9.]*"
+    r"|awk|gawk|mawk|nawk)(?=[ \t]|$)"
+)
+
+# Per interpreter family: the flags whose NEXT token is the program, the flags that take a
+# value (skipped with it), and whether a combined short flag ending in e/E/c carries code.
+_PROGRAM_FLAGS = (
+    (re.compile(r"^(?:python|pypy)"), {"-c"}, {"-W", "-X", "--check-hash-based-pycs"}, "c"),
+    (re.compile(r"^perl"), {"-e", "-E"}, {"-I", "-M", "-m", "-x"}, "eE"),
+    (re.compile(r"^ruby"), {"-e"}, {"-r", "-I", "-C", "-E", "-x"}, "e"),
+    (re.compile(r"^(?:node|nodejs|bun)"), {"-e", "--eval", "-p", "--print"},
+     {"-r", "--require", "--import", "--loader", "--conditions", "-C"}, ""),
+    (re.compile(r"^php"), {"-r"}, {"-c", "-d", "-z"}, ""),
+    (re.compile(r"^(?:lua|luajit)"), {"-e"}, {"-l"}, ""),
+    (re.compile(r"^(?:R|Rscript)$"), {"-e"}, set(), ""),
+    (re.compile(r"^osascript$"), {"-e"}, {"-l"}, ""),
+)
+_AWK_HEAD_RE = re.compile(r"^(?:awk|gawk|mawk|nawk)$")
+
+
+def _program_from_tokens(head: str, tokens: list) -> str | None:
+    """The program text an interpreter is given on its command line, from its shell
+    tokens (tokens[0] is the interpreter), or None when it runs a script, a module or
+    stdin. Several -e programs are joined with newlines."""
+    if head == "deno":
+        rest = [t for t in tokens[1:] if not t.startswith("-")]
+        return rest[1] if len(rest) >= 2 and rest[0] == "eval" else None
+    if _AWK_HEAD_RE.match(head):
+        i = 1
+        while i < len(tokens):
+            t = tokens[i]
+            if t == "--":
+                i += 1
+                break
+            if t in ("-f", "--file") or t.startswith("-f"):
+                return None
+            if t in ("-F", "-v", "--field-separator", "--assign"):
+                i += 2
+                continue
+            if not t.startswith("-") or t == "-":
+                break
+            i += 1
+        return tokens[i] if i < len(tokens) else None
+    for head_re, code_flags, value_flags, combined in _PROGRAM_FLAGS:
+        if not head_re.match(head):
+            continue
+        programs, i = [], 1
+        while i < len(tokens):
+            t = tokens[i]
+            if t in code_flags or (
+                combined and re.fullmatch(r"-[A-Za-z]+", t) and t[-1] in combined and len(t) > 2
+            ):
+                if i + 1 < len(tokens):
+                    programs.append(tokens[i + 1])
+                i += 2
+                continue
+            if t in value_flags:
+                i += 2
+                continue
+            if t.startswith("--") and "=" in t:
+                i += 1
+                continue
+            if t == "-" or not t.startswith("-") or t in ("-m",):
+                break
+            i += 1
+        return "\n".join(programs) if programs else None
+    return None
+
+
+# Call names whose last segment runs a process (any qualifier: os.system, Bun.spawn,
+# child_process's execSync, IO.popen, …). `execute` is Lua's os.execute only.
+_EXEC_CALL_NAMES = frozenset({
+    "system", "system2", "popen", "popen2", "popen3", "popen4", "exec", "execl", "execle",
+    "execlp", "execlpe", "execv", "execve", "execvp", "execvpe", "execsync", "execfile",
+    "execfilesync", "spawn", "spawnsync", "spawnl", "spawnle", "spawnlp", "spawnlpe",
+    "spawnv", "spawnve", "spawnvp", "spawnvpe", "posix_spawn", "posix_spawnp", "fork",
+    "forkpty", "shell_exec", "passthru", "proc_open", "pcntl_exec", "readpipe",
+    "getoutput", "getstatusoutput", "check_output", "check_call", "binding",
+    "create_subprocess_shell", "create_subprocess_exec",
+})
+# Modules every attribute of which is a process route (subprocess.run, Open3.capture2, …).
+_EXEC_MODULES = frozenset({"subprocess", "child_process", "pty", "commands", "open3", "open2", "ipc"})
+# Bare reflective calls that can reach any of the above by name.
+_REFLECTIVE_CALLS = frozenset({
+    "eval", "exec", "compile", "getattr", "vars", "globals", "locals", "__import__",
+    "methodcaller", "call_user_func", "call_user_func_array", "instance_eval", "class_eval",
+})
+_CALL_NAME_RE = re.compile(r"(?<![\w$])((?:[A-Za-z_$][\w$]*(?:\.|::))*[A-Za-z_$][\w$]*)\s*\(")
+_PY_FROM_IMPORT_RE = re.compile(
+    r"\bfrom\s+(subprocess|os|pty|commands)\s+import\s*(?:\(([^)]*)\)|([\w \t,]+))"
+)
+_PY_IMPORT_AS_RE = re.compile(r"\bimport[ \t]+([\w \t,]+)")
+_JS_TAGGED_TEMPLATE_RE = re.compile(r"\$\s*`")
+_AWK_PIPE_RE = re.compile(r"\b(?:print|printf)\b[^;}\n]*(?<!\|)\|(?!\|)|\|\s*getline\b|\|&")
+_STATEMENT_FORMS = (
+    # ruby / perl run a command without parentheses: system "…", exec "…", spawn "…"
+    (re.compile(r"^(?:ruby|perl)"), re.compile(r"(?<![\w$.:])(?:system|exec|spawn)[ \t]+(?=[^\s=;,)\]}])")),
+    (re.compile(r"^perl"), re.compile(r"(?<![\w$])(?:qx\s*[^\w\s]|readpipe\b|open\s+[\w$]+\s*,|(?:use|require)\s+IPC::)")),
+    (re.compile(r"^ruby"), re.compile(r"%x\s*[^\w\s]|(?:__send__|public_send|send)\s*\(?\s*:(?:system|exec|spawn|`|popen)")),
+    (re.compile(r"^osascript$"), re.compile(r"\bdo\s+shell\s+script\b")),
+    (re.compile(r"^(?:python|pypy)"), re.compile(r"(?<![\w$])(?:__dict__|__builtins__|builtins)\b")),
+)
+
+
+def _python_aliases(masked: str) -> tuple[set, set]:
+    """Names a Python program imported as process routes: bare names (`from subprocess
+    import run`, `from os import system`) and module aliases (`import subprocess as sp`)."""
+    bare, modules = set(), set()
+    for m in _PY_FROM_IMPORT_RE.finditer(masked):
+        for part in (m.group(2) or m.group(3)).split(","):
+            words = part.split()
+            if not words:
+                continue
+            name, alias = words[0], words[-1]
+            if m.group(1) != "os" or name.lower() in _EXEC_CALL_NAMES:
+                bare.add(alias.lower())
+    for m in _PY_IMPORT_AS_RE.finditer(masked):
+        for part in m.group(1).split(","):
+            words = part.split()
+            if len(words) == 3 and words[1] == "as" and words[0] in ("subprocess", "os", "pty"):
+                modules.add(words[2].lower())
+    return bare, modules
+
+
+def _is_primitive_call(name: str, head: str, aliases: tuple) -> bool:
+    segs = [x.lower() for x in re.split(r"\.|::", name)]
+    first, last = segs[0], segs[-1]
+    bare, modules = aliases
+    if len(segs) == 1 and (last in bare or last in _REFLECTIVE_CALLS):
+        return True
+    if first in _EXEC_MODULES or (first in modules and (last in _EXEC_CALL_NAMES or first in modules)):
+        return True
+    if last in _EXEC_CALL_NAMES or last == "import_module":
+        return True
+    if last == "execute" and re.match(r"^(?:lua|luajit)", head):
+        return True
+    if first == "deno" and last in ("run", "command"):
+        return True
+    if last == "open" and re.match(r"^(?:perl|ruby)", head):
+        return True
+    return last == "pipe" and head in ("R", "Rscript")
+
+
+def _program_names_primitive(head: str, program: str) -> bool:
+    """True iff `head`'s program reaches a process: a call or statement shaped like one
+    of the language's exec primitives, judged OUTSIDE string literals (a primitive name
+    inside a string or a longer word is data), or a backtick / pipe in a language where
+    those run a command (ruby/perl/php backticks, a `$`-tagged JS template, awk's
+    print | and | getline)."""
+    masked = _mask_string_literals(program)
+    aliases = _python_aliases(masked) if re.match(r"^(?:python|pypy)", head) else (set(), set())
+    for m in _CALL_NAME_RE.finditer(masked):
+        if _is_primitive_call(m.group(1), head, aliases):
+            return True
+    for head_re, form in _STATEMENT_FORMS:
+        if head_re.match(head) and form.search(masked):
+            return True
+    if _BACKTICK_EXEC_HEAD_RE.match(head) and "`" in masked:
+        return True
+    if re.match(r"^(?:node|nodejs|bun|deno)$", head) and _JS_TAGGED_TEMPLATE_RE.search(masked):
+        return True
+    if _AWK_HEAD_RE.match(head) and _AWK_PIPE_RE.search(masked):
+        return True
+    return bool(re.match(r"^(?:tclsh|wish)", head) and _TCL_EXEC_RE.search(masked))
+
+
 def _code_runs_guarded_directly(head: str, code: str, _depth: int = 0) -> bool:
     """True iff `head`'s program `code` passes a guarded command DIRECTLY to an exec
     primitive: the first argument of a primitive-named call is a string or list literal
@@ -2947,9 +3112,10 @@ def _code_runs_guarded_directly(head: str, code: str, _depth: int = 0) -> bool:
     is one, or a backtick span that runs a shell is one. Call names, backticks and Tcl
     lines written inside a string literal are data. A command reached through a variable
     needs dataflow and is not followed."""
-    if _depth >= _DIRECT_CALL_MAX_DEPTH or not _INTERPRETER_EXEC_PRIMITIVE_RE.search(code):
+    if _depth >= _DIRECT_CALL_MAX_DEPTH or not _program_names_primitive(head, code):
         return False
     masked = _mask_string_literals(code)
+    aliases = _python_aliases(masked) if re.match(r"^(?:python|pypy)", head) else (set(), set())
     for m in re.finditer(r"(\$?)`([^`]*)`", masked):
         if m.group(1) or _BACKTICK_EXEC_HEAD_RE.match(head):
             span = code[m.start(2):m.end(2)]
@@ -2960,7 +3126,7 @@ def _code_runs_guarded_directly(head: str, code: str, _depth: int = 0) -> bool:
             if _is_dangerous_at_depth(code[m.start(1):m.end(1)].strip(), _depth + 1):
                 return True
     for m in _PRIMITIVE_CALL_RE.finditer(masked):
-        if not _INTERPRETER_EXEC_PRIMITIVE_RE.search(m.group(1)):
+        if not _is_primitive_call(m.group(1), head, aliases):
             continue
         cmd = _first_argument_command(code, m.end())
         if cmd and _is_dangerous_at_depth(cmd, _depth + 1):
@@ -4612,7 +4778,7 @@ _SHELL_STRING_EXECUTORS = re.compile(
 # interpreter. pypy, php-cgi, bun, deno, lua/luajit, R/Rscript and osascript run code given
 # on their command line the same way.
 _INTERPRETER_HEADS = re.compile(
-    r"^(?:python[0-9.]*|pypy[0-9.]*|perl[0-9.]*|ruby[0-9.]*|nodejs[0-9.]*|node[0-9.]*"
+    r"^(?:python[0-9.]*t?|pypy[0-9.]*t?|perl[0-9.]*|ruby[0-9.]*|nodejs[0-9.]*|node[0-9.]*"
     r"|php[0-9.]*(?:-cgi)?|bun|deno|lua[0-9.]*|luajit|R|Rscript|osascript|tclsh[0-9.]*|wish[0-9.]*"
     r"|awk|gawk|mawk|nawk)$"
 )
@@ -5146,8 +5312,14 @@ def _leg_command_word(leg: str) -> "str | None":
 
 
 def _interpreter_names_primitive(leg: str, head: str, tokens: list) -> bool:
-    """True iff an interpreter leg names an exec primitive. `deno eval` is deno's
-    one-liner SUBCOMMAND, not a call to eval, so that one token is not searched."""
+    """True iff an interpreter leg's program reaches a process. When the program given
+    on the command line can be read, it is judged by its calls and statements outside
+    string literals. Otherwise (a script, a module, an unusual launch form) the whole leg
+    is searched for any primitive substring, which preserves (the over-block-safe side).
+    `deno eval` is deno's one-liner SUBCOMMAND, not a call to eval."""
+    program = _program_from_tokens(head, tokens)
+    if program is not None:
+        return _program_names_primitive(head, program)
     text = leg
     if head == "deno" and len(tokens) > 1 and tokens[1] == "eval":
         text = re.sub(r"(?<![\w./-])deno\s+eval(?=\s|$)", "deno", leg, count=1)

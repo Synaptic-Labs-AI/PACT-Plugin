@@ -245,3 +245,48 @@ def test_object_argv_forms(label, executing, inert):
 def test_object_argv_nested_deeper_is_data():
     cmd = "deno eval 'new Deno.Command(\"echo\", {env: {args: [\"gh\", \"pr\", \"merge\", \"5\"]}}).outputSync()'"
     assert is_dangerous_command(cmd) is False
+
+
+# Primitives are matched as calls and statements outside string literals: an aliased
+# import is still the primitive, a paren-less perl open or a ruby send(:system) is still a
+# route, while python's open() is file I/O and awk's `||` is a logical or.
+CALL_SHAPED_ROUTES = [
+    ("py from-import run", "python3 -c 'from subprocess import run; run([\"gh\", \"pr\", \"merge\", \"5\"])'"),
+    ("py import as", "python3 -c 'import subprocess as sp; sp.run([\"gh\", \"pr\", \"merge\", \"5\"])'"),
+    ("py from os import system", f"python3 -c 'from os import system; system(\"{D}\")'"),
+    ("py from-import alias", "python3 -c 'from subprocess import check_call as cc; cc([\"gh\", \"pr\", \"merge\", \"5\"])'"),
+    ("pl paren-less open pipe", f"perl -e 'open F, \"| {D}\"; close F'"),
+    ("rb send system", f"ruby -e 'Kernel.send(:system, \"{D}\")'"),
+    ("rb public_send system", f"ruby -e 'Kernel.public_send(:system, \"{D}\")'"),
+    ("pl -ne combined flag", f"perl -ne 'system(\"{D}\")' notes.txt"),
+    ("py value flag before -c", f"python3 -W ignore -c 'import os; os.system(\"{D}\")'"),
+]
+CALL_SHAPED_DATA = [
+    ("py open is file io", f"python3 -c 'print(open(\"session.log\").read().count(\"{D}\"))'"),
+    ("awk logical or", f"awk '/x/ || /{D}/ {{print}}' session.log"),
+    ("py word holding system", f"python3 -c 'print(\"filesystem check before {D}\")'"),
+    ("rb send of another method", f"ruby -e 'puts [1].send(:first), \"{D}\"'"),
+    ("py call name inside a string", f"python3 -c 'print(\"then os.system({D}) by hand\")'"),
+    ("pl -ne word holding system", f"perl -ne 'print \"filesystem: $_\" if /{D}/' session.log"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", CALL_SHAPED_ROUTES, ids=[r[0] for r in CALL_SHAPED_ROUTES])
+def test_call_shaped_route_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", CALL_SHAPED_DATA, ids=[r[0] for r in CALL_SHAPED_DATA])
+def test_primitive_like_text_that_runs_nothing_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+def test_aliased_import_on_its_own_line_in_fed_code_is_refused():
+    cmd = "python3 - <<'EOF'\nimport subprocess as sp\nsp.run([\"gh\", \"pr\", \"merge\", \"5\"])\nEOF"
+    assert is_dangerous_command(cmd) is True
+
+
+def test_parenthesized_multi_line_from_import_is_resolved():
+    cmd = ("python3 - <<'EOF'\nfrom subprocess import (\n    run,\n    Popen as P,\n)\n"
+           "P([\"gh\", \"pr\", \"merge\", \"5\"])\nEOF")
+    assert is_dangerous_command(cmd) is True
