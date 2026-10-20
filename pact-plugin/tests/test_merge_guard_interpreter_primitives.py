@@ -86,6 +86,14 @@ EXECUTING_ROUTES = [
     # carrier must leave its argument for the interpreter clause to judge.
     ("php echo system", _sq("php -r", f'echo system("{D}");')),
     ("php echo shell_exec wrapped", _sq("timeout 5 php -r", f'echo shell_exec("{D}");')),
+    # The same php leg behind a prefix the leg slicer must see through: an fd redirect
+    # (sliced on the shared view, not at its `&`) and a coarse wrapper (fails safe).
+    ("php echo behind 2>&1", _sq("2>&1 php -r", f'echo shell_exec("{D}");')),
+    ("php echo behind flock", _sq("flock f php -r", f'echo system("{D}");')),
+    ("php echo behind env", _sq("env X=1 php -r", f'echo system("{D}");')),
+    ("php echo behind nohup", _sq("nohup php -r", f'echo system("{D}");')),
+    ("ruby behind env", _sq("env X=1 ruby -e", f'system("{D}")')),
+    ("perl behind nohup", _sq("nohup perl -e", f'system("{D}")')),
     # awk
     ("awk system", _sq("awk", f'BEGIN {{ system("{D}") }}')),
     ("awk print pipe", _sq("awk", f'BEGIN {{ print "x" | "{D}" }}')),
@@ -101,6 +109,10 @@ INERT_ROWS = [
     ("js log", _sq("node -e", f'console.log("{D}")')),
     ("php echo", _sq("php -r", f'echo "{D}";')),
     ("shell echo in bash -c", _sq("bash -c", f'echo "{D}"')),
+    # Only php has an `echo` statement. In other interpreter code an `echo ... | bash`
+    # string is data (a rig writing a test command), even beside a primitive.
+    ("py rig with echo data", "python3 -c \"import json, subprocess; "
+                              "json.dump({'c': \\\"echo '" + D + "' | bash\\\"}, open('c.json', 'w'))\""),
     ("awk pattern", f"awk '/{D}/ {{print}}' notes.txt"),
 ]
 

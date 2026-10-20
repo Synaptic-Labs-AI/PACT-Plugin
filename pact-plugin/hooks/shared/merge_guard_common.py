@@ -3254,10 +3254,11 @@ def _strip_non_executable_content(command: str) -> str:
             # sq -> bareword STRIPPED (sq $() is literal). The verb + flags sit OUTSIDE these
             # inner subs and stay intact.
             span = span_match.group(0)
-            # An `echo` inside an interpreter's program code is that language's statement,
-            # not the shell builtin: `php -r 'echo shell_exec("…");'` RUNS its argument.
-            # Leave such a span whole for the interpreter clause of carrier 10 to judge.
-            if _in_interpreter_exec_code(echo_text, span_match.start()):
+            # Inside php code, `echo` is php's statement, not the shell builtin:
+            # `php -r 'echo shell_exec("…");'` RUNS its argument. Leave such a span whole
+            # for the interpreter clause of carrier 10 to judge. Other interpreters have
+            # no `echo` statement, so an `echo` in their quoted text is data.
+            if _in_php_exec_code(echo_text, span_match.start()):
                 return span
             span = re.sub(r'"(?:[^"\\]|\\.)*"', _strip_echo_dq_arg, span)
             span = re.sub(r"'[^']*'", "STRIPPED", span)
@@ -4930,34 +4931,56 @@ def _leg_command_word(leg: str) -> "str | None":
     return None                                          # only assignments/redirects → no command
 
 
-def _is_interpreter_exec_leg(leg: str, _depth: int = 0) -> bool:
-    """True iff this leg's command word, through any modeled wrapper, is an interpreter
-    and the leg names an exec primitive: its quoted code can run a shell command."""
+_PHP_HEAD_RE = re.compile(r"^php[0-9.]*$")
+
+
+def _is_php_exec_leg(leg: str, _depth: int = 0) -> bool:
+    """True iff this leg runs php code that names an exec primitive, so a php `echo`
+    statement in that code can print the output of a shell call. Walks the modeled
+    wrappers like _is_preserve_leg, and FAILS SAFE to True when a coarse wrapper, an
+    uncertain wrapper boundary or the depth limit hides the head while php is named
+    in the leg (True keeps the echo argument for the preserve check to judge)."""
     if not _INTERPRETER_EXEC_PRIMITIVE_RE.search(leg):
         return False
     cmd_leg = _leg_command_word(leg)
     tokens = _shell_tokenize(cmd_leg) if cmd_leg is not None else None
     if not tokens:
         return False
+    names_php = any(_PHP_HEAD_RE.match(os.path.basename(t)) for t in tokens)
     head = os.path.basename(tokens[0])
-    if _INTERPRETER_HEADS.match(head):
+    if _PHP_HEAD_RE.match(head):
         return True
-    if head in _EXEC_WRAPPERS_RECURSE and _depth < _MAX_WRAPPER_DEPTH:
+    if head in _EXEC_WRAPPERS_COARSE:
+        return names_php
+    if head in _EXEC_WRAPPERS_RECURSE:
+        if _depth >= _MAX_WRAPPER_DEPTH:
+            return names_php
         nested = _wrapper_nested_command(cmd_leg, head)
-        return nested is not None and _is_interpreter_exec_leg(nested, _depth + 1)
+        if nested is None:
+            return names_php
+        return _is_php_exec_leg(nested, _depth + 1)
     return False
 
 
-def _in_interpreter_exec_code(text: str, pos: int) -> bool:
+def _leg_slicing_view(text: str) -> str:
+    """The view legs are sliced on: quotes masked and fd redirects (`2>&1`, `>&2`,
+    `&>`, `>|`) blanked, so only real shell operators separate legs. Same length as
+    `text`, so offsets carry over. Shared by carrier 10 and the echo carrier."""
+    return _FD_REDIRECT_RE.sub(lambda m: " " * len(m.group()), _mask_shell_quotes(text))
+
+
+def _in_php_exec_code(text: str, pos: int) -> bool:
     """True iff offset `pos` of `text` sits inside a quoted span of a leg that
-    _is_interpreter_exec_leg accepts, i.e. inside program code that can run a shell."""
-    masked = _mask_shell_quotes(text)
-    if masked[pos] != " " or text[pos] == " ":
+    _is_php_exec_leg accepts, i.e. inside php code whose `echo` prints a shell call."""
+    view = _leg_slicing_view(text)
+    if view[pos] != " " or text[pos] == " ":
         return False                                     # not inside a quoted span
-    before = [m.end() for m in re.finditer(r"[;&|\n]", masked[:pos])]
-    after = re.search(r"[;&|\n]", masked[pos:])
-    leg = text[before[-1] if before else 0: pos + after.start() if after else len(text)]
-    return _is_interpreter_exec_leg(leg)
+    start = 0
+    for m in _COMPOUND_OPS_RE.finditer(view):
+        if m.start() >= pos:
+            return _is_php_exec_leg(text[start:m.start()])
+        start = m.end()
+    return _is_php_exec_leg(text[start:])
 
 
 def _is_preserve_leg(leg: str, _depth: int = 0) -> bool:
@@ -5195,9 +5218,7 @@ def _strip_inert_positional_legs(result: str) -> str:
     legs verbatim. Rejoined with the ORIGINAL separators so a downstream re-slice of this
     result sees byte-unchanged leg boundaries. Slices via this in-line walk (NOT
     ``_split_into_legs``, which re-strips → recursion)."""
-    view = _FD_REDIRECT_RE.sub(
-        lambda m: " " * len(m.group()), _mask_shell_quotes(result)
-    )
+    view = _leg_slicing_view(result)
     out, last = [], 0
     for m in _COMPOUND_OPS_RE.finditer(view):
         out.append(_maybe_strip_leg(result[last:m.start()]))
