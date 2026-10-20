@@ -410,6 +410,10 @@ class TestLivePrStateFixAEndToEnd:
         pytest.param("2026-04-17T12:00:00Z", "wrap-up", False, id="SE2-wrap-up-same-second"),
         pytest.param("2026-04-17T11:00:00Z", "wrap-up", True, id="SE3-wrap-up-before-review"),
         pytest.param("2026-04-17T13:00:00Z", None, True, id="SE10-hook-session-end-no-source"),
+        # Any source other than wrap-up proves nothing: a check that counted
+        # every sourced session_end would pass the no-source arm above.
+        pytest.param("2026-04-17T13:00:00Z", "pause", True, id="SE11-pause-source-after-review"),
+        pytest.param("2026-04-17T13:00:00Z", "Wrap-up", True, id="SE11-source-is-case-exact"),
     ])
     def test_merged_pr_and_a_session_end(self, session_dir, session_end_ts, source, warns):
         """Only a session_end with source "wrap-up", at or after the latest

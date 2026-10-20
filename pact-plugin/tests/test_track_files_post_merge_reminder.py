@@ -138,6 +138,47 @@ class TestReminderSilent:
         """S5."""
         assert _context(_run(tmp_path, _frame(command))) is None
 
+    @pytest.mark.parametrize("tool_input", [
+        pytest.param({}, id="S7-no-command"),
+        pytest.param({"command": ["gh", "pr", "merge", "1659"]}, id="S7-command-not-a-string"),
+        pytest.param({"command": ""}, id="S7-empty-command"),
+        pytest.param("gh pr merge 1659", id="S7-tool-input-not-a-dict"),
+    ])
+    def test_a_malformed_tool_input_is_silent(self, tmp_path, tool_input):
+        """S7: a lead Bash frame whose command cannot be read stays silent
+        and exits 0."""
+        assert _context(_run(tmp_path, _frame(tool_input=tool_input))) is None
+
+    def test_an_edit_carrying_merge_text_is_silent(self, tmp_path):
+        """S8: only a Bash call is a merge; an Edit whose payload names one
+        is file tracking."""
+        frame = _frame(tool_name="Edit", tool_input={
+            "file_path": str(tmp_path / "notes.md"),
+            "old_string": "", "new_string": "gh pr merge 1659 --squash",
+            "command": "gh pr merge 1659 --squash",
+        }, tool_response={"filePath": str(tmp_path / "notes.md")})
+        assert _context(_run(tmp_path, frame)) is None
+
+
+class TestReminderWording:
+    def test_a_merge_that_failed_inside_an_exit_0_command_still_gets_conditional_text(self, tmp_path):
+        """F6: the incident shape when the merge leg failed. The whole command
+        exits 0 (tail and gh pr view succeed), so PostToolUse fires and the
+        reminder fires too. Its first words make it safe to read after a failed
+        merge."""
+        frame = _frame(INCIDENT, response={
+            "stdout": "X Pull request #1659 is not mergeable: the base branch policy "
+                      "prohibits the merge.\nOPEN", "stderr": "", "interrupted": False})
+        text = _context(_run(tmp_path, frame))
+        assert text == _POST_MERGE_REMINDER
+        assert text.startswith("If the merge succeeded,"), text
+
+    def test_an_api_merge_is_a_merge(self, tmp_path):
+        """F7: the classifier reads the REST merge endpoint as a merge, so the
+        reminder follows it as it follows `gh pr merge`."""
+        frame = _frame("gh api -X PUT repos/o/r/pulls/1659/merge")
+        assert _context(_run(tmp_path, frame)) == _POST_MERGE_REMINDER
+
 
 PIN_REPORT = (
     "import shared.claude_md_drift as d\n"
