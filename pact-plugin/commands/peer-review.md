@@ -74,6 +74,8 @@ Review task: in_progress (persists until merge-ready)
 
 **Key rules**: Review stays `in_progress` until merge-ready; fresh tasks per cycle; re-review is verify-only (minimal scope); imPACT escalation blocks (doesn't complete/delete) review; resume after resolution.
 
+**Failed cycle**: a remediation cycle fails when its verify-only re-review leaves a blocking finding open, OR raises a finding in a class an earlier cycle already closed, even if every finding the cycle listed was closed. A finding's class is one sentence naming the behaviour that fails, independent of the file, line or input that exposed it. Write that sentence beside each blocking finding when you synthesize findings; two findings share a class when one sentence describes both.
+
 **Persist `remediation_cycle_count`**: `TaskUpdate(reviewTaskId, metadata={"remediation_cycle_count": N})` — increment at each cycle start; default 0 if absent.
 
 ### Verify-Only Re-Review
@@ -344,7 +346,7 @@ JSON
 JSON
        ```
      - After all fixes complete, re-run review to verify fixes only (see Verify-Only Re-Review above)
-     - **Termination**: If blocking items persist after 2 fix-verify cycles → escalate via `/PACT:imPACT`
+     - **Termination**: After 2 failed cycles (see **Failed cycle** above) → escalate via `/PACT:imPACT`
    - **Minor + Future**:
 
      **Greedy-fix mode** <!-- ANCHOR-STABLE: GREEDY-CONFIG-REF --> — consult the injected **PACT Runtime Config** block (resolved into the orchestrator's context at session start):

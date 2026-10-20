@@ -345,3 +345,31 @@ class TestImpactReturnsToCaller:
                  if "**Retry the current phase**" in ln]
         assert len(lines) == 1, lines
         assert lines[0].rstrip().endswith("then continue the invoking workflow from that phase"), lines[0]
+
+
+# ---------------------------------------------------------------------------
+# A reopened finding class fails the cycle
+# ---------------------------------------------------------------------------
+
+class TestFailedCycleRule:
+    def test_failed_cycle_counts_a_reopened_class(self):
+        """Reddens when peer-review's failed-cycle rule stops counting a finding
+        in an already-closed class, or stops defining a class. Mutation: delete
+        the clause "OR raises a finding in a class an earlier cycle already
+        closed"."""
+        paras = [p for p in _text("peer-review.md").split("\n\n")
+                 if p.startswith("**Failed cycle**:")]
+        assert len(paras) == 1, paras
+        rule = paras[0]
+        assert "leaves a blocking finding open" in rule, rule
+        assert "raises a finding in a class an earlier cycle already closed" in rule, rule
+        assert "A finding's class is one sentence naming the behaviour that fails" in rule, rule
+
+    def test_termination_reads_through_the_definition(self):
+        """Reddens when the remediation termination rule counts something other
+        than failed cycles. Mutation: restore "If blocking items persist after 2
+        fix-verify cycles"."""
+        lines = [ln for ln in _text("peer-review.md").splitlines()
+                 if "**Termination**:" in ln]
+        assert len(lines) == 1, lines
+        assert "After 2 failed cycles (see **Failed cycle** above)" in lines[0], lines[0]
