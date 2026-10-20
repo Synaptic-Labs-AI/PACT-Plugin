@@ -1150,7 +1150,8 @@ def main():
             sys.exit(0)
 
         # tool_response: {"answers": {"<question text>": "<selected label>"}, ...}
-        answers = tool_response.get("answers", {}) if isinstance(tool_response, dict) else {}
+        # (extract_tool_response always returns a dict; the answers value may not be one.)
+        answers = tool_response.get("answers", {})
         if not isinstance(answers, dict):
             answers = {}
 
