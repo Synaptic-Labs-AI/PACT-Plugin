@@ -16,19 +16,19 @@ exactly how the feature this replaces shipped inert.
 REVERT-CARDINALITY NON-VACUITY GATE — MEASURED, not asserted. Source-revert
 the Layer 1 call in `hooks/track_files.py` (replace the guarded
 `record_background_launch(input_data)` block with `pass`) and this file
-reports **6 failed, 8 passed**. The six kills are the arms that assert a
+reports **6 failed, 11 passed**. The six kills are the arms that assert a
 record IS written: `test_a_background_launch_lands_a_real_record_on_disk`,
 `test_layer_1_records_the_harness_task_id`,
 `test_a_launch_without_a_string_harness_id_records_none`,
 `test_a_SHELL_backgrounded_launch_with_NO_FLAG_lands_a_record`,
 `test_a_LONG_RUNNING_command_IS_recorded_now` and
-`test_a_SUBAGENT_launched_shell_lands_a_subagent_owned_record`. The other eight
-pin fail-open and negative behaviour and correctly survive a feature that does
-nothing. If a future edit makes that ablation report **0 failed**, this file has
+`test_a_SUBAGENT_launched_shell_lands_a_subagent_owned_record`. The other
+eleven pin fail-open and negative behaviour, or the post-merge reminder, and
+correctly survive a background recorder that does nothing. If a future edit makes that ablation report **0 failed**, this file has
 stopped measuring the seam and the number above is the tripwire.
 
 A SECOND ABLATION IS ALREADY PINNED BY THE FIXTURE: omitting the
-`pact-session-context.json` write also reports 6 failed, 8 passed, on the same
+`pact-session-context.json` write also reports 6 failed, 11 passed, on the same
 six positive-record arms, for a DIFFERENT reason: with no session context and
 no registry entry, the frame's team cannot be resolved. Two distinct
 single-point ablations, same cardinality, different cause; see the fixture
@@ -395,3 +395,46 @@ class TestTrackFilesBackgroundSeam:
         result = _run(seam, _frame())
         assert result.returncode == 0
         assert _registry(seam) == []
+
+
+MERGE = "gh pr merge 1659 --squash"
+
+
+def _reminder(result: subprocess.CompletedProcess) -> str | None:
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    return out.get("hookSpecificOutput", {}).get("additionalContext")
+
+
+class TestPostMergeReminderSeam:
+    """The post-merge reminder on captured frames: the role decision reads the
+    frame's real key set, not a synthesized one. Only the command and the
+    response are substituted."""
+
+    def test_the_captured_lead_posttooluse_frame_gets_the_reminder(self, seam):
+        from fixtures.role_frames import captured_lead_posttooluse_taskupdate_completed
+        from track_files import _POST_MERGE_REMINDER
+
+        frame = captured_lead_posttooluse_taskupdate_completed()
+        frame.update(
+            tool_name="Bash",
+            tool_input={"command": MERGE},
+            tool_response={"stdout": "", "stderr": "", "interrupted": False, "isImage": False},
+        )
+        assert _reminder(_run(seam, frame)) == _POST_MERGE_REMINDER
+
+    def test_the_captured_teammate_bash_frame_gets_no_reminder(self, seam):
+        from fixtures.role_frames import (
+            captured_posttooluse_teammate_inprocess_bash_background,
+        )
+
+        frame = captured_posttooluse_teammate_inprocess_bash_background()
+        frame["tool_input"] = {"command": MERGE}
+        assert _reminder(_run(seam, frame)) is None
+
+    def test_the_captured_lead_failure_frame_gets_no_reminder(self, seam):
+        from fixtures.role_frames import captured_posttoolusefailure_bash_headless
+
+        frame = captured_posttoolusefailure_bash_headless()
+        frame["tool_input"] = {"command": MERGE}
+        assert _reminder(_run(seam, frame)) is None

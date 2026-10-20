@@ -227,9 +227,11 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
     "track_files": frozenset({
         "background_launch", "background_work",
         "claude_md_drift", "claude_md_manager", "claude_md_markers", "constants",
-        "error_output", "failure_cause", "git_helpers", "intentional_wait", "pact_context",
+        "error_output", "failure_cause", "git_helpers", "intentional_wait",
+        "merge_guard_common", "pact_context",
         "paths", "pin_caps", "pin_credit", "pin_growth", "project_scope", "session_journal",
         "session_registry", "session_state", "staleness", "state_file", "task_utils",
+        "tool_response",
     }),  # regenerated from the live derivation, not hand-listed: the Layer 1
          # fold adds background_work + intentional_wait, and the rest were
          # already reached through the pin-staleness clear this hook carries.
@@ -237,7 +239,9 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # kernel and migration planners import the parser inside functions.
          # claude_md_drift and pin_growth reached via the pin-growth report and
          # record jobs, imported inside functions; pin_credit via the record
-         # job's credit confirm.
+         # job's credit confirm. merge_guard_common and tool_response are
+         # reached by the post-merge reminder job; a classifier change in
+         # merge_guard_common now changes this hook's reminder.
     "agent_handoff_emitter": frozenset({
         "agent_handoff_marker", "canonical_json", "constants",
         "pact_context", "paths",
