@@ -464,7 +464,7 @@ If `TaskList` shows an `in_progress` Review task whose subject ends with `({bran
 | User's decision | Specialists | Next action |
 |----------------|-------------|-------------|
 | **Yes, create PR** (Recommended) | **Keep alive** — review often needs the original specialist to fix findings | Invoke `/PACT:peer-review`. `/PACT:wrap-up` or `/PACT:pause` shuts the specialists down later. |
-| **Continue working** | **Keep alive** — apply Reuse vs. Spawn table for follow-up | Do nothing — let the user continue. More work may follow via `/PACT:comPACT` or `/PACT:orchestrate`. |
+| **Continue working** | **Keep alive** — apply Reuse vs. Spawn table for follow-up | Stay in this workflow; more work may follow via `/PACT:comPACT` or `/PACT:orchestrate`. |
 | **Pause work for now** | **Shut down after consolidation** — pause preserves knowledge | Invoke `/PACT:pause` — consolidates memory, persists state, shuts down teammates. Worktree persists; resume later. |
 
 **If blocker reported**:
