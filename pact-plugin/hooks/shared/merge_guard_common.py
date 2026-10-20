@@ -2778,6 +2778,7 @@ _STDIN_INTERPRETER = (
     r"(?P<head>python[0-9.]*|pypy[0-9.]*|perl[0-9.]*|ruby[0-9.]*|nodejs[0-9.]*|node[0-9.]*"
     r"|php[0-9.]*(?:-cgi)?|bun|deno|lua[0-9.]*|luajit|R|Rscript|osascript|tclsh[0-9.]*|wish[0-9.]*"
     r"|awk|gawk|mawk|nawk)"
+    r"(?P<sub>[ \t]+(?:eval|run)(?=[ \t]))?"         # deno's eval / run subcommand
     r"(?P<flags>(?:[ \t]+-[\w-]*)*)[ \t]*"
 )
 _CODE_ARG_FLAGS = frozenset({"-c", "-e", "-E", "-r", "-m", "-f", "--eval", "--command"})
@@ -2791,8 +2792,11 @@ _FED_HERESTRING_RE = re.compile(
 _PIPE_INTO_INTERPRETER_RE = re.compile(r"\|[ \t]*" + _STDIN_INTERPRETER + r"(?=$|[;&|)\n])")
 
 
-def _reads_program_from_stdin(flags: str) -> bool:
-    return not any(f in _CODE_ARG_FLAGS for f in flags.split())
+def _reads_program_from_stdin(m: re.Match) -> bool:
+    """No code argument: no -c/-e/… flag and not deno's `eval` subcommand."""
+    if (m.group("sub") or "").strip() == "eval":
+        return False
+    return not any(f in _CODE_ARG_FLAGS for f in m.group("flags").split())
 
 
 def _stdin_fed_code(command: str) -> list[tuple[str, str]]:
@@ -2801,12 +2805,12 @@ def _stdin_fed_code(command: str) -> list[tuple[str, str]]:
     argument, and, for a pipe into one, the quoted text upstream of it (what `echo '…'`
     or `printf '…'` emits) plus any heredoc body (`cat <<EOF | python3`)."""
     code = [(m.group("head"), m.group("body")) for m in _FED_HEREDOC_RE.finditer(command)
-            if _reads_program_from_stdin(m.group("flags"))]
+            if _reads_program_from_stdin(m)]
     code += [(m.group("head"), _unquote_literal(m.group("body")))
              for m in _FED_HERESTRING_RE.finditer(command)
-             if _reads_program_from_stdin(m.group("flags"))]
+             if _reads_program_from_stdin(m)]
     for m in _PIPE_INTO_INTERPRETER_RE.finditer(_executed_surface_view(command)):
-        if _reads_program_from_stdin(m.group("flags")):
+        if _reads_program_from_stdin(m):
             code += [(m.group("head"), _unquote_literal(q)) for q in _STRING_LITERAL_RE.findall(command)]
             code += [(m.group("head"), h.group("body")) for h in _ANY_HEREDOC_RE.finditer(command)]
     return code
@@ -2823,7 +2827,8 @@ def _code_arg_programs(command: str) -> list[tuple[str, str]]:
     out = []
     for m in _CODE_ARG_RE.finditer(command):
         flags = m.group("flags").split()
-        if not flags or flags[-1] not in _INLINE_CODE_FLAGS:
+        sub = (m.group("sub") or "").strip()
+        if sub == "run" or (sub != "eval" and (not flags or flags[-1] not in _INLINE_CODE_FLAGS)):
             continue
         code = m.group("code")
         if code[0] == '"':
@@ -2878,12 +2883,40 @@ def _literal_list_at(text: str, i: int) -> tuple[list[str], int] | None:
         i = lit.end() + re.match(r"\s*,?", text[lit.end():]).end()
 
 
+_OBJECT_ARGV_KEY_RE = re.compile(r"(?<![\w$])[\"']?(?:args|cmd)[\"']?\s*:\s*")
+
+
+def _object_argv_at(code: str, i: int) -> list[str]:
+    """The literal `args:` / `cmd:` list at the top level of the object literal starting
+    at code[i], or [] when there is none or the object's bounds are unclear. Braces and
+    keys inside string literals do not count."""
+    if code[i:i + 1] != "{":
+        return []
+    masked = _mask_string_literals(code)
+    depth, j = 0, i
+    while j < len(masked):
+        if masked[j] in "{[(":
+            depth += 1
+        elif masked[j] in "}])":
+            depth -= 1
+            if depth == 0:
+                break
+        elif depth == 1:
+            key = _OBJECT_ARGV_KEY_RE.match(masked, j)
+            if key:
+                lst = _literal_list_at(code, key.end())
+                return lst[0] if lst else []
+        j += 1
+    return []
+
+
 def _first_argument_command(code: str, pos: int) -> str | None:
     """The command a call's leading literal arguments spell: one string literal alone is
     a shell command line; otherwise the consecutive string and list literals are argv,
     joined (`system('gh', 'pr', 'merge', '5')`, `spawnSync('gh', ['pr', 'merge'])`,
-    `run(['gh', 'pr', 'merge', '5'])`). Stops at the first non-literal argument. None
-    when the first argument is not a literal."""
+    `run(['gh', 'pr', 'merge', '5'])`). An object literal ends the walk, contributing its
+    own `args:` or `cmd:` list (`new Deno.Command('gh', {args: […]})`, `Deno.run({cmd:
+    […]})`). Stops at the first other non-literal argument. None when no literal leads."""
     argv, strings, i = [], 0, pos
     while True:
         lit = _STRING_LITERAL_RE.match(code, i)
@@ -2892,6 +2925,7 @@ def _first_argument_command(code: str, pos: int) -> str | None:
         else:
             lst = _literal_list_at(code, i)
             if lst is None:
+                argv += _object_argv_at(code, i)
                 break
             argv += lst[0]; i = lst[1]
         sep = re.match(r"\s*,\s*", code[i:])

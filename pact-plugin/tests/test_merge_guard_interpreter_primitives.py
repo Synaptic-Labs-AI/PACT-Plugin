@@ -215,3 +215,33 @@ def test_direct_call_rule_reads_a_later_argument_as_data():
     assert _code_runs_guarded_directly("python3", code) is False
     direct = "import subprocess; subprocess.run(['gh', 'pr', 'merge', '5'])"
     assert _code_runs_guarded_directly("python3", direct) is True
+
+
+# argv passed inside an options object: Deno.Command(cmd, {args: [...]}), Deno.run({cmd: [...]}).
+# Only the object's own top-level `args`/`cmd` list counts; a brace inside a string does not
+# end the object, and a list nested deeper is data.
+OBJECT_ARG_FORMS = [
+    ("deno eval Command args",
+     "deno eval 'new Deno.Command(\"gh\", {args: [\"pr\", \"merge\", \"5\"]}).outputSync()'",
+     "deno eval 'console.log(\"gh\", {args: [\"pr\", \"merge\", \"5\"]})'"),
+    ("deno run - heredoc Command args",
+     "deno run - <<'EOF'\nnew Deno.Command('gh', {args: ['pr', 'merge', '5']}).outputSync()\nEOF",
+     "deno run - <<'EOF'\nconsole.log('gh', {args: ['pr', 'merge', '5']})\nEOF"),
+    ("deno eval run cmd",
+     "deno eval 'Deno.run({cmd: [\"gh\", \"pr\", \"merge\", \"5\"]})'",
+     "deno eval 'console.log({cmd: [\"gh\", \"pr\", \"merge\", \"5\"]})'"),
+    ("deno Command args after a brace in a string",
+     "deno eval 'new Deno.Command(\"git\", {cwd: \"}\", args: [\"push\", \"--force\", \"origin\", \"main\"]}).outputSync()'",
+     "deno eval 'console.log(\"git\", {cwd: \"}\", args: [\"push\", \"--force\", \"origin\", \"main\"]})'"),
+]
+
+
+@pytest.mark.parametrize("label,executing,inert", OBJECT_ARG_FORMS, ids=[r[0] for r in OBJECT_ARG_FORMS])
+def test_object_argv_forms(label, executing, inert):
+    assert is_dangerous_command(executing) is True
+    assert is_dangerous_command(inert) is False
+
+
+def test_object_argv_nested_deeper_is_data():
+    cmd = "deno eval 'new Deno.Command(\"echo\", {env: {args: [\"gh\", \"pr\", \"merge\", \"5\"]}}).outputSync()'"
+    assert is_dangerous_command(cmd) is False
