@@ -198,3 +198,39 @@ class TestMergeHandsOffToWrapUp:
         line = lines[0]
         assert "merged PR" in line and "`/PACT:wrap-up`" in line, line
         assert line.index("`/PACT:wrap-up`") < line.index("all complete"), line
+
+
+# ---------------------------------------------------------------------------
+# Teammate shutdown has one owner
+# ---------------------------------------------------------------------------
+
+_LLM_LOADED_GLOBS = ("commands/*.md", "agents/*.md", "protocols/*.md", "skills/*/SKILL.md")
+
+# A merge and `/PACT:wrap-up` joined by "or", in either order: the two offered
+# as alternative end points ("until after PR merge or `/PACT:wrap-up`").
+_MERGE_OR_WRAP_UP_RE = re.compile(
+    r"\bmerge[a-z]*`?,?\s+or\s+(?:after\s+|until\s+|via\s+)?`?/PACT:wrap-up"
+    r"|/PACT:wrap-up`?,?\s+or\s+(?:after\s+|until\s+)?(?:the\s+|a\s+|PR\s+|user\s+)*merge",
+    re.IGNORECASE,
+)
+
+
+class TestShutdownOwner:
+    def test_the_pattern_matches_the_alternative_form(self):
+        """Non-vacuity control: reddens when the pattern stops matching the
+        shape it exists to catch."""
+        assert _MERGE_OR_WRAP_UP_RE.search("persist until after PR merge or `/PACT:wrap-up`.")
+        assert _MERGE_OR_WRAP_UP_RE.search("run `/PACT:wrap-up` or merge the PR")
+
+    def test_no_llm_loaded_sentence_offers_merge_or_wrap_up(self):
+        """Reddens when any LLM-loaded file offers a merge and `/PACT:wrap-up`
+        as alternatives. Mutation: restore the persona's "Teammates persist
+        until after PR merge or `/PACT:wrap-up`."."""
+        files = [p for g in _LLM_LOADED_GLOBS for p in sorted(PLUGIN.glob(g))]
+        assert files, "no LLM-loaded files found"
+        hits = []
+        for path in files:
+            text = path.read_text(encoding="utf-8")
+            for m in _MERGE_OR_WRAP_UP_RE.finditer(text):
+                hits.append((str(path.relative_to(PLUGIN)), text[:m.start()].count("\n") + 1, m.group(0)))
+        assert not hits, hits

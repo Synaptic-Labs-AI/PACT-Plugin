@@ -485,7 +485,7 @@ JSON
    - `MERGED` → `TaskCreate` the "Invoke /PACT:wrap-up" task, complete the Review task, then invoke `/PACT:wrap-up`. Run project post-merge steps (tags, releases) alongside `/PACT:wrap-up`, never instead of it.
    - Any other state → report the state and return to step 7.
 
-> ⚠️ **Do NOT shut down reviewers here.** Teammates persist until after user-authorized merge. They may be needed for post-merge questions or if the user requests changes.
+> ⚠️ **Do NOT shut down reviewers here.** Teammates persist until `/PACT:wrap-up` ends the session or `/PACT:pause` shuts them down.
 
 ---
 

@@ -454,7 +454,7 @@ When a PreToolUse hook (`bootstrap_gate`, `dispatch_gate`, etc.) emits a WARN-sh
 
 ### Agent Shutdown Guidance
 
-Do **not** shut down teammates preemptively. Reuse idle teammates whenever possible. Teammates persist until after PR merge or `/PACT:wrap-up`.
+Do **not** shut down teammates preemptively. Reuse idle teammates whenever possible. Teammates persist until `/PACT:wrap-up` ends the session, or until `/PACT:pause` or `/PACT:refresh` shuts them down.
 
 Exceptions:
 - rePACT sub-scope specialists shut down after their nested cycle (orchestrator relays handoff details to subsequent sub-scopes)
