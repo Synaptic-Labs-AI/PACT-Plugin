@@ -276,7 +276,10 @@ class TestPostMainEntryPoint:
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert json.loads(captured.out) == {"suppressOutput": True}
+        # A mint confirms what the approval authorizes: operation and target.
+        hso = json.loads(captured.out)["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PostToolUse"
+        assert "an approval was recorded for a merge on PR #42." in hso["additionalContext"]
         # Verify token was created
         tokens = list(tmp_path.glob("merge-authorized-*"))
         assert len(tokens) == 1
