@@ -125,3 +125,25 @@ def test_every_standard_spawn_route_stays_refused(label, cmd):
 @pytest.mark.parametrize("label,cmd", INERT_ROWS, ids=[r[0] for r in INERT_ROWS])
 def test_interpreter_text_as_data_is_allowed(label, cmd):
     assert is_dangerous_command(cmd) is False, f"{label}: inert interpreter code still refused: {cmd!r}"
+
+
+# A versioned or suffixed binary is the same interpreter: with a primitive its code
+# can run the guarded command; without one the text is data.
+VERSIONED_HEADS = [
+    ("php8.2 -r", 'system("{d}");', 'echo "{d}";'),
+    ("php82 -r", 'echo system("{d}");', 'echo "{d}";'),
+    ("ruby3.2 -e", 'system("{d}")', 'puts "{d}"'),
+    ("perl5.36 -e", 'system("{d}")', 'print "{d}"'),
+    ("node18 -e", 'require("child_process").execSync("{d}")', 'console.log("{d}")'),
+    ("nodejs20 -e", 'require("child_process").execSync("{d}")', 'console.log("{d}")'),
+    ("python3.11 -c", 'import os; os.system("{d}")', 'print("{d}")'),
+    ("python3.12 -c", 'import subprocess; subprocess.run("{d}", shell=True)', 'print("{d}")'),
+    ("mawk", 'BEGIN {{ system("{d}") }}', '/{d}/ {{ print }}'),
+    ("nawk", 'BEGIN {{ system("{d}") }}', '/{d}/ {{ print }}'),
+]
+
+
+@pytest.mark.parametrize("head,executing,inert", VERSIONED_HEADS, ids=[r[0] for r in VERSIONED_HEADS])
+def test_versioned_interpreter_heads(head, executing, inert):
+    assert is_dangerous_command(_sq(head, executing.format(d=D))) is True
+    assert is_dangerous_command(_sq(head, inert.format(d=D))) is False

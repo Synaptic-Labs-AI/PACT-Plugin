@@ -4406,8 +4406,13 @@ _SHELL_STRING_EXECUTORS = re.compile(
 # only when the leg text carries a primitive; without one, -c/-e code, a script's or -m
 # module's argv and an awk program are inert. The primitive list is deliberately over-wide (a
 # case-insensitive substring anywhere in the leg): a false match preserves, the over-block-safe
-# direction. Same per-FAMILY anchoring as _SHELL_STRING_EXECUTORS (python-config is no head).
-_INTERPRETER_HEADS = re.compile(r"^(?:python[0-9.]*|perl|ruby[0-9.]*|nodejs|node|php|awk|gawk)$")
+# direction. Same per-FAMILY anchoring as _SHELL_STRING_EXECUTORS (python-config is no head);
+# a versioned or suffixed binary (php8.2, php82, perl5.36, node18, python3.12) is the same
+# interpreter.
+_INTERPRETER_HEADS = re.compile(
+    r"^(?:python[0-9.]*|perl[0-9.]*|ruby[0-9.]*|nodejs[0-9.]*|node[0-9.]*|php[0-9.]*"
+    r"|awk|gawk|mawk|nawk)$"
+)
 # Every non-obfuscated route to a process from each interpreter names one of these:
 #   python  os.system/popen, os.exec*/spawn*/posix_spawn*, subprocess (also asyncio's
 #           create_subprocess_*), pty.spawn, commands.get*, os.fork
