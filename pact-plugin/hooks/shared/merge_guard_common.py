@@ -2767,6 +2767,130 @@ def _has_pipe_to_shell(command: str) -> bool:
     )
 
 
+# An interpreter reads its PROGRAM from stdin when it gets no code argument: no -c/-e/-r/-m
+# and no script path, only flags or a lone `-`. Its stdin feed (a pipe into it, a here-string,
+# a heredoc) is then that interpreter's code, and it can run a shell exactly when it names an
+# exec primitive. The interpreter-head alternation is spelled out here because this module
+# defines _INTERPRETER_HEADS further down; test_merge_guard_interpreter_primitives pins the
+# two to the same set.
+_STDIN_INTERPRETER = (
+    r"(?<![\w./-])(?:[^\s|;&<>()]*/)?"
+    r"(?P<head>python[0-9.]*|pypy[0-9.]*|perl[0-9.]*|ruby[0-9.]*|nodejs[0-9.]*|node[0-9.]*"
+    r"|php[0-9.]*(?:-cgi)?|bun|deno|lua[0-9.]*|luajit|R|Rscript|osascript|tclsh[0-9.]*|wish[0-9.]*"
+    r"|awk|gawk|mawk|nawk)"
+    r"(?P<flags>(?:[ \t]+-[\w-]*)*)[ \t]*"
+)
+_CODE_ARG_FLAGS = frozenset({"-c", "-e", "-E", "-r", "-m", "-f", "--eval", "--command"})
+_FED_HEREDOC_RE = re.compile(
+    _STDIN_INTERPRETER + r"<<-?[ \t]*(?P<q>['\"]?)(?P<tag>\w+)(?P=q)[^\n]*\n(?P<body>.*?)\n[ \t]*(?P=tag)[ \t]*(?:\n|$)",
+    re.DOTALL,
+)
+_FED_HERESTRING_RE = re.compile(
+    _STDIN_INTERPRETER + r"<<<[ \t]*(?P<body>'[^']*'|\"(?:[^\"\\]|\\.)*\"|\S+)"
+)
+_PIPE_INTO_INTERPRETER_RE = re.compile(r"\|[ \t]*" + _STDIN_INTERPRETER + r"(?=$|[;&|)\n])")
+
+
+def _reads_program_from_stdin(flags: str) -> bool:
+    return not any(f in _CODE_ARG_FLAGS for f in flags.split())
+
+
+def _stdin_fed_code(command: str) -> list[tuple[str, str]]:
+    """(interpreter head, program text) for each program an interpreter reads from stdin
+    in this command: each heredoc or here-string body after an interpreter given no code
+    argument, and, for a pipe into one, the quoted text upstream of it (what `echo '…'`
+    or `printf '…'` emits) plus any heredoc body (`cat <<EOF | python3`)."""
+    code = [(m.group("head"), m.group("body")) for m in _FED_HEREDOC_RE.finditer(command)
+            if _reads_program_from_stdin(m.group("flags"))]
+    code += [(m.group("head"), _unquote_literal(m.group("body")))
+             for m in _FED_HERESTRING_RE.finditer(command)
+             if _reads_program_from_stdin(m.group("flags"))]
+    for m in _PIPE_INTO_INTERPRETER_RE.finditer(_executed_surface_view(command)):
+        if _reads_program_from_stdin(m.group("flags")):
+            code += [(m.group("head"), _unquote_literal(q)) for q in _STRING_LITERAL_RE.findall(command)]
+            code += [(m.group("head"), h.group("body")) for h in _ANY_HEREDOC_RE.finditer(command)]
+    return code
+
+
+def _unquote_literal(text: str) -> str:
+    return text[1:-1] if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"" else text
+
+
+_ANY_HEREDOC_RE = re.compile(
+    r"<<-?[ \t]*(['\"]?)(?P<tag>\w+)\1[^\n]*\n(?P<body>.*?)\n[ \t]*(?P=tag)[ \t]*(?:\n|$)", re.DOTALL
+)
+# A call whose name names an exec primitive, then its first argument. Guarded text passed
+# anywhere else (a variable, a later argument, a data structure) is data to this rule.
+_PRIMITIVE_CALL_RE = re.compile(r"(?<![\w$])((?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*)(?:[ \t]*\([ \t]*|[ \t]+)")
+# Tcl's `exec` takes a bare command line, not a literal: `exec sh -c "…"` in statement
+# position (line start, after `;`, or inside `[…]`).
+_TCL_EXEC_RE = re.compile(r"(?m)(?:^|[;\[{])[ \t]*exec[ \t]+([^;\]\n]+)")
+_STRING_LITERAL_RE = re.compile(r"""'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`[^`]*`""")
+_QUOTED_LITERAL_RE = re.compile(r"'(?:[^'\\\n]|\\.)*'|\"(?:[^\"\\\n]|\\.)*\"")
+# Interpreters whose bare backtick span runs a shell command; in JavaScript a backtick is
+# a template string, which runs only when tagged with `$` (Bun.$`…`, zx's $`…`).
+_BACKTICK_EXEC_HEAD_RE = re.compile(r"^(?:perl[0-9.]*|ruby[0-9.]*|php[0-9.]*(?:-cgi)?)$")
+_DIRECT_CALL_MAX_DEPTH = 2
+
+
+def _mask_string_literals(code: str) -> str:
+    """`code` with the content of every '…' and "…" literal blanked, same length, so call
+    names and backticks written INSIDE a string (data) are not read as code."""
+    return _QUOTED_LITERAL_RE.sub(lambda m: m.group(0)[0] + " " * (len(m.group(0)) - 2) + m.group(0)[-1], code)
+
+
+def _first_argument_command(code: str, pos: int) -> str | None:
+    """The command a call's first argument spells when it is a literal: a string literal's
+    content, or a list literal of string literals joined as argv. None otherwise."""
+    rest = code[pos:]
+    lit = _STRING_LITERAL_RE.match(rest)
+    if lit:
+        return lit.group(0)[1:-1]
+    if rest[:1] == "[":
+        items, i = [], 1
+        while True:
+            m = re.match(r"\s*", rest[i:]); i += m.end()
+            lit = _STRING_LITERAL_RE.match(rest, i)
+            if not lit:
+                break
+            items.append(lit.group(0)[1:-1]); i = lit.end()
+            m = re.match(r"\s*,", rest[i:])
+            if not m:
+                break
+            i += m.end()
+        return shlex.join(items) if items else None
+    return None
+
+
+def _code_runs_guarded_directly(head: str, code: str, _depth: int = 0) -> bool:
+    """True iff `head`'s program `code` passes a guarded command DIRECTLY to an exec
+    primitive: the first argument of a primitive-named call is a string or list literal
+    the danger scan reads as a guarded command (`os.system("gh pr merge 5")`,
+    `subprocess.run(["gh", "pr", "merge", "5"])`, `execSync('…')`), a Tcl `exec` line
+    is one, or a backtick span that runs a shell is one. Call names, backticks and Tcl
+    lines written inside a string literal are data. A command reached through a variable
+    needs dataflow and is not followed."""
+    if _depth >= _DIRECT_CALL_MAX_DEPTH or not _INTERPRETER_EXEC_PRIMITIVE_RE.search(code):
+        return False
+    masked = _mask_string_literals(code)
+    for m in re.finditer(r"(\$?)`([^`]*)`", masked):
+        if m.group(1) or _BACKTICK_EXEC_HEAD_RE.match(head):
+            span = code[m.start(2):m.end(2)]
+            if span and _is_dangerous_at_depth(span, _depth + 1):
+                return True
+    if re.match(r"^(?:tclsh|wish)[0-9.]*$", head):
+        for m in _TCL_EXEC_RE.finditer(masked):
+            if _is_dangerous_at_depth(code[m.start(1):m.end(1)].strip(), _depth + 1):
+                return True
+    for m in _PRIMITIVE_CALL_RE.finditer(masked):
+        if not _INTERPRETER_EXEC_PRIMITIVE_RE.search(m.group(1)):
+            continue
+        cmd = _first_argument_command(code, m.end())
+        if cmd and _is_dangerous_at_depth(cmd, _depth + 1):
+            return True
+    return False
+
+
 # Path-qualified shell token. Trailing (?![\w/]) anchors the shell name as a
 # whole PATH-LEAF token: excludes prefix-of-name (`>(basht)`/`>(teehee)`) AND
 # `>(bash/foo)` (bash is a DIRECTORY, foo the executable) while KEEPING
@@ -4412,7 +4536,7 @@ _SHELL_STRING_EXECUTORS = re.compile(
 # on their command line the same way.
 _INTERPRETER_HEADS = re.compile(
     r"^(?:python[0-9.]*|pypy[0-9.]*|perl[0-9.]*|ruby[0-9.]*|nodejs[0-9.]*|node[0-9.]*"
-    r"|php[0-9.]*(?:-cgi)?|bun|deno|lua[0-9.]*|luajit|R|Rscript|osascript"
+    r"|php[0-9.]*(?:-cgi)?|bun|deno|lua[0-9.]*|luajit|R|Rscript|osascript|tclsh[0-9.]*|wish[0-9.]*"
     r"|awk|gawk|mawk|nawk)$"
 )
 # Every non-obfuscated route to a process from each interpreter names one of these:
@@ -5380,6 +5504,18 @@ def is_dangerous_command(command: str) -> bool:
     # Pre-strip detection: eval+heredoc shape obscures destructive ops via
     # the heredoc-strip pipeline. Treat as dangerous before the strip runs.
     if _has_eval_with_heredoc(command):
+        return True
+    return _is_dangerous_at_depth(command, 0)
+
+
+def _is_dangerous_at_depth(command: str, depth: int) -> bool:
+    """is_dangerous_command's body, with the recursion depth of the stdin-fed code check."""
+    if depth and _has_eval_with_heredoc(command):
+        return True
+    # Code an interpreter reads from stdin (heredoc, here-string, pipe) is that
+    # interpreter's program: it is refused when it passes a guarded command directly
+    # to an exec primitive. The carriers below see it only as inert text.
+    if any(_code_runs_guarded_directly(head, code, depth) for head, code in _stdin_fed_code(command)):
         return True
 
     # Normalize bash line continuations (\<newline>) via the shared P0 SSOT before
