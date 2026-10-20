@@ -614,8 +614,6 @@ def _mint_confirmation(context: dict) -> str:
         where = f" on PR #{target}"
     elif isinstance(target, str):
         where = " on " + _readable_target(target, is_netstring)
-    elif isinstance(target, (list, tuple, set, frozenset)):
-        where = " on " + ", ".join(sorted(_readable_target(str(t), False) for t in target))
     else:
         where = ""
     return (
