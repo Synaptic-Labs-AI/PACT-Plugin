@@ -44,7 +44,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from clock_shift.clock_shift_env import carry_clock_shift
@@ -349,7 +349,6 @@ class TestSessionConsolidatedNoNetworkGuarantee:
         # underlying subprocess.run and assert zero calls.
         from shared.gh_helpers import check_pr_state as real_check_pr_state
 
-        mock_subprocess = MagicMock()
         with patch("session_end.check_pr_state", real_check_pr_state), \
              patch("shared.gh_helpers.subprocess.run") as mock_run:
             mock_run.side_effect = AssertionError(
@@ -837,6 +836,7 @@ JSON
         capture_output=True,
         text=True,
         timeout=15,
+        check=False,
     )
 
 
@@ -1006,6 +1006,7 @@ esac
         capture_output=True,
         text=True,
         timeout=15,
+        check=False,
     )
 
 
@@ -1179,6 +1180,7 @@ JSON
             capture_output=True,
             text=True,
             timeout=10,
+            check=False,
         )
 
         assert result.returncode != 0, (
@@ -1205,13 +1207,17 @@ JSON
 {{"pass": 2, "task_count": {{task_count}}, "memories_saved": {{memories_saved}}}}
 JSON
 """
-        subprocess.run(
+        result = subprocess.run(
             ["bash", "-c", template],
             capture_output=True,
             text=True,
             timeout=10,
+            check=False,
         )
 
+        # The write must have RUN and been refused; a shell that never reached
+        # the CLI would also leave no journal.
+        assert result.returncode != 0, result
         journal = tmp_path / "session-journal.jsonl"
         assert not journal.exists(), (
             "unsubstituted-placeholder write MUST NOT create the journal "
