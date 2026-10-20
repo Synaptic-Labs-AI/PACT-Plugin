@@ -30,6 +30,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -676,6 +677,72 @@ def write_token(context: dict, token_dir: Path | None = None) -> str | None:
         return None
 
 
+_CONFIRMING_STATE = {"merge": "MERGED", "close": "CLOSED"}
+
+# gh resolves the PR number against the repo of its working directory and its
+# GH_REPO / GH_HOST / GIT_DIR environment. A command that changes either can name
+# a PR in a different repo from the hook's own, so the state check would read the
+# wrong PR. Deliberately wide: a false match only keeps the token, today's
+# behaviour. One shape is followed instead of doubted: a single `cd <literal
+# absolute dir> &&` before the gh leg, where the check runs in that directory.
+_REPO_REDIRECT_RE = re.compile(
+    r"(?<![\w./-])pushd(?![\w./-])"
+    r"|\bgit\b[^;&|\n]*\s-C"
+    r"|(?<![\w])(?:GH_REPO|GH_HOST|GIT_DIR)="
+)
+_CD_WORD_RE = re.compile(r"(?<![\w./-])cd(?![\w./-])")
+# `&&` only: after `cd x;` or `cd x ||` the gh leg can run in the old directory.
+# The path class excludes every expansion and quoting character ($ ~ globs braces `).
+_LITERAL_CD_RE = re.compile(
+    r"(?<![\w./-])cd[ \t]+(/[^\s;&|<>(){}$~*?\[\]`'\"\\]*)[ \t]*&&"
+)
+_GH_PR_OP_RE = re.compile(r"\bgh\s+pr\s+(?:merge|close)\b")
+
+
+def _state_check_dir(command: str) -> tuple[bool, str | None]:
+    """Where the PR state check may run for this command: (True, None) for the
+    hook's own directory, (True, <dir>) after a single literal absolute `cd`,
+    and (False, None) when the command may target another repo."""
+    if _REPO_REDIRECT_RE.search(command):
+        return False, None
+    cd_count = len(_CD_WORD_RE.findall(command))
+    if cd_count == 0:
+        return True, None
+    literal = _LITERAL_CD_RE.search(command)
+    gh_leg = _GH_PR_OP_RE.search(command)
+    if cd_count != 1 or literal is None or gh_leg is None:
+        return False, None
+    path = literal.group(1)
+    if gh_leg.start() < literal.end() or ".." in path.split("/"):
+        return False, None
+    if not os.path.isdir(path):
+        return False, None
+    return True, path
+
+
+def _pr_state_confirms(command: str, op_type: str) -> bool:
+    """True only when GitHub reports the PR the command named in the state the
+    command produces. Any doubt is False, which keeps the token (the TTL and
+    MAX_USES bound still apply): a URL, branch or implicit target, an -R/--repo
+    target, a directory change or repo env assignment other than one literal
+    absolute `cd`, an unreachable or slow gh, or any exception."""
+    try:
+        followable, cwd = _state_check_dir(command)
+        if not followable:
+            return False
+        ctx = extract_command_context(_extraction_surface(command))
+        pr = ctx.get("pr_number")
+        if not isinstance(pr, str) or not pr.isdigit():
+            return False
+        if any(str(f).startswith("--repo") for f in ctx.get("bound_flags") or []):
+            return False
+        from shared.gh_helpers import check_pr_state
+
+        return check_pr_state(pr, cwd=cwd) == _CONFIRMING_STATE[op_type]
+    except Exception:  # noqa: BLE001 - any doubt keeps the token
+        return False
+
+
 def _retire_token_for_command(
     command: str,
     op_type: str,
@@ -963,7 +1030,17 @@ def main():
                 if not isinstance(stdout_text, str):
                     print(_SUPPRESS_OUTPUT)
                     sys.exit(0)
-                if expected_substring not in stdout_text:
+                if op_type in _CONFIRMING_STATE:
+                    # A piped or non-TTY gh run prints no "Merged pull request"
+                    # line, so a missing substring falls back to asking GitHub
+                    # for the PR's state; any doubt there keeps the token.
+                    confirmed = (
+                        expected_substring.lower() in stdout_text.lower()
+                        or _pr_state_confirms(command, op_type)
+                    )
+                else:
+                    confirmed = expected_substring in stdout_text
+                if not confirmed:
                     print(_SUPPRESS_OUTPUT)
                     sys.exit(0)
 

@@ -12025,7 +12025,9 @@ class TestTokenLifecycleExtensions:
                 "interrupted": False,
             },
         })
+        # GitHub state unknown: this phase tests the envelope gate alone.
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("shared.gh_helpers.check_pr_state", return_value=""), \
              patch("sys.stdin", io.StringIO(envelope)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -12040,16 +12042,15 @@ class TestTokenLifecycleExtensions:
             "(false-positive on 'would merge' stdout framing)"
         )
 
-    def test_block3_over_broad_substring_caught_by_capitalization(self, tmp_path):
-        """Layer 1 Block 3 case-sensitivity pin: the stdout substring
-        `Merged pull request` is intentionally capitalized. Lowercasing
-        the gh CLI output (hypothetical future format change) MUST NOT
-        retire the token without a deliberate substring update.
+    def test_block3_merge_substring_matches_case_insensitively(self, tmp_path):
+        """Layer 1 Block 3 for merge: the stdout substring matches in any
+        case, so gh's lowercase "✓ Squashed and merged pull request" line
+        retires the token without a GitHub state call.
 
-        # counter-test: change `"Merged pull request"` to
-        #               `"Merged pull request".lower()` (or use
-        #               `stdout_text.lower()` in the comparison) → token
-        #               retired on lowercased stdout.
+        # counter-test: compare `expected_substring in stdout_text`
+        #               case-sensitively for merge → the lowercase stdout
+        #               falls to the state check, which raises here, and
+        #               the token stays unused.
         # expected RED cardinality: {1}
         """
         from merge_guard_post import write_token, main
@@ -12059,13 +12060,13 @@ class TestTokenLifecycleExtensions:
             "tool_name": "Bash",
             "tool_input": {"command": "gh pr merge 42 --squash"},
             "tool_response": {
-                # Lowercased (hypothetical gh future-format)
-                "stdout": "merged pull request #42",
+                "stdout": "✓ Squashed and merged pull request #42",
                 "stderr": "",
                 "interrupted": False,
             },
         })
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("shared.gh_helpers.check_pr_state", side_effect=AssertionError("gh called")), \
              patch("sys.stdin", io.StringIO(envelope)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -12075,10 +12076,7 @@ class TestTokenLifecycleExtensions:
             t for t in tmp_path.glob("merge-authorized-*")
             if not str(t).endswith(".consumed") and ".use-" not in t.name
         ]
-        assert len(unused) == 1, (
-            "Layer 1 Block-3 case-sensitivity violated: lowercased stdout "
-            "retired the token"
-        )
+        assert unused == [], "lowercase merge stdout did not retire the token"
 
     # ------------------------------------------------------------------
     # Envelope-divergence detection (scope item 8 / §13.6)
@@ -12148,7 +12146,9 @@ class TestTokenLifecycleExtensions:
             "tool_input": {"command": "gh pr merge 42"},
             "tool_response": "Error: Exit code 1\nfailed to merge",
         })
+        # GitHub state unknown: this phase tests the envelope gate alone.
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("shared.gh_helpers.check_pr_state", return_value=""), \
              patch("sys.stdin", io.StringIO(string_envelope)):
             with pytest.raises(SystemExit):
                 main()
@@ -12213,7 +12213,9 @@ class TestTokenLifecycleExtensions:
             "tool_input": {"command": "gh pr merge 42"},
             "tool_response": {},
         })
+        # GitHub state unknown: this phase tests the envelope gate alone.
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("shared.gh_helpers.check_pr_state", return_value=""), \
              patch("sys.stdin", io.StringIO(empty_envelope)):
             with pytest.raises(SystemExit):
                 main()

@@ -412,11 +412,12 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # + the path/session helper spine; regenerated from the live AST
          # derivation (test_hook_infra_classifier oracle), KD-10.
     "merge_guard_post": frozenset({
-        "constants", "error_output", "merge_guard_common", "pact_context",
-        "paths", "session_journal", "session_registry", "session_state",
-        "tool_response",
-    }),  # post additionally reaches error_output (fail-loud alert) and
-         # tool_response (the canonical-envelope extractor).
+        "constants", "error_output", "gh_helpers", "merge_guard_common",
+        "pact_context", "paths", "session_journal", "session_registry",
+        "session_state", "tool_response",
+    }),  # post additionally reaches error_output (fail-loud alert),
+         # tool_response (the canonical-envelope extractor) and gh_helpers
+         # (the PR state check that confirms a merge or close).
     "wait_filler_gate": frozenset({
         "background_launch", "background_work", "constants", "intentional_wait",
         "pact_context", "paths", "session_journal", "session_registry",

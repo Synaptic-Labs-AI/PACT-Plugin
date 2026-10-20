@@ -1,0 +1,268 @@
+"""Token retirement confirmed by the PR's state on GitHub (merge_guard_post Block 3).
+
+A merge or close run through a pipe or without a TTY prints no "Merged pull
+request" line, so Block 3's stdout match misses and the consumed token used to
+survive for a second use. Block 3 now asks GitHub for the PR's state, and
+retires the token only when GitHub reports the state the command produces.
+Any doubt keeps the token: a URL, branch or implicit target, an -R/--repo
+target, a directory change or repo env assignment in the command, and an
+unreachable or slow gh. One directory change is followed instead: a single
+`cd <literal absolute existing dir> &&` before the gh leg, where the check runs.
+
+Every arm runs the REAL merge_guard_post.py as a subprocess, with a fake `gh`
+first on an explicitly built PATH and an isolated CLAUDE_CONFIG_DIR. The fake
+logs each call with its working directory, so an arm can assert gh was or was
+not asked, and where. "Retry still
+authorized" is checked with the real read side (check_merge_authorization) on
+the same token directory.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pytest
+from merge_guard_post import write_token
+from merge_guard_pre import check_merge_authorization
+from shared.merge_guard_common import extract_command_context
+
+_HOOK = Path(__file__).resolve().parent.parent / "hooks" / "merge_guard_post.py"
+_MERGE = "gh pr " + "merge"
+_CLOSE = "gh pr " + "close"
+
+
+@pytest.fixture
+def rig(tmp_path):
+    """A token dir under an isolated config root, and a fake gh on PATH."""
+    config = tmp_path / ".claude"
+    config.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "gh.log"
+    gh = bin_dir / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        'echo "$(pwd -P) :: $*" >> "$FAKE_GH_LOG"\n'
+        'if [ -n "$FAKE_GH_SLEEP" ]; then sleep "$FAKE_GH_SLEEP"; fi\n'
+        'echo "$FAKE_GH_STATE"\n'
+    )
+    gh.chmod(0o755)
+    return {"tmp": tmp_path, "config": config, "bin": bin_dir, "log": log}
+
+
+def _env(rig, state="MERGED", sleep=None, with_gh=True):
+    path_dirs = ([str(rig["bin"])] if with_gh else []) + ["/usr/bin", "/bin"]
+    env = {
+        "PATH": os.pathsep.join(path_dirs),
+        "HOME": str(rig["tmp"]),
+        "CLAUDE_CONFIG_DIR": str(rig["config"]),
+        "FAKE_GH_LOG": str(rig["log"]),
+        "FAKE_GH_STATE": state,
+    }
+    if sleep is not None:
+        env["FAKE_GH_SLEEP"] = str(sleep)
+    return env
+
+
+def _mint(rig, command):
+    ctx = extract_command_context(command)
+    assert ctx.get("operation_type"), ctx
+    assert write_token(ctx, token_dir=rig["config"])
+
+
+def _post(rig, command, stdout, **env_kw):
+    payload = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+        "tool_response": {"stdout": stdout, "stderr": "", "interrupted": False},
+    }
+    started = time.monotonic()
+    proc = subprocess.run(
+        [sys.executable, str(_HOOK)],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        env=_env(rig, **env_kw),
+        cwd=str(rig["tmp"]),
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return time.monotonic() - started
+
+
+def _gh_log(rig):
+    if not rig["log"].exists():
+        return []
+    return [line.split(" :: ", 1) for line in rig["log"].read_text().splitlines()]
+
+
+def _gh_calls(rig):
+    return [args for _, args in _gh_log(rig)]
+
+
+def _gh_cwds(rig):
+    return [cwd for cwd, _ in _gh_log(rig)]
+
+
+def _retired(rig):
+    return len(list(rig["config"].glob("merge-authorized-*.consumed"))) == 1
+
+
+class TestStateConfirmsRetirement:
+    def test_empty_stdout_merged_retires(self, rig):
+        cmd = f"{_MERGE} 1656 --squash"
+        _mint(rig, cmd)
+        _post(rig, cmd, "", state="MERGED")
+        assert _gh_calls(rig) == ["pr view 1656 --json state --jq .state"]
+        assert _retired(rig)
+
+    def test_piped_merge_merged_retires(self, rig):
+        cmd = f"{_MERGE} 1641 --squash 2>&1 | tail -5"
+        _mint(rig, f"{_MERGE} 1641 --squash")
+        _post(rig, cmd, "", state="MERGED")
+        assert _gh_calls(rig) == ["pr view 1641 --json state --jq .state"]
+        assert _retired(rig)
+
+    def test_close_closed_retires(self, rig):
+        cmd = f"{_CLOSE} 9"
+        _mint(rig, cmd)
+        _post(rig, cmd, "", state="CLOSED")
+        assert _gh_calls(rig) == ["pr view 9 --json state --jq .state"]
+        assert _retired(rig)
+
+    def test_close_reported_merged_keeps(self, rig):
+        """A close is confirmed by CLOSED only."""
+        cmd = f"{_CLOSE} 9"
+        _mint(rig, cmd)
+        _post(rig, cmd, "", state="MERGED")
+        assert not _retired(rig)
+
+    @pytest.mark.parametrize("stdout", [
+        "✓ Squashed and merged pull request owner/repo#42 (Title)",
+        "✓ Rebased and merged pull request owner/repo#42 (Title)",
+        "✓ Merged pull request owner/repo#42 (Title)",
+    ])
+    def test_merge_stdout_retires_without_gh(self, rig, stdout):
+        cmd = f"{_MERGE} 42 --squash"
+        _mint(rig, cmd)
+        _post(rig, cmd, stdout, state="OPEN")
+        assert _gh_calls(rig) == []
+        assert _retired(rig)
+
+
+class TestDoubtKeepsToken:
+    def test_refused_piped_merge_open_keeps_and_retry_authorized(self, rig):
+        cmd = f"{_MERGE} 1659 --squash 2>&1 | tail -3"
+        bare = f"{_MERGE} 1659 --squash"
+        _mint(rig, bare)
+        _post(rig, cmd, "X Pull request #1659 is not mergeable", state="OPEN")
+        assert _gh_calls(rig) == ["pr view 1659 --json state --jq .state"]
+        assert not _retired(rig)
+        assert check_merge_authorization(bare, token_dir=rig["config"]) is None
+
+    def test_gh_unreachable_keeps(self, rig):
+        cmd = f"{_MERGE} 5 --squash"
+        _mint(rig, cmd)
+        _post(rig, cmd, "", with_gh=False)
+        assert not _retired(rig)
+
+    def test_gh_hung_keeps_within_cap(self, rig):
+        cmd = f"{_MERGE} 5 --squash"
+        _mint(rig, cmd)
+        elapsed = _post(rig, cmd, "", state="MERGED", sleep=20)
+        assert elapsed < 15, elapsed
+        assert not _retired(rig)
+
+    @pytest.mark.parametrize("cmd", [
+        f"{_MERGE} 5 -R other/repo",
+        f"{_MERGE} 5 --repo=other/repo --squash",
+        f"{_MERGE} -Rother/repo 5",
+        f"{_MERGE} https://github.com/o/r/pull/77 --squash",
+        f"{_MERGE} feature-x --squash",
+        f"{_MERGE} --squash",
+    ])
+    def test_target_not_a_session_repo_number_never_calls_gh(self, rig, cmd):
+        _mint(rig, cmd)
+        _post(rig, cmd, "", state="MERGED")
+        assert _gh_calls(rig) == []
+        assert not _retired(rig)
+
+    @pytest.mark.parametrize("cmd", [
+        f"cd ../other && {_MERGE} 5 --squash 2>&1 | tail -3",
+        f"cd {{missing}} && {_MERGE} 5 --squash 2>&1 | tail -3",
+        f"cd $HOME/other && {_MERGE} 5 --squash 2>&1 | tail -3",
+        f"cd ~/other && {_MERGE} 5 --squash 2>&1 | tail -3",
+        f"cd {{repo}}/* && {_MERGE} 5 --squash 2>&1 | tail -3",
+        f"cd {{repo}}/../other && {_MERGE} 5 --squash 2>&1 | tail -3",
+        f"cd {{repo}}; {_MERGE} 5 --squash 2>&1 | tail -3",
+        f"cd {{repo}} && cd sub && {_MERGE} 5 --squash 2>&1 | tail -3",
+        f"{_MERGE} 5 --squash 2>&1 | tail -3 && cd {{repo}} && true",
+        f"pushd {{repo}} && {_MERGE} 5 --squash 2>&1 | tail -3",
+        f"git -C ../other fetch && {_MERGE} 5 --squash 2>&1 | tail -3",
+        f"GH_REPO=o/other {_MERGE} 5 --squash 2>&1 | tail -3",
+        f"GH_HOST=ghe.example.com {_MERGE} 5 --squash 2>&1 | tail -3",
+        f"GIT_DIR=../other/.git {_MERGE} 5 --squash 2>&1 | tail -3",
+    ])
+    def test_repo_redirect_never_calls_gh_and_retry_authorized(self, rig, cmd):
+        """The state check would read PR 5 in a repo the command may not have
+        targeted. Retiring on that PR's state could refuse the faithful retry, so
+        every redirect other than one literal absolute `cd ... &&` is doubt."""
+        repo = rig["tmp"] / "repo"
+        repo.mkdir()
+        (repo / "sub").mkdir()
+        (rig["tmp"] / "other").mkdir()  # so only the `..` segment makes that path doubt
+        cmd = cmd.format(repo=repo, missing=rig["tmp"] / "missing")
+        bare = f"{_MERGE} 5 --squash"
+        _mint(rig, bare)
+        _post(rig, cmd, "X Pull request #5 is not mergeable", state="MERGED")
+        assert _gh_calls(rig) == []
+        assert not _retired(rig)
+        assert check_merge_authorization(bare, token_dir=rig["config"]) is None
+
+
+class TestLiteralAbsoluteCd:
+    """`cd <worktree> && gh pr merge N ...` is the common lead shape. A single cd
+    to a literal absolute existing directory is followed: the check runs there."""
+
+    def test_merged_retires_with_check_in_target_dir(self, rig):
+        repo = rig["tmp"] / "repo"
+        repo.mkdir()
+        cmd = f"cd {repo} && {_MERGE} 1659 --squash 2>&1 | tail -3"
+        _mint(rig, f"{_MERGE} 1659 --squash")
+        _post(rig, cmd, "", state="MERGED")
+        assert _gh_calls(rig) == ["pr view 1659 --json state --jq .state"]
+        assert _gh_cwds(rig) == [os.path.realpath(repo)]
+        assert _retired(rig)
+
+    def test_open_keeps_and_retry_authorized(self, rig):
+        repo = rig["tmp"] / "repo"
+        repo.mkdir()
+        cmd = f"cd {repo} && {_MERGE} 1659 --squash 2>&1 | tail -3"
+        bare = f"{_MERGE} 1659 --squash"
+        _mint(rig, bare)
+        _post(rig, cmd, "X Pull request #1659 is not mergeable", state="OPEN")
+        assert _gh_cwds(rig) == [os.path.realpath(repo)]
+        assert not _retired(rig)
+        assert check_merge_authorization(bare, token_dir=rig["config"]) is None
+
+    def test_no_cd_runs_in_hook_dir(self, rig):
+        cmd = f"{_MERGE} 1656 --squash"
+        _mint(rig, cmd)
+        _post(rig, cmd, "", state="MERGED")
+        assert _gh_cwds(rig) == [os.path.realpath(rig["tmp"])]
+
+    def test_missing_dir_is_doubt_before_gh(self, rig):
+        """A missing directory is doubt in the hook itself, not only through gh
+        failing to start there."""
+        from merge_guard_post import _state_check_dir
+
+        missing = rig["tmp"] / "missing"
+        assert _state_check_dir(f"cd {missing} && {_MERGE} 5") == (False, None)
+        assert _state_check_dir(f"cd {rig['tmp']} && {_MERGE} 5") == (True, str(rig["tmp"]))
