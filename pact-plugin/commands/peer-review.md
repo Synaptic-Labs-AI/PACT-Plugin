@@ -261,7 +261,7 @@ TaskCreate(subject="secretary: harvest pending HANDOFFs (primary trigger, pre-me
 TaskUpdate(taskId, owner="secretary")
 ```
 
-This is the **primary memory trigger** — fires unconditionally, after the reviewers report, and stays quiet: it banks the HANDOFFs to the store and writes no Working Memory block, because remediation after this point dispatches reviewers again and an agent inherits the block as it stood when it spawned. The block is rebuilt after the merge decision (`orchestrate` step 8) and at session end.
+This is the **primary memory trigger** — fires unconditionally, after the reviewers report, and stays quiet: it banks the HANDOFFs to the store and writes no Working Memory block, because remediation after this point dispatches reviewers again and an agent inherits the block as it stood when it spawned. The block is rebuilt by `/PACT:wrap-up` when the arc closes.
 
 Reviewer independence has a second surface that this ordering does not touch: see the
 REVIEWER-MEMORY-CHANNEL clause.

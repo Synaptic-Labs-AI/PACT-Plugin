@@ -440,8 +440,8 @@ check_pattern "$PROTOCOLS_DIR/algedonic.md" \
     "algedonic.md Message Authenticity references AskUserQuestion" \
     'AskUserQuestion.*verified interaction channel'
 check_pattern "$COMMANDS_DIR/orchestrate.md" \
-    "orchestrate.md merge step references AskUserQuestion" \
-    'AskUserQuestion.*merge authorization'
+    "orchestrate.md hands the merge checkpoint to peer-review" \
+    'peer-review.*merge checkpoint'
 check_pattern "$COMMANDS_DIR/comPACT.md" \
     "comPACT.md merge decision references AskUserQuestion" \
     'AskUserQuestion'

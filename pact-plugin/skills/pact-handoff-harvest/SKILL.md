@@ -14,7 +14,7 @@ This skill provides the complete workflow for discovering, reviewing, and saving
 Three workflow variants:
 - **Standard Harvest** (orchestrate, comPACT, peer-review, plan-mode) — discover, review, save, record the processed ids. Triggered after phases complete.
 - **Incremental Harvest** (peer-review) — delta-only pass after remediation. Processes only new completions since last harvest.
-- **Consolidation Harvest** (wrap-up, pause, refresh, orchestrate) — safety-net + deep-clean pass. Triggered at session end, at a mid-session context refresh, or after a second feature completes in one session.
+- **Consolidation Harvest** (wrap-up, pause, refresh) — safety-net + deep-clean pass. Triggered at session end, at a session pause, or at a mid-session context refresh.
 
 Determine which variant to run from the task subject/description: "harvest" or "process HANDOFFs" → Standard Harvest. "incremental" or "remediation" → Incremental Harvest. "consolidation" → Consolidation Harvest. **The subject/description selects the workflow, never what is in scope.**
 
@@ -459,7 +459,7 @@ Triggered after remediation completes — processes only the delta since the las
 
 **Build the population as the Standard Harvest population rule above requires — a dispatch does not narrow it.**
 
-Triggered during `/PACT:wrap-up`, `/PACT:pause`, `/PACT:refresh`, or `/PACT:orchestrate` once a second or subsequent feature completes in one session. This is the deep-clean pass — it extends the standard workflow with memory consolidation and pruning.
+Triggered during `/PACT:wrap-up`, `/PACT:pause` or `/PACT:refresh`. This is the deep-clean pass — it extends the standard workflow with memory consolidation and pruning.
 
 ### Step 1: Safety Net (Unprocessed HANDOFFs)
 
