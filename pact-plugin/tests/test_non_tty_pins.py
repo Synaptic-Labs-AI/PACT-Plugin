@@ -202,15 +202,23 @@ class TestDocPathSitesCiteTheRealignedName:
             )
 
     def test_teams_path_sites(self):
+        # Keyed by per-file occurrence INDEX, not line number (the same
+        # discipline as _COVERED_ADJACENT), so prose drift above a site does
+        # not rot the pin — only a site's appearance or citation can.
         found = []
         for path in _DOC_SURFACE_FILES:
             lines = path.read_text(encoding="utf-8").split("\n")
-            for lineno, cited in _sites_with_citation(lines, _TEAMS_PATH):
-                found.append((_rel(path), lineno))
-                assert cited, f"{_rel(path)}:{lineno} (teams site) cites no name source"
+            for idx, (lineno, cited) in enumerate(
+                _sites_with_citation(lines, _TEAMS_PATH)
+            ):
+                found.append((_rel(path), idx))
+                assert cited, (
+                    f"{_rel(path)}:{lineno} (teams-site #{idx}) cites no "
+                    "name source"
+                )
         assert found == [
-            ("agents/pact-orchestrator.md", 63),
-            ("commands/bootstrap.md", 109),
+            ("agents/pact-orchestrator.md", 0),
+            ("commands/bootstrap.md", 0),
         ]
 
 

@@ -62,8 +62,10 @@ def _make_store(tmp_path, *names, with_config=False):
 
 
 class TestResolverKeyingMatrix:
-    """The four keying cells + the ambiguity cell, over resolve_task_dir
-    (resolve_team_dir shares _resolve_live_team_dir and is spot-checked)."""
+    """The four keying cells + the ambiguity cell + the middle-leg cell
+    (persisted store wins when the aligned dir is absent), over
+    resolve_task_dir (resolve_team_dir shares _resolve_live_team_dir and is
+    spot-checked)."""
 
     def test_short_name_present_cli_shape(self, tmp_path, monkeypatch):
         """CLI shape: aligned/persisted agree on the short name, its dir
@@ -137,6 +139,21 @@ class TestResolverKeyingMatrix:
         assert third not in (SHORT_NAME, FULL_UUID)
         _seed_candidates(monkeypatch, SHORT_NAME, FULL_UUID, third)
         base = _make_store(tmp_path, SHORT_NAME)  # ONLY the aligned store
+        got = resolve_task_dir(tasks_base_dir=str(base))
+        assert got is not None and got.name == SHORT_NAME
+
+    def test_persisted_store_wins_when_aligned_dir_absent(self, tmp_path, monkeypatch):
+        """The MIDDLE leg of the walk: the aligned name adopts a store that
+        does not exist (a stale adoption — e.g. branch-2 took a UUID whose
+        store was reaped) while the persisted context name still addresses a
+        live store -> the persisted store resolves. No other cell in this
+        class constructs a substrate where the persisted candidate is the
+        only live one, so a regression that drops the persisted candidate
+        from the walk (keeping aligned-first and session-id) reddens exactly
+        this cell — the ambiguity pre-check is not tripped because the
+        aligned dir does not exist."""
+        _seed_candidates(monkeypatch, FULL_UUID, SHORT_NAME, FULL_UUID)
+        base = _make_store(tmp_path, SHORT_NAME)  # ONLY the persisted store
         got = resolve_task_dir(tasks_base_dir=str(base))
         assert got is not None and got.name == SHORT_NAME
 

@@ -26,6 +26,9 @@ Cells:
     UUID substrate: a valid on-disk handoff produces NO warn; a completed
     task WITHOUT one still warns (positive control, so the no-warn cell is
     not vacuously green).
+  bootstrap_marker_writer — a real lead fire on the config-less substrate
+    lands harness=non_tty through the REAL resolver and REAL stamp write
+    (Writer-2 composition; the W1 unit cells mock all three externals).
 """
 
 from __future__ import annotations
@@ -210,7 +213,11 @@ class TestHandoffEmitNonTtySubstrate:
         (aligned adopts the UUID via a corroborating config, persisted still
         says the short name, both stores exist) resolve_task_dir returns None,
         the emitter fails open with an empty name, and NOTHING is emitted or
-        marked — never a pick of either store."""
+        marked — never a pick of either store. BOTH stores carry a
+        handoff-bearing completed task 43, so this cell is INDEPENDENTLY
+        discriminating: a raw-persisted-name regression (the pre-#1020 read)
+        would find the SHORT_NAME task's handoff and emit from the STALE
+        store, reddening here — not only via the lands-in-UUID-store cell."""
         from fixtures.team_split import seed_team
 
         seed_team(
@@ -220,14 +227,12 @@ class TestHandoffEmitNonTtySubstrate:
             corroborate=False,
             store=False,
         )
-        task = _write_task(non_tty_env.dir_for(FULL_UUID), task_id="43",
-                           owner="backend-coder", status="completed",
-                           with_wait=False)
-        task["metadata"]["handoff"] = VALID_HANDOFF
-        (non_tty_env.dir_for(FULL_UUID) / "43.json").write_text(
-            json.dumps(task), encoding="utf-8")
-        _write_task(non_tty_env.dir_for(SHORT_NAME), task_id="43",
-                    status="completed", with_wait=False)
+        for store in (non_tty_env.dir_for(FULL_UUID),
+                      non_tty_env.dir_for(SHORT_NAME)):
+            task = _write_task(store, task_id="43", owner="backend-coder",
+                               status="completed", with_wait=False)
+            task["metadata"]["handoff"] = VALID_HANDOFF
+            (store / "43.json").write_text(json.dumps(task), encoding="utf-8")
         monkeypatch.setattr("sys.stdin", self._stdin("43"))
         with pytest.raises(SystemExit) as exit_info:
             emitter.main()
@@ -271,10 +276,58 @@ class TestOrderingGateNonTtySubstrate:
         assert gate._evaluate(self._complete_update("A2")) is not None
 
 
+class TestBootstrapMarkerWriterStampIntegration:
+    """Writer-2 composition, NON-MOCKED end-to-end: a real
+    bootstrap_marker_writer fire on the config-less UUID substrate refines
+    the harness stamp through the REAL aligned-name resolver, the REAL
+    team-dir resolution and the REAL lead-gated stamp write. The W1 unit
+    cells (TestWriterTwoSubstrate in test_non_tty_w1.py) mock all three
+    externals; this cell closes that composition gap in CI. Measured
+    counter-tests: removing the _refine_harness_stamp CALL from
+    _try_write_marker reddens exactly this cell (the units stay green —
+    they call the function directly); neutering the function body reddens
+    this cell plus the two mocked W1 leg cells."""
+
+    def test_config_less_fire_stamps_the_real_context(
+            self, non_tty_env, monkeypatch):
+        # The tasks-side UUID store the resolver's existence probe reads
+        # (branch-2's teams-side witness already exists via non_tty_env).
+        non_tty_env.dir_for(FULL_UUID).mkdir(parents=True, exist_ok=True)
+        # A secretary JOIN witnessed the config-less way: the inbox file,
+        # the same witness the marker precondition consumes.
+        (non_tty_env.home / ".claude" / "teams" / FULL_UUID / "inboxes"
+         / "secretary.json").write_text("{}", encoding="utf-8")
+        import bootstrap_marker_writer as bmw
+        import shared.pact_context as pact_context
+        assert json.loads(
+            pact_context._context_path.read_text(encoding="utf-8")
+        ).get("harness", "") == ""  # precondition: unstamped
+        frame = captured_lead_userpromptsubmit_qualified()
+        frame.update(session_id=FULL_UUID, cwd=str(non_tty_env.home))
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(frame)))
+        with pytest.raises(SystemExit) as exit_info:
+            bmw.main()
+        assert exit_info.value.code == 0
+        recorded = json.loads(
+            pact_context._context_path.read_text(encoding="utf-8"))
+        assert recorded["harness"] == "non_tty", (
+            "a real lead fire on the config-less substrate must land the "
+            "stamp through the real resolver and the real stamp write"
+        )
+        assert "team_name" in recorded  # surgical: the write kept the record
+
+
 class TestResolverBranchCensus:
-    """The four branches the W1 battery leaves unhit — each maps to one
-    census row, so the >=90% branch claim on the resolver family is a
-    measured mapping, not an estimate."""
+    """Branch-census cells: the resolver-family and transcript-scan branches
+    the W1 unit battery leaves unhit (non-str persisted name, non-str
+    session-id candidate, garbage transcript lines, non-dict records,
+    empty-string entrypoint, scan-depth exhaustion) — six cells, each
+    mapping to one census row, so the >=90% branch claim on the resolver
+    family is a measured mapping, not an estimate. The four branches NO
+    test hits — the census residuals (two resolve_* outer excepts, the
+    loop-internal unsafe-candidate continue, the missing-session
+    transcript-skip) — are named with their no-real-input justification in
+    the TEST-phase HANDOFF, not here."""
 
     def test_non_str_persisted_team_name_is_treated_as_empty(
             self, tmp_path, monkeypatch):

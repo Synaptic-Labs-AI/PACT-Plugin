@@ -93,7 +93,7 @@ cycle; the lead accepts and completes.
 
 | # | Check | Pass |
 |---|-------|------|
-| 1 | Zero failed sends | teammate `SendMessage` delivered; `team-lead` unreachable → `main` fallback exercised AND the lead receives it |
+| 1 | Zero failed sends | teammate `SendMessage` delivered; `team-lead` unreachable → `main` fallback exercised AND the lead receives it (sanctioned construction + NOT-EXERCISED recording: §2.9) |
 | 2 | Zero path misses | `session-journal.jsonl` records the `agent_handoff` event for Task B under the UUID-keyed store; the lead's raw `cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/tasks/{team_name}/{taskId}.json \| jq .metadata.handoff` resolves, `{team_name}` read from `pact-session-context.json` |
 | 3 | Zero false advisories | no teachback-skipped / completed-without-handoff advisories from `task_lifecycle_gate` / `handoff_ordering_gate` during the cycle |
 | 4 | Stamp correct | `pact-session-context.json` `harness == "non_tty"` |
@@ -102,14 +102,22 @@ cycle; the lead accepts and completes.
 | 7 | Env-forwarding diagnostic | one-shot capture executed and read (see below) |
 | 8 | CLAUDE.md write-back skip-conditions | see below |
 
-**§2.6 Stamp-input attribution (MUST-RECORD).** After the run, read the
-session's `session_start` journal event and the substrate, and record exactly
-one of: `transcript` (event carries `entrypoint: "remote"` and the stamp is
-set), `substrate` (entrypoint empty/absent; stamp set by Writer 2 — config
-absent after first spawn or aligned-name == UUID), `both`, or `none` (stamp
-missing = a RED finding, not a pass). This observation closes the
-stamp-input attribution question in one direction permanently; record it in
-the run row.
+**§2.6 Stamp attribution (MUST-RECORD: which WRITER fired).** After the run,
+read the session's `session_start` journal event and the on-disk context, and
+record exactly one attribution — the WRITER that landed the stamp (and, for
+Writer 2, the leg), not just the input source:
+  - `writer1-transcript` — the event carries `entrypoint: "remote"` and the
+    stamp is set (session_init's SessionStart read fired first; any later
+    Writer-2 write was refused by the monotonic guard — a same-value no-op).
+  - `writer2-leg1-uuid-name` — entrypoint empty/absent, stamp set, and the
+    aligned team name equals the full session UUID.
+  - `writer2-leg2-config-less` — entrypoint empty/absent, stamp set, and the
+    live team dir holds no config.json after a witnessed secretary join.
+  - `none` — stamp missing: a RED finding, not a pass.
+Both legs' evidence is on the substrate (context `team_name` vs session id;
+`teams/<team>/config.json` presence), so the row names the writer without
+code instrumentation. This closes the writer-attribution question in one
+direction permanently; record it in the run row.
 
 **§2.7 One-shot env-forwarding diagnostic.** On the PATCHED build only, add a
 temporary line to `session_init` that writes the sorted `os.environ` key set
@@ -129,6 +137,15 @@ cloud session. If `CLAUDE_PROJECT_DIR` is unset in the cloud hook env, or no
 `session_start` journal event fired, the `- Team:` line never converges.
 REPORT the observed shape as a finding — the fix rides this PR as a commit-2
 amendment if confirmed; do NOT pre-implement it during the probe.
+
+**§2.9 Main-fallback check (check 1) — sanctioned construction.** The
+`team-lead`-unreachable leg of check 1 is exercised by the cloud harness's
+NATURAL unaddressability only: a teammate spawned before the platform's team
+registry names the lead — e.g. the Task A dispatch landing before
+`/PACT:bootstrap`'s team formation completes. If the run's timing never
+produces it, record `main-fallback: NOT-EXERCISED` with the timing observed
+in the run row; do not manufacture unreachability by other means (renaming,
+deregistering, or editing team state to force the fallback).
 
 ## §3 Desktop arm / #1019 close-out
 
