@@ -3417,3 +3417,82 @@ class TestUpdateSessionInfoMarksTransientFailures:
         result = self._update()
         assert result.startswith("Could not acquire lock on project CLAUDE.md")
         assert isinstance(result, session_resume.TransientSessionInfoFailure) is transient
+
+
+class TestWrapUpRetiresAPausedClaim:
+    """A paused claim is retired, with no gh call and no prompt, when a wrap-up
+    session_end recorded the paused PR as MERGED at or after the pause. Real
+    journal file; gh is the only double."""
+
+    PAUSE_TS = "2026-07-10T12:00:00Z"
+
+    def _resolve(self, tmp_path, events, state="MERGED", name="sess"):
+        from unittest.mock import patch as mock_patch
+        from shared.session_resume import check_resume_state
+
+        sd = tmp_path / name
+        sd.mkdir(parents=True, exist_ok=True)
+        _write_journal_events(sd, events)
+        with mock_patch(
+            "shared.session_resume._check_pr_state", return_value=state
+        ) as gh:
+            return check_resume_state(prev_session_dir=str(sd)), gh
+
+    @staticmethod
+    def _wrap_up(ts, **fields):
+        event = {"v": 1, "type": "session_end", "source": "wrap-up",
+                 "pr_state": "MERGED", "pr_number": 77, "ts": ts}
+        event.update(fields)
+        return event
+
+    def test_a_merged_wrap_up_after_the_pause_retires_it(self, tmp_path, frozen_clock):
+        result, gh = self._resolve(tmp_path, [
+            _paused_event(ts=self.PAUSE_TS),
+            self._wrap_up("2026-07-10T13:00:00Z"),
+        ])
+
+        assert result is None
+        gh.assert_not_called()
+
+    def test_a_wrap_up_at_the_pause_second_retires_it(self, tmp_path, frozen_clock):
+        result, _ = self._resolve(tmp_path, [
+            _paused_event(ts=self.PAUSE_TS), self._wrap_up(self.PAUSE_TS),
+        ])
+
+        assert result is None
+
+    @pytest.mark.parametrize("wrap_up", [
+        pytest.param(dict(ts="2026-07-10T11:00:00Z"), id="before-the-pause"),
+        pytest.param(dict(ts="2026-07-10T13:00:00Z", pr_number=78), id="another-pr"),
+        pytest.param(dict(ts="2026-07-10T13:00:00Z", pr_state="OPEN"), id="recorded-open"),
+        pytest.param(dict(ts="garbage"), id="unparseable-ts"),
+    ])
+    def test_a_non_qualifying_wrap_up_keeps_the_merged_prompt(
+        self, tmp_path, frozen_clock, wrap_up
+    ):
+        events = [_paused_event(ts=self.PAUSE_TS), self._wrap_up(**wrap_up)]
+        if wrap_up["ts"] == "2026-07-10T11:00:00Z":
+            events.reverse()
+        result, gh = self._resolve(tmp_path, events)
+
+        assert result is not None and "Run /PACT:wrap-up" in result
+        gh.assert_called_once()
+
+    def test_an_open_wrap_up_that_paused_its_own_pr_still_surfaces(self, tmp_path, frozen_clock):
+        """Branch C: wrap-up recorded OPEN and paused. Whatever the order of
+        its session_end and session_paused, the claim stays."""
+        for i, events in enumerate((
+            [self._wrap_up("2026-07-10T12:00:00Z", pr_state="OPEN"), _paused_event(ts=self.PAUSE_TS)],
+            [_paused_event(ts=self.PAUSE_TS), self._wrap_up("2026-07-10T12:00:00Z", pr_state="OPEN")],
+        )):
+            result, _ = self._resolve(tmp_path, events, state="OPEN", name=f"order{i}")
+            assert result is not None and "Paused work detected" in result
+
+    def test_a_pause_with_no_ts_is_not_retired_by_any_wrap_up(self, tmp_path, frozen_clock):
+        """Without a pause ts there is no "after the pause"; a None since would
+        mean "at any time", so the claim keeps its gh check."""
+        paused = _paused_event(ts=self.PAUSE_TS)
+        del paused["ts"]
+        _, gh = self._resolve(tmp_path, [paused, self._wrap_up("2026-07-10T13:00:00Z")])
+
+        gh.assert_called_once()

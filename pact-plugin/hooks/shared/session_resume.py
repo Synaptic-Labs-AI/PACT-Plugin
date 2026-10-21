@@ -60,6 +60,7 @@ from shared.session_journal import (
     make_event,
     read_events_from,
     read_last_event_from,
+    wrap_up_closed,
 )
 
 # The finder is imported inside the functions that use it: shared/__init__.py
@@ -1619,6 +1620,16 @@ def check_resume_state(
         refreshed = None
     if paused is not None and _pause_is_spent(claim_dir, paused):
         paused = None
+    # A wrap-up that recorded this PR MERGED at or after the pause closed it:
+    # retire the claim with no gh call. Keyed on the PAUSE ts, so a wrap-up
+    # that recorded the PR OPEN (and paused it) never retires its own claim.
+    # A pause with no ts string keeps its claim: None would mean "any time".
+    if paused is not None and claim_dir:
+        pause_ts = paused.get("ts")
+        if isinstance(pause_ts, str) and pause_ts and wrap_up_closed(
+            read_events_from(claim_dir, "session_end"), paused.get("pr_number"), pause_ts
+        ):
+            paused = None
     paused_msg = (
         _interpret_paused_event(paused) if paused is not None else None
     )  # may be None (correct for pause)
