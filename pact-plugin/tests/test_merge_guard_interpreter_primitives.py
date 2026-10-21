@@ -70,7 +70,6 @@ EXECUTING_ROUTES = [
     ("js execSync", _sq("node -e", f'require("child_process").execSync("{D}")')),
     ("js spawn", _sq("node -e", f'require("child_process").spawn("sh", ["-c", "{D}"])')),
     ("js execFile", _sq("nodejs -e", f'require("child_process").execFile("sh", ["-c", "{D}"])')),
-    ("js fork", _sq("node -e", f'require("child_process").fork("x.js", ["{D}"])')),
     ("js node: prefix", _sq("node -e", f'require("node:child_process").execSync("{D}")')),
     ("js process.binding", _sq("node -e", f'process.binding("spawn_sync").spawn({{file: "sh", args: ["sh", "-c", "{D}"]}})')),
     # php
@@ -290,3 +289,11 @@ def test_parenthesized_multi_line_from_import_is_resolved():
     cmd = ("python3 - <<'EOF'\nfrom subprocess import (\n    run,\n    Popen as P,\n)\n"
            "P([\"gh\", \"pr\", \"merge\", \"5\"])\nEOF")
     assert is_dangerous_command(cmd) is True
+
+
+def test_fork_of_a_module_passes_its_argv_as_data():
+    """child_process.fork runs a JS module with the given argv; it starts no shell, so a
+    guarded command in that argv is data to the module (the ratified script-runs-its-own-
+    argv residual), not a command the guard can see run."""
+    cmd = _sq("node -e", f'require("child_process").fork("x.js", ["{D}"])')
+    assert is_dangerous_command(cmd) is False

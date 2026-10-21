@@ -2888,6 +2888,12 @@ _PRIMITIVE_CALL_RE = re.compile(r"(?<![\w$])((?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\
 _TCL_EXEC_RE = re.compile(r"(?m)(?:^|[;\[{])[ \t]*exec[ \t]+([^;\]\n]+)")
 _STRING_LITERAL_RE = re.compile(r"""'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`[^`]*`""")
 _QUOTED_LITERAL_RE = re.compile(r"'(?:[^'\\\n]|\\.)*'|\"(?:[^\"\\\n]|\\.)*\"")
+# A string literal with an optional prefix (f"…", r'…', b"…", rf"…"): group sq/dq is
+# the text between the quotes. An f-string's {…} placeholders stay in the text.
+_PREFIXED_LITERAL_RE = re.compile(
+    r"(?<![\w$])(?:[rRbBuUfF]{1,2})?(?:'(?P<sq>(?:[^'\\\n]|\\.)*)'|\"(?P<dq>(?:[^\"\\\n]|\\.)*)\")"
+    r"|(?<![\w$])`(?P<bq>[^`]*)`"
+)
 # Interpreters whose bare backtick span runs a shell command; in JavaScript a backtick is
 # a template string, which runs only when tagged with `$` (Bun.$`…`, zx's $`…`).
 _BACKTICK_EXEC_HEAD_RE = re.compile(r"^(?:perl[0-9.]*|ruby[0-9.]*|php[0-9.]*(?:-cgi)?)$")
@@ -2903,12 +2909,14 @@ def _mask_string_literals(code: str) -> str:
 def _literal_list_at(text: str, i: int) -> tuple[list[str], int] | None:
     """The string literals of a `[…]` list literal starting at text[i], and the offset
     after it; None when an element is not a string literal."""
-    if text[i:i + 1] != "[":
+    opener = re.match(r"\[|c\(", text[i:])
+    if not opener:
         return None
-    items, i = [], i + 1
+    closer = "]" if opener.group() == "[" else ")"
+    items, i = [], i + opener.end()
     while True:
         i += re.match(r"\s*", text[i:]).end()
-        if text[i:i + 1] == "]":
+        if text[i:i + 1] == closer:
             return items, i + 1
         lit = _STRING_LITERAL_RE.match(text, i)
         if not lit:
@@ -2944,33 +2952,149 @@ def _object_argv_at(code: str, i: int) -> list[str]:
     return []
 
 
-def _first_argument_command(code: str, pos: int) -> str | None:
-    """The command a call's leading literal arguments spell: one string literal alone is
-    a shell command line; otherwise the consecutive string and list literals are argv,
-    joined (`system('gh', 'pr', 'merge', '5')`, `spawnSync('gh', ['pr', 'merge'])`,
-    `run(['gh', 'pr', 'merge', '5'])`). An object literal ends the walk, contributing its
-    own `args:` or `cmd:` list (`new Deno.Command('gh', {args: […]})`, `Deno.run({cmd:
-    […]})`). Stops at the first other non-literal argument. None when no literal leads."""
-    argv, strings, i = [], 0, pos + re.match(r"\s*", code[pos:]).end()
+def _literal_body(m: re.Match) -> str:
+    """The text a string literal spells, with backslash escapes resolved (`\\"` -> `"`)."""
+    body = next(g for g in (m.group("sq"), m.group("dq"), m.group("bq")) if g is not None)
+    return re.sub(r"\\(.)", r"\1", body)
+
+
+def _balanced_end(code: str, i: int) -> int:
+    """Offset just past the bracket group opening at code[i] (string contents masked),
+    or -1 when it does not close."""
+    masked, depth = _mask_string_literals(code), 0
+    for j in range(i, len(masked)):
+        if masked[j] in "([{":
+            depth += 1
+        elif masked[j] in ")]}":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+    return -1
+
+
+_OPERAND_RE = re.compile(r"[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*|\d+")
+
+
+def _operand_end(code: str, i: int) -> int:
+    """Offset past one non-literal operand at code[i] (a name, attribute chain, number or
+    call), or -1 when there is none."""
+    operand = _OPERAND_RE.match(code, i)
+    if not operand:
+        return -1
+    i = operand.end()
+    if code[i:i + 1] == "(":
+        return _balanced_end(code, i)
+    return i
+
+
+def _string_expr_at(code: str, i: int) -> tuple[str, int] | None:
+    """A string-valued argument expression starting at code[i], as the text it spells:
+    string literals (any prefix; an f-string keeps its {…}), joined with `+` to each other
+    or to other operands (each operand reads as `X`), `% …` applied to a literal (the
+    literal's text), `shlex.split(<literal>)`, and `"<sep>".join([…])`. A `.format(…)`
+    ends the expression after its literal, which keeps the literal's text. None
+    when no string literal takes part, e.g. a bare variable (dataflow, not followed)."""
+    parts, saw_literal = [], False
     while True:
-        lit = _STRING_LITERAL_RE.match(code, i)
+        i += re.match(r"\s*", code[i:]).end()
+        split = re.match(r"shlex\s*\.\s*split\s*\(\s*", code[i:])
+        lit = _PREFIXED_LITERAL_RE.match(code, i + (split.end() if split else 0))
         if lit:
-            argv.append(lit.group(0)[1:-1]); strings += 1; i = lit.end()
+            text, i, saw_literal = _literal_body(lit), lit.end(), True
+            if split:
+                close = re.match(r"\s*\)", code[i:])
+                if not close:
+                    return None
+                i += close.end()
+            joiner = re.match(r"\s*\.\s*join\s*\(\s*", code[i:])
+            if joiner:
+                lst = _literal_list_at(code, i + joiner.end())
+                close = re.match(r"\s*\)", code[lst[1]:]) if lst else None
+                if not lst or not close:
+                    return None
+                text, i = text.join(lst[0]), lst[1] + close.end()
+            parts.append(text)
         else:
-            lst = _literal_list_at(code, i)
-            if lst is None:
-                argv += _object_argv_at(code, i)
+            end = _operand_end(code, i)
+            if end < 0:
                 break
-            argv += lst[0]; i = lst[1]
+            i = end
+            parts.append("X")
+        percent = re.match(r"\s*%\s*", code[i:])
+        if percent and saw_literal:
+            nxt = i + percent.end()
+            lit2 = _PREFIXED_LITERAL_RE.match(code, nxt)
+            end = lit2.end() if lit2 else (
+                _balanced_end(code, nxt) if code[nxt:nxt + 1] in "([{" else _operand_end(code, nxt)
+            )
+            if end > 0:
+                i = end
+            break
+        plus = re.match(r"\s*\+\s*", code[i:])
+        if not plus:
+            break
+        i += plus.end()
+    if not saw_literal:
+        return None
+    return "".join(parts), i
+
+
+def _first_argument_command(code: str, pos: int) -> str | None:
+    """The first of `_argument_commands`, or None."""
+    cmds = _argument_commands(code, pos)
+    return cmds[0] if cmds else None
+
+
+def _argument_commands(code: str, pos: int, skip_leading: int = 0) -> list[str]:
+    """The command a call's leading arguments spell. One string expression alone is a
+    shell command line (literal, f-string, concatenation, `.format`, `shlex.split`).
+    Otherwise consecutive string expressions and list literals are argv, joined
+    (`system('gh', 'pr', 'merge', '5')`, `spawnSync('gh', ['pr', 'merge'])`,
+    `run(['gh', 'pr', 'merge', '5'])`, `run(args=[…])`). An object literal ends the walk,
+    contributing its own `args:` or `cmd:` list (`new Deno.Command('gh', {args: […]})`,
+    `Deno.run({cmd: […]})`). Stops at the first other argument. Up to `skip_leading`
+    non-literal arguments before the first literal are skipped (a spawn mode, a perl
+    open3 handle). Both readings are returned: a leading string alone as a shell line
+    (`popen("…", "r")`), and the whole argv."""
+    argv, strings, i = [], 0, pos + re.match(r"\s*", code[pos:]).end()
+    keyword = re.match(r"(?:args|cmd)\s*=(?!=)\s*", code[i:])
+    if keyword:
+        i += keyword.end()
+    for _ in range(skip_leading):
+        if code[i:i + 1] == "{" or _literal_list_at(code, i) or _PREFIXED_LITERAL_RE.match(code, i):
+            break
+        perl_var = re.match(r"(?:my\s+)?[$@%]\w+", code[i:])
+        end = i + perl_var.end() if perl_var else _operand_end(code, i)
+        sep = re.match(r"\s*,\s*", code[end:]) if end > 0 else None
+        if not sep:
+            return []
+        i = end + sep.end()
+    first_string = None
+    while True:
+        lst = _literal_list_at(code, i)
+        expr = None if lst else _string_expr_at(code, i)
+        if expr:
+            if not argv:
+                first_string = expr[0]
+            argv.append(expr[0])
+            strings += 1
+            i = expr[1]
+        elif lst:
+            argv += lst[0]
+            i = lst[1]
+        else:
+            argv += _object_argv_at(code, i)
+            break
         sep = re.match(r"\s*,\s*", code[i:])
         if not sep:
             break
         i += sep.end()
     if not argv:
-        return None
-    if strings == 1 and len(argv) == 1:
-        return argv[0]
-    return shlex.join(argv)
+        return []
+    cmds = [first_string] if first_string is not None else []
+    if len(argv) > 1:
+        cmds.append(shlex.join(argv))
+    return cmds
 
 
 # An interpreter's head word anywhere in a (quote-masked) command.
@@ -3131,6 +3255,24 @@ def _python_aliases(masked: str) -> tuple[set, set]:
     return bare, modules
 
 
+def _perl_aliases(masked: str) -> tuple[set, set]:
+    """Bare names a perl program imported as process routes (`use IPC::Run`)."""
+    bare = set()
+    if re.search(r"\buse\s+IPC::Run\b", masked):
+        bare |= {"run", "start"}
+    if re.search(r"\buse\s+IPC::Run3\b", masked):
+        bare.add("run3")
+    return bare, set()
+
+
+def _language_aliases(head: str, masked: str) -> tuple[set, set]:
+    if re.match(r"^(?:python|pypy)", head):
+        return _python_aliases(masked)
+    if head.startswith("perl"):
+        return _perl_aliases(masked)
+    return set(), set()
+
+
 def _is_primitive_call(name: str, head: str, aliases: tuple) -> bool:
     segs = [x.lower() for x in re.split(r"\.|::", name)]
     first, last = segs[0], segs[-1]
@@ -3157,7 +3299,7 @@ def _program_names_primitive(head: str, program: str) -> bool:
     those run a command (ruby/perl/php backticks, a `$`-tagged JS template, awk's
     print | and | getline)."""
     masked = _mask_string_literals(program)
-    aliases = _python_aliases(masked) if re.match(r"^(?:python|pypy)", head) else (set(), set())
+    aliases = _language_aliases(head, masked)
     for m in _CALL_NAME_RE.finditer(masked):
         if _is_primitive_call(m.group(1), head, aliases):
             return True
@@ -3184,7 +3326,7 @@ def _code_runs_guarded_directly(head: str, code: str, _depth: int = 0) -> bool:
     if _depth >= _DIRECT_CALL_MAX_DEPTH or not _program_names_primitive(head, code):
         return False
     masked = _mask_string_literals(code)
-    aliases = _python_aliases(masked) if re.match(r"^(?:python|pypy)", head) else (set(), set())
+    aliases = _language_aliases(head, masked)
     for m in re.finditer(r"(\$?)`([^`]*)`", masked):
         if m.group(1) or _BACKTICK_EXEC_HEAD_RE.match(head):
             span = code[m.start(2):m.end(2)]
@@ -3197,10 +3339,98 @@ def _code_runs_guarded_directly(head: str, code: str, _depth: int = 0) -> bool:
     for m in _PRIMITIVE_CALL_RE.finditer(masked):
         if not _is_primitive_call(m.group(1), head, aliases):
             continue
-        cmd = _first_argument_command(code, m.end())
-        if cmd and _is_dangerous_at_depth(cmd, _depth + 1):
+        name = m.group(1).lower()
+        if _runs_own_code(name, head):
+            # eval (and Python's exec) of a literal runs it as the SAME language's code
+            expr = _string_expr_at(code, m.end())
+            if expr and _code_runs_guarded_directly(head, expr[0], _depth + 1):
+                return True
+            continue
+        last = re.split(r"\.|::", name)[-1]
+        cmds = _argument_commands(
+            code, m.end(),
+            skip_leading=3 if last in ("open2", "open3", "run3") or last.startswith("spawn") else 0,
+        )
+        if any(_is_dangerous_at_depth(c, _depth + 1) for c in cmds):
             return True
-    return False
+    return any(
+        _is_dangerous_at_depth(cmd, _depth + 1) for cmd in _statement_commands(head, code, masked)
+    )
+
+
+def _runs_own_code(name: str, head: str) -> bool:
+    """A bare call that runs its string argument as the interpreter's OWN code: eval in
+    every language here, exec in Python only (elsewhere exec runs a shell command)."""
+    if name == "eval":
+        return bool(re.match(r"^(?:python|pypy|node|nodejs|bun|deno|ruby|perl|php|lua|luajit)", head))
+    return name == "exec" and bool(re.match(r"^(?:python|pypy)", head))
+
+
+# Statement-shaped routes whose command is not a call's first argument.
+_QX_RE = re.compile(r"(?<![\w$])(?:qx|%x)\s*(?P<open>[(\[{<|!/])")
+_CLOSERS = {"(": ")", "[": "]", "{": "}", "<": ">"}
+_OSASCRIPT_SHELL_RE = re.compile(r"\bdo\s+shell\s+script\s+")
+_AWK_PRINT_PIPE_RE = re.compile(r"\b(?:print|printf)\b[^;}\n|]*?(?<!\|)\|&?\s*")
+_AWK_GETLINE_RE = re.compile(r"\|&?\s*getline\b")
+_PERL_OPEN_RE = re.compile(r"(?<![\w$])open\s*\(?\s*(?:my\s+)?[\w$]+\s*,\s*")
+_RUBY_SEND_RE = re.compile(r"(?:__send__|public_send|send)\s*\(?\s*:(?:system|exec|spawn|`)\s*,\s*")
+
+
+def _perl_open_commands(code: str, i: int) -> list[str]:
+    """The command a perl `open` runs: the 2-argument form's `"| cmd"` / `"cmd |"`, or
+    the 3-argument form's command after a `-|` / `|-` mode."""
+    texts = []
+    while True:
+        expr = _string_expr_at(code, i)
+        if not expr:
+            break
+        texts.append(expr[0])
+        sep = re.match(r"\s*,\s*", code[expr[1]:])
+        if not sep:
+            break
+        i = expr[1] + sep.end()
+    if len(texts) >= 2 and texts[0].strip() in ("-|", "|-"):
+        return [shlex.join(texts[1:]) if len(texts) > 2 else texts[1]]
+    if texts and re.search(r"^\s*\||\|\s*$", texts[0]):
+        return [texts[0].strip().strip("|").strip()]
+    return []
+
+
+def _statement_commands(head: str, code: str, masked: str) -> list[str]:
+    """Commands run through a statement form rather than a call's first argument: perl
+    `qx(…)` and ruby `%x(…)`, osascript `do shell script "…"`, awk `print … | "cmd"` and
+    `"cmd" | getline`, perl `open(F, "| cmd")` / `open(F, "-|", …)`, ruby
+    `send(:system, …)`."""
+    out = []
+    if re.match(r"^(?:perl|ruby)", head):
+        for m in _QX_RE.finditer(masked):
+            close = _CLOSERS.get(m.group("open"), m.group("open"))
+            end = code.find(close, m.end())
+            if end > 0:
+                out.append(code[m.end():end])
+    if head == "osascript":
+        for m in _OSASCRIPT_SHELL_RE.finditer(masked):
+            expr = _string_expr_at(code, m.end())
+            if expr:
+                out.append(expr[0])
+    if _AWK_HEAD_RE.match(head):
+        for m in _AWK_PRINT_PIPE_RE.finditer(masked):
+            expr = _string_expr_at(code, m.end())
+            if expr:
+                out.append(expr[0])
+        for m in _AWK_GETLINE_RE.finditer(masked):
+            before = [lit for lit in _PREFIXED_LITERAL_RE.finditer(code, 0, m.start())]
+            if before:
+                out.append(_literal_body(before[-1]))
+    if head.startswith("perl"):
+        for m in _PERL_OPEN_RE.finditer(masked):
+            out += _perl_open_commands(code, m.end())
+    if head.startswith("ruby"):
+        for m in _RUBY_SEND_RE.finditer(masked):
+            cmd = _first_argument_command(code, m.end())
+            if cmd:
+                out.append(cmd)
+    return out
 
 
 # Path-qualified shell token. Trailing (?![\w/]) anchors the shell name as a
@@ -5406,10 +5636,13 @@ def _interpreter_names_primitive(leg: str, head: str, tokens: list) -> bool:
     `deno eval` is deno's one-liner SUBCOMMAND, not a call to eval."""
     try:
         program = _program_from_tokens(head, tokens)
-        verdict = _program_names_primitive(head, program) if program is not None else None
+        verdict = False if program is not None else None
     except _PARSER_ERRORS:
         verdict = None                                   # a parser defect: whole-leg search
     if verdict is not None:
+        # A readable program's quoted values are inert: whether it RUNS a guarded command
+        # is judged once, by the direct-call check over the whole command (calls and
+        # statement forms given the command, any string-expression shape).
         return verdict
     text = leg
     if head == "deno" and len(tokens) > 1 and tokens[1] == "eval":

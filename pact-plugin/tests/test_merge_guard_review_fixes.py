@@ -54,7 +54,7 @@ def test_a_parser_error_never_becomes_a_refusal(monkeypatch):
     def boom(*_args, **_kwargs):
         raise AttributeError("parser defect")
 
-    monkeypatch.setattr(mgc, "_program_names_primitive", boom)
+    monkeypatch.setattr(mgc, "_program_from_tokens", boom)
     monkeypatch.setattr(mgc, "_code_runs_guarded_directly", boom)
     assert is_dangerous_command("python3 -c 'print(1)'") is False
     assert is_dangerous_command(f"python3 -c 'import os; os.system(\"{D}\")'") is True
@@ -182,3 +182,49 @@ def test_interpreter_named_outside_a_command_word_is_allowed(label, cmd):
 @pytest.mark.parametrize("label,cmd", REAL_COMMAND_DENY, ids=[r[0] for r in REAL_COMMAND_DENY])
 def test_interpreter_in_a_command_word_is_still_judged(label, cmd):
     assert is_dangerous_command(cmd) is True
+
+
+# A readable program is refused when an exec primitive is GIVEN a guarded command, in
+# any string-expression shape; naming merge text elsewhere in the program is not a run.
+GIVEN_TO_A_PRIMITIVE_DENY = [
+    ("stdin f-string", ("python3 - <<'EOF'\nimport subprocess\nn = 5\n"
+                        "subprocess.run(f\"gh pr merge {n} --squash\", shell=True)\nEOF")),
+    ("stdin r-string", f"python3 - <<'EOF'\nimport os\nos.system(r\"{D}\")\nEOF"),
+    ("-c f-string", "python3 -c 'import subprocess; n = 5; subprocess.run(f\"gh pr merge {n}\", shell=True)'"),
+    ("-c concatenation", "python3 -c 'import subprocess; n = \"5\"; subprocess.run(\"gh pr merge \" + n, shell=True)'"),
+    ("-c split literal concatenation", "python3 -c 'import os; os.system(\"gh pr \" + \"merge 5\")'"),
+    ("stdin concatenation", ("python3 - <<'EOF'\nimport subprocess\nn = '5'\n"
+                             "subprocess.run('gh pr merge ' + n, shell=True)\nEOF")),
+    ("-c args= keyword", "python3 -c 'import subprocess; subprocess.run(args=[\"gh\", \"pr\", \"merge\", \"5\"])'"),
+    ("-c shlex.split", f"python3 -c 'import shlex, subprocess; subprocess.run(shlex.split(\"{D}\"))'"),
+    ("-c format", "python3 -c 'import subprocess; subprocess.run(\"gh pr merge {}\".format(5), shell=True)'"),
+    ("-c join", "python3 -c 'import subprocess; subprocess.run(\" \".join([\"gh\", \"pr\", \"merge\", \"5\"]), shell=True)'"),
+    ("-c percent", "python3 -c 'import subprocess; n = 5; subprocess.run(\"gh pr merge %s\" % n, shell=True)'"),
+    ("-c eval of a literal", f"python3 -c 'import os; eval(\"os.system(\\\"{D}\\\")\")'"),
+    ("-c popen with mode", f"python3 -c 'import os; os.popen(\"{D}\", \"r\").read()'"),
+    ("node execSync template", f"node -e 'require(\"child_process\").execSync(`{D}`)'"),
+    ("perl qx", f"perl -e 'print qx({D})'"),
+    ("perl open3", f"perl -e 'use IPC::Open3; open3(my $i, my $o, undef, \"{D}\")'"),
+    ("ruby %x", f"ruby -e 'puts %x({D})'"),
+    ("osascript do shell script", f"osascript -e 'do shell script \"{D}\"'"),
+    ("awk print pipe", f"awk 'BEGIN {{ print \"x\" | \"{D}\" }}'"),
+]
+NAMED_NOT_RUN_ALLOW = [
+    ("node runs another command, logs merge text",
+     ("node -e 'const {execSync}=require(\"child_process\"); const s=execSync(\"gh pr list --json number\")"
+      ".toString(); console.log(\"run: gh pr merge \" + JSON.parse(s)[0].number)'")),
+    ("rg searches for merge text", "python3 -c 'import subprocess; subprocess.run([\"rg\",\"gh pr merge\",\"-n\"])'"),
+    ("eval arithmetic, print merge text", f"python3 -c 'print(eval(\"1+1\")); print(\"{D}\")'"),
+    ("stdin runs git log, prints merge text",
+     f"python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['git', 'log', '-1'])\nprint('{D}')\nEOF"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", GIVEN_TO_A_PRIMITIVE_DENY, ids=[r[0] for r in GIVEN_TO_A_PRIMITIVE_DENY])
+def test_guarded_command_given_to_a_primitive_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", NAMED_NOT_RUN_ALLOW, ids=[r[0] for r in NAMED_NOT_RUN_ALLOW])
+def test_merge_text_beside_an_unrelated_primitive_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
