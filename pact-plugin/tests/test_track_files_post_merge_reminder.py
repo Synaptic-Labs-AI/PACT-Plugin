@@ -49,7 +49,7 @@ def _env(root: Path, **extra) -> dict:
     return carry_clock_shift(env)
 
 
-def _frame(command=MERGE, *, agent_type=LEAD, event="PostToolUse", response=None, **over):
+def _frame(command=MERGE, *, agent_type: str | None = LEAD, event="PostToolUse", response=None, **over):
     frame = {
         "hook_event_name": event,
         "session_id": "reminder-sid",
@@ -136,6 +136,17 @@ class TestReminderSilent:
     ])
     def test_a_lead_non_merge_command_gets_no_reminder(self, tmp_path, command):
         """S5."""
+        assert _context(_run(tmp_path, _frame(command))) is None
+
+    @pytest.mark.parametrize("command", [
+        pytest.param("git commit -m 'docs: explain the gh pr merge 1659 reminder'", id="S9-commit-message"),
+        pytest.param("echo 'next: gh pr merge 1659 --squash'", id="S9-echo"),
+        pytest.param("grep -n 'gh pr merge' hooks/track_files.py", id="S9-grep"),
+    ])
+    def test_a_command_that_only_mentions_a_merge_gets_no_reminder(self, tmp_path, command):
+        """S9: the operation classifier reads raw text and calls each of these a
+        merge; the reminder also requires the guard's danger scan, which reads the
+        quoted merge text as inert."""
         assert _context(_run(tmp_path, _frame(command))) is None
 
     @pytest.mark.parametrize("tool_input", [

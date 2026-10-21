@@ -390,7 +390,11 @@ def _post_merge_reminder(input_data: dict) -> str | None:
 
     It does not test stdout: a successful `gh pr merge` prints nothing, and a
     compound command's output says nothing about the merge leg. Hence the
-    conditional wording."""
+    conditional wording.
+
+    The operation classifier reads raw text, so a command that only mentions a
+    merge (`git commit -m '… gh pr merge 5 …'`, `echo`, `grep`) also classifies
+    as one; is_dangerous_command, which strips inert quoted text, must agree."""
     try:
         if not pact_context.is_lead(input_data):
             return None
@@ -402,11 +406,14 @@ def _post_merge_reminder(input_data: dict) -> str | None:
             return None
         tool_input = input_data.get("tool_input")
         command = tool_input.get("command") if isinstance(tool_input, dict) else None
-        if not isinstance(command, str) or not command:
+        if not isinstance(command, str):
             return None
-        from shared.merge_guard_common import detect_command_operation_type
+        from shared.merge_guard_common import (
+            detect_command_operation_type,
+            is_dangerous_command,
+        )
 
-        if detect_command_operation_type(command) != "merge":
+        if detect_command_operation_type(command) != "merge" or not is_dangerous_command(command):
             return None
         return _POST_MERGE_REMINDER
     except Exception:  # noqa: BLE001 - the reminder is best-effort
