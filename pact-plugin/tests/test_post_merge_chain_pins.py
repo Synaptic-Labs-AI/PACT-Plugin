@@ -204,15 +204,29 @@ class TestMergeHandsOffToWrapUp:
         assert create[0] < complete[-1], (create, complete)
 
     def test_persona_recovery_routes_a_merged_pr_to_wrap_up(self):
-        """Reddens when the persona's state-recovery next-action line stops
-        routing a merged PR to `/PACT:wrap-up`, or routes "all complete" to
-        peer-review first. Mutation: delete the merged-PR clause."""
-        lines = [ln for ln in PERSONA.read_text(encoding="utf-8").splitlines()
-                 if ln.startswith("5. Next action:")]
+        """Reddens when the persona's state-recovery next-action step stops
+        routing a merged PR to `/PACT:wrap-up`, routes "all complete" to
+        peer-review first, or moves out of the State Recovery section.
+        Mutation: delete the merged-PR clause."""
+        section = _section(PERSONA.read_text(encoding="utf-8"),
+                           "## 6. State Recovery", "\n## ")
+        lines = [ln for ln in section.splitlines() if ln.startswith("5. Next action:")]
         assert len(lines) == 1, lines
         line = lines[0]
         assert "merged PR" in line and "`/PACT:wrap-up`" in line, line
         assert line.index("`/PACT:wrap-up`") < line.index("all complete"), line
+
+    def test_persona_keys_wrap_up_on_the_wrap_up_session_end(self):
+        """Reddens when the persona decides "wrap-up has not run" from any
+        signal other than a `session_end` with source wrap-up after the latest
+        `review_dispatch`. Mutation: restore "no `session_consolidated` event
+        in the journal"."""
+        section = _section(PERSONA.read_text(encoding="utf-8"),
+                           "## 6. State Recovery", "\n## ")
+        line = next(ln for ln in section.splitlines() if ln.startswith("5. Next action:"))
+        assert ('no `session_end` event with `"source": "wrap-up"` after the latest '
+                '`review_dispatch` event') in line, line
+        assert "session_consolidated" not in line, line
 
 
 # ---------------------------------------------------------------------------
