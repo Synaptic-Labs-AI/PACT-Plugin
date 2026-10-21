@@ -11,7 +11,6 @@ a test-case list, or in a string the code only prints. A command passed through 
 variable needs dataflow to follow, and is a named residual.
 """
 
-import re
 
 import pytest
 import shared.merge_guard_common as mgc
@@ -73,13 +72,9 @@ def test_variable_indirection_is_the_named_residual():
     assert is_dangerous_command(cmd) is False
 
 
-def _alternatives(pattern: str) -> set:
-    body = re.search(r"\(\?(?:P<head>|:)(python\[0-9\.\]\*.*?awk\|gawk\|mawk\|nawk)\)", pattern, re.DOTALL)
-    assert body, pattern
-    return set(body.group(1).split("|"))
-
-
-def test_stdin_head_set_matches_interpreter_heads():
-    """The stdin feed pattern spells the interpreter heads out (it is defined before
-    _INTERPRETER_HEADS); the two sets must stay equal."""
-    assert _alternatives(mgc._STDIN_INTERPRETER) == _alternatives(mgc._INTERPRETER_HEADS.pattern)
+def test_every_head_pattern_uses_the_single_head_source():
+    """The stdin feed pattern, the head finder and _INTERPRETER_HEADS are all built from
+    _INTERPRETER_HEAD_ALTERNATION, so they cannot drift apart."""
+    alternation = mgc._INTERPRETER_HEAD_ALTERNATION
+    for pattern in (mgc._STDIN_INTERPRETER, mgc._INTERPRETER_WORD_RE.pattern, mgc._INTERPRETER_HEADS.pattern):
+        assert alternation in pattern

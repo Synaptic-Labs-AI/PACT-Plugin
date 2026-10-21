@@ -182,6 +182,7 @@ security check; the primary check is I-3 TTL expiry (bounded by TOKEN_TTL).
 
 from __future__ import annotations
 
+import functools
 import glob
 import os
 import re
@@ -2770,14 +2771,19 @@ def _has_pipe_to_shell(command: str) -> bool:
 # An interpreter reads its PROGRAM from stdin when it gets no code argument: no -c/-e/-r/-m
 # and no script path, only flags or a lone `-`. Its stdin feed (a pipe into it, a here-string,
 # a heredoc) is then that interpreter's code, and it can run a shell exactly when it names an
-# exec primitive. The interpreter-head alternation is spelled out here because this module
-# defines _INTERPRETER_HEADS further down; test_merge_guard_interpreter_primitives pins the
-# two to the same set.
+# exec primitive.
+# The interpreter heads, as one alternation: the single source for the stdin feed pattern,
+# the head finder and _INTERPRETER_HEADS. Same per-FAMILY anchoring as
+# _SHELL_STRING_EXECUTORS (python-config is no head); a versioned or suffixed binary
+# (php8.2, perl5.36, node18, python3.13t) is the same interpreter.
+_INTERPRETER_HEAD_ALTERNATION = (
+    r"python[0-9.]*t?|pypy[0-9.]*t?|perl[0-9.]*|ruby[0-9.]*|nodejs[0-9.]*|node[0-9.]*"
+    r"|php[0-9.]*(?:-cgi)?|bun|deno|lua[0-9.]*|luajit|R|Rscript|osascript|tclsh[0-9.]*|wish[0-9.]*"
+    r"|awk|gawk|mawk|nawk"
+)
 _STDIN_INTERPRETER = (
     r"(?<![\w./-])(?:[^\s|;&<>()]*/)?"
-    r"(?P<head>python[0-9.]*t?|pypy[0-9.]*t?|perl[0-9.]*|ruby[0-9.]*|nodejs[0-9.]*|node[0-9.]*"
-    r"|php[0-9.]*(?:-cgi)?|bun|deno|lua[0-9.]*|luajit|R|Rscript|osascript|tclsh[0-9.]*|wish[0-9.]*"
-    r"|awk|gawk|mawk|nawk)"
+    r"(?P<head>" + _INTERPRETER_HEAD_ALTERNATION + r")"
     r"(?P<sub>[ \t]+(?:eval|run)(?=[ \t]))?"         # deno's eval / run subcommand
     r"(?P<flags>(?:[ \t]+-[\w-]*)*)[ \t]*"
 )
@@ -2900,6 +2906,7 @@ _BACKTICK_EXEC_HEAD_RE = re.compile(r"^(?:perl[0-9.]*|ruby[0-9.]*|php[0-9.]*(?:-
 _DIRECT_CALL_MAX_DEPTH = 2
 
 
+@functools.lru_cache(maxsize=64)
 def _mask_string_literals(code: str) -> str:
     """`code` with the content of every '…' and "…" literal blanked, same length, so call
     names and backticks written INSIDE a string (data) are not read as code."""
@@ -3099,10 +3106,7 @@ def _argument_commands(code: str, pos: int, skip_leading: int = 0) -> list[str]:
 
 # An interpreter's head word anywhere in a (quote-masked) command.
 _INTERPRETER_WORD_RE = re.compile(
-    r"(?<![\w./-])(?:[^\s|;&<>()]*/)?"
-    r"(?:python[0-9.]*t?|pypy[0-9.]*t?|perl[0-9.]*|ruby[0-9.]*|nodejs[0-9.]*|node[0-9.]*"
-    r"|php[0-9.]*(?:-cgi)?|bun|deno|lua[0-9.]*|luajit|R|Rscript|osascript|tclsh[0-9.]*|wish[0-9.]*"
-    r"|awk|gawk|mawk|nawk)(?=[ \t]|$)"
+    r"(?<![\w./-])(?:[^\s|;&<>()]*/)?(?:" + _INTERPRETER_HEAD_ALTERNATION + r")(?=[ \t]|$)"
 )
 
 # Per interpreter family: the flags whose NEXT token is the program, the flags that take a
@@ -5072,15 +5076,8 @@ _SHELL_STRING_EXECUTORS = re.compile(
 # only when the leg text carries a primitive; without one, -c/-e code, a script's or -m
 # module's argv and an awk program are inert. The primitive list is deliberately over-wide (a
 # case-insensitive substring anywhere in the leg): a false match preserves, the over-block-safe
-# direction. Same per-FAMILY anchoring as _SHELL_STRING_EXECUTORS (python-config is no head);
-# a versioned or suffixed binary (php8.2, php82, perl5.36, node18, python3.12) is the same
-# interpreter. pypy, php-cgi, bun, deno, lua/luajit, R/Rscript and osascript run code given
-# on their command line the same way.
-_INTERPRETER_HEADS = re.compile(
-    r"^(?:python[0-9.]*t?|pypy[0-9.]*t?|perl[0-9.]*|ruby[0-9.]*|nodejs[0-9.]*|node[0-9.]*"
-    r"|php[0-9.]*(?:-cgi)?|bun|deno|lua[0-9.]*|luajit|R|Rscript|osascript|tclsh[0-9.]*|wish[0-9.]*"
-    r"|awk|gawk|mawk|nawk)$"
-)
+# direction. The heads are _INTERPRETER_HEAD_ALTERNATION.
+_INTERPRETER_HEADS = re.compile(r"^(?:" + _INTERPRETER_HEAD_ALTERNATION + r")$")
 # Every non-obfuscated route to a process from each interpreter names one of these:
 #   python  os.system/popen, os.exec*/spawn*/posix_spawn*, subprocess (also asyncio's
 #           create_subprocess_*), pty.spawn, commands.get*, os.fork
