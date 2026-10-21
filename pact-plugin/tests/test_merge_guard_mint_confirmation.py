@@ -102,14 +102,19 @@ class TestBundleArms:
         assert f"for a merge on {expect_target}." in notice
         assert "do not run it" in notice
 
-    @pytest.mark.parametrize("label,desc", [
-        ("B2 unbackticked bare", f"Map which read-only commands mentioning {M} get refused."),
-        ("B3 in words", "Map which read-only commands mentioning the merge command get refused."),
-    ])
-    def test_discussion_without_command_span_mints_nothing(self, tmp_path, label, desc):
+    def test_unbackticked_command_mints_nothing_and_gets_the_note(self, tmp_path):
+        """B2: the bundle names a guarded command, so the refusal is explained."""
+        desc = f"Map which read-only commands mentioning {M} get refused."
         tokens, notice = _post(tmp_path, _bundle(desc), "Measure and fix (Recommended)")
         assert tokens == []
-        assert notice is None or "approval was recorded for" not in notice
+        assert notice.startswith("PACT merge-guard: no approval was recorded from this question")
+
+    def test_command_in_words_mints_nothing_and_stays_silent(self, tmp_path):
+        """B3: no guarded command anywhere in the bundle, so no note either."""
+        desc = "Map which read-only commands mentioning the merge command get refused."
+        tokens, notice = _post(tmp_path, _bundle(desc), "Measure and fix (Recommended)")
+        assert tokens == []
+        assert notice is None
 
 
 class TestTargetRendering:
