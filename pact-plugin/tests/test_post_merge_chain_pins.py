@@ -388,6 +388,36 @@ class TestTeammateLifecycleNotKeyedOnMerge:
         assert not hits, hits
 
 
+_COMPACT_NEXT_STEPS_START = "- [ ] **`TaskUpdate`**: Feature task status = \"completed\""
+_COMPACT_NEXT_STEPS_END = "**If blocker reported**"
+
+
+class TestComPACTEndOfFlow:
+    def _block(self):
+        return _section(_text("comPACT.md"), _COMPACT_NEXT_STEPS_START, _COMPACT_NEXT_STEPS_END)
+
+    def test_the_caller_return_comes_before_the_shutdown_warning(self):
+        """Reddens when comPACT tells the lead to ask before it tells a
+        review-fixing comPACT to skip the question, or when the warning stops
+        being conditional on asking. Mutation: restore "Ask first, then act."
+        above the caller-return sentence."""
+        block = self._block()
+        caller = block.index("this comPACT is fixing review findings: skip the question below")
+        warning = block.index("When you ask the question below, do not shut down specialists")
+        question = block.index('"Work committed. What next?"')
+        assert caller < warning < question, (caller, warning, question)
+        assert "Ask first, then act." not in block, block
+
+    def test_wrap_up_shuts_specialists_down_only_on_its_end_session_branch(self):
+        """Reddens when the "Yes, create PR" row says `/PACT:wrap-up` shuts the
+        specialists down without naming its end-session branch. Mutation:
+        delete " on its end-session branch,"."""
+        rows = [ln for ln in self._block().splitlines() if ln.startswith("| **Yes, create PR**")]
+        assert len(rows) == 1, rows
+        assert ("`/PACT:wrap-up` on its end-session branch, or `/PACT:pause`, shuts the "
+                "specialists down later.") in rows[0], rows[0]
+
+
 # ---------------------------------------------------------------------------
 # The workflow chain
 # ---------------------------------------------------------------------------
