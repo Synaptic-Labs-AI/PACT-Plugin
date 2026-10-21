@@ -76,7 +76,7 @@ Review task: in_progress (persists until merge-ready)
 
 **Failed cycle**: a remediation cycle fails when its verify-only re-review leaves a blocking finding open, OR raises a finding in a class an earlier cycle already closed, even if every finding the cycle listed was closed. A finding's class is one sentence naming the behaviour that fails, independent of the file, line or input that exposed it. Write that sentence beside each blocking finding when you synthesize findings; two findings share a class when one sentence describes both.
 
-**Persist `remediation_cycle_count`**: `TaskUpdate(reviewTaskId, metadata={"remediation_cycle_count": N})` — increment at each cycle start; default 0 if absent.
+**Persist the cycle state**: at each cycle start, read `remediation_cycle_count` (default 0) and `closed_finding_classes` (default empty) from the Review task's file (`TaskGet` does NOT surface metadata). Then write both in one call: `TaskUpdate(reviewTaskId, metadata={"remediation_cycle_count": N, "closed_finding_classes": [...]})`, with N incremented and the list holding the class sentence of every finding an earlier cycle closed. Write the whole list each time. Decide whether a cycle failed against that list.
 
 ### Verify-Only Re-Review
 

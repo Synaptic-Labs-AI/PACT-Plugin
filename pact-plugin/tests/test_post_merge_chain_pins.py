@@ -572,6 +572,22 @@ class TestFailedCycleRule:
         assert "raises a finding in a class an earlier cycle already closed" in rule, rule
         assert "A finding's class is one sentence naming the behaviour that fails" in rule, rule
 
+    def test_closed_classes_persist_with_the_cycle_count(self):
+        """Reddens when the closed finding classes stop being written in the
+        same `TaskUpdate` as the cycle count, or stop being read back before a
+        cycle is classified. Mutation: drop "closed_finding_classes" from the
+        persist call."""
+        section = _section(_text("peer-review.md"), "## Remediation Task State",
+                           "### Verify-Only Re-Review")
+        paras = [p for p in section.split("\n\n") if p.startswith("**Persist the cycle state**:")]
+        assert len(paras) == 1, paras
+        rule = paras[0]
+        assert ('metadata={"remediation_cycle_count": N, "closed_finding_classes": [...]}'
+                in rule), rule
+        assert "read `remediation_cycle_count`" in rule and "`closed_finding_classes`" in rule, rule
+        assert "Write the whole list each time." in rule, rule
+        assert "Decide whether a cycle failed against that list." in rule, rule
+
     def test_termination_reads_through_the_definition(self):
         """Reddens when the remediation termination rule counts something other
         than failed cycles. Mutation: restore "If blocking items persist after 2
