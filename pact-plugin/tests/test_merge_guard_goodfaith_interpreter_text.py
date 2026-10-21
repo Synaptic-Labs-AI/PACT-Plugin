@@ -77,7 +77,7 @@ LAUNCH_HEADS = [
     "conda run -n base python", "pyenv exec python3", "sudo python3", "nice -n 5 python3",
     "timeout 30 python3", "command python3", "python3 -I", "python3 -u",
 ]
-LAUNCH_GAPS = [
+VALUE_FLAG_AND_FREE_THREADED_HEADS = [
     pytest.param("python3 -W ignore", id="value-flag-W-before-c"),
     pytest.param("python3 -X dev", id="value-flag-X-before-c"),
     pytest.param("python3.13t", id="free-threaded-313t"),
@@ -92,7 +92,7 @@ def test_every_common_launch_form_refuses_a_real_merge(head, code):
 
 
 @pytest.mark.parametrize("code", [_LIST_CODE, _SYSTEM_CODE], ids=["list", "os-system"])
-@pytest.mark.parametrize("head", LAUNCH_GAPS)
+@pytest.mark.parametrize("head", VALUE_FLAG_AND_FREE_THREADED_HEADS)
 def test_value_flag_and_free_threaded_launch_forms_are_refused(head, code):
     """A value flag (-W ignore, -X dev) placed before -c does not hide the code
     from the list-form reader, and a free-threaded build name (python3.13t) is
