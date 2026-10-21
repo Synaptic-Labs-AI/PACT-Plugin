@@ -2958,12 +2958,27 @@ _PROGRAM_FLAGS = (
 _AWK_HEAD_RE = re.compile(r"^(?:awk|gawk|mawk|nawk)$")
 
 
+# deno flags that take a separate value (`deno eval --ext ts '…'`).
+_DENO_VALUE_FLAGS = frozenset({
+    "--ext", "--config", "-c", "--import-map", "-L", "--log-level", "--location", "--seed",
+    "--cert", "--env-file", "--lock",
+})
+
+
 def _program_from_tokens(head: str, tokens: list) -> str | None:
     """The program text an interpreter is given on its command line, from its shell
     tokens (tokens[0] is the interpreter), or None when it runs a script, a module or
     stdin. Several -e programs are joined with newlines."""
     if head == "deno":
-        rest = [t for t in tokens[1:] if not t.startswith("-")]
+        rest, i = [], 1
+        while i < len(tokens):
+            t = tokens[i]
+            if t in _DENO_VALUE_FLAGS:
+                i += 2
+                continue
+            if not t.startswith("-"):
+                rest.append(t)
+            i += 1
         return rest[1] if len(rest) >= 2 and rest[0] == "eval" else None
     if _AWK_HEAD_RE.match(head):
         i = 1
@@ -2972,9 +2987,9 @@ def _program_from_tokens(head: str, tokens: list) -> str | None:
             if t == "--":
                 i += 1
                 break
-            if t in ("-f", "--file") or t.startswith("-f"):
-                return None
-            if t in ("-F", "-v", "--field-separator", "--assign"):
+            if t in ("-f", "--file", "-E", "--exec") or t.startswith("-f"):
+                return None                              # the program is in a file
+            if t in ("-F", "-v", "-i", "-l", "--field-separator", "--assign", "--include", "--load"):
                 i += 2
                 continue
             if not t.startswith("-") or t == "-":

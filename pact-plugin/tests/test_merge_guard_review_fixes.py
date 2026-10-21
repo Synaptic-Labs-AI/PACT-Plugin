@@ -64,3 +64,28 @@ def test_empty_import_list_parses_to_no_aliases():
     from shared.merge_guard_common import _python_aliases
 
     assert _python_aliases("from os import ()") == (set(), set())
+
+
+# A gawk extension or include flag, or a deno value flag, takes the NEXT token as its
+# value; the program is the token after that.
+VALUE_FLAG_DENY = [
+    ("gawk -l ext", f"gawk -l ordchr '{{system(\"{D}\")}}' f"),
+    ("gawk -i inplace", f"gawk -i inplace '{{system(\"{D}\")}}' f"),
+    ("gawk --load ext", f"gawk --load ordchr '{{system(\"{D}\")}}' f"),
+    ("gawk --include lib", f"gawk --include lib '{{system(\"{D}\")}}' f"),
+    ("deno eval --ext ts", "deno eval --ext ts 'Deno.run({cmd: [\"gh\", \"pr\", \"merge\", \"5\"]})'"),
+]
+VALUE_FLAG_ALLOW = [
+    ("gawk -i inplace print", f"gawk -i inplace '{{print \"{D}\"}}' f"),
+    ("deno eval --ext ts log", f"deno eval --ext ts 'console.log(\"{D}\")'"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", VALUE_FLAG_DENY, ids=[r[0] for r in VALUE_FLAG_DENY])
+def test_value_flag_does_not_hide_the_program(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", VALUE_FLAG_ALLOW, ids=[r[0] for r in VALUE_FLAG_ALLOW])
+def test_value_flag_program_that_only_prints_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
