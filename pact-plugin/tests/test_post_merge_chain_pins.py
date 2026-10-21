@@ -192,21 +192,28 @@ class TestEndOfFlowCheckpoints:
 # Merge -> wrap-up
 # ---------------------------------------------------------------------------
 
+_QUEUED = "`OPEN` with `autoMergeRequest` set or `isInMergeQueue` true"
+
+
 class TestStepEightStateGate:
     def test_step_8_reads_the_pr_state_first(self):
         """Reddens when step 8 stops reading the PR state (and the auto-merge
-        request) before it routes. Mutation: delete the `gh pr view` sentence."""
+        request and the merge-queue flag) before it routes, or puts a literal
+        number in the read. Mutation: delete the read sentence, or drop
+        `isInMergeQueue` from the query."""
         section, _ = _step_8_bullets()
         first = section.split("\n", 1)[0]
-        assert "Run `gh pr view <N> --json state,autoMergeRequest`." in first, first
+        assert "Run `gh api graphql -F owner='{owner}' -F repo='{repo}' -F n=<N> " in first, first
+        assert "pullRequest(number:$n){state isInMergeQueue autoMergeRequest{enabledAt}}" in first, first
+        digits = [ch for ch in first.split("`")[1] if ch.isdigit()]
+        assert not digits, ("<N> must be the only number in the read", digits)
 
     def test_only_merged_invokes_wrap_up(self):
         """Reddens when a non-MERGED bullet invokes `/PACT:wrap-up`, or when the
         MERGED bullet stops creating the wrap-up task and invoking wrap-up.
         Mutation: change "`MERGED` →" to "Always →"."""
         _, bullets = _step_8_bullets()
-        assert set(bullets) == {"`MERGED`", "`OPEN` with `autoMergeRequest` set",
-                                "Any other state"}, sorted(bullets)
+        assert set(bullets) == {"`MERGED`", _QUEUED, "Any other state"}, sorted(bullets)
         merged = bullets["`MERGED`"]
         assert '`TaskCreate` the "Invoke /PACT:wrap-up" task' in merged, merged
         assert "invoke `/PACT:wrap-up`" in merged, merged
@@ -219,7 +226,7 @@ class TestStepEightStateGate:
         Mutation: change the auto-merge bullet's "return to step 8" to "return
         to step 7"."""
         _, bullets = _step_8_bullets()
-        queued = bullets["`OPEN` with `autoMergeRequest` set"]
+        queued = bullets[_QUEUED]
         assert "Do not ask for approval again." in queued, queued
         assert "return to step 8" in queued and "step 7" not in queued, queued
 
