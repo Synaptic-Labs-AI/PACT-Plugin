@@ -45,11 +45,14 @@ def _text(name):
 
 def _section(text, anchor, end):
     """The text from the single occurrence of `anchor` to the first `end`
-    after it. An anchor that is missing or repeated fails, so a renamed or
-    duplicated section cannot silently shrink the checked set."""
+    after it, or to the end of the text when `end` is None. An anchor that is
+    missing or repeated fails, so a renamed or duplicated section cannot
+    silently shrink the checked set."""
     count = text.count(anchor)
     assert count == 1, f"anchor {anchor!r} occurs {count} times, expected 1"
     start = text.index(anchor)
+    if end is None:
+        return text[start:]
     stop = text.find(end, start + len(anchor))
     assert stop != -1, f"end marker {end!r} not found after {anchor!r}"
     return text[start:stop]
@@ -483,7 +486,9 @@ class TestWorkflowChain:
         """Reddens when pact-workflows has no **Chain** line, or when the line's
         `/PACT:` sequence disagrees with the successor graph. Mutation: delete
         the Chain line, or swap peer-review and wrap-up in it."""
-        matches = _CHAIN_RE.findall(_WORKFLOWS.read_text(encoding="utf-8"))
+        family = _section(_WORKFLOWS.read_text(encoding="utf-8"), "## The PACT Workflow Family",
+                          "### Lead-vs-Teammate")
+        matches = _CHAIN_RE.findall(family)
         assert len(matches) == 1, matches
         stages = [s.strip() for s in matches[0].split("→")]
         named = [_PACT_COMMAND_RE.findall(s) for s in stages]
@@ -577,9 +582,10 @@ class TestImpactReturnsToCaller:
 
     def test_retry_continues_the_invoking_workflow(self):
         """Reddens when the retry step stops sending the lead back into the
-        invoking workflow. Mutation: drop the appended clause."""
-        lines = [ln for ln in _text("imPACT.md").splitlines()
-                 if "**Retry the current phase**" in ln]
+        invoking workflow, or the step leaves the Phase Re-Entry section.
+        Mutation: drop the appended clause."""
+        section = _section(_text("imPACT.md"), "## Phase Re-Entry Task Protocol", None)
+        lines = [ln for ln in section.splitlines() if "**Retry the current phase**" in ln]
         assert len(lines) == 1, lines
         assert lines[0].rstrip().endswith("then continue the invoking workflow from that phase"), lines[0]
 
@@ -594,8 +600,9 @@ class TestFailedCycleRule:
         in an already-closed class, or stops defining a class. Mutation: delete
         the clause "OR raises a finding in a class an earlier cycle already
         closed"."""
-        paras = [p for p in _text("peer-review.md").split("\n\n")
-                 if p.startswith("**Failed cycle**:")]
+        section = _section(_text("peer-review.md"), "## Remediation Task State",
+                           "### Verify-Only Re-Review")
+        paras = [p for p in section.split("\n\n") if p.startswith("**Failed cycle**:")]
         assert len(paras) == 1, paras
         rule = paras[0]
         assert "leaves a blocking finding open" in rule, rule
@@ -622,8 +629,9 @@ class TestFailedCycleRule:
         """Reddens when the remediation termination rule counts something other
         than failed cycles. Mutation: restore "If blocking items persist after 2
         fix-verify cycles"."""
-        lines = [ln for ln in _text("peer-review.md").splitlines()
-                 if "**Termination**:" in ln]
+        step = _section(_text("peer-review.md"), "4. Handle recommendations by severity:",
+                        "\n5. State merge readiness")
+        lines = [ln for ln in step.splitlines() if "**Termination**:" in ln]
         assert len(lines) == 1, lines
         assert "After 2 failed cycles (see **Failed cycle** above)" in lines[0], lines[0]
 
@@ -638,6 +646,14 @@ _CALLER_CHECK_SITES = (
     "protocols/pact-workflows.md",
     "protocols/pact-protocols.md",
 )
+# (start, end) of the region each site's caller check must sit in.
+_CALLER_CHECK_REGIONS = {
+    "commands/orchestrate.md": ("## After All Phases Complete", None),
+    "commands/comPACT.md": ('- [ ] **`TaskUpdate`**: Feature task status = "completed"',
+                            "**If blocker reported**"),
+    "protocols/pact-workflows.md": ("### After Specialist Completes", "**If blocker reported**"),
+    "protocols/pact-protocols.md": ("### After Specialist Completes", "**If blocker reported**"),
+}
 _CURRENT_REVIEW = (
     "an `in_progress` Review task whose subject ends with `({branch})`, where "
     "{branch} is the output of `git branch --show-current`"
@@ -667,7 +683,7 @@ class TestCallerCheckNamesTheCurrentReview:
         subject names the branch" at any one site."""
         bad = []
         for rel in _CALLER_CHECK_SITES:
-            checks = _caller_checks(_text(rel))
+            checks = _caller_checks(_section(_text(rel), *_CALLER_CHECK_REGIONS[rel]))
             if len(checks) != 1:
                 bad.append((rel, f"{len(checks)} caller checks"))
             elif _CURRENT_REVIEW not in checks[0]:
