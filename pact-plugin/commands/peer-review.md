@@ -474,7 +474,7 @@ JSON
 
    Use that single `AskUserQuestion` (single-select) with these exact options:
    - **"Yes, merge"** (description: "Run `gh pr merge <N>` to merge this PR") → On selection: run `gh pr merge <N>`
-   - **"Continue reviewing"** (description: "Keep reviewing — no action needed yet") → On selection: return to step 7 when the user says the review is done
+   - **"Continue reviewing"** (description: "Keep reviewing — no action needed yet") → On selection: when the user says the review is done, go to step 8
    - **"Pause work for now"** (description: "Save session knowledge and pause — resume later") → On selection: invoke `/PACT:pause`
 
    Put the command literal `gh pr merge <N>` in the "Yes, merge" option's description, with `<N>` the only number and no other framing. Use the same `<N>` — the actual PR number — wherever it appears (question prompt and option); if the question and the option name different PRs the approval is rejected as ambiguous. The runtime merge guard authorizes a merge by matching the command you approved against the command actually run, so an approval that names the exact command passes cleanly. The guard — not this template — is the enforcement boundary; this convention only produces an approval the guard can recognize.
@@ -483,8 +483,9 @@ JSON
 
    > **If a merge is blocked** — the guard found no matching approval, or the approved command and the run command disagree — re-request authorization through this same `AskUserQuestion` convention with the literal `gh pr merge <N>` embedded in the "Yes, merge" option. Do NOT work around the block by running a bare command outside the checkpoint or by reducing the question to a simpler prompt — that defeats the safeguard. In a channel/headless session (e.g. Telegram) `AskUserQuestion` is unavailable, so no approval can be formed and the merge is held until you approve it interactively in a terminal — this is the intended behavior, not a bug.
 
-8. **Invoke `/PACT:wrap-up` after a merge.** First run `gh pr view <N> --json state`.
+8. **Check the PR state after the merge decision.** Run `gh pr view <N> --json state,autoMergeRequest`.
    - `MERGED` → `TaskCreate` the "Invoke /PACT:wrap-up" task, complete the Review task, then invoke `/PACT:wrap-up`. Run project post-merge steps (tags, releases) alongside `/PACT:wrap-up`, never instead of it.
+   - `OPEN` with `autoMergeRequest` set → report that the merge is queued and that wrap-up runs once it merges. Do not ask for approval again. When the user says the PR merged, return to step 8.
    - Any other state → report the state and return to step 7.
 
 > ⚠️ **Do NOT shut down reviewers here.** Teammates persist until `/PACT:wrap-up` ends the session or `/PACT:pause` shuts them down.

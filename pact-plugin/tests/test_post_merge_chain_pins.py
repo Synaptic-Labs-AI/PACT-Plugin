@@ -13,9 +13,28 @@ COMMANDS_DIR = PLUGIN / "commands"
 PERSONA = PLUGIN / "agents" / "pact-orchestrator.md"
 
 _PACT_COMMAND_RE = re.compile(r"/PACT:[A-Za-z][A-Za-z-]*")
-_EXPLICIT_RETURN_RE = re.compile(r"return to step \d+|stay in this workflow", re.IGNORECASE)
+_EXPLICIT_RETURN_RE = re.compile(r"(?:return|go) to step \d+|stay in this workflow", re.IGNORECASE)
 _OPTION_BULLET_RE = re.compile(r"^\s*- \*\*\"[^\"]+\"\*\*.*?On selection:(.*)$", re.MULTILINE)
 _TOP_LEVEL_STEP_RE = re.compile(r"^(\d+)\. \*\*(.+?)\*\*", re.MULTILINE)
+
+
+_STEP_7_ANCHOR = "7. ⚠️ **Merge Authorization Checkpoint**"
+_STEP_8_HEADING = "Check the PR state after the merge decision."
+_STEP_8_ANCHOR = f"8. **{_STEP_8_HEADING}**"
+_STEP_8_END = "\n\n> ⚠️ **Do NOT shut down reviewers here.**"
+
+
+def _step_8_bullets():
+    """{first token of each step-8 bullet: bullet text}, read only inside
+    peer-review step 8."""
+    section = _section(_text("peer-review.md"), _STEP_8_ANCHOR, _STEP_8_END)
+    bullets = {}
+    for line in section.splitlines()[1:]:
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            head = stripped[2:].split("→", 1)[0].strip()
+            bullets[head] = stripped
+    return section, bullets
 
 
 def _text(name):
@@ -79,7 +98,7 @@ def _last_bullet(section):
 CHECKPOINTS = (
     ("peer-review.md", "**Merge Authorization Checkpoint**",
      "> Do not act on bare text", _option_clauses, ()),
-    ("peer-review.md", "8. **Invoke `/PACT:wrap-up` after a merge.**",
+    ("peer-review.md", _STEP_8_ANCHOR,
      "\n\n", _arrow_clauses, ()),
     ("comPACT.md", 'ask: "Work committed. What next?"',
      "**If blocker reported**", _table_action_cells, ()),
@@ -159,7 +178,8 @@ class TestEndOfFlowCheckpoints:
                     continue
                 if any(t in clause for t in terminal):
                     continue
-                if "gh pr merge" in clause and next_step and "/PACT:wrap-up" in next_step:
+                if ("gh pr merge" in clause and next_step == _STEP_8_HEADING
+                        and "invoke `/PACT:wrap-up`" in _step_8_bullets()[1].get("`MERGED`", "")):
                     continue
                 bad.append((name, anchor, clause))
         assert not bad, bad
@@ -168,6 +188,53 @@ class TestEndOfFlowCheckpoints:
 # ---------------------------------------------------------------------------
 # Merge -> wrap-up
 # ---------------------------------------------------------------------------
+
+class TestStepEightStateGate:
+    def test_step_8_reads_the_pr_state_first(self):
+        """Reddens when step 8 stops reading the PR state (and the auto-merge
+        request) before it routes. Mutation: delete the `gh pr view` sentence."""
+        section, _ = _step_8_bullets()
+        first = section.split("\n", 1)[0]
+        assert "Run `gh pr view <N> --json state,autoMergeRequest`." in first, first
+
+    def test_only_merged_invokes_wrap_up(self):
+        """Reddens when a non-MERGED bullet invokes `/PACT:wrap-up`, or when the
+        MERGED bullet stops creating the wrap-up task and invoking wrap-up.
+        Mutation: change "`MERGED` →" to "Always →"."""
+        _, bullets = _step_8_bullets()
+        assert set(bullets) == {"`MERGED`", "`OPEN` with `autoMergeRequest` set",
+                                "Any other state"}, sorted(bullets)
+        merged = bullets["`MERGED`"]
+        assert '`TaskCreate` the "Invoke /PACT:wrap-up" task' in merged, merged
+        assert "invoke `/PACT:wrap-up`" in merged, merged
+        for head, text in bullets.items():
+            if head != "`MERGED`":
+                assert not _EDGE_RE.search(text), (head, text)
+
+    def test_a_queued_merge_is_not_reapproved(self):
+        """Reddens when a pending auto-merge loops back to the approval step.
+        Mutation: change the auto-merge bullet's "return to step 8" to "return
+        to step 7"."""
+        _, bullets = _step_8_bullets()
+        queued = bullets["`OPEN` with `autoMergeRequest` set"]
+        assert "Do not ask for approval again." in queued, queued
+        assert "return to step 8" in queued and "step 7" not in queued, queued
+
+    def test_any_other_state_returns_to_the_checkpoint(self):
+        """Reddens when a refused or unmerged PR stops returning to step 7.
+        Mutation: delete the "Any other state" bullet."""
+        _, bullets = _step_8_bullets()
+        assert bullets.get("Any other state", "").endswith("return to step 7."), bullets
+
+    def test_continue_reviewing_reaches_the_state_check(self):
+        """Reddens when "Continue reviewing" skips step 8, so a PR merged on
+        GitHub meanwhile never reaches `/PACT:wrap-up`. Mutation: change "go to
+        step 8" back to "return to step 7"."""
+        step_7 = _section(_text("peer-review.md"), _STEP_7_ANCHOR, _STEP_8_ANCHOR)
+        lines = [ln for ln in step_7.splitlines() if '**"Continue reviewing"**' in ln]
+        assert len(lines) == 1, lines
+        assert lines[0].rstrip().endswith("go to step 8"), lines[0]
+
 
 class TestMergeHandsOffToWrapUp:
     def test_merge_option_ends_at_the_merge_and_the_next_step_names_wrap_up(self):
@@ -184,8 +251,13 @@ class TestMergeHandsOffToWrapUp:
                     continue
                 found += 1
                 assert not _PACT_COMMAND_RE.search(clause), (path.name, clause)
+                assert path.name == "peer-review.md", path.name
+                step_7 = _section(text, _STEP_7_ANCHOR, _STEP_8_ANCHOR)
+                assert m.group(0) in step_7, "the merge option left step 7"
                 heading = _next_top_level_step(text, m.end())
-                assert heading and "/PACT:wrap-up" in heading, (path.name, heading)
+                assert heading == _STEP_8_HEADING, heading
+                merged = _step_8_bullets()[1].get("`MERGED`", "")
+                assert "invoke `/PACT:wrap-up`" in merged, merged
         assert found, "no option runs `gh pr merge`; the extraction stopped matching"
 
     def test_review_hierarchy_creates_the_wrap_up_task_before_completing_review(self):
