@@ -647,19 +647,36 @@ def read_task_json(
     # Team-dir lookup routes through the task_dir_for containment seam: the
     # is_safe_path_component allowlist (guard 1) and the resolve/relative_to
     # symlink-escape anchor (guard 2) all live inside the seam — one
-    # containment implementation — joining the name AS GIVEN (no case-fold;
-    # see _team_dir_under's OS-invariance note: a folded join addressed a
-    # DIFFERENT store on case-sensitive filesystems). A mixed-case name now
-    # reads the dir it names, where the historical pre-seam fold read the
-    # lowercased one — divergence only for mixed-case names, which
-    # generate_team_name never mints. An unsafe team_name yields None here,
-    # skipping the team dir and falling through to the bare-base read,
-    # preserving the fail-open {} contract. Only the single-named-file read
-    # semantics stay local (this reader reads ONE file, never globs, so the
-    # glob-result hygiene guards are correctly absent).
-    team_dir = task_dir_for(team_name, tasks_base_dir=tasks_base_dir)
-    if team_dir is not None:
-        task_dirs.append(team_dir)
+    # containment implementation — joining every candidate AS GIVEN (no
+    # folding inside the anchor; see _team_dir_under's OS-invariance note).
+    # CANDIDATE ORDER (FOLDED FIRST, architect O1 ruling; raw legacy fallback):
+    #   1. the FOLDED name, only when it differs — the marker-SSOT convergence
+    #      candidate. The marker SSOT lowercases team_name before deriving its
+    #      dir, so the O_EXCL dedup key names the LOWERCASED store; this
+    #      status-read sink must read the store that key names, or the emit
+    #      path's read and its dedup key split (the #1020 atomicity class).
+    #   2. the RAW name — the dir the caller actually named; the legacy
+    #      single-store fallback (the only candidate when folded == raw, the
+    #      universal production case: generate_team_name and the registry mint
+    #      lowercase). Cycle-2's raw join exists because a FOLDED join
+    #      bypassed a symlinked tasks/EVIL on case-sensitive filesystems —
+    #      the anchor must examine every name as given.
+    # Each candidate is built by task_dir_for — validated and anchored AS ITS
+    # OWN name, never a folded join of a raw symlink target — so the
+    # containment contract holds for both candidates identically. Writers
+    # (task_claim_gate via task_dir_for) get NO folded candidate at all — a
+    # writer folding its join recreates the CI-blocker class. An unsafe
+    # team_name yields no candidates here, falling through to the bare-base
+    # read, preserving the fail-open {} contract.
+    raw_team_dir = task_dir_for(team_name, tasks_base_dir=tasks_base_dir)
+    if isinstance(team_name, str):
+        folded_name = team_name.strip().lower()
+        if folded_name and folded_name != team_name.strip():
+            folded_dir = task_dir_for(folded_name, tasks_base_dir=tasks_base_dir)
+            if folded_dir is not None:
+                task_dirs.append(folded_dir)
+    if raw_team_dir is not None:
+        task_dirs.append(raw_team_dir)
     task_dirs.append(base)
 
     for task_dir in task_dirs:

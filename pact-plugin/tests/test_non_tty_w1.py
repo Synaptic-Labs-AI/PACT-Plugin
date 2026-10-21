@@ -531,9 +531,13 @@ class TestHarnessCarryForward:
         assert data["team_name"] == "pact-real-team"
 
 
-
+class TestJournalDiagnostics:
     """Additive, non-gating: session_start.entrypoint (optional, type-checked)
-    and dispatch_decision.resolved_team (unregistered-type passthrough)."""
+    and dispatch_decision's registered diagnostic surface — resolved_team is a
+    DECLARED optional field of the registered dispatch_decision schema (cycle
+    2 retired the former unknown-type opt-in passthrough by design; the
+    registration's own table/sample/writer tests live in test_session_journal.py
+    — these are the W1-side additive checks)."""
 
     def test_session_start_entrypoint_str_passes(self):
         event = make_event(
@@ -570,9 +574,11 @@ class TestHarnessCarryForward:
         ok, why = _validate_event_schema(event)
         assert ok, why
 
-    def test_dispatch_decision_resolved_team_passthrough(self):
-        """dispatch_decision is not a registered type (unknown-type opt-in
-        pass-through), so the additive resolved_team rides the event."""
+    def test_dispatch_decision_resolved_team_registered(self):
+        """dispatch_decision is a REGISTERED type: resolved_team is a declared
+        optional field, so it validates per-type (not via an unknown-type
+        passthrough) and rides the event as the resolver-resolved team next to
+        the literal spawn arg."""
         event = make_event(
             "dispatch_decision",
             decision="allow",
@@ -584,21 +590,23 @@ class TestHarnessCarryForward:
         assert event["resolved_team"] == FULL_UUID
 
 
-# COUNTER-TEST-BY-REVERT CARDINALITY (spec §5; MEASURED at HEAD 9ea3f6c7,
-# 2026-10-21, `python3 -m pytest tests/test_non_tty_w1.py -q` after each
-# single-line mutation of _resolve_live_team_dir's candidate walk; first
-# measured at 36 tests pre-batch-B, RE-MEASURED at 37 after
-# test_persisted_store_wins_when_aligned_dir_absent joined the battery):
+# COUNTER-TEST-BY-REVERT CARDINALITY (spec §5). The arms below mutate
+# _resolve_live_team_dir's candidate walk with one single-line inversion each
+# and count what reddens. NO WHOLE-FILE TOTAL IS RESTATED HERE (cycle-3
+# finding: the file's test count moves with every remediation cycle that adds
+# guards, so a restated total is stale on arrival) — the arms are stated over
+# the CELLS they measure, in TestResolverKeyingMatrix and its persisted-leg
+# sibling, which are the only tests the mutations can touch:
 #
-#   baseline (unmutated):            37 passed, 0 failed.
-#   ALWAYS-FALLBACK (walk drops the  1 failed, 36 passed — exactly
+#   ALWAYS-FALLBACK (walk drops the  reddens exactly 1 cell:
 #   aligned candidate):                test_aligned_first_upgrade_is_observable.
-#   NEVER-FALLBACK (walk keeps the   2 failed, 35 passed — exactly
+#   NEVER-FALLBACK (walk keeps the   reddens exactly 2 cells:
 #   aligned candidate only):           test_session_id_dir_fallback +
 #                                      test_persisted_store_wins_when_
 #                                      aligned_dir_absent (the mutation drops
 #                                      the persisted candidate together with
 #                                      the session-id one).
+#   Baseline: the measured cells all pass unmutated.
 #
 # Two design notes the measurements forced:
 # (1) The plain CLI cells (aligned == persisted) CANNOT distinguish an
