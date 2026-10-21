@@ -286,3 +286,43 @@ def test_call_inside_a_multi_line_string_is_allowed(label, cmd):
 @pytest.mark.parametrize("label,cmd", DOCSTRING_DENY, ids=[r[0] for r in DOCSTRING_DENY])
 def test_call_after_a_multi_line_string_is_refused(label, cmd):
     assert is_dangerous_command(cmd) is True
+
+
+# An argv given as a tuple, or holding a non-literal element after a literal head word
+# (a loop variable, `str(pr)`), is read with that element as a placeholder.
+ARGV_ELEMENT_DENY = [
+    ("-c tuple", "python3 -c 'import subprocess; subprocess.run((\"gh\",\"pr\",\"merge\",\"5\"))'"),
+    ("-c str() element", "python3 -c 'import subprocess; subprocess.run([\"gh\",\"pr\",\"merge\",str(5)])'"),
+    ("stdin loop over PRs",
+     ("python3 - <<'EOF'\nimport subprocess\nfor pr in [5, 6]:\n"
+      "    subprocess.run([\"gh\", \"pr\", \"merge\", str(pr), \"--squash\"], check=True)\nEOF")),
+    ("stdin variable element",
+     "python3 - <<'EOF'\nimport subprocess\npr = '5'\nsubprocess.run([\"gh\", \"pr\", \"merge\", pr])\nEOF"),
+    ("node variable element",
+     "node -e 'const cp = require(\"child_process\"); const n = \"5\"; cp.spawnSync(\"gh\", [\"pr\", \"merge\", n])'"),
+]
+ARGV_ELEMENT_ALLOW = [
+    ("-c tuple view", "python3 -c 'import subprocess; subprocess.run((\"gh\",\"pr\",\"view\",\"5\"))'"),
+    ("stdin loop viewing PRs",
+     "python3 - <<'EOF'\nimport subprocess\nfor pr in [5, 6]:\n    subprocess.run([\"gh\", \"pr\", \"view\", str(pr)])\nEOF"),
+    ("-c variable subcommand",
+     "python3 -c 'import subprocess; sub = \"view\"; subprocess.run([\"gh\", \"pr\", sub, \"5\"])'"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", ARGV_ELEMENT_DENY, ids=[r[0] for r in ARGV_ELEMENT_DENY])
+def test_merge_argv_with_a_tuple_or_variable_element_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", ARGV_ELEMENT_ALLOW, ids=[r[0] for r in ARGV_ELEMENT_ALLOW])
+def test_non_merge_argv_with_a_tuple_or_variable_element_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+def test_a_list_led_by_a_variable_is_not_read():
+    """A placeholder is read only after a literal head word: `[a, b]` spells nothing."""
+    import shared.merge_guard_common as mgc
+
+    assert mgc._literal_list_at("[a, \"pr\"]", 0) is None
+    assert mgc._literal_list_at("[\"gh\", n]", 0) == (["gh", "X"], 9)

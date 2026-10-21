@@ -2921,9 +2921,11 @@ def _mask_string_literals(code: str) -> str:
 
 
 def _literal_list_at(text: str, i: int) -> tuple[list[str], int] | None:
-    """The string literals of a `[…]` list literal starting at text[i], and the offset
-    after it; None when an element is not a string literal."""
-    opener = re.match(r"\[|c\(", text[i:])
+    """The elements of a `[…]` list, `(…)` tuple or R `c(…)` vector starting at text[i],
+    as the text they spell, and the offset after it. The first element must be a string
+    literal; a later non-literal element (`str(pr)`, a variable) reads as `X`. None
+    otherwise, or when an element is neither."""
+    opener = re.match(r"\[|c?\(", text[i:])
     if not opener:
         return None
     closer = "]" if opener.group() == "[" else ")"
@@ -2933,10 +2935,15 @@ def _literal_list_at(text: str, i: int) -> tuple[list[str], int] | None:
         if text[i:i + 1] == closer:
             return items, i + 1
         lit = _STRING_LITERAL_RE.match(text, i)
-        if not lit:
-            return None
-        items.append(lit.group(0)[1:-1])
-        i = lit.end() + re.match(r"\s*,?", text[lit.end():]).end()
+        if lit:
+            items.append(lit.group(0)[1:-1])
+            end = lit.end()
+        else:
+            end = _operand_end(text, i) if items else -1
+            if end < 0:
+                return None
+            items.append("X")
+        i = end + re.match(r"\s*,?", text[end:]).end()
 
 
 _OBJECT_ARGV_KEY_RE = re.compile(r"(?<![\w$])[\"']?(?:args|cmd)[\"']?\s*:\s*")
