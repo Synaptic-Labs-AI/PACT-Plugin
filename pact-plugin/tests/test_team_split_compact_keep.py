@@ -336,7 +336,7 @@ def test_wiring_an_unstamped_task_after_a_compaction_is_denied(tmp_path,
     assert verdict and "no metadata.variety stamp" in verdict, verdict
 
 
-def test_wiring_against_a_stale_record_is_silently_bypassed(tmp_path,
+def test_wiring_against_a_stale_record_enforces_on_the_live_store(tmp_path,
                                                             monkeypatch):
     """INVERTED by the resolver seam (the #1020 migration): the record names
     the pre-resume team, but the gate resolves the LIVE store through
@@ -361,7 +361,7 @@ def test_wiring_against_a_stale_record_is_silently_bypassed(tmp_path,
     )
 
 
-def test_the_stale_store_world_would_warn(tmp_path, monkeypatch):
+def test_the_stale_store_world_suppresses_the_advisory(tmp_path, monkeypatch):
     """Control for the cell above, REKEYED by the resolver seam: with the
     record naming the pre-resume team while BOTH stores live, the substrate is
     the both-DISAGREE cell (aligned identity-match names the live team, the

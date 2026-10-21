@@ -127,7 +127,7 @@ def test_after_realign_and_compaction_the_journal_holds_this_teams_handoff(
     assert _journaled_handoffs(world) == [_NEW_HANDOFF]
 
 
-def test_a_record_naming_the_old_team_journals_the_old_handoff(tmp_path,
+def test_a_record_naming_the_old_team_journals_no_handoff(tmp_path,
                                                                 monkeypatch):
     """Control, REKEYED by the resolver seam: with the record on the
     pre-resume team while BOTH stores live, the substrate is the
