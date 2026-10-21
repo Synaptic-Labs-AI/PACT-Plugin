@@ -21,6 +21,7 @@ imports its helper inside the function, so the patch reaches it.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -32,6 +33,7 @@ from track_files import _POST_MERGE_REMINDER
 
 HOOKS = Path(__file__).resolve().parents[1] / "hooks"
 HOOK = HOOKS / "track_files.py"
+PEER_REVIEW = Path(__file__).resolve().parents[1] / "commands" / "peer-review.md"
 
 LEAD = "PACT:pact-orchestrator"
 MERGE = "gh pr merge 1659 --squash"
@@ -87,8 +89,10 @@ def _context(result: subprocess.CompletedProcess) -> str | None:
     output is exactly one JSON object and never a decision (N1)."""
     assert result.returncode == 0, result.stderr
     out = json.loads(result.stdout)  # raises on a second object
+    # Decision KEYS, not the word: step 8's heading says "merge decision".
+    hook_out = out.get("hookSpecificOutput", {})
     for key in ("decision", "permissionDecision"):
-        assert key not in json.dumps(out), out
+        assert key not in out and key not in hook_out, out
     assert out.get("continue") is not False, out
     if out == {"suppressOutput": True}:
         return None
@@ -187,8 +191,16 @@ class TestReminderWording:
     def test_the_reminder_routes_a_peer_review_lead_to_its_pr_state_check(self):
         """Inside /PACT:peer-review the lead continues at that command's PR-state
         check (which invokes wrap-up on MERGED), not a bare wrap-up that skips it."""
-        assert "inside /PACT:peer-review, continue at its PR-state check" in _POST_MERGE_REMINDER
+        assert "inside /PACT:peer-review, continue at its step 8" in _POST_MERGE_REMINDER
         assert "otherwise invoke `/PACT:wrap-up` next" in _POST_MERGE_REMINDER
+
+    def test_the_reminder_names_peer_review_step_8_by_its_heading(self):
+        """The reminder sends the lead to peer-review's step 8 by name, so the
+        name must be that step's heading as the command file spells it."""
+        text = PEER_REVIEW.read_text(encoding="utf-8")
+        headings = re.findall(r"(?m)^8\. \*\*(.+?)\*\*", text)
+        assert len(headings) == 1, headings
+        assert f'step 8, "{headings[0].rstrip(".")}"' in _POST_MERGE_REMINDER
 
     def test_an_api_merge_is_a_merge(self, tmp_path):
         """F7: the classifier reads the REST merge endpoint as a merge, so the
