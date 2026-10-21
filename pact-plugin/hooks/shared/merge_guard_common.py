@@ -3059,7 +3059,9 @@ _STATEMENT_FORMS = (
 
 def _python_aliases(masked: str) -> tuple[set, set]:
     """Names a Python program imported as process routes: bare names (`from subprocess
-    import run`, `from os import system`) and module aliases (`import subprocess as sp`)."""
+    import run`, `from os import system`) and aliases of modules EVERY attribute of which
+    is a process route (`import subprocess as sp`). An os alias (`import os as o`) is not
+    one: `o.system(…)` already counts through its attribute name, `o.path.join` must not."""
     bare, modules = set(), set()
     for m in _PY_FROM_IMPORT_RE.finditer(masked):
         for part in (m.group(2) or m.group(3) or "").split(","):
@@ -3072,7 +3074,7 @@ def _python_aliases(masked: str) -> tuple[set, set]:
     for m in _PY_IMPORT_AS_RE.finditer(masked):
         for part in m.group(1).split(","):
             words = part.split()
-            if len(words) == 3 and words[1] == "as" and words[0] in ("subprocess", "os", "pty"):
+            if len(words) == 3 and words[1] == "as" and words[0] in ("subprocess", "pty"):
                 modules.add(words[2].lower())
     return bare, modules
 
@@ -3083,7 +3085,7 @@ def _is_primitive_call(name: str, head: str, aliases: tuple) -> bool:
     bare, modules = aliases
     if len(segs) == 1 and (last in bare or last in _REFLECTIVE_CALLS):
         return True
-    if first in _EXEC_MODULES or (first in modules and (last in _EXEC_CALL_NAMES or first in modules)):
+    if first in _EXEC_MODULES or first in modules:
         return True
     if last in _EXEC_CALL_NAMES or last == "import_module":
         return True

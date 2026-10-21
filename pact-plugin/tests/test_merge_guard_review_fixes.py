@@ -89,3 +89,26 @@ def test_value_flag_does_not_hide_the_program(label, cmd):
 @pytest.mark.parametrize("label,cmd", VALUE_FLAG_ALLOW, ids=[r[0] for r in VALUE_FLAG_ALLOW])
 def test_value_flag_program_that_only_prints_is_allowed(label, cmd):
     assert is_dangerous_command(cmd) is False
+
+
+# `import os as o` makes `o` an alias of os, of which only some attributes start a
+# process; `import subprocess as sp` makes every `sp.*` call one.
+OS_ALIAS_ALLOW = [
+    ("os alias path.join", f"python3 -c \"import os as o; print(o.path.join('a', 'b'), '{D}')\""),
+    ("os alias getcwd", f"python3 -c \"import os as o; print(o.getcwd(), '{D}')\""),
+]
+MODULE_ALIAS_DENY = [
+    ("os alias system", f"python3 -c \"import os as o; o.system('{D}')\""),
+    ("subprocess alias run list", "python3 -c \"import subprocess as sp; sp.run(['gh', 'pr', 'merge', '5'])\""),
+    ("pty alias spawn", "python3 -c \"import pty as p; p.spawn(['gh', 'pr', 'merge', '5'])\""),
+]
+
+
+@pytest.mark.parametrize("label,cmd", OS_ALIAS_ALLOW, ids=[r[0] for r in OS_ALIAS_ALLOW])
+def test_os_alias_non_process_call_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+@pytest.mark.parametrize("label,cmd", MODULE_ALIAS_DENY, ids=[r[0] for r in MODULE_ALIAS_DENY])
+def test_module_alias_process_call_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
