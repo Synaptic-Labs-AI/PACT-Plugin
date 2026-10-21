@@ -16,19 +16,19 @@ exactly how the feature this replaces shipped inert.
 REVERT-CARDINALITY NON-VACUITY GATE — MEASURED, not asserted. Source-revert
 the Layer 1 call in `hooks/track_files.py` (replace the guarded
 `record_background_launch(input_data)` block with `pass`) and this file
-reports **6 failed, 11 passed**. The six kills are the arms that assert a
+reports **6 failed, 12 passed**. The six kills are the arms that assert a
 record IS written: `test_a_background_launch_lands_a_real_record_on_disk`,
 `test_layer_1_records_the_harness_task_id`,
 `test_a_launch_without_a_string_harness_id_records_none`,
 `test_a_SHELL_backgrounded_launch_with_NO_FLAG_lands_a_record`,
 `test_a_LONG_RUNNING_command_IS_recorded_now` and
 `test_a_SUBAGENT_launched_shell_lands_a_subagent_owned_record`. The other
-eleven pin fail-open and negative behaviour, or the post-merge reminder, and
+twelve pin fail-open and negative behaviour, or the post-merge reminder, and
 correctly survive a background recorder that does nothing. If a future edit makes that ablation report **0 failed**, this file has
 stopped measuring the seam and the number above is the tripwire.
 
 A SECOND ABLATION IS ALREADY PINNED BY THE FIXTURE: omitting the
-`pact-session-context.json` write also reports 6 failed, 11 passed, on the same
+`pact-session-context.json` write also reports 6 failed, 12 passed, on the same
 six positive-record arms, for a DIFFERENT reason: with no session context and
 no registry entry, the frame's team cannot be resolved. Two distinct
 single-point ablations, same cardinality, different cause; see the fixture
@@ -432,9 +432,28 @@ class TestPostMergeReminderSeam:
         frame["tool_input"] = {"command": MERGE}
         assert _reminder(_run(seam, frame)) is None
 
-    def test_the_captured_lead_failure_frame_gets_no_reminder(self, seam):
+    @staticmethod
+    def _failure_frame(event):
+        """The captured lead failure frame with a merge command and a dict
+        response. The capture carries no tool_response, and the reminder is
+        silent without one whatever the event, so the response is added: only
+        the event then separates the failure arm from its control."""
         from fixtures.role_frames import captured_posttoolusefailure_bash_headless
 
         frame = captured_posttoolusefailure_bash_headless()
-        frame["tool_input"] = {"command": MERGE}
-        assert _reminder(_run(seam, frame)) is None
+        frame.update(
+            hook_event_name=event,
+            tool_input={"command": MERGE},
+            tool_response={"stdout": "", "stderr": "", "interrupted": False, "isImage": False},
+        )
+        return frame
+
+    def test_the_captured_lead_failure_frame_gets_no_reminder(self, seam):
+        assert _reminder(_run(seam, self._failure_frame("PostToolUseFailure"))) is None
+
+    def test_the_same_frame_as_posttooluse_gets_the_reminder(self, seam):
+        """Control for the arm above: the frame reminds when the event is the
+        only change, so that arm's silence comes from the failure event."""
+        from track_files import _POST_MERGE_REMINDER
+
+        assert _reminder(_run(seam, self._failure_frame("PostToolUse"))) == _POST_MERGE_REMINDER

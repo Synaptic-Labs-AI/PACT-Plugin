@@ -5,13 +5,12 @@ testing for the text of a merge. None runs one. The danger scan decides on
 `is_dangerous_command`, the predicate the merge-guard corpus certification
 replays.
 
-ALLOW_FREED were refused on the reference tree before this change and are
-allowed now, so these arms pin the freed shapes. ALLOW_WORDS are refused today
-because the -c/-e exec-primitive scan matches a primitive name as a bare
-substring anywhere in the code, string contents included: "empty" holds
-`pty`, "filesystem" holds `system`, "executable" holds `exec`, and a Python
-backtick or `|` is not a process route at all. MUST_DENY bounds any fix to
-those: each runs the guarded command through a real primitive.
+ALLOW_FREED pins shapes the guard allows: text that is only printed, searched
+or passed as data. ALLOW_WORDS pins that a primitive name is matched as a call
+outside string literals, never as a substring: "empty" holds `pty`,
+"filesystem" holds `system`, "executable" holds `exec`, and a Python backtick
+or `|` is not a process route at all. MUST_DENY bounds both sets: each runs
+the guarded command through a real primitive and must stay refused.
 """
 
 from __future__ import annotations
@@ -94,11 +93,10 @@ def test_every_common_launch_form_refuses_a_real_merge(head, code):
 
 @pytest.mark.parametrize("code", [_LIST_CODE, _SYSTEM_CODE], ids=["list", "os-system"])
 @pytest.mark.parametrize("head", LAUNCH_GAPS)
-def test_launch_forms_the_head_and_code_readers_miss(head, code):
-    """Reddens today. A value flag (-W ignore, -X dev) placed before -c hides
-    the code from the list-form reader. A free-threaded build name (python3.13t)
-    is not an interpreter head at all, so even os.system with the command
-    spelled out is allowed."""
+def test_value_flag_and_free_threaded_launch_forms_are_refused(head, code):
+    """A value flag (-W ignore, -X dev) placed before -c does not hide the code
+    from the list-form reader, and a free-threaded build name (python3.13t) is
+    an interpreter head, so both primitive forms are refused."""
     assert is_dangerous_command(f"{head} -c '{code}'") is True
 
 
@@ -123,8 +121,9 @@ ALIASED_IMPORTS = [
 @pytest.mark.parametrize("code", ALIASED_IMPORTS)
 @pytest.mark.parametrize("form", ["c", "stdin"])
 def test_an_aliased_import_running_the_command_is_refused(code, form):
-    """Reddens today for the forms that name neither `subprocess.` nor
-    `os.system` at the call site."""
+    """An import alias resolves to its primitive, so a call that names neither
+    `subprocess.` nor `os.system` at the call site is still refused, in -c
+    code and in code fed on stdin."""
     command = (f"python3 -c '{code}'" if form == "c"
                else "python3 - <<'EOF'\n" + code.replace("; ", "\n") + "\nEOF")
     assert is_dangerous_command(command) is True
@@ -137,9 +136,9 @@ def test_freed_text_only_command_is_allowed(command):
 
 @pytest.mark.parametrize("command", ALLOW_WORDS)
 def test_a_primitive_name_inside_other_text_does_not_refuse(command):
-    """Reddens today: the -c/-e scan matches primitive names as substrings of
-    string contents and of ordinary words, and counts a backtick or `|` as a
-    process route in every language."""
+    """The -c/-e scan matches a primitive as a call outside string literals, so
+    a primitive name inside a string or an ordinary word does not refuse, and a
+    backtick or `|` is a process route only in a language where it runs one."""
     assert is_dangerous_command(command) is False
 
 
