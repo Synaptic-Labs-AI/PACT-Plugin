@@ -26,9 +26,11 @@ Cells:
     UUID substrate: a valid on-disk handoff produces NO warn; a completed
     task WITHOUT one still warns (positive control, so the no-warn cell is
     not vacuously green).
-  bootstrap_marker_writer — a real lead fire on the config-less substrate
-    lands harness=non_tty through the REAL resolver and REAL stamp write
-    (Writer-2 composition; the W1 unit cells mock all three externals).
+  bootstrap_marker_writer — a real lead fire lands harness=non_tty through
+    the REAL stamp write on BOTH refinement legs: leg 1 on the config-less
+    UUID substrate (real branch-2 adoption; no team-dir probe), leg 2 on a
+    SHORT-named config-less team (real team-dir resolution, config-absence
+    check and inbox witness). The W1 unit cells mock all three externals.
 """
 
 from __future__ import annotations
@@ -277,21 +279,31 @@ class TestOrderingGateNonTtySubstrate:
 
 
 class TestBootstrapMarkerWriterStampIntegration:
-    """Writer-2 composition, NON-MOCKED end-to-end: a real
-    bootstrap_marker_writer fire on the config-less UUID substrate refines
-    the harness stamp through the REAL aligned-name resolver, the REAL
-    team-dir resolution and the REAL lead-gated stamp write. The W1 unit
-    cells (TestWriterTwoSubstrate in test_non_tty_w1.py) mock all three
-    externals; this cell closes that composition gap in CI. Measured
-    counter-tests: removing the _refine_harness_stamp CALL from
-    _try_write_marker reddens exactly this cell (the units stay green —
-    they call the function directly); neutering the function body reddens
-    this cell plus the two mocked W1 leg cells."""
+    """Writer-2 composition, NON-MOCKED end-to-end, one cell per refinement
+    leg. The W1 unit cells (TestWriterTwoSubstrate in test_non_tty_w1.py)
+    mock all three externals; these cells close that composition gap in CI.
+    Adjudicated by trace (Bugbot, cycle 2): on the config-less UUID
+    substrate get_team_name() adopts the UUID via branch-2, so LEG 1
+    (aligned == session id) fires and resolve_team_dir is never reached —
+    the leg-1 cell therefore claims exactly that composition, and the leg-2
+    cell builds the substrate where leg 2 genuinely carries (a SHORT-named
+    config-less team: no UUID store, so aligned is the persisted fail-safe
+    default != session id, and the real team-dir resolution, config-absence
+    check and inbox witness all execute). Measured counter-tests: removing
+    the _refine_harness_stamp CALL from _try_write_marker reddens exactly
+    these two cells (the units stay green — they call the function
+    directly); neutering the function body reddens them plus the two mocked
+    W1 leg cells; deleting ONLY the leg-2 block reddens only the leg-2
+    cell."""
 
-    def test_config_less_fire_stamps_the_real_context(
+    def test_leg_one_uuid_name_fire_stamps_the_real_context(
             self, non_tty_env, monkeypatch):
-        # The tasks-side UUID store the resolver's existence probe reads
-        # (branch-2's teams-side witness already exists via non_tty_env).
+        """LEG 1 composition: the #1658 config-less UUID substrate. The
+        aligned name adopts the UUID for real (branch-2), equals the session
+        id, and the real lead-gated stamp write lands — WITHOUT any
+        team-dir resolution (leg 1 returns before resolve_team_dir; that
+        composition is the leg-2 cell below, and team-dir resolution at
+        consumers is carried by the emitter/ordering/parity cells)."""
         non_tty_env.dir_for(FULL_UUID).mkdir(parents=True, exist_ok=True)
         # A secretary JOIN witnessed the config-less way: the inbox file,
         # the same witness the marker precondition consumes.
@@ -311,10 +323,44 @@ class TestBootstrapMarkerWriterStampIntegration:
         recorded = json.loads(
             pact_context._context_path.read_text(encoding="utf-8"))
         assert recorded["harness"] == "non_tty", (
-            "a real lead fire on the config-less substrate must land the "
-            "stamp through the real resolver and the real stamp write"
+            "a real lead fire on the config-less UUID substrate must land "
+            "the stamp through the real adoption and the real stamp write"
         )
         assert "team_name" in recorded  # surgical: the write kept the record
+
+    def test_leg_two_config_less_fire_stamps_through_the_real_team_dir(
+            self, non_tty_env, monkeypatch):
+        """LEG 2 composition: a SHORT-named config-less team (no UUID store
+        anywhere — strip the fixture's UUID dirs), aligned = the persisted
+        fail-safe default != session id, so refinement proceeds to the REAL
+        resolve_team_dir, the REAL config-absence check and the REAL inbox
+        witness before the real lead-gated stamp write."""
+        import bootstrap_marker_writer as bmw
+        import shared.pact_context as pact_context
+        for stripped in (non_tty_env.home / ".claude" / "teams" / FULL_UUID,
+                         non_tty_env.dir_for(FULL_UUID)):
+            if stripped.is_dir():
+                shutil.rmtree(stripped)
+        short_team = non_tty_env.home / ".claude" / "teams" / SHORT_NAME
+        (short_team / "inboxes").mkdir(parents=True, exist_ok=True)
+        (short_team / "inboxes" / "secretary.json").write_text(
+            "{}", encoding="utf-8")
+        assert json.loads(
+            pact_context._context_path.read_text(encoding="utf-8")
+        ).get("harness", "") == ""  # precondition: unstamped
+        frame = captured_lead_userpromptsubmit_qualified()
+        frame.update(session_id=FULL_UUID, cwd=str(non_tty_env.home))
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(frame)))
+        with pytest.raises(SystemExit) as exit_info:
+            bmw.main()
+        assert exit_info.value.code == 0
+        recorded = json.loads(
+            pact_context._context_path.read_text(encoding="utf-8"))
+        assert recorded["harness"] == "non_tty", (
+            "a real lead fire on the SHORT config-less substrate must land "
+            "the stamp through the real team-dir resolution, the "
+            "config-absence check, the inbox witness and the stamp write"
+        )
 
 
 class TestResolverBranchCensus:

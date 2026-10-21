@@ -106,7 +106,10 @@ cycle; the lead accepts and completes.
 read the session's `session_start` journal event and the on-disk context, and
 record exactly one attribution — the WRITER that landed the stamp (and, for
 Writer 2, the leg), not just the input source:
-  - `writer1-transcript` — the event carries `entrypoint: "remote"` and the
+  - `writer1-transcript` — the event carries an `entrypoint` value in
+    `session_init._NON_TTY_ENTRYPOINTS` (the code's mapping constant — read
+    the symbol, never restate its values here, or the runbook drifts when
+    the constant changes) and the
     stamp is set (session_init's SessionStart read fired first; any later
     Writer-2 write was refused by the monotonic guard — a same-value no-op).
   - `writer2-leg1-uuid-name` — entrypoint empty/absent, stamp set, and the
@@ -154,8 +157,8 @@ on ARM 2's evidence plus #1309's posture-equivalence argument — both launchers
 share the config-less UUID substrate and the TTY-gated team formation, and
 #1019's deadlock mechanism is exactly what the resolver + stamp address. A
 literal Desktop arm remains the alternative; if the user chooses it, run ARM
-2's procedure and pass table unchanged on a Desktop session (transcript
-`entrypoint: "claude-desktop"`).
+2's procedure and pass table unchanged on a Desktop session (the transcript
+read must yield a value in `session_init._NON_TTY_ENTRYPOINTS`).
 
 ## §4 Revert and restore
 
