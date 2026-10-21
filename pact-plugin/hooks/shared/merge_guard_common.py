@@ -3042,7 +3042,7 @@ _REFLECTIVE_CALLS = frozenset({
 })
 _CALL_NAME_RE = re.compile(r"(?<![\w$])((?:[A-Za-z_$][\w$]*(?:\.|::))*[A-Za-z_$][\w$]*)\s*\(")
 _PY_FROM_IMPORT_RE = re.compile(
-    r"\bfrom\s+(subprocess|os|pty|commands)\s+import\s*(?:\(([^)]*)\)|([\w \t,]+))"
+    r"\bfrom\s+(subprocess|os|pty|commands)\s+import\s*(?:\(([^)]*)\)|([\w \t,*]+))"
 )
 _PY_IMPORT_AS_RE = re.compile(r"\bimport[ \t]+([\w \t,]+)")
 _JS_TAGGED_TEMPLATE_RE = re.compile(r"\$\s*`")
@@ -3057,6 +3057,16 @@ _STATEMENT_FORMS = (
 )
 
 
+# The process-starting names a `from <module> import *` brings in as bare calls.
+_STAR_IMPORT_CALLS = {
+    "subprocess": ("run", "call", "check_call", "check_output", "popen", "getoutput",
+                   "getstatusoutput"),
+    "commands": ("getoutput", "getstatusoutput"),
+    "pty": ("spawn", "fork"),
+    "os": (),  # every os process call is already a primitive by its own name
+}
+
+
 def _python_aliases(masked: str) -> tuple[set, set]:
     """Names a Python program imported as process routes: bare names (`from subprocess
     import run`, `from os import system`) and aliases of modules EVERY attribute of which
@@ -3067,6 +3077,9 @@ def _python_aliases(masked: str) -> tuple[set, set]:
         for part in (m.group(2) or m.group(3) or "").split(","):
             words = part.split()
             if not words:
+                continue
+            if words == ["*"]:
+                bare.update(_STAR_IMPORT_CALLS.get(m.group(1), ()))
                 continue
             name, alias = words[0], words[-1]
             if m.group(1) != "os" or name.lower() in _EXEC_CALL_NAMES:

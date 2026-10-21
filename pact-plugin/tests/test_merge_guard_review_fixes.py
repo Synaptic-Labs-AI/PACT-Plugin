@@ -112,3 +112,25 @@ def test_os_alias_non_process_call_is_allowed(label, cmd):
 @pytest.mark.parametrize("label,cmd", MODULE_ALIAS_DENY, ids=[r[0] for r in MODULE_ALIAS_DENY])
 def test_module_alias_process_call_is_refused(label, cmd):
     assert is_dangerous_command(cmd) is True
+
+
+# `from subprocess import *` brings run, call, check_call, check_output and Popen in
+# as bare names, so a bare call is the primitive.
+STAR_IMPORT_DENY = [
+    ("subprocess star run", "python3 -c 'from subprocess import *; run([\"gh\",\"pr\",\"merge\",\"5\"])'"),
+    ("subprocess star check_call", "python3 -c 'from subprocess import *; check_call([\"gh\",\"pr\",\"merge\",\"5\"])'"),
+    ("os star system", f"python3 -c 'from os import *; system(\"{D}\")'"),
+]
+STAR_IMPORT_ALLOW = [
+    ("subprocess star print", f"python3 -c 'from subprocess import *; print(\"{D}\")'"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", STAR_IMPORT_DENY, ids=[r[0] for r in STAR_IMPORT_DENY])
+def test_star_import_process_call_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", STAR_IMPORT_ALLOW, ids=[r[0] for r in STAR_IMPORT_ALLOW])
+def test_star_import_without_a_process_call_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
