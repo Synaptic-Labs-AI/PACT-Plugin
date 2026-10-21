@@ -326,3 +326,48 @@ def test_a_list_led_by_a_variable_is_not_read():
 
     assert mgc._literal_list_at("[a, \"pr\"]", 0) is None
     assert mgc._literal_list_at("[\"gh\", n]", 0) == (["gh", "X"], 9)
+
+
+# When the direct-call parser raises on a program, that program falls back to a coarse
+# check: it names a primitive and a string literal in it reads as a guarded command. A
+# merge beside a primitive is still refused (in -c and stdin code), and nothing raises.
+PARSER_DEFECT_DENY = [
+    ("-c os.system", f"python3 -c 'import os; os.system(\"{D}\")'"),
+    ("stdin os.system", f"python3 - <<'EOF'\nimport os\nos.system(\"{D}\")\nEOF"),
+    ("node execSync", f"node -e 'require(\"child_process\").execSync(\"{D}\")'"),
+]
+PARSER_DEFECT_ALLOW = [
+    ("-c prints merge text", f"python3 -c 'print(\"{D}\")'"),
+    ("-c plain program", "python3 -c 'print(1)'"),
+]
+
+
+@pytest.fixture
+def direct_parser_raises(monkeypatch):
+    import shared.merge_guard_common as mgc
+
+    def boom(*_args, **_kwargs):
+        raise IndexError("parser defect")
+
+    monkeypatch.setattr(mgc, "_code_runs_guarded_directly", boom)
+
+
+@pytest.mark.parametrize("label,cmd", PARSER_DEFECT_DENY, ids=[r[0] for r in PARSER_DEFECT_DENY])
+def test_a_direct_parser_defect_still_refuses_a_merge_beside_a_primitive(direct_parser_raises, label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", PARSER_DEFECT_ALLOW, ids=[r[0] for r in PARSER_DEFECT_ALLOW])
+def test_a_direct_parser_defect_allows_a_program_without_a_primitive(direct_parser_raises, label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+def test_a_defect_in_both_parsers_falls_back_to_primitive_names(direct_parser_raises, monkeypatch):
+    import shared.merge_guard_common as mgc
+
+    def boom(*_args, **_kwargs):
+        raise KeyError("parser defect")
+
+    monkeypatch.setattr(mgc, "_program_names_primitive", boom)
+    assert is_dangerous_command(f"python3 - <<'EOF'\nimport os\nos.system(\"{D}\")\nEOF") is True
+    assert is_dangerous_command(f"python3 - <<'EOF'\nprint(\"{D}\")\nEOF") is False

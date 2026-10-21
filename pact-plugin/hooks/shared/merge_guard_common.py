@@ -5627,16 +5627,37 @@ _PARSER_ERRORS = (AttributeError, TypeError, ValueError, IndexError, KeyError, R
 
 def _interpreter_code_runs_guarded(command: str, depth: int) -> bool:
     """The direct-call judgment over every program this command hands an interpreter.
-    It only ADDS refusals, so a parser defect here must not refuse: an exception is
-    read as "no direct call found", never as a refusal (the pre-hook turns a raised
-    exception into a deny, which would block a good-faith command)."""
+    A parser defect must never raise: the pre-hook turns a raised exception into a deny,
+    which would block a good-faith command. When the direct-call parser raises on one
+    program, that program is judged by `_guarded_literal_beside_primitive` instead, so
+    a defect neither refuses outright nor allows outright."""
     try:
-        return any(
-            _code_runs_guarded_directly(head, code, depth)
-            for head, code in _stdin_fed_code(command) + _code_arg_programs(command)
-        )
+        programs = _stdin_fed_code(command) + _code_arg_programs(command)
     except _PARSER_ERRORS:
         return False
+    for head, code in programs:
+        try:
+            if _code_runs_guarded_directly(head, code, depth):
+                return True
+        except _PARSER_ERRORS:
+            if _guarded_literal_beside_primitive(head, code, depth):
+                return True
+    return False
+
+
+def _guarded_literal_beside_primitive(head: str, code: str, depth: int) -> bool:
+    """The coarse judgment for a program the direct-call parser could not read: it
+    names an exec primitive, and one of its string literals reads as a guarded command.
+    A program whose calls cannot be told apart is searched for primitive names."""
+    if depth >= _DIRECT_CALL_MAX_DEPTH:
+        return False
+    try:
+        names_primitive = _program_names_primitive(head, code)
+    except _PARSER_ERRORS:
+        names_primitive = bool(_INTERPRETER_EXEC_PRIMITIVE_RE.search(code))
+    return names_primitive and any(
+        _is_dangerous_at_depth(_literal_body(lit), depth + 1) for lit in _PREFIXED_LITERAL_RE.finditer(code)
+    )
 
 
 def _interpreter_names_primitive(leg: str, head: str, tokens: list) -> bool:
