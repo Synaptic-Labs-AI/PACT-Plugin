@@ -93,7 +93,7 @@ Output:
   status: completed  # Non-happy-path uses completed with metadata (e.g., {"stalled": true} or {"blocked": true}) per task lifecycle conventions
 ```
 
-> **State persistence**: Input fields are stored in per-scope sub-task metadata during ATOMIZE and read on entry from the task file — `TaskGet` does NOT surface task metadata, so read the raw JSON: `cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team_name}/{taskId}.json" | jq .metadata.<key>`.
+> **State persistence**: Input fields are stored in per-scope sub-task metadata during ATOMIZE and read on entry from the task file — `TaskGet` does NOT surface task metadata, so read the raw JSON: `cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team_name}/{taskId}.json" | jq .metadata.<key>`. The `{team_name}` segment is the realigned team name — read it from `pact-session-context.json` (`team_name` field).
 
 #### Current Executor: rePACT
 

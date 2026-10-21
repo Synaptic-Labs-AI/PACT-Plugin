@@ -1,6 +1,6 @@
 # PACT — Orchestration Harness for Claude Code
 
-> **Version**: 4.8.4
+> **Version**: 4.8.6
 
 Turn a single Claude Code session into a managed team of specialist AI agents that prepare, design, build, and test your code systematically.
 
@@ -48,6 +48,8 @@ Then add `~/.claude/teams` and `~/.claude/pact-sessions` to your `additionalDire
 > **Note:** Bash allow rules are intentionally omitted — they are [fragile](https://docs.anthropic.com/en/docs/claude-code/settings#permission-settings) for commands with arguments. When agents run `mkdir` or `rm` in `~/.claude/` paths, select **"Yes, and always allow from this project"** to add the rule automatically.
 
 The two `env` values are prerequisites and they gate different things: Agent Teams, and the task tools PACT must have to bootstrap. If specialists will not spawn, see [If specialist agents will not spawn](https://github.com/Synaptic-Labs-AI/PACT-Plugin#if-specialist-agents-will-not-spawn).
+
+If both `env` values are set and the lead session holds the task tools but spawned specialists still report them missing, the cause is the spawn mode, not the settings: on non-TTY harnesses (web, Desktop), background spawns lose the task tools. Dispatch specialists with `run_in_background: false` plus a `ToolSearch "select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage"` line in the spawn prompt — details in [If specialist agents will not spawn](https://github.com/Synaptic-Labs-AI/PACT-Plugin#if-specialist-agents-will-not-spawn).
 
 Then restart Claude Code. Requires [Agent Teams enabled](https://github.com/Synaptic-Labs-AI/PACT-Plugin#enabling-agent-teams) and the `--agent` flag wired up — see [Loading PACT at session start](https://github.com/Synaptic-Labs-AI/PACT-Plugin#upgrading-from-v3x-to-v40) for the three convenience patterns (per-project `.claude/settings.json`, the `pact` shell wrapper, or manual `claude --agent PACT:pact-orchestrator`).
 
