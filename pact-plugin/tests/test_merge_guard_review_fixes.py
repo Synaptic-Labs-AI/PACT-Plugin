@@ -228,3 +228,34 @@ def test_guarded_command_given_to_a_primitive_is_refused(label, cmd):
 @pytest.mark.parametrize("label,cmd", NAMED_NOT_RUN_ALLOW, ids=[r[0] for r in NAMED_NOT_RUN_ALLOW])
 def test_merge_text_beside_an_unrelated_primitive_is_allowed(label, cmd):
     assert is_dangerous_command(cmd) is False
+
+
+Q3, S3 = '"' * 3, "'" * 3  # triple quotes, kept out of this file's own string syntax
+
+# A triple-quoted literal is read whole, including one that spans lines, rather than as
+# the empty literal its first two quotes would be.
+TRIPLE_QUOTED_DENY = [
+    ("-c single-quote triple", f"python3 -c \"import os; os.system({S3}{D}{S3})\""),
+    ("-c triple plus concatenation", f"python3 -c 'import os; os.system({Q3}{D}{Q3} + \" --squash\")'"),
+    ("-c multi-line shell block",
+     f"python3 -c 'import subprocess\nsubprocess.run({Q3}\ngit fetch origin\n{D} --squash\n{Q3}, shell=True)'"),
+    ("stdin multi-line shell block",
+     (f"python3 - <<'EOF'\nimport subprocess\nsubprocess.run({Q3}\ngit fetch origin\n{D} --squash\n{Q3}, "
+      "shell=True)\nEOF")),
+    ("stdin f-string triple", f"python3 - <<'EOF'\nimport os\nn = 5\nos.system(f{Q3}gh pr merge {{n}}{Q3})\nEOF"),
+]
+TRIPLE_QUOTED_ALLOW = [
+    ("-c prints a triple", f"python3 -c 'print({Q3}usage: {D}{Q3})'"),
+    ("-c searches for a triple", f"python3 -c 'import subprocess; subprocess.run([\"rg\", {Q3}{D}{Q3}, \"-n\"])'"),
+    ("-c runs a view", f"python3 -c 'import os; os.system({Q3}gh pr view 5{Q3})'"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", TRIPLE_QUOTED_DENY, ids=[r[0] for r in TRIPLE_QUOTED_DENY])
+def test_triple_quoted_merge_given_to_a_primitive_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", TRIPLE_QUOTED_ALLOW, ids=[r[0] for r in TRIPLE_QUOTED_ALLOW])
+def test_triple_quoted_merge_text_not_run_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False

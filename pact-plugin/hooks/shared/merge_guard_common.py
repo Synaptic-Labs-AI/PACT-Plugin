@@ -2894,10 +2894,13 @@ _PRIMITIVE_CALL_RE = re.compile(r"(?<![\w$])((?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\
 _TCL_EXEC_RE = re.compile(r"(?m)(?:^|[;\[{])[ \t]*exec[ \t]+([^;\]\n]+)")
 _STRING_LITERAL_RE = re.compile(r"""'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`[^`]*`""")
 _QUOTED_LITERAL_RE = re.compile(r"'(?:[^'\\\n]|\\.)*'|\"(?:[^\"\\\n]|\\.)*\"")
-# A string literal with an optional prefix (f"…", r'…', b"…", rf"…"): group sq/dq is
-# the text between the quotes. An f-string's {…} placeholders stay in the text.
+# A string literal with an optional prefix (f"…", r'…', b"…", rf"…"): group tdq/tsq/sq/dq
+# is the text between the quotes. A triple-quoted literal may span lines, and is tried
+# first, so `"""x"""` is not read as the empty literal `""`. An f-string's {…}
+# placeholders stay in the text.
 _PREFIXED_LITERAL_RE = re.compile(
-    r"(?<![\w$])(?:[rRbBuUfF]{1,2})?(?:'(?P<sq>(?:[^'\\\n]|\\.)*)'|\"(?P<dq>(?:[^\"\\\n]|\\.)*)\")"
+    r"(?<![\w$])(?:[rRbBuUfF]{1,2})?(?:\"\"\"(?P<tdq>(?s:.*?))\"\"\"|'''(?P<tsq>(?s:.*?))'''"
+    r"|'(?P<sq>(?:[^'\\\n]|\\.)*)'|\"(?P<dq>(?:[^\"\\\n]|\\.)*)\")"
     r"|(?<![\w$])`(?P<bq>[^`]*)`"
 )
 # Interpreters whose bare backtick span runs a shell command; in JavaScript a backtick is
@@ -2961,7 +2964,7 @@ def _object_argv_at(code: str, i: int) -> list[str]:
 
 def _literal_body(m: re.Match) -> str:
     """The text a string literal spells, with backslash escapes resolved (`\\"` -> `"`)."""
-    body = next(g for g in (m.group("sq"), m.group("dq"), m.group("bq")) if g is not None)
+    body = next(g for g in m.group("tdq", "tsq", "sq", "dq", "bq") if g is not None)
     return re.sub(r"\\(.)", r"\1", body)
 
 
