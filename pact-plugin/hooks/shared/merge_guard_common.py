@@ -2912,7 +2912,7 @@ def _first_argument_command(code: str, pos: int) -> str | None:
     `run(['gh', 'pr', 'merge', '5'])`). An object literal ends the walk, contributing its
     own `args:` or `cmd:` list (`new Deno.Command('gh', {args: […]})`, `Deno.run({cmd:
     […]})`). Stops at the first other non-literal argument. None when no literal leads."""
-    argv, strings, i = [], 0, pos
+    argv, strings, i = [], 0, pos + re.match(r"\s*", code[pos:]).end()
     while True:
         lit = _STRING_LITERAL_RE.match(code, i)
         if lit:
