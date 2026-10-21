@@ -438,7 +438,9 @@ def test_a_tmux_frame_is_named_from_its_registry_row(tmp_path, monkeypatch):
 def test_a_realign_adds_no_field_to_the_session_context(tmp_path, monkeypatch):
     """After the prompt-time write-back realigns the record, the context file
     holds exactly the fields it held before: the lead-session set is derived,
-    never stored."""
+    never stored. (`harness` joined the SCHEMA with the non-TTY stamp work —
+    every context carries it from build_context_cache, realign or not, so it
+    is part of the expected set rather than a realign-added field.)"""
     import bootstrap_marker_writer
     world = split_world(tmp_path, monkeypatch, saved_team=OLD_TEAM)
     reset_context_module()
@@ -450,4 +452,5 @@ def test_a_realign_adds_no_field_to_the_session_context(tmp_path, monkeypatch):
     context = json.loads(world.context_path.read_text(encoding="utf-8"))
     assert context["team_name"] == NEW_TEAM
     assert set(context) == {"team_name", "session_id", "project_dir",
-                            "plugin_root", "started_at", "process_key"}
+                            "plugin_root", "started_at", "process_key",
+                            "harness"}

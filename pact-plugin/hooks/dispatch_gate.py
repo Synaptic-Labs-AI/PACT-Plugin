@@ -100,6 +100,7 @@ try:
         has_task_assigned,
     )
     from shared.session_journal import append_event_checked, make_event
+    from shared.task_utils import resolve_task_dir
     from shared.paths import get_claude_config_dir
     from shared.stale_session import detect_stale_session_block
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
@@ -548,6 +549,14 @@ def _journal_decision(decision: str, reason: str | None, rule: str | None,
     """
     try:
         prompt = tool_input.get("prompt", "") if isinstance(tool_input, dict) else ""
+        # resolved_team (additive diagnostic): the resolver-resolved live store's
+        # name, next to the LITERAL Agent() team_name param kept above. The two
+        # diverge exactly when the lead typed a name the platform store does not
+        # key (the non-TTY session-<id8>-vs-UUID split), which is what this
+        # field exists to make visible post-mortem. "" when the resolver finds
+        # no live store (fail-open; never raises).
+        resolved_task_dir = resolve_task_dir()
+        resolved_team = resolved_task_dir.name if resolved_task_dir else ""
         event = make_event(
             "dispatch_decision",
             decision=decision,
@@ -555,6 +564,7 @@ def _journal_decision(decision: str, reason: str | None, rule: str | None,
             subagent_type=tool_input.get("subagent_type") if isinstance(tool_input, dict) else None,
             name=tool_input.get("name") if isinstance(tool_input, dict) else None,
             team_name=tool_input.get("team_name") if isinstance(tool_input, dict) else None,
+            resolved_team=resolved_team or None,
             reason=reason,
             prompt_redacted=_redact(prompt)[:1024],
         )

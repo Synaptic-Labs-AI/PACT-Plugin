@@ -470,7 +470,7 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # the session dir the project CLAUDE.md named before this one, when there
     # is one and it is not this session's own; session_resume walks it to
     # reach a claim behind sessions that did nothing.
-    "session_start": {"source": str, "prev_session_dir": str},
+    "session_start": {"source": str, "prev_session_dir": str, "entrypoint": str},
     # hooks/session_end.py writes session_end with an optional `warning`
     # string when check_unpaused_pr detects an open PR that was NOT
     # paused (no memory consolidation). The empty-dict registration in

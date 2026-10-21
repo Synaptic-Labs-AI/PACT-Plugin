@@ -4143,13 +4143,16 @@ class TestValidateOptionalFieldTypes:
                 assert isinstance(expected_type, type)
 
     def test_session_start_source_declared_optional(self):
-        """session_start has `source: str` and `prev_session_dir: str` in
-        _OPTIONAL_FIELDS_BY_TYPE.
+        """session_start has `source: str`, `prev_session_dir: str` and
+        `entrypoint: str` in _OPTIONAL_FIELDS_BY_TYPE.
 
         Pins the canonical case — the isinstance guard in session_init.py
         clamps `source` at runtime; this schema entry pins the contract
         at the journal boundary. A prev_session_dir that is not a string is
-        rejected rather than landing on disk.
+        rejected rather than landing on disk. `entrypoint` is the non-gating
+        launcher diagnostic (raw transcript entrypoint, OMITTED when the read
+        yielded nothing — the validator rejects an EMPTY present str, so
+        "not read" must be absence, never "").
         """
         from shared.session_journal import (
             _OPTIONAL_FIELDS_BY_TYPE,
@@ -4160,12 +4163,17 @@ class TestValidateOptionalFieldTypes:
         assert _OPTIONAL_FIELDS_BY_TYPE.get("session_start") == {
             "source": str,
             "prev_session_dir": str,
+            "entrypoint": str,
         }
         base = {"session_id": "s", "project_dir": "/tmp/proj"}
         assert _validate_event_schema(make_event(
             "session_start", prev_session_dir="/tmp/prev", **base))[0]
         assert not _validate_event_schema(make_event(
             "session_start", prev_session_dir=7, **base))[0]
+        assert _validate_event_schema(make_event(
+            "session_start", entrypoint="remote", **base))[0]
+        assert not _validate_event_schema(make_event(
+            "session_start", entrypoint=42, **base))[0]
 
     def test_compaction_attributed_latency_declared_optional(self):
         """compaction_attributed has `latency_s: float`, the seconds from staging

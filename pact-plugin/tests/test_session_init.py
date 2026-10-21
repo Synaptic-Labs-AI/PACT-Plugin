@@ -1747,6 +1747,8 @@ class TestWriteContextIntegration:
         # #878 SHAPE-2: build_context_cache takes the 4 positional args; the
         # lead/teammate disk gate moved OUT of this call (it's now persist_context,
         # invoked only when frame_is_lead) — so no write_disk kwarg here.
+        # harness: the non-TTY stamp carry-forward ("" when nothing recorded
+        # and the transcript names no non-TTY entrypoint — this test's shape).
         mock_build_ctx.assert_called_once_with(
             "session-aabb1122",
             "aabb1122-0000-0000-0000-000000000000",
@@ -1754,6 +1756,7 @@ class TestWriteContextIntegration:
             "",  # plugin_root: CLAUDE_PLUGIN_ROOT not set in this test
             started_at=None,  # a startup records now; only a compaction keeps the value on disk
             process_key=ANY,
+            harness=ANY,
         )
 
     def test_missing_session_id_falls_back_to_unknown_and_warns(self, monkeypatch, tmp_path, capsys):
@@ -3130,6 +3133,7 @@ class TestPluginRootEnvWiring:
         assert exc_info.value.code == 0
         # 4th positional arg is plugin_root; #878 SHAPE-2 moved the disk gate out
         # of this call into persist_context, so no write_disk kwarg here.
+        # harness: the non-TTY stamp carry-forward ("" in this test's shape).
         mock_build_ctx.assert_called_once_with(
             "session-aabb1122",
             "aabb1122-0000-0000-0000-000000000000",
@@ -3137,6 +3141,7 @@ class TestPluginRootEnvWiring:
             plugin_root_value,
             started_at=None,
             process_key=ANY,
+            harness=ANY,
         )
 
     def test_plugin_root_env_flows_to_update_session_info(

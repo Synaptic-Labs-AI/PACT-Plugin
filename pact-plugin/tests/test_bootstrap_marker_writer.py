@@ -1689,12 +1689,13 @@ class TestConcurrentTwoHealerRace:
         assert gate_rc == 0, f"gate stderr={gate_err!r}"
 
         # Exactly one well-formed context file with the expected content,
-        # whichever healer won the rename race.
+        # whichever healer won the rename race. `harness` joined the schema
+        # with the non-TTY stamp work — every context carries it.
         assert ctx.exists(), "at least one healer must land the file"
         content = json.loads(ctx.read_text(encoding="utf-8"))
         assert set(content.keys()) == {
             "team_name", "session_id", "project_dir", "plugin_root",
-            "started_at", "process_key",
+            "started_at", "process_key", "harness",
         }
         assert content["team_name"] == "session-deadbeef"
         assert content["session_id"] == session_id
