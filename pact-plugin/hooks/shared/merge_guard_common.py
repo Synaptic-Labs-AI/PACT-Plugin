@@ -2893,7 +2893,11 @@ _PRIMITIVE_CALL_RE = re.compile(r"(?<![\w$])((?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\
 # position (line start, after `;`, or inside `[…]`).
 _TCL_EXEC_RE = re.compile(r"(?m)(?:^|[;\[{])[ \t]*exec[ \t]+([^;\]\n]+)")
 _STRING_LITERAL_RE = re.compile(r"""'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`[^`]*`""")
-_QUOTED_LITERAL_RE = re.compile(r"'(?:[^'\\\n]|\\.)*'|\"(?:[^\"\\\n]|\\.)*\"")
+# A triple-quoted literal may span lines, and is tried first, so a call written inside a
+# docstring is masked as data rather than read as code.
+_QUOTED_LITERAL_RE = re.compile(
+    r"\"\"\"(?s:.*?)\"\"\"|'''(?s:.*?)'''|'(?:[^'\\\n]|\\.)*'|\"(?:[^\"\\\n]|\\.)*\""
+)
 # A string literal with an optional prefix (f"…", r'…', b"…", rf"…"): group tdq/tsq/sq/dq
 # is the text between the quotes. A triple-quoted literal may span lines, and is tried
 # first, so `"""x"""` is not read as the empty literal `""`. An f-string's {…}

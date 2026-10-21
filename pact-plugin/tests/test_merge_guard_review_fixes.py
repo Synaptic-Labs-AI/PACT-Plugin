@@ -259,3 +259,30 @@ def test_triple_quoted_merge_given_to_a_primitive_is_refused(label, cmd):
 @pytest.mark.parametrize("label,cmd", TRIPLE_QUOTED_ALLOW, ids=[r[0] for r in TRIPLE_QUOTED_ALLOW])
 def test_triple_quoted_merge_text_not_run_is_allowed(label, cmd):
     assert is_dangerous_command(cmd) is False
+
+
+# A call written inside a multi-line triple-quoted string (a docstring, a usage text) is
+# data, not code.
+DOCSTRING_ALLOW = [
+    ("stdin docstring example",
+     f"python3 - <<'EOF'\ndoc = {Q3}\nExample:\n    os.system(\"{D}\")\n{Q3}\nprint(doc)\nEOF"),
+    ("-c docstring example", f"python3 -c 'doc = {Q3}\nExample:\n    os.system(\"{D}\")\n{Q3}\nprint(doc)'"),
+    ("stdin function docstring",
+     (f"python3 - <<'EOF'\ndef helper():\n    {Q3}Call like:\n    subprocess.run([\"gh\", \"pr\", \"merge\", \"5\"])\n"
+      f"    {Q3}\n    return 1\nprint(helper())\nEOF")),
+    ("stdin single-quote docstring", f"python3 - <<'EOF'\ndoc = {S3}\n    os.system(\"{D}\")\n{S3}\nprint(doc)\nEOF"),
+]
+DOCSTRING_DENY = [
+    ("stdin real call after a docstring",
+     f"python3 - <<'EOF'\n{Q3}Merge script.\n{Q3}\nimport os\nos.system(\"{D}\")\nEOF"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", DOCSTRING_ALLOW, ids=[r[0] for r in DOCSTRING_ALLOW])
+def test_call_inside_a_multi_line_string_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+@pytest.mark.parametrize("label,cmd", DOCSTRING_DENY, ids=[r[0] for r in DOCSTRING_DENY])
+def test_call_after_a_multi_line_string_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
