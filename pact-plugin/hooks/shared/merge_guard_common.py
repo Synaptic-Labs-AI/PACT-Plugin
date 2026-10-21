@@ -2920,6 +2920,14 @@ def _mask_string_literals(code: str) -> str:
     return _QUOTED_LITERAL_RE.sub(lambda m: m.group(0)[0] + " " * (len(m.group(0)) - 2) + m.group(0)[-1], code)
 
 
+def _skip(pattern: str, text: str, i: int) -> int:
+    """Offset past `pattern` matched at text[i], or i when it does not match: an int
+    where `re.match(...).end()` would be Optional, for patterns that can match the empty
+    string."""
+    m = re.compile(pattern).match(text, i)
+    return m.end() if m else i
+
+
 def _literal_list_at(text: str, i: int) -> tuple[list[str], int] | None:
     """The elements of a `[…]` list, `(…)` tuple or R `c(…)` vector starting at text[i],
     as the text they spell, and the offset after it. The first element must be a string
@@ -2931,7 +2939,7 @@ def _literal_list_at(text: str, i: int) -> tuple[list[str], int] | None:
     closer = "]" if opener.group() == "[" else ")"
     items, i = [], i + opener.end()
     while True:
-        i += re.match(r"\s*", text[i:]).end()
+        i = _skip(r"\s*", text, i)
         if text[i:i + 1] == closer:
             return items, i + 1
         lit = _STRING_LITERAL_RE.match(text, i)
@@ -2943,7 +2951,7 @@ def _literal_list_at(text: str, i: int) -> tuple[list[str], int] | None:
             if end < 0:
                 return None
             items.append("X")
-        i = end + re.match(r"\s*,?", text[end:]).end()
+        i = _skip(r"\s*,?", text, end)
 
 
 _OBJECT_ARGV_KEY_RE = re.compile(r"(?<![\w$])[\"']?(?:args|cmd)[\"']?\s*:\s*")
@@ -3017,7 +3025,7 @@ def _string_expr_at(code: str, i: int) -> tuple[str, int] | None:
     when no string literal takes part, e.g. a bare variable (dataflow, not followed)."""
     parts, saw_literal = [], False
     while True:
-        i += re.match(r"\s*", code[i:]).end()
+        i = _skip(r"\s*", code, i)
         split = re.match(r"shlex\s*\.\s*split\s*\(\s*", code[i:])
         lit = _PREFIXED_LITERAL_RE.match(code, i + (split.end() if split else 0))
         if lit:
@@ -3077,7 +3085,7 @@ def _argument_commands(code: str, pos: int, skip_leading: int = 0) -> list[str]:
     non-literal arguments before the first literal are skipped (a spawn mode, a perl
     open3 handle). Both readings are returned: a leading string alone as a shell line
     (`popen("…", "r")`), and the whole argv."""
-    argv, strings, i = [], 0, pos + re.match(r"\s*", code[pos:]).end()
+    argv, strings, i = [], 0, _skip(r"\s*", code, pos)
     keyword = re.match(r"(?:args|cmd)\s*=(?!=)\s*", code[i:])
     if keyword:
         i += keyword.end()
@@ -5694,7 +5702,9 @@ def _is_php_exec_leg(leg: str, _depth: int = 0) -> bool:
     if not _INTERPRETER_EXEC_PRIMITIVE_RE.search(leg):
         return False
     cmd_leg = _leg_command_word(leg)
-    tokens = _shell_tokenize(cmd_leg) if cmd_leg is not None else None
+    if cmd_leg is None:
+        return False
+    tokens = _shell_tokenize(cmd_leg)
     if not tokens:
         return False
     names_php = any(_PHP_HEAD_RE.match(os.path.basename(t)) for t in tokens)
