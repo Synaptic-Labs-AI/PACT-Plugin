@@ -107,6 +107,15 @@ _REQUIRED_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # consumers depend on; team is redundant with CLAUDE.md and worktree is
     # empty at write time.
     "session_start": {"session_id": str, "project_dir": str},
+    # hooks/dispatch_gate.py writes exactly one dispatch_decision per gate
+    # decision (best-effort sink; the gate's decision stands regardless).
+    # ``decision`` is the load-bearing discriminator (always one of the
+    # evaluate_dispatch literals, never empty); everything else rides the
+    # OPTIONAL table and is OMITTED by the writer when absent/empty rather
+    # than written as None (the optional-str contract rejects a present
+    # empty, and registration must not turn a sparse decision into a
+    # journal_emit_skipped).
+    "dispatch_decision": {"decision": str},
     # shared/compaction_owner.py writes compaction_attributed, best effort, once a
     # settle's write is recorded as acted, so there is at most one row per
     # recorded act: a raise inside the write step is never recorded, and its
@@ -471,6 +480,21 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # is one and it is not this session's own; session_resume walks it to
     # reach a claim behind sessions that did nothing.
     "session_start": {"source": str, "prev_session_dir": str, "entrypoint": str},
+    # dispatch_decision's optional diagnostic surface: the literal Agent()
+    # spawn args (team_name is WHAT THE LEAD TYPED) plus resolved_team (the
+    # resolver-resolved live store — the two diverge exactly when the typed
+    # name keys no platform store, the non-TTY split this field makes
+    # visible), the rule identifier, the human-facing reason, and the
+    # redacted prompt fragment. The writer omits every absent/empty value.
+    "dispatch_decision": {
+        "rule": str,
+        "subagent_type": str,
+        "name": str,
+        "team_name": str,
+        "resolved_team": str,
+        "reason": str,
+        "prompt_redacted": str,
+    },
     # hooks/session_end.py writes session_end with an optional `warning`
     # string when check_unpaused_pr detects an open PR that was NOT
     # paused (no memory consolidation). The empty-dict registration in

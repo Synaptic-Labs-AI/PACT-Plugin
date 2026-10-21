@@ -380,22 +380,32 @@ def build_post_compaction_checkpoint(
 def _team_dir_under(base: Path, name: object) -> Path | None:
     """Containment SSOT for ONE team-keyed name under ONE root.
 
-    Case-folds the name before validating (parity with read_task_json's
-    historical folding and the O_EXCL marker SSOT's normalization, so every
-    sink treats a mixed-case name identically), validates with
-    is_safe_path_component, joins under ``base``, and asserts the resolved dir
-    stays under the resolved base (symlink-escape defense). Returns the JOINED
-    (unresolved) dir on success, ``None`` for any unsafe/absent name — never
-    raises, so callers fail open exactly as they did with inline copies.
+    Validates and joins the name AS GIVEN (whitespace-stripped, NEVER
+    case-folded), then asserts the resolved dir stays under the resolved base
+    (symlink-escape defense). Returns the JOINED (unresolved) dir on success,
+    ``None`` for any unsafe name — never raises, so callers fail open exactly
+    as they did with inline copies.
+
+    WHY NO CASE-FOLD (OS-invariance, the Linux-CI lesson): folding the join
+    made the addressed path a DIFFERENT name on case-SENSITIVE filesystems —
+    a symlinked tasks/EVIL was bypassed entirely by joining tasks/evil (a
+    fresh, clean dir inside the base), so the escape guard never engaged on
+    Linux, while on case-INSENSITIVE macOS the folded lookup traversed the
+    symlink anyway and the guard fired — the test passed locally by
+    filesystem accident. Joining the name AS GIVEN makes the guard depend on
+    the symlink alone, identical on every filesystem. (The allowlist is
+    charset-only, so validation is case-free and unchanged.) Comparison-level
+    folding survives where it belongs: the resolver's CANDIDATE comparison in
+    _context_team_candidates, whose names are platform-minted lowercase.
     """
     try:
         if not isinstance(name, str):
             return None
-        folded = name.strip().lower()
-        if not folded or not is_safe_path_component(folded):
+        stripped = name.strip()
+        if not stripped or not is_safe_path_component(stripped):
             return None
         base_resolved = base.resolve()
-        team_dir = base / folded
+        team_dir = base / stripped
         team_dir.resolve().relative_to(base_resolved)
         return team_dir
     except (OSError, ValueError, TypeError):
@@ -635,12 +645,14 @@ def read_task_json(
 
     task_dirs = []
     # Team-dir lookup routes through the task_dir_for containment seam: the
-    # case-fold (parity with the O_EXCL marker SSOT's normalization, so this
-    # status-read sink and the marker sink treat team_name case IDENTICALLY —
-    # harmless today since generate_team_name mints lowercase-only names),
-    # the is_safe_path_component allowlist (guard 1) and the resolve/
-    # relative_to symlink-escape anchor (guard 2) all live inside the seam —
-    # one containment implementation. An unsafe team_name yields None here,
+    # is_safe_path_component allowlist (guard 1) and the resolve/relative_to
+    # symlink-escape anchor (guard 2) all live inside the seam — one
+    # containment implementation — joining the name AS GIVEN (no case-fold;
+    # see _team_dir_under's OS-invariance note: a folded join addressed a
+    # DIFFERENT store on case-sensitive filesystems). A mixed-case name now
+    # reads the dir it names, where the historical pre-seam fold read the
+    # lowercased one — divergence only for mixed-case names, which
+    # generate_team_name never mints. An unsafe team_name yields None here,
     # skipping the team dir and falling through to the bare-base read,
     # preserving the fail-open {} contract. Only the single-named-file read
     # semantics stay local (this reader reads ONE file, never globs, so the

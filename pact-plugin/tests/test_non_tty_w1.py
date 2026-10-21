@@ -410,7 +410,128 @@ class TestWriterTwoSubstrate:
         assert stamps == []
 
 
-class TestJournalDiagnostics:
+class TestOsInvariantRawJoin:
+    """The containment seam joins the caller's name AS GIVEN (no case-fold).
+
+    The Linux-CI lesson: folding the join made tasks/EVIL (a symlink escaping
+    the base) invisible to the guard on case-SENSITIVE filesystems — the
+    folded join addressed tasks/evil, a fresh clean dir INSIDE the base, so
+    the write landed there and the guard never fired; on case-INSENSITIVE
+    macOS the folded lookup traversed the symlink anyway and the guard fired
+    by filesystem accident (the CI test passed locally and failed on all
+    three Linux interpreters). These pins are OS-INVARIANT: the second
+    (case-preservation) reddens on ANY OS if the fold returns.
+    """
+
+    def test_symlink_named_exactly_as_given_is_rejected(self, tmp_path):
+        base = tmp_path / "tasks"
+        base.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (base / "EVIL").symlink_to(outside, target_is_directory=True)
+        assert task_dir_for("EVIL", tasks_base_dir=str(base)) is None
+
+    def test_join_preserves_case_of_the_given_name(self, tmp_path):
+        """A regression to case-folding changes the JOINED dir's name to
+        lowercase — visible on every filesystem via .name, so this pin does
+        not depend on the local FS being case-sensitive (macOS cannot
+        reproduce the CI failure directly for exactly that reason)."""
+        got = task_dir_for("MixedCase-Team")
+        assert got is not None and got.name == "MixedCase-Team"
+
+    def test_atomic_claim_cannot_write_through_symlinked_dir(self, tmp_path):
+        """The CI-blocker scenario end-to-end: the claim gate must refuse the
+        flip when tasks/{team} is a symlink escaping the base, with the team
+        name in the SAME case the symlink carries."""
+        import task_claim_gate as gate
+
+        base = tmp_path / ".claude" / "tasks"
+        base.mkdir(parents=True, exist_ok=True)
+        (base / "B.json").write_text(json.dumps(
+            {"id": "B", "owner": "x", "status": "pending"}), encoding="utf-8")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (base / "EVIL").symlink_to(outside, target_is_directory=True)
+        # Route the seam's base to this tmp root (production default resolves
+        # via get_claude_config_dir; the explicit task id keeps the read on the
+        # bare base where B.json lives).
+        assert gate._atomic_claim("B", "EVIL") is False
+        assert not (outside / "B.json").exists()
+        assert json.loads((base / "B.json").read_text())["status"] == "pending"
+
+
+class TestHarnessCarryForward:
+    """build_context_cache carries a recorded non-empty harness forward when
+    the caller threads none — the monotonic never-clear guard for every
+    rebuild-after-stamp writer (write_context, the realign healer)."""
+
+    def _recorded(self, tmp_path, harness_value):
+        target = tmp_path / "pact-session-context.json"
+        target.write_text(json.dumps({
+            "team_name": SHORT_NAME, "session_id": FULL_UUID,
+            "project_dir": "/p", "plugin_root": "/r",
+            "started_at": "2026-10-21T00:00:00+00:00", "process_key": "",
+            "harness": harness_value,
+        }), encoding="utf-8")
+        return target
+
+    def test_rebuild_without_harness_param_keeps_stamp(
+        self, tmp_path, monkeypatch
+    ):
+        target = self._recorded(tmp_path, "non_tty")
+        monkeypatch.setattr(pact_context, "_context_path", target)
+        monkeypatch.setattr(pact_context, "_cache", None)
+        result = pact_context.build_context_cache(
+            SHORT_NAME, FULL_UUID, "/proj", "/root",
+        )
+        assert result is not None
+        assert result[1]["harness"] == "non_tty"
+
+    def test_explicit_empty_param_still_carries(
+        self, tmp_path, monkeypatch
+    ):
+        """An explicit "" from a caller that legitimately threads the value is
+        still upgraded by the carry — the parameter's default is the only
+        signal distinguishing 'threaded' from 'not threaded', and monotonic
+        never-clear must hold either way."""
+        target = self._recorded(tmp_path, "non_tty")
+        monkeypatch.setattr(pact_context, "_context_path", target)
+        result = pact_context.build_context_cache(
+            SHORT_NAME, FULL_UUID, "/proj", "/root", harness="",
+        )
+        assert result[1]["harness"] == "non_tty"
+
+    def test_no_stamp_stays_absent_when_nothing_recorded(
+        self, tmp_path, monkeypatch
+    ):
+        self._recorded(tmp_path, "")
+        monkeypatch.setattr(pact_context, "_context_path", None)
+        result = pact_context.build_context_cache(
+            SHORT_NAME, FULL_UUID, "/proj", "/root",
+        )
+        assert result[1]["harness"] == ""
+
+    def test_write_context_end_to_end_preserves_the_stamp(
+        self, tmp_path, monkeypatch
+    ):
+        """The Bugbot Medium scenario verbatim: stamp once, then let the
+        realign healer's write_context rebuild the file — the stamp survives."""
+        target = self._recorded(tmp_path, "")
+        monkeypatch.setattr(pact_context, "_context_path", target)
+        monkeypatch.setattr(pact_context, "_cache", None)
+        assert pact_context.set_harness_stamp(
+            "non_tty", {"agent_type": "PACT:pact-orchestrator"}) is True
+        monkeypatch.setattr(pact_context, "_context_path", target)
+        pact_context.write_context(
+            "pact-real-team", FULL_UUID, "/proj", "/root",
+            started_at="2026-10-21T00:00:00+00:00",
+        )
+        data = json.loads(target.read_text())
+        assert data["harness"] == "non_tty"
+        assert data["team_name"] == "pact-real-team"
+
+
+
     """Additive, non-gating: session_start.entrypoint (optional, type-checked)
     and dispatch_decision.resolved_team (unregistered-type passthrough)."""
 
@@ -463,15 +584,21 @@ class TestJournalDiagnostics:
         assert event["resolved_team"] == FULL_UUID
 
 
-# COUNTER-TEST-BY-REVERT CARDINALITY (spec §5; MEASURED on this worktree,
+# COUNTER-TEST-BY-REVERT CARDINALITY (spec §5; MEASURED at HEAD 9ea3f6c7,
 # 2026-10-21, `python3 -m pytest tests/test_non_tty_w1.py -q` after each
-# single-line mutation of _resolve_live_team_dir's candidate walk):
+# single-line mutation of _resolve_live_team_dir's candidate walk; first
+# measured at 36 tests pre-batch-B, RE-MEASURED at 37 after
+# test_persisted_store_wins_when_aligned_dir_absent joined the battery):
 #
-#   baseline (unmutated):            36 passed, 0 failed.
-#   ALWAYS-FALLBACK (walk drops the  1 failed, 35 passed — exactly
+#   baseline (unmutated):            37 passed, 0 failed.
+#   ALWAYS-FALLBACK (walk drops the  1 failed, 36 passed — exactly
 #   aligned candidate):                test_aligned_first_upgrade_is_observable.
-#   NEVER-FALLBACK (walk keeps the   1 failed, 35 passed — exactly
-#   aligned candidate only):           test_session_id_dir_fallback.
+#   NEVER-FALLBACK (walk keeps the   2 failed, 35 passed — exactly
+#   aligned candidate only):           test_session_id_dir_fallback +
+#                                      test_persisted_store_wins_when_
+#                                      aligned_dir_absent (the mutation drops
+#                                      the persisted candidate together with
+#                                      the session-id one).
 #
 # Two design notes the measurements forced:
 # (1) The plain CLI cells (aligned == persisted) CANNOT distinguish an
@@ -485,6 +612,7 @@ class TestJournalDiagnostics:
 #     the cell: it seeds the POST-ALIGNMENT truth (aligned == UUID), so the
 #     aligned candidate alone already resolves it — that is the fix's claim,
 #     that alignment (not fallback) carries the UUID store. The fallback
-#     arm's observable is the session-id cell (both name candidates empty).
+#     arm's observables are the session-id cell (both name candidates empty)
+#     and the persisted-leg cell (aligned dir absent, persisted store live).
 #     This deviates from spec §5's letter ("never-fallback reddens exactly
 #     the UUID-only tests") for a measured reason; flagged in the W1 HANDOFF.

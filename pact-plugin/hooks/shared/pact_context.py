@@ -2230,6 +2230,26 @@ def build_context_cache(
             process_key = ""
     context["process_key"] = process_key or ""
 
+    # HARNESS carry-forward (monotonic never-clear, the same discipline the
+    # process_key read above applies): when the caller threads NO harness
+    # value ("" — write_context, the realign healer, any rebuild-after-stamp
+    # writer), a non-empty harness already recorded for THIS session is kept.
+    # Without this, write_context (which rebuilds the context from parameters)
+    # would blank the stamp on its next rewrite — violating the never-clear
+    # contract set_harness_stamp declares. Callers that DO thread a value
+    # (session_init, monotonic: saved-or-transcript) are unaffected — the
+    # carry only fires on the parameter's default.
+    if not harness:
+        try:
+            recorded_harness = json.loads(target.read_text(encoding="utf-8")).get(
+                "harness", ""
+            )
+            if isinstance(recorded_harness, str) and recorded_harness:
+                harness = recorded_harness
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+    context["harness"] = harness if isinstance(harness, str) else ""
+
     # Populate the in-process cache UNCONDITIONALLY (Option A). The cache is the
     # process's own working truth; disk persistence is an independent side-effect.
     # Invalidate _aligned_cache (#989): it is DERIVED from the context team_name,
