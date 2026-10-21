@@ -928,7 +928,7 @@ class TestCheckUnpausedPr:
             if event_type == "review_dispatch":
                 return [{"type": "review_dispatch", "pr_number": 42, "ts": "2026-01-01T00:00:00Z"}]
             if event_type == "session_end":
-                return [{"type": "session_end", "source": "wrap-up", "ts": "2026-01-01T01:00:00Z"}]
+                return [{"type": "session_end", "source": "wrap-up", "pr_state": "MERGED", "pr_number": 42, "ts": "2026-01-01T01:00:00Z"}]
             return []
 
         with patch("session_end.read_events", side_effect=mock_read_events), \
@@ -1017,7 +1017,7 @@ class TestCheckUnpausedPr:
 
         def mock_read_events(event_type=None):
             if event_type == "session_end":
-                return [{"type": "session_end", "source": "wrap-up", "ts": "2026-01-02T00:00:00Z"}]
+                return [{"type": "session_end", "source": "wrap-up", "pr_state": "MERGED", "pr_number": 42, "ts": "2026-01-02T00:00:00Z"}]
             if event_type == "session_consolidated":
                 return [{"type": "session_consolidated", "ts": "2026-01-02T00:00:00Z"}]
             if event_type == "review_dispatch":

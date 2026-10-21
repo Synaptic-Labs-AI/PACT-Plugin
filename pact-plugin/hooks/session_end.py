@@ -49,6 +49,7 @@ from shared.session_journal import (
     make_event,
     read_events,
     read_last_event_from,
+    wrap_up_closed,
 )
 
 from shared.session_state import is_safe_path_component
@@ -75,6 +76,18 @@ def _at_or_after(ts: object, ref_ts: object) -> bool:
         return False
 
 
+def _as_pr_int(pr_number: object) -> int | None:
+    """The PR number as an int: an int (not a bool) as is, a digit string
+    converted, anything else None, which matches no wrap-up record."""
+    if isinstance(pr_number, bool):
+        return None
+    if isinstance(pr_number, int):
+        return pr_number
+    if isinstance(pr_number, str) and pr_number.isdigit():
+        return int(pr_number)
+    return None
+
+
 def check_unpaused_pr(
     tasks: list[dict] | None,
     project_slug: str,
@@ -82,10 +95,11 @@ def check_unpaused_pr(
     """
     Safety-net: detect open PRs that were NOT paused (no memory consolidation).
 
-    The signal for "wrap-up ran for the current review arc" is a
-    `session_end` event with source "wrap-up" at or after the latest
-    `review_dispatch`; with no `review_dispatch`, any wrap-up `session_end`
-    counts. That returns None with no network call. A pause or a
+    The signal for "wrap-up ran for this PR" is session_journal's
+    wrap_up_closed: a wrap-up `session_end` that recorded this PR as MERGED,
+    at or after the latest `review_dispatch` (at any time when there is
+    none). That returns None with no network call. A wrap-up that recorded
+    any other state silences nothing by itself. A pause or a
     consolidation at or after the latest review covers an OPEN PR (pause
     owns it into the next session) but not a MERGED one: that costs one gh
     call, and a MERGED PR then warns that /PACT:wrap-up did not run. With no
@@ -119,10 +133,6 @@ def check_unpaused_pr(
         if not review_events:
             return True
         return _at_or_after(event.get("ts"), review_events[-1].get("ts"))
-
-    # Wrap-up ran for this arc: no network (AC#4 for wrap-up cases).
-    if any(e.get("source") == "wrap-up" and covers(e) for e in read_events("session_end")):
-        return None
 
     # Fix B (#453) and the pause-vs-review reconciliation: a consolidation
     # (wrap-up or pause Pass 2) or a pause at or after the latest review.
@@ -161,9 +171,14 @@ def check_unpaused_pr(
     if not pr_number:
         return None
 
+    # Wrap-up closed this merged PR: no network (AC#4 for wrap-up cases).
+    since_ts = review_events[-1].get("ts") if review_events else None
+    if wrap_up_closed(read_events("session_end"), _as_pr_int(pr_number), since_ts):
+        return None
+
     # Fix A (#453): live PR-state check. A CLOSED PR needs nothing. A MERGED
     # PR (including one merged via the GitHub web UI mid-session) warns: the
-    # wrap-up check above already returned for a PR wrap-up covered. This
+    # wrap-up check above already returned for a PR wrap-up closed. This
     # hook's own session_end carries no source and never counts.
     #
     # Fail-open: check_pr_state returns "" on gh-missing / timeout /

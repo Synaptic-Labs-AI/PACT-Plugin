@@ -145,7 +145,7 @@ class TestSessionConsolidatedRegression:
             pr_url="https://github.com/org/repo/pull/447",
             reviewers=["backend-coder"],
         )
-        _write_event("session_end", source="wrap-up")
+        _write_event("session_end", source="wrap-up", pr_state="MERGED", pr_number=447)
         _write_event("session_consolidated", **{"pass": 2, "task_count": 7, "memories_saved": 3})
 
         with patch("session_end.check_pr_state", return_value="MERGED"):
@@ -344,7 +344,7 @@ class TestSessionConsolidatedNoNetworkGuarantee:
             reviewers=["backend-coder"],
         )
         # What wrap-up step 5 writes: its session_end, then the consolidation.
-        _write_event("session_end", source="wrap-up")
+        _write_event("session_end", source="wrap-up", pr_state="MERGED", pr_number=777)
         _write_event("session_consolidated", **{"pass": 2})
 
         # Override the autouse check_pr_state mock with the REAL
@@ -429,7 +429,7 @@ class TestLivePrStateFixAEndToEnd:
             pr_url="https://github.com/org/repo/pull/450",
             reviewers=["backend-coder"],
         )
-        fields = {"source": source} if source else {}
+        fields = {"source": source, "pr_state": "MERGED", "pr_number": 450} if source else {}
         _write_event("session_end", ts=session_end_ts, **fields)
 
         with patch("session_end.check_pr_state", return_value="MERGED"):
@@ -440,6 +440,49 @@ class TestLivePrStateFixAEndToEnd:
         else:
             assert warning is None
 
+    @pytest.mark.parametrize("fields", [
+        pytest.param({"pr_state": "OPEN", "pr_number": 454}, id="N1-open-state"),
+        pytest.param({"pr_state": "NONE"}, id="none-state"),
+        pytest.param({"pr_state": "UNKNOWN"}, id="unknown-state"),
+        pytest.param({"pr_state": "MERGED", "pr_number": 999}, id="other-pr"),
+        pytest.param({}, id="no-state"),
+    ])
+    def test_a_wrap_up_that_did_not_record_this_pr_merged_does_not_silence(
+        self, session_dir, fields
+    ):
+        """N1: wrap-up silences the merged warning only when it recorded THIS
+        PR as MERGED. A wrap-up that saw the PR OPEN and then the PR merged
+        on the web UI still warns."""
+        from session_end import check_unpaused_pr
+
+        _write_event(
+            "review_dispatch",
+            ts="2026-04-17T12:00:00Z",
+            pr_number=454,
+            pr_url="https://github.com/org/repo/pull/454",
+            reviewers=["backend-coder"],
+        )
+        _write_event("session_end", ts="2026-04-17T13:00:00Z", source="wrap-up", **fields)
+
+        with patch("session_end.check_pr_state", return_value="MERGED"):
+            warning = check_unpaused_pr(tasks=None, project_slug="test-project")
+
+        assert warning is not None and "PR #454 was merged" in warning
+
+    def test_a_digit_string_task_pr_matches_an_int_wrap_up_record(self, session_dir):
+        """The task-metadata fallback may carry the PR as a string; the reader
+        converts it before matching. No gh call."""
+        from session_end import check_unpaused_pr
+
+        _write_event("session_end", source="wrap-up", pr_state="MERGED", pr_number=455)
+        tasks = [{"metadata": {"pr_number": "455"}}]
+
+        with patch("session_end.check_pr_state") as gh:
+            warning = check_unpaused_pr(tasks=tasks, project_slug="test-project")
+
+        assert warning is None
+        gh.assert_not_called()
+
     @pytest.mark.parametrize("wrap_up,warns", [
         pytest.param(False, True, id="SE8-no-wrap-up-warns"),
         pytest.param(True, False, id="SE8-wrap-up-silences"),
@@ -449,7 +492,7 @@ class TestLivePrStateFixAEndToEnd:
         from session_end import check_unpaused_pr
 
         if wrap_up:
-            _write_event("session_end", source="wrap-up")
+            _write_event("session_end", source="wrap-up", pr_state="MERGED", pr_number=451)
         tasks = [{"metadata": {"pr_number": 451}}]
 
         with patch("session_end.check_pr_state", return_value="MERGED"):
@@ -524,7 +567,7 @@ class TestLivePrStateFixAEndToEnd:
             pr_url="https://github.com/org/repo/pull/453",
             reviewers=["backend-coder"],
         )
-        _write_event("session_end", source="wrap-up")
+        _write_event("session_end", source="wrap-up", pr_state="MERGED", pr_number=453)
         _write_event("session_consolidated", **{"pass": 2})
         import shared.session_journal as sj
 
@@ -672,9 +715,21 @@ class TestMergedPrRealHook:
         sd, env = self._world(tmp_path)
         self._journal(sd, env, "review_dispatch", {
             "pr_number": 42, "pr_url": "https://github.com/o/r/pull/42", "reviewers": ["x"]})
-        self._journal(sd, env, "session_end", {"source": "wrap-up"})
+        self._journal(sd, env, "session_end", {"source": "wrap-up", "pr_state": "MERGED", "pr_number": 42})
 
         assert self._session_end_warning(sd, env) is None
+
+    def test_a_wrap_up_that_recorded_open_does_not_silence_a_later_merge(self, tmp_path):
+        """N1 on the real hook: wrap-up recorded the PR OPEN; the PR merged
+        afterwards; the session end still warns."""
+        sd, env = self._world(tmp_path)
+        self._journal(sd, env, "review_dispatch", {
+            "pr_number": 42, "pr_url": "https://github.com/o/r/pull/42", "reviewers": ["x"]})
+        self._journal(sd, env, "session_end", {"source": "wrap-up", "pr_state": "OPEN", "pr_number": 42})
+
+        warning = self._session_end_warning(sd, env)
+
+        assert warning is not None and "PR #42 was merged" in warning
 
     def test_a_pause_after_review_does_not_silence_the_merge_warning(self, tmp_path):
         sd, env = self._world(tmp_path)
@@ -697,7 +752,7 @@ class TestMergedPrRealHook:
         self._journal(sd, env, "review_dispatch", {
             "pr_number": 42, "pr_url": "https://github.com/o/r/pull/42", "reviewers": ["x"]})
         with (sd / "session-journal.jsonl").open("a") as journal:
-            journal.write(json.dumps({"v": 1, "type": "session_end", "source": "wrap-up", "ts": 5}) + "\n")
+            journal.write(json.dumps({"v": 1, "type": "session_end", "source": "wrap-up", "pr_state": "MERGED", "pr_number": 42, "ts": 5}) + "\n")
             journal.write(json.dumps({"v": 1, "type": "session_consolidated", "pass": 2, "ts": "garbage"}) + "\n")
 
         warning = self._session_end_warning(sd, env)
