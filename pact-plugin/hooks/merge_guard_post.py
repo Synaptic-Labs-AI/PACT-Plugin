@@ -590,21 +590,27 @@ def _readable_item(item: str) -> str:
     return item
 
 
-def _readable_target(value: str, is_netstring: bool) -> str:
-    """A minted target value as plain text: sentinels named, netstrings split, and
-    every control character (NUL included) dropped, capped in length."""
-    parts = (_split_netstring(value) if is_netstring else None) or [value]
-    text = ", ".join(_readable_item(p) for p in parts)
+def _plain(text: str) -> str:
+    """`text` with every control character (NUL included) dropped, capped in length."""
     text = "".join(ch for ch in text if ch.isprintable())
     if len(text) > _CONFIRMATION_TARGET_MAX:
         text = text[:_CONFIRMATION_TARGET_MAX] + "..."
     return text
 
 
+def _readable_target(value: str, is_netstring: bool) -> str:
+    """A minted target value as plain text: sentinels named, netstrings split, and
+    every control character (NUL included) dropped, capped in length."""
+    parts = (_split_netstring(value) if is_netstring else None) or [value]
+    return _plain(", ".join(_readable_item(p) for p in parts))
+
+
 def _mint_confirmation(context: dict) -> str:
     """The notice printed after a successful mint, naming what the approval
     authorizes, so a click that was not an approval of this command is caught
-    before the command runs."""
+    before the command runs. The bound flags (`--admin`, `--repo=…`,
+    `--delete-branch`, …) are part of what the token authorizes, so every one is
+    named."""
     op = context.get("operation_type") or "destructive command"
     target = _target_value(context)
     is_netstring = any(
@@ -616,6 +622,9 @@ def _mint_confirmation(context: dict) -> str:
         where = " on " + _readable_target(target, is_netstring)
     else:
         where = ""
+    flags = context.get("bound_flags")
+    if isinstance(flags, list) and flags:
+        where += " with " + _plain(" ".join(str(f) for f in flags))
     return (
         f"PACT merge-guard: an approval was recorded for a {op}{where}. It "
         f"authorizes that command for {TOKEN_TTL // 60} minutes, at most {MAX_USES} "

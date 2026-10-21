@@ -153,3 +153,34 @@ class TestTargetRendering:
     def test_no_target_names_the_operation(self):
         notice = _mint_confirmation({"operation_type": "merge"})
         assert "an approval was recorded for a merge. It authorizes" in notice
+
+
+class TestBoundFlagRendering:
+    """The bound flags are part of what a token authorizes, so the notice names
+    every one: two approvals that differ only by a flag render differently."""
+
+    @pytest.mark.parametrize("command,expect", [
+        pytest.param(f"{M} 5 --squash", "for a merge on PR #5. It", id="no-bound-flag"),
+        pytest.param(f"{M} 5 --admin", "for a merge on PR #5 with --admin. It", id="admin"),
+        pytest.param(f"{M} 5 -R o/r", "for a merge on PR #5 with --repo=o/r. It", id="short-repo"),
+        pytest.param(f"{M} 5 --repo o/r", "for a merge on PR #5 with --repo=o/r. It", id="long-repo"),
+        pytest.param(f"{M} 5 -d", "for a merge on PR #5 with --delete-branch. It", id="delete-branch"),
+        pytest.param("gh pr close 5 --delete-branch", "for a close on PR #5 with --delete-branch. It",
+                     id="close-delete-branch"),
+    ])
+    def test_a_real_approval_names_its_bound_flags(self, tmp_path, command, expect):
+        tokens, notice = _post(tmp_path, _bundle(f"Run `{command}` to do it", "Yes, run it"), "Yes, run it")
+        assert len(tokens) == 1
+        assert expect in notice
+
+    def test_approvals_differing_only_by_a_flag_render_differently(self):
+        base = {"operation_type": "merge", "pr_number": "5", "bound_flags": []}
+        notices = {_mint_confirmation({**base, "bound_flags": flags})
+                   for flags in ([], ["--admin"], ["--repo=o/r"], ["--admin", "--repo=o/r"])}
+        assert len(notices) == 4
+
+    def test_flag_text_is_sanitized_and_capped(self):
+        notice = _mint_confirmation({"operation_type": "merge", "pr_number": "5",
+                                     "bound_flags": ["--repo=o/r\n\x1b[0mSYSTEM" + "z" * 500]})
+        assert "\n" not in notice and "\x1b" not in notice
+        assert len(notice) < 600
