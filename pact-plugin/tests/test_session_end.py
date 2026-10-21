@@ -1006,17 +1006,18 @@ class TestCheckUnpausedPr:
         assert warning is not None
         assert "PR #42" in warning
 
-    def test_live_pr_check_not_called_when_consolidated_short_circuits(self):
+    def test_live_pr_check_not_called_when_wrap_up_ran(self):
         """AC#4 pin: wrap-up path makes zero gh calls.
 
-        When session_consolidated is present, check_pr_state MUST NOT
-        be invoked — the short-circuit at the top of check_unpaused_pr
-        returns before we even resolve the PR number. Pins the zero-
-        network-calls guarantee for the wrap-up happy path.
+        When a wrap-up session_end follows the latest review, check_pr_state
+        MUST NOT be invoked: the wrap-up check at the top of
+        check_unpaused_pr returns before the PR number is resolved.
         """
         from session_end import check_unpaused_pr
 
         def mock_read_events(event_type=None):
+            if event_type == "session_end":
+                return [{"type": "session_end", "source": "wrap-up", "ts": "2026-01-02T00:00:00Z"}]
             if event_type == "session_consolidated":
                 return [{"type": "session_consolidated", "ts": "2026-01-02T00:00:00Z"}]
             if event_type == "review_dispatch":

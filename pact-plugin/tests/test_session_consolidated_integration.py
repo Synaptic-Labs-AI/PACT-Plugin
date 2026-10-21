@@ -145,10 +145,11 @@ class TestSessionConsolidatedRegression:
             pr_url="https://github.com/org/repo/pull/447",
             reviewers=["backend-coder"],
         )
-        _write_event("session_end")
+        _write_event("session_end", source="wrap-up")
         _write_event("session_consolidated", **{"pass": 2, "task_count": 7, "memories_saved": 3})
 
-        warning = check_unpaused_pr(tasks=None, project_slug="test-project")
+        with patch("session_end.check_pr_state", return_value="MERGED"):
+            warning = check_unpaused_pr(tasks=None, project_slug="test-project")
 
         assert warning is None, (
             f"T23 regression: wrap-up after merged PR must not warn. "
@@ -342,6 +343,8 @@ class TestSessionConsolidatedNoNetworkGuarantee:
             pr_url="https://github.com/org/repo/pull/777",
             reviewers=["backend-coder"],
         )
+        # What wrap-up step 5 writes: its session_end, then the consolidation.
+        _write_event("session_end", source="wrap-up")
         _write_event("session_consolidated", **{"pass": 2})
 
         # Override the autouse check_pr_state mock with the REAL
@@ -457,12 +460,9 @@ class TestLivePrStateFixAEndToEnd:
         else:
             assert warning is None
 
-    def test_a_pause_after_review_silences_a_later_merge(self, session_dir):
-        """A pause after the review owns the PR into the next session: a
-        web-UI merge after it does not warn here (session_resume names
-        /PACT:wrap-up when the paused PR turns out merged)."""
-        from session_end import check_unpaused_pr
-
+    @staticmethod
+    def _cover_after_review(kind):
+        """A review at 12:00, then a pause or a consolidation at 13:00."""
         _write_event(
             "review_dispatch",
             ts="2026-04-17T12:00:00Z",
@@ -470,20 +470,74 @@ class TestLivePrStateFixAEndToEnd:
             pr_url="https://github.com/org/repo/pull/452",
             reviewers=["backend-coder"],
         )
-        _write_event(
-            "session_paused",
-            ts="2026-04-17T13:00:00Z",
-            pr_number=452,
-            pr_url="https://github.com/org/repo/pull/452",
-            branch="feat/test",
-            worktree_path="/tmp/wt",
-            consolidation_completed=False,
-        )
+        if kind == "pause":
+            _write_event(
+                "session_paused",
+                ts="2026-04-17T13:00:00Z",
+                pr_number=452,
+                pr_url="https://github.com/org/repo/pull/452",
+                branch="feat/test",
+                worktree_path="/tmp/wt",
+                consolidation_completed=True,
+            )
+        else:
+            _write_event("session_consolidated", ts="2026-04-17T13:00:00Z", **{"pass": 2})
 
-        with patch("session_end.check_pr_state", return_value="MERGED"):
+    @pytest.mark.parametrize("kind", ["pause", "consolidation"])
+    def test_a_pause_or_consolidation_after_review_does_not_silence_a_merge(
+        self, session_dir, kind
+    ):
+        """Only wrap-up's session_end proves wrap-up ran. A pause (or its
+        consolidation) after the review covers an OPEN PR, not a MERGED one."""
+        from session_end import check_unpaused_pr
+
+        self._cover_after_review(kind)
+        with patch("session_end.check_pr_state", return_value="MERGED") as gh:
+            warning = check_unpaused_pr(tasks=None, project_slug="test-project")
+
+        assert warning is not None and "PR #452 was merged" in warning
+        assert gh.call_count == 1
+
+    @pytest.mark.parametrize("state", ["OPEN", "", "CLOSED"])
+    @pytest.mark.parametrize("kind", ["pause", "consolidation"])
+    def test_a_pause_or_consolidation_after_review_covers_an_unmerged_pr(
+        self, session_dir, kind, state
+    ):
+        from session_end import check_unpaused_pr
+
+        self._cover_after_review(kind)
+        with patch("session_end.check_pr_state", return_value=state):
             warning = check_unpaused_pr(tasks=None, project_slug="test-project")
 
         assert warning is None
+
+    @pytest.mark.parametrize("bad_ts", [5, "not-a-time", None])
+    def test_a_corrupt_ts_never_proves_wrap_up_ran(self, session_dir, bad_ts):
+        """B8: a wrap-up session_end whose ts does not parse proves nothing,
+        and nothing raises."""
+        from session_end import check_unpaused_pr
+
+        _write_event(
+            "review_dispatch",
+            ts="2026-04-17T12:00:00Z",
+            pr_number=453,
+            pr_url="https://github.com/org/repo/pull/453",
+            reviewers=["backend-coder"],
+        )
+        _write_event("session_end", source="wrap-up")
+        _write_event("session_consolidated", **{"pass": 2})
+        import shared.session_journal as sj
+
+        events = sj.read_events()
+        for ev in events:
+            if ev["type"] in ("session_end", "session_consolidated"):
+                ev["ts"] = bad_ts
+        with patch("session_end.read_events",
+                   lambda t=None: [e for e in events if t is None or e["type"] == t]), \
+             patch("session_end.check_pr_state", return_value="MERGED"):
+            warning = check_unpaused_pr(tasks=None, project_slug="test-project")
+
+        assert warning is not None and "PR #453 was merged" in warning
 
     def test_closed_pr_no_consolidation_short_circuits(self, session_dir):
         """AC#2 sibling: gh says CLOSED → no warning."""
@@ -621,6 +675,51 @@ class TestMergedPrRealHook:
         self._journal(sd, env, "session_end", {"source": "wrap-up"})
 
         assert self._session_end_warning(sd, env) is None
+
+    def test_a_pause_after_review_does_not_silence_the_merge_warning(self, tmp_path):
+        sd, env = self._world(tmp_path)
+        self._journal(sd, env, "review_dispatch", {
+            "pr_number": 42, "pr_url": "https://github.com/o/r/pull/42", "reviewers": ["x"]})
+        self._journal(sd, env, "session_paused", {
+            "pr_number": 42, "pr_url": "https://github.com/o/r/pull/42", "branch": "b",
+            "worktree_path": "/tmp/wt", "consolidation_completed": True})
+        self._journal(sd, env, "session_consolidated", {"pass": 2})
+
+        warning = self._session_end_warning(sd, env)
+
+        assert warning is not None and "PR #42 was merged" in warning
+
+    def test_a_corrupt_ts_neither_proves_wrap_up_nor_skips_cleanup(self, tmp_path):
+        """B8: hand-corrupted timestamps on a real journal. The hook still
+        writes its session_end (with the merge warning: nothing proves
+        wrap-up) and still runs the cleanup that follows."""
+        sd, env = self._world(tmp_path)
+        self._journal(sd, env, "review_dispatch", {
+            "pr_number": 42, "pr_url": "https://github.com/o/r/pull/42", "reviewers": ["x"]})
+        with (sd / "session-journal.jsonl").open("a") as journal:
+            journal.write(json.dumps({"v": 1, "type": "session_end", "source": "wrap-up", "ts": 5}) + "\n")
+            journal.write(json.dumps({"v": 1, "type": "session_consolidated", "pass": 2, "ts": "garbage"}) + "\n")
+
+        warning = self._session_end_warning(sd, env)
+
+        assert warning is not None and "PR #42 was merged" in warning
+        types = [json.loads(line)["type"] for line in
+                 (sd / "session-journal.jsonl").read_text().splitlines()]
+        assert "cleanup_summary" in types
+
+    def test_a_fault_in_the_pr_check_does_not_skip_the_session_end_or_cleanup(self, tmp_path):
+        """A task whose metadata is not an object makes the PR check raise.
+        The hook still writes its session_end and runs the cleanup."""
+        sd, env = self._world(tmp_path)
+        task_dir = tmp_path / "tasks" / "session-merged"
+        task_dir.mkdir(parents=True)
+        (task_dir / "1.json").write_text(json.dumps({"id": "1", "metadata": "corrupt"}))
+        self._journal(sd, env, "session_start", {"session_id": self.SID, "project_dir": self.PROJECT})
+
+        assert self._session_end_warning(sd, env) is None
+        types = [json.loads(line)["type"] for line in
+                 (sd / "session-journal.jsonl").read_text().splitlines()]
+        assert "cleanup_summary" in types
 
 
 # ---------------------------------------------------------------------------

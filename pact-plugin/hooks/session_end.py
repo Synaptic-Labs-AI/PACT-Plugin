@@ -44,6 +44,7 @@ from shared.pact_context import (
     project_slug,
 )
 from shared.session_journal import (
+    _parse_ts,
     append_event,
     make_event,
     read_events,
@@ -65,6 +66,15 @@ def get_project_slug() -> str:
     return project_slug(get_project_dir())
 
 
+def _at_or_after(ts: object, ref_ts: object) -> bool:
+    """True iff both timestamps parse and `ts` is at or after `ref_ts`. A
+    missing or unparseable value is False: it proves nothing."""
+    try:
+        return _parse_ts(ts) >= _parse_ts(ref_ts)
+    except (ValueError, TypeError):
+        return False
+
+
 def check_unpaused_pr(
     tasks: list[dict] | None,
     project_slug: str,
@@ -72,18 +82,21 @@ def check_unpaused_pr(
     """
     Safety-net: detect open PRs that were NOT paused (no memory consolidation).
 
-    Compares the session journal's most-recent `session_paused` event against
-    its most-recent `review_dispatch` event. The pause covers a PR only when
-    it occurred at-or-after that PR was dispatched; an older pause does NOT
-    cover a freshly-dispatched PR (e.g., pause→resume→new PR→quit). If the
-    current PR is unpaused, returns a warning string so the caller can attach
-    it to the single `session_end` journal event.
+    The signal for "wrap-up ran for the current review arc" is a
+    `session_end` event with source "wrap-up" at or after the latest
+    `review_dispatch`; with no `review_dispatch`, any wrap-up `session_end`
+    counts. That returns None with no network call. A pause or a
+    consolidation at or after the latest review covers an OPEN PR (pause
+    owns it into the next session) but not a MERGED one: that costs one gh
+    call, and a MERGED PR then warns that /PACT:wrap-up did not run. With no
+    `review_dispatch`, any pause or consolidation silences, as before.
 
     Also checks task metadata as fallback for PRs not tracked through the normal
     review workflow (preserves the existing safety-net regex detection).
 
-    When gh reports the PR MERGED, warns instead that /PACT:wrap-up did not
-    run, unless a wrap-up `session_end` (source "wrap-up") covers it.
+    Timestamps are compared as parsed datetimes. A missing or unparseable
+    `ts` never counts as covering the review, so a corrupt journal errs
+    toward a warning.
 
     This is detection-only. SessionEnd is async fire-and-forget and cannot run
     agents or memory operations.
@@ -99,33 +112,27 @@ def check_unpaused_pr(
         return None
 
     review_events = read_events("review_dispatch")
-    last_review_ts = review_events[-1].get("ts", "") if review_events else None
 
-    # Fix B (#453): structural consolidation signal — short-circuit if
-    # /PACT:wrap-up or /PACT:pause ran Pass 2 memory consolidation for
-    # the latest PR: a consolidation at or after the last review_dispatch,
-    # or any consolidation when no PR was dispatched for review. A
-    # consolidation that predates the latest review covers an earlier PR,
-    # not this one. Fail-open: read_events returns [] on missing journal /
-    # unreadable journal / corrupt entries, which falls through to the
-    # logic below.
-    consolidated = read_events("session_consolidated")
-    if any(last_review_ts is None or e.get("ts", "") >= last_review_ts for e in consolidated):
+    def covers(event: dict) -> bool:
+        """The event is at or after the latest review_dispatch (any event
+        covers when there is none)."""
+        if not review_events:
+            return True
+        return _at_or_after(event.get("ts"), review_events[-1].get("ts"))
+
+    # Wrap-up ran for this arc: no network (AC#4 for wrap-up cases).
+    if any(e.get("source") == "wrap-up" and covers(e) for e in read_events("session_end")):
         return None
 
-    paused_events = read_events("session_paused")
-
-    # Reconcile pause vs review timing: a pause only "covers" a PR when it
-    # occurred at-or-after that PR's dispatch. Bias toward "paused" (silence)
-    # on equal timestamps via `>=` to avoid spurious warnings on the
-    # 1-second ISO precision tie.
-    if paused_events and review_events:
-        last_pause_ts = paused_events[-1].get("ts", "")
-        if last_pause_ts >= last_review_ts:
-            return None  # Most recent PR was paused; safe.
-        # else fall through — current PR is unpaused
-    elif paused_events:
-        return None  # Paused, no PRs at all — safe.
+    # Fix B (#453) and the pause-vs-review reconciliation: a consolidation
+    # (wrap-up or pause Pass 2) or a pause at or after the latest review.
+    # Fail-open: read_events returns [] on missing / unreadable / corrupt
+    # journals, which falls through to the logic below.
+    covered = any(covers(e) for e in read_events("session_consolidated")) or any(
+        covers(e) for e in read_events("session_paused")
+    )
+    if covered and not review_events:
+        return None
 
     # Check journal for PR creation
     pr_number = None
@@ -154,30 +161,25 @@ def check_unpaused_pr(
     if not pr_number:
         return None
 
-    # Fix A (#453): live PR-state check, reached only when every cheaper
-    # signal has fallen through, so AC#4 (no network for wrap-up cases)
-    # is preserved structurally by the ordering above. A CLOSED PR needs
-    # nothing. A MERGED PR (including one merged via the GitHub web UI
-    # mid-session) warns unless /PACT:wrap-up ran for it: only a
-    # session_end with source "wrap-up", at or after the last
-    # review_dispatch, proves that. This hook's own session_end carries
-    # no source and never counts.
+    # Fix A (#453): live PR-state check. A CLOSED PR needs nothing. A MERGED
+    # PR (including one merged via the GitHub web UI mid-session) warns: the
+    # wrap-up check above already returned for a PR wrap-up covered. This
+    # hook's own session_end carries no source and never counts.
     #
     # Fail-open: check_pr_state returns "" on gh-missing / timeout /
-    # auth-expired / OSError, and we fall through to the open-PR warning,
-    # the conservative behavior when we cannot distinguish "offline" from
-    # "PR actually open."
+    # auth-expired / OSError. A covered (paused) PR stays silent then; an
+    # uncovered one gets the open-PR warning, the conservative behavior when
+    # we cannot distinguish "offline" from "PR actually open."
     pr_state = check_pr_state(pr_number)
     if pr_state == "CLOSED":
         return None
     if pr_state == "MERGED":
-        wrap_ups = [e for e in read_events("session_end") if e.get("source") == "wrap-up"]
-        if any(last_review_ts is None or e.get("ts", "") >= last_review_ts for e in wrap_ups):
-            return None
         return (
             f"PR #{pr_number} was merged but /PACT:wrap-up did not run: "
             f"the consolidation and the retrospective were skipped. Run /PACT:wrap-up."
         )
+    if covered:
+        return None
 
     return (
         f"Session ended without memory consolidation. "
@@ -1116,11 +1118,18 @@ def main():
         # Safety-net: warn if open PR detected but pause-mode wasn't run.
         # Returns a warning string (or None) so we can emit a single
         # session_end event with an optional `warning=` field.
+        # The check has its own try: a fault in it (a corrupt journal or task
+        # record, say) must not skip the session_end write and the cleanup
+        # below.
         tasks = get_task_list()
-        warning = check_unpaused_pr(
-            tasks=tasks,
-            project_slug=project_slug,
-        )
+        try:
+            warning = check_unpaused_pr(
+                tasks=tasks,
+                project_slug=project_slug,
+            )
+        except Exception as e:
+            print(f"Hook warning (session_end PR check): {e}", file=sys.stderr)
+            warning = None
 
         # Write a single session_end event to the journal (best-effort).
         # Wrapped in its own try/except so a journal failure does not skip
