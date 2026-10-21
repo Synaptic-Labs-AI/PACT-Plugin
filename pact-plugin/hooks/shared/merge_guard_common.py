@@ -2843,13 +2843,25 @@ def _pipeline_view(command: str) -> tuple[str, list]:
     return "".join(view), heredocs
 
 
+# A shell comment: `#` at the start of a word, through the end of the line. Run on a
+# view with quoted text and heredoc bodies blanked, so a `#` inside them never counts.
+_COMMENT_RE = re.compile(r"(?:^|(?<=[\s;&|(]))#[^\n]*", re.MULTILINE)
+_PRINT_ONLY_HEADS = frozenset({"echo", "printf"})
+
+
 def _code_arg_programs(command: str) -> list[tuple[str, str]]:
     """(interpreter head, program text) for each program given on an interpreter's
     command line (-c / -e / -r / deno eval / an awk program), wherever the interpreter
-    sits in the command (after sudo, env, uv run, …). Quoted text is never read as a head."""
+    sits in the command (after sudo, env, uv run, …). Quoted text, heredoc bodies and
+    shell comments are never read as a head, and neither is a word `echo` or `printf`
+    only prints."""
     out = []
-    view = _leg_slicing_view(command)
+    view = _COMMENT_RE.sub(lambda c: " " * len(c.group()), _pipeline_view(command)[0])
     for m in _INTERPRETER_WORD_RE.finditer(view):
+        leg_start = max((op.end() for op in _COMPOUND_OPS_RE.finditer(view, 0, m.start())), default=0)
+        words = view[leg_start:m.start()].split()
+        if words and os.path.basename(words[0]) in _PRINT_ONLY_HEADS:
+            continue
         end = _COMPOUND_OPS_RE.search(view, m.end())
         tokens = _shell_tokenize(command[m.start():end.start() if end else len(command)])
         if not tokens:

@@ -157,3 +157,28 @@ def test_text_outside_the_pipeline_is_not_fed_code(label, cmd):
 @pytest.mark.parametrize("label,cmd", PIPELINE_DENY, ids=[r[0] for r in PIPELINE_DENY])
 def test_text_inside_the_pipeline_is_fed_code(label, cmd):
     assert is_dangerous_command(cmd) is True
+
+
+# The interpreter direct-call scan reads only real command words: a shell comment and
+# the arguments of echo/printf name an interpreter without running it.
+NOT_A_COMMAND_ALLOW = [
+    ("trailing comment", f"git status  # python3 -c 'import os; os.system(\"{D}\")'"),
+    ("comment line", f"# python3 -c 'import os; os.system(\"{D}\")'\ngit log -1"),
+    ("echo carries the one-liner", f"echo python3 -c 'import os; os.system(\"{D}\")'"),
+    ("printf carries the one-liner", f"printf '%s\\n' python3 -c 'import os; os.system(\"{D}\")'"),
+]
+REAL_COMMAND_DENY = [
+    ("one-liner after a comment line", f"# note\npython3 -c 'import os; os.system(\"{D}\")'"),
+    ("one-liner after echo", f"echo start; python3 -c 'import os; os.system(\"{D}\")'"),
+    ("hash inside the code", f"python3 -c 'import os  # run it\nos.system(\"{D}\")'"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", NOT_A_COMMAND_ALLOW, ids=[r[0] for r in NOT_A_COMMAND_ALLOW])
+def test_interpreter_named_outside_a_command_word_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+@pytest.mark.parametrize("label,cmd", REAL_COMMAND_DENY, ids=[r[0] for r in REAL_COMMAND_DENY])
+def test_interpreter_in_a_command_word_is_still_judged(label, cmd):
+    assert is_dangerous_command(cmd) is True
