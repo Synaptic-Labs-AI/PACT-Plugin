@@ -3047,7 +3047,7 @@ def _python_aliases(masked: str) -> tuple[set, set]:
     import run`, `from os import system`) and module aliases (`import subprocess as sp`)."""
     bare, modules = set(), set()
     for m in _PY_FROM_IMPORT_RE.finditer(masked):
-        for part in (m.group(2) or m.group(3)).split(","):
+        for part in (m.group(2) or m.group(3) or "").split(","):
             words = part.split()
             if not words:
                 continue
@@ -5311,15 +5311,37 @@ def _leg_command_word(leg: str) -> "str | None":
     return None                                          # only assignments/redirects → no command
 
 
+# What the interpreter-program parsers can raise on malformed or unexpected text.
+_PARSER_ERRORS = (AttributeError, TypeError, ValueError, IndexError, KeyError, RecursionError)
+
+
+def _interpreter_code_runs_guarded(command: str, depth: int) -> bool:
+    """The direct-call judgment over every program this command hands an interpreter.
+    It only ADDS refusals, so a parser defect here must not refuse: an exception is
+    read as "no direct call found", never as a refusal (the pre-hook turns a raised
+    exception into a deny, which would block a good-faith command)."""
+    try:
+        return any(
+            _code_runs_guarded_directly(head, code, depth)
+            for head, code in _stdin_fed_code(command) + _code_arg_programs(command)
+        )
+    except _PARSER_ERRORS:
+        return False
+
+
 def _interpreter_names_primitive(leg: str, head: str, tokens: list) -> bool:
     """True iff an interpreter leg's program reaches a process. When the program given
     on the command line can be read, it is judged by its calls and statements outside
     string literals. Otherwise (a script, a module, an unusual launch form) the whole leg
     is searched for any primitive substring, which preserves (the over-block-safe side).
     `deno eval` is deno's one-liner SUBCOMMAND, not a call to eval."""
-    program = _program_from_tokens(head, tokens)
-    if program is not None:
-        return _program_names_primitive(head, program)
+    try:
+        program = _program_from_tokens(head, tokens)
+        verdict = _program_names_primitive(head, program) if program is not None else None
+    except _PARSER_ERRORS:
+        verdict = None                                   # a parser defect: whole-leg search
+    if verdict is not None:
+        return verdict
     text = leg
     if head == "deno" and len(tokens) > 1 and tokens[1] == "eval":
         text = re.sub(r"(?<![\w./-])deno\s+eval(?=\s|$)", "deno", leg, count=1)
@@ -5764,8 +5786,7 @@ def _is_dangerous_at_depth(command: str, depth: int) -> bool:
     # Code an interpreter reads from stdin (heredoc, here-string, pipe) is that
     # interpreter's program: it is refused when it passes a guarded command directly
     # to an exec primitive. The carriers below see it only as inert text.
-    if any(_code_runs_guarded_directly(head, code, depth)
-           for head, code in _stdin_fed_code(command) + _code_arg_programs(command)):
+    if _interpreter_code_runs_guarded(command, depth):
         return True
 
     # Normalize bash line continuations (\<newline>) via the shared P0 SSOT before

@@ -30,3 +30,37 @@ def test_multi_line_call_running_a_merge_is_refused(label, cmd):
 @pytest.mark.parametrize("label,cmd", MULTI_LINE_ALLOW, ids=[r[0] for r in MULTI_LINE_ALLOW])
 def test_multi_line_call_printing_a_merge_is_allowed(label, cmd):
     assert is_dangerous_command(cmd) is False
+
+
+# An empty import list is a syntax error in Python, but it reaches the classifier in
+# comments and quoted text. It must not raise: the pre-hook turns a raise into a deny.
+EMPTY_IMPORT_ALLOW = [
+    ("from os import ()", "python3 -c 'from os import (); print(1)'"),
+    ("from subprocess import ()", "python3 -c 'from subprocess import (); print(1)'"),
+    ("in a heredoc comment", f"python3 - <<'EOF'\n# from os import ()\nprint('{D}')\nEOF"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", EMPTY_IMPORT_ALLOW, ids=[r[0] for r in EMPTY_IMPORT_ALLOW])
+def test_empty_import_list_does_not_raise(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+def test_a_parser_error_never_becomes_a_refusal(monkeypatch):
+    """A defect in the program parsers degrades to the pre-parser behaviour instead of
+    raising into the pre-hook's fail-closed deny."""
+    import shared.merge_guard_common as mgc
+
+    def boom(*_args, **_kwargs):
+        raise AttributeError("parser defect")
+
+    monkeypatch.setattr(mgc, "_program_names_primitive", boom)
+    monkeypatch.setattr(mgc, "_code_runs_guarded_directly", boom)
+    assert is_dangerous_command("python3 -c 'print(1)'") is False
+    assert is_dangerous_command(f"python3 -c 'import os; os.system(\"{D}\")'") is True
+
+
+def test_empty_import_list_parses_to_no_aliases():
+    from shared.merge_guard_common import _python_aliases
+
+    assert _python_aliases("from os import ()") == (set(), set())
