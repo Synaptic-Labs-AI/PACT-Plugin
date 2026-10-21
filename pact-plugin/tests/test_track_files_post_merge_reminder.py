@@ -182,7 +182,13 @@ class TestReminderWording:
                       "prohibits the merge.\nOPEN", "stderr": "", "interrupted": False})
         text = _context(_run(tmp_path, frame))
         assert text == _POST_MERGE_REMINDER
-        assert text.startswith("If the merge succeeded,"), text
+        assert text.startswith("If the merge succeeded:"), text
+
+    def test_the_reminder_routes_a_peer_review_lead_to_its_pr_state_check(self):
+        """Inside /PACT:peer-review the lead continues at that command's PR-state
+        check (which invokes wrap-up on MERGED), not a bare wrap-up that skips it."""
+        assert "inside /PACT:peer-review, continue at its PR-state check" in _POST_MERGE_REMINDER
+        assert "otherwise invoke `/PACT:wrap-up` next" in _POST_MERGE_REMINDER
 
     def test_an_api_merge_is_a_merge(self, tmp_path):
         """F7: the classifier reads the REST merge endpoint as a merge, so the
