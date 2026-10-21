@@ -722,6 +722,49 @@ class TestMergedPrRealHook:
         assert "cleanup_summary" in types
 
 
+class TestResumeDigestShowsOnlyTheCurrentWarning:
+    """The resume digest, read from a real journal: a session_end warning shows
+    only while no later session_end supersedes it."""
+
+    def test_two_resumes_do_not_reprint_a_superseded_warning(self, session_dir):
+        from shared.session_resume import _build_journal_resume
+
+        merged = (
+            "PR #42 was merged but /PACT:wrap-up did not run: the consolidation "
+            "and the retrospective were skipped. Run /PACT:wrap-up."
+        )
+        _write_event("session_start", session_id="s1", project_dir="/p")
+        _write_event("review_dispatch", pr_number=42,
+                     pr_url="https://github.com/o/r/pull/42", reviewers=["x"])
+        _write_event("session_end", warning=merged)
+
+        first = _build_journal_resume(session_dir)
+        assert first is not None and merged in first
+
+        # The resumed session runs wrap-up, then ends cleanly.
+        _write_event("session_start", session_id="s1", project_dir="/p")
+        _write_event("session_end", source="wrap-up")
+        _write_event("session_end")
+
+        second = _build_journal_resume(session_dir) or ""
+        assert "**Warning**" not in second
+
+    def test_only_the_latest_warning_shows(self, session_dir):
+        from shared.session_resume import _build_journal_resume
+
+        _write_event("session_start", session_id="s1", project_dir="/p")
+        _write_event("session_end", warning="older open-PR warning")
+        _write_event("session_start", session_id="s1", project_dir="/p")
+        _write_event("session_end", warning="newer open-PR warning")
+
+        digest = _build_journal_resume(session_dir)
+
+        assert digest is not None
+        assert digest.count("**Warning**") == 1
+        assert "newer open-PR warning" in digest
+        assert "older open-PR warning" not in digest
+
+
 # ---------------------------------------------------------------------------
 # AC#3 true-positive preservation + legacy path preservation
 # ---------------------------------------------------------------------------

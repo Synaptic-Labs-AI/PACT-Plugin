@@ -1123,13 +1123,14 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
             )
         lines.append("")
 
-    # Check for warnings in session_end events
+    # A session_end warning shows only on the LATEST session_end in journal
+    # order: any later session_end (a wrap-up's, or a later session's end)
+    # supersedes it.
     end_events = [e for e in all_events if e.get("type") == "session_end"]
-    for end_event in end_events:
-        warning = end_event.get("warning")
-        if warning:
-            lines.append(f"**Warning**: {warning}")
-            lines.append("")
+    warning = end_events[-1].get("warning") if end_events else None
+    if warning:
+        lines.append(f"**Warning**: {warning}")
+        lines.append("")
 
     # Minimal output check
     if len(lines) <= 2:
