@@ -569,9 +569,11 @@ def _split_netstring(value: str) -> list[str] | None:
     items, i = [], 0
     while i < len(value):
         colon = value.find(":", i)
-        if colon <= i or not value[i:colon].isdigit():
+        length = value[i:colon]
+        # isdigit() alone accepts non-ASCII digits ("²") that int() rejects.
+        if colon <= i or not (length.isascii() and length.isdigit()):
             return None
-        end = colon + 1 + int(value[i:colon])
+        end = colon + 1 + int(length)
         if end > len(value):
             return None
         items.append(value[colon + 1:end])
@@ -616,7 +618,10 @@ def _mint_confirmation(context: dict) -> str:
     is_netstring = any(
         target is not None and context.get(k) == target for k in _NETSTRING_TARGET_KEYS
     )
-    if isinstance(target, str) and target == context.get("pr_number") and target.isdigit():
+    if (
+        isinstance(target, str) and target == context.get("pr_number")
+        and target.isascii() and target.isdigit()
+    ):
         where = f" on PR #{target}"
     elif isinstance(target, str):
         where = " on " + _readable_target(target, is_netstring)

@@ -154,6 +154,19 @@ class TestTargetRendering:
         notice = _mint_confirmation({"operation_type": "merge"})
         assert "an approval was recorded for a merge. It authorizes" in notice
 
+    @pytest.mark.parametrize("context", [
+        pytest.param({"operation_type": "branch-delete", "branch_set": "²:ab"}, id="netstring-length"),
+        pytest.param({"operation_type": "force-push",
+                      "force_push_implicit": "\x00implicit-force-push²:ab"}, id="sentinel-tail"),
+    ])
+    def test_a_non_ascii_digit_length_renders_without_raising(self, context):
+        """str.isdigit() accepts "²", which int() rejects; the render must not raise."""
+        assert "approval was recorded for" in _mint_confirmation(context)
+
+    def test_a_non_ascii_digit_pr_number_is_not_rendered_as_a_pr(self):
+        notice = _mint_confirmation({"operation_type": "merge", "pr_number": "²"})
+        assert "PR #" not in notice
+
 
 class TestBoundFlagRendering:
     """The bound flags are part of what a token authorizes, so the notice names
