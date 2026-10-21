@@ -123,11 +123,59 @@ def _run_main(
         "started_at": "",
     }
 
+    # The resolver seam (task_utils.resolve_task_dir) reads the context
+    # LATE-BOUND through the shared.pact_context module, so the
+    # agent_handoff_emitter.pact_context.get_pact_context patch below (which
+    # patches the shared module's attribute) reaches it: the persisted-name
+    # candidate is the context team. The resolver is EXISTENCE-ONLY, so also
+    # materialize a live tasks/{team} store for the same team — a context file
+    # alone no longer yields a name; no store means the emit path legitimately
+    # suppresses. A DEGENERATE team name creates no store (and no dir is
+    # materialized for a traversal value — mkdir would escape tmp); instead
+    # the resolver is PATCHED to return the raw name's join anyway, modeling
+    # the pre-resolver passthrough so the marker-side sanitization-guard
+    # tests (which simulate an impossible production shape on purpose: the
+    # context minter only ever writes safe names) stay NON-VACUOUS under the
+    # resolver seam.
+    from shared.session_state import is_safe_path_component as _is_safe
+    from shared.paths import get_claude_config_dir as _config_root
+
+    _extra_patches = []
+    if _is_safe(_resolved_ctx_team):
+        _store = _config_root() / "tasks" / _resolved_ctx_team
+        _store.mkdir(parents=True, exist_ok=True)
+        (_config_root() / "teams" / _resolved_ctx_team).mkdir(
+            parents=True, exist_ok=True
+        )
+    elif _resolved_ctx_team or (
+        context_team_name is _USE_STDIN_TEAM_NAME
+        and stdin_payload.get("team_name") == ""
+    ):
+        # A raw-Path join would normalize dot-shapes away (Path(".").name is
+        # ""), so hand back a stub whose .name is the RAW value verbatim —
+        # the emitter consumes only .name from the resolver's return. The
+        # empty-string arm fires only for an EXPLICIT team_name="" payload
+        # (the deliberate degenerate probe); an ABSENT field leaves the real
+        # resolver in charge (its None → legitimate suppress).
+        from types import SimpleNamespace as _SimpleNamespace
+        _extra_patches.append(
+            patch(
+                "agent_handoff_emitter.resolve_task_dir",
+                return_value=_SimpleNamespace(name=_resolved_ctx_team),
+            )
+        )
+
     with patch("agent_handoff_emitter.read_task_json", return_value=task_data), \
          patch("agent_handoff_emitter.append_event", side_effect=_append_spy), \
          patch("agent_handoff_emitter.get_journal_path", return_value=journal_path), \
          patch("agent_handoff_emitter.pact_context.get_pact_context", return_value=_ctx), \
          patch("sys.stdin", io.StringIO(json.dumps(stdin_payload))):
-        with pytest.raises(SystemExit) as exc_info:
-            main()
+        for _p in _extra_patches:
+            _p.start()
+        try:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        finally:
+            for _p in _extra_patches:
+                _p.stop()
     return exc_info.value.code

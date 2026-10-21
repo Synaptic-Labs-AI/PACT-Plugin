@@ -122,11 +122,11 @@ try:
         iter_team_task_jsons,
         is_teachback_subject,
         read_task_json,
+        task_dir_for,
     )
     from shared.intentional_wait import is_self_complete_exempt
     from shared.session_state import is_safe_path_component
     from shared.agent_handoff_marker import sanitize_path_component
-    from shared.paths import get_claude_config_dir
     _IMPORTS_OK = True
 except BaseException:  # noqa: BLE001 — fail-OPEN catch-all (this gate never denies)
     _IMPORTS_OK = False
@@ -348,23 +348,20 @@ def _atomic_claim(task_id: str, team_name: str) -> bool:
     # for the status flip.
     metadata["gate_writeback"] = True
 
-    # Writer/reader symlink-anchoring parity: mirror the sibling READERS'
-    # resolve()+relative_to containment assertion (read_task_json does
-    # `task_dir.resolve().relative_to(base.resolve())`; iter_team_task_jsons
-    # asserts the resolved team dir under the resolved tasks_root) BEFORE writing.
-    # team_name already passed is_safe_path_component (no traversal), but a
-    # SYMLINK at tasks/{team_name} pointing outside base is an ORTHOGONAL escape
-    # vector the readers guard and the writer must too — else os.replace could
-    # land the write outside the anchored tasks tree. Fail-OPEN on mismatch:
-    # return False → caller degrades to the M1 advisory (never deny, never write
-    # outside the anchored dir). Write via the UNresolved path after the check
-    # passes (matches read_task_json; inherits the same accepted TOCTOU window —
-    # parity, not gold-plating).
-    base = get_claude_config_dir() / "tasks"
-    tasks_root = base / team_name
-    try:
-        tasks_root.resolve().relative_to(base.resolve())
-    except (OSError, ValueError):
+    # Writer/reader symlink-anchoring parity, ROUTED THROUGH THE SEAM: the
+    # resolve()+relative_to containment assertion and the is_safe_path_component
+    # validation the sibling READERS apply now live in task_utils.task_dir_for
+    # (the one containment implementation), and this writer joins through the
+    # same helper — a SYMLINK at tasks/{team_name} pointing outside base is
+    # still rejected (task_dir_for -> None) so os.replace cannot land the write
+    # outside the anchored tasks tree. Fail-OPEN on mismatch: return False →
+    # caller degrades to the M1 advisory (never deny, never write outside the
+    # anchored dir). Write via the UNresolved join after the check passes
+    # (matches read_task_json; inherits the same accepted TOCTOU window —
+    # parity, not gold-plating). Construction-only: no existence claim; the
+    # mkdir below is the writer's own race backstop, as before.
+    tasks_root = task_dir_for(team_name)
+    if tasks_root is None:
         return False
     target = tasks_root / f"{sanitized}.json"
     tmp = tasks_root / f".{sanitized}.json.tmp"

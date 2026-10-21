@@ -3697,7 +3697,7 @@ def _compact_tasks_dir(tmp_path, monkeypatch, pact_context):
     session_id = "aabb1122-0000-0000-0000-000000000000"
     team_name = "session-aabb1122"
     tasks_dir = tmp_path / ".claude" / "tasks" / team_name
-    tasks_dir.mkdir(parents=True)
+    tasks_dir.mkdir(parents=True, exist_ok=True)
     pact_context(session_id=session_id, team_name=team_name)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -6571,7 +6571,7 @@ class TestSessionInitCompactBranchExceptions:
         # fire, making their parametrize cases vacuously pass. Team session →
         # tasks resolve under {team_name} (the team-dir resolution fix).
         tasks_dir = tmp_path / ".claude" / "tasks" / team_name
-        tasks_dir.mkdir(parents=True)
+        tasks_dir.mkdir(parents=True, exist_ok=True)
         (tasks_dir / "f-1.json").write_text(json.dumps({
             "id": "f-1",
             "subject": "Feature for helper-raise test",
@@ -6785,7 +6785,7 @@ class TestSessionInitDirectiveAcrossAllSources:
 
         # Team session → tasks resolve under {team_name} (team-dir fix).
         tasks_dir = tmp_path / ".claude" / "tasks" / team_name
-        tasks_dir.mkdir(parents=True)
+        tasks_dir.mkdir(parents=True, exist_ok=True)
         feature = {
             "id": "f-order",
             "subject": "Order invariant feature",

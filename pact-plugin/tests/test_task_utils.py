@@ -62,7 +62,7 @@ class TestGetTaskList:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         tasks_dir = tmp_path / ".claude" / "tasks" / "test-team"
-        tasks_dir.mkdir(parents=True)
+        tasks_dir.mkdir(parents=True, exist_ok=True)
         write_task(tasks_dir, "1", {"subject": "Test task", "status": "pending"})
         write_task(tasks_dir, "2", {"subject": "Another task", "status": "in_progress"})
 
@@ -82,7 +82,7 @@ class TestGetTaskList:
 
         # Create tasks under task-list-id, not session-id
         tasks_dir = tmp_path / ".claude" / "tasks" / "task-list-id"
-        tasks_dir.mkdir(parents=True)
+        tasks_dir.mkdir(parents=True, exist_ok=True)
         write_task(tasks_dir, "1", {"subject": "Task", "status": "pending"})
 
         result = get_task_list()
@@ -99,7 +99,7 @@ class TestGetTaskList:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         tasks_dir = tmp_path / ".claude" / "tasks" / "test-session"
-        tasks_dir.mkdir(parents=True)
+        tasks_dir.mkdir(parents=True, exist_ok=True)
 
         result = get_task_list()
         assert result is None
@@ -113,7 +113,7 @@ class TestGetTaskList:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         tasks_dir = tmp_path / ".claude" / "tasks" / "test-team"
-        tasks_dir.mkdir(parents=True)
+        tasks_dir.mkdir(parents=True, exist_ok=True)
         (tasks_dir / "bad.json").write_text("not json", encoding="utf-8")
         write_task(tasks_dir, "1", {"subject": "Good task", "status": "pending"})
 
@@ -132,7 +132,7 @@ class TestGetTaskList:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         tasks_dir = tmp_path / ".claude" / "tasks" / "test-session"
-        tasks_dir.mkdir(parents=True)
+        tasks_dir.mkdir(parents=True, exist_ok=True)
 
         with patch.object(Path, "glob", side_effect=PermissionError("denied")):
             result = get_task_list()
@@ -150,7 +150,7 @@ class TestGetTaskList:
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         tasks_dir = tmp_path / ".claude" / "tasks" / "solo-session"
-        tasks_dir.mkdir(parents=True)
+        tasks_dir.mkdir(parents=True, exist_ok=True)
         write_task(tasks_dir, "1", {"subject": "Solo task", "status": "in_progress"})
 
         result = get_task_list()
@@ -170,7 +170,7 @@ class TestGetTaskList:
         from task_utils import get_task_list
         pact_context(session_id="session-id", team_name="")
         base = tmp_path / "tasks"
-        base.mkdir(parents=True)
+        base.mkdir(parents=True, exist_ok=True)
         escape = tmp_path / "escape"
         escape.mkdir()
         (escape / "secret.json").write_text(
@@ -193,7 +193,7 @@ class TestGetTaskList:
         monkeypatch.setenv("CLAUDE_CODE_TASK_LIST_ID", "pact-abcd1234")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         tasks_dir = tmp_path / ".claude" / "tasks" / "pact-abcd1234"
-        tasks_dir.mkdir(parents=True)
+        tasks_dir.mkdir(parents=True, exist_ok=True)
         write_task(tasks_dir, "1", {"subject": "Legit", "status": "in_progress"})
         result = get_task_list()
         assert result is not None and len(result) == 1
@@ -209,7 +209,7 @@ class TestGetTaskList:
         pact_context(session_id="session-id", team_name="")
         base = tmp_path / "tasks"
         tdir = base / "solo-x"
-        tdir.mkdir(parents=True)
+        tdir.mkdir(parents=True, exist_ok=True)
         secret = tmp_path / "secret.json"  # OUTSIDE base
         secret.write_text(json.dumps({"id": "leak", "subject": "LEAKED"}), encoding="utf-8")
         write_task(tdir, "1", {"subject": "Real", "status": "in_progress"})
@@ -232,7 +232,7 @@ class TestGetTaskList:
         from task_utils import get_task_list
         pact_context(session_id="session-id", team_name="")
         base = tmp_path / "tasks"
-        base.mkdir(parents=True)
+        base.mkdir(parents=True, exist_ok=True)
         outside = tmp_path / "escapedir"  # OUTSIDE base
         outside.mkdir()
         (outside / "secret.json").write_text(
@@ -257,7 +257,7 @@ class TestGetTaskList:
         pact_context(session_id="session-id", team_name="")
         base = tmp_path / "tasks"
         tdir = base / "solo-x"
-        tdir.mkdir(parents=True)
+        tdir.mkdir(parents=True, exist_ok=True)
         write_task(tdir, "1", {"subject": "Real", "status": "in_progress"})
         (tdir / ".evil.json").write_text(
             json.dumps({"id": "e", "subject": "DOTFILE-INJECTED"}), encoding="utf-8"
@@ -282,7 +282,7 @@ class TestGetTaskList:
         pact_context(session_id="session-id", team_name="")
         base = tmp_path / "tasks"
         tdir = base / "solo-x"
-        tdir.mkdir(parents=True)
+        tdir.mkdir(parents=True, exist_ok=True)
         write_task(tdir, "1", {"subject": "Real", "status": "in_progress"})
         (tdir / "bad.json").write_text(json.dumps([1, 2, 3]), encoding="utf-8")  # valid JSON, non-dict
         monkeypatch.setenv("CLAUDE_CODE_TASK_LIST_ID", "solo-x")
@@ -309,7 +309,7 @@ class TestGetTaskList:
         pact_context(session_id="session-id", team_name="")
         base = tmp_path / "tasks"
         d = base / "a b"
-        d.mkdir(parents=True)
+        d.mkdir(parents=True, exist_ok=True)
         (d / "1.json").write_text(
             json.dumps({"id": "1", "subject": "NONALLOWLISTED"}), encoding="utf-8"
         )
@@ -654,7 +654,7 @@ class TestReadTaskJsonContainmentParity:
         from task_utils import read_task_json
         base = tmp_path / "tasks"
         tdir = base / "pact-legit-team"
-        tdir.mkdir(parents=True)
+        tdir.mkdir(parents=True, exist_ok=True)
         (tdir / "5.json").write_text(
             json.dumps({"id": "5", "subject": "Real"}), encoding="utf-8"
         )
@@ -668,7 +668,7 @@ class TestReadTaskJsonContainmentParity:
         # symlink and reads the planted out-of-base secret.
         from task_utils import read_task_json
         base = tmp_path / "tasks"
-        base.mkdir(parents=True)
+        base.mkdir(parents=True, exist_ok=True)
         outside = tmp_path / "escapedir"
         outside.mkdir()
         (outside / "7.json").write_text(
@@ -691,7 +691,7 @@ class TestReadTaskJsonContainmentParity:
         from task_utils import read_task_json
         base = tmp_path / "tasks"
         nested = base / "sub" / "evil"
-        nested.mkdir(parents=True)
+        nested.mkdir(parents=True, exist_ok=True)
         (nested / "3.json").write_text(
             json.dumps({"id": "3", "subject": "NESTED"}), encoding="utf-8"
         )
@@ -731,7 +731,7 @@ class TestReadTaskJsonContainmentParity:
             )
         base = tmp_path / "tasks"
         lowered_dir = base / "session-deadbeef"
-        lowered_dir.mkdir(parents=True)
+        lowered_dir.mkdir(parents=True, exist_ok=True)
         (lowered_dir / "5.json").write_text(
             json.dumps({"id": "5", "subject": "CaseFolded"}), encoding="utf-8"
         )
@@ -764,7 +764,7 @@ class TestReadTaskJsonResolverEnvSet:
 
         config_dir = tmp_path / "config"
         team_dir = config_dir / "tasks" / "pact-relocated"
-        team_dir.mkdir(parents=True)
+        team_dir.mkdir(parents=True, exist_ok=True)
         (team_dir / "7.json").write_text(
             json.dumps({"id": "7", "subject": "relocated task"}), encoding="utf-8")
         fake_home = tmp_path / "home"
@@ -780,7 +780,7 @@ class TestReadTaskJsonResolverEnvSet:
         from task_utils import read_task_json
 
         config_dir = tmp_path / "config"
-        (config_dir / "tasks" / "pact-relocated").mkdir(parents=True)
+        (config_dir / "tasks" / "pact-relocated").mkdir(parents=True, exist_ok=True)
         fake_home = tmp_path / "home"
         fake_home.mkdir()
         monkeypatch.setattr(Path, "home", lambda: fake_home)

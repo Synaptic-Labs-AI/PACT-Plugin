@@ -394,7 +394,7 @@ def test_silent_when_owner_is_teachback_exempt_secretary(tmp_path, monkeypatch, 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     pact_context(team_name="test-team", session_id="test-session")
     team_dir = tmp_path / ".claude" / "teams" / "test-team"
-    team_dir.mkdir(parents=True)
+    team_dir.mkdir(parents=True, exist_ok=True)
     (team_dir / "config.json").write_text(
         json.dumps({
             "team_name": "test-team",
@@ -424,7 +424,7 @@ def test_advisory_when_pact_owner_is_not_teachback_exempt(tmp_path, monkeypatch,
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     pact_context(team_name="test-team", session_id="test-session")
     team_dir = tmp_path / ".claude" / "teams" / "test-team"
-    team_dir.mkdir(parents=True)
+    team_dir.mkdir(parents=True, exist_ok=True)
     (team_dir / "config.json").write_text(
         json.dumps({
             "team_name": "test-team",
@@ -456,7 +456,7 @@ def test_silent_when_teachback_exempt_resolves_via_team_config_agent_type(
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     pact_context(team_name="test-team", session_id="test-session")
     team_dir = tmp_path / ".claude" / "teams" / "test-team"
-    team_dir.mkdir(parents=True)
+    team_dir.mkdir(parents=True, exist_ok=True)
     (team_dir / "config.json").write_text(
         json.dumps({
             "team_name": "test-team",
@@ -488,7 +488,7 @@ def test_teachback_addblocks_missing_still_fires_for_stray_secretary_teachback(
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     pact_context(team_name="test-team", session_id="test-session")
     team_dir = tmp_path / ".claude" / "teams" / "test-team"
-    team_dir.mkdir(parents=True)
+    team_dir.mkdir(parents=True, exist_ok=True)
     (team_dir / "config.json").write_text(
         json.dumps({
             "team_name": "test-team",
@@ -527,7 +527,7 @@ def test_advisory_when_pact_owner_not_in_members_fails_closed(tmp_path, monkeypa
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     pact_context(team_name="test-team", session_id="test-session")
     team_dir = tmp_path / ".claude" / "teams" / "test-team"
-    team_dir.mkdir(parents=True)
+    team_dir.mkdir(parents=True, exist_ok=True)
     (team_dir / "config.json").write_text(
         json.dumps({
             "team_name": "test-team",
@@ -569,7 +569,7 @@ def _setup_team_inbox(
     """
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     inbox_dir = tmp_path / ".claude" / "teams" / team_name / "inboxes"
-    inbox_dir.mkdir(parents=True)
+    inbox_dir.mkdir(parents=True, exist_ok=True)
     if paired_offset_seconds is not None:
         ts = datetime.now(timezone.utc).timestamp() - paired_offset_seconds
         ts_iso = (
@@ -888,7 +888,7 @@ def test_silent_when_secretary_self_completes(tmp_path, monkeypatch, pact_contex
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     pact_context(team_name="test-team", session_id="test-session")
     team_dir = tmp_path / ".claude" / "teams" / "test-team"
-    team_dir.mkdir(parents=True)
+    team_dir.mkdir(parents=True, exist_ok=True)
     (team_dir / "config.json").write_text(
         json.dumps({
             "team_name": "test-team",
@@ -935,7 +935,7 @@ def test_advisory_when_owner_named_secretary_without_agenttype(
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     pact_context(team_name="test-team", session_id="test-session")
     team_dir = tmp_path / ".claude" / "teams" / "test-team"
-    team_dir.mkdir(parents=True)
+    team_dir.mkdir(parents=True, exist_ok=True)
     (team_dir / "config.json").write_text(
         json.dumps({
             "team_name": "test-team",
@@ -2018,7 +2018,7 @@ def test_silent_r4_on_teachback_exempt_secretary(
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     pact_context(team_name="test-team", session_id="test-session")
     team_dir = tmp_path / ".claude" / "teams" / "test-team"
-    team_dir.mkdir(parents=True)
+    team_dir.mkdir(parents=True, exist_ok=True)
     (team_dir / "config.json").write_text(
         json.dumps({
             "team_name": "test-team",
@@ -2594,7 +2594,7 @@ def _setup_blocks_pair(
     Used by R3 + R5 branch tests."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     tasks_dir = tmp_path / ".claude" / "tasks" / team_name
-    tasks_dir.mkdir(parents=True)
+    tasks_dir.mkdir(parents=True, exist_ok=True)
     task_a = {
         "id": task_a_id,
         "subject": "preparer: TEACHBACK for foo",
@@ -2762,7 +2762,7 @@ def test_r3_band_unresolvable_when_blocks_missing(
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     pact_context(team_name="test-team", session_id="test-session")
     tasks_dir = tmp_path / ".claude" / "tasks" / "test-team"
-    tasks_dir.mkdir(parents=True)
+    tasks_dir.mkdir(parents=True, exist_ok=True)
     task_a = {
         "id": "1",
         "subject": "preparer: TEACHBACK for foo",
@@ -2798,7 +2798,7 @@ def test_r3_band_unresolvable_when_task_b_missing(
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     pact_context(team_name="test-team", session_id="test-session")
     tasks_dir = tmp_path / ".claude" / "tasks" / "test-team"
-    tasks_dir.mkdir(parents=True)
+    tasks_dir.mkdir(parents=True, exist_ok=True)
     task_a = {
         "id": "1",
         "subject": "preparer: TEACHBACK for foo",
@@ -2966,7 +2966,7 @@ def test_r5_silent_on_non_teachback_subject(
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     pact_context(team_name="test-team", session_id="test-session")
     tasks_dir = tmp_path / ".claude" / "tasks" / "test-team"
-    tasks_dir.mkdir(parents=True)
+    tasks_dir.mkdir(parents=True, exist_ok=True)
     task = {
         "id": "1",
         "subject": "implement foo",  # NOT a teachback subject

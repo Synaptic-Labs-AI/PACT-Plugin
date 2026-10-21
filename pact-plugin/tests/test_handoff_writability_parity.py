@@ -419,16 +419,18 @@ class TestMarkerKeyConvergence:
 
     def test_both_paths_resolve_team_name_from_get_pact_context(self):
         """Source pin backstopping the behavioral convergence: BOTH the b1
-        resolution and the b2/b3 caller resolution read team_name from
-        get_pact_context().get("team_name", ...). Fails if a future edit
-        reintroduces a divergent source (e.g. an input_data/stdin read on b1, or
-        a bespoke team_name resolution at the lead-side call site)."""
-        RESOLVE = 'get_pact_context().get("team_name"'
+        resolution and the b2/b3 caller resolution derive team_name through
+        the resolver seam (resolve_task_dir, which reads the context candidates
+        — aligned first, then the persisted get_pact_context()["team_name"]).
+        Fails if a future edit reintroduces a divergent source (e.g. an
+        input_data/stdin read on b1, or a bespoke raw-context read at the
+        lead-side call site — the #1020 class this seam closed)."""
+        RESOLVE = "resolve_task_dir()"
         b1_src = inspect.getsource(b1.main)
         assert RESOLVE in b1_src, (
             "b1 (agent_handoff_emitter.main) no longer resolves the marker "
-            "team_name from get_pact_context().get('team_name', ...) — the AC-5 "
-            "rebind regressed (a divergent source splits the marker key)."
+            "team_name through resolve_task_dir() — the single-source rebind "
+            "regressed (a divergent source splits the marker key)."
         )
         # b2/b3 resolve team_name at the evaluate_lifecycle function scope and
         # PASS it into _emit_lead_side_agent_handoff. Pin the resolution at the
@@ -436,9 +438,9 @@ class TestMarkerKeyConvergence:
         caller_src = inspect.getsource(tlg.evaluate_lifecycle)
         assert RESOLVE in caller_src, (
             "the lead-side caller (task_lifecycle_gate.evaluate_lifecycle) no "
-            "longer resolves team_name from get_pact_context().get('team_name', "
-            "...) before feeding _emit_lead_side_agent_handoff — b2/b3 would "
-            "diverge from b1's marker key."
+            "longer resolves team_name through resolve_task_dir() before "
+            "feeding _emit_lead_side_agent_handoff — b2/b3 would diverge from "
+            "b1's marker key."
         )
 
     @pytest.mark.parametrize(

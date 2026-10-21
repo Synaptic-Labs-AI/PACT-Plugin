@@ -213,6 +213,13 @@ class TestMarkerFailOpen:
         monkeypatch.setenv("HOME", str(tmp_path))
         from agent_handoff_emitter import main
         from shared.agent_handoff_marker import occupant_hash
+        from shared.paths import get_claude_config_dir as _config_root
+
+        # The resolver seam is EXISTENCE-ONLY: materialize the live store the
+        # context team names, or the emit path legitimately suppresses before
+        # the marker-claim/journal-write sequence this test drives.
+        (_config_root() / "tasks" / "pact-test").mkdir(parents=True, exist_ok=True)
+        (_config_root() / "teams" / "pact-test").mkdir(parents=True, exist_ok=True)
 
         append_call_count = {"n": 0}
 

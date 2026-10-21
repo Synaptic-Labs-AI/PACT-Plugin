@@ -19,6 +19,9 @@ Functions:
     find_active_agents: Find all active agent tasks
     find_blockers: Find blocker/algedonic tasks
     build_post_compaction_checkpoint: Build [POST-COMPACTION CHECKPOINT] message from Task state
+    task_dir_for: Containment-validated join of one team name under the tasks root
+    resolve_team_dir: Resolve the live teams/{team} dir from context candidates
+    resolve_task_dir: Resolve the live tasks/{team} dir from context candidates
     iter_team_task_jsons: Yield parsed task JSONs from a team dir (path-traversal safe)
     read_task_json: Read the raw task JSON by id + team_name (path-traversal safe)
     is_teachback_subject: True iff a subject matches the canonical Teachback shape
@@ -33,6 +36,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from shared.pact_context import get_session_id, get_team_name
+import shared.pact_context as _pact_context_module
 from shared.session_state import is_safe_path_component
 from shared.paths import get_claude_config_dir
 
@@ -356,6 +360,178 @@ def build_post_compaction_checkpoint(
     return "\n".join(lines)
 
 
+# ─── team/task path resolution (the one seam every hook builds paths through) ─
+#
+# Two layers:
+#   * task_dir_for / _team_dir_under — CONSTRUCTION: validate one name, join it
+#     under one root, assert containment. No existence claim. This is the
+#     containment SSOT: the R3 symlink-escape anchor (resolve + relative_to)
+#     and the is_safe_path_component allowlist live HERE and nowhere else, so
+#     migrating a caller to these helpers RETIRES that caller's local copy
+#     rather than adding a second one.
+#   * resolve_task_dir / resolve_team_dir — RESOLUTION: pick the live store
+#     from context candidates (aligned-first, one-directional), existence-only.
+#     Non-TTY harnesses key the store by the full session UUID while the
+#     persisted context name says "session-<id8>"; the resolver absorbs that
+#     divergence so raw reads of get_pact_context()["team_name"] cannot address
+#     the wrong (absent) store — the #1020 silent-HANDOFF-loss class.
+
+
+def _team_dir_under(base: Path, name: object) -> Path | None:
+    """Containment SSOT for ONE team-keyed name under ONE root.
+
+    Case-folds the name before validating (parity with read_task_json's
+    historical folding and the O_EXCL marker SSOT's normalization, so every
+    sink treats a mixed-case name identically), validates with
+    is_safe_path_component, joins under ``base``, and asserts the resolved dir
+    stays under the resolved base (symlink-escape defense). Returns the JOINED
+    (unresolved) dir on success, ``None`` for any unsafe/absent name — never
+    raises, so callers fail open exactly as they did with inline copies.
+    """
+    try:
+        if not isinstance(name, str):
+            return None
+        folded = name.strip().lower()
+        if not folded or not is_safe_path_component(folded):
+            return None
+        base_resolved = base.resolve()
+        team_dir = base / folded
+        team_dir.resolve().relative_to(base_resolved)
+        return team_dir
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def task_dir_for(team_name: object, tasks_base_dir: str | Path | None = None) -> Path | None:
+    """Construction-only join of ``team_name`` under the tasks root.
+
+    The explicit-name form of the seam for callers that hold their OWN
+    team name from a non-context SSOT (task_claim_gate resolves the registry
+    @team half, which may legitimately differ from the context candidates).
+    Validates + joins + anchors via ``_team_dir_under``; makes NO existence
+    claim — writers mkdir on top of the returned dir exactly as they did with
+    their local builds. ``None`` when the name is unusable (fail-open).
+    """
+    try:
+        base = (
+            Path(tasks_base_dir)
+            if tasks_base_dir
+            else (get_claude_config_dir() / "tasks")
+        )
+        return _team_dir_under(base, team_name)
+    except (OSError, ValueError):
+        return None
+
+
+def _context_team_candidates() -> tuple[str, str]:
+    """The aligned and persisted team names from the context cache, folded.
+
+    Returns ``(aligned, persisted)`` — aligned from get_team_name() (the
+    identity-matched resolver; "" on its fail-closed paths), persisted from
+    get_pact_context()["team_name"]. Both lowercased/stripped; "" when the
+    cache is uninitialised. Never raises. Candidate ORDER (aligned first) is
+    one-directional: resolution may only UPGRADE from the persisted name to
+    the identity-matched one, never pick a name the resolver distrusts.
+
+    Accesses the context through the MODULE (late-bound
+    ``shared.pact_context.<name>``), not from-imported names: the test
+    harnesses patch the pact_context module's attributes (e.g.
+    ``patch.object(emitter.pact_context, "get_pact_context", ...)``), and a
+    from-imported binding here would silently dodge every such patch. The
+    explicit-name paths (get_task_list) keep their from-imported bindings —
+    those are patched at the task_utils attribute in tests, by design.
+    """
+    try:
+        aligned = (_pact_context_module.get_team_name() or "").strip().lower()
+    except Exception:
+        aligned = ""
+    try:
+        raw = _pact_context_module.get_pact_context().get("team_name", "")
+        persisted = raw.strip().lower() if isinstance(raw, str) else ""
+    except Exception:
+        persisted = ""
+    return aligned, persisted
+
+
+def _resolve_live_team_dir(root: Path) -> Path | None:
+    """Resolve the LIVE team dir under ``root`` from context candidates.
+
+    Resolution order (existence-only — first existing dir wins):
+      1. the aligned name (get_team_name()),
+      2. the persisted context name,
+      3. the session-id dir (the config-less UUID-keyed store), if it exists.
+    BOTH-DISAGREE fails CLOSED: when the aligned and persisted names differ
+    and BOTH name existing dirs under ``root``, the substrate is ambiguous
+    (a stale team lingers beside the live one) and picking either would
+    silently address the wrong store — return None and let consumers
+    suppress, mirroring bootstrap_marker_writer's ambiguity suppression.
+    Never raises; None when no candidate resolves.
+    """
+    try:
+        aligned, persisted = _context_team_candidates()
+        if aligned and persisted and aligned != persisted:
+            first = _team_dir_under(root, aligned)
+            second = _team_dir_under(root, persisted)
+            if (
+                first is not None
+                and second is not None
+                and first.is_dir()
+                and second.is_dir()
+            ):
+                return None  # ambiguous substrate — fail closed, consumers suppress
+        seen: set[str] = set()
+        for candidate in (aligned, persisted, _pact_context_module.get_session_id()):
+            if not isinstance(candidate, str):
+                continue
+            folded = candidate.strip().lower()
+            if not folded or folded in seen:
+                continue
+            seen.add(folded)
+            team_dir = _team_dir_under(root, folded)
+            if team_dir is not None and team_dir.is_dir():
+                return team_dir
+        return None
+    except Exception:
+        return None
+
+
+def resolve_team_dir(teams_dir: str | None = None) -> Path | None:
+    """Resolve the live ``teams/{team}`` dir from context candidates.
+
+    Aligned-first, one-directional, existence-only, never raises. ``None``
+    when nothing resolves (callers fail open — absence of a team dir is the
+    existing "no team state" signal, not an error). ``teams_dir`` mirrors the
+    ``_resolve_aligned_team_name`` override seam (testing only).
+    """
+    try:
+        base = Path(teams_dir) if teams_dir else (get_claude_config_dir() / "teams")
+        return _resolve_live_team_dir(base)
+    except (OSError, ValueError):
+        return None
+
+
+def resolve_task_dir(tasks_base_dir: str | Path | None = None) -> Path | None:
+    """Resolve the live ``tasks/{team}`` dir from context candidates.
+
+    The #1020 fix's read side: replaces raw ``get_pact_context()["team_name"]``
+    reads that addressed ``tasks/session-<id8>/`` while the store lived under
+    the full session UUID. Same resolution order and BOTH-DISAGREE fail-closed
+    cell as ``resolve_team_dir``; ``tasks_base_dir`` mirrors task_utils' own
+    override idiom (``Path(tasks_base_dir) if tasks_base_dir else ...``).
+    Existence-only: writability is never probed (an explicit opt-in would be
+    added only when a writer wants fail-fast — none does today).
+    """
+    try:
+        base = (
+            Path(tasks_base_dir)
+            if tasks_base_dir
+            else (get_claude_config_dir() / "tasks")
+        )
+        return _resolve_live_team_dir(base)
+    except (OSError, ValueError):
+        return None
+
+
 def iter_team_task_jsons(
     team_name: str,
     tasks_base_dir: str | None = None,
@@ -364,12 +540,15 @@ def iter_team_task_jsons(
     Yield parsed task JSON dicts from ~/.claude/tasks/{team_name}/*.json.
 
     Path-traversal defense (single source of truth for per-team task
-    iteration):
+    iteration), re-expressed on the task_dir_for containment seam:
       - team_name validated via is_safe_path_component (positive
         allowlist; rejects empty, non-string, traversal fragments,
-        separators, controls, whitespace).
-      - tasks_root resolved once; team_dir resolved and asserted under
-        tasks_root via relative_to (symlink-escape defense).
+        separators, controls, whitespace) INSIDE task_dir_for, with the
+        resolve/relative_to symlink-escape anchor — one containment
+        implementation, not a per-caller copy.
+    NO candidate fallthrough: this iterator addresses exactly
+    tasks/{team_name}/ as passed (callers holding their own name keep their
+    semantics); context-candidate resolution is resolve_task_dir's job.
 
     Args:
         team_name: Team identifier; the {team_name} path component.
@@ -388,23 +567,11 @@ def iter_team_task_jsons(
     Yields:
         dict per successfully-parsed task JSON file.
     """
-    if not is_safe_path_component(team_name):
+    team_dir = task_dir_for(team_name, tasks_base_dir=tasks_base_dir)
+    if team_dir is None or not team_dir.is_dir():
         return
     try:
-        base = Path(tasks_base_dir) if tasks_base_dir else (get_claude_config_dir() / "tasks")
-        tasks_root = base.resolve()
-    except OSError:
-        return
-    team_dir = tasks_root / team_name
-    try:
-        resolved_team_dir = team_dir.resolve()
-        resolved_team_dir.relative_to(tasks_root)
-    except (OSError, ValueError):
-        return  # symlink escape or unreadable path
-    if not resolved_team_dir.exists():
-        return
-    try:
-        for task_file in resolved_team_dir.glob("*.json"):
+        for task_file in team_dir.glob("*.json"):
             # Exclude dotfile-prefixed JSON files: pathlib glob includes
             # them, but the platform's task system never writes them.
             # An attacker dropping one into the team's tasks dir could
@@ -467,36 +634,23 @@ def read_task_json(
     base = Path(tasks_base_dir)
 
     task_dirs = []
-    # Case-fold for the team-dir lookup so this status-read sink and the O_EXCL
-    # marker sink treat team_name case IDENTICALLY. The marker SSOT
-    # (agent_handoff_marker._resolve_marker_target) lowercases team_name before
-    # deriving its dir; this reader historically did not, so the two sinks could
-    # diverge on a mixed-case name. Harmless today (generate_team_name mints
-    # lowercase-only "session-[a-f0-9-]"), so this is a latent-only convergence:
-    # for any real value lowered == original. Validate the FOLDED value so a
-    # name that is safe only after folding cannot reach the join.
-    team_name_lc = team_name.lower() if team_name else team_name
-    # Bounded containment parity, guard (1): reject a traversal team_name
-    # (mirror iter_team_task_jsons's is_safe_path_component return-on-invalid).
-    # An unsafe team_name skips the team dir and falls through to the bare-base
-    # read, preserving the fail-open {} contract. Legit pact-<slug>/UUID names
-    # are single [A-Za-z0-9_-] components and pass unchanged.
-    if team_name_lc and is_safe_path_component(team_name_lc):
-        task_dirs.append(base / team_name_lc)
+    # Team-dir lookup routes through the task_dir_for containment seam: the
+    # case-fold (parity with the O_EXCL marker SSOT's normalization, so this
+    # status-read sink and the marker sink treat team_name case IDENTICALLY —
+    # harmless today since generate_team_name mints lowercase-only names),
+    # the is_safe_path_component allowlist (guard 1) and the resolve/
+    # relative_to symlink-escape anchor (guard 2) all live inside the seam —
+    # one containment implementation. An unsafe team_name yields None here,
+    # skipping the team dir and falling through to the bare-base read,
+    # preserving the fail-open {} contract. Only the single-named-file read
+    # semantics stay local (this reader reads ONE file, never globs, so the
+    # glob-result hygiene guards are correctly absent).
+    team_dir = task_dir_for(team_name, tasks_base_dir=tasks_base_dir)
+    if team_dir is not None:
+        task_dirs.append(team_dir)
     task_dirs.append(base)
 
     for task_dir in task_dirs:
-        # Bounded containment parity, guard (2): skip a task_dir that resolves
-        # OUTSIDE base — e.g. a safe-named team dir that is a SYMLINK escaping
-        # the tasks base. Mirror the sibling readers' resolve()+relative_to;
-        # fail-open (continue to the bare-base fallback), preserving {}. Only
-        # guards (1)+(2) apply to this single-named-file reader; the glob-result
-        # hygiene guards (per-file is_symlink / dotfile skip / isinstance(dict))
-        # are correctly absent — read_task_json reads ONE named file, never globs.
-        try:
-            task_dir.resolve().relative_to(base.resolve())
-        except (ValueError, OSError):
-            continue
         task_file = task_dir / f"{task_id}.json"
         # M2 (security): exists() is INSIDE the try and ValueError is caught.
         # A NUL byte in task_id that slips past the sanitizer raises
