@@ -2809,11 +2809,38 @@ def _stdin_fed_code(command: str) -> list[tuple[str, str]]:
     code += [(m.group("head"), _unquote_literal(m.group("body")))
              for m in _FED_HERESTRING_RE.finditer(command)
              if _reads_program_from_stdin(m)]
-    for m in _PIPE_INTO_INTERPRETER_RE.finditer(_executed_surface_view(command)):
-        if _reads_program_from_stdin(m):
-            code += [(m.group("head"), _unquote_literal(q)) for q in _STRING_LITERAL_RE.findall(command)]
-            code += [(m.group("head"), h.group("body")) for h in _ANY_HEREDOC_RE.finditer(command)]
+    if not _PIPE_INTO_INTERPRETER_RE.search(_executed_surface_view(command)):
+        return code
+    # A pipe feeds an interpreter only what its OWN pipeline produces: take the quoted
+    # text and heredoc bodies of that pipeline, not of other commands in the line.
+    view, heredocs = _pipeline_view(command)
+    start = 0
+    for sep in [*_PIPELINE_SEPARATOR_RE.finditer(view), None]:
+        end = sep.start() if sep else len(command)
+        for m in _PIPE_INTO_INTERPRETER_RE.finditer(view[start:end]):
+            if not _reads_program_from_stdin(m):
+                continue
+            head = m.group("head")
+            code += [(head, _unquote_literal(q)) for q in _STRING_LITERAL_RE.findall(command[start:end])]
+            code += [(head, h.group("body")) for h in heredocs if start <= h.start() < end]
+        start = sep.end() if sep else end
     return code
+
+
+# Separators between pipelines: `;`, `&&`, `||`, a background `&`, a newline. A single
+# `|` joins commands INTO a pipeline and is not one.
+_PIPELINE_SEPARATOR_RE = re.compile(r"&&|\|\||;|(?<![|>&<])&(?![&>])|\n")
+
+
+def _pipeline_view(command: str) -> tuple[str, list]:
+    """`command` with quoted text and heredoc bodies blanked, same length, so pipeline
+    separators are found only in shell structure; plus the heredoc matches."""
+    view = list(_leg_slicing_view(command))
+    heredocs = list(_ANY_HEREDOC_RE.finditer(command))
+    for h in heredocs:
+        for k in range(h.start("body"), h.end()):
+            view[k] = " "
+    return "".join(view), heredocs
 
 
 def _code_arg_programs(command: str) -> list[tuple[str, str]]:

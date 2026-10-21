@@ -134,3 +134,26 @@ def test_star_import_process_call_is_refused(label, cmd):
 @pytest.mark.parametrize("label,cmd", STAR_IMPORT_ALLOW, ids=[r[0] for r in STAR_IMPORT_ALLOW])
 def test_star_import_without_a_process_call_is_allowed(label, cmd):
     assert is_dangerous_command(cmd) is False
+
+
+# A pipe into a stdin interpreter is fed only by its own pipeline: quoted text in an
+# earlier, separate command is not that interpreter's program.
+PIPELINE_ALLOW = [
+    ("grep then unrelated pipe", f"grep -rn 'os.system(\"{D}\")' tests/ ; git diff | python3 -"),
+    ("&& then unrelated pipe", f"echo 'os.system(\"{D}\")' > notes.txt && git log | python3 -"),
+]
+PIPELINE_DENY = [
+    ("echo piped into python3 -", f"echo 'import os; os.system(\"{D}\")' | python3 -"),
+    ("cat heredoc piped", f"cat <<'EOF' | python3 -\nimport os\nos.system(\"{D}\")\nEOF"),
+    ("piped after an unrelated command", f"git status; echo 'import os; os.system(\"{D}\")' | python3"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", PIPELINE_ALLOW, ids=[r[0] for r in PIPELINE_ALLOW])
+def test_text_outside_the_pipeline_is_not_fed_code(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+@pytest.mark.parametrize("label,cmd", PIPELINE_DENY, ids=[r[0] for r in PIPELINE_DENY])
+def test_text_inside_the_pipeline_is_fed_code(label, cmd):
+    assert is_dangerous_command(cmd) is True
