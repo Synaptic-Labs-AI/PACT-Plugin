@@ -38,7 +38,7 @@ A reply to the user that contains content the team-lead needs to act on (a block
 1. Check `TaskList` for tasks assigned to you (by your name)
 2. Claim your assigned task: `TaskUpdate(taskId, status="in_progress")`
 3. Read the task description — it contains your full mission (CONTEXT, MISSION, INSTRUCTIONS, GUIDELINES). If upstream tasks are referenced, read their task files — `TaskGet` does NOT surface metadata.
-4. **GATE — Submit teachback on Task A**: Under the Task A + Task B dispatch shape, the teachback gate task (Task A) blocks the work task (Task B) via `blockedBy`. Store your teachback in `metadata.teachback_submit` on Task A per the [pact-teachback](../pact-teachback/SKILL.md) skill, **notify the team-lead via `SendMessage` carrying the canonical payload (pact-teachback Step 2)**, SET `intentional_wait{reason=awaiting_lead_completion}`, and idle. **Ordering invariant**: metadata write FIRST → `SendMessage` SECOND → `intentional_wait` SET THIRD (load-bearing; see [pact-teachback §Action: store teachback now](../pact-teachback/SKILL.md#action-store-teachback-now) for rationale). The team-lead's `TaskUpdate(A, status="completed")` paired with a wake-signal `SendMessage` IS acceptance — Task B becomes claimable only then. The teachback notify is a protocol-boundary message — run the [Boundary-Drain Rule](#boundary-drain-rule) before composing it: a scope change that crossed your in-flight turn must be reflected in the teachback you submit, not discovered after acceptance.
+4. **GATE — Submit teachback on Task A**: Under the Task A + Task B dispatch shape, the teachback gate task (Task A) blocks the work task (Task B) via `blockedBy`. Store your teachback in `metadata.teachback_submit` on Task A per the [pact-teachback](../pact-teachback/SKILL.md) skill, **notify the team-lead via `SendMessage` carrying the canonical payload (pact-teachback Step 2)**, SET `intentional_wait{reason=awaiting_lead_completion}`, and end the turn (idle). **Ordering invariant**: metadata write FIRST → `SendMessage` SECOND → `intentional_wait` SET THIRD (load-bearing; see [pact-teachback §Action: store teachback now](../pact-teachback/SKILL.md#action-store-teachback-now) for rationale). The team-lead's `TaskUpdate(A, status="completed")` paired with a wake-signal `SendMessage` IS acceptance — Task B becomes claimable only then. The teachback notify is a protocol-boundary message — run the [Boundary-Drain Rule](#boundary-drain-rule) before composing it: a scope change that crossed your in-flight turn must be reflected in the teachback you submit, not discovered after acceptance.
    - **DO NOT** call `Edit`, `Write`, or `Bash` for implementation work before storing your teachback
    - See [Teachback](#teachback-conversation-verification) below for the full skill reference
 5. **CLAIM Task B before working**: On wake to teachback acceptance (Task A → `completed` + the lead's wake-signal), claim Task B FIRST — `TaskUpdate(<Task B id>, status="in_progress")` BEFORE any `Edit`, `Write`, or `Bash`. Task B was pre-assigned to you (owner already set) but is still `pending` — **YOU** flip it to `in_progress`; the lead does not. This `pending → in_progress` flip is the lead's only "work started" signal; skipping it makes your live work look unclaimed and can trigger a false stall nudge. The durable Task A read is authoritative: if Task A already shows `completed` on disk, claim Task B and proceed even if the wake-signal message is not yet visible — wake messages can trail the status flip (see [§On Wake: Disk-First Re-Read](#on-wake-disk-first-re-read-seam-agnostic)).
@@ -61,6 +61,8 @@ team-lead to relay this information:
 cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team_name}/{taskId}.json" | jq .metadata.<key>
 ```
 
+The `{team_name}` segment is the realigned team name — read it from `pact-session-context.json` (`team_name` field).
+
 Common chain-reads:
 - **Coders** → read architect's task for design decisions and interface contracts
 - **Test engineers** → read coder tasks for what was built and flagged uncertainties
@@ -82,6 +84,8 @@ skill. Do NOT call `Edit`, `Write`, or `Bash` for implementation work
 before teachback storage.
 
 Background: [pact-ct-teachback.md](../../protocols/pact-ct-teachback.md) (optional — protocol rationale and design history).
+
+**Relay fallback (Task tools absent despite a foreground dispatch).** If your Task tools are absent even though the dispatch carried `run_in_background: false`, do not stall: deliver the structured content (teachback or HANDOFF payload) via `SendMessage` to the team-lead, and the team-lead performs the metadata writes on your behalf from the message copy. The relay is the sanctioned fallback for that residual case only — it is not a route around the metadata-first ordering.
 
 ## Progress Reporting
 
@@ -207,7 +211,7 @@ If ANY precondition is unmet, KEEP WORKING. Do not write `metadata.handoff` to "
    > The payload block carries every field you wrote to `metadata.handoff`, verbatim, single-line; omit fields you did not write. The `summary` never carries payload content (it truncates at 200 chars).
    > After writing the payload, read the task JSON back and confirm every field is present, non-empty, and ends on its intended final content — a sender-side output cut lands mid-JSON and surfaces as a write error, not as silence. This check holds at any size.
 
-3. **SET `intentional_wait` and idle**:
+3. **SET `intentional_wait`, then end the turn**:
    ```
    TaskUpdate(taskId, metadata={"intentional_wait": {
        "reason": "awaiting_lead_completion",
@@ -217,7 +221,7 @@ If ANY precondition is unmet, KEEP WORKING. Do not write `metadata.handoff` to "
    }})
    ```
 
-4. **Idle.** The team-lead judges acceptance on the payload your notify carries (the disk copy is their deferred audit), and either:
+4. **End the turn (idle).** The team-lead judges acceptance on the payload your notify carries (the disk copy is their deferred audit), and either:
    - **Accepts**: `TaskUpdate(taskId, status="completed")` plus a wake-signal `SendMessage`. On wake, CLEAR `intentional_wait` and check `TaskList` for follow-up work.
    - **Rejects**: writes `metadata.handoff_rejection = {reason, corrections, since, revision_number}` plus a wake-signal `SendMessage`. Follow §On Rejection below.
 
@@ -242,6 +246,8 @@ If the team-lead rejects your teachback or HANDOFF, you wake on the inbound `Sen
    - For Task A (teachback): `cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team_name}/{taskId}.json" | jq .metadata.teachback_rejection`
    - For Task B (work): `cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team_name}/{taskId}.json" | jq .metadata.handoff_rejection`
 
+   The `{team_name}` segment is the realigned team name — read it from `pact-session-context.json` (`team_name` field).
+
    The shape is `{"reason": str, "corrections": [str, ...], "since": ISO8601, "revision_number": int}`.
 
 3. **Revise**. For teachback rejection: rewrite `metadata.teachback_submit` per the corrections. For HANDOFF rejection: revise the deliverable (re-edit files, re-run tests, etc.) and rewrite `metadata.handoff`.
@@ -252,7 +258,7 @@ If the team-lead rejects your teachback or HANDOFF, you wake on the inbound `Sen
    - Increment `metadata.revision_number`. The team-lead writes `revision_number=1` in the rejection record. On your first revision, increment to `2`. On each subsequent revision, increment again. This count is the rejection-cycle audit trail — it feeds the imPACT META-BLOCK 3-cycle signal, not harvest routing. It does NOT gate whether your revised content is preserved: the team-lead's acceptance (the single completion) emits whatever `metadata.handoff` holds at that moment, so the revised content reaches the journal regardless of the count.
    - `SendMessage` the team-lead carrying the revised payload verbatim in the same form as the first submission: `"[{sender}→team-lead] Revised teachback/HANDOFF on Task #{id} (revision {N})."` followed by the payload block — `pact-teachback` Step 2 for a teachback, On Completion Step 2 for a HANDOFF. The team-lead accepts the revision on the message-carried payload; the disk read is their deferred audit.
    - Re-SET `intentional_wait{reason=awaiting_lead_completion, expected_resolver=lead, since=<fresh canonical_since() output>, covers_since=<the same value as since>}`.
-   - Idle.
+   - End the turn (idle).
 
 > **Revision visibility**: your revised content reaches institutional memory because of *when* the journal event is emitted, not because of `revision_number`. A rejection keeps your task `in_progress` and emits nothing. The team-lead's acceptance (their completion of your task) emits an `agent_handoff` journal event carrying whatever `metadata.handoff` holds at that moment, so a revision that lands BEFORE acceptance reaches the journal and harvest reads it there (drain-proof).
 >
@@ -313,7 +319,7 @@ output (even zero-content) blocks the next inbox delivery.
 - **Idle-waiting for a protocol-defined resolution** (teachback, team-lead commit,
   peer reply, user decision)? Use the `intentional_wait` task metadata per
   the Intentional Waiting section below.
-- **Awaiting lead completion?** SET `intentional_wait{reason=awaiting_lead_completion, expected_resolver=lead, since=<canonical_since() output>, covers_since=<the same value as since>}` after storing your HANDOFF or teachback metadata AND sending the notify `SendMessage` to the team-lead. **Ordering invariant** (audit anchor, lead-side mirror): metadata write FIRST → notify `SendMessage` SECOND → intentional_wait SET THIRD. This ordering exists because the team-lead must wait for teammate's wake-signal `SendMessage` before treating their raw `cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/.../{id}.json" | jq .metadata.{handoff,teachback_submit}` read as authoritative — see [pact-completion-authority §Read-Trigger Precondition](../../protocols/pact-completion-authority.md#read-trigger-precondition). Sending the `SendMessage` before the metadata write lands produces false-empty raw reads on the lead side; going idle before the `SendMessage` strands the lead silently. Do NOT poll `TaskList` while idle — you cannot self-wake to do so. The team-lead's wake-signal `SendMessage` is the resolver. Because your notify carries the payload, that raw read is now the lead's deferred audit, not their acceptance input.
+- **Awaiting lead completion?** SET `intentional_wait{reason=awaiting_lead_completion, expected_resolver=lead, since=<canonical_since() output>, covers_since=<the same value as since>}` after storing your HANDOFF or teachback metadata AND sending the notify `SendMessage` to the team-lead — if `team-lead` is unreachable, send it to `main`. **Ordering invariant** (audit anchor, lead-side mirror): metadata write FIRST → notify `SendMessage` SECOND → intentional_wait SET THIRD. This ordering exists because the team-lead must wait for teammate's wake-signal `SendMessage` before treating their raw `cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/.../{id}.json" | jq .metadata.{handoff,teachback_submit}` read as authoritative — see [pact-completion-authority §Read-Trigger Precondition](../../protocols/pact-completion-authority.md#read-trigger-precondition). Sending the `SendMessage` before the metadata write lands produces false-empty raw reads on the lead side; going idle before the `SendMessage` strands the lead silently. Do NOT poll `TaskList` while idle — you cannot self-wake to do so. The team-lead's wake-signal `SendMessage` is the resolver. Because your notify carries the payload, that raw read is now the lead's deferred audit, not their acceptance input. Then END THE TURN (idle) — ending the turn IS idling for an in-process teammate; the lead's acceptance `SendMessage` resumes you.
 - **Genuinely stuck**? Follow the On Blocker section.
 
 If you have nothing to say that advances the work, say nothing.

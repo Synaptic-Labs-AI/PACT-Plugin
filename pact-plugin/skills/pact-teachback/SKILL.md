@@ -117,7 +117,7 @@ TaskUpdate(taskId, metadata={"teachback_submit": {
 }})
 ```
 
-Read Task B's four variety SCORES (via Task A's `blocks[0]`) when needed; read the `*_rationale` strings ONLY AFTER composing the other four fields above. **Required: a rationale read earlier cannot be un-read.** — `TaskGet` is metadata-blind; read the task file. SCORES: `cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team_name}/{taskId}.json" | jq '.metadata.variety|map_values(select(type=="number"))'`. RATIONALES, afterwards: the same `cat` piped to `jq .metadata.variety`. Judge each of the four per-dimension rationales against THIS dispatch's complexity and record `yes` / `no` / `concern`; when not `yes`, name the smell in `concern`. **A rationale reading `WITHHELD: ignorance-dependent dispatch` is deliberate, not malformed — record `concern` QUOTING that literal verbatim; do NOT ask for a re-stamp.** Full review workflow: [`protocols/pact-variety.md` §Variety Calibration Record](../../protocols/pact-variety.md#variety-calibration-record).
+Read Task B's four variety SCORES (via Task A's `blocks[0]`) when needed; read the `*_rationale` strings ONLY AFTER composing the other four fields above. **Required: a rationale read earlier cannot be un-read.** — `TaskGet` is metadata-blind; read the task file (team name from `pact-session-context.json`, `team_name` field). SCORES: `cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team_name}/{taskId}.json" | jq '.metadata.variety|map_values(select(type=="number"))'`. RATIONALES, afterwards: the same `cat` piped to `jq .metadata.variety`. Judge each of the four per-dimension rationales against THIS dispatch's complexity and record `yes` / `no` / `concern`; when not `yes`, name the smell in `concern`. **A rationale reading `WITHHELD: ignorance-dependent dispatch` is deliberate, not malformed — record `concern` QUOTING that literal verbatim; do NOT ask for a re-stamp.** Full review workflow: [`protocols/pact-variety.md` §Variety Calibration Record](../../protocols/pact-variety.md#variety-calibration-record).
 
 **Step 2 — notify the team-lead** (carrying the canonical payload verbatim):
 
@@ -145,7 +145,7 @@ SendMessage(
 )
 ```
 
-> One line, space-joined; the `summary` never carries payload content (it truncates at 200 chars).
+> One line, space-joined; the `summary` never carries payload content (it truncates at 200 chars). If `team-lead` is unreachable, send the notify to `main`.
 > After writing the payload, read the task JSON back and confirm every field is present, non-empty, and ends on its intended final content — a sender-side output cut lands mid-JSON and surfaces as a write error, not as silence. This check holds at any size.
 
 > # ANTI-PATTERN: Step 1 and Step 3 are SEPARATE `TaskUpdate` calls writing
@@ -169,7 +169,7 @@ TaskUpdate(taskId, metadata={"intentional_wait": {
 }})
 ```
 
-Do NOT begin Task B until Task A's status transitions to `completed`. The team-lead's wake-signal `SendMessage` confirms acceptance — you cannot self-wake to poll `TaskList` while idle.
+Do NOT begin Task B until Task A's status transitions to `completed`. The lead's acceptance `SendMessage` resumes you — you cannot self-wake to poll `TaskList` while idle. Then END THE TURN (idle).
 
 **On rejection** (team-lead writes `metadata.teachback_rejection` and sends a wake-signal `SendMessage` carrying the rejection payload verbatim): see [pact-agent-teams §On Rejection](../pact-agent-teams/SKILL.md#on-rejection-wake-signal-receipt).
 
@@ -211,9 +211,9 @@ Under the Task A + Task B dispatch shape, this ordering is structurally reinforc
 
 ## Post-store behavior
 
-Idle on `awaiting_lead_completion` until the team-lead's wake-signal arrives. Do NOT speculatively begin Task B; the team-lead's status flip is the gate. When the wake-signal arrives, claim Task B FIRST — `TaskUpdate(<Task B id>, status="in_progress")` BEFORE any `Edit`/`Write`/`Bash` — then begin: Task B is pre-assigned to you (owner already set) but still `pending`, so YOU flip it to `in_progress` (the lead does not), preserving the lead's "work started" signal.
+End the turn (idle) on `awaiting_lead_completion` until the team-lead's wake-signal arrives. When the wake-signal arrives, claim Task B FIRST — `TaskUpdate(<Task B id>, status="in_progress")` BEFORE any `Edit`/`Write`/`Bash`. Task B is pre-assigned but still `pending`; you flip it to `in_progress`, preserving the lead's "work started" signal.
 
-If you have other claimable, unblocked tasks unrelated to this dispatch (a separate Task A from a different mission), you may claim and work them. The wait is per-task, not per-agent.
+If you have other claimable, unblocked tasks unrelated to this dispatch, you may claim and work them — the wait is per-task, not per-agent.
 
 **If you background work, flag the wait before you end the turn.** A `Bash` call with `run_in_background`, or a command a shell `&` sends to the background, may finish while you are idle, and when you run in-process its completion does not wake you — SET `metadata.intentional_wait` naming it, on every task the wait covers.
 
