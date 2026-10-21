@@ -394,7 +394,7 @@ For full detail, `Read(file_path="../protocols/pact-variety.md")` when calibrati
 
 ## 11. Agent Teams Dispatch
 
-> ⚠️ **MANDATORY**: Specialists are spawned as teammates via `Agent(name=..., team_name="{team_name}", subagent_type=..., description=...)`. The session team is pre-created by the platform at session start per INSTRUCTIONS step 1. The `session_init` hook provides the specific team name in your session context.
+> ⚠️ **MANDATORY**: Specialists are spawned as teammates via `Agent(name=..., team_name="{team_name}", subagent_type=..., description=..., run_in_background: false)`. The session team is pre-created by the platform at session start per INSTRUCTIONS step 1. The `session_init` hook provides the specific team name in your session context.
 >
 > ⚠️ **NEVER** use plain `Agent(subagent_type=...)` without `name` and `team_name` for specialist agents. This bypasses team coordination, task tracking, and `SendMessage` communication.
 

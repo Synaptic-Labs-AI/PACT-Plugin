@@ -567,12 +567,17 @@ def _refine_harness_stamp(input_data: dict) -> None:
       1. The aligned team name IS the full session UUID — the config-less
          substrate keys team state by session id (the TTY-gated roster never
          formed; the identity match adopted the UUID-anchored team).
-      2. A teammate spawn has been OBSERVED (secretary dispatched — the same
-         witness the marker precondition uses) AND the live team dir holds no
-         config.json AFTER that spawn. Absence BEFORE any spawn is not
-         evidence: the platform writes config eagerly at TTY team formation,
-         so pre-spawn absence is indistinguishable from pre-bootstrap, and
-         only the transcript leg (Writer 1) may stamp there.
+      2. The secretary has JOINED the team — proven by _team_has_secretary
+         (a config.json members[] roster entry, or the async-written
+         secretary inbox as the config-less fallback), a witness strictly
+         STRONGER than a dispatched spawn: a join makes post-join config
+         absence durable evidence, and loosening this to "a spawn was
+         dispatched" would make pre-delivery absence count. The live team
+         dir must hold no config.json AFTER that join. Absence BEFORE any
+         join is not evidence: the platform writes config eagerly at TTY
+         team formation, so pre-join absence is indistinguishable from
+         pre-bootstrap, and only the transcript leg (Writer 1) may stamp
+         there.
 
     The stamp is diagnostic-only in v1 — nothing gates on it — so a refused or
     lost write degrades to absence, never to wrong behavior.
@@ -596,7 +601,7 @@ def _refine_harness_stamp(input_data: dict) -> None:
         if (team_dir / "config.json").is_file():
             return  # roster formed -> TTY posture; the misstamp-guard cell
         if not _team_has_secretary(aligned):
-            return  # no spawn witnessed yet; absence is not evidence
+            return  # no join witnessed yet (roster or inbox); absence is not evidence
         pact_context.set_harness_stamp(
             pact_context.HARNESS_NON_TTY, input_data)
     except Exception:
