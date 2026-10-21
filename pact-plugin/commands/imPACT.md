@@ -130,6 +130,8 @@ Answer three questions:
 | **Not truly blocked** | Neither question is "Yes" | Instruct agent to continue with clarified guidance |
 | **Escalate to user** | 3+ imPACT cycles without resolution | Proto-algedonic signal—systemic issue needs user input |
 
+**Return to the caller**: imPACT runs inside another workflow. After the chosen outcome is carried out and the blocker task is completed, resume the workflow whose task the blocker blocked, at the step that blocked. Never start a new workflow from imPACT.
+
 **When to consider rePACT**:
 If the blocker reveals that a sub-task is more complex than expected and needs its own research/design phase, use `/PACT:rePACT` instead of just augmenting:
 ```
@@ -171,4 +173,4 @@ When imPACT decides to redo a prior phase (e.g., "redo ARCHITECT because the des
 4. **Block the current phase** (the one that hit the blocker): `TaskUpdate(currentPhaseId, addBlockedBy=[retryPhaseId])`
 5. **Dispatch agent(s)** for the retry phase
 6. **On retry completion**: `TaskUpdate(retryPhaseId, status="completed")` — unblocks the current phase
-7. **Retry the current phase** with a new agent task using the updated outputs (re-dispatched agents will teachback their understanding before starting)
+7. **Retry the current phase** with a new agent task using the updated outputs (re-dispatched agents will teachback their understanding before starting), then continue the invoking workflow from that phase

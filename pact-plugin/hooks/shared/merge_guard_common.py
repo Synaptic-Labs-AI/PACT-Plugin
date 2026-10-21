@@ -2767,6 +2767,373 @@ def _has_pipe_to_shell(command: str) -> bool:
     )
 
 
+# An interpreter reads its PROGRAM from stdin when it gets no code argument: no -c/-e/-r/-m
+# and no script path, only flags or a lone `-`. Its stdin feed (a pipe into it, a here-string,
+# a heredoc) is then that interpreter's code, and it can run a shell exactly when it names an
+# exec primitive. The interpreter-head alternation is spelled out here because this module
+# defines _INTERPRETER_HEADS further down; test_merge_guard_interpreter_primitives pins the
+# two to the same set.
+_STDIN_INTERPRETER = (
+    r"(?<![\w./-])(?:[^\s|;&<>()]*/)?"
+    r"(?P<head>python[0-9.]*t?|pypy[0-9.]*t?|perl[0-9.]*|ruby[0-9.]*|nodejs[0-9.]*|node[0-9.]*"
+    r"|php[0-9.]*(?:-cgi)?|bun|deno|lua[0-9.]*|luajit|R|Rscript|osascript|tclsh[0-9.]*|wish[0-9.]*"
+    r"|awk|gawk|mawk|nawk)"
+    r"(?P<sub>[ \t]+(?:eval|run)(?=[ \t]))?"         # deno's eval / run subcommand
+    r"(?P<flags>(?:[ \t]+-[\w-]*)*)[ \t]*"
+)
+_CODE_ARG_FLAGS = frozenset({"-c", "-e", "-E", "-r", "-m", "-f", "--eval", "--command"})
+_FED_HEREDOC_RE = re.compile(
+    _STDIN_INTERPRETER + r"<<-?[ \t]*(?P<q>['\"]?)(?P<tag>\w+)(?P=q)[^\n]*\n(?P<body>.*?)\n[ \t]*(?P=tag)[ \t]*(?:\n|$)",
+    re.DOTALL,
+)
+_FED_HERESTRING_RE = re.compile(
+    _STDIN_INTERPRETER + r"<<<[ \t]*(?P<body>'[^']*'|\"(?:[^\"\\]|\\.)*\"|\S+)"
+)
+_PIPE_INTO_INTERPRETER_RE = re.compile(r"\|[ \t]*" + _STDIN_INTERPRETER + r"(?=$|[;&|)\n])")
+
+
+def _reads_program_from_stdin(m: re.Match) -> bool:
+    """No code argument: no -c/-e/… flag and not deno's `eval` subcommand."""
+    if (m.group("sub") or "").strip() == "eval":
+        return False
+    return not any(f in _CODE_ARG_FLAGS for f in m.group("flags").split())
+
+
+def _stdin_fed_code(command: str) -> list[tuple[str, str]]:
+    """(interpreter head, program text) for each program an interpreter reads from stdin
+    in this command: each heredoc or here-string body after an interpreter given no code
+    argument, and, for a pipe into one, the quoted text upstream of it (what `echo '…'`
+    or `printf '…'` emits) plus any heredoc body (`cat <<EOF | python3`)."""
+    code = [(m.group("head"), m.group("body")) for m in _FED_HEREDOC_RE.finditer(command)
+            if _reads_program_from_stdin(m)]
+    code += [(m.group("head"), _unquote_literal(m.group("body")))
+             for m in _FED_HERESTRING_RE.finditer(command)
+             if _reads_program_from_stdin(m)]
+    for m in _PIPE_INTO_INTERPRETER_RE.finditer(_executed_surface_view(command)):
+        if _reads_program_from_stdin(m):
+            code += [(m.group("head"), _unquote_literal(q)) for q in _STRING_LITERAL_RE.findall(command)]
+            code += [(m.group("head"), h.group("body")) for h in _ANY_HEREDOC_RE.finditer(command)]
+    return code
+
+
+def _code_arg_programs(command: str) -> list[tuple[str, str]]:
+    """(interpreter head, program text) for each program given on an interpreter's
+    command line (-c / -e / -r / deno eval / an awk program), wherever the interpreter
+    sits in the command (after sudo, env, uv run, …). Quoted text is never read as a head."""
+    out = []
+    view = _leg_slicing_view(command)
+    for m in _INTERPRETER_WORD_RE.finditer(view):
+        end = _COMPOUND_OPS_RE.search(view, m.end())
+        tokens = _shell_tokenize(command[m.start():end.start() if end else len(command)])
+        if not tokens:
+            continue
+        head = os.path.basename(tokens[0])
+        program = _program_from_tokens(head, tokens)
+        if program:
+            out.append((head, program))
+    return out
+
+
+def _unquote_literal(text: str) -> str:
+    return text[1:-1] if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"" else text
+
+
+_ANY_HEREDOC_RE = re.compile(
+    r"<<-?[ \t]*(['\"]?)(?P<tag>\w+)\1[^\n]*\n(?P<body>.*?)\n[ \t]*(?P=tag)[ \t]*(?:\n|$)", re.DOTALL
+)
+# A call whose name names an exec primitive, then its first argument. Guarded text passed
+# anywhere else (a variable, a later argument, a data structure) is data to this rule.
+_PRIMITIVE_CALL_RE = re.compile(r"(?<![\w$])((?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*)(?:[ \t]*\([ \t]*|[ \t]+)")
+# Tcl's `exec` takes a bare command line, not a literal: `exec sh -c "…"` in statement
+# position (line start, after `;`, or inside `[…]`).
+_TCL_EXEC_RE = re.compile(r"(?m)(?:^|[;\[{])[ \t]*exec[ \t]+([^;\]\n]+)")
+_STRING_LITERAL_RE = re.compile(r"""'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`[^`]*`""")
+_QUOTED_LITERAL_RE = re.compile(r"'(?:[^'\\\n]|\\.)*'|\"(?:[^\"\\\n]|\\.)*\"")
+# Interpreters whose bare backtick span runs a shell command; in JavaScript a backtick is
+# a template string, which runs only when tagged with `$` (Bun.$`…`, zx's $`…`).
+_BACKTICK_EXEC_HEAD_RE = re.compile(r"^(?:perl[0-9.]*|ruby[0-9.]*|php[0-9.]*(?:-cgi)?)$")
+_DIRECT_CALL_MAX_DEPTH = 2
+
+
+def _mask_string_literals(code: str) -> str:
+    """`code` with the content of every '…' and "…" literal blanked, same length, so call
+    names and backticks written INSIDE a string (data) are not read as code."""
+    return _QUOTED_LITERAL_RE.sub(lambda m: m.group(0)[0] + " " * (len(m.group(0)) - 2) + m.group(0)[-1], code)
+
+
+def _literal_list_at(text: str, i: int) -> tuple[list[str], int] | None:
+    """The string literals of a `[…]` list literal starting at text[i], and the offset
+    after it; None when an element is not a string literal."""
+    if text[i:i + 1] != "[":
+        return None
+    items, i = [], i + 1
+    while True:
+        i += re.match(r"\s*", text[i:]).end()
+        if text[i:i + 1] == "]":
+            return items, i + 1
+        lit = _STRING_LITERAL_RE.match(text, i)
+        if not lit:
+            return None
+        items.append(lit.group(0)[1:-1])
+        i = lit.end() + re.match(r"\s*,?", text[lit.end():]).end()
+
+
+_OBJECT_ARGV_KEY_RE = re.compile(r"(?<![\w$])[\"']?(?:args|cmd)[\"']?\s*:\s*")
+
+
+def _object_argv_at(code: str, i: int) -> list[str]:
+    """The literal `args:` / `cmd:` list at the top level of the object literal starting
+    at code[i], or [] when there is none or the object's bounds are unclear. Braces and
+    keys inside string literals do not count."""
+    if code[i:i + 1] != "{":
+        return []
+    masked = _mask_string_literals(code)
+    depth, j = 0, i
+    while j < len(masked):
+        if masked[j] in "{[(":
+            depth += 1
+        elif masked[j] in "}])":
+            depth -= 1
+            if depth == 0:
+                break
+        elif depth == 1:
+            key = _OBJECT_ARGV_KEY_RE.match(masked, j)
+            if key:
+                lst = _literal_list_at(code, key.end())
+                return lst[0] if lst else []
+        j += 1
+    return []
+
+
+def _first_argument_command(code: str, pos: int) -> str | None:
+    """The command a call's leading literal arguments spell: one string literal alone is
+    a shell command line; otherwise the consecutive string and list literals are argv,
+    joined (`system('gh', 'pr', 'merge', '5')`, `spawnSync('gh', ['pr', 'merge'])`,
+    `run(['gh', 'pr', 'merge', '5'])`). An object literal ends the walk, contributing its
+    own `args:` or `cmd:` list (`new Deno.Command('gh', {args: […]})`, `Deno.run({cmd:
+    […]})`). Stops at the first other non-literal argument. None when no literal leads."""
+    argv, strings, i = [], 0, pos
+    while True:
+        lit = _STRING_LITERAL_RE.match(code, i)
+        if lit:
+            argv.append(lit.group(0)[1:-1]); strings += 1; i = lit.end()
+        else:
+            lst = _literal_list_at(code, i)
+            if lst is None:
+                argv += _object_argv_at(code, i)
+                break
+            argv += lst[0]; i = lst[1]
+        sep = re.match(r"\s*,\s*", code[i:])
+        if not sep:
+            break
+        i += sep.end()
+    if not argv:
+        return None
+    if strings == 1 and len(argv) == 1:
+        return argv[0]
+    return shlex.join(argv)
+
+
+# An interpreter's head word anywhere in a (quote-masked) command.
+_INTERPRETER_WORD_RE = re.compile(
+    r"(?<![\w./-])(?:[^\s|;&<>()]*/)?"
+    r"(?:python[0-9.]*t?|pypy[0-9.]*t?|perl[0-9.]*|ruby[0-9.]*|nodejs[0-9.]*|node[0-9.]*"
+    r"|php[0-9.]*(?:-cgi)?|bun|deno|lua[0-9.]*|luajit|R|Rscript|osascript|tclsh[0-9.]*|wish[0-9.]*"
+    r"|awk|gawk|mawk|nawk)(?=[ \t]|$)"
+)
+
+# Per interpreter family: the flags whose NEXT token is the program, the flags that take a
+# value (skipped with it), and whether a combined short flag ending in e/E/c carries code.
+_PROGRAM_FLAGS = (
+    (re.compile(r"^(?:python|pypy)"), {"-c"}, {"-W", "-X", "--check-hash-based-pycs"}, "c"),
+    (re.compile(r"^perl"), {"-e", "-E"}, {"-I", "-M", "-m", "-x"}, "eE"),
+    (re.compile(r"^ruby"), {"-e"}, {"-r", "-I", "-C", "-E", "-x"}, "e"),
+    (re.compile(r"^(?:node|nodejs|bun)"), {"-e", "--eval", "-p", "--print"},
+     {"-r", "--require", "--import", "--loader", "--conditions", "-C"}, ""),
+    (re.compile(r"^php"), {"-r"}, {"-c", "-d", "-z"}, ""),
+    (re.compile(r"^(?:lua|luajit)"), {"-e"}, {"-l"}, ""),
+    (re.compile(r"^(?:R|Rscript)$"), {"-e"}, set(), ""),
+    (re.compile(r"^osascript$"), {"-e"}, {"-l"}, ""),
+)
+_AWK_HEAD_RE = re.compile(r"^(?:awk|gawk|mawk|nawk)$")
+
+
+def _program_from_tokens(head: str, tokens: list) -> str | None:
+    """The program text an interpreter is given on its command line, from its shell
+    tokens (tokens[0] is the interpreter), or None when it runs a script, a module or
+    stdin. Several -e programs are joined with newlines."""
+    if head == "deno":
+        rest = [t for t in tokens[1:] if not t.startswith("-")]
+        return rest[1] if len(rest) >= 2 and rest[0] == "eval" else None
+    if _AWK_HEAD_RE.match(head):
+        i = 1
+        while i < len(tokens):
+            t = tokens[i]
+            if t == "--":
+                i += 1
+                break
+            if t in ("-f", "--file") or t.startswith("-f"):
+                return None
+            if t in ("-F", "-v", "--field-separator", "--assign"):
+                i += 2
+                continue
+            if not t.startswith("-") or t == "-":
+                break
+            i += 1
+        return tokens[i] if i < len(tokens) else None
+    for head_re, code_flags, value_flags, combined in _PROGRAM_FLAGS:
+        if not head_re.match(head):
+            continue
+        programs, i = [], 1
+        while i < len(tokens):
+            t = tokens[i]
+            if t in code_flags or (
+                combined and re.fullmatch(r"-[A-Za-z]+", t) and t[-1] in combined and len(t) > 2
+            ):
+                if i + 1 < len(tokens):
+                    programs.append(tokens[i + 1])
+                i += 2
+                continue
+            if t in value_flags:
+                i += 2
+                continue
+            if t.startswith("--") and "=" in t:
+                i += 1
+                continue
+            if t == "-" or not t.startswith("-") or t in ("-m",):
+                break
+            i += 1
+        return "\n".join(programs) if programs else None
+    return None
+
+
+# Call names whose last segment runs a process (any qualifier: os.system, Bun.spawn,
+# child_process's execSync, IO.popen, …). `execute` is Lua's os.execute only.
+_EXEC_CALL_NAMES = frozenset({
+    "system", "system2", "popen", "popen2", "popen3", "popen4", "exec", "execl", "execle",
+    "execlp", "execlpe", "execv", "execve", "execvp", "execvpe", "execsync", "execfile",
+    "execfilesync", "spawn", "spawnsync", "spawnl", "spawnle", "spawnlp", "spawnlpe",
+    "spawnv", "spawnve", "spawnvp", "spawnvpe", "posix_spawn", "posix_spawnp", "fork",
+    "forkpty", "shell_exec", "passthru", "proc_open", "pcntl_exec", "readpipe",
+    "getoutput", "getstatusoutput", "check_output", "check_call", "binding",
+    "create_subprocess_shell", "create_subprocess_exec",
+})
+# Modules every attribute of which is a process route (subprocess.run, Open3.capture2, …).
+_EXEC_MODULES = frozenset({"subprocess", "child_process", "pty", "commands", "open3", "open2", "ipc"})
+# Bare reflective calls that can reach any of the above by name.
+_REFLECTIVE_CALLS = frozenset({
+    "eval", "exec", "compile", "getattr", "vars", "globals", "locals", "__import__",
+    "methodcaller", "call_user_func", "call_user_func_array", "instance_eval", "class_eval",
+})
+_CALL_NAME_RE = re.compile(r"(?<![\w$])((?:[A-Za-z_$][\w$]*(?:\.|::))*[A-Za-z_$][\w$]*)\s*\(")
+_PY_FROM_IMPORT_RE = re.compile(
+    r"\bfrom\s+(subprocess|os|pty|commands)\s+import\s*(?:\(([^)]*)\)|([\w \t,]+))"
+)
+_PY_IMPORT_AS_RE = re.compile(r"\bimport[ \t]+([\w \t,]+)")
+_JS_TAGGED_TEMPLATE_RE = re.compile(r"\$\s*`")
+_AWK_PIPE_RE = re.compile(r"\b(?:print|printf)\b[^;}\n]*(?<!\|)\|(?!\|)|\|\s*getline\b|\|&")
+_STATEMENT_FORMS = (
+    # ruby / perl run a command without parentheses: system "…", exec "…", spawn "…"
+    (re.compile(r"^(?:ruby|perl)"), re.compile(r"(?<![\w$.:])(?:system|exec|spawn)[ \t]+(?=[^\s=;,)\]}])")),
+    (re.compile(r"^perl"), re.compile(r"(?<![\w$])(?:qx\s*[^\w\s]|readpipe\b|open\s+[\w$]+\s*,|(?:use|require)\s+IPC::)")),
+    (re.compile(r"^ruby"), re.compile(r"%x\s*[^\w\s]|(?:__send__|public_send|send)\s*\(?\s*:(?:system|exec|spawn|`|popen)")),
+    (re.compile(r"^osascript$"), re.compile(r"\bdo\s+shell\s+script\b")),
+    (re.compile(r"^(?:python|pypy)"), re.compile(r"(?<![\w$])(?:__dict__|__builtins__|builtins)\b")),
+)
+
+
+def _python_aliases(masked: str) -> tuple[set, set]:
+    """Names a Python program imported as process routes: bare names (`from subprocess
+    import run`, `from os import system`) and module aliases (`import subprocess as sp`)."""
+    bare, modules = set(), set()
+    for m in _PY_FROM_IMPORT_RE.finditer(masked):
+        for part in (m.group(2) or m.group(3)).split(","):
+            words = part.split()
+            if not words:
+                continue
+            name, alias = words[0], words[-1]
+            if m.group(1) != "os" or name.lower() in _EXEC_CALL_NAMES:
+                bare.add(alias.lower())
+    for m in _PY_IMPORT_AS_RE.finditer(masked):
+        for part in m.group(1).split(","):
+            words = part.split()
+            if len(words) == 3 and words[1] == "as" and words[0] in ("subprocess", "os", "pty"):
+                modules.add(words[2].lower())
+    return bare, modules
+
+
+def _is_primitive_call(name: str, head: str, aliases: tuple) -> bool:
+    segs = [x.lower() for x in re.split(r"\.|::", name)]
+    first, last = segs[0], segs[-1]
+    bare, modules = aliases
+    if len(segs) == 1 and (last in bare or last in _REFLECTIVE_CALLS):
+        return True
+    if first in _EXEC_MODULES or (first in modules and (last in _EXEC_CALL_NAMES or first in modules)):
+        return True
+    if last in _EXEC_CALL_NAMES or last == "import_module":
+        return True
+    if last == "execute" and re.match(r"^(?:lua|luajit)", head):
+        return True
+    if first == "deno" and last in ("run", "command"):
+        return True
+    if last == "open" and re.match(r"^(?:perl|ruby)", head):
+        return True
+    return last == "pipe" and head in ("R", "Rscript")
+
+
+def _program_names_primitive(head: str, program: str) -> bool:
+    """True iff `head`'s program reaches a process: a call or statement shaped like one
+    of the language's exec primitives, judged OUTSIDE string literals (a primitive name
+    inside a string or a longer word is data), or a backtick / pipe in a language where
+    those run a command (ruby/perl/php backticks, a `$`-tagged JS template, awk's
+    print | and | getline)."""
+    masked = _mask_string_literals(program)
+    aliases = _python_aliases(masked) if re.match(r"^(?:python|pypy)", head) else (set(), set())
+    for m in _CALL_NAME_RE.finditer(masked):
+        if _is_primitive_call(m.group(1), head, aliases):
+            return True
+    for head_re, form in _STATEMENT_FORMS:
+        if head_re.match(head) and form.search(masked):
+            return True
+    if _BACKTICK_EXEC_HEAD_RE.match(head) and "`" in masked:
+        return True
+    if re.match(r"^(?:node|nodejs|bun|deno)$", head) and _JS_TAGGED_TEMPLATE_RE.search(masked):
+        return True
+    if _AWK_HEAD_RE.match(head) and _AWK_PIPE_RE.search(masked):
+        return True
+    return bool(re.match(r"^(?:tclsh|wish)", head) and _TCL_EXEC_RE.search(masked))
+
+
+def _code_runs_guarded_directly(head: str, code: str, _depth: int = 0) -> bool:
+    """True iff `head`'s program `code` passes a guarded command DIRECTLY to an exec
+    primitive: the first argument of a primitive-named call is a string or list literal
+    the danger scan reads as a guarded command (`os.system("gh pr merge 5")`,
+    `subprocess.run(["gh", "pr", "merge", "5"])`, `execSync('…')`), a Tcl `exec` line
+    is one, or a backtick span that runs a shell is one. Call names, backticks and Tcl
+    lines written inside a string literal are data. A command reached through a variable
+    needs dataflow and is not followed."""
+    if _depth >= _DIRECT_CALL_MAX_DEPTH or not _program_names_primitive(head, code):
+        return False
+    masked = _mask_string_literals(code)
+    aliases = _python_aliases(masked) if re.match(r"^(?:python|pypy)", head) else (set(), set())
+    for m in re.finditer(r"(\$?)`([^`]*)`", masked):
+        if m.group(1) or _BACKTICK_EXEC_HEAD_RE.match(head):
+            span = code[m.start(2):m.end(2)]
+            if span and _is_dangerous_at_depth(span, _depth + 1):
+                return True
+    if re.match(r"^(?:tclsh|wish)[0-9.]*$", head):
+        for m in _TCL_EXEC_RE.finditer(masked):
+            if _is_dangerous_at_depth(code[m.start(1):m.end(1)].strip(), _depth + 1):
+                return True
+    for m in _PRIMITIVE_CALL_RE.finditer(masked):
+        if not _is_primitive_call(m.group(1), head, aliases):
+            continue
+        cmd = _first_argument_command(code, m.end())
+        if cmd and _is_dangerous_at_depth(cmd, _depth + 1):
+            return True
+    return False
+
+
 # Path-qualified shell token. Trailing (?![\w/]) anchors the shell name as a
 # whole PATH-LEAF token: excludes prefix-of-name (`>(basht)`/`>(teehee)`) AND
 # `>(bash/foo)` (bash is a DIRECTORY, foo the executable) while KEEPING
@@ -3246,12 +3613,20 @@ def _strip_non_executable_content(command: str) -> str:
             transformed = _preserve_substitution_spans(m.group(0))
             return m.group(0) if transformed is None else transformed
 
+        echo_text = result
+
         def _strip_echo_span(span_match: re.Match) -> str:
             # Strip every quoted arg within the echo/printf span. dq FIRST, then sq, so a dq
             # value's embedded `'` is consumed before the sq pass runs (no cross-contamination);
             # sq -> bareword STRIPPED (sq $() is literal). The verb + flags sit OUTSIDE these
             # inner subs and stay intact.
             span = span_match.group(0)
+            # Inside php code, `echo` is php's statement, not the shell builtin:
+            # `php -r 'echo shell_exec("…");'` RUNS its argument. Leave such a span whole
+            # for the interpreter clause of carrier 10 to judge. Other interpreters have
+            # no `echo` statement, so an `echo` in their quoted text is data.
+            if _in_php_exec_code(echo_text, span_match.start()):
+                return span
             span = re.sub(r'"(?:[^"\\]|\\.)*"', _strip_echo_dq_arg, span)
             span = re.sub(r"'[^']*'", "STRIPPED", span)
             return span
@@ -4390,8 +4765,49 @@ _SHELL_STRING_EXECUTORS = re.compile(
     r"|hush|lash|msh"                                   # busybox exec-shell applets (run a -c string)
     r"|eval|expect|watch"                               # string runners
     r"|ssh|rsh|remsh|slogin|su"                         # remote / user-switch (-c / a command)
-    r"|python[0-9.]*|perl|ruby[0-9.]*|nodejs|node|php|awk|gawk"  # interpreters (-c/-e/-r)
     r")$"
+)
+
+# (a') Interpreters run their quoted text as program code, and that code reaches a shell only
+# through an exec primitive of its language. A leg headed by one preserves its quoted values
+# only when the leg text carries a primitive; without one, -c/-e code, a script's or -m
+# module's argv and an awk program are inert. The primitive list is deliberately over-wide (a
+# case-insensitive substring anywhere in the leg): a false match preserves, the over-block-safe
+# direction. Same per-FAMILY anchoring as _SHELL_STRING_EXECUTORS (python-config is no head);
+# a versioned or suffixed binary (php8.2, php82, perl5.36, node18, python3.12) is the same
+# interpreter. pypy, php-cgi, bun, deno, lua/luajit, R/Rscript and osascript run code given
+# on their command line the same way.
+_INTERPRETER_HEADS = re.compile(
+    r"^(?:python[0-9.]*t?|pypy[0-9.]*t?|perl[0-9.]*|ruby[0-9.]*|nodejs[0-9.]*|node[0-9.]*"
+    r"|php[0-9.]*(?:-cgi)?|bun|deno|lua[0-9.]*|luajit|R|Rscript|osascript|tclsh[0-9.]*|wish[0-9.]*"
+    r"|awk|gawk|mawk|nawk)$"
+)
+# Every non-obfuscated route to a process from each interpreter names one of these:
+#   python  os.system/popen, os.exec*/spawn*/posix_spawn*, subprocess (also asyncio's
+#           create_subprocess_*), pty.spawn, commands.get*, os.fork
+#   ruby    system, exec, spawn, backticks, %x, IO.popen, Open3, PTY.spawn, open("|cmd")
+#   perl    system, exec, qx, backticks, readpipe, IPC::Open2/Open3/Run, open with a pipe
+#   node    child_process (exec/execSync/spawn/fork/execFile), process.binding
+#   php     system, exec, shell_exec, passthru, popen, proc_open, pcntl_exec, backticks
+#   awk     system(), print | "cmd", "cmd" | getline, |& coprocesses
+#   bun     Bun.spawn/spawnSync, Bun.$`cmd` (a backtick template), child_process
+#   deno    Deno.run, new Deno.Command
+#   lua     os.execute, io.popen
+#   R       system, system2, pipe()
+#   osascript  do shell script
+# The reflective entries (eval, getattr, import_module, ...) catch an honest dynamic call.
+# A primitive name built at runtime (string arithmetic inside a reflective call) is not
+# matched: that needs deliberate obfuscation, an accepted adversarial-only residual.
+_INTERPRETER_EXEC_PRIMITIVES = (
+    "system", "exec", "spawn", "popen", "subprocess", "child_process", "open3", "open2",
+    "passthru", "proc_open", "pty", "fork", "readpipe", "ipc::", "binding",
+    "commands.get", "eval", "getattr", "__import__", "import_module", "compile", "vars",
+    "globals", "locals", "__dict__", "builtins", "methodcaller", ".send(", "public_send",
+    "call_user_func", "core::", "`", "qx", "%x", "|", "deno.run", "deno.command", "pipe(",
+    "shell script",
+)
+_INTERPRETER_EXEC_PRIMITIVE_RE = re.compile(
+    "|".join(re.escape(p) for p in _INTERPRETER_EXEC_PRIMITIVES), re.IGNORECASE
 )
 
 # (a) Modeled exec-WRAPPERS whose (possibly nested) executor's quoted arg executes. Split by
@@ -4491,9 +4907,10 @@ _TOOL_HEADS = frozenset({"git", "gh"})
 #     "never list a boolean" (`--invert-grep`, `--all-match`, `-w/--web`,
 #     `--draft`, shortlog `-e/--email` MUST NOT appear — listing an arity-0
 #     flag would consume the next real token). Ambiguous arity → exclude
-#     (fail-toward-preserve). `--format`/`--pretty` (git) and
-#     `--json`/`--jq`/`--template` (gh) stay OUT of every flag_arm (smallest
-#     certified vocabulary; preserved = status quo).
+#     (fail-toward-preserve). `--format`/`--pretty` (git) stay OUT of every
+#     flag_arm (smallest certified vocabulary; preserved = status quo), and
+#     `--json`/`--jq`/`--template` (gh) are in the flag_arm of `gh pr view` and
+#     `gh issue view` only: those two verbs never execute a value.
 #   - deny_re: an EXECUTING flag anywhere in the leg's shlex tokens preserves
 #     the WHOLE leg (fail-toward-preserve). git grep `-O[<pager>]` /
 #     `--open-files-in-pager[=…]` EXECUTES its attached value (`-Ovim` runs
@@ -4559,6 +4976,16 @@ _READ_VERB_SPECS: "dict[tuple[str, ...], _ReadVerbSpec]" = {
             r"|--mention|--type|--state|--limit|--repo)\s+"
             r"|(?<!\S)-[SAalmsLR]\s*)"
         ),
+        None, False,
+    ),
+    # gh pr view / gh issue view never execute a value: --jq is a jq filter and --template a
+    # Go template. The booleans -c/--comments and -w/--web are omitted; positionals stay.
+    ("gh", "pr", "view"): _ReadVerbSpec(
+        re.compile(r"((?<!\S)(?:--json|--jq|--template|--repo)\s+|(?<!\S)-[qtR]\s*)"),
+        None, False,
+    ),
+    ("gh", "issue", "view"): _ReadVerbSpec(
+        re.compile(r"((?<!\S)(?:--json|--jq|--template|--repo)\s+|(?<!\S)-[qtR]\s*)"),
         None, False,
     ),
     ("gh", "pr", "list"): _ReadVerbSpec(
@@ -4884,6 +5311,73 @@ def _leg_command_word(leg: str) -> "str | None":
     return None                                          # only assignments/redirects → no command
 
 
+def _interpreter_names_primitive(leg: str, head: str, tokens: list) -> bool:
+    """True iff an interpreter leg's program reaches a process. When the program given
+    on the command line can be read, it is judged by its calls and statements outside
+    string literals. Otherwise (a script, a module, an unusual launch form) the whole leg
+    is searched for any primitive substring, which preserves (the over-block-safe side).
+    `deno eval` is deno's one-liner SUBCOMMAND, not a call to eval."""
+    program = _program_from_tokens(head, tokens)
+    if program is not None:
+        return _program_names_primitive(head, program)
+    text = leg
+    if head == "deno" and len(tokens) > 1 and tokens[1] == "eval":
+        text = re.sub(r"(?<![\w./-])deno\s+eval(?=\s|$)", "deno", leg, count=1)
+    return bool(_INTERPRETER_EXEC_PRIMITIVE_RE.search(text))
+
+
+_PHP_HEAD_RE = re.compile(r"^php[0-9.]*(?:-cgi)?$")
+
+
+def _is_php_exec_leg(leg: str, _depth: int = 0) -> bool:
+    """True iff this leg runs php code that names an exec primitive, so a php `echo`
+    statement in that code can print the output of a shell call. Walks the modeled
+    wrappers like _is_preserve_leg, and FAILS SAFE to True when a coarse wrapper, an
+    uncertain wrapper boundary or the depth limit hides the head while php is named
+    in the leg (True keeps the echo argument for the preserve check to judge)."""
+    if not _INTERPRETER_EXEC_PRIMITIVE_RE.search(leg):
+        return False
+    cmd_leg = _leg_command_word(leg)
+    tokens = _shell_tokenize(cmd_leg) if cmd_leg is not None else None
+    if not tokens:
+        return False
+    names_php = any(_PHP_HEAD_RE.match(os.path.basename(t)) for t in tokens)
+    head = os.path.basename(tokens[0])
+    if _PHP_HEAD_RE.match(head):
+        return True
+    if head in _EXEC_WRAPPERS_COARSE:
+        return names_php
+    if head in _EXEC_WRAPPERS_RECURSE:
+        if _depth >= _MAX_WRAPPER_DEPTH:
+            return names_php
+        nested = _wrapper_nested_command(cmd_leg, head)
+        if nested is None:
+            return names_php
+        return _is_php_exec_leg(nested, _depth + 1)
+    return False
+
+
+def _leg_slicing_view(text: str) -> str:
+    """The view legs are sliced on: quotes masked and fd redirects (`2>&1`, `>&2`,
+    `&>`, `>|`) blanked, so only real shell operators separate legs. Same length as
+    `text`, so offsets carry over. Shared by carrier 10 and the echo carrier."""
+    return _FD_REDIRECT_RE.sub(lambda m: " " * len(m.group()), _mask_shell_quotes(text))
+
+
+def _in_php_exec_code(text: str, pos: int) -> bool:
+    """True iff offset `pos` of `text` sits inside a quoted span of a leg that
+    _is_php_exec_leg accepts, i.e. inside php code whose `echo` prints a shell call."""
+    view = _leg_slicing_view(text)
+    if view[pos] != " " or text[pos] == " ":
+        return False                                     # not inside a quoted span
+    start = 0
+    for m in _COMPOUND_OPS_RE.finditer(view):
+        if m.start() >= pos:
+            return _is_php_exec_leg(text[start:m.start()])
+        start = m.end()
+    return _is_php_exec_leg(text[start:])
+
+
 def _is_preserve_leg(leg: str, _depth: int = 0) -> bool:
     """True iff this single leg's quoted-arg values must be PRESERVED (not stripped) by the
     #1178 general inert-default strip — see the catalog block above for clauses (a)/(b)/(c).
@@ -4914,7 +5408,10 @@ def _is_preserve_leg(leg: str, _depth: int = 0) -> bool:
             head = os.path.basename(tokens[0])
             if head in _TOOL_HEADS:                      # (d2) git/gh → defer to carriers 5/7/8/9
                 return True
-            if _SHELL_STRING_EXECUTORS.match(head):      # (a) executor / interpreter
+            if _INTERPRETER_HEADS.match(head):           # (a') interpreter
+                if _interpreter_names_primitive(leg, head, tokens):
+                    return True
+            elif _SHELL_STRING_EXECUTORS.match(head):    # (a) shell / string runner
                 return True
             if head in _HTTP_CLIENT_HEADS:               # (b) curl/wget (quoted head via shlex)
                 return True
@@ -5116,9 +5613,7 @@ def _strip_inert_positional_legs(result: str) -> str:
     legs verbatim. Rejoined with the ORIGINAL separators so a downstream re-slice of this
     result sees byte-unchanged leg boundaries. Slices via this in-line walk (NOT
     ``_split_into_legs``, which re-strips → recursion)."""
-    view = _FD_REDIRECT_RE.sub(
-        lambda m: " " * len(m.group()), _mask_shell_quotes(result)
-    )
+    view = _leg_slicing_view(result)
     out, last = [], 0
     for m in _COMPOUND_OPS_RE.finditer(view):
         out.append(_maybe_strip_leg(result[last:m.start()]))
@@ -5258,6 +5753,19 @@ def is_dangerous_command(command: str) -> bool:
     # Pre-strip detection: eval+heredoc shape obscures destructive ops via
     # the heredoc-strip pipeline. Treat as dangerous before the strip runs.
     if _has_eval_with_heredoc(command):
+        return True
+    return _is_dangerous_at_depth(command, 0)
+
+
+def _is_dangerous_at_depth(command: str, depth: int) -> bool:
+    """is_dangerous_command's body, with the recursion depth of the stdin-fed code check."""
+    if depth and _has_eval_with_heredoc(command):
+        return True
+    # Code an interpreter reads from stdin (heredoc, here-string, pipe) is that
+    # interpreter's program: it is refused when it passes a guarded command directly
+    # to an exec primitive. The carriers below see it only as inert text.
+    if any(_code_runs_guarded_directly(head, code, depth)
+           for head, code in _stdin_fed_code(command) + _code_arg_programs(command)):
         return True
 
     # Normalize bash line continuations (\<newline>) via the shared P0 SSOT before

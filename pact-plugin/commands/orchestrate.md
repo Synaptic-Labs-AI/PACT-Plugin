@@ -1009,20 +1009,5 @@ After you resolve a blocker, message the teammate by name. Spawn fresh if the te
    python3 "{plugin_root}/hooks/shared/backlog.py" set <item-id> --status done
    ```
    Report what you wrote. If the write is refused, report the refusal and carry on.
-5. **Run `/PACT:peer-review`** to create PR and get multi-agent review
-6. **Present review summary and stop** — use `AskUserQuestion` for merge authorization (S5 policy)
-7. **S4 Retrospective** (after user decides): Briefly note—what worked well? What should we adapt for next time? The secretary gathers calibration metrics during HANDOFF processing and will ask you for a brief difficulty assessment. Respond with whether actual difficulty was higher, lower, or about the same as predicted, and which dimensions surprised you.
-8. **Save memories from HANDOFFs** (idempotent — safe if already processed at phase boundary):
-   ```
-   TaskCreate(subject="secretary: harvest pending HANDOFFs (post-review)",
-     description="Harvest HANDOFFs for team {team_name}. Follow the Standard Harvest workflow in your pact-handoff-harvest skill. Then propagate the store into the Working Memory block. Report summary when done.")
-   TaskUpdate(taskId, owner="secretary")
-   ```
-9. **Mid-session consolidation** (multi-feature sessions only): If this is the second or subsequent feature completed in this session, create a consolidation task to merge cross-feature knowledge:
-   ```
-   TaskCreate(subject="secretary: mid-session consolidation",
-     description="Multiple features completed this session. Follow the Consolidation Harvest workflow in your pact-handoff-harvest skill: review memories saved so far, consolidate related entries across features, prune superseded memories. Then propagate the store into the Working Memory block. Report summary when done.")
-   TaskUpdate(taskId, owner="secretary")
-   ```
-   Skip for the first feature in a session — full consolidation happens during `/PACT:wrap-up`.
-10. **High-variety audit trail** (variety 10+ only): Save key orchestration decisions, S3/S4 tensions resolved, and lessons learned via the secretary
+5. **Return to a calling review**: if `TaskList` shows an `in_progress` Review task whose subject ends with `({branch})`, where {branch} is the output of `git branch --show-current`, this orchestrate is fixing review findings. Return to that `/PACT:peer-review` at its verify-only re-review, and stop here.
+6. **Invoke `/PACT:peer-review`** to create the PR and run the multi-agent review. Peer-review holds the merge checkpoint and names the next command: `/PACT:wrap-up` after a merge, `/PACT:pause` on a pause.

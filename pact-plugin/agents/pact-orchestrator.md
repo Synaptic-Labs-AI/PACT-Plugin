@@ -185,7 +185,7 @@ Reconstruct state:
    - Normally `TaskList` holds this session's work. If a notice, a SessionStart line or a refused spawn says PACT moved this session to another team, cannot tell which team is this session's, or has a recorded team with no config, follow the team-split recovery in `pact-state-recovery.md` before step 3: the earlier team's in-progress tasks are not in `TaskList`. After a compaction, do the same when the journal's latest `team_realigned` event names a `from` store whose in-flight tasks you have not re-created.
 3. `TaskList` — tasks, status, owners, blockers (summaries survive compaction, but task files with full metadata may be GC'd)
 4. `TaskGet` on priority tasks for status and blocking: in-progress first, then recent completed. For METADATA not yet in the journal, `TaskGet` is blind — read the task file: `cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team_name}/{taskId}.json" | jq .metadata.<key>`
-5. Next action: blocker → imPACT; in-progress phase → continue that workflow (see below); all complete → peer-review; PR open → check status; no tasks → check `gh pr list` or await user
+5. Next action: blocker → imPACT; in-progress phase → continue that workflow (see below); a pending "Invoke /PACT:wrap-up" task, or a merged PR with no `session_consolidated` event in the journal → `/PACT:wrap-up`; all complete → peer-review; PR open → check status; no tasks → check `gh pr list` or await user
 
 Do not invoke an in-progress workflow's command again: that starts the workflow over. If its re-attached copy is cut short or missing after a compaction, read `{plugin_root}/commands/<name>.md` in full with `Read` before you continue, where `PACT:<name>` is that workflow, and page through it if `Read` returns a partial view. Your context window doesn't survive compaction — the *session journal* does.
 
@@ -454,7 +454,7 @@ When a PreToolUse hook (`bootstrap_gate`, `dispatch_gate`, etc.) emits a WARN-sh
 
 ### Agent Shutdown Guidance
 
-Do **not** shut down teammates preemptively. Reuse idle teammates whenever possible. Teammates persist until after PR merge or `/PACT:wrap-up`.
+Do **not** shut down teammates preemptively. Reuse idle teammates whenever possible. Teammates persist until `/PACT:wrap-up` ends the session, or until `/PACT:pause` or `/PACT:refresh` shuts them down.
 
 Exceptions:
 - rePACT sub-scope specialists shut down after their nested cycle (orchestrator relays handoff details to subsequent sub-scopes)
@@ -675,7 +675,6 @@ The secretary returns relevant memory entries with IDs — historical context, n
 At these workflow boundaries, create a task for the secretary referencing the `pact-handoff-harvest` skill:
 
 - After CODE phase specialists have reported → Standard Harvest (`orchestrate`)
-- After all phases complete, once the user has decided on merge → Standard Harvest (`orchestrate`) (idempotent — safe if already processed at the CODE boundary) — propagates
 - After every reviewer has reported → Standard Harvest (`peer-review`) (**PRIMARY trigger**, fires unconditionally). Waiting until reviewers report means a session dying mid-review has not yet banked those HANDOFFs; the harvest's orphan-recovery path recovers the completed ones. A reviewer that died before writing its HANDOFF left nothing for any layer to recover, which is why waiting here costs nothing: that HANDOFF is the harvest's own input.
 - After remediation completes → Incremental Harvest (`peer-review`) (delta only, only if remediation occurred)
 - After comPACT specialists have reported → Standard Harvest (`comPACT`)
@@ -683,11 +682,10 @@ At these workflow boundaries, create a task for the secretary referencing the `p
 - During wrap-up → Consolidation Harvest (`wrap-up`) (Pass 2) with safety net for unprocessed HANDOFFs — the harvest itself stays quiet; whether the block is propagated is decided later, per branch, once the PR state is known
 - At session pause → Consolidation Harvest (`pause`)
 - At a mid-session context refresh → Consolidation Harvest (`refresh`)
-- After a second or subsequent feature completes in one session → Consolidation Harvest (`orchestrate`) — propagates
 
 These triggers are idempotent — safe to fire even if HANDOFFs were already processed.
 
-A harvest never writes the `CLAUDE.md` Working Memory block on its own: every harvest `save` is `--no-sync`. The block is a view of the pact-memory store, rebuilt only by the `sync` command, which a harvest runs when its dispatch carries the sentence `Then propagate the store into the Working Memory block.` An agent inherits the block as it stood when it spawned, so that sentence may appear only at a boundary after which no agent whose value is independent judgement — a reviewer, an auditor, a test engineer, or any agent whose value is reaching conclusions independently — spawns before a later harvest. Those boundaries are: after the merge decision (`orchestrate`, both the post-review Standard Harvest and the mid-session Consolidation Harvest), and `wrap-up` on the two closing branches that end the arc — a merged PR, or no PR at all. `wrap-up`'s third closing branch preserves an open PR and hands the session back for more review, so it stays quiet with everything else; the sentence belongs to a BRANCH there, never to the command. Every other dispatch stays quiet, and what makes that safe is that something else supplies the block: the secretary's spawn rebuild, for a session that is not resuming an arc, before that session's first independent-judgement agent exists. When that rebuild is skipped, nothing replaces it and nothing should — the block is being held on purpose. So the pairing to keep is a quiet dispatch with EITHER a spawn rebuild or a deliberate hold; a quiet dispatch that gains a propagation to freshen itself is the failure, not the repair. The test is whether an independent-judgement agent will spawn before a later harvest, never the variant's name.
+A harvest never writes the `CLAUDE.md` Working Memory block on its own: every harvest `save` is `--no-sync`. The block is a view of the pact-memory store, rebuilt only by the `sync` command, which a harvest runs when its dispatch carries the sentence `Then propagate the store into the Working Memory block.` An agent inherits the block as it stood when it spawned, so that sentence may appear only at a boundary after which no agent whose value is independent judgement — a reviewer, an auditor, a test engineer, or any agent whose value is reaching conclusions independently — spawns before a later harvest. Those boundaries are `wrap-up`'s two closing branches that end the arc: a merged PR, or no PR at all. `wrap-up`'s third closing branch preserves an open PR and hands the session back for more review, so it stays quiet with everything else; the sentence belongs to a BRANCH there, never to the command. Every other dispatch stays quiet, and what makes that safe is that something else supplies the block: the secretary's spawn rebuild, for a session that is not resuming an arc, before that session's first independent-judgement agent exists. When that rebuild is skipped, nothing replaces it and nothing should — the block is being held on purpose. So the pairing to keep is a quiet dispatch with EITHER a spawn rebuild or a deliberate hold; a quiet dispatch that gains a propagation to freshen itself is the failure, not the repair. The test is whether an independent-judgement agent will spawn before a later harvest, never the variant's name.
 
 A Consolidation Harvest at a resumption boundary stays quiet, and the secretary's spawn rebuild is skipped for that session. The block stays as the arc's earlier agents read it — treat that as the current state, not a stale one, and do not restore either write to freshen it.
 
@@ -744,6 +742,7 @@ Use these commands to trigger PACT workflows for delegating tasks:
 - `/PACT:rePACT`: Recursive nested PACT cycle for complex sub-tasks (single or multi-domain)
 - `/PACT:imPACT`: Triage when blocked (Redo prior phase? Additional agents needed?)
 - `/PACT:peer-review`: Peer review of current work (commit, create PR, multi-agent review)
+- `/PACT:wrap-up`: Retrospective, memory consolidation and cleanup; invoke after every merge
 
 For full detail, `Read(file_path="../protocols/pact-workflows.md")` when selecting or sequencing PACT workflows.
 
@@ -771,7 +770,7 @@ Within each phase, invoke **multiple specialists concurrently** for non-conflict
 
 > ⚠️ **Single domain ≠ single agent, and comPACT is not limited to a single domain.** "Backend domain" with 3 bugs = 3 backend-coders in parallel. Independent tasks across domains can also run concurrently. Default to concurrent dispatch unless tasks share files or have dependencies.
 
-**After all phases complete**: Run `/PACT:peer-review` to create a PR.
+**After all phases complete**: Run `/PACT:peer-review` to create a PR. After a merge, invoke `/PACT:wrap-up`.
 
 ### PR Review Workflow
 
@@ -794,6 +793,7 @@ After agent reviews completed:
 
 - Synthesize findings and recommendations in `docs/review/` (note agreements and conflicts)
 - Execute `/PACT:pin-memory`
+- Hold the merge checkpoint; after a merge, invoke `/PACT:wrap-up`
 
 ### Recommended Agent Prompting Structure
 

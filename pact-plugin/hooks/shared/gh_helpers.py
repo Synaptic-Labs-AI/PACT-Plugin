@@ -28,6 +28,7 @@ def run_gh(
     args: Sequence[str],
     timeout: int = 5,
     text: bool = True,
+    cwd: str | None = None,
 ) -> Optional[subprocess.CompletedProcess]:
     """
     Invoke `gh <args...>` with capture_output and a 5-second default timeout.
@@ -50,6 +51,8 @@ def run_gh(
         timeout: seconds before subprocess.TimeoutExpired is raised.
                  Default 5s, matching check_pr_state's original convention.
         text: decode stdout/stderr as UTF-8 if True (default); return bytes if False.
+        cwd: directory gh runs in, which selects the repo it resolves a bare PR
+             number against. Default None: the caller's working directory.
 
     Returns:
         CompletedProcess on success-path; None on any exception.
@@ -60,6 +63,7 @@ def run_gh(
             capture_output=True,
             text=text,
             timeout=timeout,
+            cwd=cwd,
         )
     except Exception:
         # Catch-all per gh_helpers.py SACROSANCT fail-open contract.
@@ -67,7 +71,7 @@ def run_gh(
         return None
 
 
-def check_pr_state(pr_number: int | str) -> str:
+def check_pr_state(pr_number: int | str, cwd: str | None = None) -> str:
     """
     Check PR state via ``gh pr view``. Returns uppercase state string or
     empty string on any error.
@@ -87,13 +91,16 @@ def check_pr_state(pr_number: int | str) -> str:
 
     Args:
         pr_number: PR number (int or str). Coerced to str for the gh call.
+        cwd: directory whose repo the number names (passed to run_gh). Default
+             None: the caller's working directory.
 
     Returns:
         Uppercase state string (e.g. "OPEN", "MERGED", "CLOSED"), or "" on
         any error or unknown response. Callers MUST treat "" as "unknown."
     """
     result = run_gh(
-        ["pr", "view", str(pr_number), "--json", "state", "--jq", ".state"]
+        ["pr", "view", str(pr_number), "--json", "state", "--jq", ".state"],
+        cwd=cwd,
     )
     if result is None or result.returncode != 0:
         return ""

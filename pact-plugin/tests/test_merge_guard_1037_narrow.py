@@ -163,13 +163,20 @@ class TestNarrowGhCommentCarrierStripBlock:
 
         assert is_dangerous_command("gh pr close 5 --delete-branch")
 
-    def test_python_dash_c_blocks(self):
-        # python -c EXECUTES its arg; not a carrier verb -> not stripped -> BLOCK.
-        # `print('...')` style per the security ratification (an `x='...'` form would
-        # be removed by the pre-existing var-assignment carrier and is a weaker canary).
+    def test_python_dash_c_print_allows(self):
+        # An interpreter leg without an exec primitive is inert: print() only writes the
+        # text, so the quoted code is stripped -> ALLOW.
         from merge_guard_pre import is_dangerous_command
 
-        assert is_dangerous_command('python3 -c "print(' + _SQ + "gh pr merge 42" + _SQ + ')"')
+        assert not is_dangerous_command('python3 -c "print(' + _SQ + "gh pr merge 42" + _SQ + ')"')
+
+    def test_python_dash_c_system_blocks(self):
+        # The same leg with an exec primitive runs the text as a shell command -> BLOCK.
+        from merge_guard_pre import is_dangerous_command
+
+        assert is_dangerous_command(
+            'python3 -c "import os; os.system(' + _SQ + "gh pr merge 42" + _SQ + ')"'
+        )
 
     def test_general_grep_papercut_now_closed(self):
         # The `grep "...op..."` over-block papercut this #1037 NARROW fix deliberately left

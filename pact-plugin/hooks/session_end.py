@@ -82,6 +82,9 @@ def check_unpaused_pr(
     Also checks task metadata as fallback for PRs not tracked through the normal
     review workflow (preserves the existing safety-net regex detection).
 
+    When gh reports the PR MERGED, warns instead that /PACT:wrap-up did not
+    run, unless a wrap-up `session_end` (source "wrap-up") covers it.
+
     This is detection-only. SessionEnd is async fire-and-forget and cannot run
     agents or memory operations.
 
@@ -95,20 +98,22 @@ def check_unpaused_pr(
     if not project_slug:
         return None
 
+    review_events = read_events("review_dispatch")
+    last_review_ts = review_events[-1].get("ts", "") if review_events else None
+
     # Fix B (#453): structural consolidation signal — short-circuit if
-    # /PACT:wrap-up or /PACT:pause ran Pass 2 memory consolidation in
-    # this session. Placed first because it is the cheapest check
-    # (disk-local journal read already cached by read_events) and
-    # covers the most common false-positive cases (wrap-up on merged
-    # PR, pause with consolidation). Fail-open: read_events returns []
-    # on missing journal / unreadable journal / corrupt entries, which
-    # falls through to the legacy logic below — identical to pre-fix
-    # behavior for sessions that never consolidated.
-    if read_events("session_consolidated"):
+    # /PACT:wrap-up or /PACT:pause ran Pass 2 memory consolidation for
+    # the latest PR: a consolidation at or after the last review_dispatch,
+    # or any consolidation when no PR was dispatched for review. A
+    # consolidation that predates the latest review covers an earlier PR,
+    # not this one. Fail-open: read_events returns [] on missing journal /
+    # unreadable journal / corrupt entries, which falls through to the
+    # logic below.
+    consolidated = read_events("session_consolidated")
+    if any(last_review_ts is None or e.get("ts", "") >= last_review_ts for e in consolidated):
         return None
 
     paused_events = read_events("session_paused")
-    review_events = read_events("review_dispatch")
 
     # Reconcile pause vs review timing: a pause only "covers" a PR when it
     # occurred at-or-after that PR's dispatch. Bias toward "paused" (silence)
@@ -116,7 +121,6 @@ def check_unpaused_pr(
     # 1-second ISO precision tie.
     if paused_events and review_events:
         last_pause_ts = paused_events[-1].get("ts", "")
-        last_review_ts = review_events[-1].get("ts", "")
         if last_pause_ts >= last_review_ts:
             return None  # Most recent PR was paused; safe.
         # else fall through — current PR is unpaused
@@ -150,20 +154,30 @@ def check_unpaused_pr(
     if not pr_number:
         return None
 
-    # Fix A (#453): live PR-state check — last-line-of-defense against
-    # merged or closed PRs that neither Fix B nor the pause-vs-review
-    # timestamp comparison caught (e.g., PR merged via GitHub web UI
-    # mid-session with no wrap-up). Invoked only when every cheaper
+    # Fix A (#453): live PR-state check, reached only when every cheaper
     # signal has fallen through, so AC#4 (no network for wrap-up cases)
-    # is preserved structurally by the ordering above.
+    # is preserved structurally by the ordering above. A CLOSED PR needs
+    # nothing. A MERGED PR (including one merged via the GitHub web UI
+    # mid-session) warns unless /PACT:wrap-up ran for it: only a
+    # session_end with source "wrap-up", at or after the last
+    # review_dispatch, proves that. This hook's own session_end carries
+    # no source and never counts.
     #
     # Fail-open: check_pr_state returns "" on gh-missing / timeout /
-    # auth-expired / OSError. "" is not in ("MERGED", "CLOSED"), so we
-    # fall through to the warning — the conservative pre-fix behavior
-    # when we cannot distinguish "offline" from "PR actually open."
+    # auth-expired / OSError, and we fall through to the open-PR warning,
+    # the conservative behavior when we cannot distinguish "offline" from
+    # "PR actually open."
     pr_state = check_pr_state(pr_number)
-    if pr_state in ("MERGED", "CLOSED"):
+    if pr_state == "CLOSED":
         return None
+    if pr_state == "MERGED":
+        wrap_ups = [e for e in read_events("session_end") if e.get("source") == "wrap-up"]
+        if any(last_review_ts is None or e.get("ts", "") >= last_review_ts for e in wrap_ups):
+            return None
+        return (
+            f"PR #{pr_number} was merged but /PACT:wrap-up did not run: "
+            f"the consolidation and the retrospective were skipped. Run /PACT:wrap-up."
+        )
 
     return (
         f"Session ended without memory consolidation. "

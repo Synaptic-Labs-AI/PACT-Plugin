@@ -30,6 +30,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -541,13 +542,85 @@ def _no_mint_advisory(refusal_reason: str) -> str:
         refusal_reason, "the approval did not match the canonical form"
     )
     return (
-        "PACT merge-guard: an AskUserQuestion approval was issued but NO "
-        "authorization token was minted — " + why + ". The merge is HELD until a "
-        "matching approval is given. Re-approve via the canonical template in "
-        "pact-plugin/commands/peer-review.md: a SINGLE-select question, a short "
-        '"Yes, merge" affirmative label, and the command in THAT option\'s '
-        "DESCRIPTION in backticks (e.g. Run `gh pr merge <N>` to merge this PR), "
-        "with <N> the only number anywhere in the prompt."
+        "PACT merge-guard: no approval was recorded from this question — " + why + ". "
+        "If it was meant to approve a guarded command, ask again as a single-select "
+        "question whose approving option has a short label and the command in "
+        "backticks in its description, for example Run `gh pr merge <N>` to merge "
+        "this PR (the merge checkpoint in peer-review.md). If it was not an "
+        "approval, ignore this note."
+    )
+
+
+# Target values carry NUL-framed sentinels for targets a command leaves implicit
+# (the current branch, the default remote), and multi-item targets are netstring
+# encoded (`<len>:<item>...`). The confirmation renders both readably.
+_SENTINEL_WORDS = (
+    ("\x00implicit-merge", "the current branch"),
+    ("\x00implicit-force-push", "the current branch"),
+    ("\x00implicit", "the default remote"),
+)
+_CONFIRMATION_TARGET_MAX = 200
+# The context keys whose values are netstring-encoded multi-item targets.
+_NETSTRING_TARGET_KEYS = ("branch_set", "push_set", "force_push_set", "mass_target")
+
+
+def _split_netstring(value: str) -> list[str] | None:
+    """The items of a `<len>:<item>...` encoding, or None when the value is not one."""
+    items, i = [], 0
+    while i < len(value):
+        colon = value.find(":", i)
+        if colon <= i or not value[i:colon].isdigit():
+            return None
+        end = colon + 1 + int(value[i:colon])
+        if end > len(value):
+            return None
+        items.append(value[colon + 1:end])
+        i = end
+    return items or None
+
+
+def _readable_item(item: str) -> str:
+    for sentinel, words in _SENTINEL_WORDS:
+        if item.startswith(sentinel):
+            rest = item[len(sentinel):]
+            parts = _split_netstring(rest) if rest else []
+            if parts is None:
+                parts = [rest]
+            return ", ".join([words] + [_readable_item(p) for p in parts])
+    return item
+
+
+def _readable_target(value: str, is_netstring: bool) -> str:
+    """A minted target value as plain text: sentinels named, netstrings split, and
+    every control character (NUL included) dropped, capped in length."""
+    parts = (_split_netstring(value) if is_netstring else None) or [value]
+    text = ", ".join(_readable_item(p) for p in parts)
+    text = "".join(ch for ch in text if ch.isprintable())
+    if len(text) > _CONFIRMATION_TARGET_MAX:
+        text = text[:_CONFIRMATION_TARGET_MAX] + "..."
+    return text
+
+
+def _mint_confirmation(context: dict) -> str:
+    """The notice printed after a successful mint, naming what the approval
+    authorizes, so a click that was not an approval of this command is caught
+    before the command runs."""
+    op = context.get("operation_type") or "destructive command"
+    target = _target_value(context)
+    is_netstring = any(
+        target is not None and context.get(k) == target for k in _NETSTRING_TARGET_KEYS
+    )
+    if isinstance(target, str) and target == context.get("pr_number") and target.isdigit():
+        where = f" on PR #{target}"
+    elif isinstance(target, str):
+        where = " on " + _readable_target(target, is_netstring)
+    else:
+        where = ""
+    return (
+        f"PACT merge-guard: an approval was recorded for a {op}{where}. It "
+        f"authorizes that command for {TOKEN_TTL // 60} minutes, at most {MAX_USES} "
+        "times. If the option the user selected was not an approval of this "
+        "command, do not run it."
     )
 
 
@@ -674,6 +747,84 @@ def write_token(context: dict, token_dir: Path | None = None) -> str | None:
             return None
     except OSError:
         return None
+
+
+_CONFIRMING_STATE = {"merge": "MERGED", "close": "CLOSED"}
+
+# gh resolves the PR number against the repo of its working directory and its
+# GH_REPO / GH_HOST / GIT_DIR environment. A command that changes either can name
+# a PR in a different repo from the hook's own, so the state check would read the
+# wrong PR. Deliberately wide: a false match only keeps the token, today's
+# behaviour. One shape is followed instead of doubted: a single `cd <literal
+# absolute dir> &&` before the gh leg, where the check runs in that directory.
+_REPO_REDIRECT_RE = re.compile(
+    r"(?<![\w./-])pushd(?![\w./-])"
+    r"|\bgit\b[^;&|\n]*\s-C"
+    r"|(?<![\w])(?:GH_REPO|GH_HOST|GIT_DIR)="
+)
+_CD_WORD_RE = re.compile(r"(?<![\w./-])cd(?![\w./-])")
+# `&&` only: after `cd x;` or `cd x ||` the gh leg can run in the old directory.
+# The path class excludes every expansion and quoting character ($ ~ globs braces `).
+_LITERAL_CD_RE = re.compile(
+    r"(?<![\w./-])cd[ \t]+(/[^\s;&|<>(){}$~*?\[\]`'\"\\]*)[ \t]*&&"
+)
+_GH_PR_OP_RE = re.compile(r"\bgh\s+pr\s+(?:merge|close)\b")
+
+
+def _state_check_dir(
+    command: str, frame_cwd: object = None
+) -> tuple[bool, str | None]:
+    """Where the PR state check may run for this command: (True, <dir>) for the
+    session's directory (the hook frame's `cwd`, when it is an absolute existing
+    directory), (True, None) for the hook's own directory when the frame names
+    none, (True, <dir>) after a single literal absolute `cd`, and (False, None)
+    when the command may target another repo."""
+    if _REPO_REDIRECT_RE.search(command):
+        return False, None
+    cd_count = len(_CD_WORD_RE.findall(command))
+    if cd_count == 0:
+        # The command ran in the session's shell directory, which an earlier
+        # Bash call may have changed; the hook's own directory may differ.
+        if (
+            isinstance(frame_cwd, str)
+            and os.path.isabs(frame_cwd)
+            and os.path.isdir(frame_cwd)
+        ):
+            return True, frame_cwd
+        return True, None
+    literal = _LITERAL_CD_RE.search(command)
+    gh_leg = _GH_PR_OP_RE.search(command)
+    if cd_count != 1 or literal is None or gh_leg is None:
+        return False, None
+    path = literal.group(1)
+    if gh_leg.start() < literal.end() or ".." in path.split("/"):
+        return False, None
+    if not os.path.isdir(path):
+        return False, None
+    return True, path
+
+
+def _pr_state_confirms(command: str, op_type: str, frame_cwd: object = None) -> bool:
+    """True only when GitHub reports the PR the command named in the state the
+    command produces. Any doubt is False, which keeps the token (the TTL and
+    MAX_USES bound still apply): a URL, branch or implicit target, an -R/--repo
+    target, a directory change or repo env assignment other than one literal
+    absolute `cd`, an unreachable or slow gh, or any exception."""
+    try:
+        followable, cwd = _state_check_dir(command, frame_cwd)
+        if not followable:
+            return False
+        ctx = extract_command_context(_extraction_surface(command))
+        pr = ctx.get("pr_number")
+        if not isinstance(pr, str) or not pr.isdigit():
+            return False
+        if any(str(f).startswith("--repo") for f in ctx.get("bound_flags") or []):
+            return False
+        from shared.gh_helpers import check_pr_state
+
+        return check_pr_state(pr, cwd=cwd) == _CONFIRMING_STATE[op_type]
+    except Exception:  # noqa: BLE001 - any doubt keeps the token
+        return False
 
 
 def _retire_token_for_command(
@@ -935,14 +1086,13 @@ def main():
                 print(_SUPPRESS_OUTPUT)
                 sys.exit(0)
 
-            # Block 2 — Platform-level success signal (dict-shape +
-            # non-interrupted). PostToolUse only fires on tool-call
-            # success at the platform layer (failed Bash routes to
-            # PostToolUseFailure per Agent SDK); the dict-shape vs
-            # non-dict asymmetry is a structural success boundary.
-            if not isinstance(tool_response, dict):
-                print(_SUPPRESS_OUTPUT)
-                sys.exit(0)
+            # Block 2 — Platform-level success signal (non-interrupted).
+            # PostToolUse only fires on tool-call success at the platform
+            # layer (failed Bash routes to PostToolUseFailure per Agent
+            # SDK). extract_tool_response always returns a dict: a
+            # non-dict or absent response arrives here as {}, carries no
+            # stdout, and so retires only if Block 3's state check
+            # confirms the PR's final state.
             if tool_response.get("interrupted") is True:
                 print(_SUPPRESS_OUTPUT)
                 sys.exit(0)
@@ -963,7 +1113,17 @@ def main():
                 if not isinstance(stdout_text, str):
                     print(_SUPPRESS_OUTPUT)
                     sys.exit(0)
-                if expected_substring not in stdout_text:
+                if op_type in _CONFIRMING_STATE:
+                    # A piped or non-TTY gh run prints no "Merged pull request"
+                    # line, so a missing substring falls back to asking GitHub
+                    # for the PR's state; any doubt there keeps the token.
+                    confirmed = (
+                        expected_substring.lower() in stdout_text.lower()
+                        or _pr_state_confirms(command, op_type, input_data.get("cwd"))
+                    )
+                else:
+                    confirmed = expected_substring in stdout_text
+                if not confirmed:
                     print(_SUPPRESS_OUTPUT)
                     sys.exit(0)
 
@@ -988,7 +1148,8 @@ def main():
             sys.exit(0)
 
         # tool_response: {"answers": {"<question text>": "<selected label>"}, ...}
-        answers = tool_response.get("answers", {}) if isinstance(tool_response, dict) else {}
+        # (extract_tool_response always returns a dict; the answers value may not be one.)
+        answers = tool_response.get("answers", {})
         if not isinstance(answers, dict):
             answers = {}
 
@@ -1019,6 +1180,16 @@ def main():
                     f"Merge authorization token written: {safe_token_path}",
                     file=sys.stderr,
                 )
+                # Observer-style confirmation (exit 0): name what the approval
+                # authorizes, so a click that was not an approval of this command
+                # is caught before the command runs. The token is unchanged.
+                print(json.dumps({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PostToolUse",
+                        "additionalContext": _mint_confirmation(context),
+                    }
+                }))
+                sys.exit(0)
         elif refusal_reason is not None and _bundle_has_command(questions):
             # B2 (#1052): an approval was issued for a command-bearing bundle but
             # minted NO token. Emit a self-teaching, OBSERVER-STYLE advisory that

@@ -1,0 +1,187 @@
+"""Token retirement arms the PR-state check's own file does not carry.
+
+Same rig shape as test_merge_guard_pr_state_retirement.py: the REAL
+merge_guard_post.py as a subprocess, an isolated CLAUDE_CONFIG_DIR holding the
+token, and a fake `gh` first on an explicitly built PATH that logs each call.
+This fake can also exit non-zero while printing a state.
+
+What these arms add:
+- Block 2 still runs before the state check: an interrupted call neither
+  asks gh nor retires. A non-dict response is normalised to {} upstream and is
+  decided by the state check, like an empty stdout.
+- The token stays bound to its PR: a confirmed merge of another PR does not
+  retire it.
+- A retired token no longer authorizes the same command.
+- gh's exit status is read, not only its output: a failing gh that prints
+  MERGED keeps the token, as does a state GitHub never returns.
+- Only merge and close ask gh. Force-push, branch-delete and push-to-main never do.
+- merge_guard_post is not registered on PostToolUseFailure, so a failed bare
+  merge never reaches retirement at all.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+from merge_guard_post import write_token
+from merge_guard_pre import check_merge_authorization
+from shared.merge_guard_common import extract_command_context
+
+_PLUGIN = Path(__file__).resolve().parent.parent
+_HOOK = _PLUGIN / "hooks" / "merge_guard_post.py"
+_MERGE = "gh pr " + "merge"
+
+
+@pytest.fixture
+def rig(tmp_path):
+    config = tmp_path / ".claude"
+    config.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gh = bin_dir / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        'echo "$*" >> "$FAKE_GH_LOG"\n'
+        'echo "$FAKE_GH_STATE"\n'
+        'exit "${FAKE_GH_RC:-0}"\n'
+    )
+    gh.chmod(0o755)
+    return {"tmp": tmp_path, "config": config, "bin": bin_dir, "log": tmp_path / "gh.log"}
+
+
+def _post(rig, command, response, state="MERGED", rc=0):
+    payload = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+        "tool_response": response,
+    }
+    env = {
+        "PATH": os.pathsep.join([str(rig["bin"]), "/usr/bin", "/bin"]),
+        "HOME": str(rig["tmp"]),
+        "CLAUDE_CONFIG_DIR": str(rig["config"]),
+        "FAKE_GH_LOG": str(rig["log"]),
+        "FAKE_GH_STATE": state,
+        "FAKE_GH_RC": str(rc),
+    }
+    proc = subprocess.run(
+        [sys.executable, str(_HOOK)], input=json.dumps(payload), capture_output=True,
+        text=True, env=env, cwd=str(rig["tmp"]), timeout=30, check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {"suppressOutput": True}, proc.stdout
+
+
+def _mint(rig, command):
+    ctx = extract_command_context(command)
+    assert ctx.get("operation_type"), ctx
+    assert write_token(ctx, token_dir=rig["config"])
+
+
+def _gh_calls(rig):
+    return rig["log"].read_text().splitlines() if rig["log"].exists() else []
+
+
+def _retired(rig):
+    return len(list(rig["config"].glob("merge-authorized-*.consumed"))) == 1
+
+
+_EMPTY = {"stdout": "", "stderr": "", "interrupted": False}
+
+
+class TestBlockTwoRunsFirst:
+    def test_an_interrupted_call_never_asks_gh_or_retires(self, rig):
+        cmd = f"{_MERGE} 5 --squash"
+        _mint(rig, cmd)
+        _post(rig, cmd, {"stdout": "", "stderr": "", "interrupted": True})
+        assert _gh_calls(rig) == []
+        assert not _retired(rig)
+
+    @pytest.mark.parametrize("response", [
+        pytest.param("merged", id="non-dict"),
+        pytest.param(None, id="null"),
+    ])
+    @pytest.mark.parametrize("state,retired", [("MERGED", True), ("OPEN", False)])
+    def test_a_non_dict_response_is_an_empty_one(self, rig, response, state, retired):
+        """extract_tool_response maps a non-dict or absent response to {}, so
+        Block 2's isinstance test never sees one: the frame reaches the state
+        check like an empty stdout, and GitHub's state alone decides. Pinned
+        so a change to that mapping is seen here."""
+        cmd = f"{_MERGE} 5 --squash"
+        _mint(rig, cmd)
+        _post(rig, cmd, response, state=state)
+        assert _gh_calls(rig) == ["pr view 5 --json state --jq .state"]
+        assert _retired(rig) is retired
+
+
+class TestTokenStaysBoundToItsPr:
+    def test_a_confirmed_merge_of_another_pr_keeps_the_token(self, rig):
+        _mint(rig, f"{_MERGE} 5 --squash")
+        _post(rig, f"{_MERGE} 6 --squash", _EMPTY)
+        assert not _retired(rig)
+        assert check_merge_authorization(f"{_MERGE} 5 --squash", token_dir=rig["config"]) is None
+
+    def test_a_retired_token_no_longer_authorizes_the_command(self, rig):
+        """The point of retirement: after the confirmed merge, the same
+        command needs a new approval."""
+        cmd = f"{_MERGE} 5 --squash"
+        _mint(rig, cmd)
+        assert check_merge_authorization(cmd, token_dir=rig["config"]) is None
+        _post(rig, cmd, _EMPTY)
+        assert _retired(rig)
+        assert check_merge_authorization(cmd, token_dir=rig["config"]) is not None
+
+
+class TestGhAnswerIsReadStrictly:
+    @pytest.mark.parametrize("state,rc", [
+        pytest.param("MERGED", 1, id="gh-fails-but-prints-merged"),
+        pytest.param("DRAFT", 0, id="state-github-never-returns"),
+        pytest.param("", 0, id="empty-answer"),
+        pytest.param("MERGED\nCLOSED", 0, id="two-lines"),
+    ])
+    def test_anything_but_a_clean_merged_keeps_the_token(self, rig, state, rc):
+        cmd = f"{_MERGE} 5 --squash"
+        _mint(rig, cmd)
+        _post(rig, cmd, _EMPTY, state=state, rc=rc)
+        assert _gh_calls(rig) == ["pr view 5 --json state --jq .state"]
+        assert not _retired(rig)
+
+    def test_lowercase_merged_from_gh_still_confirms(self, rig):
+        """check_pr_state upper-cases the answer, so the comparison is on
+        GitHub's state, not on its spelling."""
+        cmd = f"{_MERGE} 5 --squash"
+        _mint(rig, cmd)
+        _post(rig, cmd, _EMPTY, state="merged")
+        assert _retired(rig)
+
+
+class TestOnlyMergeAndCloseAskGh:
+    @pytest.mark.parametrize("cmd", [
+        "git push --force origin feature",
+        "git push origin --delete feature",
+        "git push origin main",
+    ])
+    def test_other_guarded_operations_never_call_gh(self, rig, cmd):
+        _mint(rig, cmd)
+        _post(rig, cmd, _EMPTY)
+        assert _gh_calls(rig) == []
+
+
+class TestRegistration:
+    def test_merge_guard_post_runs_on_post_tool_use_only(self):
+        """A failed bare merge goes to PostToolUseFailure. Registered there, the
+        hook would reach retirement on a merge that never happened."""
+        hooks = json.loads((_PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
+        events = {
+            event
+            for event, groups in hooks.items()
+            for group in groups
+            for hook in group.get("hooks", [])
+            if "merge_guard_post.py" in hook.get("command", "")
+        }
+        assert events == {"PostToolUse"}, events

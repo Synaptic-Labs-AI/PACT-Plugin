@@ -324,7 +324,7 @@ def _enclosing_block(text, offset):
 
 PROPAGATE_SENTENCE = "Then propagate the store into the Working Memory block."
 PROPAGATION_PARAGRAPH_MARKER = "may appear only at a boundary"
-PROPAGATING_COMMANDS = frozenset({"orchestrate", "wrap-up"})
+PROPAGATING_COMMANDS = frozenset({"wrap-up"})
 
 # Any literal a command hands an agent. NOT narrowed to a harvest dispatch
 # description -- see _propagating_sites.
@@ -430,9 +430,8 @@ class TestOnlyTheSafeBoundariesPropagateTheWorkingMemoryBlock:
         or when the sentence vanishes from the tree (non-vacuity: the count is
         pinned, so an empty extraction fails loudly).
 
-        FOUR SITES, in two commands: `orchestrate`'s post-review Standard
-        Harvest and its mid-session Consolidation Harvest, and `wrap-up`'s two
-        arc-closing step-6 branches. The count is per SITE, so it moves when a
+        TWO SITES, in one command: `wrap-up`'s two arc-closing step-6
+        branches. The count is per SITE, so it moves when a
         branch gains or loses its propagation even though the command set does
         not -- which is the whole reason the unit changed.
         """
@@ -442,7 +441,7 @@ class TestOnlyTheSafeBoundariesPropagateTheWorkingMemoryBlock:
             "the carrier extraction stopped matching. Report this as an "
             "extraction failure, not as agreement." % (COMMANDS_DIR, PROPAGATE_SENTENCE)
         )
-        assert len(carrying) == 4, carrying
+        assert len(carrying) == 2, carrying
         assert set(carrying) <= PROPAGATING_COMMANDS, sorted(set(carrying) - PROPAGATING_COMMANDS)
 
     def test_every_propagating_site_is_named_in_the_persona_paragraph(self):

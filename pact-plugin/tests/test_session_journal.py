@@ -5013,7 +5013,7 @@ class TestValidateOptionalFieldTypes:
         """session_end.warning wrong-type is rejected live (#433 cycle-7 N1).
 
         COUNTER-TEST BY REVERT target: removing
-        `"session_end": {"warning": str}` from `_OPTIONAL_FIELDS_BY_TYPE`
+        `"session_end": {"warning": str, "source": str}` from `_OPTIONAL_FIELDS_BY_TYPE`
         in shared/session_journal.py flips this test to pass-as-OK
         because `_validate_event_schema` has no declared optional
         fields for `session_end` and the int value sails through the
@@ -5045,6 +5045,17 @@ class TestValidateOptionalFieldTypes:
         ok, reason = _validate_event_schema(good)
         assert ok is True, f"valid warning should pass; got {reason!r}"
         assert reason == "ok"
+
+    def test_validate_session_end_source(self):
+        """`source` is optional and must be a str: wrap-up step 5 writes
+        source="wrap-up", and session_end.check_unpaused_pr compares it."""
+        from shared.session_journal import _validate_event_schema, make_event
+
+        ok, reason = _validate_event_schema(make_event("session_end", source="wrap-up"))
+        assert (ok, reason) == (True, "ok")
+        ok, reason = _validate_event_schema(make_event("session_end", source=1))
+        assert ok is False
+        assert "source" in reason and "must be str" in reason
 
     # ---------------------------------------------------------------------
     # session_consolidated schema activation + optional-field tests (#453)

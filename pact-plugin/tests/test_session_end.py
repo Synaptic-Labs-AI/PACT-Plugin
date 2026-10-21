@@ -893,19 +893,42 @@ class TestCheckUnpausedPr:
     # #453 Fix A — live PR-state defense-in-depth tests
     # ========================================================================
 
-    def test_live_pr_check_merged_short_circuits(self):
-        """gh reports MERGED → no warning (AC#2).
+    def test_live_pr_check_merged_without_wrap_up_warns(self):
+        """gh reports MERGED and no wrap-up ran → warn to run /PACT:wrap-up.
 
-        Catches the case where a PR was merged on the GitHub web UI
-        mid-session and no wrap-up ran. Fix B is empty (no
-        session_consolidated event); Fix A covers the gap via live
-        gh check.
+        Catches the case where a PR was merged (on the GitHub web UI or
+        by a merge with no wrap-up after it) mid-session. Fix B is empty
+        (no session_consolidated event); Fix A sees the merge via the
+        live gh check.
         """
         from session_end import check_unpaused_pr
 
         def mock_read_events(event_type=None):
             if event_type == "review_dispatch":
                 return [{"type": "review_dispatch", "pr_number": 42, "ts": "2026-01-01T00:00:00Z"}]
+            return []
+
+        with patch("session_end.read_events", side_effect=mock_read_events), \
+             patch("session_end.check_pr_state", return_value="MERGED"):
+            warning = check_unpaused_pr(
+                tasks=None,
+                project_slug="proj",
+            )
+
+        assert warning == (
+            "PR #42 was merged but /PACT:wrap-up did not run: "
+            "the consolidation and the retrospective were skipped. Run /PACT:wrap-up."
+        )
+
+    def test_live_pr_check_merged_with_wrap_up_is_silent(self):
+        """gh reports MERGED and a wrap-up session_end follows the review → None."""
+        from session_end import check_unpaused_pr
+
+        def mock_read_events(event_type=None):
+            if event_type == "review_dispatch":
+                return [{"type": "review_dispatch", "pr_number": 42, "ts": "2026-01-01T00:00:00Z"}]
+            if event_type == "session_end":
+                return [{"type": "session_end", "source": "wrap-up", "ts": "2026-01-01T01:00:00Z"}]
             return []
 
         with patch("session_end.read_events", side_effect=mock_read_events), \

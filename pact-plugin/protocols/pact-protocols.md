@@ -893,7 +893,7 @@ Derive agent state from progress signals (see agent-teams skill, Progress Signal
 > **Cybernetic basis**: Bateson's deutero-learning — the system learns to learn by comparing
 > predicted difficulty against actual outcomes, creating a feedback loop for scoring accuracy.
 
-At workflow completion (orchestrate wrap-up or comPACT completion), the secretary gathers calibration metrics during HANDOFF processing, asks the team-lead for a brief difficulty assessment, and saves the calibration record to pact-memory. Records feed back into Learning II pattern matching.
+At workflow completion (`/PACT:wrap-up` after orchestrate, or comPACT completion), the secretary gathers calibration metrics during HANDOFF processing, asks the team-lead for a brief difficulty assessment, and saves the calibration record to pact-memory. Records feed back into Learning II pattern matching.
 
 **Schema**:
 
@@ -1054,7 +1054,11 @@ The aggregation feeds back into Learning II calibration data alongside the featu
 | **comPACT** | Focused, independent tasks | Dispatch concurrent specialists for self-contained tasks. No PACT phases needed. |
 | **rePACT** | Complex sub-tasks within orchestration | Recursive nested P→A→C→T cycle (single or multi-domain) |
 | **imPACT** | When blocked or need to iterate | Triage: Redo prior phase? Additional agents needed? |
+| **peer-review** | Work committed, ready for review | Create the PR, run the multi-agent review, hold the merge checkpoint |
+| **wrap-up** | After a merge, or to end the session | Retrospective, memory consolidation, cleanup, session decision |
 | **pause** | PR open, not ready to merge | Consolidate memory, persist state, shut down teammates |
+
+**Chain**: `/PACT:orchestrate` or `/PACT:comPACT` → `/PACT:peer-review` → merge → `/PACT:wrap-up`. `/PACT:pause` and `/PACT:refresh` interrupt the chain; the session resumes it later. A workflow invoked by another workflow returns to its caller at the step that invoked it and skips its own next-step question: `/PACT:imPACT` returns to the workflow it was triaging, and `/PACT:comPACT` or `/PACT:orchestrate` dispatched to fix review findings returns to that `/PACT:peer-review`.
 
 ### Lead-vs-Teammate Completion Responsibilities (per workflow)
 
@@ -1229,10 +1233,12 @@ See the [Concurrent Audit Protocol](pact-audit.md) for full details.
 4. **Create atomic commit(s)** — stage and commit before proceeding
 5. **Calibration** — The secretary gathers calibration metrics during HANDOFF processing. When asked, provide a brief difficulty assessment: was actual difficulty higher, lower, or about the same as predicted? Which dimensions surprised you?
 
-**Next steps** — After commit, ask: "Work committed. Create PR?"
-- Yes (Recommended) → invoke `/PACT:peer-review`
-- Not yet / pause → invoke `/PACT:pause` — consolidates memory, persists state, shuts down teammates. Worktree persists; resume later.
-- More work → continue with comPACT or orchestrate
+If `TaskList` shows an `in_progress` Review task whose subject ends with `({branch})`, where {branch} is the output of `git branch --show-current`, this comPACT is fixing review findings: skip the question below and return to that `/PACT:peer-review` at its verify-only re-review.
+
+**Next steps** — After commit, use `AskUserQuestion` to ask: "Work committed. What next?"
+- Yes, create PR (Recommended) → invoke `/PACT:peer-review`
+- Continue working → stay in this workflow; more work may follow via `/PACT:comPACT` or `/PACT:orchestrate`
+- Pause work for now → invoke `/PACT:pause` — consolidates memory, persists state, shuts down teammates. Worktree persists; resume later.
 
 **If blocker reported**:
 1. Receive blocker from specialist

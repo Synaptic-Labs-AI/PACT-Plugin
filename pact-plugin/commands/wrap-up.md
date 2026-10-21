@@ -151,7 +151,9 @@ Before ending the session (step 8), ensure all journal entries have been process
 set -e
 trap 'rc=$?; echo "[JOURNAL WRITE FAILED] wrap-up.md (bash line $LINENO): \"${BASH_COMMAND%%$'\''\n'\''*}\" exit=$rc" >&2; exit $rc' ERR
 python3 "{plugin_root}/hooks/shared/session_journal.py" write \
-  --type session_end --session-dir '{session_dir}'
+  --type session_end --session-dir '{session_dir}' --stdin <<'JSON'
+{"source": "wrap-up"}
+JSON
 # Emit session_consolidated only when consolidation actually ran in step 1.
 # Shell-clamped via case/esac (mirrors pause.md step 5) so the prose
 # contract is enforced mechanically and an invalid flag value fails
@@ -248,8 +250,9 @@ Audit and optionally clean up Task state:
 1. `TaskList`: Review all session tasks
 2. For abandoned in_progress tasks: complete or document reason
 3. Verify Feature task reflects final state
-4. Report task summary: "Session has N tasks (X completed, Y pending)"
-5. IF multi-session mode (CLAUDE_CODE_TASK_LIST_ID set):
+4. Complete the "Invoke /PACT:wrap-up" task if one is pending
+5. Report task summary: "Session has N tasks (X completed, Y pending)"
+6. IF multi-session mode (CLAUDE_CODE_TASK_LIST_ID set):
    - Offer: "Clean up completed workflows? (Context archived to memory)"
    - User confirms → delete completed feature hierarchies
    - User declines → leave as-is

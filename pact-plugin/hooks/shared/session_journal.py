@@ -478,8 +478,10 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # ACTIVATES this optional check — _validate_event_schema
     # short-circuits on unknown event types and would otherwise skip
     # the optional loop. Symmetric with the cleanup_summary registration
-    # shipped in the same PR (#412 Fix B).
-    "session_end": {"warning": str},
+    # shipped in the same PR (#412 Fix B). `source` is written by wrap-up
+    # step 5 as "wrap-up"; check_unpaused_pr reads it to tell a wrap-up's
+    # session_end from the SessionEnd hook's own.
+    "session_end": {"warning": str, "source": str},
     # shared/compaction_owner.py adds `latency_s`, the seconds from staging a
     # summary to resolving it, whenever the staged record's time is readable.
     "compaction_attributed": {"latency_s": float},
