@@ -1806,7 +1806,7 @@ Output:
   status: completed  # Non-happy-path uses completed with metadata (e.g., {"stalled": true} or {"blocked": true}) per task lifecycle conventions
 ```
 
-> **State persistence**: Input fields are stored in per-scope sub-task metadata during ATOMIZE and read on entry from the task file — `TaskGet` does NOT surface task metadata, so read the raw JSON: `cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team_name}/{taskId}.json" | jq .metadata.<key>`.
+> **State persistence**: Input fields are stored in per-scope sub-task metadata during ATOMIZE and read on entry from the task file — `TaskGet` does NOT surface task metadata, so read the raw JSON: `cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team_name}/{taskId}.json" | jq .metadata.<key>`. The `{team_name}` segment is the realigned team name — read it from `pact-session-context.json` (`team_name` field).
 
 #### Current Executor: rePACT
 
@@ -1904,7 +1904,7 @@ This phase dispatches sub-scopes for independent execution. Each sub-scope runs 
 
 This phase verifies that independently-developed sub-scopes are compatible before comprehensive testing.
 
-**Recover scope state**: Read each sub-scope's `scope_contract` and `worktree_path` from its task file — `TaskGet` does NOT surface task metadata: `cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team_name}/{taskId}.json" | jq .metadata.<key>`. If that file cannot be read (task store drained), recover from the session journal instead: run `python3 "{plugin_root}/hooks/shared/session_journal.py" read --session-dir "{session_dir}" --type task_metadata_snapshot` (prints a JSON array), filter to events whose `task_id` matches the scope task, take the latest-`ts` event, and read `scope_contract` / `worktree_path` from its `metadata` (honor `_truncated` / `_dropped_keys` markers if present).
+**Recover scope state**: Read each sub-scope's `scope_contract` and `worktree_path` from its task file — `TaskGet` does NOT surface task metadata: `cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team_name}/{taskId}.json" | jq .metadata.<key>`. The `{team_name}` segment is the realigned team name — read it from `pact-session-context.json` (`team_name` field). If that file cannot be read (task store drained), recover from the session journal instead: run `python3 "{plugin_root}/hooks/shared/session_journal.py" read --session-dir "{session_dir}" --type task_metadata_snapshot` (prints a JSON array), filter to events whose `task_id` matches the scope task, take the latest-`ts` event, and read `scope_contract` / `worktree_path` from its `metadata` (honor `_truncated` / `_dropped_keys` markers if present).
 
 **Merge sub-scope branches**: Before running contract verification, merge each sub-scope's work back:
 1. For each completed sub-scope, merge its suffix branch to the feature branch
@@ -2141,6 +2141,8 @@ You — the team-lead — are the **only** actor who marks teammate-owned tasks 
 
 `blockedBy` is pull-only at the platform level — the platform does NOT push a wake on blocker resolution; `blockedBy` is computed at `TaskList` query time. Idle teammates cannot self-wake to re-poll, so the wake-signal `SendMessage` is paired with each metadata or status write that resolves their wait.
 
+**Relay fallback (Task tools absent despite a foreground dispatch).** When a teammate's Task tools are absent even though the dispatch carried `run_in_background: false` (the residual case), the sanctioned fallback is the relay: the teammate delivers the structured content via `SendMessage`, and you perform the metadata writes (`teachback_submit` / `handoff`) on their behalf from the message copy. No hook suppression logic and no relay marker exist for this — acceptance and rejection flows are unchanged.
+
 ### Acceptance — two-call atomic pair (BOTH required, `TaskUpdate` FIRST)
 
 1. `TaskUpdate(taskId, status="completed")` — status flip; auto-unblocks any tasks with `blockedBy=[<id>]`
@@ -2172,7 +2174,7 @@ The canonical predicate `is_self_complete_exempt(task, team_name)` in `shared/in
 |---|---|---|
 | imPACT termination | `metadata.terminated == true` | You force-complete an unrecoverable agent's task via `TaskStop` + `TaskUpdate(status="completed", metadata={"terminated": true, "reason": "..."})`. See [imPACT.md](../commands/imPACT.md). The `terminated` marker is recognized directly by audit/inspection; `is_self_complete_exempt` does NOT cover this surface (the team-lead writes status=completed directly). |
 
-**`TaskGet` metadata-blindness reminder**: `TaskGet` does NOT surface metadata. Read directly:
+**`TaskGet` metadata-blindness reminder**: `TaskGet` does NOT surface metadata. Read directly (the `{team_name}` path segment is the realigned team name — `pact-session-context.json`, `team_name` field):
 
 ```
 cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team_name}/{taskId}.json" | jq .metadata.handoff
@@ -2265,7 +2267,7 @@ Both tasks are created at dispatch time; the teammate receives both in their ini
 
 **Reviewing the TEACHBACK**:
 
-Read `metadata.teachback_submit` directly:
+Read `metadata.teachback_submit` directly (the `{team_name}` path segment is the realigned team name — `pact-session-context.json`, `team_name` field):
 
 ```
 cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team_name}/{A_id}.json" | jq .metadata.teachback_submit
@@ -2540,7 +2542,7 @@ Events are JSONL entries with common fields `v` (schema version), `type`, and `t
 
 1. Read session journal for current session → full event history survives
 2. `TaskList` → task summaries (status, blocking, ownership)
-3. The task file on disk (`cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team_name}/{taskId}.json" | jq .metadata.<key>`) → metadata if task files still exist; `TaskGet` does NOT surface it
+3. The task file on disk (`cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team_name}/{taskId}.json" | jq .metadata.<key>`; the `{team_name}` segment is the realigned team name — `pact-session-context.json`, `team_name` field) → metadata if task files still exist; `TaskGet` does NOT surface it
 4. Journal is authoritative when task metadata is unavailable
 5. If the journal's latest `team_realigned` event names a `from` store whose in-flight tasks you have not re-created, run the team-split recovery below from its step 3. Skip tasks already re-created: their description cites the old id.
 

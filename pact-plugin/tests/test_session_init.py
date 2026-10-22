@@ -1747,6 +1747,8 @@ class TestWriteContextIntegration:
         # #878 SHAPE-2: build_context_cache takes the 4 positional args; the
         # lead/teammate disk gate moved OUT of this call (it's now persist_context,
         # invoked only when frame_is_lead) — so no write_disk kwarg here.
+        # harness: the non-TTY stamp carry-forward ("" when nothing recorded
+        # and the transcript names no non-TTY entrypoint — this test's shape).
         mock_build_ctx.assert_called_once_with(
             "session-aabb1122",
             "aabb1122-0000-0000-0000-000000000000",
@@ -1754,6 +1756,7 @@ class TestWriteContextIntegration:
             "",  # plugin_root: CLAUDE_PLUGIN_ROOT not set in this test
             started_at=None,  # a startup records now; only a compaction keeps the value on disk
             process_key=ANY,
+            harness=ANY,
         )
 
     def test_missing_session_id_falls_back_to_unknown_and_warns(self, monkeypatch, tmp_path, capsys):
@@ -3130,6 +3133,7 @@ class TestPluginRootEnvWiring:
         assert exc_info.value.code == 0
         # 4th positional arg is plugin_root; #878 SHAPE-2 moved the disk gate out
         # of this call into persist_context, so no write_disk kwarg here.
+        # harness: the non-TTY stamp carry-forward ("" in this test's shape).
         mock_build_ctx.assert_called_once_with(
             "session-aabb1122",
             "aabb1122-0000-0000-0000-000000000000",
@@ -3137,6 +3141,7 @@ class TestPluginRootEnvWiring:
             plugin_root_value,
             started_at=None,
             process_key=ANY,
+            harness=ANY,
         )
 
     def test_plugin_root_env_flows_to_update_session_info(
@@ -3697,7 +3702,7 @@ def _compact_tasks_dir(tmp_path, monkeypatch, pact_context):
     session_id = "aabb1122-0000-0000-0000-000000000000"
     team_name = "session-aabb1122"
     tasks_dir = tmp_path / ".claude" / "tasks" / team_name
-    tasks_dir.mkdir(parents=True)
+    tasks_dir.mkdir(parents=True, exist_ok=True)
     pact_context(session_id=session_id, team_name=team_name)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -6571,7 +6576,7 @@ class TestSessionInitCompactBranchExceptions:
         # fire, making their parametrize cases vacuously pass. Team session →
         # tasks resolve under {team_name} (the team-dir resolution fix).
         tasks_dir = tmp_path / ".claude" / "tasks" / team_name
-        tasks_dir.mkdir(parents=True)
+        tasks_dir.mkdir(parents=True, exist_ok=True)
         (tasks_dir / "f-1.json").write_text(json.dumps({
             "id": "f-1",
             "subject": "Feature for helper-raise test",
@@ -6785,7 +6790,7 @@ class TestSessionInitDirectiveAcrossAllSources:
 
         # Team session → tasks resolve under {team_name} (team-dir fix).
         tasks_dir = tmp_path / ".claude" / "tasks" / team_name
-        tasks_dir.mkdir(parents=True)
+        tasks_dir.mkdir(parents=True, exist_ok=True)
         feature = {
             "id": "f-order",
             "subject": "Order invariant feature",

@@ -181,6 +181,24 @@ def pact_context(tmp_path, monkeypatch):
         monkeypatch.setattr(ctx_module, "_context_path", context_file)
         # Clear the module-level cache so fresh reads happen
         monkeypatch.setattr(ctx_module, "_cache", None)
+        # Materialize the LIVE team store the resolver seam needs: the migrated
+        # hook sites resolve tasks/{team}/ through task_utils.resolve_task_dir,
+        # which is EXISTENCE-ONLY — a context file alone no longer yields a
+        # team name, and no store legitimately suppresses. The autouse
+        # _isolate_config_root_to_tmp fixture already redirects
+        # get_claude_config_dir() to this tmp tree, so the store lands beside
+        # the context file. Gated on the safe-component allowlist: a
+        # degenerate team_name (the hostile-name tests) creates NO store, so
+        # the resolver's own gate stays the exercised surface there. A blank
+        # session_id also creates NOTHING (no session -> no live store; tests
+        # asserting a no-session world stays unwritten depend on that).
+        from shared.paths import get_claude_config_dir as _config_root
+        from shared.session_state import is_safe_path_component as _is_safe
+
+        if session_id and _is_safe(team_name):
+            _root = _config_root()
+            (_root / "tasks" / team_name).mkdir(parents=True, exist_ok=True)
+            (_root / "teams" / team_name).mkdir(parents=True, exist_ok=True)
         return context_file
 
     # Always reset module state at fixture setup (even if _write isn't called,

@@ -106,6 +106,12 @@ _EMPTY_CONTEXT = {
     "plugin_root": "",
     "started_at": "",
     "process_key": "",
+    # Harness posture stamp: "" = unknown/default (TTY CLI posture not yet
+    # determined); the single non-empty value in v1 is "non_tty" (set when the
+    # transcript entrypoint or the team substrate says the session runs under a
+    # non-TTY harness — remote/cloud or Desktop). MONOTONIC by contract: writers
+    # may only SET it, never clear or change it; nothing gates on it in v1.
+    "harness": "",
 }
 
 # Read-boundary path-safety guard for team_name. The persisted value is minted
@@ -2138,6 +2144,7 @@ def build_context_cache(
     plugin_root: str = "",
     started_at: str | None = None,
     process_key: str | None = None,
+    harness: str = "",
 ) -> tuple[Path, dict] | None:
     """Build the session context dict + path and populate the in-process cache.
 
@@ -2175,6 +2182,11 @@ def build_context_cache(
             None keeps the key the file already records for this session, so
             a writer running outside a hook (the realign verb's shell) never
             replaces it.
+        harness: The harness posture stamp ("" unknown, "non_tty" the single
+            v1 value). Callers pass the MONOTONIC carry-forward: a non-empty
+            value already recorded for this session wins over a fresh "" read
+            (set_harness_stamp owns same-value idempotence; this parameter
+            only threads the value through the cache/persist seam).
 
     Returns:
         ``(target, context)`` on success, or ``None`` if the path is uncomputable.
@@ -2188,6 +2200,7 @@ def build_context_cache(
         "plugin_root": plugin_root,
         "started_at": started_at or datetime.now(timezone.utc).isoformat(),
         "process_key": "",
+        "harness": harness if isinstance(harness, str) else "",
     }
 
     # Use _context_path if already set (from init() or test fixture),
@@ -2216,6 +2229,26 @@ def build_context_cache(
         except (OSError, ValueError, TypeError, AttributeError):
             process_key = ""
     context["process_key"] = process_key or ""
+
+    # HARNESS carry-forward (monotonic never-clear, the same discipline the
+    # process_key read above applies): when the caller threads NO harness
+    # value ("" — write_context, the realign healer, any rebuild-after-stamp
+    # writer), a non-empty harness already recorded for THIS session is kept.
+    # Without this, write_context (which rebuilds the context from parameters)
+    # would blank the stamp on its next rewrite — violating the never-clear
+    # contract set_harness_stamp declares. Callers that DO thread a value
+    # (session_init, monotonic: saved-or-transcript) are unaffected — the
+    # carry only fires on the parameter's default.
+    if not harness:
+        try:
+            recorded_harness = json.loads(target.read_text(encoding="utf-8")).get(
+                "harness", ""
+            )
+            if isinstance(recorded_harness, str) and recorded_harness:
+                harness = recorded_harness
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+    context["harness"] = harness if isinstance(harness, str) else ""
 
     # Populate the in-process cache UNCONDITIONALLY (Option A). The cache is the
     # process's own working truth; disk persistence is an independent side-effect.
@@ -2336,6 +2369,65 @@ def write_context(
     )
     if result is not None:
         persist_context(*result)
+
+
+# The single legal harness-stamp value in v1. Single-key/single-value by
+# ruling: launcher identity rides the non-gating journal entrypoint diagnostic,
+# NOT the stamp — no per-launcher values here.
+HARNESS_NON_TTY = "non_tty"
+
+
+def set_harness_stamp(value: str, input_data: dict | None = None) -> bool:
+    """Set ``context["harness"] = value``; MONOTONIC; LEAD-GATED; never raises.
+
+    The harness-stamp writer seam (bootstrap_marker_writer's substrate
+    refinement; session_init threads its transcript-read value through
+    build_context_cache instead). Surgical read-modify-write of the ONE key:
+    every other recorded field is preserved byte-for-byte — unlike
+    write_context, which REBUILDS the context from parameters and is the
+    wrong tool for a single-field diagnostic update.
+
+    Lead gate (#877 symmetry): the on-disk session-context file is a
+    lead-only artifact a teammate/plain frame must not rewrite — same rule
+    as persist_context. ``input_data`` is the hook frame; a non-lead frame
+    (or an unreadable one) returns False without touching disk.
+
+    Monotonicity: a non-empty value already on disk is never cleared and never
+    changed (v1 has exactly one legal value, so "changed" cannot arise from a
+    conforming caller; the guard makes the contract hold against a
+    non-conforming one anyway). Same-value writes are no-ops (the
+    byte-identical skip in the write below).
+
+    Returns True iff a write landed. Fail-open on every error (missing
+    context path, unreadable/unwritable file, malformed JSON): the stamp is
+    diagnostic-only — nothing gates on it — so a lost write degrades to
+    absence, never to wrong behavior.
+    """
+    try:
+        if not is_lead(input_data if isinstance(input_data, dict) else {}):
+            return False
+        if value != HARNESS_NON_TTY:
+            # Single legal value (v1); anything else is a caller bug, and the
+            # monotonic contract says refuse rather than record it.
+            return False
+        if _context_path is None:
+            return False
+        try:
+            recorded = json.loads(_context_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        if not isinstance(recorded, dict):
+            return False
+        current = recorded.get("harness", "")
+        if isinstance(current, str) and current:
+            return False  # already stamped (monotonic: set, never change)
+        recorded["harness"] = value
+        persist_context(_context_path, recorded)
+        if isinstance(_cache, dict):
+            _cache["harness"] = value
+        return True
+    except Exception:
+        return False
 
 
 def describe_context_failure() -> str:

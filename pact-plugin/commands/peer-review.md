@@ -161,7 +161,7 @@ A_id = TaskCreate(
     description="DOGFOOD TEACHBACK GATE.\n\n"
                 "Submit TEACHBACK by writing metadata.teachback_submit using the CANONICAL field schema (do NOT improvise key names): understanding, most_likely_wrong, least_confident_item, first_action, variety_acknowledgment (an OBJECT). See the pact-teachback skill for field semantics. "
                 "Then send the notify SendMessage carrying the canonical payload verbatim (pact-teachback Step 2). "
-                "SET intentional_wait{reason=awaiting_lead_completion}. Idle. "
+                "SET intentional_wait{reason=awaiting_lead_completion}. End the turn (idle). "
                 "DO NOT mark this task completed — team-lead-only completion.\n\n"
                 "When Task B unblocks, claim it (TaskUpdate status=in_progress) BEFORE any implementation tool-use — it is pre-assigned to you but still pending; you flip it, not the lead. Task B stays blocked until the lead accepts this teachback: that is the gate, not a desync.\n\n"
                 "Mission for Task B: the primary-work task assigned to you in your TaskList (the work task, NOT this TEACHBACK gate task), identified by its subject (the '{role}: {mission}' pattern). Claim it after this teachback is accepted."
@@ -239,7 +239,8 @@ Agent(
   team_name="{team_name}",
   subagent_type="pact-{reviewer-type}",
   description="Spawn {reviewer-name} specialist",
-  prompt="YOUR PACT ROLE: teammate ({reviewer-name}).\n\nYou are joining team {team_name}. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. Then check `TaskList` for tasks assigned to you."
+  run_in_background: false,
+  prompt="YOUR PACT ROLE: teammate ({reviewer-name}).\n\nYou are joining team {team_name}. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. If the Task tools are deferred, load them with ToolSearch \"select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage\". Then check `TaskList` for tasks assigned to you."
 )
 ```
 

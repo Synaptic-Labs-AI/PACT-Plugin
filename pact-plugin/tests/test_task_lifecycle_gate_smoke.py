@@ -60,7 +60,7 @@ def test_teachback_wiring_update_without_addblocks(tmp_path, monkeypatch, pact_c
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     pact_context(team_name="test-team", session_id="test-session")
     tasks_dir = tmp_path / ".claude" / "tasks" / "test-team"
-    tasks_dir.mkdir(parents=True)
+    tasks_dir.mkdir(parents=True, exist_ok=True)
     (tasks_dir / "A.json").write_text(
         json.dumps({
             "id": "A",
@@ -122,7 +122,7 @@ def test_self_completion_writeback(tmp_path, monkeypatch, pact_context):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     tasks_dir = tmp_path / ".claude" / "tasks" / "test-team"
-    tasks_dir.mkdir(parents=True)
+    tasks_dir.mkdir(parents=True, exist_ok=True)
     task_path = tasks_dir / "99.json"
     task_payload = {
         "id": "99",

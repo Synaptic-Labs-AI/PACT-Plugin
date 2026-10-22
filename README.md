@@ -408,6 +408,8 @@ are present.
 - **Any of the four missing** — this is the problem, and the setting below fixes it.
 - **All four present** — this is *not* the problem, and the setting below will not help. Something else is refusing the spawn; this check rules out one cause, not the rest.
 
+**A different case: your session has the task tools, but spawned specialists do not.** Both `env` values (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` and `CLAUDE_CODE_ENABLE_TODO_TOOLS`) set, and the lead session holds `TaskCreate`, `TaskUpdate`, `TaskList` and `TaskGet`, yet every spawned teammate reports them missing? The cause is the spawn mode, not the settings. On non-TTY harnesses (Claude Code on the web, Claude Code Desktop), the platform withholds the task tools from background spawns. Dispatch each specialist with `run_in_background: false`, and include a `ToolSearch "select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage"` line in the spawn prompt — tools are fixed at spawn-request time, and a foreground-requested spawn keeps them for life even if the harness auto-backgrounds it. A teammate already spawned without the flag cannot be repaired in place; re-spawn it with the flag.
+
 **The setting.** Add `CLAUDE_CODE_ENABLE_TODO_TOOLS` to the `env` block of your `~/.claude/settings.json`, alongside the Agent Teams setting, then start a new session:
 
 ```json

@@ -39,7 +39,7 @@ def config(tmp_path, monkeypatch, pact_context):
     root = tmp_path / "config"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
     pact_context(team_name=TEAM, session_id="claim-session")
-    (root / "tasks" / TEAM).mkdir(parents=True)
+    (root / "tasks" / TEAM).mkdir(parents=True, exist_ok=True)
     return root
 
 
@@ -211,18 +211,18 @@ def test_a_separate_process_teammate_claim_extends_its_record_with_no_context_fi
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/claim/project")
     session = "tmux-claim-session"
-    (root / "teams" / TEAM).mkdir(parents=True)
+    (root / "teams" / TEAM).mkdir(parents=True, exist_ok=True)
     (root / "teams" / TEAM / "config.json").write_text(json.dumps({
         "leadSessionId": "lead-claim-session",
         "members": [{"name": OWNER, "agentId": f"{OWNER}@{TEAM}",
                      "agentType": "pact-backend-coder", "backendType": "tmux"}],
     }), encoding="utf-8")
     registry = root / "pact-sessions" / ".teammate-registry.jsonl"
-    registry.parent.mkdir(parents=True)
+    registry.parent.mkdir(parents=True, exist_ok=True)
     registry.write_text(
         json.dumps({"session_id": session, "value": f"{OWNER}@{TEAM}"}) + "\n", encoding="utf-8"
     )
-    (root / "tasks" / TEAM).mkdir(parents=True)
+    (root / "tasks" / TEAM).mkdir(parents=True, exist_ok=True)
     now = utc_now()
     assert save_records([_record(now - timedelta(minutes=10))], team_name=TEAM) is True
     _write_task(root, "A")

@@ -3553,6 +3553,7 @@ class TestValidateEventSchemaPerType:
             "session_id": "test-session-id",
             "project_dir": "/tmp/proj",
         },
+        "dispatch_decision": {"decision": "ALLOW"},
         "compaction_attributed": {"verdict": "teammate", "basis": "content"},
         "compaction_summary_dropped": {"cause": "no_free_stamp"},
         "team_realigned": {"from": "session-old", "to": "session-new"},
@@ -4142,14 +4143,121 @@ class TestValidateOptionalFieldTypes:
                 assert isinstance(field, str) and field.strip()
                 assert isinstance(expected_type, type)
 
+    def test_dispatch_decision_declared_schema(self):
+        """dispatch_decision is REGISTERED (the former unknown-type opt-in
+        passthrough is retired by design): ``decision`` required, the
+        diagnostic surface optional — including resolved_team (the
+        resolver-resolved live store next to the literal spawn arg). The
+        writer omits absent/empty optionals rather than writing None or "",
+        so a sparse decision still validates instead of landing as a
+        journal_emit_skipped.
+        """
+        from shared.session_journal import (
+            _OPTIONAL_FIELDS_BY_TYPE,
+            _REQUIRED_FIELDS_BY_TYPE,
+            _validate_event_schema,
+            make_event,
+        )
+
+        assert _REQUIRED_FIELDS_BY_TYPE.get("dispatch_decision") == {
+            "decision": str,
+        }
+        assert _OPTIONAL_FIELDS_BY_TYPE.get("dispatch_decision") == {
+            "rule": str,
+            "subagent_type": str,
+            "name": str,
+            "team_name": str,
+            "resolved_team": str,
+            "reason": str,
+            "prompt_redacted": str,
+        }
+        # Happy path: the full diagnostic surface validates.
+        ok, why = _validate_event_schema(make_event(
+            "dispatch_decision",
+            decision="ALLOW",
+            rule="name_required",
+            subagent_type="pact-preparer",
+            name="preparer",
+            team_name="session-abcd1234",
+            resolved_team="9f8e7d6c-5b4a-3f2e-1d0c-9b8a7f6e5d4c",
+            reason="ok",
+            prompt_redacted="…",
+        ))
+        assert ok, why
+        # Sparse decision (the omit-empty shape the writer emits): validates.
+        ok, why = _validate_event_schema(make_event(
+            "dispatch_decision", decision="ALLOW",
+        ))
+        assert ok, why
+        # Required field missing / wrong type / empty: rejected.
+        assert not _validate_event_schema(make_event(
+            "dispatch_decision", rule="name_required",
+        ))[0]
+        assert not _validate_event_schema(make_event(
+            "dispatch_decision", decision=42,
+        ))[0]
+        assert not _validate_event_schema(make_event(
+            "dispatch_decision", decision="",
+        ))[0]
+        # Optional present-but-wrong-type: rejected (incl. resolved_team).
+        # (A None-valued optional reads as ABSENT per the validator's
+        # None-is-absent rule, so it is not a rejection case — the writer's
+        # omit-empty discipline keeps even those out of the shape.)
+        for field, bad in (("resolved_team", 7), ("team_name", [])):
+            assert not _validate_event_schema(make_event(
+                "dispatch_decision", decision="ALLOW", **{field: bad},
+            ))[0], field
+        # Present-but-EMPTY str: rejected — the case the writer's omit-empty
+        # discipline exists to avoid (resolved_team="" on a no-store resolve).
+        assert not _validate_event_schema(make_event(
+            "dispatch_decision", decision="ALLOW", resolved_team="",
+        ))[0]
+
+    def test_dispatch_decision_writer_emits_registered_shape(self, monkeypatch):
+        """The WRITER side of the registration: with a sparse tool_input the
+        emitted event carries only non-empty str fields (no None, no empty
+        strings) — the omit-empty discipline that keeps a sparse decision
+        valid under the registered schema. Reddens if the writer regresses to
+        writing None/empty optionals (each would reject at validate time)."""
+        import dispatch_gate
+        from shared.session_journal import _validate_event_schema
+
+        captured = []
+
+        def _capture(event, event_type):
+            captured.append(event)
+            return True
+
+        monkeypatch.setattr(dispatch_gate, "append_event_checked", _capture)
+        monkeypatch.setattr(
+            dispatch_gate, "resolve_task_dir", lambda: None,
+        )
+        dispatch_gate._journal_decision(
+            "ALLOW", None, None, {"taskId": "1"},
+        )
+        assert len(captured) == 1
+        event = captured[0]
+        assert event["decision"] == "ALLOW"
+        for key, value in event.items():
+            if key in ("v",):
+                continue
+            assert not isinstance(value, type(None)), key
+            if isinstance(value, str):
+                assert value, key
+        ok, why = _validate_event_schema(event)
+        assert ok, why
+
     def test_session_start_source_declared_optional(self):
-        """session_start has `source: str` and `prev_session_dir: str` in
-        _OPTIONAL_FIELDS_BY_TYPE.
+        """session_start has `source: str`, `prev_session_dir: str` and
+        `entrypoint: str` in _OPTIONAL_FIELDS_BY_TYPE.
 
         Pins the canonical case — the isinstance guard in session_init.py
         clamps `source` at runtime; this schema entry pins the contract
         at the journal boundary. A prev_session_dir that is not a string is
-        rejected rather than landing on disk.
+        rejected rather than landing on disk. `entrypoint` is the non-gating
+        launcher diagnostic (raw transcript entrypoint, OMITTED when the read
+        yielded nothing — the validator rejects an EMPTY present str, so
+        "not read" must be absence, never "").
         """
         from shared.session_journal import (
             _OPTIONAL_FIELDS_BY_TYPE,
@@ -4160,12 +4268,17 @@ class TestValidateOptionalFieldTypes:
         assert _OPTIONAL_FIELDS_BY_TYPE.get("session_start") == {
             "source": str,
             "prev_session_dir": str,
+            "entrypoint": str,
         }
         base = {"session_id": "s", "project_dir": "/tmp/proj"}
         assert _validate_event_schema(make_event(
             "session_start", prev_session_dir="/tmp/prev", **base))[0]
         assert not _validate_event_schema(make_event(
             "session_start", prev_session_dir=7, **base))[0]
+        assert _validate_event_schema(make_event(
+            "session_start", entrypoint="remote", **base))[0]
+        assert not _validate_event_schema(make_event(
+            "session_start", entrypoint=42, **base))[0]
 
     def test_compaction_attributed_latency_declared_optional(self):
         """compaction_attributed has `latency_s: float`, the seconds from staging

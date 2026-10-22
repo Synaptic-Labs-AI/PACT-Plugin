@@ -135,7 +135,7 @@ try:
         variety_stamp_as_of_write,
     )
     from shared.intentional_wait import is_self_complete_exempt
-    from shared.task_utils import is_teachback_subject, read_task_json
+    from shared.task_utils import is_teachback_subject, read_task_json, resolve_task_dir
     from shared.teachback_schema import resolve_variety_total
     _IMPORTS_OK = True
 except BaseException:  # noqa: BLE001 — fail-OPEN catch-all (warn gate never denies)
@@ -183,9 +183,14 @@ def _evaluate(input_data: dict) -> str | None:
         return None
     try:
         pact_context.init(input_data)
-        team_name = pact_context.get_pact_context().get("team_name", "")
     except Exception:
-        team_name = ""
+        pass
+    # #1020 migration: resolver seam (live store's dir name) replaces the raw
+    # persisted read — on config-less substrates the raw name addressed the
+    # absent tasks/session-<id8>/ store while the tasks lived under the full
+    # session UUID. resolve_task_dir never raises; "" on no-store/ambiguity.
+    resolved_task_dir = resolve_task_dir()
+    team_name = resolved_task_dir.name if resolved_task_dir else ""
     if not team_name:
         return None  # no team context → cannot resolve the task → bypass
 
@@ -444,9 +449,12 @@ def _evaluate_dispatch_variety(input_data: dict) -> str | None:
         return None
     try:
         pact_context.init(input_data)
-        team_name = pact_context.get_pact_context().get("team_name", "")
     except Exception:
-        team_name = ""
+        pass
+    # #1020 migration: same resolver-seam replacement as the ordering check —
+    # raw persisted name -> resolve_task_dir() ("" on no-store/ambiguity).
+    resolved_task_dir = resolve_task_dir()
+    team_name = resolved_task_dir.name if resolved_task_dir else ""
     if not team_name:
         return None  # no team context → cannot resolve owner/Task B → bypass
 

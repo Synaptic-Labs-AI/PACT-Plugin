@@ -72,7 +72,7 @@ def session_end_live_env(tmp_path, monkeypatch, pact_context):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     pact_context(team_name=TEAM, session_id=SID, project_dir=PROJECT_DIR)
     team_dir = tmp_path / ".claude" / "tasks" / TEAM
-    team_dir.mkdir(parents=True)
+    team_dir.mkdir(parents=True, exist_ok=True)
     return team_dir
 
 

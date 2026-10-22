@@ -96,7 +96,7 @@ Events are JSONL entries with common fields `v` (schema version), `type`, and `t
 
 1. Read session journal for current session → full event history survives
 2. `TaskList` → task summaries (status, blocking, ownership)
-3. The task file on disk (`cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team_name}/{taskId}.json" | jq .metadata.<key>`) → metadata if task files still exist; `TaskGet` does NOT surface it
+3. The task file on disk (`cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team_name}/{taskId}.json" | jq .metadata.<key>`; the `{team_name}` segment is the realigned team name — `pact-session-context.json`, `team_name` field) → metadata if task files still exist; `TaskGet` does NOT surface it
 4. Journal is authoritative when task metadata is unavailable
 5. If the journal's latest `team_realigned` event names a `from` store whose in-flight tasks you have not re-created, run the team-split recovery below from its step 3. Skip tasks already re-created: their description cites the old id.
 
