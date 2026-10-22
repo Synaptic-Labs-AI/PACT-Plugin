@@ -2,8 +2,9 @@
 Location: pact-plugin/tests/test_peer_review_prose_pin.py
 Summary: Canonical-substring + count pin on the merge-readiness lint-read
          instruction in commands/peer-review.md. That step tells the reviewer
-         to run the repository's local lint gate where one is defined AND
-         read the PR's checks and the inline review threads before merge
+         to run the repository's fail-closed local lint gate where one is
+         defined AND read the PR's checks and the inline review threads
+         before merge
          readiness; pin the dual-action requirement exactly so it cannot
          silently rot out of the shipped prose, while incidental rewording
          outside the pinned phrase floats. The step-scope scan is BOUNDED by
@@ -24,15 +25,16 @@ NEXT_STEP_HEADING = "6. **Calibration save**"
 
 class TestPeerReviewMergeReadinessProsePin:
     """The merge-readiness step must name BOTH actions — run the repository's
-    local lint gate and read the PR's checks and the inline review threads —
+    fail-closed local lint gate and read the PR's checks and the inline
+    review threads —
     in one contiguous canonical phrase, exactly once, inside that step alone.
     Dropping either action, splitting the phrase, or moving it out of the
     step reds this test."""
 
     CANONICAL_INSTRUCTION = (
-        "run the repository's local lint gate where one is defined, and "
-        "read the PR's checks (`gh pr checks <N>`) and the inline review "
-        "threads"
+        "run the repository's fail-closed local lint gate where one is "
+        "defined, and read the PR's checks (`gh pr checks <N>`) and the "
+        "inline review threads"
     )
 
     def test_canonical_instruction_present_exactly_once(self):
