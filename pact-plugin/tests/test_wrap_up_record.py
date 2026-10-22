@@ -201,3 +201,203 @@ def test_a_failed_write_is_not_masked_by_an_earlier_identical_record(tmp_path):
 
     assert result.returncode == 1
     assert "write failed" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Fallback: the cwd has no PR (wrap-up run outside the feature worktree), so
+# the script reads the PR of the latest review_dispatch in the session journal.
+# ---------------------------------------------------------------------------
+
+NO_PR_STDERR = 'no pull requests found for branch "main"\n'
+
+
+def _stub_gh_two_reads(bindir: Path, *, numbered_stdout: str = "", numbered_stderr: str = "",
+                       numbered_rc: int = 0) -> None:
+    """A gh whose cwd read (`gh pr view --json ...`) finds no PR and whose
+    numbered read (`gh pr view <N> ...`) answers as given. Records argv."""
+    bindir.mkdir(parents=True, exist_ok=True)
+    (bindir / "num_out.txt").write_text(numbered_stdout)
+    (bindir / "num_err.txt").write_text(numbered_stderr)
+    gh = bindir / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$*" >> "{bindir}/argv.txt"\n'
+        'if [ "$3" = "--json" ]; then\n'
+        f"  printf '%s' '{NO_PR_STDERR}' >&2; exit 1\n"
+        "fi\n"
+        f'cat "{bindir}/num_out.txt"\n'
+        f'cat "{bindir}/num_err.txt" >&2\n'
+        f"exit {numbered_rc}\n"
+    )
+    gh.chmod(0o755)
+
+
+def _review(session: Path, pr_number, pr_url="https://github.com/own/repo-x/pull/61",
+            ts="2026-04-17T12:00:00Z") -> None:
+    session.mkdir(parents=True, exist_ok=True)
+    with (session / "session-journal.jsonl").open("a") as journal:
+        journal.write(json.dumps({"v": 1, "type": "review_dispatch", "pr_number": pr_number,
+                                  "pr_url": pr_url, "reviewers": ["x"], "ts": ts}) + "\n")
+
+
+def _argv(tmp_path: Path) -> list[str]:
+    return (tmp_path / "bin" / "argv.txt").read_text().splitlines()
+
+
+def _session_ends(tmp_path: Path) -> list[dict]:
+    return [e for e in _journal(tmp_path) if e["type"] == "session_end"]
+
+
+def test_no_pr_in_the_cwd_falls_back_to_the_reviewed_pr(tmp_path):
+    _stub_gh_two_reads(tmp_path / "bin", numbered_stdout=PR_JSON.replace("{state}", "MERGED"))
+    _review(tmp_path / "session", 61)
+
+    result = _run(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert _lines(result) == {
+        "pr_state": "MERGED", "pr_number": "61", "branch": "feat/x",
+        "head_owner": "own", "head_repo": "repo-x",
+    }
+    (event,) = _session_ends(tmp_path)
+    assert (event["pr_state"], event["pr_number"]) == ("MERGED", 61)
+    assert _argv(tmp_path) == [
+        "pr view --json number,state,headRefName,headRepository,headRepositoryOwner",
+        "pr view 61 --repo own/repo-x --json number,state,headRefName,headRepository,headRepositoryOwner",
+    ]
+
+
+def test_the_latest_review_dispatch_is_the_one_read(tmp_path):
+    _stub_gh_two_reads(tmp_path / "bin", numbered_stdout=PR_JSON.replace("{state}", "MERGED"))
+    _review(tmp_path / "session", 50, pr_url="https://github.com/own/repo-x/pull/50",
+            ts="2026-04-17T10:00:00Z")
+    _review(tmp_path / "session", 61)
+
+    _run(tmp_path)
+
+    assert _argv(tmp_path)[1].startswith("pr view 61 ")
+
+
+@pytest.mark.parametrize("pr_url", [
+    "not a url", "https://gitlab.com/own/repo-x/pull/61", "https://github.com/-own/repo-x/pull/61", None,
+])
+def test_an_unparseable_pr_url_does_not_fall_back(tmp_path, pr_url):
+    """With no repo to name, a bare `gh pr view 61` would read PR 61 of
+    whatever repo the cwd is in: a different PR. The cwd result stands, and
+    a stub that would answer MERGED for 61 is never asked."""
+    _stub_gh_two_reads(tmp_path / "bin", numbered_stdout=PR_JSON.replace("{state}", "MERGED"))
+    _review(tmp_path / "session", 61, pr_url=pr_url)
+
+    result = _run(tmp_path)
+
+    assert _lines(result)["pr_state"] == "NONE"
+    assert len(_argv(tmp_path)) == 1
+
+
+def test_outside_any_repo_an_unparseable_pr_url_stays_unknown(tmp_path):
+    _stub_gh_outside_a_repo(tmp_path / "bin", numbered_stdout=PR_JSON.replace("{state}", "MERGED"))
+    _review(tmp_path / "session", 61, pr_url="not a url")
+
+    result = _run(tmp_path)
+
+    assert _lines(result)["pr_state"] == "UNKNOWN"
+    assert len(_argv(tmp_path)) == 1
+
+
+def test_no_review_dispatch_keeps_none_with_one_gh_call(tmp_path):
+    _stub_gh_two_reads(tmp_path / "bin", numbered_stdout=PR_JSON.replace("{state}", "MERGED"))
+
+    result = _run(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert _lines(result)["pr_state"] == "NONE"
+    assert len(_argv(tmp_path)) == 1
+
+
+@pytest.mark.parametrize("pr_number", ["61", True, None])
+def test_a_review_dispatch_without_an_int_number_keeps_none(tmp_path, pr_number):
+    _stub_gh_two_reads(tmp_path / "bin", numbered_stdout=PR_JSON.replace("{state}", "MERGED"))
+    _review(tmp_path / "session", pr_number)
+
+    result = _run(tmp_path)
+
+    assert _lines(result)["pr_state"] == "NONE"
+    assert len(_argv(tmp_path)) == 1
+
+
+@pytest.mark.parametrize("stub", [
+    pytest.param(dict(numbered_rc=1, numbered_stderr="error connecting to api.github.com\n"),
+                 id="network"),
+    pytest.param(dict(numbered_rc=1, numbered_stderr=NO_PR_STDERR), id="numbered-says-no-pr"),
+    pytest.param(dict(numbered_stdout="not json"), id="unreadable-json"),
+    pytest.param(dict(numbered_stdout=PR_JSON.replace("{state}", "MERGED").replace("61", "62")),
+                 id="another-number"),
+])
+def test_a_failed_fallback_records_unknown_never_none(tmp_path, stub):
+    """A fallback that cannot confirm the reviewed PR must not leave NONE:
+    NONE would send wrap-up down its no-PR branch for a PR that exists."""
+    _stub_gh_two_reads(tmp_path / "bin", **stub)
+    _review(tmp_path / "session", 61)
+
+    result = _run(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert _lines(result)["pr_state"] == "UNKNOWN"
+    (event,) = _session_ends(tmp_path)
+    assert event["pr_state"] == "UNKNOWN" and "pr_number" not in event
+
+
+def test_a_pr_found_in_the_cwd_makes_no_second_read(tmp_path):
+    _stub_gh(tmp_path / "bin", stdout=PR_JSON.replace("{state}", "OPEN"))
+    _review(tmp_path / "session", 99)
+
+    result = _run(tmp_path)
+
+    assert _lines(result)["pr_number"] == "61"
+    assert len(_argv(tmp_path)) == 1
+
+
+NOT_A_REPO = "failed to run git: fatal: not a git repository (or any of the parent directories): .git\n"
+
+
+def _stub_gh_outside_a_repo(bindir: Path, *, numbered_stdout: str = "", numbered_rc: int = 0,
+                            numbered_stderr: str = "") -> None:
+    """A gh whose cwd read fails as it does outside any repo, and whose
+    numbered `--repo` read answers as given."""
+    _stub_gh_two_reads(bindir, numbered_stdout=numbered_stdout, numbered_rc=numbered_rc,
+                       numbered_stderr=numbered_stderr)
+    gh = bindir / "gh"
+    gh.write_text(gh.read_text().replace(NO_PR_STDERR, NOT_A_REPO))
+
+
+def test_outside_any_repo_the_reviewed_pr_is_read_with_repo(tmp_path):
+    """The cwd read fails as UNKNOWN ("not a git repository"); the fallback's
+    --repo read resolves the reviewed PR anyway."""
+    _stub_gh_outside_a_repo(tmp_path / "bin", numbered_stdout=PR_JSON.replace("{state}", "MERGED"))
+    _review(tmp_path / "session", 61)
+
+    result = _run(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert _lines(result)["pr_state"] == "MERGED"
+    assert _argv(tmp_path)[1].startswith("pr view 61 --repo own/repo-x ")
+
+
+def test_outside_any_repo_a_failed_fallback_stays_unknown(tmp_path):
+    _stub_gh_outside_a_repo(tmp_path / "bin", numbered_rc=1,
+                            numbered_stderr="error connecting to api.github.com\n")
+    _review(tmp_path / "session", 61)
+
+    result = _run(tmp_path)
+
+    assert _lines(result)["pr_state"] == "UNKNOWN"
+    assert len(_argv(tmp_path)) == 2
+
+
+def test_outside_any_repo_with_no_review_stays_unknown_with_one_call(tmp_path):
+    _stub_gh_outside_a_repo(tmp_path / "bin", numbered_stdout=PR_JSON.replace("{state}", "MERGED"))
+
+    result = _run(tmp_path)
+
+    assert _lines(result)["pr_state"] == "UNKNOWN"
+    assert len(_argv(tmp_path)) == 1

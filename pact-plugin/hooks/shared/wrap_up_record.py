@@ -9,6 +9,12 @@ Summary: Wrap-up's PR read and its session_end record. Runs ONE
 Used by: commands/wrap-up.md step 5, from inside the feature worktree:
          python3 "{plugin_root}/hooks/shared/wrap_up_record.py" --session-dir '{session_dir}'
 
+When the current directory gives no PR (NONE) or no answer (UNKNOWN, as
+outside any git repo), it reads the PR of the latest `review_dispatch` in the
+journal by number instead, naming the repo from that event's pr_url; with no
+parseable pr_url there is no fallback. A fallback that cannot confirm that
+PR records UNKNOWN, never NONE.
+
 Run by file path, not `python3 -m`: the current directory must stay the
 worktree (gh resolves the PR from it), and `-m` would put that directory
 first on sys.path, where a consumer repo's own `shared/` would shadow this
@@ -35,6 +41,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 
 if __name__ == "__main__":
@@ -46,7 +53,12 @@ if __name__ == "__main__":
 # module (session_journal.append_event, gh_helpers.run_gh) must reach this too.
 from shared import gh_helpers, session_journal  # noqa: E402
 
-GH_ARGS = ["pr", "view", "--json", "number,state,headRefName,headRepository,headRepositoryOwner"]
+GH_JSON = ["--json", "number,state,headRefName,headRepository,headRepositoryOwner"]
+GH_ARGS = ["pr", "view", *GH_JSON]
+# owner/repo from a review_dispatch pr_url; each part starts alphanumeric.
+PR_URL_RE = re.compile(
+    r"^https://github\.com/([A-Za-z0-9][A-Za-z0-9_.-]*)/([A-Za-z0-9][A-Za-z0-9_.-]*)/pull/\d+/?$"
+)
 GH_TIMEOUT_S = 15
 NO_PR_MARKER = "no pull requests found"
 PR_STATES = ("MERGED", "OPEN", "CLOSED")
@@ -58,7 +70,39 @@ def read_pr(cwd: str | None = None) -> dict:
     CLOSED from gh; NONE when gh says no pull request exists; UNKNOWN on any
     other failure or an answer this cannot read. pr_number is an int, present
     only for the three gh states."""
-    result = gh_helpers.run_gh(GH_ARGS, timeout=GH_TIMEOUT_S, cwd=cwd)
+    return _map(gh_helpers.run_gh(GH_ARGS, timeout=GH_TIMEOUT_S, cwd=cwd))
+
+
+def read_reviewed_pr(session_dir: str) -> dict | None:
+    """The PR of the latest review_dispatch in the journal, read by number
+    and repo: the fallback when the current directory gives no PR or no
+    answer (wrap-up run outside the feature worktree, or outside any repo).
+
+    None, so the current-directory result stands, when there is no
+    review_dispatch with an int pr_number, or when its pr_url does not parse
+    to owner/repo. Never read the number without --repo: run from another
+    repo, a bare read would find that repo's PR with the same number, and a
+    MERGED answer there would send wrap-up's cleanup to the wrong branch.
+
+    Anything short of a clear answer about THAT PR is UNKNOWN, never NONE:
+    the PR was reviewed, so it exists."""
+    reviews = session_journal.read_events_from(session_dir, "review_dispatch")
+    number = reviews[-1].get("pr_number") if reviews else None
+    if not isinstance(number, int) or isinstance(number, bool):
+        return None
+    url = reviews[-1].get("pr_url")
+    match = PR_URL_RE.match(url) if isinstance(url, str) else None
+    if not match:
+        return None
+    args = ["pr", "view", str(number), "--repo", f"{match.group(1)}/{match.group(2)}"]
+    pr = _map(gh_helpers.run_gh([*args, *GH_JSON], timeout=GH_TIMEOUT_S))
+    if pr["pr_state"] == "NONE" or pr.get("pr_number") != number:
+        return {"pr_state": "UNKNOWN"}
+    return pr
+
+
+def _map(result) -> dict:
+    """Map one `gh pr view --json ...` result (or None) to the PR fields."""
     pr: dict = {"pr_state": "UNKNOWN"}
     if result is None:
         return pr
@@ -114,6 +158,10 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 2
     pr = read_pr()
+    if pr["pr_state"] in ("NONE", "UNKNOWN"):
+        reviewed = read_reviewed_pr(session_dir)
+        if reviewed is not None:
+            pr = reviewed
     failure = record(session_dir, pr)
     for key in FIELDS:
         print(f"{key}={pr.get(key, '')}")
