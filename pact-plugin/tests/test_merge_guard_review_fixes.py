@@ -767,3 +767,27 @@ def test_a_quoted_hash_leaves_both_merges_visible_to_compound_detection():
 
     assert is_compound_destructive_command("ruby -e 'system(\"gh pr " + "merge #{5}\")' && gh pr " + "merge 6") is True
     assert is_compound_destructive_command("git commit -m 'fix #12' && gh pr " + "merge 6") is False
+
+
+# A `NAME="…"` written inside another quoted string (perl `$c="…"` in `perl -e '…'`) is
+# program text, not a shell assignment whose value a later leg expands.
+PROGRAM_ASSIGNMENT_ALLOW = [
+    ("perl merge held and printed", f'perl -e \'my $c="{D}"; print "$c\\n";\''),
+    ("perl merge held, then a view run", f'perl -e \'my $c="{D}"; $c="gh pr view 5"; system($c)\''),
+]
+SHELL_ASSIGNMENT_DENY = [
+    ("perl merge held and run", f'perl -e \'my $c="{D}"; system($c)\''),
+    ("shell assignment then expansion", f'FOO="{D}" && $FOO'),
+    ("shell export then eval", f'export CMD="{D}" && eval $CMD'),
+    ("shell assignment prefixing bash -c", f'FOO="{D}" bash -c "$FOO"'),
+]
+
+
+@pytest.mark.parametrize("label,cmd", PROGRAM_ASSIGNMENT_ALLOW, ids=[r[0] for r in PROGRAM_ASSIGNMENT_ALLOW])
+def test_an_assignment_inside_a_program_is_not_a_shell_assignment(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+@pytest.mark.parametrize("label,cmd", SHELL_ASSIGNMENT_DENY, ids=[r[0] for r in SHELL_ASSIGNMENT_DENY])
+def test_a_shell_assignment_that_runs_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True

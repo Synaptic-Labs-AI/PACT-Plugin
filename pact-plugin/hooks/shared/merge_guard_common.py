@@ -6009,6 +6009,18 @@ def _in_php_exec_code(text: str, pos: int) -> bool:
     return _is_php_exec_leg(text[start:])
 
 
+_QUOTED_ASSIGNMENT_RE = re.compile(r"""[A-Za-z_]\w*=["']""")
+
+
+def _has_shell_quoted_assignment(leg: str) -> bool:
+    """True iff the leg holds a shell `NAME="…"` / `NAME='…'` assignment: one whose
+    `NAME=` sits in shell structure, not inside another quoted string. A perl
+    `$c="…"` inside `perl -e '…'` is program text. An unterminated quote leaves the
+    rest unmasked, so it still counts."""
+    view = _mask_shell_quotes(leg)
+    return any(view[m.start()] != " " for m in _QUOTED_ASSIGNMENT_RE.finditer(leg))
+
+
 def _is_preserve_leg(leg: str, _depth: int = 0) -> bool:
     """True iff this single leg's quoted-arg values must be PRESERVED (not stripped) by the
     #1178 general inert-default strip — see the catalog block above for clauses (a)/(b)/(c).
@@ -6027,7 +6039,7 @@ def _is_preserve_leg(leg: str, _depth: int = 0) -> bool:
     # inside) — but carrier 4 pre-strips flag-attached literals before carrier 10, so it is a
     # no-op there; and either way the false-match direction is always PRESERVE (over-block-safe,
     # never under-block).
-    if re.search(r"""[A-Za-z_]\w*=["']""", leg):
+    if _has_shell_quoted_assignment(leg):
         return True
     # HEAD-DISPLACEMENT guard (#1178 SEC): compute the head clauses on the TRUE command word
     # (skip leading env-assignment / redirection prefixes) — else a leading `LC_ALL=C` / bare
@@ -6156,7 +6168,7 @@ def _strip_read_verb_values(leg: str, _depth: int = 0) -> "str | None":
     # ---- guards: ANY hit => return None (fall through to _is_preserve_leg) ----
     if _shell_tokenize(leg) is None:                 # g1 unbalanced quote (fail-safe)
         return None
-    if re.search(r"""[A-Za-z_]\w*=["']""", leg):     # g2 d1-replica: a NAME="…" survivor
+    if _has_shell_quoted_assignment(leg):            # g2 d1-replica: a NAME="…" survivor
         return None                                  #    is an expanded/eval'd value
     if _has_command_substitution(leg):               # g3 $()/backtick anywhere in the leg
         return None
