@@ -190,9 +190,16 @@ class TestReminderWording:
 
     def test_the_reminder_routes_a_peer_review_lead_to_its_pr_state_check(self):
         """Inside /PACT:peer-review the lead continues at that command's PR-state
-        check (which invokes wrap-up on MERGED), not a bare wrap-up that skips it."""
+        check (which invokes wrap-up on MERGED), not a bare wrap-up that skips it.
+        The other branch is named by place, never "otherwise", which reads as the
+        else of "If the merge succeeded" and so as wrap-up after a failed merge,
+        and it waits for the merge, because a queued `--auto` merge exits 0."""
         assert "inside /PACT:peer-review, continue at its step 8" in _POST_MERGE_REMINDER
-        assert "otherwise invoke `/PACT:wrap-up` next" in _POST_MERGE_REMINDER
+        assert (
+            "outside /PACT:peer-review, invoke `/PACT:wrap-up` once the PR has merged"
+            in _POST_MERGE_REMINDER
+        )
+        assert "otherwise" not in _POST_MERGE_REMINDER
 
     def test_the_reminder_names_peer_review_step_8_by_its_heading(self):
         """The reminder sends the lead to peer-review's step 8 by name, so the

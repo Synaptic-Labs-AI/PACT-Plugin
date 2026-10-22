@@ -380,7 +380,7 @@ def _report_pin_growth(input_data: dict) -> str | None:
 _POST_MERGE_REMINDER = (
     "If the merge succeeded: inside /PACT:peer-review, continue at its step 8, "
     "\"Check the PR state after the merge decision\", which invokes `/PACT:wrap-up` "
-    "on MERGED; otherwise invoke `/PACT:wrap-up` next. "
+    "on MERGED; outside /PACT:peer-review, invoke `/PACT:wrap-up` once the PR has merged. "
     "Project post-merge steps (tags, releases) run alongside it, never instead of it."
 )
 
