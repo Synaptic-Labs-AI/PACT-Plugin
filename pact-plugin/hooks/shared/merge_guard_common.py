@@ -2945,9 +2945,11 @@ def _skip(pattern: str, text: str, i: int) -> int:
 
 def _literal_list_at(text: str, i: int) -> tuple[list[str], int] | None:
     """The elements of a `[…]` list, `(…)` tuple or R `c(…)` vector starting at text[i],
-    as the text they spell, and the offset after it. The first element must be a string
-    literal; a later non-literal element (`str(pr)`, a variable) reads as `X`. None
-    otherwise, or when an element is neither."""
+    as the text they spell, and the offset after it. A bare-name element reads as the
+    literal string its last earlier assignment gave it (`g = "gh"; [g, "pr", …]`). The
+    first element must read as a string; a later non-literal element (`str(pr)`, a
+    variable with no literal value) reads as `X`. None otherwise, or when an element is
+    neither."""
     opener = re.match(r"\[|c?\(", text[i:])
     if not opener:
         return None
@@ -2958,9 +2960,14 @@ def _literal_list_at(text: str, i: int) -> tuple[list[str], int] | None:
         if text[i:i + 1] == closer:
             return items, i + 1
         lit = _STRING_LITERAL_RE.match(text, i)
+        named = None if lit else _named_value_at(text, i)
+        value = _string_expr_at(text, named[0]) if named else None
         if lit:
             items.append(lit.group(0)[1:-1])
             end = lit.end()
+        elif named and value:
+            items.append(value[0])
+            end = named[1]
         else:
             end = _operand_end(text, i) if items else -1
             if end < 0:
@@ -3098,9 +3105,9 @@ def _first_argument_command(code: str, pos: int) -> str | None:
     return cmds[0] if cmds else None
 
 
-# A call argument that is a bare variable name (`run(cmd)`, `system($c)`), up to the
-# comma or parenthesis that ends it.
-_BARE_NAME_ARG_RE = re.compile(r"(?P<name>[$@]?[A-Za-z_]\w*)(?=\s*[,)])")
+# A call argument or list element that is a bare variable name (`run(cmd)`,
+# `system($c)`, `[g, "pr"]`), up to the comma or bracket that ends it.
+_BARE_NAME_ARG_RE = re.compile(r"(?P<name>[$@]?[A-Za-z_]\w*)(?=\s*[,)\]])")
 
 
 # `name = value`, outside string literals; `==`, `=~` and `=>` are not assignments.

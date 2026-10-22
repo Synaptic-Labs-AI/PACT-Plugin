@@ -487,3 +487,31 @@ def test_a_name_is_resolved_only_to_an_earlier_assignment():
     assert mgc._named_value_at("run(c); c = 'x'", 4) is None
     assert mgc._named_value_at("c == 'x'; run(c)", 14) is None
     assert mgc._named_value_at("c = 'x'; run(c)", 13) == (4, 14)
+
+
+# A list element that is a bare name reads as the literal its last earlier assignment
+# gave it, so an argv led by a variable holding the gh path is read. A name with no
+# literal value stays unknown.
+NAMED_ELEMENT_DENY = [
+    ("-c gh path in a constant",
+     "python3 -c 'import subprocess; GH=\"/usr/local/bin/gh\"; subprocess.run([GH,\"pr\",\"merge\",\"5\"])'"),
+    ("-c gh in a variable", "python3 -c 'import subprocess; g=\"gh\"; subprocess.run([g,\"pr\",\"merge\",\"5\"])'"),
+    ("-c subcommand as the last element",
+     "python3 -c 'import subprocess; sub=\"merge\"; subprocess.run([\"gh\",\"pr\",sub])'"),
+]
+NAMED_ELEMENT_ALLOW = [
+    ("-c gh in a variable, view", "python3 -c 'import subprocess; g=\"gh\"; subprocess.run([g,\"pr\",\"view\",\"5\"])'"),
+    ("-c name with no literal value",
+     "python3 -c 'import subprocess, shutil; g=shutil.which(\"gh\"); subprocess.run([g,\"pr\",\"merge\",\"5\"])'"),
+    ("-c name never assigned", "python3 -c 'import subprocess; subprocess.run([g,\"pr\",\"merge\",\"5\"])'"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", NAMED_ELEMENT_DENY, ids=[r[0] for r in NAMED_ELEMENT_DENY])
+def test_merge_argv_with_a_named_element_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", NAMED_ELEMENT_ALLOW, ids=[r[0] for r in NAMED_ELEMENT_ALLOW])
+def test_argv_with_a_named_element_not_a_merge_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
