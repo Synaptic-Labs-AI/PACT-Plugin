@@ -731,19 +731,25 @@ class TestStateRecoveryEventsTable:
 
     def test_session_end_documents_the_wrap_up_source(self):
         """Reddens when the events table stops naming the optional `source`
-        fields or what a wrap-up `session_end` records. Mutation: restore the
-        row "`warning` (optional) | Detect incomplete shutdowns"."""
+        fields, what a wrap-up `session_end` records, the no-review case, or the
+        paused-claim retirement. Mutation: delete "(at any time, when there is
+        none)" or the paused-claim clause."""
         row = self._rows()["`session_end`"]
         assert "`source`, `pr_state`, `pr_number` (optional, wrap-up:" in row, row
         assert ("A wrap-up `session_end` with `pr_state` `MERGED` and a PR's `pr_number`, at or "
-                "after the latest `review_dispatch`, records that wrap-up closed that merged PR") in row, row
+                "after the latest `review_dispatch` (at any time, when there is none), records that "
+                "wrap-up closed that merged PR") in row, row
+        assert ("one at or after a `session_paused` event for that PR also retires that paused "
+                "claim") in row, row
 
     def test_a_consolidation_never_silences_a_merged_pr(self):
         """Reddens when the table claims a consolidation silences SessionEnd
-        regardless of PR state. Mutation: restore "regardless of PR state"."""
+        regardless of PR state, or omits the unreadable-state case. Mutation:
+        restore "regardless of PR state", or drop "or one whose state cannot be
+        read"."""
         row = self._rows()["`session_consolidated`"]
         assert "regardless of PR state" not in row, row
-        assert "for an open PR, never for a merged one" in row, row
+        assert "for an open PR or one whose state cannot be read, never for a merged one" in row, row
 
 
 # ---------------------------------------------------------------------------
