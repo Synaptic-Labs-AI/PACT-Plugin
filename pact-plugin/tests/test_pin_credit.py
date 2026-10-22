@@ -56,7 +56,7 @@ def store(tmp_path, monkeypatch, pact_context):
     from shared.pact_context import get_session_dir
 
     session_dir = Path(get_session_dir())
-    session_dir.mkdir(parents=True)
+    session_dir.mkdir(parents=True, exist_ok=True)
     return session_dir, project
 
 

@@ -281,10 +281,7 @@ def _emit_load_failure_advisory(
 
 # ─── fail-closed wrapper around cross-package imports ─────────────────────────
 try:
-    import re
-
     import shared.pact_context as pact_context
-    from shared.paths import get_claude_config_dir
     from shared.agent_handoff_marker import (
         already_emitted,
         handoff_already_emitted,
@@ -318,7 +315,7 @@ try:
         emit_task_metadata_snapshot,
     )
     from shared.task_utils import is_teachback_subject as _is_teachback_subject
-    from shared.task_utils import read_task_json
+    from shared.task_utils import read_task_json, resolve_task_dir
     from shared.teachback_schema import (
         DISPATCH_VARIETY_KEYS,
         TEACHBACK_OBJECT_FIELDS,
@@ -515,12 +512,17 @@ def _writeback_dispute(task_id: str) -> bool:
     sanitized_id = sanitize_path_component(task_id)
     if not sanitized_id:
         return False
-    try:
-        team_name = pact_context.get_pact_context().get("team_name", "")
-    except Exception:
-        team_name = ""
-    if not team_name or not re.fullmatch(r"[A-Za-z0-9_\-]+", team_name):
+    # #1020 migration: resolve the LIVE store through the resolver seam instead
+    # of the raw persisted context name, which addressed tasks/session-<id8>/
+    # while the store lived under the full session UUID on config-less
+    # substrates. The resolver owns name validation and containment, so the
+    # local charset regex retires with the raw read. None (no live store, or
+    # an ambiguous aligned-vs-persisted substrate) fails OPEN to False — the
+    # advisory is the load-bearing user-facing signal either way.
+    resolved_task_dir = resolve_task_dir()
+    if resolved_task_dir is None:
         return False
+    team_name = resolved_task_dir.name
 
     task = read_task_json(sanitized_id, team_name)
     if not task:
@@ -533,7 +535,7 @@ def _writeback_dispute(task_id: str) -> bool:
     metadata["completion_disputed"] = True
     metadata["gate_writeback"] = True
 
-    tasks_root = get_claude_config_dir() / "tasks" / team_name
+    tasks_root = resolved_task_dir
     target = tasks_root / f"{sanitized_id}.json"
     tmp = tasks_root / f".{sanitized_id}.json.tmp"
     try:
@@ -617,12 +619,13 @@ def _writeback_audit_recovery(task_id: str, updates: dict) -> bool:
     sanitized_id = sanitize_path_component(task_id)
     if not sanitized_id:
         return False
-    try:
-        team_name = pact_context.get_pact_context().get("team_name", "")
-    except Exception:
-        team_name = ""
-    if not team_name or not re.fullmatch(r"[A-Za-z0-9_\-]+", team_name):
+    # #1020 migration: same resolver-seam replacement as _writeback_dispute —
+    # raw persisted name -> resolve_task_dir() (validation + containment owned
+    # by the seam; None fails OPEN to False, the advisory still fires).
+    resolved_task_dir = resolve_task_dir()
+    if resolved_task_dir is None:
         return False
+    team_name = resolved_task_dir.name
 
     task = read_task_json(sanitized_id, team_name)
     if not task:
@@ -636,7 +639,7 @@ def _writeback_audit_recovery(task_id: str, updates: dict) -> bool:
         metadata[key] = value
     metadata["gate_writeback"] = True
 
-    tasks_root = get_claude_config_dir() / "tasks" / team_name
+    tasks_root = resolved_task_dir
     target = tasks_root / f"{sanitized_id}.json"
     tmp = tasks_root / f".{sanitized_id}.json.tmp"
     try:
@@ -1419,10 +1422,14 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
     # uses it for the team-scoped task path. Empty string on failure
     # (fail-closed downstream: both predicates return False on empty
     # team_name).
-    try:
-        team_name = pact_context.get_pact_context().get("team_name", "")
-    except Exception:
-        team_name = ""
+    # #1020 migration: the name comes from the resolver seam (the live store's
+    # dir name), not the raw persisted context value — the raw read addressed
+    # tasks/session-<id8>/ while the store lived under the full session UUID
+    # on config-less substrates. This is also the lead-side emit twin's marker
+    # key derivation, so ALL emit paths still converge on one O_EXCL marker
+    # key by construction (the teammate twin resolves the same way).
+    resolved_task_dir = resolve_task_dir()
+    team_name = resolved_task_dir.name if resolved_task_dir else ""
 
     # ②a #906 auditor-verdict overwrite-protection (codified mirror).
     # ONE hook, TWO structural branches keyed on is_lead (no new matcher):

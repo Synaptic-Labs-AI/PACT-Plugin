@@ -97,6 +97,7 @@ from shared.constants import (
     get_compact_summary_path,
 )
 from shared.pact_context import (
+    HARNESS_NON_TTY,
     _is_unknown_or_missing_session,
     _resolve_aligned_team_name,
     build_context_cache,
@@ -639,7 +640,9 @@ def _saved_context(session_id: str, project_dir: str) -> dict:
     Reads the file build_context_cache writes, before this run rewrites it.
     Returns {} when it is missing or unreadable. Each field is kept only when
     valid: ``team_name`` when it is a safe path component, ``started_at``
-    when it is a timezone-aware ISO-8601 time.
+    when it is a timezone-aware ISO-8601 time, ``harness`` when it is a str
+    (the MONOTONIC carry-forward: a stamp already recorded for this session
+    survives every re-fire; writers may set it, never clear it).
     """
     try:
         path = (
@@ -661,7 +664,58 @@ def _saved_context(session_id: str, project_dir: str) -> dict:
             saved["started_at"] = started_at
     except Exception:
         pass
+    harness = data.get("harness")
+    if isinstance(harness, str):
+        saved["harness"] = harness
     return saved
+
+
+# Entrypoint values the transcript read maps onto the non_tty stamp. The env
+# var CLAUDE_CODE_ENTRYPOINT is deliberately NOT an input: launcher env does
+# not reach the hook subprocess (predicted dead; unmeasured firing), and no
+# input ships that no measurement observed firing. The transcript IS measured
+# live (the field rides ordinary transcript lines from the sixth onward).
+_NON_TTY_ENTRYPOINTS = frozenset({"remote", "claude-desktop"})
+
+# Bounded scan depth for _read_transcript_entrypoint. The entrypoint field is
+# measured on ordinary transcript lines from the sixth onward, so 50 lines
+# covers every observed shape with margin while keeping the read O(small).
+_TRANSCRIPT_ENTRYPOINT_SCAN_LINES = 50
+
+
+def _read_transcript_entrypoint(transcript_path: object) -> str:
+    """Read the raw ``entrypoint`` value from the session transcript. FAIL-OPEN.
+
+    Writer 1 of the harness stamp: the transcript (hook stdin
+    ``transcript_path``) carries an ``entrypoint`` string on ordinary lines
+    (attachment/user/assistant/system — measured live from the sixth line
+    onward), so a bounded scan of the first lines finds one cheaply. Returns
+    the raw value ("" when absent/unreadable/not-a-str). Never raises: an
+    unreadable transcript degrades to NO stamp — the missing hint falls to
+    the substrate refinement (Writer 2 in bootstrap_marker_writer), never to
+    wrong behavior, because nothing gates on the stamp in v1.
+    """
+    try:
+        if not isinstance(transcript_path, str) or not transcript_path:
+            return ""
+        path = Path(transcript_path)
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            for _ in range(_TRANSCRIPT_ENTRYPOINT_SCAN_LINES):
+                line = f.readline()
+                if not line:
+                    break
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                entrypoint = record.get("entrypoint")
+                if isinstance(entrypoint, str) and entrypoint:
+                    return entrypoint
+        return ""
+    except (OSError, ValueError):
+        return ""
 
 
 def _record_launch_realign(
@@ -1886,6 +1940,19 @@ def main():
             {} if session_id_was_missing
             else _saved_context(session_id, project_dir)
         )
+        # Harness posture stamp, Writer 1 (transcript read, FAIL-OPEN). The
+        # raw entrypoint string also feeds the non-gating session_start
+        # journal diagnostic below. MONOTONIC carry-forward: a stamp already
+        # recorded for this session (saved, from any earlier fire) survives;
+        # the transcript can only SET non_tty where nothing was recorded.
+        # Env-var input is excluded by design (see _NON_TTY_ENTRYPOINTS).
+        transcript_entrypoint = (
+            "" if session_id_was_missing
+            else _read_transcript_entrypoint(input_data.get("transcript_path"))
+        )
+        harness = saved.get("harness", "")
+        if not harness and transcript_entrypoint in _NON_TTY_ENTRYPOINTS:
+            harness = HARNESS_NON_TTY
         if not session_id_was_missing:
             # The resolver's census reads this session's journal through
             # get_session_dir(), which is empty until the context module is
@@ -1937,6 +2004,7 @@ def main():
                     # An empty key (CLAUDE_PID not this hook's parent) is no
                     # reading: None keeps the key this session recorded.
                     process_key=(process_key or None) if frame_is_lead else None,
+                    harness=harness,
                 )
                 if frame_is_lead and _ctx_result is not None:
                     persist_context(*_ctx_result)
@@ -1996,6 +2064,12 @@ def main():
                 _start_fields = {}
                 if prev_session_dir and not _same_dir(prev_session_dir, session_dir):
                     _start_fields["prev_session_dir"] = prev_session_dir
+                # Non-gating entrypoint diagnostic (post-mortem launcher
+                # attribution; the OPTIONAL journal schema type-checks a
+                # PRESENT non-empty str, so the field is OMITTED when the
+                # transcript read yielded nothing rather than written empty).
+                if transcript_entrypoint:
+                    _start_fields["entrypoint"] = transcript_entrypoint
                 append_event(
                     make_event(
                         "session_start",

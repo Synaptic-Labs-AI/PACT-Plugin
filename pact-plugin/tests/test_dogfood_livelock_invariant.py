@@ -330,6 +330,20 @@ def _run_emitter(stdin_payload, task_data, append_calls, tmp_home, monkeypatch):
         "plugin_root": "",
         "started_at": "",
     }
+    # The resolver seam (resolve_task_dir) is EXISTENCE-ONLY and reads the
+    # context through the shared module (so the get_pact_context patch below
+    # reaches its persisted candidate): materialize the live tasks/{team}
+    # store, or the emit path legitimately suppresses before the fires this
+    # suite counts ever happen. Gated on the safe-component allowlist — a
+    # degenerate team creates no store and exercises the suppress path.
+    from shared.paths import get_claude_config_dir as _config_root
+    from shared.session_state import is_safe_path_component as _is_safe
+
+    _ctx_team = _ctx["team_name"]
+    if _is_safe(_ctx_team):
+        _root = _config_root()
+        (_root / "tasks" / _ctx_team).mkdir(parents=True, exist_ok=True)
+        (_root / "teams" / _ctx_team).mkdir(parents=True, exist_ok=True)
     with patch("agent_handoff_emitter.read_task_json", return_value=task_data), \
          patch("agent_handoff_emitter.append_event", side_effect=_append_spy), \
          patch("agent_handoff_emitter.get_journal_path",

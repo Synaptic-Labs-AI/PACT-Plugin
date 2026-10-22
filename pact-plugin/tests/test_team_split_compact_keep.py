@@ -336,11 +336,17 @@ def test_wiring_an_unstamped_task_after_a_compaction_is_denied(tmp_path,
     assert verdict and "no metadata.variety stamp" in verdict, verdict
 
 
-def test_wiring_against_a_stale_record_is_silently_bypassed(tmp_path,
+def test_wiring_against_a_stale_record_enforces_on_the_live_store(tmp_path,
                                                             monkeypatch):
-    """Control, and the bypass the compaction keep prevents: with the record
-    naming the pre-resume team, whose store does not hold the task, the same
-    write passes unchecked."""
+    """INVERTED by the resolver seam (the #1020 migration): the record names
+    the pre-resume team, but the gate resolves the LIVE store through
+    resolve_task_dir (aligned-first, one-directional), so the write is
+    ENFORCED exactly as in the live-record world — the old silent bypass
+    (raw persisted name -> stale store -> read miss -> fail-open) was the
+    #1020 divergence class the migration exists to close. The deny-default
+    gate's reach widening from stale-record worlds to the live store is
+    deliberate; the sibling live-record test above now and this one pin the
+    SAME verdict."""
     import handoff_ordering_gate
     world = split_world(tmp_path, monkeypatch, saved_team=OLD_TEAM,
                         live_store_aged=True)
@@ -348,13 +354,21 @@ def test_wiring_against_a_stale_record_is_silently_bypassed(tmp_path,
     write_task(world.tasks / NEW_TEAM, {
         "id": "30", "status": "pending", "subject": "architect: design"})
     reset_context_module()
-    assert handoff_ordering_gate._evaluate_dispatch_variety(_wiring_frame()) is None
+    verdict = handoff_ordering_gate._evaluate_dispatch_variety(_wiring_frame())
+    assert verdict and "no metadata.variety stamp" in verdict, (
+        "a stale record must no longer mask the live store from the "
+        "dispatch-variety gate — the resolver addresses the live team"
+    )
 
 
-def test_the_stale_store_world_would_warn(tmp_path, monkeypatch):
-    """Control for the cell above: with the record naming the pre-resume team,
-    the same completion warns about the old task, so the cell above can tell
-    the two records apart."""
+def test_the_stale_store_world_suppresses_the_advisory(tmp_path, monkeypatch):
+    """Control for the cell above, REKEYED by the resolver seam: with the
+    record naming the pre-resume team while BOTH stores live, the substrate is
+    the both-DISAGREE cell (aligned identity-match names the live team, the
+    record names the old one, both dirs exist) — the resolver fails CLOSED
+    and the gate suppresses: no advisory, the ambiguity-suppression contract.
+    (The pre-migration control asserted the old-store advisory; the raw
+    persisted read that produced it is the #1020 divergence class.)"""
     world = split_world(tmp_path, monkeypatch, saved_team=OLD_TEAM)
     old_store = world.tasks / OLD_TEAM
     old_store.mkdir(parents=True, exist_ok=True)
@@ -369,4 +383,7 @@ def test_the_stale_store_world_would_warn(tmp_path, monkeypatch):
         "tool_name": "TaskUpdate",
         "tool_input": {"taskId": "20", "status": "completed"},
     })
-    assert advisory and "reviewer: old" in advisory
+    assert advisory is None, (
+        "both stores live + divergent record = the both-DISAGREE cell; the "
+        "resolver must fail closed and the gate suppress"
+    )

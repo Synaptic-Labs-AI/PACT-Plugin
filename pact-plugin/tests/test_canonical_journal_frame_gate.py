@@ -142,12 +142,12 @@ def frame_rig(tmp_path, monkeypatch, pact_context):
         team_name=TEAM, session_id=SESSION_ID, project_dir=PROJECT_DIR
     )
     teams_dir = tmp_path / ".claude" / "teams" / TEAM
-    teams_dir.mkdir(parents=True)
+    teams_dir.mkdir(parents=True, exist_ok=True)
     teams_dir.joinpath("config.json").write_text(
         json.dumps({"leadSessionId": SESSION_ID}), encoding="utf-8"
     )
     tasks_dir = tmp_path / ".claude" / "tasks" / TEAM
-    tasks_dir.mkdir(parents=True)
+    tasks_dir.mkdir(parents=True, exist_ok=True)
 
     emit_calls: list[str] = []
     real_handoff = tlg._emit_lead_side_agent_handoff
@@ -254,7 +254,7 @@ class TestFramePredicateControl:
         stale team config produces in the field.
         """
         teams_dir = tmp_path / "teams" / TEAM
-        teams_dir.mkdir(parents=True)
+        teams_dir.mkdir(parents=True, exist_ok=True)
         cfg = teams_dir / "config.json"
         cfg.write_text(json.dumps({"leadSessionId": SESSION_ID}), encoding="utf-8")
         monkeypatch.setattr(pc, "get_claude_config_dir", lambda: tmp_path)
@@ -810,7 +810,7 @@ class TestSubprocessOrderingPin:
         home = tmp_path / "home"
         slug = Path(PROJECT_DIR).name
         session_dir = home / ".claude" / "pact-sessions" / slug / SESSION_ID
-        session_dir.mkdir(parents=True)
+        session_dir.mkdir(parents=True, exist_ok=True)
         # The on-disk context file is what `pact_context.init()` READS. The
         # in-process module globals stay unseeded, which is the state this
         # arm exists to exercise.
@@ -825,12 +825,12 @@ class TestSubprocessOrderingPin:
             encoding="utf-8",
         )
         teams = home / ".claude" / "teams" / TEAM
-        teams.mkdir(parents=True)
+        teams.mkdir(parents=True, exist_ok=True)
         teams.joinpath("config.json").write_text(
             json.dumps({"leadSessionId": SESSION_ID}), encoding="utf-8"
         )
         tasks = home / ".claude" / "tasks" / TEAM
-        tasks.mkdir(parents=True)
+        tasks.mkdir(parents=True, exist_ok=True)
         tasks.joinpath("7.json").write_text(
             json.dumps(_completed_task(metadata={})), encoding="utf-8"
         )

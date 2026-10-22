@@ -80,7 +80,7 @@ from shared.agent_handoff_marker import (
 )
 from shared.session_journal import append_event, get_journal_path, make_event
 from shared.task_metadata_snapshot import emit_task_metadata_snapshot
-from shared.task_utils import read_task_json
+from shared.task_utils import read_task_json, resolve_task_dir
 
 # Suppress false "hook error" display in Claude Code UI on bare exit paths.
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -155,18 +155,28 @@ def main() -> None:
         # task_id (from stdin) is sanitized for the two filesystem sinks it
         # feeds: read_task_json for the status read, and the marker join inside
         # shared.agent_handoff_marker.already_emitted for the O_EXCL dedup
-        # marker. team_name is NOT sanitized here: it is read RAW from the
-        # session context (the SSOT minted by pact_context.generate_team_name(),
-        # which produces a "session-<id8>" name constrained to [a-f0-9-] at
-        # production time — path-safe by construction, not an untrusted input).
-        # Reading it raw matches the lead-side emit twin's marker-key derivation
-        # (task_lifecycle_gate._emit_lead_side_agent_handoff reads the same
-        # `get_pact_context().get("team_name", "")`), so all three emit paths
+        # marker. team_name is NOT sanitized here: it is the RESOLVER-resolved
+        # live store's dir name (resolve_task_dir validates + case-folds every
+        # candidate and fails closed on an ambiguous substrate, so the name is
+        # path-safe and store-correct by construction — the raw
+        # `get_pact_context().get("team_name", "")` read it replaces addressed
+        # tasks/session-<id8>/ while the store lived under the full session
+        # UUID on config-less substrates, silently losing the HANDOFF emit).
+        # All emit paths derive the name the SAME way (the lead-side twin in
+        # task_lifecycle_gate resolves through the same seam), so they still
         # converge on one O_EXCL marker key by construction. The deprecated
         # stdin `team_name` read is dropped (a teammate-frame stdin value could
         # diverge from the SSOT and split the marker dir).
         task_id = sanitize_path_component(str(task_id))
-        team_name = pact_context.get_pact_context().get("team_name", "")
+        # No live store (or an ambiguous both-disagree substrate) -> "" and
+        # CONTINUE, exactly as the pre-migration reject-to-empty flow did: the
+        # downstream read then misses naturally and the status gate suppresses,
+        # while a caller-patched read still reaches the emit-without-marker
+        # fail-open (#24 handoff-preservation bias). Exiting HERE would diverge
+        # from the lead-side twin (b2), which also continues on an empty name —
+        # the two paths must converge on ONE outcome per substrate.
+        resolved_task_dir = resolve_task_dir()
+        team_name = resolved_task_dir.name if resolved_task_dir else ""
 
         task_data = read_task_json(task_id, team_name)
 

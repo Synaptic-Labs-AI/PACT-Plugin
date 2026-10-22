@@ -51,7 +51,8 @@ Agent(
   team_name="{team_name}",
   subagent_type="pact-{teammate-type}",
   description="Spawn {teammate-name} specialist",
-  prompt="YOUR PACT ROLE: teammate ({teammate-name}).\n\nYou are joining team {team_name}. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. Then check `TaskList` for tasks assigned to you."
+  run_in_background: false,
+  prompt="YOUR PACT ROLE: teammate ({teammate-name}).\n\nYou are joining team {team_name}. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. If the Task tools are deferred, load them with ToolSearch \"select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage\". Then check `TaskList` for tasks assigned to you."
 )
 ```
 
@@ -74,7 +75,7 @@ A_id = TaskCreate(
     description="DOGFOOD TEACHBACK GATE for {feature}.\n\n"
                 "Submit TEACHBACK by writing metadata.teachback_submit using the CANONICAL field schema (do NOT improvise key names): understanding, most_likely_wrong, least_confident_item, first_action, variety_acknowledgment (an OBJECT). See the pact-teachback skill for field semantics. "
                 "Then send the notify SendMessage carrying the canonical payload verbatim (pact-teachback Step 2). "
-                "SET intentional_wait{reason=awaiting_lead_completion, expected_resolver=lead, since=<canonical_since() output>, covers_since=<the same value as since>}. Idle. "
+                "SET intentional_wait{reason=awaiting_lead_completion, expected_resolver=lead, since=<canonical_since() output>, covers_since=<the same value as since>}. End the turn (idle). "
                 "DO NOT mark this task completed — team-lead-only completion. Lead will mark completed "
                 "after teachback acceptance, then send a wake-signal SendMessage confirming Task B is claimable. "
                 "If TEACHBACK is rejected, team-lead writes metadata.teachback_rejection and sends a "
@@ -91,7 +92,7 @@ B_id = TaskCreate(
                 "FIRST claim this task (TaskUpdate status=in_progress) before any implementation tool-use — it is pre-assigned to you but still pending; you flip it, not the lead.\n\n"
                 "DO NOT mark this task completed yourself. "
                 "After staging artifacts, write metadata.handoff, send notify SendMessage carrying the canonical HANDOFF payload (pact-agent-teams On Completion Step 2) to team-lead, "
-                "SET intentional_wait{reason=awaiting_lead_completion}. Idle. Lead will mark "
+                "SET intentional_wait{reason=awaiting_lead_completion}. End the turn (idle). Lead will mark "
                 "completed after HANDOFF validation. If team-lead rejects, team-lead writes metadata.handoff_rejection; "
                 "revise on this same task.\n\nWrite the HANDOFF whatever the size of the diff — a task whose deliverable is a JUDGEMENT rather than a CHANGE carries its value in the rationale, not in the diff.\n\nUpstream: TEACHBACK Task #{A_id}.",
     metadata={
@@ -505,7 +506,8 @@ Agent(
   team_name="{team_name}",
   subagent_type="pact-preparer",
   description="Spawn preparer specialist",
-  prompt="YOUR PACT ROLE: teammate (preparer).\n\nYou are joining team {team_name}. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. Then check `TaskList` for tasks assigned to you."
+  run_in_background: false,
+  prompt="YOUR PACT ROLE: teammate (preparer).\n\nYou are joining team {team_name}. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. If the Task tools are deferred, load them with ToolSearch \"select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage\". Then check `TaskList` for tasks assigned to you."
 )
 ```
 
@@ -622,7 +624,8 @@ Agent(
   team_name="{team_name}",
   subagent_type="pact-architect",
   description="Spawn architect specialist",
-  prompt="YOUR PACT ROLE: teammate (architect).\n\nYou are joining team {team_name}. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. Then check `TaskList` for tasks assigned to you."
+  run_in_background: false,
+  prompt="YOUR PACT ROLE: teammate (architect).\n\nYou are joining team {team_name}. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. If the Task tools are deferred, load them with ToolSearch \"select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage\". Then check `TaskList` for tasks assigned to you."
 )
 ```
 
@@ -770,7 +773,8 @@ Agent(
   team_name="{team_name}",
   subagent_type="pact-{coder-type}",
   description="Spawn {coder-name} specialist",
-  prompt="YOUR PACT ROLE: teammate ({coder-name}).\n\nYou are joining team {team_name}. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. Then check `TaskList` for tasks assigned to you."
+  run_in_background: false,
+  prompt="YOUR PACT ROLE: teammate ({coder-name}).\n\nYou are joining team {team_name}. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. If the Task tools are deferred, load them with ToolSearch \"select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage\". Then check `TaskList` for tasks assigned to you."
 )
 ```
 
@@ -799,7 +803,8 @@ Agent(
   team_name="{team_name}",
   subagent_type="pact-auditor",
   description="Spawn auditor specialist",
-  prompt="YOUR PACT ROLE: teammate (auditor).\n\nYou are joining team {team_name}. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. Then check `TaskList` for tasks assigned to you."
+  run_in_background: false,
+  prompt="YOUR PACT ROLE: teammate (auditor).\n\nYou are joining team {team_name}. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. If the Task tools are deferred, load them with ToolSearch \"select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage\". Then check `TaskList` for tasks assigned to you."
 )
 ```
 
@@ -835,7 +840,7 @@ JSON
 JSON
   ```
 - [ ] **HANDOFF acceptance**: on receiving each Task-complete `SendMessage`, accept on the HANDOFF payload the notify carries. If the notify carries no HANDOFF payload, `SendMessage` the agent to submit one before downstream dispatch proceeds. The disk copy is the deferred audit, not the acceptance surface — see [pact-completion-authority.md §Read-Trigger Precondition](../protocols/pact-completion-authority.md#read-trigger-precondition) point 4 for the audit, the integrity finding and the repair.
-- [ ] **Concurrent-audit coverage check**: before dispatching TEST, confirm ONE of — the auditor task's file carries `metadata.audit_summary` OR `metadata.audit_summary_authored` (`cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team_name}/{taskId}.json" | jq '.metadata | has("audit_summary") or has("audit_summary_authored")'`; `TaskGet` does NOT surface metadata), OR an audit has been dispatched against the committed artifact. If neither holds, `SendMessage` the auditor with the committed SHA, or dispatch a post-artifact audit, then proceed.
+- [ ] **Concurrent-audit coverage check**: before dispatching TEST, confirm ONE of — the auditor task's file carries `metadata.audit_summary` OR `metadata.audit_summary_authored` (`cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team_name}/{taskId}.json" | jq '.metadata | has("audit_summary") or has("audit_summary_authored")'`; `TaskGet` does NOT surface metadata; the `{team_name}` segment is the realigned team name from `pact-session-context.json`), OR an audit has been dispatched against the committed artifact. If neither holds, `SendMessage` the auditor with the committed SHA, or dispatch a post-artifact audit, then proceed.
 - [ ] **Process coder HANDOFFs** (dispatch as soon as the coders have reported; the auditor need not have finished — this harvest writes no Working Memory block, and a later harvest picks up the auditor's HANDOFF):
   ```
   TaskCreate(subject="secretary: harvest pending HANDOFFs",
@@ -928,7 +933,8 @@ Agent(
   team_name="{team_name}",
   subagent_type="pact-test-engineer",
   description="Spawn test-engineer specialist",
-  prompt="YOUR PACT ROLE: teammate (test-engineer).\n\nYou are joining team {team_name}. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. Then check `TaskList` for tasks assigned to you."
+  run_in_background: false,
+  prompt="YOUR PACT ROLE: teammate (test-engineer).\n\nYou are joining team {team_name}. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. If the Task tools are deferred, load them with ToolSearch \"select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage\". Then check `TaskList` for tasks assigned to you."
 )
 ```
 

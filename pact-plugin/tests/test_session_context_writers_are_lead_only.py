@@ -93,6 +93,10 @@ KNOWN_WRITE_CALLS = Counter({
     # $CLAUDE_CODE_SESSION_ID, so it only rewrites a lead's own file.
     ("hooks/shared/realign_team.py", "realign_team", "write_context"): 1,
     ("hooks/shared/pact_context.py", "write_context", "persist_context"): 1,
+    # The harness-stamp writer (non-TTY posture): internally lead-gated on the
+    # hook frame (is_lead on agent_type — same gate as persist_context's
+    # frame_is_lead caller), refusing non-lead frames before touching disk.
+    ("hooks/shared/pact_context.py", "set_harness_stamp", "persist_context"): 1,
 })
 
 # (file, enclosing function): count of references to build_context_cache, which
@@ -121,6 +125,9 @@ KNOWN_MODULE_PATH_USES = Counter({
     ("hooks/shared/pact_context.py", "init"): 2,
     ("hooks/shared/pact_context.py", "is_initialized"): 1,
     ("hooks/shared/pact_context.py", "reset_for_tests"): 1,
+    # set_harness_stamp: reads the recorded file, hands the path to
+    # persist_context — three bare-name uses (None-check, read, pass-through).
+    ("hooks/shared/pact_context.py", "set_harness_stamp"): 3,
 })
 
 # (file, enclosing function): count of code strings naming the file. Each one
@@ -799,3 +806,38 @@ class TestTeamNameWriteBack:
             monkeypatch, _project(tmp_path, "subject"), agent_type
         )
         assert after == before
+
+
+class TestHarnessStampWriter:
+    """pact_context.set_harness_stamp rewrites one key of the session-context
+    file. The write site gates itself on the hook frame's lead role (same
+    self-gating discipline as heal_context_if_missing and the team write-back),
+    so a caller that skips the marker writer's entry-point lead check still
+    cannot stamp."""
+
+    def _seed(self, monkeypatch, project):
+        pact_context.reset_for_tests()
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+        pact_context.write_context("session-cccc3333", _SID, str(project), "")
+        before = _context_file(project).read_text()
+        assert json.loads(before)["harness"] == ""
+        pact_context.reset_for_tests()
+        pact_context.init(_frame(LEAD))
+        return before
+
+    def test_a_lead_frame_stamps(self, monkeypatch, tmp_path):
+        project = _project(tmp_path, "control")
+        before = self._seed(monkeypatch, project)
+        wrote = pact_context.set_harness_stamp("non_tty", _frame(LEAD))
+        after = _context_file(project).read_text()
+        assert wrote is True
+        assert json.loads(after)["harness"] == "non_tty"
+        assert json.loads(after)["team_name"] == json.loads(before)["team_name"]
+
+    @pytest.mark.parametrize("agent_type", [TEAMMATE, None], ids=["teammate", "no-role"])
+    def test_a_non_lead_frame_does_not_stamp(self, agent_type, monkeypatch, tmp_path):
+        project = _project(tmp_path, "subject")
+        before = self._seed(monkeypatch, project)
+        wrote = pact_context.set_harness_stamp("non_tty", _frame(agent_type))
+        assert wrote is False
+        assert _context_file(project).read_text() == before

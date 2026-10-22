@@ -594,7 +594,7 @@ class TestResolveAgentName:
 
         # Create team config with members
         team_dir = tmp_path / "pact-test1234"
-        team_dir.mkdir(parents=True)
+        team_dir.mkdir(parents=True, exist_ok=True)
         config = {
             "members": [
                 {"id": "agent-uuid-123", "name": "backend-coder"},
@@ -644,7 +644,7 @@ class TestResolveAgentName:
         from shared.pact_context import resolve_agent_name
 
         team_dir = tmp_path / "pact-test1234"
-        team_dir.mkdir(parents=True)
+        team_dir.mkdir(parents=True, exist_ok=True)
         config = {"members": [{"id": "other-uuid", "name": "other-agent"}]}
         (team_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
 
@@ -708,7 +708,7 @@ class TestResolveAgentName:
         from shared.pact_context import resolve_agent_name
 
         team_dir = tmp_path / "pact-test1234"
-        team_dir.mkdir(parents=True)
+        team_dir.mkdir(parents=True, exist_ok=True)
         config = {"members": "not-a-list"}
         (team_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
 
@@ -1042,7 +1042,7 @@ class TestResolveAgentNameEdgeCases:
         from shared.pact_context import resolve_agent_name
 
         team_dir = tmp_path / "pact-test1234"
-        team_dir.mkdir(parents=True)
+        team_dir.mkdir(parents=True, exist_ok=True)
         (team_dir / "config.json").write_text("not json!", encoding="utf-8")
 
         result = resolve_agent_name(
@@ -1061,7 +1061,7 @@ class TestResolveAgentNameEdgeCases:
 
         # Create team config at the real home path (using teams_dir override for testing)
         team_dir = tmp_path / "teams" / "pact-from-context"
-        team_dir.mkdir(parents=True)
+        team_dir.mkdir(parents=True, exist_ok=True)
         config = {"members": [{"id": "uuid-abc", "name": "my-agent"}]}
         (team_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
 
@@ -1079,7 +1079,7 @@ class TestResolveAgentNameEdgeCases:
 
         # Create team config — should NOT be consulted
         team_dir = tmp_path / "pact-test"
-        team_dir.mkdir(parents=True)
+        team_dir.mkdir(parents=True, exist_ok=True)
         config = {"members": [{"id": "uuid-123", "name": "looked-up-name"}]}
         (team_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
 
@@ -1096,7 +1096,7 @@ class TestResolveAgentNameEdgeCases:
         from shared.pact_context import resolve_agent_name
 
         team_dir = tmp_path / "pact-team"
-        team_dir.mkdir(parents=True)
+        team_dir.mkdir(parents=True, exist_ok=True)
         config = {"members": [{"id": "uuid-found", "name": "resolved-name"}]}
         (team_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
 
@@ -1116,7 +1116,7 @@ class TestResolveAgentNameEdgeCases:
         from shared.pact_context import resolve_agent_name
 
         team_dir = tmp_path / "pact-team"
-        team_dir.mkdir(parents=True)
+        team_dir.mkdir(parents=True, exist_ok=True)
         config = {"members": [{"id": "uuid-no-name"}]}  # No "name" key
         (team_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
 
@@ -1430,7 +1430,7 @@ class TestCategoryC_MemoryScriptFallback:
         project_dir = "/Users/example/my-project"
         slug = Path(project_dir).name
         ctx_dir = tmp_path / ".claude" / "pact-sessions" / slug / session_id
-        ctx_dir.mkdir(parents=True)
+        ctx_dir.mkdir(parents=True, exist_ok=True)
         ctx_file = ctx_dir / "pact-session-context.json"
         ctx_file.write_text(json.dumps({
             "session_id": session_id,
@@ -1474,7 +1474,7 @@ class TestCategoryC_MemoryScriptFallback:
         project_dir = "/Users/example/project"
         slug = Path(project_dir).name
         ctx_dir = tmp_path / ".claude" / "pact-sessions" / slug / session_id
-        ctx_dir.mkdir(parents=True)
+        ctx_dir.mkdir(parents=True, exist_ok=True)
         ctx_file = ctx_dir / "pact-session-context.json"
         ctx_file.write_text("not json", encoding="utf-8")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -1733,7 +1733,7 @@ class TestInitOrdering:
         session_id = "sess-abc12345"
         slug = "my-project"
         scoped_dir = tmp_path / ".claude" / "pact-sessions" / slug / session_id
-        scoped_dir.mkdir(parents=True)
+        scoped_dir.mkdir(parents=True, exist_ok=True)
         ctx_file = scoped_dir / "pact-session-context.json"
         ctx_file.write_text(json.dumps({
             "team_name": "pact-abc12345",
@@ -1882,7 +1882,7 @@ class TestPactSessionPath:
             tmp_path / "relocated" / "pact-sessions" / "proj" / "sid_8"
             / "pact-session-context.json"
         )
-        context_file.parent.mkdir(parents=True)
+        context_file.parent.mkdir(parents=True, exist_ok=True)
         context_file.write_text(json.dumps({"session_id": "sid 8"}), encoding="utf-8")
 
         assert _resolve_context_on_disk("sid 8") == "sid 8"
@@ -2161,7 +2161,7 @@ class TestLibraryModuleInitContract:
         # Create a task file under the TEAM dir so get_task_list's team branch
         # finds it (the fixture defaults team_name="test-team").
         tasks_dir = tmp_path / ".claude" / "tasks" / team_name
-        tasks_dir.mkdir(parents=True)
+        tasks_dir.mkdir(parents=True, exist_ok=True)
         task_file = tasks_dir / "1.json"
         task_file.write_text(json.dumps({
             "id": "1",
@@ -2472,7 +2472,7 @@ class TestGetSessionDirAdversarial:
         sessions_root = tmp_path / ".claude" / "pact-sessions"
         sessions_root.mkdir(parents=True, exist_ok=True)
         sibling = sessions_root / "other-project" / "other-session"
-        sibling.mkdir(parents=True)
+        sibling.mkdir(parents=True, exist_ok=True)
 
         result = _build_session_path(
             "my-project", "../other-project/other-session"
@@ -2872,7 +2872,7 @@ class TestHealContextIfMissing:
 
         target = self._absent_context(monkeypatch, tmp_path)
         session_dir = target.parent
-        session_dir.mkdir(parents=True)
+        session_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/test/heal-project")
 
         frame = lead_frame_qualified(session_id=self._VALID_SID)
@@ -2969,7 +2969,7 @@ class TestMissingContextFileIsSilent:
         hook = Path(__file__).resolve().parent.parent / "hooks" / "track_files.py"
         project = tmp_path / "project"
         project.mkdir()
-        (tmp_path / "home" / ".claude").mkdir(parents=True)
+        (tmp_path / "home" / ".claude").mkdir(parents=True, exist_ok=True)
         env = {**os.environ, "HOME": str(tmp_path / "home"),
                "CLAUDE_CONFIG_DIR": str(tmp_path / "home" / ".claude"),
                "CLAUDE_PROJECT_DIR": str(project)}
@@ -3062,7 +3062,7 @@ class TestLeadSessionFrameGivenLeadId:
     def _team(self, tmp_path, monkeypatch, lead):
         import shared.pact_context as ctx
         teams = tmp_path / ".claude" / "teams" / "team-x"
-        teams.mkdir(parents=True)
+        teams.mkdir(parents=True, exist_ok=True)
         (teams / "config.json").write_text(json.dumps({"leadSessionId": lead}))
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
@@ -3198,7 +3198,7 @@ class TestProjectSessionRecordsMemo:
         return ctx, slug_dir
 
     def _session(self, slug_dir, sid):
-        (slug_dir / sid).mkdir(parents=True)
+        (slug_dir / sid).mkdir(parents=True, exist_ok=True)
         (slug_dir / sid / "pact-session-context.json").write_text(
             json.dumps({"session_id": sid, "team_name": "t"}))
 
@@ -3269,7 +3269,7 @@ class TestContextProcessKeyCarry:
         ctx.reset_for_tests()
         target = ctx._build_session_path(ctx.project_slug(project),
                                          "aaaa0000-sid")
-        target.mkdir(parents=True)
+        target.mkdir(parents=True, exist_ok=True)
         (target / "pact-session-context.json").write_text(json.dumps({
             "session_id": "other-sid",
             "process_key": "123:Mon Jan  5 09:00:00 2026"}))

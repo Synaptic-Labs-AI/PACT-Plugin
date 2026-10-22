@@ -127,14 +127,18 @@ def test_after_realign_and_compaction_the_journal_holds_this_teams_handoff(
     assert _journaled_handoffs(world) == [_NEW_HANDOFF]
 
 
-def test_a_record_naming_the_old_team_journals_the_old_handoff(tmp_path,
+def test_a_record_naming_the_old_team_journals_no_handoff(tmp_path,
                                                                 monkeypatch):
-    """Control: with the record on the pre-resume team, the same completion
-    journals that team's same-id handoff. The two stores are told apart, so
-    the cell above can fail."""
+    """Control, REKEYED by the resolver seam: with the record on the
+    pre-resume team while BOTH stores live, the substrate is the
+    both-DISAGREE cell (aligned identity-match names the live team, the
+    record names the old one, both dirs exist) — the resolver fails CLOSED,
+    the emit suppresses, and NO handoff is journaled from either store. The
+    pre-migration control journaled the old team's handoff via the raw
+    persisted read — the #1020 divergence class the resolver closes."""
     world = _world(tmp_path, monkeypatch, saved_team=OLD_TEAM)
     _complete(monkeypatch, world)
-    assert _journaled_handoffs(world) == [_OLD_HANDOFF]
+    assert _journaled_handoffs(world) == []
 
 
 def test_a_realigned_record_journals_this_teams_handoff(tmp_path, monkeypatch):

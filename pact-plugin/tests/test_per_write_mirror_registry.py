@@ -131,19 +131,19 @@ class TestReadLeadSessionId:
 
     def test_malformed_json_returns_empty(self, teams_root):
         team_dir = teams_root / "test-team"
-        team_dir.mkdir()
+        team_dir.mkdir(exist_ok=True)
         (team_dir / "config.json").write_text("{not json", encoding="utf-8")
         assert ctx_module._read_lead_session_id("test-team") == ""
 
     def test_non_object_top_level_returns_empty(self, teams_root):
         team_dir = teams_root / "test-team"
-        team_dir.mkdir()
+        team_dir.mkdir(exist_ok=True)
         (team_dir / "config.json").write_text("[1, 2]", encoding="utf-8")
         assert ctx_module._read_lead_session_id("test-team") == ""
 
     def test_missing_key_returns_empty(self, teams_root):
         team_dir = teams_root / "test-team"
-        team_dir.mkdir()
+        team_dir.mkdir(exist_ok=True)
         (team_dir / "config.json").write_text(
             json.dumps({"members": []}), encoding="utf-8"
         )
@@ -227,7 +227,7 @@ class TestIsCanonicalJournalFrame:
     def test_malformed_config_false(self, teams_root, pact_context):
         pact_context(team_name="test-team", session_id=OTHER_CONTEXT_SESSION)
         team_dir = teams_root / "test-team"
-        team_dir.mkdir()
+        team_dir.mkdir(exist_ok=True)
         (team_dir / "config.json").write_text("{not json", encoding="utf-8")
         assert not ctx_module.is_canonical_journal_frame(
             {"agent_type": "pact-backend-coder", "session_id": LEAD_SESSION}

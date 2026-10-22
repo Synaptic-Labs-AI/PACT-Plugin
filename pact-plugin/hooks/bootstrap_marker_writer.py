@@ -188,6 +188,7 @@ try:
         recorded_team_of,
         update_session_info,
     )
+    from shared.task_utils import resolve_team_dir
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_advisory("module imports", _module_load_error)
 
@@ -553,6 +554,62 @@ def _ambiguity_notice() -> str | None:
         return None
 
 
+def _refine_harness_stamp(input_data: dict) -> None:
+    """Set ``harness: non_tty`` on substrate evidence; monotonic; never raises.
+
+    Writer 2 of the harness stamp (session_init's transcript read is Writer 1).
+    Runs on EVERY lead UserPromptSubmit / PostToolUse(Agent) fire, idempotent
+    under the monotonic rule (set_harness_stamp no-ops once any value is
+    recorded). Either evidence leg suffices; the misstamp guard is simply
+    that NEITHER fires without positive substrate evidence — a TTY session
+    with config.json present and a short-name aligned team never stamps:
+
+      1. The aligned team name IS the full session UUID — the config-less
+         substrate keys team state by session id (the TTY-gated roster never
+         formed; the identity match adopted the UUID-anchored team).
+      2. The secretary has JOINED the team — proven by _team_has_secretary
+         (a config.json members[] roster entry, or the async-written
+         secretary inbox as the config-less fallback), a witness strictly
+         STRONGER than a dispatched spawn: a join makes post-join config
+         absence durable evidence, and loosening this to "a spawn was
+         dispatched" would make pre-delivery absence count. The live team
+         dir must hold no config.json AFTER that join. Absence BEFORE any
+         join is not evidence: the platform writes config eagerly at TTY
+         team formation, so pre-join absence is indistinguishable from
+         pre-bootstrap, and only the transcript leg (Writer 1) may stamp
+         there.
+
+    The stamp is diagnostic-only in v1 — nothing gates on it — so a refused or
+    lost write degrades to absence, never to wrong behavior.
+    """
+    try:
+        aligned = pact_context.get_team_name()
+        if not aligned:
+            return
+        # Leg 1: UUID-keyed store (aligned name == full session id).
+        session_id = (pact_context.get_session_id() or "").strip().lower()
+        if session_id and aligned.strip().lower() == session_id:
+            pact_context.set_harness_stamp(
+                pact_context.HARNESS_NON_TTY, input_data)
+            return
+        # Leg 2: spawn observed + config-less team dir. The teams dir routes
+        # through the resolver seam (resolve_team_dir owns validation and the
+        # both-disagree fail-closed cell); no live dir -> no evidence.
+        team_dir = resolve_team_dir()
+        if team_dir is None:
+            return
+        if (team_dir / "config.json").is_file():
+            return  # roster formed -> TTY posture; the misstamp-guard cell
+        if not _team_has_secretary(aligned):
+            return  # no join witnessed yet (roster or inbox); absence is not evidence
+        pact_context.set_harness_stamp(
+            pact_context.HARNESS_NON_TTY, input_data)
+    except Exception:
+        # Fail-safe by contract: the marker write after this is the
+        # load-bearing action; a refinement failure must never abort it.
+        return
+
+
 def _try_write_marker(input_data: dict) -> str | None:
     """Realign the session's team, then write the marker if its pre-conditions
     are met. Returns a lead notice to emit, or None.
@@ -601,6 +658,12 @@ def _try_write_marker(input_data: dict) -> str | None:
     # BEFORE the secretary check so the check reads the aligned team.
     # A team that did not move but cannot be decided gets its own notice.
     notice = _realign_team(input_data) or _ambiguity_notice()
+
+    # Harness-stamp substrate refinement (Writer 2), AFTER the realign so the
+    # aligned team name is fresh, BEFORE the marker fast path so it still runs
+    # on sessions whose marker is already valid. Never raises; monotonic and
+    # idempotent via set_harness_stamp.
+    _refine_harness_stamp(input_data)
 
     # Idempotent fast path: marker already valid → no marker write. Uses the
     # same is_marker_set predicate the gate uses, so producer and verifier

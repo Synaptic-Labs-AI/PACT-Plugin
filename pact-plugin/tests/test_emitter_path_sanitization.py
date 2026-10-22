@@ -1046,8 +1046,14 @@ class TestPostRebindMarkerKeyInvariants:
         from shared.agent_handoff_marker import (
             handoff_already_emitted as _real_already_emitted,
         )
+        from shared.paths import get_claude_config_dir as _config_root
 
         context_team = "session-cafebabe"
+        # The resolver seam is EXISTENCE-ONLY: materialize the live store the
+        # context team names, or the emit path legitimately suppresses before
+        # either sink fires.
+        (_config_root() / "tasks" / context_team).mkdir(parents=True, exist_ok=True)
+        (_config_root() / "teams" / context_team).mkdir(parents=True, exist_ok=True)
         ctx = {
             "team_name": context_team,
             "session_id": "",

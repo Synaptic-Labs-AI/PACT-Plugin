@@ -406,10 +406,15 @@ class TestEvaluationOrderNegations:
         assert len(sites(events)) == 1, "control: fixture must be able to emit"
 
         # THE GUARDED CASE — team_name unresolvable. Only step (2) stands here.
+        # Stub BOTH context surfaces the resolver seam reads: the persisted
+        # name AND the aligned resolver (get_team_name memoizes per process, so
+        # the control phase's aligned value would otherwise leak through the
+        # aligned-first candidate and mask the flip this case exists to make).
         events.clear()
         monkeypatch.setattr(
             tlg.pact_context, "get_pact_context", lambda: {"team_name": ""}
         )
+        monkeypatch.setattr(tlg.pact_context, "get_team_name", lambda: "")
         tlg.evaluate_lifecycle(wiring("43"))
         assert sites(events) == [], (
             "an unresolvable team_name must stop the emit even when the "
