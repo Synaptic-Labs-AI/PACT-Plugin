@@ -40,6 +40,7 @@ AC#3 true-positive preservation:
 """
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -1155,13 +1156,17 @@ class TestPauseBashConditionalEmission:
 # ---------------------------------------------------------------------------
 
 
-# The session_end write in wrap-up.md step 5, after its `write \` line. The
+# The session_end write in wrap-up.md step 5: the wrap-up record script. The
 # helper below runs it and TestWrapUpSessionEndSource pins it against the
 # command file, so the two cannot drift apart silently.
-_WRAP_UP_SESSION_END_ARGS = (
-    "  --type session_end --session-dir '{session_dir}' --stdin <<'JSON'\n"
-    '{{"source": "wrap-up"}}\n'
-    "JSON"
+_WRAP_UP_RECORD_CALL = (
+    'python3 "{plugin_root}/hooks/shared/wrap_up_record.py" --session-dir \'{session_dir}\''
+)
+
+# What the stub gh answers for the helper's run: a merged PR 61.
+_STUB_GH_MERGED = (
+    '{"headRefName":"feat/x","headRepository":{"name":"repo-x"},'
+    '"headRepositoryOwner":{"login":"own"},"number":61,"state":"MERGED"}'
 )
 
 
@@ -1181,8 +1186,7 @@ def _run_wrap_up_bash(session_dir, *, consolidation_ran):
     """
     template = f"""set -e
 trap 'rc=$?; echo "[JOURNAL WRITE FAILED] wrap-up.md (bash line $LINENO): \\"${{BASH_COMMAND%%$'\\''\\n'\\''*}}\\" exit=$rc" >&2; exit $rc' ERR
-python3 "{_SESSION_JOURNAL_PY}" write \\
-{_WRAP_UP_SESSION_END_ARGS.format(session_dir=session_dir)}
+{_WRAP_UP_RECORD_CALL.format(plugin_root=_PACT_PLUGIN_DIR, session_dir=session_dir)}
 case '{consolidation_ran}' in
   true)
     python3 "{_SESSION_JOURNAL_PY}" write \\
@@ -1198,12 +1202,19 @@ JSON
     ;;
 esac
 """
+    bindir = Path(session_dir) / "stub-bin"
+    bindir.mkdir(parents=True, exist_ok=True)
+    gh = bindir / "gh"
+    gh.write_text(f"#!/bin/sh\nprintf '%s\\n' '{_STUB_GH_MERGED}'\n")
+    gh.chmod(0o755)
+    env = {**os.environ, "PATH": f"{bindir}:{os.environ.get('PATH', '/usr/bin:/bin')}"}
     return subprocess.run(
         ["bash", "-c", template],
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=60,
         check=False,
+        env=env,
     )
 
 
@@ -1313,23 +1324,30 @@ class TestWrapUpBashConditionalEmission:
 
 
 class TestWrapUpSessionEndSource:
-    """wrap-up's session_end carries source "wrap-up": the SessionEnd hook
-    reads it to tell that a merged PR got its wrap-up."""
+    """wrap-up's session_end carries source "wrap-up" and the PR state it
+    read: the session hooks read both to tell that a merged PR got its
+    wrap-up."""
 
-    def test_the_step_5_write_records_source_wrap_up(self, tmp_path):
+    def test_the_step_5_block_records_the_merged_pr(self, tmp_path):
         result = _run_wrap_up_bash(str(tmp_path), consolidation_ran="false")
 
         assert result.returncode == 0, result.stderr
+        assert "pr_state=MERGED" in result.stdout.splitlines()
         events = [json.loads(line) for line in
                   (tmp_path / "session-journal.jsonl").read_text().splitlines()]
-        assert [e.get("source") for e in events if e["type"] == "session_end"] == ["wrap-up"]
+        ends = [e for e in events if e["type"] == "session_end"]
+        assert [(e.get("source"), e.get("pr_state"), e.get("pr_number")) for e in ends] == [
+            ("wrap-up", "MERGED", 61)
+        ]
 
     def test_wrap_up_md_carries_the_same_write(self):
         text = (_PACT_PLUGIN_DIR / "commands" / "wrap-up.md").read_text(encoding="utf-8")
-        snippet = _WRAP_UP_SESSION_END_ARGS.format(session_dir="{session_dir}")
-        assert text.count(snippet) == 1, (
+        assert text.count(_WRAP_UP_RECORD_CALL) == 1, (
             "wrap-up.md step 5 no longer carries the session_end write this "
             "file runs; update both together"
+        )
+        assert "--type session_end" not in text, (
+            "wrap-up.md writes a second session_end beside the record script"
         )
 
 

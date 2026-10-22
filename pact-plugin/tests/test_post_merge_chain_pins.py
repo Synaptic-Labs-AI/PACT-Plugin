@@ -306,8 +306,9 @@ class TestMergeHandsOffToWrapUp:
         section = _section(PERSONA.read_text(encoding="utf-8"),
                            "## 6. State Recovery", "\n## ")
         line = next(ln for ln in section.splitlines() if ln.startswith("5. Next action:"))
-        assert ('no `session_end` event with `"source": "wrap-up"` after the latest '
-                '`review_dispatch` event') in line, line
+        assert ('no `session_end` event with `"source": "wrap-up"`, `"pr_state": "MERGED"` '
+                "and that PR's `pr_number`, at or after the latest `review_dispatch` event "
+                "(at any time, when there is none)") in line, line
         assert "session_consolidated" not in line, line
 
 
@@ -641,6 +642,63 @@ class TestFailedCycleRule:
         lines = [ln for ln in step.splitlines() if "**Termination**:" in ln]
         assert len(lines) == 1, lines
         assert "After 2 failed cycles (see **Failed cycle** above)" in lines[0], lines[0]
+
+
+# ---------------------------------------------------------------------------
+# Wrap-up records the PR state its cleanup branch is chosen from
+# ---------------------------------------------------------------------------
+
+_WRAP_UP_RECORD = """python3 "{plugin_root}/hooks/shared/wrap_up_record.py" --session-dir '{session_dir}'"""
+
+
+class TestWrapUpRecordsItsBranch:
+    def _step(self, n, title, nxt):
+        return _section(_text("wrap-up.md"), f"## {n}. {title}", f"## {nxt}")
+
+    def test_the_record_is_written_whether_or_not_the_drain_confirmed(self):
+        """Reddens when step 5 gates the wrap-up record on the secretary's
+        confirmation. Mutation: delete "Then still run the journal block
+        below." from item 3."""
+        step = self._step(5, "Journal Drain-Before-Close", "6. Worktree Cleanup")
+        items = [ln for ln in step.splitlines() if ln.startswith("3. **If secretary cannot confirm**")]
+        assert len(items) == 1, items
+        assert items[0].rstrip().endswith("Then still run the journal block below."), items[0]
+        events = [p for p in step.split("\n\n") if p.startswith("**Journal events**:")]
+        assert len(events) == 1, events
+        assert "whether or not the secretary confirmed" in events[0], events[0]
+
+    def test_step_5_reads_the_pr_state_once_and_before_the_consolidation_branch(self):
+        """Reddens when the record write leaves step 5, appears twice, or
+        moves inside the consolidation `case`. Mutation: move the CLI line below
+        `case '{consolidation_ran}' in`."""
+        step = self._step(5, "Journal Drain-Before-Close", "6. Worktree Cleanup")
+        assert step.count(_WRAP_UP_RECORD) == 1, step.count(_WRAP_UP_RECORD)
+        assert step.index(_WRAP_UP_RECORD) < step.index("case '{consolidation_ran}' in")
+        assert "--type session_end" not in step, "a second session_end write is back"
+
+    def test_step_6_reuses_the_recorded_state_and_never_reads_again(self):
+        """Reddens when step 6 runs its own `gh pr view`, or branches on
+        anything but the recorded `pr_state`. Mutation: restore step 6's
+        `gh pr view --json state,...` block."""
+        step = self._step(6, "Worktree Cleanup", "7. Task Audit")
+        assert "gh pr view --json" not in step, step[:400]
+        assert "do NOT run `gh pr view` again" in step
+        heads = [ln.split("):", 1)[0] for ln in step.splitlines() if ln.startswith(("**A —", "**B —", "**C —", "**D —"))]
+        assert heads == [
+            '**A — PR is MERGED** (`pr_state == "MERGED"`',
+            '**B — No PR exists** (`pr_state == "NONE"`',
+            '**C — PR exists but is not merged** (`pr_state` is `"OPEN"` or `"CLOSED"`',
+            '**D — PR state unreadable** (`pr_state == "UNKNOWN"`',
+        ], heads
+
+    def test_an_unreadable_state_touches_nothing(self):
+        """Reddens when the UNKNOWN branch cleans up, deletes or pauses.
+        Mutation: add "Invoke `/PACT:worktree-cleanup`." to branch D."""
+        step = self._step(6, "Worktree Cleanup", "7. Task Audit")
+        d = step[step.index("**D — PR state unreadable**"):]
+        assert "run no cleanup and no delete, and write no `session_paused` event" in d, d
+        for forbidden in ("/PACT:worktree-cleanup", "git branch -D", "--delete", "TaskStop"):
+            assert forbidden not in d, (forbidden, d)
 
 
 # ---------------------------------------------------------------------------
