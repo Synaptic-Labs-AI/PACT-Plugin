@@ -686,3 +686,30 @@ def test_a_program_after_a_continuation_is_read(label, cmd):
 @pytest.mark.parametrize("label,cmd", CONTINUED_PROGRAM_ALLOW, ids=[r[0] for r in CONTINUED_PROGRAM_ALLOW])
 def test_a_program_after_a_continuation_that_only_views_is_allowed(label, cmd):
     assert is_dangerous_command(cmd) is False
+
+
+# A guarded command an interpreter program runs is a destructive leg for compound
+# detection: two of them, or one beside a shell merge, are refused as compound, and a
+# single one beside benign legs is not.
+_RUBY_HASH = "ruby -e 'system(\"gh pr \" + \"merge #{5} --squash\")'".replace("\" + \"", "")
+COMPOUND_ROWS = [
+    ("two interpreter merges", _A + " && " + _B, True),
+    ("an interpreter merge and a shell merge", _A + " && gh pr " + "merge 6", True),
+    ("a stdin merge and a shell merge", f"python3 - <<'EOF'\nimport os\nos.system(\"{D}\")\nEOF\ngh pr " + "merge 6", True),
+    ("one program running two merges", f"python3 -c 'import os; os.system(\"{D}\"); os.system(\"gh pr \" + \"merge 6\")'", True),
+    ("one interpreter merge", _A, False),
+    ("an interpreter merge then echo", _A + " && echo ok", False),
+    ("an interpreter merge then git status", _A + "; git status", False),
+    ("an interpreter merge under timeout", "timeout 30 " + _A, False),
+    ("an interpreter merge under sh -c", "sh -c \"python3 -c 'import os; os.system(\\\"" + D + "\\\")'\"", False),
+    ("the same merge twice in one program", f"python3 -c 'import os; os.system(\"{D}\"); os.system(\"{D}\")'", False),
+    ("a ruby merge read by both the shell and the program", _RUBY_HASH, False),
+]
+
+
+@pytest.mark.parametrize("label,cmd,compound", COMPOUND_ROWS, ids=[r[0] for r in COMPOUND_ROWS])
+def test_interpreter_legs_count_toward_compound(label, cmd, compound):
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_dangerous_command(cmd) is True
+    assert is_compound_destructive_command(cmd) is compound

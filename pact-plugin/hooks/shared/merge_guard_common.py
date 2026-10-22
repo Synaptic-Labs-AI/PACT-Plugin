@@ -6538,7 +6538,9 @@ def is_compound_destructive_command(command: str) -> bool:
     `gh pr merge 5 && echo ok`, `gh pr merge 5 ; echo done`, `gh pr merge 5 &`,
     `gh pr merge 5 | tee log`, `gh pr merge 5 > out.log` are NOT compound-destructive
     (one destructive leg). Only >=2 destructive legs are refused (route to
-    one-op-at-a-time approval).
+    one-op-at-a-time approval). Each distinct guarded command an interpreter program
+    runs (`python3 -c '…run(["gh", "pr", "merge", "5"])'`) counts as one destructive
+    leg, so `A && gh pr merge 6` with A such a program is compound.
     """
     # Legs come from the shared _split_into_legs SSOT (masked + FD-neutralized split
     # on _COMPOUND_OPS_RE, slices taken from `stripped`). A command with no operator
@@ -6554,4 +6556,11 @@ def is_compound_destructive_command(command: str) -> bool:
     # already True (a git/gh op is present) at the read call site, so a bare `rm` or a
     # pure-rm chain — is_dangerous=False — never reaches it (the guard stays out of
     # pure-filesystem commands).
-    return sum(1 for leg in legs if _leg_is_destructive(leg)) >= 2
+    # A program handed to an interpreter is stripped from the legs above, so the
+    # guarded commands such programs run are counted from the programs: interpreter
+    # legs together count as the larger of their destructive legs and the distinct
+    # commands their programs run, so neither reading counts one command twice.
+    destructive = [leg for leg in legs if _leg_is_destructive(leg)]
+    on_interpreters = sum(1 for leg in destructive if _INTERPRETER_WORD_RE.search(leg))
+    interpreted = {normalize_command_text(c) for c in _interpreter_guarded_commands(command, 0)}
+    return len(destructive) - on_interpreters + max(on_interpreters, len(interpreted)) >= 2
