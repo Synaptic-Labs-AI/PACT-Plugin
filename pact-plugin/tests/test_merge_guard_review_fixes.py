@@ -411,3 +411,35 @@ def test_a_defect_in_the_list_reader_too_keeps_the_literal_judgment(direct_parse
     monkeypatch.setattr(mgc, "_literal_list_at", boom)
     assert is_dangerous_command(f"python3 -c 'import os; os.system(\"{D}\")'") is True
     assert is_dangerous_command("python3 -c 'import subprocess; subprocess.run([\"gh\", \"pr\", \"view\"])'") is False
+
+
+# A subscripted argv element (`sys.argv[1]`, `pr["number"]`) is a placeholder too.
+SUBSCRIPT_ELEMENT_DENY = [
+    ("-c sys.argv", "python3 -c 'import subprocess, sys; subprocess.run([\"gh\",\"pr\",\"merge\",sys.argv[1]])' 5"),
+    ("-c dict key", "python3 -c 'import subprocess; pr = {\"number\": 5}; subprocess.run([\"gh\",\"pr\",\"merge\",pr[\"number\"]])'"),
+    ("-c subscript then method",
+     "python3 -c 'import subprocess, sys; subprocess.run([\"gh\",\"pr\",\"merge\",sys.argv[-1].strip(),\"--squash\"])' 5"),
+    ("node process.argv",
+     "node -e 'const cp = require(\"child_process\"); cp.spawnSync(\"gh\", [\"pr\", \"merge\", process.argv[1]])' 5"),
+]
+SUBSCRIPT_ELEMENT_ALLOW = [
+    ("-c view by sys.argv", "python3 -c 'import subprocess, sys; subprocess.run([\"gh\",\"pr\",\"view\",sys.argv[1]])' 5"),
+    ("-c subscripted subcommand", "python3 -c 'import subprocess; s = [\"view\"]; subprocess.run([\"gh\",\"pr\",s[0],\"5\"])'"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", SUBSCRIPT_ELEMENT_DENY, ids=[r[0] for r in SUBSCRIPT_ELEMENT_DENY])
+def test_merge_argv_with_a_subscripted_element_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", SUBSCRIPT_ELEMENT_ALLOW, ids=[r[0] for r in SUBSCRIPT_ELEMENT_ALLOW])
+def test_non_merge_argv_with_a_subscripted_element_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+def test_an_unclosed_subscript_is_not_an_operand():
+    import shared.merge_guard_common as mgc
+
+    assert mgc._operand_end("sys.argv[1", 0) == -1
+    assert mgc._operand_end("a[0].b(c)[1] + x", 0) == 12

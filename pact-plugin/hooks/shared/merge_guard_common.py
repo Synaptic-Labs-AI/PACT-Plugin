@@ -3016,18 +3016,27 @@ def _balanced_end(code: str, i: int) -> int:
 
 
 _OPERAND_RE = re.compile(r"[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*|\d+")
+_OPERAND_ATTR_RE = re.compile(r"\s*\.\s*[A-Za-z_$][\w$]*")
 
 
 def _operand_end(code: str, i: int) -> int:
-    """Offset past one non-literal operand at code[i] (a name, attribute chain, number or
-    call), or -1 when there is none."""
+    """Offset past one non-literal operand at code[i] (a name, attribute chain or number,
+    followed by any calls, subscripts and attributes: `sys.argv[1]`, `pr["number"]`,
+    `str(n).strip()`), or -1 when there is none or a bracket does not close."""
     operand = _OPERAND_RE.match(code, i)
     if not operand:
         return -1
     i = operand.end()
-    if code[i:i + 1] == "(":
-        return _balanced_end(code, i)
-    return i
+    while True:
+        if code[i:i + 1] in ("(", "["):
+            i = _balanced_end(code, i)
+            if i < 0:
+                return -1
+            continue
+        attr = _OPERAND_ATTR_RE.match(code, i)
+        if not attr:
+            return i
+        i = attr.end()
 
 
 def _string_expr_at(code: str, i: int) -> tuple[str, int] | None:
