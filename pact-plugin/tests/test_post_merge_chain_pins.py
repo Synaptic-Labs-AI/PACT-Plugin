@@ -691,6 +691,28 @@ class TestWrapUpRecordsItsBranch:
             '**D — PR state unreadable** (`pr_state == "UNKNOWN"`',
         ], heads
 
+    def test_branch_c_keeps_its_own_paragraph_and_d_follows_it(self):
+        """Reddens when a branch is inserted between branch C and C's
+        no-propagate paragraph, when D leaves the end of the branch list, or
+        when step 6 still counts three branches. Mutation: move branch D back
+        above C's "Send NO propagate request" paragraph."""
+        step = self._step(6, "Worktree Cleanup", "7. Task Audit")
+        paras = step.split("\n\n")
+        c = next(i for i, p in enumerate(paras) if p.startswith("**C — PR exists but is not merged**"))
+        assert paras[c + 1].startswith("**Send NO propagate request on this branch"), paras[c + 1][:80]
+        assert paras[c + 2].startswith("**D — PR state unreadable**"), paras[c + 2][:80]
+        assert paras[c + 3].startswith("> **Non-mocked seam-integration-test gate"), paras[c + 3][:80]
+        assert "three branches" not in step, "step 6 still counts three branches"
+
+    def test_a_failed_record_takes_branch_d_without_a_new_read(self):
+        """Reddens when step 6 stops routing a failed or silent step-5 block
+        to branch D, or lets the lead re-read the PR to fill the gap. Mutation:
+        delete the failed-block sentence from the step-6 opening."""
+        intro = self._step(6, "Worktree Cleanup", "7. Task Audit").split("\n\n")[1]
+        assert ("If the step-5 block failed (non-zero exit) or printed no `pr_state` line, "
+                "take branch D and report that the wrap-up record was not written; do not run "
+                "`gh pr view` to fill the gap.") in intro, intro
+
     def test_an_unreadable_state_touches_nothing(self):
         """Reddens when the UNKNOWN branch cleans up, deletes or pauses.
         Mutation: add "Invoke `/PACT:worktree-cleanup`." to branch D."""
