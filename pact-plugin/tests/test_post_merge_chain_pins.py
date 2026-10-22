@@ -725,18 +725,23 @@ class TestWrapUpRecordsItsBranch:
         asks for a full wrap-up re-run, or guesses a directory. Mutations:
         delete the review sentence; replace its continuation with "run
         /PACT:wrap-up again"; delete the no-worktree clause; delete the
-        missing-`pr_source` clause."""
+        missing-`pr_source` clause; delete the second-review clause; drop
+        `--porcelain` or the exact `branch refs/heads/<BRANCH>` match."""
         intro = self._step(6, "Worktree Cleanup", "7. Task Audit").split("\n\n")[1]
         for phrase in (
             "If it printed no `pr_source` line, take branch D.",
             "If `pr_source` is `review`, take no branch, whatever `pr_state` says",
-            "look for the worktree of `BRANCH` in `git worktree list`",
+            ("run `git worktree list --porcelain` and find the entry whose `branch` line is exactly "
+             "`branch refs/heads/<BRANCH>`"),
+            "`cd` into the path on that entry's `worktree` line",
             ("run step 5's `wrap_up_record.py` command there, and continue from step 6 with its output, "
-             "in this same run: steps 1-4 are not repeated, and steps 7 and 8 run once, after that."),
-            "If no worktree for `BRANCH` exists, report that and take no branch.",
+             "in this same run: steps 1-4 are not repeated, and steps 7 and 8 run once, after that. "
+             "If that output's `pr_source` is also `review`, take branch D."),
+            "If no entry matches exactly, report that and take no branch.",
         ):
             assert phrase in intro, (phrase, intro)
         assert "/PACT:wrap-up again" not in intro, intro
+        assert "in `git worktree list`" not in intro, "a non-exact worktree lookup is back"
         assert intro.index("take branch D and report") < intro.index("If `pr_source` is `review`"), intro
 
     def test_an_unreadable_state_touches_nothing(self):
