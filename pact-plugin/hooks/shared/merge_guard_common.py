@@ -3517,7 +3517,7 @@ def _program_names_primitive(head: str, program: str) -> bool:
     return bool(re.match(r"^(?:tclsh|wish)", head) and _TCL_EXEC_RE.search(masked))
 
 
-def _guarded_commands_directly(head: str, code: str, _depth: int = 0) -> list[str]:
+def _guarded_commands_directly(head: str, code: str, _depth: int = 0, found: list[str] | None = None) -> list[str]:
     """Every guarded command `head`'s program `code` passes DIRECTLY to an exec
     primitive, in program order: the first argument of a primitive-named call that is a
     string or list literal the danger scan reads as a guarded command
@@ -3525,10 +3525,12 @@ def _guarded_commands_directly(head: str, code: str, _depth: int = 0) -> list[st
     `execSync('…')`), a Tcl `exec` line, a backtick span that runs a shell, a statement
     form, and the same inside an eval/exec of a literal. Call names, backticks and Tcl
     lines written inside a string literal are data. Every one is collected, not only
-    the first, so a reader can tell one guarded command from several."""
+    the first, so a reader can tell one guarded command from several. Each is appended
+    to `found` as it is read, so a caller's list keeps the ones read before a parser
+    defect raises."""
+    found = [] if found is None else found
     if _depth >= _DIRECT_CALL_MAX_DEPTH or not _program_names_primitive(head, code):
-        return []
-    found: list[str] = []
+        return found
     masked = _mask_string_literals(code, head)
     aliases = _language_aliases(head, masked)
     for m in re.finditer(r"(\$?)`([^`]*)`", masked):
@@ -3549,7 +3551,7 @@ def _guarded_commands_directly(head: str, code: str, _depth: int = 0) -> list[st
             # eval (and Python's exec) of a literal runs it as the SAME language's code
             expr = _string_expr_at(code, m.end(), head)
             for text in expr[0] if expr else []:
-                found += _guarded_commands_directly(head, text, _depth + 1)
+                _guarded_commands_directly(head, text, _depth + 1, found)
             continue
         last = re.split(r"\.|::", name)[-1]
         cmds = _argument_commands(
@@ -5826,8 +5828,8 @@ def _interpreter_guarded_commands(command: str, depth: int) -> list[str]:
     then `-c '…'` on the next line). A parser defect must never raise: the pre-hook
     turns a raised exception into a deny, which would block a good-faith command. When
     the direct-call parser raises on one program, that program is judged by
-    `_guarded_literals_beside_primitive` instead, so a defect neither refuses outright
-    nor allows outright."""
+    `_guarded_literals_beside_primitive` as well, joined to the guarded commands read
+    before the defect, so a defect neither refuses outright nor allows outright."""
     spliced = _normalize_line_continuations(command)
     try:
         programs = _stdin_fed_code(command) + _code_arg_programs(command)
@@ -5837,10 +5839,12 @@ def _interpreter_guarded_commands(command: str, depth: int) -> list[str]:
         return []
     found: list[str] = []
     for head, code in programs:
+        read: list[str] = []
         try:
-            found += _guarded_commands_directly(head, code, depth)
+            _guarded_commands_directly(head, code, depth, read)
         except _PARSER_ERRORS:
-            found += _guarded_literals_beside_primitive(head, code, depth)
+            read += _guarded_literals_beside_primitive(head, code, depth)   # with what was read before it
+        found += read
     return found
 
 

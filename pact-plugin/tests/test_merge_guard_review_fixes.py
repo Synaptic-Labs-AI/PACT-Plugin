@@ -713,3 +713,24 @@ def test_interpreter_legs_count_toward_compound(label, cmd, compound):
 
     assert is_dangerous_command(cmd) is True
     assert is_compound_destructive_command(cmd) is compound
+
+
+def test_a_parser_defect_on_a_later_call_keeps_what_was_read_before_it(monkeypatch):
+    """A merge read through a name (which the coarse fallback cannot see) stays refused,
+    and readable for the mint, when a later call in the same program trips the parser."""
+    import shared.merge_guard_common as mgc
+
+    real, calls = mgc._argument_commands, []
+
+    def second_call_raises(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise IndexError("parser defect")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mgc, "_argument_commands", second_call_raises)
+    cmd = ("python3 -c 'import os, subprocess; cmd = \"gh pr \" + \"merge 5\"; "
+           "os.system(cmd); subprocess.check_call([\"ls\"])'")
+    assert is_dangerous_command(cmd) is True
+    calls.clear()
+    assert mgc.interpreter_command_context(cmd) == _MERGE_5
