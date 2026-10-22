@@ -371,3 +371,28 @@ def test_a_defect_in_both_parsers_falls_back_to_primitive_names(direct_parser_ra
     monkeypatch.setattr(mgc, "_program_names_primitive", boom)
     assert is_dangerous_command(f"python3 - <<'EOF'\nimport os\nos.system(\"{D}\")\nEOF") is True
     assert is_dangerous_command(f"python3 - <<'EOF'\nprint(\"{D}\")\nEOF") is False
+
+
+# In a Python program a `#` comment is not code: a triple quote written in it does not
+# open a literal that hides the call after it. In JavaScript `#` names a private field.
+COMMENT_QUOTE_DENY = [
+    ("stdin comment naming triple quotes",
+     f"python3 - <<'EOF'\nimport os\n# docstrings use {Q3} quotes\nos.system(\"{D} --squash\")\nHELP = {Q3}done{Q3}\nEOF"),
+    ("-c comment naming triple quotes",
+     f"python3 -c 'import os\n# uses {Q3} too\nos.system(\"{D}\")\nx = {Q3}y{Q3}'"),
+    ("node private field before the call",
+     f"node -e 'class A {{ #f = 1 }}; require(\"child_process\").execSync(\"{D}\")'"),
+]
+COMMENT_QUOTE_ALLOW = [
+    ("stdin commented-out call", f"python3 - <<'EOF'\nimport os\n# os.system(\"{D}\")\nprint(1)\nEOF"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", COMMENT_QUOTE_DENY, ids=[r[0] for r in COMMENT_QUOTE_DENY])
+def test_quote_in_a_comment_does_not_hide_a_merge(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", COMMENT_QUOTE_ALLOW, ids=[r[0] for r in COMMENT_QUOTE_ALLOW])
+def test_python_comment_is_not_code(label, cmd):
+    assert is_dangerous_command(cmd) is False

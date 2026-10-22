@@ -2898,6 +2898,10 @@ _STRING_LITERAL_RE = re.compile(r"""'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`[^`
 _QUOTED_LITERAL_RE = re.compile(
     r"\"\"\"(?s:.*?)\"\"\"|'''(?s:.*?)'''|'(?:[^'\\\n]|\\.)*'|\"(?:[^\"\\\n]|\\.)*\""
 )
+# In a Python program a `#` comment is blanked as well, whichever of comment or literal
+# starts first, so a quote written in a comment does not open a literal.
+_PYTHON_HEAD_RE = re.compile(r"^(?:python|pypy)")
+_PYTHON_MASKED_RE = re.compile(r"#[^\n]*|" + _QUOTED_LITERAL_RE.pattern)
 # A string literal with an optional prefix (f"…", r'…', b"…", rf"…"): group tdq/tsq/sq/dq
 # is the text between the quotes. A triple-quoted literal may span lines, and is tried
 # first, so `"""x"""` is not read as the empty literal `""`. An f-string's {…}
@@ -2914,10 +2918,20 @@ _DIRECT_CALL_MAX_DEPTH = 2
 
 
 @functools.lru_cache(maxsize=64)
-def _mask_string_literals(code: str) -> str:
+def _mask_string_literals(code: str, head: str = "") -> str:
     """`code` with the content of every '…' and "…" literal blanked, same length, so call
-    names and backticks written INSIDE a string (data) are not read as code."""
-    return _QUOTED_LITERAL_RE.sub(lambda m: m.group(0)[0] + " " * (len(m.group(0)) - 2) + m.group(0)[-1], code)
+    names and backticks written INSIDE a string (data) are not read as code. For a
+    Python `head`, `#` comments are blanked whole."""
+    pattern = _PYTHON_MASKED_RE if _PYTHON_HEAD_RE.match(head) else _QUOTED_LITERAL_RE
+    return pattern.sub(_blank_literal, code)
+
+
+def _blank_literal(m: re.Match) -> str:
+    """A masked literal keeps its quote characters; a masked comment is all blanks."""
+    text = m.group(0)
+    if text.startswith("#"):
+        return " " * len(text)
+    return text[0] + " " * (len(text) - 2) + text[-1]
 
 
 def _skip(pattern: str, text: str, i: int) -> int:
@@ -3324,7 +3338,7 @@ def _program_names_primitive(head: str, program: str) -> bool:
     inside a string or a longer word is data), or a backtick / pipe in a language where
     those run a command (ruby/perl/php backticks, a `$`-tagged JS template, awk's
     print | and | getline)."""
-    masked = _mask_string_literals(program)
+    masked = _mask_string_literals(program, head)
     aliases = _language_aliases(head, masked)
     for m in _CALL_NAME_RE.finditer(masked):
         if _is_primitive_call(m.group(1), head, aliases):
@@ -3351,7 +3365,7 @@ def _code_runs_guarded_directly(head: str, code: str, _depth: int = 0) -> bool:
     needs dataflow and is not followed."""
     if _depth >= _DIRECT_CALL_MAX_DEPTH or not _program_names_primitive(head, code):
         return False
-    masked = _mask_string_literals(code)
+    masked = _mask_string_literals(code, head)
     aliases = _language_aliases(head, masked)
     for m in re.finditer(r"(\$?)`([^`]*)`", masked):
         if m.group(1) or _BACKTICK_EXEC_HEAD_RE.match(head):
