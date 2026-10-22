@@ -55,7 +55,7 @@ def test_a_parser_error_never_becomes_a_refusal(monkeypatch):
         raise AttributeError("parser defect")
 
     monkeypatch.setattr(mgc, "_program_from_tokens", boom)
-    monkeypatch.setattr(mgc, "_code_runs_guarded_directly", boom)
+    monkeypatch.setattr(mgc, "_guarded_commands_directly", boom)
     assert is_dangerous_command("python3 -c 'print(1)'") is False
     assert is_dangerous_command(f"python3 -c 'import os; os.system(\"{D}\")'") is True
 
@@ -355,7 +355,7 @@ def direct_parser_raises(monkeypatch):
     def boom(*_args, **_kwargs):
         raise IndexError("parser defect")
 
-    monkeypatch.setattr(mgc, "_code_runs_guarded_directly", boom)
+    monkeypatch.setattr(mgc, "_guarded_commands_directly", boom)
 
 
 @pytest.mark.parametrize("label,cmd", PARSER_DEFECT_DENY, ids=[r[0] for r in PARSER_DEFECT_DENY])
@@ -583,3 +583,50 @@ def test_a_commented_out_assignment_is_not_the_value(label, cmd):
 @pytest.mark.parametrize("label,cmd", COMMENTED_ASSIGNMENT_DENY, ids=[r[0] for r in COMMENTED_ASSIGNMENT_DENY])
 def test_a_live_merge_assignment_beside_comment_syntax_is_refused(label, cmd):
     assert is_dangerous_command(cmd) is True
+
+
+# The mint and the pre-hook read an interpreter merge through one public reader: the
+# context of the ONE guarded command the programs run, or None.
+_A = "python3 -c 'import subprocess; subprocess.run([\"gh\",\"pr\",\"merge\",\"5\",\"--squash\"])'"
+_B = "python3 -c 'import subprocess; subprocess.run([\"gh\",\"pr\",\"merge\",\"6\"])'"
+_MERGE_5 = {"operation_type": "merge", "bound_flags": [], "pr_number": "5"}
+INTERPRETER_CONTEXT_ROWS = [
+    ("-c list", _A, _MERGE_5),
+    ("-c string with --admin", f"python3 -c 'import os; os.system(\"{D} --admin\")'",
+     {"operation_type": "merge", "bound_flags": ["--admin"], "pr_number": "5"}),
+    ("-c command held in a variable",
+     "python3 -c 'import subprocess; cmd=[\"gh\",\"pr\",\"merge\",\"5\"]; subprocess.run(cmd)'", _MERGE_5),
+    ("stdin program", f"python3 - <<'EOF'\nimport os\nos.system(\"{D} --squash\")\nEOF", _MERGE_5),
+    ("stdin program running bash -c", f"python3 - <<'EOF'\nimport os\nos.system(\"bash -c '{D}'\")\nEOF", _MERGE_5),
+    ("the same merge twice", f"python3 -c 'import os; os.system(\"{D}\"); os.system(\"{D}\")'", _MERGE_5),
+    ("two interpreter merges joined", _A + " && " + _B, None),
+    ("one program running two merges",
+     f"python3 -c 'import os; os.system(\"{D}\"); os.system(\"gh pr \" + \"merge 6\")'", None),
+    ("a program that only prints a merge", f"python3 -c 'print(\"{D}\")'", None),
+    ("a shell merge, no interpreter", D, None),
+]
+
+
+@pytest.mark.parametrize("label,cmd,context", INTERPRETER_CONTEXT_ROWS, ids=[r[0] for r in INTERPRETER_CONTEXT_ROWS])
+def test_interpreter_command_context_reads_one_guarded_command(label, cmd, context):
+    from shared.merge_guard_common import interpreter_command_context
+
+    assert interpreter_command_context(cmd) == context
+
+
+def test_interpreter_command_context_never_raises(monkeypatch):
+    import shared.merge_guard_common as mgc
+
+    def boom(*_args, **_kwargs):
+        raise ValueError("parser defect")
+
+    monkeypatch.setattr(mgc, "_interpreter_guarded_commands", boom)
+    assert mgc.interpreter_command_context(_A) is None
+
+
+def test_normalize_command_text_splices_and_collapses():
+    from shared.merge_guard_common import normalize_command_text
+
+    assert normalize_command_text(f"  {D} \\\n  --squash\n") == f"{D} --squash"
+    assert normalize_command_text(f"{D}\t--squash") == f"{D} --squash"
+    assert normalize_command_text(f"{D}\\\n5") == f"{D}5"

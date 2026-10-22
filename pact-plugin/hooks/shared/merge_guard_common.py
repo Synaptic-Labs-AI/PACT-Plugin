@@ -3488,27 +3488,30 @@ def _program_names_primitive(head: str, program: str) -> bool:
     return bool(re.match(r"^(?:tclsh|wish)", head) and _TCL_EXEC_RE.search(masked))
 
 
-def _code_runs_guarded_directly(head: str, code: str, _depth: int = 0) -> bool:
-    """True iff `head`'s program `code` passes a guarded command DIRECTLY to an exec
-    primitive: the first argument of a primitive-named call is a string or list literal
-    the danger scan reads as a guarded command (`os.system("gh pr merge 5")`,
-    `subprocess.run(["gh", "pr", "merge", "5"])`, `execSync('…')`), a Tcl `exec` line
-    is one, or a backtick span that runs a shell is one. Call names, backticks and Tcl
-    lines written inside a string literal are data. A command reached through a variable
-    needs dataflow and is not followed."""
+def _guarded_commands_directly(head: str, code: str, _depth: int = 0) -> list[str]:
+    """Every guarded command `head`'s program `code` passes DIRECTLY to an exec
+    primitive, in program order: the first argument of a primitive-named call that is a
+    string or list literal the danger scan reads as a guarded command
+    (`os.system("gh pr merge 5")`, `subprocess.run(["gh", "pr", "merge", "5"])`,
+    `execSync('…')`), a Tcl `exec` line, a backtick span that runs a shell, a statement
+    form, and the same inside an eval/exec of a literal. Call names, backticks and Tcl
+    lines written inside a string literal are data. Every one is collected, not only
+    the first, so a reader can tell one guarded command from several."""
     if _depth >= _DIRECT_CALL_MAX_DEPTH or not _program_names_primitive(head, code):
-        return False
+        return []
+    found: list[str] = []
     masked = _mask_string_literals(code, head)
     aliases = _language_aliases(head, masked)
     for m in re.finditer(r"(\$?)`([^`]*)`", masked):
         if m.group(1) or _BACKTICK_EXEC_HEAD_RE.match(head):
             span = code[m.start(2):m.end(2)]
             if span and _is_dangerous_at_depth(span, _depth + 1):
-                return True
+                found.append(span)
     if re.match(r"^(?:tclsh|wish)[0-9.]*$", head):
         for m in _TCL_EXEC_RE.finditer(masked):
-            if _is_dangerous_at_depth(code[m.start(1):m.end(1)].strip(), _depth + 1):
-                return True
+            line = code[m.start(1):m.end(1)].strip()
+            if _is_dangerous_at_depth(line, _depth + 1):
+                found.append(line)
     for m in _PRIMITIVE_CALL_RE.finditer(masked):
         if not _is_primitive_call(m.group(1), head, aliases):
             continue
@@ -3516,8 +3519,8 @@ def _code_runs_guarded_directly(head: str, code: str, _depth: int = 0) -> bool:
         if _runs_own_code(name, head):
             # eval (and Python's exec) of a literal runs it as the SAME language's code
             expr = _string_expr_at(code, m.end(), head)
-            if expr and any(_code_runs_guarded_directly(head, text, _depth + 1) for text in expr[0]):
-                return True
+            for text in expr[0] if expr else []:
+                found += _guarded_commands_directly(head, text, _depth + 1)
             continue
         last = re.split(r"\.|::", name)[-1]
         cmds = _argument_commands(
@@ -3525,11 +3528,15 @@ def _code_runs_guarded_directly(head: str, code: str, _depth: int = 0) -> bool:
             skip_leading=3 if last in ("open2", "open3", "run3") or last.startswith("spawn") else 0,
             head=head,
         )
-        if any(_is_dangerous_at_depth(c, _depth + 1) for c in cmds):
-            return True
-    return any(
-        _is_dangerous_at_depth(cmd, _depth + 1) for cmd in _statement_commands(head, code, masked)
-    )
+        found += [c for c in cmds if _is_dangerous_at_depth(c, _depth + 1)]
+    found += [cmd for cmd in _statement_commands(head, code, masked) if _is_dangerous_at_depth(cmd, _depth + 1)]
+    return found
+
+
+def _code_runs_guarded_directly(head: str, code: str, _depth: int = 0) -> bool:
+    """True iff `head`'s program `code` passes a guarded command directly to an exec
+    primitive (see _guarded_commands_directly)."""
+    return bool(_guarded_commands_directly(head, code, _depth))
 
 
 def _runs_own_code(name: str, head: str) -> bool:
@@ -5783,39 +5790,69 @@ def _leg_command_word(leg: str) -> "str | None":
 _PARSER_ERRORS = (AttributeError, TypeError, ValueError, IndexError, KeyError, RecursionError)
 
 
-def _interpreter_code_runs_guarded(command: str, depth: int) -> bool:
-    """The direct-call judgment over every program this command hands an interpreter.
-    A parser defect must never raise: the pre-hook turns a raised exception into a deny,
-    which would block a good-faith command. When the direct-call parser raises on one
-    program, that program is judged by `_guarded_literal_beside_primitive` instead, so
-    a defect neither refuses outright nor allows outright."""
+def _interpreter_guarded_commands(command: str, depth: int) -> list[str]:
+    """Every guarded command the programs this command hands an interpreter (-c/-e and
+    stdin-fed code) pass directly to an exec primitive. A parser defect must never
+    raise: the pre-hook turns a raised exception into a deny, which would block a
+    good-faith command. When the direct-call parser raises on one program, that program
+    is judged by `_guarded_literals_beside_primitive` instead, so a defect neither
+    refuses outright nor allows outright."""
     try:
         programs = _stdin_fed_code(command) + _code_arg_programs(command)
     except _PARSER_ERRORS:
-        return False
+        return []
+    found: list[str] = []
     for head, code in programs:
         try:
-            if _code_runs_guarded_directly(head, code, depth):
-                return True
+            found += _guarded_commands_directly(head, code, depth)
         except _PARSER_ERRORS:
-            if _guarded_literal_beside_primitive(head, code, depth):
-                return True
-    return False
+            found += _guarded_literals_beside_primitive(head, code, depth)
+    return found
 
 
-def _guarded_literal_beside_primitive(head: str, code: str, depth: int) -> bool:
-    """The coarse judgment for a program the direct-call parser could not read: it
-    names an exec primitive, and one of its string literals, or one literal argv list
-    joined, reads as a guarded command. A program whose calls cannot be told apart is
+def _interpreter_code_runs_guarded(command: str, depth: int) -> bool:
+    """True iff a program this command hands an interpreter runs a guarded command
+    (see _interpreter_guarded_commands)."""
+    return bool(_interpreter_guarded_commands(command, depth))
+
+
+def normalize_command_text(command: str) -> str:
+    """A command's text for exact comparison: continuations spliced as the guard
+    splices them, whitespace runs collapsed, ends stripped."""
+    return " ".join(_normalize_line_continuations(command).split())
+
+
+def interpreter_command_context(command: str) -> dict | None:
+    """The extract_command_context of the ONE guarded command the interpreter programs
+    in `command` pass to an exec primitive, read the way is_dangerous_command reads them
+    (-c/-e and stdin-fed programs, eval/exec of a literal, backtick spans, Tcl exec,
+    statement forms). None when they pass none, when their distinct contexts number
+    more than one, or when the one has no operation_type. Never raises."""
+    try:
+        contexts: dict = {}
+        for text in _interpreter_guarded_commands(command, 0):
+            context = extract_command_context(text)
+            if context.get("operation_type") is None:
+                return None
+            contexts[repr(sorted(context.items()))] = context
+        return next(iter(contexts.values())) if len(contexts) == 1 else None
+    except _PARSER_ERRORS:
+        return None
+
+
+def _guarded_literals_beside_primitive(head: str, code: str, depth: int) -> list[str]:
+    """The coarse reading of a program the direct-call parser could not read: when it
+    names an exec primitive, its string literals, and its literal argv lists joined,
+    that read as a guarded command. A program whose calls cannot be told apart is
     searched for primitive names."""
     if depth >= _DIRECT_CALL_MAX_DEPTH:
-        return False
+        return []
     try:
         names_primitive = _program_names_primitive(head, code)
     except _PARSER_ERRORS:
         names_primitive = bool(_INTERPRETER_EXEC_PRIMITIVE_RE.search(code))
     if not names_primitive:
-        return False
+        return []
     texts = [_literal_body(lit) for lit in _PREFIXED_LITERAL_RE.finditer(code)]
     try:
         for opener in re.finditer(r"[\[(]", code):
@@ -5823,7 +5860,7 @@ def _guarded_literal_beside_primitive(head: str, code: str, depth: int) -> bool:
             texts += [shlex.join(items) for items in (lst[0] if lst else []) if len(items) > 1]
     except _PARSER_ERRORS:
         pass                                             # the list reader failed too: literals only
-    return any(_is_dangerous_at_depth(text, depth + 1) for text in texts)
+    return [text for text in texts if _is_dangerous_at_depth(text, depth + 1)]
 
 
 def _interpreter_names_primitive(leg: str, head: str, tokens: list) -> bool:
