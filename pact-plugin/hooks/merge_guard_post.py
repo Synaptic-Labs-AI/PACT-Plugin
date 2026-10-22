@@ -101,6 +101,11 @@ try:
         # read hook uses, so mint and read can never disagree on danger/compound.
         is_dangerous_command,
         is_compound_destructive_command,
+        # An interpreter program's guarded command has no contiguous `gh pr merge`
+        # for the region finder; the pre-hook's own interpreter reading supplies its
+        # (op, target, flags), and the token binds the command's normalized text.
+        interpreter_command_context,
+        normalize_command_text,
         # #1083: the mint flag-scan window runs the SAME two-tier leg selection
         # (unique dangerous leg -> unique detectable leg) the read bind seam runs,
         # so mint and read bind over identical leg semantics BY CONSTRUCTION —
@@ -460,6 +465,20 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
     # (pure-floor scope — the question prose is NOT cross-checked): ==1 mints, >1
     # refuses (a single click carrying 2 commands), ==0 yields no token. ──
     bundle_pairs = _collect_pairs(selected_option_texts)
+    # An interpreter program is read by the pre-hook's own interpreter reader and
+    # bound by its text, whether its guarded command is split argv the region finder
+    # cannot see (`subprocess.run(["gh", "pr", "merge", "5"])`) or a string it can
+    # (`os.system("gh pr merge 5 --admin")`, whose quoted flag the region reading
+    # misses). A located command with another (op, target) beside it is a second
+    # operation.
+    interpreted = _interpreter_mint_context(selected_option_texts)
+    if interpreted.refusal_reason != "no_command":
+        ctx = interpreted.context
+        if ctx is not None and any(
+            pair != (ctx.get("operation_type"), _target_value(ctx)) for pair in bundle_pairs
+        ):
+            return MintResult(None, "multiple_commands")
+        return interpreted
     if len(bundle_pairs) != 1:
         return MintResult(
             None, "no_command" if len(bundle_pairs) == 0 else "multiple_commands"
@@ -505,6 +524,34 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
         ),
         None,
     )
+
+
+# A fenced block (```lang\n…```) or an inline backtick span, which may run over lines.
+_BACKTICK_SPAN_RE = re.compile(r"```[^\n`]*\n(.*?)```|`([^`]+)`", re.DOTALL)
+
+
+def _interpreter_mint_context(option_texts: list[str]) -> MintResult:
+    """The mint for a clicked option whose backticked command is an interpreter
+    program the read floor refuses (`python3 -c 'subprocess.run(["gh", "pr",
+    "merge", "5"])'`). Its (op, target, flags) come from the pre-hook's own
+    interpreter reading, and the token also carries the command's normalized text,
+    which is all the pre-hook then matches: the approval runs that command and no
+    other. One distinct command per approval; a compound never mints."""
+    found: dict[str, dict] = {}
+    for text in option_texts:
+        for m in _BACKTICK_SPAN_RE.finditer(text):
+            span = (m.group(1) or m.group(2) or "").strip()
+            if not span or not is_dangerous_command(span):
+                continue
+            if is_compound_destructive_command(span):
+                return MintResult(None, "compound_command")
+            ctx = interpreter_command_context(span)
+            if ctx and ctx.get("operation_type"):
+                found[normalize_command_text(span)] = ctx
+    if len(found) != 1:
+        return MintResult(None, "multiple_commands" if found else "no_command")
+    command_text, ctx = next(iter(found.items()))
+    return MintResult({**ctx, "command_text": command_text}, None)
 
 
 def _bundle_has_command(questions: list) -> bool:
@@ -623,6 +670,8 @@ def _mint_confirmation(context: dict) -> str:
         and target.isascii() and target.isdigit()
     ):
         where = f" on PR #{target}"
+    elif "command_text" in context:
+        where = ""  # an exact-command token binds its text, not a readable target
     elif isinstance(target, str):
         where = " on " + _readable_target(target, is_netstring)
     else:
@@ -841,6 +890,74 @@ def _pr_state_confirms(command: str, op_type: str, frame_cwd: object = None) -> 
         return False
 
 
+def _token_in_session(token_data: dict, current_session: str) -> bool:
+    """Whether a token may be retired from this session.
+
+    SEC-S1 cycle-2: gate ONLY when current_session is populated. When
+    current_session=="" (no PACT context), preserve graceful-degradation per
+    architect §3 revised design. Cycle-1 fail-OPEN-on-either-empty
+    AND-short-circuit WAS itself the attack surface — populated current_session +
+    empty token_session let attacker-written tokens through. See
+    test_no_session_id_accepts_any_token (in test_merge_guard.py) for the
+    preserved invariant; its SEC-S1 inversion counterpart is the fix landing."""
+    if not current_session:
+        return True
+    token_session = token_data.get("session_id", "")
+    return bool(token_session) and current_session == token_session
+
+
+def _retire_exact_text_token(
+    command: str, frame_cwd: object = None, token_dir: Path | None = None
+) -> bool:
+    """Retire this session's exact-command token (minted for an interpreter
+    program) once GitHub reports its PR in the state the command produces. The
+    operation classifier cannot read such a command, so Layer 1 below never sees
+    it. Any doubt keeps the token; the TTL and MAX_USES bound still apply.
+    Never raises."""
+    try:
+        text = normalize_command_text(command)
+        current_session = get_session_id()
+        for path in glob.glob(str((token_dir or TOKEN_DIR) / f"{TOKEN_PREFIX}*")):
+            if path.endswith(".consumed") or USE_MARKER_SUFFIX in os.path.basename(path):
+                continue
+            try:
+                with open(path, "r") as f:
+                    token_data = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                continue
+            ctx = token_data.get("context") if isinstance(token_data, dict) else None
+            if not isinstance(ctx, dict) or ctx.get("command_text") != text:
+                continue
+            op, pr = ctx.get("operation_type"), ctx.get("pr_number")
+            if op not in _CONFIRMING_STATE or not (
+                isinstance(pr, str) and pr.isascii() and pr.isdigit()
+            ):
+                continue
+            if not _token_in_session(token_data, current_session):
+                continue
+            cwd = (
+                frame_cwd
+                if isinstance(frame_cwd, str) and os.path.isabs(frame_cwd) and os.path.isdir(frame_cwd)
+                else None
+            )
+            from shared.gh_helpers import check_pr_state
+
+            if check_pr_state(pr, cwd=cwd) != _CONFIRMING_STATE[op]:
+                continue
+            try:
+                os.rename(path, path + ".consumed")
+            except OSError:
+                pass  # a concurrent retire or cleanup won the race
+            print(
+                f"[security] merge-authorization token retired (exact command, op_type={op})",
+                file=sys.stderr,
+            )
+            return True
+    except Exception:  # noqa: BLE001 - any doubt keeps the token
+        return False
+    return False
+
+
 def _retire_token_for_command(
     command: str,
     op_type: str,
@@ -997,19 +1114,8 @@ def _retire_token_for_command(
         if set(token_flags) != cmd_flags:
             continue
         # Session scoping (SEC-S1 cycle-2 revised asymmetric predicate).
-        token_session = token_data.get("session_id", "")
-        if current_session:
-            # SEC-S1 cycle-2: gate ONLY when current_session is populated.
-            # When current_session=="" (no PACT context), preserve
-            # graceful-degradation per architect §3 revised design.
-            # Cycle-1 fail-OPEN-on-either-empty AND-short-circuit WAS
-            # itself the attack surface — populated current_session +
-            # empty token_session let attacker-written tokens through.
-            # See test_no_session_id_accepts_any_token (in test_merge_guard.py)
-            # for the preserved invariant; its SEC-S1 inversion counterpart is
-            # the fix landing.
-            if not token_session or current_session != token_session:
-                continue
+        if not _token_in_session(token_data, current_session):
+            continue
         try:
             os.rename(path, path + ".consumed")
             print(
@@ -1088,6 +1194,8 @@ def main():
             command = (
                 tool_input.get("command", "") if isinstance(tool_input, dict) else ""
             )
+            if isinstance(command, str) and tool_response.get("interrupted") is not True:
+                _retire_exact_text_token(command, input_data.get("cwd"))
 
             # Block 1 — Command-shape filter (SEC-S2: extends from merge-
             # only to all op_types in LAYER1_SUCCESS_STDOUT_PATTERNS).

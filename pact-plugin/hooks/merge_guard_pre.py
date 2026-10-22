@@ -58,6 +58,7 @@ try:
         cleanup_consumed_tokens as _cleanup_consumed_tokens,
         cleanup_orphan_tokens as _cleanup_orphan_tokens,
         extract_command_context,
+        normalize_command_text,
         _single_destructive_leg,
         _single_detectable_leg,
     )
@@ -497,6 +498,13 @@ def _token_matches_command(token: dict, command: str) -> bool:
     context = token.get("context", {})
     if not isinstance(context, dict):
         return False  # F-READ-1: a non-dict context proves nothing — REFUSE
+
+    # An exact-command token (minted for an interpreter program, whose split argv
+    # the (op, target) extractor cannot read) authorizes that command text and
+    # nothing else: no other target, flag or command can match it.
+    if "command_text" in context:
+        command_text = context["command_text"]
+        return isinstance(command_text, str) and normalize_command_text(command) == command_text
 
     token_op = context.get("operation_type")
     # Derive (op, target, bound_flags) from the SINGLE destructive leg, not the
