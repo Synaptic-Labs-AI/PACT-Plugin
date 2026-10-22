@@ -3143,19 +3143,39 @@ _BARE_NAME_ARG_RE = re.compile(r"(?P<name>[$@]?[A-Za-z_]\w*)(?=\s*[,)\]])")
 _ASSIGNMENT_RE = re.compile(r"(?<![\w$@.])(?P<name>[$@]?[A-Za-z_]\w*)\s*=(?![=~>])\s*")
 
 
-# Per head family, its comments. The assignment index blanks them, so a commented-out
-# assignment is not a value; the call scan does not use this mask. Python's `#`
-# comments are already blanked by _mask_string_literals for a Python head.
+# Literal forms that may hold a comment opener, per family: a JS template (a URL in
+# it), a lua long string, ruby %w/%q/%Q/%i lists, and perl q/qq/qw/qr/m and s/tr/y
+# forms. Each `(?P<d…>)` group is a delimiter its own literal closes on.
+_PERL_LITERALS = (
+    r"(?<![\w$@%&])(?:qq|qw|qr|q|m)\s*(?:\[[^\]]*\]|\([^)]*\)|\{[^}]*\}|<[^>]*>"
+    r"|(?P<dq>[^\w\s(\[{<])(?:(?!(?P=dq)).)*(?P=dq))"
+    r"|(?<![\w$@%&])(?:s|tr|y)\s*(?P<ds>[^\w\s(\[{<])(?:(?!(?P=ds)).)*(?P=ds)(?:(?!(?P=ds)).)*(?P=ds)[a-z]*"
+)
+_RUBY_LITERALS = (
+    r"%[wWqQiI](?:\[[^\]]*\]|\([^)]*\)|\{[^}]*\}|<[^>]*>"
+    r"|(?P<dr>[^\w\s(\[{<])(?:(?!(?P=dr)).)*(?P=dr))"
+)
+# Per head family, its own literal forms and its comments. One leftmost match decides,
+# so a literal that starts first stays a literal and a comment that starts first is a
+# comment. The assignment index blanks both, so a commented-out assignment is not a
+# value; the call scan does not use this mask. Python's `#` comments are already
+# blanked by _mask_string_literals for a Python head.
 _INDEX_COMMENT_RES = tuple(
-    (re.compile(head_re), re.compile(comments + "|" + _QUOTED_LITERAL_RE.pattern))
-    for head_re, comments in (
-        (r"^(?:node|nodejs|bun|deno)", r"/\*(?s:.*?)\*/|//[^\n]*"),
-        (r"^php", r"/\*(?s:.*?)\*/|//[^\n]*|#(?!\[)[^\n]*"),
-        (r"^(?:perl|ruby|R$|Rscript|tclsh|wish)", r"(?:(?m:^)|(?<=[\s;]))#(?!\{)[^\n]*"),
-        (r"^(?:lua|luajit)", r"--\[\[(?s:.*?)\]\]|--[^\n]*"),
-        (r"^osascript", r"\(\*(?s:.*?)\*\)|--[^\n]*"),
+    (re.compile(head_re), re.compile("|".join(part for part in (literals, comments, _QUOTED_LITERAL_RE.pattern) if part)))
+    for head_re, literals, comments in (
+        (r"^(?:node|nodejs|bun|deno)", r"`(?:[^`\\]|\\.)*`", r"/\*(?s:.*?)\*/|//[^\n]*"),
+        (r"^php", "", r"/\*(?s:.*?)\*/|//[^\n]*|#(?!\[)[^\n]*"),
+        (r"^perl", _PERL_LITERALS, r"(?:(?m:^)|(?<=[\s;]))#(?!\{)[^\n]*"),
+        (r"^ruby", _RUBY_LITERALS, r"(?:(?m:^)|(?<=[\s;]))#(?!\{)[^\n]*"),
+        (r"^(?:R$|Rscript|tclsh|wish)", "", r"(?:(?m:^)|(?<=[\s;]))#(?!\{)[^\n]*"),
+        (r"^(?:lua|luajit)", r"\[(?P<ll>=*)\[(?s:.*?)\](?P=ll)\]", r"--\[(?P<lc>=*)\[(?s:.*?)\](?P=lc)\]|--[^\n]*"),
+        (r"^osascript", "", r"\(\*(?s:.*?)\*\)|--[^\n]*"),
     )
 )
+# A `/` earlier on the line may open a regex (`=~ / #/`, `split / #/`), which this
+# view does not delimit, so a `#` after it is not taken as a comment: the line stays
+# readable.
+_SLASH_GUARDED_RE = re.compile(r"^(?:perl|ruby)")
 
 
 def _blank_kept_lines(m: re.Match) -> str:
@@ -3168,11 +3188,20 @@ def _blank_kept_lines(m: re.Match) -> str:
 
 @functools.lru_cache(maxsize=64)
 def _index_view(code: str, head: str) -> str:
-    """`code` with string literals and, for a known head, its comments blanked, same
-    length: the text the assignment index and the scope finder read."""
+    """`code` with string literals and, for a known head, its own literal forms and its
+    comments blanked, same length: the text the assignment index and the scope finder
+    read."""
+    guarded = bool(_SLASH_GUARDED_RE.match(head))
+
+    def blank(m: re.Match) -> str:
+        text = m.group(0)
+        if guarded and text.startswith("#") and "/" in code[code.rfind("\n", 0, m.start()) + 1:m.start()]:
+            return text
+        return _blank_kept_lines(m)
+
     for head_re, pattern in _INDEX_COMMENT_RES:
         if head_re.match(head):
-            return pattern.sub(_blank_kept_lines, code)
+            return pattern.sub(blank, code)
     return _mask_string_literals(code, head)
 
 

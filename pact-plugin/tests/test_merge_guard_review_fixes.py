@@ -630,3 +630,32 @@ def test_normalize_command_text_splices_and_collapses():
     assert normalize_command_text(f"  {D} \\\n  --squash\n") == f"{D} --squash"
     assert normalize_command_text(f"{D}\t--squash") == f"{D} --squash"
     assert normalize_command_text(f"{D}\\\n5") == f"{D}5"
+
+
+# A comment opener inside a language's own literal (a URL in a JS template, `#` in a
+# ruby %w list, `--` in a lua long string, `#` in a perl regex) is not a comment: the
+# assignment after it on the line still counts.
+_V = "gh pr view 5"
+LITERAL_OPENER_ROWS = [
+    ("node template URL", 'node -e \'let c="{a}"; const u=`http://x`; c="{b}"; require("child_process").execSync(c)\''),
+    ("ruby %w list", 'ruby -e \'c="{a}"; w=%w[a #b]; c="{b}"; system(c)\''),
+    ("lua long string", 'lua -e \'local c="{a}"; local s=[[a -- b]]; c="{b}"; os.execute(c)\''),
+]
+LITERAL_OPENER_DENY = [
+    (label, shape.format(a=_V, b=D)) for label, shape in LITERAL_OPENER_ROWS
+] + [
+    ("perl regex after =~", f'perl -e \'my $c="{_V}"; my $x = "a" =~ / #/; $c="{D}"; system($c)\''),
+    ("perl q{} string", f'perl -e \'my $c="{_V}"; my $x = q{{a #b}}; $c="{D}"; system($c)\''),
+    ("perl split regex keeps the line", f'perl -e \'my $c="{_V}"; my @p = split / #/, "x"; $c="{D}"; system($c)\''),
+]
+LITERAL_OPENER_ALLOW = [(label, shape.format(a=D, b=_V)) for label, shape in LITERAL_OPENER_ROWS]
+
+
+@pytest.mark.parametrize("label,cmd", LITERAL_OPENER_DENY, ids=[r[0] for r in LITERAL_OPENER_DENY])
+def test_a_comment_opener_inside_a_literal_hides_nothing(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", LITERAL_OPENER_ALLOW, ids=[r[0] for r in LITERAL_OPENER_ALLOW])
+def test_a_reassignment_after_a_literal_opener_is_read(label, cmd):
+    assert is_dangerous_command(cmd) is False
