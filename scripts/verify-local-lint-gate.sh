@@ -34,7 +34,11 @@
 #   0    both legs green
 #   2    refused before linting started (ruff absent, or the repository root
 #        the script resolved does not carry a pact-plugin/ directory)
-#   1    a usage error, or the exit code of the first failing ruff leg
+#   1    a usage error, or the first failing ruff leg reported findings
+#   3    ruff itself failed (a runtime exit above 1 — config error, crash —
+#        which is neither a findings count nor a gate refusal). Kept distinct
+#        from 2 so a wrapper keying exit codes cannot misread a linter crash
+#        as a refusal; the observed ruff exit rides in the marker line.
 #
 # DRIFT GUARD
 #   pact-plugin/tests/test_local_lint_parity.py byte-compares this script's
@@ -53,6 +57,11 @@ fi
 # caller's working directory: scripts/ sits directly under the root, and the
 # invocation below is root-relative BY CONTRACT.
 script_dir="$(cd "$(dirname "$0")" && pwd -P)"
+if [ -z "$script_dir" ]; then
+    printf 'GATE REFUSED: the script directory could not be resolved, so the repository root cannot be either.\n' >&2
+    printf '  This happens only when the invoked path vanishes mid-run; re-invoke by a stable path.\n' >&2
+    exit 2
+fi
 repo_root="$(dirname "$script_dir")"
 
 if [ ! -d "$repo_root/pact-plugin" ]; then
@@ -88,14 +97,22 @@ printf 'LINT-GATE-RUFF %s\n' "$(ruff --version)"
 # pact-plugin/tests/test_local_lint_parity.py.
 ruff check --select F401,F821 --target-version py39 pact-plugin/
 status=$?
-if [ "$status" -ne 0 ]; then
+if [ "$status" -gt 1 ]; then
+    printf 'LINT-GATE-LEG-1-ERROR exit %s\n' "$status" >&2
+    exit 3
+fi
+if [ "$status" -eq 1 ]; then
     printf 'LINT-GATE-LEG-1-FAILED exit %s\n' "$status" >&2
     exit "$status"
 fi
 
 ruff check --select F821 --target-version py39 pact-plugin/
 status=$?
-if [ "$status" -ne 0 ]; then
+if [ "$status" -gt 1 ]; then
+    printf 'LINT-GATE-LEG-2-ERROR exit %s\n' "$status" >&2
+    exit 3
+fi
+if [ "$status" -eq 1 ]; then
     printf 'LINT-GATE-LEG-2-FAILED exit %s\n' "$status" >&2
     exit "$status"
 fi

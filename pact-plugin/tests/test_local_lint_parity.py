@@ -37,6 +37,7 @@ invocation — same line-oriented read, comments dropped first, same
 skip-outside-a-checkout rule.
 """
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -188,4 +189,89 @@ def test_script_refuses_when_ruff_absent():
         "the gate script's ruff-absent refusal message is gone or reworded "
         "past recognition. The refusal is the operator-facing half of "
         "fail-closed: it must name the problem and the remedy."
+    )
+
+def test_workflow_lint_step_echoes_resolved_ruff_version():
+    """The workflow's lint step carries exactly one `ruff --version` line.
+
+    The echo is the CI half of the skew comparison: ruff installs UNPINNED,
+    so the echo is the only record of what a given CI run linted with, and
+    the gate script stamps the local half. Count-anchored like the legs: a
+    reformat that folds or drops the line must redden here rather than
+    silently disarming the comparison.
+    """
+    _, workflow_text, _ = _require_checkout()
+    echo_lines = [
+        line.strip()
+        for line in workflow_text.splitlines()
+        if not line.strip().startswith("#") and line.strip().startswith("ruff --version")
+    ]
+    assert echo_lines, (
+        "PARSE FAILURE, not an echo regression: no `ruff --version` line could "
+        "be read from the workflow. The echo is known present — the skew "
+        "comparison depends on it — so an empty read means the parser no "
+        "longer models the file. RE-POINT THE PARSER."
+    )
+    assert len(echo_lines) == 1, (
+        f"{len(echo_lines)} `ruff --version` lines were read from the "
+        f"workflow ({echo_lines}). The lint contract carries ONE echo; more "
+        f"than one means the parse caught advice prose or the step structure "
+        f"changed — reconcile the parser and the step together."
+    )
+
+
+def test_script_refuses_when_root_lacks_pact_plugin():
+    """The no-pact-plugin/ refusal branch is pinned, mirroring ruff-absent.
+
+    The script resolves its root from its own location and must refuse —
+    not guess, not lint the caller's tree — when that root carries no
+    pact-plugin/ directory. The probe and the message are pinned as bytes
+    for the same reason as the ruff-absent refusal: the branch exists to be
+    read by an operator standing in the wrong place, so its wording is part
+    of the contract.
+    """
+    _, _, script_text = _require_checkout()
+    assert "[ ! -d \"$repo_root/pact-plugin\" ]" in script_text, (
+        "the gate script no longer probes for pact-plugin/ under its "
+        "resolved root. Without the probe, a mis-rooted script would run "
+        "root-relative legs against whatever tree it found itself in — "
+        "restore it."
+    )
+    assert (
+        "GATE REFUSED: the root this script resolved carries no "
+        "pact-plugin/ directory" in script_text
+    ), (
+        "the gate script's no-pact-plugin refusal message is gone or "
+        "reworded past recognition. The refusal is the operator-facing half "
+        "of fail-closed: it must name the problem and the remedy."
+    )
+
+
+def test_usage_error_exits_1():
+    """An argument is a usage error: exit 1, usage on stderr, no linting.
+
+    Exercised as a real subprocess (bash 3.2, the repo's floor shell) rather
+    than pinned as bytes, because an exit code and a stderr stream are
+    behaviors, not strings. The script takes no arguments by contract; a
+    caller passing one must be refused before any ruff leg can run.
+    """
+    root, _, _ = _require_checkout()
+    script = root / _GATE_SCRIPT_REL
+    result = subprocess.run(
+        ["/bin/bash", str(script), "--unexpected-argument"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 1, (
+        f"an argument must be a usage error exiting 1; observed exit "
+        f"{result.returncode} with stderr: {result.stderr!r}"
+    )
+    assert "usage:" in result.stderr, (
+        f"the usage refusal must tell the operator how to call the script; "
+        f"stderr was: {result.stderr!r}"
+    )
+    assert "ruff" not in result.stdout, (
+        "the usage refusal must fire before any ruff invocation; a ruff "
+        "stamp in stdout means an argument was not refused upfront"
     )
