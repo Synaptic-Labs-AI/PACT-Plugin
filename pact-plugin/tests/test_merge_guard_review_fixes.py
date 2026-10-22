@@ -320,11 +320,13 @@ def test_non_merge_argv_with_a_tuple_or_variable_element_is_allowed(label, cmd):
     assert is_dangerous_command(cmd) is False
 
 
-def test_a_list_led_by_a_variable_is_not_read():
-    """A placeholder is read only after a literal head word: `[a, b]` spells nothing."""
+def test_a_list_led_by_a_variable_is_read_only_as_gh_pr():
+    """An unresolved leading element reads as gh only before `"pr"`; otherwise the
+    list spells nothing. A later unresolved element is a placeholder."""
     import shared.merge_guard_common as mgc
 
-    assert mgc._literal_list_at("[a, \"pr\"]", 0) is None
+    assert mgc._literal_list_at("[a, \"push\"]", 0) is None
+    assert mgc._literal_list_at("[a, \"pr\"]", 0) == (["gh", "pr"], 9)
     assert mgc._literal_list_at("[\"gh\", n]", 0) == (["gh", "X"], 9)
 
 
@@ -501,9 +503,6 @@ NAMED_ELEMENT_DENY = [
 ]
 NAMED_ELEMENT_ALLOW = [
     ("-c gh in a variable, view", "python3 -c 'import subprocess; g=\"gh\"; subprocess.run([g,\"pr\",\"view\",\"5\"])'"),
-    ("-c name with no literal value",
-     "python3 -c 'import subprocess, shutil; g=shutil.which(\"gh\"); subprocess.run([g,\"pr\",\"merge\",\"5\"])'"),
-    ("-c name never assigned", "python3 -c 'import subprocess; subprocess.run([g,\"pr\",\"merge\",\"5\"])'"),
 ]
 
 
@@ -514,4 +513,35 @@ def test_merge_argv_with_a_named_element_is_refused(label, cmd):
 
 @pytest.mark.parametrize("label,cmd", NAMED_ELEMENT_ALLOW, ids=[r[0] for r in NAMED_ELEMENT_ALLOW])
 def test_argv_with_a_named_element_not_a_merge_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+# gh's path resolved at run time (`shutil.which("gh")`, an environment variable): an
+# unresolved leading element followed by `"pr"` reads as gh, and the rest is judged as
+# `gh pr ...` typed in a shell is.
+RUNTIME_GH_DENY = [
+    ("-c shutil.which",
+     "python3 -c 'import subprocess, shutil; g = shutil.which(\"gh\"); subprocess.run([g, \"pr\", \"merge\", \"5\"])'"),
+    ("-c environment with default",
+     "python3 -c 'import subprocess, os; g = os.environ.get(\"GH\", \"gh\"); subprocess.run([g, \"pr\", \"merge\", \"5\"])'"),
+    ("-c close with branch delete",
+     ("python3 -c 'import subprocess, shutil; g = shutil.which(\"gh\"); "
+      "subprocess.run([g, \"pr\", \"close\", \"5\", \"--delete-branch\"])'")),
+    ("-c name never assigned", "python3 -c 'import subprocess; subprocess.run([g, \"pr\", \"merge\", \"5\"])'"),
+]
+RUNTIME_GH_ALLOW = [
+    ("-c view", "python3 -c 'import subprocess, shutil; g = shutil.which(\"gh\"); subprocess.run([g, \"pr\", \"view\", \"5\"])'"),
+    ("-c list", "python3 -c 'import subprocess, shutil; g = shutil.which(\"gh\"); subprocess.run([g, \"pr\", \"list\"])'"),
+    ("-c another program's merge subcommand",
+     "python3 -c 'import subprocess, shutil; t = shutil.which(\"tool\"); subprocess.run([t, \"merge\", \"5\"])'"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", RUNTIME_GH_DENY, ids=[r[0] for r in RUNTIME_GH_DENY])
+def test_gh_resolved_at_run_time_running_a_merge_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", RUNTIME_GH_ALLOW, ids=[r[0] for r in RUNTIME_GH_ALLOW])
+def test_gh_resolved_at_run_time_reading_is_allowed(label, cmd):
     assert is_dangerous_command(cmd) is False

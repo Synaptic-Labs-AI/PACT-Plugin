@@ -2946,10 +2946,10 @@ def _skip(pattern: str, text: str, i: int) -> int:
 def _literal_list_at(text: str, i: int) -> tuple[list[str], int] | None:
     """The elements of a `[…]` list, `(…)` tuple or R `c(…)` vector starting at text[i],
     as the text they spell, and the offset after it. A bare-name element reads as the
-    literal string its last earlier assignment gave it (`g = "gh"; [g, "pr", …]`). The
-    first element must read as a string; a later non-literal element (`str(pr)`, a
-    variable with no literal value) reads as `X`. None otherwise, or when an element is
-    neither."""
+    literal string its last earlier assignment gave it (`g = "gh"; [g, "pr", …]`). A
+    later non-literal element (`str(pr)`, a variable with no literal value) reads as
+    `X`; a leading one reads as `gh` when `"pr"` follows it, and otherwise the list is
+    not read. None also when an element is neither."""
     opener = re.match(r"\[|c?\(", text[i:])
     if not opener:
         return None
@@ -2969,11 +2969,20 @@ def _literal_list_at(text: str, i: int) -> tuple[list[str], int] | None:
             items.append(value[0])
             end = named[1]
         else:
-            end = _operand_end(text, i) if items else -1
-            if end < 0:
+            end = _operand_end(text, i)
+            if end < 0 or (not items and not _leads_a_gh_pr_argv(text, end)):
                 return None
-            items.append("X")
+            items.append("X" if items else "gh")
         i = _skip(r"\s*,?", text, end)
+
+
+def _leads_a_gh_pr_argv(text: str, end: int) -> bool:
+    """True iff the list element after an unresolved leading element ending at text[end]
+    is the literal `"pr"`: a program resolved at run time (`shutil.which("gh")`, an
+    environment variable) followed by `pr` is gh, and the rest of the argv is judged
+    as `gh pr …` is."""
+    nxt = _STRING_LITERAL_RE.match(text, _skip(r"\s*,\s*", text, end))
+    return bool(nxt) and nxt.group(0)[1:-1] == "pr"
 
 
 _OBJECT_ARGV_KEY_RE = re.compile(r"(?<![\w$])[\"']?(?:args|cmd)[\"']?\s*:\s*")
