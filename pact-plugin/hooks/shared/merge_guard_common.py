@@ -182,6 +182,7 @@ security check; the primary check is I-3 TTL expiry (bounded by TOKEN_TTL).
 
 from __future__ import annotations
 
+import bisect
 import functools
 import glob
 import os
@@ -3097,6 +3098,41 @@ def _first_argument_command(code: str, pos: int) -> str | None:
     return cmds[0] if cmds else None
 
 
+# A call argument that is a bare variable name (`run(cmd)`, `system($c)`), up to the
+# comma or parenthesis that ends it.
+_BARE_NAME_ARG_RE = re.compile(r"(?P<name>[$@]?[A-Za-z_]\w*)(?=\s*[,)])")
+
+
+# `name = value`, outside string literals; `==`, `=~` and `=>` are not assignments.
+_ASSIGNMENT_RE = re.compile(r"(?<![\w$@.])(?P<name>[$@]?[A-Za-z_]\w*)\s*=(?![=~>])\s*")
+
+
+@functools.lru_cache(maxsize=64)
+def _assignments(code: str) -> dict[str, tuple[list[int], list[int]]]:
+    """Per assigned name, the offsets of its assignments and of their values, in order,
+    found once per program."""
+    found: dict[str, tuple[list[int], list[int]]] = {}
+    for m in _ASSIGNMENT_RE.finditer(_mask_string_literals(code)):
+        starts, values = found.setdefault(m.group("name"), ([], []))
+        starts.append(m.start())
+        values.append(m.end())
+    return found
+
+
+def _named_value_at(code: str, i: int) -> tuple[int, int] | None:
+    """For a bare-name argument at code[i], (offset of the value in that name's last
+    assignment before i, offset past the name); None when code[i] is not a bare name or
+    the name is not assigned earlier in the program."""
+    named = _BARE_NAME_ARG_RE.match(code, i)
+    if not named:
+        return None
+    starts, values = _assignments(code).get(named.group("name"), ([], []))
+    k = bisect.bisect_left(starts, i)
+    if k == 0:
+        return None
+    return values[k - 1], named.end()
+
+
 def _argument_commands(code: str, pos: int, skip_leading: int = 0) -> list[str]:
     """The command a call's leading arguments spell. One string expression alone is a
     shell command line (literal, f-string, concatenation, `.format`, `shlex.split`).
@@ -3106,8 +3142,10 @@ def _argument_commands(code: str, pos: int, skip_leading: int = 0) -> list[str]:
     contributing its own `args:` or `cmd:` list (`new Deno.Command('gh', {args: […]})`,
     `Deno.run({cmd: […]})`). Stops at the first other argument. Up to `skip_leading`
     non-literal arguments before the first literal are skipped (a spawn mode, a perl
-    open3 handle). Both readings are returned: a leading string alone as a shell line
-    (`popen("…", "r")`), and the whole argv."""
+    open3 handle). An argument that is a bare name reads as the literal value its last
+    earlier assignment gave it (`cmd = ["gh", …]; run(cmd)`). Both readings are
+    returned: a leading string alone as a shell line (`popen("…", "r")`), and the
+    whole argv."""
     argv, strings, i = [], 0, _skip(r"\s*", code, pos)
     keyword = re.match(r"(?:args|cmd)\s*=(?!=)\s*", code[i:])
     if keyword:
@@ -3123,17 +3161,19 @@ def _argument_commands(code: str, pos: int, skip_leading: int = 0) -> list[str]:
         i = end + sep.end()
     first_string = None
     while True:
-        lst = _literal_list_at(code, i)
-        expr = None if lst else _string_expr_at(code, i)
+        named = _named_value_at(code, i)
+        at = named[0] if named else i
+        lst = _literal_list_at(code, at)
+        expr = None if lst else _string_expr_at(code, at)
         if expr:
             if not argv:
                 first_string = expr[0]
             argv.append(expr[0])
             strings += 1
-            i = expr[1]
+            i = named[1] if named else expr[1]
         elif lst:
             argv += lst[0]
-            i = lst[1]
+            i = named[1] if named else lst[1]
         else:
             argv += _object_argv_at(code, i)
             break

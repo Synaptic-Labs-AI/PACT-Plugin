@@ -66,9 +66,16 @@ def test_guarded_text_as_data_stays_allowed(label, cmd):
     assert is_dangerous_command(cmd) is False, f"{label}: data was refused"
 
 
-def test_variable_indirection_is_the_named_residual():
-    """A command reached through a variable needs dataflow; it stays allowed."""
+def test_a_literal_command_held_in_a_variable_is_refused():
+    """A variable given a literal command reads as that literal at the call."""
     cmd = f"python3 - <<'EOF'\nimport subprocess\nc = '{D}'\nsubprocess.run(c, shell=True)\nEOF"
+    assert is_dangerous_command(cmd) is True
+
+
+def test_a_command_built_by_a_function_is_the_named_residual():
+    """A command a function returns needs dataflow across the call; it stays allowed."""
+    cmd = (f"python3 - <<'EOF'\nimport subprocess\ndef build():\n    return '{D}'\n"
+           "c = build()\nsubprocess.run(c, shell=True)\nEOF")
     assert is_dangerous_command(cmd) is False
 
 

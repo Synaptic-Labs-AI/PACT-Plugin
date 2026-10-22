@@ -443,3 +443,47 @@ def test_an_unclosed_subscript_is_not_an_operand():
 
     assert mgc._operand_end("sys.argv[1", 0) == -1
     assert mgc._operand_end("a[0].b(c)[1] + x", 0) == 12
+
+
+# A command held in a variable and then passed to a primitive reads as the literal value
+# the variable was last given before the call. Merge text held in a variable that no
+# primitive is given stays data.
+NAMED_COMMAND_DENY = [
+    ("-c argv in a variable", "python3 -c 'import subprocess; cmd=[\"gh\",\"pr\",\"merge\",\"12\"]; subprocess.run(cmd)'"),
+    ("-c line in a variable", "python3 -c 'import os; c=\"gh pr merge 12\"; os.system(c)'"),
+    ("stdin variable with keyword args",
+     ("python3 - <<'EOF'\nimport subprocess\ncmd = [\"gh\", \"pr\", \"merge\", \"12\", \"--squash\"]\n"
+      "subprocess.run(cmd, check=True)\nEOF")),
+    ("stdin concatenated line in a variable",
+     "python3 - <<'EOF'\nimport os\nn = '12'\nline = 'gh pr merge ' + n\nos.system(line)\nEOF"),
+    ("perl scalar", "perl -e 'my $c = \"gh pr merge 12\"; system($c)'"),
+    ("node const", "node -e 'const c = \"gh pr merge 12\"; require(\"child_process\").execSync(c)'"),
+]
+NAMED_COMMAND_ALLOW = [
+    ("merge text printed, other command run",
+     "python3 -c 'import subprocess; print(\"gh pr merge 12\"); subprocess.run([\"ls\"])'"),
+    ("variable reassigned before the call",
+     "python3 -c 'import os; c = \"gh pr merge 12\"; c = \"gh pr view 12\"; os.system(c)'"),
+    ("merge text in one variable, another run",
+     "python3 -c 'import subprocess; msg = \"gh pr merge 12\"; cmd = [\"ls\"]; print(msg); subprocess.run(cmd)'"),
+    ("assignment written only inside a string",
+     "python3 - <<'EOF'\nimport os\nc = 'ls'\nprint(\"c = 'gh pr merge 12'\")\nos.system(c)\nEOF"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", NAMED_COMMAND_DENY, ids=[r[0] for r in NAMED_COMMAND_DENY])
+def test_merge_held_in_a_variable_given_to_a_primitive_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", NAMED_COMMAND_ALLOW, ids=[r[0] for r in NAMED_COMMAND_ALLOW])
+def test_merge_text_in_a_variable_no_primitive_runs_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+def test_a_name_is_resolved_only_to_an_earlier_assignment():
+    import shared.merge_guard_common as mgc
+
+    assert mgc._named_value_at("run(c); c = 'x'", 4) is None
+    assert mgc._named_value_at("c == 'x'; run(c)", 14) is None
+    assert mgc._named_value_at("c = 'x'; run(c)", 13) == (4, 14)
