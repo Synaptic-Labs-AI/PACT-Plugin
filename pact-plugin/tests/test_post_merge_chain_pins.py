@@ -713,6 +713,32 @@ class TestWrapUpRecordsItsBranch:
                 "take branch D and report that the wrap-up record was not written; do not run "
                 "`gh pr view` to fill the gap.") in intro, intro
 
+    def test_step_5_names_the_six_lines_with_pr_source(self):
+        """Reddens when step 5 stops listing `pr_source` among the lines the
+        record prints. Mutation: restore "five `key=value` lines"."""
+        step = self._step(5, "Journal Drain-Before-Close", "6. Worktree Cleanup")
+        assert ("six `key=value` lines (`pr_state`, `pr_number`, `branch`, `head_owner`, "
+                "`head_repo`, `pr_source`)") in step
+
+    def test_a_review_sourced_record_takes_no_branch(self):
+        """Reddens when step 6 lets a record read from the review run a branch,
+        asks for a full wrap-up re-run, or guesses a directory. Mutations:
+        delete the review sentence; replace its continuation with "run
+        /PACT:wrap-up again"; delete the no-worktree clause; delete the
+        missing-`pr_source` clause."""
+        intro = self._step(6, "Worktree Cleanup", "7. Task Audit").split("\n\n")[1]
+        for phrase in (
+            "If it printed no `pr_source` line, take branch D.",
+            "If `pr_source` is `review`, take no branch, whatever `pr_state` says",
+            "look for the worktree of `BRANCH` in `git worktree list`",
+            ("run step 5's `wrap_up_record.py` command there, and continue from step 6 with its output, "
+             "in this same run: steps 1-4 are not repeated, and steps 7 and 8 run once, after that."),
+            "If no worktree for `BRANCH` exists, report that and take no branch.",
+        ):
+            assert phrase in intro, (phrase, intro)
+        assert "/PACT:wrap-up again" not in intro, intro
+        assert intro.index("take branch D and report") < intro.index("If `pr_source` is `review`"), intro
+
     def test_an_unreadable_state_touches_nothing(self):
         """Reddens when the UNKNOWN branch cleans up, deletes or pauses.
         Mutation: add "Invoke `/PACT:worktree-cleanup`." to branch D."""
@@ -735,7 +761,8 @@ class TestStateRecoveryEventsTable:
         paused-claim retirement. Mutation: delete "(at any time, when there is
         none)" or the paused-claim clause."""
         row = self._rows()["`session_end`"]
-        assert "`source`, `pr_state`, `pr_number` (optional, wrap-up:" in row, row
+        assert "`source`, `pr_state`, `pr_number`, `pr_source` (optional, wrap-up:" in row, row
+        assert "and `cwd` or `review` for where the state was read)" in row, row
         assert ("A wrap-up `session_end` with `pr_state` `MERGED` and a PR's `pr_number`, at or "
                 "after the latest `review_dispatch` (at any time, when there is none), records that "
                 "wrap-up closed that merged PR") in row, row
