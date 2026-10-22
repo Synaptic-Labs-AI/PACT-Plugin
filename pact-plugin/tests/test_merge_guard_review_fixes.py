@@ -326,8 +326,8 @@ def test_a_list_led_by_a_variable_is_read_only_as_gh_pr():
     import shared.merge_guard_common as mgc
 
     assert mgc._literal_list_at("[a, \"push\"]", 0) is None
-    assert mgc._literal_list_at("[a, \"pr\"]", 0) == (["gh", "pr"], 9)
-    assert mgc._literal_list_at("[\"gh\", n]", 0) == (["gh", "X"], 9)
+    assert mgc._literal_list_at("[a, \"pr\"]", 0) == ([["gh", "pr"]], 9)
+    assert mgc._literal_list_at("[\"gh\", n]", 0) == ([["gh", "X"]], 9)
 
 
 # When the direct-call parser raises on a program, that program falls back to a coarse
@@ -486,9 +486,9 @@ def test_merge_text_in_a_variable_no_primitive_runs_is_allowed(label, cmd):
 def test_a_name_is_resolved_only_to_an_earlier_assignment():
     import shared.merge_guard_common as mgc
 
-    assert mgc._named_value_at("run(c); c = 'x'", 4) is None
-    assert mgc._named_value_at("c == 'x'; run(c)", 14) is None
-    assert mgc._named_value_at("c = 'x'; run(c)", 13) == (4, 14)
+    assert mgc._named_values_at("", "run(c); c = 'x'", 4) is None
+    assert mgc._named_values_at("", "c == 'x'; run(c)", 14) is None
+    assert mgc._named_values_at("", "c = 'x'; run(c)", 13) == ([4], 14)
 
 
 # A list element that is a bare name reads as the literal its last earlier assignment
@@ -545,3 +545,41 @@ def test_gh_resolved_at_run_time_running_a_merge_is_refused(label, cmd):
 @pytest.mark.parametrize("label,cmd", RUNTIME_GH_ALLOW, ids=[r[0] for r in RUNTIME_GH_ALLOW])
 def test_gh_resolved_at_run_time_reading_is_allowed(label, cmd):
     assert is_dangerous_command(cmd) is False
+
+
+# A commented-out assignment is not the name's value, whatever the language's comment
+# syntax; the live assignment it replaced decides.
+COMMENTED_ASSIGNMENT_ALLOW = [
+    ("python list", ("python3 - <<'EOF'\nimport subprocess\ncmd = [\"gh\", \"pr\", \"view\", \"5\"]\n"
+                     "# cmd = [\"gh\", \"pr\", \"merge\", \"5\"]\nsubprocess.run(cmd)\nEOF")),
+    ("python string", ("python3 - <<'EOF'\nimport subprocess\ncmd = \"gh pr view 5\"\n"
+                       f"# old: cmd = \"{D} --squash\"\nsubprocess.run(cmd, shell=True)\nEOF")),
+    ("node line comment", ("node - <<'EOF'\nconst cmd = \"gh pr view 5\";\n"
+                           f"// const cmd = \"{D}\";\nrequire(\"child_process\").execSync(cmd);\nEOF")),
+    ("node block comment", ("node - <<'EOF'\nlet cmd = \"gh pr view 5\";\n"
+                            f"/* cmd = \"{D}\"; */\nrequire(\"child_process\").execSync(cmd);\nEOF")),
+    ("php hash comment", f"php -r '$c = \"gh pr view 5\";\n# $c = \"{D}\";\nshell_exec($c);'"),
+    ("php slash comment", f"php -r '$c = \"gh pr view 5\";\n// $c = \"{D}\";\nshell_exec($c);'"),
+    ("perl comment", f"perl -e 'my $c = \"gh pr view 5\";\n# $c = \"{D}\";\nsystem($c);'"),
+    ("ruby comment", f"ruby -e 'c = \"gh pr view 5\"\n# c = \"{D}\"\nsystem(c)'"),
+    ("lua comment", f"lua -e 'local c = \"gh pr view 5\"\n-- c = \"{D}\"\nos.execute(c)'"),
+]
+COMMENTED_ASSIGNMENT_DENY = [
+    ("python trailing comment on a live merge",
+     f"python3 - <<'EOF'\nimport os\nc = \"{D}\"  # was: gh pr view 5\nos.system(c)\nEOF"),
+    ("node URL string before a live merge",
+     ("node - <<'EOF'\nconst u = \"https://example.com\";\n"
+      f"const c = \"{D}\";\nrequire(\"child_process\").execSync(c);\nEOF")),
+    ("perl array length is not a comment",
+     f"perl -e 'my @a = (1); my $n = $#a; my $c = \"{D}\"; system($c);'"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", COMMENTED_ASSIGNMENT_ALLOW, ids=[r[0] for r in COMMENTED_ASSIGNMENT_ALLOW])
+def test_a_commented_out_assignment_is_not_the_value(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+@pytest.mark.parametrize("label,cmd", COMMENTED_ASSIGNMENT_DENY, ids=[r[0] for r in COMMENTED_ASSIGNMENT_DENY])
+def test_a_live_merge_assignment_beside_comment_syntax_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True

@@ -2943,10 +2943,19 @@ def _skip(pattern: str, text: str, i: int) -> int:
     return m.end() if m else i
 
 
-def _literal_list_at(text: str, i: int) -> tuple[list[str], int] | None:
-    """The elements of a `[…]` list, `(…)` tuple or R `c(…)` vector starting at text[i],
-    as the text they spell, and the offset after it. A bare-name element reads as the
-    literal string its last earlier assignment gave it (`g = "gh"; [g, "pr", …]`). A
+# How many readings one expression may produce when names in it reach several values.
+_MAX_READINGS = 16
+
+
+def _with_each(readings: list, options: list) -> list:
+    """Each reading extended by each option, at most _MAX_READINGS of them."""
+    return [r + [o] for r in readings for o in options][:_MAX_READINGS]
+
+
+def _literal_list_at(text: str, i: int, head: str = "") -> tuple[list[list[str]], int] | None:
+    """The readings of a `[…]` list, `(…)` tuple or R `c(…)` vector starting at text[i],
+    each the elements it spells, and the offset after it. A bare-name element reads as
+    each literal string its reaching assignments give it (`g = "gh"; [g, "pr", …]`). A
     later non-literal element (`str(pr)`, a variable with no literal value) reads as
     `X`; a leading one reads as `gh` when `"pr"` follows it, and otherwise the list is
     not read. None also when an element is neither."""
@@ -2954,26 +2963,35 @@ def _literal_list_at(text: str, i: int) -> tuple[list[str], int] | None:
     if not opener:
         return None
     closer = "]" if opener.group() == "[" else ")"
-    items, i = [], i + opener.end()
+    readings: list[list[str]] = [[]]
+    count, i = 0, i + opener.end()
     while True:
         i = _skip(r"\s*", text, i)
         if text[i:i + 1] == closer:
-            return items, i + 1
+            return readings, i + 1
         lit = _STRING_LITERAL_RE.match(text, i)
-        named = None if lit else _named_value_at(text, i)
-        value = _string_expr_at(text, named[0]) if named else None
+        named = None if lit else _named_values_at(head, text, i)
+        values = _named_strings(head, text, named[0]) if named else []
         if lit:
-            items.append(lit.group(0)[1:-1])
-            end = lit.end()
-        elif named and value:
-            items.append(value[0])
-            end = named[1]
+            readings, end = _with_each(readings, [lit.group(0)[1:-1]]), lit.end()
+        elif named and values:
+            readings, end = _with_each(readings, values), named[1]
         else:
             end = _operand_end(text, i)
-            if end < 0 or (not items and not _leads_a_gh_pr_argv(text, end)):
+            if end < 0 or (not count and not _leads_a_gh_pr_argv(text, end)):
                 return None
-            items.append("X" if items else "gh")
+            readings = _with_each(readings, ["X" if count else "gh"])
+        count += 1
         i = _skip(r"\s*,?", text, end)
+
+
+def _named_strings(head: str, code: str, offsets: list[int]) -> list[str]:
+    """The string texts the values at these offsets spell, in order, without repeats."""
+    out: list[str] = []
+    for off in offsets:
+        expr = _string_expr_at(code, off, head)
+        out += [text for text in (expr[0] if expr else []) if text not in out]
+    return out[:_MAX_READINGS]
 
 
 def _leads_a_gh_pr_argv(text: str, end: int) -> bool:
@@ -2988,10 +3006,10 @@ def _leads_a_gh_pr_argv(text: str, end: int) -> bool:
 _OBJECT_ARGV_KEY_RE = re.compile(r"(?<![\w$])[\"']?(?:args|cmd)[\"']?\s*:\s*")
 
 
-def _object_argv_at(code: str, i: int) -> list[str]:
-    """The literal `args:` / `cmd:` list at the top level of the object literal starting
-    at code[i], or [] when there is none or the object's bounds are unclear. Braces and
-    keys inside string literals do not count."""
+def _object_argv_at(code: str, i: int, head: str = "") -> list[list[str]]:
+    """The readings of the literal `args:` / `cmd:` list at the top level of the object
+    literal starting at code[i], or [] when there is none or the object's bounds are
+    unclear. Braces and keys inside string literals do not count."""
     if code[i:i + 1] != "{":
         return []
     masked = _mask_string_literals(code)
@@ -3006,7 +3024,7 @@ def _object_argv_at(code: str, i: int) -> list[str]:
         elif depth == 1:
             key = _OBJECT_ARGV_KEY_RE.match(masked, j)
             if key:
-                lst = _literal_list_at(code, key.end())
+                lst = _literal_list_at(code, key.end(), head)
                 return lst[0] if lst else []
         j += 1
     return []
@@ -3056,14 +3074,15 @@ def _operand_end(code: str, i: int) -> int:
         i = attr.end()
 
 
-def _string_expr_at(code: str, i: int) -> tuple[str, int] | None:
-    """A string-valued argument expression starting at code[i], as the text it spells:
-    string literals (any prefix; an f-string keeps its {…}), joined with `+` to each other
-    or to other operands (each operand reads as `X`), `% …` applied to a literal (the
-    literal's text), `shlex.split(<literal>)`, and `"<sep>".join([…])`. A `.format(…)`
-    ends the expression after its literal, which keeps the literal's text. None
-    when no string literal takes part, e.g. a bare variable (dataflow, not followed)."""
-    parts, saw_literal = [], False
+def _string_expr_at(code: str, i: int, head: str = "") -> tuple[list[str], int] | None:
+    """The readings of a string-valued argument expression starting at code[i], each the
+    text it spells: string literals (any prefix; an f-string keeps its {…}), joined with
+    `+` to each other or to other operands (each operand reads as `X`), `% …` applied to
+    a literal (the literal's text), `shlex.split(<literal>)`, and `"<sep>".join([…])`
+    (one reading per reading of the list). A `.format(…)` ends the expression after its
+    literal, which keeps the literal's text. None when no string literal takes part,
+    e.g. a bare variable (dataflow, not followed)."""
+    readings, saw_literal = [""], False
     while True:
         i = _skip(r"\s*", code, i)
         split = re.match(r"shlex\s*\.\s*split\s*\(\s*", code[i:])
@@ -3075,20 +3094,21 @@ def _string_expr_at(code: str, i: int) -> tuple[str, int] | None:
                 if not close:
                     return None
                 i += close.end()
+            texts = [text]
             joiner = re.match(r"\s*\.\s*join\s*\(\s*", code[i:])
             if joiner:
-                lst = _literal_list_at(code, i + joiner.end())
+                lst = _literal_list_at(code, i + joiner.end(), head)
                 close = re.match(r"\s*\)", code[lst[1]:]) if lst else None
                 if not lst or not close:
                     return None
-                text, i = text.join(lst[0]), lst[1] + close.end()
-            parts.append(text)
+                texts, i = [text.join(items) for items in lst[0]], lst[1] + close.end()
+            readings = [r + t for r in readings for t in texts][:_MAX_READINGS]
         else:
             end = _operand_end(code, i)
             if end < 0:
                 break
             i = end
-            parts.append("X")
+            readings = [r + "X" for r in readings]
         percent = re.match(r"\s*%\s*", code[i:])
         if percent and saw_literal:
             nxt = i + percent.end()
@@ -3105,12 +3125,12 @@ def _string_expr_at(code: str, i: int) -> tuple[str, int] | None:
         i += plus.end()
     if not saw_literal:
         return None
-    return "".join(parts), i
+    return readings, i
 
 
-def _first_argument_command(code: str, pos: int) -> str | None:
+def _first_argument_command(code: str, pos: int, head: str = "") -> str | None:
     """The first of `_argument_commands`, or None."""
-    cmds = _argument_commands(code, pos)
+    cmds = _argument_commands(code, pos, head=head)
     return cmds[0] if cmds else None
 
 
@@ -3123,33 +3143,79 @@ _BARE_NAME_ARG_RE = re.compile(r"(?P<name>[$@]?[A-Za-z_]\w*)(?=\s*[,)\]])")
 _ASSIGNMENT_RE = re.compile(r"(?<![\w$@.])(?P<name>[$@]?[A-Za-z_]\w*)\s*=(?![=~>])\s*")
 
 
+# Per head family, its comments. The assignment index blanks them, so a commented-out
+# assignment is not a value; the call scan does not use this mask. Python's `#`
+# comments are already blanked by _mask_string_literals for a Python head.
+_INDEX_COMMENT_RES = tuple(
+    (re.compile(head_re), re.compile(comments + "|" + _QUOTED_LITERAL_RE.pattern))
+    for head_re, comments in (
+        (r"^(?:node|nodejs|bun|deno)", r"/\*(?s:.*?)\*/|//[^\n]*"),
+        (r"^php", r"/\*(?s:.*?)\*/|//[^\n]*|#(?!\[)[^\n]*"),
+        (r"^(?:perl|ruby|R$|Rscript|tclsh|wish)", r"(?:(?m:^)|(?<=[\s;]))#(?!\{)[^\n]*"),
+        (r"^(?:lua|luajit)", r"--\[\[(?s:.*?)\]\]|--[^\n]*"),
+        (r"^osascript", r"\(\*(?s:.*?)\*\)|--[^\n]*"),
+    )
+)
+
+
+def _blank_kept_lines(m: re.Match) -> str:
+    """A masked comment is blanks with its line breaks kept; a literal keeps its quotes."""
+    text = m.group(0)
+    if text[0] in "\"'":
+        return _blank_literal(m)
+    return re.sub(r"[^\n]", " ", text)
+
+
 @functools.lru_cache(maxsize=64)
-def _assignments(code: str) -> dict[str, tuple[list[int], list[int]]]:
+def _index_view(code: str, head: str) -> str:
+    """`code` with string literals and, for a known head, its comments blanked, same
+    length: the text the assignment index and the scope finder read."""
+    for head_re, pattern in _INDEX_COMMENT_RES:
+        if head_re.match(head):
+            return pattern.sub(_blank_kept_lines, code)
+    return _mask_string_literals(code, head)
+
+
+@functools.lru_cache(maxsize=64)
+def _assignments(code: str, head: str = "") -> dict[str, tuple[list[int], list[int]]]:
     """Per assigned name, the offsets of its assignments and of their values, in order,
-    found once per program."""
+    found once per program. Assignments inside string literals or comments do not count."""
     found: dict[str, tuple[list[int], list[int]]] = {}
-    for m in _ASSIGNMENT_RE.finditer(_mask_string_literals(code)):
+    for m in _ASSIGNMENT_RE.finditer(_index_view(code, head)):
         starts, values = found.setdefault(m.group("name"), ([], []))
         starts.append(m.start())
         values.append(m.end())
     return found
 
 
-def _named_value_at(code: str, i: int) -> tuple[int, int] | None:
-    """For a bare-name argument at code[i], (offset of the value in that name's last
-    assignment before i, offset past the name); None when code[i] is not a bare name or
-    the name is not assigned earlier in the program."""
+def _named_values_at(head: str, code: str, i: int) -> tuple[list[int], int] | None:
+    """For a bare-name argument at code[i], (the offsets of the values of the name's
+    assignments that may reach the use, offset past the name); None when code[i] is not
+    a bare name or no assignment with a value reaches it."""
     named = _BARE_NAME_ARG_RE.match(code, i)
     if not named:
         return None
-    starts, values = _assignments(code).get(named.group("name"), ([], []))
+    starts, values = _assignments(code, head).get(named.group("name"), ([], []))
     k = bisect.bisect_left(starts, i)
     if k == 0:
         return None
-    return values[k - 1], named.end()
+    return [values[k - 1]], named.end()
 
 
-def _argument_commands(code: str, pos: int, skip_leading: int = 0) -> list[str]:
+def _argument_readings(head: str, code: str, at: int) -> tuple[list[tuple[bool, list[str]]], int] | None:
+    """The readings of one call argument at code[at]: (is a string expression, the argv
+    items it adds), and the offset after it; None when it is neither a list nor a string
+    expression."""
+    lst = _literal_list_at(code, at, head)
+    if lst:
+        return [(False, items) for items in lst[0]], lst[1]
+    expr = _string_expr_at(code, at, head)
+    if expr:
+        return [(True, [text]) for text in expr[0]], expr[1]
+    return None
+
+
+def _argument_commands(code: str, pos: int, skip_leading: int = 0, head: str = "") -> list[str]:
     """The command a call's leading arguments spell. One string expression alone is a
     shell command line (literal, f-string, concatenation, `.format`, `shlex.split`).
     Otherwise consecutive string expressions and list literals are argv, joined
@@ -3158,16 +3224,16 @@ def _argument_commands(code: str, pos: int, skip_leading: int = 0) -> list[str]:
     contributing its own `args:` or `cmd:` list (`new Deno.Command('gh', {args: […]})`,
     `Deno.run({cmd: […]})`). Stops at the first other argument. Up to `skip_leading`
     non-literal arguments before the first literal are skipped (a spawn mode, a perl
-    open3 handle). An argument that is a bare name reads as the literal value its last
-    earlier assignment gave it (`cmd = ["gh", …]; run(cmd)`). Both readings are
-    returned: a leading string alone as a shell line (`popen("…", "r")`), and the
-    whole argv."""
-    argv, strings, i = [], 0, _skip(r"\s*", code, pos)
+    open3 handle). An argument that is a bare name reads as each literal value its
+    reaching assignments gave it (`cmd = ["gh", …]; run(cmd)`). Every reading is
+    returned twice over: a leading string alone as a shell line (`popen("…", "r")`),
+    and the whole argv."""
+    i = _skip(r"\s*", code, pos)
     keyword = re.match(r"(?:args|cmd)\s*=(?!=)\s*", code[i:])
     if keyword:
         i += keyword.end()
     for _ in range(skip_leading):
-        if code[i:i + 1] == "{" or _literal_list_at(code, i) or _PREFIXED_LITERAL_RE.match(code, i):
+        if code[i:i + 1] == "{" or _literal_list_at(code, i, head) or _PREFIXED_LITERAL_RE.match(code, i):
             break
         perl_var = re.match(r"(?:my\s+)?[$@%]\w+", code[i:])
         end = i + perl_var.end() if perl_var else _operand_end(code, i)
@@ -3175,33 +3241,35 @@ def _argument_commands(code: str, pos: int, skip_leading: int = 0) -> list[str]:
         if not sep:
             return []
         i = end + sep.end()
-    first_string = None
+    # Each state is one reading so far: (argv, the leading string when it led).
+    states: list[tuple[list[str], str | None]] = [([], None)]
     while True:
-        named = _named_value_at(code, i)
-        at = named[0] if named else i
-        lst = _literal_list_at(code, at)
-        expr = None if lst else _string_expr_at(code, at)
-        if expr:
-            if not argv:
-                first_string = expr[0]
-            argv.append(expr[0])
-            strings += 1
-            i = named[1] if named else expr[1]
-        elif lst:
-            argv += lst[0]
-            i = named[1] if named else lst[1]
-        else:
-            argv += _object_argv_at(code, i)
+        named = _named_values_at(head, code, i)
+        readings: list[tuple[bool, list[str]]] = []
+        end = -1
+        for at in named[0] if named else [i]:
+            got = _argument_readings(head, code, at)
+            if got:
+                readings += got[0]
+                end = named[1] if named else got[1]
+        if not readings:
+            options = _object_argv_at(code, i, head)
+            if options:
+                states = [(argv + items, first) for argv, first in states for items in options]
             break
-        sep = re.match(r"\s*,\s*", code[i:])
+        states = [
+            (argv + items, first if argv else (items[0] if is_string else None))
+            for argv, first in states for is_string, items in readings
+        ][:_MAX_READINGS]
+        sep = re.match(r"\s*,\s*", code[end:])
         if not sep:
             break
-        i += sep.end()
-    if not argv:
-        return []
-    cmds = [first_string] if first_string is not None else []
-    if len(argv) > 1:
-        cmds.append(shlex.join(argv))
+        i = end + sep.end()
+    cmds: list[str] = []
+    for argv, first in states[:_MAX_READINGS]:
+        for cmd in ([first] if first is not None else []) + ([shlex.join(argv)] if len(argv) > 1 else []):
+            if cmd not in cmds:
+                cmds.append(cmd)
     return cmds
 
 
@@ -3447,14 +3515,15 @@ def _code_runs_guarded_directly(head: str, code: str, _depth: int = 0) -> bool:
         name = m.group(1).lower()
         if _runs_own_code(name, head):
             # eval (and Python's exec) of a literal runs it as the SAME language's code
-            expr = _string_expr_at(code, m.end())
-            if expr and _code_runs_guarded_directly(head, expr[0], _depth + 1):
+            expr = _string_expr_at(code, m.end(), head)
+            if expr and any(_code_runs_guarded_directly(head, text, _depth + 1) for text in expr[0]):
                 return True
             continue
         last = re.split(r"\.|::", name)[-1]
         cmds = _argument_commands(
             code, m.end(),
             skip_leading=3 if last in ("open2", "open3", "run3") or last.startswith("spawn") else 0,
+            head=head,
         )
         if any(_is_dangerous_at_depth(c, _depth + 1) for c in cmds):
             return True
@@ -3481,24 +3550,26 @@ _PERL_OPEN_RE = re.compile(r"(?<![\w$])open\s*\(?\s*(?:my\s+)?[\w$]+\s*,\s*")
 _RUBY_SEND_RE = re.compile(r"(?:__send__|public_send|send)\s*\(?\s*:(?:system|exec|spawn|`)\s*,\s*")
 
 
-def _perl_open_commands(code: str, i: int) -> list[str]:
-    """The command a perl `open` runs: the 2-argument form's `"| cmd"` / `"cmd |"`, or
-    the 3-argument form's command after a `-|` / `|-` mode."""
-    texts = []
+def _perl_open_commands(code: str, i: int, head: str = "") -> list[str]:
+    """The commands a perl `open` runs: the 2-argument form's `"| cmd"` / `"cmd |"`, or
+    the 3-argument form's command after a `-|` / `|-` mode, for each reading."""
+    readings: list[list[str]] = [[]]
     while True:
-        expr = _string_expr_at(code, i)
+        expr = _string_expr_at(code, i, head)
         if not expr:
             break
-        texts.append(expr[0])
+        readings = _with_each(readings, expr[0])
         sep = re.match(r"\s*,\s*", code[expr[1]:])
         if not sep:
             break
         i = expr[1] + sep.end()
-    if len(texts) >= 2 and texts[0].strip() in ("-|", "|-"):
-        return [shlex.join(texts[1:]) if len(texts) > 2 else texts[1]]
-    if texts and re.search(r"^\s*\||\|\s*$", texts[0]):
-        return [texts[0].strip().strip("|").strip()]
-    return []
+    out = []
+    for texts in readings:
+        if len(texts) >= 2 and texts[0].strip() in ("-|", "|-"):
+            out.append(shlex.join(texts[1:]) if len(texts) > 2 else texts[1])
+        elif texts and re.search(r"^\s*\||\|\s*$", texts[0]):
+            out.append(texts[0].strip().strip("|").strip())
+    return out
 
 
 def _statement_commands(head: str, code: str, masked: str) -> list[str]:
@@ -3515,24 +3586,24 @@ def _statement_commands(head: str, code: str, masked: str) -> list[str]:
                 out.append(code[m.end():end])
     if head == "osascript":
         for m in _OSASCRIPT_SHELL_RE.finditer(masked):
-            expr = _string_expr_at(code, m.end())
+            expr = _string_expr_at(code, m.end(), head)
             if expr:
-                out.append(expr[0])
+                out += expr[0]
     if _AWK_HEAD_RE.match(head):
         for m in _AWK_PRINT_PIPE_RE.finditer(masked):
-            expr = _string_expr_at(code, m.end())
+            expr = _string_expr_at(code, m.end(), head)
             if expr:
-                out.append(expr[0])
+                out += expr[0]
         for m in _AWK_GETLINE_RE.finditer(masked):
             before = [lit for lit in _PREFIXED_LITERAL_RE.finditer(code, 0, m.start())]
             if before:
                 out.append(_literal_body(before[-1]))
     if head.startswith("perl"):
         for m in _PERL_OPEN_RE.finditer(masked):
-            out += _perl_open_commands(code, m.end())
+            out += _perl_open_commands(code, m.end(), head)
     if head.startswith("ruby"):
         for m in _RUBY_SEND_RE.finditer(masked):
-            cmd = _first_argument_command(code, m.end())
+            cmd = _first_argument_command(code, m.end(), head)
             if cmd:
                 out.append(cmd)
     return out
@@ -5748,9 +5819,8 @@ def _guarded_literal_beside_primitive(head: str, code: str, depth: int) -> bool:
     texts = [_literal_body(lit) for lit in _PREFIXED_LITERAL_RE.finditer(code)]
     try:
         for opener in re.finditer(r"[\[(]", code):
-            lst = _literal_list_at(code, opener.start())
-            if lst and len(lst[0]) > 1:
-                texts.append(shlex.join(lst[0]))
+            lst = _literal_list_at(code, opener.start(), head)
+            texts += [shlex.join(items) for items in (lst[0] if lst else []) if len(items) > 1]
     except _PARSER_ERRORS:
         pass                                             # the list reader failed too: literals only
     return any(_is_dangerous_at_depth(text, depth + 1) for text in texts)
