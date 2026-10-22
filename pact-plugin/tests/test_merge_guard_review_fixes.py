@@ -329,12 +329,16 @@ def test_a_list_led_by_a_variable_is_not_read():
 
 
 # When the direct-call parser raises on a program, that program falls back to a coarse
-# check: it names a primitive and a string literal in it reads as a guarded command. A
-# merge beside a primitive is still refused (in -c and stdin code), and nothing raises.
+# check: it names a primitive and a string literal, or a literal argv list joined, reads
+# as a guarded command. A merge beside a primitive is still refused (in -c and stdin
+# code), and nothing raises.
 PARSER_DEFECT_DENY = [
     ("-c os.system", f"python3 -c 'import os; os.system(\"{D}\")'"),
     ("stdin os.system", f"python3 - <<'EOF'\nimport os\nos.system(\"{D}\")\nEOF"),
     ("node execSync", f"node -e 'require(\"child_process\").execSync(\"{D}\")'"),
+    ("-c split argv", "python3 -c 'import subprocess; subprocess.run([\"gh\", \"pr\", \"merge\", \"5\"])'"),
+    ("stdin split argv tuple",
+     "python3 - <<'EOF'\nimport subprocess\nsubprocess.run((\"gh\", \"pr\", \"merge\", \"5\"))\nEOF"),
 ]
 PARSER_DEFECT_ALLOW = [
     ("-c prints merge text", f"python3 -c 'print(\"{D}\")'"),
@@ -396,3 +400,14 @@ def test_quote_in_a_comment_does_not_hide_a_merge(label, cmd):
 @pytest.mark.parametrize("label,cmd", COMMENT_QUOTE_ALLOW, ids=[r[0] for r in COMMENT_QUOTE_ALLOW])
 def test_python_comment_is_not_code(label, cmd):
     assert is_dangerous_command(cmd) is False
+
+
+def test_a_defect_in_the_list_reader_too_keeps_the_literal_judgment(direct_parser_raises, monkeypatch):
+    import shared.merge_guard_common as mgc
+
+    def boom(*_args, **_kwargs):
+        raise TypeError("parser defect")
+
+    monkeypatch.setattr(mgc, "_literal_list_at", boom)
+    assert is_dangerous_command(f"python3 -c 'import os; os.system(\"{D}\")'") is True
+    assert is_dangerous_command("python3 -c 'import subprocess; subprocess.run([\"gh\", \"pr\", \"view\"])'") is False

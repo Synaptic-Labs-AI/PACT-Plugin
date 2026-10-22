@@ -5669,17 +5669,26 @@ def _interpreter_code_runs_guarded(command: str, depth: int) -> bool:
 
 def _guarded_literal_beside_primitive(head: str, code: str, depth: int) -> bool:
     """The coarse judgment for a program the direct-call parser could not read: it
-    names an exec primitive, and one of its string literals reads as a guarded command.
-    A program whose calls cannot be told apart is searched for primitive names."""
+    names an exec primitive, and one of its string literals, or one literal argv list
+    joined, reads as a guarded command. A program whose calls cannot be told apart is
+    searched for primitive names."""
     if depth >= _DIRECT_CALL_MAX_DEPTH:
         return False
     try:
         names_primitive = _program_names_primitive(head, code)
     except _PARSER_ERRORS:
         names_primitive = bool(_INTERPRETER_EXEC_PRIMITIVE_RE.search(code))
-    return names_primitive and any(
-        _is_dangerous_at_depth(_literal_body(lit), depth + 1) for lit in _PREFIXED_LITERAL_RE.finditer(code)
-    )
+    if not names_primitive:
+        return False
+    texts = [_literal_body(lit) for lit in _PREFIXED_LITERAL_RE.finditer(code)]
+    try:
+        for opener in re.finditer(r"[\[(]", code):
+            lst = _literal_list_at(code, opener.start())
+            if lst and len(lst[0]) > 1:
+                texts.append(shlex.join(lst[0]))
+    except _PARSER_ERRORS:
+        pass                                             # the list reader failed too: literals only
+    return any(_is_dangerous_at_depth(text, depth + 1) for text in texts)
 
 
 def _interpreter_names_primitive(leg: str, head: str, tokens: list) -> bool:
