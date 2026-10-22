@@ -106,6 +106,7 @@ try:
         # (op, target, flags), and the token binds the command's normalized text.
         interpreter_command_context,
         normalize_command_text,
+        shell_c_string,
         # #1083: the mint flag-scan window runs the SAME two-tier leg selection
         # (unique dangerous leg -> unique detectable leg) the read bind seam runs,
         # so mint and read bind over identical leg semantics BY CONSTRUCTION —
@@ -471,7 +472,7 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
     # (`os.system("gh pr merge 5 --admin")`, whose quoted flag the region reading
     # misses). A located command with another (op, target) beside it is a second
     # operation.
-    interpreted = _interpreter_mint_context(selected_option_texts)
+    interpreted = _exact_text_mint_context(selected_option_texts, interpreter_command_context)
     if interpreted.refusal_reason != "no_command":
         ctx = interpreted.context
         if ctx is not None and any(
@@ -479,6 +480,10 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
         ):
             return MintResult(None, "multiple_commands")
         return interpreted
+    if not bundle_pairs:
+        # No located (op, target): a guarded command inside a shell executor's -c
+        # string (`bash -c 'git push --force origin feat'`), read from that string.
+        return _exact_text_mint_context(selected_option_texts, _shell_string_context)
     if len(bundle_pairs) != 1:
         return MintResult(
             None, "no_command" if len(bundle_pairs) == 0 else "multiple_commands"
@@ -530,13 +535,28 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
 _BACKTICK_SPAN_RE = re.compile(r"```[^\n`]*\n(.*?)```|`([^`]+)`", re.DOTALL)
 
 
-def _interpreter_mint_context(option_texts: list[str]) -> MintResult:
-    """The mint for a clicked option whose backticked command is an interpreter
-    program the read floor refuses (`python3 -c 'subprocess.run(["gh", "pr",
-    "merge", "5"])'`). Its (op, target, flags) come from the pre-hook's own
-    interpreter reading, and the token also carries the command's normalized text,
-    which is all the pre-hook then matches: the approval runs that command and no
-    other. One distinct command per approval; a compound never mints."""
+def _shell_string_context(command: str) -> dict | None:
+    """The (op, target, flags) of the one guarded command a shell executor runs from
+    its -c string (behind env/timeout/sudo wrappers, in the command's one destructive
+    leg when other legs surround it), selected leg by leg the way the
+    pre-hook selects it, so the notice names its target; None when there is no such
+    string, it holds more than one destructive leg, or no guarded op."""
+    inner = shell_c_string(_single_destructive_leg(command) or command)
+    if not inner or is_compound_destructive_command(inner):
+        return None
+    ctx = extract_command_context(
+        _single_destructive_leg(inner) or _single_detectable_leg(inner) or inner
+    )
+    return ctx if ctx.get("operation_type") else None
+
+
+def _exact_text_mint_context(option_texts: list[str], reader) -> MintResult:
+    """The mint for a clicked option whose backticked command the region reading
+    cannot type: an interpreter program (`python3 -c 'subprocess.run(["gh", "pr",
+    "merge", "5"])'`) or a shell's -c string. `reader` gives its (op, target, flags)
+    the way the pre-hook reads it, and the token also carries the command's
+    normalized text, which is all the pre-hook then matches: the approval runs that
+    command and no other. One distinct command per approval; a compound never mints."""
     found: dict[str, dict] = {}
     for text in option_texts:
         for m in _BACKTICK_SPAN_RE.finditer(text):
@@ -545,7 +565,7 @@ def _interpreter_mint_context(option_texts: list[str]) -> MintResult:
                 continue
             if is_compound_destructive_command(span):
                 return MintResult(None, "compound_command")
-            ctx = interpreter_command_context(span)
+            ctx = reader(span)
             if ctx and ctx.get("operation_type"):
                 found[normalize_command_text(span)] = ctx
     if len(found) != 1:
@@ -907,13 +927,18 @@ def _token_in_session(token_data: dict, current_session: str) -> bool:
 
 
 def _retire_exact_text_token(
-    command: str, frame_cwd: object = None, token_dir: Path | None = None
+    command: str,
+    frame_cwd: object = None,
+    token_dir: Path | None = None,
+    stdout_text: object = "",
 ) -> bool:
-    """Retire this session's exact-command token (minted for an interpreter
-    program) once GitHub reports its PR in the state the command produces. The
-    operation classifier cannot read such a command, so Layer 1 below never sees
-    it. Any doubt keeps the token; the TTL and MAX_USES bound still apply.
-    Never raises."""
+    """Retire this session's exact-command token (minted for an interpreter program
+    or a shell's -c string) on the same success signal Layer 1 uses for its op: a
+    merge or close once GitHub reports the PR in the state the command produces,
+    any other op by LAYER1_SUCCESS_STDOUT_PATTERNS (no pattern: the successful run
+    itself). The operation classifier cannot read such a command, so Layer 1 below
+    never sees it. Any doubt keeps the token; the TTL and MAX_USES bound still
+    apply. Never raises."""
     try:
         text = normalize_command_text(command)
         current_session = get_session_id()
@@ -928,21 +953,26 @@ def _retire_exact_text_token(
             ctx = token_data.get("context") if isinstance(token_data, dict) else None
             if not isinstance(ctx, dict) or ctx.get("command_text") != text:
                 continue
-            op, pr = ctx.get("operation_type"), ctx.get("pr_number")
-            if op not in _CONFIRMING_STATE or not (
-                isinstance(pr, str) and pr.isascii() and pr.isdigit()
-            ):
-                continue
             if not _token_in_session(token_data, current_session):
                 continue
-            cwd = (
-                frame_cwd
-                if isinstance(frame_cwd, str) and os.path.isabs(frame_cwd) and os.path.isdir(frame_cwd)
-                else None
-            )
-            from shared.gh_helpers import check_pr_state
+            op, pr = ctx.get("operation_type"), ctx.get("pr_number")
+            if op in _CONFIRMING_STATE:
+                if not (isinstance(pr, str) and pr.isascii() and pr.isdigit()):
+                    continue
+                cwd = (
+                    frame_cwd
+                    if isinstance(frame_cwd, str) and os.path.isabs(frame_cwd) and os.path.isdir(frame_cwd)
+                    else None
+                )
+                from shared.gh_helpers import check_pr_state
 
-            if check_pr_state(pr, cwd=cwd) != _CONFIRMING_STATE[op]:
+                if check_pr_state(pr, cwd=cwd) != _CONFIRMING_STATE[op]:
+                    continue
+            elif op in LAYER1_SUCCESS_STDOUT_PATTERNS:
+                pattern = LAYER1_SUCCESS_STDOUT_PATTERNS[op]
+                if pattern is not None and not (isinstance(stdout_text, str) and pattern in stdout_text):
+                    continue
+            else:
                 continue
             try:
                 os.rename(path, path + ".consumed")
@@ -1195,7 +1225,9 @@ def main():
                 tool_input.get("command", "") if isinstance(tool_input, dict) else ""
             )
             if isinstance(command, str) and tool_response.get("interrupted") is not True:
-                _retire_exact_text_token(command, input_data.get("cwd"))
+                _retire_exact_text_token(
+                    command, input_data.get("cwd"), stdout_text=tool_response.get("stdout", "")
+                )
 
             # Block 1 — Command-shape filter (SEC-S2: extends from merge-
             # only to all op_types in LAYER1_SUCCESS_STDOUT_PATTERNS).
