@@ -734,3 +734,36 @@ def test_a_parser_defect_on_a_later_call_keeps_what_was_read_before_it(monkeypat
     assert is_dangerous_command(cmd) is True
     calls.clear()
     assert mgc.interpreter_command_context(cmd) == _MERGE_5
+
+
+# A `#` inside a quoted string is text, not a shell comment: it does not hide the legs
+# after it. A `#` that starts a word outside quotes still starts a comment.
+QUOTED_HASH_DENY = [
+    ("commit message naming an issue", "git commit -m 'fix #12' && gh pr " + "merge 6"),
+    ("echo with a step number", "echo 'step #1 done' && gh pr " + "merge 6"),
+    ("double-quoted hash", 'git commit -m "fix #12" && gh pr ' + "merge 6"),
+    ("escaped quote then hash", 'git commit -m "a \\" #1" && gh pr ' + "merge 6"),
+    ("comment with an apostrophe, then a quoted hash", "# don't\ngit commit -m 'fix #12' && gh pr " + "merge 6"),
+]
+QUOTED_HASH_ALLOW = [
+    ("an unquoted comment hides the rest", "echo a #b && gh pr " + "merge 6"),
+    ("a commit naming an issue, alone", "git commit -m 'fix #12'"),
+    ("a comment with an apostrophe", f"# don't {D}\ngit status"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", QUOTED_HASH_DENY, ids=[r[0] for r in QUOTED_HASH_DENY])
+def test_a_hash_inside_quotes_hides_nothing(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", QUOTED_HASH_ALLOW, ids=[r[0] for r in QUOTED_HASH_ALLOW])
+def test_a_shell_comment_is_still_stripped(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+def test_a_quoted_hash_leaves_both_merges_visible_to_compound_detection():
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_compound_destructive_command("ruby -e 'system(\"gh pr " + "merge #{5}\")' && gh pr " + "merge 6") is True
+    assert is_compound_destructive_command("git commit -m 'fix #12' && gh pr " + "merge 6") is False

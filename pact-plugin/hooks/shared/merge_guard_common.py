@@ -4022,6 +4022,37 @@ def _strip_flag_values(span: str, flag_sep_regex: str, keep_fn) -> str:
     return span
 
 
+def _strip_shell_comments(text: str) -> str:
+    """`text` without its shell comments: a `#` that starts a word (line start, after
+    whitespace or `;`) outside quotes, to the end of its line. A `#` inside '…' or "…"
+    is text, and a quote inside a comment opens nothing. An unterminated quote leaves
+    the rest as text."""
+    out: list[str] = []
+    i, n, quote = 0, len(text), ""
+    while i < n:
+        c = text[i]
+        if quote:
+            if c == "\\" and quote == '"' and i + 1 < n:
+                out.append(text[i:i + 2])
+                i += 2
+                continue
+            if c == quote:
+                quote = ""
+        elif c == "\\" and i + 1 < n:
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        elif c in "'\"":
+            quote = c
+        elif c == "#" and (i == 0 or text[i - 1].isspace() or text[i - 1] == ";"):
+            end = text.find("\n", i)
+            i = n if end < 0 else end
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def _strip_non_executable_content(command: str) -> str:
     """Strip shell content that is clearly non-executable before pattern matching.
 
@@ -4097,8 +4128,9 @@ def _strip_non_executable_content(command: str) -> str:
 
     # 2. Strip comments: # to end of line
     #    Only strip when # appears at start of line or after whitespace/semicolon
-    #    (not inside words like issue#42 or URLs with #fragment).
-    result = re.sub(r"(?:^|(?<=\s)|(?<=;))\#.*$", "", result, flags=re.MULTILINE)
+    #    (not inside words like issue#42 or URLs with #fragment), and outside quotes
+    #    (`git commit -m 'fix #12' && …` keeps everything after the message).
+    result = _strip_shell_comments(result)
 
     # 3. Strip echo/printf quoted arguments
     #    Match echo/printf followed by flags then quoted strings.
