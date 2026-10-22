@@ -5910,6 +5910,72 @@ def interpreter_command_context(command: str) -> dict | None:
         return None
 
 
+# The shells whose -c string is a shell command line (not eval/ssh/su, whose argument
+# is not read this way). Short flags a shell takes before -c without a value.
+_POSIX_SHELL_HEADS_RE = re.compile(r"^(?:sh|bash|zsh|dash|ash|ksh(?:93)?|rksh|mksh|hush|lash|msh)$")
+_SHELL_SHORT_BOOL_FLAGS = frozenset("abefhiklmnprstuvxBCEHPT")
+_SHELL_LONG_BOOL_FLAGS = frozenset({"--norc", "--noprofile", "--login", "--posix"})
+_REDIRECT_OPERATOR_RE = re.compile(r"^(?:\d*|&)(?:>>?|<)&?$")
+_REDIRECT_WITH_TARGET_RE = re.compile(r"^(?:\d*|&)(?:>>?|<)\S+$")
+
+
+def shell_c_string(command: str) -> str | None:
+    """The string a POSIX shell leg runs with -c, unquoted as the shell receives it:
+    `bash -lc 'gh pr merge 5'` gives `gh pr merge 5`. `command` is one leg. Leading
+    NAME=VALUE words and the modeled exec wrappers (env, timeout, nice, sudo, ...) are
+    walked past; the shell's own flags before -c may be bundled shorts (`-eu`, `-lc`),
+    `-o NAME`, or --norc/--noprofile/--login/--posix; redirects may follow the string.
+    None for anything else: another head, no -c, an unknown flag, an unbalanced quote,
+    arguments after the string, or a string holding a command substitution the calling
+    shell runs first (`$(…)` or a backtick outside single quotes). A `$VAR` is returned
+    as written, as a bare command's text is approved. Never raises."""
+    return _shell_c_argument(command, strict=True)
+
+
+def _shell_c_argument(command: str, strict: bool, _depth: int = 0) -> str | None:
+    """shell_c_string's reader. With `strict` False it also returns a string the calling
+    shell expands first and one followed by arguments (`$0`, `$1`, …): the text is
+    still the command line the shell runs, for judging rather than minting."""
+    leg = _leg_command_word(command)
+    tokens = _shell_tokenize(leg) if leg else None
+    if not tokens or leg is None:
+        return None
+    head = os.path.basename(tokens[0])
+    if head in _EXEC_WRAPPERS_RECURSE:
+        nested = _wrapper_nested_command(leg, head) if _depth < _MAX_WRAPPER_DEPTH else None
+        return _shell_c_argument(nested, strict, _depth + 1) if nested else None
+    if not _POSIX_SHELL_HEADS_RE.match(head):
+        return None
+    i, has_c = 1, False
+    while i < len(tokens) and not has_c:
+        tok = tokens[i]
+        i += 1
+        if tok in _SHELL_LONG_BOOL_FLAGS:
+            continue
+        if tok in ("-o", "+o"):
+            i += 1                                       # the option name
+        elif len(tok) > 1 and tok[0] == "-" and set(tok[1:]) <= _SHELL_SHORT_BOOL_FLAGS | {"c"}:
+            has_c = "c" in tok
+        else:
+            return None                                  # a script path or an unknown flag
+    spans = _leg_token_spans(leg)
+    if not has_c or i >= len(tokens) or len(spans) != len(tokens):
+        return None
+    if not strict:
+        return tokens[i]
+    if re.search(r"\$\(|`", re.sub(r"'[^']*'", "", leg[spans[i][0]:spans[i][1]])):
+        return None
+    rest = tokens[i + 1:]
+    while rest:
+        if _REDIRECT_OPERATOR_RE.match(rest[0]) and len(rest) > 1:
+            rest = rest[2:]
+        elif _REDIRECT_WITH_TARGET_RE.match(rest[0]):
+            rest = rest[1:]
+        else:
+            return None
+    return tokens[i]
+
+
 def _guarded_literals_beside_primitive(head: str, code: str, depth: int) -> list[str]:
     """The coarse reading of a program the direct-call parser could not read: when it
     names an exec primitive, its string literals, and its literal argv lists joined,
@@ -6423,6 +6489,12 @@ def _is_dangerous_at_depth(command: str, depth: int) -> bool:
     # selection (_single_destructive_leg) ALL route through is_dangerous_command, so
     # suppressing here makes every consumer agree the inert leg is non-gating.
     stripped = _neutralize_inert_help_legs(stripped)
+    # A POSIX shell's -c string is a command line: judge it as the bare command is.
+    if depth < _MAX_WRAPPER_DEPTH:
+        for leg in _slice_stripped_legs(stripped):
+            inner = _shell_c_argument(leg, strict=False)
+            if inner is not None and _is_dangerous_at_depth(inner, depth + 1):
+                return True
     # The literal danger battery (DANGEROUS_PATTERNS + the four per-leg literal-arm families +
     # the additive normalized-flag condition) is the SSOT _stripped_surface_danger — factored
     # out so the #1178 general-strip preserve-predicate can consult the SAME predicate on a
@@ -6611,4 +6683,16 @@ def is_compound_destructive_command(command: str) -> bool:
     destructive = [leg for leg in legs if _leg_is_destructive(leg)]
     on_interpreters = sum(1 for leg in destructive if _INTERPRETER_WORD_RE.search(leg))
     interpreted = {normalize_command_text(c) for c in _interpreter_guarded_commands(command, 0)}
-    return len(destructive) - on_interpreters + max(on_interpreters, len(interpreted)) >= 2
+    in_shells = sum(_shell_leg_destructive_count(leg) for leg in destructive)
+    return in_shells - on_interpreters + max(on_interpreters, len(interpreted)) >= 2
+
+
+def _shell_leg_destructive_count(leg: str, depth: int = 0) -> int:
+    """1 for a destructive leg, or for a POSIX shell leg the destructive legs its -c
+    string chains, as the bare command counts them: `bash -c 'gh pr merge 5 && git
+    branch -D x'` counts 2, and a string whose only guarded text is a comment counts 0."""
+    inner = _shell_c_argument(leg, strict=False) if depth < _MAX_WRAPPER_DEPTH else None
+    if inner is None:
+        return 1
+    inner_destructive = [part for part in _split_into_legs(inner) if _leg_is_destructive(part)]
+    return sum(_shell_leg_destructive_count(part, depth + 1) for part in inner_destructive)

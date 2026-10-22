@@ -791,3 +791,91 @@ def test_an_assignment_inside_a_program_is_not_a_shell_assignment(label, cmd):
 @pytest.mark.parametrize("label,cmd", SHELL_ASSIGNMENT_DENY, ids=[r[0] for r in SHELL_ASSIGNMENT_DENY])
 def test_a_shell_assignment_that_runs_is_refused(label, cmd):
     assert is_dangerous_command(cmd) is True
+
+
+# shell_c_string: the string a POSIX shell leg runs with -c, for minting an approval of
+# a guarded command inside it.
+SHELL_C_STRING_ROWS = [
+    ("plain -c", "bash -c 'git push --force origin feat'", "git push --force origin feat"),
+    ("env -i, assignment, path head, redirect",
+     "env -i HOME=/x /bin/bash -c 'command -v git; git push --force origin feat' 2>&1",
+     "command -v git; git push --force origin feat"),
+    ("timeout, double quotes", 'timeout 30 sh -c "git branch -D feat"', "git branch -D feat"),
+    ("bundled -lc", "bash -lc 'gh pr merge 5'", "gh pr merge 5"),
+    ("--norc", "bash --norc -c 'gh pr merge 5'", "gh pr merge 5"),
+    ("bundled -eu", "bash -eu -c 'gh pr merge 5'", "gh pr merge 5"),
+    ("separate -e -u", "bash -e -u -c 'gh pr merge 5'", "gh pr merge 5"),
+    ("-o value", "bash -o pipefail -c 'gh pr merge 5'", "gh pr merge 5"),
+    ("sudo, two redirects", "sudo bash -c 'gh pr merge 5' > out.txt 2>&1", "gh pr merge 5"),
+    ("leading assignment", "FOO=1 bash -c 'gh pr merge 5'", "gh pr merge 5"),
+    ("single-quoted $ reaches the inner shell", "bash -c 'gh pr merge $N'", "gh pr merge $N"),
+    ("script path", "bash script.sh", None),
+    ("interpreter", "python3 -c 'print(1)'", None),
+    ("no string", "bash -c", None),
+    ("argument after the string", "bash -c 'x' arg0", None),
+    ("unbalanced quote", "bash -c 'unbalanced", None),
+    ("double-quoted $VAR as written", 'bash -c "gh pr merge $N"', "gh pr merge $N"),
+    ("double-quoted ${VAR} as written", 'bash -c "git push --force origin ${B}"', "git push --force origin ${B}"),
+    ("outer command substitution", 'bash -c "git push --force origin $(git branch --show-current)"', None),
+    ("outer backtick", 'bash -c "gh pr merge `n`"', None),
+    ("single-quoted substitution reaches the inner shell", "bash -c 'gh pr merge $(cat n)'", "gh pr merge $(cat n)"),
+    ("eval", "eval 'gh pr merge 5'", None),
+    ("ssh", "ssh host -c 'x'", None),
+    ("unknown long flag", "bash --rcfile x -c 'y'", None),
+    ("unknown short flag", "bash -X -c 'y'", None),
+    ("empty", "", None),
+]
+
+
+@pytest.mark.parametrize("label,cmd,want", SHELL_C_STRING_ROWS, ids=[r[0] for r in SHELL_C_STRING_ROWS])
+def test_shell_c_string_reads_the_string_a_shell_runs(label, cmd, want):
+    from shared.merge_guard_common import shell_c_string
+
+    assert shell_c_string(cmd) == want
+
+
+# A POSIX shell's -c string is judged as the bare command it runs: a push to main, a
+# remote branch delete or a mirror push inside `bash -c` is refused as it is bare.
+SHELL_C_PUSH_OPS = [
+    "git push origin main", "git push origin --delete feat", "git push origin :feat", "git push --mirror origin",
+]
+SHELL_C_WRAPPERS = [
+    "bash -c '{}'", "sh -c '{}'", "bash -lc '{}'", "bash -eu -c '{}'", "bash --norc -c '{}'",
+    "env -i HOME=/x /bin/bash -c 'command -v git; {}' 2>&1", "timeout 30 bash -c '{}'",
+]
+SHELL_C_DENY = [(w.format(op), op) for w in SHELL_C_WRAPPERS for op in SHELL_C_PUSH_OPS] + [
+    ('bash -c "cd $DIR && git push origin main"', "outer expansion"),
+    ("bash -c 'git push origin main' name", "argument after the string"),
+]
+SHELL_C_ALLOW = [
+    "bash -c 'git push origin feat'",
+    "bash -c 'git status'",
+    "bash -c \"echo 'git push origin main'\"",
+    "sh -c 'git fetch origin main'",
+]
+SHELL_C_COMPOUND = [
+    ("bash -c 'gh pr merge 5 && git branch -D x'", True),
+    ("bash -c 'git push origin main; git push origin :feat'", True),
+    ("bash -c 'git push origin main' && gh pr merge 5", True),
+    ("sh -c \"bash -c 'gh pr merge 5 && git push origin main'\"", True),
+    ("bash -c 'gh pr merge 5 && echo ok'", False),
+    ("bash -c 'ls # then gh pr merge 5' && gh pr merge 6", False),
+    ("bash -c 'git push origin main'", False),
+]
+
+
+@pytest.mark.parametrize("cmd,label", SHELL_C_DENY, ids=[r[0] for r in SHELL_C_DENY])
+def test_a_shell_c_string_is_judged_as_the_bare_command(cmd, label):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("cmd", SHELL_C_ALLOW)
+def test_a_shell_c_string_running_nothing_guarded_is_allowed(cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+@pytest.mark.parametrize("cmd,want", SHELL_C_COMPOUND, ids=[r[0] for r in SHELL_C_COMPOUND])
+def test_a_shell_c_string_counts_its_destructive_legs(cmd, want):
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_compound_destructive_command(cmd) is want
