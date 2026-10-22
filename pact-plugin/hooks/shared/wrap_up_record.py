@@ -12,8 +12,10 @@ Used by: commands/wrap-up.md step 5, from inside the feature worktree:
 When the current directory gives no PR (NONE) or no answer (UNKNOWN, as
 outside any git repo), it reads the PR of the latest `review_dispatch` in the
 journal by number instead, naming the repo from that event's pr_url; with no
-parseable pr_url there is no fallback. A fallback that cannot confirm that
-PR records UNKNOWN, never NONE.
+parseable pr_url there is no fallback. On NONE it also skips a PR whose
+wrap-up already recorded it MERGED after that review: the session has moved
+on to a feature with no PR. A fallback that cannot confirm that PR records
+UNKNOWN, never NONE.
 
 Run by file path, not `python3 -m`: the current directory must stay the
 worktree (gh resolves the PR from it), and `-m` would put that directory
@@ -27,6 +29,11 @@ when unknown):
     branch=<headRefName>
     head_owner=<headRepositoryOwner.login>
     head_repo=<headRepository.name>
+    pr_source=<cwd|review>
+
+pr_source is review when the fallback ran and its result replaced the
+current directory's read (also when the fallback itself ended UNKNOWN), and
+cwd otherwise. The session_end event records it too.
 
 Exit codes: 0 the event was written and read back; 1 the write or the
 read-back failed (the lines are still printed, the reason is on stderr);
@@ -62,7 +69,7 @@ PR_URL_RE = re.compile(
 GH_TIMEOUT_S = 15
 NO_PR_MARKER = "no pull requests found"
 PR_STATES = ("MERGED", "OPEN", "CLOSED")
-FIELDS = ("pr_state", "pr_number", "branch", "head_owner", "head_repo")
+FIELDS = ("pr_state", "pr_number", "branch", "head_owner", "head_repo", "pr_source")
 
 
 def read_pr(cwd: str | None = None) -> dict:
@@ -73,7 +80,7 @@ def read_pr(cwd: str | None = None) -> dict:
     return _map(gh_helpers.run_gh(GH_ARGS, timeout=GH_TIMEOUT_S, cwd=cwd))
 
 
-def read_reviewed_pr(session_dir: str) -> dict | None:
+def read_reviewed_pr(session_dir: str, *, skip_if_wrapped: bool = False) -> dict | None:
     """The PR of the latest review_dispatch in the journal, read by number
     and repo: the fallback when the current directory gives no PR or no
     answer (wrap-up run outside the feature worktree, or outside any repo).
@@ -84,6 +91,10 @@ def read_reviewed_pr(session_dir: str) -> dict | None:
     repo, a bare read would find that repo's PR with the same number, and a
     MERGED answer there would send wrap-up's cleanup to the wrong branch.
 
+    With `skip_if_wrapped`, also None when a wrap-up already recorded that PR
+    MERGED at or after its review (session_journal.wrap_up_closed): the
+    current directory's NONE is then the truth about a new, PR-less feature.
+
     Anything short of a clear answer about THAT PR is UNKNOWN, never NONE:
     the PR was reviewed, so it exists."""
     reviews = session_journal.read_events_from(session_dir, "review_dispatch")
@@ -93,6 +104,10 @@ def read_reviewed_pr(session_dir: str) -> dict | None:
     url = reviews[-1].get("pr_url")
     match = PR_URL_RE.match(url) if isinstance(url, str) else None
     if not match:
+        return None
+    if skip_if_wrapped and session_journal.wrap_up_closed(
+        session_journal.read_events_from(session_dir, "session_end"), number, reviews[-1].get("ts")
+    ):
         return None
     args = ["pr", "view", str(number), "--repo", f"{match.group(1)}/{match.group(2)}"]
     pr = _map(gh_helpers.run_gh([*args, *GH_JSON], timeout=GH_TIMEOUT_S))
@@ -138,6 +153,7 @@ def record(session_dir: str, pr: dict) -> str | None:
     fields = {"source": "wrap-up", "pr_state": pr["pr_state"]}
     if "pr_number" in pr:
         fields["pr_number"] = pr["pr_number"]
+    fields["pr_source"] = pr["pr_source"]
     event = session_journal.make_event("session_end", **fields)
     if not session_journal.append_event(event, session_dir=session_dir):
         return "the session_end write failed (schema or I/O)"
@@ -157,11 +173,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrap_up_record: --session-dir is not an existing absolute directory: {session_dir!r}",
               file=sys.stderr)
         return 2
-    pr = read_pr()
+    pr = {**read_pr(), "pr_source": "cwd"}
     if pr["pr_state"] in ("NONE", "UNKNOWN"):
-        reviewed = read_reviewed_pr(session_dir)
+        # On NONE, a PR whose wrap-up already ran is not reread: the session
+        # has moved on to a feature with no PR.
+        reviewed = read_reviewed_pr(session_dir, skip_if_wrapped=pr["pr_state"] == "NONE")
         if reviewed is not None:
-            pr = reviewed
+            pr = {**reviewed, "pr_source": "review"}
     failure = record(session_dir, pr)
     for key in FIELDS:
         print(f"{key}={pr.get(key, '')}")

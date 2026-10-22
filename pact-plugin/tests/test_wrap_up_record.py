@@ -67,7 +67,7 @@ def _run(tmp_path: Path, session_dir: str | None = None) -> subprocess.Completed
 def _lines(result: subprocess.CompletedProcess) -> dict:
     lines = result.stdout.splitlines()
     assert [line.split("=", 1)[0] for line in lines] == [
-        "pr_state", "pr_number", "branch", "head_owner", "head_repo"
+        "pr_state", "pr_number", "branch", "head_owner", "head_repo", "pr_source"
     ], result.stdout
     return dict(line.split("=", 1) for line in lines)
 
@@ -86,11 +86,12 @@ def test_a_pr_state_is_recorded_with_its_number(tmp_path, state):
     assert result.returncode == 0, result.stderr
     assert _lines(result) == {
         "pr_state": state, "pr_number": "61", "branch": "feat/x",
-        "head_owner": "own", "head_repo": "repo-x",
+        "head_owner": "own", "head_repo": "repo-x", "pr_source": "cwd",
     }
     (event,) = _journal(tmp_path)
-    assert {k: event[k] for k in ("type", "source", "pr_state", "pr_number")} == {
+    assert {k: event[k] for k in ("type", "source", "pr_state", "pr_number", "pr_source")} == {
         "type": "session_end", "source": "wrap-up", "pr_state": state, "pr_number": 61,
+        "pr_source": "cwd",
     }
     assert wrap_up_closed([event], 61, None) is (state == "MERGED")
     argv = (tmp_path / "bin" / "argv.txt").read_text().splitlines()
@@ -106,6 +107,7 @@ def test_no_pull_request_records_none_without_a_number(tmp_path):
     assert result.returncode == 0, result.stderr
     assert _lines(result) == {
         "pr_state": "NONE", "pr_number": "", "branch": "", "head_owner": "", "head_repo": "",
+        "pr_source": "cwd",
     }
     (event,) = _journal(tmp_path)
     assert event["pr_state"] == "NONE" and "pr_number" not in event
@@ -257,10 +259,10 @@ def test_no_pr_in_the_cwd_falls_back_to_the_reviewed_pr(tmp_path):
     assert result.returncode == 0, result.stderr
     assert _lines(result) == {
         "pr_state": "MERGED", "pr_number": "61", "branch": "feat/x",
-        "head_owner": "own", "head_repo": "repo-x",
+        "head_owner": "own", "head_repo": "repo-x", "pr_source": "review",
     }
     (event,) = _session_ends(tmp_path)
-    assert (event["pr_state"], event["pr_number"]) == ("MERGED", 61)
+    assert (event["pr_state"], event["pr_number"], event["pr_source"]) == ("MERGED", 61, "review")
     assert _argv(tmp_path) == [
         "pr view --json number,state,headRefName,headRepository,headRepositoryOwner",
         "pr view 61 --repo own/repo-x --json number,state,headRefName,headRepository,headRepositoryOwner",
@@ -401,3 +403,100 @@ def test_outside_any_repo_with_no_review_stays_unknown_with_one_call(tmp_path):
 
     assert _lines(result)["pr_state"] == "UNKNOWN"
     assert len(_argv(tmp_path)) == 1
+
+
+# ---------------------------------------------------------------------------
+# A cwd NONE falls back only to a reviewed PR that wrap-up has not closed yet.
+# ---------------------------------------------------------------------------
+
+def _wrapped(session: Path, pr_number: int, ts: str) -> None:
+    """An earlier wrap-up's record: this PR MERGED, at `ts`."""
+    session.mkdir(parents=True, exist_ok=True)
+    with (session / "session-journal.jsonl").open("a") as journal:
+        journal.write(json.dumps({"v": 1, "type": "session_end", "source": "wrap-up",
+                                  "pr_state": "MERGED", "pr_number": pr_number,
+                                  "pr_source": "cwd", "ts": ts}) + "\n")
+
+
+def test_a_reviewed_pr_already_wrapped_keeps_none(tmp_path):
+    """A session merged and wrapped PR 61, then wraps a new feature with no
+    PR: the cwd's NONE is the truth, and PR 61 must not be recorded again."""
+    _stub_gh_two_reads(tmp_path / "bin", numbered_stdout=PR_JSON.replace("{state}", "MERGED"))
+    _review(tmp_path / "session", 61, ts="2026-04-17T12:00:00Z")
+    _wrapped(tmp_path / "session", 61, ts="2026-04-17T13:00:00Z")
+
+    result = _run(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert _lines(result)["pr_state"] == "NONE"
+    assert _lines(result)["pr_source"] == "cwd"
+    assert len(_argv(tmp_path)) == 1
+    assert _session_ends(tmp_path)[-1]["pr_source"] == "cwd"
+
+
+def test_a_wrap_up_before_the_latest_review_does_not_close_it(tmp_path):
+    """The earlier wrap-up predates the latest review of the same PR (a second
+    review round): that review is not wrapped yet, so the fallback runs."""
+    _stub_gh_two_reads(tmp_path / "bin", numbered_stdout=PR_JSON.replace("{state}", "MERGED"))
+    _wrapped(tmp_path / "session", 61, ts="2026-04-17T11:00:00Z")
+    _review(tmp_path / "session", 61, ts="2026-04-17T12:00:00Z")
+
+    result = _run(tmp_path)
+
+    assert _lines(result)["pr_state"] == "MERGED"
+    assert _lines(result)["pr_source"] == "review"
+
+
+def test_another_prs_wrap_up_does_not_close_the_reviewed_one(tmp_path):
+    _stub_gh_two_reads(tmp_path / "bin", numbered_stdout=PR_JSON.replace("{state}", "MERGED"))
+    _review(tmp_path / "session", 61, ts="2026-04-17T12:00:00Z")
+    _wrapped(tmp_path / "session", 50, ts="2026-04-17T13:00:00Z")
+
+    result = _run(tmp_path)
+
+    assert _lines(result)["pr_source"] == "review"
+
+
+def test_an_unknown_cwd_read_falls_back_even_for_a_wrapped_pr(tmp_path):
+    _stub_gh_outside_a_repo(tmp_path / "bin", numbered_stdout=PR_JSON.replace("{state}", "MERGED"))
+    _review(tmp_path / "session", 61, ts="2026-04-17T12:00:00Z")
+    _wrapped(tmp_path / "session", 61, ts="2026-04-17T13:00:00Z")
+
+    result = _run(tmp_path)
+
+    assert _lines(result)["pr_state"] == "MERGED"
+    assert _lines(result)["pr_source"] == "review"
+    assert len(_argv(tmp_path)) == 2
+
+
+def test_a_failed_fallback_is_review_sourced(tmp_path):
+    """The fallback ran and replaced the cwd read, so the source is review,
+    even though it could only say UNKNOWN."""
+    _stub_gh_two_reads(tmp_path / "bin", numbered_rc=1,
+                       numbered_stderr="error connecting to api.github.com\n")
+    _review(tmp_path / "session", 61)
+
+    result = _run(tmp_path)
+
+    assert _lines(result)["pr_state"] == "UNKNOWN"
+    assert _lines(result)["pr_source"] == "review"
+    assert _session_ends(tmp_path)[-1]["pr_source"] == "review"
+
+
+def test_a_cwd_unknown_with_no_review_is_cwd_sourced(tmp_path):
+    _stub_gh_outside_a_repo(tmp_path / "bin")
+
+    result = _run(tmp_path)
+
+    assert _lines(result)["pr_state"] == "UNKNOWN"
+    assert _lines(result)["pr_source"] == "cwd"
+
+
+def test_the_schema_types_pr_source(tmp_path):
+    from shared.session_journal import _validate_event_schema, make_event
+
+    ok = make_event("session_end", source="wrap-up", pr_state="NONE", pr_source="cwd")
+    assert _validate_event_schema(ok) == (True, "ok")
+    valid, reason = _validate_event_schema(
+        make_event("session_end", source="wrap-up", pr_state="NONE", pr_source=1))
+    assert valid is False and "pr_source" in reason

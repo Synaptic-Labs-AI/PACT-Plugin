@@ -483,7 +483,9 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # session_end from the SessionEnd hook's own. Wrap-up also records the
     # PR state it read (`pr_state`: MERGED, OPEN, CLOSED, NONE or UNKNOWN)
     # and, when there is a PR, its `pr_number`; wrap_up_closed reads both.
-    "session_end": {"warning": str, "source": str, "pr_state": str, "pr_number": int},
+    "session_end": {
+        "warning": str, "source": str, "pr_state": str, "pr_number": int, "pr_source": str,
+    },
     # shared/compaction_owner.py adds `latency_s`, the seconds from staging a
     # summary to resolving it, whenever the staged record's time is readable.
     "compaction_attributed": {"latency_s": float},
