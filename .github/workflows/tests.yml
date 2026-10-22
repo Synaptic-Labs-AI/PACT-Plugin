@@ -369,8 +369,17 @@ jobs:
       # on walrus operators used in the hooks — do not drop the flag.
       # Where an editing session has an LSP server, its diagnostics complement
       # this check at edit time; this step is the mechanical guarantee.
+      # `ruff --version` echoes the resolved version into the log: ruff is
+      # installed UNPINNED (the --select bound keeps releases from adding rule
+      # classes), so this line is the only record of what a given run linted
+      # with — the CI half of the version comparison a local-green/CI-red
+      # divergence needs. The local mirror scripts/verify-local-lint-gate.sh
+      # stamps its own version the same way, and
+      # pact-plugin/tests/test_local_lint_parity.py byte-compares this step's
+      # legs against that script.
       - name: Import-hygiene lint (F401/F821)
         run: |
+          ruff --version
           ruff check --select F401,F821 --target-version py39 pact-plugin/
           ruff check --select F821 --target-version py39 pact-plugin/
 
