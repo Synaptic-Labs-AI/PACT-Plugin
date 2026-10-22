@@ -701,6 +701,29 @@ class TestWrapUpRecordsItsBranch:
             assert forbidden not in d, (forbidden, d)
 
 
+class TestStateRecoveryEventsTable:
+    def _rows(self):
+        text = _text("protocols/pact-state-recovery.md")
+        return {ln.split("|")[1].strip(): ln for ln in text.splitlines()
+                if ln.startswith("| `session_")}
+
+    def test_session_end_documents_the_wrap_up_source(self):
+        """Reddens when the events table stops naming the optional `source`
+        fields or what a wrap-up `session_end` records. Mutation: restore the
+        row "`warning` (optional) | Detect incomplete shutdowns"."""
+        row = self._rows()["`session_end`"]
+        assert "`source`, `pr_state`, `pr_number` (optional, wrap-up:" in row, row
+        assert ("A wrap-up `session_end` with `pr_state` `MERGED` and a PR's `pr_number`, at or "
+                "after the latest `review_dispatch`, records that wrap-up closed that merged PR") in row, row
+
+    def test_a_consolidation_never_silences_a_merged_pr(self):
+        """Reddens when the table claims a consolidation silences SessionEnd
+        regardless of PR state. Mutation: restore "regardless of PR state"."""
+        row = self._rows()["`session_consolidated`"]
+        assert "regardless of PR state" not in row, row
+        assert "for an open PR, never for a merged one" in row, row
+
+
 # ---------------------------------------------------------------------------
 # A caller check returns only to the review of the current branch
 # ---------------------------------------------------------------------------
