@@ -5821,13 +5821,18 @@ _PARSER_ERRORS = (AttributeError, TypeError, ValueError, IndexError, KeyError, R
 
 def _interpreter_guarded_commands(command: str, depth: int) -> list[str]:
     """Every guarded command the programs this command hands an interpreter (-c/-e and
-    stdin-fed code) pass directly to an exec primitive. A parser defect must never
-    raise: the pre-hook turns a raised exception into a deny, which would block a
-    good-faith command. When the direct-call parser raises on one program, that program
-    is judged by `_guarded_literals_beside_primitive` instead, so a defect neither
-    refuses outright nor allows outright."""
+    stdin-fed code) pass directly to an exec primitive, read from the command as written
+    and, when it has line continuations, as the shell splices them too (`python3 \\`
+    then `-c '…'` on the next line). A parser defect must never raise: the pre-hook
+    turns a raised exception into a deny, which would block a good-faith command. When
+    the direct-call parser raises on one program, that program is judged by
+    `_guarded_literals_beside_primitive` instead, so a defect neither refuses outright
+    nor allows outright."""
+    spliced = _normalize_line_continuations(command)
     try:
         programs = _stdin_fed_code(command) + _code_arg_programs(command)
+        if spliced != command:
+            programs += [p for p in _stdin_fed_code(spliced) + _code_arg_programs(spliced) if p not in programs]
     except _PARSER_ERRORS:
         return []
     found: list[str] = []

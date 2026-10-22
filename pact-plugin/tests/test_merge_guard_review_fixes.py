@@ -659,3 +659,30 @@ def test_a_comment_opener_inside_a_literal_hides_nothing(label, cmd):
 @pytest.mark.parametrize("label,cmd", LITERAL_OPENER_ALLOW, ids=[r[0] for r in LITERAL_OPENER_ALLOW])
 def test_a_reassignment_after_a_literal_opener_is_read(label, cmd):
     assert is_dangerous_command(cmd) is False
+
+
+# A line continuation before `-c` wraps a long command; the program after it is still
+# read, as the shell splices it.
+CONTINUED_PROGRAM_DENY = [
+    ("continuation then indented -c",
+     "python3 \\\n  -c 'import subprocess; subprocess.run([\"gh\",\"pr\",\"merge\",\"5\",\"--squash\"])'"),
+    ("continuation then -c", "python3 \\\n-c 'import subprocess; subprocess.run([\"gh\",\"pr\",\"merge\",\"5\"])'"),
+    ("continuation before -e", f"node \\\n  -e 'require(\"child_process\").execSync(\"{D}\")'"),
+]
+CONTINUED_PROGRAM_ALLOW = [
+    ("continuation then a view", "python3 \\\n  -c 'import subprocess; subprocess.run([\"gh\",\"pr\",\"view\",\"5\"])'"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", CONTINUED_PROGRAM_DENY, ids=[r[0] for r in CONTINUED_PROGRAM_DENY])
+def test_a_program_after_a_continuation_is_read(label, cmd):
+    from shared.merge_guard_common import interpreter_command_context
+
+    assert is_dangerous_command(cmd) is True
+    context = interpreter_command_context(cmd)
+    assert context is not None and context["pr_number"] == "5"
+
+
+@pytest.mark.parametrize("label,cmd", CONTINUED_PROGRAM_ALLOW, ids=[r[0] for r in CONTINUED_PROGRAM_ALLOW])
+def test_a_program_after_a_continuation_that_only_views_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
