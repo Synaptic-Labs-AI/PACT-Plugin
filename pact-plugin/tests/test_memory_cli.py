@@ -27,14 +27,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Reused rather than re-implemented: the canonical minimal-CLAUDE.md seeder
+# (fixtures/claude_md_seed.py). The isolation fixture below needs a real file
+# at the env-var root, because the display resolver treats "no CLAUDE.md
+# here" as "keep looking".
+from fixtures.claude_md_seed import seed_claude_md
 from fixtures.hf_cache import hf_cache_env
 
 from helpers import create_test_schema, make_cli_memory_dict
-
-# Reused rather than re-implemented: the canonical minimal-CLAUDE.md seeder.
-# The isolation fixture below needs a real file at the env-var root, because
-# the display resolver treats "no CLAUDE.md here" as "keep looking".
-from test_working_memory_concurrency_comprehensive import _seed_claude_md
 
 from scripts.cli import build_parser, cmd_save, cmd_search, cmd_list, cmd_get, cmd_status, cmd_setup, cmd_update, cmd_delete, main, _COMMANDS, _refuse_live_db_under_pytest
 from scripts.memory_api import PACTMemory
@@ -125,7 +125,7 @@ def _isolate_claude_md_target(tmp_path, monkeypatch):
     by placement -- a global autouse would break files that legitimately exercise
     the resolver's fallback branches.
     """
-    _seed_claude_md(tmp_path)
+    seed_claude_md(tmp_path)
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
     # THE MODEL CACHE RIDES THE SAME INHERITANCE. Because the sites here pass
     # no `env=`, the only way to reach their children is this process's
