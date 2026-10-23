@@ -1155,3 +1155,49 @@ def test_a_parameter_passed_through_an_unpacked_call_reads_nothing_known():
     code = "import subprocess\ndef run(c):\n    subprocess.run(c)\nrun(*[['gh', 'pr', 'view']])\n"
     reach = _python_reaching(code)
     assert reach is not None and reach.uses[code.index("run(c)\n") + 4] == frozenset({_OPAQUE})
+
+
+# A named JS function (`function f(c) {…}`, `const f = (c) => …`): a parameter reads
+# what its calls pass in that position, and a call reads what the function returns. A
+# method call (`o.f(…)`), a spread argument or a name declared twice reads nothing.
+JS_HELPER_DENY = [
+    ('function expression param', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nconst sh = function(c) { cp.execSync(c); };\nsh("' + M + ' 5");\nEOF2'),
+    ('fn param', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction run(c) { cp.execFileSync(c[0], c.slice(1)); }\nfunction sh(c) { cp.execSync(c); }\nsh("' + M + ' 5");\nEOF2'),
+    ('arrow param', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nconst sh = (c) => cp.execSync(c);\nsh("' + M + ' 5");\nEOF2'),
+    ('arrow block param', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nconst sh = (c) => { cp.execSync(c); };\nsh("' + M + ' 5");\nEOF2'),
+    ('fn return', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction cmd() { return "' + M + ' 5"; }\ncp.execSync(cmd());\nEOF2'),
+    ('arrow expr return', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nconst cmd = () => "' + M + ' 5";\ncp.execSync(cmd());\nEOF2'),
+    ('return via name', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction cmd() { return "' + M + ' 5"; }\nconst c = cmd();\ncp.execSync(c);\nEOF2'),
+    ('two hops', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh(c) { cp.execSync(c); }\nfunction go(x) { sh(x); }\ngo("' + M + ' 5");\nEOF2'),
+    ('second param', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh(opts, c) { cp.execSync(c, opts); }\nsh({}, "' + M + ' 5");\nEOF2'),
+]
+JS_HELPER_ALLOW = [
+    ('function expression param view', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nconst sh = function(c) { cp.execSync(c); };\nsh("gh pr view 5");\nEOF2'),
+    ('fn param view', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh(c) { cp.execSync(c); }\nsh("gh pr view 5");\nEOF2'),
+    ('fn return view', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction cmd() { return "gh pr view 5"; }\ncp.execSync(cmd());\nEOF2'),
+    ('module merge printed, arrow param view', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nconst c = "' + M + ' 5";\nconsole.log(c);\nconst sh = (c) => cp.execSync(c);\nsh("gh pr view 5");\nEOF2'),
+    ('fn param reassigned to view', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh(c) { c = "gh pr view 5"; cp.execSync(c); }\nsh("' + M + ' 5");\nEOF2'),
+    ('method call not the helper', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh(c) { cp.execSync(c); }\nconst o = { sh: (x) => console.log(x) };\no.sh("' + M + ' 5");\nsh("gh pr view 5");\nEOF2'),
+    ('declared twice', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh(c) { cp.execSync(c); }\nfunction sh(c) { console.log(c); }\nsh("' + M + ' 5");\nEOF2'),
+    ("nested return is not the helper's", 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction cmd() { const f = () => { return "' + M + ' 5"; }; return "gh pr view 5"; }\ncp.execSync(cmd());\nEOF2'),
+    ('two hops view', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh(c) { cp.execSync(c); }\nfunction go(x) { sh(x); }\ngo("gh pr view 5");\nEOF2'),
+    ('spread call', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh(c) { cp.execSync(c); }\nsh(...["gh pr view 5"]);\nEOF2'),
+]
+
+
+@pytest.mark.parametrize("label,cmd", JS_HELPER_DENY, ids=[r[0] for r in JS_HELPER_DENY])
+def test_a_merge_through_a_js_helper_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", JS_HELPER_ALLOW, ids=[r[0] for r in JS_HELPER_ALLOW])
+def test_a_view_through_a_js_helper_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+def test_a_js_call_with_a_spread_argument_passes_nothing_known():
+    """`sh(...a, x)` cannot be matched to parameters by position, so it passes nothing."""
+    from shared.merge_guard_common import _js_calls
+
+    code = 'function sh(c) { console.log(c); }\nsh(...a, "x");\nsh("y");\n'
+    assert _js_calls(code, "node", "sh") == [[], [code.index('"y"')]]

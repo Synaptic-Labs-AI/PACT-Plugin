@@ -3936,11 +3936,17 @@ def _python_reaching(code: str) -> "_PyReach | None":
 
 
 def _returned_values_at(head: str, code: str, i: int) -> tuple[list[int], int] | None:
-    """For a call at code[i] to a function the Python program defines, (the offsets of
-    the values its `return` statements give, offset past the call); None otherwise."""
-    reach = _python_reaching(code) if _PYTHON_HEAD_RE.match(head) else None
-    values = sorted(reach.returns.get(i, ())) if reach else []
-    callee = re.match(r"[A-Za-z_]\w*\s*(?=\()", code[i:]) if values else None
+    """For a call at code[i] to a function the Python or JS program defines, (the
+    offsets of the values its `return` statements give, offset past the call); None
+    otherwise."""
+    callee = re.match(r"[A-Za-z_$][\w$]*(?=\s*\()", code[i:])
+    if _JS_HEAD_RE.match(head):
+        fn = _js_functions(code, head).get(callee.group()) if callee else None
+        values = sorted(fn.returns) if fn else []
+    else:
+        reach = _python_reaching(code) if _PYTHON_HEAD_RE.match(head) else None
+        values = sorted(reach.returns.get(i, ())) if reach else []
+    callee = re.match(r"[A-Za-z_$][\w$]*\s*(?=\()", code[i:]) if values else None
     end = _balanced_end(code, i + callee.end()) if callee else -1
     return (values, end) if end > 0 else None
 
@@ -4263,6 +4269,109 @@ def _block_of(code: str, head: str, i: int, floor: int) -> tuple:
     return floor, len(code)
 
 
+# A named JS function: `function name(params) {`, `const|let|var name = function(params) {`,
+# or `const|let|var name = (params) =>` / `name = param =>`, with a `{…}` body or an
+# expression body.
+_JS_NAMED_FUNCTION_RE = re.compile(
+    r"\bfunction\s*\*?\s*(?P<fname>[A-Za-z_$][\w$]*)\s*\((?P<fparams>[^()]*)\)\s*\{"
+    r"|\b(?:const|let|var)\s+(?P<ename>[A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?function\b\s*\*?\s*[\w$]*\s*"
+    r"\((?P<eparams>[^()]*)\)\s*\{"
+    r"|\b(?:const|let|var)\s+(?P<aname>[A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?"
+    r"(?:\((?P<aparams>[^()]*)\)|(?P<aparam>[A-Za-z_$][\w$]*))\s*=>\s*"
+)
+
+
+class _JsFunction(NamedTuple):
+    """A named JS function: its parameters in order, its body, and its return values."""
+
+    params: tuple
+    start: int
+    end: int
+    returns: tuple
+
+
+def _expression_end(view: str, i: int) -> int:
+    """Offset where an expression starting at view[i] ends: a `;`, `,` or closing bracket
+    at its own depth, or a line break outside brackets."""
+    depth = 0
+    for j in range(i, len(view)):
+        ch = view[j]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return j
+            depth -= 1
+        elif depth == 0 and ch in ";,\n":
+            return j
+    return len(view)
+
+
+@functools.lru_cache(maxsize=64)
+def _js_functions(code: str, head: str) -> dict:
+    """Per name, the named functions a JS program declares. A name declared twice is
+    left out: which one a call reaches is not known."""
+    view = _index_view(code, head)
+    found: dict = {}
+    for m in _JS_NAMED_FUNCTION_RE.finditer(view):
+        block = m.group("fname") or m.group("ename")
+        name = block or m.group("aname")
+        params = (m.group("fparams") or m.group("eparams") or "") if block else (m.group("aparams") or m.group("aparam") or "")
+        names = tuple(re.findall(r"^\s*(?:\.\.\.)?([A-Za-z_$][\w$]*)", part)[0] if re.match(r"^\s*(?:\.\.\.)?[A-Za-z_$]", part) else ""
+                      for part in params.split(",")) if params.strip() else ()
+        if block or view[m.end():m.end() + 1] == "{":
+            start = m.end() - 1 if block else m.end()
+            end = _matching(view, start)
+            if end < 0:
+                continue
+            body = view[start + 1:end]
+            nested = [n.start() for n in _JS_NAMED_FUNCTION_RE.finditer(body)] + [n.start() for n in re.finditer(r"\bfunction\b|=>", body)]
+            returns = tuple(start + 1 + r.end() for r in re.finditer(r"\breturn\s+", body)
+                            if not any(n < r.start() for n in nested))
+        else:
+            start, end = m.end(), _expression_end(view, m.end())
+            returns = (start,)
+        found.setdefault(name, []).append(_JsFunction(names, start, end, returns))
+    return {name: fns[0] for name, fns in found.items() if len(fns) == 1}
+
+
+def _js_calls(code: str, head: str, name: str) -> list:
+    """The argument offsets of each call `name(…)` in a JS program, outside its own
+    declaration; [] for a call with a spread argument."""
+    view = _index_view(code, head)
+    out = []
+    for m in re.finditer(r"(?<![\w$.])" + re.escape(name) + r"\s*\(", view):
+        if re.search(r"\bfunction\s*\*?\s*$", view[:m.start()]):
+            continue
+        close = _matching(view, m.end() - 1)
+        if close < 0:
+            continue
+        args, k = [], m.end()
+        while k < close:
+            k = _skip(r"\s*", view, k)
+            if k >= close:
+                break
+            args.append(k)
+            k = _expression_end(view, k)
+            k = k + 1 if view[k:k + 1] == "," else k
+        out.append([] if any(view[a:a + 3] == "..." for a in args) else args)
+    return out
+
+
+def _js_param_values(head: str, code: str, i: int, name: str) -> list | None:
+    """For a use at code[i] of a parameter of the innermost named JS function holding
+    it, the offsets of the arguments its calls pass in that position; None when the use
+    is not such a parameter, or the body assigns it before the use."""
+    fns = [f for f in _js_functions(code, head).items() if f[1].start <= i < f[1].end and name in f[1].params]
+    if not fns:
+        return None
+    fname, fn = max(fns, key=lambda f: f[1].start)
+    if any(fn.start <= at < i for at in _assignments(code, head).get(name, ([], []))[0]):
+        return None                                      # reassigned in the body first
+    position = fn.params.index(name)
+    return sorted({args[position] for args in _js_calls(code, head, fname) if position < len(args)})
+
+
 def _span_reaching(head: str, code: str, i: int, name: str) -> list:
     """The literal values of `name` reaching a use at code[i], for a program without a
     parser: the assignments in the use's own function span (outside nested spans),
@@ -4270,7 +4379,12 @@ def _span_reaching(head: str, code: str, i: int, name: str) -> list:
     it; a parameter is unreadable; a name free in its span takes every assignment of it
     in the enclosing span, outward until one has any; an assignment only after the use
     leaves it unresolved. A JS `let`/`const` inside a block reaches only uses in that
-    block. Ruby and lua spans come from their block keywords."""
+    block. Ruby and lua spans come from their block keywords. A parameter of a named JS
+    function reads the arguments its calls pass for it."""
+    if _JS_HEAD_RE.match(head):
+        passed = _js_param_values(head, code, i, name)
+        if passed is not None:
+            return passed
     spans, depth = _scope_spans(code, head), _depths(code, head)
     starts, values = _assignments(code, head).get(name, ([], []))
     enclosing = _enclosing_assignments(code, head)
