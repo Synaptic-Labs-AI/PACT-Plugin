@@ -15,10 +15,12 @@ import re
 
 import pytest
 
+from scripts import working_memory
 from scripts.working_memory import sync_retrieved_to_claude_md, sync_to_claude_md
 from shared.claude_md_manager import MEMORY_END_MARKER, MEMORY_START_MARKER
 from shared.claude_md_markers import parse
 from test_claude_md_corpus_writers import _CASES, _CORPUS, _UNCERTAIN, _changed_rows, _state
+from test_retrieved_context_one_entry_per_memory import _FrozenClock
 
 _MEMORY = {"id": "m1", "context": "a context", "goal": "a goal", "created_at": "2026-01-02T03:04:05+00:00"}
 _SYNCS = {
@@ -37,12 +39,15 @@ def test_the_syncs(case, sync_name, tmp_path, monkeypatch):
     uncertain memory block inside a found one, leaves the file byte-identical.
     A write leaves one real section heading in the window, changes no other
     row's kind or hidden flag, and a repeated Retrieved Context sync of the same
-    memory changes nothing."""
+    memory changes nothing. The clock is frozen: a Retrieved Context entry is
+    headed with the minute it was written, so a minute rollover between the two
+    syncs would change that header."""
     heading, sync = _SYNCS[sync_name]
     raw = (_CORPUS / f"{case}.md").read_bytes()
     path = tmp_path / "CLAUDE.md"
     path.write_bytes(raw)
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    monkeypatch.setattr(working_memory, "datetime", _FrozenClock)
     memory, managed = _state(case, "MEMORY"), _state(case, "MANAGED")
     result = sync(tmp_path, path)
     after = path.read_bytes()
