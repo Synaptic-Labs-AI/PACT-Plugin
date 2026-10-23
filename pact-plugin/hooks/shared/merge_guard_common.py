@@ -2945,6 +2945,9 @@ def _skip(pattern: str, text: str, i: int) -> int:
 
 # How many readings one expression may produce when names in it reach several values.
 _MAX_READINGS = 16
+# How many names deep a value is followed (`a = b + "x"; b = "gh "`); a name whose
+# value is itself built from the name stops here.
+_MAX_NAME_DEPTH = 3
 
 
 def _with_each(readings: list, options: list) -> list:
@@ -2952,13 +2955,14 @@ def _with_each(readings: list, options: list) -> list:
     return [r + [o] for r in readings for o in options][:_MAX_READINGS]
 
 
-def _literal_list_at(text: str, i: int, head: str = "") -> tuple[list[list[str]], int] | None:
+def _literal_list_at(text: str, i: int, head: str = "", _depth: int = 0) -> tuple[list[list[str]], int] | None:
     """The readings of a `[…]` list, `(…)` tuple or R `c(…)` vector starting at text[i],
     each the elements it spells, and the offset after it. A bare-name element reads as
     each literal string its reaching assignments give it (`g = "gh"; [g, "pr", …]`). A
-    later non-literal element (`str(pr)`, a variable with no literal value) reads as
-    `X`; a leading one reads as `gh` when `"pr"` follows it, and otherwise the list is
-    not read. None also when an element is neither."""
+    spread element (`*a`, `...a`) and, in an R `c(…)`, a name whose value is a vector
+    splice in that list's elements. A later non-literal element (`str(pr)`, a variable
+    with no literal value) reads as `X`; a leading one reads as `gh` when `"pr"` follows
+    it, and otherwise the list is not read. None also when an element is neither."""
     opener = re.match(r"\[|c?\(", text[i:])
     if not opener:
         return None
@@ -2970,10 +2974,16 @@ def _literal_list_at(text: str, i: int, head: str = "") -> tuple[list[list[str]]
         if text[i:i + 1] == closer:
             return readings, i + 1
         lit = _STRING_LITERAL_RE.match(text, i)
-        named = None if lit else _named_values_at(head, text, i)
-        values = _named_strings(head, text, named[0]) if named else []
+        spread = None if lit else re.match(r"\*(?!\*)|\.\.\.", text[i:])
+        at = i + spread.end() if spread else i
+        named = None if lit or _depth >= _MAX_NAME_DEPTH else _named_values_at(head, text, at)
+        lists = _named_lists(head, text, named[0], _depth) if named and (spread or opener.group() == "c(") else []
+        values = _named_strings(head, text, named[0], _depth + 1) if named and not lists else []
         if lit:
             readings, end = _with_each(readings, [lit.group(0)[1:-1]]), lit.end()
+        elif lists:
+            readings = [r + items for r in readings for items in lists][:_MAX_READINGS]
+            end = named[1] if named else at
         elif named and values:
             readings, end = _with_each(readings, values), named[1]
         else:
@@ -2985,13 +2995,45 @@ def _literal_list_at(text: str, i: int, head: str = "") -> tuple[list[list[str]]
         i = _skip(r"\s*,?", text, end)
 
 
-def _named_strings(head: str, code: str, offsets: list[int]) -> list[str]:
+def _named_strings(head: str, code: str, offsets: list[int], _depth: int = 0) -> list[str]:
     """The string texts the values at these offsets spell, in order, without repeats."""
     out: list[str] = []
     for off in offsets:
-        expr = _string_expr_at(code, off, head)
+        expr = _string_expr_at(code, off, head, _depth)
         out += [text for text in (expr[0] if expr else []) if text not in out]
     return out[:_MAX_READINGS]
+
+
+def _named_lists(head: str, code: str, offsets: list[int], _depth: int = 0) -> list[list[str]]:
+    """The element readings of the list values at these offsets, without repeats."""
+    out: list[list[str]] = []
+    for off in offsets:
+        lst = _list_expr_at(code, off, head, _depth + 1)
+        out += [items for items in (lst[0] if lst else []) if items not in out]
+    return out[:_MAX_READINGS]
+
+
+def _list_expr_at(code: str, i: int, head: str = "", _depth: int = 0) -> tuple[list[list[str]], int] | None:
+    """The readings of a list expression starting at code[i]: list literals and names
+    whose values are lists, joined with `+` (`A + ["5"]`). None when no operand is a
+    list."""
+    readings: list[list[str]] = [[]]
+    while True:
+        i = _skip(r"\s*", code, i)
+        lst = _literal_list_at(code, i, head, _depth)
+        named = None if lst or _depth >= _MAX_NAME_DEPTH else _named_values_at(head, code, i, _NAME_OPERAND_RE)
+        lists = _named_lists(head, code, named[0], _depth) if named else []
+        if lst:
+            options, i = lst[0], lst[1]
+        elif lists and named:
+            options, i = lists, named[1]
+        else:
+            return None
+        readings = [r + items for r in readings for items in options][:_MAX_READINGS]
+        plus = re.match(r"\s*\+\s*", code[i:])
+        if not plus:
+            return readings, i
+        i += plus.end()
 
 
 # gh or hub as a word, in any case: `GH`, `/opt/homebrew/bin/gh`, `which("hub")`.
@@ -3085,14 +3127,15 @@ def _operand_end(code: str, i: int) -> int:
         i = attr.end()
 
 
-def _string_expr_at(code: str, i: int, head: str = "") -> tuple[list[str], int] | None:
+def _string_expr_at(code: str, i: int, head: str = "", _depth: int = 0) -> tuple[list[str], int] | None:
     """The readings of a string-valued argument expression starting at code[i], each the
     text it spells: string literals (any prefix; an f-string keeps its {…}), joined with
-    `+` to each other or to other operands (each operand reads as `X`), `% …` applied to
-    a literal (the literal's text), `shlex.split(<literal>)`, and `"<sep>".join([…])`
-    (one reading per reading of the list). A `.format(…)` ends the expression after its
-    literal, which keeps the literal's text. None when no string literal takes part,
-    e.g. a bare variable (dataflow, not followed)."""
+    `+` to each other or to other operands, `% …` applied to a literal (the literal's
+    text), `shlex.split(<literal>)`, and `"<sep>".join([…])` (one reading per reading of
+    the list). A name operand reads as each literal value its reaching assignments give
+    it (`base = "gh pr "; base + "merge 5"`), and any other operand as `X`. A
+    `.format(…)` ends the expression after its literal, which keeps the literal's text.
+    None when no string literal or literal-valued name takes part."""
     readings, saw_literal = [""], False
     while True:
         i = _skip(r"\s*", code, i)
@@ -3115,11 +3158,17 @@ def _string_expr_at(code: str, i: int, head: str = "") -> tuple[list[str], int] 
                 texts, i = [text.join(items) for items in lst[0]], lst[1] + close.end()
             readings = [r + t for r in readings for t in texts][:_MAX_READINGS]
         else:
-            end = _operand_end(code, i)
-            if end < 0:
-                break
-            i = end
-            readings = [r + "X" for r in readings]
+            named = _named_values_at(head, code, i, _NAME_OPERAND_RE) if _depth < _MAX_NAME_DEPTH else None
+            values = _named_strings(head, code, named[0], _depth + 1) if named else []
+            if named and values:
+                readings = [r + v for r in readings for v in values][:_MAX_READINGS]
+                i, saw_literal = named[1], True
+            else:
+                end = _operand_end(code, i)
+                if end < 0:
+                    break
+                i = end
+                readings = [r + "X" for r in readings]
         percent = re.match(r"\s*%\s*", code[i:])
         if percent and saw_literal:
             nxt = i + percent.end()
@@ -3148,6 +3197,9 @@ def _first_argument_command(code: str, pos: int, head: str = "") -> str | None:
 # A call argument or list element that is a bare variable name (`run(cmd)`,
 # `system($c)`, `[g, "pr"]`), up to the comma or bracket that ends it.
 _BARE_NAME_ARG_RE = re.compile(r"(?P<name>[$@]?[A-Za-z_]\w*)(?=\s*[,)\]])")
+# A name operand of a `+` expression: followed by `+`, the end of the argument, or the
+# end of its statement.
+_NAME_OPERAND_RE = re.compile(r"(?P<name>[$@]?[A-Za-z_]\w*)(?=[ \t]*(?:[+,)\]};\n]|$))")
 
 
 # `name = value`, outside string literals; `==`, `=~` and `=>` are not assignments.
@@ -3216,12 +3268,36 @@ def _index_view(code: str, head: str) -> str:
     return _mask_string_literals(code, head)
 
 
+# R assigns with `<-` and, to the enclosing environment, `<<-`; TypeScript annotates a
+# declaration's type before its `=`.
+_R_ASSIGNMENT_RE = re.compile(r"(?<![\w.])(?P<name>[A-Za-z_.][\w.]*)\s*(?P<op><<-|<-|=(?![=~>]))\s*")
+_TS_ASSIGNMENT_RE = re.compile(
+    r"(?<![\w$@.])(?P<name>[A-Za-z_$][\w$]*)\s*(?::\s*[\w$.]+(?:<[^<>=;\n]*>)?(?:\[\])*\s*)?=(?![=>])\s*"
+)
+_R_HEAD_RE = re.compile(r"^(?:R$|Rscript)")
+
+
+def _assignment_re(head: str) -> re.Pattern:
+    """The assignment pattern for a head's language."""
+    if _R_HEAD_RE.match(head):
+        return _R_ASSIGNMENT_RE
+    return _TS_ASSIGNMENT_RE if _JS_HEAD_RE.match(head) else _ASSIGNMENT_RE
+
+
+@functools.lru_cache(maxsize=64)
+def _enclosing_assignments(code: str, head: str) -> frozenset:
+    """The offsets of R `<<-` assignments, which assign in the enclosing environment."""
+    if not _R_HEAD_RE.match(head):
+        return frozenset()
+    return frozenset(m.start() for m in _R_ASSIGNMENT_RE.finditer(_index_view(code, head)) if m.group("op") == "<<-")
+
+
 @functools.lru_cache(maxsize=64)
 def _assignments(code: str, head: str = "") -> dict[str, tuple[list[int], list[int]]]:
     """Per assigned name, the offsets of its assignments and of their values, in order,
     found once per program. Assignments inside string literals or comments do not count."""
     found: dict[str, tuple[list[int], list[int]]] = {}
-    for m in _ASSIGNMENT_RE.finditer(_index_view(code, head)):
+    for m in _assignment_re(head).finditer(_index_view(code, head)):
         starts, values = found.setdefault(m.group("name"), ([], []))
         starts.append(m.start())
         values.append(m.end())
@@ -3562,12 +3638,12 @@ def _python_reaching(code: str) -> dict | None:
     return _PyReach(code, tree).uses
 
 
-def _named_values_at(head: str, code: str, i: int) -> tuple[list[int], int] | None:
+def _named_values_at(head: str, code: str, i: int, shape: re.Pattern = _BARE_NAME_ARG_RE) -> tuple[list[int], int] | None:
     """For a bare-name argument at code[i], (the offsets of the values of the name's
     assignments that may reach the use, offset past the name); None when code[i] is not
-    a bare name or no assignment with a value reaches it. A Python program that parses
-    is resolved by scope (_PyReach)."""
-    named = _BARE_NAME_ARG_RE.match(code, i)
+    a bare name of `shape` or no assignment with a value reaches it. A Python program
+    that parses is resolved by scope (_PyReach)."""
+    named = shape.match(code, i)
     if not named:
         return None
     reaching = _python_reaching(code) if _PYTHON_HEAD_RE.match(head) else None
@@ -3890,14 +3966,21 @@ def _span_reaching(head: str, code: str, i: int, name: str) -> list:
     block. Ruby and lua spans come from their block keywords."""
     spans, depth = _scope_spans(code, head), _depths(code, head)
     starts, values = _assignments(code, head).get(name, ([], []))
+    enclosing = _enclosing_assignments(code, head)
+
+    def home(k: int) -> int:
+        """The span an assignment binds in: an R `<<-` binds in its span's parent."""
+        inner = _innermost(spans, starts[k])
+        return spans[inner].parent if starts[k] in enclosing and inner >= 0 else inner
+
     span = _innermost(spans, i)
     floor = spans[span].start if span >= 0 else 0
-    own = [k for k in range(len(starts)) if _innermost(spans, starts[k]) == span]
+    own = [k for k in range(len(starts)) if home(k) == span]
     params = spans[span].params if span >= 0 else frozenset()
     if not own and name not in params:
         while span >= 0:
             span = spans[span].parent
-            outer = [values[k] for k in range(len(starts)) if _innermost(spans, starts[k]) == span]
+            outer = [values[k] for k in range(len(starts)) if home(k) == span]
             if outer:
                 return sorted(outer)
         return []
@@ -3918,7 +4001,7 @@ def _argument_readings(head: str, code: str, at: int) -> tuple[list[tuple[bool, 
     """The readings of one call argument at code[at]: (is a string expression, the argv
     items it adds), and the offset after it; None when it is neither a list nor a string
     expression."""
-    lst = _literal_list_at(code, at, head)
+    lst = _list_expr_at(code, at, head)
     if lst:
         return [(False, items) for items in lst[0]], lst[1]
     expr = _string_expr_at(code, at, head)

@@ -1052,3 +1052,42 @@ def test_a_shell_c_string_counts_its_destructive_legs(cmd, want):
     from shared.merge_guard_common import is_compound_destructive_command
 
     assert is_compound_destructive_command(cmd) is want
+
+
+# A name read through an expression: a name operand of a string `+` reads its literal
+# values, a list `+` and a spread (`*a`, `...a`) or an R `c(...)` splice take a named
+# list's elements, and R `<-`/`<<-` and TypeScript `name: T =` are assignments.
+NAME_EXPR_DENY = [
+    ('js typed const', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nconst c: string = "' + M + ' 5";\ncp.execSync(c);\nEOF2'),
+    ('bun typed let', 'bun -e \'const cp = require("child_process"); let c: string = "' + M + ' 5"; cp.execSync(c);\''),
+    ('js concat names', 'node -e \'const cp = require("child_process"); const base = "gh pr "; cp.execSync(base + "merge 5");\''),
+    ('two names', "python3 - <<'EOF2'\nimport os\na = \"gh pr \"\nb = \"merge 5\"\nos.system(a + b)\nEOF2"),
+    ('chained name', "python3 - <<'EOF2'\nimport os\nbase = \"gh \"\nsub = base + \"pr \"\nos.system(sub + \"merge 5\")\nEOF2"),
+    ('py concat names', "python3 - <<'EOF2'\nimport os\nbase = \"gh pr \"\nos.system(base + \"merge 5\")\nEOF2"),
+    ('py list concat', "python3 - <<'EOF2'\nimport subprocess\nA = [\"gh\", \"pr\"]\nB = [\"merge\", \"5\"]\nsubprocess.run(A + B)\nEOF2"),
+    ('py spread', "python3 - <<'EOF2'\nimport subprocess\nA = [\"gh\", \"pr\"]\nsubprocess.run([*A, \"merge\", \"5\"])\nEOF2"),
+    ('js spread', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nconst a = ["pr", "merge", "5"];\ncp.execFileSync("gh", [...a]);\nEOF2'),
+    ('R arrow', "Rscript -e 'c <- \"" + M + " 5\"; system(c)'"),
+    ('R superarrow', "Rscript -e 'f <- function() { c <<- \"" + M + " 5\" }; f(); system(c)'"),
+    ('R c splice', "Rscript -e 'a <- c(\"pr\", \"merge\"); system2(\"gh\", c(a, \"5\"))'"),
+]
+NAME_EXPR_ALLOW = [
+    ('bun typed let view', 'bun -e \'const cp = require("child_process"); let c: string = "gh pr view 5"; cp.execSync(c);\''),
+    ('js concat names view', 'node -e \'const cp = require("child_process"); const base = "gh pr "; cp.execSync(base + "view 5");\''),
+    ('self-referential loop', "python3 - <<'EOF2'\nimport os\nx = \"\"\nfor p in [\"a\", \"b\"]:\n    x = x + p\nos.system(x + \" ls\")\nEOF2"),
+    ('R c splice view', "Rscript -e 'a <- c(\"pr\", \"view\"); system2(\"gh\", c(a, \"5\"))'"),
+    ('py spread view', "python3 - <<'EOF2'\nimport subprocess\nA = [\"gh\", \"pr\"]\nsubprocess.run([*A, \"view\", \"5\"])\nEOF2"),
+    ('py concat names view', "python3 - <<'EOF2'\nimport os\nbase = \"gh pr \"\nos.system(base + \"view 5\")\nEOF2"),
+    ('py list concat view', "python3 - <<'EOF2'\nimport subprocess\nA = [\"gh\", \"pr\"]\nB = [\"view\", \"5\"]\nsubprocess.run(A + B)\nEOF2"),
+    ('R arrow view', "Rscript -e 'c <- \"gh pr view 5\"; system(c)'"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", NAME_EXPR_DENY, ids=[r[0] for r in NAME_EXPR_DENY])
+def test_a_merge_reached_through_a_name_expression_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", NAME_EXPR_ALLOW, ids=[r[0] for r in NAME_EXPR_ALLOW])
+def test_a_view_reached_through_a_name_expression_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
