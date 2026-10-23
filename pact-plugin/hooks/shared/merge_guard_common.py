@@ -5216,7 +5216,7 @@ def _excise_heredoc_bodies_for_routing_scan(command: str) -> str:
 
     def _repl(m: "re.Match") -> str:
         preceding = command[: m.start()].rstrip()
-        if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
+        if _shell_reads_stdin(preceding):
             return m.group(0)        # shell-fed heredoc: body executes — keep
         return m.group(1) + "HEREDOC_BODY_EXCISED\n" + m.group(3)
 
@@ -5612,6 +5612,22 @@ def _blank_unquoted_print_words(span: str) -> str:
     return "".join(out)
 
 
+def _shell_reads_stdin(preceding: str) -> bool:
+    """Whether the text right before a heredoc or here-string operator ends in a shell that
+    may read its commands from stdin: `bash`, `bash -e`, `bash -s [args]`. A shell given -c
+    runs that string instead, and reads the heredoc as its input data."""
+    words = re.split(r"[;&|\n(]", preceding)[-1].split()
+    at = max((k for k, w in enumerate(words) if re.match(r"^(?:.*/)?(?:bash|sh|zsh)$", w)), default=None)
+    if at is None:
+        return False
+    for word in words[at + 1:]:
+        if word == "--" or not word.startswith("-"):
+            break
+        if re.match(r"^-[A-Za-z]*c", word):
+            return False
+    return True
+
+
 def _strip_non_executable_content(command: str) -> str:
     """Strip shell content that is clearly non-executable before pattern matching.
 
@@ -5684,7 +5700,7 @@ def _strip_non_executable_content(command: str) -> str:
         start = match.start()
         preceding = command[:start].rstrip()
         # If the preceding command is a shell interpreter, preserve content
-        if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
+        if _shell_reads_stdin(preceding):
             return match.group(0)  # Preserve — content executes
         if eval_fed:
             return match.group(0)  # Preserve — an eval runs this heredoc's text
@@ -5891,7 +5907,7 @@ def _strip_non_executable_content(command: str) -> str:
             # Check what command precedes the <<< (shell-interpreter guard stays FIRST).
             start = match.start()
             preceding = command[:start].rstrip()
-            if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
+            if _shell_reads_stdin(preceding):
                 return match.group(0)  # Preserve — a shell reads the here-string as stdin
             if not _has_command_substitution(match.group(0)):
                 return "<<<STRIPPED"                  # no-$() unchanged (bareword)
@@ -5914,7 +5930,7 @@ def _strip_non_executable_content(command: str) -> str:
             # Check what command precedes the <<<
             start = match.start()
             preceding = command[:start].rstrip()
-            if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
+            if _shell_reads_stdin(preceding):
                 return match.group(0)  # Preserve — content executes
             return "<<<STRIPPED"
 

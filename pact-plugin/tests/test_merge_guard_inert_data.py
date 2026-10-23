@@ -1123,3 +1123,27 @@ def test_an_assignment_after_a_heredoc_is_read_at_its_own_offset():
     # after it; the assignment and its expansion must still be found where they are.
     cmd = "python3 - <<'PY'\n" + "x = 1\n" * 40 + "PY\n" + f'P="{FORCE_MAIN}"; ./retry.sh "$P"'
     assert is_dangerous_command(cmd) is True
+
+
+# A shell given -s (or only flags) reads its commands from a heredoc or here-string.
+SHELL_STDIN_DENY = [
+    ("bash -s", f"bash -s <<'EOF'\n{M} --squash\nEOF"),
+    ("bash -s with arguments", f"bash -s -- 5 <<'EOF'\n{M[:-1]}\"$1\" --squash\nEOF"),
+    ("sh -s", f"sh -s <<'EOF'\n{M}\nEOF"),
+    ("bash -e", f"bash -e <<'EOF'\n{M}\nEOF"),
+    ("a here-string to bash -s", f"bash -s arg <<< '{M}'"),
+]
+SHELL_STDIN_ALLOW = [
+    ("bash -c given the heredoc as input", f"bash -c 'cat > notes' <<'EOF'\n{M}\nEOF"),
+    ("sh -c given a here-string as input", f"sh -c 'cat > notes' <<< '{M}'"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", SHELL_STDIN_DENY, ids=[r[0] for r in SHELL_STDIN_DENY])
+def test_a_shell_reading_its_commands_from_stdin_runs_the_heredoc(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", SHELL_STDIN_ALLOW, ids=[r[0] for r in SHELL_STDIN_ALLOW])
+def test_a_shell_given_c_reads_the_heredoc_as_data(label, cmd):
+    assert is_dangerous_command(cmd) is False
