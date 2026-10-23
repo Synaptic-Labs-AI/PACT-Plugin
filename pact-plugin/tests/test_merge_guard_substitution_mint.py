@@ -525,3 +525,29 @@ class TestAScriptWrittenThenRunMintsAndRuns:
     def test_the_approved_command_is_refused_then_runs(self, command, style):
         assert not _runs(None, command)
         assert _runs(_mint_styled(command, style), command)
+
+
+PROBE_WRITE = "cat > probe.py <<'EOF'\nimport sys\nprint(sys.argv)\nEOF\n"
+ENV_PREFIXED = {
+    "probe-given-commands-as-data": PROBE_WRITE + 'M="' + MERGE + '5 --squash"; P="' + FORCE + 'main"; '
+    'PYTHONDONTWRITEBYTECODE=1 python3 probe.py "bash -n < f" "bash --version < f" '
+    '"bash -s <<< \'$P\'#" "printf x | env bash -x#"',
+}
+
+
+class TestAnEnvPrefixedLaunchAfterAFileWrite:
+    """A file written earlier and an env-assignment prefix on the launch keep a
+    variable read where the shell expands it: one inside a larger argument is data,
+    and a whole guarded command handed to the script is refused and runs once
+    approved."""
+
+    @pytest.mark.parametrize("command", ENV_PREFIXED.values(), ids=ENV_PREFIXED.keys())
+    def test_commands_passed_as_data_are_allowed_and_mint_nothing(self, command):
+        assert _runs(None, command)
+        assert _mint(command)[0] is None
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    def test_a_variable_holding_a_guarded_command_runs_once_approved(self, style):
+        command = PROBE_WRITE + 'P="' + FORCE + 'main"; X=1 python3 probe.py "$P"'
+        assert not _runs(None, command)
+        assert _runs(_mint_styled(command, style), command)
