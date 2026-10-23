@@ -107,6 +107,7 @@ try:
         interpreter_command_context,
         normalize_command_text,
         shell_c_string,
+        _has_command_substitution,
         # #1083: the mint flag-scan window runs the SAME two-tier leg selection
         # (unique dangerous leg -> unique detectable leg) the read bind seam runs,
         # so mint and read bind over identical leg semantics BY CONSTRUCTION —
@@ -472,18 +473,15 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
     # (`os.system("gh pr merge 5 --admin")`, whose quoted flag the region reading
     # misses). A located command with another (op, target) beside it is a second
     # operation.
-    interpreted = _exact_text_mint_context(selected_option_texts, interpreter_command_context)
-    if interpreted.refusal_reason != "no_command":
-        ctx = interpreted.context
+    exact, exact_spans = _exact_text_mint_context(selected_option_texts)
+    if exact.refusal_reason != "no_command":
+        ctx = exact.context
+        beside = _collect_pairs([_without(t, exact_spans) for t in selected_option_texts])
         if ctx is not None and any(
-            pair != (ctx.get("operation_type"), _target_value(ctx)) for pair in bundle_pairs
+            pair != (ctx.get("operation_type"), _target_value(ctx)) for pair in beside
         ):
             return MintResult(None, "multiple_commands")
-        return interpreted
-    if not bundle_pairs:
-        # No located (op, target): a guarded command inside a shell executor's -c
-        # string (`bash -c 'git push --force origin feat'`), read from that string.
-        return _exact_text_mint_context(selected_option_texts, _shell_string_context)
+        return exact
     if len(bundle_pairs) != 1:
         return MintResult(
             None, "no_command" if len(bundle_pairs) == 0 else "multiple_commands"
@@ -535,43 +533,67 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
 _BACKTICK_SPAN_RE = re.compile(r"```[^\n`]*\n(.*?)```|`([^`]+)`", re.DOTALL)
 
 
-def _shell_string_context(command: str) -> dict | None:
-    """The (op, target, flags) of the one guarded command a shell executor runs from
-    its -c string (behind env/timeout/sudo wrappers, in the command's one destructive
-    leg when other legs surround it), selected leg by leg the way the
-    pre-hook selects it, so the notice names its target; None when there is no such
-    string, it holds more than one destructive leg, or no guarded op."""
-    inner = shell_c_string(_single_destructive_leg(command) or command)
-    if not inner or is_compound_destructive_command(inner):
+def _exact_text_reading(span: str, located: str) -> dict | None:
+    """The (op, target, flags) of a backticked command the region reading cannot
+    bind, read the way the pre-hook reads it; None when the region reading binds
+    it where the option shows it (`located`, the span with its backticks) or no
+    single guarded op is found. Three shapes:
+      - an interpreter program (`python3 -c 'subprocess.run(["gh", "pr", "merge",
+        "5"])'`), read by the interpreter reader, even where its merge text is
+        contiguous (a quoted flag the region reading misses is then bound);
+      - a command with a substitution (`git push --force origin $(git branch
+        --show-current)`), whose target the region reading cannot resolve;
+      - a guarded op in a shell's -c string that the region reading locates nothing
+        in (`bash -c 'git push --force origin feat'`), read from that string, in the
+        command's one destructive leg when other legs surround it.
+    A plain command the region reading cannot bind is left to it, so its own
+    extraction stays the only binding for those."""
+    ctx = interpreter_command_context(span)
+    if ctx and ctx.get("operation_type"):
+        return ctx
+    if _collect_pairs([located]) and not _has_command_substitution(span):
         return None
+    leg = _single_destructive_leg(span) or span
+    inner = shell_c_string(leg)
+    if inner is None and not _has_command_substitution(span):
+        return None
+    if inner is not None and is_compound_destructive_command(inner):
+        return None
+    body = leg if inner is None else inner
     ctx = extract_command_context(
-        _single_destructive_leg(inner) or _single_detectable_leg(inner) or inner
+        _single_destructive_leg(body) or _single_detectable_leg(body) or body
     )
     return ctx if ctx.get("operation_type") else None
 
 
-def _exact_text_mint_context(option_texts: list[str], reader) -> MintResult:
-    """The mint for a clicked option whose backticked command the region reading
-    cannot type: an interpreter program (`python3 -c 'subprocess.run(["gh", "pr",
-    "merge", "5"])'`) or a shell's -c string. `reader` gives its (op, target, flags)
-    the way the pre-hook reads it, and the token also carries the command's
-    normalized text, which is all the pre-hook then matches: the approval runs that
-    command and no other. One distinct command per approval; a compound never mints."""
+def _exact_text_mint_context(option_texts: list[str]) -> tuple[MintResult, list[str]]:
+    """The mint for a clicked option's backticked command that _exact_text_reading
+    reads, and the raw spans it read. The token carries the command's normalized
+    text, which is all the pre-hook then matches: the approval runs that command and
+    no other. One distinct command per approval; a compound never mints."""
     found: dict[str, dict] = {}
+    spans: list[str] = []
     for text in option_texts:
         for m in _BACKTICK_SPAN_RE.finditer(text):
             span = (m.group(1) or m.group(2) or "").strip()
             if not span or not is_dangerous_command(span):
                 continue
             if is_compound_destructive_command(span):
-                return MintResult(None, "compound_command")
-            ctx = reader(span)
-            if ctx and ctx.get("operation_type"):
+                return MintResult(None, "compound_command"), []
+            ctx = _exact_text_reading(span, m.group(0))
+            if ctx:
                 found[normalize_command_text(span)] = ctx
+                spans.append(m.group(0))
     if len(found) != 1:
-        return MintResult(None, "multiple_commands" if found else "no_command")
+        return MintResult(None, "multiple_commands" if found else "no_command"), spans
     command_text, ctx = next(iter(found.items()))
-    return MintResult({**ctx, "command_text": command_text}, None)
+    return MintResult({**ctx, "command_text": command_text}, None), spans
+
+
+def _without(text: str, spans: list[str]) -> str:
+    for span in spans:
+        text = text.replace(span, " ")
+    return text
 
 
 def _bundle_has_command(questions: list) -> bool:

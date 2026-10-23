@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from merge_guard_post import _mint_context_from_bundle, _retire_exact_text_token, _shell_string_context
+from merge_guard_post import _mint_context_from_bundle, _retire_exact_text_token, _exact_text_reading
 from merge_guard_pre import _token_matches_command
 from shared.merge_guard_common import (
     is_compound_destructive_command,
@@ -105,7 +105,7 @@ class TestEveryGatedOpRunsFromAShellString:
 
 class TestTheNoticeNamesTheTarget:
     def test_the_destructive_leg_gives_the_target_beside_a_benign_leg(self):
-        ctx = _shell_string_context(ROW_22)
+        ctx = _exact_text_reading(ROW_22, f"`{ROW_22}`")
         assert ctx is not None
         assert (ctx["operation_type"], ctx["target_ref"]) == ("force-push", "feat")
 
@@ -128,7 +128,7 @@ class TestNothingElseRuns:
         pytest.param("bash -c 'git status'", id="no-op"),
     ])
     def test_the_reader_returns_nothing_without_one_guarded_command(self, command):
-        assert _shell_string_context(command) is None
+        assert _exact_text_reading(command, f"`{command}`") is None
 
 
 class TestTheCorpusRow:

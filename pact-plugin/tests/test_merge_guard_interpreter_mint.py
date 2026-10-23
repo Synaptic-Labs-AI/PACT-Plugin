@@ -25,7 +25,7 @@ from merge_guard_post import (
     _retire_exact_text_token,
 )
 from merge_guard_pre import _token_matches_command
-from shared.merge_guard_common import interpreter_command_context, normalize_command_text
+from shared.merge_guard_common import normalize_command_text
 
 HOOKS = Path(__file__).resolve().parents[1] / "hooks"
 G = "gh pr " + "merge"
@@ -138,15 +138,13 @@ class TestMintGates:
     def test_a_span_the_read_floor_allows_never_mints(self, monkeypatch):
         """Mint only what the pre-hook gates: a span it lets run without a token
         gets none, whatever the reader says."""
-        def reader(span):
-            return {"operation_type": "merge", "pr_number": "5", "bound_flags": []}
-
-        assert _exact_text_mint_context(["Run `echo hello` now"], reader).context is None
+        monkeypatch.setattr("merge_guard_post.interpreter_command_context",
+                            lambda s: {"operation_type": "merge", "pr_number": "5", "bound_flags": []})
+        assert _exact_text_mint_context(["Run `echo hello` now"])[0].context is None
 
     def test_a_compound_span_is_refused_as_one(self, monkeypatch):
         monkeypatch.setattr("merge_guard_post.is_compound_destructive_command", lambda s: True)
-        assert _exact_text_mint_context([f"Run `{LIST_C}` now"], interpreter_command_context) == (
-            None, "compound_command")
+        assert _exact_text_mint_context([f"Run `{LIST_C}` now"])[0] == (None, "compound_command")
 
     def test_the_notice_names_no_target_it_cannot_read(self):
         notice = _mint_confirmation({"operation_type": "merge", "pr_number": "branch:X",
