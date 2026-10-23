@@ -118,11 +118,21 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers",
-        "claude_md_ambient: this test measures AMBIENT CLAUDE.md resolution "
-        "(git-anchor fallback, project-dir read contract) and must NOT receive "
-        "the suite-wide tmp redirect. Applying it to a module opts out every "
-        "test in it; apply to a single test only when that test's subject is "
-        "ambient resolution and its siblings' is not.",
+        "claude_md_ambient: this test's subject REQUIRES the ambient/"
+        "scrub-only CLAUDE.md world, so the suite-wide tmp redirect skips it "
+        "— the redirect would pre-empt or pollute exactly what the test "
+        "measures. Census classes (the parenthesized suffix tags at each "
+        "marker site resolve HERE): (a) resolution/absence/fall-through "
+        "outcome arms — the no-CLAUDE.md world is the precondition; "
+        "(b) created-file lifecycle arms — no seed at either location can "
+        "coexist with create-when-missing or neither-exists asserts; "
+        "(d) refusal-path subjects — the test engineers an ambient refusal "
+        "and asserts it; (f) CPD-presence sensitivity — behavior differs "
+        "when CLAUDE_PROJECT_DIR is declared at all; M3 marker-count "
+        "baselines — a count derives from the tree the test builds alone. "
+        "Applying the marker to a module opts out every test in it; apply "
+        "to a single test only when its subject needs the ambient world and "
+        "its siblings' does not.",
     )
 
     # RELOCATE THE MEMORY STORE BEFORE COLLECTION BEGINS.
@@ -388,8 +398,13 @@ def _isolate_claude_md_target(
     ``os.environ``/``os.path.expanduser`` rather than ``Path.home()``, which
     ``_isolate_config_root_to_tmp`` patches.
 
-    Opt-out: items marked ``claude_md_ambient`` measure AMBIENT resolution
-    (git-anchor fallback, project-dir read contract) and skip this redirect;
+    Opt-out: items marked ``claude_md_ambient`` need the ambient/scrub-only
+    CLAUDE.md world for their subject and skip this redirect. The census
+    classes behind each marker site — (a) absence/resolution outcomes,
+    (b) created-file lifecycle arms, (d) refusal-path subjects, (f)
+    CPD-presence sensitivity, M3 marker-count baselines — are DEFINED in
+    the marker's registration text in ``pytest_configure``; the suffix
+    tags at the marker sites resolve there.
     ``grep claude_md_ambient pact-plugin/tests`` lists every opt-out.
 
     Teardown interplay: this fixture's ``monkeypatch`` undo REMOVES the

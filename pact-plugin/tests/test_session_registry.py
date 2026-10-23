@@ -407,6 +407,13 @@ class TestRegistryTeachExamples:
         # REBIND (§11.3.1 class (c)): the emptiness census below counts this
         # test's own sandbox; the suite-wide redirect seeds tmp_path/CLAUDE.md
         # (legacy slot) at the parent, so the sandbox moves one level down.
+        # The narrowing is deliberate, not a coverage loss: what the old
+        # tmp_path-wide census could additionally have caught is an ambient
+        # CLAUDE.md write by the child, and that write stays refused by the
+        # production pytest guard (_refuse_ambient_target_under_pytest fires
+        # on the inherited PYTEST_CURRENT_TEST before resolution) — so the
+        # sandbox-scoped census keeps the test's subject, the example runs
+        # hermetically and writes nothing, without watching the parent.
         sandbox = tmp_path / "registry-example"
         sandbox.mkdir()
         env["CLAUDE_CONFIG_DIR"] = str(sandbox)
