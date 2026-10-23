@@ -283,3 +283,79 @@ def test_xargs_running_a_shell_on_its_stdin_items_is_refused(label, cmd):
 def test_xargs_that_runs_no_item_is_allowed(label, cmd):
     assert is_dangerous_command(cmd) is False
 
+
+# ---------------------------------------------------------------------------
+# A backtick in single quotes, or an escaped one, is literal text.
+# ---------------------------------------------------------------------------
+
+PUSH = "git push " + "--force origin"
+BRANCH_D = "git branch " + "-D"
+
+LITERAL_BACKTICK_ALLOW = [
+    ("escaped backtick in double quotes",
+     f'python3 dbg.py tree "{PUSH} \\`git branch --show-current\\`:feat"'),
+    ("backtick in single quotes",
+     f"python3 dbg.py tree '{PUSH} `git branch --show-current`:feat'"),
+    ("escaped backtick in prose",
+     f'python3 -B check.py a.txt "prose \\`: x\\` then {BRANCH_D} \\"feat\\""'),
+    ("escaped backtick in a module's argument",
+     f'python3 -m dbg tree "{PUSH} \\`git branch --show-current\\`:feat"'),
+    ("backtick in single quotes in a module's argument",
+     f"python3 -m dbg tree '{PUSH} `git branch --show-current`:feat'"),
+]
+
+EXECUTED_BACKTICK_DENY = [
+    ("unescaped backtick in double quotes runs",
+     f'python3 dbg.py tree "x `{BRANCH_D} feat` y"'),
+    ("unquoted backtick runs", f"python3 dbg.py tree `{BRANCH_D} feat`"),
+    ("double backslash leaves the backtick live",
+     f'python3 dbg.py tree "x \\\\`{BRANCH_D} feat\\\\` y"'),
+    ("unescaped backtick in a module's argument runs", f'python3 -m dbg tree "x `{BRANCH_D} feat` y"'),
+]
+
+
+@pytest.mark.parametrize("label,cmd", LITERAL_BACKTICK_ALLOW, ids=[r[0] for r in LITERAL_BACKTICK_ALLOW])
+def test_a_literal_backtick_in_a_script_argument_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+@pytest.mark.parametrize("label,cmd", EXECUTED_BACKTICK_DENY, ids=[r[0] for r in EXECUTED_BACKTICK_DENY])
+def test_an_executed_backtick_in_a_script_argument_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+# A script file's arguments are its argv data; a shell substitution in them runs first.
+SCRIPT_ARGV_ALLOW = [
+    ("prose naming eval and a branch delete",
+     f'python3 -B tools/check.py msg.txt "an eval of a printer that prints {BRANCH_D} feat"'),
+    ("prose naming system() and a merge", f'python3 tools/check.py "a note: {M} runs via system()"'),
+    ("single-quoted prose naming eval", f"python3 x.py 'eval of {M}'"),
+    ("a single-quoted substitution", f"python3 x.py '$({M})'"),
+    ("an escaped substitution", f'python3 x.py "\\$({M})"'),
+    ("an unquoted escaped backtick", f'python3 x.py \\`eval\\` "{M}"'),
+]
+
+SCRIPT_ARGV_DENY = [
+    ("a substitution in double quotes runs", f'python3 x.py "$({M})"'),
+    ("a backtick in double quotes runs", f'python3 x.py "`{M}`"'),
+    ("an unquoted substitution runs", f"python3 x.py $({M})"),
+    ("an unquoted backtick runs", f"python3 x.py `{M}`"),
+    ("a module's argument is searched whole", f'python3 -m tool "eval {M}"'),
+    ("a bundled module flag is not a script launch", f'python3 -Bm tool x.py "eval {M}"'),
+    ("a live substitution beside the prose", f'python3 x.py "$(which eval) {M}"'),
+    ("a program read from stdin is not a script launch", f'python3 - tools/x.py "eval {M}"'),
+    ("conservative: a flag value before the script is not placed",
+     f'python3 -W ignore tools/x.py "eval {M}"'),
+    ("conservative: a live backtick keeps a module's argument judged", f'python3 -m tool "x `ls` {M}"'),
+]
+
+
+@pytest.mark.parametrize("label,cmd", SCRIPT_ARGV_ALLOW, ids=[r[0] for r in SCRIPT_ARGV_ALLOW])
+def test_a_script_files_quoted_arguments_are_data(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+@pytest.mark.parametrize("label,cmd", SCRIPT_ARGV_DENY, ids=[r[0] for r in SCRIPT_ARGV_DENY])
+def test_a_substitution_or_unplaceable_launch_stays_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+

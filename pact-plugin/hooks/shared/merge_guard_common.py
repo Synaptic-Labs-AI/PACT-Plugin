@@ -7007,10 +7007,106 @@ def _interpreter_names_primitive(leg: str, head: str, tokens: list) -> bool:
         # is judged once, by the direct-call check over the whole command (calls and
         # statement forms given the command, any string-expression shape).
         return verdict
-    text = leg
+    text = _script_launch_surface(leg, tokens)
+    if text is None:
+        text = _blank_literal_backticks(leg)
     if head == "deno" and len(tokens) > 1 and tokens[1] == "eval":
-        text = re.sub(r"(?<![\w./-])deno\s+eval(?=\s|$)", "deno", leg, count=1)
+        text = re.sub(r"(?<![\w./-])deno\s+eval(?=\s|$)", "deno", text, count=1)
     return bool(_INTERPRETER_EXEC_PRIMITIVE_RE.search(text))
+
+
+# A script file an interpreter runs: a path with a directory part or a script extension.
+_SCRIPT_PATH_RE = re.compile(
+    r"/|\.(?:py|pyw|js|mjs|cjs|ts|mts|rb|pl|pm|php|lua|r|tcl|sh|bash)$", re.IGNORECASE
+)
+# An interpreter flag that gives the program on the command line, or reads it from stdin
+# (a bundled short flag counts when any of its letters does).
+_INLINE_PROGRAM_FLAG_RE = re.compile(r"^-$|^-[A-Za-z]*[cemErpx]|^--(?:eval|print|command|exec)\b")
+
+
+def _script_launch_surface(leg: str, tokens: list) -> str | None:
+    """For a script-file launch (`<interpreter> [flags] path/to/x.py ARGS…`), the leg up to
+    the script path with each ARG blanked: the arguments are the script's argv data. A
+    shell substitution in them (unquoted, or unescaped in double quotes) runs before the
+    script starts, so it stays. None when the leg is not a script-file launch the guard can
+    place (an inline-program flag, a non-flag word before a path, a quoted path)."""
+    head_at = leg.find(tokens[0])
+    if head_at < 0:
+        return None
+    pos = head_at + len(tokens[0])
+    for tok in tokens[1:]:
+        if tok.startswith("-"):
+            if _INLINE_PROGRAM_FLAG_RE.match(tok):
+                return None
+            pos = leg.find(tok, pos)
+            if pos < 0:
+                return None
+            pos += len(tok)
+            continue
+        if not _SCRIPT_PATH_RE.search(tok):
+            return None
+        at = leg.find(tok, pos)
+        if at < 0:
+            return None
+        end = at + len(tok)
+        return leg[:end] + _substitution_spans_only(leg[end:])
+    return None
+
+
+def _substitution_spans_only(text: str) -> str:
+    """`text` blanked except the shell substitutions that run: unquoted, or unescaped in
+    double quotes. Same length; an unterminated substitution keeps the rest (fail closed)."""
+    view = _mask_quotes_keeping_substitutions(text)
+    out = [" "] * len(view)
+    i, n = 0, len(view)
+    while i < n:
+        c = view[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "$" and i + 1 < n and view[i + 1] == "(":
+            _, end = _extract_dollar_paren(view, i)
+        elif c == "`":
+            _, end = _extract_backtick(view, i)
+        else:
+            i += 1
+            continue
+        end = min(end, n)
+        out[i:end] = view[i:end]
+        i = max(end, i + 1)
+    return "".join(out)
+
+
+def _blank_literal_backticks(text: str) -> str:
+    """`text` with each LITERAL backtick replaced by a space: one inside single quotes, or
+    one escaped by an odd backslash run (inside double quotes or unquoted). Such a backtick
+    runs nothing, so it is not an exec primitive. An unescaped backtick in double quotes or
+    unquoted opens a command substitution and stays. Same length as the input; an
+    unterminated quote leaves the rest as it is."""
+    if "`" not in text:
+        return text
+    out = list(text)
+    i, n, quote = 0, len(text), None
+    while i < n:
+        c = text[i]
+        if quote == "'":
+            if c == "'":
+                quote = None
+            elif c == "`":
+                out[i] = " "
+            i += 1
+            continue
+        if c == "\\":
+            if i + 1 < n and text[i + 1] == "`":
+                out[i + 1] = " "
+            i += 2
+            continue
+        if c == '"':
+            quote = None if quote == '"' else '"'
+        elif c == "'" and quote is None:
+            quote = "'"
+        i += 1
+    return "".join(out)
 
 
 _PHP_HEAD_RE = re.compile(r"^php[0-9.]*(?:-cgi)?$")
