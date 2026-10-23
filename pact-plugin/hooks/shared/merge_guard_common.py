@@ -5577,6 +5577,8 @@ def _blank_unquoted_print_words(span: str) -> str:
     holding a command or process substitution (it runs), read whole. A `${…}` other than
     a plain name keeps the rest of the span."""
     verb = re.match(r"\S+\s+", span)
+    if verb is None:
+        return span                           # a bare verb prints nothing
     out = [verb.group(0)]
     i, n = verb.end(), len(span)
     while i < n:

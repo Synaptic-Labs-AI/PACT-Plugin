@@ -522,6 +522,13 @@ PRINT_WORDS_DENY = [
 ]
 
 
+def test_a_bare_print_verb_is_left_as_it_is():
+    from shared.merge_guard_common import _blank_unquoted_print_words
+
+    assert _blank_unquoted_print_words("echo") == "echo"
+    assert _blank_unquoted_print_words("") == ""
+
+
 @pytest.mark.parametrize("label,cmd", PRINT_WORDS_ALLOW, ids=[r[0] for r in PRINT_WORDS_ALLOW])
 def test_words_an_echo_only_prints_are_allowed(label, cmd):
     assert is_dangerous_command(cmd) is False
