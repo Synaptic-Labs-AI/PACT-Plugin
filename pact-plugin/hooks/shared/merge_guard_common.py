@@ -7459,6 +7459,95 @@ def is_dangerous_command(command: str) -> bool:
     return _is_dangerous_at_depth(command, 0)
 
 
+_XARGS_HEAD_RE = re.compile(r"(?:^|(?<=[;&|(\n]))[ \t]*xargs(?![\w-])", re.MULTILINE)
+_XARGS_HEREDOC_RE = re.compile(
+    r"<<-?[ \t]*(?P<q>['\"]?)(?P<tag>\w+)(?P=q)[^\n]*\n(?P<body>.*?)\n?[ \t]*(?P=tag)[ \t]*(?:\n|$)",
+    re.DOTALL,
+)
+_XARGS_POSITIONAL_SCRIPT = ("$@", "${@}", "$1", "${1}", "$*", "${*}")
+_XARGS_MAX_DEPTH = 3
+
+
+def _xargs_shell_stdin_items(command: str) -> list[str]:
+    """The input items an `xargs` leg hands a shell to run, when its stdin is a here-string
+    or a heredoc: `xargs -I{} sh -c "{}" <<< "CMD"` runs CMD, as its pipe form
+    `echo CMD | xargs -I{} sh -c "{}"` does. The leg's command must be a POSIX shell with
+    -c whose script holds the replacement token (-I/-i, default `{}`) or a positional
+    (`"$@"`, `"$1"`). Items are the input's lines, or its NUL- or -d-separated parts.
+    An xargs flag the grammar does not know makes the leg abstain (no items)."""
+    if "xargs" not in command or "<<" not in command:
+        return []
+    view = _mask_shell_quotes(command)
+    grammar = _WRAPPER_GRAMMAR["xargs"]
+    items: list[str] = []
+    for head in _XARGS_HEAD_RE.finditer(view):
+        end = head.end()
+        while end < len(view) and view[end] not in ";&|\n":
+            end += 1
+        here = view.find("<<<", head.end(), end)
+        if here != -1:
+            feed_tokens = _shell_tokenize(command[here + 3:end])
+            if not feed_tokens:
+                continue
+            feed = feed_tokens[0]
+            argv_end = here
+        else:
+            doc = _XARGS_HEREDOC_RE.search(command, head.end())
+            if doc is None or doc.start() >= end:
+                continue
+            feed = doc.group("body")
+            argv_end = doc.start()
+        argv = _shell_tokenize(command[head.end():argv_end])
+        if not argv:
+            continue
+        token, delim, i = None, "\n", 0
+        while i < len(argv) and argv[i].startswith("-"):
+            flag = argv[i]
+            if flag == "--":
+                i += 1
+                break
+            if flag in ("-0", "--null"):
+                delim = "\0"
+            elif flag.startswith("-I"):
+                token = flag[2:] or (argv[i + 1] if i + 1 < len(argv) else None)
+                i += 0 if flag[2:] else 1
+            elif flag.startswith(("-i", "--replace")):
+                token = flag.partition("=")[2] if flag.startswith("--") else flag[2:]
+                token = token or "{}"
+            elif flag in ("-d", "--delimiter") or flag.startswith(("-d", "--delimiter=")):
+                value = (argv[i + 1] if i + 1 < len(argv) else "") if flag in ("-d", "--delimiter") \
+                    else flag.partition("=")[2] if flag.startswith("--") else flag[2:]
+                delim = {"\\n": "\n", "\\0": "\0", "\\t": "\t"}.get(value, value) or "\n"
+                i += 1 if flag in ("-d", "--delimiter") else 0
+            elif flag in grammar.value_flags:
+                i += 1
+            elif flag[:2] in grammar.value_flags or flag.partition("=")[0] in grammar.value_flags:
+                pass
+            elif flag not in grammar.bool_flags:
+                break
+            i += 1
+        if i >= len(argv) or argv[i].startswith("-"):
+            continue
+        shell = argv[i]
+        if not _POSIX_SHELL_HEADS_RE.match(shell.rsplit("/", 1)[-1]):
+            continue
+        script = None
+        for j in range(i + 1, len(argv)):
+            flag = argv[j]
+            if flag.startswith("-") and not flag.startswith("--") and "c" in flag[1:]:
+                script = argv[j + 1] if j + 1 < len(argv) else None
+                break
+            if flag in _SHELL_LONG_BOOL_FLAGS or (flag.startswith("-") and set(flag[1:]) <= _SHELL_SHORT_BOOL_FLAGS):
+                continue
+            break
+        if not script:
+            continue
+        if not ((token and token in script) or any(p in script for p in _XARGS_POSITIONAL_SCRIPT)):
+            continue
+        items += [part.strip() for part in feed.split(delim) if part.strip()]
+    return items
+
+
 def _is_dangerous_at_depth(command: str, depth: int) -> bool:
     """is_dangerous_command's body, with the recursion depth of the stdin-fed code check."""
     if depth:
@@ -7469,6 +7558,12 @@ def _is_dangerous_at_depth(command: str, depth: int) -> bool:
     # interpreter's program: it is refused when it passes a guarded command directly
     # to an exec primitive. The carriers below see it only as inert text.
     if _interpreter_code_runs_guarded(command, depth):
+        return True
+    # An xargs leg that runs a shell on each item of a here-string or heredoc runs those
+    # items as commands, the same as its `echo … | xargs sh -c` pipe form.
+    if depth < _XARGS_MAX_DEPTH and any(
+        _is_dangerous_at_depth(item, depth + 1) for item in _xargs_shell_stdin_items(command)
+    ):
         return True
 
     # Normalize bash line continuations (\<newline>) via the shared P0 SSOT before

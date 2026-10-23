@@ -249,3 +249,37 @@ def test_an_implicit_post_api_merge_mints_and_runs(label, cmd):
 def test_a_gh_api_field_named_merge_is_allowed(label, cmd):
     assert is_dangerous_command(cmd) is False
 
+
+# ---------------------------------------------------------------------------
+# xargs running a shell on here-string or heredoc input runs each item.
+# ---------------------------------------------------------------------------
+
+XARGS_SHELL_DENY = [
+    ("here-string, -I{}", f'xargs -I{{}} sh -c "{{}}" <<< "{M}"'),
+    ("here-string, -0", f"xargs -0 -I{{}} sh -c '{{}}' <<< \"{M}\""),
+    ("heredoc", f'xargs -I{{}} sh -c "{{}}" <<EOF\n{M}\nEOF'),
+    ("-i default token", f'xargs -i bash -c "{{}}" <<< "{M}"'),
+    ("bash -lc", f'xargs -I@ bash -lc "@" <<< "{M}"'),
+    ("$@ script", f"xargs -L1 sh -c '\"$@\"' _ <<< \"{M}\""),
+    ("second heredoc line", f'xargs -I{{}} sh -c "{{}}" <<EOF\necho hi\n{M}\nEOF'),
+]
+
+XARGS_SHELL_ALLOW = [
+    ("echo is not a shell", f'xargs -I{{}} echo "{{}}" <<< "{M}"'),
+    ("grep -c is not a shell", f'xargs -I{{}} grep -c "{{}}" notes.txt <<< "{M}"'),
+    ("shell without the token", f'xargs -I{{}} sh -c "echo done" <<< "{M}"'),
+    ("printf with the token", f'xargs -I{{}} printf "%s\\n" "{{}}" <<< "{M}"'),
+    ("token in single quotes of a script", "xargs -I{} sh -c 'echo $1' <<< \"x\""),
+    ("plain heredoc to xargs", "xargs -n1 echo <<EOF\na b\nEOF"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", XARGS_SHELL_DENY, ids=[r[0] for r in XARGS_SHELL_DENY])
+def test_xargs_running_a_shell_on_its_stdin_items_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", XARGS_SHELL_ALLOW, ids=[r[0] for r in XARGS_SHELL_ALLOW])
+def test_xargs_that_runs_no_item_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
