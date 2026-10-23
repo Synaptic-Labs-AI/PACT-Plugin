@@ -3609,8 +3609,9 @@ class _PyReach:
     the def's direct call sites (every definition in that scope when it has none), and
     a `global` or `nonlocal` write joins the caller at those call sites. A parameter
     reads the argument passed for it at every call of its function by name (its default
-    where a call omits it), and `returns` maps each such call to the values its
-    function returns."""
+    where a call omits it) and each element of a literal list `map(f, [...])` passes it,
+    a `for` target over a literal list reads each element, and `returns` maps each call
+    by name to the values its function returns."""
 
     def __init__(self, code: str, tree: ast.Module):
         self.code = code
@@ -3625,7 +3626,14 @@ class _PyReach:
                 self.functions.setdefault(node.name, []).append(node)
         self.calls: dict = {}          # function name -> call nodes, anywhere in the program
         self.returns: dict = {}        # call offset -> offsets of its function's return values
+        self.mapped: dict = {}         # function name -> literal elements `map(f, [...])` passes it
         for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "map"
+                and len(node.args) == 2 and isinstance(node.args[0], ast.Name) and node.args[0].id in self.functions
+                and self._literal_elements(node.args[1]) is not None
+            ):
+                self.mapped.setdefault(node.args[0].id, []).extend(self._literal_elements(node.args[1]) or [])
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in self.functions:
                 self.calls.setdefault(node.func.id, []).append(node)
                 self.returns[self._offset(node)] = frozenset(
@@ -3642,6 +3650,11 @@ class _PyReach:
             else:
                 lam, outer = self.lambdas.pop(0)
                 self._lambda(lam, outer)
+
+    @staticmethod
+    def _literal_elements(node) -> list | None:
+        """The elements of a list or tuple literal, or None (a `*` element reads nothing)."""
+        return list(node.elts) if isinstance(node, (ast.List, ast.Tuple)) else None
 
     # -- offsets ------------------------------------------------------------------------
     def _offset(self, node) -> int:
@@ -3845,8 +3858,9 @@ class _PyReach:
             carried = {name: frozenset(defs) for name, defs in self._bindings(st.body).items()}
             start = _env_union(env, carried)
             if not isinstance(st, ast.While):
+                elements = self._literal_elements(st.iter) if isinstance(st.target, ast.Name) else None
                 for name in self._target_names(st.target):
-                    start[name] = frozenset({_OPAQUE})
+                    start[name] = frozenset(self._offset(e) for e in elements) if elements else frozenset({_OPAQUE})
                     self._assign_defs(defs_scope, name, start[name])
             end = _env_union(env, self._block(st.body, start, scope, defs_scope))
             return _env_union(end, self._block(st.orelse, end, scope, defs_scope)) if st.orelse else end
@@ -3897,18 +3911,20 @@ class _PyReach:
         by position or keyword, else the parameter's default; _OPAQUE for a call that
         omits it with no default or passes `*args`/`**kwargs`, and for a `*`/`**`
         parameter. A function with no call by name gives its parameters nothing."""
-        args, calls = fn.args, self.calls.get(fn.name, [])
+        args, calls = fn.args, self.calls.get(fn.name, [])     # and `map(fn, [...])` elements
         positional = getattr(args, "posonlyargs", []) + args.args
         defaults = dict(zip([a.arg for a in positional][len(positional) - len(args.defaults):], args.defaults))
         defaults.update((a.arg, d) for a, d in zip(args.kwonlyargs, args.kw_defaults) if d is not None)
         out: dict = {name: set() for name in self._params(args)}
         for name in [a.arg for a in (args.vararg, args.kwarg) if a is not None]:
             out[name] = {_OPAQUE}
-        for call in calls:
-            unpacked = any(isinstance(a, ast.Starred) for a in call.args) or any(k.arg is None for k in call.keywords)
-            keywords = {k.arg: k.value for k in call.keywords}
+        invocations = [(call.args, call.keywords) for call in calls]
+        invocations += [([element], []) for element in self.mapped.get(fn.name, [])]
+        for given_args, given_keywords in invocations:
+            unpacked = any(isinstance(a, ast.Starred) for a in given_args) or any(k.arg is None for k in given_keywords)
+            keywords = {k.arg: k.value for k in given_keywords}
             for k, a in enumerate(positional + args.kwonlyargs):
-                given = call.args[k] if k < len(positional) and k < len(call.args) else keywords.get(a.arg, defaults.get(a.arg))
+                given = given_args[k] if k < len(positional) and k < len(given_args) else keywords.get(a.arg, defaults.get(a.arg))
                 out[a.arg].add(_OPAQUE if unpacked or given is None else self._offset(given))
         return {name: frozenset(defs) for name, defs in out.items()}
 
@@ -4530,9 +4546,10 @@ _DECLARATION_BEFORE_RE = re.compile(r"\b(?:function\s*\*?|def|sub)\s*&?\s*$")
 def _calls(code: str, head: str, name: str) -> list:
     """The argument offsets of each call `name(…)` (and, in ruby and perl, `name "…"`
     without parentheses) outside its own declaration; [] for a call with a spread or
-    splat argument."""
+    splat argument. A JS `[…].forEach(name)` / `.map(name)` calls it once per element."""
     view = _index_view(code, head)
-    out = []
+    out = [[e] for callee, elements in (_js_element_bindings(code, head)[1] if _JS_HEAD_RE.match(head) else ())
+           if callee == name for e in elements]
     for m in re.finditer(r"(?<![\w$.:>@])" + re.escape(name) + r"(?:\s*\(|[ \t]+(?=[\"'$\[]))", view):
         if _DECLARATION_BEFORE_RE.search(view[:m.start()]):
             continue
@@ -4554,6 +4571,78 @@ def _calls(code: str, head: str, name: str) -> list:
             k = k + 1 if view[k:k + 1] == "," else k
         out.append([] if any(view[a:a + 3] == "..." or view[a:a + 1] == "*" or view[a:a + 2] == "@_" for a in args) else args)
     return out
+
+
+def _literal_list_elements(view: str, i: int) -> list | None:
+    """The offsets of the elements of the `[…]` literal at view[i] (strings masked), or
+    None when it does not close (a `...` element reads nothing)."""
+    close = _matching(view, i) if view[i:i + 1] == "[" else -1
+    if close < 0:
+        return None
+    out, k = [], i + 1
+    while k < close:
+        k = _skip(r"\s*", view, k)
+        if k >= close:
+            break
+        out.append(k)
+        k = min(_expression_end(view, k), close)
+        k = k + 1 if view[k:k + 1] == "," else k
+    return out
+
+
+# A literal JS list handed element by element to a callback or a loop:
+# `[…].forEach(f)` / `.map(f)`, `[…].forEach((c) => …)` / `c => …` / `function (c) {…}`,
+# and `for (const c of […])`.
+_JS_EACH_RE = re.compile(r"\]\s*\.\s*(?:forEach|map)\s*\(\s*")
+_JS_FOR_OF_RE = re.compile(r"\bfor\s*\(\s*(?:const|let|var)\s+(?P<name>[A-Za-z_$][\w$]*)\s+of\s+(?=\[)")
+_JS_INLINE_CALLBACK_RE = re.compile(
+    r"(?:\(\s*(?P<p1>[A-Za-z_$][\w$]*)\s*\)|(?P<p2>[A-Za-z_$][\w$]*))\s*=>\s*"
+    r"|function\s*\(\s*(?P<p3>[A-Za-z_$][\w$]*)\s*\)\s*(?=\{)"
+)
+
+
+def _list_opening(view: str, close: int) -> int:
+    """The offset of the `[` that the `]` at view[close] closes, or -1."""
+    depth = 0
+    for k in range(close, -1, -1):
+        if view[k] in ")]}":
+            depth += 1
+        elif view[k] in "([{":
+            depth -= 1
+            if depth == 0:
+                return k if view[k] == "[" else -1
+    return -1
+
+
+@functools.lru_cache(maxsize=64)
+def _js_element_bindings(code: str, head: str) -> tuple:
+    """(name, body start, body end, element offsets) for each literal JS list whose
+    elements a loop or an inline callback binds to a name, and (callee name, element
+    offsets) pairs for a named callback (`[…].forEach(f)`)."""
+    view = _index_view(code, head)
+    bound, named = [], []
+    for m in _JS_EACH_RE.finditer(view):
+        opening = _list_opening(view, m.start())
+        elements = _literal_list_elements(view, opening) if opening >= 0 else None
+        if elements is None:
+            continue
+        callee = re.match(r"([A-Za-z_$][\w$]*)\s*\)", view[m.end():])
+        inline = _JS_INLINE_CALLBACK_RE.match(view, m.end())
+        if inline:
+            name = inline.group("p1") or inline.group("p2") or inline.group("p3")
+            start = inline.end()
+            bound.append((name, start, _expression_end(view, start), tuple(elements)))
+        elif callee:
+            named.append((callee.group(1), tuple(elements)))
+    for m in _JS_FOR_OF_RE.finditer(view):
+        elements = _literal_list_elements(view, m.end())
+        head_close = _matching(view, m.start() + view[m.start():].index("("))
+        if elements is None or head_close < 0:
+            continue
+        start = _skip(r"\s*", view, head_close + 1)
+        end = _matching(view, start) if view[start:start + 1] == "{" else _expression_end(view, start)
+        bound.append((m.group("name"), start, end, tuple(elements)))
+    return tuple(bound), tuple(named)
 
 
 def _param_values(head: str, code: str, i: int, name: str) -> list | None:
@@ -4587,7 +4676,13 @@ def _span_reaching(head: str, code: str, i: int, name: str) -> list:
     in the enclosing span, outward until one has any; an assignment only after the use
     leaves it unresolved. A JS `let`/`const` inside a block reaches only uses in that
     block. Ruby and lua spans come from their block keywords. A parameter of a named
-    function (JS, ruby, perl, lua, php, R) reads the arguments its calls pass for it."""
+    function (JS, ruby, perl, lua, php, R) reads the arguments its calls pass for it, and
+    a JS name a loop or inline callback binds to a literal list reads its elements."""
+    if _JS_HEAD_RE.match(head):
+        bound = [b for b in _js_element_bindings(code, head)[0] if b[0] == name and b[1] <= i < b[2]]
+        inner = max(bound, key=lambda b: b[1]) if bound else None
+        if inner and not any(inner[1] <= at < i for at in _assignments(code, head).get(name, ([], []))[0]):
+            return sorted(inner[3])
     if _JS_HEAD_RE.match(head) or _HELPER_HEAD_RE.match(head):
         passed = _param_values(head, code, i, name)
         if passed is not None:

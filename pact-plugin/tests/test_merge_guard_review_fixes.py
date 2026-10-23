@@ -1320,3 +1320,61 @@ def test_object_helper_merge_is_refused(label, cmd):
 @pytest.mark.parametrize("label,cmd", OBJECT_HELPER_ALLOW, ids=[r[0] for r in OBJECT_HELPER_ALLOW])
 def test_object_helper_view_is_allowed(label, cmd):
     assert is_dangerous_command(cmd) is False
+
+
+# Each element of a literal list handed to a callback or a loop is one call: a JS
+# [...].forEach(f) / .map(f), an inline arrow or function callback, a for...of loop,
+# Python map(f, [...]) and for c in [...]. A list with two merges runs two: refused, and
+# no single approval mints it. A non-literal or spread list reads nothing.
+EACH_HELPER_DENY = [
+    ('js forEach named', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh(c) { cp.execSync(c); }\n["' + M + ' 5"].forEach(sh);\nEOF2'),
+    ('js map named', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nconst sh = (c) => cp.execSync(c);\n["' + M + ' 5"].map(sh);\nEOF2'),
+    ('js forEach inline arrow', 'node - <<\'EOF2\'\nconst cp = require("child_process");\n["' + M + ' 5"].forEach(c => cp.execSync(c));\nEOF2'),
+    ('js forEach inline block', 'node - <<\'EOF2\'\nconst cp = require("child_process");\n["' + M + ' 5"].forEach((c) => { cp.execSync(c); });\nEOF2'),
+    ('js forEach inline function', 'node - <<\'EOF2\'\nconst cp = require("child_process");\n["' + M + ' 5"].forEach(function (c) { cp.execSync(c); });\nEOF2'),
+    ('js for-of', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfor (const c of ["' + M + ' 5"]) cp.execSync(c);\nEOF2'),
+    ('js for-of block helper', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh(c) { cp.execSync(c); }\nfor (const c of ["' + M + ' 5"]) {\n  sh(c);\n}\nEOF2'),
+    ('py map named', 'python3 - <<\'EOF2\'\nimport subprocess\ndef run(c):\n    subprocess.run(c)\nlist(map(run, [["gh", "pr", "merge", "5"]]))\nEOF2'),
+    ('py for-in direct', 'python3 - <<\'EOF2\'\nimport subprocess\nfor c in [["gh", "pr", "merge", "5"]]:\n    subprocess.run(c)\nEOF2'),
+    ('py for-in helper', 'python3 - <<\'EOF2\'\nimport subprocess\ndef run(c):\n    subprocess.run(c)\nfor c in [["gh", "pr", "merge", "5"]]:\n    run(c)\nEOF2'),
+    ('py for-in tuple', 'python3 - <<\'EOF2\'\nimport subprocess\nfor c in ("' + M + ' 5",):\n    subprocess.run(c, shell=True)\nEOF2'),
+    ('js forEach two merges', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh(c) { cp.execSync(c); }\n["' + M + ' 5", "' + M + ' 6"].forEach(sh);\nEOF2'),
+    ('py for-in two merges', 'python3 - <<\'EOF2\'\nimport subprocess\nfor c in [["gh", "pr", "merge", "5"], ["gh", "pr", "merge", "6"]]:\n    subprocess.run(c)\nEOF2'),
+]
+EACH_HELPER_ALLOW = [
+    ('js forEach named view', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh(c) { cp.execSync(c); }\n["gh pr view 5"].forEach(sh);\nEOF2'),
+    ('js map named view', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nconst sh = (c) => cp.execSync(c);\n["gh pr view 5"].map(sh);\nEOF2'),
+    ('js forEach inline arrow view', 'node - <<\'EOF2\'\nconst cp = require("child_process");\n["gh pr view 5"].forEach(c => cp.execSync(c));\nEOF2'),
+    ('js forEach inline block view', 'node - <<\'EOF2\'\nconst cp = require("child_process");\n["gh pr view 5"].forEach((c) => { cp.execSync(c); });\nEOF2'),
+    ('js forEach inline function view', 'node - <<\'EOF2\'\nconst cp = require("child_process");\n["gh pr view 5"].forEach(function (c) { cp.execSync(c); });\nEOF2'),
+    ('js for-of view', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfor (const c of ["gh pr view 5"]) cp.execSync(c);\nEOF2'),
+    ('js for-of block helper view', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh(c) { cp.execSync(c); }\nfor (const c of ["gh pr view 5"]) {\n  sh(c);\n}\nEOF2'),
+    ('py map named view', 'python3 - <<\'EOF2\'\nimport subprocess\ndef run(c):\n    subprocess.run(c)\nlist(map(run, [["gh", "pr", "view", "5"]]))\nEOF2'),
+    ('py for-in direct view', 'python3 - <<\'EOF2\'\nimport subprocess\nfor c in [["gh", "pr", "view", "5"]]:\n    subprocess.run(c)\nEOF2'),
+    ('py for-in helper view', 'python3 - <<\'EOF2\'\nimport subprocess\ndef run(c):\n    subprocess.run(c)\nfor c in [["gh", "pr", "view", "5"]]:\n    run(c)\nEOF2'),
+    ('py for-in tuple view', 'python3 - <<\'EOF2\'\nimport subprocess\nfor c in ("gh pr view 5",):\n    subprocess.run(c, shell=True)\nEOF2'),
+    ('js forEach non-literal list', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh(c) { cp.execSync(c); }\nlist.forEach(sh);\nEOF2'),
+    ('js forEach spread list', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh(c) { cp.execSync(c); }\n[...more, "gh pr view 5"].forEach(sh);\nEOF2'),
+    ('js loop variable reassigned', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfor (let c of ["' + M + ' 5"]) { c = "gh pr view 5"; cp.execSync(c); }\nEOF2'),
+    ('py for-in non-literal', "python3 - <<'EOF2'\nimport subprocess\nfor c in load():\n    subprocess.run(c)\nEOF2"),
+    ('py for-in merge only printed', 'python3 - <<\'EOF2\'\nimport subprocess\nfor c in [["gh", "pr", "merge", "5"]]:\n    print(c)\nsubprocess.run(["gh", "pr", "view", "5"])\nEOF2'),
+]
+
+
+@pytest.mark.parametrize("label,cmd", EACH_HELPER_DENY, ids=[r[0] for r in EACH_HELPER_DENY])
+def test_each_helper_merge_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", EACH_HELPER_ALLOW, ids=[r[0] for r in EACH_HELPER_ALLOW])
+def test_each_helper_view_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+@pytest.mark.parametrize("label", ["js forEach two merges", "py for-in two merges"])
+def test_a_literal_list_with_two_merges_is_compound_and_mints_nothing(label):
+    from shared.merge_guard_common import interpreter_command_context, is_compound_destructive_command
+
+    cmd = dict(EACH_HELPER_DENY)[label]
+    assert is_compound_destructive_command(cmd) is True
+    assert interpreter_command_context(cmd) is None
