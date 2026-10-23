@@ -246,6 +246,14 @@ BACKTICK_ROWS = {
     "bare": FORCE + "`git branch --show-current`",
     "in-bash-c": 'bash -c "' + FORCE + '`git branch --show-current`"',
 }
+INLINE_SUBSTITUTIONS = {
+    "evald-heredoc-assignment": 'eval "$(cat <<EOF\nx=`date`; ' + MERGE + '5\nEOF\n)"',
+    "evald-heredoc-flag-value": 'eval "$(cat <<EOF\n' + MERGE + '5 --body x`date`\nEOF\n)"',
+    "file-run-after-an-assignment": "printf '%s\\n' '" + MERGE + "5' > f; x=`date`; bash f",
+    "bash-c-with-a-trailing-argument": 'bash -c "' + FORCE + 'main" x`date`',
+    "two-substitutions-apart": 'bash -c "' + FORCE + 'main" `date` `whoami`',
+}
+SHELL_C = "bash -c '" + FORCE + "feat'"
 APPROVAL_STYLES = {
     "inline": lambda c: f"Run `{c}` now",
     "double-backtick": lambda c: f"Run `` {c} `` now",
@@ -288,6 +296,19 @@ class TestABacktickTargetRunsHoweverTheApprovalQuotesIt:
         command = BACKTICK_ROWS["bare"]
         ctx = _mint_styled(command, lambda c: f"Run `{c}` then check `gh pr view 5`")
         assert _runs(ctx, command)
+
+    @pytest.mark.parametrize("command", INLINE_SUBSTITUTIONS.values(), ids=INLINE_SUBSTITUTIONS.keys())
+    def test_a_substitution_after_a_word_runs_under_an_inline_approval(self, command):
+        assert not _runs(None, command)
+        assert _runs(_mint_styled(command, APPROVAL_STYLES["inline"]), command)
+
+    @pytest.mark.parametrize("style", [
+        pytest.param(lambda c: f"Use the `gh`s output, then run `{c}` now", id="word-after-a-span"),
+        pytest.param(lambda c: f"Run `{c}` (`gh pr view 5` shows it)", id="span-in-parentheses-after"),
+    ])
+    def test_prose_spans_beside_the_command_stay_apart(self, style):
+        assert not _runs(None, SHELL_C)
+        assert _runs(_mint_styled(SHELL_C, style), SHELL_C)
 
 
 class TestNothingElseRuns:

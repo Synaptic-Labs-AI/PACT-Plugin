@@ -538,22 +538,41 @@ _FENCED_BLOCK_RE = re.compile(r"```[^\n`]*\n(.*?)```", re.DOTALL)
 _BACKTICK_RUN_RE = re.compile(r"`+")
 
 
-def _closes_span(text: str, run: re.Match) -> bool:
-    """Whether the backtick `run` can close a code span: it ends the text or is
-    followed by whitespace or punctuation, where a backtick opening a substitution is
-    followed by the command it runs."""
-    return run.end() == len(text) or text[run.end()].isspace() or text[run.end()] in ".,;:!?)]}'\""
+def _ends_span(text: str, after: int) -> bool:
+    """Whether a backtick ending just before `after` can close a code span: it ends
+    the text or is followed by whitespace or punctuation, where a backtick opening a
+    substitution is followed by the command it runs."""
+    return after == len(text) or text[after].isspace() or text[after] in ".,;:!?)]}'\""
+
+
+def _substitution_span_end(text: str, early: int) -> int | None:
+    """The index of the backtick that closes a single-backtick code span whose
+    closer at `early` really opens a substitution (`origin `git branch``,
+    `x=`date``, `--body x`date``); None when the backticks after it do not read as
+    substitutions. Each substitution's closer follows a non-space character (a
+    backtick after a space opens a new span instead, as in prose), and the span's
+    closer is the first backtick after a substitution that is followed by
+    whitespace, punctuation or the end."""
+    ticks = [k for k in range(early, len(text)) if text[k] == "`"]
+    t = 0
+    while True:
+        if t + 1 >= len(ticks) or text[ticks[t + 1] - 1].isspace():
+            return None
+        if t + 2 >= len(ticks):
+            return None
+        nxt = ticks[t + 2]
+        if _ends_span(text, nxt + 1):
+            return nxt
+        t += 2
 
 
 def _code_spans(text: str) -> list[tuple[str, str]]:
     """(raw, content) for each fenced block and inline code span in `text`. An inline
     span opens with a run of backticks and closes at the next run of the same length
-    (`` cmd with `x` `` holds backticks). A single-backtick span whose content ends
-    in whitespace and whose closer is followed by a word was closed early by a
-    backtick opening a substitution (`git push --force origin `git branch
-    --show-current``): it runs to the first later backtick that leaves the
-    substitutions balanced and is followed by whitespace, punctuation or the end.
-    Inline spans may run over lines."""
+    (`` cmd with `x` `` holds backticks). A single-backtick span whose closer is
+    followed by a word was closed early by a backtick opening a substitution: it
+    runs on past each substitution to the backtick that closes it (see
+    _substitution_span_end). Inline spans may run over lines."""
     spans = [(m.group(0), m.group(1)) for m in _FENCED_BLOCK_RE.finditer(text)]
     rest = _FENCED_BLOCK_RE.sub(lambda m: " " * len(m.group(0)), text)
     runs = list(_BACKTICK_RUN_RE.finditer(rest))
@@ -566,16 +585,12 @@ def _code_spans(text: str) -> list[tuple[str, str]]:
             continue
         content = rest[opener.end():runs[close].start()]
         end = runs[close].end()
-        if len(opener.group(0)) == 1 and content[-1:].isspace() and not _closes_span(rest, runs[close]):
-            # The early closer opens a substitution: the span runs to the first later
-            # backtick that leaves the substitutions balanced and closes a span.
-            for k in range(close + 1, len(runs)):
-                inner = rest[opener.end():runs[k].end() - 1]
-                if inner.count("`") % 2 == 0 and _closes_span(rest, runs[k]):
-                    content, end, close = inner, runs[k].end(), k
-                    break
+        if len(opener.group(0)) == 1 and not _ends_span(rest, end):
+            last = _substitution_span_end(rest, runs[close].start())
+            if last is not None:
+                content, end = rest[opener.end():last], last + 1
         spans.append((text[opener.start():end], content))
-        i = close + 1
+        i = next((k for k in range(close + 1, len(runs)) if runs[k].start() >= end), len(runs))
     return spans
 
 
