@@ -793,6 +793,75 @@ def test_a_shell_assignment_that_runs_is_refused(label, cmd):
     assert is_dangerous_command(cmd) is True
 
 
+# Name resolution follows Python scope: the definitions that may reach a use, per scope,
+# with branches and loops joined, parameters and loop targets unreadable, and a free name
+# read at its def's call sites. Rows: the name-resolution spec's DENY and ALLOW sets.
+M = "gh pr " + "merge"
+SCOPED_NAME_DENY = [
+    ('reuse', 'python3 - <<\'EOF2\'\nimport subprocess, sys\ncmd = ["gh", "pr", "view", "5"]\nsubprocess.run(cmd)\ncmd = ["gh", "pr", "merge", "5", "--squash"]\nsubprocess.run(cmd)\nEOF2'),
+    ('if/else', 'python3 - <<\'EOF2\'\nimport subprocess, sys\nif len(sys.argv) > 1:\n    cmd = ["gh", "pr", "merge", "5", "--squash"]\nelse:\n    cmd = ["gh", "pr", "view", "5"]\nsubprocess.run(cmd)\nEOF2'),
+    ('free variable, called after', 'python3 - <<\'EOF2\'\nimport subprocess, sys\ncmd = ["gh", "pr", "merge", "5", "--squash"]\ndef go():\n    subprocess.run(cmd)\ngo()\nEOF2'),
+    ('def before the assignment', 'python3 - <<\'EOF2\'\nimport subprocess, sys\ndef go():\n    subprocess.run(cmd)\ncmd = ["gh", "pr", "merge", "5", "--squash"]\ngo()\nEOF2'),
+    ('loop local', 'python3 - <<\'EOF2\'\nimport subprocess, sys\nfor n in [5]:\n    cmd = ["gh", "pr", "merge", str(n)]\n    subprocess.run(cmd)\nEOF2'),
+    ('function-local reuse', 'python3 - <<\'EOF2\'\nimport subprocess, sys\ndef f():\n    cmd = ["gh", "pr", "view", "5"]\n    subprocess.run(cmd)\n    cmd = ["gh", "pr", "merge", "5", "--squash"]\n    subprocess.run(cmd)\nf()\nEOF2'),
+    ('try/except', 'python3 - <<\'EOF2\'\nimport subprocess, sys\ntry:\n    cmd = ["gh", "pr", "merge", "5", "--squash"]\nexcept Exception:\n    cmd = ["gh", "pr", "view", "5"]\nsubprocess.run(cmd)\nEOF2'),
+    ('closure', 'python3 - <<\'EOF2\'\nimport subprocess, sys\ndef outer():\n    cmd = ["gh", "pr", "merge", "5", "--squash"]\n    def inner():\n        subprocess.run(cmd)\n    inner()\nouter()\nEOF2'),
+    ('shell string', 'python3 - <<\'EOF2\'\nimport subprocess, sys\nc = "' + M + ' 5 --squash"\nsubprocess.run(c, shell=True)\nEOF2'),
+    ('cmd = cmd + [...]', 'python3 - <<\'EOF2\'\nimport subprocess, sys\ncmd = ["gh", "pr", "merge"]\ncmd = cmd + ["5"]\nsubprocess.run(cmd)\nEOF2'),
+    ('annotated', 'python3 - <<\'EOF2\'\nimport subprocess, sys\ncmd: list = ["gh", "pr", "merge", "5", "--squash"]\nsubprocess.run(cmd)\nEOF2'),
+    ('while', 'python3 - <<\'EOF2\'\nimport subprocess, sys\nwhile True:\n    cmd = ["gh", "pr", "merge", "5", "--squash"]\n    subprocess.run(cmd)\n    break\nEOF2'),
+    ('annotated assignment at module level', 'python3 - <<\'EOF2\'\nimport subprocess\ncmd: list[str] = ["gh", "pr", "merge", "5"]\nsubprocess.run(cmd)\nEOF2'),
+    ('global written by a helper called before the run', 'python3 - <<\'EOF2\'\nimport subprocess\ndef setup():\n    global cmd\n    cmd = ["gh", "pr", "merge", "5", "--squash"]\ncmd = ["gh", "pr", "view", "5"]\nsetup()\nsubprocess.run(cmd)\nEOF2'),
+    ('merge assigned in an except handler',
+     "python3 - <<'EOF'\nimport subprocess\ntry:\n    cmd = ['gh', 'pr', 'view', '5']\nexcept Exception:\n    cmd = ['gh', 'pr', '" + 'merge' + "', '5']\nsubprocess.run(cmd)\nEOF"),
+    ('nonlocal written by a helper called before the run', 'python3 - <<\'EOF2\'\nimport subprocess\ndef outer():\n    def pick():\n        nonlocal cmd\n        cmd = ["gh", "pr", "merge", "5"]\n    cmd = ["gh", "pr", "view", "5"]\n    pick()\n    subprocess.run(cmd)\nouter()\nEOF2'),
+]
+SCOPED_NAME_ALLOW = [
+    ('merge printed, then reassigned', 'python3 - <<\'EOF2\'\nimport subprocess, sys\ncmd = ["gh", "pr", "merge", "5", "--squash"]\nprint(cmd)\ncmd = ["gh", "pr", "view", "5"]\nsubprocess.run(cmd)\nEOF2'),
+    ('free variable whose call site sees view', 'python3 - <<\'EOF2\'\nimport subprocess, sys\ncmd = ["gh", "pr", "merge", "5", "--squash"]\nprint(cmd)\ncmd = ["gh", "pr", "view", "5"]\ndef go():\n    subprocess.run(cmd)\ngo()\nEOF2'),
+    ('two defs', 'python3 - <<\'EOF2\'\nimport subprocess, sys\ndef a():\n    cmd = ["gh", "pr", "merge", "5", "--squash"]\n    print(cmd)\ndef b():\n    cmd = ["gh", "pr", "view", "5"]\n    subprocess.run(cmd)\nb()\nEOF2'),
+    ('lambda parameter', 'python3 - <<\'EOF2\'\nimport subprocess, sys\ncmd = ["gh", "pr", "merge", "5", "--squash"]\nprint(cmd)\nf = lambda cmd: subprocess.run(cmd)\nf(["gh", "pr", "view", "5"])\nEOF2'),
+    ('comprehension variable', 'python3 - <<\'EOF2\'\nimport subprocess, sys\nc = ["gh", "pr", "merge", "5", "--squash"]\nprint(c)\n[subprocess.run(c) for c in (["gh", "pr", "view", "5"],)]\nEOF2'),
+    ('for target', 'python3 - <<\'EOF2\'\nimport subprocess, sys\ncmd = ["gh", "pr", "merge", "5", "--squash"]\nprint(cmd)\nfor cmd in (["gh", "pr", "view", "5"],):\n    subprocess.run(cmd)\nEOF2'),
+    ('with target', 'python3 - <<\'EOF2\'\nimport subprocess, sys\ncmd = ["gh", "pr", "merge", "5", "--squash"]\nprint(cmd)\nwith open(\'/dev/null\') as cmd:\n    pass\ncmd = ["gh", "pr", "view", "5"]\nsubprocess.run(cmd)\nEOF2'),
+    ('parameter of a helper', 'python3 - <<\'EOF2\'\nimport subprocess, sys\nimport shutil\ncmd = ["gh", "pr", "merge", "5", "--squash"]\nprint(cmd)\ndef run(cmd):\n    return subprocess.run(cmd)\nrun(["gh", "pr", "view", "5"])\nrun(["gh", "pr", "list"])\nEOF2'),
+    ('dead if', 'python3 - <<\'EOF2\'\nimport subprocess, sys\ncmd = ["gh", "pr", "merge", "5", "--squash"]\nif False:\n    pass\nprint(cmd)\ncmd = ["gh", "pr", "view", "5"]\nsubprocess.run(cmd)\nEOF2'),
+    ('class attribute', 'python3 - <<\'EOF2\'\nimport subprocess, sys\nclass K:\n    cmd = ["gh", "pr", "merge", "5", "--squash"]\ncmd = ["gh", "pr", "view", "5"]\nsubprocess.run(cmd)\nEOF2'),
+    ('class attribute after the module assignment',
+     "python3 - <<'EOF'\nimport subprocess\ncmd = ['gh', 'pr', 'view', '5']\nclass K:\n    cmd = ['gh', 'pr', '" + 'merge' + "', '5']\nsubprocess.run(cmd)\nEOF"),
+    ('module merge printed, helper parameter run', 'python3 - <<\'EOF2\'\nimport subprocess\ncmd = "' + M + ' 5 --squash"\nprint("suggest:", cmd)\ndef run(cmd):\n    return subprocess.run(cmd, shell=True, capture_output=True)\nrun("gh pr view 5")\nEOF2'),
+    ('merge local to another function', 'python3 - <<\'EOF2\'\nimport subprocess\ndef show():\n    cmd = "' + M + ' 5 --squash"\n    print(cmd)\ndef check():\n    subprocess.run(cmd)\ncmd = ["gh", "pr", "view", "5"]\ncheck()\nEOF2'),
+    ('shadowing row 1', 'python3 - <<\'EOF2\'\nimport subprocess\ndef show():\n    cmd = ["gh", "pr", "merge", "5", "--squash"]\n    print(" ".join(cmd))\ndef check():\n    subprocess.run(cmd)\ncmd = ["gh", "pr", "view", "5"]\ncheck()\nEOF2'),
+    ('shadowing row 2', 'python3 - <<\'EOF2\'\nimport subprocess\nMERGE = ["gh", "pr", "merge", "5", "--squash"]\nprint("next step:", MERGE)\ndef run(cmd):\n    return subprocess.run(cmd, capture_output=True, text=True)\nrun(["gh", "pr", "checks", "5"])\nEOF2'),
+    ('shadowing row 3', 'python3 - <<\'EOF2\'\nimport subprocess\ncmd = ["gh", "pr", "merge", "5", "--squash"]\nprint(cmd)\ndef run(cmd):\n    subprocess.run(cmd)\nrun(["gh", "pr", "view", "5"])\nEOF2'),
+    ('shadowing row 4', 'python3 - <<\'EOF2\'\nimport subprocess\nfor cmd in (["gh", "pr", "view", "5"], ["gh", "pr", "checks", "5"]):\n    subprocess.run(cmd)\ncmd = ["gh", "pr", "merge", "5"]\nprint(cmd)\nEOF2'),
+    ('shadowing row 5', 'python3 -c \'import subprocess; cmd = ["gh","pr","view","5"]; subprocess.run(cmd)  # cmd = ["gh","pr","merge","5"]\''),
+]
+
+
+@pytest.mark.parametrize("label,cmd", SCOPED_NAME_DENY, ids=[r[0] for r in SCOPED_NAME_DENY])
+def test_a_merge_reaching_the_use_in_scope_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", SCOPED_NAME_ALLOW, ids=[r[0] for r in SCOPED_NAME_ALLOW])
+def test_a_merge_not_reaching_the_use_in_scope_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+def test_a_program_that_does_not_parse_does_not_raise():
+    """A SyntaxError leaves the scope rule unused; the reader still answers."""
+    assert is_dangerous_command(f"python3 - <<'EOF'\nimport os\nc = \"{D}\"\nos.system(c)\nnot python (\nEOF") is True
+
+
+def test_reaching_definitions_use_character_offsets_on_non_ascii_lines():
+    import shared.merge_guard_common as mgc
+
+    code = 'n = "é ü"; c = ["gh"]; run(c)'
+    use = code.rindex("c)")
+    assert mgc._named_values_at("python3", code, use) == ([code.index('["gh"]')], use + 1)
+
+
 # shell_c_string: the string a POSIX shell leg runs with -c, for minting an approval of
 # a guarded command inside it.
 SHELL_C_STRING_ROWS = [

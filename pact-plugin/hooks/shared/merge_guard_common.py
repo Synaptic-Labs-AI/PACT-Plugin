@@ -182,6 +182,7 @@ security check; the primary check is I-3 TTL expiry (bounded by TOKEN_TTL).
 
 from __future__ import annotations
 
+import ast
 import bisect
 import functools
 import glob
@@ -3217,13 +3218,352 @@ def _assignments(code: str, head: str = "") -> dict[str, tuple[list[int], list[i
     return found
 
 
+# A binding whose value cannot be read: a parameter, a loop or `with` target, an import,
+# a def or class name, a tuple target.
+_OPAQUE = -1
+_PY_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+_PY_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+_PY_TRY = tuple(t for t in (getattr(ast, "Try", None), getattr(ast, "TryStar", None)) if t)
+_PY_MATCH = getattr(ast, "Match", ())
+
+
+def _env_union(*envs: dict) -> dict:
+    """Per name, the union of its definitions across environments."""
+    out: dict = {}
+    for env in envs:
+        for name, defs in env.items():
+            out[name] = out.get(name, frozenset()) | defs
+    return out
+
+
+class _PyScope:
+    """A Python scope: the module, a def or a lambda (a class body is processed inside
+    the scope that encloses it)."""
+
+    def __init__(self, node, parent):
+        self.node, self.parent = node, parent
+        self.defs: dict = {}            # name -> every definition anywhere in the scope
+        self.locals: set = set()
+        self.free_memo: dict = {}
+
+
+class _PyReach:
+    """For a parsed Python program, the definitions that may reach each name it reads,
+    keyed by the read's character offset: reaching definitions per scope, in one forward
+    pass per scope. A literal assignment replaces a name's definitions, an extension
+    (`+=`, `x = x + …`, `.append`) keeps them, branches and loops take the union, and
+    an unreadable binding is _OPAQUE. A name free in a def reads the enclosing scope at
+    the def's direct call sites (every definition in that scope when it has none), and
+    a `global` or `nonlocal` write joins the caller at those call sites."""
+
+    def __init__(self, code: str, tree: ast.Module):
+        self.code = code
+        self.starts = [0] + [m.end() for m in re.finditer(r"\r\n|\r|\n", code)]
+        self.uses: dict = {}
+        self.callsites: dict = {}      # (id(scope), function name) -> [environment]
+        self.pending: list = []        # (def node, enclosing scope)
+        self.lambdas: list = []        # (lambda node, enclosing scope)
+        self.functions: dict = {}      # name -> def nodes
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self.functions.setdefault(node.name, []).append(node)
+        self.outer_writes = {id(fn): self._outer_writes(fn) for fns in self.functions.values() for fn in fns}
+        module = _PyScope(tree, None)
+        self._block(tree.body, {}, module, module)
+        while self.pending or self.lambdas:
+            if self.pending:
+                fn, outer = self.pending.pop(0)
+                self._function(fn, outer)
+            else:
+                lam, outer = self.lambdas.pop(0)
+                self._lambda(lam, outer)
+
+    # -- offsets ------------------------------------------------------------------------
+    def _offset(self, node) -> int:
+        start = self.starts[node.lineno - 1]
+        line = self.code[start:start + node.col_offset]
+        if line.isascii():
+            return start + node.col_offset
+        return start + len(line.encode()[:node.col_offset].decode("utf-8", "ignore"))
+
+    # -- what a scope binds ---------------------------------------------------------------
+    @staticmethod
+    def _target_names(target) -> list:
+        if isinstance(target, ast.Name):
+            return [target.id]
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return [n for elt in target.elts for n in _PyReach._target_names(elt)]
+        if isinstance(target, ast.Starred):
+            return _PyReach._target_names(target.value)
+        return []
+
+    @staticmethod
+    def _own_nodes(stmts):
+        """Every node under these statements outside nested defs, lambdas and classes
+        (whose names are yielded, not their bodies)."""
+        stack = list(stmts)
+        while stack:
+            node = stack.pop()
+            yield node
+            if isinstance(node, _PY_SCOPES):
+                continue
+            stack.extend(ast.iter_child_nodes(node))
+
+    def _bindings(self, stmts) -> dict:
+        """name -> the definitions these statements give it, outside nested scopes."""
+        out: dict = {}
+        for node in self._own_nodes(stmts):
+            if isinstance(node, ast.Assign):
+                for t in node.targets:
+                    for name in self._target_names(t):
+                        out.setdefault(name, set()).add(self._offset(node.value) if isinstance(t, ast.Name) else _OPAQUE)
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                for name in self._target_names(node.target):
+                    out.setdefault(name, set()).add(self._offset(node.value))
+            elif isinstance(node, (ast.For, ast.AsyncFor)):
+                for name in self._target_names(node.target):
+                    out.setdefault(name, set()).add(_OPAQUE)
+            elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+                for name in self._target_names(node.optional_vars):
+                    out.setdefault(name, set()).add(_OPAQUE)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    out.setdefault((alias.asname or alias.name).split(".")[0], set()).add(_OPAQUE)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) or (
+                isinstance(node, ast.ExceptHandler) and node.name
+            ):
+                out.setdefault(node.name, set()).add(_OPAQUE)
+            elif isinstance(node, ast.NamedExpr):
+                out.setdefault(node.target.id, set()).add(self._offset(node.value))
+        return out
+
+    def _outer_writes(self, fn) -> dict:
+        """For a def's `global` / `nonlocal` names, the definitions it writes to them."""
+        declared = {n for node in self._own_nodes(fn.body) if isinstance(node, (ast.Global, ast.Nonlocal)) for n in node.names}
+        written = self._bindings(fn.body)
+        return {name: frozenset(written.get(name, ())) for name in declared}
+
+    # -- lookups --------------------------------------------------------------------------
+    def _lookup(self, name: str, env: dict, scope: _PyScope) -> frozenset:
+        if name in env:
+            return env[name]
+        if scope.parent is None or name in scope.locals:
+            return frozenset()
+        return self._free(scope, name)
+
+    def _free(self, scope: _PyScope, name: str) -> frozenset:
+        """A name free in a def or lambda: the enclosing scope at the def's direct call
+        sites, or every definition of it there when it has none."""
+        if name in scope.free_memo:
+            return scope.free_memo[name]
+        scope.free_memo[name] = frozenset()             # a cycle reads as nothing
+        outer = scope.parent
+        envs = [] if isinstance(scope.node, ast.Lambda) else self.callsites.get((id(outer), scope.node.name), [])
+        if envs:
+            found = frozenset().union(*(self._lookup(name, env, outer) for env in envs))
+        else:
+            found = frozenset(outer.defs.get(name, ()))
+            if not found and outer.parent is not None and name not in outer.locals:
+                found = self._free(outer, name)
+        scope.free_memo[name] = found
+        return found
+
+    # -- expressions ----------------------------------------------------------------------
+    def _read(self, node, env: dict, scope: _PyScope, opaque=frozenset()) -> tuple[list, list]:
+        """Record the definitions reaching each name read under node; return the names of
+        the functions it calls directly, and the walrus bindings it makes."""
+        called, stack = [], [(node, opaque)]
+        walrus = []
+        while stack:
+            n, bound = stack.pop()
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+                self.uses[self._offset(n)] = frozenset({_OPAQUE}) if n.id in bound else self._lookup(n.id, env, scope)
+                continue
+            if isinstance(n, ast.Lambda):
+                stack.extend((d, bound) for d in n.args.defaults + [d for d in n.args.kw_defaults if d is not None])
+                self.lambdas.append((n, scope))
+                continue
+            if isinstance(n, _PY_COMPREHENSIONS):
+                names = {x for g in n.generators for x in self._target_names(g.target)}
+                stack.extend((c, bound | names) for c in ast.iter_child_nodes(n))
+                continue
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
+                called.append(n.func.id)
+            if isinstance(n, ast.NamedExpr):
+                walrus.append((n.target.id, self._offset(n.value)))
+            stack.extend((c, bound) for c in ast.iter_child_nodes(n))
+        for name in called:
+            if name in self.functions:
+                self.callsites.setdefault((id(scope), name), []).append(dict(env))
+        return called, walrus
+
+    def _effects(self, read, env: dict) -> dict:
+        """Apply a statement's walrus bindings and its callees' global/nonlocal writes."""
+        called, walrus = read
+        for name, off in walrus:
+            env[name] = frozenset({off})
+        for callee in called:
+            for fn in self.functions.get(callee, []):
+                for name, defs in self.outer_writes[id(fn)].items():
+                    env[name] = env.get(name, frozenset()) | defs
+        return env
+
+    # -- statements -----------------------------------------------------------------------
+    def _block(self, stmts, env: dict, scope: _PyScope, defs_scope: _PyScope) -> dict:
+        env = dict(env)
+        for st in stmts:
+            env = self._stmt(st, env, scope, defs_scope)
+        return env
+
+    def _assign_defs(self, defs_scope: _PyScope, name: str, defs) -> None:
+        defs_scope.defs.setdefault(name, set()).update(defs)
+
+    def _stmt(self, st, env: dict, scope: _PyScope, defs_scope: _PyScope) -> dict:
+        if isinstance(st, ast.Assign):
+            read = self._read(st.value, env, scope)
+            for t in st.targets:
+                if not isinstance(t, ast.Name):
+                    self._read(t, env, scope)
+            value, rhs = self._offset(st.value), st.value
+            extended = (
+                rhs.left.id
+                if isinstance(rhs, ast.BinOp) and isinstance(rhs.op, ast.Add) and isinstance(rhs.left, ast.Name)
+                else None
+            )
+            for t in st.targets:
+                for name in self._target_names(t):
+                    if extended == name and isinstance(t, ast.Name):
+                        continue                         # `x = x + …` extends x
+                    defs = frozenset({value}) if isinstance(t, ast.Name) else frozenset({_OPAQUE})
+                    env[name] = defs
+                    self._assign_defs(defs_scope, name, defs)
+            return self._effects(read, env)
+        if isinstance(st, ast.AnnAssign):
+            read = self._read(st.value, env, scope) if st.value is not None else ([], [])
+            if st.value is not None and isinstance(st.target, ast.Name):
+                env[st.target.id] = frozenset({self._offset(st.value)})
+                self._assign_defs(defs_scope, st.target.id, env[st.target.id])
+            return self._effects(read, env)
+        if isinstance(st, ast.AugAssign):
+            return self._effects(self._read(st, env, scope), env)   # extends: definitions kept
+        if isinstance(st, (ast.Import, ast.ImportFrom)):
+            for alias in st.names:
+                name = (alias.asname or alias.name).split(".")[0]
+                env[name] = frozenset({_OPAQUE})
+                self._assign_defs(defs_scope, name, env[name])
+            return env
+        if isinstance(st, ast.Delete):
+            for t in st.targets:
+                for name in self._target_names(t):
+                    env[name] = frozenset()
+            return env
+        if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for d in st.decorator_list + st.args.defaults + [d for d in st.args.kw_defaults if d is not None]:
+                self._read(d, env, scope)
+            env[st.name] = frozenset({_OPAQUE})
+            self._assign_defs(defs_scope, st.name, env[st.name])
+            self.pending.append((st, scope))
+            return env
+        if isinstance(st, ast.ClassDef):
+            for d in st.decorator_list + st.bases + [k.value for k in st.keywords]:
+                self._read(d, env, scope)
+            self._block(st.body, env, scope, _PyScope(st, scope))   # class attributes stay in the class
+            env[st.name] = frozenset({_OPAQUE})
+            self._assign_defs(defs_scope, st.name, env[st.name])
+            return env
+        if isinstance(st, ast.If):
+            self._effects(self._read(st.test, env, scope), env)
+            return _env_union(self._block(st.body, env, scope, defs_scope), self._block(st.orelse, env, scope, defs_scope))
+        if isinstance(st, (ast.For, ast.AsyncFor, ast.While)):
+            head = st.test if isinstance(st, ast.While) else st.iter
+            self._effects(self._read(head, env, scope), env)
+            carried = {name: frozenset(defs) for name, defs in self._bindings(st.body).items()}
+            start = _env_union(env, carried)
+            if not isinstance(st, ast.While):
+                for name in self._target_names(st.target):
+                    start[name] = frozenset({_OPAQUE})
+                    self._assign_defs(defs_scope, name, start[name])
+            end = _env_union(env, self._block(st.body, start, scope, defs_scope))
+            return _env_union(end, self._block(st.orelse, end, scope, defs_scope)) if st.orelse else end
+        if isinstance(st, (ast.With, ast.AsyncWith)):
+            for item in st.items:
+                self._effects(self._read(item.context_expr, env, scope), env)
+                for name in self._target_names(item.optional_vars) if item.optional_vars is not None else []:
+                    env[name] = frozenset({_OPAQUE})
+                    self._assign_defs(defs_scope, name, env[name])
+            return self._block(st.body, env, scope, defs_scope)
+        if _PY_TRY and isinstance(st, _PY_TRY):
+            body = self._block(st.body, env, scope, defs_scope)
+            ends = [body]
+            for handler in st.handlers:
+                start = _env_union(env, body)
+                if handler.name:
+                    start[handler.name] = frozenset({_OPAQUE})
+                ends.append(self._block(handler.body, start, scope, defs_scope))
+            if st.orelse:
+                ends.append(self._block(st.orelse, body, scope, defs_scope))
+            joined = _env_union(env, *ends)
+            return self._block(st.finalbody, joined, scope, defs_scope) if st.finalbody else joined
+        if _PY_MATCH and isinstance(st, _PY_MATCH):
+            self._effects(self._read(st.subject, env, scope), env)
+            ends = [env]
+            for case in st.cases:
+                start = dict(env)
+                for node in ast.walk(case.pattern):
+                    for name in [getattr(node, "name", None)] + list(getattr(node, "names", []) or []):
+                        if isinstance(name, str):
+                            start[name] = frozenset({_OPAQUE})
+                if case.guard is not None:
+                    self._read(case.guard, start, scope)
+                ends.append(self._block(case.body, start, scope, defs_scope))
+            return _env_union(*ends)
+        if isinstance(st, (ast.Global, ast.Nonlocal, ast.Pass, ast.Break, ast.Continue)):
+            return env
+        return self._effects(self._read(st, env, scope), env)
+
+    # -- defs and lambdas -----------------------------------------------------------------
+    @staticmethod
+    def _params(args) -> list:
+        names = [a.arg for a in getattr(args, "posonlyargs", []) + args.args + args.kwonlyargs]
+        return names + [a.arg for a in (args.vararg, args.kwarg) if a is not None]
+
+    def _function(self, fn, outer: _PyScope) -> None:
+        scope = _PyScope(fn, outer)
+        declared = set(self.outer_writes[id(fn)])
+        params = self._params(fn.args)
+        scope.locals = (set(params) | set(self._bindings(fn.body))) - declared
+        env = {name: frozenset({_OPAQUE}) for name in params}
+        self._block(fn.body, env, scope, scope)
+
+    def _lambda(self, lam, outer: _PyScope) -> None:
+        scope = _PyScope(lam, outer)
+        scope.locals = set(self._params(lam.args))
+        self._read(lam.body, {name: frozenset({_OPAQUE}) for name in scope.locals}, scope)
+
+
+@functools.lru_cache(maxsize=64)
+def _python_reaching(code: str) -> dict | None:
+    """The definitions reaching each name a Python program reads (see _PyReach), or
+    None when it does not parse."""
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError, MemoryError):
+        return None
+    return _PyReach(code, tree).uses
+
+
 def _named_values_at(head: str, code: str, i: int) -> tuple[list[int], int] | None:
     """For a bare-name argument at code[i], (the offsets of the values of the name's
     assignments that may reach the use, offset past the name); None when code[i] is not
-    a bare name or no assignment with a value reaches it."""
+    a bare name or no assignment with a value reaches it. A Python program that parses
+    is resolved by scope (_PyReach)."""
     named = _BARE_NAME_ARG_RE.match(code, i)
     if not named:
         return None
+    reaching = _python_reaching(code) if _PYTHON_HEAD_RE.match(head) else None
+    if reaching is not None:
+        values = sorted(v for v in reaching.get(i, ()) if v != _OPAQUE)
+        return (values, named.end()) if values else None
     starts, values = _assignments(code, head).get(named.group("name"), ([], []))
     k = bisect.bisect_left(starts, i)
     if k == 0:
