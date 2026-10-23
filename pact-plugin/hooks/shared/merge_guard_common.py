@@ -4834,6 +4834,29 @@ def _strip_shell_comments(text: str) -> str:
     return "".join(out)
 
 
+# Words and marks that open or close a compound command on the pipeline view: a group,
+# a subshell or command substitution, a loop body, an if branch, a case.
+_COMPOUND_OPEN_RE = re.compile(r"(?<![\w$])\{(?=\s)|\(|(?<![\w-])(?:do|then|case)(?![\w-])")
+_COMPOUND_CLOSE_RE = re.compile(r"(?<![\w$])\}|\)|(?<![\w-])(?:done|fi|esac)(?![\w-])")
+
+
+def _output_reaches_shell_from(view: str, procsub_view: str, pos: int) -> bool | None:
+    """Whether the output of the simple command at `pos` reaches a shell: on the pipeline
+    view (quotes and heredoc bodies blanked), from `pos` to the next pipeline separator,
+    a `| shell` / `| xargs … shell` or an output-side `>(shell)`. None when `pos` sits
+    inside an open compound command, whose output a pipe after it may route; the caller
+    then keeps the whole-command flags."""
+    before = view[:pos]
+    if len(_COMPOUND_OPEN_RE.findall(before)) > len(_COMPOUND_CLOSE_RE.findall(before)):
+        return None
+    sep = _PIPELINE_SEPARATOR_RE.search(view, pos)
+    end = sep.start() if sep else len(view)
+    return bool(
+        _has_pipe_to_shell(view[pos:end])
+        or _has_process_substitution_to_shell(procsub_view[pos:end])
+    )
+
+
 def _strip_non_executable_content(command: str) -> str:
     """Strip shell content that is clearly non-executable before pattern matching.
 
@@ -4890,27 +4913,41 @@ def _strip_non_executable_content(command: str) -> str:
     #    is fed to a shell interpreter (e.g. bash << EOF ... EOF — body executes).
     #    GUARD (output-side): the outer piped/process-sub skip preserves the body
     #    when it is routed to a shell via `| bash` / `> >(bash)`. The two COMPOSE.
+    #    The output-side guard is PER PIPELINE: a heredoc's body is routed to a shell
+    #    only when its OWN command's output reaches one (`cat <<EOF | bash`), not
+    #    because some other pipeline in the command pipes to a shell. A heredoc inside
+    #    a compound command (group, subshell, loop, if, case) keeps the whole-command
+    #    flags, since the compound's output may be piped.
     #    GUARD (eval): a command whose eval is fed by a heredoc keeps its bodies, so
     #    the approval for it mints from the command the eval runs.
     eval_fed = _has_eval_with_heredoc(command)
-    if not piped_to_shell and not process_sub_to_shell:
-        def _strip_heredoc(match: re.Match) -> str:
-            # Check what command precedes the heredoc operator
-            start = match.start()
-            preceding = command[:start].rstrip()
-            # If the preceding command is a shell interpreter, preserve content
-            if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
-                return match.group(0)  # Preserve — content executes
-            if eval_fed:
-                return match.group(0)  # Preserve — an eval runs this heredoc's text
-            return "<<HEREDOC_STRIPPED"
+    routing_views = None
 
-        result = re.sub(
-            r"<<-?\s*['\"]?(\w+)['\"]?.*?\n.*?\n\t*\1\b",
-            _strip_heredoc,
-            result,
-            flags=re.DOTALL,
-        )
+    def _strip_heredoc(match: re.Match) -> str:
+        nonlocal routing_views
+        # Check what command precedes the heredoc operator
+        start = match.start()
+        preceding = command[:start].rstrip()
+        # If the preceding command is a shell interpreter, preserve content
+        if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
+            return match.group(0)  # Preserve — content executes
+        if eval_fed:
+            return match.group(0)  # Preserve — an eval runs this heredoc's text
+        if routing_views is None:
+            routing_views = (_pipeline_view(command)[0], _procsub_anchor_view(command))
+        routed = _output_reaches_shell_from(*routing_views, start)
+        if routed is None:
+            routed = piped_to_shell or process_sub_to_shell
+        if routed:
+            return match.group(0)  # Preserve — this heredoc's output runs in a shell
+        return "<<HEREDOC_STRIPPED"
+
+    result = re.sub(
+        r"<<-?\s*['\"]?(\w+)['\"]?.*?\n.*?\n\t*\1\b",
+        _strip_heredoc,
+        result,
+        flags=re.DOTALL,
+    )
 
     # 2. Strip comments: # to end of line
     #    Only strip when # appears at start of line or after whitespace/semicolon

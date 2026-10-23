@@ -359,3 +359,36 @@ def test_a_script_files_quoted_arguments_are_data(label, cmd):
 def test_a_substitution_or_unplaceable_launch_stays_refused(label, cmd):
     assert is_dangerous_command(cmd) is True
 
+
+# ---------------------------------------------------------------------------
+# A heredoc's body runs only when its own command's output reaches a shell.
+# ---------------------------------------------------------------------------
+
+HEREDOC_ROUTED_DENY = [
+    ("own pipe to bash", f"cat <<EOF | bash\n{M}\nEOF"),
+    ("own pipe through sed", f"cat <<EOF | sed s/x/y/ | bash\n{M}\nEOF"),
+    ("own procsub", f"cat <<EOF > >(bash)\n{M}\nEOF"),
+    ("own pipe to xargs sh", f'cat <<EOF | xargs -I{{}} sh -c "{{}}"\n{M}\nEOF'),
+    ("group piped", f"{{ cat <<EOF\n{M}\nEOF\n}} | bash"),
+    ("subshell piped", f"( cat <<EOF\n{M}\nEOF\n) | sh"),
+    ("loop piped", f"for i in 1; do cat <<EOF\n{M}\nEOF\ndone | bash"),
+    ("substitution then piped", f'x=$(cat <<EOF\n{M}\nEOF\n); echo "$x" | bash'),
+]
+
+HEREDOC_DATA_ALLOW = [
+    ("data heredoc, another pipeline to bash",
+     f"cat > rows.json <<'EOF'\n{{\"cmd\": \"{M}\"}}\nEOF\nprintf ok | bash -c 'cat'"),
+    ("data heredoc, a later sh read",
+     f"cat > f <<'EOF'\n{M}\nEOF\necho x | sh -c 'read y'"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", HEREDOC_ROUTED_DENY, ids=[r[0] for r in HEREDOC_ROUTED_DENY])
+def test_a_heredoc_whose_output_reaches_a_shell_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", HEREDOC_DATA_ALLOW, ids=[r[0] for r in HEREDOC_DATA_ALLOW])
+def test_a_data_heredoc_beside_another_shell_pipe_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
