@@ -331,7 +331,7 @@ class TestSyncSemanticsUnchangedUnderLock:
         from importlib import import_module
         return import_module("scripts.working_memory")
 
-    def test_working_memory_rolling_window_trims_to_max(self, tmp_path, monkeypatch):
+    def test_working_memory_rolling_window_trims_to_max(self, tmp_path):
         """Syncing more than MAX_WORKING_MEMORIES entries keeps only the most
         recent MAX, newest-first — unchanged by the lock."""
         wm = self._import_wm()
@@ -358,7 +358,7 @@ class TestSyncSemanticsUnchangedUnderLock:
             f"ROLL-{total - wm.MAX_WORKING_MEMORIES}"
         ), "entries are not newest-first under the lock"
 
-    def test_idempotent_resync_does_not_corrupt_section(self, tmp_path, monkeypatch):
+    def test_idempotent_resync_does_not_corrupt_section(self, tmp_path):
         """Re-syncing the SAME memory twice in a row leaves a well-formed
         section with exactly one Working Memory header — the lock's
         acquire/release across two calls does not duplicate or drop the
@@ -376,7 +376,7 @@ class TestSyncSemanticsUnchangedUnderLock:
         )
         assert "IDEMPOTENT" in final
 
-    def test_pact_markers_survive_sync_under_lock(self, tmp_path, monkeypatch):
+    def test_pact_markers_survive_sync_under_lock(self, tmp_path):
         """When CLAUDE.md carries the PACT managed/memory markers, a locked
         sync must preserve all four in structural order — the lock wraps the
         same read-modify-write that the marker-preservation pipeline relies

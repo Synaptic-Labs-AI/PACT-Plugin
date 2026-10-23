@@ -304,7 +304,7 @@ class TestRewritersSkip:
         assert pin_marker_writer._plan_and_write() == "skipped_not_utf8"
         assert (project / "CLAUDE.md").read_bytes() == before
 
-    def test_the_working_memory_sync_skips(self, tmp_path, monkeypatch):
+    def test_the_working_memory_sync_skips(self, tmp_path):
         from scripts import working_memory as wm
 
         text = ("# Project\n\n## Working Memory\n"

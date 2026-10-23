@@ -1495,7 +1495,7 @@ class TestCollisionIsDistinguishableFromCompletedMigration:
         )
 
     def test_a_stray_own_line_copy_is_reported_as_half_a_pair(
-        self, tmp_path, monkeypatch
+        self, tmp_path
     ):
         """A stray own-line copy under Working Memory, a document a user could
         be holding today. The pair lookup in the memory block finds one START
