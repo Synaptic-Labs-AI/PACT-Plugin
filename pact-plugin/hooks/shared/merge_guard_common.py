@@ -791,8 +791,8 @@ def _detect_op_pass(
     # None->merge; that is the whole point of the arm. Only NON-merge inputs are
     # unchanged.) Recognition predicate: tolerant IGNORECASE client (_GH_API_PREFIX, so a
     # `gh -R o/r api` global-flag spelling also mints) + IGNORECASE PUT/PATCH/POST +
-    # case-SENSITIVE pulls/<N>/merge path. DELETE excluded; the implicit-POST (-f/--data,
-    # no method keyword) spelling is a deliberate residual, per the git/refs detect arm.
+    # case-SENSITIVE pulls/<N>/merge path. DELETE excluded; the implicit-POST spelling (a gh api
+    # body field flag and no GET) is a POST too, so it is recognized the same way.
     for _leg in raw_legs:
         if _api_merge_leg_endpoint(_leg) is not None:
             return "merge"
@@ -1307,7 +1307,7 @@ def _api_merge_leg_endpoint(leg: str) -> str | None:
     # The capturing _PULLS_MERGE_PR_RE is used only for EXTRACTION (the walk + fallback).
     if not re.search(r"pulls/\d+/merge\b", leg):
         return None
-    if not re.search(r"\b(?:PUT|PATCH|POST)\b", leg, re.IGNORECASE):
+    if not (re.search(r"\b(?:PUT|PATCH|POST)\b", leg, re.IGNORECASE) or _gh_api_implicit_post(leg)):
         return None
     # Recognized. Extract the ENDPOINT-position PR.
     stripped = _strip_non_executable_content(leg)
@@ -1342,6 +1342,15 @@ def _api_merge_leg_endpoint(leg: str) -> str | None:
     # gh-api-only per Option B: curl/wget never reach this walk — they classify None at
     # the client gate above — so there is no exotic-curl residual to accept.)
     return None
+
+
+def _gh_api_implicit_post(leg: str) -> bool:
+    """Whether a gh api leg is an implicit POST: a body field flag and no GET method,
+    the same condition as the implicit-POST read arm."""
+    return bool(
+        re.search(r"(?:^|\s)(?:-f|-F|--field|--raw-field|--input)\s", leg)
+        and not re.search(r"(?:-X|--method)\s+GET\b", leg, re.IGNORECASE)
+    )
 
 
 def _extract_api_merge_pr(command: str) -> str | None:

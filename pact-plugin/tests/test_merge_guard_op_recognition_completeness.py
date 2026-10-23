@@ -2185,7 +2185,6 @@ class TestApiMergeMintParity:
             "gh api -X GET /repos/o/r/pulls/42/merge",       # explicit GET
             "gh api -X DELETE /repos/o/r/pulls/42/merge",    # DELETE excluded
             "gh api -X PUT /repos/o/r/merges/xyz",           # non-pulls path (read-gated residual, unmintable)
-            "gh api -f commit_title=t /repos/o/r/pulls/42/merge",  # implicit-POST (deliberate residual)
             "gh api repos/o/r/pulls/5/merge && echo -X PUT",       # per-leg canary
             "gh -R o/r api repos/o/r/pulls/5/merge && echo -X PUT",  # per-leg canary, tolerant matcher
         ],
@@ -2196,9 +2195,9 @@ class TestApiMergeMintParity:
         FAIL under a whole-command arm (a method keyword in a benign continuation
         leg must not classify the compound) — they hold under the tolerant client
         matcher too (Ruling-B widens only the in-leg client span, not the leg
-        isolation). The non-pulls and implicit-POST rows are read-floor-gated
-        (D=True) but deliberately unmintable — PRE-EXISTING residuals (read-floor
-        breadth / implicit-POST parity with git/refs), not #1096 regressions."""
+        isolation). The non-pulls row is read-floor-gated (D=True) but
+        deliberately unmintable — a PRE-EXISTING read-floor-breadth residual on a
+        path that is not the merges endpoint, not a #1096 regression."""
         assert OP(cmd) is None, f"non-faithful API-merge form classified: {cmd!r}"
         ctx, _refusal = mint(cmd)
         assert ctx is None, f"non-faithful API-merge form MINTED: {cmd!r}"

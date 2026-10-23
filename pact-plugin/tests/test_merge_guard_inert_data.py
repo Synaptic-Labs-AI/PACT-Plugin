@@ -230,6 +230,21 @@ def test_a_gh_api_merge_endpoint_is_refused(label, cmd):
     assert is_dangerous_command(cmd) is True
 
 
+IMPLICIT_POST_MERGES = [
+    ("a field after the endpoint", "gh api repos/O/R/pulls/5/" + "merge -f merge_method=squash"),
+    ("a field before the endpoint", "gh api -f commit_title=t /repos/O/R/pulls/5/" + "merge"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", IMPLICIT_POST_MERGES, ids=[r[0] for r in IMPLICIT_POST_MERGES])
+def test_an_implicit_post_api_merge_mints_and_runs(label, cmd):
+    assert is_dangerous_command(cmd) is True
+    result = _mint(cmd)
+    assert result.context is not None, result.refusal_reason
+    assert (result.context["operation_type"], result.context["pr_number"]) == ("merge", "5")
+    assert merge_guard_pre._token_matches_command({"context": result.context}, cmd) is True
+
+
 @pytest.mark.parametrize("label,cmd", GH_API_SETTINGS_ALLOW, ids=[r[0] for r in GH_API_SETTINGS_ALLOW])
 def test_a_gh_api_field_named_merge_is_allowed(label, cmd):
     assert is_dangerous_command(cmd) is False
