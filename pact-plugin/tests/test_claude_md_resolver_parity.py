@@ -27,6 +27,11 @@ import pytest
 # measure. See the marker's registration in tests/conftest.py.
 pytestmark = pytest.mark.claude_md_ambient
 
+# The consolidated canonical seeder, imported directly because this module
+# runs OUTSIDE the conftest redirect (the opt-out above) and arms its worlds
+# by hand.
+from fixtures.claude_md_seed import seed_claude_md
+
 
 # Classification vocabulary -- shared across all resolvers
 NOT_FOUND = "not_found"
@@ -403,3 +408,104 @@ class TestDisplayResolverParityInvariant:
         # ...and specifically at the MAIN repo file, so a future change that made
         # both resolvers agree on the WRONG file would still be caught.
         assert os.path.realpath(display) == os.path.realpath(main_file)
+
+
+class TestWritePathResolverIdentity:
+    """Pin WHICH resolver the two WRITE entry points resolve through.
+
+    Sibling axis to TestDisplayResolverParityInvariant: that class owns the
+    display-vs-main RELATIONSHIP; this one owns the write-path IDENTITY. The
+    trap (issue #1240 correction 2): both write callers resolve through the
+    WITH-BASE variant — sync_to_claude_md calls
+    _resolve_display_claude_md_with_base() when target is None, and so does
+    sync_retrieved_to_claude_md — while read-only callers use the wrapper
+    _resolve_display_claude_md_path (itself a thin [0] over the with-base
+    variant). A pin on the wrapper proves NOTHING about the write path, so
+    these arms spy the with-base variant and poison the wrapper: a refactor
+    that reroutes either write caller through the read-only wrapper trips the
+    poison here. The poison is precise because only callers of that exact
+    name trip it — the wrapper's own internal with-base call cannot (it is
+    replaced wholesale, and the spy answers in its place).
+
+    The module-wide claude_md_ambient opt-out is what keeps these arms
+    self-contained: no conftest redirect runs, so resolution is ENTIRELY the
+    spy's, and the target file is seeded by hand via the consolidated seeder.
+    """
+
+    def _spy_and_poison(self, monkeypatch, seeded_path, tmp_path):
+        """Arm the spy (with-base variant) + the poison (read-only wrapper).
+
+        Returns the spy's call list; the poison raises on any call to the
+        wrapper name.
+        """
+        from scripts import working_memory as wm
+
+        recorded = []
+
+        def _spy():
+            recorded.append(1)
+            return (seeded_path, tmp_path)
+
+        def _poison():
+            raise AssertionError(
+                "the write path resolved through the read-only wrapper"
+            )
+
+        monkeypatch.setattr(wm, "_resolve_display_claude_md_with_base", _spy)
+        monkeypatch.setattr(wm, "_resolve_display_claude_md_path", _poison)
+        return recorded
+
+    def test_sync_to_claude_md_resolves_via_with_base_variant(
+        self, tmp_path, monkeypatch
+    ):
+        """Arm 1: the Working Memory writer, called in-process with
+        target=None and claude_md_root=None (the ambient shape), must resolve
+        through the with-base variant, write the seeded tmp file, and report
+        SyncResult.WROTE."""
+        from scripts import working_memory as wm
+
+        seeded_path = seed_claude_md(tmp_path, preferred=True)
+        recorded = self._spy_and_poison(monkeypatch, seeded_path, tmp_path)
+
+        result = wm.sync_to_claude_md(
+            {"context": "guard-arm-wm", "goal": "guard-arm-goal"},
+            None,
+            "guard-arm-id",
+        )
+
+        assert result.reason == wm.SyncResult.WROTE, (
+            f"the write arm did not reach a write; reason={result.reason!r}"
+        )
+        assert len(recorded) == 1, (
+            f"the with-base spy fired {len(recorded)} times"
+        )
+        # Execution reaching these asserts is itself the poison assertion:
+        # the wrapper never ran.
+
+    def test_sync_retrieved_to_claude_md_resolves_via_with_base_variant(
+        self, tmp_path, monkeypatch
+    ):
+        """Arm 2: the Retrieved Context writer, called in-process with
+        claude_md_root=None (the ambient shape — it takes no target at all),
+        must resolve through the with-base variant, write, and report
+        SyncResult.WROTE."""
+        from scripts import working_memory as wm
+
+        seeded_path = seed_claude_md(tmp_path, preferred=True)
+        recorded = self._spy_and_poison(monkeypatch, seeded_path, tmp_path)
+
+        result = wm.sync_retrieved_to_claude_md(
+            [{"context": "guard-arm-rc", "goal": "guard-arm-rc-goal"}],
+            query="guard-arm-query",
+            scores=[0.9],
+            memory_ids=["guard-arm-rc-id"],
+        )
+
+        assert result.reason == wm.SyncResult.WROTE, (
+            f"the write arm did not reach a write; reason={result.reason!r}"
+        )
+        assert len(recorded) == 1, (
+            f"the with-base spy fired {len(recorded)} times"
+        )
+        # Execution reaching these asserts is itself the poison assertion:
+        # the wrapper never ran.
