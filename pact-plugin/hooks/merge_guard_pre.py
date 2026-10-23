@@ -58,7 +58,10 @@ try:
         cleanup_consumed_tokens as _cleanup_consumed_tokens,
         cleanup_orphan_tokens as _cleanup_orphan_tokens,
         extract_command_context,
+        interpreter_command_context,
         normalize_command_text,
+        rewritten_executed_command,
+        shell_c_string,
         _single_destructive_leg,
         _single_detectable_leg,
     )
@@ -470,6 +473,21 @@ def _both_present_equal(token_val: object, cmd_val: object) -> bool:
     return str(token_val) == str(cmd_val)
 
 
+def _inner_command_contexts(command: str) -> list[dict]:
+    """The (op, target, flags) of each command a wrapper around `command` runs: the
+    -c string of its guarded leg, the program an interpreter runs, and the command
+    the classifier reads after rewriting it. Empty for a plain command."""
+    leg = _single_destructive_leg(command) or _single_detectable_leg(command) or command
+    inner_texts = [shell_c_string(leg), rewritten_executed_command(command)]
+    contexts = [interpreter_command_context(command) or {}]
+    for text in inner_texts:
+        if text:
+            contexts.append(extract_command_context(
+                _single_destructive_leg(text) or _single_detectable_leg(text) or text
+            ))
+    return [ctx for ctx in contexts if ctx]
+
+
 def _token_matches_command(token: dict, command: str) -> bool:
     """Check that a token's context POSITIVELY matches the command being executed.
 
@@ -551,6 +569,16 @@ def _token_matches_command(token: dict, command: str) -> bool:
     # (over-block-safe; tokens expire after TOKEN_TTL, so no backward-compat is needed).
     # bound_flags is an attribute checked here, never part of pair identity.
     if set(context.get("bound_flags", [])) != set(cmd.get("bound_flags", [])):
+        return False
+    # The same holds for the command a wrapper runs: a shell's -c string, an
+    # interpreter program, or the command the classifier reads after a rewrite. The
+    # outer leg reads `bash -c 'gh pr merge 5 --admin'` without the quoted flag, so
+    # each inner reading of the same op must carry exactly the approved flags too.
+    if any(
+        inner.get("operation_type") == token_op
+        and set(inner.get("bound_flags", [])) != set(context.get("bound_flags", []))
+        for inner in _inner_command_contexts(command)
+    ):
         return False
 
     # (b) Target axis, per op-class — require a POSITIVE, command-anchored target

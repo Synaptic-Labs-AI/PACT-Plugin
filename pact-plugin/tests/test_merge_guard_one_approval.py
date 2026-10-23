@@ -3,9 +3,13 @@ Location: pact-plugin/tests/test_merge_guard_one_approval.py
 Summary: One approval runs one guarded operation. A command whose target is set
          only when it runs (a variable, a substitution, the implicit current
          branch) retires its token on the first successful run, so the same
-         approval cannot run a second, different target.
+         approval cannot run a second, different target. A token never authorizes
+         flags the approved command lacks, also when a wrapper (a shell's -c
+         string, an interpreter program, a file the command writes and runs)
+         carries them.
 Used by: pytest. The real merge_guard_post and merge_guard_pre hooks run as
-         subprocesses.
+         subprocesses for the run sequences; the token matcher runs in process
+         for the wrapper rows.
 """
 
 from __future__ import annotations
@@ -17,6 +21,8 @@ import sys
 from pathlib import Path
 
 import pytest
+from merge_guard_post import _mint_context_from_bundle
+from merge_guard_pre import _token_matches_command
 
 HOOKS = Path(__file__).resolve().parents[1] / "hooks"
 MERGE = "gh pr " + "merge "
@@ -81,3 +87,32 @@ class TestATargetSetAtRunTimeRunsOnce:
         _approve(approved, tmp_path)
         assert _runs(first, tmp_path)
         assert _runs(first, tmp_path)
+
+
+def _token(command: str) -> dict:
+    q = [{"question": "Run this?", "header": "Run", "multiSelect": False,
+          "options": [{"label": "Yes, run", "description": f"Run `{command}` now"},
+                      {"label": "No", "description": "Hold."}]}]
+    ctx = _mint_context_from_bundle(q, {"Run this?": "Yes, run"})[0]
+    assert ctx is not None
+    return {"context": ctx}
+
+
+PLAIN = MERGE + "5 --squash"
+ESCALATED_WRAPPERS = {
+    "plain-admin": PLAIN + " --admin",
+    "bash-c-admin": "bash -c '" + PLAIN + " --admin'",
+    "python-c-admin": "python3 -c 'import os; os.system(\"" + PLAIN + " --admin\")'",
+    "file-run-admin": "echo '" + PLAIN + " --admin' > /tmp/a.sh && bash /tmp/a.sh",
+    "python-c-other-repo": "python3 -c 'import os; os.system(\"" + PLAIN + " --repo evil/other\")'",
+}
+
+
+class TestATokenNeverAddsFlagsThroughAWrapper:
+    @pytest.mark.parametrize("command", ESCALATED_WRAPPERS.values(), ids=ESCALATED_WRAPPERS.keys())
+    def test_a_wrapped_escalation_is_refused(self, command):
+        assert not _token_matches_command(_token(PLAIN), command)
+
+    @pytest.mark.parametrize("command", [PLAIN, "bash -c '" + PLAIN + "'"], ids=["plain", "bash-c-same-flags"])
+    def test_the_approved_operation_still_runs(self, command):
+        assert _token_matches_command(_token(PLAIN), command)
