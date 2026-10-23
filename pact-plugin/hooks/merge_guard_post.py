@@ -647,7 +647,13 @@ def _exact_text_reading(span: str, located: str) -> dict | None:
         return {"operation_type": "heredoc eval"}
     pairs = _collect_pairs([located])
     leg = _single_destructive_leg(span) or span
-    rewritten = None if pairs else rewritten_executed_command(span)
+    # The region reading binds only a command the pre-hook can type the same way; a
+    # pair found in a written file's text (`cat > f <<EOF … EOF; bash f`) cannot be.
+    region_binds = bool(pairs) and bool(
+        extract_command_context(_single_destructive_leg(span) or _single_detectable_leg(span) or span)
+        .get("operation_type")
+    )
+    rewritten = None if region_binds else rewritten_executed_command(span)
     if rewritten is not None:
         # A file the command writes and then runs is read as the program it holds.
         ctx = interpreter_command_context(rewritten)

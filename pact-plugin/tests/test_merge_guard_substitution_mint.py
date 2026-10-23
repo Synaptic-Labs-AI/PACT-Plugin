@@ -507,3 +507,21 @@ class TestAnUnspacedDoubleBacktickApprovalRuns:
     def test_the_approved_command_is_refused_then_runs(self, command):
         assert not _runs(None, command)
         assert _runs(_mint_styled(command, lambda c: f"Run ``{c}`` now"), command)
+
+
+WRITTEN_SCRIPTS = {
+    "merge": "cat > /tmp/m.sh <<'EOF'\n" + MERGE + "5 --squash\nEOF\nbash /tmp/m.sh",
+    "force-push": "cat > /tmp/m.sh <<'EOF'\n" + FORCE + "feat/x\nEOF\nbash /tmp/m.sh",
+}
+
+
+class TestAScriptWrittenThenRunMintsAndRuns:
+    """The region reading finds the guarded command in the written file's text, a
+    place the pre-hook does not type it from; the mint reads the command the
+    classifier says runs instead, so the approval binds its exact text."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("command", WRITTEN_SCRIPTS.values(), ids=WRITTEN_SCRIPTS.keys())
+    def test_the_approved_command_is_refused_then_runs(self, command, style):
+        assert not _runs(None, command)
+        assert _runs(_mint_styled(command, style), command)
