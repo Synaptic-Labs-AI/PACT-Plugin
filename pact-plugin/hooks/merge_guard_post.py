@@ -644,6 +644,10 @@ def _exact_text_reading(span: str, located: str) -> dict | None:
     leg = _single_destructive_leg(span) or span
     rewritten = None if pairs else rewritten_executed_command(span)
     if rewritten is not None:
+        # A file the command writes and then runs is read as the program it holds.
+        ctx = interpreter_command_context(rewritten)
+        if ctx and ctx.get("operation_type"):
+            return ctx
         if is_compound_destructive_command(rewritten):
             return None
         body = rewritten
@@ -686,7 +690,12 @@ def _exact_text_mint_context(option_texts: list[str]) -> tuple[MintResult, list[
             span = content.strip()
             if not span or not is_dangerous_command(span):
                 continue
-            if is_compound_destructive_command(span):
+            rewritten = rewritten_executed_command(span)
+            if is_compound_destructive_command(span) or (
+                rewritten is not None and is_compound_destructive_command(rewritten)
+            ):
+                # One approval runs one guarded operation, also when the command
+                # carries several in a value it hands to something that runs it.
                 return MintResult(None, "compound_command"), []
             ctx = _exact_text_reading(span, raw)
             if ctx:

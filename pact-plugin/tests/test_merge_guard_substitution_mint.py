@@ -389,3 +389,111 @@ class TestNothingElseRuns:
         command = f"{FORCE}{CURRENT} && {MERGE}5"
         ctx, reason = _mint(command)
         assert (ctx, reason) == (None, "compound_command")
+
+
+PY_MERGE = 'import subprocess\nsubprocess.run(["gh", "pr", "' + 'merge", "5"])'
+FILE_RUNS = {
+    "python-heredoc": "cat > helper.py <<'EOF'\n" + PY_MERGE + "\nEOF\npython3 helper.py",
+    "python-heredoc-single-quotes": "cat > helper.py <<'EOF'\n" + PY_MERGE.replace('"', "'") + "\nEOF\npython3 helper.py",
+    "node-echo": "echo 'require(\"child_process\").execSync(\"" + MERGE + "5\")' > run.js; node run.js",
+    "ruby-echo": "echo 'system(\"" + MERGE + "5\")' > run.rb && ruby run.rb",
+    "perl-printf": "printf '%s\\n' 'system(\"" + FORCE + "main\");' > run.pl; perl run.pl",
+    "node-echo-then-a-harmless-leg": "echo 'require(\"child_process\").execSync(\"" + MERGE + "5\")' > run.js; node run.js; echo done",
+    "python-unbuffered": "cat > helper.py <<'EOF'\n" + PY_MERGE + "\nEOF\npython3 -u helper.py",
+    "python-with-an-argument": "cat > helper.py <<'EOF'\n" + PY_MERGE + "\nEOF\npython3 helper.py arg1",
+    "bash-errexit": "echo '" + MERGE + "5' > f; bash -e f",
+    "bash-with-an-argument": "echo '" + MERGE + "5' > f; bash f arg1",
+    "sh-xtrace-with-arguments": "echo '" + MERGE + "5' > f; sh -x f a b",
+    "bash-reading-the-file": "echo '" + MERGE + "5' > f; bash <f",
+}
+FILE_RUN_CONTROLS = {
+    "program-prints-the-command": "cat > helper.py <<'EOF'\nprint(\"" + MERGE + "5\")\nEOF\npython3 helper.py",
+    "file-only-read": "cat > helper.py <<'EOF'\n" + PY_MERGE + "\nEOF\ncat helper.py",
+    "program-runs-a-read": "cat > helper.py <<'EOF'\n" + PY_MERGE.replace("merge", "view") + "\nEOF\npython3 helper.py",
+    "another-file-run": "cat > helper.py <<'EOF'\n" + PY_MERGE + "\nEOF\npython3 other.py",
+    "inline-program-before-the-file": "cat > helper.py <<'EOF'\n" + PY_MERGE + "\nEOF\npython3 -c 'print(1)' helper.py",
+    "shell-c-before-the-file": "echo '" + MERGE + "5' > f; bash -c 'echo hi' f",
+    "shell-stdin-given-the-file": "echo '" + MERGE + "5' > f; bash -s f < /dev/null",
+}
+SCRIPT_VARIABLES = {
+    "force-push-to-a-shell-script": 'P="' + FORCE + 'main"; ./retry.sh "$P"',
+    "force-push-to-a-python-script": 'P="' + FORCE + 'main"; python3 x.py "$P"',
+    "branch-delete-to-a-shell-script": "D='git branch -" + "D victim'; ./retry.sh \"$D\"",
+}
+SCRIPT_VARIABLE_TARGETS = {
+    "force-push-to-a-shell-script": ("force-push", "target_ref", "main"),
+    "force-push-to-a-python-script": ("force-push", "target_ref", "main"),
+    "branch-delete-to-a-shell-script": ("branch-delete", "branch", "victim"),
+}
+DATA_VARIABLES = {
+    "variable-inside-a-larger-argument": 'P="' + FORCE + 'main"; python3 x.py "a $P b"',
+    "its-literal-twin": 'python3 x.py "a ' + FORCE + 'main b"',
+    "variable-in-a-here-string-argument": 'P="' + FORCE + 'main"; python3 x.py "bash -s <<< \'$P\'#"',
+}
+
+
+class TestAFileWrittenThenRunMintsAndRuns:
+    @pytest.mark.parametrize("command", FILE_RUNS.values(), ids=FILE_RUNS.keys())
+    def test_the_approved_command_is_refused_then_runs(self, command):
+        assert not _runs(None, command)
+        assert _runs(_mint(command)[0], command)
+
+    @pytest.mark.parametrize("command", FILE_RUN_CONTROLS.values(), ids=FILE_RUN_CONTROLS.keys())
+    def test_a_control_mints_nothing(self, command):
+        assert _runs(None, command)
+        assert _mint(command)[0] is None
+
+
+class TestACommandHeldInAVariableForAScriptRuns:
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("key", SCRIPT_VARIABLES.keys())
+    def test_the_approved_command_runs_and_binds_its_target(self, key, style):
+        command = SCRIPT_VARIABLES[key]
+        assert not _runs(None, command)
+        ctx = _mint_styled(command, style)
+        assert _runs(ctx, command)
+        op, field, value = SCRIPT_VARIABLE_TARGETS[key]
+        assert (ctx["operation_type"], ctx[field]) == (op, value)
+
+    @pytest.mark.parametrize("command", DATA_VARIABLES.values(), ids=DATA_VARIABLES.keys())
+    def test_a_variable_in_a_larger_argument_is_data(self, command):
+        assert _runs(None, command)
+        assert _mint(command)[0] is None
+
+    def test_a_variable_holding_two_guarded_commands_mints_nothing(self):
+        command = "D='git branch -" + "D a; git branch -" + "D b'; ./retry.sh \"$D\""
+        assert not _runs(None, command)
+        assert _mint(command)[0] is None
+
+
+UNKNOWN_PROGRAM_VARIABLE = 'P="' + FORCE + 'main"; mytool "$P"'
+
+
+class TestACommandHeldInAVariableForAnUnknownProgramRuns:
+    """An unknown program given a variable holding a guarded command stays refused;
+    an approval binds its exact text, so it runs and the same program given another
+    value does not."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    def test_the_approved_command_is_refused_then_runs(self, style):
+        assert not _runs(None, UNKNOWN_PROGRAM_VARIABLE)
+        ctx = _mint_styled(UNKNOWN_PROGRAM_VARIABLE, style)
+        assert ctx is not None and ctx["command_text"] == normalize_command_text(UNKNOWN_PROGRAM_VARIABLE)
+        assert _runs(ctx, UNKNOWN_PROGRAM_VARIABLE)
+
+    @pytest.mark.parametrize("other", [
+        pytest.param(UNKNOWN_PROGRAM_VARIABLE.replace("main", "release"), id="same-variable-other-value"),
+        pytest.param('Q="' + FORCE + 'release"; mytool "$Q"', id="other-variable"),
+    ])
+    def test_an_approval_runs_no_other_value(self, other):
+        ctx = _mint_styled(UNKNOWN_PROGRAM_VARIABLE, APPROVAL_STYLES["inline"])
+        assert not _runs(None, other)
+        assert not _runs(ctx, other)
+
+    @pytest.mark.parametrize("command", [
+        pytest.param("D='git branch -" + "D a; git branch -" + "D b'; mytool \"$D\"", id="unknown-program"),
+        pytest.param("D='git branch -" + "D a; git branch -" + "D b'; ./retry.sh \"$D\"", id="script"),
+    ])
+    def test_a_value_holding_two_guarded_commands_mints_nothing(self, command):
+        assert not _runs(None, command)
+        assert _mint(command) == (None, "compound_command")
