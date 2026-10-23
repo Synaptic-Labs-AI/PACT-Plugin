@@ -985,7 +985,9 @@ class TestAfterSectionSurvivesTheSync:
         "test_the_excluded_branch_cannot_carry_a_value proves that cause."
     )
 
-    def test_every_after_carrying_assignment_is_driven_or_excluded(self, tmp_path):
+    def test_every_after_carrying_assignment_is_driven_or_excluded(
+        self, tmp_path, monkeypatch
+    ):
         """Each assignment that carries an after term is driven, or excluded.
 
         THE POPULATION IS DERIVED FROM THE SOURCE AND THE DRIVEN SET FROM A
@@ -1037,6 +1039,14 @@ class TestAfterSectionSurvivesTheSync:
             for index, (_label, driver, doc) in enumerate(self._drivers()):
                 target_dir = tmp_path / f"drive{index}"
                 target_dir.mkdir()
+                # REBIND (§11.3.1 class (c)): the destination belongs to this
+                # test. Each driver's file lands in its own subworld below
+                # tmp_path; the suite-wide conftest redirect DECLARES
+                # tmp_path, and a declared scope the resolution escapes is
+                # exactly what the scope-escape guard refuses. Re-declaring
+                # CPD at the driver's own world makes declaration and
+                # resolution agree.
+                monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(target_dir))
                 driver(target_dir, doc)
         finally:
             sys.settrace(previous)

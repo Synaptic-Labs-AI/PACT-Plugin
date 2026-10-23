@@ -151,10 +151,21 @@ class TestAutouseProjectDirScrubPinned:
     exporting shell and the cells below go red.
     """
 
+    @pytest.mark.claude_md_ambient
     def test_scrub_removes_an_ambient_project_dir(self):
         """Same skip-unless-ambient discipline as the session-id cell: absence
         alone cannot tell "the scrub fired" from "there was nothing to
         scrub", so skip (visible in the header) when the ambient was clean.
+
+        AMENDED for the suite-wide CLAUDE.md redirect: this cell is marked
+        ``claude_md_ambient``, so the redirect SKIPS it and the scrub is the
+        only autouse actor over ``CLAUDE_PROJECT_DIR`` — the same world every
+        other marked test lives in, and the one where the scrub's pop does
+        the protecting. Unmarked tests see the redirect's per-test tmp
+        declaration instead (scrub pops, redirect sets — the ordering the
+        redirect's dependency parameter forces); that half of the contract is
+        pinned structurally by the parameter, and a redirect that stopped
+        honoring the marker reddens HERE (the var would arrive set).
         """
         if _AMBIENT_PROJECT_DIR is None:
             pytest.skip(
@@ -172,11 +183,19 @@ class TestAutouseProjectDirScrubPinned:
             "project instead of the test's inputs."
         )
 
+    @pytest.mark.claude_md_ambient
     def test_init_cannot_derive_a_context_path_from_ambient_env(self):
         """Mechanism pin for the measured failure mode: with the var scrubbed,
         ``pact_context.init()`` must leave ``_context_path`` None for an input
         carrying only a session_id — the exact precondition the
         bootstrap no-session tests rely on (no session dir -> no-op gate).
+
+        AMENDED for the suite-wide CLAUDE.md redirect: marked
+        ``claude_md_ambient`` for the same reason as the sibling cell above —
+        the marked world is scrub-only, which is the precondition this
+        mechanism pin has always asserted. An unmarked test would carry the
+        redirect's tmp declaration, from which init() MAY legitimately derive
+        an in-tmp context path.
         """
         import shared.pact_context as ctx
 
@@ -191,6 +210,25 @@ class TestAutouseProjectDirScrubPinned:
             )
         finally:
             ctx.reset_for_tests()
+
+    def test_redirect_declaration_survives_scrub_at_test_body(self, tmp_path):
+        """UNMARKED ORDERING PIN (§11.3.1 class (e) amendment, architect
+        ruling): at an unmarked test body, the redirect's declaration must be
+        the value in force — the scrub POPPED at setup and the redirect SET
+        after it, the ordering the redirect's dependency parameter forces.
+
+        The direct witness for the unmarked half of the contract the marked
+        cells above cannot see: they measure the scrub-only world, so a
+        redirect that stopped honoring the marker reddens THERE, while a
+        removed dependency parameter or an inverted setup order reddens HERE
+        first (the pop would land after the set and the declaration would be
+        gone).
+        """
+        assert os.environ.get("CLAUDE_PROJECT_DIR") == str(tmp_path), (
+            "CLAUDE_PROJECT_DIR at the test body is not the redirect's "
+            "per-test tmp declaration — the scrub's pop ran after the "
+            "redirect's set (ordering broken), or the redirect did not run"
+        )
 
 
 class TestAutouseMergeTokenDirIsolationPinned:

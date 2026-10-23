@@ -1420,6 +1420,7 @@ class TestEndToEnd:
         assert written.count(fenced) == 1
         assert written.index(START_LINE) < written.index(fenced) < written.index(END_LINE)
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a)/(b): absent-CLAUDE.md-is-never-created arm
     def test_absent_claude_md_is_never_created(self, tmp_path):
         """The hook must not bring the file into being under any circumstance."""
         rc, out, err = run_hook(

@@ -211,6 +211,7 @@ class TestProjectionReplacesTheSection:
 class TestProjectionRunsThroughTheSameWriteSite:
     """The replace arm inherits the write site's certifications."""
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (d): refusal-path subject — engineers an ambient refusal
     def test_a_target_outside_the_resolved_base_is_refused(
         self, tmp_path, monkeypatch
     ):

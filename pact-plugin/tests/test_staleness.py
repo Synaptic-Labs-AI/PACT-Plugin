@@ -460,6 +460,7 @@ class TestGetProjectClaudeMdPath:
 
         assert result == claude_md
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a): absence arm — needs the no-CLAUDE.md world
     def test_returns_none_when_no_claude_md_found(self, tmp_path, clean_env_no_claude_project_dir):
         """Should return None when CLAUDE.md does not exist anywhere."""
         from session_init import _get_project_claude_md_path
@@ -1696,6 +1697,7 @@ class TestCheckPinnedStalenessHardening:
         assert not managed_path.is_symlink()
         assert "STALE" in managed_path.read_text(encoding="utf-8")
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a): resolution-outcome arm
     def test_in_project_symlink_redirect_allowed_containment_supersedes_ban(self, tmp_path):
         """#1247 deliberate behavior change: an IN-PROJECT symlink redirect is
         ALLOWED. Containment refuses only ESCAPES; an in-project target is

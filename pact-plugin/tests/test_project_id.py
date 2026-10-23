@@ -584,6 +584,7 @@ class TestDetectProjectId:
 class TestFindProjectRoot:
     """Tests for PACTMemory._find_project_root() walk-up helper."""
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a): marker-absence detection — the fixture's CLAUDE.md IS a project marker
     def test_returns_start_when_no_markers(self, tmp_path, monkeypatch):
         """No markers anywhere on the path → returns start unchanged."""
         nested = tmp_path / "a" / "b" / "c"
@@ -727,6 +728,7 @@ class TestCwdSubdirectoryDetection:
 
         assert result == "root-project"
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a): marker-absence detection — the fixture's CLAUDE.md IS a project marker
     def test_cwd_no_markers_falls_back_to_cwd_basename(
         self, clean_env_no_claude_project_dir, tmp_path, monkeypatch
     ):

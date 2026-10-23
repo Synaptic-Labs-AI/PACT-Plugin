@@ -321,6 +321,7 @@ def test_same_path_never_raises(tmp_path, monkeypatch):
     assert staleness.same_path(tmp_path, tmp_path) is False
 
 
+@pytest.mark.claude_md_ambient  # §11.3.1 (a)/M3: counter/absence outcome
 def test_assume_present_counts_a_missing_candidate_only_when_asked(tmp_path):
     from staleness import _find_existing_claude_md
 

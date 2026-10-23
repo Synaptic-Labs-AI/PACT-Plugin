@@ -143,6 +143,7 @@ def test_project_dir_unset_returns_none(monkeypatch):
 # =============================================================================
 
 
+@pytest.mark.claude_md_ambient  # §11.3.1 (a): absence arm — needs the no-CLAUDE.md world
 def test_no_claude_md_anywhere_returns_none(tmp_path, monkeypatch):
     """Empty project dir — neither .claude/CLAUDE.md nor ./CLAUDE.md (the
     worktree/gitignored case). content stays None → None."""

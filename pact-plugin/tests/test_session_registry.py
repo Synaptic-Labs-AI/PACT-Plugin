@@ -404,10 +404,15 @@ class TestRegistryTeachExamples:
             k: v for k, v in os.environ.items()
             if k != "CLAUDE_CODE_SESSION_ID"
         }
-        env["CLAUDE_CONFIG_DIR"] = str(tmp_path)
+        # REBIND (§11.3.1 class (c)): the emptiness census below counts this
+        # test's own sandbox; the suite-wide redirect seeds tmp_path/CLAUDE.md
+        # (legacy slot) at the parent, so the sandbox moves one level down.
+        sandbox = tmp_path / "registry-example"
+        sandbox.mkdir()
+        env["CLAUDE_CONFIG_DIR"] = str(sandbox)
         r = subprocess.run(
             self._EXAMPLE, shell=True, capture_output=True, text=True, env=env,
         )
         assert r.returncode == 0, r.stderr
         assert "Permission denied" not in r.stderr
-        assert list(tmp_path.rglob("*")) == []
+        assert list(sandbox.rglob("*")) == []

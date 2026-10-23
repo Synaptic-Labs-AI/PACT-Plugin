@@ -46,16 +46,18 @@ _UPDATED = "Session info updated in project CLAUDE.md"
 _CREATED = "Session info created in new project CLAUDE.md"
 
 
-def _seed_first_pass(tmp_path):
+def _seed_first_pass(root):
     """Write the first session block, and return the target path.
 
     Case 0 builds the file with an f-string and reaches no substitution, so
     the payload arms must run as a SECOND pass. This helper makes that
-    ordering explicit rather than incidental to each arm.
+    ordering explicit rather than incidental to each arm. ``root`` is the
+    caller-owned project world (a subworld below tmp_path — see the REBIND
+    note at each call site).
     """
     from shared.session_resume import update_session_info
 
-    target = tmp_path / ".claude" / "CLAUDE.md"
+    target = root / ".claude" / "CLAUDE.md"
     result = update_session_info(
         "session-alpha", "team-alpha", session_dir="/tmp/ordinary/alpha"
     )
@@ -81,8 +83,13 @@ class TestSessionBlockSubstitutionIsLiteral:
         """
         from shared.session_resume import update_session_info
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
-        target = _seed_first_pass(tmp_path)
+        # REBIND (§11.3.1 class (c)): this test owns its project world, so
+        # CPD is re-declared at a subworld below tmp_path — the suite-wide
+        # conftest redirect's legacy seed (tmp_path/CLAUDE.md) is not this
+        # world's fallback file, and the create path stays reachable.
+        world = tmp_path / "session-block-world"
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(world))
+        target = _seed_first_pass(world)
 
         payload = "/tmp/dir\\n## INJECTED HEADING"
         # NON-VACUITY ON THE INPUT, asserted before the call and independent
@@ -126,8 +133,13 @@ class TestSessionBlockSubstitutionIsLiteral:
         """
         from shared.session_resume import update_session_info
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
-        target = _seed_first_pass(tmp_path)
+        # REBIND (§11.3.1 class (c)): this test owns its project world, so
+        # CPD is re-declared at a subworld below tmp_path — the suite-wide
+        # conftest redirect's legacy seed (tmp_path/CLAUDE.md) is not this
+        # world's fallback file, and the create path stays reachable.
+        world = tmp_path / "session-block-world"
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(world))
+        target = _seed_first_pass(world)
 
         result = update_session_info(
             "session-beta", "team-beta", session_dir="/tmp/dir\\dtail"
@@ -157,8 +169,13 @@ class TestSessionBlockSubstitutionIsLiteral:
         """
         from shared.session_resume import update_session_info
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
-        target = _seed_first_pass(tmp_path)
+        # REBIND (§11.3.1 class (c)): this test owns its project world, so
+        # CPD is re-declared at a subworld below tmp_path — the suite-wide
+        # conftest redirect's legacy seed (tmp_path/CLAUDE.md) is not this
+        # world's fallback file, and the create path stays reachable.
+        world = tmp_path / "session-block-world"
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(world))
+        target = _seed_first_pass(world)
 
         result = update_session_info(
             "session-beta", "team-beta", session_dir="/tmp/dir\\g<0>tail"
@@ -185,8 +202,13 @@ class TestSessionBlockSubstitutionIsLiteral:
         """
         from shared.session_resume import update_session_info
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
-        target = _seed_first_pass(tmp_path)
+        # REBIND (§11.3.1 class (c)): this test owns its project world, so
+        # CPD is re-declared at a subworld below tmp_path — the suite-wide
+        # conftest redirect's legacy seed (tmp_path/CLAUDE.md) is not this
+        # world's fallback file, and the create path stays reachable.
+        world = tmp_path / "session-block-world"
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(world))
+        target = _seed_first_pass(world)
 
         result = update_session_info(
             "session-beta", "team-beta", session_dir="/tmp/ordinary/beta"
