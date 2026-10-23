@@ -533,6 +533,16 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
 _BACKTICK_SPAN_RE = re.compile(r"```[^\n`]*\n(.*?)```|`([^`]+)`", re.DOTALL)
 
 
+def _mask_substitutions(text: str) -> str | None:
+    """`text` with each command substitution (`$(…)`, a backtick span) replaced by a
+    placeholder word, innermost first; None when one cannot be closed."""
+    previous = None
+    while previous != text:
+        previous = text
+        text = re.sub(r"\$\([^()]*\)|`[^`]*`", "_", text)
+    return None if "$(" in text or "`" in text else text
+
+
 def _exact_text_reading(span: str, located: str) -> dict | None:
     """The (op, target, flags) of a backticked command the region reading cannot
     bind, read the way the pre-hook reads it; None when the region reading binds
@@ -559,7 +569,11 @@ def _exact_text_reading(span: str, located: str) -> dict | None:
         return None
     if inner is not None and is_compound_destructive_command(inner):
         return None
-    body = leg if inner is None else inner
+    # The op must stand outside any substitution: a substitution that itself runs
+    # guarded commands (`eval "$(cat <<EOF … EOF)"`) is masked and types nothing.
+    body = _mask_substitutions(leg if inner is None else inner)
+    if body is None:
+        return None
     ctx = extract_command_context(
         _single_destructive_leg(body) or _single_detectable_leg(body) or body
     )

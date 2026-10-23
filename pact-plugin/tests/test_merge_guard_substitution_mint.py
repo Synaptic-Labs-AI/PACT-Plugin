@@ -14,7 +14,7 @@ Used by: pytest. The real mint function and the real pre-hook matcher run in
 from __future__ import annotations
 
 import pytest
-from merge_guard_post import _mint_context_from_bundle
+from merge_guard_post import _exact_text_reading, _mint_context_from_bundle
 from merge_guard_pre import _token_matches_command
 from shared.merge_guard_common import (
     is_compound_destructive_command,
@@ -63,6 +63,24 @@ class TestAFaithfulClickRuns:
         ctx, _ = _mint(ROWS[key])
         assert ctx is not None
         assert ctx["command_text"] == normalize_command_text(ROWS[key])
+
+
+class TestASubstitutionThatRunsCommandsTypesNothing:
+    """The op must stand outside the substitution; a substitution that itself runs
+    guarded commands would otherwise type one op for a text that runs several."""
+
+    @pytest.mark.parametrize("command", [
+        pytest.param('eval "$(cat <<EOF\n' + MERGE + "5\n" + FORCE + 'main\nEOF\n)"', id="evald-heredoc"),
+        pytest.param("bash -c 'eval \"$(printf %s \\\"" + MERGE + "5; " + FORCE + "main\\\")\"'",
+                     id="evald-in-bash-c"),
+    ])
+    def test_two_commands_in_a_substitution_never_type_an_op(self, command):
+        assert _exact_text_reading(command, f"`{command}`") is None
+        assert _mint(command)[0] is None
+
+    def test_a_substituted_target_still_mints_and_runs(self):
+        ctx, _ = _mint(ROWS["force-dollar-paren"])
+        assert _runs(ctx, ROWS["force-dollar-paren"])
 
 
 class TestNothingElseRuns:
