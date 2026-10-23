@@ -433,3 +433,42 @@ def test_words_an_echo_only_prints_are_allowed(label, cmd):
 def test_printed_words_that_reach_a_shell_or_run_are_refused(label, cmd):
     assert is_dangerous_command(cmd) is True
 
+
+# ---------------------------------------------------------------------------
+# A guarded command run by a substitution is read as that command, so its target binds.
+# ---------------------------------------------------------------------------
+
+BRANCH_DEL = "git branch -" + "D feat"
+SUBSTITUTED_COMMAND_TARGETS = [
+    ("an input process substitution", f"cat <({PUSHF})", ("force-push", "target_ref", "main")),
+    ("one beside a file", f"diff <({PUSHF}) x", ("force-push", "target_ref", "main")),
+    ("an output process substitution", f"printf %s >({PUSHF})", ("force-push", "target_ref", "main")),
+    ("a command substitution", f"echo $({PUSHF})", ("force-push", "target_ref", "main")),
+    ("a backtick substitution", f"echo `{PUSHF}`", ("force-push", "target_ref", "main")),
+    ("a branch delete", f"cat <({BRANCH_DEL})", ("branch-delete", "branch", "feat")),
+    ("a branch delete echoed", f"echo <({BRANCH_DEL})", ("branch-delete", "branch", "feat")),
+    ("an assignment from a substitution", f"x=$({PUSHF})", ("force-push", "target_ref", "main")),
+    ("a merge", f"echo <({M})", ("merge", "pr_number", "5")),
+]
+
+
+@pytest.mark.parametrize("label,cmd,want", SUBSTITUTED_COMMAND_TARGETS,
+                         ids=[r[0] for r in SUBSTITUTED_COMMAND_TARGETS])
+def test_a_substituted_command_binds_its_own_target_and_an_approval_runs_it(label, cmd, want):
+    from shared.merge_guard_common import extract_command_context
+
+    op, key, value = want
+    found = extract_command_context(cmd)
+    assert (found.get("operation_type"), found.get(key)) == (op, value)
+    result = _mint(cmd)
+    assert result.context is not None, result.refusal_reason
+    assert merge_guard_pre._token_matches_command({"context": result.context}, cmd) is True
+
+
+def test_a_substitution_running_two_guarded_commands_binds_nothing_from_its_body():
+    from shared.merge_guard_common import _guarded_substitution_body
+
+    assert _guarded_substitution_body(f"echo $({M}; {PUSHF})") is None
+    assert _guarded_substitution_body(f"{M} $({PUSHF})") is None
+    assert _guarded_substitution_body(f"echo $({M}) $({PUSHF})") is None
+

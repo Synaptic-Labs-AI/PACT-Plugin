@@ -2297,6 +2297,40 @@ def extract_privileged_flags(command: str, op_type: str | None) -> list[str]:
     return sorted(found)
 
 
+def _guarded_substitution_body(command: str) -> str | None:
+    """The body of the one substitution (`$(…)`, `<(…)`, `>(…)`, backticks) that holds a
+    guarded operation, when that body is exactly one guarded command and nothing outside
+    the substitutions is guarded; else None."""
+    if "(" not in command and "`" not in command:
+        return None
+    view = _mask_quotes_keeping_substitutions(command)
+    outside, bodies, i, n = list(command), [], 0, len(command)
+    while i < n:
+        if view[i] == "\\":
+            i += 2
+            continue
+        if view.startswith(("$(", "<(", ">("), i):
+            span, end = _extract_dollar_paren(command, i)
+            body = None if span is None else span[2:-1]
+        elif view[i] == "`":
+            span, end = _extract_backtick(command, i)
+            body = None if span is None else span[1:-1]
+        else:
+            i += 1
+            continue
+        if body is None:
+            return None
+        bodies.append(body)
+        outside[i:end] = " " * (end - i)
+        i = end
+    guarded = [b for b in bodies if detect_command_operation_type(b) is not None]
+    if len(guarded) != 1 or detect_command_operation_type("".join(outside)) is not None:
+        return None
+    if _single_destructive_leg(guarded[0]) != guarded[0].strip():
+        return None
+    return guarded[0]
+
+
 def extract_command_context(command: str, flag_scan_text: str | None = None) -> dict:
     """Extract operation context FROM A COMMAND STRING (never prose).
 
@@ -2369,6 +2403,10 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
     command = _normalize_line_continuations(command)
     if flag_scan_text is not None:
         flag_scan_text = _normalize_line_continuations(flag_scan_text)
+    # A guarded command run by a substitution is read as that command, so its target binds.
+    body = _guarded_substitution_body(command)
+    if body is not None:
+        return extract_command_context(body, flag_scan_text)
     op_type = detect_command_operation_type(command)
     if op_type is None:
         return context
