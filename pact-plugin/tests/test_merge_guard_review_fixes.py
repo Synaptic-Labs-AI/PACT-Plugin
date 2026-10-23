@@ -1091,3 +1091,67 @@ def test_a_merge_reached_through_a_name_expression_is_refused(label, cmd):
 @pytest.mark.parametrize("label,cmd", NAME_EXPR_ALLOW, ids=[r[0] for r in NAME_EXPR_ALLOW])
 def test_a_view_reached_through_a_name_expression_is_allowed(label, cmd):
     assert is_dangerous_command(cmd) is False
+
+
+# A helper function: a parameter reads what its calls pass for it (by position, by
+# keyword, or its default), and a call to a function the program defines reads what
+# it returns. A helper called with two merges runs two merges: refused, and no single
+# approval mints it.
+HELPER_DENY = [
+    ('param list', 'python3 - <<\'EOF2\'\nimport subprocess, os\ndef run(c):\n    subprocess.run(c)\nrun(["gh", "pr", "merge", "5"])\nEOF2'),
+    ('param string', 'python3 - <<\'EOF2\'\nimport subprocess, os\ndef sh(cmd):\n    os.system(cmd)\nsh("' + M + ' 5")\nEOF2'),
+    ('param keyword', 'python3 - <<\'EOF2\'\nimport subprocess, os\ndef run(c, check=True):\n    subprocess.run(c, check=check)\nrun(check=False, c=["gh", "pr", "merge", "5"])\nEOF2'),
+    ('param via name', 'python3 - <<\'EOF2\'\nimport subprocess, os\ndef run(c):\n    subprocess.run(c)\nargs = ["gh", "pr", "merge", "5"]\nrun(args)\nEOF2'),
+    ('param two hops', 'python3 - <<\'EOF2\'\nimport subprocess, os\ndef run(c):\n    subprocess.run(c)\ndef go(x):\n    run(x)\ngo(["gh", "pr", "merge", "5"])\nEOF2'),
+    ('param default', 'python3 - <<\'EOF2\'\nimport subprocess, os\ndef run(c=["gh", "pr", "merge", "5"]):\n    subprocess.run(c)\nrun()\nEOF2'),
+    ('param prefix concat', 'python3 - <<\'EOF2\'\nimport subprocess, os\ndef pr(*rest):\n    pass\ndef run(sub):\n    subprocess.run(["gh", "pr"] + sub)\nrun(["merge", "5"])\nEOF2'),
+    ('return list', 'python3 - <<\'EOF2\'\nimport subprocess, os\ndef build():\n    return ["gh", "pr", "merge", "5"]\nsubprocess.run(build())\nEOF2'),
+    ('return via name', 'python3 - <<\'EOF2\'\nimport subprocess, os\ndef build():\n    return ["gh", "pr", "merge", "5"]\nc = build()\nsubprocess.run(c)\nEOF2'),
+    ('return local name', 'python3 - <<\'EOF2\'\nimport subprocess, os\ndef build():\n    out = ["gh", "pr", "merge", "5"]\n    return out\nsubprocess.run(build())\nEOF2'),
+    ('return string', 'python3 - <<\'EOF2\'\nimport subprocess, os\ndef cmd():\n    return "' + M + ' 5"\nos.system(cmd())\nEOF2'),
+    ('two merges via helper', 'python3 - <<\'EOF2\'\nimport subprocess, os\ndef run(c):\n    subprocess.run(c)\nrun(["gh", "pr", "merge", "5"])\nrun(["gh", "pr", "merge", "6"])\nEOF2'),
+]
+HELPER_ALLOW = [
+    ('a nested def returns the merge, the helper returns a view', 'python3 - <<\'EOF2\'\nimport subprocess\ndef build():\n    def inner():\n        return ["gh", "pr", "merge", "5"]\n    return ["gh", "pr", "view", "5"]\nsubprocess.run(build())\nEOF2'),
+    ('param list view', 'python3 - <<\'EOF2\'\nimport subprocess, os\ndef run(c):\n    subprocess.run(c)\nrun(["gh", "pr", "view", "5"])\nEOF2'),
+    ('param string view', 'python3 - <<\'EOF2\'\nimport subprocess, os\ndef sh(cmd):\n    os.system(cmd)\nsh("gh pr view 5")\nEOF2'),
+    ('param two hops view', 'python3 - <<\'EOF2\'\nimport subprocess, os\ndef run(c):\n    subprocess.run(c)\ndef go(x):\n    run(x)\ngo(["gh", "pr", "view", "5"])\nEOF2'),
+    ('return list view', 'python3 - <<\'EOF2\'\nimport subprocess, os\ndef build():\n    return ["gh", "pr", "view", "5"]\nsubprocess.run(build())\nEOF2'),
+    ('return string view', 'python3 - <<\'EOF2\'\nimport subprocess, os\ndef cmd():\n    return "gh pr view 5"\nos.system(cmd())\nEOF2'),
+    ('helper never passed merge, module merge printed', 'python3 - <<\'EOF2\'\nimport subprocess, os\nc = "' + M + ' 5"\nprint(c)\ndef run(c):\n    subprocess.run(c)\nrun(["gh", "pr", "view", "5"])\nEOF2'),
+    ('uncalled helper', 'python3 - <<\'EOF2\'\nimport subprocess, os\ndef run(c):\n    subprocess.run(c)\nprint(["gh", "pr", "merge", "5"])\nEOF2'),
+]
+
+
+@pytest.mark.parametrize("label,cmd", HELPER_DENY, ids=[r[0] for r in HELPER_DENY])
+def test_a_merge_through_a_helper_function_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", HELPER_ALLOW, ids=[r[0] for r in HELPER_ALLOW])
+def test_a_view_through_a_helper_function_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+def test_a_helper_called_with_two_merges_is_compound_and_mints_nothing():
+    from shared.merge_guard_common import interpreter_command_context, is_compound_destructive_command
+
+    cmd = dict(HELPER_DENY)["two merges via helper"]
+    assert is_compound_destructive_command(cmd) is True
+    assert interpreter_command_context(cmd) is None
+
+
+def test_a_helper_called_once_reads_one_merge_context():
+    from shared.merge_guard_common import interpreter_command_context
+
+    context = interpreter_command_context(dict(HELPER_DENY)["param list"])
+    assert context is not None and context["pr_number"] == "5"
+
+
+def test_a_parameter_passed_through_an_unpacked_call_reads_nothing_known():
+    """`run(*args)` cannot be matched to parameters, so the parameter stays unreadable."""
+    from shared.merge_guard_common import _OPAQUE, _python_reaching
+
+    code = "import subprocess\ndef run(c):\n    subprocess.run(c)\nrun(*[['gh', 'pr', 'view']])\n"
+    reach = _python_reaching(code)
+    assert reach is not None and reach.uses[code.index("run(c)\n") + 4] == frozenset({_OPAQUE})

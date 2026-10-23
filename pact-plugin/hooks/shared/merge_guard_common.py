@@ -3274,14 +3274,16 @@ def _named_lists(head: str, code: str, offsets: list[int], _depth: int = 0) -> l
 
 
 def _list_expr_at(code: str, i: int, head: str = "", _depth: int = 0) -> tuple[list[list[str]], int] | None:
-    """The readings of a list expression starting at code[i]: list literals and names
-    whose values are lists, joined with `+` (`A + ["5"]`). None when no operand is a
-    list."""
+    """The readings of a list expression starting at code[i]: list literals, names whose
+    values are lists and calls to a Python function that returns one, joined with `+`
+    (`A + ["5"]`). None when no operand is a list."""
     readings: list[list[str]] = [[]]
     while True:
         i = _skip(r"\s*", code, i)
         lst = _literal_list_at(code, i, head, _depth)
-        named = None if lst or _depth >= _MAX_NAME_DEPTH else _named_values_at(head, code, i, _NAME_OPERAND_RE)
+        named = None if lst or _depth >= _MAX_NAME_DEPTH else (
+            _named_values_at(head, code, i, _NAME_OPERAND_RE) or _returned_values_at(head, code, i)
+        )
         lists = _named_lists(head, code, named[0], _depth) if named else []
         if lst:
             options, i = lst[0], lst[1]
@@ -3393,7 +3395,8 @@ def _string_expr_at(code: str, i: int, head: str = "", _depth: int = 0) -> tuple
     `+` to each other or to other operands, `% …` applied to a literal (the literal's
     text), `shlex.split(<literal>)`, and `"<sep>".join([…])` (one reading per reading of
     the list). A name operand reads as each literal value its reaching assignments give
-    it (`base = "gh pr "; base + "merge 5"`), and any other operand as `X`. A
+    it (`base = "gh pr "; base + "merge 5"`), a call to a function the Python program
+    defines as each value it returns, and any other operand as `X`. A
     `.format(…)` ends the expression after its literal, which keeps the literal's text.
     None when no string literal or literal-valued name takes part."""
     readings, saw_literal = [""], False
@@ -3418,7 +3421,9 @@ def _string_expr_at(code: str, i: int, head: str = "", _depth: int = 0) -> tuple
                 texts, i = [text.join(items) for items in lst[0]], lst[1] + close.end()
             readings = [r + t for r in readings for t in texts][:_MAX_READINGS]
         else:
-            named = _named_values_at(head, code, i, _NAME_OPERAND_RE) if _depth < _MAX_NAME_DEPTH else None
+            named = (
+                _named_values_at(head, code, i, _NAME_OPERAND_RE) or _returned_values_at(head, code, i)
+            ) if _depth < _MAX_NAME_DEPTH else None
             values = _named_strings(head, code, named[0], _depth + 1) if named else []
             if named and values:
                 readings = [r + v for r in readings for v in values][:_MAX_READINGS]
@@ -3600,7 +3605,10 @@ class _PyReach:
     (`+=`, `x = x + …`, `.append`) keeps them, branches and loops take the union, and
     an unreadable binding is _OPAQUE. A name free in a def reads the enclosing scope at
     the def's direct call sites (every definition in that scope when it has none), and
-    a `global` or `nonlocal` write joins the caller at those call sites."""
+    a `global` or `nonlocal` write joins the caller at those call sites. A parameter
+    reads the argument passed for it at every call of its function by name (its default
+    where a call omits it), and `returns` maps each such call to the values its
+    function returns."""
 
     def __init__(self, code: str, tree: ast.Module):
         self.code = code
@@ -3613,6 +3621,15 @@ class _PyReach:
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 self.functions.setdefault(node.name, []).append(node)
+        self.calls: dict = {}          # function name -> call nodes, anywhere in the program
+        self.returns: dict = {}        # call offset -> offsets of its function's return values
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in self.functions:
+                self.calls.setdefault(node.func.id, []).append(node)
+                self.returns[self._offset(node)] = frozenset(
+                    self._offset(r.value) for fn in self.functions[node.func.id]
+                    for r in self._own_nodes(fn.body) if isinstance(r, ast.Return) and r.value is not None
+                )
         self.outer_writes = {id(fn): self._outer_writes(fn) for fns in self.functions.values() for fn in fns}
         module = _PyScope(tree, None)
         self._block(tree.body, {}, module, module)
@@ -3873,12 +3890,32 @@ class _PyReach:
         names = [a.arg for a in getattr(args, "posonlyargs", []) + args.args + args.kwonlyargs]
         return names + [a.arg for a in (args.vararg, args.kwarg) if a is not None]
 
+    def _arguments(self, fn) -> dict:
+        """Per parameter of `fn`, the offsets of what its calls pass for it: the argument
+        by position or keyword, else the parameter's default; _OPAQUE for a call that
+        omits it with no default or passes `*args`/`**kwargs`, and for a `*`/`**`
+        parameter. A function with no call by name gives its parameters nothing."""
+        args, calls = fn.args, self.calls.get(fn.name, [])
+        positional = getattr(args, "posonlyargs", []) + args.args
+        defaults = dict(zip([a.arg for a in positional][len(positional) - len(args.defaults):], args.defaults))
+        defaults.update((a.arg, d) for a, d in zip(args.kwonlyargs, args.kw_defaults) if d is not None)
+        out: dict = {name: set() for name in self._params(args)}
+        for name in [a.arg for a in (args.vararg, args.kwarg) if a is not None]:
+            out[name] = {_OPAQUE}
+        for call in calls:
+            unpacked = any(isinstance(a, ast.Starred) for a in call.args) or any(k.arg is None for k in call.keywords)
+            keywords = {k.arg: k.value for k in call.keywords}
+            for k, a in enumerate(positional + args.kwonlyargs):
+                given = call.args[k] if k < len(positional) and k < len(call.args) else keywords.get(a.arg, defaults.get(a.arg))
+                out[a.arg].add(_OPAQUE if unpacked or given is None else self._offset(given))
+        return {name: frozenset(defs) for name, defs in out.items()}
+
     def _function(self, fn, outer: _PyScope) -> None:
         scope = _PyScope(fn, outer)
         declared = set(self.outer_writes[id(fn)])
         params = self._params(fn.args)
         scope.locals = (set(params) | set(self._bindings(fn.body))) - declared
-        env = {name: frozenset({_OPAQUE}) for name in params}
+        env = self._arguments(fn)
         self._block(fn.body, env, scope, scope)
 
     def _lambda(self, lam, outer: _PyScope) -> None:
@@ -3888,14 +3925,24 @@ class _PyReach:
 
 
 @functools.lru_cache(maxsize=64)
-def _python_reaching(code: str) -> dict | None:
-    """The definitions reaching each name a Python program reads (see _PyReach), or
-    None when it does not parse."""
+def _python_reaching(code: str) -> "_PyReach | None":
+    """A Python program's reaching definitions and call returns (see _PyReach), or None
+    when it does not parse."""
     try:
         tree = ast.parse(code)
     except (SyntaxError, ValueError, MemoryError):
         return None
-    return _PyReach(code, tree).uses
+    return _PyReach(code, tree)
+
+
+def _returned_values_at(head: str, code: str, i: int) -> tuple[list[int], int] | None:
+    """For a call at code[i] to a function the Python program defines, (the offsets of
+    the values its `return` statements give, offset past the call); None otherwise."""
+    reach = _python_reaching(code) if _PYTHON_HEAD_RE.match(head) else None
+    values = sorted(reach.returns.get(i, ())) if reach else []
+    callee = re.match(r"[A-Za-z_]\w*\s*(?=\()", code[i:]) if values else None
+    end = _balanced_end(code, i + callee.end()) if callee else -1
+    return (values, end) if end > 0 else None
 
 
 def _named_values_at(head: str, code: str, i: int, shape: re.Pattern = _BARE_NAME_ARG_RE) -> tuple[list[int], int] | None:
@@ -3906,9 +3953,9 @@ def _named_values_at(head: str, code: str, i: int, shape: re.Pattern = _BARE_NAM
     named = shape.match(code, i)
     if not named:
         return None
-    reaching = _python_reaching(code) if _PYTHON_HEAD_RE.match(head) else None
-    if reaching is not None:
-        values = sorted(v for v in reaching.get(i, ()) if v != _OPAQUE)
+    reach = _python_reaching(code) if _PYTHON_HEAD_RE.match(head) else None
+    if reach is not None:
+        values = sorted(v for v in reach.uses.get(i, ()) if v != _OPAQUE)
         return (values, named.end()) if values else None
     values = _span_reaching(head, code, i, named.group("name"))
     return (values, named.end()) if values else None

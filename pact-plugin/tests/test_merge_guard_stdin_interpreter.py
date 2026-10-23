@@ -72,11 +72,11 @@ def test_a_literal_command_held_in_a_variable_is_refused():
     assert is_dangerous_command(cmd) is True
 
 
-def test_a_command_built_by_a_function_is_the_named_residual():
-    """A command a function returns needs dataflow across the call; it stays allowed."""
+def test_a_command_built_by_a_function_is_refused():
+    """A call to a function the program defines reads what it returns."""
     cmd = (f"python3 - <<'EOF'\nimport subprocess\ndef build():\n    return '{D}'\n"
            "c = build()\nsubprocess.run(c, shell=True)\nEOF")
-    assert is_dangerous_command(cmd) is False
+    assert is_dangerous_command(cmd) is True
 
 
 def test_every_head_pattern_uses_the_single_head_source():
