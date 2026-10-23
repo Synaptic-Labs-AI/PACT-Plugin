@@ -515,9 +515,15 @@ _CLOSE_LITERAL_ARMS = (
 # safety is preserved BY CONSTRUCTION, not by denylist-emptiness: an isolated API
 # leg is method-less hence detect-negative, so tier 2 abstains → symmetric
 # whole-command bind (the safe direction) — see TestEmergentDangerClassIsCloseOnly.
+# A gh-api merge endpoint: `merge` or `merges` as a whole PATH segment.
+_GH_API_MERGE_PATH = r".*/merges?(?![\w-])"
+
 _API_LITERAL_ARMS = (
-    # API-based merge bypasses (require mutating HTTP method to avoid blocking reads)
-    re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:PUT|PATCH|POST)\b).*merge", re.IGNORECASE),
+    # API-based merge bypasses (require mutating HTTP method to avoid blocking reads).
+    # The gh-api arms read `merge` only as an endpoint PATH segment (`/pulls/<n>/merge`,
+    # `/merges`), never inside a field name: `-f delete_branch_on_merge=true` is a repo
+    # settings change, not a merge.
+    re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:PUT|PATCH|POST)\b)" + _GH_API_MERGE_PATH, re.IGNORECASE),
     re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PUT|PATCH|POST)\b).*api.*merge", re.IGNORECASE),
     # API-based branch deletion via DELETE to git/refs endpoint.
     # HOST-AGNOSTIC (#1061): the curl arms drop the literal `.*api.*` substring so a
@@ -553,7 +559,7 @@ _API_LITERAL_ARMS = (
     # cause gh api to default to POST. Dangerous when targeting git/refs or merge.
     # Negative lookahead excludes explicit GET (which overrides implicit POST).
     re.compile(_GH_API_PREFIX + r"(?!.*(?:-X|--method)\s+GET\b)(?=.*(?:-f|-F|--field|--raw-field|--input)\s).*git/refs", re.IGNORECASE),
-    re.compile(_GH_API_PREFIX + r"(?!.*(?:-X|--method)\s+GET\b)(?=.*(?:-f|-F|--field|--raw-field|--input)\s).*merge", re.IGNORECASE),
+    re.compile(_GH_API_PREFIX + r"(?!.*(?:-X|--method)\s+GET\b)(?=.*(?:-f|-F|--field|--raw-field|--input)\s)" + _GH_API_MERGE_PATH, re.IGNORECASE),
     # curl implicit POST: --data/-d/--data-raw/--data-binary flags cause curl to
     # default to POST. Dangerous when targeting git/refs or merge API endpoints.
     # Negative lookahead excludes explicit GET (which overrides implicit POST).

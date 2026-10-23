@@ -203,3 +203,34 @@ QUOTED_PROGRAM_TEXT_ALLOW = [
 def test_guarded_text_quoted_in_a_program_or_argument_is_allowed(label, cmd):
     assert is_dangerous_command(cmd) is False
 
+
+# ---------------------------------------------------------------------------
+# A gh api call is a merge by its endpoint, never by a field name.
+# ---------------------------------------------------------------------------
+
+API = "gh " + "api"
+
+GH_API_MERGE_DENY = [
+    ("PUT on the merge endpoint", f"{API} -X PUT repos/O/R/pulls/5/merge"),
+    ("implicit POST on the merge endpoint", f"{API} repos/O/R/pulls/5/merge -f merge_method=squash"),
+    ("POST on merges", f"{API} -X POST repos/O/R/merges -f base=main -f head=feat"),
+]
+
+GH_API_SETTINGS_ALLOW = [
+    ("delete_branch_on_merge", f"{API} -X PATCH repos/O/R -f delete_branch_on_merge=true"),
+    ("allow_auto_merge", f"{API} -X PATCH repos/O/R -F allow_auto_merge=true -F allow_merge_commit=false"),
+    ("squash_merge_commit_title", f"{API} repos/O/R -f squash_merge_commit_title=PR_TITLE"),
+    ("merge as a field value", f"{API} -X PATCH repos/O/R/pulls/5 -f title=merge"),
+    ("a path segment that starts with merge", f"{API} -X PUT repos/O/R/environments/merge-checks"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", GH_API_MERGE_DENY, ids=[r[0] for r in GH_API_MERGE_DENY])
+def test_a_gh_api_merge_endpoint_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", GH_API_SETTINGS_ALLOW, ids=[r[0] for r in GH_API_SETTINGS_ALLOW])
+def test_a_gh_api_field_named_merge_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
