@@ -8901,6 +8901,8 @@ def _is_plain_literal_assignment(command: str, view: str, m: re.Match) -> bool:
     before = view[:m.start()]
     if len(_COMPOUND_OPEN_RE.findall(before)) > len(_COMPOUND_CLOSE_RE.findall(before)):
         return False
+    if re.split(r"[;&|\n]", before)[-1].strip():
+        return False                          # an argument (`-f query=…`), not an assignment
     rest = command[m.end():].lstrip(" \t")
     if rest and not rest.startswith((";", "\n", "&&", "||")):
         return False                          # a prefix assignment, piped, or backgrounded

@@ -1147,3 +1147,24 @@ def test_a_shell_reading_its_commands_from_stdin_runs_the_heredoc(label, cmd):
 @pytest.mark.parametrize("label,cmd", SHELL_STDIN_ALLOW, ids=[r[0] for r in SHELL_STDIN_ALLOW])
 def test_a_shell_given_c_reads_the_heredoc_as_data(label, cmd):
     assert is_dangerous_command(cmd) is False
+
+
+# A `key=value` word that is a command's argument (`gh api -f query=…`) is no assignment.
+GRAPHQL_QUERY_WITH_VARIABLES = "mutation($id: ID!) { " + "merge" + "PullRequest(input: {pullRequestId: $id}) { clientMutationId } }"
+FIELD_ARGUMENT_DENY = [
+    ("the node id from a shell variable", f"gh api graphql -F id=\"$NODE\" -f query='{GRAPHQL_QUERY_WITH_VARIABLES}'"),
+    ("the node id as a field", f"gh api graphql -f id=PR_1 -f query='{GRAPHQL_QUERY_WITH_VARIABLES}'"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", FIELD_ARGUMENT_DENY, ids=[r[0] for r in FIELD_ARGUMENT_DENY])
+def test_a_graphql_merge_with_query_variables_is_refused_and_typed(label, cmd):
+    from shared.merge_guard_common import extract_command_context
+
+    assert is_dangerous_command(cmd) is True
+    assert extract_command_context(cmd)["graphql_mutation"] == "merge" + "PullRequest"
+
+
+def test_a_query_with_variables_that_reads_is_allowed():
+    cmd = "gh api graphql -F id=\"$NODE\" -f query='query($id: ID!) { node(id: $id) { id } }'"
+    assert is_dangerous_command(cmd) is False
