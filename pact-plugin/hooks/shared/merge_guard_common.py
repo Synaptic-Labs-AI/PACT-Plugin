@@ -3283,6 +3283,7 @@ def _list_expr_at(code: str, i: int, head: str = "", _depth: int = 0) -> tuple[l
         lst = _literal_list_at(code, i, head, _depth)
         named = None if lst or _depth >= _MAX_NAME_DEPTH else (
             _named_values_at(head, code, i, _NAME_OPERAND_RE) or _returned_values_at(head, code, i)
+            or _member_values_at(head, code, i)
         )
         lists = _named_lists(head, code, named[0], _depth) if named else []
         if lst:
@@ -3423,6 +3424,7 @@ def _string_expr_at(code: str, i: int, head: str = "", _depth: int = 0) -> tuple
         else:
             named = (
                 _named_values_at(head, code, i, _NAME_OPERAND_RE) or _returned_values_at(head, code, i)
+                or _member_values_at(head, code, i)
             ) if _depth < _MAX_NAME_DEPTH else None
             values = _named_strings(head, code, named[0], _depth + 1) if named else []
             if named and values:
@@ -4319,8 +4321,11 @@ def _js_functions(code: str, head: str) -> dict:
         block = m.group("fname") or m.group("ename")
         name = block or m.group("aname")
         params = (m.group("fparams") or m.group("eparams") or "") if block else (m.group("aparams") or m.group("aparam") or "")
-        names = tuple(re.findall(r"^\s*(?:\.\.\.)?([A-Za-z_$][\w$]*)", part)[0] if re.match(r"^\s*(?:\.\.\.)?[A-Za-z_$]", part) else ""
-                      for part in params.split(",")) if params.strip() else ()
+        names = tuple(
+            part.strip() if part.strip().startswith("{") else
+            (re.findall(r"^\s*(?:\.\.\.)?([A-Za-z_$][\w$]*)", part) or [""])[0]
+            for part in _top_level_parts(params)
+        ) if params.strip() else ()
         if block or view[m.end():m.end() + 1] == "{":
             start = m.end() - 1 if block else m.end()
             end = _matching(view, start)
@@ -4414,6 +4419,103 @@ def _other_functions(code: str, head: str) -> dict:
     return {name: fns[0] for name, fns in found.items() if len(fns) == 1}
 
 
+def _top_level_parts(text: str) -> list:
+    """`text` split at the commas outside brackets."""
+    parts, depth, last = [], 0, 0
+    for k, ch in enumerate(text):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(text[last:k])
+            last = k + 1
+    return parts + [text[last:]]
+
+
+def _destructured_key(pattern: str, name: str) -> str | None:
+    """For a `{…}` destructuring pattern, the key that binds `name` (`{cmd}` -> cmd,
+    `{c: cmd}` -> c, `{cmd = "x"}` -> cmd), or None."""
+    if not pattern.startswith("{"):
+        return None
+    for part in _top_level_parts(pattern[1:-1]):
+        m = re.match(r"\s*([A-Za-z_$][\w$]*)\s*(?::\s*([A-Za-z_$][\w$]*))?\s*(?:=.*)?$", part, re.S)
+        if m and (m.group(2) or m.group(1)) == name:
+            return m.group(1)
+    return None
+
+
+# A key of an object or dict literal at its top level: `cmd:`, `"cmd":`, `'cmd':`.
+def _object_key_values(head: str, code: str, i: int, key: str, _depth: int = 0) -> list[int]:
+    """For the object or dict literal starting at code[i] (after whitespace), the offsets
+    of the values its constant `key` may hold: a later entry wins, as at run time, so a
+    later `key:` replaces an earlier one and a spread (`...a`, `**a`) of a literal that
+    sets the key replaces it too; a spread that may or may not set it keeps the earlier
+    value as one of the possibilities. [] when there is no literal or no such key."""
+    i = _skip(r"\s*", code, i)
+    view = _mask_string_literals(code)
+    if view[i:i + 1] != "{":
+        return []
+    close = _matching(view, i)
+    if close < 0:
+        return []
+    starts, depth = [i + 1], 0
+    for k in range(i + 1, close):
+        if view[k] in "([{":
+            depth += 1
+        elif view[k] in ")]}":
+            depth -= 1
+        elif view[k] == "," and depth == 0:
+            starts.append(k + 1)
+    key_re = re.compile(r"\s*(?:([\"'])" + re.escape(key) + r"\1|" + re.escape(key) + r"(?![\w$]))\s*:\s*")
+    found: list[int] = []
+    for start in starts:
+        spread = re.match(r"\s*(?:\.\.\.|\*\*)\s*", view[start:close])
+        if spread:
+            at = start + spread.end()
+            named = _named_values_at(head, code, at, _NAME_OPERAND_RE) if _depth < _MAX_NAME_DEPTH else None
+            holders = named[0] if named else ([at] if view[at:at + 1] == "{" else [])
+            supplied = [_object_key_values(head, code, h, key, _depth + 1) for h in holders]
+            given = [v for values in supplied for v in values]
+            found = given if holders and all(supplied) else found + given
+            continue
+        m = key_re.match(code, start)
+        if m:
+            found = [m.end()]
+    return found
+
+
+# A constant-key read of a name: `opts["cmd"]`, `opts['cmd']`, `opts.get("cmd")` and,
+# outside Python, `opts.cmd`.
+_MEMBER_READ_RE = re.compile(
+    r"(?P<name>[A-Za-z_$][\w$]*)\s*(?:\[\s*(?P<q>[\"'])(?P<k1>[\w$-]+)(?P=q)\s*\]"
+    r"|\.\s*get\s*\(\s*(?P<q2>[\"'])(?P<k2>[\w$-]+)(?P=q2)\s*\)"
+    r"|\.(?P<k3>[A-Za-z_$][\w$]*)(?!\s*\())"
+)
+
+
+def _member_values_at(head: str, code: str, i: int) -> tuple[list[int], int] | None:
+    """For a constant-key read at code[i] of a name whose values are object or dict
+    literals, (the offsets of the values that key holds in them, offset past the read);
+    None otherwise. `.key` is a member read only outside Python."""
+    m = _MEMBER_READ_RE.match(code, i)
+    if not m or (m.group("k3") and _PYTHON_HEAD_RE.match(head)):
+        return None
+    key = m.group("k1") or m.group("k2") or m.group("k3")
+    reach = _python_reaching(code) if _PYTHON_HEAD_RE.match(head) else None
+    if reach is not None:
+        holders = [v for v in reach.uses.get(i, ()) if v != _OPAQUE]
+    else:
+        holders = _span_reaching(head, code, i, m.group("name"))
+    for _ in range(_MAX_NAME_DEPTH):                  # a holder that is itself a name
+        named = [_named_values_at(head, code, h) for h in holders]
+        if not any(named):
+            break
+        holders = [v for h, n in zip(holders, named) for v in (n[0] if n else [h])]
+    values = sorted({v for h in holders for v in _object_key_values(head, code, h, key)})
+    return (values, m.end()) if values else None
+
+
 def _named_functions(code: str, head: str) -> dict:
     """The named functions a program declares, for the families whose helpers are read."""
     if _JS_HEAD_RE.match(head):
@@ -4458,8 +4560,10 @@ def _param_values(head: str, code: str, i: int, name: str) -> list | None:
     """For a use at code[i] of a parameter of the innermost named function holding it,
     the offsets of the arguments its calls pass in that position; None when the use is
     not such a parameter, or the body assigns it before the use (perl's own
-    `my $x = shift` / `= @_` binding excepted)."""
-    fns = [f for f in _named_functions(code, head).items() if f[1].start <= i < f[1].end and name in f[1].params]
+    `my $x = shift` / `= @_` binding excepted). A name a JS `{…}` pattern destructures
+    reads the value its key holds in each literal object passed there."""
+    fns = [f for f in _named_functions(code, head).items() if f[1].start <= i < f[1].end
+           and (name in f[1].params or any(_destructured_key(p, name) for p in f[1].params))]
     if not fns:
         return None
     fname, fn = max(fns, key=lambda f: f[1].start)
@@ -4467,8 +4571,12 @@ def _param_values(head: str, code: str, i: int, name: str) -> list | None:
     view = _index_view(code, head)
     if any(fn.start <= at < i and not re.match(r"shift\b|@_", view[v:]) for at, v in zip(starts, values)):
         return None                                      # reassigned in the body first
-    position = fn.params.index(name)
-    return sorted({args[position] for args in _calls(code, head, fname) if position < len(args)})
+    if name in fn.params:
+        position = fn.params.index(name)
+        return sorted({args[position] for args in _calls(code, head, fname) if position < len(args)})
+    position, key = next((k, key) for k, p in enumerate(fn.params) if (key := _destructured_key(p, name)))
+    calls = [args for args in _calls(code, head, fname) if position < len(args)]
+    return sorted({v for args in calls for v in _object_key_values(head, code, args[position], key)})
 
 
 def _span_reaching(head: str, code: str, i: int, name: str) -> list:

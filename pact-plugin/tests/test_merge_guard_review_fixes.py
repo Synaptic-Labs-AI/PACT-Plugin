@@ -1259,3 +1259,64 @@ def test_other_helper_merge_is_refused(label, cmd):
 @pytest.mark.parametrize("label,cmd", OTHER_HELPER_ALLOW, ids=[r[0] for r in OTHER_HELPER_ALLOW])
 def test_other_helper_view_is_allowed(label, cmd):
     assert is_dangerous_command(cmd) is False
+
+
+# A literal object or dict passed to a helper and read by a constant key: a JS
+# destructured parameter or opts.cmd / opts["cmd"], a Python opts["cmd"] or opts.get("cmd").
+# A later entry wins: a later key or a spread of a literal that sets the key replaces
+# the value, and a spread that may not set it keeps it as a possible value. A computed
+# key, another key or a non-literal argument reads nothing.
+OBJECT_HELPER_DENY = [
+    ('js destructured arrow', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nconst sh = ({cmd}) => cp.execSync(cmd);\nsh({cmd: "' + M + ' 5"});\nEOF2'),
+    ('js destructured function', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh({cmd}) { cp.execSync(cmd); }\nsh({cmd: "' + M + ' 5"});\nEOF2'),
+    ('js destructured alias', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh({c: cmd}) { cp.execSync(cmd); }\nsh({c: "' + M + ' 5"});\nEOF2'),
+    ('js spread before the key', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nconst base = {cwd: "."};\nfunction sh(opts) { cp.execSync(opts.cmd); }\nsh({...base, cmd: "' + M + ' 5"});\nEOF2'),
+    ('py dict later key wins', 'python3 - <<\'EOF2\'\nimport subprocess\ndef run(opts):\n    subprocess.run(opts["cmd"])\nrun({"cmd": ["ls"], "cmd": ["gh", "pr", "merge", "5"]})\nEOF2'),
+    ('js spread after the key', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nconst opts = {timeout: 5};\nfunction sh(o) { cp.execSync(o.cmd, o); }\nsh({cmd: "' + M + ' 5", ...opts});\nEOF2'),
+    ('js spread of an unknown after the key', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh(o) { cp.execSync(o.cmd); }\nsh({cmd: "' + M + ' 5", ...load()});\nEOF2'),
+    ('py spread after the key', 'python3 - <<\'EOF2\'\nimport subprocess\nopts = {"check": True}\ndef run(o):\n    subprocess.run(o["cmd"])\nrun({"cmd": ["gh", "pr", "merge", "5"], **opts})\nEOF2'),
+    ('js spread of a literal setting cmd', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh(o) { cp.execSync(o.cmd); }\nsh({cmd: "gh pr view 5", ...{cmd: "' + M + ' 5"}});\nEOF2'),
+    ('js destructured second key', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh({cwd, cmd}) { cp.execSync(cmd, {cwd}); }\nsh({cwd: ".", cmd: "' + M + ' 5"});\nEOF2'),
+    ('js member dot', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh(opts) { cp.execSync(opts.cmd); }\nsh({cmd: "' + M + ' 5"});\nEOF2'),
+    ('js member bracket', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh(opts) { cp.execSync(opts["cmd"]); }\nsh({"cmd": "' + M + ' 5"});\nEOF2'),
+    ('py dict subscript', 'python3 - <<\'EOF2\'\nimport subprocess\ndef run(opts):\n    subprocess.run(opts["cmd"])\nrun({"cmd": ["gh", "pr", "merge", "5"]})\nEOF2'),
+    ('py dict get', 'python3 - <<\'EOF2\'\nimport subprocess\ndef run(opts):\n    subprocess.run(opts.get("cmd"))\nrun({"cmd": ["gh", "pr", "merge", "5"]})\nEOF2'),
+    ('py dict string', 'python3 - <<\'EOF2\'\nimport subprocess\nimport os\ndef run(opts):\n    os.system(opts["cmd"])\nrun({"cmd": "' + M + ' 5"})\nEOF2'),
+    ('py dict through a name', 'python3 - <<\'EOF2\'\nimport subprocess\ndef run(opts):\n    subprocess.run(opts["cmd"])\no = {"cmd": ["gh", "pr", "merge", "5"]}\nrun(o)\nEOF2'),
+]
+OBJECT_HELPER_ALLOW = [
+    ('js destructured arrow view', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nconst sh = ({cmd}) => cp.execSync(cmd);\nsh({cmd: "gh pr view 5"});\nEOF2'),
+    ('js destructured function view', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh({cmd}) { cp.execSync(cmd); }\nsh({cmd: "gh pr view 5"});\nEOF2'),
+    ('js destructured alias view', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh({c: cmd}) { cp.execSync(cmd); }\nsh({c: "gh pr view 5"});\nEOF2'),
+    ('js spread before the key view', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nconst base = {cwd: "."};\nfunction sh(opts) { cp.execSync(opts.cmd); }\nsh({...base, cmd: "gh pr view 5"});\nEOF2'),
+    ('py dict later key wins view', 'python3 - <<\'EOF2\'\nimport subprocess\ndef run(opts):\n    subprocess.run(opts["cmd"])\nrun({"cmd": ["ls"], "cmd": ["gh", "pr", "view", "5"]})\nEOF2'),
+    ('js spread after the key view', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nconst opts = {timeout: 5};\nfunction sh(o) { cp.execSync(o.cmd, o); }\nsh({cmd: "gh pr view 5", ...opts});\nEOF2'),
+    ('js spread of an unknown after the key view', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh(o) { cp.execSync(o.cmd); }\nsh({cmd: "gh pr view 5", ...load()});\nEOF2'),
+    ('py spread after the key view', 'python3 - <<\'EOF2\'\nimport subprocess\nopts = {"check": True}\ndef run(o):\n    subprocess.run(o["cmd"])\nrun({"cmd": ["gh", "pr", "view", "5"], **opts})\nEOF2'),
+    ('js spread of a literal setting cmd view', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh(o) { cp.execSync(o.cmd); }\nsh({cmd: "gh pr view 5", ...{cmd: "gh pr view 5"}});\nEOF2'),
+    ('js destructured second key view', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh({cwd, cmd}) { cp.execSync(cmd, {cwd}); }\nsh({cwd: ".", cmd: "gh pr view 5"});\nEOF2'),
+    ('js member dot view', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh(opts) { cp.execSync(opts.cmd); }\nsh({cmd: "gh pr view 5"});\nEOF2'),
+    ('js member bracket view', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh(opts) { cp.execSync(opts["cmd"]); }\nsh({"cmd": "gh pr view 5"});\nEOF2'),
+    ('py dict subscript view', 'python3 - <<\'EOF2\'\nimport subprocess\ndef run(opts):\n    subprocess.run(opts["cmd"])\nrun({"cmd": ["gh", "pr", "view", "5"]})\nEOF2'),
+    ('py dict get view', 'python3 - <<\'EOF2\'\nimport subprocess\ndef run(opts):\n    subprocess.run(opts.get("cmd"))\nrun({"cmd": ["gh", "pr", "view", "5"]})\nEOF2'),
+    ('py dict string view', 'python3 - <<\'EOF2\'\nimport subprocess\nimport os\ndef run(opts):\n    os.system(opts["cmd"])\nrun({"cmd": "gh pr view 5"})\nEOF2'),
+    ('py dict through a name view', 'python3 - <<\'EOF2\'\nimport subprocess\ndef run(opts):\n    subprocess.run(opts["cmd"])\no = {"cmd": ["gh", "pr", "view", "5"]}\nrun(o)\nEOF2'),
+    ('js computed key', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh(opts, k) { cp.execSync(opts[k]); }\nsh({cmd: "' + M + ' 5"}, "cmd");\nEOF2'),
+    ('js object spread', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nconst base = {cmd: "gh pr view 5"};\nfunction sh(opts) { cp.execSync(opts.cmd); }\nsh({...base, other: "' + M + ' 5"});\nEOF2'),
+    ('js other key holds the merge', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction sh({cmd}) { cp.execSync(cmd); }\nsh({cmd: "gh pr view 5", note: "' + M + ' 5"});\nEOF2'),
+    ('py non-literal argument', 'python3 - <<\'EOF2\'\nimport subprocess\ndef run(opts):\n    subprocess.run(opts["cmd"])\nrun(load())\nEOF2'),
+    ('py other key holds the merge', 'python3 - <<\'EOF2\'\nimport subprocess\ndef run(opts):\n    subprocess.run(opts["cmd"])\nrun({"cmd": ["gh", "pr", "view", "5"], "note": "' + M + ' 5"})\nEOF2'),
+    ('js spread after the key sets cmd', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nconst extra = {cmd: "gh pr view 5"};\nfunction sh(opts) { cp.execSync(opts.cmd); }\nsh({cmd: "' + M + ' 5", ...extra});\nEOF2'),
+    ('py spread after the key sets cmd', 'python3 - <<\'EOF2\'\nimport subprocess\nextra = {"cmd": ["gh", "pr", "view", "5"]}\ndef run(opts):\n    subprocess.run(opts["cmd"])\nrun({"cmd": ["gh", "pr", "merge", "5"], **extra})\nEOF2'),
+    ('py dict spread', 'python3 - <<\'EOF2\'\nimport subprocess\nbase = {"cmd": ["gh", "pr", "view", "5"]}\ndef run(opts):\n    subprocess.run(opts["cmd"])\nrun({**base, "note": "' + M + ' 5"})\nEOF2'),
+]
+
+
+@pytest.mark.parametrize("label,cmd", OBJECT_HELPER_DENY, ids=[r[0] for r in OBJECT_HELPER_DENY])
+def test_object_helper_merge_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", OBJECT_HELPER_ALLOW, ids=[r[0] for r in OBJECT_HELPER_ALLOW])
+def test_object_helper_view_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
