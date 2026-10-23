@@ -184,9 +184,21 @@ A second narrowing the byte-parity comparison does not cover: the mirror and
 the parity test compare INVOCATION LINES on the assumption that no ruff
 CONFIGURATION file exists anywhere in the repo (no `ruff.toml`, no
 `.ruff.toml`, no `[tool.ruff]` in a `pyproject.toml` — verified absent on
-this branch). A config file would change the EFFECTIVE rule surface — its
-own select, its own exclusions — without changing a single compared byte, so
-parity would stay green over a different lint than either side's invocation
-line suggests. If a ruff config ever lands in this repo, extend the parity
-guard to compare the config surface too before trusting the mirror.
+this branch). WHICH config keys are vectors was measured, not assumed (each
+below on a scratch copy carrying one unused import, ruff 0.16.5):
+
+- `select` is NOT a vector: the legs pass `--select` on the command line,
+  and a CLI select REPLACES a config's select — a config declaring
+  `select = ["E501"]` left F401 flagged. The rule surface is CLI-pinned.
+- `per-file-ignores` IS a vector: `{"*_probe.py" = ["F401"]}` suppressed the
+  finding and the leg went green — exit 0 over a file CI-bytes would flag.
+- `exclude` (and `extend-exclude`) IS a vector: the matching file was
+  skipped entirely, same green exit 0.
+
+Both vectors narrow the EFFECTIVE sweep without changing a single compared
+byte, so parity stays green over a different lint than the invocation lines
+suggest. If a ruff config ever lands in this repo, extend the parity guard
+to compare the exclude/per-file-ignores surface too before trusting the
+mirror — the select surface needs no guard while the legs keep passing
+`--select` on the command line.
 

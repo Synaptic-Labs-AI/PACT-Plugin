@@ -37,6 +37,7 @@ invocation — same line-oriented read, comments dropped first, same
 skip-outside-a-checkout rule.
 """
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -274,4 +275,121 @@ def test_usage_error_exits_1():
     assert "ruff" not in result.stdout, (
         "the usage refusal must fire before any ruff invocation; a ruff "
         "stamp in stdout means an argument was not refused upfront"
+    )
+
+
+def _write_executable(path, body):
+    """A small executable, mirroring the fake-ruff pattern in
+    test_lint_check_files_mode.py's TestCrashHonestyGuard."""
+    path.write_text(body, encoding="utf-8")
+    path.chmod(0o755)
+
+
+class TestExitThreeCrashArm:
+    """A ruff that CRASHES on check must map to exit 3, not collide with the
+    refusal exit 2 or read as findings exit 1.
+
+    Exercised through a fake ruff on PATH (the crash-guard pattern in
+    test_lint_check_files_mode.py): the fake passes the availability probe
+    and the version stamp, then exits 2 on check — the shape of a real
+    config-load failure or internal error. This is the committed regression
+    net for the exit taxonomy; the runbook's arm F is the manual repetition.
+    """
+
+    def test_crashing_ruff_maps_to_exit_3(self, tmp_path):
+        fakebin = tmp_path / "fakebin"
+        fakebin.mkdir()
+        _write_executable(
+            fakebin / "ruff",
+            "#!/bin/bash\n"
+            'if [ "$1" = "--version" ]; then echo fake-ruff 9.9.9; exit 0; fi\n'
+            'echo "ruff failed: simulated crash" >&2\n'
+            "exit 2\n",
+        )
+        root, _, _ = _require_checkout()
+        script = root / _GATE_SCRIPT_REL
+        env = dict(os.environ)
+        env["PATH"] = f"{fakebin}:{env['PATH']}"
+        result = subprocess.run(
+            ["/bin/bash", str(script)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+        )
+        assert result.returncode == 3, (
+            f"a crashing ruff must map to exit 3 (crash), disjoint from "
+            f"refusal 2 and findings 1; observed exit {result.returncode} "
+            f"with stderr: {result.stderr!r}"
+        )
+        assert "LINT-GATE-LEG-1-ERROR exit 2" in result.stderr, (
+            f"the crash marker must name the leg and carry the observed ruff "
+            f"exit; stderr was: {result.stderr!r}"
+        )
+
+    def test_silent_version_call_leaves_no_empty_stamp(self, tmp_path):
+        """A version call that succeeds with NO output prints no stamp.
+
+        The stamp is evidence; an empty `LINT-GATE-RUFF ` line would read as
+        a stamp a greper could mistake for version evidence. The absent
+        stamp is disclosed on stderr and the run proceeds — here straight
+        into the crashing leg, proving the guard does not gate the legs.
+        """
+        fakebin = tmp_path / "fakebin"
+        fakebin.mkdir()
+        _write_executable(
+            fakebin / "ruff",
+            "#!/bin/bash\n"
+            'if [ "$1" = "--version" ]; then exit 0; fi\n'
+            "exit 2\n",
+        )
+        root, _, _ = _require_checkout()
+        script = root / _GATE_SCRIPT_REL
+        env = dict(os.environ)
+        env["PATH"] = f"{fakebin}:{env['PATH']}"
+        result = subprocess.run(
+            ["/bin/bash", str(script)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+        )
+        assert not any(
+            line.startswith("LINT-GATE-RUFF ") for line in result.stdout.splitlines()
+        ), (
+            f"no stdout line may carry an empty version stamp; stdout was: "
+            f"{result.stdout!r}"
+        )
+        assert "LINT-GATE-RUFF-UNAVAILABLE" in result.stderr, (
+            f"the absent stamp must be disclosed on stderr; stderr was: "
+            f"{result.stderr!r}"
+        )
+        assert result.returncode == 3, (
+            f"the stamp guard must not gate the legs: the crashing ruff "
+            f"still maps to exit 3; observed {result.returncode}"
+        )
+
+
+def test_script_guards_unresolvable_script_dir():
+    """The -z guard on the resolved script directory is pinned as bytes.
+
+    If the cd inside the script_dir substitution ever failed, an unguarded
+    script would fall through with dirname-of-empty and resolve the
+    repository root from the CALLER's directory. The guard refuses instead.
+    Pinned as a presence assertion; the branch is unreachable by ordinary
+    invocation (the executing script's directory exists), so exercising it
+    would mean faking a vanishing path — the byte pin carries the review
+    intent at proportionate cost.
+    """
+    _, _, script_text = _require_checkout()
+    assert '[ -z "$script_dir" ]' in script_text, (
+        "the gate script no longer guards against an empty script_dir "
+        "resolution. Without the guard, a failed substitution silently "
+        "re-roots the sweep at the caller's directory — restore it."
+    )
+    assert (
+        "the script directory could not be resolved" in script_text
+    ), (
+        "the -z guard's refusal message is gone or reworded past "
+        "recognition; the refusal must name what failed."
     )

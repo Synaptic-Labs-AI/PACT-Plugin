@@ -90,7 +90,16 @@ cd "$repo_root" || {
 
 # Evidence stamps: the version and the tree are part of what a run certifies.
 printf 'LINT-GATE-ROOT %s\n' "$repo_root"
-printf 'LINT-GATE-RUFF %s\n' "$(ruff --version)"
+# The version stamp prints ONLY when `ruff --version` succeeds with output:
+# a crashing or silent version call must not leave an empty stamp line that a
+# greper could read as version evidence. The absent stamp is disclosed on
+# stderr instead, and the run continues — the legs' own exits carry the gate.
+ruff_version="$(ruff --version 2>/dev/null)" || ruff_version=""
+if [ -n "$ruff_version" ]; then
+    printf 'LINT-GATE-RUFF %s\n' "$ruff_version"
+else
+    printf 'LINT-GATE-RUFF-UNAVAILABLE: ruff --version failed or returned nothing; this run carries no version evidence\n' >&2
+fi
 
 # CI's two import-hygiene legs, verbatim and in order. The stripped form of
 # these exact lines is byte-compared against the workflow by
