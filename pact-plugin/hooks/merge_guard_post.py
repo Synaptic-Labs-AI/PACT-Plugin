@@ -1062,13 +1062,14 @@ def _retire_exact_text_token(
     token_dir: Path | None = None,
     stdout_text: object = "",
 ) -> bool:
-    """Retire this session's exact-command token (minted for an interpreter program
-    or a shell's -c string) on the same success signal Layer 1 uses for its op: a
-    merge or close once GitHub reports the PR in the state the command produces,
-    any other op by LAYER1_SUCCESS_STDOUT_PATTERNS (no pattern: the successful run
-    itself). The operation classifier cannot read such a command, so Layer 1 below
-    never sees it. Any doubt keeps the token; the TTL and MAX_USES bound still
-    apply. Never raises."""
+    """Retire this session's exact-command token on the same success signal Layer 1
+    uses for its op: a merge or close of a numbered PR once GitHub reports it in the
+    state the command produces, an op with a LAYER1_SUCCESS_STDOUT_PATTERNS entry by
+    that output, and any other op (a branch-merge, a merge or close named by a
+    GraphQL node ID, an eval of a heredoc the classifier cannot read) by the
+    successful run itself, so the approval runs once. The operation classifier
+    cannot read such a command, so Layer 1 below never sees it. Any doubt keeps the
+    token; the TTL and MAX_USES bound still apply. Never raises."""
     try:
         text = normalize_command_text(command)
         current_session = get_session_id()
@@ -1086,9 +1087,7 @@ def _retire_exact_text_token(
             if not _token_in_session(token_data, current_session):
                 continue
             op, pr = ctx.get("operation_type"), ctx.get("pr_number")
-            if op in _CONFIRMING_STATE:
-                if not (isinstance(pr, str) and pr.isascii() and pr.isdigit()):
-                    continue
+            if op in _CONFIRMING_STATE and isinstance(pr, str) and pr.isascii() and pr.isdigit():
                 cwd = (
                     frame_cwd
                     if isinstance(frame_cwd, str) and os.path.isabs(frame_cwd) and os.path.isdir(frame_cwd)
@@ -1098,12 +1097,10 @@ def _retire_exact_text_token(
 
                 if check_pr_state(pr, cwd=cwd) != _CONFIRMING_STATE[op]:
                     continue
-            elif op in LAYER1_SUCCESS_STDOUT_PATTERNS:
-                pattern = LAYER1_SUCCESS_STDOUT_PATTERNS[op]
+            elif op not in _CONFIRMING_STATE:
+                pattern = LAYER1_SUCCESS_STDOUT_PATTERNS.get(op)
                 if pattern is not None and not (isinstance(stdout_text, str) and pattern in stdout_text):
                     continue
-            else:
-                continue
             try:
                 os.rename(path, path + ".consumed")
             except OSError:

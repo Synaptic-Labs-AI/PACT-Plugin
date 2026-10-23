@@ -16,6 +16,12 @@ Used by: pytest. The real mint function and the real pre-hook matcher run in
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 from merge_guard_post import _exact_text_reading, _mint_context_from_bundle
 from merge_guard_pre import _token_matches_command
@@ -233,6 +239,64 @@ class TestAnUnreadableEvaldHeredocRunsOnAClick:
     def test_an_approval_runs_no_other_command(self, other):
         ctx, _ = _mint(UNREADABLE_EVALS["default-expansion"])
         assert not _runs(ctx, other)
+
+
+HOOKS = Path(__file__).resolve().parents[1] / "hooks"
+ONE_RUN = {
+    "unreadable-evald-heredoc": UNREADABLE_EVALS["default-expansion"],
+    "branch-merge": BRANCH_UPDATES["merge-upstream"],
+    "graphql-node-id-merge": API_SHAPES["graphql-merge-pull-request"],
+}
+
+
+class TestAnApprovalWithNoSuccessSignalRunsOnce:
+    """A token whose op has no stdout success line and no PR number to read back
+    retires on the successful run itself, through the real hooks: the approved
+    command runs once, and a second run is refused. A failed run (the platform
+    sends PostToolUseFailure, which this hook does not receive) keeps the token."""
+
+    def _hook(self, name: str, payload: dict, root: Path) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(HOOKS / name)], input=json.dumps({"session_id": "s1", **payload}),
+            capture_output=True, text=True, cwd=str(root), timeout=60, check=False,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(root),
+                 "CLAUDE_CONFIG_DIR": str(root / ".claude")})
+
+    def _approve(self, command: str, root: Path) -> None:
+        (root / ".claude").mkdir()
+        q = [{"question": "Run this?", "header": "Run", "multiSelect": False,
+              "options": [{"label": "Yes, run", "description": f"Run `{command}` now"},
+                          {"label": "No", "description": "Hold."}]}]
+        post = self._hook("merge_guard_post.py", {
+            "hook_event_name": "PostToolUse", "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": q}, "tool_response": {"answers": {"Run this?": "Yes, run"}},
+        }, root)
+        assert "token written" in post.stderr, post.stderr
+
+    def _runs(self, command: str, root: Path) -> bool:
+        pre = self._hook("merge_guard_pre.py", {
+            "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command},
+        }, root)
+        return '"deny"' not in pre.stdout
+
+    def _succeeded(self, command: str, root: Path) -> None:
+        self._hook("merge_guard_post.py", {
+            "hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": command},
+            "tool_response": {"stdout": "", "stderr": "", "interrupted": False},
+        }, root)
+
+    @pytest.mark.parametrize("command", ONE_RUN.values(), ids=ONE_RUN.keys())
+    def test_a_successful_run_retires_the_approval(self, command, tmp_path):
+        self._approve(command, tmp_path)
+        assert self._runs(command, tmp_path)
+        self._succeeded(command, tmp_path)
+        assert not self._runs(command, tmp_path)
+
+    def test_a_failed_run_keeps_the_approval_for_a_retry(self, tmp_path):
+        command = ONE_RUN["unreadable-evald-heredoc"]
+        self._approve(command, tmp_path)
+        assert self._runs(command, tmp_path)
+        assert self._runs(command, tmp_path)
 
 
 class TestASubstitutionThatRunsCommandsTypesNothing:
