@@ -472,3 +472,67 @@ def test_a_substitution_running_two_guarded_commands_binds_nothing_from_its_body
     assert _guarded_substitution_body(f"{M} $({PUSHF})") is None
     assert _guarded_substitution_body(f"echo $({M}) $({PUSHF})") is None
 
+
+# ---------------------------------------------------------------------------
+# A file written with literal text and then run is judged as the text it runs.
+# ---------------------------------------------------------------------------
+
+FILE_RUN_DENY = [
+    ("heredoc written then run", f"cat > f <<'EOF'\n{M}\nEOF\nbash f"),
+    ("echo then bash", f"echo '{M}' > f; bash f"),
+    ("echo then sh", f"echo '{M}' > f; sh f"),
+    ("echo then source", f"echo '{M}' > f && source f"),
+    ("printf then dot", f"printf '%s\\n' '{M}' > f; . ./f"),
+    ("tee then bash", f"echo '{M}' | tee f; bash f"),
+    ("append then bash from stdin", f"echo '{M}' >> f; bash < f"),
+    ("chmod then run", f"echo '{M}' > f; chmod +x f; ./f"),
+    ("an append after a harmless line", f"echo 'echo hi' > f; echo '{M}' >> f; bash f"),
+    ("cat into bash", f"echo '{M}' > f; cat f | bash"),
+    ("the run's output piped to a shell", f"echo \"echo '{M}'\" > f; bash f | bash"),
+    ("a harmless line appended after the merge", f"echo '{M}' > f; echo 'echo hi' >> f; bash f"),
+    ("dynamic text beside the merge", f'echo "{M} $(date)" > f; bash f'),
+    ("a backtick beside the merge", f'echo "{M} `date`" > f; bash f'),
+    ("an expanding heredoc beside the merge", f"cat > f <<EOF\n{M} $(date)\nEOF\nbash f"),
+    ("a substitution in an earlier leg", f"ts=$(date); echo '{M}' > f; bash f"),
+    ("a backtick holding a cd in an earlier leg", f"ts=`true; cd /tmp`; echo '{M}' > f; bash f"),
+    ("an unquoted substitution beside the merge", f"echo {M} $(date) > f; bash f"),
+]
+
+FILE_RUN_ALLOW = [
+    ("written, never run", f"echo '{M}' > f"),
+    ("written then printed", f"echo '{M}' > f; cat f"),
+    ("another file run", f"echo '{M}' > f; bash g"),
+    ("run before the write", f"bash f; echo '{M}' > f"),
+    ("a harmless file", "echo 'echo hi' > f; bash f"),
+    ("a read in the file", "echo 'gh pr view 5' > f; bash f"),
+    ("a later write replaces the first", f"echo '{M}' > f; echo 'echo hi' > f; bash f"),
+    ("a harmless heredoc file", "cat > f <<'EOF'\necho hi\nEOF\nbash f"),
+    ("a substitution alone names no command", 'echo "$(cat cmds)" > f; bash f'),
+    ("dynamic text in a harmless file", 'echo "echo $(date)" > f; bash f'),
+    ("an expanding heredoc that only echoes", "cat > f <<EOF\necho $HOME\nEOF\nbash f"),
+    ("a cd between write and run", f"echo '{M}' > f; cd x; bash f"),
+    ("a write and run inside a python heredoc",
+     f"python3 - <<'PY'\nprint(\"echo '{M}' > f; bash f\")\nPY"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", FILE_RUN_DENY, ids=[r[0] for r in FILE_RUN_DENY])
+def test_a_file_written_then_run_is_judged_as_its_text(label, cmd):
+    assert is_dangerous_command(cmd) is True
+    result = _mint(cmd)
+    assert result.context is not None, result.refusal_reason
+    assert (result.context["operation_type"], result.context["pr_number"]) == ("merge", "5")
+    assert merge_guard_pre._token_matches_command({"context": result.context}, cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", FILE_RUN_ALLOW, ids=[r[0] for r in FILE_RUN_ALLOW])
+def test_a_file_not_run_or_harmless_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+def test_the_rewritten_command_inlines_the_run_file():
+    assert rewritten_executed_command(f"echo '{M}' > f; bash f") == f"echo '{M}' > f; {M}"
+    assert rewritten_executed_command(f"echo '{M}' > f; bash g") is None
+    dynamic = 'echo "$(cat cmds)" > f; bash f'
+    assert rewritten_executed_command(dynamic) == 'echo "$(cat cmds)" > f; $(cat cmds)'
+

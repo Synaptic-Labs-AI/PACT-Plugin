@@ -5801,14 +5801,191 @@ def _rewrite_readable_evals(command: str) -> str:
 
 
 def rewritten_executed_command(command: str) -> str | None:
-    """The command as the guard judges it after its rewrites (each readable eval replaced in
-    place by the text it runs), or None when nothing was rewritten. The approval side reads
-    it so the refusal and the approval share one rewrite. Never raises."""
+    """The command as the guard judges it after its rewrites (each readable eval, and each
+    run of a file written earlier, replaced in place by the text it runs), or None when
+    nothing was rewritten. The approval side reads it so the refusal and the approval
+    share one rewrite. Never raises."""
     try:
-        rewritten = _rewrite_readable_evals(command)
+        rewritten = _rewrite_file_runs(_rewrite_readable_evals(command))
     except Exception:  # noqa: BLE001 - a reader for the approval side must not raise
         return None
     return rewritten if rewritten != command else None
+
+
+# A file written and then run in the same command. Writers whose text the guard can read:
+# echo, printf (`%s`/`%b` formats), `… | tee [-a] F` after one of those, and `cat > F <<TAG`.
+_FILE_RUN_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+_FILE_HEREDOC_WRITER_RE = re.compile(
+    r"(?:^|(?<=[;&|\n]))[ \t]*cat[ \t]*(?P<mode>>>?)[ \t]*(?P<file>[^\s;&|<>]+)[ \t]*"
+    r"<<(?P<dash>-?)[ \t]*(?P<q>['\"\\]?)(?P<tag>\w+)['\"]?[ \t]*\n"
+    r"(?P<body>.*?)\n?(?P=tag)(?=[ \t]*(?:\n|$))",
+    re.DOTALL | re.MULTILINE,
+)
+_PRINTF_READABLE_FORMAT_RE = re.compile(r"(?:[^%\\]|%[sb]|\\[nt\\])*")
+
+
+def _file_key(token: str) -> str:
+    return token[2:] if token.startswith("./") else token
+
+
+def _redirect_target(tokens: list) -> "tuple[list, str | None, str | None]":
+    """The tokens without their output redirection, the redirected file and its mode
+    (`>` or `>>`). A file descriptor redirect (`2>`, `>&2`) is left in place."""
+    words, target, mode = [], None, None
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        m = re.fullmatch(r"(>>?)(.*)", tok)
+        if m:
+            mode = m.group(1)
+            target = m.group(2) or (tokens[i + 1] if i + 1 < len(tokens) else None)
+            i += 1 if m.group(2) else 2
+            continue
+        words.append(tok)
+        i += 1
+    return words, target, mode
+
+
+def _printed_text(words: list) -> str | None:
+    """What an echo or printf leg prints, or None when the guard cannot read it."""
+    if words[0] == "echo":
+        args, newline, escapes = words[1:], True, False
+        while args and re.fullmatch(r"-[neE]+", args[0]):
+            newline = newline and "n" not in args[0]
+            escapes = "e" in args[0] or (escapes and "E" not in args[0])
+            args = args[1:]
+        text = " ".join(args)
+        if escapes:
+            text = text.replace("\\n", "\n").replace("\\t", "\t")
+        return text + ("\n" if newline else "")
+    if len(words) < 2 or not _PRINTF_READABLE_FORMAT_RE.fullmatch(words[1]):
+        return None
+    fmt = words[1].replace("\\n", "\n").replace("\\t", "\t").replace("\\\\", "\\")
+    slots = len(re.findall(r"%[sb]", fmt))
+    args = words[2:]
+    if not slots:
+        return fmt
+    out = []
+    for k in range(0, max(len(args), 1), slots):
+        chunk = args[k:k + slots] + [""] * (slots - len(args[k:k + slots]))
+        out.append(re.sub(r"%[sb]", lambda _m, it=iter(chunk): next(it), fmt))
+    return "".join(out)
+
+
+def _fill_substitutions(view: str) -> str:
+    """`view` with each unquoted `$(…)` or backtick span filled with `_`, so legs slice
+    around it as one word. Same length; an unterminated span fills the rest."""
+    out, i, n = list(view), 0, len(view)
+    while i < n:
+        if view[i] == "\\":
+            i += 2
+            continue
+        if view.startswith("$(", i):
+            _, end = _extract_dollar_paren(view, i)
+        elif view[i] == "`":
+            _, end = _extract_backtick(view, i)
+        else:
+            i += 1
+            continue
+        out[i:end] = "_" * (end - i)
+        i = end
+    return "".join(out)
+
+
+def _rewrite_file_runs(command: str) -> str:
+    """`command` with each run of a file it wrote earlier replaced, in place, by the text
+    written to that file (`echo 'gh pr merge 5' > f; bash f` is judged as `gh pr merge 5`).
+    Writes and runs count only in command position on the top level of the command; a
+    `cd`, a compound command, or a leg the guard cannot tokenize leaves the command as it
+    is. A write holding a substitution or an expansion is read as its literal text, so a
+    guarded command written beside it is still judged where the file runs."""
+    if ">" not in command and "tee" not in command:
+        return command
+    flat = list(command)
+    writes_at: dict[int, tuple] = {}
+    for m in _FILE_HEREDOC_WRITER_RE.finditer(command):
+        body = m.group("body")
+        if m.group("dash"):
+            body = "\n".join(line.lstrip("\t") for line in body.split("\n"))
+        writes_at[m.start("mode")] = (_file_key(m.group("file")), m.group("mode"), body + "\n")
+        start = command.index("\n", m.end("tag"))
+        flat[start:m.end()] = " " * (m.end() - start)
+    flat_text = "".join(flat)
+    view = _fill_substitutions(_leg_slicing_view(flat_text))
+    if _COMPOUND_OPEN_RE.search(view):
+        return command
+    legs, last, seps = [], 0, []
+    for sep in _COMPOUND_OPS_RE.finditer(view):
+        legs.append((last, sep.start()))
+        seps.append(sep.group(0).strip())
+        last = sep.end()
+    legs.append((last, len(command)))
+    seps.append("")
+    files: dict[str, list] = {}
+    replacements: list[tuple[int, int, str]] = []
+    printed = None
+    for k, (a, b) in enumerate(legs):
+        text = flat_text[a:b]
+        tokens = _shell_tokenize(text)
+        if tokens is None:
+            return command
+        if not tokens:
+            continue
+        head = tokens[0]
+        here = next((v for pos, v in writes_at.items() if a <= pos < b), None)
+        if head == "cd":
+            return command
+        if here is not None:
+            key, mode, body = here
+            files[key] = ([] if mode == ">" else files.get(key, [])) + [body]
+            printed = None
+            continue
+        if head in ("echo", "printf"):
+            words, target, mode = _redirect_target(tokens)
+            text_out = _printed_text(words)
+            if target is not None:
+                key = _file_key(target)
+                files[key] = ([] if mode == ">" else files.get(key, [])) + [text_out]
+                printed = None
+            else:
+                printed = text_out if seps[k] == "|" else None
+            continue
+        if head == "tee" and k and seps[k - 1] == "|":
+            names = [t for t in tokens[1:] if not t.startswith("-")]
+            append = any(t in ("-a", "--append") for t in tokens[1:])
+            for name in names:
+                key = _file_key(name)
+                files[key] = (files.get(key, []) if append else []) + [printed]
+            printed = None
+            continue
+        printed = None
+        run_file, span = None, (a, b)
+        if head in _FILE_RUN_SHELLS and len(tokens) == 2 and not tokens[1].startswith("-"):
+            run_file = tokens[1][1:] if tokens[1].startswith("<") and len(tokens[1]) > 1 else tokens[1]
+        elif head in _FILE_RUN_SHELLS and len(tokens) == 3 and tokens[1] == "<":
+            run_file = tokens[2]
+        elif head in ("source", ".") and len(tokens) == 2:
+            run_file = tokens[1]
+        elif head == "cat" and len(tokens) == 2 and seps[k] == "|" and k + 1 < len(legs):
+            nxt = _shell_tokenize(flat_text[legs[k + 1][0]:legs[k + 1][1]]) or []
+            if len(nxt) == 1 and nxt[0] in _FILE_RUN_SHELLS:
+                run_file, span = tokens[1], (a, legs[k + 1][1])
+        elif len(tokens) == 1 and _file_key(head) in files:
+            run_file = head
+        if run_file is None:
+            continue
+        written = files.get(_file_key(run_file))
+        if written is None:
+            continue
+        readable = "".join(part for part in written if part is not None)
+        lead = len(text) - len(text.lstrip())
+        replacements.append((span[0] + lead, span[1], readable.rstrip("\n")))
+    if not replacements:
+        return command
+    out = command
+    for start, end, literal in sorted(replacements, reverse=True):
+        out = out[:start] + literal + out[end:]
+    return out
 
 
 def _eval_heredoc_verdict(command: str, depth: int) -> bool | None:
@@ -7770,6 +7947,11 @@ def _is_dangerous_at_depth(command: str, depth: int) -> bool:
         verdict = _eval_heredoc_verdict(command, depth)
         if verdict is not None:
             return verdict
+    # A file written with literal text and then run is judged as the text it runs.
+    if depth < _MAX_WRAPPER_DEPTH:
+        rewritten = _rewrite_file_runs(command)
+        if rewritten != command:
+            return _is_dangerous_at_depth(rewritten, depth + 1)
     # Code an interpreter reads from stdin (heredoc, here-string, pipe) is that
     # interpreter's program: it is refused when it passes a guarded command directly
     # to an exec primitive. The carriers below see it only as inert text.
