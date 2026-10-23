@@ -394,7 +394,7 @@ class TestRegistryTeachExamples:
         assert "error:" in r.stderr
         assert self._EXAMPLE in r.stderr
 
-    def test_pasted_example_executes_hermetically(self, tmp_path, monkeypatch):
+    def test_pasted_example_executes_hermetically(self, tmp_path):
         # The one live paste-execute the bar allows: hermetic by
         # construction — CLAUDE_CONFIG_DIR redirected into the sandbox and
         # $CLAUDE_CODE_SESSION_ID removed, so register() takes its documented
