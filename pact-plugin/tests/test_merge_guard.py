@@ -4513,28 +4513,23 @@ class TestToolSpecificFlagExclusion:
 # =============================================================================
 
 
-class TestVariableIndirectionBypass:
-    """Tests documenting that variable indirection bypasses regex detection.
+class TestVariableIndirection:
+    """A variable assigned once with a quoted value is judged where the shell
+    expands it, so an API path held in a variable is detected."""
 
-    This is an inherent limitation of command-line regex matching — when
-    the URL path is stored in a variable and expanded at runtime, the
-    regex cannot see the actual path. These tests document the limitation.
-    """
-
-    def test_variable_url_bypasses_detection(self):
-        """Variable indirection: URL in variable is NOT detected (inherent regex limit)."""
+    def test_variable_url_is_detected(self):
+        """Variable indirection: a destructive URL in a variable is detected."""
         from merge_guard_pre import is_dangerous_command
 
-        # The URL is in a variable — regex sees $URL, not the actual path
-        assert not is_dangerous_command(
+        assert is_dangerous_command(
             'URL="repos/owner/repo/git/refs/heads/main" && gh api -X DELETE $URL'
         )
 
-    def test_variable_endpoint_bypasses_detection(self):
-        """Variable endpoint: endpoint in variable is NOT detected."""
+    def test_variable_endpoint_is_detected(self):
+        """Variable endpoint: a destructive endpoint in a variable is detected."""
         from merge_guard_pre import is_dangerous_command
 
-        assert not is_dangerous_command(
+        assert is_dangerous_command(
             'ENDPOINT="git/refs/heads/main" && gh api -X PATCH repos/owner/repo/$ENDPOINT'
         )
 

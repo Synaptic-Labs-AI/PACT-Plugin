@@ -2413,6 +2413,11 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
         return extract_command_context(body, flag_scan_text)
     op_type = detect_command_operation_type(command)
     if op_type is None:
+        # A guarded command written through a variable (`CMD=gh; $CMD pr merge 5`) is read
+        # with its variables expanded, as the refusal reads it.
+        expanded = _expand_literal_variables(command)
+        if expanded != command:
+            return extract_command_context(expanded, flag_scan_text)
         return context
     context["operation_type"] = op_type
     # bound_flags is computed HERE (the single call site) so both arms inherit it
@@ -5778,11 +5783,41 @@ _READABLE_EVAL_RES = (
 )
 
 
+def _unquoted_heredoc_text(body: str) -> tuple[str, bool] | None:
+    """The text an unquoted-delimiter heredoc body gives when its only expansions are
+    backslash escapes (of `$`, a backtick, a backslash, a newline) and plain `$NAME` /
+    `${NAME}` parameters, which stay as written, and whether it holds such a parameter;
+    None for any other expansion."""
+    out, i, n, params = [], 0, len(body), False
+    while i < n:
+        c = body[i]
+        if c == "\\" and i + 1 < n and body[i + 1] in "$`\\\n":
+            out.append("" if body[i + 1] == "\n" else body[i + 1])
+            i += 2
+            continue
+        if c == "`":
+            return None
+        if c == "$":
+            param = re.match(r"\$(?:[A-Za-z_]\w*|\{[A-Za-z_]\w*\})", body[i:])
+            if param is None:
+                return None
+            out.append(param.group(0))
+            params = True
+            i += param.end()
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out), params
+
+
 def _rewrite_readable_evals(command: str) -> str:
     """`command` with each readable eval replaced by the text it runs: the body as written
     when the substitution is double-quoted, or its words joined by single spaces when it is
-    unquoted (word splitting). Left as it is, so refused: a body with an unquoted delimiter
-    that expands (`$`, backtick, backslash); a body holding its own terminator line, where
+    unquoted (word splitting). Under an unquoted delimiter the body is read as the shell
+    expands it: a backslash escape gives its character and a plain `$NAME` stays as written.
+    Left as it is, so refused: such a body holding any other expansion (a substitution,
+    `${…}` with an operator, arithmetic), or a plain parameter while the text it reads as is
+    not guarded on its own; a body holding its own terminator line, where
     the shell ends the heredoc first; an unquoted substitution whose body holds a glob
     character, which the shell may expand to file names."""
     if "eval" not in command or "<<" not in command:
@@ -5790,8 +5825,13 @@ def _rewrite_readable_evals(command: str) -> str:
 
     def _executed(m: re.Match) -> str:
         body = m.group("body")
-        if not m.group("dq") and any(ch in body for ch in "$`\\"):
-            return m.group(0)
+        if not m.group("dq"):
+            read = _unquoted_heredoc_text(body)
+            # A parameter the heredoc expands is parsed again by eval, so its value could be
+            # code: such a body is read only when what it reads as is guarded on its own.
+            if read is None or (read[1] and detect_command_operation_type(read[0]) is None):
+                return m.group(0)
+            body = read[0]
         tab = "\t" if m.group("dash") else ""
         if any(line.lstrip(tab) == m.group("tag") for line in body.split("\n")):
             return m.group(0)
@@ -5806,16 +5846,26 @@ def _rewrite_readable_evals(command: str) -> str:
 
 def rewritten_executed_command(command: str) -> str | None:
     """The command as the guard judges it after its rewrites (each readable eval, and each
-    run of a file written earlier, replaced in place by the text it runs; a script given a
-    whole guarded command as one argument read as that command), or None when nothing was
-    rewritten. The approval side reads it so the refusal and the approval share one
-    rewrite. Never raises."""
+    run of a file written earlier, replaced in place by the text it runs, then each literal
+    variable expanded; a script given a whole guarded command as one argument read as that
+    command), or None when nothing was rewritten. The approval side reads it so the
+    refusal and the approval share one rewrite. Never raises."""
     try:
-        rewritten = _rewrite_file_runs(_rewrite_readable_evals(command))
+        rewritten = _expand_literal_variables(_rewrite_file_runs(_rewrite_readable_evals(command)))
         rewritten = _script_argv_guarded_command(rewritten) or rewritten
     except Exception:  # noqa: BLE001 - a reader for the approval side must not raise
         return None
     return rewritten if rewritten != command else None
+
+
+def unreadable_evald_heredoc(command: str) -> bool:
+    """True when an eval fed by a heredoc runs a body the guard cannot read, so the command
+    is refused on that alone, and nothing was rewritten (`rewritten_executed_command` is
+    None). The approval side binds such a command by its exact text. Never raises."""
+    try:
+        return _has_eval_with_heredoc(command) and rewritten_executed_command(command) is None
+    except Exception:  # noqa: BLE001 - a reader for the approval side must not raise
+        return False
 
 
 # A file written and then run in the same command. Writers whose text the guard can read:
@@ -7899,6 +7949,205 @@ def is_dangerous_command(command: str) -> bool:
     return _is_dangerous_at_depth(command, 0)
 
 
+# A variable assigned a literal value is judged where the shell expands it, as if the value
+# of the last assignment before it were written there. Heads whose arguments the guard reads: data
+# tools (they print, match or store an argument) and the shells, wrappers and eval words
+# whose argument is a command the guard judges. Any other program's argument (a script
+# file, an unknown binary) is unreadable, so a variable passed there keeps the value
+# executing (the command stays refused, and a faithful approval mints it).
+_VAR_DATA_TOOL_HEADS = frozenset({
+    "echo", "printf", "grep", "egrep", "fgrep", "rg", "cat", "wc", "head", "tail", "test",
+    "[", "[[", "tee", "diff", "cmp", "jq", "git", "gh", "true", ":",
+})
+_VAR_RUNNER_HEADS = frozenset({
+    "sh", "bash", "zsh", "dash", "ksh", "eval", "source", ".", "ssh", "exec", "xargs",
+    "timeout", "env", "sudo", "nohup", "nice", "watch", "command", "time", "builtin",
+})
+_VAR_ASSIGNMENT_RE = re.compile(
+    r"(?<![\w$])(?P<name>[A-Za-z_]\w*)="
+    r"(?P<value>'[^']*'|\"(?:[^\"\\]|\\.)*\"|(?:[^\s;&|<>()'\"`$\\]|\\.)+)"
+)
+_VAR_SITE_RE = re.compile(r"\$(?:\{(?P<braced>[A-Za-z_]\w*)(?P<op>[^}]*)\}|(?P<bare>[A-Za-z_]\w*))")
+_VAR_BINDING_RE = r"(?<![\w-])(?:export|declare|typeset|local|readonly|read|mapfile|readarray|for|select|let|unset)(?![\w-])[^;&|\n]*?(?<![\w$])"
+
+
+def _quote_states(command: str) -> list[int] | None:
+    """Per character: 0 unquoted, 1 inside single quotes, 2 inside double quotes, 3 a
+    character a backslash makes literal. None when a quote is left open or a double-quoted
+    span holds a command substitution (its inner quoting is not modeled)."""
+    states = [0] * len(command)
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            if i + 1 < n:
+                states[i + 1] = 3
+            i += 2
+            continue
+        if c == "'":
+            j = command.find("'", i + 1)
+            if j == -1:
+                return None
+            for k in range(i, j + 1):
+                states[k] = 1
+            i = j + 1
+            continue
+        if c == '"':
+            j = i + 1
+            while j < n and command[j] != '"':
+                if command[j] == "\\" and j + 1 < n:
+                    states[j] = 2
+                    states[j + 1] = 3 if command[j + 1] in '$`"\\\n' else 2
+                    j += 2
+                    continue
+                if command[j] == "`" or command.startswith("$(", j):
+                    return None
+                states[j] = 2
+                j += 1
+            if j >= n:
+                return None
+            states[i] = states[j] = 2
+            i = j + 1
+            continue
+        i += 1
+    return states
+
+
+def _var_site_is_readable(cmd: str, offset: int, depth: int = 0) -> bool:
+    """Whether an expansion at `offset` of the simple command `cmd` sits where the guard
+    reads the result: the command word, an argument of a data tool or of a shell, wrapper
+    or eval word, or an interpreter's own program. False for an argument of anything
+    else, and for any position this cannot place."""
+    word = _leg_command_word(cmd)
+    if word is None:
+        return False
+    base = len(cmd) - len(word)
+    spans = _leg_token_spans(word)
+    k = next((k for k, (s, e) in enumerate(spans) if s <= offset - base < e), None)
+    if k is None:
+        return False
+    if k == 0:
+        return True
+    tokens = _shell_tokenize(word)
+    if not tokens:
+        return False
+    head = os.path.basename(tokens[0])
+    if head in _VAR_DATA_TOOL_HEADS or _POSIX_SHELL_HEADS_RE.match(head):
+        return True
+    if head in _WRAPPER_GRAMMAR and depth < _MAX_WRAPPER_DEPTH:
+        nested = _wrapper_nested_command(word, head)
+        if nested is None:
+            return False
+        start = len(word) - len(nested)
+        if offset - base < start:
+            return True                      # the wrapper's own argument
+        return _var_site_is_readable(nested, offset - base - start, depth + 1)
+    if head in _VAR_RUNNER_HEADS:
+        return True
+    if _INTERPRETER_HEADS.match(head):
+        program = _program_from_tokens(head, tokens)
+        return program is not None and k < len(tokens) and tokens[k] == program
+    return False
+
+
+def _assignment_value(raw: str) -> str:
+    """An assignment's value after quote removal: a quoted value's inside, or an unquoted
+    word with its backslash escapes removed."""
+    if raw[0] in "'\"":
+        return raw[1:-1]
+    return re.sub(r"\\(.)", r"\1", raw)
+
+
+def _is_plain_literal_assignment(command: str, view: str, m: re.Match) -> bool:
+    """Whether an assignment stands as its own simple command at the top level (not in a
+    group, subshell, loop or branch, not a command prefix) with a value that does not
+    expand (a double-quoted `$`, backtick or backslash)."""
+    before = view[:m.start()]
+    if len(_COMPOUND_OPEN_RE.findall(before)) > len(_COMPOUND_CLOSE_RE.findall(before)):
+        return False
+    rest = command[m.end():].lstrip(" \t")
+    if rest and not rest.startswith((";", "\n", "&&", "||")):
+        return False                          # a prefix assignment, piped, or backgrounded
+    raw = m.group("value")
+    return not (raw[0] == '"' and any(ch in raw[1:-1] for ch in "$`\\"))
+
+
+def _expand_literal_variables(command: str) -> str:
+    """`command` with each literal variable's expansions replaced by the value of the last
+    assignment before them, written literally, when every expansion sits where the guard
+    reads it (_var_site_is_readable). A name is left as it is (every value keeps executing,
+    today's rule) when it is bound another way (export, read, a loop), assigned inside a
+    group, subshell or branch or as a command prefix, expanded before its first assignment
+    or with a parameter operator, or given a value that expands; and nothing is replaced
+    when the command has a heredoc, an eval or source, or quoting this cannot model. The
+    value is inserted as literal text, escaped for the site's quoting."""
+    if "=" not in command or "$" not in command or "<<" in command:
+        return command
+    states = _quote_states(command)
+    if states is None:
+        return command
+    surface = _executed_surface_view(command)
+    if _has_eval_or_source(surface):
+        return command
+    view = _leg_slicing_view(command)
+    legs = []
+    last = 0
+    for sep in _COMPOUND_OPS_RE.finditer(view):
+        legs.append((last, sep.start()))
+        last = sep.end()
+    legs.append((last, len(command)))
+    replacements: list[tuple[int, int, str]] = []
+    assignments: dict[str, list[re.Match]] = {}
+    for m in _VAR_ASSIGNMENT_RE.finditer(command):
+        if states[m.start()] == 0 and surface[m.start()] != " ":
+            assignments.setdefault(m.group("name"), []).append(m)
+    for name, found in assignments.items():
+        if len(re.findall(r"(?<![\w$])" + name + r"=", surface)) != len(found):
+            continue
+        if re.search(_VAR_BINDING_RE + name + r"(?![\w])", surface):
+            continue
+        if not all(_is_plain_literal_assignment(command, view, m) for m in found):
+            continue
+        sites = []
+        ok = True
+        for s in _VAR_SITE_RE.finditer(command):
+            if (s.group("braced") or s.group("bare")) != name:
+                continue
+            if states[s.start()] in (1, 3):
+                continue                      # single-quoted or escaped: literal text
+            if s.group("braced") and s.group("op"):
+                ok = False
+                break
+            reaching = [m for m in found if m.end() <= s.start()]
+            if not reaching or (states[s.start()] == 0 and surface[s.start()] == " "):
+                ok = False
+                break
+            leg = next((a, b) for a, b in legs if a <= s.start() < b)
+            leg_text = command[leg[0]:leg[1]]
+            leg_view = view[leg[0]:leg[1]]
+            if "$(" in leg_view or "`" in leg_view or not _var_site_is_readable(leg_text, s.start() - leg[0]):
+                ok = False
+                break
+            sites.append((s, _assignment_value(reaching[-1].group("value"))))
+        if not ok:
+            continue
+        # Each value now sits, literally, at every site the shell expands it, so the
+        # assignments themselves run nothing: write them as the inert value carrier 4 gives
+        # a variable that is never expanded.
+        for m in found:
+            replacements.append((m.start("value"), m.end("value"), "STRIPPED"))
+        for s, value in sites:
+            special = '\\$`"' if states[s.start()] == 2 else "\\$`'\""
+            literal = "".join("\\" + ch if ch in special else ch for ch in value)
+            replacements.append((s.start(), s.end(), literal))
+    if not replacements:
+        return command
+    out = command
+    for start, end, literal in sorted(replacements, reverse=True):
+        out = out[:start] + literal + out[end:]
+    return out
+
+
 _XARGS_HEAD_RE = re.compile(r"(?:^|(?<=[;&|(\n]))[ \t]*xargs(?![\w-])", re.MULTILINE)
 _XARGS_HEREDOC_RE = re.compile(
     r"<<-?[ \t]*(?P<q>['\"]?)(?P<tag>\w+)(?P=q)[^\n]*\n(?P<body>.*?)\n?[ \t]*(?P=tag)[ \t]*(?:\n|$)",
@@ -8003,6 +8252,10 @@ def _is_dangerous_at_depth(command: str, depth: int) -> bool:
         rewritten = _rewrite_file_runs(command)
         if rewritten != command:
             return _is_dangerous_at_depth(rewritten, depth + 1)
+    # A variable assigned a literal value is judged where it is expanded, as the value of
+    # the last assignment before it written there; a site the guard cannot read keeps the
+    # value executing.
+    command = _expand_literal_variables(command)
     # Code an interpreter reads from stdin (heredoc, here-string, pipe) is that
     # interpreter's program: it is refused when it passes a guarded command directly
     # to an exec primitive. The carriers below see it only as inert text.

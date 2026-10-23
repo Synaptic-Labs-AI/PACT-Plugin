@@ -595,3 +595,178 @@ def test_the_rewritten_command_is_the_command_the_script_is_given():
     assert [rewritten_executed_command(cmd) for _, cmd, _ in SCRIPT_GIVEN_A_COMMAND] == given
     assert [rewritten_executed_command(cmd) for _, cmd in SCRIPT_GIVEN_TEXT_ALLOW] == [None] * 4
 
+
+# ---------------------------------------------------------------------------
+# A variable assigned a literal value is judged where the shell expands it, as if its value
+# were written there. A site the guard cannot read (an argument of a script or an
+# unknown program) keeps the value executing, so the command stays refused.
+# ---------------------------------------------------------------------------
+
+VAR = f"CMD='{M}'; "
+
+VARIABLE_SITE_ALLOW = [
+    ("an unquoted program path echoed", 'GH=/usr/local/bin/gh; echo "$GH pr ' + 'merge 5"'),
+    ("an unquoted escaped value echoed", 'CMD=gh\\ pr\\ ' + 'merge\\ 5; echo "$CMD"'),
+    ("unquoted reassignment to a harmless command", f"CMD='{M}'; CMD=true; $CMD"),
+    ("reassigned to a harmless command before it runs", f"CMD='{M}'; CMD='echo hi'; $CMD"),
+    ("reassigned before it is echoed", f"CMD='{M}'; CMD='echo hi'; echo \"$CMD\""),
+    ("an earlier value beside a single-quoted name", f"CMD='{M}'; CMD='echo hi'; echo '$CMD' \"$CMD\""),
+    ("echo", VAR + 'echo "$CMD"'),
+    ("echo braces", VAR + 'echo "${CMD}"'),
+    ("printf", VAR + 'printf "%s\\n" "$CMD"'),
+    ("grep", VAR + 'grep -- "$CMD" notes.txt'),
+    ("git commit -m", VAR + 'git commit -m "$CMD"'),
+    ("tee", VAR + 'echo hi | tee "$CMD.log"'),
+    ("double-quoted assignment", f'CMD="{M}"; echo "$CMD"'),
+    ("escaped expansion is text", VAR + 'python3 tool.py "\\$CMD"'),
+    ("single-quoted expansion is text", VAR + "python3 tool.py '$CMD'"),
+]
+
+VARIABLE_SITE_DENY = [
+    ("an unquoted program path runs", "GH=/usr/local/bin/gh; $GH pr " + "merge 5"),
+    ("an unquoted program name runs", "CMD=gh; $CMD pr " + "merge 5"),
+    ("an unquoted escaped value runs", "CMD=gh\\ pr\\ " + "merge\\ 5; $CMD"),
+    ("reassigned to a guarded command before it runs", f"CMD='echo hi'; CMD='{M}'; $CMD"),
+    ("each run reads the value before it", f"CMD='{M}'; $CMD; CMD='echo hi'; $CMD"),
+    ("command position", VAR + "$CMD"),
+    ("timeout prefix", VAR + "timeout 60 $CMD"),
+    ("env prefix", VAR + "env FOO=1 $CMD"),
+    ("sudo prefix", VAR + "sudo $CMD"),
+    ("bash -c", VAR + 'bash -c "$CMD"'),
+    ("eval", VAR + 'eval "$CMD"'),
+    ("ssh", VAR + 'ssh host "$CMD"'),
+    ("echo to bash", VAR + 'echo "$CMD" | bash'),
+    ("python -c program", VAR + "python3 -c \"import os; os.system('$CMD')\""),
+    ("script argument (refused, approvable)", VAR + './retry.sh "$CMD"'),
+    ("python script argument (refused, approvable)", VAR + 'python3 tool.py "$CMD"'),
+    ("unknown binary argument", VAR + 'mytool "$CMD"'),
+    ("script site wins over an echo site", VAR + 'echo "$CMD"; ./retry.sh "$CMD"'),
+    ("assigned twice", VAR + "CMD='echo hi'; CMD='" + M + "'; echo \"$CMD\"; $CMD"),
+    ("value holding an expansion", f'CMD="{M} $X"; $CMD'),
+    ("parameter expansion form", VAR + "${CMD:-x}"),
+    ("used before it is assigned", "$CMD; " + VAR + 'echo "$CMD"'),
+    ("assigned in a subshell", f"( CMD='{M}' ); $CMD"),
+]
+
+
+def test_a_variable_written_to_a_file_and_run_is_judged_as_its_value():
+    cmd = f"P='{M}'; echo \"$P\" > f; bash f"
+    assert is_dangerous_command(cmd) is True
+    result = _mint(cmd)
+    assert result.context is not None, result.refusal_reason
+    assert (result.context["operation_type"], result.context["pr_number"]) == ("merge", "5")
+
+
+def test_the_rewritten_command_expands_literal_variables():
+    assert rewritten_executed_command("CMD=gh; $CMD pr " + "merge 5") == "CMD=STRIPPED; gh pr " + "merge 5"
+    assert rewritten_executed_command("GH=/usr/local/bin/gh; echo hi") is None
+
+
+@pytest.mark.parametrize("label,cmd", VARIABLE_SITE_ALLOW, ids=[r[0] for r in VARIABLE_SITE_ALLOW])
+def test_a_variable_expanded_only_where_it_is_data_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+@pytest.mark.parametrize("label,cmd", VARIABLE_SITE_DENY, ids=[r[0] for r in VARIABLE_SITE_DENY])
+def test_a_variable_expanded_where_it_runs_or_cannot_be_read_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("site", ['echo "{}"', 'grep -- "{}" notes.txt', 'git commit -m "{}"'])
+def test_a_data_site_matches_its_literal_twin(site):
+    assert is_dangerous_command(VAR + site.format("$CMD")) is is_dangerous_command(site.format(M))
+
+
+# Each row below pins one of the variable rule's conservative checks: dropping the check changes the verdict.
+VARIABLE_GUARD_DENY = [
+    ("a prefix assignment reaches a script's environment", f"CMD='{M}' ./retry.sh; echo \"$CMD\""),
+    ("a value read from stdin is unknown", VAR + 'read CMD; echo "$CMD"'),
+    ("an exported value reaches child processes", f"export CMD='{M}'; echo \"$CMD\""),
+    ("a parameter default runs", f"CMD=''; ${{CMD:-{M}}}"),
+    # The value at the site is not certain, so today's rule keeps the value whole. These
+    # are conservative refusals the rule requires, not executed commands.
+    ("assigned in a branch keeps today's rule", f"if true; then CMD='{M}'; fi; echo \"$CMD\""),
+    ("an expanding unquoted reassignment keeps today's rule", f"CMD='{M}'; CMD=$X; echo \"$CMD\""),
+    ("assigned in a subshell keeps today's rule", f"( CMD='{M}'; echo hi ); echo \"$CMD\""),
+    ("used before its assignment keeps today's rule", f"echo \"$CMD\"; CMD='{M}'; echo ok"),
+    ("a value that expands keeps today's rule", f"X=a; CMD=\"{M} $X\"; echo \"$CMD\""),
+    ("an eval in the command keeps today's rule", VAR + 'echo "$CMD"; eval true'),
+]
+
+VARIABLE_LITERAL_ALLOW = [
+    ("a value holding quotes stays one argument", 'CMD=\'x" ; ' + M + ' ; echo "\'; echo "$CMD"'),
+    ("a value holding a substitution is not re-run", f"CMD='$({M})'; echo \"$CMD\""),
+]
+
+
+@pytest.mark.parametrize("label,cmd", VARIABLE_GUARD_DENY, ids=[r[0] for r in VARIABLE_GUARD_DENY])
+def test_a_variable_whose_value_is_uncertain_keeps_todays_rule(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", VARIABLE_LITERAL_ALLOW, ids=[r[0] for r in VARIABLE_LITERAL_ALLOW])
+def test_a_variable_value_is_inserted_as_literal_text(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+EVAL_HEREDOC_PARAMETER = [
+    ("an escaped parameter", 'eval "$(cat <<EOF\n' + M[:-1] + '\\$N\nEOF\n)"', M[:-1] + "$N"),
+    ("a parameter expanded by the heredoc", 'eval "$(cat <<EOF\n' + M[:-1] + '$N\nEOF\n)"', M[:-1] + "$N"),
+    ("a braced parameter", 'eval "$(cat <<EOF\n' + M[:-1] + '${N}\nEOF\n)"', M[:-1] + "${N}"),
+    ("an escaped backslash", 'eval "$(cat <<EOF\n' + M + ' \\\\\nEOF\n)"', M + " \\"),
+]
+EVAL_HEREDOC_UNREAD = [
+    ("a substitution", 'eval "$(cat <<EOF\n' + M[:-1] + '$(cat n)\nEOF\n)"'),
+    ("a backtick", 'eval "$(cat <<EOF\n' + M[:-1] + '`cat n`\nEOF\n)"'),
+    ("a parameter with an operator", 'eval "$(cat <<EOF\n' + M[:-1] + '${N:-5}\nEOF\n)"'),
+    ("a parameter beside harmless text", 'eval "$(cat <<EOF\necho $X\nEOF\n)"'),
+]
+
+
+@pytest.mark.parametrize("label,cmd,runs", EVAL_HEREDOC_PARAMETER, ids=[r[0] for r in EVAL_HEREDOC_PARAMETER])
+def test_an_eval_heredoc_with_escapes_and_parameters_is_read_as_the_shell_expands_it(label, cmd, runs):
+    from shared.merge_guard_common import rewritten_executed_command
+
+    assert is_dangerous_command(cmd) is True
+    assert rewritten_executed_command(cmd) == runs
+
+
+@pytest.mark.parametrize("label,cmd", EVAL_HEREDOC_UNREAD, ids=[r[0] for r in EVAL_HEREDOC_UNREAD])
+def test_an_eval_heredoc_with_another_expansion_is_left_unread_and_refused(label, cmd):
+    from shared.merge_guard_common import rewritten_executed_command
+
+    assert is_dangerous_command(cmd) is True
+    assert rewritten_executed_command(cmd) is None
+
+
+UNREADABLE_EVAL_HEREDOC = [
+    ("a parameter with an operator", 'eval "$(cat <<EOF\n' + M[:-1] + '${N:-5}\nEOF\n)"'),
+    ("a substitution", 'eval "$(cat <<EOF\n' + M[:-1] + '$(cat n.txt)\nEOF\n)"'),
+    ("a parameter beside harmless text", 'eval "$(cat <<EOF\necho $X\nEOF\n)"'),
+]
+NOT_UNREADABLE_EVAL_HEREDOC = [
+    ("an escaped parameter", 'eval "$(cat <<EOF\n' + M[:-1] + '\\$N\nEOF\n)"'),
+    ("a parameter read as guarded", 'eval "$(cat <<EOF\n' + M[:-1] + '$N\nEOF\n)"'),
+    ("a quoted delimiter", 'eval "$(cat <<\'EOF\'\n' + M[:-1] + '$N\nEOF\n)"'),
+    ("a readable literal body", 'eval "$(cat <<EOF\n' + M + '\nEOF\n)"'),
+    ("a guarded command without eval", M),
+    ("a harmless command", "echo hi"),
+    ("an unreadable eval beside a readable one",
+     'eval "$(cat <<EOF\necho $X\nEOF\n)"; eval "$(cat <<EOF\n' + M + '\nEOF\n)"'),
+]
+
+
+@pytest.mark.parametrize("label,cmd", UNREADABLE_EVAL_HEREDOC, ids=[r[0] for r in UNREADABLE_EVAL_HEREDOC])
+def test_an_unreadable_eval_heredoc_is_refused_and_reported(label, cmd):
+    from shared.merge_guard_common import rewritten_executed_command, unreadable_evald_heredoc
+
+    assert is_dangerous_command(cmd) is True
+    assert unreadable_evald_heredoc(cmd) is True
+    assert rewritten_executed_command(cmd) is None
+
+
+@pytest.mark.parametrize("label,cmd", NOT_UNREADABLE_EVAL_HEREDOC, ids=[r[0] for r in NOT_UNREADABLE_EVAL_HEREDOC])
+def test_a_readable_or_non_eval_command_is_not_reported_as_an_unreadable_eval(label, cmd):
+    from shared.merge_guard_common import unreadable_evald_heredoc
+
+    assert unreadable_evald_heredoc(cmd) is False
