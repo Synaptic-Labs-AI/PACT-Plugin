@@ -1037,3 +1037,44 @@ def test_a_variable_given_to_an_unknown_program_keeps_its_value_executing_and_is
     assert rewritten_executed_command(two) == "git branch -" + "D a; git branch -" + "D b"
     both = f'P="{FORCE_MAIN}"; Q="{M}"; mytool "$P" "$Q"'
     assert rewritten_executed_command(both) == f"{FORCE_MAIN}; {M}"
+
+
+# A heredoc elsewhere in the command does not stop the literal-variable rule; only an
+# expansion or assignment inside a heredoc's body is left as it is.
+WRITTEN_PROBE = "cat > t.py <<'EOF'\nprint(1)\nEOF\n"
+HEREDOC_BESIDE_A_VARIABLE_DENY = [
+    ("an env-prefixed script given the variable", WRITTEN_PROBE + f'P="{FORCE_MAIN}"; X=1 python3 t.py "$P"'),
+    ("the written script given the variable", WRITTEN_PROBE + f'P="{FORCE_MAIN}"; python3 t.py "$P"'),
+    ("the written script given the literal", WRITTEN_PROBE + f'python3 t.py "{FORCE_MAIN}"'),
+]
+HEREDOC_BESIDE_A_VARIABLE_ALLOW = [
+    ("the variable inside a larger argument", WRITTEN_PROBE + f'P="{FORCE_MAIN}"; X=1 python3 t.py "bash -s <<< \'$P\'#"'),
+    ("its literal twin", WRITTEN_PROBE + f'X=1 python3 t.py "bash -s <<< \'{FORCE_MAIN}\'#"'),
+]
+
+
+@pytest.mark.parametrize("label,cmd", HEREDOC_BESIDE_A_VARIABLE_DENY, ids=[r[0] for r in HEREDOC_BESIDE_A_VARIABLE_DENY])
+def test_a_script_given_a_guarded_command_beside_a_heredoc_is_refused_and_reported(label, cmd):
+    from shared.merge_guard_common import rewritten_executed_command
+
+    assert is_dangerous_command(cmd) is True
+    assert rewritten_executed_command(cmd) == FORCE_MAIN
+
+
+@pytest.mark.parametrize("label,cmd", HEREDOC_BESIDE_A_VARIABLE_ALLOW, ids=[r[0] for r in HEREDOC_BESIDE_A_VARIABLE_ALLOW])
+def test_a_variable_inside_a_script_argument_beside_a_heredoc_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+def test_a_variable_inside_a_heredoc_body_is_left_as_it_is():
+    from shared.merge_guard_common import _expand_literal_variables
+
+    cmd = f'P="{FORCE_MAIN}"; cat > notes <<EOF\n$P\nEOF'
+    assert _expand_literal_variables(cmd) == cmd
+
+
+def test_an_assignment_after_a_heredoc_is_read_at_its_own_offset():
+    # The heredoc's body is long, so a surface that dropped it would shift every offset
+    # after it; the assignment and its expansion must still be found where they are.
+    cmd = "python3 - <<'PY'\n" + "x = 1\n" * 40 + "PY\n" + f'P="{FORCE_MAIN}"; ./retry.sh "$P"'
+    assert is_dangerous_command(cmd) is True

@@ -6529,6 +6529,12 @@ def rewritten_executed_command(command: str) -> str | None:
     argument) is reported as the command: the value itself, whole. The approval side
     reads it so the refusal and the approval share one rewrite. Never raises."""
     try:
+        # A script given a whole guarded command, literally or through a literal variable,
+        # is judged as that command before a file run's rewrite drops its arguments.
+        script = (_script_argv_guarded_command(command)
+                  or _script_argv_guarded_command(_expand_literal_variables(command)))
+        if script is not None:
+            return script
         rewritten = _rewrite_file_runs(_rewrite_readable_evals(command))
         kept: list[str] = []
         expanded = _expand_literal_variables(rewritten, kept)
@@ -8867,22 +8873,29 @@ def _expand_literal_variables(command: str, kept: list[str] | None = None) -> st
     reads it (_var_site_is_readable). A name is left as it is (every value keeps executing,
     today's rule) when it is bound another way (export, read, a loop), assigned inside a
     group, subshell or branch or as a command prefix, expanded before its first assignment
-    or with a parameter operator, or given a value that expands; and nothing is replaced
-    when the command has a heredoc or here-string (outside quotes), an eval or source, or
-    quoting this cannot model. The
-    value is inserted as literal text, escaped for the site's quoting. Given a `kept` list,
-    each value left executing at a site the guard cannot read is appended to it."""
+    or with a parameter operator, or given a value that expands, or when an expansion sits
+    in a heredoc's body; and nothing is replaced when the command has an
+    eval or source, or quoting this cannot model. The value is inserted as literal text,
+    escaped for the site's quoting. Given a `kept` list, each value left executing at a
+    site the guard cannot read is appended to it."""
     if "=" not in command or "$" not in command:
         return command
     states = _quote_states(command)
     if states is None:
         return command
-    surface = _executed_surface_view(command)
+    # A heredoc's body is the heredoc's text, not the shell's: the surface is read with each
+    # body blanked in place (offsets match the command), so an expansion there is left.
+    bodies = [(h.start("body"), h.end("body")) for h in _ANY_HEREDOC_RE.finditer(command)]
+    if bodies:
+        blanked = list(command)
+        for a, b in bodies:
+            blanked[a:b] = " " * (b - a)
+        surface = _mask_shell_quotes("".join(blanked))
+    else:
+        surface = _executed_surface_view(command)
     if _has_eval_or_source(surface):
         return command
     view = _leg_slicing_view(command)
-    if "<<" in view:                          # a heredoc or here-string the shell reads
-        return command
     legs = []
     last = 0
     for sep in _COMPOUND_OPS_RE.finditer(view):
@@ -9048,18 +9061,19 @@ def _is_dangerous_at_depth(command: str, depth: int) -> bool:
     # wrapper), as a variable passed there does.
     if depth < _MAX_WRAPPER_DEPTH and _script_argv_guarded_command(command, depth) is not None:
         return True
+    # A variable assigned a literal value is judged where it is expanded, as the value of
+    # the last assignment before it written there; a site the guard cannot read keeps the
+    # value executing. A script given the expanded value is judged as given the literal,
+    # before a file run's rewrite drops the script's arguments.
+    expanded = _expand_literal_variables(command)
+    if (expanded != command and depth < _MAX_WRAPPER_DEPTH
+            and _script_argv_guarded_command(expanded, depth) is not None):
+        return True
     # A file written with literal text and then run is judged as the text it runs.
     if depth < _MAX_WRAPPER_DEPTH:
         rewritten = _rewrite_file_runs(command)
         if rewritten != command:
             return _is_dangerous_at_depth(rewritten, depth + 1)
-    # A variable assigned a literal value is judged where it is expanded, as the value of
-    # the last assignment before it written there; a site the guard cannot read keeps the
-    # value executing. A script given the expanded value is judged as given the literal.
-    expanded = _expand_literal_variables(command)
-    if (expanded != command and depth < _MAX_WRAPPER_DEPTH
-            and _script_argv_guarded_command(expanded, depth) is not None):
-        return True
     command = expanded
     # Code an interpreter reads from stdin (heredoc, here-string, pipe) is that
     # interpreter's program: it is refused when it passes a guarded command directly
