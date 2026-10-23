@@ -83,6 +83,54 @@ class TestASubstitutionThatRunsCommandsTypesNothing:
         assert _runs(ctx, ROWS["force-dollar-paren"])
 
 
+BACKTICK_ROWS = {
+    "bare": FORCE + "`git branch --show-current`",
+    "in-bash-c": 'bash -c "' + FORCE + '`git branch --show-current`"',
+}
+APPROVAL_STYLES = {
+    "inline": lambda c: f"Run `{c}` now",
+    "double-backtick": lambda c: f"Run `` {c} `` now",
+    "fenced": lambda c: f"Run this:\n```bash\n{c}\n```",
+}
+
+
+def _mint_styled(command: str, style) -> dict | None:
+    q = [{"question": "Run this?", "header": "Run", "multiSelect": False,
+          "options": [{"label": "Yes, run", "description": style(command)},
+                      {"label": "No", "description": "Hold."}]}]
+    return _mint_context_from_bundle(q, {"Run this?": "Yes, run"})[0]
+
+
+class TestABacktickTargetRunsHoweverTheApprovalQuotesIt:
+    """An approval may quote a command that holds backticks inline, between double
+    backticks, or in a fenced block; each must bind the whole command."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("command", BACKTICK_ROWS.values(), ids=BACKTICK_ROWS.keys())
+    def test_the_approved_command_is_refused_then_runs(self, command, style):
+        assert not _runs(None, command)
+        assert _runs(_mint_styled(command, style), command)
+
+    def test_two_separate_code_spans_still_bind_the_command_span(self):
+        command = MERGE + "5"
+        ctx = _mint_styled(command, lambda c: f"Run `{c}` (check it with `gh pr view 5` first)")
+        assert _runs(ctx, command)
+
+    @pytest.mark.parametrize("style", [
+        pytest.param(lambda c: f"Run `{c} ` then check with `gh pr view 5`", id="second-span-after"),
+        pytest.param(lambda c: f"Run `{c} ` to merge", id="no-second-span"),
+        pytest.param(lambda c: f"Run `{c} `", id="at-end-of-text"),
+    ])
+    def test_a_trailing_space_inside_the_span_does_not_join_it_to_the_next(self, style):
+        command = MERGE + "5"
+        assert _runs(_mint_styled(command, style), command)
+
+    def test_a_backtick_span_stops_at_its_own_closer_before_a_second_span(self):
+        command = BACKTICK_ROWS["bare"]
+        ctx = _mint_styled(command, lambda c: f"Run `{c}` then check `gh pr view 5`")
+        assert _runs(ctx, command)
+
+
 class TestNothingElseRuns:
     @pytest.mark.parametrize("other", [
         pytest.param(FORCE + "$(git rev-parse --abbrev-ref HEAD)", id="other-substitution"),

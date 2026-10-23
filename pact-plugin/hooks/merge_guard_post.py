@@ -529,8 +529,49 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
     )
 
 
-# A fenced block (```lang\n…```) or an inline backtick span, which may run over lines.
-_BACKTICK_SPAN_RE = re.compile(r"```[^\n`]*\n(.*?)```|`([^`]+)`", re.DOTALL)
+_FENCED_BLOCK_RE = re.compile(r"```[^\n`]*\n(.*?)```", re.DOTALL)
+_BACKTICK_RUN_RE = re.compile(r"`+")
+
+
+def _closes_span(text: str, run: re.Match) -> bool:
+    """Whether the backtick `run` can close a code span: it ends the text or is
+    followed by whitespace or punctuation, where a backtick opening a substitution is
+    followed by the command it runs."""
+    return run.end() == len(text) or text[run.end()].isspace() or text[run.end()] in ".,;:!?)]}'\""
+
+
+def _code_spans(text: str) -> list[tuple[str, str]]:
+    """(raw, content) for each fenced block and inline code span in `text`. An inline
+    span opens with a run of backticks and closes at the next run of the same length
+    (`` cmd with `x` `` holds backticks). A single-backtick span whose content ends
+    in whitespace and whose closer is followed by a word was closed early by a
+    backtick opening a substitution (`git push --force origin `git branch
+    --show-current``): it runs to the first later backtick that leaves the
+    substitutions balanced and is followed by whitespace, punctuation or the end.
+    Inline spans may run over lines."""
+    spans = [(m.group(0), m.group(1)) for m in _FENCED_BLOCK_RE.finditer(text)]
+    rest = _FENCED_BLOCK_RE.sub(lambda m: " " * len(m.group(0)), text)
+    runs = list(_BACKTICK_RUN_RE.finditer(rest))
+    i = 0
+    while i < len(runs):
+        opener = runs[i]
+        close = next((j for j in range(i + 1, len(runs)) if len(runs[j].group(0)) == len(opener.group(0))), None)
+        if close is None:
+            i += 1
+            continue
+        content = rest[opener.end():runs[close].start()]
+        end = runs[close].end()
+        if len(opener.group(0)) == 1 and content[-1:].isspace() and not _closes_span(rest, runs[close]):
+            # The early closer opens a substitution: the span runs to the first later
+            # backtick that leaves the substitutions balanced and closes a span.
+            for k in range(close + 1, len(runs)):
+                inner = rest[opener.end():runs[k].end() - 1]
+                if inner.count("`") % 2 == 0 and _closes_span(rest, runs[k]):
+                    content, end, close = inner, runs[k].end(), k
+                    break
+        spans.append((text[opener.start():end], content))
+        i = close + 1
+    return spans
 
 
 def _mask_substitutions(text: str) -> str | None:
@@ -588,16 +629,16 @@ def _exact_text_mint_context(option_texts: list[str]) -> tuple[MintResult, list[
     found: dict[str, dict] = {}
     spans: list[str] = []
     for text in option_texts:
-        for m in _BACKTICK_SPAN_RE.finditer(text):
-            span = (m.group(1) or m.group(2) or "").strip()
+        for raw, content in _code_spans(text):
+            span = content.strip()
             if not span or not is_dangerous_command(span):
                 continue
             if is_compound_destructive_command(span):
                 return MintResult(None, "compound_command"), []
-            ctx = _exact_text_reading(span, m.group(0))
+            ctx = _exact_text_reading(span, raw)
             if ctx:
                 found[normalize_command_text(span)] = ctx
-                spans.append(m.group(0))
+                spans.append(raw)
     if len(found) != 1:
         return MintResult(None, "multiple_commands" if found else "no_command"), spans
     command_text, ctx = next(iter(found.items()))
