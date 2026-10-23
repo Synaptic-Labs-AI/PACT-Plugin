@@ -318,11 +318,11 @@ class TestAutouseProjectDirScrubPinned:
         """EXACT-SET pin on the MODULE population of the claude_md_ambient
         opt-out (architect ruling): a module-level ``pytestmark`` exempts
         EVERY test in its file, so over-opt-out is the multiplicative
-        hazard and its membership is pinned BOTH directions — an 8th
-        module opting out module-wide, or any of the ruled seven dropping
-        it, reddens here. Per-test decoration is the designed granularity
-        and is deliberately UNPINNED (its growth is a census decision, not
-        a regression).
+        hazard and membership is pinned BOTH directions — any module
+        BEYOND ``_MODULE_WIDE_AMBIENT`` opting out module-wide, or any
+        module IN the set dropping the mark, reddens here. Per-test
+        decoration is the designed granularity and is deliberately
+        UNPINNED (its growth is a census decision, not a regression).
 
         Scan shape: a tree AST census (test_conftest_import_guard style),
         NOT collection-time marker introspection — the AST walk follows
