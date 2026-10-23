@@ -106,6 +106,11 @@ try:
         # (op, target, flags), and the token binds the command's normalized text.
         interpreter_command_context,
         normalize_command_text,
+        # The command the classifier judges after rewriting this one (an eval of
+        # readable text, a file written then run, a literal variable, a script
+        # given a whole command); the mint reads that command, binding its text.
+        rewritten_executed_command,
+        unreadable_evald_heredoc,
         shell_c_string,
         _has_command_substitution,
         # #1083: the mint flag-scan window runs the SAME two-tier leg selection
@@ -574,6 +579,11 @@ def _code_spans(text: str) -> list[tuple[str, str]]:
     return spans
 
 
+# Ops the pre-hook binds only by exact text: a branch-merge's target is its base, and
+# its head is not part of the target, so an (op, target) token would run any head.
+_TEXT_BOUND_OPS = frozenset({"branch-merge"})
+
+
 def _mask_substitutions(text: str) -> str | None:
     """`text` with each command substitution (`$(…)`, a backtick span) replaced by a
     placeholder word, innermost first; None when one cannot be closed."""
@@ -588,37 +598,65 @@ def _exact_text_reading(span: str, located: str) -> dict | None:
     """The (op, target, flags) of a backticked command the region reading cannot
     bind, read the way the pre-hook reads it; None when the region reading binds
     it where the option shows it (`located`, the span with its backticks) or no
-    single guarded op is found. Three shapes:
+    single guarded op is found. The shapes:
       - an interpreter program (`python3 -c 'subprocess.run(["gh", "pr", "merge",
         "5"])'`), read by the interpreter reader, even where its merge text is
         contiguous (a quoted flag the region reading misses is then bound);
-      - a command with a substitution (`git push --force origin $(git branch
-        --show-current)`), whose target the region reading cannot resolve;
+      - a command whose target is a substitution (`git push --force origin
+        $(git branch --show-current)`): its op is read with the substitutions
+        masked, so a substitution that itself runs guarded commands types nothing;
       - a guarded op in a shell's -c string that the region reading locates nothing
         in (`bash -c 'git push --force origin feat'`), read from that string, in the
-        command's one destructive leg when other legs surround it.
-    A plain command the region reading cannot bind is left to it, so its own
-    extraction stays the only binding for those."""
+        command's one destructive leg when other legs surround it;
+      - a plain command whose target the pre-hook binds only by text (a
+        branch-merge, a GraphQL pull-request mutation);
+      - an eval of a heredoc the classifier refuses because it cannot read the
+        command it runs (`${N:-5}`, a substitution): bound by its text alone;
+      - a command the classifier judges after a rewrite (an eval of readable text,
+        a file written then run, a literal variable, a script given a whole
+        command) where the region reading binds nothing, read from the command
+        the classifier reports it runs.
+    Any other plain command is left to the region reading, so its own extraction
+    stays the only binding for those."""
     ctx = interpreter_command_context(span)
     if ctx and ctx.get("operation_type"):
         return ctx
-    if _collect_pairs([located]) and not _has_command_substitution(span):
-        return None
+    if unreadable_evald_heredoc(span):
+        # The classifier cannot read what this eval runs, so nothing but its text
+        # can bind it: the token runs exactly the command the user saw.
+        return {"operation_type": "heredoc eval"}
+    pairs = _collect_pairs([located])
     leg = _single_destructive_leg(span) or span
-    inner = shell_c_string(leg)
-    if inner is None and not _has_command_substitution(span):
-        return None
-    if inner is not None and is_compound_destructive_command(inner):
-        return None
-    # The op must stand outside any substitution: a substitution that itself runs
-    # guarded commands (`eval "$(cat <<EOF … EOF)"`) is masked and types nothing.
-    body = _mask_substitutions(leg if inner is None else inner)
-    if body is None:
-        return None
+    rewritten = None if pairs else rewritten_executed_command(span)
+    if rewritten is not None:
+        if is_compound_destructive_command(rewritten):
+            return None
+        body = rewritten
+    elif _has_command_substitution(span):
+        body = _mask_substitutions(leg)
+        if body is None:
+            return None
+    else:
+        inner = shell_c_string(leg)
+        if inner is not None:
+            if pairs or is_compound_destructive_command(inner):
+                return None
+            body = inner
+        else:
+            body = leg
     ctx = extract_command_context(
         _single_destructive_leg(body) or _single_detectable_leg(body) or body
     )
-    return ctx if ctx.get("operation_type") else None
+    plain = body is leg and rewritten is None and not _has_command_substitution(span)
+    if not ctx.get("operation_type"):
+        return None
+    if plain and not (
+        ctx["operation_type"] in _TEXT_BOUND_OPS
+        or ctx.get("pr_node_id")
+        or "graphql_mutation" in ctx
+    ):
+        return None
+    return ctx
 
 
 def _exact_text_mint_context(option_texts: list[str]) -> tuple[MintResult, list[str]]:

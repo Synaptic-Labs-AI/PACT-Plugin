@@ -5,8 +5,11 @@ Summary: A faithful approval of a guarded command whose target is a command
          mints and runs. The region reading cannot resolve such a target, so the
          mint reads the command's one guarded op and binds the token to the
          command's normalized text; the pre-hook then runs exactly that text.
-         Also pins the ruled case of a guarded command held in a variable and
-         passed to a script.
+         The same exact-text mint covers every command the classifier judges after
+         a rewrite (an eval of readable text, a file written then run, a literal
+         variable, a script given a whole command), the GitHub API and GraphQL
+         merge and branch-update shapes, and an eval of a heredoc the classifier
+         refuses because it cannot read it.
 Used by: pytest. The real mint function and the real pre-hook matcher run in
          process; a fenced block carries an approval whose command holds backticks.
 """
@@ -32,6 +35,9 @@ ROWS = {
     "force-dollar-paren-in-bash-c-dq": 'bash -c "' + FORCE + CURRENT + '"',
     "force-dollar-paren-in-bash-c-sq": "bash -c '" + FORCE + CURRENT + "'",
     "merge-held-in-a-variable-for-a-script": "CMD='" + MERGE + "5'; ./retry.sh \"$CMD\"",
+    "evald-heredoc-variable-target": 'eval "$(cat <<EOF\n' + MERGE + '\\$N\nEOF\n)"',
+    "evald-heredoc-unescaped-variable": 'eval "$(cat <<EOF\n' + MERGE + '$N\nEOF\n)"',
+    "evald-heredoc-quoted-delimiter": "eval \"$(cat <<'EOF'\n" + MERGE + "$N\nEOF\n)\"",
 }
 
 
@@ -65,22 +71,175 @@ class TestAFaithfulClickRuns:
         assert ctx["command_text"] == normalize_command_text(ROWS[key])
 
 
-class TestASubstitutionThatRunsCommandsTypesNothing:
-    """The op must stand outside the substitution; a substitution that itself runs
-    guarded commands would otherwise type one op for a text that runs several."""
+API = "gh " + "api "
+API_SHAPES = {
+    "implicit-post-pulls-merge": API + "repos/O/R/pulls/5/merge -f merge_method=squash",
+    "branch-merge": API + "-X POST repos/O/R/merges -f base=main -f head=feat",
+    "graphql-merge-pull-request": API + "graphql -f query='mutation{mergePullRequest("
+                                  "input:{pullRequestId:\"PR_kwDO123\"}){clientMutationId}}'",
+    "graphql-enable-auto-merge": API + "graphql -f query='mutation{enablePullRequestAutoMerge("
+                                 "input:{pullRequestId:\"PR_kwDO123\"}){clientMutationId}}'",
+    "graphql-merge-branch": API + "graphql -F query='mutation{mergeBranch(input:{repositoryId:"
+                            "\"R_1\",base:\"main\",head:\"feat\"}){clientMutationId}}'",
+}
+UNQUOTED = {
+    "assigned-gh-path": "GH=/usr/local/bin/gh; $GH pr " + "merge 5",
+    "assigned-gh-word": "CMD=gh; $CMD pr " + "merge 5",
+    "escaped-spaces": "CMD=gh\\ pr\\ " + "merge\\ 5; $CMD",
+}
 
-    @pytest.mark.parametrize("command", [
-        pytest.param('eval "$(cat <<EOF\n' + MERGE + "5\n" + FORCE + 'main\nEOF\n)"', id="evald-heredoc"),
-        pytest.param("bash -c 'eval \"$(printf %s \\\"" + MERGE + "5; " + FORCE + "main\\\")\"'",
-                     id="evald-in-bash-c"),
-    ])
-    def test_two_commands_in_a_substitution_never_type_an_op(self, command):
+
+class TestGhApiMergeShapesRunOnAClick:
+    @pytest.mark.parametrize("command", API_SHAPES.values(), ids=API_SHAPES.keys())
+    def test_the_approved_api_merge_is_refused_then_runs(self, command):
+        assert not _runs(None, command)
+        ctx, _ = _mint(command)
+        assert _runs(ctx, command)
+
+    def test_a_graphql_token_runs_only_its_own_node_id(self):
+        ctx, _ = _mint(API_SHAPES["graphql-merge-pull-request"])
+        other = API_SHAPES["graphql-merge-pull-request"].replace("PR_kwDO123", "PR_kwDO999")
+        assert not _runs(ctx, other)
+        assert not _runs(ctx, MERGE + "5")
+
+    def test_a_branch_merge_token_runs_only_its_own_head(self):
+        ctx, _ = _mint(API_SHAPES["branch-merge"])
+        assert ctx is not None and "command_text" in ctx
+        assert not _runs(ctx, API_SHAPES["branch-merge"].replace("head=feat", "head=other"))
+
+
+class TestAnUnquotedVariableMergeRunsOnAClick:
+    @pytest.mark.parametrize("command", UNQUOTED.values(), ids=UNQUOTED.keys())
+    def test_the_approved_command_is_refused_then_runs(self, command):
+        assert not _runs(None, command)
+        ctx, _ = _mint(command)
+        assert _runs(ctx, command)
+
+    def test_a_plain_command_the_region_reading_misses_is_left_to_it(self, monkeypatch):
+        """Only a fact the classifier reports licenses the exact-text path for a
+        plain command: the region reading finding nothing must not, on its own."""
+        monkeypatch.setattr("merge_guard_post._collect_pairs", lambda texts: {})
+        command = MERGE + "5"
         assert _exact_text_reading(command, f"`{command}`") is None
+
+
+SCRIPT_ARGS = {
+    "shell-script-merge": "./retry.sh \"" + MERGE + "5\"",
+    "python-script-merge": "python3 retry.py \"" + MERGE + "5\"",
+    "node-script-force-push": "node run.js \"" + FORCE + "main\"",
+    "shell-script-branch-delete": "./retry.sh \"git branch -" + "D feat\"",
+    "variable-for-a-script": "CMD=\"" + MERGE + "5\"; ./retry.sh \"$CMD\"",
+    "bash-script-merge": "bash run.sh \"" + MERGE + "5\"",
+}
+FILE_THEN_RUN = {
+    "heredoc-written": "cat > f <<'EOF'\n" + MERGE + "5\nEOF\nbash f",
+    "echo-bash": "echo '" + MERGE + "5' > f; bash f",
+    "echo-sh": "echo '" + MERGE + "5' > f; sh f",
+    "echo-source": "echo '" + MERGE + "5' > f && source f",
+    "printf-dot": "printf '%s\\n' '" + MERGE + "5' > f; . ./f",
+    "tee-bash": "echo '" + MERGE + "5' | tee f; bash f",
+    "append-stdin": "echo '" + MERGE + "5' >> f; bash < f",
+    "chmod-run": "echo '" + MERGE + "5' > f; chmod +x f; ./f",
+    "second-line-appended": "echo 'echo hi' > f; echo '" + MERGE + "5' >> f; bash f",
+    "variable-written": "P='" + MERGE + "5'; echo \"$P\" > f; bash f",
+}
+BRANCH_UPDATES = {
+    "merge-upstream": API + "-X POST repos/O/R/merge-upstream -f branch=main",
+    "merge-upstream-implicit-post": API + "repos/O/R/merge-upstream -f branch=main",
+    "pr-update-branch": "gh pr update-" + "branch 5",
+    "pr-update-branch-rebase": "gh pr update-" + "branch 5 --rebase",
+    "rest-update-branch": API + "-X PUT repos/O/R/pulls/5/update-" + "branch",
+    "rest-update-branch-expected-head": API + "-X PUT repos/O/R/pulls/5/update-" + "branch -f expected_head_sha=abc",
+    "graphql-update-branch": API + "graphql -f query='mutation{updatePullRequest" + "Branch(input:{pullRequestId:\"PR_1\"}){clientMutationId}}'",
+    "graphql-enqueue": API + "graphql -f query='mutation{enqueuePullRequest(input:{pullRequestId:\"PR_1\"}){clientMutationId}}'",
+    "rest-merges-implicit-post": API + "repos/o/r/merges -f base=main -f head=x",
+    "rest-merges-body-file": API + "repos/o/r/merges --input body.json",
+    "rest-merges-on-a-host": API + "--hostname ghe.io repos/o/r/merges -f base=main",
+    "graphql-merge-empty-input": API + "graphql -f query=\x27mutation{ merge" + "PullRequest(input:{}) { number } }\x27",
+}
+MERGE_BODY = '{"query":"mutation{merge' + 'PullRequest(input:{pullRequestId:\\"PR_1\\"}){clientMutationId}}"}'
+INPUT_BODIES = {
+    "heredoc": API + "graphql --input - <<'EOF'\n" + MERGE_BODY + "\nEOF",
+    "here-string": API + "graphql --input - <<< '" + MERGE_BODY + "'",
+    "echoed": "echo '" + MERGE_BODY + "' | " + API + "graphql --input -",
+    "printed": "printf '%s' '" + MERGE_BODY + "' | " + API + "graphql --input -",
+    "process-substitution": API + "graphql --input <(echo '" + MERGE_BODY + "')",
+}
+NOT_GUARDED = {
+    "pattern-argument": "python3 tool.py --pattern '" + MERGE.strip() + "'",
+    "merge-text-in-a-message": "./notify.sh \"merged: " + MERGE + "5 done\"",
+    "grep-for-merge": "/usr/bin/grep -n '" + MERGE.strip() + "' commands/peer-review.md",
+    "view-for-a-script": "python3 tools/log.py \"gh pr view 5\"",
+    "argument-to-an-inline-program": "python3 -c \"print(1)\" \"" + MERGE + "5\"",
+    "pr-merge-state": "gh pr view 5 --json mergeStateStatus",
+    "rest-pull-read": API + "repos/O/R/pulls/5",
+    "graphql-merge-queue-read": API + "graphql -f query='query{repository(owner:\"O\",name:\"R\"){mergeQueue{entries{totalCount}}}}'",
+    "echoed-update-branch": "echo \"gh pr update-" + "branch 5\"",
+    "merge-upstream-read": API + "repos/O/R/merge-upstream",
+    "environment-named-merge": API + "-X PUT repos/O/R/environments/merge-checks",
+    "repo-setting-naming-merge": API + "-X PATCH repos/O/R -f delete_branch_on_merge=true",
+    "file-written-not-run": "echo '" + MERGE + "5' > f; cat f",
+    "other-file-run": "echo '" + MERGE + "5' > f; bash g",
+    "harmless-file-run": "echo 'echo hi' > f; bash f",
+}
+UNREADABLE_EVALS = {
+    "default-expansion": 'eval "$(cat <<EOF\n' + MERGE + '${N:-5}\nEOF\n)"',
+    "substitution": 'eval "$(cat <<EOF\n' + MERGE + '$(cat n.txt)\nEOF\n)"',
+    "echoed-variable": 'eval "$(cat <<EOF\necho $X\nEOF\n)"',
+}
+
+
+class TestARewrittenOrTextBoundCommandRunsOnAClick:
+    @pytest.mark.parametrize("command", [
+        *[pytest.param(c, id=f"script-{k}") for k, c in SCRIPT_ARGS.items()],
+        *[pytest.param(c, id=f"file-{k}") for k, c in FILE_THEN_RUN.items()],
+        *[pytest.param(c, id=f"branch-{k}") for k, c in BRANCH_UPDATES.items()],
+        *[pytest.param(c, id=f"input-{k}") for k, c in INPUT_BODIES.items()],
+    ])
+    def test_the_approved_command_is_refused_then_runs(self, command):
+        assert not _runs(None, command)
+        ctx, _ = _mint(command)
+        assert _runs(ctx, command)
+
+    @pytest.mark.parametrize("command", NOT_GUARDED.values(), ids=NOT_GUARDED.keys())
+    def test_a_command_the_guard_allows_mints_nothing(self, command):
+        assert _runs(None, command)
         assert _mint(command)[0] is None
 
-    def test_a_substituted_target_still_mints_and_runs(self):
-        ctx, _ = _mint(ROWS["force-dollar-paren"])
-        assert _runs(ctx, ROWS["force-dollar-paren"])
+    def test_a_branch_update_token_runs_only_its_own_pull_request(self):
+        ctx, _ = _mint(BRANCH_UPDATES["pr-update-branch"])
+        assert ctx is not None and "command_text" in ctx
+        assert not _runs(ctx, "gh pr update-" + "branch 6")
+
+
+class TestAnUnreadableEvaldHeredocRunsOnAClick:
+    """The classifier refuses an eval of a heredoc whose command it cannot read;
+    an approval binds the command's exact text, so it runs as shown and nothing
+    else does."""
+
+    @pytest.mark.parametrize("command", UNREADABLE_EVALS.values(), ids=UNREADABLE_EVALS.keys())
+    def test_the_approved_command_is_refused_then_runs(self, command):
+        assert not _runs(None, command)
+        ctx, _ = _mint(command)
+        assert ctx is not None and ctx["command_text"] == normalize_command_text(command)
+        assert _runs(ctx, command)
+
+    @pytest.mark.parametrize("other", [
+        *[pytest.param(c, id=k) for k, c in UNREADABLE_EVALS.items() if k != "default-expansion"],
+        pytest.param(UNREADABLE_EVALS["default-expansion"].replace(":-5", ":-6"), id="other-default"),
+        pytest.param(MERGE + "5", id="plain-merge"),
+        pytest.param(FORCE + "main", id="force-push"),
+    ])
+    def test_an_approval_runs_no_other_command(self, other):
+        ctx, _ = _mint(UNREADABLE_EVALS["default-expansion"])
+        assert not _runs(ctx, other)
+
+
+class TestASubstitutionThatRunsCommandsTypesNothing:
+    def test_two_commands_in_an_evald_substitution_never_mint(self):
+        command = 'eval "$(cat <<EOF\n' + MERGE + "5\n" + FORCE + 'main\nEOF\n)"'
+        assert _mint(command)[0] is None
+
 
 
 BACKTICK_ROWS = {
