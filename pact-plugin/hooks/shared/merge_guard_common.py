@@ -183,7 +183,6 @@ security check; the primary check is I-3 TTL expiry (bounded by TOKEN_TTL).
 from __future__ import annotations
 
 import ast
-import bisect
 import functools
 import glob
 import os
@@ -3564,11 +3563,344 @@ def _named_values_at(head: str, code: str, i: int) -> tuple[list[int], int] | No
     if reaching is not None:
         values = sorted(v for v in reaching.get(i, ()) if v != _OPAQUE)
         return (values, named.end()) if values else None
-    starts, values = _assignments(code, head).get(named.group("name"), ([], []))
-    k = bisect.bisect_left(starts, i)
-    if k == 0:
+    values = _span_reaching(head, code, i, named.group("name"))
+    return (values, named.end()) if values else None
+
+
+class _Span(NamedTuple):
+    """A function body: [start, end) of its text, its parameters, its parent's index
+    (-1 for the program)."""
+
+    start: int
+    end: int
+    params: frozenset
+    parent: int
+
+
+# Where a function's parameter list opens, per family; the body is the `{…}` after it.
+_BRACE_FUNCTION_RES = (
+    (re.compile(r"^(?:node|nodejs|bun|deno)"), re.compile(r"\bfunction\b\s*\*?\s*[\w$]*\s*\(")),
+    (re.compile(r"^php"), re.compile(r"\bfunction\b\s*&?\s*\w*\s*\(")),
+    (re.compile(r"^(?:R$|Rscript)"), re.compile(r"\bfunction\s*\(")),
+)
+_JS_HEAD_RE = re.compile(r"^(?:node|nodejs|bun|deno)")
+_ARROW_BODY_RE = re.compile(r"=>\s*\{")
+_PERL_SUB_RE = re.compile(r"\bsub\b\s*[\w:]*\s*\{")
+_PERL_PARAMS_RE = re.compile(r"\bmy\s*\(([^)]*)\)\s*=\s*@_")
+_PERL_SHIFT_RE = re.compile(r"\s*my\s+(\$\w+)\s*=\s*shift\b")
+_PY_DEF_RE = re.compile(r"(?m)^([ \t]*)(?:async[ \t]+)?def[ \t]+\w+[ \t]*\(([^)]*)\)[^\n]*:")
+_PY_LAMBDA_RE = re.compile(r"\blambda\b([^:\n]*):")
+
+
+def _param_names(text: str, head: str) -> frozenset:
+    """The names a parameter list binds: `$name` in perl and php, otherwise each
+    identifier outside a default value."""
+    text = re.sub(r"=[^,]*", "", text)
+    if re.match(r"^(?:perl|php)", head):
+        return frozenset(re.findall(r"[$@%]\w+", text))
+    return frozenset(re.findall(r"[A-Za-z_$][\w$]*", text))
+
+
+def _matching(view: str, i: int) -> int:
+    """Offset of the bracket closing the one at view[i], or -1 when it does not close."""
+    pairs, depth = {"(": ")", "{": "}", "[": "]"}, 0
+    opener, closer = view[i], pairs[view[i]]
+    for j in range(i, len(view)):
+        if view[j] == opener:
+            depth += 1
+        elif view[j] == closer:
+            depth -= 1
+            if depth == 0:
+                return j
+    return -1
+
+
+def _brace_spans(view: str, head: str) -> list:
+    """(start, end, params) of each `{…}` function body for a brace-delimited family."""
+    found = []
+    for head_re, opener_re in _BRACE_FUNCTION_RES:
+        if not head_re.match(head):
+            continue
+        for m in opener_re.finditer(view):
+            close = _matching(view, m.end() - 1)
+            body = re.match(r"\s*\{", view[close + 1:]) if close >= 0 else None
+            if body:
+                start = close + 1 + body.end() - 1
+                found.append((start, _matching(view, start), _param_names(view[m.end():close], head)))
+    if _JS_HEAD_RE.match(head):
+        for m in _ARROW_BODY_RE.finditer(view):
+            before = view[:m.start()].rstrip()
+            if before.endswith(")"):
+                depth, j = 0, len(before) - 1
+                while j >= 0:
+                    depth += {")": 1, "(": -1}.get(before[j], 0)
+                    if depth == 0:
+                        break
+                    j -= 1
+                params = _param_names(before[j + 1:-1], head) if j >= 0 else frozenset()
+            else:
+                name = re.search(r"[A-Za-z_$][\w$]*$", before)
+                params = frozenset([name.group()]) if name else frozenset()
+            start = m.end() - 1
+            found.append((start, _matching(view, start), params))
+    if head.startswith("perl"):
+        for m in _PERL_SUB_RE.finditer(view):
+            start = m.end() - 1
+            end = _matching(view, start)
+            params = set()
+            for pm in _PERL_PARAMS_RE.finditer(view, start + 1, end if end > 0 else len(view)):
+                params |= _param_names(pm.group(1), head)
+            shifted = _PERL_SHIFT_RE.match(view, start + 1)
+            if shifted:
+                params.add(shifted.group(1))
+            found.append((start, end, frozenset(params)))
+    return found
+
+
+# A JS method or object-literal shorthand: `name(params) {` at a statement start.
+_JS_METHOD_RE = re.compile(
+    r"(?:(?m:^)|(?<=[;},]))[ \t]*(?:(?:async|static|get|set)[ \t]+|\*[ \t]*)*(?P<name>[A-Za-z_$][\w$]*)[ \t]*\("
+)
+_JS_NOT_METHOD = frozenset({"if", "for", "while", "switch", "catch", "function", "with", "return"})
+
+
+def _js_method_spans(view: str) -> list:
+    """(start, end, params) of each JS method body."""
+    found = []
+    for m in _JS_METHOD_RE.finditer(view):
+        if m.group("name") in _JS_NOT_METHOD:
+            continue
+        close = _matching(view, m.end() - 1)
+        body = re.match(r"\s*\{", view[close + 1:]) if close >= 0 else None
+        if body:
+            start = close + 1 + body.end() - 1
+            found.append((start, _matching(view, start), _param_names(view[m.end():close], "node")))
+    return found
+
+
+# Block keywords. Lua: function, if and do open, end closes; repeat … until. Ruby: def,
+# class, module, begin, case and do open, and if/unless/while/until/for only at a
+# statement start; `.end` and `:end` are not keywords.
+_LUA_KEYWORD_RE = re.compile(r"(?<![\w.:])(function|if|do|end|repeat|until)(?!\w)")
+_RUBY_KEYWORD_RE = re.compile(
+    r"(?<![\w.:$@])(def|class|module|begin|case|do|if|unless|while|until|for|end)(?![\w?!:])"
+)
+_RUBY_STATEMENT_KEYWORDS = frozenset({"if", "unless", "while", "until", "for"})
+_RUBY_ENDLESS_DEF_RE = re.compile(r"def\s+[\w.?!]+\s*(?:\([^)]*\))?\s*=(?![=~>])")
+_KEYWORD_HEADER_RE = re.compile(r"[ \t]*[\w.:?!]*[ \t]*(?:\(([^)]*)\)|([^\n;]*))")
+_RUBY_BLOCK_PARAMS_RE = re.compile(r"[ \t]*\|([^|\n]*)\|")
+_RUBY_BRACE_BLOCK_RE = re.compile(r"\{[ \t]*\|([^|\n]*)\|")
+
+
+def _endless_def_end(view: str, line_start: int) -> int:
+    """The end of a ruby endless def whose line starts at view[line_start]: the end of
+    that line, extended over each following line indented deeper than it (a body
+    written on the next line). Blank lines do not end it."""
+    indent = len(view[line_start:]) - len(view[line_start:].lstrip(" \t"))
+    end = view.find("\n", line_start)
+    while end >= 0:
+        nxt = view.find("\n", end + 1)
+        line = view[end + 1:len(view) if nxt < 0 else nxt]
+        if line.strip() and len(line) - len(line.lstrip(" \t")) <= indent:
+            break
+        end = nxt
+    return len(view) if end < 0 else end
+
+
+def _keyword_blocks(view: str, head: str) -> tuple | None:
+    """For ruby and lua: (function spans, per-offset keyword depth), from counting
+    block keywords against `end`; None when they do not balance. A ruby statement
+    modifier (`x if y`), the `do` of a `while … do` header on its line and an endless
+    def (`def f(x) = …`, a span over its line and the lines indented deeper below it)
+    open nothing. A def or a lua
+    function is a span with its
+    parameters; a ruby `do |a, b|` or `{ |a, b|` block is a span with its block
+    parameters."""
+    lua = not head.startswith("ruby")
+    stack: list = []
+    spans: list = []
+    deltas: list = []
+    header_line = -1
+    for m in (_LUA_KEYWORD_RE if lua else _RUBY_KEYWORD_RE).finditer(view):
+        word, at = m.group(1), m.start()
+        line_start = view.rfind("\n", 0, at) + 1
+        if word == "end" or (lua and word == "until"):
+            if not stack or (stack[-1][0] == "repeat") != (word == "until"):
+                return None
+            _, start, params, is_function = stack.pop()
+            deltas.append((at, -1))
+            if is_function:
+                spans.append((start, at, params))
+            continue
+        if not lua and word in _RUBY_STATEMENT_KEYWORDS:
+            prefix = view[max(line_start, view.rfind(";", 0, at) + 1):at].strip()
+            if prefix and not prefix.endswith(("=", "(")):
+                continue                                 # a statement modifier
+            if word in ("while", "until", "for"):
+                header_line = line_start
+        elif not lua and word == "do" and header_line == line_start:
+            header_line = -1
+            continue                                     # the header's own `do`
+        elif not lua and word == "def" and _RUBY_ENDLESS_DEF_RE.match(view, at):
+            header = _KEYWORD_HEADER_RE.match(view, m.end())
+            spans.append((m.end(), _endless_def_end(view, line_start), _param_names(header.group(1) or "" if header else "", head)))
+            continue                                     # an endless def: no `end`
+        start, params, is_function = m.end(), frozenset(), False
+        if word in ("function", "def"):
+            header = _KEYWORD_HEADER_RE.match(view, m.end())
+            text = (header.group(1) or header.group(2) or "") if header else ""
+            start, params, is_function = header.end() if header else m.end(), _param_names(text, head), True
+        elif word == "do" and not lua:
+            bar = _RUBY_BLOCK_PARAMS_RE.match(view, m.end())
+            if bar:
+                start, params, is_function = bar.end(), _param_names(bar.group(1), head), True
+        stack.append((word, start, params, is_function))
+        deltas.append((m.end(), 1))
+    if stack:
         return None
-    return [values[k - 1]], named.end()
+    if not lua:
+        for m in _RUBY_BRACE_BLOCK_RE.finditer(view):
+            end = _matching(view, m.start())
+            if end < 0:
+                return None
+            spans.append((m.end(), end, _param_names(m.group(1), head)))
+    depth, out, k = 0, [], 0
+    deltas.sort()
+    for offset in range(len(view) + 1):
+        while k < len(deltas) and deltas[k][0] <= offset:
+            depth += deltas[k][1]
+            k += 1
+        out.append(depth)
+    return spans, tuple(out)
+
+
+_KEYWORD_FAMILY_RE = re.compile(r"^(?:ruby|lua|luajit)")
+
+
+def _python_fallback_spans(view: str) -> list:
+    """(start, end, params) of each def body (the lines indented deeper than the def
+    line) and each lambda, for Python that does not parse."""
+    found = []
+    for m in _PY_DEF_RE.finditer(view):
+        indent, end = len(m.group(1).expandtabs()), len(view)
+        for line in re.finditer(r"(?m)^([ \t]*)\S[^\n]*$", view[m.end():]):
+            if len(line.group(1).expandtabs()) <= indent:
+                end = m.end() + line.start()
+                break
+        found.append((m.end(), end, _param_names(m.group(2), "python")))
+    for m in _PY_LAMBDA_RE.finditer(view):
+        eol = view.find("\n", m.end())
+        found.append((m.end(), eol if eol >= 0 else len(view), _param_names(m.group(1), "python")))
+    return found
+
+
+@functools.lru_cache(maxsize=64)
+def _scope_spans(code: str, head: str) -> tuple:
+    """The function spans of a program without a parser, nested by containment. Empty
+    (the whole program is one span) when a body's brackets do not close."""
+    view = _index_view(code, head)
+    if _PYTHON_HEAD_RE.match(head):
+        raw = _python_fallback_spans(view)
+    elif _KEYWORD_FAMILY_RE.match(head):
+        blocks = _keyword_blocks(view, head)
+        raw = list(blocks[0]) if blocks else []
+    else:
+        raw = _brace_spans(view, head) + (_js_method_spans(view) if _JS_HEAD_RE.match(head) else [])
+    if any(end < 0 for _, end, _ in raw):
+        return ()
+    raw.sort(key=lambda span: (span[0], -span[1]))
+    spans: list = []
+    for start, end, params in raw:
+        parent = -1
+        for k in range(len(spans) - 1, -1, -1):
+            if spans[k].start <= start and end <= spans[k].end:
+                parent = k
+                break
+        spans.append(_Span(start, end, params, parent))
+    return tuple(spans)
+
+
+def _innermost(spans: tuple, i: int) -> int:
+    """Index of the innermost span containing offset i, or -1 for the program."""
+    found = -1
+    for k, span in enumerate(spans):
+        if span.start <= i < span.end:
+            found = k
+    return found
+
+
+@functools.lru_cache(maxsize=64)
+def _depths(code: str, head: str) -> tuple:
+    """Per offset, the nesting depth there: `{` minus `}` before it; for ruby and lua,
+    the block keywords open before it (0 everywhere when they do not balance); for
+    Python that does not parse, the indentation of its line."""
+    view = _index_view(code, head)
+    out, depth = [], 0
+    if _KEYWORD_FAMILY_RE.match(head):
+        blocks = _keyword_blocks(view, head)
+        return blocks[1] if blocks else (0,) * (len(view) + 1)
+    if _PYTHON_HEAD_RE.match(head):
+        for line in view.split("\n"):
+            indent = len(line) - len(line.lstrip(" \t"))
+            out += [indent] * (len(line) + 1)
+        return tuple(out)
+    for ch in view:
+        out.append(depth)
+        depth += {"{": 1, "}": -1}.get(ch, 0)
+    out.append(depth)
+    return tuple(out)
+
+
+def _block_of(code: str, head: str, i: int, floor: int) -> tuple:
+    """[open, close) of the innermost `{…}` containing offset i and opening at or after
+    floor, or (floor, len(code)) when there is none."""
+    view = _index_view(code, head)
+    depth, j = 0, i - 1
+    while j >= floor:
+        ch = view[j]
+        if ch == "}":
+            depth += 1
+        elif ch == "{":
+            if depth == 0:
+                close = _matching(view, j)
+                return j, close if close >= 0 else len(code)
+            depth -= 1
+        j -= 1
+    return floor, len(code)
+
+
+def _span_reaching(head: str, code: str, i: int, name: str) -> list:
+    """The literal values of `name` reaching a use at code[i], for a program without a
+    parser: the assignments in the use's own function span (outside nested spans),
+    walked back from the use until one at the use's depth or shallower, which dominates
+    it; a parameter is unreadable; a name free in its span takes every assignment of it
+    in the enclosing span, outward until one has any; an assignment only after the use
+    leaves it unresolved. A JS `let`/`const` inside a block reaches only uses in that
+    block. Ruby and lua spans come from their block keywords."""
+    spans, depth = _scope_spans(code, head), _depths(code, head)
+    starts, values = _assignments(code, head).get(name, ([], []))
+    span = _innermost(spans, i)
+    floor = spans[span].start if span >= 0 else 0
+    own = [k for k in range(len(starts)) if _innermost(spans, starts[k]) == span]
+    params = spans[span].params if span >= 0 else frozenset()
+    if not own and name not in params:
+        while span >= 0:
+            span = spans[span].parent
+            outer = [values[k] for k in range(len(starts)) if _innermost(spans, starts[k]) == span]
+            if outer:
+                return sorted(outer)
+        return []
+    view = _index_view(code, head) if _JS_HEAD_RE.match(head) else ""
+    found = []
+    for k in sorted((k for k in own if starts[k] < i), key=lambda k: -starts[k]):
+        if view and re.search(r"\b(?:let|const)\s+$", view[floor:starts[k]]):
+            block = _block_of(code, head, starts[k], floor)
+            if not block[0] <= i < block[1]:
+                continue
+        found.append(values[k])
+        if depth[starts[k]] <= depth[i]:
+            break
+    return sorted(found)
 
 
 def _argument_readings(head: str, code: str, at: int) -> tuple[list[tuple[bool, list[str]]], int] | None:

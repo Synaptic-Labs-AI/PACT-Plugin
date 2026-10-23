@@ -862,6 +862,77 @@ def test_reaching_definitions_use_character_offsets_on_non_ascii_lines():
     assert mgc._named_values_at("python3", code, use) == ([code.index('["gh"]')], use + 1)
 
 
+# Without a parser, scope comes from function spans: a parameter is unreadable, an
+# assignment in another function does not reach, and the walk back from a use stops at
+# the first assignment at the use's depth or shallower. Python that does not parse uses
+# def and lambda spans with indentation as depth.
+SPAN_SCOPE_DENY = [
+    ('node: reuse', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nlet cmd = "gh pr view 5";\ncp.execSync(cmd);\ncmd = "' + M + ' 5 --squash";\ncp.execSync(cmd);\nEOF2'),
+    ('node: if/else', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nlet cmd;\nif (process.argv[2]) { cmd = "' + M + ' 5 --squash"; } else { cmd = "gh pr view 5"; }\ncp.execSync(cmd);\nEOF2'),
+    ('node: helper-local merge', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction go() { const cmd = "' + M + ' 5 --squash"; cp.execSync(cmd); }\ngo();\nEOF2'),
+    ('node: free module variable', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nconst cmd = "' + M + ' 5 --squash";\nfunction go() { cp.execSync(cmd); }\ngo();\nEOF2'),
+    ('php: string in a variable', 'php -r \'$cmd = "' + M + ' 5"; shell_exec($cmd);\''),
+    ('node: block-local const run in its block', 'node - <<\'EOF2\'\nconst cp = require("child_process");\n{ const cmd = "' + M + ' 5"; cp.execSync(cmd); }\nEOF2'),
+    ('python that does not parse: helper-local merge', 'python3 - <<\'EOF2\'\nimport subprocess\ndef go():\n    cmd = ["gh", "pr", "merge", "5"]\n    subprocess.run(cmd)\ngo()\nthis line is not python (\nEOF2'),
+]
+SPAN_SCOPE_ALLOW = [
+    ('node: merge local to another function', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nfunction show() { const cmd = "' + M + ' 5 --squash"; console.log(cmd); }\nfunction check() { cp.execSync(cmd); }\nconst cmd = "gh pr view 5";\ncheck();\nEOF2'),
+    ('node: parameter of a helper', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nconst cmd = "' + M + ' 5 --squash";\nconsole.log(cmd);\nfunction run(cmd) { cp.execSync(cmd); }\nrun("gh pr view 5");\nEOF2'),
+    ('node: arrow parameter', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nconst cmd = "' + M + ' 5 --squash";\nconsole.log(cmd);\nconst run = (cmd) => { cp.execSync(cmd); };\nrun("gh pr view 5");\nEOF2'),
+    ('node: block-local const', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nlet cmd = "gh pr view 5";\n{ const cmd = "' + M + ' 5"; console.log(cmd); }\ncp.execSync(cmd);\nEOF2'),
+    ('perl: parameter from @_', 'perl - <<\'EOF2\'\nmy $cmd = "' + M + ' 5 --squash";\nprint "$cmd\\n";\nsub run { my ($cmd) = @_; system($cmd); }\nrun("gh pr view 5");\nEOF2'),
+    ('php: parameter', 'php -r \'$cmd = "' + M + ' 5 --squash"; echo $cmd; function run($cmd) { shell_exec($cmd); } run("gh pr view 5");\''),
+    ('R: parameter', 'Rscript -e \'cmd = "' + M + ' 5 --squash"; print(cmd); run = function(cmd) { system(cmd) }; run("gh pr view 5")\''),
+    ('python that does not parse: parameter of a helper', 'python3 - <<\'EOF2\'\nimport subprocess\ncmd = ["gh", "pr", "merge", "5", "--squash"]\nprint(cmd)\ndef run(cmd):\n    subprocess.run(cmd)\nrun(["gh", "pr", "view", "5"])\nthis line is not python (\nEOF2'),
+    ("node: merge printed, then reassigned",
+     "node - <<'EOF'\nconst cp = require(\"child_process\");\nlet cmd = \"gh pr " + "merge 5\";\nconsole.log(cmd);\ncmd = \"gh pr view 5\";\ncp.execSync(cmd);\nEOF"),
+    ("node: unbalanced braces leave one span", "node -e 'const cmd = \"gh pr view 5\"; function f() { const cmd = \"x\"; require(\"child_process\").execSync(cmd)'"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", SPAN_SCOPE_DENY, ids=[r[0] for r in SPAN_SCOPE_DENY])
+def test_a_merge_reaching_the_use_in_its_span_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", SPAN_SCOPE_ALLOW, ids=[r[0] for r in SPAN_SCOPE_ALLOW])
+def test_a_merge_not_reaching_the_use_in_its_span_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+# Ruby and lua spans come from their block keywords; JS methods are spans too.
+KEYWORD_SPAN_DENY = [
+    ('ruby: reuse', 'ruby - <<\'EOF2\'\nc = "gh pr view 5"\nsystem(c)\nc = "' + M + ' 5 --squash"\nsystem(c)\nEOF2'),
+    ('ruby: if/else', 'ruby - <<\'EOF2\'\nif ARGV[0]\n  c = "' + M + ' 5 --squash"\nelse\n  c = "gh pr view 5"\nend\nsystem(c)\nEOF2'),
+    ('ruby: helper-local merge', 'ruby - <<\'EOF2\'\ndef go\n  c = "' + M + ' 5 --squash"\n  system(c) if c\nend\ngo\nEOF2'),
+    ('ruby: merge used after an endless def', 'ruby - <<\'EOF2\'\ncmd = "' + M + ' 5 --squash"\ndef show(cmd) =\n  puts(cmd)\nsystem(cmd)\nEOF2'),
+    ('lua: helper-local merge', 'lua - <<\'EOF2\'\nlocal function go()\n  local c = "' + M + ' 5 --squash"\n  os.execute(c)\nend\ngo()\nEOF2'),
+    ('lua: if/else', 'lua - <<\'EOF2\'\nlocal c\nif arg[1] then c = "' + M + ' 5" else c = "gh pr view 5" end\nos.execute(c)\nEOF2'),
+    ('node: method-local merge', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nclass Runner {\n  go() { const c = "' + M + ' 5 --squash"; cp.execSync(c); }\n}\nnew Runner().go();\nEOF2'),
+]
+KEYWORD_SPAN_ALLOW = [
+    ('ruby: helper parameter, modifier if', 'ruby - <<\'EOF2\'\ncmd = "' + M + ' 5 --squash"\nputs cmd\ndef run(cmd)\n  return if cmd.nil?\n  system(cmd)\nend\nrun("gh pr view 5")\nEOF2'),
+    ('ruby: while-do, endless def and block parameter', 'ruby - <<\'EOF2\'\ncmd = "' + M + ' 5 --squash"\nputs cmd\nwhile false do\n  break\nend\ndef run(cmd) = system(cmd)\n["gh pr view 5"].each do |cmd|\n  system(cmd)\nend\nEOF2'),
+    ('ruby: endless def body on the next line', 'ruby - <<\'EOF2\'\ncmd = "' + M + ' 5 --squash"\nputs cmd\ndef run(cmd) =\n  system(cmd)\nrun("gh pr view 5")\nEOF2'),
+    ('ruby: brace block parameter', 'ruby - <<\'EOF2\'\ncmd = "' + M + ' 5 --squash"\nputs cmd\n["gh pr view 5"].each { |cmd| system(cmd) }\nEOF2'),
+    ('lua: helper parameter, for-do and if', 'lua - <<\'EOF2\'\nlocal cmd = "' + M + ' 5 --squash"\nprint(cmd)\nlocal function run(cmd)\n  for i = 1, 1 do\n    if cmd then os.execute(cmd) end\n  end\nend\nrun("gh pr view 5")\nEOF2'),
+    ('node: class method parameter', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nconst cmd = "' + M + ' 5 --squash";\nconsole.log(cmd);\nclass Runner {\n  run(cmd) { cp.execSync(cmd); }\n}\nnew Runner().run("gh pr view 5");\nEOF2'),
+    ('node: object shorthand method parameter', 'node - <<\'EOF2\'\nconst cp = require("child_process");\nconst cmd = "' + M + ' 5 --squash";\nconsole.log(cmd);\nconst tools = {\n  async run(cmd) { cp.execSync(cmd); },\n};\ntools.run("gh pr view 5");\nEOF2'),
+    ("ruby: unbalanced keywords leave one span",
+     "ruby -e 'c = \"gh pr view 5\"; def f(c)\n  x = 1\n  system(c)'"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", KEYWORD_SPAN_DENY, ids=[r[0] for r in KEYWORD_SPAN_DENY])
+def test_a_merge_reaching_the_use_in_its_keyword_span_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", KEYWORD_SPAN_ALLOW, ids=[r[0] for r in KEYWORD_SPAN_ALLOW])
+def test_a_merge_not_reaching_the_use_in_its_keyword_span_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
 # shell_c_string: the string a POSIX shell leg runs with -c, for minting an approval of
 # a guarded command inside it.
 SHELL_C_STRING_ROWS = [
