@@ -41,6 +41,11 @@ from scripts.working_memory import (
 )
 from scripts.memory_api import PACTMemory
 
+# claude_md_ambient (module-wide): the branch-spy asserts pin WHICH resolver
+# branch answered, so these tests must see the ambient world rather than the
+# suite-wide tmp redirect. See tests/conftest.py.
+pytestmark = pytest.mark.claude_md_ambient
+
 
 WORKING_MEMORY_SCAFFOLD = (
     "# {title}\n\n"

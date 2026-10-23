@@ -22,6 +22,11 @@ from typing import Optional
 
 import pytest
 
+# claude_md_ambient (module-wide): the resolver-parity pins assert the
+# git-anchor branches — the suite-wide tmp redirect would sever what they
+# measure. See the marker's registration in tests/conftest.py.
+pytestmark = pytest.mark.claude_md_ambient
+
 
 # Classification vocabulary -- shared across all resolvers
 NOT_FOUND = "not_found"

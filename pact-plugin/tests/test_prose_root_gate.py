@@ -14,6 +14,13 @@ appears to work, an interactive shell function may be rewriting `grep` to
 import re
 from pathlib import Path
 
+import pytest
+
+# claude_md_ambient (module-wide): the prose-root refusal is this module's
+# subject and is orthogonal to the CLAUDE.md resolution redirect; marked so
+# the redirect is explicitly not applied here. See tests/conftest.py.
+pytestmark = pytest.mark.claude_md_ambient
+
 PLUGIN_ROOT = Path(__file__).parent.parent
 
 # The census population. NOT the nine dirs the model gate walks, and no

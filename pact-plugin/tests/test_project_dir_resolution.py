@@ -66,6 +66,11 @@ from scripts.pact_session import ProjectScopeDisagreementError
 from shared import backlog
 from clock_shift.clock_shift_env import carry_clock_shift
 
+# claude_md_ambient (module-wide): this module owns the project-dir read
+# contract (env -> session record -> git -> cwd); the suite-wide tmp redirect
+# would pre-empt the very rungs under test. See tests/conftest.py.
+pytestmark = pytest.mark.claude_md_ambient
+
 
 _MEMORY_CLI = (
     Path(__file__).parent.parent / "skills" / "pact-memory" / "scripts" / "cli.py"
