@@ -1378,3 +1378,40 @@ def test_a_literal_list_with_two_merges_is_compound_and_mints_nothing(label):
     cmd = dict(EACH_HELPER_DENY)[label]
     assert is_compound_destructive_command(cmd) is True
     assert interpreter_command_context(cmd) is None
+
+
+# A program a shell's -c string hands an interpreter is read as the bare program is,
+# heredoc included, and the approval reads the same merge from it. A heredoc the
+# outer shell feeds as data is not read.
+SHELL_C_PROGRAM_DENY = [
+    ('bash -c heredoc python', 'bash -c \'python3 - <<EOF\nimport subprocess\nsubprocess.run(["gh", "pr", "merge", "5"])\nEOF\''),
+    ('bash -c python -c', 'bash -c "python3 -c \'import subprocess; subprocess.run([\\"gh\\", \\"pr\\", \\"merge\\", \\"5\\"])\'"'),
+    ('sh -c node -e', 'sh -c \'node -e "require(\\"child_process\\").execSync(\\"' + M + ' 5\\")"\''),
+    ('bash -lc heredoc helper', 'bash -lc \'python3 - <<EOF\nimport subprocess\ndef run(c):\n    subprocess.run(c)\nrun(["gh", "pr", "merge", "5"])\nEOF\''),
+]
+SHELL_C_PROGRAM_ALLOW = [
+    ('bash -c heredoc python view', 'bash -c \'python3 - <<EOF\nimport subprocess\nsubprocess.run(["gh", "pr", "view", "5"])\nEOF\''),
+    ('bash -c python -c view', 'bash -c "python3 -c \'import subprocess; subprocess.run([\\"gh\\", \\"pr\\", \\"view\\", \\"5\\"])\'"'),
+    ('sh -c node -e view', 'sh -c \'node -e "require(\\"child_process\\").execSync(\\"gh pr view 5\\")"\''),
+    ('bash -lc heredoc helper view', 'bash -lc \'python3 - <<EOF\nimport subprocess\ndef run(c):\n    subprocess.run(c)\nrun(["gh", "pr", "view", "5"])\nEOF\''),
+    ('data heredoc quoting it', 'cat <<\'DOC\'\nbash -c \'python3 - <<EOF\nimport subprocess\nsubprocess.run(["gh", "pr", "merge", "5"])\nEOF\'\nDOC'),
+    ('echo of it', 'echo "bash -c \'python3 - <<EOF\'"'),
+]
+
+
+@pytest.mark.parametrize("label,cmd", SHELL_C_PROGRAM_DENY, ids=[r[0] for r in SHELL_C_PROGRAM_DENY])
+def test_shell_c_program_merge_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", SHELL_C_PROGRAM_ALLOW, ids=[r[0] for r in SHELL_C_PROGRAM_ALLOW])
+def test_shell_c_program_view_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+@pytest.mark.parametrize("label,cmd", SHELL_C_PROGRAM_DENY, ids=[r[0] for r in SHELL_C_PROGRAM_DENY])
+def test_a_program_inside_a_shell_c_string_reads_one_merge_to_approve(label, cmd):
+    from shared.merge_guard_common import interpreter_command_context
+
+    context = interpreter_command_context(cmd)
+    assert context is not None and context["operation_type"] == "merge" and context["pr_number"] == "5"

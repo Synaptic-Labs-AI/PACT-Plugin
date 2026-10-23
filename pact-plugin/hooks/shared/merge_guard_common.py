@@ -7917,7 +7917,8 @@ def _interpreter_guarded_commands(command: str, depth: int) -> list[str]:
     """Every guarded command the programs this command hands an interpreter (-c/-e and
     stdin-fed code) pass directly to an exec primitive, read from the command as written
     and, when it has line continuations, as the shell splices them too (`python3 \\`
-    then `-c '…'` on the next line). A parser defect must never raise: the pre-hook
+    then `-c '…'` on the next line), and inside the -c string a POSIX shell leg runs
+    (`bash -c "python3 -c '…'"`, `bash -c 'python3 - <<EOF … EOF'`). A parser defect must never raise: the pre-hook
     turns a raised exception into a deny, which would block a good-faith command. When
     the direct-call parser raises on one program, that program is judged by
     `_guarded_literals_beside_primitive` as well, joined to the guarded commands read
@@ -7937,7 +7938,41 @@ def _interpreter_guarded_commands(command: str, depth: int) -> list[str]:
         except _PARSER_ERRORS:
             read += _guarded_literals_beside_primitive(head, code, depth)   # with what was read before it
         found += read
+    if depth < _MAX_WRAPPER_DEPTH:                       # programs a shell's -c string hands on
+        try:
+            for inner in _shell_c_programs(command):
+                found += _interpreter_guarded_commands(inner, depth + 1)
+        except _PARSER_ERRORS:
+            pass
     return found
+
+
+# A POSIX shell's name as a word anywhere in a command: the cheap test before a -c read.
+_SHELL_WORD_RE = re.compile(r"(?<![\w.-])(?:sh|bash|zsh|dash|ash|ksh(?:93)?|rksh|mksh|hush|lash|msh)(?![\w.-])")
+
+
+@functools.lru_cache(maxsize=256)
+def _shell_c_programs(command: str) -> tuple:
+    """The -c strings the POSIX shell legs of `command` run, as written. The legs are
+    the stripped command's, so a heredoc the outer shell feeds as data is not read; a
+    heredoc written inside the quoted -c string belongs to the inner shell, so that
+    string is taken from the command as written rather than from the strip."""
+    if not _SHELL_WORD_RE.search(command):
+        return ()
+    command = _normalize_line_continuations(command)
+    stripped = _neutralize_inert_help_legs(_strip_non_executable_content(command))
+    written: list[str] | None = None
+    out = []
+    for leg in _slice_stripped_legs(stripped):
+        inner = _shell_c_argument(leg, strict=False)
+        if inner is not None and "<<HEREDOC_STRIPPED" in inner:
+            if written is None:
+                written = [w for w in (_shell_c_argument(part, strict=False) for part in _slice_stripped_legs(command)) if w]
+            prefix = inner.split("<<HEREDOC_STRIPPED")[0]
+            inner = next((w for w in written if w.startswith(prefix + "<<")), inner)
+        if inner is not None:
+            out.append(inner)
+    return tuple(out)
 
 
 def _interpreter_code_runs_guarded(command: str, depth: int) -> bool:
@@ -8960,9 +8995,8 @@ def _is_dangerous_at_depth(command: str, depth: int) -> bool:
     stripped = _neutralize_inert_help_legs(stripped)
     # A POSIX shell's -c string is a command line: judge it as the bare command is.
     if depth < _MAX_WRAPPER_DEPTH:
-        for leg in _slice_stripped_legs(stripped):
-            inner = _shell_c_argument(leg, strict=False)
-            if inner is not None and _is_dangerous_at_depth(inner, depth + 1):
+        for inner in _shell_c_programs(command):
+            if _is_dangerous_at_depth(inner, depth + 1):
                 return True
     # The literal danger battery (DANGEROUS_PATTERNS + the four per-leg literal-arm families +
     # the additive normalized-flag condition) is the SSOT _stripped_surface_danger — factored
