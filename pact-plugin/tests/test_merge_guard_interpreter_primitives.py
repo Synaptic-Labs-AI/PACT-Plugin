@@ -205,12 +205,12 @@ def test_code_argument_direct_call_forms(label, executing, inert):
 
 def test_direct_call_rule_reads_a_later_argument_as_data():
     """The direct-call rule refuses only the command a primitive runs: a probe given
-    guarded text as an argument runs `python3 probe.py`. (The whole -c leg is still
+    prose naming a guarded command runs `python3 probe.py`. (The whole -c leg is still
     refused by the older primitive-plus-guarded-text rule, a known over-block whose
     route is a script file.)"""
     from shared.merge_guard_common import _code_runs_guarded_directly
 
-    code = "import subprocess; subprocess.run(['python3', 'probe.py', '" + D + "'])"
+    code = "import subprocess; subprocess.run(['python3', 'probe.py', 'note: " + D + "'])"
     assert _code_runs_guarded_directly("python3", code) is False
     direct = "import subprocess; subprocess.run(['gh', 'pr', 'merge', '5'])"
     assert _code_runs_guarded_directly("python3", direct) is True

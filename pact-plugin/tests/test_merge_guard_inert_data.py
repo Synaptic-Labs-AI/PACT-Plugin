@@ -293,9 +293,9 @@ BRANCH_D = "git branch " + "-D"
 
 LITERAL_BACKTICK_ALLOW = [
     ("escaped backtick in double quotes",
-     f'python3 dbg.py tree "{PUSH} \\`git branch --show-current\\`:feat"'),
+     f'python3 dbg.py tree "note: {PUSH} \\`git branch --show-current\\`:feat"'),
     ("backtick in single quotes",
-     f"python3 dbg.py tree '{PUSH} `git branch --show-current`:feat'"),
+     f"python3 dbg.py tree 'note: {PUSH} `git branch --show-current`:feat'"),
     ("escaped backtick in prose",
      f'python3 -B check.py a.txt "prose \\`: x\\` then {BRANCH_D} \\"feat\\""'),
     ("escaped backtick in a module's argument",
@@ -332,7 +332,7 @@ SCRIPT_ARGV_ALLOW = [
     ("single-quoted prose naming eval", f"python3 x.py 'eval of {M}'"),
     ("a single-quoted substitution", f"python3 x.py '$({M})'"),
     ("an escaped substitution", f'python3 x.py "\\$({M})"'),
-    ("an unquoted escaped backtick", f'python3 x.py \\`eval\\` "{M}"'),
+    ("an unquoted escaped backtick", f'python3 x.py \\`eval\\` "note: {M}"'),
 ]
 
 SCRIPT_ARGV_DENY = [
@@ -535,4 +535,63 @@ def test_the_rewritten_command_inlines_the_run_file():
     assert rewritten_executed_command(f"echo '{M}' > f; bash g") is None
     dynamic = 'echo "$(cat cmds)" > f; bash f'
     assert rewritten_executed_command(dynamic) == 'echo "$(cat cmds)" > f; $(cat cmds)'
+
+
+# ---------------------------------------------------------------------------
+# A script given a whole guarded command as one argument runs it, like a variable passed there.
+# ---------------------------------------------------------------------------
+
+PUSH_MAIN = "git push --" + "force origin main"
+SCRIPT_GIVEN_A_COMMAND = [
+    ("a retry wrapper", f'./retry.sh "{M}"', {"operation_type": "merge", "pr_number": "5"}),
+    ("a python runner", f'python3 retry.py "{M}"', {"operation_type": "merge", "pr_number": "5"}),
+    ("a node runner given a force push", f'node run.js "{PUSH_MAIN}"',
+     {"operation_type": "force-push", "target_ref": "main"}),
+    ("a retry wrapper given a branch delete", './retry.sh "git branch -' + 'D feat"',
+     {"operation_type": "branch-delete", "branch": "feat"}),
+    ("a script without an extension", f'./retry "{M}"', {"operation_type": "merge", "pr_number": "5"}),
+]
+
+SCRIPT_GIVEN_TEXT_ALLOW = [
+    ("a flag's value", "python3 tool.py --pattern 'gh pr " + "merge'"),
+    ("a command named in prose", f'./notify.sh "merged: {M} done"'),
+    ("grep for the command", "/usr/bin/grep -n 'gh pr " + "merge' commands/peer-review.md"),
+    ("a read command", 'python3 tools/log.py "gh pr view 5"'),
+]
+
+
+@pytest.mark.parametrize("label,cmd,ctx", SCRIPT_GIVEN_A_COMMAND, ids=[r[0] for r in SCRIPT_GIVEN_A_COMMAND])
+def test_a_script_given_a_whole_guarded_command_is_refused_and_read_as_it(label, cmd, ctx):
+    from shared.merge_guard_common import extract_command_context
+
+    assert is_dangerous_command(cmd) is True
+    found = extract_command_context(cmd)
+    assert {k: found.get(k) for k in ctx} == ctx
+
+
+@pytest.mark.parametrize("label,cmd", SCRIPT_GIVEN_TEXT_ALLOW, ids=[r[0] for r in SCRIPT_GIVEN_TEXT_ALLOW])
+def test_a_script_given_text_that_is_not_a_whole_command_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+def test_an_approved_merge_given_to_a_script_mints_and_runs():
+    for _, cmd, _ in SCRIPT_GIVEN_A_COMMAND[:2]:
+        result = _mint(cmd)
+        assert result.context is not None, result.refusal_reason
+        assert merge_guard_pre._token_matches_command({"context": result.context}, cmd) is True
+
+
+def test_an_inline_program_is_not_a_script_launch():
+    from shared.merge_guard_common import _script_argv_guarded_command
+
+    assert _script_argv_guarded_command(f'python3 -c x.py "{M}"') is None
+    assert _script_argv_guarded_command(f'python3 -B x.py "{M}"') == M
+
+
+def test_the_rewritten_command_is_the_command_the_script_is_given():
+    from shared.merge_guard_common import rewritten_executed_command
+
+    given = [M, M, PUSH_MAIN, "git branch -" + "D feat", M]
+    assert [rewritten_executed_command(cmd) for _, cmd, _ in SCRIPT_GIVEN_A_COMMAND] == given
+    assert [rewritten_executed_command(cmd) for _, cmd in SCRIPT_GIVEN_TEXT_ALLOW] == [None] * 4
 

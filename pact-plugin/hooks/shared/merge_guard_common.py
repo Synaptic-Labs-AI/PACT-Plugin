@@ -2403,6 +2403,10 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
     command = _normalize_line_continuations(command)
     if flag_scan_text is not None:
         flag_scan_text = _normalize_line_continuations(flag_scan_text)
+    # A script given a whole guarded command is read as that command, so its target binds.
+    script_arg = _script_argv_guarded_command(command)
+    if script_arg is not None:
+        return extract_command_context(script_arg, flag_scan_text)
     # A guarded command run by a substitution is read as that command, so its target binds.
     body = _guarded_substitution_body(command)
     if body is not None:
@@ -5802,11 +5806,13 @@ def _rewrite_readable_evals(command: str) -> str:
 
 def rewritten_executed_command(command: str) -> str | None:
     """The command as the guard judges it after its rewrites (each readable eval, and each
-    run of a file written earlier, replaced in place by the text it runs), or None when
-    nothing was rewritten. The approval side reads it so the refusal and the approval
-    share one rewrite. Never raises."""
+    run of a file written earlier, replaced in place by the text it runs; a script given a
+    whole guarded command as one argument read as that command), or None when nothing was
+    rewritten. The approval side reads it so the refusal and the approval share one
+    rewrite. Never raises."""
     try:
         rewritten = _rewrite_file_runs(_rewrite_readable_evals(command))
+        rewritten = _script_argv_guarded_command(rewritten) or rewritten
     except Exception:  # noqa: BLE001 - a reader for the approval side must not raise
         return None
     return rewritten if rewritten != command else None
@@ -5986,6 +5992,47 @@ def _rewrite_file_runs(command: str) -> str:
     for start, end, literal in sorted(replacements, reverse=True):
         out = out[:start] + literal + out[end:]
     return out
+
+
+def _script_argv_guarded_command(command: str, depth: int = 0) -> str | None:
+    """The guarded command a script-file launch is given whole, as one argument
+    (`./retry.sh "gh pr merge 5"`, `python3 retry.py "gh pr merge 5"`), or None. A
+    script-file launch is `./x`, `../x`, a path to a file with a script extension, or an
+    interpreter given a script path. The argument must itself be a guarded gh or git
+    command; one that is a flag's value (`--pattern 'gh pr merge'`) or that only names a
+    command in prose is not."""
+    view = _leg_slicing_view(command)
+    last, spans = 0, []
+    for sep in _COMPOUND_OPS_RE.finditer(view):
+        spans.append((last, sep.start()))
+        last = sep.end()
+    spans.append((last, len(command)))
+    for a, b in spans:
+        word = _leg_command_word(command[a:b])
+        tokens = _shell_tokenize(word) if word else None
+        if not tokens:
+            continue
+        head = os.path.basename(tokens[0])
+        args = None
+        if _INTERPRETER_HEADS.match(head):
+            for k, tok in enumerate(tokens[1:], 1):
+                if tok.startswith("-"):
+                    if _INLINE_PROGRAM_FLAG_RE.match(tok):
+                        break
+                    continue
+                if _SCRIPT_PATH_RE.search(tok):
+                    args = tokens[k + 1:]
+                break
+        elif tokens[0].startswith(("./", "../")) or ("/" in tokens[0] and _SCRIPT_PATH_RE.search(head)):
+            args = tokens[1:]
+        for k, arg in enumerate(args or ()):
+            if k and args[k - 1].startswith("-"):
+                continue                      # a flag's value
+            arg_tokens = _shell_tokenize(arg) or []
+            if (arg_tokens and os.path.basename(arg_tokens[0]) in ("gh", "git")
+                    and _is_dangerous_at_depth(arg, depth + 1)):
+                return arg
+    return None
 
 
 def _eval_heredoc_verdict(command: str, depth: int) -> bool | None:
@@ -7947,6 +7994,10 @@ def _is_dangerous_at_depth(command: str, depth: int) -> bool:
         verdict = _eval_heredoc_verdict(command, depth)
         if verdict is not None:
             return verdict
+    # A script given a whole guarded command as one argument runs it (a retry or run
+    # wrapper), as a variable passed there does.
+    if depth < _MAX_WRAPPER_DEPTH and _script_argv_guarded_command(command, depth) is not None:
+        return True
     # A file written with literal text and then run is judged as the text it runs.
     if depth < _MAX_WRAPPER_DEPTH:
         rewritten = _rewrite_file_runs(command)
