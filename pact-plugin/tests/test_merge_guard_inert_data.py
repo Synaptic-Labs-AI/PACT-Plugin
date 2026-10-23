@@ -936,3 +936,59 @@ def test_a_readable_or_non_eval_command_is_not_reported_as_an_unreadable_eval(la
     from shared.merge_guard_common import unreadable_evald_heredoc
 
     assert unreadable_evald_heredoc(cmd) is False
+
+
+# A literal variable given to a script is judged as its literal twin.
+FORCE_MAIN = "git push --" + "force origin main"
+VARIABLE_GIVEN_TO_A_SCRIPT = [
+    ("a retry wrapper", f'P="{FORCE_MAIN}"; ./retry.sh "$P"', FORCE_MAIN,
+     {"operation_type": "force-push", "target_ref": "main"}),
+    ("a python runner", f'P="{FORCE_MAIN}"; python3 x.py "$P"', FORCE_MAIN,
+     {"operation_type": "force-push", "target_ref": "main"}),
+    ("a single-quoted branch delete", "D='git branch -" + "D victim'; ./retry.sh \"$D\"",
+     "git branch -" + "D victim", {"operation_type": "branch-delete", "branch": "victim"}),
+]
+VARIABLE_IN_A_SCRIPT_DATA_ARGUMENT_ALLOW = [
+    ("inside a larger argument", f'P="{FORCE_MAIN}"; python3 x.py "a $P b"'),
+    ("its literal twin", f'python3 x.py "a {FORCE_MAIN} b"'),
+    ("a here-string written inside the argument", f'P="{FORCE_MAIN}"; python3 x.py "bash -s <<< \'$P\'#"'),
+    ("the same without the comment", f'P="{FORCE_MAIN}"; python3 x.py "bash -s <<< \'$P\'"'),
+    ("the here-string's literal twin", f'python3 x.py "bash -s <<< \'{FORCE_MAIN}\'#"'),
+]
+
+
+@pytest.mark.parametrize("label,cmd,runs,ctx", VARIABLE_GIVEN_TO_A_SCRIPT,
+                         ids=[r[0] for r in VARIABLE_GIVEN_TO_A_SCRIPT])
+def test_a_variable_given_whole_to_a_script_is_read_as_the_command_it_holds(label, cmd, runs, ctx):
+    from shared.merge_guard_common import extract_command_context, rewritten_executed_command
+
+    assert is_dangerous_command(cmd) is True
+    assert rewritten_executed_command(cmd) == runs
+    found = extract_command_context(cmd)
+    assert {k: found.get(k) for k in ctx} == ctx
+
+
+@pytest.mark.parametrize("label,cmd", VARIABLE_IN_A_SCRIPT_DATA_ARGUMENT_ALLOW,
+                         ids=[r[0] for r in VARIABLE_IN_A_SCRIPT_DATA_ARGUMENT_ALLOW])
+def test_a_variable_inside_a_script_data_argument_is_allowed_like_its_literal_twin(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+def test_a_script_given_a_variable_holding_two_guarded_commands_is_refused_and_binds_nothing():
+    from shared.merge_guard_common import extract_command_context
+
+    cmd = "D='git branch -" + "D a; git branch -" + "D b'; ./retry.sh \"$D\""
+    assert is_dangerous_command(cmd) is True
+    assert extract_command_context(cmd) == {}
+
+
+def test_a_variable_given_to_an_unknown_program_keeps_its_value_executing_and_is_reported():
+    from shared.merge_guard_common import rewritten_executed_command
+
+    cmd = f'P="{FORCE_MAIN}"; mytool "$P"'
+    assert is_dangerous_command(cmd) is True
+    assert rewritten_executed_command(cmd) == FORCE_MAIN
+    two = "D='git branch -" + "D a; git branch -" + "D b'; mytool \"$D\""
+    assert rewritten_executed_command(two) == "git branch -" + "D a; git branch -" + "D b"
+    both = f'P="{FORCE_MAIN}"; Q="{M}"; mytool "$P" "$Q"'
+    assert rewritten_executed_command(both) == f"{FORCE_MAIN}; {M}"

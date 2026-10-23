@@ -2578,9 +2578,13 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
     command = _normalize_line_continuations(command)
     if flag_scan_text is not None:
         flag_scan_text = _normalize_line_continuations(flag_scan_text)
-    # A script given a whole guarded command is read as that command, so its target binds.
-    script_arg = _script_argv_guarded_command(command)
+    # A script given a whole guarded command, literally or through a literal variable, is
+    # read as that command, so its target binds; one given several binds none of them.
+    script_arg = (_script_argv_guarded_command(command)
+                  or _script_argv_guarded_command(_expand_literal_variables(command)))
     if script_arg is not None:
+        if is_compound_destructive_command(script_arg):
+            return context
         return extract_command_context(script_arg, flag_scan_text)
     # A guarded command run by a substitution is read as that command, so its target binds.
     body = _guarded_substitution_body(command)
@@ -6520,11 +6524,17 @@ def rewritten_executed_command(command: str) -> str | None:
     """The command as the guard judges it after its rewrites (each readable eval, and each
     run of a file written earlier, replaced in place by the text it runs, then each literal
     variable expanded; a script given a whole guarded command as one argument read as that
-    command), or None when nothing was rewritten. The approval side reads it so the
-    refusal and the approval share one rewrite. Never raises."""
+    command), or None when nothing was rewritten. When nothing else is rewritten, a value a
+    literal variable keeps executing at a site the guard cannot read (an unknown program's
+    argument) is reported as the command: the value itself, whole. The approval side
+    reads it so the refusal and the approval share one rewrite. Never raises."""
     try:
-        rewritten = _expand_literal_variables(_rewrite_file_runs(_rewrite_readable_evals(command)))
-        rewritten = _script_argv_guarded_command(rewritten) or rewritten
+        rewritten = _rewrite_file_runs(_rewrite_readable_evals(command))
+        kept: list[str] = []
+        expanded = _expand_literal_variables(rewritten, kept)
+        if expanded == rewritten and kept:
+            return "; ".join(dict.fromkeys(kept))
+        rewritten = _script_argv_guarded_command(expanded) or expanded
     except Exception:  # noqa: BLE001 - a reader for the approval side must not raise
         return None
     return rewritten if rewritten != command else None
@@ -6751,6 +6761,21 @@ def _launched_script(tokens: list, inline_flag: re.Pattern) -> int | None:
     return None
 
 
+def _script_launch_args(tokens: list) -> int | None:
+    """The index where a script-file launch's own arguments start, or None when `tokens`
+    is no script-file launch: `./x`, `../x`, a path to a file with a script extension, or
+    an interpreter given a script path (`_launched_script`)."""
+    head = os.path.basename(tokens[0])
+    if _INTERPRETER_HEADS.match(head):
+        script = _launched_script(tokens, _INLINE_PROGRAM_FLAG_RE)
+        if script is not None and _SCRIPT_PATH_RE.search(tokens[script]):
+            return script + 1
+        return None
+    if tokens[0].startswith(("./", "../")) or ("/" in tokens[0] and _SCRIPT_PATH_RE.search(head)):
+        return 1
+    return None
+
+
 def _script_argv_guarded_command(command: str, depth: int = 0) -> str | None:
     """The guarded command a script-file launch is given whole, as one argument
     (`./retry.sh "gh pr merge 5"`, `python3 retry.py "gh pr merge 5"`), or None. A
@@ -6769,14 +6794,8 @@ def _script_argv_guarded_command(command: str, depth: int = 0) -> str | None:
         tokens = _shell_tokenize(word) if word else None
         if not tokens:
             continue
-        head = os.path.basename(tokens[0])
-        args: list[str] = []
-        if _INTERPRETER_HEADS.match(head):
-            script = _launched_script(tokens, _INLINE_PROGRAM_FLAG_RE)
-            if script is not None and _SCRIPT_PATH_RE.search(tokens[script]):
-                args = tokens[script + 1:]
-        elif tokens[0].startswith(("./", "../")) or ("/" in tokens[0] and _SCRIPT_PATH_RE.search(head)):
-            args = tokens[1:]
+        start = _script_launch_args(tokens)
+        args: list[str] = [] if start is None else tokens[start:]
         for k, arg in enumerate(args):
             if k and args[k - 1].startswith("-"):
                 continue                      # a flag's value
@@ -8783,6 +8802,10 @@ def _var_site_is_readable(cmd: str, offset: int, depth: int = 0) -> bool:
         return _var_site_is_readable(nested, offset - base - start, depth + 1)
     if head in _VAR_RUNNER_HEADS:
         return True
+    # A script launch's words are read as its literal twin's are (the script-argument rule
+    # judges a whole guarded command there; other text is data).
+    if _script_launch_args(tokens) is not None:
+        return True
     if _INTERPRETER_HEADS.match(head):
         program = _program_from_tokens(head, tokens)
         return program is not None and k < len(tokens) and tokens[k] == program
@@ -8811,16 +8834,18 @@ def _is_plain_literal_assignment(command: str, view: str, m: re.Match) -> bool:
     return not (raw[0] == '"' and any(ch in raw[1:-1] for ch in "$`\\"))
 
 
-def _expand_literal_variables(command: str) -> str:
+def _expand_literal_variables(command: str, kept: list[str] | None = None) -> str:
     """`command` with each literal variable's expansions replaced by the value of the last
     assignment before them, written literally, when every expansion sits where the guard
     reads it (_var_site_is_readable). A name is left as it is (every value keeps executing,
     today's rule) when it is bound another way (export, read, a loop), assigned inside a
     group, subshell or branch or as a command prefix, expanded before its first assignment
     or with a parameter operator, or given a value that expands; and nothing is replaced
-    when the command has a heredoc, an eval or source, or quoting this cannot model. The
-    value is inserted as literal text, escaped for the site's quoting."""
-    if "=" not in command or "$" not in command or "<<" in command:
+    when the command has a heredoc or here-string (outside quotes), an eval or source, or
+    quoting this cannot model. The
+    value is inserted as literal text, escaped for the site's quoting. Given a `kept` list,
+    each value left executing at a site the guard cannot read is appended to it."""
+    if "=" not in command or "$" not in command:
         return command
     states = _quote_states(command)
     if states is None:
@@ -8829,6 +8854,8 @@ def _expand_literal_variables(command: str) -> str:
     if _has_eval_or_source(surface):
         return command
     view = _leg_slicing_view(command)
+    if "<<" in view:                          # a heredoc or here-string the shell reads
+        return command
     legs = []
     last = 0
     for sep in _COMPOUND_OPS_RE.finditer(view):
@@ -8864,7 +8891,12 @@ def _expand_literal_variables(command: str) -> str:
             leg = next((a, b) for a, b in legs if a <= s.start() < b)
             leg_text = command[leg[0]:leg[1]]
             leg_view = view[leg[0]:leg[1]]
-            if "$(" in leg_view or "`" in leg_view or not _var_site_is_readable(leg_text, s.start() - leg[0]):
+            if "$(" in leg_view or "`" in leg_view:
+                ok = False
+                break
+            if not _var_site_is_readable(leg_text, s.start() - leg[0]):
+                if kept is not None:
+                    kept.append(_assignment_value(reaching[-1].group("value")))
                 ok = False
                 break
             sites.append((s, _assignment_value(reaching[-1].group("value"))))
@@ -8996,8 +9028,12 @@ def _is_dangerous_at_depth(command: str, depth: int) -> bool:
             return _is_dangerous_at_depth(rewritten, depth + 1)
     # A variable assigned a literal value is judged where it is expanded, as the value of
     # the last assignment before it written there; a site the guard cannot read keeps the
-    # value executing.
-    command = _expand_literal_variables(command)
+    # value executing. A script given the expanded value is judged as given the literal.
+    expanded = _expand_literal_variables(command)
+    if (expanded != command and depth < _MAX_WRAPPER_DEPTH
+            and _script_argv_guarded_command(expanded, depth) is not None):
+        return True
+    command = expanded
     # Code an interpreter reads from stdin (heredoc, here-string, pipe) is that
     # interpreter's program: it is refused when it passes a guarded command directly
     # to an exec primitive. The carriers below see it only as inert text.
