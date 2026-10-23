@@ -27,13 +27,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Reused rather than re-implemented: the canonical minimal-CLAUDE.md seeder
-# (fixtures/claude_md_seed.py). The isolation fixture below needs a real file
-# at the env-var root, because the display resolver treats "no CLAUDE.md
-# here" as "keep looking".
-from fixtures.claude_md_seed import seed_claude_md
-from fixtures.hf_cache import hf_cache_env
-
 from helpers import create_test_schema, make_cli_memory_dict
 
 from scripts.cli import build_parser, cmd_save, cmd_search, cmd_list, cmd_get, cmd_status, cmd_setup, cmd_update, cmd_delete, main, _COMMANDS, _refuse_live_db_under_pytest
@@ -101,44 +94,11 @@ def cli_script_path():
     )
 
 
-@pytest.fixture(autouse=True)
-def _isolate_claude_md_target(tmp_path, monkeypatch):
-    """Redirect every CLAUDE.md resolution in this module to a per-test tmp tree.
-
-    The subprocess sites in this file pass neither ``env=`` nor ``cwd=``, so each
-    child inherits this process's ``os.environ`` and cwd. Without this fixture the
-    display resolver walks git from the inherited cwd and lands on the DEVELOPER'S
-    REAL project CLAUDE.md, and the ``save`` and ``search`` sites then write
-    Working Memory entries into it. That file is gitignored and untracked, so the
-    damage is invisible to ``git status`` and has no git recovery path.
-
-    BOTH halves are required, and this is the part that makes the obvious fix a
-    silent no-op: setting ``CLAUDE_PROJECT_DIR`` alone does NOT isolate, because
-    ``_resolve_display_claude_md_path`` probes the env dir and CONTINUES when no
-    CLAUDE.md is found there, falling through to the git walk and back onto the
-    live file. Seeding a CLAUDE.md at the env dir is what makes the first probe
-    succeed and terminate resolution before the walk.
-
-    Autouse rather than opt-in: a test that simply does not request the fixture
-    would be unprotected with nothing to see in review, and invisible non-coverage
-    is the exact failure mode this fixture exists to prevent. Scoped to this module
-    by placement -- a global autouse would break files that legitimately exercise
-    the resolver's fallback branches.
-    """
-    seed_claude_md(tmp_path)
-    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
-    # THE MODEL CACHE RIDES THE SAME INHERITANCE. Because the sites here pass
-    # no `env=`, the only way to reach their children is this process's
-    # environment — so the cache pin belongs beside the project-dir pin rather
-    # than at 60 call sites. Measured without it: 59 model-load attempts from
-    # children plus 1 in this process, each a cold-cache download wherever no
-    # warm cache exists (i.e. CI).
-    for _k, _v in hf_cache_env().items():
-        monkeypatch.setenv(_k, _v)
-
-
 class TestSubprocessClaudeMdIsolation:
-    """Proof that the autouse isolation reaches a SPAWNED CHILD, not just this process."""
+    """Proof that the CONFTEST-LEVEL autouse redirect reaches a SPAWNED CHILD,
+    not just this process. (This module used to carry its own
+    ``_isolate_claude_md_target`` fixture; the conftest promotion absorbed it,
+    and this class now proves the conftest one.)"""
 
     def test_spawned_subprocess_resolves_claude_md_under_tmp(self, tmp_path):
         """A child spawned the way every E2E site spawns one must resolve the
@@ -167,7 +127,9 @@ class TestSubprocessClaudeMdIsolation:
         assert result.returncode == 0, f"stderr: {result.stderr}"
 
         resolved = Path(result.stdout.strip())
-        assert resolved.resolve() == (tmp_path / ".claude" / "CLAUDE.md").resolve()
+        # The LEGACY path: the conftest redirect seeds tmp_path/CLAUDE.md (the
+        # lower-precedence slot), so the child's resolution terminates there.
+        assert resolved.resolve() == (tmp_path / "CLAUDE.md").resolve()
         # Containment is the property that matters: anything under tmp_path is
         # disposable, anything outside it is somebody's real file.
         resolved.resolve().relative_to(tmp_path.resolve())
@@ -2762,17 +2724,17 @@ class TestSaveSyncSuppression:
         assert search_p["sync_to_claude"].default is True
 
     def test_claude_md_untouched_when_suppressed(self, tmp_path):
-        """End-to-end against the REAL file the autouse fixture seeded.
+        """End-to-end against the REAL file the conftest redirect seeded.
 
         Byte-identity rather than a content check: it fails if ANYTHING
         writes, including a writer nobody has thought of, whereas a check for
         one specific string only fails for the writer you already suspected.
         """
-        # The autouse fixture seeds the PREFERRED layout, .claude/CLAUDE.md,
-        # not the legacy sibling — asserted rather than assumed, because a
-        # wrong path here would make every byte comparison below vacuous.
-        claude_md = tmp_path / ".claude" / "CLAUDE.md"
-        assert claude_md.exists(), "isolation fixture must have seeded a file"
+        # The conftest redirect seeds the LEGACY layout, tmp_path/CLAUDE.md —
+        # asserted rather than assumed, because a wrong path here would make
+        # every byte comparison below vacuous.
+        claude_md = tmp_path / "CLAUDE.md"
+        assert claude_md.exists(), "conftest redirect must have seeded a file"
 
         before = claude_md.read_bytes()
         memory = PACTMemory(db_path=tmp_path / "s.db")
