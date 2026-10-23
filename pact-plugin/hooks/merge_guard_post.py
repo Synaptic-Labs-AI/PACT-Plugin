@@ -572,18 +572,23 @@ def _code_spans(text: str) -> list[tuple[str, str]]:
     (`` cmd with `x` `` holds backticks). A single-backtick span whose closer is
     followed by a word was closed early by a backtick opening a substitution: it
     runs on past each substitution to the backtick that closes it (see
-    _substitution_span_end). Inline spans may run over lines."""
+    _substitution_span_end). A span of n > 1 backticks with no later run of n closes
+    at the first longer run, whose extra leading backticks are the command's own
+    (``cmd `x```). Inline spans may run over lines."""
     spans = [(m.group(0), m.group(1)) for m in _FENCED_BLOCK_RE.finditer(text)]
     rest = _FENCED_BLOCK_RE.sub(lambda m: " " * len(m.group(0)), text)
     runs = list(_BACKTICK_RUN_RE.finditer(rest))
     i = 0
     while i < len(runs):
         opener = runs[i]
-        close = next((j for j in range(i + 1, len(runs)) if len(runs[j].group(0)) == len(opener.group(0))), None)
+        width = len(opener.group(0))
+        close = next((j for j in range(i + 1, len(runs)) if len(runs[j].group(0)) == width), None)
+        if close is None and width > 1:
+            close = next((j for j in range(i + 1, len(runs)) if len(runs[j].group(0)) > width), None)
         if close is None:
             i += 1
             continue
-        content = rest[opener.end():runs[close].start()]
+        content = rest[opener.end():runs[close].end() - width]
         end = runs[close].end()
         if len(opener.group(0)) == 1 and not _ends_span(rest, end):
             last = _substitution_span_end(rest, runs[close].start())

@@ -497,3 +497,13 @@ class TestACommandHeldInAVariableForAnUnknownProgramRuns:
     def test_a_value_holding_two_guarded_commands_mints_nothing(self, command):
         assert not _runs(None, command)
         assert _mint(command) == (None, "compound_command")
+
+
+class TestAnUnspacedDoubleBacktickApprovalRuns:
+    """An approval between double backticks with no inner spaces ends in one run of
+    three backticks when the command itself ends in a substitution's closer."""
+
+    @pytest.mark.parametrize("command", BACKTICK_ROWS.values(), ids=BACKTICK_ROWS.keys())
+    def test_the_approved_command_is_refused_then_runs(self, command):
+        assert not _runs(None, command)
+        assert _runs(_mint_styled(command, lambda c: f"Run ``{c}`` now"), command)
