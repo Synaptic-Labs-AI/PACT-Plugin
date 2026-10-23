@@ -6645,7 +6645,9 @@ def _rewrite_file_runs(command: str) -> str:
         return command
     flat = list(command)
     writes_at: dict[int, tuple] = {}
+    bodies: list[tuple[int, int]] = []
     for m in _FILE_HEREDOC_WRITER_RE.finditer(command):
+        bodies.append((m.start("body"), m.end("body")))
         body = m.group("body")
         if m.group("dash"):
             body = "\n".join(line.lstrip("\t") for line in body.split("\n"))
@@ -6738,6 +6740,9 @@ def _rewrite_file_runs(command: str) -> str:
         replacements.append((span[0] + lead, span[1], readable))
     if not replacements:
         return command
+    # The text a heredoc wrote now stands where the file runs, so the heredoc's own body
+    # is data: drop it, so the rewrite holds each command it runs once.
+    replacements += [(start, end, "") for start, end in bodies]
     out = command
     for start, end, literal in sorted(replacements, reverse=True):
         out = out[:start] + literal + out[end:]

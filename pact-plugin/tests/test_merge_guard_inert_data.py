@@ -696,6 +696,37 @@ def test_a_shell_running_a_written_file_with_flags_or_arguments_is_judged_as_its
     assert rewritten_executed_command(cmd).endswith(M)
 
 
+HEREDOC_SCRIPT_RUNS = [
+    ("a heredoc-written script run by bash", f"cat > /tmp/m.sh <<'EOF'\n{M} --squash\nEOF\nbash /tmp/m.sh", M + " --squash"),
+    ("with a set -e header", f"cat > /tmp/m.sh <<'EOF'\n#!/bin/bash\nset -e\n{M} --squash\nEOF\nbash /tmp/m.sh",
+     M + " --squash"),
+    ("made executable and run", f"cat > /tmp/m.sh <<'EOF'\n{M} --squash\nEOF\nchmod +x /tmp/m.sh && /tmp/m.sh",
+     M + " --squash"),
+    ("a force push body", "cat > /tmp/m.sh <<'EOF'\ngit push --" + "force origin feat/x\nEOF\nbash /tmp/m.sh",
+     "git push --" + "force origin feat/x"),
+]
+
+
+@pytest.mark.parametrize("label,cmd,runs", HEREDOC_SCRIPT_RUNS, ids=[r[0] for r in HEREDOC_SCRIPT_RUNS])
+def test_a_heredoc_written_script_is_reported_running_its_command_once(label, cmd, runs):
+    from shared.merge_guard_common import is_compound_destructive_command, rewritten_executed_command
+
+    assert is_dangerous_command(cmd) is True
+    rewritten = rewritten_executed_command(cmd)
+    assert rewritten.count(runs) == 1
+    assert is_compound_destructive_command(rewritten) is False
+    result = _mint(cmd)
+    assert result.context is not None, result.refusal_reason
+
+
+def test_a_heredoc_written_script_running_two_commands_stays_compound():
+    from shared.merge_guard_common import is_compound_destructive_command, rewritten_executed_command
+
+    cmd = f"cat > /tmp/m.sh <<'EOF'\n{M}\n{M[:-1]}6\nEOF\nbash /tmp/m.sh"
+    assert is_dangerous_command(cmd) is True
+    assert is_compound_destructive_command(rewritten_executed_command(cmd)) is True
+
+
 @pytest.mark.parametrize("label,cmd", INTERPRETER_FILE_RUN_DENY, ids=[r[0] for r in INTERPRETER_FILE_RUN_DENY])
 def test_an_interpreter_running_a_file_the_command_wrote_is_judged_as_its_program(label, cmd):
     from shared.merge_guard_common import interpreter_command_context, rewritten_executed_command
