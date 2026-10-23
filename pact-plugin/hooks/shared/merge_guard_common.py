@@ -6620,9 +6620,13 @@ def _fill_substitutions(view: str) -> str:
     return "".join(out)
 
 
+_FILE_RUN_TAG = "PACT_FILE_RUN"
+
+
 def _rewrite_file_runs(command: str) -> str:
     """`command` with each run of a file it wrote earlier replaced, in place, by the text
-    written to that file (`echo 'gh pr merge 5' > f; bash f` is judged as `gh pr merge 5`).
+    written to that file (`echo 'gh pr merge 5' > f; bash f` is judged as `gh pr merge 5`;
+    an interpreter's run, `python3 f`, as its program read on stdin from a heredoc).
     Writes and runs count only in command position on the top level of the command; a
     `cd`, a compound command, or a leg the guard cannot tokenize leaves the command as it
     is. A write holding a substitution or an expansion is read as its literal text, so a
@@ -6687,10 +6691,8 @@ def _rewrite_file_runs(command: str) -> str:
             printed = None
             continue
         printed = None
-        run_file, span = None, (a, b)
-        if head in _FILE_RUN_SHELLS and len(tokens) == 2 and not tokens[1].startswith("-"):
-            run_file = tokens[1][1:] if tokens[1].startswith("<") and len(tokens[1]) > 1 else tokens[1]
-        elif head in _FILE_RUN_SHELLS and len(tokens) == 3 and tokens[1] == "<":
+        run_file, span, interpreter = None, (a, b), None
+        if head in _FILE_RUN_SHELLS and len(tokens) == 3 and tokens[1] == "<":
             run_file = tokens[2]
         elif head in ("source", ".") and len(tokens) == 2:
             run_file = tokens[1]
@@ -6700,20 +6702,53 @@ def _rewrite_file_runs(command: str) -> str:
                 run_file, span = tokens[1], (a, legs[k + 1][1])
         elif len(tokens) == 1 and _file_key(head) in files:
             run_file = head
+        elif head in _FILE_RUN_SHELLS or _INTERPRETER_HEADS.match(os.path.basename(head)):
+            shell = head in _FILE_RUN_SHELLS
+            script = _launched_script(tokens, _SHELL_INLINE_FLAG_RE if shell else _INLINE_PROGRAM_FLAG_RE)
+            if script is not None:
+                run_file = tokens[script]
+                if shell and run_file.startswith("<") and len(run_file) > 1:
+                    run_file = run_file[1:]
+                interpreter = None if shell else head
         if run_file is None:
             continue
         written = files.get(_file_key(run_file))
         if written is None:
             continue
-        readable = "".join(part for part in written if part is not None)
+        readable = "".join(part for part in written if part is not None).rstrip("\n")
+        if interpreter is not None:
+            # An interpreter runs the file as its own program: judged as that program
+            # read on stdin from a quoted heredoc, where the interpreter rules read it.
+            if _FILE_RUN_TAG in readable.split("\n"):
+                continue
+            readable = f"{interpreter} <<'{_FILE_RUN_TAG}'\n{readable}\n{_FILE_RUN_TAG}"
+            if span[1] < len(command):
+                readable += "\n"
         lead = len(text) - len(text.lstrip())
-        replacements.append((span[0] + lead, span[1], readable.rstrip("\n")))
+        replacements.append((span[0] + lead, span[1], readable))
     if not replacements:
         return command
     out = command
     for start, end, literal in sorted(replacements, reverse=True):
         out = out[:start] + literal + out[end:]
     return out
+
+
+# A shell flag that gives the command on the command line (-c) or reads it from stdin (-s).
+_SHELL_INLINE_FLAG_RE = re.compile(r"^-$|^-[A-Za-z]*[cs]")
+
+
+def _launched_script(tokens: list, inline_flag: re.Pattern) -> int | None:
+    """The index of the script path an interpreter or shell launch runs: the first word
+    after its flags, with the arguments after it. None when a flag gives the program
+    inline or on stdin instead (`inline_flag`), or no word follows the flags. A flag's
+    separate value before the path is read as the path."""
+    for k, tok in enumerate(tokens[1:], 1):
+        if not tok.startswith("-"):
+            return k
+        if inline_flag.match(tok):
+            return None
+    return None
 
 
 def _script_argv_guarded_command(command: str, depth: int = 0) -> str | None:
@@ -6735,19 +6770,14 @@ def _script_argv_guarded_command(command: str, depth: int = 0) -> str | None:
         if not tokens:
             continue
         head = os.path.basename(tokens[0])
-        args = None
+        args: list[str] = []
         if _INTERPRETER_HEADS.match(head):
-            for k, tok in enumerate(tokens[1:], 1):
-                if tok.startswith("-"):
-                    if _INLINE_PROGRAM_FLAG_RE.match(tok):
-                        break
-                    continue
-                if _SCRIPT_PATH_RE.search(tok):
-                    args = tokens[k + 1:]
-                break
+            script = _launched_script(tokens, _INLINE_PROGRAM_FLAG_RE)
+            if script is not None and _SCRIPT_PATH_RE.search(tokens[script]):
+                args = tokens[script + 1:]
         elif tokens[0].startswith(("./", "../")) or ("/" in tokens[0] and _SCRIPT_PATH_RE.search(head)):
             args = tokens[1:]
-        for k, arg in enumerate(args or ()):
+        for k, arg in enumerate(args):
             if k and args[k - 1].startswith("-"):
                 continue                      # a flag's value
             arg_tokens = _shell_tokenize(arg) or []

@@ -642,6 +642,65 @@ def test_the_rewritten_command_inlines_the_run_file():
     assert rewritten_executed_command(dynamic) == 'echo "$(cat cmds)" > f; $(cat cmds)'
 
 
+# An interpreter run of a file the command wrote runs that file as its program.
+HELPER_MERGE = "import subprocess\nsubprocess.run([\"gh\", \"pr\", \"" + "merge\", \"5\"])"
+INTERPRETER_FILE_RUN_DENY = [
+    ("python reads a heredoc-written file", f"cat > helper.py <<'EOF'\n{HELPER_MERGE}\nEOF\npython3 helper.py"),
+    ("single-quoted argv", "cat > helper.py <<'EOF'\n" + HELPER_MERGE.replace('"', "'") + "\nEOF\npython3 helper.py"),
+    ("node reads an echoed file", f"echo 'require(\"child_process\").execSync(\"{M}\")' > run.js; node run.js"),
+    ("ruby after &&", f"echo 'system(\"{M}\")' > run.rb && ruby run.rb"),
+    ("perl reads a printf-written file",
+     "printf '%s\\n' 'system(\"git push --" + "force origin main\");' > run.pl; perl run.pl"),
+    ("a command after the run", f"echo 'require(\"child_process\").execSync(\"{M}\")' > run.js; node run.js; echo done"),
+    ("an interpreter flag before the file", f"cat > helper.py <<'EOF'\n{HELPER_MERGE}\nEOF\npython3 -u helper.py"),
+    ("an argument after the file", f"cat > helper.py <<'EOF'\n{HELPER_MERGE}\nEOF\npython3 helper.py arg1"),
+]
+SHELL_FILE_RUN_ARGS_DENY = [
+    ("a shell flag before the file", f"echo '{M}' > f; bash -e f"),
+    ("an argument after the file", f"echo '{M}' > f; bash f arg1"),
+    ("both", f"echo '{M}' > f; sh -x f a b"),
+    ("a redirect glued to the file", f"echo '{M}' > f; bash <f"),
+]
+INTERPRETER_FILE_RUN_ALLOW = [
+    ("a program that prints the command", f"cat > helper.py <<'EOF'\nprint(\"{M}\")\nEOF\npython3 helper.py", True),
+    ("the file is only read", f"cat > helper.py <<'EOF'\n{HELPER_MERGE}\nEOF\ncat helper.py", False),
+    ("a program that runs a read",
+     "cat > helper.py <<'EOF'\n" + HELPER_MERGE.replace("merge", "view") + "\nEOF\npython3 helper.py", True),
+    ("the run is of another file", f"cat > helper.py <<'EOF'\n{HELPER_MERGE}\nEOF\npython3 other.py", False),
+    ("an inline program before the file",
+     f"cat > helper.py <<'EOF'\n{HELPER_MERGE}\nEOF\npython3 -c 'print(1)' helper.py", False),
+    ("a shell given -c before the file", f"echo '{M}' > f; bash -c 'echo hi' f", False),
+    ("a shell reading stdin given the file as an argument", f"echo '{M}' > f; bash -s f < /dev/null", False),
+]
+
+
+@pytest.mark.parametrize("label,cmd", SHELL_FILE_RUN_ARGS_DENY, ids=[r[0] for r in SHELL_FILE_RUN_ARGS_DENY])
+def test_a_shell_running_a_written_file_with_flags_or_arguments_is_judged_as_its_text(label, cmd):
+    from shared.merge_guard_common import rewritten_executed_command
+
+    assert is_dangerous_command(cmd) is True
+    assert rewritten_executed_command(cmd).endswith(M)
+
+
+@pytest.mark.parametrize("label,cmd", INTERPRETER_FILE_RUN_DENY, ids=[r[0] for r in INTERPRETER_FILE_RUN_DENY])
+def test_an_interpreter_running_a_file_the_command_wrote_is_judged_as_its_program(label, cmd):
+    from shared.merge_guard_common import interpreter_command_context, rewritten_executed_command
+
+    assert is_dangerous_command(cmd) is True
+    rewritten = rewritten_executed_command(cmd)
+    assert rewritten is not None and "<<'PACT_FILE_RUN'\n" in rewritten
+    assert interpreter_command_context(rewritten)["operation_type"] in ("merge", "force-push")
+
+
+@pytest.mark.parametrize("label,cmd,rewritten", INTERPRETER_FILE_RUN_ALLOW,
+                         ids=[r[0] for r in INTERPRETER_FILE_RUN_ALLOW])
+def test_an_interpreter_file_that_runs_no_guarded_command_is_allowed(label, cmd, rewritten):
+    from shared.merge_guard_common import rewritten_executed_command
+
+    assert is_dangerous_command(cmd) is False
+    assert (rewritten_executed_command(cmd) is not None) is rewritten
+
+
 # ---------------------------------------------------------------------------
 # A script given a whole guarded command as one argument runs it, like a variable passed there.
 # ---------------------------------------------------------------------------
@@ -662,6 +721,8 @@ SCRIPT_GIVEN_TEXT_ALLOW = [
     ("a command named in prose", f'./notify.sh "merged: {M} done"'),
     ("grep for the command", "/usr/bin/grep -n 'gh pr " + "merge' commands/peer-review.md"),
     ("a read command", 'python3 tools/log.py "gh pr view 5"'),
+    ("a bare-word argv", "grep 'gh pr " + "merge 5' notes"),
+    ("an awk program, not a script path", "awk '{print $1}' 'gh pr " + "merge 5'"),
 ]
 
 
@@ -698,7 +759,7 @@ def test_the_rewritten_command_is_the_command_the_script_is_given():
 
     given = [M, M, PUSH_MAIN, "git branch -" + "D feat", M]
     assert [rewritten_executed_command(cmd) for _, cmd, _ in SCRIPT_GIVEN_A_COMMAND] == given
-    assert [rewritten_executed_command(cmd) for _, cmd in SCRIPT_GIVEN_TEXT_ALLOW] == [None] * 4
+    assert [rewritten_executed_command(cmd) for _, cmd in SCRIPT_GIVEN_TEXT_ALLOW] == [None] * len(SCRIPT_GIVEN_TEXT_ALLOW)
 
 
 # ---------------------------------------------------------------------------
