@@ -335,7 +335,6 @@ class TestSyncSemanticsUnchangedUnderLock:
         """Syncing more than MAX_WORKING_MEMORIES entries keeps only the most
         recent MAX, newest-first — unchanged by the lock."""
         wm = self._import_wm()
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
         seed_claude_md(tmp_path)
 
         total = wm.MAX_WORKING_MEMORIES + 2
@@ -365,7 +364,6 @@ class TestSyncSemanticsUnchangedUnderLock:
         acquire/release across two calls does not duplicate or drop the
         section."""
         wm = self._import_wm()
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
         seed_claude_md(tmp_path)
 
         mem = {"context": "IDEMPOTENT", "goal": "same"}
@@ -384,7 +382,6 @@ class TestSyncSemanticsUnchangedUnderLock:
         same read-modify-write that the marker-preservation pipeline relies
         on, so it must not perturb them."""
         wm = self._import_wm()
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
         claude_dir = tmp_path / ".claude"
         claude_dir.mkdir(parents=True, exist_ok=True)

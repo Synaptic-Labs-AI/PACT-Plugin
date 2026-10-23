@@ -71,7 +71,6 @@ class TestLockReleaseOnException:
         from scripts import working_memory as wm
 
         claude_md = seed_claude_md(tmp_path)
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
         # Raise at the os.fchmod inside _atomic_write_text (mode-set on the open
         # temp handle, before the rename), exercising the mid-window path.
@@ -117,7 +116,6 @@ class TestLockReleaseOnException:
 
         claude_md = seed_claude_md(tmp_path)
         before = claude_md.read_text(encoding="utf-8")
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
         def boom_fchmod(*args, **kwargs):
             raise OSError("simulated mode-set failure mid-window")
@@ -179,7 +177,6 @@ class TestReadOnlyDirectoryFailSafe:
         sidecar = claude_dir / f".{claude_md.name}.lock"
         sidecar.write_text("", encoding="utf-8")
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
         # Instrument the SITE: record that _atomic_write_text was reached (proving
         # the lock was passed) and let the REAL read-only dir make its mkstemp

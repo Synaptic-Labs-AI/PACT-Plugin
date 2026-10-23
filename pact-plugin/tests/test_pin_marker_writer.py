@@ -643,7 +643,6 @@ class TestAdjacencySurvivesBothMachineWriters:
         marked = apply_insertion(old, planned)
         target = tmp_path / "CLAUDE.md"
         target.write_text(marked, encoding="utf-8")
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
         return target
 
     @staticmethod
@@ -1514,7 +1513,6 @@ class TestCollisionIsDistinguishableFromCompletedMigration:
         )
         assert START_LINE in original, "FIXTURE INVALID: no own-line copy"
         (tmp_path / "CLAUDE.md").write_text(original, encoding="utf-8")
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
         resolved, _base = _resolve_project_claude_md_with_base()
         assert resolved == tmp_path / "CLAUDE.md", (
             "FIXTURE INVALID: the resolver escaped tmp_path and would read a "
@@ -1546,7 +1544,6 @@ class TestCollisionIsDistinguishableFromCompletedMigration:
 
         monkeypatch.setattr(pin_markers, "apply_insertion", broken_assembly)
         (tmp_path / "CLAUDE.md").write_text(original, encoding="utf-8")
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
         resolved, _base = _resolve_project_claude_md_with_base()
         assert resolved == tmp_path / "CLAUDE.md", (
             "FIXTURE INVALID: the resolver escaped tmp_path and would read a "

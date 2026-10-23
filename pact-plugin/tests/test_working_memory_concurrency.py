@@ -180,7 +180,6 @@ class TestFailOpenOnTimeout:
         from scripts import working_memory as wm
 
         claude_md = seed_claude_md(tmp_path)
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
         from contextlib import contextmanager
 
@@ -209,7 +208,6 @@ class TestFailOpenOnTimeout:
         from scripts import working_memory as wm
 
         claude_md = seed_claude_md(tmp_path)
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
         from contextlib import contextmanager
 
