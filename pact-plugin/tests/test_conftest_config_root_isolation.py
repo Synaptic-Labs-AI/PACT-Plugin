@@ -230,6 +230,44 @@ class TestAutouseProjectDirScrubPinned:
             "redirect's set (ordering broken), or the redirect did not run"
         )
 
+    def test_unmarked_resolution_lands_on_the_legacy_seed(self, tmp_path):
+        """The redirect's BOTH-HALVES contract, asserted in-process at an
+        UNMARKED test body: resolution must terminate branch 1 on the
+        fixture's LEGACY seed (``tmp_path/CLAUDE.md``, base=``tmp_path``),
+        with the preferred slot never created.
+
+        The declaration half alone is pinned by the ordering pin above, and
+        the memory_cli proof class pins the seed half through a spawned
+        child — but both are one hop removed from the composed in-process
+        contract, and this is the assertion that reddens DIRECTLY on either
+        half regressing: a conftest edit that drops the seed (setenv-only —
+        the silent no-op trap the isolation issue names) sends resolution
+        through the git walk to the ambient anchors, and one that seeds the
+        preferred slot (``tmp_path/.claude``) instead of legacy breaks the
+        §11.2 shape (M2's collision surface). No bytes move: this test only
+        resolves and asserts.
+        """
+        from scripts.working_memory import _resolve_display_claude_md_with_base
+
+        assert (tmp_path / "CLAUDE.md").exists(), (
+            "the conftest redirect did not seed the legacy slot for this "
+            "unmarked test — resolution will fall through to the git walk"
+        )
+        assert not (tmp_path / ".claude").exists(), (
+            "the redirect created the preferred slot, violating the §11.2 "
+            "legacy-only shape"
+        )
+        path, base = _resolve_display_claude_md_with_base()
+        assert path == tmp_path / "CLAUDE.md", (
+            f"an unmarked test's resolution landed on {path} (base {base}) "
+            "instead of the fixture's legacy seed — the redirect is not "
+            "terminating branch 1 in-tmp"
+        )
+        assert base == tmp_path, (
+            f"resolution reported base {base} — branch 1 did not answer "
+            "from the declared project dir"
+        )
+
 
 class TestAutouseMergeTokenDirIsolationPinned:
     """Pin the autouse ``_isolate_merge_token_dir_to_tmp`` fixture.
