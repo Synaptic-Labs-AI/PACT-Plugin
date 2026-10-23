@@ -10,6 +10,8 @@ import pytest
 from merge_guard_post import _mint_context_from_bundle
 from shared.merge_guard_common import (
     _has_eval_with_heredoc,
+    detect_command_operation_type,
+    extract_command_context,
     _rewrite_readable_evals,
     is_compound_destructive_command,
     is_dangerous_command,
@@ -243,6 +245,102 @@ def test_an_implicit_post_api_merge_mints_and_runs(label, cmd):
     assert result.context is not None, result.refusal_reason
     assert (result.context["operation_type"], result.context["pr_number"]) == ("merge", "5")
     assert merge_guard_pre._token_matches_command({"context": result.context}, cmd) is True
+
+
+GQL = API + " graphql -f query="
+MERGE_BODY = '{"query":"mutation{mergePullRequest(input:{pullRequestId:\\"PR_1\\"}){clientMutationId}}"}'
+QUERY_BODY = '{"query":"query{repository(owner:\\"O\\",name:\\"R\\"){pullRequest(number:5){isInMergeQueue}}}"}'
+API_MERGE_TYPED_DENY = [
+    ("mergePullRequest",
+     GQL + "'mutation{mergePullRequest(input:{pullRequestId:\"PR_1\"}){clientMutationId}}'", "merge"),
+    ("enablePullRequestAutoMerge",
+     GQL + "'mutation { enablePullRequestAutoMerge(input: {pullRequestId: \"PR_1\"}) { clientMutationId } }'",
+     "merge"),
+    ("mergeBranch",
+     GQL + "'mutation{mergeBranch(input:{repositoryId:\"R_1\",base:\"main\",head:\"feat\"}){clientMutationId}}'",
+     "branch-merge"),
+    ("POST on merges", f"{API} -X POST repos/O/R/merges -f base=main -f head=feat", "branch-merge"),
+    ("implicit POST on merges", f"{API} repos/O/R/merges -f base=main -f head=feat", "branch-merge"),
+    ("POST on merge-upstream", f"{API} -X POST repos/O/R/merge-upstream -f branch=main", "branch-merge"),
+    ("implicit POST on merge-upstream", f"{API} repos/O/R/merge-upstream -f branch=main", "branch-merge"),
+    ("gh pr update-branch", "gh pr update-branch 5", "branch-merge"),
+    ("gh pr update-branch with rebase", "gh pr update-branch 5 --rebase", "branch-merge"),
+    ("PUT on update-branch", f"{API} -X PUT repos/O/R/pulls/5/update-branch", "branch-merge"),
+    ("updatePullRequestBranch",
+     GQL + "'mutation{updatePullRequestBranch(input:{pullRequestId:\"PR_1\"}){clientMutationId}}'",
+     "branch-merge"),
+    ("enqueuePullRequest",
+     GQL + "'mutation{enqueuePullRequest(input:{pullRequestId:\"PR_1\"}){clientMutationId}}'", "merge"),
+]
+
+API_MERGE_INPUT_DENY = [
+    ("an --input body from a heredoc", API + " graphql --input - <<'EOF'\n" + MERGE_BODY + "\nEOF"),
+    ("an --input body from a here-string", API + " graphql --input - <<< '" + MERGE_BODY + "'"),
+    ("an --input body echoed into it", "echo '" + MERGE_BODY + "' | " + API + " graphql --input -"),
+    ("an --input body printed into it", "printf '%s' '" + MERGE_BODY + "' | " + API + " graphql --input -"),
+    ("an --input process substitution", API + " graphql --input <(echo '" + MERGE_BODY + "')"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", API_MERGE_INPUT_DENY, ids=[r[0] for r in API_MERGE_INPUT_DENY])
+def test_a_graphql_merge_in_a_readable_input_body_is_refused_and_typed(label, cmd):
+    assert is_dangerous_command(cmd) is True
+    ctx = extract_command_context(cmd)
+    assert (ctx["operation_type"], ctx["pr_node_id"]) == ("merge", "PR_1")
+
+
+GRAPHQL_DATA_ALLOW = [
+    ("an --input body that queries", "echo '" + QUERY_BODY + "' | " + API + " graphql --input -"),
+    ("an --input heredoc that queries", API + " graphql --input - <<'EOF'\n" + QUERY_BODY + "\nEOF"),
+    ("an --input file the guard cannot read", API + " graphql --input body.json"),    ("a query", GQL + "'query{repository(owner:\"O\",name:\"R\"){pullRequest(number:5){mergeable}}}'"),
+    ("a mutation name inside a comment body",
+     GQL + "'mutation{addComment(input:{subjectId:\"X\",body:\"run mergePullRequest(soon)\"}){clientMutationId}}'"),
+    ("an echoed mutation", "echo \"" + GQL + "'mutation{mergePullRequest(input:{pullRequestId:1})}'\""),
+    ("a path below the merges endpoint", f"{API} repos/O/R/merges/abc"),
+    ("a merge-checks environment", f"{API} -X PUT repos/O/R/environments/merge-checks"),
+    ("a read of merge-upstream", f"{API} repos/O/R/merge-upstream"),
+    ("viewing the merge state", "gh pr view 5 --json mergeStateStatus"),
+    ("a read of the pull request", f"{API} repos/O/R/pulls/5"),
+    ("a merge queue query",
+     GQL + "'query{repository(owner:\"O\",name:\"R\"){mergeQueue{entries{totalCount}}}}'"),
+    ("an echoed update-branch", "echo \"gh pr update-branch 5\""),
+    ("a read of update-branch without PUT", f"{API} repos/O/R/pulls/5/update-branch"),
+]
+
+
+@pytest.mark.parametrize("label,cmd,op", API_MERGE_TYPED_DENY, ids=[r[0] for r in API_MERGE_TYPED_DENY])
+def test_a_graphql_or_branch_merge_is_refused_and_typed(label, cmd, op):
+    assert is_dangerous_command(cmd) is True
+    assert detect_command_operation_type(cmd) == op
+
+
+@pytest.mark.parametrize("label,cmd", GRAPHQL_DATA_ALLOW, ids=[r[0] for r in GRAPHQL_DATA_ALLOW])
+def test_graphql_text_that_merges_nothing_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+def test_a_merge_mutation_binds_its_node_id_and_a_branch_merge_its_base():
+    pr = extract_command_context(API_MERGE_TYPED_DENY[0][1])
+    assert pr["operation_type"] == "merge" and pr["pr_node_id"] == "PR_1" and "pr_number" not in pr
+    for _, cmd, _op in API_MERGE_TYPED_DENY:
+        if "merges" in cmd or "merge-upstream" in cmd or "mergeBranch" in cmd:
+            assert extract_command_context(cmd)["target_ref"] == "main"
+
+
+def test_a_graphql_merge_names_its_mutation_and_a_rest_merge_does_not():
+    assert extract_command_context(GQL + "'mutation{ mergePullRequest(input:{}) { number } }'")[
+        "graphql_mutation"] == "mergePullRequest"
+    assert extract_command_context(API_MERGE_INPUT_DENY[0][1])["graphql_mutation"] == "mergePullRequest"
+    assert "graphql_mutation" not in extract_command_context("gh pr merge 5")
+    assert "graphql_mutation" not in extract_command_context(f"{API} -X POST repos/O/R/merges -f base=main")
+
+
+def test_a_branch_update_binds_its_pull_request():
+    for _, cmd, _op in API_MERGE_TYPED_DENY:
+        if "update-branch" in cmd:
+            assert extract_command_context(cmd)["pr_number"] == "5"
+        elif "updatePullRequestBranch" in cmd or "enqueuePullRequest" in cmd:
+            assert extract_command_context(cmd)["pr_node_id"] == "PR_1"
 
 
 @pytest.mark.parametrize("label,cmd", GH_API_SETTINGS_ALLOW, ids=[r[0] for r in GH_API_SETTINGS_ALLOW])

@@ -81,17 +81,19 @@ class TestWritesStayHeld:
 
     def test_api_merges_body_flag_held(self):
         # Endpoint `…/merges` (positional) survives carrier 9; the -f body value is
-        # carrier 8's domain. Held via the implicit-POST .*merge API arm; op_type None.
+        # carrier 8's domain. Held via the implicit-POST merge API arm, and typed as a
+        # branch merge so an approval can mint it.
         cmd = f"gh api repos/o/r/{M}s -f base=main -f head=x"
         assert is_dangerous_command(cmd) is True
-        assert detect_command_operation_type(cmd) is None
+        assert detect_command_operation_type(cmd) == "branch-merge"
 
     def test_api_merges_input_held(self):
         # --input arms implicit-POST and its VALUE is stripped, but the real target
-        # `…/merges` is the positional endpoint (never stripped) -> still held.
+        # `…/merges` is the positional endpoint (never stripped) -> still held, typed as a
+        # branch merge.
         cmd = f"gh api repos/o/r/{M}s --input body.json"
         assert is_dangerous_command(cmd) is True
-        assert detect_command_operation_type(cmd) is None
+        assert detect_command_operation_type(cmd) == "branch-merge"
 
     def test_api_delete_gitrefs_held(self):
         cmd = f"gh api -X DELETE repos/o/r/{GR}/heads/x"

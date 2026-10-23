@@ -104,10 +104,10 @@ class TestDirection2HeldExpanded:
 
     def test_api_merges_hostname_held(self):
         # §6 row 19: --hostname value stripped, but the /merges positional + implicit-POST
-        # (-f) survive -> still held; op None (implicit-POST merge API, not a classified verb).
+        # (-f) survive -> still held, typed as a branch merge so an approval can mint it.
         cmd = f"gh api --hostname ghe.io repos/o/r/{M}s -f base=main"
         assert is_dangerous_command(cmd) is True
-        assert detect_command_operation_type(cmd) is None
+        assert detect_command_operation_type(cmd) == "branch-merge"
 
     def test_api_delete_gitrefs_hostname_preview_held(self):
         # §6 row 20: --hostname AND -p values stripped, but git/refs positional + -X DELETE

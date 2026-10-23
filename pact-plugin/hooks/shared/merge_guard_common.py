@@ -185,6 +185,7 @@ from __future__ import annotations
 import ast
 import functools
 import glob
+import json
 import os
 import re
 import shlex
@@ -515,13 +516,14 @@ _CLOSE_LITERAL_ARMS = (
 # safety is preserved BY CONSTRUCTION, not by denylist-emptiness: an isolated API
 # leg is method-less hence detect-negative, so tier 2 abstains → symmetric
 # whole-command bind (the safe direction) — see TestEmergentDangerClassIsCloseOnly.
-# A gh-api merge endpoint: `merge` or `merges` as a whole PATH segment.
-_GH_API_MERGE_PATH = r".*/merges?(?![\w-])"
+# A gh-api merge endpoint, as a whole PATH segment: `merge` (a pull request), `merges` (a
+# branch into a branch) or `merge-upstream` (upstream into a fork's branch).
+_GH_API_MERGE_PATH = r".*/(?:merges?|merge-upstream)(?![\w-])"
 
 _API_LITERAL_ARMS = (
     # API-based merge bypasses (require mutating HTTP method to avoid blocking reads).
     # The gh-api arms read `merge` only as an endpoint PATH segment (`/pulls/<n>/merge`,
-    # `/merges`), never inside a field name: `-f delete_branch_on_merge=true` is a repo
+    # `/merges`, `/merge-upstream`), never inside a field name: `-f delete_branch_on_merge=true` is a repo
     # settings change, not a merge.
     re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:PUT|PATCH|POST)\b)" + _GH_API_MERGE_PATH, re.IGNORECASE),
     re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PUT|PATCH|POST)\b).*api.*merge", re.IGNORECASE),
@@ -573,8 +575,8 @@ _API_LITERAL_ARMS = (
     # Alternative HTTP clients: wget with --method flag
     re.compile(r"\bwget\b(?=.*--method=(?:DELETE|PATCH|POST|PUT)\b).*git/refs", re.IGNORECASE),
     re.compile(r"\bwget\b(?=.*--method=(?:DELETE|PATCH|POST|PUT)\b).*merge", re.IGNORECASE),
+    # GraphQL merge mutations are read by _graphql_merge_mutation, beside these arms.
     # Known API detection gaps (defense-in-depth, not a security boundary):
-    # - GraphQL mutations: gh api graphql -f query='mutation { ... }' bypasses REST-path matching
     # - gh alias: aliases can hide API calls (tracked in #270)
 )
 
@@ -679,6 +681,9 @@ def detect_command_operation_type(command: str) -> str | None:
         _lop = _flag_condition_danger_op(_leg)
         if _lop in _PER_LEG_OPS:
             return _lop
+    mutation = _graphql_input_mutation(command)
+    if mutation is not None:
+        return "branch-merge" if mutation in _BRANCH_MERGE_MUTATIONS else "merge"
     return None
 
 
@@ -796,6 +801,12 @@ def _detect_op_pass(
     for _leg in raw_legs:
         if _api_merge_leg_endpoint(_leg) is not None:
             return "merge"
+    for _leg in raw_legs:
+        mutation = _graphql_merge_mutation(_leg)
+        if mutation is not None:
+            return "branch-merge" if mutation in _BRANCH_MERGE_MUTATIONS else "merge"
+        if _gh_api_branch_merge_leg(_leg) or _update_branch_target(_leg) is not None:
+            return "branch-merge"
     # branch-delete: git branch -D / --delete --force / --force --delete. Matched
     # PER-LEG over the shared _BRANCH_DELETE_LITERAL_ARMS SSOT (#1094) — the same
     # arm tuple the read floor consumes, over the same leg substrate
@@ -1351,6 +1362,167 @@ def _gh_api_implicit_post(leg: str) -> bool:
         re.search(r"(?:^|\s)(?:-f|-F|--field|--raw-field|--input)\s", leg)
         and not re.search(r"(?:-X|--method)\s+GET\b", leg, re.IGNORECASE)
     )
+
+
+# A gh api call that merges a branch into another (`POST repos/O/R/merges`, or
+# `POST repos/O/R/merge-upstream` from the upstream repository): the endpoint as the last
+# path segment, sent with a mutating method, explicit or implicit.
+_GH_API_MERGES_ENDPOINT_RE = re.compile(r"/(?:merges|merge-upstream)(?=$|[\s'\"?])")
+
+
+def _gh_api_branch_merge_leg(leg: str) -> bool:
+    """Whether a leg is a gh api call to the branch-merge endpoint."""
+    return bool(
+        re.search(_GH_API_PREFIX, leg, re.IGNORECASE)
+        and _GH_API_MERGES_ENDPOINT_RE.search(leg)
+        and (
+            re.search(r"(?:-X|--method)\s+(?:PUT|PATCH|POST)\b", leg, re.IGNORECASE)
+            or _gh_api_implicit_post(leg)
+        )
+    )
+
+
+# GraphQL mutations that merge: a gh api graphql request whose query calls one of them
+# merges a pull request (directly, by auto-merge or through the merge queue) or merges into
+# a branch. The query value is the request, so it is read.
+_GRAPHQL_MERGE_MUTATION_RE = re.compile(
+    r"\b(mergePullRequest|enablePullRequestAutoMerge|enqueuePullRequest|mergeBranch"
+    r"|updatePullRequestBranch)\s*\("
+)
+_GH_API_GRAPHQL_RE = re.compile(_GH_API_PREFIX + r".*\sgraphql(?![\w./-])")
+_GRAPHQL_STRING_RE = re.compile(r'"(?:\\.|[^"\\])*"')
+
+
+def _graphql_merge_mutation(leg: str) -> str | None:
+    """The merge mutation a gh api graphql leg's query calls, or None. A mutation name
+    inside a GraphQL string literal (a comment body) is data."""
+    if not _GH_API_GRAPHQL_RE.search(leg):
+        return None
+    tokens = _shell_tokenize(leg) or [leg]
+    for tok in tokens:
+        m = _GRAPHQL_MERGE_MUTATION_RE.search(_GRAPHQL_STRING_RE.sub('""', tok))
+        if m:
+            return m.group(1)
+    return None
+
+
+# `gh api graphql --input -` (or `--input <(…)`): the request body comes from stdin or a
+# process substitution, which the guard reads when the command writes it literally.
+_GH_API_GRAPHQL_INPUT_RE = re.compile(
+    _GH_API_PREFIX + r"[^\n;&|]*\sgraphql(?![\w./-])[^\n;&|]*?\s--input(?:\s+|=)"
+    r"(?:(?P<stdin>-)(?=\s|$)|(?P<proc><)(?=\())"
+)
+_HERE_INPUT_RE = re.compile(
+    r"\A[^\n;&|]*?(?:<<<\s*(?P<word>'[^']*'|\"(?:[^\"\\]|\\.)*\"|\S+)"
+    r"|<<-?\s*(?P<q>['\"]?)(?P<tag>\w+)(?P=q)[^\n]*\n(?P<body>.*?)\n(?P=tag)(?=\s|$))",
+    re.DOTALL,
+)
+
+
+def _graphql_input_query(command: str) -> str | None:
+    """The GraphQL query a `gh api graphql --input` call reads from text the guard can see,
+    or None: a heredoc or here-string on its own command, an echo or printf piped into it,
+    or `--input <(echo|printf …)`. A JSON body gives its `query` field. A body in a file
+    the guard cannot read is not judged."""
+    if "graphql" not in command or "--input" not in command:
+        return None
+    m = _GH_API_GRAPHQL_INPUT_RE.search(command)
+    if m is None or _executed_surface_view(command)[m.start()] == " ":
+        return None
+    text = None
+    if m.group("proc") is not None:
+        span, _ = _extract_dollar_paren(command, m.start("proc"))
+        words = (_shell_tokenize(span[2:-1]) or []) if span else []
+        if words and words[0] in ("echo", "printf"):
+            text = _printed_text(words)
+    else:
+        here = _HERE_INPUT_RE.match(command[m.end():])
+        if here and here.group("body") is not None:
+            text = here.group("body")
+        elif here:
+            word = _shell_tokenize(here.group("word")) or []
+            text = word[0] if word else None
+        else:
+            before = command[:m.start()].rstrip()
+            if before.endswith("|") and not before.endswith("||"):
+                leg = re.split(r"[;&\n]|\|\|", before[:-1])[-1]
+                words = _shell_tokenize(leg) or []
+                if words and words[0] in ("echo", "printf"):
+                    text = _printed_text(words)
+    if not text:
+        return None
+    try:
+        body = json.loads(text)
+    except ValueError:
+        return text
+    return body.get("query") if isinstance(body, dict) and isinstance(body.get("query"), str) else None
+
+
+def _graphql_input_mutation(command: str) -> str | None:
+    """The merge mutation a readable `gh api graphql --input` body calls, or None."""
+    query = _graphql_input_query(command)
+    if query is None:
+        return None
+    m = _GRAPHQL_MERGE_MUTATION_RE.search(_GRAPHQL_STRING_RE.sub('""', query))
+    return m.group(1) if m else None
+
+
+def _graphql_input_value(command: str, key: str) -> str | None:
+    """The string value of `key` in a GraphQL merge mutation's input, or None."""
+    query = _graphql_input_query(command)
+    for tok in ([query] if query else []) + (_shell_tokenize(command) or [command]):
+        if _GRAPHQL_MERGE_MUTATION_RE.search(tok):
+            m = re.search(r"\b" + key + r'\s*:\s*"([^"\\]+)"', tok)
+            if m:
+                return m.group(1)
+    return None
+
+
+# Updating a pull request's branch merges its base into it: `gh pr update-branch [N]`, or
+# `PUT …/pulls/N/update-branch` through gh api.
+_GH_PR_UPDATE_BRANCH_RE = re.compile(_GH_PREFIX + r"pr\s+update-branch(?![\w-])")
+_GH_API_UPDATE_BRANCH_RE = re.compile(
+    _GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+PUT\b).*/pulls/(\d+)/update-branch(?![\w-])",
+    re.IGNORECASE,
+)
+_BRANCH_MERGE_MUTATIONS = frozenset({"mergeBranch", "updatePullRequestBranch"})
+
+
+def _update_branch_target(leg: str) -> str | None:
+    """`""` or the pull request number when a leg updates a pull request's branch (merges
+    its base into it), else None."""
+    api = _GH_API_UPDATE_BRANCH_RE.search(leg)
+    if api:
+        return api.group(1)
+    if not _GH_PR_UPDATE_BRANCH_RE.search(leg):
+        return None
+    tokens = _shell_tokenize(leg) or []
+    if "update-branch" in tokens:
+        rest = tokens[tokens.index("update-branch") + 1:]
+        return next((tok for tok in rest if tok.isdigit()), "")
+    return ""
+
+
+def _extract_branch_merge_base(command: str) -> str | None:
+    """The branch a branch merge lands on: the REST `base=` (merges) or `branch=`
+    (merge-upstream) field, or the GraphQL `base:`."""
+    tokens = _shell_tokenize(command) or []
+    for i, tok in enumerate(tokens[:-1]):
+        if tok in ("-f", "-F", "--field", "--raw-field"):
+            key, _, value = tokens[i + 1].partition("=")
+            if key in ("base", "branch") and value:
+                return value
+    return _graphql_input_value(command, "base")
+
+
+def _is_graphql_merge_query(match: re.Match) -> bool:
+    """Whether a `key=value` match is a gh api graphql field value whose query calls a
+    merge mutation (judged on the text from the start of its command to the value)."""
+    before = match.string[: match.start()]
+    if not re.search(r"(?:^|\s)(?:-f|-F|--field|--raw-field)\s+$", before):
+        return False
+    start = max(before.rfind(sep) for sep in (";", "&", "|", "\n")) + 1
+    return _graphql_merge_mutation(before[start:] + match.group(0)) is not None
 
 
 def _extract_api_merge_pr(command: str) -> str | None:
@@ -2130,6 +2302,9 @@ PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
         # the same commit. See test_mass_target_embeds_the_scope_flag_in_its_identity.
         "--no-verify": (("--no-verify",), False),
     },
+    "branch-merge": {
+        # No bound flags: merging a branch through the API has no privileged modifier.
+    },
     "branch-protection": {
         # No bound flags: branch-protection's privileged effect (weakening protection)
         # IS its op-trigger (the DELETE|PUT|PATCH method on the protection endpoint),
@@ -2561,6 +2736,29 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
         protected_branch = _extract_protection_branch(command)
         if protected_branch is not None:
             context["protected_branch"] = protected_branch
+    elif op_type == "branch-merge":
+        base = _extract_branch_merge_base(command)
+        if base is not None:
+            context["target_ref"] = base
+        else:
+            pr = next((t for leg in _split_into_legs(command)
+                       if (t := _update_branch_target(leg))), None)
+            if pr:
+                context["pr_number"] = pr
+    if op_type in ("merge", "branch-merge") and not (
+            {"pr_number", "target_ref"} & context.keys()):
+        # A GraphQL merge names its pull request by node id, a key no numeric merge
+        # token carries.
+        node_id = _graphql_input_value(command, "pullRequestId")
+        if node_id is not None:
+            context["pr_node_id"] = node_id
+    if op_type in ("merge", "branch-merge"):
+        # A merge sent as a GraphQL mutation names that mutation, so the approval side can
+        # bind it by its text even when its input carries no id.
+        mutation = _graphql_input_mutation(command) or next(
+            (name for leg in _split_into_legs(command) if (name := _graphql_merge_mutation(leg))), None)
+        if mutation is not None:
+            context["graphql_mutation"] = mutation
     return context
 
 
@@ -5112,6 +5310,8 @@ def _strip_non_executable_content(command: str) -> str:
         # Double-quoted: guard against command substitution and bare expansion
         def _strip_var_dq(match: re.Match) -> str:
             var_name = match.group(1)
+            if _is_graphql_merge_query(match):
+                return match.group(0)  # Preserve — the gh api graphql request runs it
             # ORDER LOAD-BEARING: a bare $VAR/${VAR} expansion word-splits and EXECUTES the
             # WHOLE value (the inert literal INCLUDED, not just a substitution), so an expanded
             # var preserves WHOLE — this MUST precede the substitution span-scope below.
@@ -5147,6 +5347,8 @@ def _strip_non_executable_content(command: str) -> str:
         # Single-quoted: guard against bare expansion
         def _strip_var_sq(match: re.Match) -> str:
             var_name = match.group(1)
+            if _is_graphql_merge_query(match):
+                return match.group(0)  # Preserve — the gh api graphql request runs it
             if _var_is_expanded(var_name, command):
                 return match.group(0)  # Preserve — $VAR executes
             return var_name + "=STRIPPED"
@@ -5595,6 +5797,11 @@ def _strip_non_executable_content(command: str) -> str:
             # preserved from stripping in ANY case — else the #1096 unquoted body
             # strip removes the signal for a capital-case spelling -> under-block.
             if re.search(r"contents/", span, re.IGNORECASE):
+                return span
+            # GRAPHQL MERGE EXCEPTION: a gh api graphql query that calls a merge mutation
+            # IS the request, so the query value is kept for the read floor. A branch merge
+            # carries its target (`base=`) in the body, so its span is kept too.
+            if _graphql_merge_mutation(span) is not None or _gh_api_branch_merge_leg(span):
                 return span
 
             def _keep_flag_dq(m: re.Match) -> str:
@@ -7070,6 +7277,8 @@ def _stripped_surface_danger(stripped: str) -> bool:
     for _leg in legs:
         if any(arm.search(_leg) for arm in _API_LITERAL_ARMS):
             return True
+        if _graphql_merge_mutation(_leg) is not None or _update_branch_target(_leg) is not None:
+            return True
     for _leg in legs:
         if any(arm.search(_leg) for arm in _BRANCH_DELETE_LITERAL_ARMS):
             return True
@@ -8243,6 +8452,9 @@ def _is_dangerous_at_depth(command: str, depth: int) -> bool:
         verdict = _eval_heredoc_verdict(command, depth)
         if verdict is not None:
             return verdict
+    # A gh api graphql request whose --input body the guard can read is judged by its query.
+    if _graphql_input_mutation(command) is not None:
+        return True
     # A script given a whole guarded command as one argument runs it (a retry or run
     # wrapper), as a variable passed there does.
     if depth < _MAX_WRAPPER_DEPTH and _script_argv_guarded_command(command, depth) is not None:

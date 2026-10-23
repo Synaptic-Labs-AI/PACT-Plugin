@@ -4515,23 +4515,37 @@ class TestToolSpecificFlagExclusion:
 
 class TestVariableIndirection:
     """A variable assigned once with a quoted value is judged where the shell
-    expands it, so an API path held in a variable is detected."""
+    expands it, so an API path held in a variable is detected, and a faithful
+    approval of it mints and runs."""
+
+    @staticmethod
+    def _approval_runs(cmd):
+        from merge_guard_post import _mint_context_from_bundle
+        from merge_guard_pre import _token_matches_command
+
+        question = "Run this?"
+        bundle = [{"question": question, "header": "Run", "multiSelect": False, "options": [
+            {"label": "Yes, run", "description": f"Run `{cmd}` now"},
+            {"label": "No", "description": "Hold."},
+        ]}]
+        result = _mint_context_from_bundle(bundle, {question: "Yes, run"})
+        return result.context is not None and _token_matches_command({"context": result.context}, cmd)
 
     def test_variable_url_is_detected(self):
         """Variable indirection: a destructive URL in a variable is detected."""
         from merge_guard_pre import is_dangerous_command
 
-        assert is_dangerous_command(
-            'URL="repos/owner/repo/git/refs/heads/main" && gh api -X DELETE $URL'
-        )
+        cmd = 'URL="repos/owner/repo/git/refs/heads/main" && gh api -X DELETE $URL'
+        assert is_dangerous_command(cmd)
+        assert self._approval_runs(cmd)
 
     def test_variable_endpoint_is_detected(self):
         """Variable endpoint: a destructive endpoint in a variable is detected."""
         from merge_guard_pre import is_dangerous_command
 
-        assert is_dangerous_command(
-            'ENDPOINT="git/refs/heads/main" && gh api -X PATCH repos/owner/repo/$ENDPOINT'
-        )
+        cmd = 'ENDPOINT="git/refs/heads/main" && gh api -X PATCH repos/owner/repo/$ENDPOINT'
+        assert is_dangerous_command(cmd)
+        assert self._approval_runs(cmd)
 
 
 # =============================================================================
