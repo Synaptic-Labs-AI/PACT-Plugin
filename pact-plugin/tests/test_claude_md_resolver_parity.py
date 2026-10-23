@@ -479,6 +479,16 @@ class TestWritePathResolverIdentity:
         assert len(recorded) == 1, (
             f"the with-base spy fired {len(recorded)} times"
         )
+        # WRITE WITNESS: the spy proves the RESOLUTION, this proves the
+        # write physically landed on the seeded target. Substring, not
+        # full-content equality — the entry header carries a timestamp —
+        # and a bare section-marker assert would be VACUOUS here: the
+        # seed already carries the Working Memory heading.
+        content = seeded_path.read_text(encoding="utf-8")
+        assert "**Context**: guard-arm-wm" in content, (
+            "the entry never landed on the seeded target — WROTE without "
+            "the write"
+        )
         # Execution reaching these asserts is itself the poison assertion:
         # the wrapper never ran.
 
@@ -506,6 +516,19 @@ class TestWritePathResolverIdentity:
         )
         assert len(recorded) == 1, (
             f"the with-base spy fired {len(recorded)} times"
+        )
+        # WRITE WITNESS, the gained-section form: this seed carried NO
+        # Retrieved Context section, so the writer CREATING the section
+        # marker is itself proof the write happened — plus the payload
+        # substring, the same non-vacuous shape as arm 1.
+        content = seeded_path.read_text(encoding="utf-8")
+        assert "## Retrieved Context" in content, (
+            "the seeded target never gained the Retrieved Context section "
+            "marker — WROTE without the write"
+        )
+        assert "**Context**: guard-arm-rc" in content, (
+            "the entry never landed on the seeded target — WROTE without "
+            "the write"
         )
         # Execution reaching these asserts is itself the poison assertion:
         # the wrapper never ran.

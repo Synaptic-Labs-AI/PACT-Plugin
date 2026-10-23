@@ -13,7 +13,9 @@ Summary: Positive regression pin for the autouse conftest fixture
          counter-test that pins the FIXTURE's own closure.
 Used by: pytest.
 """
+import ast
 import os
+from pathlib import Path
 
 import pytest
 
@@ -34,6 +36,52 @@ _AMBIENT_SESSION_ID = os.environ.get("CLAUDE_CODE_SESSION_ID")
 # or a developer shell that sourced one) the ambient-removal cell
 # discriminates; on CI it skips by the same logic as the session-id cell.
 _AMBIENT_PROJECT_DIR = os.environ.get("CLAUDE_PROJECT_DIR")
+
+# The EXACT module population of the claude_md_ambient opt-out (architect
+# ruling): module-level pytestmark is the multiplicative hazard — one line
+# exempts every test in the file — so its membership is pinned as a set,
+# both directions. Per-test decoration is the designed granularity and is
+# deliberately NOT pinned.
+_MODULE_WIDE_AMBIENT = frozenset({
+    "test_claude_md_resolver_parity",
+    "test_containment_guard",
+    "test_project_dir_resolution",
+    "test_prose_root_gate",
+    "test_removed_worktree_record",
+    "test_resolver_git_env",
+    "test_working_memory_worktree_sync",
+})
+
+
+def _pytestmark_carries_ambient(tree):
+    """True when a module-level ``pytestmark`` assignment carries
+    ``pytest.mark.claude_md_ambient`` — as a bare Attribute or as a list
+    element (the list form is pytest's documented multi-mark shape, so the
+    pin must see it even though no member uses it today)."""
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(
+            isinstance(target, ast.Name) and target.id == "pytestmark"
+            for target in node.targets
+        ):
+            continue
+        elements = (
+            node.value.elts
+            if isinstance(node.value, (ast.List, ast.Tuple))
+            else [node.value]
+        )
+        for element in elements:
+            if (
+                isinstance(element, ast.Attribute)
+                and isinstance(element.value, ast.Attribute)
+                and isinstance(element.value.value, ast.Name)
+                and element.value.value.id == "pytest"
+                and element.value.attr == "mark"
+                and element.attr == "claude_md_ambient"
+            ):
+                return True
+    return False
 
 
 class TestAutouseConfigRootIsolationPinned:
@@ -228,6 +276,73 @@ class TestAutouseProjectDirScrubPinned:
             "CLAUDE_PROJECT_DIR at the test body is not the redirect's "
             "per-test tmp declaration — the scrub's pop ran after the "
             "redirect's set (ordering broken), or the redirect did not run"
+        )
+
+    def test_hf_cache_pins_survive_at_test_body(self):
+        """The redirect's THIRD half, witnessed in-process at an UNMARKED
+        test body: the HuggingFace pins must be in force. PRESENCE and
+        offline-ness only — NO path-equality assert, because
+        ``hf_cache_env`` deliberately MIRRORS huggingface_hub's own
+        resolution (env vars first, expanduser fallback), so pinning a
+        specific path here would pin the helper's internals rather than
+        the property spawned children depend on: no network reach, and a
+        cache that is not the operator's live one."""
+        assert os.environ.get("HF_HUB_OFFLINE") == "1", (
+            "HF_HUB_OFFLINE was not in force at the test body — a spawned "
+            "child with a cold cache will attempt an unbounded network read"
+        )
+        assert os.environ.get("HF_HOME"), (
+            "HF_HOME was not in force at the test body — a spawned child "
+            "will resolve an ambient cache instead of the redirect's pin"
+        )
+
+    def test_claude_md_ambient_marker_is_registered(self, pytestconfig):
+        """The opt-out marker must be REGISTERED in pytest_configure, not
+        merely attached at sites: the fixture checks the marker by NAME
+        (``get_closest_marker`` works unregistered), so a dropped
+        registration breaks no test at the marker sites — it only erases
+        the marker's documentation and its --strict-markers/census
+        contract. This pin reddens if the registration line leaves
+        ``pytest_configure``, keeping the class vocabulary defined in the
+        registration text reachable from every census-tagged site."""
+        markers = pytestconfig.getini("markers")
+        assert any(
+            line.startswith("claude_md_ambient:") for line in markers
+        ), (
+            "claude_md_ambient is not among the registered markers — the "
+            "opt-out sites and their census tags resolve against the "
+            "registration text in pytest_configure"
+        )
+
+    def test_module_wide_claude_md_ambient_census_is_exact(self):
+        """EXACT-SET pin on the MODULE population of the claude_md_ambient
+        opt-out (architect ruling): a module-level ``pytestmark`` exempts
+        EVERY test in its file, so over-opt-out is the multiplicative
+        hazard and its membership is pinned BOTH directions — an 8th
+        module opting out module-wide, or any of the ruled seven dropping
+        it, reddens here. Per-test decoration is the designed granularity
+        and is deliberately UNPINNED (its growth is a census decision, not
+        a regression).
+
+        Scan shape: a tree AST census (test_conftest_import_guard style),
+        NOT collection-time marker introspection — the AST walk follows
+        the tree wherever a file moves and reads no pytest runtime state,
+        while a collection-derived set would need session-wide item
+        plumbing to see the same population."""
+        tests_dir = Path(__file__).resolve().parent
+        found = {
+            path.stem
+            for path in sorted(tests_dir.rglob("test_*.py"))
+            if _pytestmark_carries_ambient(
+                ast.parse(path.read_text(encoding="utf-8"))
+            )
+        }
+        assert found == _MODULE_WIDE_AMBIENT, (
+            f"module-wide claude_md_ambient population drifted — "
+            f"added: {sorted(found - _MODULE_WIDE_AMBIENT)}, "
+            f"removed: {sorted(_MODULE_WIDE_AMBIENT - found)}. Module-level "
+            "opt-out is the multiplicative hazard; per-test decoration is "
+            "the designed granularity"
         )
 
     def test_unmarked_resolution_lands_on_the_legacy_seed(self, tmp_path):
