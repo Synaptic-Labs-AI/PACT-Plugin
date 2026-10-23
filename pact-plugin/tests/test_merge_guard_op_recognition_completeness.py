@@ -1244,9 +1244,9 @@ class TestCloseLiteralArmCrossLegSweep:
     @pytest.mark.parametrize(
         "cmd",
         [
-            "gh pr close 42 && gh pr close 43 && echo --delete-branch",
-            "gh pr close 42 && echo --delete-branch",
-            "echo --delete-branch && gh pr close 42",
+            "gh pr close 42 && gh pr close 43 && true --delete-branch",
+            "gh pr close 42 && true --delete-branch",
+            "true --delete-branch && gh pr close 42",
         ],
     )
     def test_close_cured_rows_non_vacuous_and_single_family(self, cmd, monkeypatch):
@@ -1345,14 +1345,14 @@ class TestApiLiteralArmCrossLegSweep:
     @pytest.mark.parametrize(
         "cmd",
         [
-            "gh api repos/o/r/git/refs/heads/x && echo -X DELETE",
-            "gh api repos/o/r/git/refs/heads/x && echo -X PATCH",
-            "gh api repos/o/r/branches/main/protection && echo -X DELETE",
-            "gh api repos/o/r/pulls/5/merge && echo -X PUT",
-            "gh api repos/o/r/contents/f && echo -X PUT main",
-            "gh api repos/o/r/git/refs/heads/x && echo -f sha=abc",
-            "curl https://api.github.com/repos/o/r/git/refs/heads/x && echo -X DELETE",
-            "wget https://api.github.com/repos/o/r/git/refs/heads/x && echo --method=DELETE",
+            "gh api repos/o/r/git/refs/heads/x && true -X DELETE",
+            "gh api repos/o/r/git/refs/heads/x && true -X PATCH",
+            "gh api repos/o/r/branches/main/protection && true -X DELETE",
+            "gh api repos/o/r/pulls/5/merge && true -X PUT",
+            "gh api repos/o/r/contents/f && true -X PUT main",
+            "gh api repos/o/r/git/refs/heads/x && true -f sha=abc",
+            "curl https://api.github.com/repos/o/r/git/refs/heads/x && true -X DELETE",
+            "wget https://api.github.com/repos/o/r/git/refs/heads/x && true --method=DELETE",
         ],
     )
     def test_api_cured_rows_non_vacuous_and_single_family(self, cmd, monkeypatch):
@@ -1549,14 +1549,14 @@ class TestBranchDeleteLiteralArmCrossLegSweep:
     @pytest.mark.parametrize(
         "cmd",
         [
-            "git branch new-feature && echo -D",
-            "git branch --list && echo --delete --force",
+            "git branch new-feature && true -D",
+            "git branch --list && true --delete --force",
             "git branch temp && grep -D skip pattern f.txt",
             "git branch backup ; ls -D",
-            "git checkout main && git branch temp && echo -D",
-            "git branch new-feature || echo -D",
+            "git checkout main && git branch temp && true -D",
+            "git branch new-feature || true -D",
             "git branch new | grep -D x f.txt",
-            "git branch new & echo -D",
+            "git branch new & true -D",
             "git branch new |& grep -D x f.txt",
         ],
     )
@@ -1603,7 +1603,7 @@ class TestBranchDeleteLiteralArmCrossLegSweep:
         classification of the cured compound — proving read floor and detect
         consume one substrate (per-leg parity is by construction, not by two
         parallel implementations that could drift)."""
-        cmd = "git branch new-feature && echo -D"
+        cmd = "git branch new-feature && true -D"
         assert mgc.detect_command_operation_type(cmd) is None
         monkeypatch.setattr(mgc, "_slice_stripped_legs", lambda s: [s])
         assert mgc.detect_command_operation_type(cmd) == "branch-delete", (

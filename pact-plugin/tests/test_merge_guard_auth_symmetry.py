@@ -1253,7 +1253,7 @@ class TestLegBoundedMintWindow:
         channel RE-OPENS. Proves the close-channel canaries are coupled to the
         per-leg conversion, not vacuously green."""
         from shared.merge_guard_common import is_dangerous_command
-        ambiguous = "gh pr close 42 && gh pr close 43 && echo --delete-branch"
+        ambiguous = "gh pr close 42 && gh pr close 43 && true --delete-branch"
         escalated = "gh pr close 42 --delete-branch"
         q = "Close it?"
         opts = [_opt("Yes, close", f"On approval run: `{ambiguous}`"), _opt("Cancel", "Abort")]
@@ -1297,7 +1297,7 @@ class TestLegBoundedMintWindow:
         AUTHORIZES — the laundering channel RE-OPENS, proving the closure is
         coupled to the per-leg conversion, not vacuously green."""
         from shared.merge_guard_common import is_dangerous_command
-        ambiguous = "git branch new-feature && echo -D"
+        ambiguous = "git branch new-feature && true -D"
         escalated = "git branch -D new-feature"
         q = "Create the branch?"
         opts = [_opt("Yes, create", f"On approval run: `{ambiguous}`"), _opt("Cancel", "Abort")]

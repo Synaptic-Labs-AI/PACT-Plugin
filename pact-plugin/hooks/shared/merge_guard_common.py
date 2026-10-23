@@ -4857,6 +4857,47 @@ def _output_reaches_shell_from(view: str, procsub_view: str, pos: int) -> bool |
     )
 
 
+def _is_leg_command_word(text: str, start: int) -> bool:
+    """Whether the word at `start` is the command word of its simple command: only
+    assignments, `command` or `builtin` stand between it and the last separator."""
+    segment = re.split(r"[;&|\n(){}]|(?<![\w-])(?:then|do|else)(?![\w-])", text[:start])[-1]
+    return re.fullmatch(r"\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:(?:command|builtin)\s+)?", segment) is not None
+
+
+def _blank_unquoted_print_words(span: str) -> str:
+    """An echo/printf span with each unquoted word blanked, keeping the verb and any word
+    holding a command or process substitution (it runs), read whole. A `${…}` other than
+    a plain name keeps the rest of the span."""
+    verb = re.match(r"\S+\s+", span)
+    out = [verb.group(0)]
+    i, n = verb.end(), len(span)
+    while i < n:
+        j = i
+        while j < n and span[j].isspace():
+            j += 1
+        if j > i:
+            out.append(span[i:j])
+            i = j
+            continue
+        runs = False
+        while j < n and not span[j].isspace():
+            if span.startswith(("$(", "<(", ">("), j):
+                _, j = _extract_dollar_paren(span, j)
+                runs = True
+            elif span.startswith("${", j):
+                plain = re.match(r"\$\{[A-Za-z_]\w*\}", span[j:])
+                j, runs = (j + plain.end(), runs) if plain else (n, True)
+            elif span[j] == "`":
+                _, j = _extract_backtick(span, j)
+                runs = True
+            else:
+                j += 2 if span[j] == "\\" else 1
+        j = min(j, n)
+        out.append(span[i:j] if runs else "STRIPPED")
+        i = j
+    return "".join(out)
+
+
 def _strip_non_executable_content(command: str) -> str:
     """Strip shell content that is clearly non-executable before pattern matching.
 
@@ -4997,6 +5038,10 @@ def _strip_non_executable_content(command: str) -> str:
                 return span
             span = re.sub(r'"(?:[^"\\]|\\.)*"', _strip_echo_dq_arg, span)
             span = re.sub(r"'[^']*'", "STRIPPED", span)
+            # An echo/printf that is its leg's command prints its unquoted words too. Not
+            # when the word only follows `echo` inside another command (`env X=echo gh …`).
+            if _is_leg_command_word(echo_text, span_match.start()):
+                span = _blank_unquoted_print_words(span)
             return span
 
         # Span = verb + the shared quote-aware body that STOPS at the first UNQUOTED

@@ -392,3 +392,44 @@ def test_a_heredoc_whose_output_reaches_a_shell_is_refused(label, cmd):
 def test_a_data_heredoc_beside_another_shell_pipe_is_allowed(label, cmd):
     assert is_dangerous_command(cmd) is False
 
+
+# ---------------------------------------------------------------------------
+# An echo or printf prints its unquoted words; they run only when its output reaches a shell.
+# ---------------------------------------------------------------------------
+
+PUSHF = "git push --" + "force origin main"
+PRINT_WORDS_ALLOW = [
+    ("a plain variable beside the words", f"echo ${{X}} {M}"),
+    ("unquoted echo", f"echo {M}"),
+    ("unquoted force push echoed", f"echo {PUSHF}"),
+    ("printf words", f'printf "%s\\n" {M}'),
+    ("echo into a file", f"echo {M} > notes.txt"),
+    ("echo with a stderr redirect", f"echo -e {M} 2> err.log"),
+    ("echo after an assignment", f"FOO=1 echo {M}"),
+    ("echo in a branch", f"if true; then echo {M}; fi"),
+    ("a substitution that only prints a word", f'python3 x.py "$(echo eval) {M}"'),
+]
+
+PRINT_WORDS_DENY = [
+    ("a process substitution among the words", f"echo <({M})"),
+    ("an output process substitution", f"printf %s >({PUSHF})"),
+    ("an expansion other than a plain name", f"echo ${{X:-{M}}}"),
+    ("echo piped to bash", f"echo {M} | bash"),
+    ("echo to a process substitution", f"echo {M} > >(bash)"),
+    ("a substitution runs", f"echo $({M})"),
+    ("a substitution among words", f"echo a $(echo b; {M}) c"),
+    ("a backtick inside a word", f"echo x`{M}`y"),
+    ("echo as a value, not the command", f"env X=echo {M}"),
+    ("a command after the echo", f"echo hi; {M}"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", PRINT_WORDS_ALLOW, ids=[r[0] for r in PRINT_WORDS_ALLOW])
+def test_words_an_echo_only_prints_are_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+@pytest.mark.parametrize("label,cmd", PRINT_WORDS_DENY, ids=[r[0] for r in PRINT_WORDS_DENY])
+def test_printed_words_that_reach_a_shell_or_run_are_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
