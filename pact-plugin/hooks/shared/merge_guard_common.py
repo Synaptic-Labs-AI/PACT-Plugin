@@ -6748,16 +6748,38 @@ def _rewrite_file_runs(command: str) -> str:
 _SHELL_INLINE_FLAG_RE = re.compile(r"^-$|^-[A-Za-z]*[cs]")
 
 
+# Interpreter flags known to take a value, by family: given separately (`-W ignore`) or
+# attached (`-Wignore`, `--max-old-space-size=4096`). Any other flag takes none.
+_VALUE_FLAGS = (
+    (re.compile(r"^(?:python|pypy)"), ("-W", "-X")),
+    (re.compile(r"^(?:node|nodejs)"), ("-r", "--require", "--max-old-space-size")),
+    (re.compile(r"^ruby"), ("-I", "-r")),
+    (re.compile(r"^perl"), ("-I", "-M", "-m")),
+)
+
+
 def _launched_script(tokens: list, inline_flag: re.Pattern) -> int | None:
     """The index of the script path an interpreter or shell launch runs: the first word
     after its flags, with the arguments after it. None when a flag gives the program
-    inline or on stdin instead (`inline_flag`), or no word follows the flags. A flag's
-    separate value before the path is read as the path."""
-    for k, tok in enumerate(tokens[1:], 1):
+    inline or on stdin instead (`inline_flag`), or no word follows the flags. A known
+    value-taking flag's value (`_VALUE_FLAGS`) is skipped; any other flag's separate
+    value before the path is read as the path."""
+    head = os.path.basename(tokens[0])
+    flags = next((names for family, names in _VALUE_FLAGS if family.match(head)), ())
+    k = 1
+    while k < len(tokens):
+        tok = tokens[k]
         if not tok.startswith("-"):
             return k
+        if tok in flags:
+            k += 2                            # the flag's separate value
+            continue
+        if any(tok.startswith(f) for f in flags):
+            k += 1                            # the value attached
+            continue
         if inline_flag.match(tok):
             return None
+        k += 1
     return None
 
 

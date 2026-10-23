@@ -654,6 +654,16 @@ INTERPRETER_FILE_RUN_DENY = [
     ("a command after the run", f"echo 'require(\"child_process\").execSync(\"{M}\")' > run.js; node run.js; echo done"),
     ("an interpreter flag before the file", f"cat > helper.py <<'EOF'\n{HELPER_MERGE}\nEOF\npython3 -u helper.py"),
     ("an argument after the file", f"cat > helper.py <<'EOF'\n{HELPER_MERGE}\nEOF\npython3 helper.py arg1"),
+    ("python -W with its value", f"cat > helper.py <<'EOF'\n{HELPER_MERGE}\nEOF\npython3 -W ignore helper.py"),
+    ("python -X with its value", f"cat > helper.py <<'EOF'\n{HELPER_MERGE}\nEOF\npython3 -X dev helper.py"),
+    ("python -W with its value attached", f"cat > helper.py <<'EOF'\n{HELPER_MERGE}\nEOF\npython3 -Wignore helper.py"),
+    ("node --max-old-space-size", f"echo 'require(\"child_process\").execSync(\"{M}\")' > helper.js; node --max-old-space-size 4096 helper.js"),
+    ("node --max-old-space-size attached", f"echo 'require(\"child_process\").execSync(\"{M}\")' > helper.js; node --max-old-space-size=4096 helper.js"),
+    ("node -r", f"echo 'require(\"child_process\").execSync(\"{M}\")' > helper.js; node -r ./setup.js helper.js"),
+    ("ruby -I", f"echo 'system(\"{M}\")' > run.rb; ruby -I lib run.rb"),
+    ("ruby -r", f"echo 'system(\"{M}\")' > run.rb; ruby -r json run.rb"),
+    ("perl -I", f"echo 'system(\"{M}\");' > run.pl; perl -I lib run.pl"),
+    ("perl -M", f"echo 'system(\"{M}\");' > run.pl; perl -M strict run.pl"),
 ]
 SHELL_FILE_RUN_ARGS_DENY = [
     ("a shell flag before the file", f"echo '{M}' > f; bash -e f"),
@@ -671,6 +681,10 @@ INTERPRETER_FILE_RUN_ALLOW = [
      f"cat > helper.py <<'EOF'\n{HELPER_MERGE}\nEOF\npython3 -c 'print(1)' helper.py", False),
     ("a shell given -c before the file", f"echo '{M}' > f; bash -c 'echo hi' f", False),
     ("a shell reading stdin given the file as an argument", f"echo '{M}' > f; bash -s f < /dev/null", False),
+    ("a value-taking flag before another file",
+     f"cat > helper.py <<'EOF'\n{HELPER_MERGE}\nEOF\npython3 -W ignore other.py", False),
+    ("a flag's value naming the written file",
+     f"cat > helper.py <<'EOF'\n{HELPER_MERGE}\nEOF\npython3 -X helper.py other.py", False),
 ]
 
 
