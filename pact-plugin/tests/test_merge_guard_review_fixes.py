@@ -1197,7 +1197,65 @@ def test_a_view_through_a_js_helper_is_allowed(label, cmd):
 
 def test_a_js_call_with_a_spread_argument_passes_nothing_known():
     """`sh(...a, x)` cannot be matched to parameters by position, so it passes nothing."""
-    from shared.merge_guard_common import _js_calls
+    from shared.merge_guard_common import _calls
 
     code = 'function sh(c) { console.log(c); }\nsh(...a, "x");\nsh("y");\n'
-    assert _js_calls(code, "node", "sh") == [[], [code.index('"y"')]]
+    assert _calls(code, "node", "sh") == [[], [code.index('"y"')]]
+
+
+# A named helper in ruby, perl, lua, php or R: a parameter reads what its calls pass
+# (parentheses or, in ruby and perl, none), and a call reads what the helper returns,
+# including ruby's and R's last expression.
+OTHER_HELPER_DENY = [
+    ('ruby param parens', 'ruby - <<\'EOF2\'\ndef run(c)\n  system(c)\nend\nrun("' + M + ' 5")\nEOF2'),
+    ('ruby param no parens', 'ruby - <<\'EOF2\'\ndef run(c)\n  system(c)\nend\nrun "' + M + ' 5"\nEOF2'),
+    ('ruby two hops', 'ruby - <<\'EOF2\'\ndef run(c)\n  system(c)\nend\ndef go(x)\n  run(x)\nend\ngo("' + M + ' 5")\nEOF2'),
+    ('ruby implicit return', 'ruby -e \'def cmd; "' + M + ' 5"; end; system(cmd)\''),
+    ('ruby implicit return multiline', 'ruby - <<\'EOF2\'\ndef cmd\n  "' + M + ' 5"\nend\nsystem(cmd)\nEOF2'),
+    ('ruby explicit return', 'ruby - <<\'EOF2\'\ndef cmd\n  return "' + M + ' 5"\nend\nsystem(cmd())\nEOF2'),
+    ('perl list params', 'perl -e \'sub run { my ($c) = @_; system($c); } run("' + M + ' 5");\''),
+    ('perl shift param', 'perl -e \'sub run { my $c = shift; system($c); } run("' + M + ' 5");\''),
+    ('perl ampersand call', 'perl -e \'sub run { my ($c) = @_; system($c); } &run("' + M + ' 5");\''),
+    ('perl return', 'perl -e \'sub cmd { return "' + M + ' 5"; } system(cmd());\''),
+    ('lua param', 'lua -e \'local function run(c) os.execute(c) end run("' + M + ' 5")\''),
+    ('lua return', 'lua -e \'local function cmd() return "' + M + ' 5" end os.execute(cmd())\''),
+    ('php param', 'php -r \'function run($c) { system($c); } run("' + M + ' 5");\''),
+    ('php return', 'php -r \'function cmd() { return "' + M + ' 5"; } system(cmd());\''),
+    ('R param expression body', 'Rscript -e \'run <- function(c) system(c); run("' + M + ' 5")\''),
+    ('R param block body', 'Rscript -e \'run <- function(c) { system(c) }; run("' + M + ' 5")\''),
+    ('R implicit return', 'Rscript -e \'cmd <- function() { "' + M + ' 5" }; system(cmd())\''),
+]
+OTHER_HELPER_ALLOW = [
+    ('ruby param parens view', 'ruby - <<\'EOF2\'\ndef run(c)\n  system(c)\nend\nrun("gh pr view 5")\nEOF2'),
+    ('ruby param no parens view', 'ruby - <<\'EOF2\'\ndef run(c)\n  system(c)\nend\nrun "gh pr view 5"\nEOF2'),
+    ('ruby two hops view', 'ruby - <<\'EOF2\'\ndef run(c)\n  system(c)\nend\ndef go(x)\n  run(x)\nend\ngo("gh pr view 5")\nEOF2'),
+    ('ruby implicit return view', 'ruby -e \'def cmd; "gh pr view 5"; end; system(cmd)\''),
+    ('ruby implicit return multiline view', 'ruby - <<\'EOF2\'\ndef cmd\n  "gh pr view 5"\nend\nsystem(cmd)\nEOF2'),
+    ('ruby explicit return view', 'ruby - <<\'EOF2\'\ndef cmd\n  return "gh pr view 5"\nend\nsystem(cmd())\nEOF2'),
+    ('perl list params view', 'perl -e \'sub run { my ($c) = @_; system($c); } run("gh pr view 5");\''),
+    ('perl shift param view', 'perl -e \'sub run { my $c = shift; system($c); } run("gh pr view 5");\''),
+    ('perl ampersand call view', 'perl -e \'sub run { my ($c) = @_; system($c); } &run("gh pr view 5");\''),
+    ('perl return view', 'perl -e \'sub cmd { return "gh pr view 5"; } system(cmd());\''),
+    ('lua param view', 'lua -e \'local function run(c) os.execute(c) end run("gh pr view 5")\''),
+    ('lua return view', 'lua -e \'local function cmd() return "gh pr view 5" end os.execute(cmd())\''),
+    ('php param view', 'php -r \'function run($c) { system($c); } run("gh pr view 5");\''),
+    ('php return view', 'php -r \'function cmd() { return "gh pr view 5"; } system(cmd());\''),
+    ('R param expression body view', 'Rscript -e \'run <- function(c) system(c); run("gh pr view 5")\''),
+    ('R param block body view', 'Rscript -e \'run <- function(c) { system(c) }; run("gh pr view 5")\''),
+    ('R implicit return view', 'Rscript -e \'cmd <- function() { "gh pr view 5" }; system(cmd())\''),
+    ('ruby param reassigned to view', 'ruby - <<\'EOF2\'\ndef run(c)\n  c = "gh pr view 5"\n  system(c)\nend\nrun("' + M + ' 5")\nEOF2'),
+    ('ruby declared twice', 'ruby - <<\'EOF2\'\ndef run(c)\n  system(c)\nend\ndef run(c)\n  puts(c)\nend\nrun("' + M + ' 5")\nEOF2'),
+    ('ruby module merge printed, helper view', 'ruby - <<\'EOF2\'\nc = "' + M + ' 5"\nputs c\ndef run(c)\n  system(c)\nend\nrun("gh pr view 5")\nEOF2'),
+    ('perl helper never called', 'perl -e \'sub run { my ($c) = @_; system($c); } print("' + M + ' 5");\''),
+    ('lua method call not the helper', 'lua -e \'local function run(c) os.execute(c) end obj.run("' + M + ' 5") run("gh pr view 5")\''),
+]
+
+
+@pytest.mark.parametrize("label,cmd", OTHER_HELPER_DENY, ids=[r[0] for r in OTHER_HELPER_DENY])
+def test_other_helper_merge_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", OTHER_HELPER_ALLOW, ids=[r[0] for r in OTHER_HELPER_ALLOW])
+def test_other_helper_view_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False

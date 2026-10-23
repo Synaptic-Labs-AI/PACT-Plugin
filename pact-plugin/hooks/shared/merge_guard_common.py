@@ -3936,17 +3936,19 @@ def _python_reaching(code: str) -> "_PyReach | None":
 
 
 def _returned_values_at(head: str, code: str, i: int) -> tuple[list[int], int] | None:
-    """For a call at code[i] to a function the Python or JS program defines, (the
-    offsets of the values its `return` statements give, offset past the call); None
-    otherwise."""
-    callee = re.match(r"[A-Za-z_$][\w$]*(?=\s*\()", code[i:])
-    if _JS_HEAD_RE.match(head):
-        fn = _js_functions(code, head).get(callee.group()) if callee else None
-        values = sorted(fn.returns) if fn else []
-    else:
-        reach = _python_reaching(code) if _PYTHON_HEAD_RE.match(head) else None
+    """For a call at code[i] to a function the program defines, (the offsets of the
+    values it returns, offset past the call); None otherwise. A ruby method called with
+    no arguments needs no parentheses (`system(cmd)`)."""
+    if _PYTHON_HEAD_RE.match(head):
+        reach = _python_reaching(code)
         values = sorted(reach.returns.get(i, ())) if reach else []
-    callee = re.match(r"[A-Za-z_$][\w$]*\s*(?=\()", code[i:]) if values else None
+    else:
+        callee = re.match(r"[A-Za-z_$][\w$.]*[?!]?(?=\s*\()" + (r"|[A-Za-z_]\w*[?!]?" if head.startswith("ruby") else ""), code[i:])
+        fn = _named_functions(code, head).get(callee.group()) if callee else None
+        values = sorted(fn.returns) if fn else []
+        if callee and values and code[callee.end() + i:].lstrip()[:1] != "(":
+            return values, i + callee.end()
+    callee = re.match(r"[A-Za-z_$][\w$.]*[?!]?\s*(?=\()", code[i:]) if values else None
     end = _balanced_end(code, i + callee.end()) if callee else -1
     return (values, end) if end > 0 else None
 
@@ -4281,8 +4283,8 @@ _JS_NAMED_FUNCTION_RE = re.compile(
 )
 
 
-class _JsFunction(NamedTuple):
-    """A named JS function: its parameters in order, its body, and its return values."""
+class _NamedFunction(NamedTuple):
+    """A named function: its parameters in order, its body, and its return values."""
 
     params: tuple
     start: int
@@ -4331,19 +4333,113 @@ def _js_functions(code: str, head: str) -> dict:
         else:
             start, end = m.end(), _expression_end(view, m.end())
             returns = (start,)
-        found.setdefault(name, []).append(_JsFunction(names, start, end, returns))
+        found.setdefault(name, []).append(_NamedFunction(names, start, end, returns))
     return {name: fns[0] for name, fns in found.items() if len(fns) == 1}
 
 
-def _js_calls(code: str, head: str, name: str) -> list:
-    """The argument offsets of each call `name(…)` in a JS program, outside its own
-    declaration; [] for a call with a spread argument."""
+# Named functions in the other families with function spans, as (header, how its
+# parameters are listed). A header ends where the function's span starts.
+_HELPER_HEAD_RE = re.compile(r"^(?:ruby|perl|lua|luajit|php|R$|Rscript)")
+_HELPER_HEADERS = (
+    (re.compile(r"^ruby"), re.compile(r"\bdef[ \t]+(?:self\.)?(?P<name>[A-Za-z_]\w*[?!]?)[ \t]*(?:\((?P<params>[^()]*)\)|(?P<bare>[^\n;=()]*))")),
+    (re.compile(r"^perl"), re.compile(r"\bsub\s+(?P<name>[A-Za-z_]\w*)\s*")),
+    (re.compile(r"^(?:lua|luajit)"), re.compile(r"\bfunction\s+(?P<name>[A-Za-z_][\w.]*)\s*\((?P<params>[^()]*)\)")),
+    (re.compile(r"^php"), re.compile(r"\bfunction\s+&?\s*(?P<name>[A-Za-z_]\w*)\s*\((?P<params>[^()]*)\)\s*")),
+    (re.compile(r"^(?:R$|Rscript)"), re.compile(r"(?<![\w.])(?P<name>[A-Za-z_.][\w.]*)\s*(?:<-|=)\s*function\s*\((?P<params>[^()]*)\)\s*")),
+)
+# Perl names its parameters inside the body: `my ($a, $b) = @_;` or `my $a = shift;`.
+_PERL_ARGS_RE = re.compile(r"\bmy\s*\(([^)]*)\)\s*=\s*@_|\bmy\s+(\$\w+)\s*=\s*shift\b")
+
+
+def _ordered_params(text: str, head: str) -> tuple:
+    """The parameter names a parameter list binds, in order (`$name` in perl and php)."""
+    pattern = r"[$@%]\w+" if re.match(r"^(?:perl|php)", head) else r"[A-Za-z_.][\w.]*"
+    return tuple((re.findall(pattern, part) or [""])[0] for part in re.sub(r"=[^,]*", "", text).split(",")) if text.strip() else ()
+
+
+def _last_statement(view: str, start: int, end: int) -> int:
+    """Offset of the last statement in view[start:end] at the body's own depth, or -1."""
+    depth, last = 0, -1
+    k = start
+    while k < end:
+        ch = view[k]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0 and ch in ";\n":
+            nxt = _skip(r"[ \t;\n]*", view, k)
+            if nxt < end:
+                last = nxt
+            k = nxt
+            continue
+        k += 1
+    first = _skip(r"[ \t;\n]*", view, start)
+    return last if last >= 0 else (first if first < end else -1)
+
+
+@functools.lru_cache(maxsize=64)
+def _other_functions(code: str, head: str) -> dict:
+    """Per name, the named functions a ruby, perl, lua, php or R program declares, each
+    with its parameters in order and its return values: every `return` value in its
+    own body, plus the last expression of a ruby or R body. A name declared twice is
+    left out."""
+    view = _index_view(code, head)
+    header = next((h for family, h in _HELPER_HEADERS if family.match(head)), None)
+    if header is None:
+        return {}
+    spans = _scope_spans(code, head)
+    found: dict = {}
+    for m in header.finditer(view):
+        params = _ordered_params(m.groupdict().get("params") or m.groupdict().get("bare") or "", head)
+        span = next((sp for sp in spans if m.end() - 1 <= sp.start <= _skip(r"\s*", view, m.end())), None)
+        if span is None and _R_HEAD_RE.match(head) and view[m.end():m.end() + 1] != "{":
+            start, end = m.end(), _expression_end(view, m.end())
+        elif span is None:
+            continue
+        else:
+            start, end = span.start, span.end
+        body = view[start:end]
+        if re.match(r"^perl", head):
+            given = _PERL_ARGS_RE.findall(body)
+            params = tuple(n for listed, one in given for n in (re.findall(r"[$@%]\w+", listed) if listed else [one]))
+        nested = [sp.start - start for sp in spans if start < sp.start < end]
+        returns = [start + r.end() for r in re.finditer(r"\breturn\b[ \t(]*", body) if not any(n < r.start() for n in nested)]
+        if re.match(r"^ruby|^R$|^Rscript", head):
+            body_start = start + 1 if view[start:start + 1] == "{" else start
+            last = _last_statement(view, body_start, end - (1 if view[end - 1:end] == "}" else 0))
+            if last >= 0 and not re.match(r"(?:return|if|unless|while|until|for|case|begin|end|puts|print)\b", view[last:]):
+                returns.append(last)
+        found.setdefault(m.group("name"), []).append(_NamedFunction(params, start, end, tuple(sorted(set(returns)))))
+    return {name: fns[0] for name, fns in found.items() if len(fns) == 1}
+
+
+def _named_functions(code: str, head: str) -> dict:
+    """The named functions a program declares, for the families whose helpers are read."""
+    if _JS_HEAD_RE.match(head):
+        return _js_functions(code, head)
+    return _other_functions(code, head) if _HELPER_HEAD_RE.match(head) else {}
+
+
+# A call that is not the function's own declaration.
+_DECLARATION_BEFORE_RE = re.compile(r"\b(?:function\s*\*?|def|sub)\s*&?\s*$")
+
+
+def _calls(code: str, head: str, name: str) -> list:
+    """The argument offsets of each call `name(…)` (and, in ruby and perl, `name "…"`
+    without parentheses) outside its own declaration; [] for a call with a spread or
+    splat argument."""
     view = _index_view(code, head)
     out = []
-    for m in re.finditer(r"(?<![\w$.])" + re.escape(name) + r"\s*\(", view):
-        if re.search(r"\bfunction\s*\*?\s*$", view[:m.start()]):
+    for m in re.finditer(r"(?<![\w$.:>@])" + re.escape(name) + r"(?:\s*\(|[ \t]+(?=[\"'$\[]))", view):
+        if _DECLARATION_BEFORE_RE.search(view[:m.start()]):
             continue
-        close = _matching(view, m.end() - 1)
+        if view[m.end() - 1] == "(":
+            close = _matching(view, m.end() - 1)
+        elif re.match(r"^(?:ruby|perl)", head):
+            close = _skip(r"[^;\n]*", view, m.end())
+        else:
+            continue
         if close < 0:
             continue
         args, k = [], m.end()
@@ -4352,24 +4448,27 @@ def _js_calls(code: str, head: str, name: str) -> list:
             if k >= close:
                 break
             args.append(k)
-            k = _expression_end(view, k)
+            k = min(_expression_end(view, k), close)
             k = k + 1 if view[k:k + 1] == "," else k
-        out.append([] if any(view[a:a + 3] == "..." for a in args) else args)
+        out.append([] if any(view[a:a + 3] == "..." or view[a:a + 1] == "*" or view[a:a + 2] == "@_" for a in args) else args)
     return out
 
 
-def _js_param_values(head: str, code: str, i: int, name: str) -> list | None:
-    """For a use at code[i] of a parameter of the innermost named JS function holding
-    it, the offsets of the arguments its calls pass in that position; None when the use
-    is not such a parameter, or the body assigns it before the use."""
-    fns = [f for f in _js_functions(code, head).items() if f[1].start <= i < f[1].end and name in f[1].params]
+def _param_values(head: str, code: str, i: int, name: str) -> list | None:
+    """For a use at code[i] of a parameter of the innermost named function holding it,
+    the offsets of the arguments its calls pass in that position; None when the use is
+    not such a parameter, or the body assigns it before the use (perl's own
+    `my $x = shift` / `= @_` binding excepted)."""
+    fns = [f for f in _named_functions(code, head).items() if f[1].start <= i < f[1].end and name in f[1].params]
     if not fns:
         return None
     fname, fn = max(fns, key=lambda f: f[1].start)
-    if any(fn.start <= at < i for at in _assignments(code, head).get(name, ([], []))[0]):
+    starts, values = _assignments(code, head).get(name, ([], []))
+    view = _index_view(code, head)
+    if any(fn.start <= at < i and not re.match(r"shift\b|@_", view[v:]) for at, v in zip(starts, values)):
         return None                                      # reassigned in the body first
     position = fn.params.index(name)
-    return sorted({args[position] for args in _js_calls(code, head, fname) if position < len(args)})
+    return sorted({args[position] for args in _calls(code, head, fname) if position < len(args)})
 
 
 def _span_reaching(head: str, code: str, i: int, name: str) -> list:
@@ -4379,10 +4478,10 @@ def _span_reaching(head: str, code: str, i: int, name: str) -> list:
     it; a parameter is unreadable; a name free in its span takes every assignment of it
     in the enclosing span, outward until one has any; an assignment only after the use
     leaves it unresolved. A JS `let`/`const` inside a block reaches only uses in that
-    block. Ruby and lua spans come from their block keywords. A parameter of a named JS
-    function reads the arguments its calls pass for it."""
-    if _JS_HEAD_RE.match(head):
-        passed = _js_param_values(head, code, i, name)
+    block. Ruby and lua spans come from their block keywords. A parameter of a named
+    function (JS, ruby, perl, lua, php, R) reads the arguments its calls pass for it."""
+    if _JS_HEAD_RE.match(head) or _HELPER_HEAD_RE.match(head):
+        passed = _param_values(head, code, i, name)
         if passed is not None:
             return passed
     spans, depth = _scope_spans(code, head), _depths(code, head)
