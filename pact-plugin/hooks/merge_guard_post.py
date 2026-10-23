@@ -1124,6 +1124,22 @@ def _retire_exact_text_token(
     return False
 
 
+_RUN_TIME_TARGET_MARKS = ("$", "`", "\x00")
+
+
+def _target_set_at_run_time(command: str) -> bool:
+    """Whether the command's target is fixed only when it runs: a variable, a
+    substitution, or the implicit current branch (`gh pr merge "$PR"`, a variable
+    branch to delete, a bare `gh pr merge`). Its token retires on the successful run
+    itself, since no output line or PR state can say which target ran, and the same
+    approval must not run a second, different target."""
+    ctx = extract_command_context(
+        _single_destructive_leg(command) or _single_detectable_leg(command) or command
+    )
+    target = _target_value(ctx)
+    return isinstance(target, str) and any(mark in target for mark in _RUN_TIME_TARGET_MARKS)
+
+
 def _retire_token_for_command(
     command: str,
     op_type: str,
@@ -1398,7 +1414,7 @@ def main():
             # (fail-closed-on-no-signal — no retirement degrades to
             # TTL/MAX_USES safety net, NOT bypass).
             expected_substring = LAYER1_SUCCESS_STDOUT_PATTERNS[op_type]
-            if expected_substring is not None:
+            if expected_substring is not None and not _target_set_at_run_time(command):
                 stdout_text = tool_response.get("stdout", "")
                 if not isinstance(stdout_text, str):
                     print(_SUPPRESS_OUTPUT)

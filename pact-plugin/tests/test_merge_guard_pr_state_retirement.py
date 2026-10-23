@@ -189,13 +189,21 @@ class TestDoubtKeepsToken:
         f"{_MERGE} -Rother/repo 5",
         f"{_MERGE} https://github.com/o/r/pull/77 --squash",
         f"{_MERGE} feature-x --squash",
-        f"{_MERGE} --squash",
     ])
     def test_target_not_a_session_repo_number_never_calls_gh(self, rig, cmd):
         _mint(rig, cmd)
         _post(rig, cmd, "", state="MERGED")
         assert _gh_calls(rig) == []
         assert not _retired(rig)
+
+    def test_an_implicit_target_retires_on_its_run_without_calling_gh(self, rig):
+        """The current branch is read when the command runs, so no PR state can say
+        which PR merged; the successful run itself retires the token."""
+        cmd = f"{_MERGE} --squash"
+        _mint(rig, cmd)
+        _post(rig, cmd, "", state="MERGED")
+        assert _gh_calls(rig) == []
+        assert _retired(rig)
 
     @pytest.mark.parametrize("cmd", [
         f"cd ../other && {_MERGE} 5 --squash 2>&1 | tail -3",
