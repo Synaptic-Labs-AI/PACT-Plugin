@@ -4875,6 +4875,9 @@ def _strip_non_executable_content(command: str) -> str:
     #    is fed to a shell interpreter (e.g. bash << EOF ... EOF — body executes).
     #    GUARD (output-side): the outer piped/process-sub skip preserves the body
     #    when it is routed to a shell via `| bash` / `> >(bash)`. The two COMPOSE.
+    #    GUARD (eval): a command whose eval is fed by a heredoc keeps its bodies, so
+    #    the approval for it mints from the command the eval runs.
+    eval_fed = _has_eval_with_heredoc(command)
     if not piped_to_shell and not process_sub_to_shell:
         def _strip_heredoc(match: re.Match) -> str:
             # Check what command precedes the heredoc operator
@@ -4883,6 +4886,8 @@ def _strip_non_executable_content(command: str) -> str:
             # If the preceding command is a shell interpreter, preserve content
             if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
                 return match.group(0)  # Preserve — content executes
+            if eval_fed:
+                return match.group(0)  # Preserve — an eval runs this heredoc's text
             return "<<HEREDOC_STRIPPED"
 
         result = re.sub(
@@ -5605,6 +5610,89 @@ def _strip_non_executable_content(command: str) -> str:
     return result
 
 
+# The eval forms whose input the guard can read: `cat` (or `cat -`) emitting exactly one
+# heredoc, inside the eval's own substitution (i), feeding the eval's command (ii), or piped
+# into it (iii). `q` is the substitution's double quote, when it has one.
+_HEREDOC_OPENER = r"<<(?P<dash>-?)[ \t]*(?P<dq>['\"\\]?)(?P<tag>\w+)['\"]?"
+_CAT = r"cat(?:[ \t]+-)?[ \t]*"
+_READABLE_EVAL_RES = (
+    re.compile(
+        r"(?<![\w-])eval[ \t]+(?P<q>\"?)\$\([ \t]*" + _CAT + _HEREDOC_OPENER
+        + r"[ \t]*\n(?P<body>.*?)\n(?P=tag)[ \t]*\n[ \t]*\)(?P=q)",
+        re.DOTALL,
+    ),
+    re.compile(
+        r"(?<![\w-])eval[ \t]+(?P<q>\"?)`[ \t]*" + _CAT + _HEREDOC_OPENER
+        + r"[ \t]*\n(?P<body>.*?)\n(?P=tag)[ \t]*\n[ \t]*`(?P=q)",
+        re.DOTALL,
+    ),
+    re.compile(
+        r"(?<![\w-])eval[ \t]+(?P<q>\"?)\$\([ \t]*" + _CAT + r"\)(?P=q)[ \t]*" + _HEREDOC_OPENER
+        + r"[ \t]*\n(?P<body>.*?)\n(?P=tag)(?=[ \t]*(?:\n|$))",
+        re.DOTALL,
+    ),
+    re.compile(
+        r"(?<![\w-])" + _CAT + _HEREDOC_OPENER + r"[ \t]*\|[ \t]*eval[ \t]+(?P<q>\"?)\$\([ \t]*"
+        + _CAT + r"\)(?P=q)[ \t]*\n(?P<body>.*?)\n(?P=tag)(?=[ \t]*(?:\n|$))",
+        re.DOTALL,
+    ),
+)
+
+
+def _rewrite_readable_evals(command: str) -> str:
+    """`command` with each readable eval replaced by the text it runs: the body as written
+    when the substitution is double-quoted, or its words joined by single spaces when it is
+    unquoted (word splitting). Left as it is, so refused: a body with an unquoted delimiter
+    that expands (`$`, backtick, backslash); a body holding its own terminator line, where
+    the shell ends the heredoc first; an unquoted substitution whose body holds a glob
+    character, which the shell may expand to file names."""
+    if "eval" not in command or "<<" not in command:
+        return command
+
+    def _executed(m: re.Match) -> str:
+        body = m.group("body")
+        if not m.group("dq") and any(ch in body for ch in "$`\\"):
+            return m.group(0)
+        tab = "\t" if m.group("dash") else ""
+        if any(line.lstrip(tab) == m.group("tag") for line in body.split("\n")):
+            return m.group(0)
+        if not m.group("q") and any(ch in body for ch in "*?["):
+            return m.group(0)
+        return body if m.group("q") else " ".join(body.split())
+
+    for pattern in _READABLE_EVAL_RES:
+        command = pattern.sub(_executed, command)
+    return command
+
+
+def rewritten_executed_command(command: str) -> str | None:
+    """The command as the guard judges it after its rewrites (each readable eval replaced in
+    place by the text it runs), or None when nothing was rewritten. The approval side reads
+    it so the refusal and the approval share one rewrite. Never raises."""
+    try:
+        rewritten = _rewrite_readable_evals(command)
+    except Exception:  # noqa: BLE001 - a reader for the approval side must not raise
+        return None
+    return rewritten if rewritten != command else None
+
+
+def _eval_heredoc_verdict(command: str, depth: int) -> bool | None:
+    """None when no eval runs a heredoc. Otherwise whether the command is dangerous with
+    each readable eval (`_READABLE_EVAL_RES`) replaced, in place, by the text it runs: the
+    body as written when the substitution is double-quoted, or its words joined by single
+    spaces when it is unquoted (word splitting). Judging in place keeps the variables
+    assigned earlier in the command and the output's routing. A body with an unquoted
+    delimiter must not expand (`$`, backtick, backslash). Any eval fed by a heredoc the
+    guard cannot read (another reader, a file, several heredocs) is refused."""
+    if not _has_eval_with_heredoc(command):
+        return None
+
+    rewritten = _rewrite_readable_evals(command)
+    if _has_eval_with_heredoc(rewritten):
+        return True
+    return _is_dangerous_at_depth(rewritten, depth + 1)
+
+
 def _has_eval_with_heredoc(command: str) -> bool:
     """Detect eval (or backtick) command-substitution that wraps a heredoc.
 
@@ -5624,16 +5712,139 @@ def _has_eval_with_heredoc(command: str) -> bool:
     legitimate operator command flows do not use eval-wrapped heredoc as
     a delivery mechanism, so the false-positive risk is low.
 
-    Detects both the modern ``$(...)`` substitution form and the legacy
-    backtick form.
+    Judged on the executed surface (_eval_surface_view): an ``eval`` word in
+    command position, fed by a heredoc that also executes. The heredoc feeds
+    the eval when it is (i) inside the eval's ``$(...)``/backtick argument,
+    (ii) on the eval's own simple command (``eval "$(cat)" <<EOF``), (iii) on
+    an earlier leg of the eval's pipeline (``cat <<EOF | eval "$(cat)"``), or
+    (iv) written to a file earlier in the command (``cat > f <<EOF``, ``cat >>
+    f <<``, ``tee f <<``) with the eval after it. An eval word that only sits
+    in data (a quoted string, a comment, a non-shell heredoc body) never fires.
+    An unbalanced substitution after an executed eval fires (fail closed).
     """
-    # eval $(...) with a heredoc anywhere within the substitution
-    if re.search(r"\beval\s+\$\(", command) and "<<" in command:
-        return True
-    # eval `...` (backtick) wrapping a heredoc
-    if re.search(r"\beval\s+`[^`]*<<", command):
-        return True
+    if "eval" not in command or "<<" not in command:
+        return False
+    view = _eval_surface_view(command)
+    for m in _EXECUTED_EVAL_RE.finditer(view):
+        if _eval_is_fed_by_heredoc(view, m.start("eval"), m.end("eval")):
+            return True
     return False
+
+
+# An `eval` word in command position on the eval surface: at the start of a line,
+# or after a command separator, `(`, a backtick or `$(`, optionally after `builtin`
+# or `command`.
+_EXECUTED_EVAL_RE = re.compile(
+    r"(?:^|(?<=[;&|(\n`]))[ \t]*(?:(?:builtin|command)[ \t]+)*(?P<eval>eval)(?![\w-])",
+    re.MULTILINE,
+)
+
+# A heredoc written to a file: `cat > F <<`, `cat >> F <<`, `tee F <<`, in any order
+# of the redirect and the operator within one simple command.
+_HEREDOC_TO_FILE_RE = re.compile(
+    r"(?:^|(?<=[;&|(\n`]))[ \t]*(?:"
+    r"cat\b[^\n;&|]*?>>?[ \t]*[^\s(&][^\n;&|]*?<<|cat\b[^\n;&|]*?<<[^\n;&|]*?>>?[ \t]*[^\s(&]"
+    r"|tee\b[^\n;&|<]*?[ \t][^-\s<][^\n;&|]*?<<|tee\b[^\n;&|]*?<<[^\n;&|]*?[ \t][^-\s<]"
+    r")",
+    re.MULTILINE,
+)
+
+
+def _mask_quotes_keeping_substitutions(command: str) -> str:
+    """_mask_shell_quotes, except that an unescaped ``$(...)`` or backtick span
+    inside a DOUBLE-quoted span stays visible: the shell runs it. Same length as
+    the input. A backslash-escaped ``\\$(`` or backtick inside double quotes is
+    literal and stays masked; single-quoted text is masked whole."""
+    masked = _mask_shell_quotes(command)
+    if "$(" not in command and "`" not in command:
+        return masked
+    out = list(masked)
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "'":
+            j = command.find("'", i + 1)
+            if j == -1:
+                break
+            i = j + 1
+            continue
+        if c != '"':
+            i += 1
+            continue
+        j = i + 1
+        while j < n and command[j] != '"':
+            if command[j] == "\\":
+                j += 2
+                continue
+            if command[j] == "$" and j + 1 < n and command[j + 1] == "(":
+                _, end = _extract_dollar_paren(command, j)
+                end = min(end, n)
+                out[j:end] = command[j:end]
+                j = end
+                continue
+            if command[j] == "`":
+                _, end = _extract_backtick(command, j)
+                end = min(end, n)
+                out[j:end] = command[j:end]
+                j = end
+                continue
+            j += 1
+        i = j + 1
+    return "".join(out)
+
+
+def _eval_surface_view(command: str) -> str:
+    """The executed surface for the eval+heredoc rule: non-shell heredoc bodies
+    excised (opener line and closing marker kept; a shell-fed body stays), quoted
+    spans masked except the substitutions a double-quoted span runs, and comments
+    excised. Offsets of the excised command and the view align 1:1."""
+    excised = _excise_heredoc_bodies_for_routing_scan(command)
+    view = _mask_quotes_keeping_substitutions(excised)
+    return _excise_comments_view(excised, view)
+
+
+def _eval_is_fed_by_heredoc(view: str, start: int, end: int) -> bool:
+    """Whether the eval at view[start:end] is fed by an executed heredoc (arms
+    i-iv of _has_eval_with_heredoc). Walks the eval's simple command: a
+    substitution span is read whole, and the walk ends at an unquoted separator."""
+    i, n = end, len(view)
+    while i < n:
+        c = view[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "$" and i + 1 < n and view[i + 1] == "(":
+            span, i = _extract_dollar_paren(view, i)
+            if span is None or "<<" in span:
+                return True          # (i), or an unbalanced span: fail closed
+            continue
+        if c == "`":
+            span, i = _extract_backtick(view, i)
+            if span is None or "<<" in span:
+                return True
+            continue
+        if view.startswith("<<", i):
+            return True              # (ii)
+        if c in ";&|\n":
+            break
+        i += 1
+    # (iii): a heredoc on an earlier leg of the eval's pipeline.
+    k = start - 1
+    while k >= 0 and view[k] in " \t":
+        k -= 1
+    while k >= 4 and view[k - 6:k + 1] in ("builtin", "command"):
+        k -= 7
+        while k >= 0 and view[k] in " \t":
+            k -= 1
+    if k >= 0 and view[k] == "|" and (k == 0 or view[k - 1] != "|"):
+        leg_start = max(view.rfind(sep, 0, k) for sep in (";", "&", "\n", "||"))
+        if "<<" in view[leg_start + 1:k]:
+            return True
+    # (iv): a heredoc written to a file earlier in the command.
+    return bool(_HEREDOC_TO_FILE_RE.search(view, 0, start))
 
 
 def _shell_tokenize(command: str) -> list[str] | None:
@@ -7225,17 +7436,20 @@ def is_dangerous_command(command: str) -> bool:
     Returns:
         True if the command matches a dangerous pattern
     """
-    # Pre-strip detection: eval+heredoc shape obscures destructive ops via
-    # the heredoc-strip pipeline. Treat as dangerous before the strip runs.
-    if _has_eval_with_heredoc(command):
-        return True
+    # Pre-strip detection: an eval fed by a heredoc runs the heredoc's text, which the
+    # heredoc strip below would hide. Judge it before the strip runs.
+    verdict = _eval_heredoc_verdict(command, 0)
+    if verdict is not None:
+        return verdict
     return _is_dangerous_at_depth(command, 0)
 
 
 def _is_dangerous_at_depth(command: str, depth: int) -> bool:
     """is_dangerous_command's body, with the recursion depth of the stdin-fed code check."""
-    if depth and _has_eval_with_heredoc(command):
-        return True
+    if depth:
+        verdict = _eval_heredoc_verdict(command, depth)
+        if verdict is not None:
+            return verdict
     # Code an interpreter reads from stdin (heredoc, here-string, pipe) is that
     # interpreter's program: it is refused when it passes a guarded command directly
     # to an exec primitive. The carriers below see it only as inert text.
@@ -7374,6 +7588,8 @@ def _single_destructive_leg(command: str) -> str | None:
     destructive op is a token of its OWN simple-command (leg), so it stays bound;
     only a different statement's flag (past an operator boundary) is dropped.
     """
+    # An eval's heredoc lines are the command it runs, not legs of their own.
+    command = _rewrite_readable_evals(command)
     dangerous = [
         leg.strip()
         for leg in _split_into_legs(command)
@@ -7446,7 +7662,15 @@ def is_compound_destructive_command(command: str) -> bool:
     # guarded commands such programs run are counted from the programs: interpreter
     # legs together count as the larger of their destructive legs and the distinct
     # commands their programs run, so neither reading counts one command twice.
-    destructive = [leg for leg in legs if _leg_is_destructive(leg)]
+    # When an eval runs a heredoc, the heredoc bodies stay in the legs, so the commands
+    # the eval runs are counted from their own legs; the eval's leg is not counted again
+    # for the eval+heredoc shape alone.
+    if _has_eval_with_heredoc(command):
+        destructive = [
+            leg for leg in legs if _is_dangerous_at_depth(leg, 0) or _RM_HEAD_RE.match(leg)
+        ]
+    else:
+        destructive = [leg for leg in legs if _leg_is_destructive(leg)]
     on_interpreters = sum(1 for leg in destructive if _INTERPRETER_WORD_RE.search(leg))
     interpreted = {normalize_command_text(c) for c in _interpreter_guarded_commands(command, 0)}
     in_shells = sum(_shell_leg_destructive_count(leg) for leg in destructive)
