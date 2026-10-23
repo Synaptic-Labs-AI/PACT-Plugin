@@ -696,6 +696,51 @@ def test_a_shell_running_a_written_file_with_flags_or_arguments_is_judged_as_its
     assert rewritten_executed_command(cmd).endswith(M)
 
 
+HEREDOC_WRITER_FORMS_DENY = [
+    ("the redirect after the heredoc", f"cat <<'EOF' > /tmp/m.sh\n{M} --squash\nEOF\nsh /tmp/m.sh"),
+    ("an append after the heredoc", f"cat <<'EOF' >> /tmp/m.sh\n{M} --squash\nEOF\nbash /tmp/m.sh"),
+    ("tee to a file", f"tee /tmp/m.sh >/dev/null <<'EOF'\n{M} --squash\nEOF\nbash /tmp/m.sh"),
+    ("tee -a", f"tee -a /tmp/m.sh <<'EOF'\n{M} --squash\nEOF\nbash /tmp/m.sh"),
+    ("tee with a redirect before the file", f"tee 2> err.log /tmp/m.sh <<'EOF'\n{M} --squash\nEOF\nbash /tmp/m.sh"),
+]
+HEREDOC_APPENDS_KEEP_EARLIER_TEXT = [
+    ("cat appends", f"echo '{M}' > /tmp/m.sh; cat <<'EOF' >> /tmp/m.sh\necho hi\nEOF\nbash /tmp/m.sh"),
+    ("tee -a appends", f"echo '{M}' > /tmp/m.sh; tee -a /tmp/m.sh <<'EOF'\necho hi\nEOF\nbash /tmp/m.sh"),
+]
+HEREDOC_WRITER_FORMS_ALLOW = [
+    ("a written file never run", f"cat <<'EOF' > notes.txt\n{M}\nEOF\ncat notes.txt"),
+    ("tee writing a log never run", f"tee log.txt <<'EOF'\n{M}\nEOF"),
+    ("another file run", f"tee /tmp/m.sh >/dev/null <<'EOF'\n{M}\nEOF\nbash /tmp/other.sh"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", HEREDOC_WRITER_FORMS_DENY, ids=[r[0] for r in HEREDOC_WRITER_FORMS_DENY])
+def test_a_heredoc_written_by_cat_or_tee_then_run_is_judged_as_its_text(label, cmd):
+    from shared.merge_guard_common import rewritten_executed_command
+
+    assert is_dangerous_command(cmd) is True
+    assert rewritten_executed_command(cmd).count(M) == 1
+
+
+@pytest.mark.parametrize("label,cmd", HEREDOC_APPENDS_KEEP_EARLIER_TEXT,
+                         ids=[r[0] for r in HEREDOC_APPENDS_KEEP_EARLIER_TEXT])
+def test_a_heredoc_append_keeps_the_text_written_before_it(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+def test_a_heredoc_only_printed_keeps_its_text_in_the_report():
+    from shared.merge_guard_common import rewritten_executed_command
+
+    for cat in ("cat", "cat -n"):
+        cmd = f"{cat} <<'EOF'\nnote {M}\nEOF\necho 'echo hi' > f; bash f"
+        assert f"note {M}" in rewritten_executed_command(cmd)
+
+
+@pytest.mark.parametrize("label,cmd", HEREDOC_WRITER_FORMS_ALLOW, ids=[r[0] for r in HEREDOC_WRITER_FORMS_ALLOW])
+def test_a_heredoc_written_file_that_is_not_run_is_data(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
 HEREDOC_SCRIPT_RUNS = [
     ("a heredoc-written script run by bash", f"cat > /tmp/m.sh <<'EOF'\n{M} --squash\nEOF\nbash /tmp/m.sh", M + " --squash"),
     ("with a set -e header", f"cat > /tmp/m.sh <<'EOF'\n#!/bin/bash\nset -e\n{M} --squash\nEOF\nbash /tmp/m.sh",

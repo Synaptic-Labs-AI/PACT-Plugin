@@ -6557,14 +6557,36 @@ def unreadable_evald_heredoc(command: str) -> bool:
 
 
 # A file written and then run in the same command. Writers whose text the guard can read:
-# echo, printf (`%s`/`%b` formats), `… | tee [-a] F` after one of those, and `cat > F <<TAG`.
+# echo, printf (`%s`/`%b` formats), `… | tee [-a] F` after one of those, and a heredoc fed to
+# `cat` redirected to F (`cat > F <<TAG`, `cat <<TAG > F`) or to `tee [-a] F <<TAG`.
 _FILE_RUN_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
 _FILE_HEREDOC_WRITER_RE = re.compile(
-    r"(?:^|(?<=[;&|\n]))[ \t]*cat[ \t]*(?P<mode>>>?)[ \t]*(?P<file>[^\s;&|<>]+)[ \t]*"
-    r"<<(?P<dash>-?)[ \t]*(?P<q>['\"\\]?)(?P<tag>\w+)['\"]?[ \t]*\n"
+    r"(?:^|(?<=[;&|\n]))[ \t]*(?P<head>cat|tee)(?![\w-])(?P<before>[^\n<]*)"
+    r"<<(?P<dash>-?)[ \t]*(?P<q>['\"\\]?)(?P<tag>\w+)['\"]?(?P<after>[^\n]*)\n"
     r"(?P<body>.*?)\n?(?P=tag)(?=[ \t]*(?:\n|$))",
     re.DOTALL | re.MULTILINE,
 )
+
+
+def _heredoc_write_target(m: re.Match) -> tuple[str, str] | None:
+    """(file, mode) a heredoc writer line writes: `cat`'s `>`/`>>` redirect, or `tee`'s
+    first file argument (`>>` with -a). None when the line names no file this can read."""
+    words = _shell_tokenize(m.group("before") + " " + m.group("after"))
+    if not words:
+        return None
+    if m.group("head") == "cat":
+        for k, word in enumerate(words):
+            redirect = re.match(r"^(>>?)(.*)$", word)
+            if redirect:
+                target = redirect.group(2) or (words[k + 1] if k + 1 < len(words) else "")
+                return (target, redirect.group(1)) if target else None
+        return None
+    files = [w for k, w in enumerate(words)
+             if not w.startswith("-") and not re.match(r"^\d*>", w)
+             and not (k and re.match(r"^\d*>>?$", words[k - 1]))]
+    if not files:
+        return None
+    return files[0], ">>" if any(w in ("-a", "--append") for w in words) else ">"
 _PRINTF_READABLE_FORMAT_RE = re.compile(r"(?:[^%\\]|%[sb]|\\[nt\\])*")
 
 
@@ -6653,11 +6675,14 @@ def _rewrite_file_runs(command: str) -> str:
     writes_at: dict[int, tuple] = {}
     bodies: list[tuple[int, int]] = []
     for m in _FILE_HEREDOC_WRITER_RE.finditer(command):
+        target = _heredoc_write_target(m)
+        if target is None:
+            continue
         bodies.append((m.start("body"), m.end("body")))
         body = m.group("body")
         if m.group("dash"):
             body = "\n".join(line.lstrip("\t") for line in body.split("\n"))
-        writes_at[m.start("mode")] = (_file_key(m.group("file")), m.group("mode"), body + "\n")
+        writes_at[m.start("head")] = (_file_key(target[0]), target[1], body + "\n")
         start = command.index("\n", m.end("tag"))
         flat[start:m.end()] = " " * (m.end() - start)
     flat_text = "".join(flat)
