@@ -2978,7 +2978,7 @@ def _literal_list_at(text: str, i: int, head: str = "") -> tuple[list[list[str]]
             readings, end = _with_each(readings, values), named[1]
         else:
             end = _operand_end(text, i)
-            if end < 0 or (not count and not _leads_a_gh_pr_argv(text, end)):
+            if end < 0 or (not count and not _leads_a_gh_pr_argv(head, text, i, end)):
                 return None
             readings = _with_each(readings, ["X" if count else "gh"])
         count += 1
@@ -2994,13 +2994,24 @@ def _named_strings(head: str, code: str, offsets: list[int]) -> list[str]:
     return out[:_MAX_READINGS]
 
 
-def _leads_a_gh_pr_argv(text: str, end: int) -> bool:
-    """True iff the list element after an unresolved leading element ending at text[end]
-    is the literal `"pr"`: a program resolved at run time (`shutil.which("gh")`, an
-    environment variable) followed by `pr` is gh, and the rest of the argv is judged
-    as `gh pr …` is."""
+# gh or hub as a word, in any case: `GH`, `/opt/homebrew/bin/gh`, `which("hub")`.
+_GH_WORD_RE = re.compile(r"(?<![A-Za-z0-9])(?:gh|hub)(?![A-Za-z0-9])", re.IGNORECASE)
+
+
+def _leads_a_gh_pr_argv(head: str, text: str, start: int, end: int) -> bool:
+    """True iff the unresolved leading list element text[start:end] is gh resolved at
+    run time (`shutil.which("gh")`, `os.environ.get("GH", "gh")`, a name `gh`): the
+    next element is the literal `"pr"`, and the element's text names gh or hub, or,
+    for a bare name, the name or a value assigned to it does. The rest of the argv is
+    then judged as `gh pr …` is."""
     nxt = _STRING_LITERAL_RE.match(text, _skip(r"\s*,\s*", text, end))
-    return bool(nxt) and nxt.group(0)[1:-1] == "pr"
+    if not nxt or nxt.group(0)[1:-1] != "pr":
+        return False
+    source = text[start:end]
+    named = _named_values_at(head, text, start)
+    for offset in named[0] if named else []:
+        source += " " + text[offset:].partition("\n")[0].partition(";")[0]
+    return bool(_GH_WORD_RE.search(source))
 
 
 _OBJECT_ARGV_KEY_RE = re.compile(r"(?<![\w$])[\"']?(?:args|cmd)[\"']?\s*:\s*")

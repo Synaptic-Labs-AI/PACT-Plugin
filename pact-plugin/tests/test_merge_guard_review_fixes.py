@@ -321,12 +321,14 @@ def test_non_merge_argv_with_a_tuple_or_variable_element_is_allowed(label, cmd):
 
 
 def test_a_list_led_by_a_variable_is_read_only_as_gh_pr():
-    """An unresolved leading element reads as gh only before `"pr"`; otherwise the
-    list spells nothing. A later unresolved element is a placeholder."""
+    """An unresolved leading element reads as gh only before `"pr"` and only when its
+    text names gh or hub; otherwise the list spells nothing. A later unresolved element
+    is a placeholder."""
     import shared.merge_guard_common as mgc
 
     assert mgc._literal_list_at("[a, \"push\"]", 0) is None
-    assert mgc._literal_list_at("[a, \"pr\"]", 0) == ([["gh", "pr"]], 9)
+    assert mgc._literal_list_at("[a, \"pr\"]", 0) is None
+    assert mgc._literal_list_at("[gh, \"pr\"]", 0) == ([["gh", "pr"]], 10)
     assert mgc._literal_list_at("[\"gh\", n]", 0) == ([["gh", "X"]], 9)
 
 
@@ -527,9 +529,10 @@ RUNTIME_GH_DENY = [
     ("-c close with branch delete",
      ("python3 -c 'import subprocess, shutil; g = shutil.which(\"gh\"); "
       "subprocess.run([g, \"pr\", \"close\", \"5\", \"--delete-branch\"])'")),
-    ("-c name never assigned", "python3 -c 'import subprocess; subprocess.run([g, \"pr\", \"merge\", \"5\"])'"),
 ]
 RUNTIME_GH_ALLOW = [
+    # A name never assigned raises NameError before anything runs.
+    ("-c name never assigned", "python3 -c 'import subprocess; subprocess.run([g, \"pr\", \"merge\", \"5\"])'"),
     ("-c view", "python3 -c 'import subprocess, shutil; g = shutil.which(\"gh\"); subprocess.run([g, \"pr\", \"view\", \"5\"])'"),
     ("-c list", "python3 -c 'import subprocess, shutil; g = shutil.which(\"gh\"); subprocess.run([g, \"pr\", \"list\"])'"),
     ("-c another program's merge subcommand",
@@ -930,6 +933,36 @@ def test_a_merge_reaching_the_use_in_its_keyword_span_is_refused(label, cmd):
 
 @pytest.mark.parametrize("label,cmd", KEYWORD_SPAN_ALLOW, ids=[r[0] for r in KEYWORD_SPAN_ALLOW])
 def test_a_merge_not_reaching_the_use_in_its_keyword_span_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+# An unresolved program read as gh must name gh or hub: in its own text
+# (`shutil.which("gh")`, `os.environ.get("GH_BIN", "gh")`), in a bare name (`hub`), or
+# in a value assigned to that name. `sys.executable` or an unnamed environment variable
+# before `"pr"` runs some other program.
+LEADER_DENY = [
+    ("which gh assigned", "python3 - <<'EOF'\nimport subprocess, shutil\ngh = shutil.which(\"gh\")\nsubprocess.run([gh, \"pr\", \"merge\", \"5\"])\nEOF"),
+    ("which hub assigned to cli", "python3 - <<'EOF'\nimport subprocess, shutil\ncli = shutil.which(\"hub\")\nsubprocess.run([cli, \"pr\", \"merge\", \"5\"])\nEOF"),
+    ("environ default gh", "python3 - <<'EOF'\nimport subprocess, os\nbinary = os.environ.get(\"GH_BIN\", \"gh\")\nsubprocess.run([binary, \"pr\", \"merge\", \"5\"])\nEOF"),
+    ("inline which gh", "python3 -c 'import subprocess, shutil; subprocess.run([shutil.which(\"gh\"), \"pr\", \"merge\", \"5\"])'"),
+    ("parameter named hub", "python3 - <<'EOF'\nimport subprocess\ndef run(hub):\n    subprocess.run([hub, \"pr\", \"merge\", \"5\"])\nrun(None)\nEOF"),
+]
+LEADER_ALLOW = [
+    ("sys.executable script", "python3 - <<'EOF'\nimport subprocess, sys\nsubprocess.run([sys.executable, \"pr\", \"merge.py\"])\nEOF"),
+    ("unnamed environment tool", "python3 - <<'EOF'\nimport subprocess, os\ntool = os.environ[\"MY_CLI\"]\nsubprocess.run([tool, \"pr\", \"merge\", \"5\"])\nEOF"),
+    ("inline sys.executable", "python3 -c 'import subprocess, sys; subprocess.run([sys.executable, \"pr\", \"merge\", \"5\"])'"),
+    ("SIGH is not gh", "python3 -c 'import subprocess, os; subprocess.run([os.environ[\"SIGH\"], \"pr\", \"merge\", \"5\"])'"),
+    ("ghost is not gh", "python3 -c 'import subprocess; ghost = \"/usr/bin/ghost\"; subprocess.run([ghost, \"pr\", \"merge\", \"5\"])'"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", LEADER_DENY, ids=[r[0] for r in LEADER_DENY])
+def test_a_leader_naming_gh_runs_gh_pr(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", LEADER_ALLOW, ids=[r[0] for r in LEADER_ALLOW])
+def test_a_leader_not_naming_gh_is_some_other_program(label, cmd):
     assert is_dangerous_command(cmd) is False
 
 
