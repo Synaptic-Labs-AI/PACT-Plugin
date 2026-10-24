@@ -6659,17 +6659,20 @@ _PRINTED_STRING_RE = re.compile(
 
 
 def _substitution_printed_text(body: str, depth: int = 0) -> str | None:
-    """The text a substitution body prints whole when all it does is print: `printf '…'`
-    with no format or escape, `echo` of plain words, or a shell's -c (its positional words
-    in place) or an eval whose program does one of these. None for anything else."""
+    """The text a substitution body prints whole when all it does is print: an echo or a
+    printf the leg reader can read (quoted words and plain formats included), or a shell's
+    -c (its positional words in place) or an eval whose program does one of these. None for
+    anything else, including a body that runs a substitution of its own."""
     body = body.strip()
-    printed = re.fullmatch(r"printf[ \t]+'([^'%\\]*)'|echo[ \t]+([^$`'\"\\()|;&<>\n]*)", body)
-    if printed:
-        return printed.group(1) if printed.group(1) is not None else printed.group(2).strip()
-    if depth >= _MAX_WRAPPER_DEPTH or any(ch in _mask_shell_quotes(body) for ch in "|;&<>\n`"):
+    if "`" in body or any(ch in _mask_shell_quotes(body) for ch in "|;&<>\n"):
         return None
     tokens = _shell_tokenize(body)
     if not tokens:
+        return None
+    if tokens[0] in ("echo", "printf"):
+        printed = _printed_text(tokens)
+        return None if printed is None else printed.rstrip("\n")
+    if depth >= _MAX_WRAPPER_DEPTH:
         return None
     program = _string_runner_program(body, os.path.basename(tokens[0]), tokens)
     return None if program is None else _substitution_printed_text(program, depth + 1)

@@ -2286,3 +2286,37 @@ def test_a_nested_printing_runner_is_read_as_its_printed_text():
 
     cmd = "eval \"$(sh -c 'bash -c \"echo gh pr " + "merge 5 --squash\"')\""
     assert rewritten_executed_command(cmd) == "gh pr " + "merge 5 --squash"
+
+
+# An echo or printf whose output eval or a shell's -c runs is read as the leg reader reads
+# it: quoted words and plain formats included.
+QUOTED_PRINT_FEEDS_A_RUNNER = [
+    ("single-quoted echo word", "bash -c \"$(echo 'gh pr " + "merge 5 --squash')\""),
+    ("double-quoted echo word", "eval \"$(echo \"gh pr " + "merge 5 --squash\")\""),
+    ("echo of mixed words", "sh -c \"$(echo 'gh pr' " + "merge 5 --squash)\""),
+    ("-c printf in double quotes", "eval \"$(bash -c 'printf \"gh pr " + "merge 5 --squash\"')\""),
+    ("printf with a format", "bash -c \"$(printf 'gh pr %s 5 --squash' " + "merge)\""),
+    ("echo -n", "eval \"$(echo -n 'gh pr " + "merge 5 --squash')\""),
+]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", QUOTED_PRINT_FEEDS_A_RUNNER, ids=[r[0] for r in QUOTED_PRINT_FEEDS_A_RUNNER])
+def test_a_quoted_print_whose_output_runs_is_refused_then_runs(label, cmd, style):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("cmd", [
+    "eval \"$(echo 'gh pr view 5')\"",
+    "bash -c \"$(printf '%s\\n' 'gh pr view 5')\"",
+    "eval \"$(echo 'echo gh pr " + "merge 5')\"",
+], ids=["quoted-view", "printf-view", "prints-an-echo"])
+def test_a_quoted_print_whose_output_runs_nothing_guarded_is_allowed(cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+def test_a_print_that_runs_a_backtick_substitution_is_not_read():
+    from shared.merge_guard_common import rewritten_executed_command
+
+    assert rewritten_executed_command("eval \"$(echo `date`)\"") is None
