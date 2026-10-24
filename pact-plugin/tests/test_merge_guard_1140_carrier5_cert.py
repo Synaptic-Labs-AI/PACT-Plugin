@@ -1391,7 +1391,9 @@ class TestFC1StripSurfaceMechanism:
     # Document the native-dq span-scope surface (literal -> STRIPPED, span preserved VERBATIM) per
     # carrier, so a mechanism regression is visible.
     def test_echo_span_scoped(self):
-        assert STRIP('echo "as of $(date): note %s"' % BD) == 'echo "STRIPPED$(date)STRIPPED"'
+        # A substitution an echo prints is judged by its body: `$(date)` runs nothing
+        # guarded, so the whole printed word is stripped; a guarded body stays (below).
+        assert STRIP('echo "as of $(date): note %s"' % BD) == 'echo STRIPPED'
 
     def test_echo_truepositive_span_preserved(self):
         assert STRIP('echo "$(%s)"' % BD) == 'echo "$(%s)"' % BD
@@ -1533,7 +1535,7 @@ class TestEchoPrintfCarveoutStripSurface:
         assert STRIP('echo "a" \'note %s\'' % BD) == "echo STRIPPED STRIPPED"
 
     def test_printf_fmt_and_data_stripped(self):
-        assert STRIP('printf "%%s\\n" "note $(date) %s"' % BD) == 'printf STRIPPED "STRIPPED$(date)STRIPPED"'
+        assert STRIP('printf "%%s\\n" "note $(date) %s"' % BD) == 'printf STRIPPED STRIPPED'
 
     def test_leg_locality_tail_preserved(self):
         assert STRIP('echo "x" && %s' % BD) == "echo STRIPPED && %s" % BD

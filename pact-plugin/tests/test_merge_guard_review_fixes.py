@@ -1877,3 +1877,75 @@ def test_a_ruby_endless_method_given_two_merges_is_compound():
     cmd = "ruby - <<'EOF'\ndef gh(*a) = system(\"gh\", *a)\ngh(\"pr\", \"merge\", \"5\")\ngh(\"pr\", \"merge\", \"6\")\nEOF"
     assert is_compound_destructive_command(cmd) is True
     assert not _runs_after_approval(cmd, APPROVAL_STYLES["inline"])
+
+
+# A substitution inside a printed value runs only its own body: when that body runs
+# nothing guarded (it only prints), the value is printed text, nested spans included.
+M5 = "gh pr " + "merge 5"
+PRINTED_SUBSTITUTION_ALLOW = [
+    ("backtick in quotes", 'echo "`echo ' + M5 + '`"'),
+    ("bare backtick", "echo `echo " + M5 + "`"),
+    ("dollar paren in quotes", 'echo "$(echo ' + M5 + ')"'),
+    ("printf in a substitution", 'echo "$(printf %s ' + M5 + ')"'),
+    ("git log grep in a substitution", 'echo "`git log --grep ' + M5 + '`"'),
+    ("commit message from a substitution", 'git commit -m "$(echo fix ' + M5 + ' docs)"'),
+    ("backtick in a comment body", 'gh pr comment 7 --body "`echo ' + M5 + '`"'),
+    ("backtick in an assignment", 'MSG="`echo ' + M5 + '`"'),
+    ("backtick in a commit message", 'git commit -m "`echo fix ' + M5 + '`"'),
+    ("printf of a printing substitution", "printf '%s\\n' \"$(echo " + M5 + ')"'),
+    ("unquoted dollar paren", "echo $(echo " + M5 + ")"),
+    ("unquoted dollar paren between words", "echo hi $(printf %s " + M5 + ") there"),
+]
+RUNNING_SUBSTITUTION_DENY = [
+    ("dollar paren", 'echo "$(' + M5 + ')"'),
+    ("backtick in quotes", 'echo "`' + M5 + '`"'),
+    ("bare backtick", "echo `" + M5 + "`"),
+    ("nested dollar paren", 'echo "$(echo "$(' + M5 + ')")"'),
+    ("backtick nested in dollar paren", 'echo "$(echo `' + M5 + '`)"'),
+    ("commit message running a merge", 'git commit -m "$(' + M5 + ' && echo done)"'),
+]
+
+
+@pytest.mark.parametrize("label,cmd", PRINTED_SUBSTITUTION_ALLOW, ids=[r[0] for r in PRINTED_SUBSTITUTION_ALLOW])
+def test_a_substitution_that_only_prints_is_printed_text(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", RUNNING_SUBSTITUTION_DENY, ids=[r[0] for r in RUNNING_SUBSTITUTION_DENY])
+def test_a_substitution_that_runs_a_merge_is_refused_then_runs(label, cmd, style):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+def _post_hook_mints(command: str, style, tmp_path) -> bool:
+    """Whether the real post hook writes a token for a faithful approval of `command`."""
+    import json
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    hooks = Path(__file__).resolve().parents[1] / "hooks"
+    (tmp_path / ".claude").mkdir(exist_ok=True)
+    q = [{"question": "Run this?", "header": "Run", "multiSelect": False,
+          "options": [{"label": "Yes, run", "description": style(command)},
+                      {"label": "No", "description": "Hold."}]}]
+    payload = {"session_id": "s1", "hook_event_name": "PostToolUse", "tool_name": "AskUserQuestion",
+               "tool_input": {"questions": q}, "tool_response": {"answers": {"Run this?": "Yes, run"}}}
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path),
+           "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude")}
+    r = subprocess.run([sys.executable, str(hooks / "merge_guard_post.py")], input=json.dumps(payload),
+                       capture_output=True, text=True, env=env, cwd=str(tmp_path), timeout=60, check=False)
+    return "token written" in r.stderr
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", PRINTED_SUBSTITUTION_ALLOW[:4], ids=[r[0] for r in PRINTED_SUBSTITUTION_ALLOW[:4]])
+def test_approving_a_printed_substitution_mints_nothing(label, cmd, style, tmp_path):
+    assert _post_hook_mints(cmd, style, tmp_path) is False
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+def test_approving_a_real_merge_still_mints(style, tmp_path):
+    assert _post_hook_mints("gh pr " + "merge 777", style, tmp_path) is True

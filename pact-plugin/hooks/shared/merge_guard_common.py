@@ -5531,7 +5531,9 @@ def _preserve_substitution_spans(value):
     "(?:[^"\\]|\\.)*") -> malformed -> fail-safe. In the UNQUOTED arm BOTH ' and " stay
     structural -> fail-safe. Return None -> FAIL-SAFE (caller preserves whole value = today's
     behavior) for: unterminated span, a preserved span carrying a quote, a " in dq-inner, or
-    either quote in the unquoted arm."""
+    either quote in the unquoted arm. A backtick span whose body runs nothing guarded
+    (`"`echo gh pr merge 5`"`) is literal text too, judged recursively, so a nested
+    substitution that runs a guarded command keeps its span."""
     def _scan(c, dq_inner):
         out = []; lit = False; i = 0; n = len(c)
         def flush():
@@ -5547,6 +5549,7 @@ def _preserve_substitution_spans(value):
             if ch == "`":
                 span, j = _extract_backtick(c, i)
                 if span is None or '"' in span or "'" in span: return None
+                if not _is_dangerous_at_depth(span[1:-1], 1): lit = True; i = j; continue
                 flush(); out.append(span); i = j; continue
             if ch == '"': return None              # structural dq terminator -> fail-safe (malformed in dq-inner)
             if ch == "'" and not dq_inner: return None   # unquoted: ' is structural -> fail-safe
@@ -5681,8 +5684,8 @@ def _is_leg_command_word(text: str, start: int) -> bool:
 
 def _blank_unquoted_print_words(span: str) -> str:
     """An echo/printf span with each unquoted word blanked, keeping the verb and any word
-    holding a command or process substitution (it runs), read whole. A `${…}` other than
-    a plain name keeps the rest of the span."""
+    holding a command or process substitution whose body runs something guarded, read
+    whole. A `${…}` other than a plain name keeps the rest of the span."""
     verb = re.match(r"\S+\s+", span)
     if verb is None:
         return span                           # a bare verb prints nothing
@@ -5699,14 +5702,14 @@ def _blank_unquoted_print_words(span: str) -> str:
         runs = False
         while j < n and not span[j].isspace():
             if span.startswith(("$(", "<(", ">("), j):
-                _, j = _extract_dollar_paren(span, j)
-                runs = True
+                sub, j = _extract_dollar_paren(span, j)
+                runs = runs or sub is None or _is_dangerous_at_depth(sub[2:-1], 1)
             elif span.startswith("${", j):
                 plain = re.match(r"\$\{[A-Za-z_]\w*\}", span[j:])
                 j, runs = (j + plain.end(), runs) if plain else (n, True)
             elif span[j] == "`":
-                _, j = _extract_backtick(span, j)
-                runs = True
+                sub, j = _extract_backtick(span, j)
+                runs = runs or sub is None or _is_dangerous_at_depth(sub[1:-1], 1)
             else:
                 j += 2 if span[j] == "\\" else 1
         j = min(j, n)
