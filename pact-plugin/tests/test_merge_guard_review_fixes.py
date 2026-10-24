@@ -2527,3 +2527,53 @@ def test_a_negation_that_cannot_let_two_ops_run_stays_one_op(cmd, style):
 
     assert is_compound_destructive_command(cmd) is False
     assert _runs_after_approval(cmd, style)
+
+
+# Under a negated condition the first branch runs only when the condition's op failed, so the
+# two are alternatives (one op, the approval binding the whole text); a later branch runs
+# only when the op succeeded, so it adds to the condition.
+NEGATED_CONDITION_FALLBACKS = {
+    "then-only": "if ! gh pr " + "merge 5 --squash; then gh pr " + "merge 5 --rebase; fi",
+    "plain-else": "if ! gh pr " + "merge 5 --squash; then gh pr " + "merge 5 --rebase; else echo done; fi",
+    "plain-leg-before": "if gh pr checks 5; ! gh pr " + "merge 5 --squash; then gh pr " + "merge 5 --rebase; fi",
+    "multi-line": "if ! gh pr " + "merge 5 --squash\nthen gh pr " + "merge 5 --rebase\nfi",
+}
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("cmd", NEGATED_CONDITION_FALLBACKS.values(), ids=NEGATED_CONDITION_FALLBACKS.keys())
+def test_a_negated_condition_and_its_then_branch_are_one_op_that_runs_approved(cmd, style):
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_dangerous_command(cmd) is True
+    assert is_compound_destructive_command(cmd) is False
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+def test_a_negated_condition_approval_runs_neither_bare(style):
+    from merge_guard_post import _mint_context_from_bundle
+    from merge_guard_pre import _token_matches_command
+
+    approved = NEGATED_CONDITION_FALLBACKS["then-only"]
+    q = [{"question": "Run this?", "header": "Run", "multiSelect": False,
+          "options": [{"label": "Yes, run", "description": style(approved)},
+                      {"label": "No", "description": "Hold."}]}]
+    token = {"context": _mint_context_from_bundle(q, {"Run this?": "Yes, run"})[0]}
+    assert _token_matches_command(token, approved)
+    for bare in ("gh pr " + "merge 5 --squash", "gh pr " + "merge 5 --rebase", "gh pr " + "merge 777 --squash"):
+        assert not _token_matches_command(token, bare)
+
+
+@pytest.mark.parametrize("cmd", [
+    "if ! gh pr " + "merge 5 --squash; then echo; else gh pr " + "merge 6 --squash; fi",
+    "if ! gh pr " + "merge 5 --squash; then gh pr " + "merge 5 --rebase; else gh pr " + "merge 6 --squash; fi",
+    "if ! gh pr " + "merge 5 --squash || gh pr " + "merge 6 --squash; then echo; fi",
+    "if ! gh pr " + "merge 5 --squash; gh pr " + "merge 6 --squash; then echo; fi",
+    "if gh pr " + "merge 5 --squash; ! test -f x; then gh pr " + "merge 6 --squash; fi",
+], ids=["negated-condition-and-else", "with-a-guarded-else", "negated-leg-in-an-or-condition",
+        "guarded-leg-after-the-negation", "guarded-leg-before-a-negated-test"])
+def test_a_negated_condition_and_what_runs_when_it_succeeds_stay_compound(cmd):
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_compound_destructive_command(cmd) is True
