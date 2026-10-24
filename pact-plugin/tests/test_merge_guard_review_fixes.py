@@ -2139,3 +2139,35 @@ def test_a_c_program_read_as_its_bare_command_is_refused_then_runs(label, cmd, s
 ], ids=["printed-view", "piped-view"])
 def test_a_c_program_that_runs_nothing_guarded_is_allowed(cmd):
     assert is_dangerous_command(cmd) is False
+
+
+# An eval string or a -c program (its positional words in place) that only prints runs
+# nothing guarded: its words are data, as an echo's are.
+PRINTING_STRING_RUNNERS = [
+    ("eval of a quoted echo", "eval \"echo gh pr " + "merge 5\""),
+    ("eval of a bare echo", "eval echo gh pr " + "merge 5"),
+    ("-c echo of its positional words", "bash -c 'echo \"$@\"' _ gh pr " + "merge 5"),
+    ("-c printf of its positional words", "bash -c 'printf \"%s \" \"$@\"' _ gh pr " + "merge 5"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", PRINTING_STRING_RUNNERS, ids=[r[0] for r in PRINTING_STRING_RUNNERS])
+def test_a_string_runner_that_only_prints_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+RUNNING_STRING_RUNNERS = [
+    ("eval of a quoted merge", "eval \"gh pr " + "merge 5 --squash\""),
+    ("eval of a bare merge", "eval gh pr " + "merge 5 --squash"),
+    ("-c verb in its positional words", "bash -c 'gh \"$@\"' _ pr " + "merge 5 --squash"),
+    ("-c runs its positional words", "bash -c '\"$@\"' _ gh pr " + "merge 5 --squash"),
+    ("-c execs its positional words", "sh -c 'exec \"$0\" \"$@\"' gh pr " + "merge 5 --squash"),
+    ("eval prints then merges", "eval \"echo x; gh pr " + "merge 5 --squash\""),
+]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", RUNNING_STRING_RUNNERS, ids=[r[0] for r in RUNNING_STRING_RUNNERS])
+def test_a_string_runner_that_runs_a_merge_is_refused_then_runs(label, cmd, style):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)

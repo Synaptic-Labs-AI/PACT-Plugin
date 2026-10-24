@@ -8639,6 +8639,16 @@ def _has_shell_quoted_assignment(leg: str) -> bool:
     return any(view[m.start()] != " " for m in _QUOTED_ASSIGNMENT_RE.finditer(leg))
 
 
+def _string_runner_program(leg: str, head: str, tokens: list) -> str | None:
+    """The command line a POSIX shell's -c (its positional words in place) or an eval runs,
+    or None for another runner or a string that cannot be read."""
+    if _POSIX_SHELL_HEADS_RE.match(head):
+        return shell_c_string(leg)
+    if head == "eval" and len(tokens) > 1:
+        return " ".join(tokens[1:])
+    return None
+
+
 def _is_preserve_leg(leg: str, _depth: int = 0) -> bool:
     """True iff this single leg's quoted-arg values must be PRESERVED (not stripped) by the
     #1178 general inert-default strip — see the catalog block above for clauses (a)/(b)/(c).
@@ -8675,7 +8685,7 @@ def _is_preserve_leg(leg: str, _depth: int = 0) -> bool:
             elif _SHELL_STRING_EXECUTORS.match(head):    # (a) shell / string runner
                 # A -c string is a command line: kept only when it runs something guarded,
                 # so `sh -c 'echo gh pr merge 5'` prints as its bare command does.
-                inner = shell_c_string(leg) if _POSIX_SHELL_HEADS_RE.match(head) and _depth < _MAX_WRAPPER_DEPTH else None
+                inner = _string_runner_program(leg, head, tokens) if _depth < _MAX_WRAPPER_DEPTH else None
                 # A heredoc the strip already removed from the string cannot be judged here.
                 return inner is None or "HEREDOC_STRIPPED" in inner or _is_dangerous_at_depth(inner, _depth + 1)
             if head in _HTTP_CLIENT_HEADS:               # (b) curl/wget (quoted head via shlex)
@@ -8859,6 +8869,14 @@ def _maybe_strip_leg(leg: str) -> str:
         return rv                                    # already balance-checked inside
     if _is_preserve_leg(leg):
         return leg
+    # A -c program or eval string that runs nothing guarded takes its words as data: they
+    # are blanked whole, positional words and unquoted words included.
+    word = _leg_command_word(leg)
+    tokens = _shell_tokenize(word) if word else None
+    if word and tokens and _string_runner_program(leg, os.path.basename(tokens[0]), tokens) is not None:
+        head_end = len(leg) - len(word) + len(tokens[0]) if word.startswith(tokens[0]) else None
+        if head_end is not None:
+            return leg[:head_end] + " STRIPPED"
     stripped = _strip_quoted_positionals(leg)
     # QUOTE-BALANCE fail-safe (#1118 leg-merge guard): the per-span dq regex is NOT
     # $()-nesting-aware, so on an exotic nested-quote value (`"a $(b "c") d"`) it can mis-pair
