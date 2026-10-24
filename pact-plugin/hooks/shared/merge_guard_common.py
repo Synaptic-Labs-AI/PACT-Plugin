@@ -9740,11 +9740,13 @@ def _leg_operators(command: str) -> list[str]:
 
 
 def _leg_is_negated(leg: str) -> bool:
-    """True when `leg`, past any if/then/else word opening it, is a pipeline negated with `!`."""
+    """True when `leg`, past any if/then/else word opening it, is a pipeline negated with `!`
+    an odd number of times (`! !` negates nothing)."""
     rest = leg
     while m := _BRANCH_WORD_RE.match(rest):
         rest = rest[m.end():]
-    return re.match(r"\s*!\s", rest) is not None
+    bangs = re.match(r"(?:\s*!(?=\s))*", rest)
+    return bangs is not None and bangs.group().count("!") % 2 == 1
 
 
 def _alternative_branch_walk(legs: list[str], counts: list[int], ops: list[str]) -> tuple[int, int]:
@@ -9855,7 +9857,7 @@ def _alternative_branch_walk(legs: list[str], counts: list[int], ops: list[str])
             rest = rest[m.end():]
         for word in words[:-1]:
             step(word, 0, False, False)
-        step(words[-1] if words else "", n, not leg.strip(), re.match(r"\s*!\s", rest) is not None)
+        step(words[-1] if words else "", n, not leg.strip(), _leg_is_negated(leg))
     return (0, 0) if stack else (total - top, widest)
 
 

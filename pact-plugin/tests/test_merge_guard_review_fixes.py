@@ -2697,3 +2697,27 @@ def test_a_negated_elif_and_a_guarded_else_stay_compound():
 
     cmd = "if gh pr checks 5; then echo ok; elif ! gh pr " + "merge 5 --squash; then echo; else gh pr " + "merge 6 --squash; fi"
     assert is_compound_destructive_command(cmd) is True
+
+
+# An even number of `!` negates nothing; an odd number negates once.
+@pytest.mark.parametrize("cmd", [
+    "if ! ! gh pr " + "merge 5 --squash; then gh pr " + "merge 6 --squash; fi",
+    "! ! ! gh pr " + "merge 5 --squash || gh pr " + "merge 6 --squash",
+], ids=["double-negated-condition-and-then", "triple-negated-or-chain"])
+def test_a_negation_count_that_lets_two_ops_run_stays_compound(cmd):
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_compound_destructive_command(cmd) is True
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("cmd", [
+    "! ! gh pr " + "merge 5 --squash || gh pr " + "merge 5 --rebase",
+    "if ! ! gh pr " + "merge 5 --squash; then echo; else gh pr " + "merge 5 --rebase; fi",
+    "if ! ! ! gh pr " + "merge 5 --squash; then gh pr " + "merge 5 --rebase; fi",
+], ids=["double-negated-or-chain", "double-negated-condition-and-else", "triple-negated-condition"])
+def test_a_negation_count_that_lets_one_op_run_is_one_op(cmd, style):
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_compound_destructive_command(cmd) is False
+    assert _runs_after_approval(cmd, style)
