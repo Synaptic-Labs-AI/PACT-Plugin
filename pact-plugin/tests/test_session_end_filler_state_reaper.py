@@ -64,6 +64,26 @@ def test_never_rmtrees_directories_in_the_root(tmp_path):
     assert (nested / "inner.json").exists()
 
 
+def test_unexpected_entries_are_skipped_silently(tmp_path):
+    """TEST-phase O3 pin: a directory and a symlink inside the root are
+    neither reaped nor COUNTED as skipped — `skipped` is reserved for
+    stat failures on regular files (an OSError branch no portable fixture
+    can reach: entries that fail is_file()/is_symlink() read as False).
+    The observable contract: unexpected entry types vanish from BOTH
+    counters and stay on disk."""
+    root = tmp_path / "pact-filler-state"
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}", encoding="utf-8")
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "unexpected-dir").mkdir()
+    (root / "planted.json").symlink_to(outside)
+    reaped, skipped = cleanup_old_filler_state(state_base_dir=str(root))
+    assert (reaped, skipped) == (0, 0)
+    assert (root / "unexpected-dir").is_dir()
+    assert (root / "planted.json").is_symlink()
+    assert outside.exists()
+
+
 def test_missing_root_is_a_noop(tmp_path):
     assert cleanup_old_filler_state(
         state_base_dir=str(tmp_path / "nothing-here")

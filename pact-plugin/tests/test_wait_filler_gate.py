@@ -52,6 +52,22 @@ Registration pins:
 S1 (script exists) is auto-covered by
 test_hooks_json.py::TestReferencedScriptsExist once registered.
 
+TEST-phase acceptance matrix (issue #1657, appended below the CODE-phase
+smoke arms): frozen-literal pins (tier-1 byte-identity vs the 18aea673
+blob; valve payload verbatim), tier-3 count/total rendered DISTINCTLY,
+channel discipline at tiers 2-3, verdict invariance through deep
+escalation, budget-exhaustion persistence + post-valve count
+non-regression, session isolation, normalization-coupled counting (one
+content address across decorated spellings), instant-predicate
+derivation from the normalized string, saturation boundary armed both
+sides (totals 6/7, re-fire shape), corrupt-budget V2, growth caps,
+unset-env degrade (O4), allow fast-path emitted-byte identity (O2),
+docstring no-raw-tabs (O1), CROSS-PROCESS subprocess probes (gradient,
+valve budget), concurrency no-lost-update, and a writer->reaper
+integration close-out. The two ablation-table entries below close the
+matrix; O3 (reaper silent skip) is pinned in
+test_session_end_filler_state_reaper.py.
+
 Mutation-ablation table (the TEST-phase verification spec; each ablation
 predicts the flipped arms before running, and an ablation whose prediction
 agrees with the arm proves nothing). AS-EXECUTED, RE-RUN at remediation
@@ -89,6 +105,27 @@ on the sleep row — the widen moved it by exactly the new arms):
       arm (pins the trailing-dot admission — without the arm this
       narrowing ships silently).
 A total non-flip across arms is an instrument alarm, not a finding.
+
+TEST-phase gradient/valve ablations (measured 2026-10-24, isolated copy
+of the whole pact-plugin tree, gate file at its post-matrix 93-test
+size; each prediction recorded before its run and each run OBSERVED to
+match its prediction exactly — counts and witnesses):
+  loosen _INSTANT_FILLER to _FILLER_PATTERN (the coherent "valve opens
+      for every filler" mutation, not a naive flip)  -> observed 8:
+      test_gradient_tier_progression_renders_count,
+      test_valve_never_opens_for_nonzero_or_infinite_sleep,
+      test_valve_instant_grammar_edges,
+      test_tier3_renders_count_and_total_distinctly,
+      test_verdict_invariance_through_deep_escalation,
+      test_normalized_forms_share_one_counter,
+      test_saturation_boundary_armed_both_sides,
+      test_cross_process_gradient_persists. Survivors are by design:
+      the budget and concurrency arms assert STATE, not verdicts, and
+      the channel-discipline arm passes because the valve envelope
+      keeps the same single-key shape (its teeth are envelope-only).
+  drop the saturation boost (tier = min(3, count))   -> observed 2:
+      test_saturation_boost_escalates_a_fresh_command,
+      test_saturation_boundary_armed_both_sides.
 
 Counter-test record (measured at authoring time): this module was run
 against the repo BEFORE hooks/wait_filler_gate.py existed (TDD red-first):
@@ -686,3 +723,456 @@ def test_agent_type_sections_are_distinct(tmp_path, monkeypatch, capsys):
     state = json.loads(_state_path(tmp_path).read_text(encoding="utf-8"))
     assert state["pact-devops-engineer"]["total"] == 1
     assert state[""]["total"] == 1
+
+
+# ---------------------------------------------------------------------------
+# TEST-phase acceptance matrix (issue #1657) — plan Test Phase, P0s first.
+# Appended by the test-engineer dispatch; the CODE-phase smoke arms above
+# stay untouched (extend, don't break). The cross-process subprocess probes
+# are the plan's own named P0: the hook runs as a fresh interpreter per
+# Bash call, so in-process main() calls cannot prove persistence.
+#
+# Frozen-literal pins below are embedded MECHANICALLY (ast.literal_eval of
+# the 18aea673 blob for tier 1, of the module source for the valve text) —
+# never hand-transcribed: the strings carry an em-dash, where char-count
+# and byte-count diverge.
+# ---------------------------------------------------------------------------
+
+# The historical advisory, byte-identical (245 chars, verified against the
+# 18aea673 blob). Tier 1 is FROZEN by the plan; drift here must redden.
+_FROZEN_TIER1 = (
+    "Passive waiting is the protocol — end the turn with no tool call; "
+    "teammate messages arrive as their own turns. A bare true/sleep filler "
+    "call manufactures the next turn without producing new information; "
+    "compose it with real work or end the turn."
+)
+
+# The valve payload, verbatim (wording is CODE-owned; the pin is
+# deliberate — this text IS the loop-breaking mechanism, so a wording
+# edit must be a conscious pin update, never a silent drift).
+_VALVE_PAYLOAD_TEMPLATE = (
+    "CIRCUIT-BREAKER: this no-op filler call was allowed as your "
+    "sanctioned terminal wait — it produced no new information, and "
+    "nothing will come of it. Your turn ends NOW: do not call any tool "
+    "again this turn. Teammate messages arrive as their own turns. "
+    "(Circuit-breaker budget remaining: {budget}.)"
+)
+
+
+def test_tier1_is_frozen_byte_identical_to_history():
+    """P0 tier-1 freeze: _DENY_REASON equals the 18aea673 blob's constant
+    byte-for-byte. The existing P2 anchor checks a substring; this pin is
+    the full-string contract — the half of the behavior that must NOT
+    change while everything around it escalates."""
+    import wait_filler_gate
+
+    assert wait_filler_gate._DENY_REASON == _FROZEN_TIER1, (
+        "tier-1 denial text drifted from the frozen historical advisory"
+    )
+
+
+def test_tier3_renders_count_and_total_distinctly(tmp_path, monkeypatch, capsys):
+    """P0 rendered count: tier 3 renders BOTH numbers, and they are the
+    per-command count and the session total respectively — count and total
+    are made DISTINCT (a shared counter would render the same number
+    twice and this arm would pass on the wrong arithmetic)."""
+    # command A twice (total 2, A count 2 -> tier 2)
+    # command B twice (total 4, B count 2 -> tier 2)
+    # command B again (total 5, B count 3 -> tier 3)
+    _drive(["sleep 30", "sleep 30", "sleep 31", "sleep 31"], tmp_path,
+           monkeypatch, capsys)
+    _code, payload, _err = _invoke(
+        _gradient_frame("sleep 31"), capsys
+    )
+    reason = _deny_reason(payload)
+    assert "denied 3 times this session" in reason
+    assert "(5 filler calls in total)" in reason
+
+
+def test_tier2_tier3_keep_channel_discipline(tmp_path, monkeypatch, capsys):
+    """P3 extended to the escalating tiers: the deny payload at tier 2 and
+    tier 3 still carries ONLY the hookSpecificOutput key — escalation adds
+    text inside the envelope, never sibling channels."""
+    results = _drive(["sleep 30"] * 3, tmp_path, monkeypatch, capsys)
+    for tier, (_c, payload, _e) in zip((1, 2, 3), results):
+        assert set(payload.keys()) == {"hookSpecificOutput"}, tier
+
+
+def test_verdict_invariance_through_deep_escalation(
+    tmp_path, monkeypatch, capsys
+):
+    """P0 verdict invariance: a NON-instant filler is denied on every one
+    of 8 consecutive attempts — escalation changes text, never the
+    verdict. Only the bounded valve (instant form, tier 3, budget) may
+    exit 0, and this command can never reach it."""
+    results = _drive(["sleep 30"] * 8, tmp_path, monkeypatch, capsys)
+    assert [c for c, _p, _e in results] == [2] * 8
+    for payload in (p for _c, p, _e in results):
+        envelope = payload["hookSpecificOutput"]
+        assert envelope["permissionDecision"] == "deny"
+
+
+def test_valve_payload_is_pinned_verbatim(tmp_path, monkeypatch, capsys):
+    """P0 valve payload pin: the circuit-breaker text, full-string, with
+    the live budget rendered — this text is the mechanism the plan says
+    must be pinned, not just its 'CIRCUIT-BREAKER' head."""
+    results = _drive(["true"] * 3, tmp_path, monkeypatch, capsys)
+    code, payload, _err = results[2]
+    assert code == 0
+    envelope = payload["hookSpecificOutput"]
+    assert envelope["additionalContext"] == _VALVE_PAYLOAD_TEMPLATE.format(
+        budget=1
+    )
+    # envelope shape: advisory-style allow, no deny keys
+    assert "permissionDecision" not in envelope
+
+
+def test_exhausted_budget_persists_and_post_valve_count_never_regresses(
+    tmp_path, monkeypatch, capsys
+):
+    """Budget exhaustion persists in the state file (valve_budget 0), and
+    the count keeps climbing through valve allows, so the re-fire after
+    exhaustion lands at tier 3 with the THROUGH-valve count rendered —
+    never regresses to tier 2."""
+    results = _drive(["true"] * 5, tmp_path, monkeypatch, capsys)
+    assert [c for c, _p, _e in results] == [2, 2, 0, 0, 2]
+    state = json.loads(_state_path(tmp_path).read_text(encoding="utf-8"))
+    assert state[""]["valve_budget"] == 0
+    _code, payload, _err = _invoke(_gradient_frame("true"), capsys)
+    reason = _deny_reason(payload)
+    assert "FILLER-LOCK" in reason
+    assert "denied 6 times this session (6 filler calls in total)" in reason
+
+
+def test_sessions_are_isolated_by_session_id(tmp_path, monkeypatch, capsys):
+    """One file per session_id: counters in s-iso-1 and s-iso-2 never
+    share a count."""
+    import wait_filler_gate
+
+    _drive(["true", "true"], tmp_path, monkeypatch, capsys,
+           session_id="s-iso-1")
+    code, payload, _err = _invoke(
+        _gradient_frame("true", session_id="s-iso-2"), capsys
+    )
+    assert code == 2
+    assert _deny_reason(payload) == wait_filler_gate._DENY_REASON  # tier 1
+    for sid in ("s-iso-1", "s-iso-2"):
+        assert _state_path(tmp_path, sid).exists()
+
+
+def test_normalized_forms_share_one_counter(tmp_path, monkeypatch, capsys):
+    """Command-keying is on the POST-NORMALIZATION command: whitespace
+    decoration, a wrapper prefix and an env-assignment prefix of the same
+    filler increment ONE count (they are one content address). Uses a
+    non-instant filler so tier 3 is a FILLER-LOCK deny, not a valve."""
+    import wait_filler_gate
+
+    results = _drive(
+        ["sleep 30", "   sleep 30   ", "command sleep 30"],
+        tmp_path, monkeypatch, capsys,
+    )
+    reasons = [_deny_reason(p) for _c, p, _e in results]
+    assert reasons[0] == wait_filler_gate._DENY_REASON  # count 1
+    assert "denied 2 times this session" in reasons[1]
+    assert "FILLER-LOCK" in reasons[2]  # count 3 -> tier 3
+
+
+def test_instant_predicate_derives_from_normalized_string(
+    tmp_path, monkeypatch, capsys
+):
+    """V1's derivation pin: the instant-form test sees the SAME normalized
+    string that produced the verdict — a decorated instant filler
+    (env-assignment or wrapper prefix) is valve-eligible, not just the
+    bare spelling."""
+    for decorated in ("FOO=1 sleep 0", "builtin true"):
+        results = _drive([decorated] * 3, tmp_path, monkeypatch, capsys)
+        assert [c for c, _p, _e in results] == [2, 2, 0], decorated
+
+
+def test_saturation_boundary_armed_both_sides(tmp_path, monkeypatch, capsys):
+    """O5 both sides: totals 1..6 carry no boost (a re-fire at total 6 is
+    still plain tier 2), and the attempt that takes the total PAST 6 gets
+    the boost — pinned on a RE-FIRE (count 2 + boost -> tier 3), which the
+    fresh-command arm above does not cover."""
+    # 5 distinct fresh commands: totals 1..5, all tier 1
+    _drive([f"sleep {n}" for n in range(50, 55)], tmp_path, monkeypatch,
+           capsys)
+    # 6th attempt: re-fire of sleep 50 -> count 2, total 6, no boost
+    _code, payload, _err = _invoke(_gradient_frame("sleep 50"), capsys)
+    assert "denied 2 times this session" in _deny_reason(payload)
+    assert "FILLER-LOCK" not in _deny_reason(payload)
+    # 7th attempt: fresh sleep 55 -> count 1 + boost -> tier 2
+    _code, payload, _err = _invoke(_gradient_frame("sleep 55"), capsys)
+    assert "denied 1 times this session" in _deny_reason(payload)
+    # 8th attempt: re-fire of sleep 50 -> count 3 + boost -> tier 3
+    _code, payload, _err = _invoke(_gradient_frame("sleep 50"), capsys)
+    assert "FILLER-LOCK" in _deny_reason(payload)
+
+
+def test_corrupt_budget_denies_tier1_with_valve_closed(
+    tmp_path, monkeypatch, capsys
+):
+    """V2 arm: well-formed JSON whose valve_budget is not an int is
+    UNKNOWN = DENY at the frozen tier 1, file untouched (no rewrite on
+    the degrade path)."""
+    import wait_filler_gate
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    state = _state_path(tmp_path)
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(
+        json.dumps({"": {"pairs": {}, "total": 9, "valve_budget": "two"}}),
+        encoding="utf-8",
+    )
+    # 'true' three times: with total 9 every attempt would be tier 3 and
+    # valve-eligible were the budget readable — it is not, so all deny
+    # at tier 1.
+    for _ in range(3):
+        code, payload, _err = _invoke(_gradient_frame("true"), capsys)
+        assert code == 2
+        assert _deny_reason(payload) == wait_filler_gate._DENY_REASON
+    assert json.loads(state.read_text(encoding="utf-8"))[""]["valve_budget"] == "two"
+
+
+def test_state_raise_degrades_tier1_with_stderr_note(
+    tmp_path, monkeypatch, capsys
+):
+    """The _escalate catch-all itself: a locked_update that RAISES
+    (sidecar-lock timeout, containment refusal) — not one that returns
+    None — degrades to the frozen tier-1 deny with a stderr note, valve
+    closed. Distinct from the loader-None and corrupt-file arms, which
+    take explicit returns."""
+    import wait_filler_gate
+
+    def _raising_update(_path, _apply, _root, timeout=None):
+        raise TimeoutError("sidecar lock held past timeout")
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        wait_filler_gate, "_load_locked_update", lambda: _raising_update
+    )
+    for _ in range(3):  # instant form that would be tier 3 valve-eligible
+        code, payload, err = _invoke(_gradient_frame("true"), capsys)
+        assert code == 2
+        assert _deny_reason(payload) == wait_filler_gate._DENY_REASON
+        assert "filler-state error" in err
+    assert not _state_path(tmp_path).exists()
+
+
+def test_growth_caps_degrade_without_persisting(tmp_path, monkeypatch, capsys):
+    """Unbounded-growth guards: a section at the 64-pair cap (fresh key)
+    and a file at the 32-section cap (fresh agent) degrade to the
+    stateless tier-1 deny and leave the file byte-untouched."""
+    import wait_filler_gate
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    state = _state_path(tmp_path)
+    state.parent.mkdir(parents=True, exist_ok=True)
+
+    capped_pairs = {"": {
+        "pairs": {f"k{n:02x}": 1 for n in range(64)},
+        "total": 64, "valve_budget": 2,
+    }}
+    state.write_text(json.dumps(capped_pairs), encoding="utf-8")
+    frozen = state.read_text(encoding="utf-8")
+    code, payload, _err = _invoke(_gradient_frame("sleep 30"), capsys)
+    assert code == 2
+    assert _deny_reason(payload) == wait_filler_gate._DENY_REASON
+    assert state.read_text(encoding="utf-8") == frozen
+
+    capped_sections = {f"agent{n:02x}": {
+        "pairs": {}, "total": 1, "valve_budget": 2,
+    } for n in range(32)}
+    state.write_text(json.dumps(capped_sections), encoding="utf-8")
+    frozen = state.read_text(encoding="utf-8")
+    code, payload, _err = _invoke(
+        _gradient_frame("sleep 30", agent_type="pact-test-engineer"), capsys
+    )
+    assert code == 2
+    assert _deny_reason(payload) == wait_filler_gate._DENY_REASON
+    assert state.read_text(encoding="utf-8") == frozen
+
+
+def test_unset_config_env_degrades_stateless_tier1(
+    tmp_path, monkeypatch, capsys
+):
+    """O4: with CLAUDE_CONFIG_DIR unset (the conftest autouse scrub leaves
+    it unset; this arm deliberately does not set it), a session_id-bearing
+    filler denial is today's tier-1 deny — permanently, no gradient — and
+    NOTHING is written under the (redirected) home root. Documented,
+    bounded degradation; dogfood-probe material, not a bug."""
+    import wait_filler_gate
+
+    for _ in range(3):
+        code, payload, _err = _invoke(
+            _gradient_frame("sleep 30", session_id="s-o4"), capsys
+        )
+        assert code == 2
+        assert _deny_reason(payload) == wait_filler_gate._DENY_REASON
+    assert not (Path.home() / "pact-filler-state").exists()
+    assert not (tmp_path / "pact-filler-state").exists()
+
+
+def test_allow_fast_path_emits_identical_bytes(capsys):
+    """O2: the allow fast-path's EMITTED output is byte-identical to the
+    pre-gradient hook (not merely source-level 'unchanged' — comments
+    moved in the branch, the bytes on stdout must not). Plain non-filler
+    command, no agent_type: exactly the historical allow line on stdout,
+    nothing on stderr, exit 0."""
+    from wait_filler_gate import main
+
+    with patch("sys.stdin", io.StringIO(_bash_payload("git status"))):
+        with pytest.raises(SystemExit) as exc:
+            main()
+    captured = capsys.readouterr()
+    assert exc.value.code == 0
+    # print()'s trailing newline is part of the emitted bytes — the
+    # pre-gradient hook printed the same constant the same way.
+    assert captured.out == '{"suppressOutput": true}\n'
+    assert captured.err == ""
+
+
+def test_docstring_carries_no_raw_tabs():
+    """O1: the pattern documentation keeps `\\t` as the two-character
+    escape (visible in any viewer), not a raw tab byte — the cosmetic
+    normalization the audit observed, pinned so it cannot drift back."""
+    import wait_filler_gate
+
+    assert "\t" not in (wait_filler_gate.__doc__ or "")
+
+
+# ---------------------------------------------------------------------------
+# Cross-process subprocess probes — the plan's named P0. The hook runs as
+# a FRESH interpreter for every Bash call; only these arms prove the
+# gradient, valve and budget live on disk, not in process memory.
+# ---------------------------------------------------------------------------
+
+
+def _run_hook_script(frame: dict) -> "tuple[int, str, str]":
+    """Run the hook as a script in a fresh interpreter. Returns
+    (exit_code, stdout, stderr). CLAUDE_CONFIG_DIR is inherited from the
+    test process (monkeypatch-scoped, so hermetic per arm)."""
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [sys.executable, str(HOOK_PATH)],
+        input=json.dumps(frame),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def _probe_reason(stdout: str) -> str:
+    payload = json.loads(stdout)
+    return payload["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_cross_process_gradient_persists(tmp_path, monkeypatch):
+    """P0 subprocess probe: three separate interpreters, same session —
+    tier 1, tier 2, tier 3 in order. In-process state would leave every
+    invocation at tier 1; only on-disk state produces this sequence."""
+    import wait_filler_gate
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    reasons = []
+    for _ in range(3):
+        code, out, _err = _run_hook_script(
+            json.loads(_gradient_frame("sleep 30"))
+        )
+        assert code == 2
+        reasons.append(_probe_reason(out))
+    assert reasons[0] == wait_filler_gate._DENY_REASON
+    assert "denied 2 times this session" in reasons[1]
+    assert "FILLER-LOCK" in reasons[2]
+
+
+def test_cross_process_valve_budget_survives(tmp_path, monkeypatch):
+    """P0 subprocess probe: five separate interpreters fire the valve
+    exactly twice (attempts 3 and 4), and the exhaustion persists — the
+    6th interpreter's instant form is denied at tier 3 with the budget
+    rendered at 0 on the last allow."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    codes, allows = [], []
+    for _ in range(5):
+        code, out, _err = _run_hook_script(json.loads(_gradient_frame("true")))
+        codes.append(code)
+        if code == 0:
+            allows.append(
+                json.loads(out)["hookSpecificOutput"]["additionalContext"]
+            )
+    assert codes == [2, 2, 0, 0, 2]
+    assert "remaining: 1" in allows[0]
+    assert "remaining: 0" in allows[1]
+    code, out, _err = _run_hook_script(json.loads(_gradient_frame("true")))
+    assert code == 2
+    assert "FILLER-LOCK" in _probe_reason(out)
+
+
+def test_concurrent_updates_lose_nothing(tmp_path, monkeypatch):
+    """P1 concurrency: two hook processes racing on one state file. The
+    sidecar lock must serialize the read-modify-write so no increment is
+    lost — distinct commands both count (total 2), and the same command
+    raced lands on count 2, not the last-writer's 1."""
+    import subprocess
+    import sys
+
+    import wait_filler_gate
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+
+    def _spawn(command):
+        return subprocess.Popen(
+            [sys.executable, str(HOOK_PATH)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    def _frame(command):
+        return json.dumps(json.loads(_gradient_frame(command)))
+
+    # distinct commands, concurrent
+    procs = [_spawn("sleep 30"), _spawn("sleep 31")]
+    for proc, command in zip(procs, ("sleep 30", "sleep 31")):
+        proc.communicate(input=_frame(command), timeout=30)
+    state = json.loads(_state_path(tmp_path).read_text(encoding="utf-8"))
+    assert state[""]["total"] == 2
+    assert sorted(state[""]["pairs"].values()) == [1, 1]
+
+    # same command, concurrent: the sidecar lock serializes both
+    # increments onto the phase-1 count (1 -> 3, not a last-writer 1 or 2)
+    procs = [_spawn("sleep 30"), _spawn("sleep 30")]
+    for proc in procs:
+        proc.communicate(input=_frame("sleep 30"), timeout=30)
+    state = json.loads(_state_path(tmp_path).read_text(encoding="utf-8"))
+    assert state[""]["total"] == 4
+    assert state[""]["pairs"][
+        wait_filler_gate._pair_key("sleep 30")
+    ] == 3
+    assert state[""]["pairs"][
+        wait_filler_gate._pair_key("sleep 31")
+    ] == 1
+
+
+def test_cross_process_reaper_sees_probe_state(tmp_path, monkeypatch):
+    """Integration close-out: state the probe wrote is exactly what
+    cleanup_old_filler_state reaps — the writer and the reaper share the
+    env-resolved root and the per-sid file naming."""
+    import os
+    import time
+
+    import session_end
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    _run_hook_script(json.loads(_gradient_frame("sleep 30")))
+    state = _state_path(tmp_path)
+    assert state.exists()
+    stale = time.time() - 31 * 86400
+    os.utime(state, (stale, stale))
+    reaped, _skipped = session_end.cleanup_old_filler_state()
+    assert reaped == 1
+    assert not state.exists()
