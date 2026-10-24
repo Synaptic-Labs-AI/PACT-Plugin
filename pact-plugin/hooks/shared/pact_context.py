@@ -112,6 +112,9 @@ _EMPTY_CONTEXT = {
     # non-TTY harness — remote/cloud or Desktop). MONOTONIC by contract: writers
     # may only SET it, never clear or change it; nothing gates on it in v1.
     "harness": "",
+    # Lead's SendMessage address (#1666 item 1): "team-lead" locally, "main" in
+    # a cloud session. "" = not recorded; readers fall back to the env value.
+    "lead_address": "",
 }
 
 # Read-boundary path-safety guard for team_name. The persisted value is minted
@@ -369,7 +372,8 @@ def get_pact_context() -> dict:
     """
     Read session context from the context file.
 
-    Returns dict with keys: team_name, session_id, project_dir, plugin_root, started_at.
+    Returns dict with keys: team_name, session_id, project_dir, plugin_root,
+    started_at, process_key, lead_address (allowlisted; "" when not recorded).
     All values are strings. Returns empty strings for all keys on any error
     (file missing, malformed JSON, permission denied). A missing file is the
     normal state of a session with no PACT context (a plain session, or a
@@ -420,6 +424,9 @@ def get_pact_context() -> dict:
             "plugin_root": str(data.get("plugin_root", "")),
             "started_at": str(data.get("started_at", "")),
             "process_key": str(data.get("process_key", "")),
+            # Allowlisted at the read boundary: anything outside
+            # LEAD_ADDRESSES (tampered, older file without the key) reads "".
+            "lead_address": _valid_lead_address(data.get("lead_address")),
         }
         return _cache
     except FileNotFoundError:
@@ -1657,7 +1664,10 @@ def generate_team_name(input_data: dict) -> str:
     # all — the platform owns teardown of its own session-* namespace, so
     # this prefix change cannot expose the live team dir to reaping. The
     # [a-f0-9-] charset constraint is retained because the tasks skip-set's
-    # allowlist still relies on it.
+    # allowlist still relies on it. Exception: in a cloud session
+    # `cloud_team_default` passes the platform's full session id as the
+    # resolver *default*; that id is adopted, not minted, and satisfies the
+    # same `[a-f0-9-]` charset.
     raw_id = input_data.get("session_id")
     session_id = str(raw_id) if raw_id else ""
     if session_id:
@@ -1665,6 +1675,57 @@ def generate_team_name(input_data: dict) -> str:
     else:
         suffix = secrets.token_hex(4)
     return f"session-{suffix}"
+
+
+# Cloud harness signal (#1666). The ONLY env read of CLAUDE_CODE_REMOTE in
+# PACT; see docs/architecture/session-start-lead-address.md §4 for the
+# re-opened #1662 ruling and its scope (team default + lead address only;
+# never a harness-stamp input). Absent/other value -> local behaviour.
+CLOUD_SESSION_ENV = "CLAUDE_CODE_REMOTE"
+LEAD_ADDRESS_LOCAL = "team-lead"
+LEAD_ADDRESS_CLOUD = "main"
+LEAD_ADDRESSES = frozenset({LEAD_ADDRESS_LOCAL, LEAD_ADDRESS_CLOUD})
+_FULL_SESSION_ID_RE = re.compile(r"[a-f0-9-]+")
+
+
+def is_cloud_session() -> bool:
+    """True iff this process runs in a cloud session (CLAUDE_CODE_REMOTE=true)."""
+    return os.environ.get(CLOUD_SESSION_ENV, "").strip().lower() == "true"
+
+
+def cloud_team_default(session_id: str) -> str | None:
+    """The resolver default for a cloud session: the full session id, which
+    the platform uses as the team name there. None when not cloud, or when
+    the id is not a safe single [a-f0-9-] path component (caller falls back to
+    generate_team_name)."""
+    if not is_cloud_session():
+        return None
+    sid = str(session_id or "")
+    if (
+        sid
+        and not _is_unknown_or_missing_session(sid)
+        and _FULL_SESSION_ID_RE.fullmatch(sid)
+        and is_safe_path_component(sid)
+    ):
+        return sid
+    return None
+
+
+def resolve_lead_address() -> str:
+    """The lead's SendMessage address for this harness, from the environment."""
+    return LEAD_ADDRESS_CLOUD if is_cloud_session() else LEAD_ADDRESS_LOCAL
+
+
+def _valid_lead_address(value: object) -> str:
+    """Read-boundary allowlist: an allowlisted value, else ""."""
+    return value if isinstance(value, str) and value in LEAD_ADDRESSES else ""
+
+
+def get_lead_address() -> str:
+    """Recorded lead address for this session; when none is recorded (or the
+    recorded value is not allowlisted), the environment-derived value. Never
+    returns anything outside LEAD_ADDRESSES."""
+    return get_pact_context().get("lead_address") or resolve_lead_address()
 
 
 def _is_unknown_or_missing_session(raw_id: object) -> bool:
@@ -2145,6 +2206,7 @@ def build_context_cache(
     started_at: str | None = None,
     process_key: str | None = None,
     harness: str = "",
+    lead_address: str | None = None,
 ) -> tuple[Path, dict] | None:
     """Build the session context dict + path and populate the in-process cache.
 
@@ -2187,6 +2249,11 @@ def build_context_cache(
             value already recorded for this session wins over a fresh "" read
             (set_harness_stamp owns same-value idempotence; this parameter
             only threads the value through the cache/persist seam).
+        lead_address: The lead's SendMessage address ("team-lead" / "main").
+            An allowlisted value is recorded as given (session_init recomputes
+            it every SessionStart). None (every write_context rewriter) keeps
+            the value recorded for THIS session, else derives it from the
+            environment. NOT monotonic, unlike ``harness``.
 
     Returns:
         ``(target, context)`` on success, or ``None`` if the path is uncomputable.
@@ -2201,6 +2268,7 @@ def build_context_cache(
         "started_at": started_at or datetime.now(timezone.utc).isoformat(),
         "process_key": "",
         "harness": harness if isinstance(harness, str) else "",
+        "lead_address": "",
     }
 
     # Use _context_path if already set (from init() or test fixture),
@@ -2249,6 +2317,21 @@ def build_context_cache(
         except (OSError, ValueError, TypeError, AttributeError):
             pass
     context["harness"] = harness if isinstance(harness, str) else ""
+
+    # LEAD ADDRESS (#1666 item 1). An allowlisted value from the caller wins
+    # (session_init recomputes it every SessionStart). None -- every
+    # write_context rewriter -- keeps the value recorded for THIS session, and
+    # with nothing valid recorded (the healer's absent file) derives it from
+    # the environment, so a rewrite never blanks it.
+    resolved_address = _valid_lead_address(lead_address)
+    if not resolved_address:
+        try:
+            recorded = json.loads(target.read_text(encoding="utf-8"))
+            if recorded.get("session_id") == session_id:
+                resolved_address = _valid_lead_address(recorded.get("lead_address"))
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+    context["lead_address"] = resolved_address or resolve_lead_address()
 
     # Populate the in-process cache UNCONDITIONALLY (Option A). The cache is the
     # process's own working truth; disk persistence is an independent side-effect.
@@ -2573,8 +2656,8 @@ def heal_context_if_missing(input_data: dict) -> bool:
          mirrors session_init's session_id_was_missing persist gate
 
     Heal = write_context(_resolve_aligned_team_name(str(raw_id),
-    default=generate_team_name(input_data)), str(raw_id), CLAUDE_PROJECT_DIR,
-    CLAUDE_PLUGIN_ROOT) — the existing build+cache+persist seam: atomic write
+    default=cloud_team_default(str(raw_id)) or generate_team_name(input_data)),
+    str(raw_id), CLAUDE_PROJECT_DIR, CLAUDE_PLUGIN_ROOT) — the existing build+cache+persist seam: atomic write
     (mkstemp+rename), 0o600, and build_context_cache resets _cache so THIS
     process's subsequent get_team_name()/get_session_dir() calls see the
     healed values.
@@ -2625,9 +2708,12 @@ def heal_context_if_missing(input_data: dict) -> bool:
         # the heal path. Thread the computed name as the resolver default so a
         # cold heal (real dir not yet present) still writes a valid computed
         # name, while a gate-time heal (real dir present) writes the aligned
-        # name and converges the context in one prompt.
+        # name and converges the context in one prompt. In a cloud session
+        # the default is the full session id (#1666 item 2), the same helper
+        # session_init's startup default uses.
         aligned_team = _resolve_aligned_team_name(
-            str(raw_id), default=generate_team_name(input_data)
+            str(raw_id),
+            default=cloud_team_default(str(raw_id)) or generate_team_name(input_data),
         )
         write_context(
             aligned_team,

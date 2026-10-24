@@ -320,6 +320,11 @@ class TestWriterOneTranscript:
     def test_empty_context_schema_has_harness_key(self):
         assert pact_context._EMPTY_CONTEXT["harness"] == ""
 
+    def test_empty_context_schema_has_lead_address_key(self):
+        # Sibling key (#1666 item 1): "" = not recorded; readers fall back
+        # to the environment-derived address.
+        assert pact_context._EMPTY_CONTEXT["lead_address"] == ""
+
     def test_build_context_cache_threads_harness(self, tmp_path, monkeypatch):
         monkeypatch.setattr(pact_context, "_context_path", None)
         result = pact_context.build_context_cache(

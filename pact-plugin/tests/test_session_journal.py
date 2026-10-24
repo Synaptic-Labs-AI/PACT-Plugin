@@ -4269,6 +4269,7 @@ class TestValidateOptionalFieldTypes:
             "source": str,
             "prev_session_dir": str,
             "entrypoint": str,
+            "lead_address": str,
         }
         base = {"session_id": "s", "project_dir": "/tmp/proj"}
         assert _validate_event_schema(make_event(
@@ -4279,6 +4280,11 @@ class TestValidateOptionalFieldTypes:
             "session_start", entrypoint="remote", **base))[0]
         assert not _validate_event_schema(make_event(
             "session_start", entrypoint=42, **base))[0]
+        # `lead_address`: the in-hook reading of the cloud signal (#1666).
+        assert _validate_event_schema(make_event(
+            "session_start", lead_address="main", **base))[0]
+        assert not _validate_event_schema(make_event(
+            "session_start", lead_address=["main"], **base))[0]
 
     def test_compaction_attributed_latency_declared_optional(self):
         """compaction_attributed has `latency_s: float`, the seconds from staging

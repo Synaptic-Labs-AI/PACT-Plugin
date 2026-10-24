@@ -134,6 +134,14 @@ current build. Either answer is recorded; NEVER promote the env var to a
 stamp input on the strength of a single observation without the architect and
 lead re-opening the design.
 
+*Amendment (#1666).* The architect and lead re-opened this ruling for
+`CLAUDE_CODE_REMOTE` ONLY (`docs/architecture/session-start-lead-address.md`
+§4, and the PR that shipped it). Scope: it is read solely through
+`pact_context.is_cloud_session()`, for the cloud team-name resolver *default*
+and the recorded `lead_address`. It is still NOT a harness-stamp input, and
+`CLAUDE_CODE_ENTRYPOINT` stays excluded. Absent, or any value other than
+`true`, gives the pre-#1666 behaviour. §2.10 is its measurement.
+
 **§2.8 CLAUDE.md write-back skip-conditions (architect risk (i)).** Check
 whether the project CLAUDE.md `Current Session` block was written during the
 cloud session. If `CLAUDE_PROJECT_DIR` is unset in the cloud hook env, or no
@@ -149,6 +157,23 @@ registry names the lead — e.g. the Task A dispatch landing before
 produces it, record `main-fallback: NOT-EXERCISED` with the timing observed
 in the run row; do not manufacture unreachability by other means (renaming,
 deregistering, or editing team state to force the fallback).
+
+**§2.10 CLAUDE_CODE_REMOTE at cloud SessionStart (#1666 items 1 and 2).** The
+user starts a FRESH cloud session (`source=startup`) with the plugin loaded
+from the branch under test, then reads three things:
+  1. the session journal's `session_start` event with `source: startup` —
+     its `lead_address` and `team` fields;
+  2. `pact-session-context.json` — its `team_name` and `lead_address`;
+  3. the first-turn SessionStart directive — the
+     ``Use `<value>` wherever {lead_address} appears`` sentence.
+On a startup fire nothing is carried, so the journal field is a direct reading
+of `is_cloud_session()` inside the SessionStart hook process. Record one of:
+  - `remote-visible` — `lead_address: "main"` and `team` equal to the full
+    session id on the startup event (items 1 and 2 are live in the cloud);
+  - `remote-absent` — `lead_address: "team-lead"` and `team: session-<id8>`.
+    The code is still correct (fail-safe to today's behaviour), but items 1
+    and 2 do nothing in the cloud: record it as a #1666 finding, not a revert
+    trigger.
 
 ## §3 Desktop arm / #1019 close-out
 

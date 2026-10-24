@@ -48,7 +48,13 @@ from shared.claude_md_manager import (
 )
 from shared.failure_cause import failure_cause
 from shared.handoff_schema import resolve_handoff_field
-from shared.pact_context import _build_session_path, get_session_dir, project_slug
+from shared.pact_context import (
+    LEAD_ADDRESS_LOCAL,
+    LEAD_ADDRESSES,
+    _build_session_path,
+    get_session_dir,
+    project_slug,
+)
 from shared.paths import get_claude_config_dir
 from shared.session_state import is_safe_path_component
 from shared.stale_session import recorded_session_id, session_block_rows
@@ -715,20 +721,33 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
 
 
 def format_session_substitutions(
-    team_name: str, session_dir: str, plugin_root: str
+    team_name: str,
+    session_dir: str,
+    plugin_root: str,
+    lead_address: str = LEAD_ADDRESS_LOCAL,
 ) -> str:
     """The sentence telling the orchestrator which values replace the
-    {team_name}, {session_dir} and {plugin_root} placeholders in commands.
+    {team_name}, {session_dir}, {plugin_root} and {lead_address} placeholders
+    in commands, spawn prompts and task text.
 
     An empty session_dir (no session id on stdin) is named as unavailable
-    rather than substituted.
+    rather than substituted. ``lead_address`` is allowlisted: any value
+    outside LEAD_ADDRESSES is replaced by ``team-lead``, so no file or caller
+    content reaches the LLM-facing sentence except one of two fixed strings.
     """
+    if lead_address not in LEAD_ADDRESSES:
+        lead_address = LEAD_ADDRESS_LOCAL
+    lead_sentence = (
+        f' Use `{lead_address}` wherever {{lead_address}} appears in spawn '
+        f'prompts and task text.'
+    )
     if session_dir:
         return (
             f'Session placeholder variables (substitute before running commands): '
             f'Use the name `{team_name}` wherever {{team_name}} appears in commands. '
             f'Use `{session_dir}` wherever {{session_dir}} appears in commands. '
             f'Use `{plugin_root}` wherever {{plugin_root}} appears in commands.'
+            + lead_sentence
         )
     return (
         f'Session placeholder variables (substitute before running commands): '
@@ -736,6 +755,7 @@ def format_session_substitutions(
         f'Session dir unavailable (session_id missing from stdin) — '
         f'do not run commands that depend on {{session_dir}} until next clean start. '
         f'Use `{plugin_root}` wherever {{plugin_root}} appears in commands.'
+        + lead_sentence
     )
 
 

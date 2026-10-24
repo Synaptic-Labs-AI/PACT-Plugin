@@ -362,6 +362,30 @@ def _scrub_claude_project_dir_env():
 
 
 @pytest.fixture(autouse=True)
+def _scrub_claude_code_remote_env():
+    """Pop + restore ``os.environ['CLAUDE_CODE_REMOTE']`` around every test.
+    Runs for EVERY test (autouse).
+
+    ``CLAUDE_CODE_REMOTE`` is the cloud-harness signal (#1666), read only by
+    ``pact_context.is_cloud_session()``. It flips the startup team-name
+    default from ``session-<id8>`` to the full session id and the recorded
+    lead address from ``team-lead`` to ``main``. A cloud container exports
+    it as ``true``, so without this scrub the suite's local expectations
+    would depend on where it runs. POP at setup, restore the ambient value at
+    teardown — same posture as ``_scrub_claude_project_dir_env``. Tests that
+    exercise the cloud path call ``monkeypatch.setenv("CLAUDE_CODE_REMOTE",
+    "true")``, which overrides the scrub for that test.
+    """
+    _UNSET = object()
+    original = os.environ.pop("CLAUDE_CODE_REMOTE", _UNSET)
+    yield
+    if original is _UNSET:
+        os.environ.pop("CLAUDE_CODE_REMOTE", None)
+    else:
+        os.environ["CLAUDE_CODE_REMOTE"] = original
+
+
+@pytest.fixture(autouse=True)
 def _isolate_claude_md_target(
     # The scrub pops at setup; this fixture sets; the dependency parameter
     # forces pop-then-set: pytest orders the two setups by this edge, so the
