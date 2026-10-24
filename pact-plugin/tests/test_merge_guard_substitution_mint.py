@@ -551,3 +551,85 @@ class TestAnEnvPrefixedLaunchAfterAFileWrite:
         command = PROBE_WRITE + 'P="' + FORCE + 'main"; X=1 python3 probe.py "$P"'
         assert not _runs(None, command)
         assert _runs(_mint_styled(command, style), command)
+
+
+QUOTED_BACKTICK_COMMANDS = {
+    "argument-to-a-python-script": 'python3 x.py "`' + MERGE + '5`"',
+    "argument-to-a-shell-script": './retry.sh "`' + MERGE + '5`"',
+    "argument-to-echo": 'echo "`' + MERGE + '5`"',
+    "second-argument": 'python3 x.py "eval" "`' + MERGE + '5`"',
+    "force-push-to-a-python-script": 'python3 x.py "`' + FORCE + 'feat/x`"',
+    "force-push-to-a-shell-script": './retry.sh "`' + FORCE + 'feat/x`"',
+    "branch-delete-to-a-python-script": 'python3 x.py "`git branch -' + 'D feat/x`"',
+    "branch-delete-to-echo": 'echo "`git branch -' + 'D feat/x`"',
+}
+TWO_QUOTED_BACKTICK_COMMANDS = {
+    "two-merges": 'python3 x.py "`' + MERGE + '5`" "`' + MERGE + '6`"',
+    "merge-and-branch-delete": 'python3 x.py "`' + MERGE + '5`" "`git branch -' + 'D feat/x`"',
+}
+MASKED_READINGS = {
+    "force-backtick-target": (ROWS["force-backtick"],
+                              {"operation_type": "force-push", "bound_flags": [], "target_ref": "_"}),
+    "force-dollar-paren-target": (ROWS["force-dollar-paren"],
+                                  {"operation_type": "force-push", "bound_flags": [], "target_ref": "_"}),
+    "merge-dollar-paren-target": (ROWS["merge-dollar-paren"],
+                                  {"operation_type": "merge", "bound_flags": [], "pr_number": "branch:_"}),
+}
+QUOTED_BACKTICK_RUNS = {
+    "merge-to-a-python-script": (QUOTED_BACKTICK_COMMANDS["argument-to-a-python-script"],
+                                 "✓ Merged pull request #5"),
+    "merge-as-second-argument": (QUOTED_BACKTICK_COMMANDS["second-argument"], "✓ Merged pull request #5"),
+    "force-push-to-a-python-script": ('python3 x.py "`' + FORCE + 'main`"', ""),
+    "branch-delete-to-a-python-script": (QUOTED_BACKTICK_COMMANDS["branch-delete-to-a-python-script"],
+                                         "Deleted branch feat/x (was abc1234)."),
+}
+
+
+class TestAGuardedCommandThatIsTheSubstitutionRuns:
+    """The guarded command is the backtick substitution itself, so masking the
+    substitution leaves nothing to read; the classifier's reading of the command
+    binds it instead."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("command", QUOTED_BACKTICK_COMMANDS.values(), ids=QUOTED_BACKTICK_COMMANDS.keys())
+    def test_the_approved_command_is_refused_then_runs(self, command, style):
+        assert not _runs(None, command)
+        assert _runs(_mint_styled(command, style), command)
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("command", TWO_QUOTED_BACKTICK_COMMANDS.values(),
+                             ids=TWO_QUOTED_BACKTICK_COMMANDS.keys())
+    def test_two_guarded_substitutions_mint_nothing(self, command, style):
+        assert not _runs(None, command)
+        assert _mint_styled(command, style) is None
+
+    @pytest.mark.parametrize("command,reading", MASKED_READINGS.values(), ids=MASKED_READINGS.keys())
+    def test_a_command_masking_reads_keeps_its_masked_reading(self, command, reading):
+        assert _exact_text_reading(command, f"`{command}`") == reading
+
+
+class TestAGuardedCommandThatIsTheSubstitutionRunsOnce:
+    """Through the real hooks, in each approval style: refused, then minted, run
+    once, and retired by the successful run; an unrelated merge stays refused."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("command,stdout", QUOTED_BACKTICK_RUNS.values(), ids=QUOTED_BACKTICK_RUNS.keys())
+    def test_the_approval_runs_the_command_once(self, command, stdout, style, tmp_path):
+        rig = TestAnApprovalWithNoSuccessSignalRunsOnce()
+        (tmp_path / ".claude").mkdir()
+        assert not rig._runs(command, tmp_path)
+        q = [{"question": "Run this?", "header": "Run", "multiSelect": False,
+              "options": [{"label": "Yes, run", "description": style(command)},
+                          {"label": "No", "description": "Hold."}]}]
+        post = rig._hook("merge_guard_post.py", {
+            "hook_event_name": "PostToolUse", "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": q}, "tool_response": {"answers": {"Run this?": "Yes, run"}},
+        }, tmp_path)
+        assert "token written" in post.stderr, post.stderr
+        assert rig._runs(command, tmp_path)
+        assert not rig._runs(MERGE + "777", tmp_path)
+        rig._hook("merge_guard_post.py", {
+            "hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": command},
+            "tool_response": {"stdout": stdout, "stderr": "", "interrupted": False},
+        }, tmp_path)
+        assert not rig._runs(command, tmp_path)

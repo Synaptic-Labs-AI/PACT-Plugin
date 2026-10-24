@@ -614,6 +614,18 @@ def _mask_substitutions(text: str) -> str | None:
     return None if "$(" in text or "`" in text else text
 
 
+def _guarded_substitution_count(text: str) -> int:
+    """How many command substitutions in `text` hold a guarded command, innermost
+    first, the way _mask_substitutions walks them."""
+    count, previous = 0, None
+    while previous != text:
+        previous = text
+        count += sum(is_dangerous_command(m.group(1) or m.group(2) or "")
+                     for m in re.finditer(r"\$\(([^()]*)\)|`([^`]*)`", text))
+        text = re.sub(r"\$\([^()]*\)|`[^`]*`", "_", text)
+    return count
+
+
 def _exact_text_reading(span: str, located: str) -> dict | None:
     """The (op, target, flags) of a backticked command the region reading cannot
     bind, read the way the pre-hook reads it; None when the region reading binds
@@ -666,6 +678,15 @@ def _exact_text_reading(span: str, located: str) -> dict | None:
         body = _mask_substitutions(leg)
         if body is None:
             return None
+        if not extract_command_context(
+            _single_destructive_leg(body) or _single_detectable_leg(body) or body
+        ).get("operation_type"):
+            # The guarded command is the substitution itself (`x.py "`gh pr merge 5`"`):
+            # masking removes it, so the classifier's reading of the command stands.
+            # Two guarded substitutions are two operations, which no approval runs.
+            if _guarded_substitution_count(leg) != 1:
+                return None
+            body = leg
     else:
         inner = shell_c_string(leg)
         if inner is not None:
