@@ -2378,3 +2378,62 @@ def test_set_positional_words_read_by_a_later_command_are_refused_then_run(label
 ], ids=["a-view", "echoed-words", "echoed-merge", "set-e", "set-as-an-echo-word", "another-command"])
 def test_set_positional_words_that_run_nothing_guarded_are_allowed(cmd):
     assert is_dangerous_command(cmd) is False
+
+
+# Legs joined only by `||` run one after another only while each fails, so at most one of
+# them succeeds: the chain is one op, and its approval binds the whole text.
+OR_CHAIN_MERGES = {
+    "method-fallback": "gh pr " + "merge 5 --squash || gh pr " + "merge 5 --rebase",
+    "three-methods": "gh pr " + "merge 5 --squash || gh pr " + "merge 5 --rebase || gh pr " + "merge 5 --merge",
+    "another-pr": "gh pr " + "merge 5 --squash || gh pr " + "merge 6 --squash",
+    "admin-on-one-leg": "gh pr " + "merge 5 --squash --admin || gh pr " + "merge 5 --rebase",
+    "inside-a-branch": "if true; then gh pr " + "merge 5 --squash || gh pr " + "merge 5 --rebase; fi",
+}
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("cmd", OR_CHAIN_MERGES.values(), ids=OR_CHAIN_MERGES.keys())
+def test_an_or_chain_of_merges_is_one_op_that_runs_approved(cmd, style):
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_dangerous_command(cmd) is True
+    assert is_compound_destructive_command(cmd) is False
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+def test_an_or_chain_approval_runs_no_leg_bare(style):
+    from merge_guard_post import _mint_context_from_bundle
+    from merge_guard_pre import _token_matches_command
+
+    approved = OR_CHAIN_MERGES["method-fallback"]
+    q = [{"question": "Run this?", "header": "Run", "multiSelect": False,
+          "options": [{"label": "Yes, run", "description": style(approved)},
+                      {"label": "No", "description": "Hold."}]}]
+    token = {"context": _mint_context_from_bundle(q, {"Run this?": "Yes, run"})[0]}
+    assert _token_matches_command(token, approved)
+    for bare in ("gh pr " + "merge 5 --squash", "gh pr " + "merge 5 --rebase", "gh pr " + "merge 777 --squash"):
+        assert not _token_matches_command(token, bare)
+
+
+@pytest.mark.parametrize("cmd", [
+    "gh pr checks 5 && gh pr " + "merge 5 --squash || gh pr " + "merge 5 --rebase",
+    "gh pr " + "merge 5 --squash || gh pr " + "merge 5 --rebase && gh pr " + "merge 6",
+    "gh pr " + "merge 5 --squash && gh pr " + "merge 6 --squash",
+    "gh pr " + "merge 5 --squash || gh pr " + "merge 6 --squash | tee log",
+], ids=["and-before-the-chain", "and-after-the-chain", "and", "pipe-after-the-chain"])
+def test_merges_joined_by_and_or_a_pipe_stay_compound(cmd):
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_compound_destructive_command(cmd) is True
+
+
+@pytest.mark.parametrize("cmd,count", [
+    ("gh pr " + "merge 5 --squash || gh pr " + "merge 5 --rebase", 2),
+    ("gh pr " + "merge 5 --squash || gh pr " + "merge 5 --rebase || gh pr " + "merge 5 --merge", 3),
+    ("gh pr " + "merge 5 --squash || echo failed", 1),
+], ids=["two-legs", "three-legs", "one-destructive-leg"])
+def test_alternative_destructive_branch_count_reads_or_chains(cmd, count):
+    from shared.merge_guard_common import alternative_destructive_branch_count
+
+    assert alternative_destructive_branch_count(cmd) == count

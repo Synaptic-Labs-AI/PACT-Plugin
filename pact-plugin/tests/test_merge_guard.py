@@ -9618,12 +9618,14 @@ class TestCompoundDestructiveCommandRejection:
             "gh pr merge 100 && gh pr merge 999 --admin"
         ) is True
 
-    def test_compound_double_pipe_still_matches(self):
+    def test_compound_double_pipe_is_one_op(self):
+        # Legs joined only by `||` run one after another only while each fails, so at most
+        # one succeeds; the approval of such a chain binds its whole text.
         from merge_guard_pre import is_compound_destructive_command
 
         assert is_compound_destructive_command(
             "gh pr merge 100 || gh pr merge 999 --admin"
-        ) is True
+        ) is False
 
     def test_compound_semicolon_still_matches(self):
         from merge_guard_pre import is_compound_destructive_command

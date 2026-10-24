@@ -9653,10 +9653,11 @@ def is_compound_destructive_command(command: str) -> bool:
     on_interpreters = sum(1 for leg in destructive if _INTERPRETER_WORD_RE.search(leg))
     interpreted = {normalize_command_text(c) for c in _interpreter_guarded_commands(command, 0)}
     in_shells = sum(_shell_leg_destructive_count(leg) for leg in destructive)
-    # Only one branch of an if/elif/else or one arm of a case runs.
+    # Only one branch of an if/elif/else or one arm of a case runs, and one leg of a
+    # chain joined only by `||` succeeds.
     in_shells -= _alternative_branch_walk(legs, [
         _shell_leg_destructive_count(leg) if leg in destructive else 0 for leg in legs
-    ])[0]
+    ], _leg_operators(command))[0]
     # Commands a substitution runs are counted from its body, as a program's are: legs
     # holding a substitution count as the larger of their own number and the body's.
     on_substitutions = sum(1 for leg in destructive if re.search(r"[$<>]\(|`", leg))
@@ -9698,14 +9699,37 @@ def _varies_with(leg: str, uses: "re.Pattern") -> bool:
 _BRANCH_WORD_RE = re.compile(r"\s*(if|then|elif|else|fi|case|esac)(?![\w-])")
 
 
-def _alternative_branch_walk(legs: list[str], counts: list[int]) -> tuple[int, int]:
-    """Walk the if/elif/else and case groups over per-leg destructive counts. Returns how
-    much more the counts add up to than the commands that can run together (a group runs
-    one branch, so it counts as its largest branch; conditions always run and count in
-    full; nested groups count by the same rule inside their branch), and the most branches
-    of one group that each hold a destructive command. (0, 0) when a group does not close."""
+def _leg_operators(command: str) -> list[str]:
+    """The operator that ends each leg of `command` (`""` after the last), read from the
+    same spans `_split_into_legs` slices."""
+    stripped = _strip_non_executable_content(_normalize_line_continuations(command))
+    spans = _slice_stripped_leg_spans(stripped)
+    return [stripped[end:start] for (_, end), (start, _) in zip(spans, spans[1:])] + [""]
+
+
+def _alternative_branch_walk(legs: list[str], counts: list[int], ops: list[str]) -> tuple[int, int]:
+    """Walk the if/elif/else and case groups and the `||` chains over per-leg destructive
+    counts, `ops` being the operator after each leg. Returns how much more the counts add up
+    to than the commands that can run together (a group runs one branch, so it counts as its
+    largest branch; conditions always run and count in full; nested groups count by the same
+    rule inside their branch; legs joined only by `||` run one after another only while each
+    fails, so the chain counts as its largest leg), and the most branches of one group, or
+    legs of one chain, that each hold a destructive command. (0, 0) when a group does not
+    close."""
     stack: list[dict] = []
     top = widest = 0
+    total, counts = sum(counts), list(counts)
+    i = 0
+    while i < len(legs):
+        j = i
+        while j < len(legs) - 1 and ops[j] == "||":
+            j += 1
+        # An && or a pipe on either side makes the chain's legs run together.
+        if j > i and (i == 0 or ops[i - 1] not in ("&&", "|", "|&")) and ops[j] not in ("&&", "|", "|&"):
+            run = counts[i:j + 1]
+            widest = max(widest, sum(1 for c in run if c))
+            counts[i:j + 1] = [max(run)] + [0] * (j - i)
+        i = j + 1
 
     def step(word: str, n: int, empty: bool) -> None:
         nonlocal top, widest
@@ -9754,19 +9778,20 @@ def _alternative_branch_walk(legs: list[str], counts: list[int]) -> tuple[int, i
         for word in words[:-1]:
             step(word, 0, False)
         step(words[-1] if words else "", n, not leg.strip())
-    return (0, 0) if stack else (sum(counts) - top, widest)
+    return (0, 0) if stack else (total - top, widest)
 
 
 def alternative_destructive_branch_count(command: str) -> int:
-    """The most branches of one if/elif/else or case group in `command` that each run a
-    destructive command: 2 for `if c; then gh pr merge 5; else gh pr merge 6; fi`, 0 when
-    no group has a destructive branch or a group does not close. Each such branch can run
+    """The most branches of one if/elif/else or case group, or legs of one chain joined only
+    by `||`, in `command` that each run a destructive command: 2 for `if c; then gh pr
+    merge 5; else gh pr merge 6; fi` and for `gh pr merge 5 --squash || gh pr merge 5
+    --rebase`, 0 when there is none or a group does not close. Each such branch can run
     on its own, so an approval of the command binds its whole text when this is 2 or more."""
     legs = _split_into_legs(command)
     destructive = _destructive_legs(command, legs)
     return _alternative_branch_walk(legs, [
         _shell_leg_destructive_count(leg) if leg in destructive else 0 for leg in legs
-    ])[1]
+    ], _leg_operators(command))[1]
 
 
 def _destructive_legs(command: str, legs: list[str]) -> list[str]:
