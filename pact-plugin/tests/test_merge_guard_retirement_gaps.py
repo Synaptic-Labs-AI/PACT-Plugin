@@ -240,3 +240,51 @@ class TestAnUnconfirmableTargetRetiresOnItsOwnSuccess:
         _mint(rig, cmd)
         _post(rig, cmd, "Error: Exit code 1")
         assert not _retired(rig)
+
+
+class TestARunThatDidNotDoTheOperationKeepsTheToken:
+    """A dry run and a backgrounded leg exit 0 without doing the operation, so
+    their success retires nothing; the operation run in the foreground still
+    retires on its success, piped or not."""
+
+    @pytest.mark.parametrize("cmd", [
+        "git push --dry-run --force origin feature",
+        "git push -n --force origin feature",
+        "git push -fn origin feature",
+        "git push --force -n origin feature",
+        "git push --force origin feature &",
+        "git push --force origin feature & wait",
+    ])
+    def test_the_token_is_kept(self, rig, cmd):
+        _mint(rig, "git push --force origin feature")
+        _post(rig, cmd, _EMPTY)
+        assert not _retired(rig)
+
+    @pytest.mark.parametrize("cmd", [
+        "bash -c 'git push --force origin feature &'",
+        "bash -c 'git push -fn origin feature'",
+    ])
+    def test_an_exact_command_token_is_kept(self, rig, cmd):
+        from shared.merge_guard_common import normalize_command_text
+
+        assert write_token({"operation_type": "force-push",
+                            "command_text": normalize_command_text(cmd)}, token_dir=rig["config"])
+        _post(rig, cmd, _EMPTY)
+        assert not _retired(rig)
+
+    @pytest.mark.parametrize("cmd", [
+        "git push --force origin feature",
+        "git push --force origin feature 2>&1 | tail -3",
+        "sleep 1 & git push --force origin feature",
+        "git log -n 1 && git push --force origin feature",
+    ])
+    def test_the_operation_itself_still_retires(self, rig, cmd):
+        _mint(rig, "git push --force origin feature")
+        _post(rig, cmd, _EMPTY)
+        assert _retired(rig)
+
+    def test_a_flag_holding_an_n_is_not_a_dry_run(self):
+        from merge_guard_post import _op_did_not_run
+
+        assert not _op_did_not_run("find . -name x -exec sh -c 'gh pr " + "merge 5' \\;")
+        assert _op_did_not_run("git push -qn --force origin feature")

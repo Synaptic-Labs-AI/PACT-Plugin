@@ -1127,7 +1127,30 @@ def _top_level_legs(command: str) -> tuple[list[str], list[str]] | None:
     return legs, seps
 
 
-_DRY_RUN_RE = re.compile(r"(?<!\S)(?:--dry-run|-n)(?!\S)")
+# --dry-run, or -n alone or bundled with git push's other flag-only short options
+# (`-fn`); a word like `-name` is not one.
+_DRY_RUN_RE = re.compile(r"(?<!\S)(?:--dry-run|-[46dfquv]*n[46dfquv]*)(?!\S)")
+
+
+def _op_did_not_run(command: str) -> bool:
+    """Whether a leg that holds the guarded op is a dry run or runs in the
+    background, so the command's success says nothing about the op. A shell's -c
+    string is read the same way."""
+    try:
+        inner = shell_c_string(command)
+        if inner is not None:
+            return _op_did_not_run(inner)
+        split = _top_level_legs(command)
+        if split is None:
+            return False
+        legs, seps = split
+        return any(
+            detect_command_operation_type(leg) is not None
+            and (_DRY_RUN_RE.search(leg) or (k < len(seps) and seps[k] == "&"))
+            for k, leg in enumerate(legs)
+        )
+    except Exception:  # noqa: BLE001 - doubt changes nothing here
+        return False
 
 
 def _run_succeeded_as_the_op(command: str, op_type: str, tool_response: object) -> bool:
@@ -1518,7 +1541,11 @@ def main():
             command = (
                 tool_input.get("command", "") if isinstance(tool_input, dict) else ""
             )
-            if isinstance(command, str) and tool_response.get("interrupted") is not True:
+            if (
+                isinstance(command, str)
+                and tool_response.get("interrupted") is not True
+                and not _op_did_not_run(command)
+            ):
                 _retire_exact_text_token(
                     command, input_data.get("cwd"), stdout_text=tool_response.get("stdout", "")
                 )
@@ -1545,7 +1572,7 @@ def main():
             # non-dict or absent response arrives here as {}, carries no
             # stdout, and so retires only if Block 3's state check
             # confirms the PR's final state.
-            if tool_response.get("interrupted") is True:
+            if tool_response.get("interrupted") is True or _op_did_not_run(command):
                 print(_SUPPRESS_OUTPUT)
                 sys.exit(0)
 
