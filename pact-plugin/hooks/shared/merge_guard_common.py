@@ -6597,25 +6597,27 @@ def _strip_non_executable_content(command: str) -> str:
 # heredoc, inside the eval's own substitution (i), feeding the eval's command (ii), or piped
 # into it (iii). `q` is the substitution's double quote, when it has one.
 _HEREDOC_OPENER = r"<<(?P<dash>-?)[ \t]*(?P<dq>['\"\\]?)(?P<tag>\w+)['\"]?"
+# eval, or a POSIX shell's -c, runs the string it is given.
+_RUNS_STRING = r"(?:eval|(?:ba|da|k|z)?sh[ \t]+-c)"
 _CAT = r"cat(?:[ \t]+-)?[ \t]*"
 _READABLE_EVAL_RES = (
     re.compile(
-        r"(?<![\w-])eval[ \t]+(?P<q>\"?)\$\([ \t]*" + _CAT + _HEREDOC_OPENER
+        r"(?<![\w-])" + _RUNS_STRING + r"[ \t]+(?P<q>\"?)\$\([ \t]*" + _CAT + _HEREDOC_OPENER
         + r"[ \t]*\n(?P<body>.*?)\n(?P=tag)[ \t]*\n[ \t]*\)(?P=q)",
         re.DOTALL,
     ),
     re.compile(
-        r"(?<![\w-])eval[ \t]+(?P<q>\"?)`[ \t]*" + _CAT + _HEREDOC_OPENER
+        r"(?<![\w-])" + _RUNS_STRING + r"[ \t]+(?P<q>\"?)`[ \t]*" + _CAT + _HEREDOC_OPENER
         + r"[ \t]*\n(?P<body>.*?)\n(?P=tag)[ \t]*\n[ \t]*`(?P=q)",
         re.DOTALL,
     ),
     re.compile(
-        r"(?<![\w-])eval[ \t]+(?P<q>\"?)\$\([ \t]*" + _CAT + r"\)(?P=q)[ \t]*" + _HEREDOC_OPENER
+        r"(?<![\w-])" + _RUNS_STRING + r"[ \t]+(?P<q>\"?)\$\([ \t]*" + _CAT + r"\)(?P=q)[ \t]*" + _HEREDOC_OPENER
         + r"[ \t]*\n(?P<body>.*?)\n(?P=tag)(?=[ \t]*(?:\n|$))",
         re.DOTALL,
     ),
     re.compile(
-        r"(?<![\w-])" + _CAT + _HEREDOC_OPENER + r"[ \t]*\|[ \t]*eval[ \t]+(?P<q>\"?)\$\([ \t]*"
+        r"(?<![\w-])" + _CAT + _HEREDOC_OPENER + r"[ \t]*\|[ \t]*" + _RUNS_STRING + r"[ \t]+(?P<q>\"?)\$\([ \t]*"
         + _CAT + r"\)(?P=q)[ \t]*\n(?P<body>.*?)\n(?P=tag)(?=[ \t]*(?:\n|$))",
         re.DOTALL,
     ),
@@ -6649,6 +6651,14 @@ def _unquoted_heredoc_text(body: str) -> tuple[str, bool] | None:
     return "".join(out), params
 
 
+# A string eval or `sh -c` runs that a substitution prints whole: `printf '…'` with no
+# format or escape, or `echo` of plain words.
+_PRINTED_STRING_RE = re.compile(
+    r"(?<![\w-])" + _RUNS_STRING + r"[ \t]+(?P<q>\"?)\$\([ \t]*(?:printf[ \t]+'(?P<body>[^'%\\]*)'"
+    r"|echo[ \t]+(?P<body2>[^$`'\"\\()|;&<>\n]*?))[ \t]*\)(?P=q)"
+)
+
+
 def _rewrite_readable_evals(command: str) -> str:
     """`command` with each readable eval replaced by the text it runs: the body as written
     when the substitution is double-quoted, or its words joined by single spaces when it is
@@ -6659,7 +6669,8 @@ def _rewrite_readable_evals(command: str) -> str:
     not guarded on its own; a body holding its own terminator line, where
     the shell ends the heredoc first; an unquoted substitution whose body holds a glob
     character, which the shell may expand to file names."""
-    if "eval" not in command or "<<" not in command:
+    command = _PRINTED_STRING_RE.sub(lambda m: m.group("body") if m.group("body") is not None else m.group("body2"), command)
+    if "<<" not in command or not re.search(r"(?<![\w-])" + _RUNS_STRING, command):
         return command
 
     def _executed(m: re.Match) -> str:
@@ -8247,6 +8258,12 @@ def _shell_c_programs(command: str) -> tuple:
             inner = next((w for w in written if w.startswith(prefix + "<<")), inner)
         if inner is not None:
             out.append(inner)
+    # The stripped legs can blank text inside the -c string (a printf argument piped to a
+    # shell); the string as written, outside heredoc data and comments, is read too.
+    for leg in _slice_stripped_legs(_strip_shell_comments(_excise_heredoc_bodies_for_routing_scan(command))):
+        inner = _shell_c_argument(leg, strict=False)
+        if inner is not None and inner not in out:
+            out.append(inner)
     return tuple(out)
 
 
@@ -9337,6 +9354,12 @@ def _is_dangerous_at_depth(command: str, depth: int) -> bool:
     if (expanded != command and depth < _MAX_WRAPPER_DEPTH
             and _script_argv_guarded_command(expanded, depth) is not None):
         return True
+    # A string a shell's -c (or an eval) is given by a substitution that prints it is
+    # judged as the printed text, as the approval reads it.
+    if depth < _MAX_WRAPPER_DEPTH:
+        printed = _rewrite_readable_evals(command)
+        if printed != command and _is_dangerous_at_depth(printed, depth + 1):
+            return True
     # A file written with literal text and then run is judged as the text it runs.
     if depth < _MAX_WRAPPER_DEPTH:
         rewritten = _rewrite_file_runs(command)

@@ -2113,3 +2113,29 @@ def test_a_verb_given_through_positional_words_is_refused_then_runs(label, cmd, 
 
 def test_a_view_given_through_positional_words_is_allowed():
     assert is_dangerous_command("bash -c 'gh \"$@\"' _ pr view 5") is False
+
+
+# A -c program is read the way the bare command is: a guarded command piped or fed by a
+# here-string to a shell inside it, or a -c string a substitution prints whole.
+C_PROGRAM_RUNS = [
+    ("printf piped to sh", "bash -c 'printf \"gh pr " + "merge 5 --squash\" | sh'"),
+    ("here-string to sh", "bash -c 'sh <<< \"gh pr " + "merge 5 --squash\"'"),
+    ("built by a cat heredoc", "bash -c \"$(cat <<'EOF'\ngh pr " + "merge 5 --squash\nEOF\n)\""),
+    ("built by printf", "bash -c \"$(printf 'gh pr " + "merge 5 --squash')\""),
+    ("built by echo", "bash -c \"$(echo gh pr " + "merge 5)\""),
+]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", C_PROGRAM_RUNS, ids=[r[0] for r in C_PROGRAM_RUNS])
+def test_a_c_program_read_as_its_bare_command_is_refused_then_runs(label, cmd, style):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("cmd", [
+    "sh -c \"$(printf 'gh pr view 5')\"",
+    "bash -c 'printf \"gh pr view 5\" | sh'",
+], ids=["printed-view", "piped-view"])
+def test_a_c_program_that_runs_nothing_guarded_is_allowed(cmd):
+    assert is_dangerous_command(cmd) is False
