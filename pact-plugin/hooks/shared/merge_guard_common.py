@@ -9571,6 +9571,30 @@ _DONE_LEG_RE = re.compile(r"\s*done(?![\w-])")
 _LEADING_KEYWORDS_RE = re.compile(r"^\s*(?:(?:do|then|else)\s+|\{\s+)*")
 
 
+# The gh pr merge/close flags whose value is prose (a subject, body or comment), never
+# which PR or repo the command acts on: the prose subset of _GH_PR_VALUE_TAKING_FLAGS
+# with the short aliases _INERT_HELP_EXTRA_VALUE_FLAGS lists for them.
+_GH_PROSE_VALUE_FLAGS = frozenset({"--subject", "-t", "--body", "-b", "--comment", "-c"})
+
+
+def _varies_with(leg: str, uses: "re.Pattern") -> bool:
+    """Whether `leg` reads the variable `uses` matches anywhere but in the value of a gh
+    prose flag (`--subject "try $i"`): only those values leave the operation the same."""
+    word = _leg_command_word(leg) or ""
+    tokens = _shell_tokenize(word)
+    if not tokens or os.path.basename(tokens[0]) != "gh":
+        return bool(uses.search(leg))
+    kept, skip = [], False
+    for token in tokens:
+        if skip:
+            skip = False
+        elif token in _GH_PROSE_VALUE_FLAGS:
+            skip = True
+        else:
+            kept.append(token)
+    return any(uses.search(token) for token in kept) or bool(uses.search(leg[:len(leg) - len(word)]))
+
+
 def _literal_loop_extra_passes(command: str) -> int:
     """The destructive legs a `for NAME in W1 W2 …; do …; done` loop over literal words
     runs past its first pass: `for p in 5 6; do gh pr merge "$p"; done` runs two merges,
@@ -9610,7 +9634,7 @@ def _literal_loop_extra_passes(command: str) -> int:
                 branch += 1
             elif re.match(r"\s*(?:fi|esac)(?![\w-])", raw):
                 branch -= 1
-            if not branch and not guarded[k] and uses.search(part) and _leg_is_destructive(part):
+            if not branch and not guarded[k] and _varies_with(part, uses) and _leg_is_destructive(part):
                 body += 1
         extra += (len(words) - 1) * body
     return extra

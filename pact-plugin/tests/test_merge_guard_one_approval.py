@@ -208,3 +208,35 @@ class TestALoopRepeatsOnlyWhatVariesAndAlwaysRuns:
         from shared.merge_guard_common import is_compound_destructive_command
 
         assert is_compound_destructive_command(command) is True
+
+
+# A loop variable read only in a gh prose value (subject, body, comment) changes the
+# message, not which PR or repo the command acts on, so a retry that numbers its
+# attempts in the subject is still one operation.
+PROSE_ONLY_LOOPS = {
+    "subject": "for i in 1 2 3; do " + MERGE + '5 --squash --subject "try $i" && break; done',
+    "short-subject": "for i in 1 2 3; do " + MERGE + '5 --squash -t "try $i" && break; done',
+}
+TARGET_LOOPS = {
+    "pr-number-and-subject": "for p in 5 6; do " + MERGE + '"$p" --subject "merge $p"; done',
+    "repo": "for r in a/x b/y; do " + MERGE + '5 --repo "$r"; done',
+    "base": "for b in main dev; do " + MERGE + '5 --base "$b"; done',
+    "body-file": "for f in a.md b.md; do " + MERGE + '5 --body-file "$f"; done',
+    "assigned-before-the-command": "for p in 5 6; do PR=$p " + MERGE + '"$PR"; done',
+}
+
+
+class TestAProseOnlyLoopVariableKeepsOneOperation:
+    @pytest.mark.parametrize("command", PROSE_ONLY_LOOPS.values(), ids=PROSE_ONLY_LOOPS.keys())
+    def test_a_retry_numbering_its_subject_mints_and_runs(self, command, tmp_path):
+        from shared.merge_guard_common import is_compound_destructive_command
+
+        assert is_compound_destructive_command(command) is False
+        _approve(command, tmp_path)
+        assert _runs(command, tmp_path)
+
+    @pytest.mark.parametrize("command", TARGET_LOOPS.values(), ids=TARGET_LOOPS.keys())
+    def test_a_variable_in_the_target_or_a_path_still_counts_per_word(self, command):
+        from shared.merge_guard_common import is_compound_destructive_command
+
+        assert is_compound_destructive_command(command) is True
