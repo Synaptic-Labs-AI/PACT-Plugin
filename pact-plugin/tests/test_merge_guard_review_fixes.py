@@ -1562,3 +1562,67 @@ def test_a_stdin_program_given_argv_running_two_merges_is_compound():
 
 def test_a_stdin_program_given_argv_that_only_prints_a_merge_is_allowed():
     assert is_dangerous_command("python3 - 5 <<'EOF'\nprint(\"" + D + "\")\nEOF") is False
+
+
+# A Python `*args` parameter holds the arguments each call by name passes past the
+# named ones, keyword arguments left out: `def gh(*args): subprocess.run(["gh", *args])`
+# then `gh("pr", <merge>, "5")` runs that merge, and `list(a)` / `tuple(a)` of a held
+# name is the same value. Two calls with two merges are a compound.
+STAR_ARGS_DENY = [
+    ('star args spread', 'python3 - <<\'EOF\'\nimport subprocess\ndef gh(*args):\n    subprocess.run(["gh", *args])\ngh("pr", "merge", "5")\nEOF'),
+    ('star args whole', 'python3 - <<\'EOF\'\nimport subprocess\ndef run(*a):\n    subprocess.run(a)\nrun("gh", "pr", "merge", "5")\nEOF'),
+    ('star args list()', 'python3 - <<\'EOF\'\nimport subprocess\ndef run(*a):\n    subprocess.run(list(a))\nrun("gh", "pr", "merge", "5")\nEOF'),
+    ('tuple() of a named list', 'python3 - <<\'EOF\'\nimport subprocess\nc = ["gh", "pr", "merge", "5"]\nsubprocess.run(tuple(c))\nEOF'),
+    ('star args after a positional', 'python3 - <<\'EOF\'\nimport subprocess\ndef run(cwd, *a):\n    subprocess.run(a, cwd=cwd)\nrun(".", "gh", "pr", "merge", "5")\nEOF'),
+    ('star args with a keyword call', 'python3 - <<\'EOF\'\nimport subprocess\ndef gh(*args, **kw):\n    subprocess.run(["gh", *args], **kw)\ngh("pr", "merge", "5", check=True)\nEOF'),
+    ('star args two merges', 'python3 - <<\'EOF\'\nimport subprocess\ndef gh(*args):\n    subprocess.run(["gh", *args])\ngh("pr", "merge", "5")\ngh("pr", "merge", "6")\nEOF'),
+]
+STAR_ARGS_ALLOW = [
+    ('star args spread view', 'python3 - <<\'EOF\'\nimport subprocess\ndef gh(*args):\n    subprocess.run(["gh", *args])\ngh("pr", "view", "5")\nEOF'),
+    ('star args whole view', 'python3 - <<\'EOF\'\nimport subprocess\ndef run(*a):\n    subprocess.run(a)\nrun("gh", "pr", "view", "5")\nEOF'),
+    ('star args list() view', 'python3 - <<\'EOF\'\nimport subprocess\ndef run(*a):\n    subprocess.run(list(a))\nrun("gh", "pr", "view", "5")\nEOF'),
+    ('tuple() of a named list view', 'python3 - <<\'EOF\'\nimport subprocess\nc = ["gh", "pr", "view", "5"]\nsubprocess.run(tuple(c))\nEOF'),
+    ('list() of a call', "python3 - <<'EOF'\nimport subprocess\nsubprocess.run(list(load()))\nEOF"),
+    ('sorted() of a named list is another list', 'python3 - <<\'EOF\'\nimport subprocess\nc = ["gh", "pr", "merge", "5"]\nsubprocess.run(sorted(c))\nEOF'),
+    ('star args after a positional view', 'python3 - <<\'EOF\'\nimport subprocess\ndef run(cwd, *a):\n    subprocess.run(a, cwd=cwd)\nrun(".", "gh", "pr", "view", "5")\nEOF'),
+    ('star args with a keyword call view', 'python3 - <<\'EOF\'\nimport subprocess\ndef gh(*args, **kw):\n    subprocess.run(["gh", *args], **kw)\ngh("pr", "view", "5", check=True)\nEOF'),
+    ('named argument before *args is not in it', 'python3 - <<\'EOF\'\nimport subprocess\ndef pr(mode, *a):\n    print(mode)\n    subprocess.run(["gh", "pr", *a])\npr("merge", "view", "5")\nEOF'),
+]
+
+
+@pytest.mark.parametrize("label,cmd", STAR_ARGS_DENY, ids=[r[0] for r in STAR_ARGS_DENY])
+def test_star_args_merge_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", STAR_ARGS_ALLOW, ids=[r[0] for r in STAR_ARGS_ALLOW])
+def test_star_args_view_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+STAR_ARGS_RUNS = [row for row in STAR_ARGS_DENY if row[0] != "star args two merges"]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", STAR_ARGS_RUNS, ids=[r[0] for r in STAR_ARGS_RUNS])
+def test_a_star_args_merge_runs_once_approved(label, cmd, style):
+    assert _runs_after_approval(cmd, style)
+
+
+def test_star_args_given_two_merges_are_compound_and_mint_nothing():
+    from shared.merge_guard_common import interpreter_command_context, is_compound_destructive_command
+
+    cmd = dict(STAR_ARGS_DENY)["star args two merges"]
+    assert is_compound_destructive_command(cmd) is True
+    assert interpreter_command_context(cmd) is None
+    assert not _runs_after_approval(cmd, APPROVAL_STYLES["inline"])
+
+
+@pytest.mark.parametrize("cmd", [
+    "python3 - <<'EOF'\nimport subprocess\ndef gh(*args):\n    subprocess.run([\"gh\", *args])\ngh(*load())\nEOF",
+    "python3 - <<'EOF'\nimport subprocess\nc = [\"gh\", \"pr\", \"merge\", \"5\"]\nc = [\"gh\", \"pr\", \"view\", \"5\"]\n"
+    "subprocess.run(tuple(c))\nEOF",
+    "python3 - <<'EOF'\ndef gh(*args):\n    print(\" \".join([\"gh\", *args]))\ngh(\"pr\", \"merge\", \"5\")\nEOF",
+], ids=["unread-star-argument", "reassigned-name", "only-printed"])
+def test_star_args_that_run_no_literal_merge_are_allowed(cmd):
+    assert is_dangerous_command(cmd) is False

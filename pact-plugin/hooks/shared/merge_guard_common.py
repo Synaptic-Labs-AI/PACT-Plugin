@@ -3225,19 +3225,28 @@ def _literal_list_at(text: str, i: int, head: str = "", _depth: int = 0) -> tupl
     each the elements it spells, and the offset after it. A bare-name element reads as
     each literal string its reaching assignments give it (`g = "gh"; [g, "pr", …]`). A
     spread element (`*a`, `...a`) and, in an R `c(…)`, a name whose value is a vector
-    splice in that list's elements. A later non-literal element (`str(pr)`, a variable
+    splice in that list's elements. A Python call's argument list read as a `*args`
+    tuple skips the arguments the named parameters take, and a Python call's keyword
+    arguments are never elements. A later non-literal element (`str(pr)`, a variable
     with no literal value) reads as `X`; a leading one reads as `gh` when `"pr"` follows
     it, and otherwise the list is not read. None also when an element is neither."""
     opener = re.match(r"\[|c?\(", text[i:])
     if not opener:
         return None
+    reach = _python_reaching(text) if opener.group() == "(" and _PYTHON_HEAD_RE.match(head) else None
+    skip = reach.vararg_skip.get(i, 0) if reach else 0
     closer = "]" if opener.group() == "[" else ")"
     readings: list[list[str]] = [[]]
     count, i = 0, i + opener.end()
     while True:
         i = _skip(r"\s*", text, i)
         if text[i:i + 1] == closer:
-            return readings, i + 1
+            return [r[skip:] for r in readings], i + 1
+        keyword = re.match(r"\*\*|[A-Za-z_]\w*\s*=(?!=)", text[i:]) if reach else None
+        if keyword:                                      # a keyword argument: not in `*args`
+            end = _expression_end(_mask_string_literals(text), i + keyword.end())
+            i = _skip(r"\s*,?", text, end)
+            continue
         lit = _STRING_LITERAL_RE.match(text, i)
         spread = None if lit else re.match(r"\*(?!\*)|\.\.\.", text[i:])
         at = i + spread.end() if spread else i
@@ -3278,17 +3287,27 @@ def _named_lists(head: str, code: str, offsets: list[int], _depth: int = 0) -> l
     return out[:_MAX_READINGS]
 
 
+def _copied_values_at(head: str, code: str, i: int) -> tuple[list[int], int] | None:
+    """For a Python `list(name)` / `tuple(name)` at code[i], the values `name` holds and
+    the offset past the call: the copy holds the same elements."""
+    call = re.match(r"(?:list|tuple)\s*\(\s*", code[i:]) if _PYTHON_HEAD_RE.match(head) else None
+    named = _named_values_at(head, code, i + call.end()) if call else None
+    close = re.match(r"\s*\)", code[named[1]:]) if named else None
+    return (named[0], named[1] + close.end()) if named and close else None
+
+
 def _list_expr_at(code: str, i: int, head: str = "", _depth: int = 0) -> tuple[list[list[str]], int] | None:
     """The readings of a list expression starting at code[i]: list literals, names whose
-    values are lists and calls to a Python function that returns one, joined with `+`
-    (`A + ["5"]`). None when no operand is a list."""
+    values are lists (also as Python `list(name)` / `tuple(name)`) and calls to a Python
+    function that returns one, joined with `+` (`A + ["5"]`). None when no operand is a
+    list."""
     readings: list[list[str]] = [[]]
     while True:
         i = _skip(r"\s*", code, i)
         lst = _literal_list_at(code, i, head, _depth)
         named = None if lst or _depth >= _MAX_NAME_DEPTH else (
             _named_values_at(head, code, i, _NAME_OPERAND_RE) or _returned_values_at(head, code, i)
-            or _member_values_at(head, code, i)
+            or _member_values_at(head, code, i) or _copied_values_at(head, code, i)
         )
         lists = _named_lists(head, code, named[0], _depth) if named else []
         if lst:
@@ -3632,6 +3651,7 @@ class _PyReach:
         self.calls: dict = {}          # function name -> call nodes, anywhere in the program
         self.returns: dict = {}        # call offset -> offsets of its function's return values
         self.mapped: dict = {}         # function name -> literal elements `map(f, [...])` passes it
+        self.vararg_skip: dict = {}    # call `(` offset -> named arguments before its `*args`
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "map"
@@ -3923,6 +3943,12 @@ class _PyReach:
         out: dict = {name: set() for name in self._params(args)}
         for name in [a.arg for a in (args.vararg, args.kwarg) if a is not None]:
             out[name] = {_OPAQUE}
+        if args.vararg is not None:
+            # `def f(x, *a)`: a call's argument list past the named ones is the tuple `a`
+            # holds; the list reader skips the first len(positional) of it.
+            parens = {self._call_parens(call) for call in calls}
+            self.vararg_skip.update((paren, len(positional)) for paren in parens)
+            out[args.vararg.arg] = parens or {_OPAQUE}
         invocations = [(call.args, call.keywords) for call in calls]
         invocations += [([element], []) for element in self.mapped.get(fn.name, [])]
         for given_args, given_keywords in invocations:
@@ -3932,6 +3958,11 @@ class _PyReach:
                 given = given_args[k] if k < len(positional) and k < len(given_args) else keywords.get(a.arg, defaults.get(a.arg))
                 out[a.arg].add(_OPAQUE if unpacked or given is None else self._offset(given))
         return {name: frozenset(defs) for name, defs in out.items()}
+
+    def _call_parens(self, call) -> int:
+        """The offset of the `(` that opens a call's argument list."""
+        k = self._offset(call.func) + len(call.func.id)
+        return self.code.index("(", k)
 
     def _function(self, fn, outer: _PyScope) -> None:
         scope = _PyScope(fn, outer)
