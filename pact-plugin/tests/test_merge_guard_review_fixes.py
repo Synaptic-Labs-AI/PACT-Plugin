@@ -1842,3 +1842,38 @@ def test_a_bound_name_set_skips_names_inside_a_default():
     from shared.merge_guard_common import _param_names
 
     assert _param_names("x = foo(bar, baz), *a", "ruby") == frozenset({"x", "a"})
+
+
+# A ruby endless method (`def gh(*a) = system("gh", *a)`) is a named function whose
+# body is its value; a merge it runs is read like any helper's.
+ENDLESS_DENY = [
+    ("splat helper", "ruby - <<'EOF'\ndef gh(*a) = system(\"gh\", *a)\ngh(\"pr\", \"merge\", \"5\")\nEOF"),
+    ("one line with -e", "ruby -e 'def gh(*a) = system(\"gh\", *a); gh(\"pr\", \"merge\", \"5\")'"),
+    ("named then splat", "ruby - <<'EOF'\ndef gh(dir, *a) = Dir.chdir(dir) { system(\"gh\", *a) }\n"
+                         "gh(\".\", \"pr\", \"merge\", \"5\")\nEOF"),
+    ("string parameter", "ruby - <<'EOF'\ndef run(c) = system(c)\nrun(\"gh pr " + "merge 5\")\nEOF"),
+    ("body on the next line", "ruby - <<'EOF'\ndef gh(*a) =\n  system(\"gh\", *a)\ngh(\"pr\", \"merge\", \"5\")\nEOF"),
+]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", ENDLESS_DENY, ids=[r[0] for r in ENDLESS_DENY])
+def test_a_ruby_endless_method_merge_is_refused_then_runs(label, cmd, style):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("cmd", [
+    "ruby - <<'EOF'\ndef gh(*a) = system(\"gh\", *a)\ngh(\"pr\", \"view\", \"5\")\nEOF",
+    "ruby - <<'EOF'\ndef gh(*a) = puts([\"gh\", *a].join(\" \"))\ngh(\"pr\", \"merge\", \"5\")\nEOF",
+], ids=["view-twin", "only-printed"])
+def test_a_ruby_endless_method_that_runs_no_merge_is_allowed(cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+def test_a_ruby_endless_method_given_two_merges_is_compound():
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    cmd = "ruby - <<'EOF'\ndef gh(*a) = system(\"gh\", *a)\ngh(\"pr\", \"merge\", \"5\")\ngh(\"pr\", \"merge\", \"6\")\nEOF"
+    assert is_compound_destructive_command(cmd) is True
+    assert not _runs_after_approval(cmd, APPROVAL_STYLES["inline"])

@@ -4470,7 +4470,11 @@ def _other_functions(code: str, head: str) -> dict:
     for m in header.finditer(view):
         params = _ordered_params(m.groupdict().get("params") or m.groupdict().get("bare") or "", head)
         span = next((sp for sp in spans if m.end() - 1 <= sp.start <= _skip(r"\s*", view, m.end())), None)
-        if span is None and _R_HEAD_RE.match(head) and view[m.end():m.end() + 1] != "{":
+        endless = re.match(r"[ \t]*=", view[m.end():]) if re.match(r"^ruby", head) else None
+        if endless:                                      # `def f(x) = body`: the body is its value
+            start = m.end() + endless.end()
+            end = _endless_def_end(view, view.rfind("\n", 0, m.start()) + 1)
+        elif span is None and _R_HEAD_RE.match(head) and view[m.end():m.end() + 1] != "{":
             start, end = m.end(), _expression_end(view, m.end())
         elif span is None:
             continue
