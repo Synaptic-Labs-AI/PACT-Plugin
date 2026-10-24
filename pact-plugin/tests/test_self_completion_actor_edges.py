@@ -1,6 +1,6 @@
 """
 Location: pact-plugin/tests/test_self_completion_actor_edges.py
-Summary: TEST-phase edge cases for the self-completion rule (rule A) and its
+Summary: TEST-phase edge cases for the lead-only completion rule (rule B) and its
          actor resolution (shared/actor_identity.py), beyond the CODE-phase
          verification tests.
 Used by: the pact-plugin test suite.
@@ -11,9 +11,11 @@ advisory-list assertions stay uncluttered (pact-testing-strategies
 §Sibling-file convention).
 
 Areas (dispatch for Task #30, item 5):
-  1. How often the unverified advisory fires: exactly one per completion
-     of an owned task by an unresolved non-lead frame, and never on any
-     other write.
+  1. How often the completion advisory fires: exactly one per completion
+     of an owned task by a non-lead frame (resolved or not), and never on
+     any other write. (Under rule A an unresolved frame got a soft
+     self_completion_unverified advisory; rule B gives the full
+     non_lead_completion advisory with a writeback.)
   2. meta.json missing, malformed, the wrong JSON type, empty, or holding
      an invalid name.
   3. An exempt TYPE spoofed through a NAME (subagent name, task metadata,
@@ -22,7 +24,8 @@ Areas (dispatch for Task #30, item 5):
   4. Empty, absent or non-string owner.
   5. Signal tasks: both halves of the pattern are needed.
   6. Lead-shaped teammate compaction frames: the CAPTURED shape resolves as
-     the lead, so the rule is silent (a documented residual, pinned here).
+     the lead, so the rule is silent (a documented residual under rule B
+     too, pinned here).
   7. The CAPTURED P2 subagent TaskUpdate frame (CC 2.1.310) resolves through
      the same path as the synthesized cloud frames.
 """
@@ -85,8 +88,15 @@ def _config_root():
     return get_claude_config_dir()
 
 
-def _self_rules(advisories) -> list[str]:
-    return [rule for rule, _ in advisories if rule.startswith("self_completion")]
+# Every completion-rule id the gate has used. self_completion_unverified was
+# rule A's soft advisory; it is listed so a reappearance is caught.
+_COMPLETION_RULES = frozenset({
+    "self_completion", "non_lead_completion", "self_completion_unverified",
+})
+
+
+def _completion_rules(advisories) -> list[str]:
+    return [rule for rule, _ in advisories if rule in _COMPLETION_RULES]
 
 
 @pytest.fixture
@@ -110,81 +120,84 @@ def _meta_path(root):
 
 
 # =============================================================================
-# 1. How often the unverified advisory fires
+# 1. How often the completion advisory fires
 # =============================================================================
 
 
-def test_unverified_fires_once_per_completion_and_never_writes_back(team, writebacks):
-    """One unresolved completion gives exactly one advisory: no duplicate and
-    no escalation to the hard self_completion rule."""
+def test_unresolved_completion_fires_once_with_one_writeback(team, writebacks):
+    """One unresolved non-lead completion gives exactly one advisory and one
+    writeback: no duplicate, and it is non_lead_completion (the name is
+    unknown, so it is never claimed to be a self-completion)."""
     payload = _with_task(cloud_subagent_frame(team, "pact-backend-coder"), "7", "backend-coder")
     advisories = tlg.evaluate_lifecycle(payload)
-    assert _self_rules(advisories) == ["self_completion_unverified"]
-    assert writebacks == []
+    assert _completion_rules(advisories) == ["non_lead_completion"]
+    assert writebacks == ["7"]
 
 
-def test_unverified_message_names_task_owner_and_source(team, writebacks):
+def test_unresolved_message_names_task_owner_and_source(team, writebacks):
     payload = _with_task(cloud_subagent_frame(team, "pact-backend-coder"), "7", "backend-coder")
-    msgs = [m for r, m in tlg.evaluate_lifecycle(payload) if r == "self_completion_unverified"]
+    msgs = [m for r, m in tlg.evaluate_lifecycle(payload) if r == "non_lead_completion"]
     assert len(msgs) == 1
     assert "Task 7" in msgs[0]
     assert "'backend-coder'" in msgs[0]
+    assert "name unresolved" in msgs[0]
     assert SOURCE_SUBAGENT_NO_META in msgs[0]
     assert SUBAGENT_ID not in msgs[0]  # never leaks the agent id
 
 
 @pytest.mark.parametrize("status", ["in_progress", "pending", "deleted"])
-def test_unverified_never_fires_on_non_completion_status(team, writebacks, status):
+def test_completion_rule_never_fires_on_non_completion_status(team, writebacks, status):
     payload = cloud_subagent_frame(team, "pact-backend-coder")
     payload["tool_input"] = {"taskId": "7", "status": status}
     payload["tool_response"] = {"task": {"id": "7", "subject": "x", "owner": "backend-coder",
                                          "metadata": {}}}
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == []
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == []
     assert writebacks == []
 
 
-def test_unverified_never_fires_on_owner_only_write(team, writebacks):
+def test_completion_rule_never_fires_on_owner_only_write(team, writebacks):
     """A claim (owner change, no status) is not a completion."""
     payload = cloud_subagent_frame(team, "pact-backend-coder")
     payload["tool_input"] = {"taskId": "7", "owner": "backend-coder"}
     payload["tool_response"] = {}
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == []
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == []
 
 
-def test_unverified_never_fires_on_taskcreate(team, writebacks):
+def test_completion_rule_never_fires_on_taskcreate(team, writebacks):
     payload = cloud_subagent_frame(team, "pact-backend-coder")
     payload["tool_name"] = "TaskCreate"
     payload["tool_input"] = {"subject": "x", "description": "y"}
     payload["tool_response"] = {}
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == []
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == []
 
 
-def test_unverified_fires_for_general_purpose_subagent_completing_lead_owned_task(team, writebacks):
-    """The noise case the coder flagged (MEDIUM): a lead-spawned
-    general-purpose subagent with no meta.json completes a task the lead
-    owns. The rule cannot tell this apart from a self-completion, so it
-    fires the soft advisory. Pinned so a change in frequency is a visible,
-    deliberate decision. The P1 and P2 probes saw meta.json present at a
-    subagent's first tool call, so in practice this needs a missing or
-    unreadable meta file."""
+def test_general_purpose_subagent_completing_lead_owned_task_is_flagged(team, writebacks):
+    """A lead-spawned general-purpose subagent with no meta.json completes a
+    task the lead owns. Under rule B only the lead completes tasks, so this
+    is flagged with a writeback (design section 4.4, cost 3: correct under
+    the policy, new noise if anyone relied on it). Pinned so a change is a
+    visible, deliberate decision."""
     payload = _with_task(cloud_subagent_frame(team, "general-purpose"), "7", "lead")
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == ["self_completion_unverified"]
-    assert writebacks == []
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == ["non_lead_completion"]
+    assert writebacks == ["7"]
 
 
-def test_general_purpose_subagent_with_meta_completing_lead_task_is_silent(team, writebacks):
+def test_general_purpose_subagent_with_meta_completing_lead_task_is_flagged(team, writebacks):
     """The same completion with meta.json present (the shape P2 captured):
-    the name resolves, differs from the owner, and rule A stays silent."""
+    the name resolves and differs from the owner. Rule A was silent here;
+    rule B flags it, naming the subagent."""
     write_subagent_meta(team, SUBAGENT_ID, cloud_meta("probe-sub", "general-purpose"))
     payload = _with_task(cloud_subagent_frame(team, "general-purpose"), "7", "lead")
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == []
-    assert writebacks == []
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert _completion_rules(advisories) == ["non_lead_completion"]
+    assert any("'probe-sub'" in m for r, m in advisories if r == "non_lead_completion")
+    assert writebacks == ["7"]
 
 
 @pytest.mark.parametrize("make_frame", [lead_frame, plain_frame], ids=["lead", "plain"])
-def test_unverified_never_fires_for_lead_or_plain_frames(team, writebacks, make_frame):
+def test_completion_rule_never_fires_for_lead_or_plain_frames(team, writebacks, make_frame):
     payload = _with_task(make_frame(), "7", "backend-coder")
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == []
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == []
 
 
 def test_completed_frames_without_team_are_silent(writebacks):
@@ -194,7 +207,7 @@ def test_completed_frames_without_team_are_silent(writebacks):
     no journal and no advisory."""
     payload = cloud_subagent_frame(_config_root(), "pact-backend-coder")
     payload["tool_response"] = {}
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == []
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == []
 
 
 # =============================================================================
@@ -222,13 +235,15 @@ def test_malformed_meta_degrades_to_no_meta(team, raw):
 
 
 @pytest.mark.parametrize("raw", ["{not json", "[]", "{}"], ids=["truncated", "list", "empty-dict"])
-def test_malformed_meta_gives_unverified_not_disputed(team, writebacks, raw):
+def test_malformed_meta_gives_non_lead_completion(team, writebacks, raw):
+    """An unreadable meta costs only the name: the role still comes from
+    agent_type, so the full advisory and writeback fire."""
     path = _meta_path(team)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(raw, encoding="utf-8")
     payload = _with_task(cloud_subagent_frame(team, "pact-backend-coder"), "7", "backend-coder")
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == ["self_completion_unverified"]
-    assert writebacks == []
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == ["non_lead_completion"]
+    assert writebacks == ["7"]
 
 
 def test_malformed_meta_with_exempt_frame_type_is_silent(team, writebacks):
@@ -239,39 +254,42 @@ def test_malformed_meta_with_exempt_frame_type_is_silent(team, writebacks):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{not json", encoding="utf-8")
     payload = _with_task(cloud_subagent_frame(team, "PACT:pact-secretary"), "7", "secretary")
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == []
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == []
     assert writebacks == []
 
 
-def test_meta_with_no_name_key_gives_unverified(team, writebacks):
+def test_meta_with_no_name_key_gives_non_lead_completion(team, writebacks):
     meta = cloud_meta("backend-coder", "pact-backend-coder")
     del meta["name"]
     write_subagent_meta(team, SUBAGENT_ID, meta)
     payload = _with_task(cloud_subagent_frame(team, "pact-backend-coder"), "7", "backend-coder")
     actor = resolve_actor(payload, TEAM)
     assert actor.source == SOURCE_SUBAGENT_META and actor.name is None
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == ["self_completion_unverified"]
-    assert writebacks == []
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == ["non_lead_completion"]
+    assert writebacks == ["7"]
 
 
 @pytest.mark.parametrize("bad_name", ["", "x" * 129, "back\nend", "nul\x00", 7, None, ["a"]])
 def test_meta_invalid_name_never_matches_owner(team, writebacks, bad_name):
     """An invalid meta name is discarded, never compared with the owner,
-    even when the owner holds the identical bad value."""
+    even when the owner holds the identical bad value: the completion is a
+    non_lead_completion (name unresolved), never a self_completion."""
     meta = cloud_meta("backend-coder", "pact-backend-coder")
     meta["name"] = bad_name
     write_subagent_meta(team, SUBAGENT_ID, meta)
     owner = bad_name if isinstance(bad_name, str) and bad_name else "backend-coder"
     payload = _with_task(cloud_subagent_frame(team, "pact-backend-coder"), "7", owner)
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == ["self_completion_unverified"]
-    assert writebacks == []
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert _completion_rules(advisories) == ["non_lead_completion"]
+    assert any("name unresolved" in m for r, m in advisories if r == "non_lead_completion")
+    assert writebacks == ["7"]
 
 
 def test_meta_name_at_max_length_is_accepted(team, writebacks):
     name = "n" * 128
     write_subagent_meta(team, SUBAGENT_ID, cloud_meta(name, "pact-backend-coder"))
     payload = _with_task(cloud_subagent_frame(team, "pact-backend-coder"), "7", name)
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == ["self_completion"]
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == ["self_completion"]
     assert writebacks == ["7"]
 
 
@@ -281,7 +299,7 @@ def test_meta_for_a_different_agent_id_is_not_read(team, writebacks):
     write_subagent_meta(team, "a" + "f" * 16, cloud_meta("backend-coder", "pact-backend-coder"))
     payload = _with_task(cloud_subagent_frame(team, "pact-backend-coder"), "7", "backend-coder")
     assert resolve_actor(payload, TEAM).name is None
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == ["self_completion_unverified"]
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == ["non_lead_completion"]
 
 
 @pytest.mark.parametrize("bad_id", ["a../../x", "a0123456789abcde", "A0123456789ABCDEF", "a0123456789abcdef0"])
@@ -308,7 +326,7 @@ def test_subagent_named_like_exempt_type_is_not_exempt(team, writebacks):
     payload = _with_task(cloud_subagent_frame(team, "general-purpose"), "7", "pact-secretary")
     actor = resolve_actor(payload, TEAM)
     assert (actor.name, actor.agent_type) == ("pact-secretary", "general-purpose")
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == ["self_completion"]
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == ["self_completion"]
     assert writebacks == ["7"]
 
 
@@ -321,7 +339,7 @@ def test_meta_agenttype_equal_to_name_is_not_a_type(team, writebacks):
     actor = resolve_actor(payload, TEAM)
     assert actor.name == "pact-secretary"
     assert actor.agent_type is None
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == ["self_completion"]
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == ["self_completion"]
     assert writebacks == ["7"]
 
 
@@ -331,7 +349,7 @@ def test_qualified_meta_type_equal_to_unqualified_name_is_not_a_type(team, write
     write_subagent_meta(team, SUBAGENT_ID, {"name": "pact-secretary", "agentType": "PACT:pact-secretary"})
     payload = _with_task(cloud_subagent_frame(team, "PACT:pact-secretary"), "7", "pact-secretary")
     assert resolve_actor(payload, TEAM).agent_type is None
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == ["self_completion"]
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == ["self_completion"]
 
 
 @pytest.mark.parametrize("task_meta", [
@@ -346,36 +364,47 @@ def test_task_metadata_cannot_claim_the_exempt_type(team, writebacks, task_meta)
     write_subagent_meta(team, SUBAGENT_ID, cloud_meta("backend-coder", "pact-backend-coder"))
     payload = _with_task(cloud_subagent_frame(team, "pact-backend-coder"), "7", "backend-coder",
                          metadata=task_meta)
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == ["self_completion"]
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == ["self_completion"]
     assert writebacks == ["7"]
 
 
-def test_exempt_actor_completing_another_owners_task_is_silent_when_name_resolves(team, writebacks):
+def test_exempt_actor_completing_another_owners_task_is_flagged(team, writebacks):
     """1b requires actor name == owner when the name resolves. A cloud
-    secretary completing someone else's task is not exempt; rule A is
-    silent anyway because the actor is not the owner (peer completion is
-    rule B's scope)."""
+    secretary completing someone else's task is not exempt, and rule B
+    flags the peer completion (rule A was silent here)."""
     write_subagent_meta(team, SUBAGENT_ID, cloud_meta("secretary", "pact-secretary"))
     payload = _with_task(cloud_subagent_frame(team, "pact-secretary"), "7", "backend-coder")
     from shared.intentional_wait import is_self_complete_exempt
     task = payload["tool_response"]["task"]
     assert not is_self_complete_exempt(task, TEAM, actor_agent_type="pact-secretary",
                                        actor_name="secretary")
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == []
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == ["non_lead_completion"]
+    assert writebacks == ["7"]
 
 
 def test_owner_spoofed_to_secretary_by_non_exempt_inprocess_teammate(team, writebacks):
     """An in-process coder sets owner='secretary' and completes. The real
-    secretary is a member with agentType pact-secretary, so surface 1
-    (owner's config type) exempts the TASK. The actor is the coder, whose
-    name differs from the owner, so rule A is silent. Pinned as a residual:
-    rule A only polices actor == owner; a spoofed owner is rule B's scope."""
+    secretary is a member with agentType pact-secretary, but surface 1 only
+    exempts when the resolved actor IS the owner, so the coder cannot borrow
+    the secretary's exemption. Rule B flags it (rule A was silent: residual
+    closed)."""
     write_team_config(team, TEAM, [
         {"name": "secretary", "agentType": "pact-secretary"},
         {"name": "coder-1", "agentType": "pact-backend-coder"},
     ])
     payload = _with_task(inprocess_frame(team, "coder-1"), "7", "secretary")
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == []
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert _completion_rules(advisories) == ["non_lead_completion"]
+    assert any("'coder-1'" in m for r, m in advisories if r == "non_lead_completion")
+    assert writebacks == ["7"]
+
+
+def test_real_secretary_completing_its_own_task_stays_exempt_inprocess(team, writebacks):
+    """Counter-case to the spoof: the secretary itself (actor == owner)
+    keeps the surface 1 exemption."""
+    write_team_config(team, TEAM, [{"name": "secretary", "agentType": "pact-secretary"}])
+    payload = _with_task(inprocess_frame(team, "secretary"), "7", "secretary")
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == []
     assert writebacks == []
 
 
@@ -388,27 +417,28 @@ def test_owner_spoofed_to_secretary_by_non_exempt_inprocess_teammate(team, write
 def test_empty_or_falsy_owner_is_silent(team, writebacks, owner):
     write_subagent_meta(team, SUBAGENT_ID, cloud_meta("backend-coder", "pact-backend-coder"))
     payload = _with_task(cloud_subagent_frame(team, "pact-backend-coder"), "7", owner)
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == []
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == []
     assert writebacks == []
 
 
 @pytest.mark.parametrize("owner", ["", None])
 def test_empty_owner_is_silent_even_when_unresolved(team, writebacks, owner):
     payload = _with_task(cloud_subagent_frame(team, "pact-backend-coder"), "7", owner)
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == []
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == []
 
 
 def test_non_string_owner_is_silent(team, writebacks):
     write_subagent_meta(team, SUBAGENT_ID, cloud_meta("backend-coder", "pact-backend-coder"))
     payload = _with_task(cloud_subagent_frame(team, "pact-backend-coder"), "7", ["backend-coder"])
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == []
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == []
 
 
 def test_owner_with_surrounding_space_does_not_match(team, writebacks):
-    """Owner matching is exact: 'backend-coder ' is not 'backend-coder'."""
+    """Owner matching is exact: 'backend-coder ' is not 'backend-coder', so
+    this is a non_lead_completion, not a self_completion."""
     write_subagent_meta(team, SUBAGENT_ID, cloud_meta("backend-coder", "pact-backend-coder"))
     payload = _with_task(cloud_subagent_frame(team, "pact-backend-coder"), "7", "backend-coder ")
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == []
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == ["non_lead_completion"]
 
 
 def test_decision_actor_owner_match_false_on_empty_owner(team, writebacks):
@@ -430,7 +460,7 @@ def test_cloud_signal_task_self_completion_is_exempt(team, writebacks, signal_ty
     write_subagent_meta(team, SUBAGENT_ID, cloud_meta("backend-coder", "pact-backend-coder"))
     payload = _with_task(cloud_subagent_frame(team, "pact-backend-coder"), "7", "backend-coder",
                          metadata={"completion_type": "signal", "type": signal_type})
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == []
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == []
     assert writebacks == []
 
 
@@ -438,7 +468,7 @@ def test_cloud_signal_task_self_completion_is_exempt(team, writebacks, signal_ty
 def test_unresolved_signal_task_completion_is_exempt(team, writebacks, signal_type):
     payload = _with_task(cloud_subagent_frame(team, "pact-backend-coder"), "7", "backend-coder",
                          metadata={"completion_type": "signal", "type": signal_type})
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == []
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == []
 
 
 @pytest.mark.parametrize("task_meta", [
@@ -452,7 +482,7 @@ def test_half_signal_pattern_is_not_exempt(team, writebacks, task_meta):
     write_subagent_meta(team, SUBAGENT_ID, cloud_meta("backend-coder", "pact-backend-coder"))
     payload = _with_task(cloud_subagent_frame(team, "pact-backend-coder"), "7", "backend-coder",
                          metadata=task_meta)
-    assert _self_rules(tlg.evaluate_lifecycle(payload)) == ["self_completion"]
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == ["self_completion"]
     assert writebacks == ["7"]
 
 
@@ -476,8 +506,8 @@ def test_captured_teammate_compaction_frames_resolve_as_lead(captured):
 
 def test_lead_shaped_teammate_completion_is_silent_documented_residual(team, writebacks):
     """If a teammate's TaskUpdate frame were lead-shaped (the shape its
-    compaction frames take), its self-completion would be silent: rule A
-    cannot see it. Only compaction frames were captured in this shape, not
+    compaction frames take), its completion would be silent: the rule keys
+    the role on agent_type, so it cannot see it (rule B included). Only compaction frames were captured in this shape, not
     a TaskUpdate. Pinned so that a future capture showing lead-shaped
     TaskUpdate frames from teammates is recognised as a gap and not a pass.
     The real fields of the captured frame are carried into the completion
@@ -489,7 +519,7 @@ def test_lead_shaped_teammate_completion_is_silent_documented_residual(team, wri
     decision: dict = {}
     advisories = tlg.evaluate_lifecycle(payload, decision=decision)
     assert decision["actor"]["role"] == "lead"
-    assert _self_rules(advisories) == []
+    assert _completion_rules(advisories) == []
     assert writebacks == []
 
 
@@ -524,7 +554,7 @@ def test_captured_subagent_posttooluse_self_completion_fires(team, writebacks):
     task_id = frame["tool_input"]["taskId"]
     frame["tool_response"] = {"task": {"id": task_id, "subject": "sub-owned",
                                        "owner": "probe-sub", "metadata": {}}}
-    assert _self_rules(tlg.evaluate_lifecycle(frame)) == ["self_completion"]
+    assert _completion_rules(tlg.evaluate_lifecycle(frame)) == ["self_completion"]
     assert writebacks == [task_id]
 
 

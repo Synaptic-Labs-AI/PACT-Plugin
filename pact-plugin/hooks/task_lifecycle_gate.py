@@ -1996,7 +1996,8 @@ def evaluate_lifecycle(
             # (teammate idles on awaiting_lead_completion) has no automated net
             # today; it is tracked as a separate follow-up.
 
-        # Teammate self-completion check (#1666 item 4). The actor comes
+        # Lead-only completion check (#1666 item 4, rule B): any non-lead
+        # completing an owned, non-exempt task is flagged. The actor comes
         # from harness data only (frame agent_type/agent_id, team config,
         # subagent meta.json) via shared.actor_identity — never the session
         # registry. The carve-out is is_self_complete_exempt: surface 1
@@ -2020,7 +2021,7 @@ def evaluate_lifecycle(
             task, team_name,
             actor_agent_type=actor.agent_type, actor_name=actor.name,
         )
-        for rule, msg, writeback in _completion_rule_A(actor, owner, task_id, exempt):
+        for rule, msg, writeback in _completion_rule_B(actor, owner, task_id, exempt):
             advisories.append((rule, msg))
             if writeback:
                 _writeback_dispute(task_id)
@@ -2450,41 +2451,52 @@ def evaluate_lifecycle(
 # ─── completion rule ─────────────────────────────────────────────────────────
 
 
-def _completion_rule_A(
+def _completion_rule_B(
     actor: ActorIdentity, owner: str, task_id: Any, exempt: bool
 ) -> list[tuple[str, str, bool]]:
-    """Rule A (actor == owner): the self-completion advisory. Pure, no I/O.
+    """Rule B (role-level, #1666 item 4): only the lead completes tasks.
+    Pure, no I/O.
 
     Returns a list of (rule, message, writeback) tuples; ``writeback`` means
     the caller must mark the task ``completion_disputed``.
 
       - lead / unknown frame, no owner, or exempt: silent.
-      - resolved actor name == owner: ``self_completion`` + writeback.
-      - resolved actor name != owner: silent (A does not police peers).
-      - unresolved name: ``self_completion_unverified``, NO writeback — the
-        actor could be the owner, but an unconfirmed accusation is not
-        written into the task file.
+      - resolved actor name == owner: ``self_completion`` + writeback
+        (message text unchanged from the original rule).
+      - any other non-lead completion (a peer's task, an owner reassigned
+        in the same call, or an unresolved name): ``non_lead_completion``
+        + writeback. The role is keyed on agent_type, so a missing name
+        changes only the message.
+
+    The role decision was gated on probe P2 (design section 9.2): on real
+    TaskUpdate frames the lead carries a lead agent_type and no agent_id,
+    and a subagent carries a non-lead agent_type and an a<16hex> agent_id.
+
+    RESIDUAL: ``owner == ""`` is silent, so TaskUpdate(owner="",
+    status="completed") escapes. Accepted: removing the guard would flag
+    teammates' unowned personal tracking tasks.
     """
     if actor.role != ROLE_TEAMMATE or not owner or exempt:
         return []
-    if actor.name is None:
+    if actor.name is not None and actor.name == owner:
         return [(
-            "self_completion_unverified",
-            f"PACT task_lifecycle_gate: a teammate frame (identity "
-            f"unresolved: {actor.source}) completed Task {task_id}, owned by "
-            f"{owner!r}. If this was the owner, it is a self-completion "
-            "without carve-out; lead-only completion authority — see "
-            "pact-completion-authority.md. Not flagged as disputed because "
-            "the actor could not be confirmed.",
-            False,
+            "self_completion",
+            f"PACT task_lifecycle_gate: teammate {actor.name!r} "
+            f"self-completed Task {task_id} without carve-out. "
+            "Lead-only completion authority — see "
+            "pact-completion-authority.md. Task marked "
+            "metadata.completion_disputed=true; lead must re-complete "
+            "intentionally to clear.",
+            True,
         )]
-    if actor.name != owner:
-        return []
+    who = (
+        f"teammate {actor.name!r}" if actor.name is not None
+        else f"a teammate (name unresolved: {actor.source})"
+    )
     return [(
-        "self_completion",
-        f"PACT task_lifecycle_gate: teammate {actor.name!r} "
-        f"self-completed Task {task_id} without carve-out. "
-        "Lead-only completion authority — see "
+        "non_lead_completion",
+        f"PACT task_lifecycle_gate: {who} completed Task {task_id}, owned by "
+        f"{owner!r}. Only the lead completes tasks — see "
         "pact-completion-authority.md. Task marked "
         "metadata.completion_disputed=true; lead must re-complete "
         "intentionally to clear.",

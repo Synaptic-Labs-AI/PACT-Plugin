@@ -493,6 +493,37 @@ class TestIsExemptAgentType:
         assert _is_exempt_agent_type("session-secretary", "test-team", teams_dir) is False
 
 
+class TestIsSelfCompleteExemptSurface1ActorCheck:
+    """Surface 1 with a known actor name: the exemption belongs to the
+    owner, so it applies only when the actor IS the owner. Stops a teammate
+    from setting owner='secretary' and completing under its exemption."""
+
+    def _team(self, teams_dir):
+        _write_team_config(teams_dir, "test-team", [
+            {"name": "secretary", "agentType": "pact-secretary"},
+        ])
+        return {"owner": "secretary", "metadata": {}}
+
+    def test_actor_is_the_owner(self, teams_dir):
+        from shared.intentional_wait import is_self_complete_exempt
+
+        task = self._team(teams_dir)
+        assert is_self_complete_exempt(task, "test-team", teams_dir, actor_name="secretary") is True
+
+    def test_actor_is_not_the_owner(self, teams_dir):
+        from shared.intentional_wait import is_self_complete_exempt
+
+        task = self._team(teams_dir)
+        assert is_self_complete_exempt(task, "test-team", teams_dir, actor_name="coder-1") is False
+
+    def test_actor_name_unknown_keeps_surface_1(self, teams_dir):
+        from shared.intentional_wait import is_self_complete_exempt
+
+        task = self._team(teams_dir)
+        assert is_self_complete_exempt(task, "test-team", teams_dir, actor_name=None) is True
+        assert is_self_complete_exempt(task, "test-team", teams_dir) is True
+
+
 class TestIsSelfCompleteExempt:
     def test_owner_with_pact_secretary_agenttype_is_exempt(self, teams_dir):
         from shared.intentional_wait import is_self_complete_exempt

@@ -9,9 +9,9 @@ Used by: teammate-authored metadata on Task records, team-lead inspection,
          audit tooling, and the PostToolUse advisory gate
          `task_lifecycle_gate.py`. The exemption predicate
          (is_self_complete_exempt) is a pure function read by that advisory
-         gate (advisory-only — it cannot DENY; it emits a `self_completion`
-         advisory + a `completion_disputed` writeback when a non-exempt
-         teammate self-completes) as well as by team-lead instructions and
+         gate (advisory-only — it cannot DENY; when a non-lead completes a
+         non-exempt task it emits a `self_completion` or `non_lead_completion`
+         advisory + a `completion_disputed` writeback) as well as by team-lead instructions and
          audit consumers. No hook BLOCKS on it; the exemption is not enforced
          (it stays instruction-level). See skills/pact-agent-teams/SKILL.md
          and agents/pact-orchestrator.md for the contract.
@@ -353,7 +353,9 @@ def is_self_complete_exempt(
        spawned under any name (`session-secretary`, `team-secretary`,
        etc.) reach this surface as long as their agentType matches.
        Requires `team_name`; with `team_name=""` (the default) this
-       surface short-circuits to False (fail-closed).
+       surface short-circuits to False (fail-closed). When `actor_name` is
+       given (not None), surface 1 also requires `actor_name == task.owner`,
+       so a teammate cannot borrow an exempt owner by reassigning the task.
        1b. By the completing ACTOR's harness-derived type, for where no team
        config exists (cloud): `actor_agent_type` is in
        SELF_COMPLETE_EXEMPT_AGENT_TYPES AND (`actor_name` is None OR
@@ -372,10 +374,11 @@ def is_self_complete_exempt(
     (conservative — never silently exempt).
 
     Read by the PostToolUse advisory gate `task_lifecycle_gate.py` (the
-    `self_completion` advisory) as well as team-lead-side task-file inspection,
-    audit tooling, and future consumers. That gate is advisory-only — it
-    cannot DENY; on a non-exempt self-completion it emits an advisory + a
-    `completion_disputed` writeback. No hook BLOCKS on it and the exemption
+    `self_completion` / `non_lead_completion` advisories) as well as
+    team-lead-side task-file inspection, audit tooling, and future consumers.
+    That gate is advisory-only — it cannot DENY; when a non-lead completes a
+    non-exempt task it emits an advisory + a `completion_disputed`
+    writeback. No hook BLOCKS on it and the exemption
     is not enforced (nothing forces an exempt teammate to self-complete —
     that remains instruction-level), so reading it here introduces no
     livelock-capable hook surface.
@@ -408,8 +411,9 @@ def is_self_complete_exempt(
                    `_iter_members`.
         actor_agent_type: Surface 1b — the completing actor's harness-derived
                    TYPE (keyword-only; None disables 1b).
-        actor_name: Surface 1b — the completing actor's resolved name, or
-                   None when unresolved (keyword-only).
+        actor_name: Surfaces 1 and 1b — the completing actor's resolved name,
+                   or None when unresolved (keyword-only). When set, it must
+                   equal task.owner for surface 1 or 1b to exempt.
     """
     if not isinstance(task, dict):
         return False
@@ -418,9 +422,16 @@ def is_self_complete_exempt(
     if not isinstance(metadata, dict):
         return False
 
-    # Surface 1: owner's team-config agentType is in the exempt set.
+    # Surface 1: owner's team-config agentType is in the exempt set — and,
+    # when the completing actor's name is known, the actor IS that owner
+    # (otherwise a teammate could set owner="secretary" and complete the
+    # task under the secretary's exemption).
     owner = task.get("owner")
-    if isinstance(owner, str) and _is_exempt_agent_type(owner, team_name, teams_dir):
+    if (
+        isinstance(owner, str)
+        and (actor_name is None or actor_name == owner)
+        and _is_exempt_agent_type(owner, team_name, teams_dir)
+    ):
         return True
 
     # Surface 1b: the actor's harness-derived type (cloud: no team config).

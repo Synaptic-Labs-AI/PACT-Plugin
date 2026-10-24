@@ -914,6 +914,17 @@ def _config_root():
     return get_claude_config_dir()
 
 
+_COMPLETION_RULES = frozenset({
+    "self_completion", "non_lead_completion", "self_completion_unverified",
+})
+
+
+def _completion_rules(advisories) -> list[str]:
+    """Every completion-rule advisory, so a silent-path test also fails on a
+    non_lead_completion (a startswith("self_completion") filter would hide it)."""
+    return [rule for rule, _ in advisories if rule in _COMPLETION_RULES]
+
+
 @pytest.fixture
 def writebacks(monkeypatch):
     """Record _writeback_dispute calls instead of writing task files."""
@@ -936,7 +947,7 @@ def test_silent_when_secretary_self_completes_inprocess(pact_context, writebacks
     advisories = tlg.evaluate_lifecycle(payload, decision=decision)
     assert decision["actor"]["source"] == "inprocess_id"
     assert decision["actor"]["owner_match"] is True
-    assert not any(rule.startswith("self_completion") for rule, _ in advisories)
+    assert _completion_rules(advisories) == []
     assert writebacks == []
 
 
@@ -953,7 +964,7 @@ def test_silent_when_secretary_self_completes_cloud(pact_context, writebacks):
     assert decision["actor"]["name"] == "secretary"
     assert decision["actor"]["source"] == "subagent_meta"
     assert decision["actor"]["owner_match"] is True
-    assert not any(rule.startswith("self_completion") for rule, _ in advisories)
+    assert _completion_rules(advisories) == []
     assert writebacks == []
 
 
@@ -966,9 +977,7 @@ def test_advisory_when_cloud_teammate_self_completes(pact_context, writebacks):
     write_subagent_meta(root, SUBAGENT_ID, cloud_meta("backend-coder", "pact-backend-coder"))
     payload = _with_task(cloud_subagent_frame(root, "pact-backend-coder"), "7", "backend-coder")
     advisories = tlg.evaluate_lifecycle(payload)
-    assert [rule for rule, _ in advisories if rule.startswith("self_completion")] == [
-        "self_completion"
-    ]
+    assert _completion_rules(advisories) == ["self_completion"]
     assert any("self-completed" in msg for _, msg in advisories)
     assert writebacks == ["7"]
 
@@ -985,7 +994,7 @@ def test_advisory_when_owner_named_secretary_without_agenttype(pact_context, wri
     payload = _with_task(inprocess_frame(root, "secretary"), "9", "secretary",
                          subject="spoof attempt")
     advisories = tlg.evaluate_lifecycle(payload)
-    assert any(rule == "self_completion" for rule, _ in advisories)
+    assert _completion_rules(advisories) == ["self_completion"]
     assert writebacks == ["9"]
 
 
@@ -1002,7 +1011,7 @@ def test_silent_when_signal_task_self_completes(pact_context, writebacks):
         metadata={"completion_type": "signal", "type": "blocker"}, subject="signal: ack",
     )
     advisories = tlg.evaluate_lifecycle(payload)
-    assert not any(rule.startswith("self_completion") for rule, _ in advisories)
+    assert _completion_rules(advisories) == []
     assert writebacks == []
 
 
@@ -1010,7 +1019,7 @@ def test_silent_when_lead_frame_completes(pact_context, writebacks):
     pact_context(team_name="test-team", session_id="test-session")
     payload = _with_task(actor_lead_frame(), "7", "backend-coder-3")
     advisories = tlg.evaluate_lifecycle(payload)
-    assert not any(rule.startswith("self_completion") for rule, _ in advisories)
+    assert _completion_rules(advisories) == []
     assert writebacks == []
 
 
@@ -1019,23 +1028,22 @@ def test_silent_when_plain_frame_completes(pact_context, writebacks):
     pact_context(team_name="test-team", session_id="test-session")
     payload = _with_task(plain_frame(), "7", "backend-coder-3")
     advisories = tlg.evaluate_lifecycle(payload)
-    assert not any(rule.startswith("self_completion") for rule, _ in advisories)
+    assert _completion_rules(advisories) == []
     assert writebacks == []
 
 
-def test_unverified_advisory_when_teammate_name_unresolved(pact_context, writebacks):
-    """Rule A, decision 2: a non-lead frame whose name cannot be resolved
-    (cloud, meta.json missing, non-exempt type) gets the soft
-    self_completion_unverified advisory and NO completion_disputed
-    writeback. Replaces the old test that pinned the silent skip."""
+def test_non_lead_completion_when_teammate_name_unresolved(pact_context, writebacks):
+    """Rule B, decision 2: a non-lead frame whose name cannot be resolved
+    (cloud, meta.json missing, non-exempt type) is still a non-lead, so it
+    gets the full non_lead_completion advisory and a completion_disputed
+    writeback; the message says the name was unresolved."""
     pact_context(team_name="test-team", session_id="test-session")
     root = _config_root()
     payload = _with_task(cloud_subagent_frame(root, "pact-backend-coder"), "7", "backend-coder-3")
     advisories = tlg.evaluate_lifecycle(payload)
-    assert [rule for rule, _ in advisories if rule.startswith("self_completion")] == [
-        "self_completion_unverified"
-    ]
-    assert writebacks == []
+    assert _completion_rules(advisories) == ["non_lead_completion"]
+    assert any("name unresolved: subagent_no_meta" in m for _, m in advisories)
+    assert writebacks == ["7"]
 
 
 def test_silent_when_unresolved_actor_has_exempt_frame_type(pact_context, writebacks):
@@ -1045,12 +1053,12 @@ def test_silent_when_unresolved_actor_has_exempt_frame_type(pact_context, writeb
     root = _config_root()
     payload = _with_task(cloud_subagent_frame(root, "PACT:pact-secretary"), "7", "secretary")
     advisories = tlg.evaluate_lifecycle(payload)
-    assert not any(rule.startswith("self_completion") for rule, _ in advisories)
+    assert _completion_rules(advisories) == []
     assert writebacks == []
 
 
-def test_silent_when_teammate_completes_peers_task(pact_context, writebacks):
-    """Rule A does not police peer completion (that is rule B's scope)."""
+def test_non_lead_completion_when_teammate_completes_peers_task(pact_context, writebacks):
+    """Rule B: a teammate completing a peer's task is flagged, naming both."""
     pact_context(team_name="test-team", session_id="test-session")
     root = _config_root()
     write_team_config(root, "test-team", [
@@ -1058,7 +1066,36 @@ def test_silent_when_teammate_completes_peers_task(pact_context, writebacks):
     ])
     payload = _with_task(inprocess_frame(root, "backend-coder-3"), "7", "frontend-coder-1")
     advisories = tlg.evaluate_lifecycle(payload)
-    assert not any(rule.startswith("self_completion") for rule, _ in advisories)
+    assert _completion_rules(advisories) == ["non_lead_completion"]
+    msg = next(m for r, m in advisories if r == "non_lead_completion")
+    assert "'backend-coder-3'" in msg and "'frontend-coder-1'" in msg
+    assert "Only the lead completes tasks" in msg
+    assert writebacks == ["7"]
+
+
+def test_non_lead_completion_when_owner_reassigned_in_the_completing_call(pact_context, writebacks):
+    """Rule B closes rule A's one-call escape: TaskUpdate(owner='other',
+    status='completed') leaves owner='other' in the post-state, so the
+    actor is not the owner and the completion is flagged."""
+    pact_context(team_name="test-team", session_id="test-session")
+    root = _config_root()
+    write_subagent_meta(root, SUBAGENT_ID, cloud_meta("backend-coder", "pact-backend-coder"))
+    payload = _with_task(cloud_subagent_frame(root, "pact-backend-coder"), "7", "other")
+    payload["tool_input"]["owner"] = "other"
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert _completion_rules(advisories) == ["non_lead_completion"]
+    assert writebacks == ["7"]
+
+
+def test_silent_when_teammate_completes_unowned_task_documented_residual(pact_context, writebacks):
+    """Accepted residual under rule B: an empty owner (a teammate's unowned
+    personal tracking task, or TaskUpdate(owner='', status='completed')) is
+    silent, so personal tracking tasks are not flagged."""
+    pact_context(team_name="test-team", session_id="test-session")
+    root = _config_root()
+    write_subagent_meta(root, SUBAGENT_ID, cloud_meta("backend-coder", "pact-backend-coder"))
+    payload = _with_task(cloud_subagent_frame(root, "pact-backend-coder"), "7", "")
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == []
     assert writebacks == []
 
 
@@ -1068,7 +1105,7 @@ def test_silent_when_tmux_teammate_has_no_team(writebacks):
     payload = _with_task(tmux_frame(), "7", "backend-coder-3")
     payload["tool_response"] = {}
     advisories = tlg.evaluate_lifecycle(payload)
-    assert not any(rule.startswith("self_completion") for rule, _ in advisories)
+    assert _completion_rules(advisories) == []
     assert writebacks == []
 
 
@@ -1092,7 +1129,7 @@ def test_silent_when_lead_completes_teammates_task(pact_context, writebacks):
     decision: dict = {}
     advisories = tlg.evaluate_lifecycle(frame, decision=decision)
     assert decision["actor"]["role"] == "lead"
-    assert not any(rule.startswith("self_completion") for rule, _ in advisories)
+    assert _completion_rules(advisories) == []
     assert writebacks == []
 
 
