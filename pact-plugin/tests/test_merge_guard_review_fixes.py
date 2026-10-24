@@ -2061,3 +2061,29 @@ def test_a_command_after_a_compound_keyword_is_read_and_runs_once_approved(label
 ], ids=["view-after-then", "printed-in-a-loop"])
 def test_a_command_after_a_compound_keyword_that_runs_nothing_guarded_is_allowed(cmd):
     assert is_dangerous_command(cmd) is False
+
+
+# A -c string is a command line: one that only prints a guarded command runs nothing
+# guarded, as its bare command does; one that runs it is still refused.
+PRINTING_C_STRINGS = [
+    ("echo in single quotes", "sh -c 'echo gh pr " + "merge 5'"),
+    ("echo in double quotes", 'bash -c "echo gh pr ' + 'merge 5"'),
+    ("in a substitution", "out=$(sh -c 'echo gh pr " + "merge 5')"),
+]
+RUNNING_C_STRINGS = [
+    ("plain", "sh -c 'gh pr " + "merge 5'"),
+    ("after an echo", 'sh -c "echo x; gh pr ' + 'merge 5"'),
+    ("printed into a shell", "sh -c 'echo gh pr " + "merge 5 | sh'"),
+]
+
+
+@pytest.mark.parametrize("label,cmd", PRINTING_C_STRINGS, ids=[r[0] for r in PRINTING_C_STRINGS])
+def test_a_c_string_that_only_prints_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", RUNNING_C_STRINGS, ids=[r[0] for r in RUNNING_C_STRINGS])
+def test_a_c_string_that_runs_the_command_is_refused_then_runs(label, cmd, style):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)

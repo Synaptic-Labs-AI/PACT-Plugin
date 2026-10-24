@@ -8645,7 +8645,11 @@ def _is_preserve_leg(leg: str, _depth: int = 0) -> bool:
                 if _interpreter_names_primitive(leg, head, tokens):
                     return True
             elif _SHELL_STRING_EXECUTORS.match(head):    # (a) shell / string runner
-                return True
+                # A -c string is a command line: kept only when it runs something guarded,
+                # so `sh -c 'echo gh pr merge 5'` prints as its bare command does.
+                inner = shell_c_string(leg) if _POSIX_SHELL_HEADS_RE.match(head) and _depth < _MAX_WRAPPER_DEPTH else None
+                # A heredoc the strip already removed from the string cannot be judged here.
+                return inner is None or "HEREDOC_STRIPPED" in inner or _is_dangerous_at_depth(inner, _depth + 1)
             if head in _HTTP_CLIENT_HEADS:               # (b) curl/wget (quoted head via shlex)
                 return True
             if head in _EXEC_WRAPPERS_COARSE:            # (a) wrapper, boundary not skippable
