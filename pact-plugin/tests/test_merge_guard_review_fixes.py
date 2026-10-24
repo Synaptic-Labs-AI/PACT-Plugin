@@ -2627,3 +2627,30 @@ def test_a_sequence_with_output_the_guard_cannot_know_is_not_read(cmd):
     from shared.merge_guard_common import rewritten_executed_command
 
     assert rewritten_executed_command(cmd) is None
+
+
+# A branch runs on its condition's last leg: a guarded command before that leg runs on every
+# path, so a merge there and one in a later branch can both run.
+@pytest.mark.parametrize("cmd", [
+    "if gh pr " + "merge 5 --squash; gh pr checks 5; then echo ok; else gh pr " + "merge 6 --squash; fi",
+    "if gh pr " + "merge 5 --squash; false; then echo ok; else gh pr " + "merge 6 --squash; fi",
+    "if gh pr " + "merge 5 --squash && false; then echo ok; else gh pr " + "merge 6 --squash; fi",
+    "if gh pr checks 5; then echo ok; elif gh pr " + "merge 5 --squash; false; then echo; else gh pr "
+    + "merge 6 --squash; fi",
+], ids=["leg-after-the-merge", "false-after-the-merge", "and-false", "in-an-elif"])
+def test_a_guarded_leg_before_a_conditions_last_leg_counts_on_every_path(cmd):
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_compound_destructive_command(cmd) is True
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("cmd", [
+    "if gh pr checks 5; gh pr " + "merge 5 --squash; then echo ok; else gh pr " + "merge 5 --rebase; fi",
+    "if gh pr checks 5; then echo ok; elif gh pr " + "merge 5 --squash; then echo; else gh pr " + "merge 5 --rebase; fi",
+], ids=["merge-is-the-last-leg", "merge-is-an-elifs-last-leg"])
+def test_a_merge_deciding_its_branch_and_a_later_branch_are_one_op(cmd, style):
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_compound_destructive_command(cmd) is False
+    assert _runs_after_approval(cmd, style)

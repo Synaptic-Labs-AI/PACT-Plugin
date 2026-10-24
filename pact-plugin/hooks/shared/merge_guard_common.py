@@ -9751,13 +9751,14 @@ def _alternative_branch_walk(legs: list[str], counts: list[int], ops: list[str])
     """Walk the if/elif/else and case groups and the `||` chains over per-leg destructive
     counts, `ops` being the operator after each leg. Returns how much more the counts add up
     to than the commands that can run together, and the most arms of one group, or legs of
-    one chain, that each hold a destructive command. A group runs one arm: an if's condition
-    runs with its first branch, and each later branch runs only when the conditions before
-    it failed, so a group counts as its largest arm (the first arm being the condition and
-    its branch). Under a condition whose one guarded command is its last leg and negated
-    (`if ! gh pr merge 5; then …`), the first branch runs only when that command failed, so
-    the two are alternatives, and each later branch runs only when it succeeded, so it adds
-    to the condition. Nested groups count by the same rule inside their arm. Legs joined only by
+    one chain, that each hold a destructive command. A case runs one arm, so it counts as its
+    largest arm. An if runs one path: each branch's condition decides, by its last leg,
+    whether that branch or the next condition runs, and the group counts as its largest
+    path. A condition whose guarded command is its last leg, with nothing guarded before it,
+    counts on the path where its branch runs and not on the paths past it (its command
+    failed there), or the other way round when that leg is negated on the first condition
+    (`if ! gh pr merge 5; then …`); any other condition counts on every path that reaches
+    it. Nested groups count by the same rule inside their arm. Legs joined only by
     `||` run one after another only while each fails, so the chain counts as its largest
     leg; a negated guarded leg (`! gh pr merge 5 || …`) fails when its op succeeds, so the
     chain breaks after it and the parts add up. (0, 0) when a group does not close."""
@@ -9776,53 +9777,74 @@ def _alternative_branch_walk(legs: list[str], counts: list[int], ops: list[str])
             counts[i:j + 1] = [max(run)] + [0] * (j - i)
         i = j + 1
 
+    def outcomes(arm: dict, first: bool) -> tuple[int, int]:
+        """What an if branch's condition counts on the paths past it and on its own."""
+        cond, parts = arm["cond"], arm["parts"]
+        if any(k for k, _ in parts[:-1]):
+            return cond, cond
+        if parts[-1][1] and first:
+            return cond, 0
+        return 0, cond
+
+    def close_if(frame: dict) -> tuple[int, list[int]]:
+        passed, paths = 0, []
+        for k, arm in enumerate(frame["arms"]):
+            if arm["else"]:
+                paths.append(passed + arm["body"])
+                return max(paths), paths
+            past, own = outcomes(arm, k == 0)
+            paths.append(passed + own + (arm["body"] or 0))
+            passed += past
+        paths.append(passed)
+        return max(paths), paths
+
+    def add(frame: dict, value: int, negated: bool) -> None:
+        if frame["case"]:
+            frame["cur"] = (frame["cur"] or 0) + value
+            return
+        arm = frame["arms"][-1]
+        if arm["body"] is None:
+            arm["cond"] += value
+            arm["parts"].append((value, negated))
+        else:
+            arm["body"] += value
+
     def step(word: str, n: int, empty: bool, negated: bool) -> None:
         nonlocal top, widest
         frame = stack[-1] if stack else None
-        if word in ("if", "case"):
-            stack.append({"branches": [], "cur": n if word == "case" else None, "case": word == "case",
-                          "cond": 0 if word == "case" else n, "elif": False,
-                          "parts": [] if word == "case" else [(n, negated)]})
+        if word == "case":
+            stack.append({"case": True, "branches": [], "cur": n})
+        elif word == "if":
+            stack.append({"case": False, "arms": [{"cond": n, "parts": [(n, negated)], "body": None, "else": False}]})
         elif frame is None:
             top += n
-        elif word == "then":
-            if frame["elif"]:
-                frame["cur"] += n
-                frame["elif"] = False
-            else:
-                frame["cur"] = n
-        elif word == "elif":
-            frame["branches"].append(frame["cur"] or 0)
-            frame["cur"], frame["elif"] = n, True
-        elif word == "else":
-            frame["branches"].append(frame["cur"] or 0)
-            frame["cur"] = n
         elif word in ("fi", "esac"):
-            frame["branches"].append(frame["cur"] or 0)
             stack.pop()
-            cond, first, later = frame["cond"], frame["branches"][0], frame["branches"][1:]
-            parts = frame["parts"]
-            if parts and parts[-1][1] and not any(k for k, _ in parts[:-1]):
-                # A negated condition: its op and the first branch are alternatives.
-                arms = [max(cond, first)] + [cond + b for b in later]
-                widest = max(widest, (cond > 0) + (first > 0))
+            if frame["case"]:
+                frame["branches"].append(frame["cur"] or 0)
+                paths = frame["branches"]
+                value = max(paths)
             else:
-                # The condition runs with the first branch; a later branch runs only when it failed.
-                arms = [cond + first] + later
-            widest = max(widest, sum(1 for arm in arms if arm))
-            value = max(arms) + n
+                value, paths = close_if(frame)
+            widest = max(widest, sum(1 for path in paths if path))
             if stack:
-                stack[-1]["cur"] = (stack[-1]["cur"] or 0) + value
+                add(stack[-1], value + n, False)
             else:
-                top += value
-        elif frame["case"] and empty:
-            frame["branches"].append(frame["cur"] or 0)
-            frame["cur"] = 0
-        elif frame["cur"] is None:
-            frame["cond"] += n
-            frame["parts"].append((n, negated))
+                top += value + n
+        elif frame["case"]:
+            if empty:
+                frame["branches"].append(frame["cur"] or 0)
+                frame["cur"] = 0
+            else:
+                frame["cur"] = (frame["cur"] or 0) + n
+        elif word == "then":
+            frame["arms"][-1]["body"] = n
+        elif word == "elif":
+            frame["arms"].append({"cond": n, "parts": [(n, negated)], "body": None, "else": False})
+        elif word == "else":
+            frame["arms"].append({"cond": 0, "parts": [], "body": n, "else": True})
         else:
-            frame["cur"] += n
+            add(frame, n, negated)
 
     for leg, n in zip(legs, counts):
         # A leg can open with several words in a row (`then if b`, `else case ...`); the
