@@ -9475,37 +9475,56 @@ def is_compound_destructive_command(command: str) -> bool:
     on_interpreters = sum(1 for leg in destructive if _INTERPRETER_WORD_RE.search(leg))
     interpreted = {normalize_command_text(c) for c in _interpreter_guarded_commands(command, 0)}
     in_shells = sum(_shell_leg_destructive_count(leg) for leg in destructive)
-    in_shells += _literal_loop_extra_passes(legs)
+    in_shells += _literal_loop_extra_passes(command)
     return in_shells - on_interpreters + max(on_interpreters, len(interpreted)) >= 2
 
 
-_FOR_IN_LEG_RE = re.compile(r"\s*for\s+[A-Za-z_]\w*\s+in\s+(.*\S)\s*$", re.DOTALL)
+_FOR_IN_LEG_RE = re.compile(r"\s*for\s+(?P<name>[A-Za-z_]\w*)\s+in\s+(?P<words>.*\S)\s*$", re.DOTALL)
 _LOOP_HEAD_LEG_RE = re.compile(r"\s*(?:for|while|until|select)\s")
 _DONE_LEG_RE = re.compile(r"\s*done(?![\w-])")
 _LEADING_KEYWORDS_RE = re.compile(r"^\s*(?:(?:do|then|else)\s+|\{\s+)*")
 
 
-def _literal_loop_extra_passes(legs: list[str]) -> int:
+def _literal_loop_extra_passes(command: str) -> int:
     """The destructive legs a `for NAME in W1 W2 …; do …; done` loop over literal words
     runs past its first pass: `for p in 5 6; do gh pr merge "$p"; done` runs two merges,
-    so it adds 1 to the one destructive leg its body holds. A list that is not plain
-    literal words (`$VAR`, `$(…)`, a glob or brace) adds nothing."""
+    so it adds 1 to the one destructive leg its body holds. A leg counts only when it
+    reads the loop variable and runs on every pass: a retry loop around one command
+    (`for i in 1 2 3; do gh pr merge 5 && break; done`) repeats one operation, and a leg
+    after `then` / `else` / in a `case`, or on the right of `&&` / `||`, runs only when
+    its guard holds, so it counts once. A list that is not plain literal words (`$VAR`,
+    `$(…)`, a glob or brace) adds nothing."""
+    stripped = _strip_non_executable_content(_normalize_line_continuations(command))
+    spans = _slice_stripped_leg_spans(stripped)
+    legs, guarded, prev = [], [], 0
+    for start, end in spans:
+        guarded.append(stripped[prev:start].strip() in ("&&", "||"))
+        legs.append(stripped[start:end])
+        prev = end
     extra = 0
-    legs = [_LEADING_KEYWORDS_RE.sub("", leg) for leg in legs]
     for i, leg in enumerate(legs):
-        m = _FOR_IN_LEG_RE.match(leg)
-        words = _shell_tokenize(m.group(1)) if m and not re.search(r"[$`*?\[{]", m.group(1)) else None
+        m = _FOR_IN_LEG_RE.match(_LEADING_KEYWORDS_RE.sub("", leg))
+        if m is None or re.search(r"[$`*?\[{]", m.group("words")):
+            continue
+        words = _shell_tokenize(m.group("words"))
         if not words:
             continue
-        depth, body = 0, 0
-        for part in legs[i + 1:]:
+        uses = re.compile(r"\$\{?" + re.escape(m.group("name")) + r"(?!\w)")
+        depth, branch, body = 0, 0, 0
+        for k in range(i + 1, len(legs)):
+            raw = legs[k]
+            part = _LEADING_KEYWORDS_RE.sub("", raw)
             if _DONE_LEG_RE.match(part):
                 if depth == 0:
                     break
                 depth -= 1
             elif _LOOP_HEAD_LEG_RE.match(part):
                 depth += 1
-            if _leg_is_destructive(part):
+            if re.match(r"\s*(?:then|case)(?![\w-])", raw):
+                branch += 1
+            elif re.match(r"\s*(?:fi|esac)(?![\w-])", raw):
+                branch -= 1
+            if not branch and not guarded[k] and uses.search(part) and _leg_is_destructive(part):
                 body += 1
         extra += (len(words) - 1) * body
     return extra
@@ -9522,4 +9541,4 @@ def _shell_leg_destructive_count(leg: str, depth: int = 0) -> int:
     inner_destructive = [part for part in inner_legs if _leg_is_destructive(part)]
     return sum(
         _shell_leg_destructive_count(part, depth + 1) for part in inner_destructive
-    ) + _literal_loop_extra_passes(inner_legs)
+    ) + _literal_loop_extra_passes(inner)

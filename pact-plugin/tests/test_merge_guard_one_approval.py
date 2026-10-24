@@ -167,3 +167,44 @@ class TestALoopOverSeveralWordsIsSeveralOperations:
         from shared.merge_guard_common import is_compound_destructive_command
 
         assert is_compound_destructive_command(command) is False
+
+
+# A pass repeats a guarded command only when the command reads the loop variable and
+# runs on every pass. A retry loop around one command is one operation, and so is a
+# command a pass runs only behind a guard (`then`, `&&`): one approval mints for them.
+ONE_OPERATION_LOOPS = {
+    "retry-with-if-break": "for i in 1 2 3; do if " + MERGE + "5 --squash; then break; fi; sleep 5; done",
+    "retry-with-and-or": "for attempt in 1 2 3; do " + MERGE + "5 --squash && break || sleep 10; done",
+    "retry-on-separate-lines": "for i in 1 2 3; do\n  " + MERGE + "5 --squash && break\n  sleep 5\ndone",
+    "until-retry": "until " + MERGE + "5 --squash; do sleep 5; done",
+    "python-range-retry": "python3 - <<'EOF'\nimport subprocess, time\nfor attempt in range(3):\n"
+                          "    if subprocess.run([\"gh\", \"pr\", \"merge\", \"5\", \"--squash\"]).returncode == 0:\n"
+                          "        break\n    time.sleep(5)\nEOF",
+    "one-quoted-word": 'for b in "a b"; do ' + DELETE + "$b; done",
+    "delete-behind-then": 'for b in a b; do if [ "$b" = a ]; then ' + DELETE + '"$b"; fi; done',
+    "delete-behind-and": 'for b in a b; do [ "$b" = a ] && ' + DELETE + '"$b"; done',
+    "delete-behind-or": 'for b in a b; do [ -z "$b" ] || ' + DELETE + '"$b"; done',
+}
+REPEATED_LOOPS = {
+    "merge-each-word": "for p in 5 6; do " + MERGE + '"$p"; done',
+    "merge-in-the-if-condition": "for p in 5 6; do if " + MERGE + '"$p"; then echo ok; fi; done',
+    "delete-each-word": "for b in a b; do " + DELETE + '"$b"; done',
+    "delete-after-a-closed-if": "for b in a b; do if true; then echo; fi; " + DELETE + '"$b"; done',
+}
+
+
+class TestALoopRepeatsOnlyWhatVariesAndAlwaysRuns:
+    @pytest.mark.parametrize("command", ONE_OPERATION_LOOPS.values(), ids=ONE_OPERATION_LOOPS.keys())
+    def test_one_operation_mints_and_runs(self, command, tmp_path):
+        from shared.merge_guard_common import is_compound_destructive_command
+
+        assert is_compound_destructive_command(command) is False
+        assert not _runs(command, tmp_path)
+        _approve(command, tmp_path)
+        assert _runs(command, tmp_path)
+
+    @pytest.mark.parametrize("command", REPEATED_LOOPS.values(), ids=REPEATED_LOOPS.keys())
+    def test_an_operation_every_pass_runs_is_still_counted_per_word(self, command):
+        from shared.merge_guard_common import is_compound_destructive_command
+
+        assert is_compound_destructive_command(command) is True
