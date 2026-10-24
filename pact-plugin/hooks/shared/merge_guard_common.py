@@ -3050,7 +3050,8 @@ _STDIN_INTERPRETER = (
     r"(?<![\w./-])(?:[^\s|;&<>()]*/)?"
     r"(?P<head>" + _INTERPRETER_HEAD_ALTERNATION + r")"
     r"(?P<sub>[ \t]+(?:eval|run)(?=[ \t]))?"         # deno's eval / run subcommand
-    r"(?P<flags>(?:[ \t]+-[\w-]*)*)[ \t]*"
+    r"(?P<flags>(?:[ \t]+-[\w-]*)*)"
+    r"(?:[ \t]+-(?:[ \t]+[^\s<>|;&()]+)+)?[ \t]*"   # `-` then the program's argv
 )
 _CODE_ARG_FLAGS = frozenset({"-c", "-e", "-E", "-r", "-m", "-f", "--eval", "--command"})
 _FED_HEREDOC_RE = re.compile(

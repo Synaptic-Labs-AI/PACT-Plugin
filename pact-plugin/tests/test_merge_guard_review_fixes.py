@@ -1512,3 +1512,53 @@ def test_positional_words_feeding_two_merges_are_compound(cmd):
 
     assert is_compound_destructive_command(cmd) is True
     assert not _runs_after_approval(cmd, APPROVAL_STYLES["inline"])
+
+
+# An interpreter given `-` and then the program's own arguments reads its program
+# from stdin (`python3 - 5 <<EOF`), so that heredoc is the program; a script path
+# before the arguments makes the heredoc data.
+STDIN_ARGV_DENY = [
+    ('python - args heredoc', 'python3 - 5 <<\'EOF\'\nimport subprocess\nsubprocess.run(["gh", "pr", "merge", "5"])\nEOF'),
+    ('argv-built merge', 'python3 - 5 <<\'EOF\'\nimport subprocess, sys\nsubprocess.run(["gh", "pr", "merge", sys.argv[1]])\nEOF'),
+    ('python - two args', 'python3 - a b <<\'EOF\'\nimport subprocess\nsubprocess.run(["gh", "pr", "merge", "5"])\nEOF'),
+    ('node - args here-string', 'node - 5 <<< \'require("child_process").execSync("' + M + ' 5")\''),
+]
+STDIN_ARGV_ALLOW = [
+    ('view twin', 'python3 - 5 <<\'EOF\'\nimport subprocess\nsubprocess.run(["gh", "pr", "view", "5"])\nEOF'),
+    ('python script reading stdin data', 'python3 script.py 5 <<\'EOF\'\nimport subprocess\nsubprocess.run(["gh", "pr", "merge", "5"])\nEOF'),
+]
+
+
+@pytest.mark.parametrize("label,cmd", STDIN_ARGV_DENY, ids=[r[0] for r in STDIN_ARGV_DENY])
+def test_stdin_argv_merge_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", STDIN_ARGV_ALLOW, ids=[r[0] for r in STDIN_ARGV_ALLOW])
+def test_stdin_argv_view_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", STDIN_ARGV_DENY, ids=[r[0] for r in STDIN_ARGV_DENY])
+def test_a_stdin_program_given_argv_runs_once_approved(label, cmd, style):
+    assert _runs_after_approval(cmd, style)
+
+
+def test_a_stdin_program_given_a_dashed_argument_is_still_the_program():
+    cmd = "python3 - --dry-run <<'EOF'\nimport subprocess\nsubprocess.run([\"gh\", \"pr\", \"merge\", \"5\"])\nEOF"
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, APPROVAL_STYLES["inline"])
+
+
+def test_a_stdin_program_given_argv_running_two_merges_is_compound():
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    cmd = ("python3 - 5 <<'EOF'\nimport subprocess\nsubprocess.run([\"gh\", \"pr\", \"merge\", \"5\"])\n"
+           "subprocess.run([\"gh\", \"pr\", \"merge\", \"6\"])\nEOF")
+    assert is_compound_destructive_command(cmd) is True
+    assert not _runs_after_approval(cmd, APPROVAL_STYLES["inline"])
+
+
+def test_a_stdin_program_given_argv_that_only_prints_a_merge_is_allowed():
+    assert is_dangerous_command("python3 - 5 <<'EOF'\nprint(\"" + D + "\")\nEOF") is False
