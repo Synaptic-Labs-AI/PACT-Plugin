@@ -116,3 +116,54 @@ class TestATokenNeverAddsFlagsThroughAWrapper:
     @pytest.mark.parametrize("command", [PLAIN, "bash -c '" + PLAIN + "'"], ids=["plain", "bash-c-same-flags"])
     def test_the_approved_operation_still_runs(self, command):
         assert _token_matches_command(_token(PLAIN), command)
+
+
+# A `for` loop over literal words runs its body once per word: two words around a merge
+# are two merges, so one approval mints nothing for it; one word is one merge.
+LOOPS_OVER_SEVERAL = {
+    "merge-two-prs": "for p in 5 6; do " + MERGE + '"$p"; done',
+    "merge-on-separate-lines": "for p in 5 6\ndo\n  " + MERGE + '"$p" --squash\ndone',
+    "delete-two-branches": "for b in a b; do " + DELETE + '"$b"; done',
+    "inside-a-shell-c-string": "bash -c 'for p in 5 6; do " + MERGE + "$p; done'",
+    "inner-loop-over-two": "for d in x; do for p in 5 6; do " + MERGE + '"$p"; done; done',
+    "merge-after-an-inner-loop": "for p in 5 6; do for f in x; do echo; done; " + MERGE + '"$p"; done',
+}
+LOOPS_RUN_ONCE = {
+    "one-word": "for p in 5; do " + MERGE + '"$p"; done',
+    "loop-ends-before-the-merge": 'for f in a b; do echo "$f"; done; ' + MERGE + "5",
+}
+
+
+class TestALoopOverSeveralWordsIsSeveralOperations:
+    @pytest.mark.parametrize("command", LOOPS_OVER_SEVERAL.values(), ids=LOOPS_OVER_SEVERAL.keys())
+    def test_it_is_compound_and_an_approval_mints_nothing(self, command, tmp_path):
+        from shared.merge_guard_common import is_compound_destructive_command
+
+        assert is_compound_destructive_command(command) is True
+        (tmp_path / ".claude").mkdir()
+        q = [{"question": "Run this?", "header": "Run", "multiSelect": False,
+              "options": [{"label": "Yes, run", "description": f"Run `{command}` now"},
+                          {"label": "No", "description": "Hold."}]}]
+        post = _hook("merge_guard_post.py", {
+            "hook_event_name": "PostToolUse", "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": q}, "tool_response": {"answers": {"Run this?": "Yes, run"}},
+        }, tmp_path)
+        assert "token written" not in post.stderr
+        assert not _runs(command, tmp_path)
+
+    @pytest.mark.parametrize("command", LOOPS_RUN_ONCE.values(), ids=LOOPS_RUN_ONCE.keys())
+    def test_one_pass_is_one_operation_and_runs_once_approved(self, command, tmp_path):
+        from shared.merge_guard_common import is_compound_destructive_command
+
+        assert is_compound_destructive_command(command) is False
+        _approve(command, tmp_path)
+        assert _runs(command, tmp_path)
+
+    @pytest.mark.parametrize("command", [
+        "for p in 5 6; do gh pr view \"$p\"; done",
+        "for p in $(gh pr list -q .number); do " + MERGE + '"$p"; done',
+    ], ids=["view-loop", "list-not-literal"])
+    def test_a_view_loop_or_an_unread_list_counts_as_before(self, command):
+        from shared.merge_guard_common import is_compound_destructive_command
+
+        assert is_compound_destructive_command(command) is False
