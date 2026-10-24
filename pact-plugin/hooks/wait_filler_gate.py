@@ -41,13 +41,18 @@ on the POST-NORMALIZATION command only — `description` is never read (a
 description-keyed counter resets when the model varies the description).
 
 VALVE: at computed tier 3, an INSTANT form (bare `true`, or `sleep` with
-zero duration) is ALLOWED at most twice per session with a
-CIRCUIT-BREAKER additionalContext payload — the sanctioned terminal
-no-op that deterministically ends the loop (no hook can end a turn; an
-allowed inert call plus an imperative payload can). The instant-form
-predicate is derived from the SAME normalized command and is a strict
-subset of the deny grammar: `sleep N>0` / `sleep infinity` are NEVER
-instant.
+zero duration) is ALLOWED with a CIRCUIT-BREAKER additionalContext
+payload — the sanctioned terminal no-op that deterministically ends the
+loop (no hook can end a turn; an allowed inert call plus an imperative
+payload can). The budget is 2 per (session_id, agent_type) SECTION, so
+each agent's loop gets its own sanctioned exit under session identity
+collapse, not 2 for the whole session file. The instant-form predicate
+is derived from the SAME normalized command and, on filler-matched
+strings, admits exactly the all-zero-duration spellings plus bare
+`true`: `sleep N>0` / `sleep infinity` are NEVER instant. "At most
+twice" is the DEFAULT: a writer able to modify the 0600 state file can
+raise `valve_budget` above 2 (same local trust domain as the accepted
+no-HMAC stance) — each extra allowance is still an inert no-op.
 
 STATE: one JSON file per session_id at
 <CLAUDE_CONFIG_DIR>/pact-filler-state/<session_id>.json, agent_type
@@ -116,10 +121,15 @@ _TRAILING_COMMENT = re.compile(r"\s+#.*\Z")
 # reaches tier 3 on its own first re-fire — the command-walk backstop.
 #
 # The instant-form predicate below is a STRICT SUBSET of _FILLER_PATTERN's
-# language (the V1 pin): `0*\.?0*` names exactly the all-zero duration
-# spellings the filler grammar admits (`0`, `00`, `0.`, `0.0`, `.0`,
-# `.00`, with an optional s/m/h/d suffix). Anything carrying a nonzero
-# digit, and `infinity`, fail the anchor and are never valve-eligible.
+# language (the V1 pin), and the property holds BOTH by pattern and by
+# call-site discipline. By pattern: the duration alternation requires a
+# digit (`0+\.?0*` or `\.0+`), so no duration-less spelling like `sleep s`
+# is admitted, and every all-zero spelling (`0`, `00`, `0.`, `0.0`, `.0`,
+# `.00`, optional s/m/h/d suffix) is also in the filler grammar's duration
+# set; anything carrying a nonzero digit, and `infinity`, fail the anchor.
+# By call-site discipline: the sole call site computes it from the
+# normalized string that already produced the filler verdict, so even a
+# future pattern regression cannot widen the valve beyond denied commands.
 _MAX_TIER = 3
 _SATURATION_TOTAL = 6
 _INITIAL_VALVE_BUDGET = 2
@@ -127,9 +137,12 @@ _MAX_TRACKED_PAIRS = 64
 _MAX_AGENT_SECTIONS = 32
 _FILLER_STATE_DIRNAME = "pact-filler-state"
 _SAFE_SESSION_ID = re.compile(r"[A-Za-z0-9_-]+")
-_INSTANT_FILLER = re.compile(r"\A(?:true|sleep[ \t]+0*\.?0*(?:[smhd])?)\Z")
+_INSTANT_FILLER = re.compile(r"\A(?:true|sleep[ \t]+(?:0+\.?0*|\.0+)(?:[smhd])?)\Z")
 
-_TIER2_SUFFIX = " This exact call has now been denied {count} times this session."
+_TIER2_SUFFIX = (
+    " This exact call has now been denied {count} time{plural} this "
+    "session ({total} filler calls in total)."
+)
 _TIER3_REASON = (
     "FILLER-LOCK: this exact call has been denied {count} times this "
     "session ({total} filler calls in total). Your turn ends now — make "
@@ -194,6 +207,15 @@ def _compute_gradient(section, key: str, instant: bool):
     INCLUDING the current attempt, or None when the section or its
     `valve_budget` is corrupt: the caller treats that as UNKNOWN = DENY
     at tier 1 with the valve closed (V2), never harder on bad state.
+
+    Corrupt-field treatment is deliberately asymmetric. Soft fields —
+    `pairs` (non-dict) and `total` (non-int/negative) — are reset to
+    {}/0 and the reset is PERSISTED (repair-on-write): a reset only
+    softens the gradient, so rewriting the record clean is safe. A
+    corrupt `valve_budget` instead degrades WITHOUT touching the file:
+    V2 requires UNKNOWN = DENY, and silently repairing the budget would
+    re-open the valve on unverified state — the one field whose corrupt
+    value must never be laundered into a fresh one.
     """
     if section is None:
         pairs, total, budget = {}, 0, _INITIAL_VALVE_BUDGET
@@ -289,11 +311,14 @@ def _escalate(input_data, normalized):
                 return text, False, None
             pairs[key] = new_count
             new_budget = budget - 1 if valve_open else budget
-            data[agent_key] = {
-                "pairs": pairs,
-                "total": new_total,
-                "valve_budget": new_budget,
-            }
+            # Preserve unknown keys: copy the section and overwrite the
+            # three known fields, so a rewrite by an OLDER hook never
+            # strips fields a NEWER version wrote (bc-F1 — review cycle 1).
+            new_section = dict(section) if isinstance(section, dict) else {}
+            new_section["pairs"] = pairs
+            new_section["total"] = new_total
+            new_section["valve_budget"] = new_budget
+            data[agent_key] = new_section
             return (
                 json.dumps(data),
                 True,
@@ -312,7 +337,9 @@ def _escalate(input_data, normalized):
             )
         if tier == 2:
             return "deny", _DENY_REASON + _TIER2_SUFFIX.format(
-                count=new_count
+                count=new_count,
+                plural="" if new_count == 1 else "s",
+                total=new_total,
             )
         return "deny", _DENY_REASON
     except Exception as error:  # noqa: BLE001 — fail-direction catch-all

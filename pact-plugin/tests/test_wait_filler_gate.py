@@ -552,7 +552,7 @@ def test_gradient_tier_progression_renders_count(tmp_path, monkeypatch, capsys):
     tier1, tier2, tier3 = (_deny_reason(p) for _c, p, _e in results)
     assert tier1 == wait_filler_gate._DENY_REASON
     assert tier2.startswith(wait_filler_gate._DENY_REASON)
-    assert "denied 2 times this session" in tier2
+    assert "denied 2 times this session (2 filler calls in total)" in tier2
     assert "FILLER-LOCK" in tier3
 
 
@@ -681,7 +681,7 @@ def test_description_variance_does_not_reset_the_gradient(
         capsys,
     )
     assert first[0] == 2 and second[0] == 2
-    assert "denied 2 times this session" in _deny_reason(second[1])
+    assert "denied 2 times this session (2 filler calls in total)" in _deny_reason(second[1])
 
 
 def test_saturation_boost_escalates_a_fresh_command(
@@ -700,7 +700,7 @@ def test_saturation_boost_escalates_a_fresh_command(
     _code, payload, _err = _invoke(
         _gradient_frame("sleep 46"), capsys
     )  # total 7 > 6 -> boost -> tier 2
-    assert "denied 1 times this session" in _deny_reason(payload)
+    assert "denied 1 time this session (7 filler calls in total)" in _deny_reason(payload)
 
 
 def test_agent_type_sections_are_distinct(tmp_path, monkeypatch, capsys):
@@ -873,7 +873,7 @@ def test_normalized_forms_share_one_counter(tmp_path, monkeypatch, capsys):
     )
     reasons = [_deny_reason(p) for _c, p, _e in results]
     assert reasons[0] == wait_filler_gate._DENY_REASON  # count 1
-    assert "denied 2 times this session" in reasons[1]
+    assert "denied 2 times this session (2 filler calls in total)" in reasons[1]
     assert "FILLER-LOCK" in reasons[2]  # count 3 -> tier 3
 
 
@@ -899,11 +899,11 @@ def test_saturation_boundary_armed_both_sides(tmp_path, monkeypatch, capsys):
            capsys)
     # 6th attempt: re-fire of sleep 50 -> count 2, total 6, no boost
     _code, payload, _err = _invoke(_gradient_frame("sleep 50"), capsys)
-    assert "denied 2 times this session" in _deny_reason(payload)
+    assert "denied 2 times this session (6 filler calls in total)" in _deny_reason(payload)
     assert "FILLER-LOCK" not in _deny_reason(payload)
     # 7th attempt: fresh sleep 55 -> count 1 + boost -> tier 2
     _code, payload, _err = _invoke(_gradient_frame("sleep 55"), capsys)
-    assert "denied 1 times this session" in _deny_reason(payload)
+    assert "denied 1 time this session (7 filler calls in total)" in _deny_reason(payload)
     # 8th attempt: re-fire of sleep 50 -> count 3 + boost -> tier 3
     _code, payload, _err = _invoke(_gradient_frame("sleep 50"), capsys)
     assert "FILLER-LOCK" in _deny_reason(payload)
@@ -932,6 +932,88 @@ def test_corrupt_budget_denies_tier1_with_valve_closed(
         assert code == 2
         assert _deny_reason(payload) == wait_filler_gate._DENY_REASON
     assert json.loads(state.read_text(encoding="utf-8"))[""]["valve_budget"] == "two"
+
+
+def test_nondict_agent_section_degrades_tier1_untouched(
+    tmp_path, monkeypatch, capsys
+):
+    """test-M3(a), review remediation: a well-formed state file whose
+    agent section is NOT a dict takes _compute_gradient's isinstance
+    degrade (a DIFFERENT branch from the corrupt-budget one) — frozen
+    tier-1 deny, valve closed, file byte-untouched."""
+    import wait_filler_gate
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    state = _state_path(tmp_path)
+    state.parent.mkdir(parents=True, exist_ok=True)
+    seeded = json.dumps({"": "corrupt-section"})
+    state.write_text(seeded, encoding="utf-8")
+    for _ in range(2):
+        code, payload, _err = _invoke(_gradient_frame("true"), capsys)
+        assert code == 2
+        assert _deny_reason(payload) == wait_filler_gate._DENY_REASON
+    assert state.read_text(encoding="utf-8") == seeded
+
+
+def test_corrupt_total_silently_resets_and_persists(
+    tmp_path, monkeypatch, capsys
+):
+    """test-M3(b), review remediation: a non-int `total` is NOT a degrade
+    — the as-built lenient branch silently treats it as 0 (repair-on-
+    write): the denial still escalates normally off a fresh total, and
+    the repaired integer total IS persisted. Pins the asymmetry bc-M3
+    documented: corrupt pairs/total reset, corrupt budget degrades."""
+    import wait_filler_gate
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    state = _state_path(tmp_path)
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(
+        json.dumps({
+            "": {"pairs": {}, "total": "nine", "valve_budget": 2}
+        }),
+        encoding="utf-8",
+    )
+    # count 1, total resets 0 -> 1: tier 1 (frozen text)
+    code, payload, _err = _invoke(_gradient_frame("sleep 30"), capsys)
+    assert code == 2
+    assert _deny_reason(payload) == wait_filler_gate._DENY_REASON
+    # re-fire: count 2, total 2 -> tier 2 — the reset total is what the
+    # boost reads, and the repair persisted an int
+    _code, payload, _err = _invoke(_gradient_frame("sleep 30"), capsys)
+    assert "denied 2 times this session (2 filler calls in total)" in _deny_reason(payload)
+    state_data = json.loads(state.read_text(encoding="utf-8"))
+    assert state_data[""]["total"] == 2
+    assert isinstance(state_data[""]["total"], int)
+
+
+def test_version_skew_unknown_section_key_survives_write(
+    tmp_path, monkeypatch, capsys
+):
+    """bc-F1 arm, review remediation: version-skew preserve — a section
+    written by a FUTURE hook version carries unknown keys; a rewrite by
+    THIS version (deny increment and valve decrement alike) must
+    merge-preserve them, not strip them. (Pre-remediation _apply replaced
+    the whole section dict and stripped them; devops lands the preserve —
+    expected transient red until that stage lands.)"""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    state = _state_path(tmp_path)
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(
+        json.dumps({
+            "": {
+                "pairs": {},
+                "total": 0,
+                "valve_budget": 2,
+                "future_field": "keep-me",
+            }
+        }),
+        encoding="utf-8",
+    )
+    _code, _payload, _err = _invoke(_gradient_frame("sleep 30"), capsys)
+    assert json.loads(state.read_text(encoding="utf-8"))[""][
+        "future_field"
+    ] == "keep-me"
 
 
 def test_state_raise_degrades_tier1_with_stderr_note(
@@ -1085,7 +1167,7 @@ def test_cross_process_gradient_persists(tmp_path, monkeypatch):
         assert code == 2
         reasons.append(_probe_reason(out))
     assert reasons[0] == wait_filler_gate._DENY_REASON
-    assert "denied 2 times this session" in reasons[1]
+    assert "denied 2 times this session (2 filler calls in total)" in reasons[1]
     assert "FILLER-LOCK" in reasons[2]
 
 
@@ -1112,10 +1194,16 @@ def test_cross_process_valve_budget_survives(tmp_path, monkeypatch):
 
 
 def test_concurrent_updates_lose_nothing(tmp_path, monkeypatch):
-    """P1 concurrency: two hook processes racing on one state file. The
-    sidecar lock must serialize the read-modify-write so no increment is
-    lost — distinct commands both count (total 2), and the same command
-    raced lands on count 2, not the last-writer's 1."""
+    """P1 concurrency: two hook processes racing on one state file, and
+    every increment lands — distinct commands both count (total 2), and
+    the same command raced adds both increments onto the phase-1 count
+    (1 -> 3), not a last-writer's partial. CLAIM SCOPE: this pins the
+    NO-LOST-UPDATE property of the final state under concurrent
+    spawning; it does NOT prove the sidecar lock serialized a genuinely
+    overlapping hold (interpreter startup may schedule the processes
+    benignly). Lock correctness is state_file.locked_update's own
+    contract and suite; contention past the 2.0s timeout is pinned by
+    test_held_lock_times_out_to_tier1."""
     import subprocess
     import sys
 
@@ -1156,6 +1244,45 @@ def test_concurrent_updates_lose_nothing(tmp_path, monkeypatch):
     assert state[""]["pairs"][
         wait_filler_gate._pair_key("sleep 31")
     ] == 1
+
+
+def test_held_lock_times_out_to_tier1(tmp_path, monkeypatch, capsys):
+    """CONTENTION, deterministically — the arm the benign-scheduling
+    concurrency probe above cannot be. Another writer (this test) holds
+    the sidecar flock past the hook's 2.0s locked_update timeout, so the
+    hook's acquire RAISES TimeoutError inside _escalate, and the
+    catch-all degrades to the frozen tier-1 deny with the valve closed
+    and a stderr note — nothing written, and the wait really happened
+    (elapsed >= the timeout; a hook that skipped the lock would finish
+    in milliseconds and fail this). flock conflicts across distinct fds
+    in one process, so the in-process hold genuinely blocks the hook."""
+    import fcntl
+    import os
+    import time
+
+    import wait_filler_gate
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    state = _state_path(tmp_path)
+    state.parent.mkdir(parents=True, exist_ok=True)
+    seeded = json.dumps({"": {"pairs": {}, "total": 0, "valve_budget": 2}})
+    state.write_text(seeded, encoding="utf-8")
+    lock_fd = os.open(
+        str(state.with_name(state.name + ".lock")), os.O_RDWR | os.O_CREAT, 0o600
+    )
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        start = time.monotonic()
+        code, payload, err = _invoke(_gradient_frame("true"), capsys)
+        elapsed = time.monotonic() - start
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+    assert code == 2
+    assert _deny_reason(payload) == wait_filler_gate._DENY_REASON
+    assert "filler-state error" in err
+    assert elapsed >= 2.0
+    assert state.read_text(encoding="utf-8") == seeded
 
 
 def test_cross_process_reaper_sees_probe_state(tmp_path, monkeypatch):
