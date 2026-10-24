@@ -1802,3 +1802,43 @@ def test_a_spread_shorter_than_the_named_slots_is_read_whole_and_still_mints():
            "gh(*[\"pr\"], \"merge\", \"5\")\nEOF")
     assert is_dangerous_command(cmd) is True
     assert _runs_after_approval(cmd, APPROVAL_STYLES["inline"])
+
+
+# A parameter default holding a comma is one parameter, so the rest after it starts at
+# the right argument.
+DEFAULT_COMMA_DENY = [
+    ("ruby list default", "ruby - <<'EOF'\ndef gh(x = [1, 2], *a)\n  system(\"gh\", *a)\nend\ngh(0, \"pr\", \"merge\", \"5\")\nEOF"),
+    ("ruby call default", "ruby - <<'EOF'\ndef gh(x = f(1, 2), *a)\n  system(\"gh\", *a)\nend\ngh(0, \"pr\", \"merge\", \"5\")\nEOF"),
+    ("php call default", "php -r 'function gh($x = max(1, 2), $y) { exec($y); } gh(0, \"gh pr " + "merge 5\");'"),
+    ("R vector default", "Rscript -e 'gh <- function(x = c(1, 2), cmd) system(cmd); gh(0, \"gh pr " + "merge 5\")'"),
+]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", DEFAULT_COMMA_DENY, ids=[r[0] for r in DEFAULT_COMMA_DENY])
+def test_a_default_with_a_comma_keeps_the_rest_in_place(label, cmd, style):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("cmd", [
+    "ruby - <<'EOF'\ndef gh(x = [1, 2], *a)\n  system(\"gh\", *a)\nend\ngh(0, \"pr\", \"view\", \"5\")\nEOF",
+    "php -r 'function gh($x = max(1, 2), $y) { exec($y); } gh(0, \"gh pr view 5\");'",
+    "Rscript -e 'gh <- function(x = c(1, 2), cmd) system(cmd); gh(0, \"gh pr view 5\")'",
+], ids=["ruby", "php", "R"])
+def test_a_default_with_a_comma_view_twin_is_allowed(cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+def test_parameter_names_skip_defaults_with_commas():
+    from shared.merge_guard_common import _ordered_params
+
+    assert _ordered_params("x = [1, 2], *a", "ruby") == ("x", "a")
+    assert _ordered_params("$x = (1, 2), @a", "perl") == ("$x", "@a")
+    assert _ordered_params("x = f(1, 2), *a", "ruby") == ("x", "a")
+
+
+def test_a_bound_name_set_skips_names_inside_a_default():
+    from shared.merge_guard_common import _param_names
+
+    assert _param_names("x = foo(bar, baz), *a", "ruby") == frozenset({"x", "a"})

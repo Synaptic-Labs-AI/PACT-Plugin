@@ -4064,7 +4064,7 @@ _PY_LAMBDA_RE = re.compile(r"\blambda\b([^:\n]*):")
 def _param_names(text: str, head: str) -> frozenset:
     """The names a parameter list binds: `$name` in perl and php, otherwise each
     identifier outside a default value."""
-    text = re.sub(r"=[^,]*", "", text)
+    text = ",".join(re.sub(r"=.*", "", part, flags=re.DOTALL) for part in _top_level_parts(text))
     if re.match(r"^(?:perl|php)", head):
         return frozenset(re.findall(r"[$@%]\w+", text))
     return frozenset(re.findall(r"[A-Za-z_$][\w$]*", text))
@@ -4156,7 +4156,7 @@ _RUBY_KEYWORD_RE = re.compile(
 )
 _RUBY_STATEMENT_KEYWORDS = frozenset({"if", "unless", "while", "until", "for"})
 _RUBY_ENDLESS_DEF_RE = re.compile(r"def\s+[\w.?!]+\s*(?:\([^)]*\))?\s*=(?![=~>])")
-_KEYWORD_HEADER_RE = re.compile(r"[ \t]*[\w.:?!]*[ \t]*(?:\(([^)]*)\)|([^\n;]*))")
+_KEYWORD_HEADER_RE = re.compile(r"[ \t]*[\w.:?!]*[ \t]*(?:\(((?:[^()]|\([^()]*\))*)\)|([^\n;]*))")
 _RUBY_BLOCK_PARAMS_RE = re.compile(r"[ \t]*\|([^|\n]*)\|")
 _RUBY_BRACE_BLOCK_RE = re.compile(r"\{[ \t]*\|([^|\n]*)\|")
 
@@ -4416,20 +4416,22 @@ def _js_functions(code: str, head: str) -> dict:
 # parameters are listed). A header ends where the function's span starts.
 _HELPER_HEAD_RE = re.compile(r"^(?:ruby|perl|lua|luajit|php|R$|Rscript)")
 _HELPER_HEADERS = (
-    (re.compile(r"^ruby"), re.compile(r"\bdef[ \t]+(?:self\.)?(?P<name>[A-Za-z_]\w*[?!]?)[ \t]*(?:\((?P<params>[^()]*)\)|(?P<bare>[^\n;=()]*))")),
+    (re.compile(r"^ruby"), re.compile(r"\bdef[ \t]+(?:self\.)?(?P<name>[A-Za-z_]\w*[?!]?)[ \t]*(?:\((?P<params>(?:[^()]|\([^()]*\))*)\)|(?P<bare>[^\n;=()]*))")),
     (re.compile(r"^perl"), re.compile(r"\bsub\s+(?P<name>[A-Za-z_]\w*)\s*")),
-    (re.compile(r"^(?:lua|luajit)"), re.compile(r"\bfunction\s+(?P<name>[A-Za-z_][\w.]*)\s*\((?P<params>[^()]*)\)")),
-    (re.compile(r"^php"), re.compile(r"\bfunction\s+&?\s*(?P<name>[A-Za-z_]\w*)\s*\((?P<params>[^()]*)\)\s*")),
-    (re.compile(r"^(?:R$|Rscript)"), re.compile(r"(?<![\w.])(?P<name>[A-Za-z_.][\w.]*)\s*(?:<-|=)\s*function\s*\((?P<params>[^()]*)\)\s*")),
+    (re.compile(r"^(?:lua|luajit)"), re.compile(r"\bfunction\s+(?P<name>[A-Za-z_][\w.]*)\s*\((?P<params>(?:[^()]|\([^()]*\))*)\)")),
+    (re.compile(r"^php"), re.compile(r"\bfunction\s+&?\s*(?P<name>[A-Za-z_]\w*)\s*\((?P<params>(?:[^()]|\([^()]*\))*)\)\s*")),
+    (re.compile(r"^(?:R$|Rscript)"), re.compile(r"(?<![\w.])(?P<name>[A-Za-z_.][\w.]*)\s*(?:<-|=)\s*function\s*\((?P<params>(?:[^()]|\([^()]*\))*)\)\s*")),
 )
 # Perl names its parameters inside the body: `my ($a, $b) = @_;` or `my $a = shift;`.
 _PERL_ARGS_RE = re.compile(r"\bmy\s*\(([^)]*)\)\s*=\s*@_|\bmy\s+(\$\w+)\s*=\s*shift\b")
 
 
 def _ordered_params(text: str, head: str) -> tuple:
-    """The parameter names a parameter list binds, in order (`$name` in perl and php)."""
+    """The parameter names a parameter list binds, in order (`$name` in perl and php). A
+    default value is not a name, and a comma inside one does not split the list."""
     pattern = r"[$@%]\w+" if re.match(r"^(?:perl|php)", head) else r"[A-Za-z_.][\w.]*"
-    return tuple((re.findall(pattern, part) or [""])[0] for part in re.sub(r"=[^,]*", "", text).split(",")) if text.strip() else ()
+    parts = [re.sub(r"=.*", "", part, flags=re.DOTALL) for part in _top_level_parts(text)]
+    return tuple((re.findall(pattern, part) or [""])[0] for part in parts) if text.strip() else ()
 
 
 def _last_statement(view: str, start: int, end: int) -> int:
@@ -4485,7 +4487,7 @@ def _other_functions(code: str, head: str) -> dict:
             last = _last_statement(view, body_start, end - (1 if view[end - 1:end] == "}" else 0))
             if last >= 0 and not re.match(r"(?:return|if|unless|while|until|for|case|begin|end|puts|print)\b", view[last:]):
                 returns.append(last)
-        raw = (m.groupdict().get("params") or m.groupdict().get("bare") or "").split(",")
+        raw = _top_level_parts(m.groupdict().get("params") or m.groupdict().get("bare") or "")
         rest = next(((k, n) for k, (part, n) in enumerate(zip(raw, params))
                      if re.match(r"\s*\*(?!\*)|\s*\.\.\.\$", part)), (0, ""))
         if re.match(r"^perl", head):                     # `@_` holds what `shift` left
