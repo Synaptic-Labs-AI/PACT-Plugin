@@ -1662,3 +1662,72 @@ def test_parsing_a_program_raises_no_warning_in_process():
         warnings.simplefilter("always")
         assert _python_reaching(code) is not None
     assert [w for w in caught if issubclass(w.category, SyntaxWarning)] == []
+
+
+# A rest parameter (ruby `*a`, perl `@_`, JS `...a`) holds the arguments each call by
+# name passes past the named parameters; `*a` / `...a` as an argument splices them.
+# Two calls with two merges are a compound.
+REST_PARAM_DENY = [
+    ('ruby splat', 'ruby - <<\'EOF\'\ndef gh(*a)\n  system("gh", *a)\nend\ngh("pr", "merge", "5")\nEOF'),
+    ('ruby splat after a named param', 'ruby - <<\'EOF\'\ndef gh(dir, *a)\n  Dir.chdir(dir) { system("gh", *a) }\nend\ngh(".", "pr", "merge", "5")\nEOF'),
+    ('perl @_', 'perl -e \'sub gh { system("gh", @_); } gh("pr", "merge", "5");\''),
+    ('perl @_ after shift', 'perl -e \'sub gh { my $d = shift; system("gh", @_); } gh(".", "pr", "merge", "5");\''),
+    ('js rest', 'node - <<\'EOF\'\nconst cp = require("child_process");\nfunction gh(...a) { cp.execFileSync("gh", a); }\ngh("pr", "merge", "5");\nEOF'),
+    ('js rest spread', 'node - <<\'EOF\'\nconst cp = require("child_process");\nconst gh = (...a) => cp.execFileSync("gh", [...a]);\ngh("pr", "merge", "5");\nEOF'),
+    ('js rest after a named param', 'node - <<\'EOF\'\nconst cp = require("child_process");\nfunction gh(opts, ...a) { cp.execFileSync("gh", a, opts); }\ngh({}, "pr", "merge", "5");\nEOF'),
+    ('ruby splat two merges', 'ruby - <<\'EOF\'\ndef gh(*a)\n  system("gh", *a)\nend\ngh("pr", "merge", "5")\ngh("pr", "merge", "6")\nEOF'),
+    ('js rest two merges', 'node - <<\'EOF\'\nconst cp = require("child_process");\nfunction gh(...a) { cp.execFileSync("gh", a); }\ngh("pr", "merge", "5");\ngh("pr", "merge", "6");\nEOF'),
+]
+REST_PARAM_ALLOW = [
+    ('ruby splat view', 'ruby - <<\'EOF\'\ndef gh(*a)\n  system("gh", *a)\nend\ngh("pr", "view", "5")\nEOF'),
+    ('ruby splat after a named param view', 'ruby - <<\'EOF\'\ndef gh(dir, *a)\n  Dir.chdir(dir) { system("gh", *a) }\nend\ngh(".", "pr", "view", "5")\nEOF'),
+    ('perl @_ view', 'perl -e \'sub gh { system("gh", @_); } gh("pr", "view", "5");\''),
+    ('perl @_ after shift view', 'perl -e \'sub gh { my $d = shift; system("gh", @_); } gh(".", "pr", "view", "5");\''),
+    ('js rest view', 'node - <<\'EOF\'\nconst cp = require("child_process");\nfunction gh(...a) { cp.execFileSync("gh", a); }\ngh("pr", "view", "5");\nEOF'),
+    ('js rest spread view', 'node - <<\'EOF\'\nconst cp = require("child_process");\nconst gh = (...a) => cp.execFileSync("gh", [...a]);\ngh("pr", "view", "5");\nEOF'),
+    ('js rest after a named param view', 'node - <<\'EOF\'\nconst cp = require("child_process");\nfunction gh(opts, ...a) { cp.execFileSync("gh", a, opts); }\ngh({}, "pr", "view", "5");\nEOF'),
+    ('perl @_ past a shifted mode', 'perl -e \'sub gh { my $m = shift; system("gh", "pr", @_); } gh("merge", "view", "5");\''),
+]
+
+
+@pytest.mark.parametrize("label,cmd", REST_PARAM_DENY, ids=[r[0] for r in REST_PARAM_DENY])
+def test_rest_param_merge_is_refused(label, cmd):
+    assert is_dangerous_command(cmd) is True
+
+
+@pytest.mark.parametrize("label,cmd", REST_PARAM_ALLOW, ids=[r[0] for r in REST_PARAM_ALLOW])
+def test_rest_param_view_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+@pytest.mark.parametrize("label", ["ruby splat two merges", "js rest two merges"])
+def test_a_rest_parameter_given_two_merges_is_compound_and_mints_nothing(label):
+    from shared.merge_guard_common import interpreter_command_context, is_compound_destructive_command
+
+    cmd = dict(REST_PARAM_DENY)[label]
+    assert is_compound_destructive_command(cmd) is True
+    assert interpreter_command_context(cmd) is None
+
+
+REST_PARAM_RUNS = [row for row in REST_PARAM_DENY if "two merges" not in row[0]]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", REST_PARAM_RUNS, ids=[r[0] for r in REST_PARAM_RUNS])
+def test_a_rest_param_merge_runs_once_approved(label, cmd, style):
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("label", ["ruby splat two merges", "js rest two merges"])
+def test_a_rest_parameter_given_two_merges_runs_on_no_approval(label):
+    assert not _runs_after_approval(dict(REST_PARAM_DENY)[label], APPROVAL_STYLES["inline"])
+
+
+@pytest.mark.parametrize("cmd", [
+    "node - <<'EOF'\nconst cp = require(\"child_process\");\nfunction gh(...a) { cp.execFileSync(\"gh\", a); }\n"
+    "gh(...load());\nEOF",
+    "perl -e 'sub gh { print join(\" \", \"gh\", @_); } gh(\"pr\", \"merge\", \"5\");'",
+    "ruby - <<'EOF'\ndef gh(*a)\n  puts [\"gh\", *a].join(\" \")\nend\ngh(\"pr\", \"merge\", \"5\")\nEOF",
+], ids=["js-unread-spread", "perl-only-printed", "ruby-only-printed"])
+def test_a_rest_parameter_running_no_literal_merge_is_allowed(cmd):
+    assert is_dangerous_command(cmd) is False

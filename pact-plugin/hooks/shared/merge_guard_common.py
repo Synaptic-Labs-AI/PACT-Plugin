@@ -3235,17 +3235,18 @@ def _literal_list_at(text: str, i: int, head: str = "", _depth: int = 0) -> tupl
     if not opener:
         return None
     reach = _python_reaching(text) if opener.group() == "(" and _PYTHON_HEAD_RE.match(head) else None
-    skip = reach.vararg_skip.get(i, 0) if reach else 0
+    skip = reach.vararg_skip.get(i, 0) if reach else (_rest_skips(text, head).get(i, 0) if opener.group() == "(" else 0)
     closer = "]" if opener.group() == "[" else ")"
     readings: list[list[str]] = [[]]
     count, i = 0, i + opener.end()
     while True:
         i = _skip(r"\s*", text, i)
         if text[i:i + 1] == closer:
-            return [r[skip:] for r in readings], i + 1
+            return readings, i + 1
         keyword = re.match(r"\*\*|[A-Za-z_]\w*\s*=(?!=)", text[i:]) if reach else None
-        if keyword:                                      # a keyword argument: not in `*args`
-            end = _expression_end(_mask_string_literals(text), i + keyword.end())
+        if keyword or skip > 0:                          # a keyword or a named argument: not in the rest
+            skip -= 0 if keyword else 1
+            end = _expression_end(_mask_string_literals(text), i + (keyword.end() if keyword else 0))
             i = _skip(r"\s*,?", text, end)
             continue
         lit = _STRING_LITERAL_RE.match(text, i)
@@ -4342,12 +4343,15 @@ _JS_NAMED_FUNCTION_RE = re.compile(
 
 
 class _NamedFunction(NamedTuple):
-    """A named function: its parameters in order, its body, and its return values."""
+    """A named function: its parameters in order, its body, its return values, and its
+    rest parameter (`...a`, `*a`, perl's `@_`) with how many arguments come before it."""
 
     params: tuple
     start: int
     end: int
     returns: tuple
+    rest: str = ""
+    rest_at: int = 0
 
 
 def _expression_end(view: str, i: int) -> int:
@@ -4394,7 +4398,9 @@ def _js_functions(code: str, head: str) -> dict:
         else:
             start, end = m.end(), _expression_end(view, m.end())
             returns = (start,)
-        found.setdefault(name, []).append(_NamedFunction(names, start, end, returns))
+        rest = next(((k, n) for k, (part, n) in enumerate(zip(_top_level_parts(params), names))
+                     if part.strip().startswith("...")), (0, ""))
+        found.setdefault(name, []).append(_NamedFunction(names, start, end, returns, rest[1], rest[0]))
     return {name: fns[0] for name, fns in found.items() if len(fns) == 1}
 
 
@@ -4471,7 +4477,13 @@ def _other_functions(code: str, head: str) -> dict:
             last = _last_statement(view, body_start, end - (1 if view[end - 1:end] == "}" else 0))
             if last >= 0 and not re.match(r"(?:return|if|unless|while|until|for|case|begin|end|puts|print)\b", view[last:]):
                 returns.append(last)
-        found.setdefault(m.group("name"), []).append(_NamedFunction(params, start, end, tuple(sorted(set(returns)))))
+        raw = (m.groupdict().get("params") or m.groupdict().get("bare") or "").split(",")
+        rest = next(((k, n) for k, (part, n) in enumerate(zip(raw, params))
+                     if re.match(r"\s*\*(?!\*)|\s*\.\.\.\$", part)), (0, ""))
+        if re.match(r"^perl", head):                     # `@_` holds what `shift` left
+            rest = (len(re.findall(r"\bshift\b", body)), "@_")
+        found.setdefault(m.group("name"), []).append(
+            _NamedFunction(params, start, end, tuple(sorted(set(returns))), rest[1], rest[0]))
     return {name: fns[0] for name, fns in found.items() if len(fns) == 1}
 
 
@@ -4685,6 +4697,21 @@ def _js_element_bindings(code: str, head: str) -> tuple:
     return tuple(bound), tuple(named)
 
 
+def _call_parens(code: str, head: str, name: str) -> list:
+    """The offsets of the `(` of each parenthesised `name(…)`; the declaration's own
+    parameter list reads as no literal list, so it adds nothing."""
+    view = _index_view(code, head)
+    return [m.end() - 1 for m in re.finditer(r"(?<![\w$.:>@])" + re.escape(name) + r"\s*\(", view)]
+
+
+@functools.lru_cache(maxsize=64)
+def _rest_skips(code: str, head: str) -> dict:
+    """Per call `(` of a function with a rest parameter, how many of its arguments the
+    named parameters take before the rest."""
+    return {paren: fn.rest_at for name, fn in _named_functions(code, head).items() if fn.rest
+            for paren in _call_parens(code, head, name)}
+
+
 def _param_values(head: str, code: str, i: int, name: str) -> list | None:
     """For a use at code[i] of a parameter of the innermost named function holding it,
     the offsets of the arguments its calls pass in that position; None when the use is
@@ -4692,10 +4719,12 @@ def _param_values(head: str, code: str, i: int, name: str) -> list | None:
     `my $x = shift` / `= @_` binding excepted). A name a JS `{…}` pattern destructures
     reads the value its key holds in each literal object passed there."""
     fns = [f for f in _named_functions(code, head).items() if f[1].start <= i < f[1].end
-           and (name in f[1].params or any(_destructured_key(p, name) for p in f[1].params))]
+           and (name in f[1].params or name == f[1].rest or any(_destructured_key(p, name) for p in f[1].params))]
     if not fns:
         return None
     fname, fn = max(fns, key=lambda f: f[1].start)
+    if name == fn.rest:                                  # each call's argument list, past the named ones
+        return sorted(_call_parens(code, head, fname))
     starts, values = _assignments(code, head).get(name, ([], []))
     view = _index_view(code, head)
     if any(fn.start <= at < i and not re.match(r"shift\b|@_", view[v:]) for at, v in zip(starts, values)):
@@ -4767,6 +4796,11 @@ def _argument_readings(head: str, code: str, at: int) -> tuple[list[tuple[bool, 
     lst = _list_expr_at(code, at, head)
     if lst:
         return [(False, items) for items in lst[0]], lst[1]
+    spread = re.match(r"\*(?!\*)|\.\.\.", code[at:])           # `*a`, `...a`: its elements, spliced
+    named = _named_values_at(head, code, at + spread.end()) if spread else None
+    lists = _named_lists(head, code, named[0]) if named else []
+    if lists and named:
+        return [(False, items) for items in lists], named[1]
     expr = _string_expr_at(code, at, head)
     if expr:
         return [(True, [text]) for text in expr[0]], expr[1]
