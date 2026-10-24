@@ -2473,6 +2473,47 @@ def extract_privileged_flags(command: str, op_type: str | None) -> list[str]:
     return sorted(found)
 
 
+def _substitution_bodies(command: str) -> list[str]:
+    """The bodies of the substitutions (`$(…)`, `<(…)`, `>(…)`, backticks) the shell runs
+    in `command`, outermost only: unquoted, or unescaped in double quotes."""
+    if "(" not in command and "`" not in command:
+        return []
+    view = _mask_quotes_keeping_substitutions(command)
+    bodies, i, n = [], 0, len(command)
+    while i < n:
+        if view[i] == "\\":
+            i += 2
+            continue
+        if view.startswith(("$(", "<(", ">("), i):
+            span, end = _extract_dollar_paren(command, i)
+            body = None if span is None else span[2:-1]
+        elif view[i] == "`":
+            span, end = _extract_backtick(command, i)
+            body = None if span is None else span[1:-1]
+        else:
+            i += 1
+            continue
+        if body is not None:
+            bodies.append(body)
+        i = max(end, i + 1)
+    return bodies
+
+
+def _substitution_destructive_count(command: str, depth: int = 0) -> int:
+    """How many guarded commands the substitutions `command` runs hold, counted in each
+    body as the bare command is counted, nested substitutions included."""
+    if depth >= _MAX_WRAPPER_DEPTH:
+        return 0
+    total = 0
+    for body in _substitution_bodies(_strip_shell_comments(_excise_heredoc_bodies_for_routing_scan(command))):
+        destructive = [leg for leg in _split_into_legs(body) if _leg_is_destructive(leg)]
+        count = sum(_shell_leg_destructive_count(leg) for leg in destructive)
+        nested = sum(1 for leg in destructive if re.search(r"[$<>]\(|`", leg))
+        count += max(nested, _substitution_destructive_count(body, depth + 1)) - nested
+        total += count or (1 if _is_dangerous_at_depth(body, depth + 1) else 0)
+    return total
+
+
 def _guarded_substitution_body(command: str) -> str | None:
     """The body of the one substitution (`$(…)`, `<(…)`, `>(…)`, backticks) that holds a
     guarded operation, when that body is exactly one guarded command and nothing outside
@@ -9312,6 +9353,11 @@ def _is_dangerous_at_depth(command: str, depth: int) -> bool:
         for inner in _shell_c_programs(command):
             if _is_dangerous_at_depth(inner, depth + 1):
                 return True
+        # A command substitution runs its body: judge it as the bare command is, so a
+        # -c string, eval, or a pipe or here-string to a shell inside it is read too.
+        for body in _substitution_bodies(_strip_shell_comments(_excise_heredoc_bodies_for_routing_scan(command))):
+            if _is_dangerous_at_depth(body, depth + 1):
+                return True
     # The literal danger battery (DANGEROUS_PATTERNS + the four per-leg literal-arm families +
     # the additive normalized-flag condition) is the SSOT _stripped_surface_danger — factored
     # out so the #1178 general-strip preserve-predicate can consult the SAME predicate on a
@@ -9511,6 +9557,10 @@ def is_compound_destructive_command(command: str) -> bool:
     on_interpreters = sum(1 for leg in destructive if _INTERPRETER_WORD_RE.search(leg))
     interpreted = {normalize_command_text(c) for c in _interpreter_guarded_commands(command, 0)}
     in_shells = sum(_shell_leg_destructive_count(leg) for leg in destructive)
+    # Commands a substitution runs are counted from its body, as a program's are: legs
+    # holding a substitution count as the larger of their own number and the body's.
+    on_substitutions = sum(1 for leg in destructive if re.search(r"[$<>]\(|`", leg))
+    in_shells += max(on_substitutions, _substitution_destructive_count(command)) - on_substitutions
     in_shells += _literal_loop_extra_passes(command)
     return in_shells - on_interpreters + max(on_interpreters, len(interpreted)) >= 2
 

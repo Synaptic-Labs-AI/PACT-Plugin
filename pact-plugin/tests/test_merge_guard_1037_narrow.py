@@ -144,6 +144,9 @@ class TestNarrowGhCommentCarrierStripBlock:
         # is_dangerous_command + its _has_command_substitution helper are promoted to
         # shared (GAP1); neuter the SHARED definition (pre re-exports the same object).
         monkeypatch.setattr("shared.merge_guard_common._has_command_substitution", lambda q: False)
+        # The substitution body is also judged as a bare command; neuter that reader too so
+        # the flip isolates the preserve guard.
+        monkeypatch.setattr("shared.merge_guard_common._substitution_bodies", lambda c: [])
         assert not is_dangerous_command(cmd)  # flips ALLOW under the neuter
 
     def test_escaped_quote_outside_carrier_flag_blocks(self):

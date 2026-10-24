@@ -1949,3 +1949,57 @@ def test_approving_a_printed_substitution_mints_nothing(label, cmd, style, tmp_p
 @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
 def test_approving_a_real_merge_still_mints(style, tmp_path):
     assert _post_hook_mints("gh pr " + "merge 777", style, tmp_path) is True
+
+
+# A command substitution runs its body, so a guarded command inside it is read with
+# every reader a bare command gets: a -c string, eval, or a pipe or here-string to a
+# shell. Two guarded commands inside it are two operations.
+SUBSTITUTED_RUNS = [
+    ("sh -c in an assignment", "out=$(sh -c 'gh pr " + "merge 5 --squash')"),
+    ("bash -c force push with a redirect", "out=$(bash -c 'git push --" + "force origin main' 2>&1)"),
+    ("sh -c in a printed value", 'echo "$(sh -c \'gh pr ' + 'merge 5 --squash\')"'),
+    ("eval in a printed value", 'echo "$(eval \'gh pr ' + 'merge 5 --squash\')"'),
+    ("printf piped to sh", 'echo "$(printf \'gh pr ' + 'merge 5 --squash\' | sh)"'),
+    ("here-string to sh", 'echo "$(sh <<< \'gh pr ' + 'merge 5 --squash\')"'),
+    ("double-quoted -c in an assignment", 'out=$(sh -c "gh pr ' + 'merge 5 --squash")'),
+    ("backtick sh -c", "out=`sh -c 'gh pr " + "merge 5 --squash'`"),
+]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", SUBSTITUTED_RUNS, ids=[r[0] for r in SUBSTITUTED_RUNS])
+def test_a_guarded_command_a_substitution_runs_is_refused_then_runs(label, cmd, style):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("cmd", [
+    "out=$(sh -c 'gh pr view 5')",
+    "echo '$(sh -c \"gh pr " + "merge 5\")'",
+    "cat <<'EOF'\n$(sh -c 'gh pr " + "merge 5')\nEOF",
+    "echo hi # $(sh -c 'gh pr " + "merge 5')",
+], ids=["view-in-a-substitution", "single-quoted-text", "quoted-heredoc-data", "comment"])
+def test_a_substitution_that_runs_nothing_guarded_is_allowed(cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+@pytest.mark.parametrize("cmd", [
+    "out=$(sh -c 'gh pr " + "merge 5 && gh pr " + "merge 6')",
+    "out=$(printf 'gh pr " + "merge 5' | sh); gh pr " + "merge 6",
+], ids=["two-in-one-c-string", "piped-body-and-a-bare-merge"])
+def test_two_guarded_commands_a_substitution_runs_are_compound(cmd):
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_compound_destructive_command(cmd) is True
+    assert not _runs_after_approval(cmd, APPROVAL_STYLES["inline"])
+
+
+@pytest.mark.parametrize("cmd", [
+    "out=$(gh pr " + "merge 5 --squash)",
+    "git push --" + "force origin $(git branch --show-current)",
+    "out=$(cat <(gh pr " + "merge 5))",
+], ids=["merge-in-a-substitution", "target-from-a-substitution", "process-substitution-nested-in-one"])
+def test_one_guarded_command_beside_a_substitution_is_not_compound(cmd):
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_compound_destructive_command(cmd) is False
