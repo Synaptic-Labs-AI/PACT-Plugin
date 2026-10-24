@@ -9756,9 +9756,9 @@ def _alternative_branch_walk(legs: list[str], counts: list[int], ops: list[str])
     whether that branch or the next condition runs, and the group counts as its largest
     path. A condition whose guarded command is its last leg, with nothing guarded before it,
     counts on the path where its branch runs and not on the paths past it (its command
-    failed there), or the other way round when that leg is negated on the first condition
-    (`if ! gh pr merge 5; then …`); any other condition counts on every path that reaches
-    it. Nested groups count by the same rule inside their arm. Legs joined only by
+    failed there), or the other way round when that leg is negated (`if ! gh pr merge 5;
+    then …`, or the same in an elif); any other condition counts on every path that
+    reaches it. Nested groups count by the same rule inside their arm. Legs joined only by
     `||` run one after another only while each fails, so the chain counts as its largest
     leg; a negated guarded leg (`! gh pr merge 5 || …`) fails when its op succeeds, so the
     chain breaks after it and the parts add up. (0, 0) when a group does not close."""
@@ -9777,22 +9777,22 @@ def _alternative_branch_walk(legs: list[str], counts: list[int], ops: list[str])
             counts[i:j + 1] = [max(run)] + [0] * (j - i)
         i = j + 1
 
-    def outcomes(arm: dict, first: bool) -> tuple[int, int]:
+    def outcomes(arm: dict) -> tuple[int, int]:
         """What an if branch's condition counts on the paths past it and on its own."""
         cond, parts = arm["cond"], arm["parts"]
         if any(k for k, _ in parts[:-1]):
             return cond, cond
-        if parts[-1][1] and first:
+        if parts[-1][1]:
             return cond, 0
         return 0, cond
 
     def close_if(frame: dict) -> tuple[int, list[int]]:
         passed, paths = 0, []
-        for k, arm in enumerate(frame["arms"]):
+        for arm in frame["arms"]:
             if arm["else"]:
                 paths.append(passed + arm["body"])
                 return max(paths), paths
-            past, own = outcomes(arm, k == 0)
+            past, own = outcomes(arm)
             paths.append(passed + own + (arm["body"] or 0))
             passed += past
         paths.append(passed)

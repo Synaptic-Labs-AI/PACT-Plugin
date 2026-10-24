@@ -2654,3 +2654,46 @@ def test_a_merge_deciding_its_branch_and_a_later_branch_are_one_op(cmd, style):
 
     assert is_compound_destructive_command(cmd) is False
     assert _runs_after_approval(cmd, style)
+
+
+# A negated elif condition and its branch are alternatives, as a negated if condition and its
+# branch are; a later branch runs only when the negated command succeeded, so it adds to it.
+NEGATED_ELIF_FALLBACKS = {
+    "fallback": "if gh pr checks 5; then echo ok; elif ! gh pr " + "merge 5 --squash; then gh pr "
+                + "merge 5 --rebase; fi",
+    "plain-else": "if gh pr checks 5; then echo ok; elif ! gh pr " + "merge 5 --squash; then gh pr "
+                  + "merge 5 --rebase; else echo done; fi",
+    "guarded-first-branch": "if gh pr checks 5; then gh pr " + "merge 6 --squash; elif ! gh pr "
+                            + "merge 5 --squash; then gh pr " + "merge 5 --rebase; fi",
+}
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("cmd", NEGATED_ELIF_FALLBACKS.values(), ids=NEGATED_ELIF_FALLBACKS.keys())
+def test_a_negated_elif_and_its_branch_are_one_op_that_runs_approved(cmd, style):
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_compound_destructive_command(cmd) is False
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+def test_a_negated_elif_approval_runs_neither_bare(style):
+    from merge_guard_post import _mint_context_from_bundle
+    from merge_guard_pre import _token_matches_command
+
+    approved = NEGATED_ELIF_FALLBACKS["fallback"]
+    q = [{"question": "Run this?", "header": "Run", "multiSelect": False,
+          "options": [{"label": "Yes, run", "description": style(approved)},
+                      {"label": "No", "description": "Hold."}]}]
+    token = {"context": _mint_context_from_bundle(q, {"Run this?": "Yes, run"})[0]}
+    assert _token_matches_command(token, approved)
+    for bare in ("gh pr " + "merge 5 --squash", "gh pr " + "merge 5 --rebase", "gh pr " + "merge 777 --squash"):
+        assert not _token_matches_command(token, bare)
+
+
+def test_a_negated_elif_and_a_guarded_else_stay_compound():
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    cmd = "if gh pr checks 5; then echo ok; elif ! gh pr " + "merge 5 --squash; then echo; else gh pr " + "merge 6 --squash; fi"
+    assert is_compound_destructive_command(cmd) is True
