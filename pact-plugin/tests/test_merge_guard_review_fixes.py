@@ -1427,7 +1427,8 @@ POSITIONAL_ROWS = [
     ("a quoted word that needs its quotes", "sh -c 'echo \"$1\"' _ 'a b'", 'echo "a b"'),
     ("$0", "bash -c 'gh pr " + "merge $0 --squash' 5", "gh pr " + "merge 5 --squash"),
     ("${1}", "sh -c 'gh pr " + "merge ${1}' x 7", "gh pr " + "merge 7"),
-    ("a word needing quotes", "bash -c 'git push --force origin $1' _ 'a b'", "git push --force origin 'a b'"),
+    ("an unquoted word is split", "bash -c 'git push --force origin $1' _ 'a b'", "git push --force origin a b"),
+    ("a quoted word keeps its quotes", "bash -c 'git push --force origin \"$1\"' _ 'a b'", "git push --force origin \"a b\""),
     ("single-quoted $1 is literal", "bash -c 'echo '\"'\"'$1'\"'\"'' _ 5", "echo '$1'"),
     ("an outer substitution in the word", "bash -c 'gh pr " + "merge \"$1\"' _ \"$(pick)\"", None),
     ("\"$@\" keeps each word whole", "bash -c 'gh pr " + "merge \"$@\"' _ 5 --squash", 'gh pr ' + 'merge 5 --squash'),
@@ -2320,3 +2321,30 @@ def test_a_print_that_runs_a_backtick_substitution_is_not_read():
     from shared.merge_guard_common import rewritten_executed_command
 
     assert rewritten_executed_command("eval \"$(echo `date`)\"") is None
+
+
+# Outside double quotes a positional parameter is split into words, as the shell splits it:
+# a whole command passed as one word and expanded bare runs that command.
+UNQUOTED_POSITIONAL_COMMANDS = [
+    ("$1 holds the command", "bash -c '$1' _ \"gh pr " + "merge 5 --squash\""),
+    ("$1 holds the start", "sh -c '$1 --squash' _ \"gh pr " + "merge 5\""),
+    ("two parameters", "bash -c '$1 $2' _ \"gh pr\" \"" + "merge 5 --squash\""),
+    ("$@ of one word", "bash -c '$@' _ \"gh pr " + "merge 5 --squash\""),
+    ("$* of one word", "bash -c '$*' _ \"gh pr " + "merge 5 --squash\""),
+]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", UNQUOTED_POSITIONAL_COMMANDS, ids=[r[0] for r in UNQUOTED_POSITIONAL_COMMANDS])
+def test_an_unquoted_positional_command_is_refused_then_runs(label, cmd, style):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("cmd", [
+    "bash -c '$1' _ \"gh pr view 5\"",
+    "bash -c 'echo $1' _ \"gh pr " + "merge 5\"",
+    "bash -c '\"$1\"' _ \"gh pr " + "merge 5 --squash\"",
+], ids=["a-view", "echoed", "quoted-whole-word"])
+def test_a_positional_word_that_runs_nothing_guarded_is_allowed(cmd):
+    assert is_dangerous_command(cmd) is False

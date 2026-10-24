@@ -8347,7 +8347,9 @@ def _with_positional_words(text: str, words: list[str]) -> str | None:
     quoted for where it sits; None when it reads a parameter with no word, `"$@"` with
     no words, or a `${N…}` expansion. `${@}`, `${*}` and `${#}` read as `$@`, `$*` and
     `$#`. A word that needs no quoting (`"5"` from `"$1"`) comes out bare, so the result
-    reads as the command the inner shell runs (`gh pr merge 5`)."""
+    reads as the command the inner shell runs (`gh pr merge 5`). Outside double quotes a
+    parameter is split into words, as the shell splits it (`$1` holding `gh pr merge 5`
+    runs gh)."""
     text = re.sub(r"\$\{([@*#])\}", r"$\1", text)
     out, k, quote = [], 0, ""
     while k < len(text):
@@ -8368,13 +8370,13 @@ def _with_positional_words(text: str, words: list[str]) -> str | None:
                     return None
                 word = words[n]
                 out.append(_SUBST_OPEN + re.sub(r'([\\"$`])', r"\\\1", word) + _SUBST_CLOSE
-                           if quote == '"' else shlex.quote(word))
+                           if quote == '"' else " ".join(shlex.quote(w) for w in word.split()))
                 k = m.end()
                 continue
             if text.startswith(("$@", "$*"), k):
                 rest = words[1:]
                 if quote != '"':
-                    out.append(" ".join(shlex.quote(w) for w in rest))
+                    out.append(" ".join(shlex.quote(part) for w in rest for part in w.split()))
                 elif text[k + 1] == "*":
                     out.append(re.sub(r'([\\"$`])', r"\\\1", " ".join(rest)))
                 elif not rest:
