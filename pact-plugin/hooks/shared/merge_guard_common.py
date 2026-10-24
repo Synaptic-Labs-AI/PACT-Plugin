@@ -9724,6 +9724,14 @@ def _leg_operators(command: str) -> list[str]:
     return [stripped[end:start] for (_, end), (start, _) in zip(spans, spans[1:])] + [""]
 
 
+def _leg_is_negated(leg: str) -> bool:
+    """True when `leg`, past any if/then/else word opening it, is a pipeline negated with `!`."""
+    rest = leg
+    while m := _BRANCH_WORD_RE.match(rest):
+        rest = rest[m.end():]
+    return re.match(r"\s*!\s", rest) is not None
+
+
 def _alternative_branch_walk(legs: list[str], counts: list[int], ops: list[str]) -> tuple[int, int]:
     """Walk the if/elif/else and case groups and the `||` chains over per-leg destructive
     counts, `ops` being the operator after each leg. Returns how much more the counts add up
@@ -9733,14 +9741,15 @@ def _alternative_branch_walk(legs: list[str], counts: list[int], ops: list[str])
     it failed, so a group counts as its largest arm (the first arm being the condition and
     its branch). Nested groups count by the same rule inside their arm. Legs joined only by
     `||` run one after another only while each fails, so the chain counts as its largest
-    leg. (0, 0) when a group does not close."""
+    leg; a negated guarded leg (`! gh pr merge 5 || …`) fails when its op succeeds, so the
+    chain breaks after it and the parts add up. (0, 0) when a group does not close."""
     stack: list[dict] = []
     top = widest = 0
     total, counts = sum(counts), list(counts)
     i = 0
     while i < len(legs):
         j = i
-        while j < len(legs) - 1 and ops[j] == "||":
+        while j < len(legs) - 1 and ops[j] == "||" and not (counts[j] and _leg_is_negated(legs[j])):
             j += 1
         # An && or a pipe on either side makes the chain's legs run together.
         if j > i and (i == 0 or ops[i - 1] not in ("&&", "|", "|&")) and ops[j] not in ("&&", "|", "|&"):

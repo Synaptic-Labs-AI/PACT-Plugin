@@ -2500,3 +2500,30 @@ def test_a_variable_holding_a_printed_command_is_refused_then_runs(label, cmd, s
 ], ids=["a-view", "echoed", "not-a-print"])
 def test_a_variable_holding_a_printed_value_that_runs_nothing_guarded_is_allowed(cmd):
     assert is_dangerous_command(cmd) is False
+
+
+# A negated guarded leg fails when its op succeeds, so the leg after its `||` runs too: the
+# two ops can both run and stay compound.
+@pytest.mark.parametrize("cmd", [
+    "! gh pr " + "merge 5 --squash || gh pr " + "merge 6 --squash",
+    "! git push --force origin feat/x || git push --force origin main",
+    "gh pr " + "merge 5 --squash || ! gh pr " + "merge 6 --squash || gh pr " + "merge 7 --squash",
+    "if true; then ! gh pr " + "merge 5 --squash || gh pr " + "merge 6 --squash; fi",
+], ids=["negated-first-leg", "negated-force-push", "negated-middle-leg", "inside-a-branch"])
+def test_a_negated_guarded_leg_and_the_leg_after_it_stay_compound(cmd):
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_compound_destructive_command(cmd) is True
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("cmd", [
+    "! test -f x || gh pr " + "merge 5 --squash",
+    "gh pr " + "merge 5 --squash || ! gh pr " + "merge 6 --squash",
+    "gh pr " + "merge 5 --squash || ! test -f x || gh pr " + "merge 6 --squash",
+], ids=["negated-plain-leg", "negated-last-leg", "negated-plain-leg-between"])
+def test_a_negation_that_cannot_let_two_ops_run_stays_one_op(cmd, style):
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_compound_destructive_command(cmd) is False
+    assert _runs_after_approval(cmd, style)
