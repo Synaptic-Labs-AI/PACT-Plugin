@@ -8141,6 +8141,11 @@ def _wrapper_nested_command(leg: str, head: str) -> "str | None":
     return leg[cmd_start:]                        # nested command head (original, quotes intact)
 
 
+# Words that open a compound command or its body and are followed by a command on the
+# same leg: `do sh -c '…'`, `then eval '…'`, `{ bash -c '…'; }`, `( sh -c '…' )`.
+_COMPOUND_LEAD_WORDS = frozenset({"do", "then", "else", "elif", "if", "while", "until", "{", "(", "!"})
+
+
 def _leg_command_word(leg: str) -> "str | None":
     """Return the leg SUBSTRING starting at the TRUE command word — skipping any LEADING
     env-assignment (`NAME=value`, quoted OR bare: `LC_ALL=C`, `FOO="a b"`) and redirection
@@ -8161,7 +8166,7 @@ def _leg_command_word(leg: str) -> "str | None":
         # (`FOO=a=b`, `FOO=$HOME`, `FOO="a b"` → carrier-4-stripped to `FOO=STRIPPED`) stays inside
         # the skipped token. (carrier 4 already stripped a non-expanded quoted RHS to NAME=STRIPPED
         # BEFORE carrier 10, so quotes are not relied on surviving.)
-        if re.match(r"^[A-Za-z_]\w*\+?=", tok):
+        if re.match(r"^[A-Za-z_]\w*\+?=", tok) or tok in _COMPOUND_LEAD_WORDS:
             k += 1
             continue
         if re.match(r"^(?:[0-9]*(?:&?[<>]|<>)|&>>?)", tok):   # redirection operator

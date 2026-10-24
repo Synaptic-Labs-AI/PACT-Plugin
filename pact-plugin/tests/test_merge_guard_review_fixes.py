@@ -2033,3 +2033,31 @@ def test_an_eval_running_one_guarded_command_runs_once_approved(cmd, style):
 
     assert is_compound_destructive_command(cmd) is False
     assert _runs_after_approval(cmd, style)
+
+
+# A command that opens a compound command's body (`do`, `then`, `{`, `(`, an `if` or
+# `while` condition) is a command like any other: its -c string, eval or program is read.
+AFTER_KEYWORD_RUNS = [
+    ("sh -c in a loop body", "for i in 1 2; do sh -c 'gh pr " + "merge 5'; done"),
+    ("sh -c after then", "if true; then sh -c 'gh pr " + "merge 5'; fi"),
+    ("bash -c in a while body", 'while true; do bash -c "git push --' + 'force origin main"; break; done'),
+    ("sh -c in a group", "{ sh -c 'gh pr " + "merge 5'; }"),
+    ("sh -c in a subshell", "( sh -c 'gh pr " + "merge 5' )"),
+    ("eval in a loop body", "for i in 1; do eval 'gh pr " + "merge 5'; done"),
+    ("sh -c as an if condition", "if sh -c 'gh pr " + "merge 5'; then echo ok; fi"),
+]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", AFTER_KEYWORD_RUNS, ids=[r[0] for r in AFTER_KEYWORD_RUNS])
+def test_a_command_after_a_compound_keyword_is_read_and_runs_once_approved(label, cmd, style):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("cmd", [
+    "if true; then sh -c 'gh pr view 5'; fi",
+    "for i in 1 2; do echo 'sh -c \"gh pr " + "merge 5\"'; done",
+], ids=["view-after-then", "printed-in-a-loop"])
+def test_a_command_after_a_compound_keyword_that_runs_nothing_guarded_is_allowed(cmd):
+    assert is_dangerous_command(cmd) is False

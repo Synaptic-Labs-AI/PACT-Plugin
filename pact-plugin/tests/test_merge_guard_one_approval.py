@@ -240,3 +240,9 @@ class TestAProseOnlyLoopVariableKeepsOneOperation:
         from shared.merge_guard_common import is_compound_destructive_command
 
         assert is_compound_destructive_command(command) is True
+
+
+def test_a_shell_string_reading_the_loop_variable_counts_per_word():
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_compound_destructive_command("for p in 5 6; do sh -c \"" + MERGE + "$p\"; done") is True
