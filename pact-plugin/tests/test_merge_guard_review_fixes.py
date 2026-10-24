@@ -2238,11 +2238,12 @@ def test_an_alternative_branch_approval_runs_neither_branch_bare(style):
     "if true; then gh pr " + "merge 5 --squash; gh pr " + "merge 6 --squash; else echo no; fi",
     "if true; then gh pr " + "merge 5 --squash; fi; gh pr " + "merge 6 --squash",
     "if true; then gh pr " + "merge 5 --squash; else gh pr " + "merge 6 --squash; fi; git branch -D old",
-    "if gh pr " + "merge 5 --squash; then echo ok; else gh pr " + "merge 6 --squash; fi",
+    "if gh pr " + "merge 5 --squash; then gh pr " + "merge 6 --squash; fi",
+    "if gh pr " + "merge 5 --squash; then gh pr " + "merge 6 --squash; else gh pr " + "merge 7 --squash; fi",
     "if a; then if b; then gh pr " + "merge 5 --squash; fi; gh pr " + "merge 6 --squash; else echo no; fi",
     "if true; then gh pr " + "merge 5 --squash; else gh pr " + "merge 6 --squash",
-], ids=["two-in-one-branch", "branch-then-bare", "branches-then-delete", "condition-and-else",
-        "nested-then-bare-in-branch", "unclosed-if"])
+], ids=["two-in-one-branch", "branch-then-bare", "branches-then-delete", "condition-and-then",
+        "condition-and-then-beside-an-else", "nested-then-bare-in-branch", "unclosed-if"])
 def test_merges_that_can_run_together_stay_compound(cmd):
     from shared.merge_guard_common import is_compound_destructive_command
 
@@ -2437,3 +2438,38 @@ def test_alternative_destructive_branch_count_reads_or_chains(cmd, count):
     from shared.merge_guard_common import alternative_destructive_branch_count
 
     assert alternative_destructive_branch_count(cmd) == count
+
+
+# An if's condition and its else are alternatives: the else runs only when the condition
+# failed, so a merge in each is one op, and the approval binds the whole text.
+CONDITION_ELSE_MERGES = {
+    "another-pr": "if gh pr " + "merge 5 --squash; then echo ok; else gh pr " + "merge 6 --squash; fi",
+    "method-fallback": "if gh pr " + "merge 5 --squash; then echo ok; else gh pr " + "merge 5 --rebase; fi",
+    "elif-conditions": "if gh pr " + "merge 5 --squash; then echo a; elif gh pr " + "merge 5 --rebase; then echo b; "
+                       "else gh pr " + "merge 5 --merge; fi",
+}
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("cmd", CONDITION_ELSE_MERGES.values(), ids=CONDITION_ELSE_MERGES.keys())
+def test_a_condition_and_its_else_are_one_op_that_runs_approved(cmd, style):
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_dangerous_command(cmd) is True
+    assert is_compound_destructive_command(cmd) is False
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+def test_a_condition_and_else_approval_runs_neither_bare(style):
+    from merge_guard_post import _mint_context_from_bundle
+    from merge_guard_pre import _token_matches_command
+
+    approved = CONDITION_ELSE_MERGES["method-fallback"]
+    q = [{"question": "Run this?", "header": "Run", "multiSelect": False,
+          "options": [{"label": "Yes, run", "description": style(approved)},
+                      {"label": "No", "description": "Hold."}]}]
+    token = {"context": _mint_context_from_bundle(q, {"Run this?": "Yes, run"})[0]}
+    assert _token_matches_command(token, approved)
+    for bare in ("gh pr " + "merge 5 --squash", "gh pr " + "merge 5 --rebase", "gh pr " + "merge 777 --squash"):
+        assert not _token_matches_command(token, bare)

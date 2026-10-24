@@ -9710,12 +9710,13 @@ def _leg_operators(command: str) -> list[str]:
 def _alternative_branch_walk(legs: list[str], counts: list[int], ops: list[str]) -> tuple[int, int]:
     """Walk the if/elif/else and case groups and the `||` chains over per-leg destructive
     counts, `ops` being the operator after each leg. Returns how much more the counts add up
-    to than the commands that can run together (a group runs one branch, so it counts as its
-    largest branch; conditions always run and count in full; nested groups count by the same
-    rule inside their branch; legs joined only by `||` run one after another only while each
-    fails, so the chain counts as its largest leg), and the most branches of one group, or
-    legs of one chain, that each hold a destructive command. (0, 0) when a group does not
-    close."""
+    to than the commands that can run together, and the most arms of one group, or legs of
+    one chain, that each hold a destructive command. A group runs one arm: an if's condition
+    runs with its first branch, and each later branch runs only when the conditions before
+    it failed, so a group counts as its largest arm (the first arm being the condition and
+    its branch). Nested groups count by the same rule inside their arm. Legs joined only by
+    `||` run one after another only while each fails, so the chain counts as its largest
+    leg. (0, 0) when a group does not close."""
     stack: list[dict] = []
     top = widest = 0
     total, counts = sum(counts), list(counts)
@@ -9754,8 +9755,10 @@ def _alternative_branch_walk(legs: list[str], counts: list[int], ops: list[str])
         elif word in ("fi", "esac"):
             frame["branches"].append(frame["cur"] or 0)
             stack.pop()
-            widest = max(widest, sum(1 for b in frame["branches"] if b))
-            value = frame["cond"] + max(frame["branches"]) + n
+            # The condition runs with the first branch; a later branch runs only when it failed.
+            arms = [frame["cond"] + frame["branches"][0]] + frame["branches"][1:]
+            widest = max(widest, sum(1 for arm in arms if arm))
+            value = max(arms) + n
             if stack:
                 stack[-1]["cur"] = (stack[-1]["cur"] or 0) + value
             else:
