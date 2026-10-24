@@ -211,6 +211,16 @@ _SESSION_MAX_AGE_DAYS = 30
 # past this threshold.
 _PAUSED_SESSION_MAX_AGE_DAYS = 180
 
+# TTL for the filler-gradient counter files (issue #1657). Separate
+# constant from _SESSION_MAX_AGE_DAYS (same split rationale as the
+# teams/tasks TTL fields): the counter state is bounded by session count
+# and a file is a few hundred bytes, but 30 days still caps the
+# accumulation. The dirname is owned by hooks/wait_filler_gate.py; held
+# locally here because session_end must not import a PreToolUse hook
+# module to learn a string.
+_FILLER_STATE_MAX_AGE_DAYS = 30
+_FILLER_STATE_DIRNAME = "pact-filler-state"
+
 
 def _is_paused_session(session_dir: str) -> bool:
     """
@@ -828,6 +838,69 @@ def cleanup_old_tasks(
     return reaped, skipped
 
 
+def cleanup_old_filler_state(
+    state_base_dir: str | None = None,
+    max_age_days: int = _FILLER_STATE_MAX_AGE_DAYS,
+) -> tuple[int, int]:
+    """
+    Remove stale per-session filler-gradient counter files under
+    <config>/pact-filler-state/ (issue #1657).
+
+    The root is PACT-OWNED — only wait_filler_gate.py's state writes
+    create files there — so unlike cleanup_old_teams there is NO
+    name-pattern gate: every regular file in the root is a counter file.
+    What stays guarded:
+    - Symlinks are skipped (lstat semantics via `entry.is_symlink()`):
+      a planted link is never followed and never unlinked.
+    - Non-file entries are skipped, never rmtree'd: this reaper owns
+      FILES, and a directory inside the root is not ours by
+      construction, so it is left entirely alone rather than recursed.
+    - Age probe is the FILE's own mtime: state_file writes replace the
+      file atomically on every update, so mtime tracks the last touch
+      exactly — no child-mtime walk is needed (unlike the teams reaper).
+
+    Best-effort: never raises. Swallows OSError per-entry and outer.
+
+    Args:
+        state_base_dir: Override for the base directory (testing).
+            Defaults to <config>/pact-filler-state.
+        max_age_days: TTL in days (default: 30).
+
+    Returns:
+        (reaped, skipped) — `reaped` counts attempted unlinks,
+        `skipped` counts entries whose age probe (stat) raised OSError.
+    """
+    if state_base_dir is None:
+        state_base_dir = os.path.join(
+            str(get_claude_config_dir()), _FILLER_STATE_DIRNAME
+        )
+    base = Path(state_base_dir)
+    if not base.exists():
+        return 0, 0
+
+    reaped = 0
+    skipped = 0
+    try:
+        for entry in base.iterdir():
+            # Skip symlinks (live or dangling) — same lstat-first
+            # discipline as cleanup_old_teams; see its comment.
+            if entry.is_symlink():
+                continue
+            if not entry.is_file():
+                continue
+            try:
+                age_days = (time.time() - entry.stat().st_mtime) / 86400
+                if age_days > max_age_days:
+                    entry.unlink()
+                    reaped += 1
+            except OSError:
+                skipped += 1
+                continue
+    except OSError:
+        pass
+    return reaped, skipped
+
+
 def _assemble_tasks_skip_set(
     team_name: str,
     task_list_id: str,
@@ -1151,6 +1224,21 @@ def main():
             teams_reaper_ran = True
 
         _prune_registry_dead_teams()
+
+        # Filler-gradient counter files (issue #1657): one per session_id
+        # under pact-filler-state/, TTL-reaped here. The current session's
+        # file needs no skip entry — every write atomically replaces it,
+        # so its mtime is always fresh. Counts surface on stderr only
+        # when something was reaped: the cleanup_summary journal schema
+        # pins its exact field set, and extending it would touch
+        # shared/session_journal.py, which is outside this change's scope.
+        filler_r, _filler_s = cleanup_old_filler_state()
+        if filler_r:
+            print(
+                f"session_end: reaped {filler_r} stale filler-state "
+                f"counter file(s)",
+                file=sys.stderr,
+            )
 
         # Assemble skip-set via the module-level helper — see
         # `_assemble_tasks_skip_set` for the full rationale on the three
