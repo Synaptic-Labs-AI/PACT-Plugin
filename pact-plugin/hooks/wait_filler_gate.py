@@ -304,9 +304,17 @@ def _escalate(input_data, normalized):
             if gradient is None:
                 return text, False, None
             tier, new_count, new_total, valve_open, budget = gradient
-            pairs = dict(section.get("pairs") or {}) if isinstance(
-                section, dict
-            ) else {}
+            # Repair-and-persist for the soft `pairs` field (Bugbot-1,
+            # review cycle 2): a non-dict pairs value — truthy or falsy —
+            # coerces to {} instead of raising, matching the guard
+            # _compute_gradient already applies and the documented
+            # repair-on-write contract. dict(x or {}) alone raised on
+            # truthy non-dicts (dict("xy"), dict([1])) and degraded the
+            # whole call without repairing the file.
+            raw_pairs = (
+                section.get("pairs") if isinstance(section, dict) else None
+            )
+            pairs = dict(raw_pairs) if isinstance(raw_pairs, dict) else {}
             if key not in pairs and len(pairs) >= _MAX_TRACKED_PAIRS:
                 return text, False, None
             pairs[key] = new_count

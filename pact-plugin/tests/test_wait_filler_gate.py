@@ -1016,6 +1016,81 @@ def test_version_skew_unknown_section_key_survives_write(
     ] == "keep-me"
 
 
+def test_valve_write_preserves_unknown_keys_and_decrements(
+    tmp_path, monkeypatch, capsys
+):
+    """Bugbot-2 arm: version-skew preserve through the VALVE write, not
+    just the deny write — the budget decrement is a different _apply
+    rewrite (new_budget = budget - 1 on the valve branch), and it must
+    merge-preserve unknown section keys exactly as the deny branch does.
+    Seeded at count 2 so this instant form's third attempt is a tier-3
+    valve ALLOW; assert the allow fired, the key survived, AND the
+    budget and count both landed their new values in the same write."""
+    import wait_filler_gate
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    state = _state_path(tmp_path)
+    state.parent.mkdir(parents=True, exist_ok=True)
+    true_key = wait_filler_gate._pair_key("true")
+    state.write_text(
+        json.dumps({
+            "": {
+                "pairs": {true_key: 2},
+                "total": 2,
+                "valve_budget": 2,
+                "future_field": "keep-me",
+            }
+        }),
+        encoding="utf-8",
+    )
+    code, payload, _err = _invoke(_gradient_frame("true"), capsys)
+    assert code == 0
+    assert "CIRCUIT-BREAKER" in payload["hookSpecificOutput"][
+        "additionalContext"
+    ]
+    section = json.loads(state.read_text(encoding="utf-8"))[""]
+    assert section["future_field"] == "keep-me"
+    assert section["valve_budget"] == 1
+    assert section["pairs"] == {true_key: 3}
+    assert section["total"] == 3
+
+
+def test_truthy_nondict_pairs_repair_and_persist(
+    tmp_path, monkeypatch, capsys
+):
+    """Bugbot-1 arm: a TRUTHY non-dict `pairs` (a string passes the
+    falsy-checks a `if not pairs` guard would use) takes the soft-field
+    repair branch — reset to {} in-memory, denial escalates normally off
+    the fresh count, and the repaired single-key pairs dict is PERSISTED
+    on the very first write. The persisted file after call 1 is the
+    discriminator: a degrade path would leave the seed untouched, and a
+    non-persisting reset would loop at tier 1 forever."""
+    import wait_filler_gate
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    state = _state_path(tmp_path)
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(
+        json.dumps({
+            "": {"pairs": "corrupt", "total": 5, "valve_budget": 2}
+        }),
+        encoding="utf-8",
+    )
+    # call 1: count 0 -> 1, total 5 -> 6, no boost -> tier 1, and the
+    # repair is persisted in the same write
+    code, payload, _err = _invoke(_gradient_frame("sleep 30"), capsys)
+    assert code == 2
+    assert _deny_reason(payload) == wait_filler_gate._DENY_REASON
+    section = json.loads(state.read_text(encoding="utf-8"))[""]
+    assert section["pairs"] == {wait_filler_gate._pair_key("sleep 30"): 1}
+    assert section["total"] == 6
+    assert isinstance(section["pairs"], dict)
+    # call 2: count 2, total 7 > 6 -> boost -> tier 3 FILLER-LOCK — the
+    # gradient resumed, not a stuck tier-1 loop
+    _code, payload, _err = _invoke(_gradient_frame("sleep 30"), capsys)
+    assert "FILLER-LOCK" in _deny_reason(payload)
+
+
 def test_state_raise_degrades_tier1_with_stderr_note(
     tmp_path, monkeypatch, capsys
 ):
