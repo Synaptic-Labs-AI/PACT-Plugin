@@ -732,10 +732,12 @@ def format_session_substitutions(
 
     An empty session_dir (no session id on stdin) is named as unavailable
     rather than substituted. ``lead_address`` is allowlisted: any value
-    outside LEAD_ADDRESSES is replaced by ``team-lead``, so no file or caller
-    content reaches the LLM-facing sentence except one of two fixed strings.
+    outside LEAD_ADDRESSES (a non-str one included, checked first so an
+    unhashable value cannot raise) is replaced by ``team-lead``, so no file
+    or caller content reaches the LLM-facing sentence except one of two
+    fixed strings.
     """
-    if lead_address not in LEAD_ADDRESSES:
+    if not isinstance(lead_address, str) or lead_address not in LEAD_ADDRESSES:
         lead_address = LEAD_ADDRESS_LOCAL
     lead_sentence = (
         f' Use `{lead_address}` wherever {{lead_address}} appears in spawn '

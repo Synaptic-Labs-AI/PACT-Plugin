@@ -584,24 +584,22 @@ class TestAllowlist:
 
 
 class TestFormatSessionSubstitutionsNonStr:
-    """Auditor LOW note: the allowlist test is ``lead_address not in
-    LEAD_ADDRESSES`` on a frozenset, so an UNHASHABLE argument raises
-    TypeError instead of falling back to team-lead. Hashable non-str values
-    (int, None, bool) fall back correctly.
+    """Auditor LOW note: the allowlist test used to be ``lead_address not in
+    LEAD_ADDRESSES`` on a frozenset alone, so an UNHASHABLE argument raised
+    TypeError instead of falling back to team-lead. The function now checks
+    ``isinstance(lead_address, str)`` first, the same order as
+    _valid_lead_address, so every non-str value falls back to team-lead.
 
-    Pinned as current behaviour. No guard is required today because both
-    production callers can only pass a str from LEAD_ADDRESSES:
+    Both production callers can only pass a str from LEAD_ADDRESSES anyway:
     session_init passes resolve_lead_address() and bootstrap_prompt_gate
     passes get_lead_address(), and the file read is filtered by
-    _valid_lead_address (isinstance-first) before it reaches either. If a
-    guard is added (``isinstance(lead_address, str) and ...``), flip the
-    first test to assert the team-lead fallback.
+    _valid_lead_address before it reaches either.
     """
 
     @pytest.mark.parametrize("value", [["main"], {"main": 1}])
-    def test_unhashable_raises_type_error(self, value):
-        with pytest.raises(TypeError):
-            format_session_substitutions("t", "/s", "/p", value)
+    def test_unhashable_falls_back_to_team_lead(self, value):
+        text = format_session_substitutions("t", "/s", "/p", value)
+        assert f"Use `team-lead` {SENTENCE}" in text
 
     # A plain set does NOT raise: CPython retries a set's membership test in
     # a frozenset as a frozenset copy, which is not in LEAD_ADDRESSES.
@@ -614,8 +612,8 @@ class TestFormatSessionSubstitutionsNonStr:
     def test_production_callers_only_pass_allowlisted_strings(
             self, tmp_path, monkeypatch):
         """The two values the callers pass are always in LEAD_ADDRESSES,
-        whatever is on disk, so the TypeError path is unreachable from
-        production code."""
+        whatever is on disk, so the non-str fallback in
+        format_session_substitutions is unreachable from production code."""
         for cloud in (False, True):
             if cloud:
                 _cloud(monkeypatch)
@@ -632,8 +630,8 @@ class TestFormatSessionSubstitutionsNonStr:
 
 _PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 # Any brace placeholder, hyphenated names included ({teammate-name},
-# {scope-prefixed-name}). The primary file's `[a-z_]+` pattern leaves the
-# hyphenated name placeholders unsubstituted, so it under-counts them.
+# {scope-prefixed-name}), at 64 chars each: a stricter budget than the
+# primary file's 32-char worst case, which uses the same placeholder pattern.
 _ANY_PLACEHOLDER = re.compile(r"\{[a-z][a-z_-]*\}")
 _LONG_NAME = "n" * 64
 

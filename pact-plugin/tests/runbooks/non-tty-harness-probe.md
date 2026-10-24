@@ -47,6 +47,12 @@ control beside it before concluding anything.
 6. **Teammate is the SUBJECT, lead is the OBSERVER.** Forbid the subject from
    inspecting the instrumentation; a subject that goes looking contaminates
    the one clean run you get.
+7. **Isolate any child `claude -p` a probe launches.** Run it with
+   `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_REMOTE_SESSION_ID` and
+   `CLAUDE_CODE_SYNC_SESSION_REFS` unset and `CLAUDE_CONFIG_DIR` pointing at a
+   scratch directory. Otherwise the child inherits the parent session's
+   identity and writes into the parent's task list (observed in #1666 Track
+   A's P2 probe).
 
 ## §1 ARM 1 — local TTY no-op of the SHIPPED change
 
@@ -160,12 +166,24 @@ deregistering, or editing team state to force the fallback).
 
 **§2.10 CLAUDE_CODE_REMOTE at cloud SessionStart (#1666 items 1 and 2).** The
 user starts a FRESH cloud session (`source=startup`) with the plugin loaded
-from the branch under test, then reads three things:
-  1. the session journal's `session_start` event with `source: startup` —
-     its `lead_address` and `team` fields;
-  2. `pact-session-context.json` — its `team_name` and `lead_address`;
-  3. the first-turn SessionStart directive — the
-     ``Use `<value>` wherever {lead_address} appears`` sentence.
+from the branch under test. The session dir is
+`{config_dir}/pact-sessions/<project-slug>/<session-id>/` (the `- Session dir:`
+line of the project CLAUDE.md names it; `{config_dir}` is
+`$CLAUDE_CONFIG_DIR`, else `~/.claude`). Read three things:
+  1. `<session dir>/session-journal.jsonl` — the FIRST `session_start` event,
+     the one with `"source": "startup"`: its `lead_address` and `team`
+     fields. Only that event counts. Later `resume` events carry the full
+     session id as `team` even on 4.8.7, because the resolver realigns
+     after startup, so they prove nothing about this change.
+  2. `<session dir>/pact-session-context.json` — its `team_name` and
+     `lead_address`. A later prompt can rewrite `team_name`, so read it
+     before the first prompt if you can, and treat the journal as primary.
+  3. The first-turn SessionStart directive, the
+     ``Use `<value>` wherever {lead_address} appears`` sentence. A cloud
+     session shows no hook output, so either ask the lead, before it
+     bootstraps, to quote that sentence from its SessionStart context
+     verbatim, or read the SessionStart `additionalContext` in the session
+     transcript.
 On a startup fire nothing is carried, so the journal field is a direct reading
 of `is_cloud_session()` inside the SessionStart hook process. Record one of:
   - `remote-visible` — `lead_address: "main"` and `team` equal to the full
@@ -173,7 +191,13 @@ of `is_cloud_session()` inside the SessionStart hook process. Record one of:
   - `remote-absent` — `lead_address: "team-lead"` and `team: session-<id8>`.
     The code is still correct (fail-safe to today's behaviour), but items 1
     and 2 do nothing in the cloud: record it as a #1666 finding, not a revert
-    trigger.
+    trigger;
+  - `mixed` — any other combination (for example `main` with
+    `session-<id8>`, or `team-lead` with the full session id). On a fresh
+    startup both fields derive from the one `is_cloud_session()` reading, so
+    a mixed result is a BUG: record the event, the context file and the
+    directive sentence verbatim and report it on #1666.
+If the probe launches a child `claude -p`, isolate it first (§0 item 7).
 
 ## §3 Desktop arm / #1019 close-out
 
@@ -199,5 +223,7 @@ reinstall the released version, and verify `gitCommitSha` matches the release.
 Record the run in `RUNBOOK_RUN_DATES.md` per its row schema. Capture for each
 arm: journal path, `harness` value, `entrypoint` raw value, stamp-input
 attribution (§2.6), env-key presence booleans (§2.7), `config.json`
-absence/presence, marker path, and any advisory text observed. These rows are
+absence/presence, marker path, the startup `session_start` event's
+`lead_address` and `team` with the §2.10 outcome (`remote-visible`,
+`remote-absent` or `mixed`), and any advisory text observed. These rows are
 the evidence #1309 / #1019 close on.

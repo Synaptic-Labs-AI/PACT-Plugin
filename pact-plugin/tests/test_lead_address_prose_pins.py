@@ -46,10 +46,15 @@ def _all_spawn_literals():
     return out
 
 
+# Any brace placeholder, hyphenated names included ({teammate-name},
+# {scope-prefixed-name}).
+_ANY_PLACEHOLDER = re.compile(r"\{[a-z][a-z_-]*\}")
+
+
 def _worst_case(literal: str) -> str:
     text = literal.replace('\\"', '"')
     text = text.replace("{team_name}", _UUID).replace("{lead_address}", "team-lead")
-    return re.sub(r"\{[a-z_]+\}", _OTHER_PLACEHOLDER, text)
+    return _ANY_PLACEHOLDER.sub(_OTHER_PLACEHOLDER, text)
 
 
 def test_census_is_thirteen():
@@ -67,6 +72,7 @@ def test_every_spawn_literal_names_the_lead_address(stem, literal):
 @pytest.mark.parametrize("stem,literal", _all_spawn_literals())
 def test_every_spawn_literal_fits_the_prompt_cap(stem, literal):
     rendered = _worst_case(literal)
+    assert not _ANY_PLACEHOLDER.search(rendered), (stem, "placeholder left unsubstituted")
     assert len(rendered) <= PROMPT_MAX_LENGTH, (stem, len(rendered))
 
 
