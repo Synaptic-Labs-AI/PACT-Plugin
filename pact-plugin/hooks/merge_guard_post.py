@@ -1162,12 +1162,11 @@ def _run_succeeded_as_the_op(command: str, op_type: str, tool_response: object) 
         return False
 
 
-def _pr_state_confirms(command: str, op_type: str, frame_cwd: object = None) -> bool:
-    """True only when GitHub reports the PR the command named in the state the
-    command produces. Any doubt is False, which keeps the token (the TTL and
-    MAX_USES bound still apply): a URL, branch or implicit target, an -R/--repo
-    target, a directory change or repo env assignment other than one literal
-    absolute `cd`, an unreachable or slow gh, or any exception. A shell's -c string
+def _pr_state(command: str, frame_cwd: object = None) -> str:
+    """The state GitHub reports for the PR the command named (OPEN, MERGED or
+    CLOSED), or "" when it cannot be read: any other answer, a URL, branch or implicit target, an -R/--repo target, a directory
+    change or repo env assignment other than one literal absolute `cd`, an
+    unreachable or slow gh, or any exception. A shell's -c string
     is read as the command it runs, with its positional words in place, so a `cd`
     inside it is followed the same way; a repo env assignment outside it still
     doubts."""
@@ -1177,18 +1176,19 @@ def _pr_state_confirms(command: str, op_type: str, frame_cwd: object = None) -> 
             command = inner
         followable, cwd = _state_check_dir(command, frame_cwd)
         if not followable:
-            return False
+            return ""
         ctx = extract_command_context(_extraction_surface(command))
         pr = ctx.get("pr_number")
         if not isinstance(pr, str) or not pr.isdigit():
-            return False
+            return ""
         if any(str(f).startswith("--repo") for f in ctx.get("bound_flags") or []):
-            return False
+            return ""
         from shared.gh_helpers import check_pr_state
 
-        return check_pr_state(pr, cwd=cwd) == _CONFIRMING_STATE[op_type]
+        state = check_pr_state(pr, cwd=cwd)
+        return state if state in ("OPEN", "MERGED", "CLOSED") else ""
     except Exception:  # noqa: BLE001 - any doubt keeps the token
-        return False
+        return ""
 
 
 def _token_in_session(token_data: dict, current_session: str) -> bool:
@@ -1569,11 +1569,16 @@ def main():
                     # A piped or non-TTY gh run prints no "Merged pull request"
                     # line, so a missing substring falls back to asking GitHub
                     # for the PR's state; any doubt there keeps the token.
-                    confirmed = (
-                        expected_substring.lower() in stdout_text.lower()
-                        or _pr_state_confirms(command, op_type, input_data.get("cwd"))
-                        or _run_succeeded_as_the_op(command, op_type, tool_response)
-                    )
+                    # A readable state outranks the exit status: a merge that
+                    # exits 0 into a merge queue or with --auto leaves the PR
+                    # OPEN and keeps its token. Only an unreadable state falls
+                    # back to the run's own success.
+                    confirmed = expected_substring.lower() in stdout_text.lower()
+                    if not confirmed:
+                        state = _pr_state(command, input_data.get("cwd"))
+                        confirmed = state == _CONFIRMING_STATE[op_type] or (
+                            not state and _run_succeeded_as_the_op(command, op_type, tool_response)
+                        )
                 else:
                     confirmed = expected_substring in stdout_text or _run_succeeded_as_the_op(
                         command, op_type, tool_response

@@ -161,6 +161,34 @@ class TestStateConfirmsRetirement:
         assert _retired(rig)
 
 
+class TestAReadableStateOutranksTheExitStatus:
+    """A merge that exits 0 into a merge queue or with --auto leaves the PR OPEN:
+    the PR's state, when it can be read, decides, and only an unreadable state
+    falls back to the run's own success."""
+
+    @pytest.mark.parametrize("cmd,state", [
+        pytest.param(f"{_MERGE} 5 --squash", "OPEN", id="merge-queued"),
+        pytest.param(f"{_MERGE} 5 --squash --auto", "OPEN", id="auto-merge"),
+        pytest.param(f"{_MERGE} 5 --squash", "CLOSED", id="merge-closed"),
+        pytest.param(f"{_CLOSE} 5 --delete-branch", "MERGED", id="close-merged"),
+    ])
+    def test_a_state_that_is_not_the_ops_keeps_the_token(self, rig, cmd, state):
+        _mint(rig, cmd)
+        _post(rig, cmd, "", state=state)
+        assert _gh_calls(rig) == ["pr view 5 --json state --jq .state"]
+        assert not _retired(rig)
+
+    @pytest.mark.parametrize("env", [
+        pytest.param({"with_gh": False}, id="gh-missing"),
+        pytest.param({"state": "DRAFT"}, id="unknown-answer"),
+    ])
+    def test_an_unreadable_state_falls_back_to_the_runs_success(self, rig, env):
+        cmd = f"{_MERGE} 5 --squash"
+        _mint(rig, cmd)
+        _post(rig, cmd, "", **env)
+        assert _retired(rig)
+
+
 class TestDoubtKeepsToken:
     def test_refused_piped_merge_open_keeps_and_retry_authorized(self, rig):
         cmd = f"{_MERGE} 1659 --squash 2>&1 | tail -3"
