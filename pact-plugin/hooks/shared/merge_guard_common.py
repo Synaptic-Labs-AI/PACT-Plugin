@@ -9609,12 +9609,7 @@ def is_compound_destructive_command(command: str) -> bool:
     # When an eval runs a heredoc, the heredoc bodies stay in the legs, so the commands
     # the eval runs are counted from their own legs; the eval's leg is not counted again
     # for the eval+heredoc shape alone.
-    if _has_eval_with_heredoc(command):
-        destructive = [
-            leg for leg in legs if _is_dangerous_at_depth(leg, 0) or _RM_HEAD_RE.match(leg)
-        ]
-    else:
-        destructive = [leg for leg in legs if _leg_is_destructive(leg)]
+    destructive = _destructive_legs(command, legs)
     on_interpreters = sum(1 for leg in destructive if _INTERPRETER_WORD_RE.search(leg))
     interpreted = {normalize_command_text(c) for c in _interpreter_guarded_commands(command, 0)}
     in_shells = sum(_shell_leg_destructive_count(leg) for leg in destructive)
@@ -9654,6 +9649,88 @@ def _varies_with(leg: str, uses: "re.Pattern") -> bool:
         else:
             kept.append(token)
     return any(uses.search(token) for token in kept) or bool(uses.search(leg[:len(leg) - len(word)]))
+
+
+_BRANCH_WORD_RE = re.compile(r"\s*(if|then|elif|else|fi|case|esac)(?![\w-])")
+
+
+def _alternative_branch_walk(legs: list[str], counts: list[int]) -> tuple[int, int]:
+    """Walk the if/elif/else and case groups over per-leg destructive counts. Returns how
+    much more the counts add up to than the commands that can run together (a group runs
+    one branch, so it counts as its largest branch; conditions always run and count in
+    full; nested groups count by the same rule inside their branch), and the most branches
+    of one group that each hold a destructive command. (0, 0) when a group does not close."""
+    stack: list[dict] = []
+    top = widest = 0
+
+    def step(word: str, n: int, empty: bool) -> None:
+        nonlocal top, widest
+        frame = stack[-1] if stack else None
+        if word in ("if", "case"):
+            stack.append({"branches": [], "cur": n if word == "case" else None, "case": word == "case",
+                          "cond": 0 if word == "case" else n, "elif": False})
+        elif frame is None:
+            top += n
+        elif word == "then":
+            if frame["elif"]:
+                frame["cur"] += n
+                frame["elif"] = False
+            else:
+                frame["cur"] = n
+        elif word == "elif":
+            frame["branches"].append(frame["cur"] or 0)
+            frame["cur"], frame["elif"] = n, True
+        elif word == "else":
+            frame["branches"].append(frame["cur"] or 0)
+            frame["cur"] = n
+        elif word in ("fi", "esac"):
+            frame["branches"].append(frame["cur"] or 0)
+            stack.pop()
+            widest = max(widest, sum(1 for b in frame["branches"] if b))
+            value = frame["cond"] + max(frame["branches"]) + n
+            if stack:
+                stack[-1]["cur"] = (stack[-1]["cur"] or 0) + value
+            else:
+                top += value
+        elif frame["case"] and empty:
+            frame["branches"].append(frame["cur"] or 0)
+            frame["cur"] = 0
+        elif frame["cur"] is None:
+            frame["cond"] += n
+        else:
+            frame["cur"] += n
+
+    for leg, n in zip(legs, counts):
+        # A leg can open with several words in a row (`then if b`, `else case ...`); the
+        # leg's commands belong to the last.
+        words, rest = [], leg
+        while m := _BRANCH_WORD_RE.match(rest):
+            words.append(m.group(1))
+            rest = rest[m.end():]
+        for word in words[:-1]:
+            step(word, 0, False)
+        step(words[-1] if words else "", n, not leg.strip())
+    return (0, 0) if stack else (sum(counts) - top, widest)
+
+
+def alternative_destructive_branch_count(command: str) -> int:
+    """The most branches of one if/elif/else or case group in `command` that each run a
+    destructive command: 2 for `if c; then gh pr merge 5; else gh pr merge 6; fi`, 0 when
+    no group has a destructive branch or a group does not close. Each such branch can run
+    on its own, so an approval of the command binds its whole text when this is 2 or more."""
+    legs = _split_into_legs(command)
+    destructive = _destructive_legs(command, legs)
+    return _alternative_branch_walk(legs, [
+        _shell_leg_destructive_count(leg) if leg in destructive else 0 for leg in legs
+    ])[1]
+
+
+def _destructive_legs(command: str, legs: list[str]) -> list[str]:
+    """The legs of `command` that run a destructive command. When an eval runs a heredoc,
+    the heredoc bodies stay in the legs and each is judged as a command."""
+    if _has_eval_with_heredoc(command):
+        return [leg for leg in legs if _is_dangerous_at_depth(leg, 0) or _RM_HEAD_RE.match(leg)]
+    return [leg for leg in legs if _leg_is_destructive(leg)]
 
 
 def _literal_loop_extra_passes(command: str) -> int:

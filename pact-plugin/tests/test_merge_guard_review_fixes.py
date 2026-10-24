@@ -2171,3 +2171,25 @@ RUNNING_STRING_RUNNERS = [
 def test_a_string_runner_that_runs_a_merge_is_refused_then_runs(label, cmd, style):
     assert is_dangerous_command(cmd) is True
     assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("cmd,count", [
+    ("if true; then gh pr " + "merge 5 --squash; else gh pr " + "merge 6 --squash; fi", 2),
+    ("case \"$x\" in a) gh pr " + "merge 5 --squash ;; b) gh pr " + "merge 6 --squash ;; esac", 2),
+    ("if [ \"$m\" = s ]; then gh pr " + "merge 5 --squash; elif [ \"$m\" = r ]; then gh pr "
+     + "merge 5 --rebase; else gh pr " + "merge 5 --merge; fi", 3),
+    ("if a; then if b; then gh pr " + "merge 5 --squash; else gh pr " + "merge 6 --squash; fi; "
+     "else gh pr " + "merge 7 --squash; fi", 2),
+    ("if a; then gh pr " + "merge 5 --squash; else if b; then gh pr " + "merge 6 --squash; fi; fi", 2),
+    ("if true; then gh pr " + "merge 5 --squash; fi", 1),
+    ("if x; then echo; else gh pr " + "merge 6 --squash; fi", 1),
+    ("gh pr " + "merge 5 --squash", 0),
+    ("if true; then gh pr " + "merge 5 --squash; else gh pr " + "merge 6 --squash", 0),
+    ("if a; then if b; then gh pr " + "merge 5 --squash; else gh pr " + "merge 6 --squash; fi", 0),
+    ("echo hi", 0),
+], ids=["if-else", "case", "elif-ladder", "nested-if", "else-if", "one-branch", "else-only",
+        "bare", "unclosed", "unclosed-outer", "benign"])
+def test_alternative_destructive_branch_count(cmd, count):
+    from shared.merge_guard_common import alternative_destructive_branch_count
+
+    assert alternative_destructive_branch_count(cmd) == count
