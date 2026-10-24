@@ -459,3 +459,230 @@ def test_s5_lead_spellings_match_the_source_set():
         "background-launch advisory; a spelling only in the gate silences every "
         "teammate whose agent_type matches it. Update the gate's copy."
     )
+
+
+# ---------------------------------------------------------------------------
+# Gradient + valve smoke arms (issue #1657). CODE-phase proof that the
+# implementation works end to end against the real on-disk state channel
+# (hermetic CLAUDE_CONFIG_DIR per arm); the full acceptance matrix —
+# cross-process persistence probes, shape-scope ablations, concurrency —
+# is TEST-phase work per the plan.
+# ---------------------------------------------------------------------------
+
+
+def _gradient_frame(command, session_id="s-grad", agent_type=None, description=None):
+    frame = {"tool_name": "Bash", "tool_input": {"command": command}}
+    if session_id is not None:
+        frame["session_id"] = session_id
+    if agent_type is not None:
+        frame["agent_type"] = agent_type
+    if description is not None:
+        frame["tool_input"]["description"] = description
+    return json.dumps(frame)
+
+
+def _drive(commands, tmp_path, monkeypatch, capsys, session_id="s-grad",
+           agent_type=None):
+    """Run main() once per command under a hermetic CLAUDE_CONFIG_DIR.
+    Returns the list of (exit_code, parsed_payload_or_None, stderr)."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    return [
+        _invoke(
+            _gradient_frame(c, session_id=session_id, agent_type=agent_type),
+            capsys,
+        )
+        for c in commands
+    ]
+
+
+def _state_path(tmp_path, session_id="s-grad"):
+    return tmp_path / "pact-filler-state" / f"{session_id}.json"
+
+
+def _deny_reason(payload):
+    return payload["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_gradient_tier_progression_renders_count(tmp_path, monkeypatch, capsys):
+    """Three identical filler calls escalate 1 -> 2 -> 3, tier 1 is frozen
+    byte-identical to the historical advisory, tier 2 renders the count,
+    tier 3 is the imperative FILLER-LOCK."""
+    import wait_filler_gate
+
+    results = _drive(["sleep 30"] * 3, tmp_path, monkeypatch, capsys)
+    codes = [code for code, _payload, _err in results]
+    assert codes == [2, 2, 2]
+    tier1, tier2, tier3 = (_deny_reason(p) for _c, p, _e in results)
+    assert tier1 == wait_filler_gate._DENY_REASON
+    assert tier2.startswith(wait_filler_gate._DENY_REASON)
+    assert "denied 2 times this session" in tier2
+    assert "FILLER-LOCK" in tier3
+
+
+def test_gradient_stderr_mirrors_the_deny_reason(tmp_path, monkeypatch, capsys):
+    """The denial text rides stdout JSON (the surface this harness parses
+    at exit 2) and is mirrored to stderr for harnesses reported to drop
+    stdout JSON at exit 2 (channel probe, issue #1657 plan)."""
+    code, payload, err = _drive(["true"], tmp_path, monkeypatch, capsys)[0]
+    assert code == 2
+    assert err.strip() == _deny_reason(payload)
+
+
+def test_valve_allows_instant_form_at_tier3_twice_then_denies(
+    tmp_path, monkeypatch, capsys
+):
+    """The circuit-breaker fires exactly at computed tier 3 for an instant
+    form, twice per session (budget 2), then closes back to the tier-3
+    deny. Attempt counts keep growing through valve allows so the gradient
+    never regresses."""
+    results = _drive(["true"] * 5, tmp_path, monkeypatch, capsys)
+    codes = [code for code, _p, _e in results]
+    assert codes == [2, 2, 0, 0, 2]
+    valve1 = results[2][1]["hookSpecificOutput"]["additionalContext"]
+    valve2 = results[3][1]["hookSpecificOutput"]["additionalContext"]
+    assert "CIRCUIT-BREAKER" in valve1 and "CIRCUIT-BREAKER" in valve2
+    assert "remaining: 1" in valve1 and "remaining: 0" in valve2
+    assert "FILLER-LOCK" in _deny_reason(results[4][1])
+
+
+def test_valve_never_opens_for_nonzero_or_infinite_sleep(
+    tmp_path, monkeypatch, capsys
+):
+    """`sleep 1` and `sleep infinity` are never instant forms: three calls
+    deny all three times, third at tier 3, and the exit code is never 0."""
+    for command in ("sleep 1", "sleep infinity"):
+        results = _drive([command] * 3, tmp_path, monkeypatch, capsys)
+        assert [c for c, _p, _e in results] == [2, 2, 2], command
+        assert "FILLER-LOCK" in _deny_reason(results[2][1]), command
+
+
+def test_valve_instant_grammar_edges(tmp_path, monkeypatch, capsys):
+    """Every all-zero duration spelling (`0`, `0.0`, `.0`, `0s`) is
+    valve-eligible at tier 3; `0.1` is not. Fresh session per form so the
+    shared budget does not couple the arms (explicit safe-shape sids: a
+    derived id containing `.` would itself fail the gate's safe-sid
+    fullmatch and pass this arm for the wrong reason)."""
+    for session_id, command, expect_valve in (
+        ("s-zero", "sleep 0", True),
+        ("s-zero-dot-zero", "sleep 0.0", True),
+        ("s-dot-zero", "sleep .0", True),
+        ("s-zero-s", "sleep 0s", True),
+        ("s-zero-dot-one", "sleep 0.1", False),
+    ):
+        results = _drive([command] * 3, tmp_path, monkeypatch, capsys,
+                         session_id=session_id)
+        third_code = results[2][0]
+        if expect_valve:
+            assert third_code == 0, command
+        else:
+            assert third_code == 2, command
+
+
+def test_state_failure_degrades_to_tier1_and_closes_valve(
+    tmp_path, monkeypatch, capsys
+):
+    """Fail-direction invariant: with the state channel unavailable the
+    hook still denies every filler at the frozen tier-1 advisory — never
+    allows, never harder, valve closed (V2 UNKNOWN = DENY)."""
+    import wait_filler_gate
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(wait_filler_gate, "_load_locked_update", lambda: None)
+    for expected_tier1 in range(5):
+        code, payload, _err = _invoke(
+            _gradient_frame("true"), capsys
+        )
+        assert code == 2, expected_tier1
+        assert _deny_reason(payload) == wait_filler_gate._DENY_REASON
+    assert not _state_path(tmp_path).exists()
+
+
+def test_corrupt_state_file_denies_at_tier1(tmp_path, monkeypatch, capsys):
+    """A state file that does not parse degrades to the tier-1 deny and
+    is left untouched (no rewrite on the degrade path)."""
+    import wait_filler_gate
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    state = _state_path(tmp_path)
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text("not json {{{", encoding="utf-8")
+    code, payload, _err = _invoke(_gradient_frame("true"), capsys)
+    assert code == 2
+    assert _deny_reason(payload) == wait_filler_gate._DENY_REASON
+    assert state.read_text(encoding="utf-8") == "not json {{{"
+
+
+def test_no_or_unsafe_session_id_never_persists(tmp_path, monkeypatch, capsys):
+    """Frames without a session_id, or carrying one that cannot be a
+    filename, deny stateless at tier 1 and never create state."""
+    import wait_filler_gate
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    for frame in (
+        _gradient_frame("true", session_id=None),
+        _gradient_frame("true", session_id="../evil"),
+        _gradient_frame("true", session_id="a/b"),
+    ):
+        code, payload, _err = _invoke(frame, capsys)
+        assert code == 2
+        assert _deny_reason(payload) == wait_filler_gate._DENY_REASON
+    assert not (tmp_path / "pact-filler-state").exists()
+    assert not (tmp_path / "evil.json").exists()
+
+
+def test_description_variance_does_not_reset_the_gradient(
+    tmp_path, monkeypatch, capsys
+):
+    """Counters key on the post-normalization command only (G5): varying
+    the description between identical commands continues the count."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    first = _invoke(
+        _gradient_frame("true", description="waiting for build"), capsys
+    )
+    second = _invoke(
+        _gradient_frame("true", description="still waiting, different words"),
+        capsys,
+    )
+    assert first[0] == 2 and second[0] == 2
+    assert "denied 2 times this session" in _deny_reason(second[1])
+
+
+def test_saturation_boost_escalates_a_fresh_command(
+    tmp_path, monkeypatch, capsys
+):
+    """Past total 6, a FIRST-seen filler command enters at tier 2 — the
+    command-walk backstop (`sleep 30/31/32...` cannot reset the gradient
+    by varying the number)."""
+    import wait_filler_gate
+
+    commands = [f"sleep {n}" for n in range(40, 46)]  # totals 1..6
+    results = _drive(commands, tmp_path, monkeypatch, capsys)
+    # totals 1..6: no boost, every first-seen command is tier 1
+    for (_c, payload, _e) in results:
+        assert _deny_reason(payload) == wait_filler_gate._DENY_REASON
+    _code, payload, _err = _invoke(
+        _gradient_frame("sleep 46"), capsys
+    )  # total 7 > 6 -> boost -> tier 2
+    assert "denied 1 times this session" in _deny_reason(payload)
+
+
+def test_agent_type_sections_are_distinct(tmp_path, monkeypatch, capsys):
+    """In-process teammates share the lead's session_id (G3 identity
+    collapse): the agent_type section keeps their counters distinct, and
+    a frame with no agent_type keys on the empty string."""
+    import wait_filler_gate
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    code_a, payload_a, _e = _invoke(
+        _gradient_frame("true", agent_type="pact-devops-engineer"), capsys
+    )
+    code_b, payload_b, _e = _invoke(
+        _gradient_frame("true", agent_type=None), capsys
+    )
+    assert code_a == 2 and code_b == 2
+    # both are FIRST denials in their own section
+    assert _deny_reason(payload_a) == wait_filler_gate._DENY_REASON
+    assert _deny_reason(payload_b) == wait_filler_gate._DENY_REASON
+    state = json.loads(_state_path(tmp_path).read_text(encoding="utf-8"))
+    assert state["pact-devops-engineer"]["total"] == 1
+    assert state[""]["total"] == 1
