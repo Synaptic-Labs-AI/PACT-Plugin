@@ -633,3 +633,48 @@ class TestAGuardedCommandThatIsTheSubstitutionRunsOnce:
             "tool_response": {"stdout": stdout, "stderr": "", "interrupted": False},
         }, tmp_path)
         assert not rig._runs(command, tmp_path)
+
+
+DATA_MENTIONS = {
+    "issue-body-heredoc": "gh issue create --title t --body-file - <<'EOF'\nSteps: " + FORCE + "main\nEOF",
+    "commit-message-heredoc": "git commit -F - <<'EOF'\ndocs: explain " + FORCE + "main\nEOF",
+    "tag-message-heredoc": "git tag -a v1 -F - <<'EOF'\nafter git branch -" + "D feat/x\nEOF",
+    "file-written-from-a-heredoc": "cat > notes.md <<'EOF'\n" + FORCE + "main\nEOF",
+}
+
+
+class TestAGuardedCommandAnAllowedCommandOnlyMentionsMintsNothing:
+    """An approval binds only the guarded command the approved command runs. A
+    guarded command written as data inside a command the pre-hook allows is not
+    one, so approving it mints nothing and the real guarded command stays refused."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("command", DATA_MENTIONS.values(), ids=DATA_MENTIONS.keys())
+    def test_approving_the_allowed_command_mints_nothing(self, command, style):
+        assert _runs(None, command)
+        assert _mint_styled(command, style) is None
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    def test_the_mentioned_command_stays_refused_after_the_approval(self, style, tmp_path):
+        rig = TestAnApprovalWithNoSuccessSignalRunsOnce()
+        (tmp_path / ".claude").mkdir()
+        command = DATA_MENTIONS["issue-body-heredoc"]
+        q = [{"question": "Run this?", "header": "Run", "multiSelect": False,
+              "options": [{"label": "Yes, run", "description": style(command)},
+                          {"label": "No", "description": "Hold."}]}]
+        rig._hook("merge_guard_post.py", {
+            "hook_event_name": "PostToolUse", "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": q}, "tool_response": {"answers": {"Run this?": "Yes, run"}},
+        }, tmp_path)
+        assert rig._runs(command, tmp_path)
+        assert not rig._runs(FORCE + "main", tmp_path)
+
+    def test_a_guarded_command_in_its_own_span_beside_one_still_mints(self):
+        command = FORCE + "main"
+        ctx = _mint_styled(command, lambda c: (
+            f"Record it with `{DATA_MENTIONS['commit-message-heredoc']}`, then run `{c}`"))
+        assert _runs(ctx, command)
+
+    @pytest.mark.parametrize("command", DATA_MENTIONS.values(), ids=DATA_MENTIONS.keys())
+    def test_the_no_mint_notice_says_the_command_needs_no_approval(self, command):
+        assert _mint(command) == (None, "not_dangerous")

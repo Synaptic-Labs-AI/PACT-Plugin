@@ -468,6 +468,12 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
             if is_compound_destructive_command(_region):
                 return MintResult(None, "compound_command")
 
+    # A guarded command written only as data inside a backticked command the pre-hook
+    # allows (the heredoc body of `gh issue create --body-file -`, the message of
+    # `git commit -F -`) is not a command the approval runs, so it binds nothing.
+    clicked_texts = selected_option_texts
+    selected_option_texts = [_without_allowed_spans(t) for t in selected_option_texts]
+
     # ── Step 3: distinct-(op,target) multiplicity over the CLICKED options ONLY
     # (pure-floor scope — the question prose is NOT cross-checked): ==1 mints, >1
     # refuses (a single click carrying 2 commands), ==0 yields no token. ──
@@ -487,6 +493,9 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
         ):
             return MintResult(None, "multiple_commands")
         return exact
+    if not bundle_pairs and _collect_pairs(clicked_texts):
+        # The only guarded command was data in a command the pre-hook allows.
+        return MintResult(None, "not_dangerous")
     if len(bundle_pairs) != 1:
         return MintResult(
             None, "no_command" if len(bundle_pairs) == 0 else "multiple_commands"
@@ -743,6 +752,13 @@ def _without(text: str, spans: list[str]) -> str:
     for span in spans:
         text = text.replace(span, " ")
     return text
+
+
+def _without_allowed_spans(text: str) -> str:
+    """`text` without each code span whose command the pre-hook allows; a guarded
+    command such a span holds is data it does not run."""
+    return _without(text, [raw for raw, content in _code_spans(text)
+                           if content.strip() and not is_dangerous_command(content.strip())])
 
 
 def _bundle_has_command(questions: list) -> bool:

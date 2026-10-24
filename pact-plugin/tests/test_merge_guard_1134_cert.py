@@ -1134,18 +1134,17 @@ class TestMergeShadowGuardIsLoadBearing:
 
 
 class TestD2RoundTripIsPipelineBlindWithoutTheGate:
-    """DOCUMENTED TRAP — do NOT 'simplify' D2 to mint + self-authorize ALLOW. Under an
-    _PER_LEG_OPS revert the row goes UNGATED yet mint+exec still returns (1, ALLOW): the
-    mint uses the fix-independent _extraction_surface and the exec ALLOWs because the row
-    is no longer gated. This asserts that blindness EXPLICITLY, so the exec-without-token
-    DENY in TestD2Mintability is understood as the fix-coupled leg, not a redundant one."""
+    """Under an _PER_LEG_OPS revert the row goes UNGATED. The mint binds nothing for a
+    command the pre-hook allows, so mint+exec returns (0, ALLOW): the round trip shows the
+    revert only as a missing token, and the exec-without-token DENY in TestD2Mintability
+    stays the fix-coupled leg."""
 
-    def test_mint_plus_allow_survives_the_fix_revert(self, tmp_path, monkeypatch):
+    def test_the_reverted_row_mints_nothing_and_runs_ungated(self, tmp_path, monkeypatch):
         row = _PREFIX + _PG + "origin --delete feature"
         monkeypatch.setattr(mgc, "_PER_LEG_OPS", ("push-to-main", "force-push"))
         assert D(row) is False, "expected the revert to ungate the row (vacuity guard)"
         minted, _ = _mint(row, tmp_path)
-        assert minted == 1, "mint is fix-independent (uses _extraction_surface) — expected 1"
+        assert minted == 0, "the mint binds nothing for a command the pre-hook allows"
         assert _execute(row, tmp_path) == _ALLOW, (
             "expected ALLOW-because-ungated under the revert — this is the blindness the "
             "exec-without-token DENY exists to close"
