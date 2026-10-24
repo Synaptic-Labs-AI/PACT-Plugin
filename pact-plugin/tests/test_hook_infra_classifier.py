@@ -688,6 +688,8 @@ _ALLOWED_DYNAMIC_IMPORT_LINES = frozenset({
     ("wait_filler_gate.py", "import importlib.util"),
     ("wait_filler_gate.py",
      'spec = importlib.util.spec_from_file_location("_pact_background_launch", path)'),
+    ("wait_filler_gate.py",
+     'spec = importlib.util.spec_from_file_location("_pact_state_file", path)'),
     ("wait_filler_gate.py", "module = importlib.util.module_from_spec(spec)"),
     ("stop_background_gate.py", "import importlib.util"),
     ("stop_background_gate.py",
@@ -711,10 +713,14 @@ class TestOracleStaticImportBoundBackstop:
             f"oracle. Offending: {hits}"
         )
 
-    @pytest.mark.parametrize("helper", ["background_launch.py", "turn_end_jobs.py"])
+    @pytest.mark.parametrize(
+        "helper",
+        ["background_launch.py", "state_file.py", "turn_end_jobs.py"],
+    )
     def test_the_by_path_loaded_helper_imports_only_the_stdlib(self, helper):
-        """A helper loaded by file path (background_launch.py by
-        wait_filler_gate, turn_end_jobs.py by stop_background_gate) is an edge
+        """A helper loaded by file path (background_launch.py and
+        state_file.py by wait_filler_gate, turn_end_jobs.py by
+        stop_background_gate) is an edge
         the oracle cannot see. The edge hides nothing only while the file imports nothing
         but the stdlib: a `shared` or relative import reaches back into the
         hooks tree, and a third-party import is a dependency no consumer
