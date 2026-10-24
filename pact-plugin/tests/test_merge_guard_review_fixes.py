@@ -1761,3 +1761,44 @@ def test_a_perl_shift_that_leaves_the_merge_in_args_is_refused_then_runs(label, 
 ], ids=["view-twin", "two-shifts-before-the-read"])
 def test_perl_shifts_before_the_read_still_take_their_arguments(cmd):
     assert is_dangerous_command(cmd) is False
+
+
+# A spread that fills a rest helper's named parameters gives them its leading elements,
+# not the whole spread, and a spread of a literal list is read as its elements.
+SPREAD_SKIP_DENY = [
+    ("literal spread after the named argument", "python3 - <<'EOF'\nimport subprocess\ndef gh(a, *args):\n"
+     "    subprocess.run([\"gh\", *args])\ngh(\"x\", *[\"pr\", \"merge\", \"5\"])\nEOF"),
+    ("literal spread fills the named slot", "python3 - <<'EOF'\nimport subprocess\ndef gh(cwd, *a):\n"
+     "    subprocess.run([\"gh\", *a], cwd=cwd)\ngh(*[\".\", \"pr\", \"merge\", \"5\"])\nEOF"),
+    ("literal spread with no named slot", "python3 - <<'EOF'\nimport subprocess\ndef gh(*a):\n"
+     "    subprocess.run([\"gh\", *a])\ngh(*[\"pr\", \"merge\", \"5\"])\nEOF"),
+    ("named spread fills the named slot", "python3 - <<'EOF'\nimport subprocess\ndef gh(cwd, *a):\n"
+     "    subprocess.run([\"gh\", *a], cwd=cwd)\ncmd = [\".\", \"pr\", \"merge\", \"5\"]\ngh(*cmd)\nEOF"),
+    ("js literal spread fills the named slot", "node - <<'EOF'\nconst cp = require(\"child_process\");\n"
+     "function gh(dir, ...a) { cp.execFileSync(\"gh\", a, {cwd: dir}); }\ngh(...[\".\", \"pr\", \"merge\", \"5\"]);\nEOF"),
+]
+SPREAD_SKIP_ALLOW = [
+    ("view twin", "python3 - <<'EOF'\nimport subprocess\ndef gh(cwd, *a):\n"
+     "    subprocess.run([\"gh\", *a], cwd=cwd)\ngh(*[\".\", \"pr\", \"view\", \"5\"])\nEOF"),
+    ("the merge word is the named slot", "python3 - <<'EOF'\nimport subprocess\ndef pr(mode, *a):\n"
+     "    subprocess.run([\"gh\", \"pr\", *a])\npr(*[\"merge\", \"view\", \"5\"])\nEOF"),
+]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", SPREAD_SKIP_DENY, ids=[r[0] for r in SPREAD_SKIP_DENY])
+def test_a_spread_into_a_rest_helper_is_read_by_element(label, cmd, style):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("label,cmd", SPREAD_SKIP_ALLOW, ids=[r[0] for r in SPREAD_SKIP_ALLOW])
+def test_a_spread_whose_named_slots_take_the_merge_word_is_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+def test_a_spread_shorter_than_the_named_slots_is_read_whole_and_still_mints():
+    cmd = ("python3 - <<'EOF'\nimport subprocess\ndef gh(a, b, *rest):\n    subprocess.run([\"gh\", *rest])\n"
+           "gh(*[\"pr\"], \"merge\", \"5\")\nEOF")
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, APPROVAL_STYLES["inline"])

@@ -3226,9 +3226,11 @@ def _literal_list_at(text: str, i: int, head: str = "", _depth: int = 0) -> tupl
     each the elements it spells, and the offset after it. A bare-name element reads as
     each literal string its reaching assignments give it (`g = "gh"; [g, "pr", …]`). A
     spread element (`*a`, `...a`) and, in an R `c(…)`, a name whose value is a vector
-    splice in that list's elements. A Python call's argument list read as a `*args`
-    tuple skips the arguments the named parameters take, and a Python call's keyword
-    arguments are never elements. A later non-literal element (`str(pr)`, a variable
+    splice in that list's elements, as does a spread of a literal list (`*["pr", …]`).
+    A call's argument list read as a rest parameter (`*args`, `...a`, `@_`) skips the
+    arguments the named parameters take: whole arguments, or the leading elements of a
+    spread that fills those slots (the whole spread is read when one of its readings is
+    shorter than the slots left). A Python call's keyword arguments are never elements. A later non-literal element (`str(pr)`, a variable
     with no literal value) reads as `X`; a leading one reads as `gh` when `"pr"` follows
     it, and otherwise the list is not read. None also when an element is neither."""
     opener = re.match(r"\[|c?\(", text[i:])
@@ -3244,22 +3246,28 @@ def _literal_list_at(text: str, i: int, head: str = "", _depth: int = 0) -> tupl
         if text[i:i + 1] == closer:
             return readings, i + 1
         keyword = re.match(r"\*\*|[A-Za-z_]\w*\s*=(?!=)", text[i:]) if reach else None
-        if keyword or skip > 0:                          # a keyword or a named argument: not in the rest
+        lit = None if keyword else _STRING_LITERAL_RE.match(text, i)
+        spread = None if keyword or lit else re.match(r"\*(?!\*)|\.\.\.", text[i:])
+        if keyword or (skip > 0 and not spread):         # a keyword or a named argument: not in the rest
             skip -= 0 if keyword else 1
             end = _expression_end(_mask_string_literals(text), i + (keyword.end() if keyword else 0))
             i = _skip(r"\s*,?", text, end)
             continue
-        lit = _STRING_LITERAL_RE.match(text, i)
-        spread = None if lit else re.match(r"\*(?!\*)|\.\.\.", text[i:])
         at = i + spread.end() if spread else i
-        named = None if lit or _depth >= _MAX_NAME_DEPTH else _named_values_at(head, text, at)
-        lists = _named_lists(head, text, named[0], _depth) if named and (spread or opener.group() == "c(") else []
+        spelled = _literal_list_at(text, at, head, _depth + 1) if spread and _depth < _MAX_NAME_DEPTH else None
+        named = None if lit or spelled or _depth >= _MAX_NAME_DEPTH else _named_values_at(head, text, at)
+        lists = spelled[0] if spelled else (
+            _named_lists(head, text, named[0], _depth) if named and (spread or opener.group() == "c(") else []
+        )
         values = _named_strings(head, text, named[0], _depth + 1) if named and not lists else []
+        if lists and skip > 0:                           # a spread fills the named slots first
+            lists = [items[skip:] for items in lists] if all(len(items) >= skip for items in lists) else lists
+            skip = 0
         if lit:
             readings, end = _with_each(readings, [lit.group(0)[1:-1]]), lit.end()
         elif lists:
             readings = [r + items for r in readings for items in lists][:_MAX_READINGS]
-            end = named[1] if named else at
+            end = spelled[1] if spelled else (named[1] if named else at)
         elif named and values:
             readings, end = _with_each(readings, values), named[1]
         else:
