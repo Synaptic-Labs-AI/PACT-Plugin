@@ -112,6 +112,9 @@ try:
         rewritten_executed_command,
         unreadable_evald_heredoc,
         shell_c_string,
+        # An if/elif/else or case whose branches run different guarded commands
+        # binds its text: no one branch's (op, target) stands for the command.
+        alternative_destructive_branch_count,
         _has_command_substitution,
         # #1083: the mint flag-scan window runs the SAME two-tier leg selection
         # (unique dangerous leg -> unique detectable leg) the read bind seam runs,
@@ -635,6 +638,11 @@ def _guarded_substitution_count(text: str) -> int:
     return count
 
 
+# The op an approval records for a command that picks one of several guarded commands;
+# it has no success line of its own, so a successful run retires it.
+_ALTERNATIVE_BRANCHES_OP = "choice between guarded commands"
+
+
 def _exact_text_reading(span: str, located: str) -> dict | None:
     """The (op, target, flags) of a backticked command the region reading cannot
     bind, read the way the pre-hook reads it; None when the region reading binds
@@ -653,6 +661,8 @@ def _exact_text_reading(span: str, located: str) -> dict | None:
         branch-merge, a GraphQL pull-request mutation);
       - an eval of a heredoc the classifier refuses because it cannot read the
         command it runs (`${N:-5}`, a substitution): bound by its text alone;
+      - an if/elif/else or case whose branches run different guarded commands:
+        bound by its text alone;
       - a command the classifier judges after a rewrite (an eval of readable text,
         a file written then run, a literal variable, a script given a whole
         command) where the region reading binds nothing, read from the command
@@ -666,6 +676,10 @@ def _exact_text_reading(span: str, located: str) -> dict | None:
         # The classifier cannot read what this eval runs, so nothing but its text
         # can bind it: the token runs exactly the command the user saw.
         return {"operation_type": "heredoc eval"}
+    if alternative_destructive_branch_count(span) >= 2:
+        # Each branch runs its own guarded command, so no one (op, target) stands for
+        # the command: its text binds it, and a branch runs only as part of it.
+        return {"operation_type": _ALTERNATIVE_BRANCHES_OP}
     pairs = _collect_pairs([located])
     leg = _single_destructive_leg(span) or span
     # The region reading binds only a command the pre-hook can type the same way; a

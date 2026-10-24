@@ -678,3 +678,47 @@ class TestAGuardedCommandAnAllowedCommandOnlyMentionsMintsNothing:
     @pytest.mark.parametrize("command", DATA_MENTIONS.values(), ids=DATA_MENTIONS.keys())
     def test_the_no_mint_notice_says_the_command_needs_no_approval(self, command):
         assert _mint(command) == (None, "not_dangerous")
+
+
+ALTERNATIVE_BRANCHES = {
+    "if-else": "if true; then " + MERGE + "5 --squash; else " + MERGE + "6 --squash; fi",
+    "case": "case x in x) " + MERGE + "5 --squash ;; *) " + MERGE + "6 --squash ;; esac",
+    "elif-ladder": ("if false; then " + MERGE + "5 --squash; elif true; then " + MERGE
+                    + "5 --rebase; else " + MERGE + "5 --merge; fi"),
+}
+
+
+class TestACommandThatPicksOneOfSeveralGuardedCommandsBindsItsText:
+    """No one branch's (op, target) stands for a command whose branches run
+    different guarded commands, so the approval binds the command's text, and a
+    branch runs only as part of it."""
+
+    @pytest.mark.parametrize("command", ALTERNATIVE_BRANCHES.values(), ids=ALTERNATIVE_BRANCHES.keys())
+    def test_the_reading_binds_the_text_alone(self, command):
+        assert _exact_text_reading(command, f"`{command}`") == {
+            "operation_type": "choice between guarded commands"}
+
+    @pytest.mark.parametrize("command", [
+        pytest.param("if true; then " + MERGE + "5 --squash; fi", id="one-guarded-branch"),
+        pytest.param("if true; then echo hi; else " + MERGE + "5 --squash; fi", id="guarded-else-only"),
+    ])
+    def test_a_single_guarded_branch_keeps_its_target_binding(self, command):
+        assert _exact_text_reading(command, f"`{command}`") is None
+
+    def test_a_successful_run_retires_the_approval(self, tmp_path):
+        rig = TestAnApprovalWithNoSuccessSignalRunsOnce()
+        (tmp_path / ".claude").mkdir()
+        command = ALTERNATIVE_BRANCHES["if-else"]
+        from merge_guard_post import write_token
+        from shared.merge_guard_common import TOKEN_PREFIX
+        assert write_token({"operation_type": "choice between guarded commands",
+                            "command_text": normalize_command_text(command)},
+                           token_dir=tmp_path / ".claude")
+
+        def live():
+            return [p for p in (tmp_path / ".claude").glob(TOKEN_PREFIX + "*")
+                    if not p.name.endswith(".consumed")]
+
+        assert live()
+        rig._succeeded(command, tmp_path)
+        assert not live()
