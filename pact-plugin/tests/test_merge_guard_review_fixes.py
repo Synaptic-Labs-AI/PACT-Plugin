@@ -987,7 +987,7 @@ SHELL_C_STRING_ROWS = [
     ("no string", "bash -c", None),
     ("a positional word the string does not read", "bash -c 'x' arg0", "x"),
     ("a positional parameter with no word", "bash -c 'gh pr view $2' _ 5", None),
-    ("all positional parameters", "bash -c 'echo \"$@\"' _ a b", 'echo "a" "b"'),
+    ("all positional parameters", "bash -c 'echo \"$@\"' _ a b", "echo a b"),
     ("all positional parameters with none given", "bash -c 'echo \"$@\"' _", None),
     ("unbalanced quote", "bash -c 'unbalanced", None),
     ("double-quoted $VAR as written", 'bash -c "gh pr merge $N"', "gh pr merge $N"),
@@ -1423,13 +1423,16 @@ def test_a_program_inside_a_shell_c_string_reads_one_merge_to_approve(label, cmd
 # Words after a -c string are its positional parameters: `sh -c 'gh pr merge "$1"' _ 5`
 # runs `gh pr merge 5`, so it is judged and approved as that command.
 POSITIONAL_ROWS = [
-    ("$1 in double quotes", "sh -c 'gh pr " + "merge \"$1\" --squash' _ 5", 'gh pr ' + 'merge "5" --squash'),
+    ("$1 in double quotes", "sh -c 'gh pr " + "merge \"$1\" --squash' _ 5", 'gh pr ' + 'merge 5 --squash'),
+    ("a quoted word that needs its quotes", "sh -c 'echo \"$1\"' _ 'a b'", 'echo "a b"'),
     ("$0", "bash -c 'gh pr " + "merge $0 --squash' 5", "gh pr " + "merge 5 --squash"),
     ("${1}", "sh -c 'gh pr " + "merge ${1}' x 7", "gh pr " + "merge 7"),
     ("a word needing quotes", "bash -c 'git push --force origin $1' _ 'a b'", "git push --force origin 'a b'"),
     ("single-quoted $1 is literal", "bash -c 'echo '\"'\"'$1'\"'\"'' _ 5", "echo '$1'"),
     ("an outer substitution in the word", "bash -c 'gh pr " + "merge \"$1\"' _ \"$(pick)\"", None),
-    ("\"$@\" keeps each word whole", "bash -c 'gh pr " + "merge \"$@\"' _ 5 --squash", 'gh pr ' + 'merge "5" "--squash"'),
+    ("\"$@\" keeps each word whole", "bash -c 'gh pr " + "merge \"$@\"' _ 5 --squash", 'gh pr ' + 'merge 5 --squash'),
+    ("\"$@\" quotes a word with a space", "bash -c 'echo \"$@\"' _ x 'a b'", 'echo x "a b"'),
+    ("${@} reads as $@", "bash -c 'gh \"${@}\"' _ pr " + "merge 5", "gh pr " + "merge 5"),
     ("$* unquoted", "bash -c 'gh pr " + "merge $*' _ 5 --squash", "gh pr " + "merge 5 --squash"),
     ("\"$*\" joins the words", "bash -c 'echo \"$*\"' _ a b", 'echo "a b"'),
     ("$# counts the words", "bash -c 'echo $#' _ a b", "echo 2"),
@@ -2087,3 +2090,26 @@ def test_a_c_string_that_only_prints_is_allowed(label, cmd):
 def test_a_c_string_that_runs_the_command_is_refused_then_runs(label, cmd, style):
     assert is_dangerous_command(cmd) is True
     assert _runs_after_approval(cmd, style)
+
+
+# A guarded verb that reaches a -c program through its positional words is read once the
+# words are in place: `bash -c 'gh "$@"' _ pr merge 5` runs `gh pr merge 5`.
+POSITIONAL_VERB_RUNS = [
+    ("gh $@", "bash -c 'gh \"$@\"' _ pr " + "merge 5 --squash"),
+    ("git $@", "bash -c 'git \"$@\"' _ push --" + "force origin main"),
+    ("after set -x", "bash -c 'set -x; gh \"$@\"' _ pr " + "merge 5 --squash"),
+    ("after cd", "bash -c 'cd /tmp && gh \"$@\"' _ pr " + "merge 5 --squash"),
+    ("braced $@", "bash -c 'gh \"${@}\"' _ pr " + "merge 5 --squash"),
+    ("numbered words", "bash -c 'gh \"$1\" \"$2\" \"$3\"' _ pr " + "merge 5"),
+]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", POSITIONAL_VERB_RUNS, ids=[r[0] for r in POSITIONAL_VERB_RUNS])
+def test_a_verb_given_through_positional_words_is_refused_then_runs(label, cmd, style):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+def test_a_view_given_through_positional_words_is_allowed():
+    assert is_dangerous_command("bash -c 'gh \"$@\"' _ pr view 5") is False

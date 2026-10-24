@@ -8309,7 +8309,10 @@ def _with_positional_words(text: str, words: list[str]) -> str | None:
     """`text`, a shell command line, with each `$N` / `${N}` it expands (outside single
     quotes) replaced by `words[N]`, `$@` / `$*` by `words[1:]` and `$#` by their count,
     quoted for where it sits; None when it reads a parameter with no word, `"$@"` with
-    no words, or a `${N…}` expansion."""
+    no words, or a `${N…}` expansion. `${@}`, `${*}` and `${#}` read as `$@`, `$*` and
+    `$#`. A word that needs no quoting (`"5"` from `"$1"`) comes out bare, so the result
+    reads as the command the inner shell runs (`gh pr merge 5`)."""
+    text = re.sub(r"\$\{([@*#])\}", r"$\1", text)
     out, k, quote = [], 0, ""
     while k < len(text):
         ch = text[k]
@@ -8328,7 +8331,8 @@ def _with_positional_words(text: str, words: list[str]) -> str | None:
                 if n >= len(words):
                     return None
                 word = words[n]
-                out.append(re.sub(r'([\\"$`])', r"\\\1", word) if quote == '"' else shlex.quote(word))
+                out.append(_SUBST_OPEN + re.sub(r'([\\"$`])', r"\\\1", word) + _SUBST_CLOSE
+                           if quote == '"' else shlex.quote(word))
                 k = m.end()
                 continue
             if text.startswith(("$@", "$*"), k):
@@ -8340,7 +8344,8 @@ def _with_positional_words(text: str, words: list[str]) -> str | None:
                 elif not rest:
                     return None
                 else:                                    # "$@": one quoted word each
-                    out.append('" "'.join(re.sub(r'([\\"$`])', r"\\\1", w) for w in rest))
+                    out.append('" "'.join(_SUBST_OPEN + re.sub(r'([\\"$`])', r"\\\1", w) + _SUBST_CLOSE
+                                          for w in rest))
                 k += 2
                 continue
             if text.startswith("$#", k):
@@ -8351,7 +8356,13 @@ def _with_positional_words(text: str, words: list[str]) -> str | None:
                 return None
         out.append(ch)
         k += 1
-    return "".join(out)
+    joined = re.sub('"' + _SUBST_OPEN + r"([A-Za-z0-9_./:@%+=,-]+)" + _SUBST_CLOSE + '"', r"\1", "".join(out))
+    return joined.replace(_SUBST_OPEN, "").replace(_SUBST_CLOSE, "")
+
+
+# Marks around a word substituted into double quotes, so a quoted word that needs no
+# quoting can be written bare once the whole string is built.
+_SUBST_OPEN, _SUBST_CLOSE = "\x01", "\x02"
 
 
 def _shell_c_argument(command: str, strict: bool, _depth: int = 0) -> str | None:
