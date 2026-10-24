@@ -121,6 +121,7 @@ class TestFailureCauseHelper:
 class TestRoutedProducersEmitNoPath:
     """One arm for each routed producer that carried the leak."""
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (b): producer drives production session code resolving the display file
     def test_ensure_project_memory_md_inner(self, tmp_path, monkeypatch):
         """HARNESS ARM. Injects at `_atomic_write_text`.
 

@@ -165,6 +165,7 @@ _SEEDED_DOCUMENT = (
 class TestEachEmitterMarksTheSectionItWrites:
     """One arm for each of the five emitters. Each RUNS its emitter."""
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (b): emitter drives production session code resolving the display file
     def test_ensure_project_memory_md_marks_both_sections(
         self, tmp_path, monkeypatch
     ):
@@ -211,6 +212,7 @@ class TestEachEmitterMarksTheSectionItWrites:
         for pair in _BOTH_PAIRS:
             _assert_region_carries(document, pair, "_build_migrated_content")
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (b): emitter drives production session code resolving the display file
     def test_update_session_info_marks_both_sections(self, tmp_path, monkeypatch):
         """Emitter 3 of 5: session_resume.update_session_info.
 

@@ -71,6 +71,7 @@ class TestPostcompactSuppression:
     @pytest.mark.parametrize("frame_builder", [
         lead_frame_qualified, lead_frame_unqualified,
     ], ids=["qualified", "unqualified"])
+    @pytest.mark.claude_md_ambient  # §11.3.1 (f): CPD-presence sensitivity — with CPD declared the frame resolves session-scoped and main() stages instead of writing; the CPD-absent resolution shape is this test's precondition
     def test_lead_writes_compact_summary(self, frame_builder, monkeypatch, tmp_path):
         """A lead frame with a compact_summary writes the summary."""
         frame = frame_builder(hook_event_name="PostCompact",

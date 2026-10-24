@@ -13,7 +13,9 @@ Summary: Positive regression pin for the autouse conftest fixture
          counter-test that pins the FIXTURE's own closure.
 Used by: pytest.
 """
+import ast
 import os
+from pathlib import Path
 
 import pytest
 
@@ -34,6 +36,52 @@ _AMBIENT_SESSION_ID = os.environ.get("CLAUDE_CODE_SESSION_ID")
 # or a developer shell that sourced one) the ambient-removal cell
 # discriminates; on CI it skips by the same logic as the session-id cell.
 _AMBIENT_PROJECT_DIR = os.environ.get("CLAUDE_PROJECT_DIR")
+
+# The EXACT module population of the claude_md_ambient opt-out (architect
+# ruling): module-level pytestmark is the multiplicative hazard — one line
+# exempts every test in the file — so its membership is pinned as a set,
+# both directions. Per-test decoration is the designed granularity and is
+# deliberately NOT pinned.
+_MODULE_WIDE_AMBIENT = frozenset({
+    "test_claude_md_resolver_parity",
+    "test_containment_guard",
+    "test_project_dir_resolution",
+    "test_prose_root_gate",
+    "test_removed_worktree_record",
+    "test_resolver_git_env",
+    "test_working_memory_worktree_sync",
+})
+
+
+def _pytestmark_carries_ambient(tree):
+    """True when a module-level ``pytestmark`` assignment carries
+    ``pytest.mark.claude_md_ambient`` — as a bare Attribute or as a list
+    element (the list form is pytest's documented multi-mark shape, so the
+    pin must see it even though no member uses it today)."""
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(
+            isinstance(target, ast.Name) and target.id == "pytestmark"
+            for target in node.targets
+        ):
+            continue
+        elements = (
+            node.value.elts
+            if isinstance(node.value, (ast.List, ast.Tuple))
+            else [node.value]
+        )
+        for element in elements:
+            if (
+                isinstance(element, ast.Attribute)
+                and isinstance(element.value, ast.Attribute)
+                and isinstance(element.value.value, ast.Name)
+                and element.value.value.id == "pytest"
+                and element.value.attr == "mark"
+                and element.attr == "claude_md_ambient"
+            ):
+                return True
+    return False
 
 
 class TestAutouseConfigRootIsolationPinned:
@@ -151,10 +199,21 @@ class TestAutouseProjectDirScrubPinned:
     exporting shell and the cells below go red.
     """
 
+    @pytest.mark.claude_md_ambient
     def test_scrub_removes_an_ambient_project_dir(self):
         """Same skip-unless-ambient discipline as the session-id cell: absence
         alone cannot tell "the scrub fired" from "there was nothing to
         scrub", so skip (visible in the header) when the ambient was clean.
+
+        AMENDED for the suite-wide CLAUDE.md redirect: this cell is marked
+        ``claude_md_ambient``, so the redirect SKIPS it and the scrub is the
+        only autouse actor over ``CLAUDE_PROJECT_DIR`` — the same world every
+        other marked test lives in, and the one where the scrub's pop does
+        the protecting. Unmarked tests see the redirect's per-test tmp
+        declaration instead (scrub pops, redirect sets — the ordering the
+        redirect's dependency parameter forces); that half of the contract is
+        pinned structurally by the parameter, and a redirect that stopped
+        honoring the marker reddens HERE (the var would arrive set).
         """
         if _AMBIENT_PROJECT_DIR is None:
             pytest.skip(
@@ -172,11 +231,19 @@ class TestAutouseProjectDirScrubPinned:
             "project instead of the test's inputs."
         )
 
+    @pytest.mark.claude_md_ambient
     def test_init_cannot_derive_a_context_path_from_ambient_env(self):
         """Mechanism pin for the measured failure mode: with the var scrubbed,
         ``pact_context.init()`` must leave ``_context_path`` None for an input
         carrying only a session_id — the exact precondition the
         bootstrap no-session tests rely on (no session dir -> no-op gate).
+
+        AMENDED for the suite-wide CLAUDE.md redirect: marked
+        ``claude_md_ambient`` for the same reason as the sibling cell above —
+        the marked world is scrub-only, which is the precondition this
+        mechanism pin has always asserted. An unmarked test would carry the
+        redirect's tmp declaration, from which init() MAY legitimately derive
+        an in-tmp context path.
         """
         import shared.pact_context as ctx
 
@@ -191,6 +258,130 @@ class TestAutouseProjectDirScrubPinned:
             )
         finally:
             ctx.reset_for_tests()
+
+    def test_redirect_declaration_survives_scrub_at_test_body(self, tmp_path):
+        """UNMARKED ORDERING PIN (§11.3.1 class (e) amendment, architect
+        ruling): at an unmarked test body, the redirect's declaration must be
+        the value in force — the scrub POPPED at setup and the redirect SET
+        after it, the ordering the redirect's dependency parameter forces.
+
+        The direct witness for the unmarked half of the contract the marked
+        cells above cannot see: they measure the scrub-only world, so a
+        redirect that stopped honoring the marker reddens THERE, while a
+        removed dependency parameter or an inverted setup order reddens HERE
+        first (the pop would land after the set and the declaration would be
+        gone).
+        """
+        assert os.environ.get("CLAUDE_PROJECT_DIR") == str(tmp_path), (
+            "CLAUDE_PROJECT_DIR at the test body is not the redirect's "
+            "per-test tmp declaration — the scrub's pop ran after the "
+            "redirect's set (ordering broken), or the redirect did not run"
+        )
+
+    def test_hf_cache_pins_survive_at_test_body(self):
+        """The redirect's THIRD half, witnessed in-process at an UNMARKED
+        test body: the HuggingFace pins must be in force. PRESENCE and
+        offline-ness only — NO path-equality assert, because
+        ``hf_cache_env`` deliberately MIRRORS huggingface_hub's own
+        resolution (env vars first, expanduser fallback), so pinning a
+        specific path here would pin the helper's internals rather than
+        the property spawned children depend on: no network reach, and a
+        cache that is not the operator's live one."""
+        assert os.environ.get("HF_HUB_OFFLINE") == "1", (
+            "HF_HUB_OFFLINE was not in force at the test body — a spawned "
+            "child with a cold cache will attempt an unbounded network read"
+        )
+        assert os.environ.get("HF_HOME"), (
+            "HF_HOME was not in force at the test body — a spawned child "
+            "will resolve an ambient cache instead of the redirect's pin"
+        )
+
+    def test_claude_md_ambient_marker_is_registered(self, pytestconfig):
+        """The opt-out marker must be REGISTERED in pytest_configure, not
+        merely attached at sites: the fixture checks the marker by NAME
+        (``get_closest_marker`` works unregistered), so a dropped
+        registration breaks no test at the marker sites — it only erases
+        the marker's documentation and its --strict-markers/census
+        contract. This pin reddens if the registration line leaves
+        ``pytest_configure``, keeping the class vocabulary defined in the
+        registration text reachable from every census-tagged site."""
+        markers = pytestconfig.getini("markers")
+        assert any(
+            line.startswith("claude_md_ambient:") for line in markers
+        ), (
+            "claude_md_ambient is not among the registered markers — the "
+            "opt-out sites and their census tags resolve against the "
+            "registration text in pytest_configure"
+        )
+
+    def test_module_wide_claude_md_ambient_census_is_exact(self):
+        """EXACT-SET pin on the MODULE population of the claude_md_ambient
+        opt-out (architect ruling): a module-level ``pytestmark`` exempts
+        EVERY test in its file, so over-opt-out is the multiplicative
+        hazard and membership is pinned BOTH directions — any module
+        BEYOND ``_MODULE_WIDE_AMBIENT`` opting out module-wide, or any
+        module IN the set dropping the mark, reddens here. Per-test
+        decoration is the designed granularity and is deliberately
+        UNPINNED (its growth is a census decision, not a regression).
+
+        Scan shape: a tree AST census (test_conftest_import_guard style),
+        NOT collection-time marker introspection — the AST walk follows
+        the tree wherever a file moves and reads no pytest runtime state,
+        while a collection-derived set would need session-wide item
+        plumbing to see the same population."""
+        tests_dir = Path(__file__).resolve().parent
+        found = {
+            path.stem
+            for path in sorted(tests_dir.rglob("test_*.py"))
+            if _pytestmark_carries_ambient(
+                ast.parse(path.read_text(encoding="utf-8"))
+            )
+        }
+        assert found == _MODULE_WIDE_AMBIENT, (
+            f"module-wide claude_md_ambient population drifted — "
+            f"added: {sorted(found - _MODULE_WIDE_AMBIENT)}, "
+            f"removed: {sorted(_MODULE_WIDE_AMBIENT - found)}. Module-level "
+            "opt-out is the multiplicative hazard; per-test decoration is "
+            "the designed granularity"
+        )
+
+    def test_unmarked_resolution_lands_on_the_legacy_seed(self, tmp_path):
+        """The redirect's BOTH-HALVES contract, asserted in-process at an
+        UNMARKED test body: resolution must terminate branch 1 on the
+        fixture's LEGACY seed (``tmp_path/CLAUDE.md``, base=``tmp_path``),
+        with the preferred slot never created.
+
+        The declaration half alone is pinned by the ordering pin above, and
+        the memory_cli proof class pins the seed half through a spawned
+        child — but both are one hop removed from the composed in-process
+        contract, and this is the assertion that reddens DIRECTLY on either
+        half regressing: a conftest edit that drops the seed (setenv-only —
+        the silent no-op trap the isolation issue names) sends resolution
+        through the git walk to the ambient anchors, and one that seeds the
+        preferred slot (``tmp_path/.claude``) instead of legacy breaks the
+        §11.2 shape (M2's collision surface). No bytes move: this test only
+        resolves and asserts.
+        """
+        from scripts.working_memory import _resolve_display_claude_md_with_base
+
+        assert (tmp_path / "CLAUDE.md").exists(), (
+            "the conftest redirect did not seed the legacy slot for this "
+            "unmarked test — resolution will fall through to the git walk"
+        )
+        assert not (tmp_path / ".claude").exists(), (
+            "the redirect created the preferred slot, violating the §11.2 "
+            "legacy-only shape"
+        )
+        path, base = _resolve_display_claude_md_with_base()
+        assert path == tmp_path / "CLAUDE.md", (
+            f"an unmarked test's resolution landed on {path} (base {base}) "
+            "instead of the fixture's legacy seed — the redirect is not "
+            "terminating branch 1 in-tmp"
+        )
+        assert base == tmp_path, (
+            f"resolution reported base {base} — branch 1 did not answer "
+            "from the declared project dir"
+        )
 
 
 class TestAutouseMergeTokenDirIsolationPinned:

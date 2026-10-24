@@ -32,19 +32,10 @@ Used by: pytest (the working_memory edge-path gate).
 import os
 from pathlib import Path
 
-def _seed_claude_md(home: Path) -> Path:
-    """Create a minimal project CLAUDE.md with an empty Working Memory section
-    under ``home``/.claude/."""
-    claude_dir = home / ".claude"
-    claude_dir.mkdir(parents=True, exist_ok=True)
-    claude_md = claude_dir / "CLAUDE.md"
-    claude_md.write_text(
-        "# Project\n\n## Working Memory\n"
-        "<!-- Auto-managed by pact-memory skill. -->\n\n",
-        encoding="utf-8",
-    )
-    return claude_md
-
+# The canonical minimal-CLAUDE.md seeder, consolidated in fixtures/ (this
+# file's local definition seeded byte-identical default-arm content; see
+# fixtures/claude_md_seed.py).
+from fixtures.claude_md_seed import seed_claude_md
 
 # ---------------------------------------------------------------------------
 # 1. Lock-release-on-exception / chmod-mid-window.
@@ -79,8 +70,7 @@ class TestLockReleaseOnException:
         """
         from scripts import working_memory as wm
 
-        claude_md = _seed_claude_md(tmp_path)
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        claude_md = seed_claude_md(tmp_path)
 
         # Raise at the os.fchmod inside _atomic_write_text (mode-set on the open
         # temp handle, before the rename), exercising the mid-window path.
@@ -124,9 +114,8 @@ class TestLockReleaseOnException:
         """
         from scripts import working_memory as wm
 
-        claude_md = _seed_claude_md(tmp_path)
+        claude_md = seed_claude_md(tmp_path)
         before = claude_md.read_text(encoding="utf-8")
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
         def boom_fchmod(*args, **kwargs):
             raise OSError("simulated mode-set failure mid-window")
@@ -179,7 +168,7 @@ class TestReadOnlyDirectoryFailSafe:
         """
         from scripts import working_memory as wm
 
-        claude_md = _seed_claude_md(tmp_path)
+        claude_md = seed_claude_md(tmp_path)
         before = claude_md.read_text(encoding="utf-8")
         claude_dir = claude_md.parent
 
@@ -188,7 +177,6 @@ class TestReadOnlyDirectoryFailSafe:
         sidecar = claude_dir / f".{claude_md.name}.lock"
         sidecar.write_text("", encoding="utf-8")
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
         # Instrument the SITE: record that _atomic_write_text was reached (proving
         # the lock was passed) and let the REAL read-only dir make its mkstemp
@@ -278,8 +266,8 @@ class TestProjectDirDivergenceResidual:
 
         root_a = tmp_path / "proj_a"
         root_b = tmp_path / "proj_b"
-        claude_a = _seed_claude_md(root_a)
-        claude_b = _seed_claude_md(root_b)
+        claude_a = seed_claude_md(root_a)
+        claude_b = seed_claude_md(root_b)
 
         with monkeypatch.context() as m:
             resolved_a = self._resolve_under_root(wm, root_a, m)
@@ -319,8 +307,8 @@ class TestProjectDirDivergenceResidual:
 
         root_a = tmp_path / "h_a"
         root_b = tmp_path / "h_b"
-        _seed_claude_md(root_a)
-        _seed_claude_md(root_b)
+        seed_claude_md(root_a)
+        seed_claude_md(root_b)
 
         path_a, src_a = resolve_project_claude_md_path(root_a)
         path_b, src_b = resolve_project_claude_md_path(root_b)

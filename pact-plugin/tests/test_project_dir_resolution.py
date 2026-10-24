@@ -43,6 +43,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from fixtures.claude_md_seed import seed_claude_md
 from fixtures.project_dir import (
     child_env,
     enable_record_discovery,
@@ -65,6 +66,11 @@ from scripts.pact_session import ProjectScopeDisagreementError
 from shared import backlog
 from clock_shift.clock_shift_env import carry_clock_shift
 
+# claude_md_ambient (module-wide): this module owns the project-dir read
+# contract (env -> session record -> git -> cwd); the suite-wide tmp redirect
+# would pre-empt the very rungs under test. See tests/conftest.py.
+pytestmark = pytest.mark.claude_md_ambient
+
 
 _MEMORY_CLI = (
     Path(__file__).parent.parent / "skills" / "pact-memory" / "scripts" / "cli.py"
@@ -73,19 +79,6 @@ _BACKLOG_CLI = Path(__file__).parent.parent / "hooks" / "shared" / "backlog.py"
 _SESSION_INIT = Path(__file__).parent.parent / "hooks" / "session_init.py"
 _PACT_MEMORY_ROOT = Path(__file__).parent.parent / "skills" / "pact-memory"
 SID = "record-rung-session-0001"
-
-
-def _seed_claude_md(root: Path) -> Path:
-    """A minimal syncable project CLAUDE.md (Working Memory section present)."""
-    claude_dir = root / ".claude"
-    claude_dir.mkdir(parents=True, exist_ok=True)
-    claude_md = claude_dir / "CLAUDE.md"
-    claude_md.write_text(
-        "# Project\n\n## Working Memory\n"
-        "<!-- Auto-managed by pact-memory skill. -->\n\n",
-        encoding="utf-8",
-    )
-    return claude_md
 
 
 def _arm_record(monkeypatch, tmp_path, record_dir) -> None:
@@ -492,7 +485,7 @@ class TestBacklogRecordRung:
 class TestWorkingMemoryRecordRung:
     def test_record_dir_is_probed_for_an_existing_claude_md(self, tmp_path, monkeypatch):
         umbrella = make_umbrella(tmp_path)
-        claude_md = _seed_claude_md(umbrella.project)
+        claude_md = seed_claude_md(umbrella.project)
         _arm_record(monkeypatch, tmp_path, umbrella.project)
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         elsewhere = tmp_path / "elsewhere"
@@ -516,7 +509,7 @@ class TestWorkingMemoryRecordRung:
         _arm_record(monkeypatch, tmp_path, umbrella.project)
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         repo = _git_repo(tmp_path / "repo-with-file")
-        git_file = _seed_claude_md(repo)
+        git_file = seed_claude_md(repo)
         monkeypatch.chdir(repo)
 
         assert wm._get_claude_md_path() == git_file
@@ -528,7 +521,7 @@ class TestWorkingMemoryDisagreementGuard:
         _arm_record(monkeypatch, tmp_path, umbrella.project)
         other = tmp_path / "other"
         other.mkdir()
-        env_file = _seed_claude_md(other)  # a REAL writable target, so the
+        env_file = seed_claude_md(other)  # a REAL writable target, so the
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(other))  # refusal is non-vacuous
 
         with pytest.raises(ProjectScopeDisagreementError) as excinfo:
@@ -546,7 +539,7 @@ class TestWorkingMemoryDisagreementGuard:
         _arm_record(monkeypatch, tmp_path, umbrella.project)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "other"))
         target_root = tmp_path / "declared"
-        target = _seed_claude_md(target_root)
+        target = seed_claude_md(target_root)
 
         result = wm.sync_to_claude_md(
             {"context": "DECLARED-TARGET", "goal": "g"}, None, "id", target=target
@@ -558,7 +551,7 @@ class TestWorkingMemoryDisagreementGuard:
         umbrella = make_umbrella(tmp_path)
         _arm_record(monkeypatch, tmp_path, umbrella.project)
         anchor = tmp_path / "anchored"
-        _seed_claude_md(anchor)
+        seed_claude_md(anchor)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(anchor))
         # env == anchor, record == umbrella: a disagreement exists, but the
         # declared containment anchor is a stronger warrant than the refusal.
@@ -569,7 +562,7 @@ class TestWorkingMemoryDisagreementGuard:
 
     def test_agreement_syncs_ambiently(self, tmp_path, monkeypatch):
         umbrella = make_umbrella(tmp_path)
-        env_file = _seed_claude_md(umbrella.project)
+        env_file = seed_claude_md(umbrella.project)
         _arm_record(monkeypatch, tmp_path, umbrella.project)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(umbrella.project))
 
@@ -692,7 +685,7 @@ class TestR1UmbrellaAcceptance:
         refusal does not fire. (That guard is the incident class of the
         scratch-store incident, not a defect in this fix.)"""
         umbrella = make_umbrella(tmp_path)
-        claude_md = _seed_claude_md(umbrella.project)
+        claude_md = seed_claude_md(umbrella.project)
         write_session_context(umbrella.config_root, SID, umbrella.project)
         env = self._env(umbrella, tmp_path, None)
         default_store = tmp_path / ".claude" / "pact-memory" / "memory.db"
@@ -775,8 +768,8 @@ class TestR2SubRepoCwd:
         ordering AGREES with the wrong answer, so a full-tie fixture would
         mask a precedence mutation. The record must still win."""
         umbrella = make_umbrella(tmp_path)
-        umbrella_md = _seed_claude_md(umbrella.project)
-        _seed_claude_md(umbrella.subrepo)  # the marker walk's answer, if reached
+        umbrella_md = seed_claude_md(umbrella.project)
+        seed_claude_md(umbrella.subrepo)  # the marker walk's answer, if reached
         _arm_record(monkeypatch, tmp_path, umbrella.project)
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         monkeypatch.chdir(umbrella.subrepo)
@@ -1076,10 +1069,10 @@ class TestSyncCliEnvelope:
         ProjectScopeDisagreementError into SCOPE_DISAGREEMENT on stderr,
         naming both values."""
         umbrella = make_umbrella(tmp_path)
-        _seed_claude_md(umbrella.project)
+        seed_claude_md(umbrella.project)
         write_session_context(umbrella.config_root, SID, umbrella.project)
         other = tmp_path / "other"
-        _seed_claude_md(other)  # a REAL writable target, so the refusal is non-vacuous
+        seed_claude_md(other)  # a REAL writable target, so the refusal is non-vacuous
         store = tmp_path / "memory.db"
         env = child_env(
             umbrella.config_root, home=tmp_path, session_id=SID,
@@ -1108,9 +1101,9 @@ class TestSyncCliEnvelope:
         NAMED root (containment warrant, not steering — resolution is
         env-first and unchanged). The refusal row above is the counter arm."""
         umbrella = make_umbrella(tmp_path)
-        umbrella_md = _seed_claude_md(umbrella.project)
+        umbrella_md = seed_claude_md(umbrella.project)
         other = tmp_path / "other"
-        other_md = _seed_claude_md(other)
+        other_md = seed_claude_md(other)
         store = tmp_path / "memory.db"
         env = child_env(
             umbrella.config_root, home=tmp_path, session_id=SID,
@@ -1338,9 +1331,9 @@ class TestWarrantedSyncProceedsUnderDisagreement:
         honest shape is env == the named destination's root, with the warrant
         making the ambient disagreement (record names the umbrella) moot."""
         umbrella = make_umbrella(tmp_path)
-        umbrella_md = _seed_claude_md(umbrella.project)
+        umbrella_md = seed_claude_md(umbrella.project)
         other = tmp_path / "other"
-        other_md = _seed_claude_md(other)
+        other_md = seed_claude_md(other)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(other))
         # A record committed under the env scope with NO session behind it.
         memory = PACTMemory()

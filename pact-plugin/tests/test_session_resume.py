@@ -68,6 +68,7 @@ class TestUpdateSessionInfo:
 
         assert result is None
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (b): create-when-missing arm — no seed can coexist with it
     def test_creates_file_when_missing(self, tmp_path, monkeypatch):
         """Should create .claude/CLAUDE.md (new default) when no project CLAUDE.md exists."""
         from shared.session_resume import update_session_info
@@ -105,6 +106,7 @@ class TestUpdateSessionInfo:
         assert "session-123" in content
         assert "pact-session1" in content
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (b): created-file lifecycle arm
     def test_created_file_has_secure_permissions(self, tmp_path, monkeypatch):
         """Newly created project CLAUDE.md should have 0o600 permissions."""
         import stat
@@ -123,6 +125,7 @@ class TestUpdateSessionInfo:
         parent_mode = stat.S_IMODE(target.parent.stat().st_mode)
         assert parent_mode == 0o700, f"Expected .claude/ 0o700, got {oct(parent_mode)}"
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (b): created-file lifecycle arm
     def test_created_file_includes_session_dir_and_plugin_root(
         self, tmp_path, monkeypatch
     ):
@@ -311,6 +314,7 @@ class TestUpdateSessionInfoDualLocation:
       - $CLAUDE_PROJECT_DIR/CLAUDE.md           (legacy)
     """
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (b): dual-location write-lifecycle arm
     def test_dot_claude_only_writes_in_place(self, tmp_path, monkeypatch):
         """When only .claude/CLAUDE.md exists, update it in place; do NOT create legacy."""
         from shared.session_resume import update_session_info
@@ -370,6 +374,7 @@ class TestUpdateSessionInfoDualLocation:
         assert "Legacy untouched" in legacy_content
         assert "both-sess" not in legacy_content
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (b): 'neither exists' arm — no seed can coexist with it
     def test_neither_exists_creates_dot_claude_default(self, tmp_path, monkeypatch):
         """When neither file exists, create at the new default .claude/CLAUDE.md."""
         from shared.session_resume import update_session_info

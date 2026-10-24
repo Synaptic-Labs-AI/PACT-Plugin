@@ -304,14 +304,13 @@ class TestRewritersSkip:
         assert pin_marker_writer._plan_and_write() == "skipped_not_utf8"
         assert (project / "CLAUDE.md").read_bytes() == before
 
-    def test_the_working_memory_sync_skips(self, tmp_path, monkeypatch):
+    def test_the_working_memory_sync_skips(self, tmp_path):
         from scripts import working_memory as wm
 
         text = ("# Project\n\n## Working Memory\n"
                 "<!-- Auto-managed by pact-memory skill. -->\n\n")
         (tmp_path / ".claude").mkdir()
         md = tmp_path / ".claude" / "CLAUDE.md"
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
         md.write_text(text, encoding="utf-8")
         assert wm.sync_to_claude_md({"context": "c", "goal": "g"}, None, "id").reason \

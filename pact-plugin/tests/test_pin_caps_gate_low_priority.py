@@ -245,6 +245,7 @@ class TestFailureLogClassification:
         # CLAUDE.md text, which no PACT record or message may carry.
         assert unexpected_failures[0]["error"] == "RuntimeError"
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a)/M3: counter/absence outcome
     def test_a_write_over_an_unreadable_file_records_classification(
         self, gate_with_captured_failures
     ):

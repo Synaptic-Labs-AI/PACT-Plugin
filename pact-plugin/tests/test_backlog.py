@@ -439,6 +439,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 from shared import backlog
 from shared import backlog_store
 
@@ -1628,6 +1630,7 @@ def test_the_alert_channel_is_gated_on_the_launch_source(monkeypatch, tmp_path):
 # --------------------------------------------------------------------------
 # the write-side guards and the reconciliation, both previously unprotected
 # --------------------------------------------------------------------------
+@pytest.mark.claude_md_ambient  # §11.3.1 (f): CPD-presence sensitivity (scrub-docstring named test)
 def test_an_unresolvable_project_id_refuses_to_write(monkeypatch, tmp_path):
     """A None project id must fail LOUDLY and never write under a default name.
 
@@ -4510,6 +4513,7 @@ def test_a_two_sided_exclusive_pair_flags_once_in_either_visit_order():
         )
 
 
+@pytest.mark.claude_md_ambient  # §11.3.1 (f): CPD-presence sensitivity (scrub-docstring named test)
 def test_a_usage_error_and_a_refusal_exit_DIFFERENTLY(tmp_path):
     """ONE RUN, VARIED INPUTS, BOTH CODES — and that is the whole design.
 

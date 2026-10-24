@@ -34,6 +34,11 @@ from pathlib import Path
 
 import pytest
 
+# claude_md_ambient (module-wide): these tests force containment refusal via
+# a deliberately wrong base; the suite-wide tmp redirect would change the
+# base instead. See tests/conftest.py.
+pytestmark = pytest.mark.claude_md_ambient
+
 # hooks/shared on path (mirrors the other hook test files).
 
 

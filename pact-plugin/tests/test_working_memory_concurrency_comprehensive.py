@@ -51,6 +51,10 @@ from pathlib import Path
 
 import pytest
 
+# The canonical minimal-CLAUDE.md seeder, consolidated in fixtures/ (moved
+# verbatim from this module; see fixtures/claude_md_seed.py).
+from fixtures.claude_md_seed import seed_claude_md
+
 # spawn is macOS's default and the most portable start method; pin it explicitly
 # so the suite behaves identically wherever it runs (fork inherits parent
 # interpreter state and can be flaky under pytest).
@@ -138,30 +142,6 @@ def _cross_site_worker(args):
 # Seeding helpers.
 # ---------------------------------------------------------------------------
 
-def _seed_claude_md(home: Path, *, with_retrieved: bool = False) -> Path:
-    """Create a minimal project CLAUDE.md.
-
-    The Working Memory section is always present. When ``with_retrieved`` is set
-    a Retrieved Context section is seeded too — exercising the section-replace
-    branch rather than the section-create branch at the second site.
-    """
-    claude_dir = home / ".claude"
-    claude_dir.mkdir(parents=True, exist_ok=True)
-    claude_md = claude_dir / "CLAUDE.md"
-    parts = ["# Project\n\n"]
-    if with_retrieved:
-        parts.append(
-            "## Retrieved Context\n"
-            "<!-- Auto-managed by pact-memory skill. -->\n\n"
-        )
-    parts.append(
-        "## Working Memory\n"
-        "<!-- Auto-managed by pact-memory skill. -->\n\n"
-    )
-    claude_md.write_text("".join(parts), encoding="utf-8")
-    return claude_md
-
-
 def _run_barrier_procs(target, arg_tuples):
     """Spawn one process per arg-tuple, all gated on a single Barrier, and
     join with a timeout. Asserts every worker exited cleanly (exitcode 0)."""
@@ -217,7 +197,7 @@ class TestNWriterLostUpdate:
         wm = import_module("scripts.working_memory")
         max_wm = wm.MAX_WORKING_MEMORIES
 
-        claude_md = _seed_claude_md(tmp_path)
+        claude_md = seed_claude_md(tmp_path)
         barrier = _MP.Barrier(n_writers)
         _run_barrier_procs(
             _wm_worker,
@@ -267,7 +247,7 @@ class TestRetrievedContextLostUpdate:
         barrier must BOTH land their Retrieved Context entry. RED on the
         unlocked source, GREEN with the lock (same read-under-lock property as
         the first site)."""
-        claude_md = _seed_claude_md(tmp_path, with_retrieved=True)
+        claude_md = seed_claude_md(tmp_path, with_retrieved=True)
         barrier = _MP.Barrier(2)
         _run_barrier_procs(
             _retrieved_worker,
@@ -285,7 +265,7 @@ class TestRetrievedContextLostUpdate:
         """Second-site serialization must hold even when the Retrieved Context
         section does not pre-exist (the section-create branch). Two writers
         race to create-and-populate; both entries survive."""
-        claude_md = _seed_claude_md(tmp_path, with_retrieved=False)
+        claude_md = seed_claude_md(tmp_path, with_retrieved=False)
         barrier = _MP.Barrier(2)
         _run_barrier_procs(
             _retrieved_worker,
@@ -319,7 +299,7 @@ class TestCrossSiteInterleave:
         Pre-fix (unlocked), the later writer reads a base missing the earlier
         writer's section-rebuild and overwrites the whole file, dropping the
         other section's just-committed entry."""
-        claude_md = _seed_claude_md(tmp_path, with_retrieved=True)
+        claude_md = seed_claude_md(tmp_path, with_retrieved=True)
         barrier = _MP.Barrier(2)
         _run_barrier_procs(
             _cross_site_worker,
@@ -351,12 +331,11 @@ class TestSyncSemanticsUnchangedUnderLock:
         from importlib import import_module
         return import_module("scripts.working_memory")
 
-    def test_working_memory_rolling_window_trims_to_max(self, tmp_path, monkeypatch):
+    def test_working_memory_rolling_window_trims_to_max(self, tmp_path):
         """Syncing more than MAX_WORKING_MEMORIES entries keeps only the most
         recent MAX, newest-first — unchanged by the lock."""
         wm = self._import_wm()
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
-        _seed_claude_md(tmp_path)
+        seed_claude_md(tmp_path)
 
         total = wm.MAX_WORKING_MEMORIES + 2
         for i in range(total):
@@ -379,14 +358,13 @@ class TestSyncSemanticsUnchangedUnderLock:
             f"ROLL-{total - wm.MAX_WORKING_MEMORIES}"
         ), "entries are not newest-first under the lock"
 
-    def test_idempotent_resync_does_not_corrupt_section(self, tmp_path, monkeypatch):
+    def test_idempotent_resync_does_not_corrupt_section(self, tmp_path):
         """Re-syncing the SAME memory twice in a row leaves a well-formed
         section with exactly one Working Memory header — the lock's
         acquire/release across two calls does not duplicate or drop the
         section."""
         wm = self._import_wm()
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
-        _seed_claude_md(tmp_path)
+        seed_claude_md(tmp_path)
 
         mem = {"context": "IDEMPOTENT", "goal": "same"}
         assert wm.sync_to_claude_md(mem, None, "same-id")
@@ -398,13 +376,12 @@ class TestSyncSemanticsUnchangedUnderLock:
         )
         assert "IDEMPOTENT" in final
 
-    def test_pact_markers_survive_sync_under_lock(self, tmp_path, monkeypatch):
+    def test_pact_markers_survive_sync_under_lock(self, tmp_path):
         """When CLAUDE.md carries the PACT managed/memory markers, a locked
         sync must preserve all four in structural order — the lock wraps the
         same read-modify-write that the marker-preservation pipeline relies
         on, so it must not perturb them."""
         wm = self._import_wm()
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
 
         claude_dir = tmp_path / ".claude"
         claude_dir.mkdir(parents=True, exist_ok=True)

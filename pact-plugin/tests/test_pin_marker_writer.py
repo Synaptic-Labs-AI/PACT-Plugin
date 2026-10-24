@@ -643,7 +643,6 @@ class TestAdjacencySurvivesBothMachineWriters:
         marked = apply_insertion(old, planned)
         target = tmp_path / "CLAUDE.md"
         target.write_text(marked, encoding="utf-8")
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
         return target
 
     @staticmethod
@@ -1420,6 +1419,7 @@ class TestEndToEnd:
         assert written.count(fenced) == 1
         assert written.index(START_LINE) < written.index(fenced) < written.index(END_LINE)
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a)/(b): absent-CLAUDE.md-is-never-created arm
     def test_absent_claude_md_is_never_created(self, tmp_path):
         """The hook must not bring the file into being under any circumstance."""
         rc, out, err = run_hook(
@@ -1495,7 +1495,7 @@ class TestCollisionIsDistinguishableFromCompletedMigration:
         )
 
     def test_a_stray_own_line_copy_is_reported_as_half_a_pair(
-        self, tmp_path, monkeypatch
+        self, tmp_path
     ):
         """A stray own-line copy under Working Memory, a document a user could
         be holding today. The pair lookup in the memory block finds one START
@@ -1513,7 +1513,6 @@ class TestCollisionIsDistinguishableFromCompletedMigration:
         )
         assert START_LINE in original, "FIXTURE INVALID: no own-line copy"
         (tmp_path / "CLAUDE.md").write_text(original, encoding="utf-8")
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
         resolved, _base = _resolve_project_claude_md_with_base()
         assert resolved == tmp_path / "CLAUDE.md", (
             "FIXTURE INVALID: the resolver escaped tmp_path and would read a "
@@ -1545,7 +1544,6 @@ class TestCollisionIsDistinguishableFromCompletedMigration:
 
         monkeypatch.setattr(pin_markers, "apply_insertion", broken_assembly)
         (tmp_path / "CLAUDE.md").write_text(original, encoding="utf-8")
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
         resolved, _base = _resolve_project_claude_md_with_base()
         assert resolved == tmp_path / "CLAUDE.md", (
             "FIXTURE INVALID: the resolver escaped tmp_path and would read a "

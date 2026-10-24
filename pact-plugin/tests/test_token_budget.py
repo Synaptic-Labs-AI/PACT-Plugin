@@ -13,6 +13,8 @@ import os
 import re
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 
 
 class TestEstimateTokens:
@@ -810,6 +812,7 @@ class TestParseRetrievedContextSection:
 class TestFindExistingClaudeMd:
     """Tests for _find_existing_claude_md() dual-location helper."""
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a): absence arm — needs the no-CLAUDE.md world
     def test_returns_none_when_neither_exists(self, tmp_path):
         """Empty directory -> None."""
         from scripts.working_memory import _find_existing_claude_md
@@ -898,6 +901,7 @@ class TestGetClaudeMdPathDualLocation:
             result = _get_claude_md_path()
         assert result == new_default
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a): fall-through arm — needs the no-CLAUDE.md world
     def test_env_var_without_claude_md_falls_through(self, tmp_path):
         """Env var set but no CLAUDE.md at either location -> fall through to
         next strategy (which will either find git root or fall back to cwd).
@@ -1028,6 +1032,7 @@ class TestGetClaudeMdPathDualLocation:
             result = _get_claude_md_path()
         assert result == new_default
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a): absence arm — needs the no-CLAUDE.md world
     def test_cwd_returns_none_when_nothing_found(self, tmp_path):
         """All strategies fail -> returns None."""
         from scripts.working_memory import _get_claude_md_path

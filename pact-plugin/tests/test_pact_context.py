@@ -876,7 +876,12 @@ class TestWriteContext:
         """Should not leave temp files after successful write."""
         import shared.pact_context as ctx_module
 
-        ctx_file = tmp_path / "pact-session-context.json"
+        # REBIND (§11.3.1 class (c)): the census below counts this test's own
+        # world; the suite-wide redirect seeds tmp_path/CLAUDE.md (legacy
+        # slot) at the parent, so the world moves one level down.
+        world = tmp_path / "ctx-write-world"
+        world.mkdir()
+        ctx_file = world / "pact-session-context.json"
         monkeypatch.setattr(ctx_module, "_context_path", ctx_file)
 
         ctx_module.write_context(
@@ -886,7 +891,7 @@ class TestWriteContext:
         )
 
         # Only the context file should exist, no .tmp files
-        files = list(tmp_path.iterdir())
+        files = list(world.iterdir())
         assert len(files) == 1
         assert files[0].name == "pact-session-context.json"
 

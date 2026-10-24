@@ -354,6 +354,7 @@ class TestCounterRevert_UnreadableWriteAllows:
     file → the Write is refused, so the target test is load-bearing (here the
     CLAUDE.md is a directory, which root cannot read either)."""
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a)/M3: counter/absence outcome
     def test_target_test_passes_on_production_source(
         self, tmp_path, monkeypatch, pact_context
     ):
@@ -370,6 +371,7 @@ class TestCounterRevert_UnreadableWriteAllows:
         })
         assert result is None, result
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a)/M3: counter/absence outcome
     def test_counter_revert_to_an_empty_comparison_causes_failure(
         self, tmp_path, monkeypatch, pact_context
     ):

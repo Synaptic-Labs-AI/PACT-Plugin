@@ -2525,6 +2525,7 @@ class TestExtractPrevSessionDirDualLocation:
 
         assert result == str(sanitised)
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (b): dual-location read arm
     def test_reads_dot_claude_when_only_dot_claude_exists(self, tmp_path, monkeypatch):
         """Reads .claude/CLAUDE.md when it is the only location present."""
         from session_init import _extract_prev_session_dir
