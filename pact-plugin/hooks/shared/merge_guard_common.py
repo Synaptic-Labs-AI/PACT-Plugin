@@ -6651,12 +6651,28 @@ def _unquoted_heredoc_text(body: str) -> tuple[str, bool] | None:
     return "".join(out), params
 
 
-# A string eval or `sh -c` runs that a substitution prints whole: `printf '…'` with no
-# format or escape, or `echo` of plain words.
+# A string eval or `sh -c` runs that a substitution gives it; the substitution's body is
+# read by _substitution_printed_text.
 _PRINTED_STRING_RE = re.compile(
-    r"(?<![\w-])" + _RUNS_STRING + r"[ \t]+(?P<q>\"?)\$\([ \t]*(?:printf[ \t]+'(?P<body>[^'%\\]*)'"
-    r"|echo[ \t]+(?P<body2>[^$`'\"\\()|;&<>\n]*?))[ \t]*\)(?P=q)"
+    r"(?<![\w-])" + _RUNS_STRING + r"[ \t]+(?P<q>\"?)\$\((?P<inner>(?:[^()'\"]|'[^']*'|\"[^\"()]*\")*)\)(?P=q)"
 )
+
+
+def _substitution_printed_text(body: str, depth: int = 0) -> str | None:
+    """The text a substitution body prints whole when all it does is print: `printf '…'`
+    with no format or escape, `echo` of plain words, or a shell's -c (its positional words
+    in place) or an eval whose program does one of these. None for anything else."""
+    body = body.strip()
+    printed = re.fullmatch(r"printf[ \t]+'([^'%\\]*)'|echo[ \t]+([^$`'\"\\()|;&<>\n]*)", body)
+    if printed:
+        return printed.group(1) if printed.group(1) is not None else printed.group(2).strip()
+    if depth >= _MAX_WRAPPER_DEPTH or any(ch in _mask_shell_quotes(body) for ch in "|;&<>\n`"):
+        return None
+    tokens = _shell_tokenize(body)
+    if not tokens:
+        return None
+    program = _string_runner_program(body, os.path.basename(tokens[0]), tokens)
+    return None if program is None else _substitution_printed_text(program, depth + 1)
 
 
 def _rewrite_readable_evals(command: str) -> str:
@@ -6669,7 +6685,7 @@ def _rewrite_readable_evals(command: str) -> str:
     not guarded on its own; a body holding its own terminator line, where
     the shell ends the heredoc first; an unquoted substitution whose body holds a glob
     character, which the shell may expand to file names."""
-    command = _PRINTED_STRING_RE.sub(lambda m: m.group("body") if m.group("body") is not None else m.group("body2"), command)
+    command = _PRINTED_STRING_RE.sub(lambda m: _substitution_printed_text(m.group("inner")) or m.group(0), command)
     if "<<" not in command or not re.search(r"(?<![\w-])" + _RUNS_STRING, command):
         return command
 

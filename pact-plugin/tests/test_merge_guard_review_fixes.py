@@ -2246,3 +2246,43 @@ def test_merges_that_can_run_together_stay_compound(cmd):
     from shared.merge_guard_common import is_compound_destructive_command
 
     assert is_compound_destructive_command(cmd) is True
+
+
+# A substitution given to eval or a shell's -c runs what it prints: when its body is a
+# shell's -c or an eval that only prints, the printed text is the command that runs.
+PRINTING_RUNNER_FEEDS_A_RUNNER = [
+    ("eval of a -c echo", "eval \"$(bash -c 'echo gh pr " + "merge 5 --squash')\""),
+    ("eval of a -c echo of its words", "eval \"$(sh -c 'echo \"$@\"' _ gh pr " + "merge 5 --squash)\""),
+    ("-c of a -c echo", "bash -c \"$(bash -c 'echo gh pr " + "merge 5 --squash')\""),
+    ("-c of an eval echo", "sh -c \"$(eval 'echo gh pr " + "merge 5 --squash')\""),
+]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", PRINTING_RUNNER_FEEDS_A_RUNNER,
+                         ids=[r[0] for r in PRINTING_RUNNER_FEEDS_A_RUNNER])
+def test_a_printing_runner_whose_output_runs_is_refused_then_runs(label, cmd, style):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("cmd", [
+    "eval \"$(bash -c 'echo gh pr view 5')\"",
+    "eval \"$(bash -c 'echo hi')\"",
+], ids=["prints-a-view", "prints-plain-text"])
+def test_a_printing_runner_whose_output_runs_nothing_guarded_is_allowed(cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+def test_a_substitution_body_that_pipes_on_is_not_read_as_its_first_print():
+    from shared.merge_guard_common import rewritten_executed_command
+
+    cmd = "eval \"$(bash -c 'echo hi' | sh -c 'gh pr " + "merge 5 --squash')\""
+    assert rewritten_executed_command(cmd) is None
+
+
+def test_a_nested_printing_runner_is_read_as_its_printed_text():
+    from shared.merge_guard_common import rewritten_executed_command
+
+    cmd = "eval \"$(sh -c 'bash -c \"echo gh pr " + "merge 5 --squash\"')\""
+    assert rewritten_executed_command(cmd) == "gh pr " + "merge 5 --squash"
