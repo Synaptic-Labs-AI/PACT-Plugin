@@ -8143,17 +8143,69 @@ def shell_c_string(command: str) -> str | None:
     NAME=VALUE words and the modeled exec wrappers (env, timeout, nice, sudo, ...) are
     walked past; the shell's own flags before -c may be bundled shorts (`-eu`, `-lc`),
     `-o NAME`, or --norc/--noprofile/--login/--posix; redirects may follow the string.
-    None for anything else: another head, no -c, an unknown flag, an unbalanced quote,
-    arguments after the string, or a string holding a command substitution the calling
-    shell runs first (`$(…)` or a backtick outside single quotes). A `$VAR` is returned
-    as written, as a bare command's text is approved. Never raises."""
+    Words after the string are its positional parameters (`sh -c '… "$1"' _ 5`): each
+    `$0`…`$9` / `${N}`, `$@`, `$*` and `$#` the string reads is replaced by its words,
+    quoted as the inner shell would see them. None for anything else: another head, no
+    -c, an unknown flag, an unbalanced quote, a parameter with no word or read as
+    `${N…}`, or a string or word holding a command substitution the calling shell runs first
+    (`$(…)` or a backtick outside single quotes). A `$VAR` is returned as written, as a
+    bare command's text is approved. Never raises."""
     return _shell_c_argument(command, strict=True)
+
+
+def _with_positional_words(text: str, words: list[str]) -> str | None:
+    """`text`, a shell command line, with each `$N` / `${N}` it expands (outside single
+    quotes) replaced by `words[N]`, `$@` / `$*` by `words[1:]` and `$#` by their count,
+    quoted for where it sits; None when it reads a parameter with no word, `"$@"` with
+    no words, or a `${N…}` expansion."""
+    out, k, quote = [], 0, ""
+    while k < len(text):
+        ch = text[k]
+        if quote != '"' and ch == "'":
+            quote = "" if quote == "'" else "'"
+        elif quote != "'" and ch == '"':
+            quote = "" if quote == '"' else '"'
+        elif quote != "'" and ch == "\\":
+            out.append(text[k:k + 2])
+            k += 2
+            continue
+        elif quote != "'" and ch == "$":
+            m = re.compile(r"\$(?:(\d)|\{(\d)\})").match(text, k)
+            if m:
+                n = int(m.group(1) or m.group(2))
+                if n >= len(words):
+                    return None
+                word = words[n]
+                out.append(re.sub(r'([\\"$`])', r"\\\1", word) if quote == '"' else shlex.quote(word))
+                k = m.end()
+                continue
+            if text.startswith(("$@", "$*"), k):
+                rest = words[1:]
+                if quote != '"':
+                    out.append(" ".join(shlex.quote(w) for w in rest))
+                elif text[k + 1] == "*":
+                    out.append(re.sub(r'([\\"$`])', r"\\\1", " ".join(rest)))
+                elif not rest:
+                    return None
+                else:                                    # "$@": one quoted word each
+                    out.append('" "'.join(re.sub(r'([\\"$`])', r"\\\1", w) for w in rest))
+                k += 2
+                continue
+            if text.startswith("$#", k):
+                out.append(str(len(words) - 1))
+                k += 2
+                continue
+            if text.startswith("${", k) and re.match(r"\d", text[k + 2:k + 3]):
+                return None
+        out.append(ch)
+        k += 1
+    return "".join(out)
 
 
 def _shell_c_argument(command: str, strict: bool, _depth: int = 0) -> str | None:
     """shell_c_string's reader. With `strict` False it also returns a string the calling
-    shell expands first and one followed by arguments (`$0`, `$1`, …): the text is
-    still the command line the shell runs, for judging rather than minting."""
+    shell expands first, and one whose positional words cannot be read in (as written):
+    the text is still the command line the shell runs, for judging rather than minting."""
     leg = _leg_command_word(command)
     tokens = _shell_tokenize(leg) if leg else None
     if not tokens or leg is None:
@@ -8179,11 +8231,17 @@ def _shell_c_argument(command: str, strict: bool, _depth: int = 0) -> str | None
     spans = _leg_token_spans(leg)
     if not has_c or i >= len(tokens) or len(spans) != len(tokens):
         return None
+    j = i + 1
+    while j < len(tokens) and not (_REDIRECT_OPERATOR_RE.match(tokens[j]) or _REDIRECT_WITH_TARGET_RE.match(tokens[j])):
+        j += 1                                           # the string's positional words
+    string = _with_positional_words(tokens[i], tokens[i + 1:j]) if j > i + 1 else tokens[i]
     if not strict:
-        return tokens[i]
-    if re.search(r"\$\(|`", re.sub(r"'[^']*'", "", leg[spans[i][0]:spans[i][1]])):
+        return tokens[i] if string is None else string
+    if string is None or any(
+        re.search(r"\$\(|`", re.sub(r"'[^']*'", "", leg[spans[k][0]:spans[k][1]])) for k in range(i, j)
+    ):
         return None
-    rest = tokens[i + 1:]
+    rest = tokens[j:]
     while rest:
         if _REDIRECT_OPERATOR_RE.match(rest[0]) and len(rest) > 1:
             rest = rest[2:]
@@ -8191,7 +8249,7 @@ def _shell_c_argument(command: str, strict: bool, _depth: int = 0) -> str | None
             rest = rest[1:]
         else:
             return None
-    return tokens[i]
+    return string
 
 
 def _guarded_literals_beside_primitive(head: str, code: str, depth: int) -> list[str]:

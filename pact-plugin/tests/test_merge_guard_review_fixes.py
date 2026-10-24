@@ -985,7 +985,10 @@ SHELL_C_STRING_ROWS = [
     ("script path", "bash script.sh", None),
     ("interpreter", "python3 -c 'print(1)'", None),
     ("no string", "bash -c", None),
-    ("argument after the string", "bash -c 'x' arg0", None),
+    ("a positional word the string does not read", "bash -c 'x' arg0", "x"),
+    ("a positional parameter with no word", "bash -c 'gh pr view $2' _ 5", None),
+    ("all positional parameters", "bash -c 'echo \"$@\"' _ a b", 'echo "a" "b"'),
+    ("all positional parameters with none given", "bash -c 'echo \"$@\"' _", None),
     ("unbalanced quote", "bash -c 'unbalanced", None),
     ("double-quoted $VAR as written", 'bash -c "gh pr merge $N"', "gh pr merge $N"),
     ("double-quoted ${VAR} as written", 'bash -c "git push --force origin ${B}"', "git push --force origin ${B}"),
@@ -1415,3 +1418,97 @@ def test_a_program_inside_a_shell_c_string_reads_one_merge_to_approve(label, cmd
 
     context = interpreter_command_context(cmd)
     assert context is not None and context["operation_type"] == "merge" and context["pr_number"] == "5"
+
+
+# Words after a -c string are its positional parameters: `sh -c 'gh pr merge "$1"' _ 5`
+# runs `gh pr merge 5`, so it is judged and approved as that command.
+POSITIONAL_ROWS = [
+    ("$1 in double quotes", "sh -c 'gh pr " + "merge \"$1\" --squash' _ 5", 'gh pr ' + 'merge "5" --squash'),
+    ("$0", "bash -c 'gh pr " + "merge $0 --squash' 5", "gh pr " + "merge 5 --squash"),
+    ("${1}", "sh -c 'gh pr " + "merge ${1}' x 7", "gh pr " + "merge 7"),
+    ("a word needing quotes", "bash -c 'git push --force origin $1' _ 'a b'", "git push --force origin 'a b'"),
+    ("single-quoted $1 is literal", "bash -c 'echo '\"'\"'$1'\"'\"'' _ 5", "echo '$1'"),
+    ("an outer substitution in the word", "bash -c 'gh pr " + "merge \"$1\"' _ \"$(pick)\"", None),
+    ("\"$@\" keeps each word whole", "bash -c 'gh pr " + "merge \"$@\"' _ 5 --squash", 'gh pr ' + 'merge "5" "--squash"'),
+    ("$* unquoted", "bash -c 'gh pr " + "merge $*' _ 5 --squash", "gh pr " + "merge 5 --squash"),
+    ("\"$*\" joins the words", "bash -c 'echo \"$*\"' _ a b", 'echo "a b"'),
+    ("$# counts the words", "bash -c 'echo $#' _ a b", "echo 2"),
+    ("${10} is not read", "bash -c 'echo ${10}' _ a", None),
+]
+
+
+@pytest.mark.parametrize("label,cmd,want", POSITIONAL_ROWS, ids=[r[0] for r in POSITIONAL_ROWS])
+def test_a_shell_c_string_reads_its_positional_words(label, cmd, want):
+    from shared.merge_guard_common import shell_c_string
+
+    assert shell_c_string(cmd) == want
+
+
+@pytest.mark.parametrize("cmd,dangerous", [
+    ("sh -c 'gh pr " + "merge \"$1\" --squash' _ 5", True),
+    ("sh -c 'gh pr view \"$1\"' _ 5", False),
+    ("bash -c 'gh pr " + "merge $0' 5", True),
+    ("bash -c 'gh pr view $0' 5", False),
+])
+def test_a_positional_shell_c_command_is_judged_as_it_runs(cmd, dangerous):
+    assert is_dangerous_command(cmd) is dangerous
+
+
+APPROVAL_STYLES = {
+    "inline": lambda c: f"Run `{c}` now",
+    "double-backtick": lambda c: f"Run `` {c} `` now",
+    "fenced": lambda c: f"Run this:\n```bash\n{c}\n```",
+}
+
+
+def _runs_after_approval(command: str, style) -> bool:
+    """Whether `command` runs once its own faithful approval, quoted in `style`, mints."""
+    from merge_guard_post import _mint_context_from_bundle
+    from merge_guard_pre import _token_matches_command
+
+    q = [{"question": "Run this?", "header": "Run", "multiSelect": False,
+          "options": [{"label": "Yes, run", "description": style(command)},
+                      {"label": "No", "description": "Hold."}]}]
+    ctx = _mint_context_from_bundle(q, {"Run this?": "Yes, run"})[0]
+    return ctx is not None and _token_matches_command({"context": ctx}, command)
+
+
+POSITIONAL_RUNS = {
+    "$1": "sh -c 'gh pr " + "merge \"$1\" --squash' _ 5",
+    "$0": "bash -c 'gh pr " + "merge $0 --squash' 5",
+    "all-words": "bash -c 'gh pr " + "merge \"$@\"' _ 5 --squash",
+    "xargs": "printf '%s\\n' 5 | xargs -I{} sh -c 'gh pr " + "merge \"$1\" --squash' _ {}",
+    "force-push-binds-its-ref": "bash -c 'git push --force origin \"$1\"' _ feat/x",
+    "unknown-word": "sh -c 'gh pr " + "merge \"$1\" --squash' _ \"$(pick)\"",
+}
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("cmd", POSITIONAL_RUNS.values(), ids=POSITIONAL_RUNS.keys())
+def test_a_positional_shell_c_merge_is_refused_then_runs_approved(cmd, style):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+def test_a_positional_approval_binds_its_own_word():
+    from merge_guard_post import _mint_context_from_bundle
+    from merge_guard_pre import _token_matches_command
+
+    approved = POSITIONAL_RUNS["force-push-binds-its-ref"]
+    q = [{"question": "Run this?", "header": "Run", "multiSelect": False,
+          "options": [{"label": "Yes, run", "description": f"Run `{approved}` now"},
+                      {"label": "No", "description": "Hold."}]}]
+    token = {"context": _mint_context_from_bundle(q, {"Run this?": "Yes, run"})[0]}
+    assert not _token_matches_command(token, approved.replace("feat/x", "main"))
+    assert not _token_matches_command(token, POSITIONAL_RUNS["$1"])
+
+
+@pytest.mark.parametrize("cmd", [
+    "sh -c 'for p in \"$@\"; do gh pr " + "merge \"$p\"; done' _ 5 6",
+    "sh -c 'gh pr " + "merge \"$1\" && gh pr " + "merge \"$2\"' _ 5 6",
+], ids=["loop-over-two-words", "two-merges"])
+def test_positional_words_feeding_two_merges_are_compound(cmd):
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_compound_destructive_command(cmd) is True
+    assert not _runs_after_approval(cmd, APPROVAL_STYLES["inline"])
