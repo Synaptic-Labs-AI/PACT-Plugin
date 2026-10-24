@@ -2473,3 +2473,30 @@ def test_a_condition_and_else_approval_runs_neither_bare(style):
     assert _token_matches_command(token, approved)
     for bare in ("gh pr " + "merge 5 --squash", "gh pr " + "merge 5 --rebase", "gh pr " + "merge 777 --squash"):
         assert not _token_matches_command(token, bare)
+
+
+# A variable assigned a substitution that only prints holds the printed text, as a literal
+# assignment of that text would.
+PRINTED_ASSIGNMENT_RUNS = [
+    ("echo", "x=$(echo gh pr " + "merge 5 --squash); $x"),
+    ("a -c echo", "x=$(bash -c 'echo gh pr " + "merge 5 --squash'); $x"),
+    ("quoted printf", "x=\"$(printf 'gh pr " + "merge 5 --squash')\"; $x"),
+    ("on the next line", "cmd=$(echo 'gh pr " + "merge 5 --squash')\n$cmd"),
+    ("eval of it", "x=$(echo gh pr " + "merge 5 --squash); eval \"$x\""),
+]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", PRINTED_ASSIGNMENT_RUNS, ids=[r[0] for r in PRINTED_ASSIGNMENT_RUNS])
+def test_a_variable_holding_a_printed_command_is_refused_then_runs(label, cmd, style):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("cmd", [
+    "x=$(echo gh pr view 5); $x",
+    "x=$(echo gh pr " + "merge 5); echo \"$x\"",
+    "x=$(gh pr list); $x",
+], ids=["a-view", "echoed", "not-a-print"])
+def test_a_variable_holding_a_printed_value_that_runs_nothing_guarded_is_allowed(cmd):
+    assert is_dangerous_command(cmd) is False

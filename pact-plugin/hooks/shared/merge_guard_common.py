@@ -6696,6 +6696,23 @@ def _rewrite_set_positionals(command: str) -> str:
     return command if rest is None else command[:m.start("words")] + command[m.end("words"):m.end()] + rest
 
 
+# NAME=$(…) or NAME="$(…)": an assignment of a substitution's output.
+_PRINTED_ASSIGNMENT_RE = re.compile(
+    r"(?P<name>[A-Za-z_]\w*)=(?P<q>\"?)\$\((?P<inner>(?:[^()'\"]|'[^']*'|\"[^\"()]*\")*)\)(?P=q)"
+)
+
+
+def _rewrite_printed_assignments(command: str) -> str:
+    """`command` with each variable assigned a substitution that only prints given the
+    printed text as a literal value instead, so `x=$(echo gh pr merge 5); $x` reads as the
+    literal assignment it amounts to."""
+    def _literal(m: re.Match) -> str:
+        printed = _substitution_printed_text(m.group("inner"))
+        return m.group(0) if printed is None else m.group("name") + "=" + shlex.quote(printed)
+
+    return _PRINTED_ASSIGNMENT_RE.sub(_literal, command)
+
+
 def _rewrite_readable_evals(command: str) -> str:
     """`command` with each readable eval replaced by the text it runs: the body as written
     when the substitution is double-quoted, or its words joined by single spaces when it is
@@ -6707,7 +6724,7 @@ def _rewrite_readable_evals(command: str) -> str:
     the shell ends the heredoc first; an unquoted substitution whose body holds a glob
     character, which the shell may expand to file names."""
     command = _PRINTED_STRING_RE.sub(lambda m: _substitution_printed_text(m.group("inner")) or m.group(0),
-                                     _rewrite_set_positionals(command))
+                                     _rewrite_printed_assignments(_rewrite_set_positionals(command)))
     if "<<" not in command or not re.search(r"(?<![\w-])" + _RUNS_STRING, command):
         return command
 
