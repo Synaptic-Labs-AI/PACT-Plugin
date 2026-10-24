@@ -6678,6 +6678,24 @@ def _substitution_printed_text(body: str, depth: int = 0) -> str | None:
     return None if program is None else _substitution_printed_text(program, depth + 1)
 
 
+# A `set --` leg giving the positional words literally, ended by `;`, `&&` or a newline.
+_SET_POSITIONALS_RE = re.compile(r"(?:^|(?<=[;&\n]))[ \t]*set[ \t]+--(?P<words>[^;&|\n]*)(?:;|&&|\n)")
+
+
+def _rewrite_set_positionals(command: str) -> str:
+    """`command` with the text after a literal `set -- WORDS` reading those words for its
+    positional parameters, so `set -- "gh pr merge 5"; eval "$1"` reads as the eval of
+    `gh pr merge 5`, and the words themselves dropped from the `set` leg. Unchanged when
+    the words cannot be read."""
+    m = _SET_POSITIONALS_RE.search(command)
+    words = _shell_tokenize(m.group("words")) if m else None
+    if m is None or words is None:
+        return command
+    rest = _with_positional_words(command[m.end():], ["sh"] + words)
+    # The words are data once read in; left in place they would read as a command too.
+    return command if rest is None else command[:m.start("words")] + command[m.end("words"):m.end()] + rest
+
+
 def _rewrite_readable_evals(command: str) -> str:
     """`command` with each readable eval replaced by the text it runs: the body as written
     when the substitution is double-quoted, or its words joined by single spaces when it is
@@ -6688,7 +6706,8 @@ def _rewrite_readable_evals(command: str) -> str:
     not guarded on its own; a body holding its own terminator line, where
     the shell ends the heredoc first; an unquoted substitution whose body holds a glob
     character, which the shell may expand to file names."""
-    command = _PRINTED_STRING_RE.sub(lambda m: _substitution_printed_text(m.group("inner")) or m.group(0), command)
+    command = _PRINTED_STRING_RE.sub(lambda m: _substitution_printed_text(m.group("inner")) or m.group(0),
+                                     _rewrite_set_positionals(command))
     if "<<" not in command or not re.search(r"(?<![\w-])" + _RUNS_STRING, command):
         return command
 

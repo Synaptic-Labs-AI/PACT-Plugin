@@ -2348,3 +2348,33 @@ def test_an_unquoted_positional_command_is_refused_then_runs(label, cmd, style):
 ], ids=["a-view", "echoed", "quoted-whole-word"])
 def test_a_positional_word_that_runs_nothing_guarded_is_allowed(cmd):
     assert is_dangerous_command(cmd) is False
+
+
+# A literal `set -- WORDS` sets the positional words a later "$1" or "$@" reads.
+SET_POSITIONAL_RUNS = [
+    ("eval of $1", "set -- \"gh pr " + "merge 5 --squash\"; eval \"$1\""),
+    ("$@ as the command", "set -- gh pr " + "merge 5 --squash; \"$@\""),
+    ("a target word", "set -- 5; gh pr " + "merge \"$1\" --squash"),
+    ("after &&", "set -- pr " + "merge 5 && gh \"$@\" --squash"),
+    ("on the next line", "set -- \"gh pr " + "merge 5 --squash\"\neval \"$1\""),
+    ("unquoted $1", "set -- \"gh pr " + "merge 5 --squash\"; $1"),
+]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", SET_POSITIONAL_RUNS, ids=[r[0] for r in SET_POSITIONAL_RUNS])
+def test_set_positional_words_read_by_a_later_command_are_refused_then_run(label, cmd, style):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("cmd", [
+    "set -- \"gh pr view 5\"; eval \"$1\"",
+    "set -- a b; echo \"$@\"",
+    "set -- \"gh pr " + "merge 5\"; echo \"$1\"",
+    "set -e; gh pr view 5",
+    "echo set -- \"gh pr " + "merge 5 --squash\"; eval \"$1\"",
+    "reset -- \"gh pr " + "merge 5 --squash\"; eval \"$1\"",
+], ids=["a-view", "echoed-words", "echoed-merge", "set-e", "set-as-an-echo-word", "another-command"])
+def test_set_positional_words_that_run_nothing_guarded_are_allowed(cmd):
+    assert is_dangerous_command(cmd) is False
