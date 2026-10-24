@@ -6658,24 +6658,39 @@ _PRINTED_STRING_RE = re.compile(
 )
 
 
-def _substitution_printed_text(body: str, depth: int = 0) -> str | None:
+def _substitution_printed_text(body: str, sequence: bool = True) -> str | None:
     """The text a substitution body prints whole when all it does is print: an echo or a
-    printf the leg reader can read (quoted words and plain formats included), or a shell's
-    -c (its positional words in place) or an eval whose program does one of these. None for
-    anything else, including a body that runs a substitution of its own."""
+    printf the leg reader can read (quoted words and plain formats included), a shell's -c
+    (its positional words in place) or an eval whose program does one of these, or a
+    sequence of such statements joined by `;`, `&&` or newlines, which prints their outputs
+    in turn (only when `sequence`). None for anything else, including a body that runs a
+    substitution of its own. The trailing newlines are dropped, as a substitution drops them."""
+    printed = _printed_output(body, 0, sequence)
+    return None if printed is None else printed.rstrip("\n")
+
+
+def _printed_output(body: str, depth: int, sequence: bool) -> str | None:
+    """What `body` writes when all it does is print (see _substitution_printed_text), or None."""
     body = body.strip()
-    if "`" in body or any(ch in _mask_shell_quotes(body) for ch in "|;&<>\n"):
+    view = _mask_shell_quotes(body)
+    if "`" in body or any(ch in view for ch in "|<>") or re.search(r"(?<!&)&(?!&)", view):
         return None
+    cuts = [m.span() for m in re.finditer(r";|&&|\n", view)]
+    if cuts and not sequence:
+        return None
+    if cuts:
+        starts, ends = [0] + [end for _, end in cuts], [start for start, _ in cuts] + [len(body)]
+        outputs = [_printed_output(body[a:b], depth, sequence) for a, b in zip(starts, ends) if body[a:b].strip()]
+        return None if not outputs or None in outputs else "".join(o for o in outputs if o is not None)
     tokens = _shell_tokenize(body)
     if not tokens:
         return None
     if tokens[0] in ("echo", "printf"):
-        printed = _printed_text(tokens)
-        return None if printed is None else printed.rstrip("\n")
+        return _printed_text(tokens)
     if depth >= _MAX_WRAPPER_DEPTH:
         return None
     program = _string_runner_program(body, os.path.basename(tokens[0]), tokens)
-    return None if program is None else _substitution_printed_text(program, depth + 1)
+    return None if program is None else _printed_output(program, depth + 1, sequence)
 
 
 # A `set --` leg giving the positional words literally, ended by `;`, `&&` or a newline.
@@ -6707,7 +6722,7 @@ def _rewrite_printed_assignments(command: str) -> str:
     printed text as a literal value instead, so `x=$(echo gh pr merge 5); $x` reads as the
     literal assignment it amounts to."""
     def _literal(m: re.Match) -> str:
-        printed = _substitution_printed_text(m.group("inner"))
+        printed = _substitution_printed_text(m.group("inner"), sequence=False)
         return m.group(0) if printed is None else m.group("name") + "=" + shlex.quote(printed)
 
     return _PRINTED_ASSIGNMENT_RE.sub(_literal, command)

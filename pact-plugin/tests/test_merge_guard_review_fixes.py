@@ -2577,3 +2577,53 @@ def test_a_negated_condition_and_what_runs_when_it_succeeds_stay_compound(cmd):
     from shared.merge_guard_common import is_compound_destructive_command
 
     assert is_compound_destructive_command(cmd) is True
+
+
+# A substitution given to eval or -c whose body is print-only statements joined by `;`, `&&`
+# or newlines runs what they print, in turn.
+PRINTED_SEQUENCE_RUNS = [
+    ("a view then a merge", "eval \"$(bash -c 'echo gh pr view 5'; echo gh pr " + "merge 5 --squash)\""),
+    ("joined by &&", "eval \"$(echo gh pr view 5 && echo gh pr " + "merge 5 --squash)\""),
+    ("on two lines", "eval \"$(echo gh pr view 5\necho gh pr " + "merge 5 --squash)\""),
+    ("given to -c", "bash -c \"$(echo gh pr view 5; echo gh pr " + "merge 5 --squash)\""),
+]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", PRINTED_SEQUENCE_RUNS, ids=[r[0] for r in PRINTED_SEQUENCE_RUNS])
+def test_a_printed_sequence_that_runs_a_merge_is_refused_then_runs(label, cmd, style):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+def test_a_printed_sequence_of_two_merges_does_not_run_on_its_approval(style):
+    cmd = "eval \"$(echo gh pr " + "merge 5 --squash; echo gh pr " + "merge 6 --squash)\""
+    assert is_dangerous_command(cmd) is True
+    assert not _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("cmd", [
+    "eval \"$(echo gh pr view 5; echo gh pr checks 5)\"",
+    "eval \"$(echo gh pr view 5; gh pr list)\"",
+    "x=$(echo gh pr view 5; echo gh pr " + "merge 5 --squash); $x",
+], ids=["prints-two-views", "a-statement-that-does-not-print", "an-assignment-runs-one-command"])
+def test_a_sequence_that_runs_nothing_guarded_is_allowed(cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+def test_a_printed_sequence_concatenates_its_outputs():
+    from shared.merge_guard_common import rewritten_executed_command
+
+    cmd = "eval \"$(printf 'gh pr '; echo " + "merge 5 --squash)\""
+    assert rewritten_executed_command(cmd) == "gh pr " + "merge 5 --squash"
+
+
+@pytest.mark.parametrize("cmd", [
+    "eval \"$(echo gh pr view 5; gh pr list)\"",
+    "eval \"$(echo gh pr view 5 & echo x)\"",
+], ids=["a-statement-that-does-not-print", "a-background-statement"])
+def test_a_sequence_with_output_the_guard_cannot_know_is_not_read(cmd):
+    from shared.merge_guard_common import rewritten_executed_command
+
+    assert rewritten_executed_command(cmd) is None
