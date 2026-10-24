@@ -594,6 +594,60 @@ class TestIsSelfCompleteExempt:
         assert is_self_complete_exempt({"owner": 42, "metadata": {}}) is False
 
 
+class TestIsSelfCompleteExemptActorSurface:
+    """Surface 1b: the completing actor's harness-derived type. No team
+    config is involved (the cloud case); team_name is left empty."""
+
+    TASK = {"owner": "secretary", "metadata": {}}
+
+    def test_exempt_type_and_name_equals_owner(self):
+        from shared.intentional_wait import is_self_complete_exempt
+
+        assert is_self_complete_exempt(
+            self.TASK, actor_agent_type="pact-secretary", actor_name="secretary"
+        ) is True
+
+    def test_exempt_type_and_name_unresolved(self):
+        from shared.intentional_wait import is_self_complete_exempt
+
+        assert is_self_complete_exempt(
+            self.TASK, actor_agent_type="pact-secretary", actor_name=None
+        ) is True
+
+    def test_exempt_type_but_name_differs_from_owner(self):
+        from shared.intentional_wait import is_self_complete_exempt
+
+        assert is_self_complete_exempt(
+            self.TASK, actor_agent_type="pact-secretary", actor_name="someone-else"
+        ) is False
+
+    def test_non_exempt_type(self):
+        from shared.intentional_wait import is_self_complete_exempt
+
+        assert is_self_complete_exempt(
+            self.TASK, actor_agent_type="pact-backend-coder", actor_name="secretary"
+        ) is False
+
+    def test_unstripped_namespace_is_not_exempt(self):
+        """The resolver strips PACT:; the predicate must not need to."""
+        from shared.intentional_wait import is_self_complete_exempt
+
+        assert is_self_complete_exempt(
+            self.TASK, actor_agent_type="PACT:pact-secretary", actor_name="secretary"
+        ) is False
+
+    def test_defaults_leave_surface_1b_off(self):
+        from shared.intentional_wait import is_self_complete_exempt
+
+        assert is_self_complete_exempt(self.TASK) is False
+
+    def test_actor_args_are_keyword_only(self):
+        from shared.intentional_wait import is_self_complete_exempt
+
+        with pytest.raises(TypeError):
+            is_self_complete_exempt(self.TASK, "", None, "pact-secretary")  # type: ignore[misc]
+
+
 class TestIsSelfCompleteExemptMalformedTaskShapes:
     """Edge cases for malformed task dicts — defensive defaults must hold."""
 

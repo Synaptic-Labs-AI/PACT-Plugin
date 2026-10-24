@@ -24,8 +24,6 @@ Exposes:
     dispatch_site emit records can never drift apart.
   - has_task_assigned(team_name, name) — task-assigned check (one of
     the dispatch_gate rules; rejects spawn before TaskCreate)
-  - trustworthy_actor_name(input_data) — actor resolution for the
-    task_lifecycle_gate self-completion rule
   - SOLO_EXEMPT — research/exploration agents that bypass dispatch_gate
 
 Module-load discipline (architect §5.6):
@@ -416,36 +414,3 @@ def has_task_assigned(team_name: str, name: str) -> bool:
         if data.get("status") in ("pending", "in_progress"):
             return True
     return False
-
-
-# ─── actor resolution (for the self-completion rule) ──────────────────────
-
-def trustworthy_actor_name(input_data: dict) -> str | None:
-    """Extract actor name from harness-trustworthy ``agent_id`` ONLY.
-
-    Bypasses ``resolve_agent_name``'s Step 1 (agent_name) and Step 4
-    (agent_type) fallbacks because they are not strong enough trust
-    signals for the self-completion check (architect §5.3 / PREPARE
-    §10).
-
-    Trust contract: ``agent_id`` is harness-set and lives at the top
-    level of the hook stdin JSON, not inside ``tool_input`` — a teammate
-    cannot collide with it via crafted tool arguments. Format is
-    ``"name@team_name"``.
-
-    Returns the ``name`` portion, or None if ``agent_id`` is missing or
-    malformed (no ``@``). Caller (task_lifecycle_gate self-completion
-    rule) treats None as "actor unresolvable — DO NOT exempt from the
-    self-completion advisory".
-
-    Pure function: no FS, no I/O, no exceptions.
-    """
-    if not isinstance(input_data, dict):
-        return None
-    agent_id = input_data.get("agent_id")
-    if not isinstance(agent_id, str) or "@" not in agent_id:
-        return None
-    name, _, team = agent_id.partition("@")
-    if not name or not team:
-        return None
-    return name

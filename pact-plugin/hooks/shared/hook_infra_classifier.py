@@ -327,7 +327,12 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "session_registry", "session_state", "task_metadata_snapshot",
         "task_utils", "teachback_schema", "tool_response", "variety_scorer",
         "background_launch", "background_work", "state_file",
-    }),  # task_metadata_snapshot reached via the lead-completion +
+        "actor_identity", "turn_end_gate", "turn_end_jobs",
+    }),  # actor_identity reached via the self-completion rule's actor
+         # resolution (#1666 item 4); it imports background_work and
+         # turn_end_gate inside resolve_actor, and turn_end_jobs is
+         # turn_end_gate's own module-level edge.
+         # task_metadata_snapshot reached via the lead-completion +
          # post-completion-backstop snapshot seams; its transitive edges
          # were already in this closure.
          # handoff_schema reached via the HANDOFF schema advisories (write-time

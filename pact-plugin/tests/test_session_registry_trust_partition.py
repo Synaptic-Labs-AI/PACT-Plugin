@@ -4,8 +4,9 @@ These are the CROSS-FILE / STRUCTURAL contracts that the registry's own unit
 suite (test_session_registry.py) cannot express:
 
   * TRUST PARTITION (load-bearing security): the registry is LABELING-ONLY. The
-    authority surfaces — trustworthy_actor_name (dispatch_helpers) + the
-    self-completion path (task_lifecycle_gate) — MUST NOT import or call the
+    authority surfaces — actor_identity.resolve_actor (the self-completion
+    actor resolver) + dispatch_helpers + the self-completion path
+    (task_lifecycle_gate) — MUST NOT import or call the
     registry resolver. The registry value is self-asserted/forgeable; feeding it
     to a who-acted/is-allowed check re-opens the confused-deputy hole that the
     harness-managed agent_id signal closes. Enforced by an AST no-import test
@@ -37,10 +38,12 @@ import pytest
 HOOKS_DIR = Path(__file__).parent.parent / "hooks"
 
 # The authority surfaces that MUST NOT consume the registry resolver. Keyed by
-# the file (relative to hooks/) whose import graph is scanned. dispatch_helpers
-# hosts trustworthy_actor_name; task_lifecycle_gate hosts the self-completion
-# advisory that consumes it.
+# the file (relative to hooks/) whose import graph is scanned.
+# shared/actor_identity.py hosts resolve_actor, the harness-data actor resolver;
+# task_lifecycle_gate hosts the self-completion advisory that consumes it;
+# dispatch_helpers hosts the dispatch-gate ownership predicates.
 _AUTHORITY_FILES = (
+    "shared/actor_identity.py",
     "shared/dispatch_helpers.py",
     "task_lifecycle_gate.py",
 )
@@ -57,6 +60,24 @@ _REGISTRY_SYMBOL_TOKENS = ("_registry_resolve", "resolve")  # the resolver alias
 # session_registry — invisible to the no-import test above. Forbidding the call
 # name closes that transitive-reintroduction path structurally.
 _FORBIDDEN_AUTHORITY_CALLS = ("_registry_resolve", "resolve_agent_name")
+
+# Per-file STRICTER call bans, on top of _FORBIDDEN_AUTHORITY_CALLS. The actor
+# resolver must not reach ANY registry-backed identity helper:
+#   * frame_team_and_name / teammate_launch_name / bind_launcher_identity
+#     (background_work) fall back to the self-asserted registry under tmux;
+#   * turn_end_gate.teammate_identity is registry-free today, but it needs the
+#     local-only taskKind/teamName meta fields, so using it would hide why a
+#     cloud lookup failed.
+# NOT global: task_lifecycle_gate legitimately calls frame_team_and_name for the
+# non-authority launch-record path (_extend_launch_records_on_claim).
+_STRICT_AUTHORITY_CALLS = {
+    "shared/actor_identity.py": (
+        "frame_team_and_name",
+        "teammate_launch_name",
+        "bind_launcher_identity",
+        "teammate_identity",
+    ),
+}
 
 # The ONLY hook files permitted to import the self-registration registry. Pairs
 # the POSITIVE 2-file authority no-import test with a NEGATIVE all-files scan: a
@@ -149,6 +170,23 @@ def _registry_imports(tree: ast.AST) -> list[str]:
     return found
 
 
+def _calls_named(tree: ast.AST, names) -> list[tuple[str, int]]:
+    """Return (name, lineno) for every Call whose callee name (bare or
+    attribute) is in ``names``."""
+    found: list[tuple[str, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fn = node.func
+            name = (
+                fn.id if isinstance(fn, ast.Name)
+                else fn.attr if isinstance(fn, ast.Attribute)
+                else None
+            )
+            if name in names:
+                found.append((name, node.lineno))
+    return found
+
+
 def _forbidden_resolver_calls(tree: ast.AST) -> list[tuple[str, int]]:
     """Return (name, lineno) for every Call whose callee name is in
     ``_FORBIDDEN_AUTHORITY_CALLS`` — matching BOTH a bare name
@@ -185,7 +223,7 @@ class TestTrustPartitionNoRegistryImport:
         assert offending == [], (
             f"{rel_file} imports the self-registration registry: {offending}. "
             f"The registry is LABELING-ONLY — its value is self-asserted and "
-            f"forgeable. An authority surface (trustworthy_actor_name / the "
+            f"forgeable. An authority surface (actor_identity.resolve_actor / the "
             f"self-completion gate) consuming it re-opens the confused-deputy "
             f"hole. Authority checks MUST read the harness-managed agent_id, "
             f"never the registry."
@@ -248,6 +286,33 @@ class TestTrustPartitionNoRegistryImport:
         assert _forbidden_resolver_calls(ast.parse(src)), (
             f"the forbidden-resolver-call detector did NOT fire on {src!r} — the "
             f"transitive trust-partition check would miss this call shape."
+        )
+
+    @pytest.mark.parametrize("rel_file", sorted(_STRICT_AUTHORITY_CALLS))
+    def test_authority_file_does_not_call_registry_backed_identity_helpers(self, rel_file):
+        """The per-file stricter ban: the actor resolver must not call any
+        identity helper that reaches the registry (or hides a cloud miss)."""
+        path = HOOKS_DIR / rel_file
+        assert path.exists(), f"authority file {rel_file} not found at {path}"
+        bad_calls = _calls_named(_parse(path), _STRICT_AUTHORITY_CALLS[rel_file])
+        assert bad_calls == [], (
+            f"{rel_file} calls a registry-backed identity helper: {bad_calls}. "
+            f"The actor resolver is an authority surface and must resolve from "
+            f"harness data only (frame, team config, subagent meta.json)."
+        )
+
+    @pytest.mark.parametrize("src", [
+        "frame_team_and_name(input_data)\n",
+        "background_work.frame_team_and_name(input_data)\n",
+        "background_work.teammate_launch_name(input_data, team)\n",
+        "bind_launcher_identity(input_data)\n",
+        "turn_end_gate.teammate_identity(input_data, team)\n",
+    ])
+    def test_strict_call_detector_fires_on_synthetic_call(self, src):
+        """Phantom-green guard for the per-file stricter ban."""
+        names = _STRICT_AUTHORITY_CALLS["shared/actor_identity.py"]
+        assert _calls_named(ast.parse(src), names), (
+            f"the strict call detector did NOT fire on {src!r}."
         )
 
     def test_call_detector_ignores_unrelated_call(self):

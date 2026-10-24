@@ -338,6 +338,9 @@ def is_self_complete_exempt(
     task: Any,
     team_name: str = "",
     teams_dir: str | None = None,
+    *,
+    actor_agent_type: str | None = None,
+    actor_name: str | None = None,
 ) -> bool:
     """
     Return True iff this task is exempt from the team-lead-only-completion rule.
@@ -351,6 +354,14 @@ def is_self_complete_exempt(
        etc.) reach this surface as long as their agentType matches.
        Requires `team_name`; with `team_name=""` (the default) this
        surface short-circuits to False (fail-closed).
+       1b. By the completing ACTOR's harness-derived type, for where no team
+       config exists (cloud): `actor_agent_type` is in
+       SELF_COMPLETE_EXEMPT_AGENT_TYPES AND (`actor_name` is None OR
+       `actor_name == task.owner`). The caller passes the type from
+       `actor_identity.resolve_actor`, which reads the hook frame and the
+       platform's subagent meta.json, never the task. The value must be
+       already `PACT:`-stripped; this predicate does not strip it. Both
+       arguments default to None, which disables 1b.
     2. By signal-task metadata: task.metadata.completion_type == "signal" AND
        task.metadata.type in {"blocker", "algedonic"}. Mirrors the inline
        literal in agent_handoff_emitter / task_utils / session_resume.
@@ -377,7 +388,13 @@ def is_self_complete_exempt(
     (currently `pact-secretary` only) AND the team-config-as-SSOT
     requirement. A non-exempt teammate cannot self-promote by spoofing
     `owner`: the team-config lookup must independently confirm the
-    privileged agentType. No in-plugin consumer reads this predicate at
+    privileged agentType. Surface 1b does not trust `owner` for the type
+    either: it trusts the harness-written hook frame and subagent
+    meta.json (same tier as the team config). `owner` only narrows 1b
+    (a resolved actor name must equal it). ACCEPTED RESIDUAL: an
+    exempt-type actor whose name is unresolved (meta.json missing) is
+    exempt even when completing another owner's task. No in-plugin
+    consumer reads this predicate at
     runtime — instructions and audit tooling are the defense. Future
     extensions adding new agentTypes to SELF_COMPLETE_EXEMPT_AGENT_TYPES
     must re-evaluate this boundary.
@@ -389,6 +406,10 @@ def is_self_complete_exempt(
                    still applies.
         teams_dir: Override teams directory (for testing). Threaded to
                    `_iter_members`.
+        actor_agent_type: Surface 1b — the completing actor's harness-derived
+                   TYPE (keyword-only; None disables 1b).
+        actor_name: Surface 1b — the completing actor's resolved name, or
+                   None when unresolved (keyword-only).
     """
     if not isinstance(task, dict):
         return False
@@ -400,6 +421,14 @@ def is_self_complete_exempt(
     # Surface 1: owner's team-config agentType is in the exempt set.
     owner = task.get("owner")
     if isinstance(owner, str) and _is_exempt_agent_type(owner, team_name, teams_dir):
+        return True
+
+    # Surface 1b: the actor's harness-derived type (cloud: no team config).
+    if (
+        isinstance(actor_agent_type, str)
+        and actor_agent_type in SELF_COMPLETE_EXEMPT_AGENT_TYPES
+        and (actor_name is None or actor_name == owner)
+    ):
         return True
 
     # Surface 2: signal-task pattern (inline-literal mirror).

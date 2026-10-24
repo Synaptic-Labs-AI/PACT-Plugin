@@ -912,7 +912,7 @@ class TestTheAgentIdShapeDecidesBeforeTheTypeChecks:
                     sites.append((path.relative_to(hooks).as_posix(),
                                   ast.unparse(passed) if passed is not None else None))
         assert sorted(p for p, _ in sites) == [
-            "peer_inject.py", "shared/background_work.py",
+            "peer_inject.py", "shared/actor_identity.py", "shared/background_work.py",
             "shared/background_work.py", "shared/turn_end_gate.py",
         ], sites
         assert all(v == "input_data.get('agent_id')" for _, v in sites), sites
