@@ -2193,3 +2193,56 @@ def test_alternative_destructive_branch_count(cmd, count):
     from shared.merge_guard_common import alternative_destructive_branch_count
 
     assert alternative_destructive_branch_count(cmd) == count
+
+
+# Only one branch of an if/elif/else, or one arm of a case, runs: alternative branches
+# each carrying one merge are one guarded op, and the approval binds the whole text.
+ALTERNATIVE_BRANCH_MERGES = {
+    "if-else": "if true; then gh pr " + "merge 5 --squash; else gh pr " + "merge 6 --squash; fi",
+    "case": "case \"$x\" in a) gh pr " + "merge 5 --squash ;; b) gh pr " + "merge 6 --squash ;; esac",
+    "elif-ladder": "if [ \"$m\" = s ]; then gh pr " + "merge 5 --squash; elif [ \"$m\" = r ]; then gh pr "
+                   + "merge 5 --rebase; else gh pr " + "merge 5 --merge; fi",
+    "nested-if": "if a; then if b; then gh pr " + "merge 5 --squash; else gh pr " + "merge 6 --squash; fi; "
+                 "else gh pr " + "merge 7 --squash; fi",
+    "else-if": "if a; then gh pr " + "merge 5 --squash; else if b; then gh pr " + "merge 6 --squash; fi; fi",
+}
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("cmd", ALTERNATIVE_BRANCH_MERGES.values(), ids=ALTERNATIVE_BRANCH_MERGES.keys())
+def test_alternative_branch_merges_are_one_op_that_runs_approved(cmd, style):
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_dangerous_command(cmd) is True
+    assert is_compound_destructive_command(cmd) is False
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+def test_an_alternative_branch_approval_runs_neither_branch_bare(style):
+    from merge_guard_post import _mint_context_from_bundle
+    from merge_guard_pre import _token_matches_command
+
+    approved = ALTERNATIVE_BRANCH_MERGES["if-else"]
+    q = [{"question": "Run this?", "header": "Run", "multiSelect": False,
+          "options": [{"label": "Yes, run", "description": style(approved)},
+                      {"label": "No", "description": "Hold."}]}]
+    token = {"context": _mint_context_from_bundle(q, {"Run this?": "Yes, run"})[0]}
+    assert _token_matches_command(token, approved)
+    assert not _token_matches_command(token, "gh pr " + "merge 5 --squash")
+    assert not _token_matches_command(token, "gh pr " + "merge 6 --squash")
+
+
+@pytest.mark.parametrize("cmd", [
+    "if true; then gh pr " + "merge 5 --squash; gh pr " + "merge 6 --squash; else echo no; fi",
+    "if true; then gh pr " + "merge 5 --squash; fi; gh pr " + "merge 6 --squash",
+    "if true; then gh pr " + "merge 5 --squash; else gh pr " + "merge 6 --squash; fi; git branch -D old",
+    "if gh pr " + "merge 5 --squash; then echo ok; else gh pr " + "merge 6 --squash; fi",
+    "if a; then if b; then gh pr " + "merge 5 --squash; fi; gh pr " + "merge 6 --squash; else echo no; fi",
+    "if true; then gh pr " + "merge 5 --squash; else gh pr " + "merge 6 --squash",
+], ids=["two-in-one-branch", "branch-then-bare", "branches-then-delete", "condition-and-else",
+        "nested-then-bare-in-branch", "unclosed-if"])
+def test_merges_that_can_run_together_stay_compound(cmd):
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_compound_destructive_command(cmd) is True

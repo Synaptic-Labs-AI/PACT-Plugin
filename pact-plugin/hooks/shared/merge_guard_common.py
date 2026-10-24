@@ -9613,6 +9613,10 @@ def is_compound_destructive_command(command: str) -> bool:
     on_interpreters = sum(1 for leg in destructive if _INTERPRETER_WORD_RE.search(leg))
     interpreted = {normalize_command_text(c) for c in _interpreter_guarded_commands(command, 0)}
     in_shells = sum(_shell_leg_destructive_count(leg) for leg in destructive)
+    # Only one branch of an if/elif/else or one arm of a case runs.
+    in_shells -= _alternative_branch_walk(legs, [
+        _shell_leg_destructive_count(leg) if leg in destructive else 0 for leg in legs
+    ])[0]
     # Commands a substitution runs are counted from its body, as a program's are: legs
     # holding a substitution count as the larger of their own number and the body's.
     on_substitutions = sum(1 for leg in destructive if re.search(r"[$<>]\(|`", leg))
