@@ -2003,3 +2003,33 @@ def test_one_guarded_command_beside_a_substitution_is_not_compound(cmd):
     from shared.merge_guard_common import is_compound_destructive_command
 
     assert is_compound_destructive_command(cmd) is False
+
+
+# eval joins its words and runs them as a command line, so the guarded commands it
+# chains are counted as a -c string's are: two of them are two operations.
+EVAL_TWO = [
+    ("two merges", "eval 'gh pr " + "merge 5 && gh pr " + "merge 6'"),
+    ("merge and delete", "eval \"gh pr " + "merge 5; git branch -" + "D old\""),
+    ("in a printed substitution", 'echo "$(eval \'gh pr ' + 'merge 5 && gh pr ' + 'merge 6\')"'),
+]
+
+
+@pytest.mark.parametrize("label,cmd", EVAL_TWO, ids=[r[0] for r in EVAL_TWO])
+def test_an_eval_chaining_two_guarded_commands_is_compound(label, cmd):
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_compound_destructive_command(cmd) is True
+    assert not _runs_after_approval(cmd, APPROVAL_STYLES["inline"])
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("cmd", [
+    "eval 'gh pr " + "merge 5'",
+    "eval gh pr " + "merge 5",
+    "eval 'gh pr " + "merge 5 && echo done'",
+], ids=["quoted", "bare-words", "with-a-benign-tail"])
+def test_an_eval_running_one_guarded_command_runs_once_approved(cmd, style):
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_compound_destructive_command(cmd) is False
+    assert _runs_after_approval(cmd, style)

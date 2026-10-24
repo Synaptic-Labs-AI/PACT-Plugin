@@ -9619,8 +9619,12 @@ def _literal_loop_extra_passes(command: str) -> int:
 def _shell_leg_destructive_count(leg: str, depth: int = 0) -> int:
     """1 for a destructive leg, or for a POSIX shell leg the destructive legs its -c
     string chains, as the bare command counts them: `bash -c 'gh pr merge 5 && git
-    branch -D x'` counts 2, and a string whose only guarded text is a comment counts 0."""
+    branch -D x'` counts 2, and a string whose only guarded text is a comment counts 0.
+    An eval leg's words, joined as eval joins them, are counted the same way."""
     inner = _shell_c_argument(leg, strict=False) if depth < _MAX_WRAPPER_DEPTH else None
+    if inner is None and depth < _MAX_WRAPPER_DEPTH:
+        tokens = _shell_tokenize(_leg_command_word(leg) or "")
+        inner = " ".join(tokens[1:]) if tokens and tokens[0] == "eval" and len(tokens) > 1 else None
     if inner is None:
         return 1
     inner_legs = _split_into_legs(inner)
