@@ -1088,6 +1088,80 @@ def _state_check_dir(
     return True, path
 
 
+def _top_level_legs(command: str) -> tuple[list[str], list[str]] | None:
+    """The legs of `command` and the list operators between them (`;`, newline,
+    `&&`, `||`, `|`, a background `&`), outside quotes. None when the command opens
+    a group or a substitution (`(`, `{`, `$(`, a backtick) or leaves a quote open."""
+    legs, seps, start, i, quote = [], [], 0, 0, ""
+    while i < len(command):
+        ch = command[i]
+        if quote:
+            if ch == "\\" and quote == '"':
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch == "\\":
+            i += 2
+            continue
+        elif ch in "'\"":
+            quote = ch
+        elif ch in "(){}`":
+            return None
+        elif ch in ";\n|&":
+            pair = command[i:i + 2]
+            redirect = ch == "&" and (
+                command[i - 1:i] in (">", "<") or command[i + 1:i + 2] == ">"
+            )
+            if not redirect:
+                op = pair if pair in ("&&", "||") else ch
+                legs.append(command[start:i])
+                seps.append(op)
+                i += len(op)
+                start = i
+                continue
+        i += 1
+    if quote:
+        return None
+    legs.append(command[start:])
+    return legs, seps
+
+
+_DRY_RUN_RE = re.compile(r"(?<!\S)(?:--dry-run|-n)(?!\S)")
+
+
+def _run_succeeded_as_the_op(command: str, op_type: str, tool_response: object) -> bool:
+    """Whether this hook firing for `command` means its guarded op succeeded. The
+    hook runs on PostToolUse only, and a failed command reaches PostToolUseFailure,
+    so a response in the success shape (`stdout` text, not interrupted) means the
+    command exited 0. That is the op's own status when the op runs in the
+    foreground as the last leg, unnegated, no `||` before it could have skipped it,
+    and it is not a dry run. A shell's -c string is read the same way.
+    Any doubt is False."""
+    if not (
+        isinstance(tool_response, dict)
+        and isinstance(tool_response.get("stdout"), str)
+        and tool_response.get("interrupted") is False
+    ):
+        return False
+    try:
+        inner = shell_c_string(command)
+        if inner is not None:
+            return _run_succeeded_as_the_op(inner, op_type, tool_response)
+        split = _top_level_legs(command)
+        if split is None:
+            return False
+        legs, seps = split
+        while len(legs) > 1 and not legs[-1].strip() and seps[-1] in (";", "\n"):
+            legs.pop()
+            seps.pop()
+        if "||" in seps or legs[-1].lstrip().startswith("!") or _DRY_RUN_RE.search(legs[-1]):
+            return False
+        return detect_command_operation_type(legs[-1]) == op_type
+    except Exception:  # noqa: BLE001 - any doubt keeps the token
+        return False
+
+
 def _pr_state_confirms(command: str, op_type: str, frame_cwd: object = None) -> bool:
     """True only when GitHub reports the PR the command named in the state the
     command produces. Any doubt is False, which keeps the token (the TTL and
@@ -1456,7 +1530,11 @@ def main():
             # against the dict keys is the SSOT for which op_types Layer 1
             # observes.
             op_type = detect_command_operation_type(command)
-            if op_type not in LAYER1_SUCCESS_STDOUT_PATTERNS:
+            # An op with no row in the table (a remote ref delete) still retires
+            # when the run's own success shows the op succeeded.
+            if op_type not in LAYER1_SUCCESS_STDOUT_PATTERNS and not (
+                op_type and _run_succeeded_as_the_op(command, op_type, tool_response)
+            ):
                 print(_SUPPRESS_OUTPUT)
                 sys.exit(0)
 
@@ -1481,7 +1559,7 @@ def main():
             # implication is the load-bearing check for force-push
             # (fail-closed-on-no-signal — no retirement degrades to
             # TTL/MAX_USES safety net, NOT bypass).
-            expected_substring = LAYER1_SUCCESS_STDOUT_PATTERNS[op_type]
+            expected_substring = LAYER1_SUCCESS_STDOUT_PATTERNS.get(op_type)
             if expected_substring is not None and not _target_set_at_run_time(command):
                 stdout_text = tool_response.get("stdout", "")
                 if not isinstance(stdout_text, str):
@@ -1494,9 +1572,12 @@ def main():
                     confirmed = (
                         expected_substring.lower() in stdout_text.lower()
                         or _pr_state_confirms(command, op_type, input_data.get("cwd"))
+                        or _run_succeeded_as_the_op(command, op_type, tool_response)
                     )
                 else:
-                    confirmed = expected_substring in stdout_text
+                    confirmed = expected_substring in stdout_text or _run_succeeded_as_the_op(
+                        command, op_type, tool_response
+                    )
                 if not confirmed:
                     print(_SUPPRESS_OUTPUT)
                     sys.exit(0)

@@ -141,9 +141,10 @@ class TestStateConfirmsRetirement:
         assert _retired(rig)
 
     def test_close_reported_merged_keeps(self, rig):
-        """A close is confirmed by CLOSED only."""
-        cmd = f"{_CLOSE} 9"
-        _mint(rig, cmd)
+        """A close is confirmed by CLOSED only (piped, so the run's own status
+        cannot confirm it)."""
+        cmd = f"{_CLOSE} 9 2>&1 | tail -3"
+        _mint(rig, f"{_CLOSE} 9")
         _post(rig, cmd, "", state="MERGED")
         assert not _retired(rig)
 
@@ -171,14 +172,14 @@ class TestDoubtKeepsToken:
         assert check_merge_authorization(bare, token_dir=rig["config"]) is None
 
     def test_gh_unreachable_keeps(self, rig):
-        cmd = f"{_MERGE} 5 --squash"
-        _mint(rig, cmd)
+        cmd = f"{_MERGE} 5 --squash 2>&1 | tail -3"
+        _mint(rig, f"{_MERGE} 5 --squash")
         _post(rig, cmd, "", with_gh=False)
         assert not _retired(rig)
 
     def test_gh_hung_keeps_within_cap(self, rig):
-        cmd = f"{_MERGE} 5 --squash"
-        _mint(rig, cmd)
+        cmd = f"{_MERGE} 5 --squash 2>&1 | tail -3"
+        _mint(rig, f"{_MERGE} 5 --squash")
         elapsed = _post(rig, cmd, "", state="MERGED", sleep=20)
         assert elapsed < 15, elapsed
         assert not _retired(rig)
@@ -192,9 +193,30 @@ class TestDoubtKeepsToken:
     ])
     def test_target_not_a_session_repo_number_never_calls_gh(self, rig, cmd):
         _mint(rig, cmd)
-        _post(rig, cmd, "", state="MERGED")
+        _post(rig, cmd + " 2>&1 | tail -3", "", state="MERGED")
         assert _gh_calls(rig) == []
         assert not _retired(rig)
+
+    @pytest.mark.parametrize("cmd", [
+        f"{_MERGE} 5 -R other/repo",
+        f"{_MERGE} 5 --repo=other/repo --squash",
+        f"{_MERGE} https://github.com/o/r/pull/77 --squash",
+        f"{_MERGE} feature-x --squash",
+        f"GH_REPO=o/other {_MERGE} 5 --squash",
+        f"pushd {{repo}} && {_MERGE} 5 --squash",
+        f"cd ~/other && {_MERGE} 5 --squash",
+    ])
+    def test_an_unpiped_run_retires_on_its_own_success(self, rig, cmd):
+        """A failed command reaches PostToolUseFailure, which this hook is not
+        registered on, so this event says the merge, the command's last leg,
+        exited 0. The approval covers that one run, whatever the target."""
+        repo = rig["tmp"] / "repo"
+        repo.mkdir()
+        cmd = cmd.format(repo=repo)
+        _mint(rig, cmd)
+        _post(rig, cmd, "", state="OPEN")
+        assert _gh_calls(rig) == []
+        assert _retired(rig)
 
     def test_an_implicit_target_retires_on_its_run_without_calling_gh(self, rig):
         """The current branch is read when the command runs, so no PR state can say
@@ -279,7 +301,7 @@ class TestLiteralAbsoluteCd:
     def test_a_repo_env_outside_the_shell_c_string_is_doubt(self, rig):
         repo = rig["tmp"] / "repo"
         repo.mkdir()
-        cmd = f"GH_REPO=o/r bash -c 'cd {repo} && gh \"$@\"' _ pr " + "merge 1659 --squash"
+        cmd = f"GH_REPO=o/r bash -c 'cd {repo} && gh \"$@\" 2>&1 | tail -3' _ pr " + "merge 1659 --squash"
         _mint(rig, f"{_MERGE} 1659 --squash")
         _post(rig, cmd, "", state="MERGED")
         assert _gh_calls(rig) == []

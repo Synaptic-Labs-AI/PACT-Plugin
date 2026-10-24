@@ -145,8 +145,10 @@ class TestGhAnswerIsReadStrictly:
         pytest.param("MERGED\nCLOSED", 0, id="two-lines"),
     ])
     def test_anything_but_a_clean_merged_keeps_the_token(self, rig, state, rc):
-        cmd = f"{_MERGE} 5 --squash"
-        _mint(rig, cmd)
+        """Piped, so the run's exit status is tail's and only GitHub's answer can
+        confirm the merge."""
+        cmd = f"{_MERGE} 5 --squash 2>&1 | tail -3"
+        _mint(rig, f"{_MERGE} 5 --squash")
         _post(rig, cmd, _EMPTY, state=state, rc=rc)
         assert _gh_calls(rig) == ["pr view 5 --json state --jq .state"]
         assert not _retired(rig)
@@ -185,3 +187,56 @@ class TestRegistration:
             if "merge_guard_post.py" in hook.get("command", "")
         }
         assert events == {"PostToolUse"}, events
+
+
+class TestAnUnconfirmableTargetRetiresOnItsOwnSuccess:
+    """This hook sees only successful runs. When the guarded command is the
+    command's last leg, nothing pipes it, runs it in the background or could skip
+    it, and it is not a dry run, that success is the operation's, so one approval
+    covers one run whatever its target."""
+
+    @pytest.mark.parametrize("cmd", [
+        "git -C {repo} push origin --delete feat/x",
+        "git -C {repo} push --force origin main",
+        "echo y | git push origin --delete feat/x",
+    ])
+    def test_the_run_retires_the_token(self, rig, cmd):
+        repo = rig["tmp"] / "repo"
+        repo.mkdir()
+        cmd = cmd.format(repo=repo)
+        _mint(rig, cmd)
+        _post(rig, cmd, _EMPTY)
+        assert _retired(rig)
+
+    def test_an_exact_command_token_retires_on_its_run(self, rig):
+        """A branch delete prints its success line only on a terminal; the run's
+        own success retires the token without it."""
+        from shared.merge_guard_common import normalize_command_text
+
+        cmd = "bash -c 'git branch -" + "D feat/x'"
+        assert write_token({"operation_type": "branch-delete",
+                            "command_text": normalize_command_text(cmd)}, token_dir=rig["config"])
+        _post(rig, cmd, _EMPTY)
+        assert _retired(rig)
+
+    @pytest.mark.parametrize("cmd", [
+        "git push origin --delete feat/x 2>&1 | tail -3",
+        "git push origin --delete feat/x || true",
+        "true || git push origin --delete feat/x",
+        "! git push origin --delete feat/x",
+        "git push origin --delete feat/x &",
+        "git push origin --delete feat/x; echo done",
+        "git push origin --delete feat/x & wait",
+        "git push --dry-run origin --delete feat/x",
+        "git push -n origin --delete feat/x",
+    ])
+    def test_a_run_whose_status_is_not_the_operations_keeps_the_token(self, rig, cmd):
+        _mint(rig, "git push origin --delete feat/x")
+        _post(rig, cmd, _EMPTY)
+        assert not _retired(rig)
+
+    def test_a_response_not_in_the_success_shape_keeps_the_token(self, rig):
+        cmd = "git push origin --delete feat/x"
+        _mint(rig, cmd)
+        _post(rig, cmd, "Error: Exit code 1")
+        assert not _retired(rig)
