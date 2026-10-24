@@ -1079,8 +1079,14 @@ def _pr_state_confirms(command: str, op_type: str, frame_cwd: object = None) -> 
     command produces. Any doubt is False, which keeps the token (the TTL and
     MAX_USES bound still apply): a URL, branch or implicit target, an -R/--repo
     target, a directory change or repo env assignment other than one literal
-    absolute `cd`, an unreachable or slow gh, or any exception."""
+    absolute `cd`, an unreachable or slow gh, or any exception. A shell's -c string
+    is read as the command it runs, with its positional words in place, so a `cd`
+    inside it is followed the same way; a repo env assignment outside it still
+    doubts."""
     try:
+        inner = shell_c_string(command)
+        if inner is not None and not _REPO_REDIRECT_RE.search(command):
+            command = inner
         followable, cwd = _state_check_dir(command, frame_cwd)
         if not followable:
             return False

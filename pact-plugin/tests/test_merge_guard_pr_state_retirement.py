@@ -263,6 +263,28 @@ class TestLiteralAbsoluteCd:
         assert not _retired(rig)
         assert check_merge_authorization(bare, token_dir=rig["config"]) is None
 
+    @pytest.mark.parametrize("shape", [
+        "bash -c 'cd {repo} && gh \"$@\"' _ pr " + "merge 1659 --squash",
+        "bash -c 'cd {repo} && {merge} 1659 --squash'",
+    ])
+    def test_cd_inside_a_shell_c_string_is_followed(self, rig, shape):
+        repo = rig["tmp"] / "repo"
+        repo.mkdir()
+        cmd = shape.format(repo=repo, merge=_MERGE)
+        _mint(rig, f"{_MERGE} 1659 --squash")
+        _post(rig, cmd, "", state="MERGED")
+        assert _gh_cwds(rig) == [os.path.realpath(repo)]
+        assert _retired(rig)
+
+    def test_a_repo_env_outside_the_shell_c_string_is_doubt(self, rig):
+        repo = rig["tmp"] / "repo"
+        repo.mkdir()
+        cmd = f"GH_REPO=o/r bash -c 'cd {repo} && gh \"$@\"' _ pr " + "merge 1659 --squash"
+        _mint(rig, f"{_MERGE} 1659 --squash")
+        _post(rig, cmd, "", state="MERGED")
+        assert _gh_calls(rig) == []
+        assert not _retired(rig)
+
     def test_no_cd_runs_in_hook_dir(self, rig):
         cmd = f"{_MERGE} 1656 --squash"
         _mint(rig, cmd)
