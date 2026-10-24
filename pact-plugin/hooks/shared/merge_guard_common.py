@@ -190,6 +190,7 @@ import os
 import re
 import shlex
 import time
+import warnings
 from collections.abc import Sequence
 from pathlib import Path
 from typing import NamedTuple
@@ -3981,9 +3982,12 @@ class _PyReach:
 @functools.lru_cache(maxsize=64)
 def _python_reaching(code: str) -> "_PyReach | None":
     """A Python program's reaching definitions and call returns (see _PyReach), or None
-    when it does not parse."""
+    when it does not parse. Warnings the parse raises about the program (an invalid
+    escape in its strings) are the program's, not the hook's, so none reaches stderr."""
     try:
-        tree = ast.parse(code)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tree = ast.parse(code)
     except (SyntaxError, ValueError, MemoryError):
         return None
     return _PyReach(code, tree)

@@ -1626,3 +1626,39 @@ def test_star_args_given_two_merges_are_compound_and_mint_nothing():
 ], ids=["unread-star-argument", "reassigned-name", "only-printed"])
 def test_star_args_that_run_no_literal_merge_are_allowed(cmd):
     assert is_dangerous_command(cmd) is False
+
+
+# Parsing a Python program to read its names must not print the program's own
+# warnings (an invalid escape in a string) on the hook's stderr.
+INVALID_ESCAPE_PROGRAM = (
+    "python3 - <<'EOF'\nprint(\"a\\c\")\nimport subprocess\nc = \"ls\"\nsubprocess.run(c)\nEOF"
+)
+
+
+def test_the_pre_hook_prints_nothing_for_a_program_with_an_invalid_escape(tmp_path):
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    hooks = Path(__file__).resolve().parents[1] / "hooks"
+    (tmp_path / ".claude").mkdir()
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude")}
+    payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+               "tool_input": {"command": INVALID_ESCAPE_PROGRAM}}
+    r = subprocess.run([sys.executable, str(hooks / "merge_guard_pre.py")], input=json.dumps(payload),
+                       capture_output=True, text=True, env=env, cwd=str(tmp_path), timeout=60, check=False)
+    assert r.returncode == 0
+    assert r.stderr == ""
+
+
+def test_parsing_a_program_raises_no_warning_in_process():
+    import warnings
+
+    from shared.merge_guard_common import _python_reaching
+
+    code = INVALID_ESCAPE_PROGRAM.split("\n", 1)[1].rsplit("\nEOF", 1)[0] + "\n# fresh\n"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert _python_reaching(code) is not None
+    assert [w for w in caught if issubclass(w.category, SyntaxWarning)] == []
