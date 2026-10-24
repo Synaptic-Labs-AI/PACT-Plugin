@@ -1731,3 +1731,33 @@ def test_a_rest_parameter_given_two_merges_runs_on_no_approval(label):
 ], ids=["js-unread-spread", "perl-only-printed", "ruby-only-printed"])
 def test_a_rest_parameter_running_no_literal_merge_is_allowed(cmd):
     assert is_dangerous_command(cmd) is False
+
+
+# Only the shifts of @_ a perl sub runs at its own level before it first reads @_ take
+# arguments away from it: a later shift, a shift of another array or one in a nested
+# block does not hide what `system("gh", @_)` runs.
+PERL_SHIFT_DENY = [
+    ("shift of ARGV after the read", "perl -e 'sub gh { my $d = shift; system(\"gh\", @_); my $x = shift @ARGV; } "
+                                     "gh(\".\", \"pr\", \"merge\", \"5\");'"),
+    ("shift after the read, none before", "perl -e 'sub gh { system(\"gh\", @_); my $x = shift; } gh(\"pr\", \"merge\", \"5\");'"),
+    ("shift in a nested block", "perl -e 'sub gh { my $d = shift; if ($d) { my $y = shift; } system(\"gh\", @_); } "
+                                "gh(\".\", \"pr\", \"merge\", \"5\");'"),
+    ("shift of ARGV before the read", "perl -e 'sub gh { my $f = shift @ARGV; system(\"gh\", @_); } gh(\"pr\", \"merge\", \"5\");'"),
+    ("shift after copying the args", "perl -e 'sub gh { my @a = @_; my $y = shift; system(\"gh\", @a) } gh(\"pr\", \"merge\", \"5\");'"),
+    ("shift inside a nested sub", "perl -e 'sub gh { my $c = sub { shift }; system(\"gh\", @_) } gh(\"pr\", \"merge\", \"5\");'"),
+]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", PERL_SHIFT_DENY, ids=[r[0] for r in PERL_SHIFT_DENY])
+def test_a_perl_shift_that_leaves_the_merge_in_args_is_refused_then_runs(label, cmd, style):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("cmd", [
+    "perl -e 'sub gh { my $d = shift; system(\"gh\", @_); my $x = shift @ARGV; } gh(\".\", \"pr\", \"view\", \"5\");'",
+    "perl -e 'sub gh { my $m = shift; my $n = shift; system(\"gh\", \"pr\", @_); } gh(\"x\", \"merge\", \"view\", \"5\");'",
+], ids=["view-twin", "two-shifts-before-the-read"])
+def test_perl_shifts_before_the_read_still_take_their_arguments(cmd):
+    assert is_dangerous_command(cmd) is False

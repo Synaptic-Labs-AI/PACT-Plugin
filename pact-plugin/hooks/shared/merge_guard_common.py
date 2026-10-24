@@ -4481,10 +4481,29 @@ def _other_functions(code: str, head: str) -> dict:
         rest = next(((k, n) for k, (part, n) in enumerate(zip(raw, params))
                      if re.match(r"\s*\*(?!\*)|\s*\.\.\.\$", part)), (0, ""))
         if re.match(r"^perl", head):                     # `@_` holds what `shift` left
-            rest = (len(re.findall(r"\bshift\b", body)), "@_")
+            rest = (_perl_shifts_before_args(body), "@_")
         found.setdefault(m.group("name"), []).append(
             _NamedFunction(params, start, end, tuple(sorted(set(returns))), rest[1], rest[0]))
     return {name: fns[0] for name, fns in found.items() if len(fns) == 1}
+
+
+def _perl_shifts_before_args(body: str) -> int:
+    """How many elements of `@_` a perl sub body shifts off before it first reads `@_`:
+    a bare `shift` or `shift @_` at the body's own level. A shift inside a nested block
+    may not run, a shift of another array (`shift @ARGV`) leaves `@_` alone, and a shift
+    after the first read cannot change what that read saw."""
+    first = body.find("@_")
+    before = body if first < 0 else body[:first]
+    top = 1 if before.startswith("{") else 0
+    depth, count = 0, 0
+    for m in re.finditer(r"[{}]|\bshift\b(?!\s*\(?\s*@(?!_\b))", before):
+        if m.group() == "{":
+            depth += 1
+        elif m.group() == "}":
+            depth -= 1
+        elif depth == top:
+            count += 1
+    return count
 
 
 def _top_level_parts(text: str) -> list:
