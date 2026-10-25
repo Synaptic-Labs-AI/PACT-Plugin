@@ -1685,7 +1685,12 @@ CLOUD_SESSION_ENV = "CLAUDE_CODE_REMOTE"
 LEAD_ADDRESS_LOCAL = "team-lead"
 LEAD_ADDRESS_CLOUD = "main"
 LEAD_ADDRESSES = frozenset({LEAD_ADDRESS_LOCAL, LEAD_ADDRESS_CLOUD})
-_FULL_SESSION_ID_RE = re.compile(r"[a-f0-9-]+")
+# A cloud session id is a lowercase UUID (8-4-4-4-12 hex). The strict shape
+# rejects degenerate ids such as "-" or "--" that the [a-f0-9-] charset alone
+# admits; any other id falls back to generate_team_name.
+_FULL_SESSION_ID_RE = re.compile(
+    r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}"
+)
 
 
 def is_cloud_session() -> bool:
@@ -1696,8 +1701,8 @@ def is_cloud_session() -> bool:
 def cloud_team_default(session_id: str) -> str | None:
     """The resolver default for a cloud session: the full session id, which
     the platform uses as the team name there. None when not cloud, or when
-    the id is not a safe single [a-f0-9-] path component (caller falls back to
-    generate_team_name)."""
+    the id is not a lowercase UUID that is also a safe single path component
+    (caller falls back to generate_team_name)."""
     if not is_cloud_session():
         return None
     sid = str(session_id or "")
@@ -2198,6 +2203,19 @@ def _lookup_agent_in_team_config(
     return ""
 
 
+def _read_recorded_context(target: Path, session_id: str) -> dict:
+    """The context dict recorded at ``target`` when it belongs to
+    ``session_id``; {} when the file is absent, unreadable, malformed, not a
+    dict, or written for another session. Never raises."""
+    try:
+        recorded = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    if not isinstance(recorded, dict) or recorded.get("session_id") != session_id:
+        return {}
+    return recorded
+
+
 def build_context_cache(
     team_name: str,
     session_id: str,
@@ -2214,8 +2232,9 @@ def build_context_cache(
     builds the ``context`` dict, resolves the session-scoped ``target`` path,
     and populates the module-level ``_cache`` / ``_context_path`` so same-process
     readers (``get_session_dir()`` and ``append_event()``'s implicit
-    path-resolution) work immediately. Its one disk read: when ``process_key``
-    is None it reads ``target`` to carry forward the key recorded there.
+    path-resolution) work immediately. Its one disk read: when the caller
+    leaves ``process_key``, ``harness`` or ``lead_address`` unset, it reads
+    ``target`` once and carries the values recorded there for THIS session.
 
     Returns ``(target, context)`` so a caller can pass them straight to
     ``persist_context()``; returns ``None`` when the session-scoped path cannot
@@ -2289,33 +2308,35 @@ def build_context_cache(
         )
         return None
 
+    # ONE guarded read of the context already recorded at the target, shared
+    # by the three carries below (process_key, harness, lead_address), and
+    # skipped when the caller threads all three values. It is used only when
+    # it was written for THIS session: a file left by another session (or
+    # unreadable, malformed, or not a dict) carries nothing.
+    needs_carry = (
+        process_key is None or not harness or not _valid_lead_address(lead_address)
+    )
+    recorded = _read_recorded_context(target, session_id) if needs_carry else {}
+
     if process_key is None:
-        try:
-            recorded = json.loads(target.read_text(encoding="utf-8"))
-            if recorded.get("session_id") == session_id:
-                process_key = str(recorded.get("process_key", ""))
-        except (OSError, ValueError, TypeError, AttributeError):
-            process_key = ""
+        process_key = str(recorded.get("process_key", "")) if recorded else ""
     context["process_key"] = process_key or ""
 
     # HARNESS carry-forward (monotonic never-clear, the same discipline the
-    # process_key read above applies): when the caller threads NO harness
-    # value ("" — write_context, the realign healer, any rebuild-after-stamp
+    # process_key carry applies): when the caller threads NO harness value
+    # ("" — write_context, the realign healer, any rebuild-after-stamp
     # writer), a non-empty harness already recorded for THIS session is kept.
     # Without this, write_context (which rebuilds the context from parameters)
     # would blank the stamp on its next rewrite — violating the never-clear
     # contract set_harness_stamp declares. Callers that DO thread a value
     # (session_init, monotonic: saved-or-transcript) are unaffected — the
-    # carry only fires on the parameter's default.
+    # carry only fires on the parameter's default. Like the other two carries,
+    # it requires the recorded session_id to match, so a stamp is never
+    # inherited from a different session's file.
     if not harness:
-        try:
-            recorded_harness = json.loads(target.read_text(encoding="utf-8")).get(
-                "harness", ""
-            )
-            if isinstance(recorded_harness, str) and recorded_harness:
-                harness = recorded_harness
-        except (OSError, ValueError, TypeError, AttributeError):
-            pass
+        recorded_harness = recorded.get("harness", "")
+        if isinstance(recorded_harness, str) and recorded_harness:
+            harness = recorded_harness
     context["harness"] = harness if isinstance(harness, str) else ""
 
     # LEAD ADDRESS (#1666 item 1). An allowlisted value from the caller wins
@@ -2323,14 +2344,9 @@ def build_context_cache(
     # write_context rewriter -- keeps the value recorded for THIS session, and
     # with nothing valid recorded (the healer's absent file) derives it from
     # the environment, so a rewrite never blanks it.
-    resolved_address = _valid_lead_address(lead_address)
-    if not resolved_address:
-        try:
-            recorded = json.loads(target.read_text(encoding="utf-8"))
-            if recorded.get("session_id") == session_id:
-                resolved_address = _valid_lead_address(recorded.get("lead_address"))
-        except (OSError, ValueError, TypeError, AttributeError):
-            pass
+    resolved_address = _valid_lead_address(lead_address) or _valid_lead_address(
+        recorded.get("lead_address")
+    )
     context["lead_address"] = resolved_address or resolve_lead_address()
 
     # Populate the in-process cache UNCONDITIONALLY (Option A). The cache is the

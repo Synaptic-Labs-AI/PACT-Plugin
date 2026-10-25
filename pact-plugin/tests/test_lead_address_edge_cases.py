@@ -45,6 +45,7 @@ from fixtures.team_split import (
 )
 from dispatch_gate import PROMPT_MAX_LENGTH
 from test_lead_address import LEAD, SESSION_ID, _record_address
+from test_commands_structure import EXPECTED_SPAWN_LITERAL_COUNTS
 from test_lead_address_prose_pins import _all_spawn_literals
 
 SENTENCE = "wherever {lead_address} appears in spawn prompts and task text."
@@ -658,7 +659,7 @@ def test_spawn_sentence_census_by_raw_text():
                 assert text[m.end():].startswith(
                     " Send messages for your lead to `{lead_address}`."), (
                     path.name, m.start())
-    assert hits == 13
+    assert hits == sum(EXPECTED_SPAWN_LITERAL_COUNTS.values())
 
 
 def test_every_placeholder_declaration_line_names_lead_address():

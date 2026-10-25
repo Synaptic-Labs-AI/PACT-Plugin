@@ -342,7 +342,8 @@ def test_placeholder_declaration_present_in_both_carriers():
         text = (PLUGIN_ROOT / rel).read_text(encoding="utf-8")
         assert any(all(t in line for t in PLACEHOLDER_TOKENS) for line in text.splitlines()), (
             f"{rel} no longer declares the placeholder token set. Both carriers "
-            "must name all five tokens together; substitution is manual textual "
+            f"must name all {len(PLACEHOLDER_TOKENS)} tokens {PLACEHOLDER_TOKENS} "
+            "together; substitution is manual textual "
             "replacement and an agent reading only one file must still learn it."
         )
 

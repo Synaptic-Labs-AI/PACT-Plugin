@@ -1997,6 +1997,14 @@ def main():
         # session, "team-lead" locally. Recomputed on every SessionStart (not
         # carried), so a session moved from cloud to local reads team-lead
         # again. Harmless on the sentinel path: nothing persists there.
+        # Why the env here, while bootstrap_prompt_gate prefers the recorded
+        # value (pact_context.get_lead_address): this hook is the WRITER of
+        # the recorded value. SessionStart is where the harness is re-read,
+        # and recording the env-derived value here is what makes the record
+        # correct for every later reader. The prompt gate fires on later
+        # turns, so it reads that record and uses the env only when nothing
+        # valid is recorded. The two agree unless the env changes
+        # mid-session, and the next SessionStart corrects the record then.
         lead_address = resolve_lead_address()
 
         if not session_id_was_missing:

@@ -57,8 +57,13 @@ def _worst_case(literal: str) -> str:
     return _ANY_PLACEHOLDER.sub(_OTHER_PLACEHOLDER, text)
 
 
-def test_census_is_thirteen():
-    assert len(_all_spawn_literals()) == sum(EXPECTED_SPAWN_LITERAL_COUNTS.values()) == 13
+def test_census_matches_the_expected_counts():
+    """The extractor finds exactly the literals the per-file census expects
+    (the count comes from EXPECTED_SPAWN_LITERAL_COUNTS, not a restated
+    number), and the census is not empty."""
+    expected = sum(EXPECTED_SPAWN_LITERAL_COUNTS.values())
+    assert expected > 0
+    assert len(_all_spawn_literals()) == expected
 
 
 @pytest.mark.parametrize("stem,literal", _all_spawn_literals())
@@ -92,6 +97,76 @@ def test_the_rule_section_exists():
     # The section must sit before the Pre-Response Channel Check.
     assert skill.index("## Your Lead's Address") < skill.index(
         "## Pre-Response Channel Check")
+
+
+# B4 (#1671 review): the literal `SendMessage(to="team-lead", ...)` blocks
+# are correct in a cloud session only because the "Your Lead's Address" rule
+# redefines them, and that rule reaches a teammate only through the
+# pact-agent-teams preload. These pins tie the three together, so removing
+# the section, renaming its header, or dropping the preload fails here.
+_TO_TEAM_LEAD = re.compile(r'(?:SendMessage\(\s*|^\s*)to="team-lead"', re.MULTILINE)
+_RULE_HEADER = "## Your Lead's Address"
+
+
+def _frontmatter_skills(text: str) -> list[str]:
+    """Skill names listed under `skills:` in a markdown file's frontmatter."""
+    if not text.startswith("---\n"):
+        return []
+    front = text.split("\n---", 2)[0]
+    skills, in_block = [], False
+    for line in front.splitlines():
+        if line.startswith("skills:"):
+            in_block = True
+            continue
+        if in_block:
+            item = re.match(r"\s+-\s+(\S+)", line)
+            if not item:
+                break
+            skills.append(item.group(1).split(":")[-1])
+    return skills
+
+
+def _to_team_lead_sites():
+    sites = []
+    for sub in ("agents", "commands", "skills", "protocols"):
+        for path in sorted((PLUGIN_ROOT / sub).rglob("*.md")):
+            text = path.read_text(encoding="utf-8")
+            count = len(_TO_TEAM_LEAD.findall(text))
+            if count:
+                sites.append((path.relative_to(PLUGIN_ROOT).as_posix(), count))
+    return sites
+
+
+def test_to_team_lead_literals_sit_under_the_rule():
+    """Every literal to="team-lead" block is in teammate-read text (a skill,
+    a protocol, or a teammate agent body), never in the orchestrator or a
+    lead-run command, and the rule section that redefines them exists and
+    names the literal."""
+    sites = _to_team_lead_sites()
+    assert sites, "census found no to=\"team-lead\" literal; the pattern is stale"
+    for rel, _ in sites:
+        assert rel != "agents/pact-orchestrator.md", rel
+        assert not rel.startswith("commands/"), rel
+    skill = (PLUGIN_ROOT / "skills" / "pact-agent-teams" / "SKILL.md").read_text(
+        encoding="utf-8")
+    assert skill.count(f"\n{_RULE_HEADER}\n") == 1
+    section = skill.split(_RULE_HEADER, 1)[1].split("\n## ", 1)[0]
+    assert 'SendMessage(to="team-lead", ...)' in section
+
+
+def test_every_teammate_agent_preloads_the_rule():
+    """The rule reaches a teammate only through the skills: preload, so every
+    agent except the orchestrator (the lead itself) must list
+    pact-agent-teams."""
+    agents = sorted((PLUGIN_ROOT / "agents").glob("*.md"))
+    assert agents
+    missing = [
+        path.name for path in agents
+        if path.stem != "pact-orchestrator"
+        and "pact-agent-teams" not in _frontmatter_skills(
+            path.read_text(encoding="utf-8"))
+    ]
+    assert missing == []
 
 
 def test_task_b_template_lines_name_the_lead_address():
