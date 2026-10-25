@@ -6915,18 +6915,23 @@ def _rewrite_git_aliases_in(command: str, every: "list[_GitPlace] | None"):
             saved.append(places)
         words = _shell_tokenize(leg.strip().strip("() \t")) or []
         if words[:1] == ["cd"]:
-            target = words[1] if len(words) == 2 else None
-            if target is not None and "$" in target:
-                # A variable the command assigns a literal once, before the cd, is that literal.
-                target = re.sub(r"\$(?:\{(\w+)\}|(\w+))", lambda v: _assigned_literal(
-                    command, v.group(1) or v.group(2), last) or "$", target)
-            if target is not None and any(ch in target for ch in "$`*?["):
-                target = None
+            # A variable in the target reads each literal value the command may have given it
+            # before the cd; one it does not fix leaves the target unknown.
+            targets: list[str | None] = [words[1] if len(words) == 2 else None]
+            for var in re.finditer(r"\$(?:\{(\w+)\}|(\w+))", targets[0] or ""):
+                values = _assigned_literals(command, var.group(1) or var.group(2), last)
+                targets = list(dict.fromkeys(
+                    None if t is None or v is None else t.replace(var.group(0), v, 1)
+                    for t in targets for v in values))[:_MAX_GIT_PLACES]
+            known = [t for t in targets if t is not None and not any(ch in t for ch in "$`*?[")]
+            unknown = len(known) < len(targets)
             # `cd` moves logically, as the shell does: `a/../b` is `b`.
-            moved: list[_GitPlace] = [(os.path.normpath(os.path.join(cwd or _COMMAND_DIRECTORY or os.getcwd(),
-                                                    os.path.expanduser(target))), env)
-                     for cwd, env in places] if target is not None else [(None, env) for _, env in places]
-            certain = target is not None and after == "&&" and before in (None, ";", "&&", "\n")
+            moved: list[_GitPlace] = [
+                (os.path.normpath(os.path.join(cwd or _COMMAND_DIRECTORY or os.getcwd(), os.path.expanduser(t))), env)
+                for t in known for cwd, env in places]
+            if unknown:
+                moved += [(None, env) for _, env in places]
+            certain = len(known) == 1 and not unknown and after == "&&" and before in (None, ";", "&&", "\n")
             places = moved if certain else _with_places(places, moved)
         elif words and words[0] in ("export", "declare", "typeset", "readonly") or (
                 words and all(re.match(r"[A-Za-z_]\w*=", w) for w in words)):
@@ -7014,26 +7019,33 @@ def _assignment_is_conditional(command: str, start: int) -> bool:
     return not all(_LITERAL_ASSIGNMENTS_LEG_RE.fullmatch(raw[a:b]) for a, b in zip(starts, ends))
 
 
-def _literal_assignments(command: str, name: str) -> "list[re.Match] | None":
+def _literal_assignments(command: str, name: str, exported: bool = False) -> "list[re.Match] | None":
     """The literal assignments of `name` that are legs of their own in `command`, with the
-    value in group `v`; None when `name` is also assigned some other way."""
-    assignment = (r"(?:^|(?<=[;&|(\n]))[ \t]*" + name
+    value in group `v` (with `exported`, `export NAME=…` counts too); None when `name` is
+    also assigned some other way."""
+    assignment = (r"(?:^|(?<=[;&|(\n]))[ \t]*" + (r"(?:export[ \t]+)?" if exported else "") + name
                   + r"=(?P<v>'[^']*'|\"[^\"$`\\]*\"|[^\s;&|$`'\"\\()]*)(?=[ \t]*(?:$|[;&|\n]))")
     found = list(re.finditer(assignment, command))
     return found if len(found) == len(re.findall(r"(?<![\w$])" + name + r"=", command)) else None
 
 
-def _assigned_literal(command: str, name: str, before: int) -> "str | None":
-    """The value of `name` when `command` assigns it a literal exactly once, as a leg of its
-    own that always runs, before offset `before`; else None."""
-    found = _literal_assignments(command, name)
-    if not found or len(found) != 1 or found[0].end() > before:
-        return None
-    start = found[0].start()
-    if re.search(r"(?:\||\()[ \t]*$", command[:start]) or _assignment_is_conditional(command, start):
-        return None
-    value = found[0].group("v")
-    return value[1:-1] if value[:1] in ("'", '"') else value
+def _assigned_literals(command: str, name: str, before: int) -> "list[str | None]":
+    """The values `name` may hold at offset `before`, from its literal assignments (or
+    `export`s) in `command` before it: the last one that always runs, and each after it
+    that may not (behind a test, after `||`, in a pipeline or a subshell). None stands
+    for a value the command does not fix (no assignment that always runs, or `name` also
+    assigned some other way)."""
+    found = [a for a in _literal_assignments(command, name, exported=True) or [] if a.end() <= before]
+    if not found:
+        return [None]
+    maybe = [re.search(r"(?:\||\()[ \t]*$", command[:a.start()]) is not None
+             or _assignment_is_conditional(command, a.start()) for a in found]
+    first = max((k for k, may in enumerate(maybe) if not may), default=None)
+    values: list[str | None] = [None] if first is None else []
+    for a in found[first or 0:]:
+        value = a.group("v")
+        values.append(value[1:-1] if value[:1] in ("'", '"') else value)
+    return list(dict.fromkeys(values))
 
 
 def _rewrite_variable_evals(command: str) -> str:
