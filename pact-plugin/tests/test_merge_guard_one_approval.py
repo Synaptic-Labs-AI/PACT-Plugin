@@ -64,13 +64,14 @@ def _succeeded(command: str, root: Path) -> None:
     }, root)
 
 
+# An approval of a command whose target is a variable runs that command, not one that
+# assigns the variable first (`PR=6; gh pr merge "$PR"` merges another PR).
 RUN_TIME_TARGETS = {
     "pr-number-in-a-variable": (MERGE + '"$PR" --squash',
-                                "PR=5; " + MERGE + '"$PR" --squash', "PR=6; " + MERGE + '"$PR" --squash'),
+                                MERGE + '"$PR" --squash', "PR=6; " + MERGE + '"$PR" --squash'),
     "implicit-current-branch": (MERGE + "--squash",
                                 MERGE + "--squash", "git checkout feat/y && " + MERGE + "--squash"),
-    "branch-in-a-variable": (DELETE + '"$B"',
-                             "B=feat/x; " + DELETE + '"$B"', "B=feat/y; " + DELETE + '"$B"'),
+    "branch-in-a-variable": (DELETE + '"$B"', DELETE + '"$B"', "B=feat/y; " + DELETE + '"$B"'),
 }
 
 
@@ -87,6 +88,13 @@ class TestATargetSetAtRunTimeRunsOnce:
         _approve(approved, tmp_path)
         assert _runs(first, tmp_path)
         assert _runs(first, tmp_path)
+
+    @pytest.mark.parametrize("approved,first,second", [
+        RUN_TIME_TARGETS["pr-number-in-a-variable"], RUN_TIME_TARGETS["branch-in-a-variable"],
+    ], ids=["pr-number-in-a-variable", "branch-in-a-variable"])
+    def test_another_value_assigned_in_the_command_is_refused(self, approved, first, second, tmp_path):
+        _approve(approved, tmp_path)
+        assert not _runs(second, tmp_path)
 
 
 def _token(command: str) -> dict:

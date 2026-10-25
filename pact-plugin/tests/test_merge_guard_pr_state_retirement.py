@@ -474,6 +474,18 @@ class TestAnEvaldMergeFollowsTheMergeRule:
         _post(rig, cmd, "", state="OPEN")
         assert not any(call.startswith("pr view 6") for call in _gh_calls(rig))
 
+    @pytest.mark.parametrize("env,retires", [
+        pytest.param({"state": "OPEN"}, False, id="open"),
+        pytest.param({"state": "MERGED"}, True, id="merged"),
+        pytest.param({"state": "DRAFT"}, True, id="unreadable"),
+    ])
+    def test_a_pr_an_earlier_leg_assigns_follows_the_merge_rule(self, rig, env, retires):
+        cmd = "PR=5; " + _MERGE + " $PR --squash"
+        self._write_text(rig, cmd)
+        _post(rig, cmd, "", **env)
+        assert "pr view 5 --json state --jq .state" in _gh_calls(rig)
+        assert _retired(rig) is retires
+
     def test_a_pr_from_the_environment_keeps_the_run_time_rule(self, rig):
         cmd = 'eval "' + _MERGE + ' $PR --squash"'
         self._write_text(rig, cmd)

@@ -862,6 +862,37 @@ LITERAL_EVALS = {
 }
 
 
+ASSIGNED_TARGETS = {
+    "merge": ("PR=5; " + MERGE + "$PR --squash", "PR=6; " + MERGE + "$PR --squash"),
+    "quoted-merge": ("PR=5; " + MERGE + '"$PR" --squash', "PR=6; " + MERGE + '"$PR" --squash'),
+    "force-push": ("BR=feat/x; " + FORCE + "$BR", "BR=feat/y; " + FORCE + "$BR"),
+    "branch-delete": ("B=topic; git branch -" + "D $B", "B=other; git branch -" + "D $B"),
+    "environment-merge": (MERGE + '"$PR" --squash', "PR=6; " + MERGE + '"$PR" --squash'),
+    "environment-merge-prefix": (MERGE + "$PR --squash", "PR=6 " + MERGE + "$PR --squash"),
+    "environment-force-push": (FORCE + '"$BR"', "BR=main; " + FORCE + '"$BR"'),
+    "environment-branch-delete": ('git branch -' + 'D "$B"', 'B=main; git branch -' + 'D "$B"'),
+}
+
+
+class TestAVariableTargetBindsItsText:
+    """A target that is a shell variable (`gh pr merge "$PR"`, `PR=5; gh pr merge
+    $PR`) is bound by the command's text: the approval runs that command, and the
+    same command with another value assigned is refused."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("approved,other", ASSIGNED_TARGETS.values(), ids=ASSIGNED_TARGETS.keys())
+    def test_the_approved_command_runs_and_no_other(self, approved, other, style):
+        assert not _runs(None, approved)
+        ctx = _mint_styled(approved, style)
+        assert _runs(ctx, approved)
+        assert not _runs(ctx, other)
+
+
+    def test_an_assignment_that_leaves_the_target_keeps_the_target_binding(self):
+        ctx = _mint_styled("X=hi; " + MERGE + '5 --squash --body "$X"', APPROVAL_STYLES["inline"])
+        assert ctx is not None and ctx.get("pr_number") == "5" and "command_text" not in ctx
+
+
 class TestAnEvalOfALiteralCommandRuns:
     """An eval of a string the region reading locates nothing in (a close or a force
     push inside the quotes) binds its text, so the approved command runs and no

@@ -731,6 +731,24 @@ def _resolved_evals(command: str) -> str:
     return legs[0] + "".join(sep + leg for sep, leg in zip(seps, legs[1:]))
 
 
+def _merge_reading(command: str) -> str:
+    """`command` as the guard reads the merge it runs: an eval of literal values
+    resolved by _resolved_evals, otherwise the classifier's own rewrite (a literal
+    variable expanded), otherwise the command itself."""
+    resolved = _resolved_evals(command)
+    if resolved != command:
+        return resolved
+    return rewritten_executed_command(command) or command
+
+
+def _target_is_a_variable(ctx: dict) -> bool:
+    """Whether the region reading's target is a shell variable (`gh pr merge "$PR"`,
+    `PR=5; gh pr merge $PR`). The same text runs another target once the command
+    assigns the variable another value, so only the command's text can bind it."""
+    target = _target_value(ctx)
+    return isinstance(target, str) and "$" in target
+
+
 def _evald_target(span: str) -> str | None:
     """The target of the one guarded command `span` evals as a single string (`eval
     "gh pr close 5 --delete-branch"`, or a variable assigned it just before): its
@@ -855,6 +873,9 @@ def _exact_text_reading(span: str, located: str) -> dict | None:
         # (op, target) it can see; its text binds it, so the approval runs exactly
         # the command shown.
         or (not pairs and _evald_target(span) is not None)
+        # A variable target (`gh pr merge "$PR"`, `PR=5; gh pr merge $PR`) binds by
+        # text, so the command with another value assigned is not approved.
+        or _target_is_a_variable(ctx)
     ):
         return None
     return ctx
@@ -1437,9 +1458,9 @@ def _retire_exact_text_token(
             op, pr = ctx.get("operation_type"), ctx.get("pr_number")
             if op == "merge" and not (isinstance(pr, str) and pr.isascii() and pr.isdigit()):
                 # A merge bound by its text whose PR an earlier leg assigns a literal
-                # number (`PR=5; c="gh pr merge $PR"; eval "$c"`) follows the merge
-                # rule below, as the plain command does.
-                resolved = _resolved_evals(command)
+                # number (`PR=5; c="gh pr merge $PR"; eval "$c"`, `PR=5; gh pr merge
+                # $PR`) follows the merge rule below, as the plain command does.
+                resolved = _merge_reading(command)
                 named = extract_command_context(
                     _single_destructive_leg(resolved) or _single_detectable_leg(resolved) or resolved
                 ).get("pr_number")
@@ -1801,7 +1822,7 @@ def main():
             expected_substring = LAYER1_SUCCESS_STDOUT_PATTERNS.get(op_type)
             # A merge whose PR an earlier leg assigns a literal number is judged as
             # that number, so the merge rule below applies to it.
-            judged = _resolved_evals(command) if op_type == "merge" else command
+            judged = _merge_reading(command) if op_type == "merge" else command
             if expected_substring is not None and not _target_set_at_run_time(judged):
                 stdout_text = tool_response.get("stdout", "")
                 if not isinstance(stdout_text, str):
