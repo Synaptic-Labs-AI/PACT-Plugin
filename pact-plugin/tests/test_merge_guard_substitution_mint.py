@@ -821,3 +821,30 @@ class TestAFlaggedMergeInAShellCStringRuns:
         ctx = _mint_styled(approved, style)
         assert _runs(ctx, approved)
         assert not _runs(ctx, other)
+
+
+RUN_TIME_EVALS = {
+    "eval-merge": ('eval "' + MERGE + '$PR --squash"', 'eval "' + MERGE + '$Q --squash"'),
+    "assigned-eval-merge": ('c="' + MERGE + '$PR --squash"; eval "$c"', 'c="' + MERGE + '$Q --squash"; eval "$c"'),
+    "eval-force-push": ('eval "' + FORCE + '$BR"', 'eval "' + FORCE + '$X"'),
+    "assigned-eval-force-push": ('c="' + FORCE + '$BR"; eval "$c"', FORCE + "$BR"),
+    "eval-implicit-merge": ('eval "' + MERGE + '--squash"', MERGE + "--squash"),
+    "eval-implicit-force-push": ('eval "git push --' + 'force"', "git push --" + "force"),
+}
+
+
+class TestAnEvalWithARunTimeTargetRuns:
+    """An eval of a string that names its target by a run-time variable has no
+    (op, target) the region reading can see; its approval binds its text, as a
+    bare command with a run-time target is bound, so it runs and nothing else does."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("approved,other", RUN_TIME_EVALS.values(), ids=RUN_TIME_EVALS.keys())
+    def test_the_approved_command_runs_and_no_other(self, approved, other, style):
+        assert not _runs(None, approved)
+        ctx = _mint_styled(approved, style)
+        assert _runs(ctx, approved)
+        assert not _runs(ctx, other)
+
+    def test_an_eval_with_no_target_stays_unmintable(self):
+        assert _mint_styled('eval "git branch -' + 'D"', APPROVAL_STYLES["inline"]) is None

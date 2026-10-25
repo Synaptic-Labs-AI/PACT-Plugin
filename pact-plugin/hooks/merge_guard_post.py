@@ -31,6 +31,7 @@ import glob
 import json
 import os
 import re
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -666,6 +667,32 @@ def _guarded_substitution_count(text: str) -> int:
 _ALTERNATIVE_BRANCHES_OP = "choice between guarded commands"
 
 
+# `NAME="text"; eval "$NAME"`: an eval of a variable assigned the text just before.
+_ASSIGNED_EVAL_RE = re.compile(
+    r"""^\s*(?P<name>[A-Za-z_]\w*)=(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)')\s*;\s*"""
+    r"""eval\s+"?\$(?:\{(?P=name)\}|(?P=name)\b)"?\s*$"""
+)
+
+
+def _run_time_target_in_eval(span: str) -> bool:
+    """Whether `span` evals a single string (`eval "gh pr merge $PR"`, or a variable
+    assigned it just before) whose guarded command's target is read at run time: a
+    variable, or the current branch it leaves implicit."""
+    m = _ASSIGNED_EVAL_RE.match(span)
+    if m:
+        text = m.group("dq") if m.group("dq") is not None else m.group("sq")
+    else:
+        try:
+            words = shlex.split(span)
+        except ValueError:
+            return False
+        if len(words) != 2 or words[0] != "eval":
+            return False
+        text = words[1]
+    target = _target_value(extract_command_context(text))
+    return isinstance(target, str) and any(mark in target for mark in _RUN_TIME_TARGET_MARKS)
+
+
 def _inner_flags_differ(leg: str, inner: str) -> bool:
     """Whether the command a shell's -c string runs carries other flags than the outer
     reading of its leg sees (`bash -c 'gh pr merge 5 --admin'` reads no --admin from
@@ -696,6 +723,8 @@ def _exact_text_reading(span: str, located: str) -> dict | None:
         command it runs (`${N:-5}`, a substitution): bound by its text alone;
       - an if/elif/else or case whose branches run different guarded commands:
         bound by its text alone;
+      - an eval of a string whose target is read at run time (`eval "gh pr merge
+        $PR"`, `eval "gh pr merge --squash"`): bound by its text alone;
       - a command the classifier judges after a rewrite (an eval of readable text,
         a file written then run, a literal variable, a script given a whole
         command) where the region reading binds nothing, read from the command
@@ -761,6 +790,10 @@ def _exact_text_reading(span: str, located: str) -> dict | None:
         ctx["operation_type"] in _TEXT_BOUND_OPS
         or ctx.get("pr_node_id")
         or "graphql_mutation" in ctx
+        # An eval of a string whose target is read at run time (a variable, an
+        # implicit current branch) has no (op, target) the region reading can see;
+        # its text binds it, as a bare command with a run-time target is bound.
+        or (not pairs and _run_time_target_in_eval(span))
     ):
         return None
     return ctx
