@@ -2871,8 +2871,9 @@ def test_an_eval_of_a_variable_holding_two_merges_is_compound(cmd):
 @pytest.mark.parametrize("cmd,reads", [
     ("x='a  b'; eval \"$x\"", "x='a  b'; eval 'a  b'"),
     ("x='a  b'; eval $x", "x='a  b'; eval 'a b'"),
-    ("x='a b'; x='c'; eval \"$x\"", None),
-], ids=["quoted-keeps-the-value", "unquoted-splits-into-words", "assigned-twice"])
+    ("x='a b'; x='c'; eval \"$x\"", "x='a b'; x='c'; eval c"),
+    ("x='a b' || x='c'; eval \"$x\"", None),
+], ids=["quoted-keeps-the-value", "unquoted-splits-into-words", "reassigned-reads-the-last", "reassigned-after-or"])
 def test_an_eval_of_a_literal_variable_reads_its_value(cmd, reads):
     from shared.merge_guard_common import _rewrite_variable_evals
 
@@ -2978,3 +2979,24 @@ def test_a_cd_whose_target_is_not_literal_falls_back_to_the_payload_directory(al
 
     mgc.set_command_directory(str(alias_repos / "repoA"))
     assert is_dangerous_command("cd \"$X\" && git pf origin main") is True
+
+
+# An eval of a variable reassigned by plain literal legs runs the last value before it.
+@pytest.mark.parametrize("cmd", [
+    "c=\"gh pr " + "merge 5\"; c=\"gh pr view 5\"; eval \"$c\"",
+    "c=\"gh pr " + "merge 5\" && c=\"gh pr view 5\" && eval \"$c\"",
+], ids=["semicolons", "ands"])
+def test_an_eval_of_a_variable_last_assigned_a_view_is_allowed(cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("cmd", [
+    "c=\"gh pr view 5\"; c=\"gh pr " + "merge 5 --squash\"; eval \"$c\"",
+    "c=\"gh pr " + "merge 5 --squash\" || c=\"gh pr view 5\"; eval \"$c\"",
+    "c=\"gh pr " + "merge 5 --squash\"; if true; then c=\"gh pr view 5\"; fi; eval \"$c\"",
+    "c=\"gh pr " + "merge 5 --squash\"; eval \"$c\"; c=\"gh pr view 5\"",
+], ids=["last-is-the-merge", "view-after-or", "view-in-a-branch", "view-after-the-eval"])
+def test_an_eval_whose_value_may_be_a_merge_is_refused_then_runs(cmd, style):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)

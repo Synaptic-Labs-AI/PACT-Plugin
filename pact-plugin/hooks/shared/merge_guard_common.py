@@ -5940,7 +5940,18 @@ def _strip_non_executable_content(command: str) -> str:
     #    GUARD: Skip stripping if $VAR or ${VAR} appears elsewhere in the
     #    command, because bare expansion executes the value as a command
     #    (e.g., CMD="gh pr merge 42" && $CMD).
-    has_eval = _has_eval_or_source(command)
+    # An eval of a variable whose value the guard reads (_rewrite_variable_evals) runs that
+    # value, which is judged there: when every eval is one of those, the assignments are
+    # read as the expansions that remain after it. An eval of a literal string runs no
+    # variable's value at all.
+    evaluated = _rewrite_variable_evals(command)
+    evals_read = (evaluated != command and not _VARIABLE_EVAL_RE.search(evaluated)
+                  and len(re.findall(r"\b(?:eval|source)\b", command)) == len(_VARIABLE_EVAL_RE.findall(command)))
+    expansions = evaluated if evals_read else command
+    # An eval of a literal string (no expansion in it) cannot run a variable's value.
+    literal_evals = not re.search(r"\bsource\b", command) and not any(
+        re.search(r"[$`]", leg) for leg in re.findall(r"\beval\b[^;&|\n]*", command))
+    has_eval = _has_eval_or_source(command) and not evals_read and not literal_evals
     if not has_eval:
         # Double-quoted: guard against command substitution and bare expansion
         def _strip_var_dq(match: re.Match) -> str:
@@ -5950,7 +5961,7 @@ def _strip_non_executable_content(command: str) -> str:
             # ORDER LOAD-BEARING: a bare $VAR/${VAR} expansion word-splits and EXECUTES the
             # WHOLE value (the inert literal INCLUDED, not just a substitution), so an expanded
             # var preserves WHOLE — this MUST precede the substitution span-scope below.
-            if _var_is_expanded(var_name, command):
+            if _var_is_expanded(var_name, expansions):
                 return match.group(0)  # Preserve — $VAR executes the whole value
             if _has_command_substitution(match.group(0)):
                 # `git -c section.key=value` config injection is OUT OF SCOPE (#11): a git config
@@ -5984,7 +5995,7 @@ def _strip_non_executable_content(command: str) -> str:
             var_name = match.group(1)
             if _is_graphql_merge_query(match):
                 return match.group(0)  # Preserve — the gh api graphql request runs it
-            if _var_is_expanded(var_name, command):
+            if _var_is_expanded(var_name, expansions):
                 return match.group(0)  # Preserve — $VAR executes
             return var_name + "=STRIPPED"
 
@@ -6865,21 +6876,26 @@ _VARIABLE_EVAL_RE = re.compile(
 
 
 def _rewrite_variable_evals(command: str) -> str:
-    """`command` with each eval of a variable assigned once, earlier in the command and as
-    a leg of its own, a literal value replaced by the eval of that value: kept whole when
-    the expansion is quoted, split into words when it is not. Unchanged otherwise."""
+    """`command` with each eval of a variable assigned earlier in the command a literal value
+    replaced by the eval of that value: kept whole when the expansion is quoted, split into
+    words when it is not. Every assignment of the variable must be a leg of its own; when
+    there are several, each must follow `;`, `&&` or a newline (so each one runs) and the
+    last before the eval gives the value. Unchanged otherwise."""
     if "eval" not in command:
         return command
 
     def _value(m: re.Match) -> str:
         name = m.group("braced") or m.group("bare")
-        found = list(re.finditer(
-            r"(?:^|(?<=[;&|(\n]))[ \t]*" + name
-            + r"=(?P<v>'[^']*'|\"[^\"$`\\]*\"|[^\s;&|$`'\"\\()]*)(?=[ \t]*(?:$|[;&|\n]))",
-            command[:m.start()]))
-        if len(found) != 1 or len(re.findall(r"(?<![\w$])" + name + r"=", command)) != 1:
+        assignment = (r"(?:^|(?<=[;&|(\n]))[ \t]*" + name
+                      + r"=(?P<v>'[^']*'|\"[^\"$`\\]*\"|[^\s;&|$`'\"\\()]*)(?=[ \t]*(?:$|[;&|\n]))")
+        everywhere = list(re.finditer(assignment, command))
+        found = [a for a in everywhere if a.end() <= m.start()]
+        if not found or len(everywhere) != len(re.findall(r"(?<![\w$])" + name + r"=", command)):
             return m.group(0)
-        value = found[0].group("v")
+        # Several assignments: each must run in turn, so none may follow a pipe, `||` or `(`.
+        if len(everywhere) > 1 and any(re.search(r"(?:\||\()[ \t]*$", command[:a.start()]) for a in everywhere):
+            return m.group(0)
+        value = found[-1].group("v")
         value = value[1:-1] if value[:1] in ("'", '"') else value
         return "eval " + shlex.quote(value if m.group("q") else " ".join(value.split()))
 
