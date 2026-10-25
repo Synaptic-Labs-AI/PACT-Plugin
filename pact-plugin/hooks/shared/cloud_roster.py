@@ -88,8 +88,12 @@ meta.json consistently". ACCEPTED RESIDUALS (user decision Q1, design §7):
   - FORGED CONFIRM PRE-EMPTION (N2), a sub-case of the two-file forge.
     Confirms are first-wins per tool_use_id, so a teammate can append a
     confirm pairing its own id with a victim's tool_use_id before the
-    victim's first handback. The victim's bind is displaced and it resolves
-    meta-only (the pre-roster baseline). The forger usually resolves
+    victim's first handback. The victim's bind is displaced, so it is
+    unbound: with no meta.json name it resolves with no name, and with its
+    own meta.json name (a roster name it holds no binding to) it resolves
+    `unattributed` for the rest of the session. So a one-file roster write
+    can ERASE a victim's attribution, but it still cannot frame anyone: the
+    victim is never named after someone else. The forger usually resolves
     `unattributed`: its id is then confirmed for two spawns (its own and
     the victim's), which unbinds it (fold rule 5), and its own name is a
     roster name it no longer holds a binding to. Only a forger with no

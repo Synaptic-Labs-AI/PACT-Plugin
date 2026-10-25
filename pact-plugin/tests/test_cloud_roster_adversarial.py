@@ -134,10 +134,11 @@ def test_truncated_roster_names_no_one(cloud):
 def test_residual_forged_confirm_preempts_the_victims_bind(cloud):
     """ACCEPTED RESIDUAL (N2, design §0.4): confirms are first-wins per
     tool_use_id, so a forged confirm for the victim's spawn, appended before
-    the victim's first handback, displaces the victim's bind. The victim
-    degrades to meta-only (the pre-roster baseline); the forger is bound to
-    the victim's name but resolves unattributed unless it also edits its
-    meta.json (the accepted two-file forge)."""
+    the victim's first handback, displaces the victim's bind. The victim is
+    left unbound: with no meta.json name it has no name (this test), and with
+    its own meta name it is unattributed (see the victim-with-meta test). The
+    forger is bound to the victim's name but resolves unattributed unless it
+    also edits its meta.json (the accepted two-file forge)."""
     forger = "a" + "f" * 16
     write_roster(cloud, TEAM, [intent(TU1, "victim", "pact-backend-coder"),
                                confirm(TU1, forger),
@@ -154,7 +155,8 @@ def test_residual_forged_confirm_usually_unbinds_the_forger(cloud):
     """N2, the usual case: the forger was itself spawned and confirmed, so a
     second confirm for the victim's spawn binds its id twice and unbinds it
     (fold rule 5). Unbound, its own name is a roster name it holds no binding
-    to, so it names nobody (task #101); the victim degrades to meta-only."""
+    to, so it names nobody (task #101); the victim is left unbound, so it
+    has no name (no meta) or is unattributed (its own meta name)."""
     forger = "a" + "f" * 16
     write_roster(cloud, TEAM, [intent(TU1, "victim", "pact-backend-coder"),
                                intent(TU2, "forger", "pact-backend-coder"),
@@ -165,3 +167,18 @@ def test_residual_forged_confirm_usually_unbinds_the_forger(cloud):
         cloud_subagent_frame(cloud, "pact-backend-coder", agent_id=forger), TEAM)
     assert (forged.name, forged.source) == (None, SOURCE_UNATTRIBUTED)
     assert _actor(cloud).source == SOURCE_SUBAGENT_NO_META
+
+
+def test_residual_forged_confirm_erases_but_never_frames_a_victim_with_meta(cloud):
+    """N2 under rule b' (task #103): the victim's own meta.json name is a
+    roster name it no longer holds a binding to, so it resolves unattributed
+    for the rest of the session. A one-file roster write can ERASE the
+    victim's attribution; it cannot put anyone else's name on it."""
+    forger = "a" + "f" * 16
+    write_roster(cloud, TEAM, [intent(TU1, "victim", "pact-backend-coder"),
+                               confirm(TU1, forger),
+                               bind(TU1, SUBAGENT_ID, "pact-backend-coder")])
+    write_subagent_meta(cloud, SUBAGENT_ID, cloud_meta("victim", "pact-backend-coder"))
+    actor = _actor(cloud)
+    assert actor.name is None and actor.source == SOURCE_UNATTRIBUTED
+    assert actor.dispute is None
