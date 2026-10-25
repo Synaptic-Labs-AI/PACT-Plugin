@@ -888,6 +888,9 @@ def _exact_text_reading(span: str, located: str) -> dict | None:
         # An op on the current branch after a checkout or cd (`git checkout feat/y &&
         # gh pr merge --squash`) binds by text, so another branch's is not approved.
         or (_implicit_target(ctx) and target_changes_before_guarded_leg(span))
+        # A close of the current branch's PR (`gh pr close --delete-branch`) names
+        # no number the extractor reads, so no (op, target) binds it; its text does.
+        or (ctx["operation_type"] == "close" and _target_value(ctx) is None)
     ):
         return None
     return ctx

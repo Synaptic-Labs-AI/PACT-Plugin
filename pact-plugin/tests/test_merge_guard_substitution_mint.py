@@ -955,6 +955,35 @@ class TestAnImplicitTargetIsTheBranchItRunsOn:
         assert _runs(ctx, same)
 
 
+_CLOSE_PR = "gh pr " + "close "
+IMPLICIT_CLOSES = {
+    "delete-branch": (_CLOSE_PR + "--delete-branch", _CLOSE_PR + "6 --delete-branch"),
+    "short-flag": (_CLOSE_PR + "-d", "git checkout feat/y && " + _CLOSE_PR + "-d"),
+    "with-comment": (_CLOSE_PR + "--comment bye -d", _CLOSE_PR + "--comment bye -d --repo evil/x"),
+    "other-repo": (_CLOSE_PR + "--delete-branch --repo o/r", _CLOSE_PR + "--delete-branch --repo o/other"),
+}
+
+
+class TestAnImplicitCloseRuns:
+    """A close of the current branch's PR names no number, so no (op, target) binds
+    it; its text does: the approved close runs, and no other close does."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("approved,other", IMPLICIT_CLOSES.values(), ids=IMPLICIT_CLOSES.keys())
+    def test_the_approved_command_runs_and_no_other(self, approved, other, style):
+        assert not _runs(None, approved)
+        ctx = _mint_styled(approved, style)
+        assert _runs(ctx, approved)
+        assert not _runs(ctx, other)
+
+    def test_a_numbered_close_keeps_its_target_binding(self):
+        ctx = _mint_styled(_CLOSE_PR + "5 --delete-branch", APPROVAL_STYLES["inline"])
+        assert _runs(ctx, _CLOSE_PR + "--delete-branch 5")
+
+    def test_a_target_less_branch_delete_stays_unmintable(self):
+        assert _mint_styled("git branch -" + "D", APPROVAL_STYLES["inline"]) is None
+
+
 class TestAnEvalOfALiteralCommandRuns:
     """An eval of a string the region reading locates nothing in (a close or a force
     push inside the quotes) binds its text, so the approved command runs and no
