@@ -213,6 +213,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "paths", "pin_caps", "pin_credit", "pin_growth", "project_scope",
         "session_journal", "session_registry", "session_state", "staleness", "state_file",
         "task_utils",
+        "actor_identity", "cloud_roster",  # cloud roster (#1670): intentional_wait's owner fallback
     }),  # state_file reached via background_work's state-file reads and writes.
          # claude_md_drift and the CLAUDE.md modules it reads through (the
          # resolver in staleness, pin_caps, pin_growth, claude_md_manager and
@@ -225,6 +226,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "constants", "error_output", "intentional_wait",
         "pact_context", "paths", "session_journal",
         "session_registry", "session_state", "state_file", "task_utils",
+        "actor_identity", "cloud_roster",  # cloud roster (#1670): intentional_wait's owner fallback
     }),
     "track_files": frozenset({
         "subagent_meta",  # background_work's module-level edge
@@ -233,6 +235,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "error_output", "failure_cause", "git_helpers", "intentional_wait", "pact_context",
         "paths", "pin_caps", "pin_credit", "pin_growth", "project_scope", "session_journal",
         "session_registry", "session_state", "staleness", "state_file", "task_utils",
+        "actor_identity", "cloud_roster",  # cloud roster (#1670): intentional_wait's owner fallback
     }),  # regenerated from the live derivation, not hand-listed: the Layer 1
          # fold adds background_work + intentional_wait, and the rest were
          # already reached through the pin-staleness clear this hook carries.
@@ -260,6 +263,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "session_journal", "session_registry", "session_resume",
         "session_state", "stale_session", "staleness", "state_file", "symlinks",
         "intentional_wait", "task_utils", "teammate_mode",
+        "actor_identity", "cloud_roster",  # cloud roster (#1670): intentional_wait's owner fallback
     }),  # background_launch, background_work and intentional_wait reached via
          # claude_md_manager.gate_frame's function-level team read.
          # stale_session reached via session_resume's Current Session reader,
@@ -301,6 +305,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "intentional_wait", "pact_config", "pact_context", "paths", "pin_caps",
         "project_scope", "session_journal", "session_registry", "session_state",
         "stale_session", "staleness", "state_file", "task_utils",
+        "actor_identity", "cloud_roster",  # cloud roster (#1670): intentional_wait's owner fallback
     }),  # pact_config reached here via the *_MODE resolver edge
          # (dispatch_gate -> shared.pact_config.get_enum for
          # PACT_DISPATCH_INLINE_MISSION_MODE); pact_config is stdlib-only, so it
@@ -333,6 +338,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "task_utils", "teachback_schema", "tool_response", "variety_scorer",
         "background_launch", "background_work", "state_file",
         "actor_identity", "subagent_meta",
+        "cloud_roster",  # actor_identity's roster read (#1670)
     }),  # actor_identity reached via the self-completion rule's actor
          # resolution (#1666 item 4); subagent_meta is its module-level
          # edge (the registry-free frame and meta.json readers). Its own
@@ -369,6 +375,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "pact_context", "paths", "pin_caps", "project_scope", "session_journal",
         "session_registry", "session_resume", "session_state", "stale_session",
         "staleness", "state_file", "task_utils",
+        "actor_identity", "cloud_roster",  # cloud roster (#1670): intentional_wait's owner fallback
     }),  # background_launch, background_work, intentional_wait and task_utils
          # reached via claude_md_manager.gate_frame's function-level team read.
          # gh_helpers reached via session_resume's function-level
@@ -393,6 +400,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "background_launch", "background_work", "constants", "intentional_wait",
         "pact_context", "paths", "session_journal", "session_registry",
         "session_state", "state_file", "task_utils",
+        "actor_identity", "cloud_roster",  # cloud roster (#1670): intentional_wait's owner fallback
     }),
     "peer_inject": frozenset({
         "subagent_meta",  # background_work's module-level edge
@@ -400,6 +408,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "pact_context", "paths", "peer_context", "plugin_manifest",
         "session_journal", "session_registry", "session_state", "state_file",
         "task_utils",
+        "actor_identity", "cloud_roster",  # cloud roster (#1670): intentional_wait's owner fallback
     }),
     "validate_handoff": frozenset({
         "subagent_meta",  # background_work's module-level edge
@@ -407,6 +416,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "intentional_wait", "pact_context", "paths", "session_journal",
         "session_registry", "session_state", "state_file", "task_utils",
         "turn_end_gate", "turn_end_jobs",
+        "actor_identity", "cloud_roster",  # cloud roster (#1670): intentional_wait's owner fallback
     }),  # regenerated from the live derivation: the SubagentStop background
          # check imports turn_end_gate, which reaches background_work and
          # state_file and their helpers.
@@ -416,6 +426,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "pact_context", "paths", "session_journal", "session_registry",
         "session_state", "state_file", "task_utils", "turn_end_gate",
         "turn_end_jobs",
+        "actor_identity", "cloud_roster",  # cloud roster (#1670): intentional_wait's owner fallback
     }),  # regenerated from the live derivation.
     "merge_guard_pre": frozenset({
         "constants", "merge_guard_common", "pact_context", "paths",
@@ -433,7 +444,8 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "subagent_meta",  # background_work's module-level edge
         "background_launch", "background_work", "constants", "intentional_wait",
         "pact_context", "paths", "session_journal", "session_registry",
-        "session_state", "state_file", "task_utils"
+        "session_state", "state_file", "task_utils",
+        "actor_identity", "cloud_roster",  # cloud roster (#1670): intentional_wait's owner fallback
     }),
     "pin_caps_gate": frozenset({
         "subagent_meta",  # background_work's module-level edge
@@ -442,6 +454,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "failure_log", "git_helpers", "intentional_wait", "pact_context", "paths",
         "pin_caps", "pin_credit", "pin_growth", "project_scope", "session_journal",
         "session_registry", "session_state", "staleness", "state_file", "task_utils",
+        "actor_identity", "cloud_roster",  # cloud roster (#1670): intentional_wait's owner fallback
     }),  # from the live derivation: the team read (background_work), the
          # resolver (claude_md_manager, staleness), the edit simulation
          # (edit_simulation), the decision (pin_growth) and the chain credit
@@ -450,11 +463,17 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "agent_handoff_marker", "canonical_json", "constants", "intentional_wait",
         "pact_context", "paths", "session_journal", "session_registry",
         "session_state", "task_utils",
+        # cloud roster (#1670): intentional_wait's owner fallback and
+        # actor_identity's roster read.
+        "actor_identity", "cloud_roster", "state_file", "subagent_meta",
     }),  # from the live derivation.
     "handoff_ordering_gate": frozenset({
         "constants", "dispatch_helpers", "intentional_wait", "pact_config",
         "pact_context", "paths", "session_journal", "session_registry",
         "session_state", "task_utils", "teachback_schema", "variety_scorer",
+        # cloud roster (#1670): intentional_wait's owner fallback and
+        # actor_identity's roster read.
+        "actor_identity", "cloud_roster", "state_file", "subagent_meta",
     }),  # from the live derivation.
     "bootstrap_prompt_gate": frozenset({
         "subagent_meta",  # background_work's module-level edge
@@ -464,6 +483,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "marker_schema", "pact_context", "paths", "pin_caps", "project_scope",
         "session_journal", "session_registry", "session_resume", "session_state",
         "stale_session", "staleness", "state_file", "task_utils",
+        "actor_identity", "cloud_roster",  # cloud roster (#1670): intentional_wait's owner fallback
     }),  # from the live derivation: session_resume's check_resume_state and
          # session_start record, and what they import.
 }

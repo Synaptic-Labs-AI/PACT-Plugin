@@ -3,9 +3,13 @@ Location: pact-plugin/hooks/shared/state_file.py
 Summary: The one write path for PACT's small JSON state files: a sidecar lock,
          a temp file, fsync, and an atomic replace. Readers take no lock.
          Every read and write must stay inside a caller-supplied root.
+         Also a lock-free single-write append for an append-only log
+         (append_line).
 Used by: shared/background_work.py (the background-work registry and the
          unflagged idle counter), shared/claude_md_drift.py (the CLAUDE.md
-         drift records) and shared/pin_credit.py (the pin-cap credit record).
+         drift records), shared/pin_credit.py (the pin-cap credit record) and
+         shared/cloud_roster.py (the append-only cloud roster, via read_text
+         and append_line).
 
 UNIX-ONLY, like the rest of PACT. `fcntl` is imported with no fallback, so no
 state file is ever written without a lock.
@@ -48,6 +52,7 @@ DIR_MODE = 0o700
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
 _LOCK_FLAGS = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
 _TEMP_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+_APPEND_FLAGS = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
 _LOCK_POLL_SECONDS = 0.02
 
 
@@ -203,3 +208,27 @@ def locked_update(
 def write_text(path: Path, text: str, root: Path) -> None:
     """Replace a state file's whole content under its sidecar lock. Raises OSError."""
     locked_update(path, lambda _current: (text, True, None), root)
+
+
+def append_line(path: Path, data: bytes, root: Path, *, max_file_bytes: int) -> bool:
+    """Append `data` to an append-only log in ONE os.write, taking no lock.
+
+    For logs whose records are small and independent (each `data` one whole
+    line, well under PIPE_BUF), where O_APPEND makes each write land whole and
+    in one piece on a local filesystem, so concurrent writers need no lock.
+
+    Returns False, writing nothing, when the file already holds at least
+    `max_file_bytes` bytes or the write is short. Raises OSError when the
+    directory resolves outside `root`, when a symlink sits at the path
+    (O_NOFOLLOW), or on any I/O error. Never creates a directory: the file's
+    directory must already exist. A new file is created with mode 0o600.
+    """
+    path = Path(path)
+    target = _contained_directory(path, root) / path.name
+    fd = os.open(str(target), _APPEND_FLAGS, FILE_MODE)
+    try:
+        if os.fstat(fd).st_size >= max_file_bytes:
+            return False
+        return os.write(fd, data) == len(data)
+    finally:
+        os.close(fd)

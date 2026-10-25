@@ -3,7 +3,10 @@ Location: pact-plugin/hooks/shared/subagent_meta.py
 Summary: Registry-free readers of harness-written subagent data: the frame's
          `agent_id` shapes, team-config membership of a frame `agent_type`,
          and the platform's `agent-<agent_id>.meta.json`.
-Used by: shared/actor_identity.py (the self-completion actor resolver),
+         Also the display-name validator `valid_name`, shared by the actor
+         resolver and the cloud roster.
+Used by: shared/actor_identity.py (the self-completion actor resolver, which
+         re-exports `valid_name` and `MAX_NAME_CHARS`), shared/cloud_roster.py,
          shared/background_work.py and shared/turn_end_gate.py (which
          re-export these names for their existing callers), peer_inject.py.
 
@@ -42,6 +45,25 @@ SUBAGENT_ID = re.compile(r"a[0-9a-f]{16}")
 PLATFORM_AGENT_TYPES = frozenset(
     {"general-purpose", "Explore", "Plan", "statusline-setup"}
 )
+
+# A usable display name: 1-128 characters, no control characters. Lives here
+# rather than in actor_identity so cloud_roster can use it without importing
+# actor_identity, which imports cloud_roster.
+MAX_NAME_CHARS = 128
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def valid_name(value: Any) -> str | None:
+    """`value` when it is a usable display name (a str of 1-128 characters
+    with no control characters), else None. Shared with task_lifecycle_gate,
+    which applies it to the teammate-writable task owner before echoing it."""
+    if (
+        isinstance(value, str)
+        and 0 < len(value) <= MAX_NAME_CHARS
+        and not _CONTROL_CHARS.search(value)
+    ):
+        return value
+    return None
 
 
 def known_agent_types() -> frozenset:

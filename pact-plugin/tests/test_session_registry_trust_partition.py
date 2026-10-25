@@ -44,8 +44,13 @@ HOOKS_DIR = Path(__file__).parent.parent / "hooks"
 # dispatch_helpers hosts the dispatch-gate ownership predicates.
 # shared/subagent_meta.py hosts the frame-shape, membership and meta.json
 # readers that actor_identity uses, so it is held to the same bans.
+# shared/cloud_roster.py hosts the cloud roster that actor_identity and the
+# owner-type exemption read, and roster_writer.py writes its bind/confirm
+# records from harness frames; both are held to the same bans (#1670).
 _AUTHORITY_FILES = (
+    "roster_writer.py",
     "shared/actor_identity.py",
+    "shared/cloud_roster.py",
     "shared/dispatch_helpers.py",
     "shared/subagent_meta.py",
     "task_lifecycle_gate.py",
@@ -80,7 +85,9 @@ _STRICT_IDENTITY_HELPERS = (
     "teammate_identity",
 )
 _STRICT_AUTHORITY_CALLS = {
+    "roster_writer.py": _STRICT_IDENTITY_HELPERS,
     "shared/actor_identity.py": _STRICT_IDENTITY_HELPERS,
+    "shared/cloud_roster.py": _STRICT_IDENTITY_HELPERS,
     "shared/subagent_meta.py": _STRICT_IDENTITY_HELPERS,
 }
 
@@ -92,7 +99,19 @@ _STRICT_AUTHORITY_CALLS = {
 # import of background_work). Everything they need from there lives in the
 # registry-free shared/subagent_meta.py.
 _REGISTRY_REACHING_MODULES = ("background_work", "turn_end_gate")
-_MODULE_BANNED_FILES = ("shared/actor_identity.py", "shared/subagent_meta.py")
+_MODULE_BANNED_FILES = (
+    "roster_writer.py",
+    "shared/actor_identity.py",
+    "shared/cloud_roster.py",
+    "shared/subagent_meta.py",
+)
+
+# The ONLY hook modules that may WRITE the cloud roster (call
+# cloud_roster.append_record): dispatch_gate (the lead's `intent`, after its
+# decision) and roster_writer (the harness-frame `bind` / `confirm`). Every
+# reader trusts these records as lead-side, so a new writer anywhere else
+# would let a teammate-reachable code path mint them (#1670, design §5.1).
+_ROSTER_APPEND_CALLERS = frozenset({"dispatch_gate.py", "roster_writer.py"})
 
 
 def _module_imports(tree: ast.AST, modules) -> list[str]:
@@ -820,4 +839,61 @@ class TestRealTmuxRegisterPreMergeGatePlan:
         raise NotImplementedError(
             "execute the TURNKEY PRE-MERGE RUNBOOK (class docstring) under a live "
             "tmux teammateMode flip"
+        )
+
+
+def _calls_cloud_roster_append(tree: ast.AST) -> bool:
+    """True iff the module calls `cloud_roster.append_record(...)` (attribute
+    form) or a bare `append_record` imported from cloud_roster."""
+    imported_bare = any(
+        isinstance(node, ast.ImportFrom)
+        and (node.module or "").split(".")[-1] == "cloud_roster"
+        and any(a.name == "append_record" for a in node.names)
+        for node in ast.walk(tree)
+    )
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr == "append_record"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "cloud_roster"
+        ):
+            return True
+        if imported_bare and isinstance(func, ast.Name) and func.id == "append_record":
+            return True
+    return False
+
+
+class TestCloudRosterWriterSet:
+    """Only dispatch_gate and roster_writer write the cloud roster (#1670)."""
+
+    def test_only_sanctioned_modules_call_cloud_roster_append(self):
+        callers = set()
+        for path in HOOKS_DIR.rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            rel = path.relative_to(HOOKS_DIR).as_posix()
+            if rel == "shared/cloud_roster.py":
+                continue
+            if _calls_cloud_roster_append(_parse(path)):
+                callers.add(rel)
+        assert callers == _ROSTER_APPEND_CALLERS, (
+            f"cloud_roster.append_record callers changed: {sorted(callers)}. Readers trust "
+            "roster records as lead-side; add a writer only with a security review."
+        )
+
+    @pytest.mark.parametrize("src", [
+        "from shared import cloud_roster\ncloud_roster.append_record('t', {})\n",
+        "from shared.cloud_roster import append_record\nappend_record('t', {})\n",
+        "def f():\n    from . import cloud_roster\n    cloud_roster.append_record('t', {})\n",
+    ])
+    def test_append_detector_fires(self, src):
+        assert _calls_cloud_roster_append(ast.parse(src))
+
+    def test_append_detector_ignores_list_append(self):
+        assert not _calls_cloud_roster_append(
+            ast.parse("x = []\nx.append(1)\nx.append_record(2)\n")
         )

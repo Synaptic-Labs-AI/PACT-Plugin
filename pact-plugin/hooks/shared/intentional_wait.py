@@ -33,20 +33,26 @@ Public surface:
   is_self_complete_exempt. Resolution is via team-config lookup
   (member.agentType), NOT owner name — secretaries spawned under any
   name (e.g. session-secretary) reach the carve-out as long as their
-  agentType is in this set.
+  agentType is in this set. With no team config (cloud), the lookup
+  falls back to the cloud roster's lead-written spawn records
+  (shared/cloud_roster.py): an owner name is exempt when every spawn
+  recorded under it has an exempt, unshadowed type.
 - TEACHBACK_EXEMPT_AGENT_TYPES — agentType tokens whose owners are
   exempt from the teachback-gated dispatch pattern (no Task A
   teachback gate; single-task dispatch). Consumed by
   task_lifecycle_gate.work_addblockedby_missing via is_teachback_exempt.
-  Same team-config agentType lookup as the prior constant.
+  Same team-config agentType lookup, and the same cloud roster fallback,
+  as the prior constant.
 - canonical_since() — ISO-8601 UTC timestamp helper for the `since` field.
 - validate_wait(wait_metadata) — True iff the flag is well-formed.
 - wait_stale(wait_metadata) — True iff the flag has aged past threshold.
 - is_self_complete_exempt(task, team_name="", teams_dir=None, *,
-  actor_agent_type=None, actor_name=None) — True iff the task is exempt
-  from the team-lead-only-completion rule: by the owner's team-config
-  agentType (surface 1), by the completing actor's harness-derived type
-  where no team config exists (surface 1b, cloud), or by the signal-task
+  actor_agent_type=None, actor_name=<not given>) — True iff the task is
+  exempt from the team-lead-only-completion rule: by the owner's
+  team-config agentType, or in the cloud the cloud roster's record of it
+  (surface 1; the roster leg answers task-level calls only), by the
+  completing actor's harness-derived type where no team config exists
+  (surface 1b, cloud), or by the signal-task
   pattern (surface 2). It answers two questions. Without the actor
   keywords it is TASK-level ("is this task exempt?"), which is how
   task_claim_gate and handoff_ordering_gate call it. With them it is
@@ -54,7 +60,9 @@ Public surface:
   task_lifecycle_gate calls it: surfaces 1 and 1b then also require a
   resolved actor name to equal the owner.
 - is_teachback_exempt(owner, team_name="", teams_dir=None) — True iff
-  the owner's team-config agentType is in TEACHBACK_EXEMPT_AGENT_TYPES.
+  the owner's team-config agentType (or, with no team config, every type
+  the cloud roster records for that name) is in
+  TEACHBACK_EXEMPT_AGENT_TYPES.
   Consumed by task_lifecycle_gate.work_addblockedby_missing.
 """
 
@@ -144,9 +152,18 @@ def _is_exempt_agent_type(
     owner: str,
     team_name: str,
     teams_dir: str | None = None,
+    *,
+    cloud_roster_leg: bool = True,
 ) -> bool:
     """Return True iff the team-config member matching `owner` has an
     agentType in SELF_COMPLETE_EXEMPT_AGENT_TYPES.
+
+    CLOUD LEG (no team config): when `teams/<team>/config.json` does NOT
+    exist, `owner` is looked up in the cloud roster's lead-written intent
+    records instead (`_cloud_owner_has_exempt_type`). Reached only when the
+    config is absent, never when it exists but lacks the member, so local
+    behaviour is unchanged. `cloud_roster_leg=False` skips it (the
+    completion-level call in is_self_complete_exempt, see there).
 
     Fail-closed: returns False on every error path (empty owner, empty
     team_name, missing/malformed config, member not found, missing or
@@ -188,7 +205,9 @@ def _is_exempt_agent_type(
                 isinstance(agent_type, str)
                 and agent_type in SELF_COMPLETE_EXEMPT_AGENT_TYPES
             )
-    return False
+    return cloud_roster_leg and _cloud_owner_has_exempt_type(
+        owner, team_name, teams_dir, SELF_COMPLETE_EXEMPT_AGENT_TYPES
+    )
 
 
 def _is_teachback_exempt_agent_type(
@@ -209,6 +228,9 @@ def _is_teachback_exempt_agent_type(
     on every error path. Conservative posture — a non-exempt owner
     falsely exempted via a corrupt config would skip the teachback
     round-trip the team-lead might genuinely have wanted.
+
+    Same CLOUD LEG as `_is_exempt_agent_type` (no team config: the cloud
+    roster's lead-written intents), keyed on TEACHBACK_EXEMPT_AGENT_TYPES.
 
     Consumed by `task_lifecycle_gate.evaluate_lifecycle` via the public
     `is_teachback_exempt` predicate.
@@ -232,7 +254,56 @@ def _is_teachback_exempt_agent_type(
                 isinstance(agent_type, str)
                 and agent_type in TEACHBACK_EXEMPT_AGENT_TYPES
             )
-    return False
+    return _cloud_owner_has_exempt_type(
+        owner, team_name, teams_dir, TEACHBACK_EXEMPT_AGENT_TYPES
+    )
+
+
+def _cloud_owner_has_exempt_type(
+    owner: str,
+    team_name: str,
+    teams_dir: str | None,
+    exempt_types: frozenset,
+) -> bool:
+    """Cloud leg of the owner-type lookups: True iff the team has NO
+    config.json, the cloud roster records at least one spawn named `owner`,
+    and EVERY spawn recorded under that name has a type in `exempt_types`.
+
+    The records are `intent`s that dispatch_gate writes from the lead's own
+    Agent call, after a non-DENY decision (shared/cloud_roster.py).
+      - UNANIMITY: if the name was ever spawned with a non-exempt type, the
+        owner string cannot say which spawn it means, so the answer is False
+        (a True only suppresses checks; fail closed).
+      - SHADOW CHECK: each recorded type spelling must resolve, through
+        actor_identity.typed_without_frame, to an exempt type. A bare
+        `pact-secretary` that a project or user agent definition shadows
+        resolves to None and is not exempt.
+
+    ACCEPTED RESIDUAL (design docs/architecture/cloud-roster.md §7): the
+    roster is a file the same OS user can write, so a forged intent for a
+    fresh name can make that owner exempt. That only suppresses a nudge, a
+    warn or the dispatch-variety deny; the same user can already edit the
+    task JSON directly.
+
+    Lazy imports keep the importers of this module from loading the roster
+    on the local path. Never raises; False on any error.
+    """
+    try:
+        from shared import cloud_roster
+
+        if not cloud_roster.applies(team_name, teams_dir):
+            return False
+        roster = cloud_roster.load_roster(team_name, teams_dir)
+        if roster is None:
+            return False
+        spellings = {i.type for i in roster.intents.values() if i.name == owner}
+        if not spellings:
+            return False
+        from shared.actor_identity import typed_without_frame
+
+        return all(typed_without_frame(t) in exempt_types for t in spellings)
+    except Exception:  # noqa: BLE001 — fail closed: never silently exempt
+        return False
 
 
 def is_teachback_exempt(
@@ -345,13 +416,20 @@ def wait_stale(
     return age_minutes >= threshold_minutes
 
 
+# Default of is_self_complete_exempt's `actor_name`: "not given" (a
+# task-level call), as distinct from an explicit None ("the actor's name is
+# unresolved", a completion-level call). Only the cloud roster leg of surface
+# 1 reads the difference.
+_ACTOR_NAME_NOT_GIVEN: Any = object()
+
+
 def is_self_complete_exempt(
     task: Any,
     team_name: str = "",
     teams_dir: str | None = None,
     *,
     actor_agent_type: str | None = None,
-    actor_name: str | None = None,
+    actor_name: Any = _ACTOR_NAME_NOT_GIVEN,
 ) -> bool:
     """
     Return True iff this task is exempt from the team-lead-only-completion rule.
@@ -367,6 +445,14 @@ def is_self_complete_exempt(
        surface short-circuits to False (fail-closed). When `actor_name` is
        given (not None), surface 1 also requires `actor_name == task.owner`,
        so a teammate cannot borrow an exempt owner by reassigning the task.
+       Surface 1 has a CLOUD LEG: with no team config, the owner is looked
+       up in the cloud roster's lead-written intent records (see
+       `_cloud_owner_has_exempt_type`). It answers TASK-level calls only
+       (no `actor_name` passed: task_claim_gate, handoff_ordering_gate). A
+       COMPLETION-level call (`actor_name` passed, even as None) skips it:
+       there the owner's roster type says nothing about the ACTOR, whose
+       name may come from its own forgeable meta.json, and surface 1b
+       already covers a real cloud secretary from its harness frame type.
        1b. By the completing ACTOR's harness-derived type, for where no team
        config exists (cloud): `actor_agent_type` is in
        SELF_COMPLETE_EXEMPT_AGENT_TYPES AND (`actor_name` is None OR
@@ -414,10 +500,19 @@ def is_self_complete_exempt(
     definition shadows (a project or user agent named `pact-secretary`),
     see shared/actor_identity.py.
 
+    The cloud leg of surface 1 trusts the cloud roster's `intent` records,
+    which only dispatch_gate writes, from the LEAD's own Agent call and after
+    a non-DENY decision. Those are lead-written, but they sit in a file the
+    teammate's OS user can write: a forged intent for a fresh owner name can
+    make that owner exempt at task level (an accepted residual, see
+    `_cloud_owner_has_exempt_type`). Unanimity over every intent for the name
+    and the shadow check bound it otherwise.
+
     ACCEPTED RESIDUAL: an exempt-type actor whose name is unresolved (any
     source: meta.json missing or unreadable, no `name` in it, a name that
-    fails the 1-128 character / no-control-character rule, or a frame-only
-    resolution) is exempt even when completing another owner's task.
+    fails the 1-128 character / no-control-character rule, a frame-only
+    resolution, or an `unattributed` cloud actor whose roster and meta.json
+    names disagree) is exempt even when completing another owner's task.
 
     Runtime consumers: task_lifecycle_gate (the self_completion /
     non_lead_completion advisories), task_claim_gate (claim nudges and the
@@ -440,8 +535,10 @@ def is_self_complete_exempt(
                    TYPE (keyword-only; None disables 1b).
         actor_name: Surfaces 1 and 1b — the completing actor's resolved name,
                    or None when unresolved (keyword-only). When set, it must
-                   equal task.owner for surface 1 or 1b to exempt. Surface 2
-                   never reads it.
+                   equal task.owner for surface 1 or 1b to exempt. Passing it
+                   at all (None included) makes the call completion-level,
+                   which skips surface 1's cloud roster leg. Surface 2 never
+                   reads it.
     """
     if not isinstance(task, dict):
         return False
@@ -455,10 +552,15 @@ def is_self_complete_exempt(
     # (otherwise a teammate could set owner="secretary" and complete the
     # task under the secretary's exemption).
     owner = task.get("owner")
+    task_level = actor_name is _ACTOR_NAME_NOT_GIVEN
+    if task_level:
+        actor_name = None
     if (
         isinstance(owner, str)
         and (actor_name is None or actor_name == owner)
-        and _is_exempt_agent_type(owner, team_name, teams_dir)
+        and _is_exempt_agent_type(
+            owner, team_name, teams_dir, cloud_roster_leg=task_level
+        )
     ):
         return True
 

@@ -34,6 +34,11 @@ patterns) so credentials accidentally pasted into a prompt never persist
 to disk; the in-memory ``permissionDecisionReason`` keeps the verbatim
 prompt-fragment for the user-facing error.
 
+Cloud roster (no team config.json): after the decision is journaled, an
+admitted (non-DENY) named spawn on the lead's frame also appends an
+``intent`` record (tool_use_id, name, type) to shared/cloud_roster.py's
+roster. It is a best-effort sink that cannot change the decision or output.
+
 Configuration:
   ``PACT_DISPATCH_INLINE_MISSION_MODE`` env-var (default ``"warn"``)
   controls the inline-mission heuristic disposition (the heuristic that
@@ -103,6 +108,7 @@ try:
     from shared.task_utils import resolve_task_dir
     from shared.paths import get_claude_config_dir
     from shared.stale_session import detect_stale_session_block
+    from shared import cloud_roster, subagent_meta
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_deny("module imports", _module_load_error)
 
@@ -909,6 +915,45 @@ def _team_alignment_diagnosis() -> str:
         return ""
 
 
+def _record_roster_intent(decision: str, tool_input: dict, input_data: dict) -> None:
+    """Cloud only: append the roster `intent` for an admitted lead spawn.
+
+    Best-effort sink, like ``_journal_decision``: it runs after the decision
+    is made and journaled, writes only to the roster file, and swallows every
+    error, so it can change neither the decision nor any emitted byte.
+
+    Written only when the decision is not DENY (a refused spawn must leave no
+    intent that the owner-to-type exemption lookup could read), the frame is
+    the lead's (a teammate's spawn is not a lead-written record), the team has
+    no config.json (``cloud_roster.applies``), and the call carries a usable
+    ``name`` and ``subagent_type``. The type is stored in the spelling the
+    lead used. See shared/cloud_roster.py and
+    docs/architecture/cloud-roster.md §3.3.
+    """
+    try:
+        if decision == "DENY" or not pact_context.is_lead(input_data):
+            return
+        tool_use_id = input_data.get("tool_use_id")
+        if not (isinstance(tool_use_id, str)
+                and cloud_roster.TOOL_USE_ID.fullmatch(tool_use_id)):
+            return
+        name = subagent_meta.valid_name(tool_input.get("name"))
+        agent_type = tool_input.get("subagent_type")
+        if name is None or not (isinstance(agent_type, str)
+                                and cloud_roster.TYPE_VALUE.fullmatch(agent_type)):
+            return
+        team = pact_context.get_team_name()
+        if not cloud_roster.applies(team):
+            return
+        cloud_roster.append_record(team, {
+            "k": cloud_roster.KIND_INTENT, "tu": tool_use_id,
+            "name": name, "type": agent_type,
+        })
+    except Exception:
+        # Best-effort; the gate decision and output stand regardless.
+        pass
+
+
 def main() -> None:
     try:
         input_data = json.load(sys.stdin)
@@ -942,6 +987,7 @@ def main() -> None:
         _emit_load_failure_deny("runtime", e)
 
     _journal_decision(decision, reason, rule, tool_input)
+    _record_roster_intent(decision, tool_input, input_data)
 
     if decision == "ALLOW":
         print(_SUPPRESS_OUTPUT)

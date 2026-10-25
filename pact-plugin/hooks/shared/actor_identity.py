@@ -3,25 +3,45 @@ Location: pact-plugin/hooks/shared/actor_identity.py
 Summary: Resolve WHO made a hook frame's tool call (role, name, type) from
          harness-written data only.
 Used by: task_lifecycle_gate.py (the self-completion rule and the
-         lifecycle_decision journal event) and task_claim_gate.py (the
-         exemption check on the actor's own tasks).
+         lifecycle_decision journal event), task_claim_gate.py (its cloud
+         branch names the actor from a roster-backed name) and
+         shared/intentional_wait.py (typed_without_frame: the shadow check
+         for the cloud owner-type exemption lookup).
 
 Inputs, all AUTHORED by the harness:
   - the frame's own `agent_type` and `agent_id` (hook stdin);
   - the team config `~/.claude/teams/<team>/config.json` (local only);
   - the subagent's `agent-<agent_id>.meta.json` under `~/.claude/projects/`
     (local and cloud), read through `subagent_meta.subagent_metadata`;
+  - the cloud roster `teams/<team>/pact-roster.jsonl` (cloud only: no team
+    config), read through `cloud_roster.load_roster`;
   - agent definition files, only to detect a shadowed plugin type (below).
 
 AUTHORED IS NOT INTEGRITY-PROTECTED. The team config and meta.json are files
 the teammate's own OS user can rewrite. Hook stdin is the only input a
 teammate cannot edit, so where the frame and meta.json both offer a TYPE, the
-frame wins (step 4). meta.json is still the only source of a cloud actor's
-NAME, so a teammate that rewrites its own meta `name` can put another
-member's name on its completion (misattribution in the advisory and journal),
-and one that deletes its meta.json resolves with no name. Neither can be
-closed here: the cloud has no other harness record of the name. A harness-side
-TaskCompleted check that carries `teammate_name` is the real control.
+frame wins (step 4).
+
+CLOUD NAMES COME FROM THE ROSTER WHEN IT HAS ONE (step 4). With no team
+config, the cloud roster ties the agent_id to the name the LEAD's own Agent
+call gave it (shared/cloud_roster.py). Step 4 compares that name with
+meta.json's:
+  - they agree                -> the name, source `roster_verified`;
+  - meta.json has no name     -> the roster name, source `roster` (deleting
+                                 meta.json no longer erases the name);
+  - they disagree             -> NO name, source `unattributed`, and
+                                 `dispute` = (roster name, meta name), so the
+                                 advisory and journal show both claims and
+                                 neither frames anyone;
+  - no binding for this id    -> meta.json's name, as before (unverified).
+A teammate that edits only its own meta.json can no longer put another
+member's name on its completion. ACCEPTED RESIDUALS (design
+docs/architecture/cloud-roster.md §7): the roster is a file the same OS user
+can write, so a consistent two-file forge (roster + meta.json) still
+misattributes; and an agent the roster has not bound yet (two same-type
+spawns starting at once, before the lead's confirm) resolves meta-only. A
+harness-side TaskCompleted check that carries `teammate_name` is the real
+control.
 
 TRUST BOUNDARY (load-bearing): this module is an AUTHORITY surface. It must
 never read the session registry or any helper that reaches it
@@ -63,7 +83,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import pact_context, subagent_meta
+from . import cloud_roster, pact_context, subagent_meta
 from .paths import get_claude_config_dir
 
 ROLE_LEAD = "lead"
@@ -77,12 +97,17 @@ SOURCE_LEAD_FRAME = "lead_frame"
 SOURCE_INPROCESS_ID = "inprocess_id"          # a<name>-<16hex> + config member
 SOURCE_SUBAGENT_META = "subagent_meta"        # a<16hex> + meta.json read
 SOURCE_SUBAGENT_NO_META = "subagent_no_meta"  # a<16hex>, meta missing/unreadable
+SOURCE_ROSTER_VERIFIED = "roster_verified"    # a<16hex>, roster name == meta name
+SOURCE_ROSTER = "roster"                      # a<16hex>, roster name, meta has none
+SOURCE_UNATTRIBUTED = "unattributed"          # a<16hex>, roster and meta disagree
 SOURCE_AT_ID = "at_id"                        # name@team (legacy/forward-compat)
 SOURCE_FRAME_ONLY = "frame_only"              # teammate role, no usable id
 SOURCE_NONE = "none"                          # role unknown
 
-MAX_NAME_CHARS = 128
-_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+# valid_name and MAX_NAME_CHARS live in subagent_meta (cloud_roster needs them
+# and must not import this module); re-exported here for existing callers.
+MAX_NAME_CHARS = subagent_meta.MAX_NAME_CHARS
+valid_name = subagent_meta.valid_name
 
 # Bounds for the shadowed-type scan: how far up from the frame's cwd to look
 # for a project `.claude/agents`, how many definition files to read in one
@@ -101,24 +126,31 @@ class ActorIdentity:
     agent_type: a TYPE with `PACT:` stripped, never a member name and never a
                 shadowed plugin type; or None.
     source:     one of the SOURCE_* constants (which resolution step won).
+    dispute:    (roster name, meta.json name) when the two disagree (source
+                `unattributed`); else None.
     """
 
     role: str
     name: str | None
     agent_type: str | None
     source: str
+    dispute: tuple | None = None
 
     def journal_view(self) -> dict:
-        """Plain dict of the four fields, for the lifecycle_decision event.
+        """Plain dict of the four fields, for the lifecycle_decision event,
+        plus `dispute` (both names) only when it is set.
 
         Holds no agent_id, session id or path.
         """
-        return {
+        view = {
             "role": self.role,
             "source": self.source,
             "name": self.name,
             "agent_type": self.agent_type,
         }
+        if self.dispute is not None:
+            view["dispute"] = list(self.dispute)
+        return view
 
 
 _UNKNOWN = ActorIdentity(ROLE_UNKNOWN, None, None, SOURCE_NONE)
@@ -182,14 +214,31 @@ def _resolve(input_data: Any, team_name: str) -> ActorIdentity:
     # FRAME's type wins over meta.json's: the frame is hook stdin, which the
     # teammate cannot edit, while it can rewrite its own meta.json. meta.json
     # types are used only when the frame offers none (or offers a NAME).
+    # The NAME comes from the cloud roster when it binds this id (see the
+    # module docstring); the roster never supplies the TYPE.
     if subagent_meta.subagent_launcher_id(input_data):
         meta = subagent_meta.subagent_metadata(input_data)
         if not isinstance(meta, dict):
             meta = {}
         name = valid_name(meta.get("name"))
         raw = _first_raw([frame_type, *_meta_candidates(meta)], name)
+        agent_type_value = _typed(raw, input_data)
+        binding = _roster_binding(input_data, team_name, frame_type)
+        if binding is not None:
+            if name is None:
+                return ActorIdentity(
+                    ROLE_TEAMMATE, binding.name, agent_type_value, SOURCE_ROSTER
+                )
+            if name == binding.name:
+                return ActorIdentity(
+                    ROLE_TEAMMATE, name, agent_type_value, SOURCE_ROSTER_VERIFIED
+                )
+            return ActorIdentity(
+                ROLE_TEAMMATE, None, agent_type_value, SOURCE_UNATTRIBUTED,
+                dispute=(binding.name, name),
+            )
         source = SOURCE_SUBAGENT_META if meta else SOURCE_SUBAGENT_NO_META
-        return ActorIdentity(ROLE_TEAMMATE, name, _typed(raw, input_data), source)
+        return ActorIdentity(ROLE_TEAMMATE, name, agent_type_value, source)
 
     # Step 5: name@team (legacy / forward-compat).
     if isinstance(agent_id, str) and "@" in agent_id:
@@ -206,6 +255,39 @@ def _resolve(input_data: Any, team_name: str) -> ActorIdentity:
     return ActorIdentity(
         ROLE_TEAMMATE, None, _typed(frame_type, input_data), SOURCE_FRAME_ONLY
     )
+
+
+def _roster_binding(input_data: dict, team_name: str, frame_type: Any):
+    """The cloud roster binding for this frame's agent_id, or None.
+
+    None when the roster does not apply (a team config exists: local, so the
+    roster is never opened), has no binding for the id, or binds it to a type
+    that disagrees with the frame's own type (the frame is harness stdin; a
+    binding that contradicts it is ignored).
+    """
+    if not cloud_roster.applies(team_name):
+        return None
+    roster = cloud_roster.load_roster(team_name)
+    if roster is None:
+        return None
+    binding = roster.binding_for(input_data.get("agent_id"))
+    if binding is None:
+        return None
+    if isinstance(frame_type, str) and _strip(frame_type) != _strip(binding.type):
+        return None
+    return binding
+
+
+def typed_without_frame(raw: Any, cwd_hint: Any = None) -> str | None:
+    """`raw` as a TYPE (`PACT:` stripped), or None when a non-plugin agent
+    definition shadows its bare spelling. For readers with no hook frame (the
+    cloud owner-type exemption lookup in intentional_wait): the project search
+    starts from `cwd_hint` when given, and from CLAUDE_PROJECT_DIR."""
+    try:
+        frame = {"cwd": cwd_hint} if isinstance(cwd_hint, str) and cwd_hint else {}
+        return _typed(raw, frame)
+    except Exception:  # noqa: BLE001 — fail closed: ambiguous
+        return None
 
 
 def _meta_candidates(meta: Any) -> list:
@@ -355,19 +437,6 @@ def _names_member(value: Any, team_name: str) -> bool:
     if not isinstance(value, str) or not value or not team_name:
         return False
     return any(m.get("name") == value for m in pact_context.iter_team_members(team_name))
-
-
-def valid_name(value: Any) -> str | None:
-    """`value` when it is a usable display name (a str of 1-128 characters
-    with no control characters), else None. Shared with task_lifecycle_gate,
-    which applies it to the teammate-writable task owner before echoing it."""
-    if (
-        isinstance(value, str)
-        and 0 < len(value) <= MAX_NAME_CHARS
-        and not _CONTROL_CHARS.search(value)
-    ):
-        return value
-    return None
 
 
 def _strip(value: Any) -> str | None:

@@ -2004,8 +2004,9 @@ def evaluate_lifecycle(
         # Lead-only completion check (#1666 item 4, rule B): any non-lead
         # completing an owned, non-exempt task is flagged. The actor comes
         # from harness data only (frame agent_type/agent_id, team config,
-        # subagent meta.json) via shared.actor_identity — never the session
-        # registry. The carve-out is is_self_complete_exempt: surface 1
+        # subagent meta.json, and in the cloud the lead-written cloud roster)
+        # via shared.actor_identity — never the session registry. The
+        # carve-out is is_self_complete_exempt: surface 1
         # (owner's team-config agentType), 1b (the actor's harness-derived
         # type, for the cloud where no team config exists) and surface 2
         # (signal tasks).
@@ -2514,10 +2515,7 @@ def _completion_rule_B(
             "intentionally to clear.",
             True,
         )]
-    who = (
-        f"teammate {actor.name!r}" if actor.name is not None
-        else f"a teammate (name unresolved: {actor.source})"
-    )
+    who = _who_phrase(actor)
     return [(
         "non_lead_completion",
         f"PACT task_lifecycle_gate: {who} completed Task {task_id}, "
@@ -2527,6 +2525,24 @@ def _completion_rule_B(
         "intentionally to clear.",
         True,
     )]
+
+
+def _who_phrase(actor: ActorIdentity) -> str:
+    """How the non_lead_completion message names the completing actor.
+
+    A cloud actor whose roster name and meta.json name disagree (source
+    `unattributed`) is named by both claims, so the advisory frames neither.
+    Both names already passed ``valid_name``.
+    """
+    if actor.name is not None:
+        return f"teammate {actor.name!r}"
+    if actor.dispute is not None:
+        roster_name, meta_name = actor.dispute
+        return (
+            f"a teammate (identity disputed: roster says {roster_name!r}, "
+            f"meta.json says {meta_name!r})"
+        )
+    return f"a teammate (name unresolved: {actor.source})"
 
 
 def _owner_phrase(owner: str) -> str:
