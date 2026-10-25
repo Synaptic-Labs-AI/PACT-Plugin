@@ -335,3 +335,32 @@ class TestGitsDeletedLineProvesAPipedRefDelete:
         _mint(rig, cmd)
         _post(rig, cmd, {**_EMPTY, "stdout": out})
         assert not _retired(rig)
+
+
+class TestAnExactMergeInAnotherRepoIsNotReadHere:
+    """An exact-command merge token whose PR is named in another repo (-R/--repo,
+    GH_REPO) cannot be confirmed by this directory's PR state, so the state of a
+    same-numbered PR here never decides it."""
+
+    @pytest.mark.parametrize("cmd,flags", [
+        ("python3 -c 'import subprocess; subprocess.run([\"gh\", \"pr\", \"" + "merge\", \"5\", \"-R\", \"o/r\"])'",
+         ["--repo=o/r"]),
+        ("GH_REPO=o/r python3 -c 'import subprocess; subprocess.run([\"gh\", \"pr\", \"" + "merge\", \"5\"])'", []),
+    ])
+    def test_the_token_is_kept_without_asking_gh(self, rig, cmd, flags):
+        from shared.merge_guard_common import normalize_command_text
+
+        assert write_token({"operation_type": "merge", "pr_number": "5", "bound_flags": flags,
+                            "command_text": normalize_command_text(cmd)}, token_dir=rig["config"])
+        _post(rig, cmd, _EMPTY, state="MERGED")
+        assert _gh_calls(rig) == []
+        assert not _retired(rig)
+
+    def test_an_exact_merge_in_this_repo_still_reads_the_state(self, rig):
+        from shared.merge_guard_common import normalize_command_text
+
+        cmd = "python3 -c 'import subprocess; subprocess.run([\"gh\", \"pr\", \"" + "merge\", \"5\"])'"
+        assert write_token({"operation_type": "merge", "pr_number": "5", "bound_flags": [],
+                            "command_text": normalize_command_text(cmd)}, token_dir=rig["config"])
+        _post(rig, cmd, _EMPTY, state="MERGED")
+        assert _retired(rig)

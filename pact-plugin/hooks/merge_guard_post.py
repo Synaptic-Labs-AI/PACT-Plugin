@@ -1322,6 +1322,10 @@ def _retire_exact_text_token(
                 continue
             op, pr = ctx.get("operation_type"), ctx.get("pr_number")
             if op in _CONFIRMING_STATE and isinstance(pr, str) and pr.isascii() and pr.isdigit():
+                if _REPO_REDIRECT_RE.search(command) or any(
+                    str(f).startswith("--repo") for f in ctx.get("bound_flags") or []
+                ):
+                    continue  # the PR is in a repo this directory's state cannot read
                 cwd = (
                     frame_cwd
                     if isinstance(frame_cwd, str) and os.path.isabs(frame_cwd) and os.path.isdir(frame_cwd)
