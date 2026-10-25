@@ -2329,10 +2329,15 @@ PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
 # `env` with its options (`-i`, `-u NAME`, `--`): the assignments after it reach the
 # command env runs, like a prefix.
 _ENV_COMMAND = r"(?:env(?:[ \t]+(?:-u[ \t]+\S+|--unset[ \t]+\S+|-\S*))*[ \t]+)"
-_GH_REPO_PREFIX_RE = re.compile(
-    r"(?:^|[;&|(\n])[ \t]*(?:[A-Za-z_]\w*=\S*[ \t]+)*?(?:(?:command[ \t]+)?" + _ENV_COMMAND
-    + r"(?:[A-Za-z_]\w*=\S*[ \t]+)*?)?GH_REPO=([^\s;&|]+)[ \t]"
-)
+# The variables gh reads its target from: the repository, and the host it is on.
+_GH_TARGET_VARIABLES = ("GH_REPO", "GH_HOST")
+_GH_TARGET_PREFIX_RES = {
+    name: re.compile(
+        r"(?:^|[;&|(\n])[ \t]*(?:[A-Za-z_]\w*=\S*[ \t]+)*?(?:(?:command[ \t]+)?" + _ENV_COMMAND
+        + r"(?:[A-Za-z_]\w*=\S*[ \t]+)*?)?" + name + r"=([^\s;&|]+)[ \t]"
+    )
+    for name in _GH_TARGET_VARIABLES
+}
 
 
 def extract_privileged_flags(command: str, op_type: str | None) -> list[str]:
@@ -2492,10 +2497,13 @@ def extract_privileged_flags(command: str, op_type: str | None) -> list[str]:
 
     # gh reads its repository from a GH_REPO assignment prefixing the command (run
     # directly or through env, command, ...) exactly as from --repo, so that prefix
-    # is the same redirect.
+    # is the same redirect. A GH_HOST prefix moves it to another host, so it binds
+    # by its value too.
     if op_type in ("merge", "close"):
-        for m in _GH_REPO_PREFIX_RE.finditer(command):
+        for m in _GH_TARGET_PREFIX_RES["GH_REPO"].finditer(command):
             found.add("--repo=" + m.group(1))
+        for m in _GH_TARGET_PREFIX_RES["GH_HOST"].finditer(command):
+            found.add("GH_HOST=" + m.group(1))
 
     return sorted(found)
 
@@ -10168,10 +10176,11 @@ def _exported_before_guarded_leg(command: str, names: tuple[str, ...]) -> bool:
     return False
 
 
-def exported_gh_repo_before_guarded_leg(command: str) -> bool:
-    """Whether a leg before the command's guarded leg exports GH_REPO (`export
-    GH_REPO=o/b; gh pr merge 5`), which gh then reads as its repository."""
-    return _exported_before_guarded_leg(command, ("GH_REPO",))
+def exported_gh_target_before_guarded_leg(command: str) -> bool:
+    """Whether a leg before the command's guarded leg exports GH_REPO or GH_HOST
+    (`export GH_REPO=o/b; gh pr merge 5`), which gh then reads as its repository or
+    host."""
+    return _exported_before_guarded_leg(command, _GH_TARGET_VARIABLES)
 
 
 def is_compound_destructive_command(command: str) -> bool:

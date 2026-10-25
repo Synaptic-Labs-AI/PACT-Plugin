@@ -1176,6 +1176,48 @@ class TestAnExportedGhRepoIsARepoRedirect:
 
 
 
+
+GH_HOSTS = {
+    "prefix": (MERGE + "--squash", "GH_HOST=ghe.example.com " + MERGE + "--squash",
+               "GH_HOST=ghe.other.com " + MERGE + "--squash"),
+    "prefix-numbered": (MERGE + "5", "GH_HOST=ghe.example.com " + MERGE + "5", "GH_HOST=ghe.other.com " + MERGE + "5"),
+    "env": (_CLOSE_PR + "5 -d", "env GH_HOST=ghe.example.com " + _CLOSE_PR + "5 -d",
+            "env GH_HOST=ghe.other.com " + _CLOSE_PR + "5 -d"),
+    "export": (MERGE + "5", "export GH_HOST=ghe.example.com; " + MERGE + "5",
+               "export GH_HOST=ghe.other.com; " + MERGE + "5"),
+    "declare-x": (MERGE + "--squash", "declare -x GH_HOST=ghe.example.com && " + MERGE + "--squash",
+                  "declare -x GH_HOST=ghe.other.com && " + MERGE + "--squash"),
+    "with-gh-repo": (MERGE + "5", "GH_REPO=o/b GH_HOST=ghe.example.com " + MERGE + "5",
+                     "GH_REPO=o/b GH_HOST=ghe.other.com " + MERGE + "5"),
+}
+
+
+class TestAGhHostIsATargetChange:
+    """gh reads its host from GH_HOST, as a prefix, after `env` or exported: a plain
+    approval does not cover it, and its own approval runs that host only."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("plain,moved,other", GH_HOSTS.values(), ids=GH_HOSTS.keys())
+    def test_a_plain_approval_does_not_cover_it(self, plain, moved, other, style):
+        ctx = _mint_styled(plain, style)
+        assert _runs(ctx, plain)
+        assert not _runs(ctx, moved)
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("plain,moved,other", GH_HOSTS.values(), ids=GH_HOSTS.keys())
+    def test_its_own_approval_runs_it_and_no_other(self, plain, moved, other, style):
+        ctx = _mint_styled(moved, style)
+        assert _runs(ctx, moved)
+        assert not _runs(ctx, other)
+
+    @pytest.mark.parametrize("command", [
+        "GH_HOST=ghe.example.com; " + MERGE + "5",
+        "echo GH_HOST=ghe.example.com; " + MERGE + "5",
+        MERGE + "5; export GH_HOST=ghe.example.com",
+    ], ids=["not-exported", "echoed", "exported-after"])
+    def test_a_plain_approval_still_covers_a_gh_host_gh_does_not_read(self, command):
+        assert _runs(_mint_styled(MERGE + "5", APPROVAL_STYLES["inline"]), command)
+
 SAME_SHELL_EXPORTS = {
     "subshell": (MERGE + "--squash", "(export GH_REPO=o/b; " + MERGE + "--squash)",
                  "(export GH_REPO=o/c; " + MERGE + "--squash)"),
