@@ -6917,7 +6917,7 @@ def _rewrite_git_aliases_in(command: str, every: "list[_GitPlace] | None"):
         if words[:1] == ["cd"]:
             target = words[1] if len(words) == 2 and not any(ch in words[1] for ch in "$`*?[") else None
             # `cd` moves logically, as the shell does: `a/../b` is `b`.
-            moved = [(os.path.normpath(os.path.join(cwd or _COMMAND_DIRECTORY or os.getcwd(),
+            moved: list[_GitPlace] = [(os.path.normpath(os.path.join(cwd or _COMMAND_DIRECTORY or os.getcwd(),
                                                     os.path.expanduser(target))), env)
                      for cwd, env in places] if target is not None else [(None, env) for _, env in places]
             certain = target is not None and after == "&&" and before in (None, ";", "&&", "\n")
@@ -6989,12 +6989,33 @@ _VARIABLE_EVAL_RE = re.compile(
 )
 
 
+# A leg made only of literal assignments, which always succeeds.
+_LITERAL_ASSIGNMENTS_LEG_RE = re.compile(
+    r"[ \t]*(?:[A-Za-z_]\w*=(?:'[^']*'|\"[^\"$`\\]*\"|[^\s;&|$`'\"\\()]*)[ \t]*)+")
+
+
+def _assignment_is_conditional(command: str, start: int) -> bool:
+    """Whether the leg starting at `start` follows `&&` after a leg that is not a literal
+    assignment, so it runs only when that leg's test passes. (A leg after `||` is caught
+    by its callers' pipe check.)"""
+    view = _mask_shell_quotes(command)[:start].rstrip(" \t")
+    if not view.endswith("&&"):
+        return False
+    begin = max(view.rfind(sep, 0, len(view) - 2) for sep in (";", "\n", "(", "|"))
+    inner, raw = view[begin + 1:len(view) - 2], command[begin + 1:len(view) - 2]
+    cuts = [m.span() for m in re.finditer("&&", inner)]
+    starts, ends = [0, *[end for _, end in cuts]], [*[start for start, _ in cuts], len(inner)]
+    return not all(_LITERAL_ASSIGNMENTS_LEG_RE.fullmatch(raw[a:b]) for a, b in zip(starts, ends))
+
+
 def _rewrite_variable_evals(command: str) -> str:
     """`command` with each eval of a variable assigned earlier in the command a literal value
     replaced by the eval of that value: kept whole when the expansion is quoted, split into
     words when it is not. Every assignment of the variable must be a leg of its own; when
-    there are several, each must follow `;`, `&&` or a newline (so each one runs) and the
-    last before the eval gives the value. Unchanged otherwise."""
+    there are several, the last one before the eval that runs whatever came before it
+    gives the value, and each later one that may not run (after `||`, after `&&` behind a
+    test, in a pipeline or a subshell) is an alternative to it: the eval then reads as an
+    `if` whose branches eval each value. Unchanged otherwise."""
     if "eval" not in command:
         return command
 
@@ -7006,12 +7027,21 @@ def _rewrite_variable_evals(command: str) -> str:
         found = [a for a in everywhere if a.end() <= m.start()]
         if not found or len(everywhere) != len(re.findall(r"(?<![\w$])" + name + r"=", command)):
             return m.group(0)
-        # Several assignments: each must run in turn, so none may follow a pipe, `||` or `(`.
-        if len(everywhere) > 1 and any(re.search(r"(?:\||\()[ \t]*$", command[:a.start()]) for a in everywhere):
-            return m.group(0)
-        value = found[-1].group("v")
-        value = value[1:-1] if value[:1] in ("'", '"') else value
-        return "eval " + shlex.quote(value if m.group("q") else " ".join(value.split()))
+        # Several assignments: one in a pipeline or a subshell, or behind a test, may
+        # leave the value before it in place.
+        maybe = [len(everywhere) > 1 and (re.search(r"(?:\||\()[ \t]*$", command[:a.start()]) is not None
+                                          or _assignment_is_conditional(command, a.start())) for a in found]
+        first = max((k for k, may in enumerate(maybe) if not may), default=0)
+        values = []
+        for a in found[first:]:
+            value = a.group("v")
+            value = value[1:-1] if value[:1] in ("'", '"') else value
+            values.append("eval " + shlex.quote(value if m.group("q") else " ".join(value.split())))
+        values = list(dict.fromkeys(values))
+        if len(values) == 1:
+            return values[0]
+        branches = "".join(f"; elif :; then {v}" for v in values[1:-1])
+        return f"if :; then {values[0]}{branches}; else {values[-1]}; fi"
 
     return _VARIABLE_EVAL_RE.sub(_value, command)
 

@@ -2872,8 +2872,10 @@ def test_an_eval_of_a_variable_holding_two_merges_is_compound(cmd):
     ("x='a  b'; eval \"$x\"", "x='a  b'; eval 'a  b'"),
     ("x='a  b'; eval $x", "x='a  b'; eval 'a b'"),
     ("x='a b'; x='c'; eval \"$x\"", "x='a b'; x='c'; eval c"),
-    ("x='a b' || x='c'; eval \"$x\"", None),
-], ids=["quoted-keeps-the-value", "unquoted-splits-into-words", "reassigned-reads-the-last", "reassigned-after-or"])
+    ("x='a b' || x='c'; eval \"$x\"", "x='a b' || x='c'; if :; then eval 'a b'; else eval c; fi"),
+    ("x='a b'; [ -n \"$D\" ] && x='c'; eval \"$x\"", "x='a b'; [ -n \"$D\" ] && x='c'; if :; then eval 'a b'; else eval c; fi"),
+], ids=["quoted-keeps-the-value", "unquoted-splits-into-words", "reassigned-reads-the-last", "reassigned-after-or",
+        "reassigned-behind-a-test"])
 def test_an_eval_of_a_literal_variable_reads_its_value(cmd, reads):
     from shared.merge_guard_common import _rewrite_variable_evals
 
@@ -3071,7 +3073,9 @@ def test_candidates_disagreeing_on_the_guarded_op_read_the_payload_directory_fir
 @pytest.mark.parametrize("cmd", [
     "c=\"gh pr " + "merge 5\"; c=\"gh pr view 5\"; eval \"$c\"",
     "c=\"gh pr " + "merge 5\" && c=\"gh pr view 5\" && eval \"$c\"",
-], ids=["semicolons", "ands"])
+    "a=1 && c=\"gh pr " + "merge 5\" && c=\"gh pr view 5\" && eval \"$c\"",
+    "[ -n \"$DRY\" ] && c=\"gh pr " + "merge 5\"; c=\"gh pr view 5\"; eval \"$c\"",
+], ids=["semicolons", "ands", "ands-after-assignments", "conditional-then-unconditional"])
 def test_an_eval_of_a_variable_last_assigned_a_view_is_allowed(cmd):
     assert is_dangerous_command(cmd) is False
 
@@ -3082,7 +3086,15 @@ def test_an_eval_of_a_variable_last_assigned_a_view_is_allowed(cmd):
     "c=\"gh pr " + "merge 5 --squash\" || c=\"gh pr view 5\"; eval \"$c\"",
     "c=\"gh pr " + "merge 5 --squash\"; if true; then c=\"gh pr view 5\"; fi; eval \"$c\"",
     "c=\"gh pr " + "merge 5 --squash\"; eval \"$c\"; c=\"gh pr view 5\"",
-], ids=["last-is-the-merge", "view-after-or", "view-in-a-branch", "view-after-the-eval"])
+    "cmd=\"gh pr " + "merge 5 --squash\"; [ \"$DRY\" = 1 ] && cmd=\"echo would run\"; eval \"$cmd\"",
+    "cmd=\"git push --" + "force origin main\"; [ \"$DRY\" = 1 ] && cmd=\"echo would run\"; eval \"$cmd\"",
+    "cmd=\"gh pr " + "merge 5 --squash\"; test -z \"$LIVE\" && cmd=\"echo would run\"; eval \"$cmd\"",
+    "cmd=\"gh pr " + "merge 5 --squash\"; $DRY && cmd=\"echo would run\"; eval \"$cmd\"",
+    "cmd=\"gh pr " + "merge 5 --squash\"; [ -n \"$LIVE\" ] || cmd=\"echo would run\"; eval \"$cmd\"",
+    "c=\"gh pr " + "merge 5 --squash\" && [ -n \"$DRY\" ] && c=\"gh pr view 5\" && eval \"$c\"",
+], ids=["last-is-the-merge", "view-after-or", "view-in-a-branch", "view-after-the-eval",
+        "dry-run-switch", "dry-run-force-push", "test-condition", "variable-condition",
+        "or-condition", "condition-inside-an-and-chain"])
 def test_an_eval_whose_value_may_be_a_merge_is_refused_then_runs(cmd, style):
     assert is_dangerous_command(cmd) is True
     assert _runs_after_approval(cmd, style)
