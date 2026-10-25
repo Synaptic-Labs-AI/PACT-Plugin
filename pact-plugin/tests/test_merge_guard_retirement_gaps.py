@@ -405,3 +405,18 @@ class TestAGitAliasRetiresAsTheCommandItRuns:
                             "command_text": normalize_command_text(cmd)}, token_dir=rig["config"])
         _post(rig, cmd, _EMPTY)
         assert _retired(rig) is retires
+
+
+class TestAShellCMergeInAnotherRepoRetiresOnItsRun:
+    """An exact-command merge in another repo cannot be read here; inside a shell's
+    -c string the merge is the command's last leg, so its success retires the token."""
+
+    def test_the_run_retires_the_token(self, rig):
+        from shared.merge_guard_common import normalize_command_text
+
+        cmd = "bash -c 'gh pr " + "merge 5 --squash --repo o/b'"
+        assert write_token({"operation_type": "merge", "pr_number": "5", "bound_flags": ["--repo=o/b"],
+                            "command_text": normalize_command_text(cmd)}, token_dir=rig["config"])
+        _post(rig, cmd, _EMPTY, state="OPEN")
+        assert _gh_calls(rig) == []
+        assert _retired(rig)

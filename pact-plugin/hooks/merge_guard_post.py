@@ -667,6 +667,16 @@ def _guarded_substitution_count(text: str) -> int:
 _ALTERNATIVE_BRANCHES_OP = "choice between guarded commands"
 
 
+def _inner_flags_differ(leg: str, inner: str) -> bool:
+    """Whether the command a shell's -c string runs carries other flags than the outer
+    reading of its leg sees (`bash -c 'gh pr merge 5 --admin'` reads no --admin from
+    outside). The pre-hook holds a token to both readings, so such a command can only
+    be bound by its text."""
+    outer = extract_command_context(leg)
+    run = extract_command_context(_single_destructive_leg(inner) or _single_detectable_leg(inner) or inner)
+    return set(outer.get("bound_flags", [])) != set(run.get("bound_flags", []))
+
+
 def _exact_text_reading(span: str, located: str) -> dict | None:
     """The (op, target, flags) of a backticked command the region reading cannot
     bind, read the way the pre-hook reads it; None when the region reading binds
@@ -737,7 +747,7 @@ def _exact_text_reading(span: str, located: str) -> dict | None:
     else:
         inner = shell_c_string(leg)
         if inner is not None:
-            if pairs or is_compound_destructive_command(inner):
+            if is_compound_destructive_command(inner) or (pairs and not _inner_flags_differ(leg, inner)):
                 return None
             body = inner
         else:
@@ -1297,6 +1307,7 @@ def _retire_exact_text_token(
     frame_cwd: object = None,
     token_dir: Path | None = None,
     stdout_text: object = "",
+    tool_response: object = None,
 ) -> bool:
     """Retire this session's exact-command token on the same success signal Layer 1
     uses for its op: a merge or close of a numbered PR once GitHub reports it in the
@@ -1327,16 +1338,20 @@ def _retire_exact_text_token(
                 if _REPO_REDIRECT_RE.search(command) or any(
                     str(f).startswith("--repo") for f in ctx.get("bound_flags") or []
                 ):
-                    continue  # the PR is in a repo this directory's state cannot read
-                cwd = (
-                    frame_cwd
-                    if isinstance(frame_cwd, str) and os.path.isabs(frame_cwd) and os.path.isdir(frame_cwd)
-                    else None
-                )
-                from shared.gh_helpers import check_pr_state
+                    # The PR is in a repo this directory's state cannot read; only
+                    # the run's own success can confirm it.
+                    if not _run_succeeded_as_the_op(command, op, tool_response):
+                        continue
+                else:
+                    cwd = (
+                        frame_cwd
+                        if isinstance(frame_cwd, str) and os.path.isabs(frame_cwd) and os.path.isdir(frame_cwd)
+                        else None
+                    )
+                    from shared.gh_helpers import check_pr_state
 
-                if check_pr_state(pr, cwd=cwd) != _CONFIRMING_STATE[op]:
-                    continue
+                    if check_pr_state(pr, cwd=cwd) != _CONFIRMING_STATE[op]:
+                        continue
             elif op not in _CONFIRMING_STATE:
                 pattern = LAYER1_SUCCESS_STDOUT_PATTERNS.get(op)
                 if pattern is not None and not (isinstance(stdout_text, str) and pattern in stdout_text):
@@ -1617,7 +1632,8 @@ def main():
                 and not _op_did_not_run(runs)
             ):
                 _retire_exact_text_token(
-                    command, input_data.get("cwd"), stdout_text=tool_response.get("stdout", "")
+                    command, input_data.get("cwd"), stdout_text=tool_response.get("stdout", ""),
+                    tool_response=tool_response,
                 )
             command = runs
 

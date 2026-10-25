@@ -784,3 +784,26 @@ class TestProseBesideAQuotedGuardedCommandBindsNothing:
     def test_a_flag_in_prose_still_binds_to_the_quoted_command(self):
         ctx = _mint_styled(MERGE + "5", lambda c: f"Run `{c}` with --admin")
         assert ctx["bound_flags"] == ["--admin"]
+
+
+SHELL_C_FLAGGED = {
+    "admin": ("bash -c '" + MERGE + "5 --admin'", "bash -c '" + MERGE + "5 --squash --admin'"),
+    "delete-branch": ("bash -c '" + MERGE + "5 --squash --delete-branch'",
+                      "bash -c '" + MERGE + "5 --squash'"),
+    "repo": ("bash -c '" + MERGE + "5 --squash --repo o/b'", "bash -c '" + MERGE + "5 --squash --repo o/c'"),
+    "sh-short-repo": ("sh -c '" + MERGE + "5 --squash -R o/b'", "sh -c '" + MERGE + "5 --squash'"),
+}
+
+
+class TestAFlaggedMergeInAShellCStringRuns:
+    """The pre-hook holds a token to the flags of both the outer command and the -c
+    string it runs, which differ when the flags sit inside the string, so such a
+    command is bound by its text: it runs as approved and no other flag set runs."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("approved,other", SHELL_C_FLAGGED.values(), ids=SHELL_C_FLAGGED.keys())
+    def test_the_approved_command_runs_and_another_flag_set_does_not(self, approved, other, style):
+        assert not _runs(None, approved)
+        ctx = _mint_styled(approved, style)
+        assert _runs(ctx, approved)
+        assert not _runs(ctx, other)
