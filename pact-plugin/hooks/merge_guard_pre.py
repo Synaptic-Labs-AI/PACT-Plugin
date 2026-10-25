@@ -52,6 +52,7 @@ try:
     from shared.merge_guard_common import (
         is_dangerous_command,
         is_compound_destructive_command,
+        set_command_directory,
         TOKEN_DIR,
         TOKEN_PREFIX,
         USE_MARKER_SUFFIX,
@@ -794,6 +795,8 @@ def main():
         pact_context.init(input_data)
         tool_input = input_data.get("tool_input", {})
         command = tool_input.get("command", "")
+        # The command's git aliases are read from the directory it runs in.
+        set_command_directory(input_data.get("cwd"))
 
         if not command:
             print(_SUPPRESS_OUTPUT)

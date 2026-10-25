@@ -2769,7 +2769,7 @@ CONFIG_GIT_ALIASES = {"pf": "push --force", "pushn": "push", "sh": "!git push --
 def config_git_aliases(monkeypatch):
     import shared.merge_guard_common as mgc
 
-    monkeypatch.setattr(mgc, "_git_config_aliases", lambda cwd: CONFIG_GIT_ALIASES)
+    monkeypatch.setattr(mgc, "_git_config_aliases", lambda cwd, git_dir=None: CONFIG_GIT_ALIASES)
     monkeypatch.setattr(mgc, "_git_commands", lambda cwd: frozenset({"status", "push", "log", "cherry"}))
 
 
@@ -2825,7 +2825,8 @@ def test_an_unreadable_git_config_keeps_todays_reading(monkeypatch):
 def test_a_config_git_alias_is_read_from_the_directory_git_runs_in(monkeypatch):
     import shared.merge_guard_common as mgc
 
-    monkeypatch.setattr(mgc, "_git_config_aliases", lambda cwd: {"pf": "push --force"} if cwd == "/tmp" else {})
+    monkeypatch.setattr(mgc, "_git_config_aliases",
+                        lambda cwd, git_dir=None: {"pf": "push --force"} if cwd == "/tmp" else {})
     monkeypatch.setattr(mgc, "_git_commands", lambda cwd: frozenset())
     assert is_dangerous_command("git -C /tmp pf origin main") is True
     assert is_dangerous_command("git pf origin main") is False
@@ -2904,3 +2905,76 @@ def test_a_heredoc_piped_into_a_guarded_op_is_refused_then_runs(label, cmd, styl
 ], ids=["grep-of-merge-text", "piped-into-a-view", "body-is-a-push-tee-d", "comment-body-mentions-merge"])
 def test_a_heredoc_piped_into_nothing_guarded_is_allowed(cmd):
     assert is_dangerous_command(cmd) is False
+
+
+# A git alias is read from the git directory the command's git uses: the directory the hook
+# payload names, a literal `cd` earlier in the command (inside a subshell only until it
+# closes), `-C`, `--git-dir` or a `GIT_DIR=` prefix.
+@pytest.fixture
+def alias_repos(tmp_path, monkeypatch):
+    import subprocess
+
+    import shared.merge_guard_common as mgc
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for name in ("repoA", "repoB"):
+        subprocess.run(["git", "init", "-q", str(tmp_path / name)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path / "repoA"), "config", "alias.pf", "push --force"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path / "repoA"), "config", "alias.ll", "log --oneline"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path / "repoA"), "config", "alias.chain", "pf"], check=True)
+    monkeypatch.chdir(tmp_path / "repoB")
+    mgc._git_config_aliases.cache_clear()
+    mgc._git_commands.cache_clear()
+    mgc.set_command_directory(None)
+    yield tmp_path
+    mgc.set_command_directory(None)
+    mgc._git_config_aliases.cache_clear()
+    mgc._git_commands.cache_clear()
+
+
+ALIAS_REACHED_THROUGH_A_DIRECTORY = [
+    ("cd prefix", "cd ../repoA && git pf origin main"),
+    ("subshell", "(cd ../repoA && git pf origin main)"),
+    ("git-dir flag", "git --git-dir=../repoA/.git pf origin main"),
+    ("GIT_DIR prefix", "GIT_DIR=../repoA/.git git pf origin main"),
+    ("-C", "git -C ../repoA pf origin main"),
+    ("alias of an alias", "cd ../repoA && git chain origin main"),
+]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", ALIAS_REACHED_THROUGH_A_DIRECTORY,
+                         ids=[r[0] for r in ALIAS_REACHED_THROUGH_A_DIRECTORY])
+def test_an_alias_from_the_directory_git_uses_is_refused_then_runs(label, cmd, style, alias_repos):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+def test_an_alias_from_the_payload_directory_is_refused_then_runs(style, alias_repos):
+    import shared.merge_guard_common as mgc
+
+    mgc.set_command_directory(str(alias_repos / "repoA"))
+    assert is_dangerous_command("git pf origin main") is True
+    assert _runs_after_approval("git pf origin main", style)
+
+
+@pytest.mark.parametrize("cmd", [
+    "git pf origin main",
+    "(cd ../repoA && git status); git pf origin main",
+    "cd \"$X\" && git pf origin main",
+    "cd ../repoA && git ll",
+], ids=["own-directory", "subshell-closed", "cd-not-literal", "alias-for-a-read"])
+def test_an_alias_the_command_does_not_reach_stays_allowed(cmd, alias_repos):
+    assert is_dangerous_command(cmd) is False
+
+
+def test_a_cd_whose_target_is_not_literal_falls_back_to_the_payload_directory(alias_repos):
+    import shared.merge_guard_common as mgc
+
+    mgc.set_command_directory(str(alias_repos / "repoA"))
+    assert is_dangerous_command("cd \"$X\" && git pf origin main") is True

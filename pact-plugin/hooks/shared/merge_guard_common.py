@@ -6705,13 +6705,26 @@ _GIT_ALWAYS_BUILTIN = frozenset(
 )
 
 
+# The directory the command runs in, from the hook payload (set_command_directory); None
+# reads from the process's own directory.
+_COMMAND_DIRECTORY: str | None = None
+
+
+def set_command_directory(cwd: str | None) -> None:
+    """Record the directory the command runs in, from the hook payload, as the base for
+    reading its git aliases."""
+    global _COMMAND_DIRECTORY
+    _COMMAND_DIRECTORY = cwd if isinstance(cwd, str) and cwd else None
+
+
 @functools.lru_cache(maxsize=8)
-def _git_config_aliases(cwd: str | None) -> dict[str, str]:
+def _git_config_aliases(cwd: str | None, git_dir: str | None = None) -> dict[str, str]:
     """The aliases in the git config seen from `cwd` (the process's directory when None),
-    read with `git config`; empty when it cannot be read in time."""
+    with `git_dir` as the repository when given, read with `git config`; empty when it
+    cannot be read in time."""
     try:
-        done = subprocess.run(["git", "config", "--get-regexp", r"^alias\."], cwd=cwd,
-                              capture_output=True, text=True, timeout=1.0, check=False)
+        done = subprocess.run(["git", *(["--git-dir", git_dir] if git_dir else []), "config", "--get-regexp",
+                               r"^alias\."], cwd=cwd, capture_output=True, text=True, timeout=1.0, check=False)
     except (OSError, subprocess.SubprocessError, ValueError):
         return {}
     aliases = {}
@@ -6733,32 +6746,41 @@ def _git_commands(cwd: str | None) -> frozenset[str]:
     return frozenset(done.stdout.split())
 
 
-def _git_alias_value(name: str, inline: dict[str, str], cwd: str | None) -> str | None:
-    """The value of git alias `name` given inline or in the git config seen from `cwd`, or
-    None, including when `name` is a command git runs as itself."""
-    value = inline.get(name) or _git_config_aliases(cwd).get(name)
+def _git_alias_value(name: str, inline: dict[str, str], cwd: str | None, git_dir: str | None) -> str | None:
+    """The value of git alias `name` given inline or in the git config seen from `cwd` (and
+    `git_dir`), or None, including when `name` is a command git runs as itself."""
+    value = inline.get(name) or _git_config_aliases(cwd, git_dir).get(name)
     return None if not value or name in _git_commands(cwd) else value
 
 
-def _expand_git_alias(leg: str, depth: int = 0) -> str:
+def _expand_git_alias(leg: str, depth: int = 0, cwd: str | None = None) -> str:
     """`leg` with a git invocation whose subcommand is an alias replaced by what the alias
     runs: its value in the subcommand's place, or for a `!` alias its shell text followed by
-    the remaining words. Unchanged when the leg is not such an invocation."""
+    the remaining words. The alias is read from the git config of `cwd` (the command's
+    directory when None), moved by `-C`, with the repository a `--git-dir` or a `GIT_DIR=`
+    prefix names. Unchanged when the leg is not such an invocation."""
     word = _leg_command_word(leg)
     tokens = _shell_tokenize(word) if word else None
     if not word or not tokens or os.path.basename(tokens[0]) != "git" or depth >= _MAX_WRAPPER_DEPTH:
         return leg
-    inline, cwd, i = {}, None, 1
+    git_dir = next((t[len("GIT_DIR="):] for t in _shell_tokenize(leg[:len(leg) - len(word)]) or []
+                    if t.startswith("GIT_DIR=")), None)
+    inline, i = {}, 1
     while i < len(tokens) and tokens[i].startswith("-"):
         if tokens[i] == "-c" and i + 1 < len(tokens) and tokens[i + 1].startswith("alias."):
             key, _, value = tokens[i + 1][len("alias."):].partition("=")
             inline[key.lower()] = value
         if tokens[i] == "-C" and i + 1 < len(tokens):
-            cwd = os.path.join(cwd or os.getcwd(), os.path.expanduser(tokens[i + 1]))
+            cwd = os.path.join(cwd or _COMMAND_DIRECTORY or os.getcwd(), os.path.expanduser(tokens[i + 1]))
+        if tokens[i] == "--git-dir" and i + 1 < len(tokens):
+            git_dir = tokens[i + 1]
+        if tokens[i].startswith("--git-dir="):
+            git_dir = tokens[i][len("--git-dir="):]
         i += 2 if tokens[i] in _GIT_VALUE_GLOBALS else 1
     if i >= len(tokens) or tokens[i] in _GIT_ALWAYS_BUILTIN:
         return leg
-    value = _git_alias_value(tokens[i].lower(), inline, cwd)
+    value = _git_alias_value(tokens[i].lower(), inline, cwd or _COMMAND_DIRECTORY,
+                             os.path.expanduser(git_dir) if git_dir else None)
     if not value:
         return leg
     rest = " ".join(shlex.quote(t) for t in tokens[i + 1:])
@@ -6766,18 +6788,34 @@ def _expand_git_alias(leg: str, depth: int = 0) -> str:
         expanded = (value[1:] + " " + rest).strip()
     else:
         expanded = " ".join(shlex.quote(t) for t in tokens[:i]) + " " + value + (" " + rest if rest else "")
-    return leg[:len(leg) - len(word)] + _expand_git_alias(expanded, depth + 1)
+    return leg[:len(leg) - len(word)] + _expand_git_alias(expanded, depth + 1, cwd)
 
 
 def _rewrite_git_aliases(command: str) -> str:
-    """`command` with each git alias invocation replaced by what the alias runs."""
+    """`command` with each git alias invocation replaced by what the alias runs, each read
+    in the directory a literal `cd` earlier in the command moves to (inside a `( … )` only
+    until it closes). After a `cd` whose target is not literal, the command's own directory
+    is used."""
     if "git" not in command:
         return command
     view = _mask_shell_quotes(command)
-    out, last = [], 0
+    out, last, cwd, saved = [], 0, None, []
     for sep in [*_COMPOUND_OPS_RE.finditer(view), None]:
         end = sep.start() if sep else len(command)
-        out.append(_expand_git_alias(command[last:end]))
+        leg = command[last:end]
+        inner = leg.strip()
+        opens = len(inner) - len(inner.lstrip("("))
+        saved.extend([cwd] * opens)
+        words = _shell_tokenize(inner.strip("() \t")) or []
+        if words[:1] == ["cd"]:
+            target = words[1] if len(words) == 2 else None
+            literal = target is not None and not any(ch in target for ch in "$`*?[")
+            cwd = os.path.join(cwd or _COMMAND_DIRECTORY or os.getcwd(),
+                               os.path.expanduser(target)) if literal else None
+        out.append(_expand_git_alias(leg, cwd=cwd))
+        for _ in range(len(inner) - len(inner.rstrip(")"))):
+            if saved:
+                cwd = saved.pop()
         if sep:
             out.append(command[sep.start():sep.end()])
             last = sep.end()

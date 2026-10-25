@@ -102,6 +102,7 @@ try:
         # read hook uses, so mint and read can never disagree on danger/compound.
         is_dangerous_command,
         is_compound_destructive_command,
+        set_command_directory,
         # An interpreter program's guarded command has no contiguous `gh pr merge`
         # for the region finder; the pre-hook's own interpreter reading supplies its
         # (op, target, flags), and the token binds the command's normalized text.
@@ -1613,6 +1614,8 @@ def main():
 
         pact_context.init(input_data)
         tool_input = input_data.get("tool_input", {})
+        # The command's git aliases are read from the directory it runs in.
+        set_command_directory(input_data.get("cwd"))
         # Defense-in-depth via SSOT helper: prefers canonical `tool_response`,
         # falls back to legacy `tool_output` for envelope-rename robustness,
         # warns on dual-envelope payloads (envelope-confusion smell).
