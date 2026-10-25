@@ -6915,7 +6915,13 @@ def _rewrite_git_aliases_in(command: str, every: "list[_GitPlace] | None"):
             saved.append(places)
         words = _shell_tokenize(leg.strip().strip("() \t")) or []
         if words[:1] == ["cd"]:
-            target = words[1] if len(words) == 2 and not any(ch in words[1] for ch in "$`*?[") else None
+            target = words[1] if len(words) == 2 else None
+            if target is not None and "$" in target:
+                # A variable the command assigns a literal once, before the cd, is that literal.
+                target = re.sub(r"\$(?:\{(\w+)\}|(\w+))", lambda v: _assigned_literal(
+                    command, v.group(1) or v.group(2), last) or "$", target)
+            if target is not None and any(ch in target for ch in "$`*?["):
+                target = None
             # `cd` moves logically, as the shell does: `a/../b` is `b`.
             moved: list[_GitPlace] = [(os.path.normpath(os.path.join(cwd or _COMMAND_DIRECTORY or os.getcwd(),
                                                     os.path.expanduser(target))), env)
@@ -7008,6 +7014,28 @@ def _assignment_is_conditional(command: str, start: int) -> bool:
     return not all(_LITERAL_ASSIGNMENTS_LEG_RE.fullmatch(raw[a:b]) for a, b in zip(starts, ends))
 
 
+def _literal_assignments(command: str, name: str) -> "list[re.Match] | None":
+    """The literal assignments of `name` that are legs of their own in `command`, with the
+    value in group `v`; None when `name` is also assigned some other way."""
+    assignment = (r"(?:^|(?<=[;&|(\n]))[ \t]*" + name
+                  + r"=(?P<v>'[^']*'|\"[^\"$`\\]*\"|[^\s;&|$`'\"\\()]*)(?=[ \t]*(?:$|[;&|\n]))")
+    found = list(re.finditer(assignment, command))
+    return found if len(found) == len(re.findall(r"(?<![\w$])" + name + r"=", command)) else None
+
+
+def _assigned_literal(command: str, name: str, before: int) -> "str | None":
+    """The value of `name` when `command` assigns it a literal exactly once, as a leg of its
+    own that always runs, before offset `before`; else None."""
+    found = _literal_assignments(command, name)
+    if not found or len(found) != 1 or found[0].end() > before:
+        return None
+    start = found[0].start()
+    if re.search(r"(?:\||\()[ \t]*$", command[:start]) or _assignment_is_conditional(command, start):
+        return None
+    value = found[0].group("v")
+    return value[1:-1] if value[:1] in ("'", '"') else value
+
+
 def _rewrite_variable_evals(command: str) -> str:
     """`command` with each eval of a variable assigned earlier in the command a literal value
     replaced by the eval of that value: kept whole when the expansion is quoted, split into
@@ -7021,11 +7049,9 @@ def _rewrite_variable_evals(command: str) -> str:
 
     def _value(m: re.Match) -> str:
         name = m.group("braced") or m.group("bare")
-        assignment = (r"(?:^|(?<=[;&|(\n]))[ \t]*" + name
-                      + r"=(?P<v>'[^']*'|\"[^\"$`\\]*\"|[^\s;&|$`'\"\\()]*)(?=[ \t]*(?:$|[;&|\n]))")
-        everywhere = list(re.finditer(assignment, command))
-        found = [a for a in everywhere if a.end() <= m.start()]
-        if not found or len(everywhere) != len(re.findall(r"(?<![\w$])" + name + r"=", command)):
+        everywhere = _literal_assignments(command, name)
+        found = [a for a in everywhere or [] if a.end() <= m.start()]
+        if not everywhere or not found:
             return m.group(0)
         # Several assignments: one in a pipeline or a subshell, or behind a test, may
         # leave the value before it in place.
@@ -7101,7 +7127,7 @@ def rewritten_executed_command(command: str) -> str | None:
         rewritten = _rewrite_file_runs(_rewrite_readable_evals(command))
         kept: list[str] = []
         expanded = _expand_literal_variables(rewritten, kept)
-        if expanded == rewritten and kept:
+        if expanded == rewritten == command and kept:
             return "; ".join(dict.fromkeys(kept))
         rewritten = _script_argv_guarded_command(expanded) or expanded
     except Exception:  # noqa: BLE001 - a reader for the approval side must not raise

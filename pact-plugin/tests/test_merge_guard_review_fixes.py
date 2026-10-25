@@ -3016,6 +3016,45 @@ def test_an_alias_guarded_only_in_the_guessed_directory_is_refused_then_runs(sty
     assert _runs_after_approval(cmd, style)
 
 
+# A cd to a variable the command assigns a literal once, before the cd and unconditionally,
+# moves to that literal.
+CD_TO_AN_ASSIGNED_VARIABLE = [
+    ("bare", "REPO=../repoA; cd \"$REPO\" && git pf origin main"),
+    ("braced", "REPO=../repoA; cd \"${REPO}\" && git pf origin main"),
+    ("with a suffix", "TOP=..; cd \"$TOP/repoA\" && git pf origin main"),
+    ("after an and", "REPO=../repoA && cd $REPO && git pf origin main"),
+    ("beside a variable another program reads", "R=hello; mytool \"$R\"; cd ../repoA && git pf origin main"),
+]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", CD_TO_AN_ASSIGNED_VARIABLE, ids=[r[0] for r in CD_TO_AN_ASSIGNED_VARIABLE])
+def test_a_cd_to_a_variable_assigned_a_literal_reads_aliases_there(label, cmd, style, alias_repos):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+def test_a_cd_to_a_variable_assigned_a_literal_moves_away_from_the_command_directory(alias_repos):
+    import shared.merge_guard_common as mgc
+
+    mgc.set_command_directory(str(alias_repos / "repoA"))
+    assert is_dangerous_command("REPO=../repoB; cd \"$REPO\" && git pf origin main") is False
+
+
+@pytest.mark.parametrize("cmd", [
+    "cd \"$REPO\" && git pf origin main",
+    "[ -n \"$X\" ] && REPO=../repoB; cd \"$REPO\" && git pf origin main",
+    "REPO=../repoB; REPO=../repoB; cd \"$REPO\" && git pf origin main",
+    "cd \"$REPO\" && git pf origin main; REPO=../repoB",
+    "REPO=\"$HOME\"; cd \"$REPO\" && git pf origin main",
+], ids=["not-assigned", "assigned-conditionally", "assigned-twice", "assigned-after", "assigned-a-variable"])
+def test_a_cd_to_a_variable_the_command_does_not_fix_keeps_the_command_directory(cmd, alias_repos):
+    import shared.merge_guard_common as mgc
+
+    mgc.set_command_directory(str(alias_repos / "repoA"))
+    assert is_dangerous_command(cmd) is True
+
+
 def test_a_paren_inside_a_substitution_or_quotes_does_not_close_a_subshell(alias_repos):
     import shared.merge_guard_common as mgc
 
