@@ -56,7 +56,7 @@ from shared.pact_context import (
     project_slug,
 )
 from shared.paths import get_claude_config_dir
-from shared.session_state import is_safe_path_component
+from shared.session_state import is_safe_path_component, is_safe_plugin_root
 from shared.stale_session import recorded_session_id, session_block_rows
 from shared.task_utils import iter_team_task_jsons
 from shared.session_journal import (
@@ -215,8 +215,10 @@ def _session_block_text(
         session_dir_line = f"- Session dir: `{cleaned_session_dir}`\n"
 
     # Build plugin root line (no abbreviation — needs to be usable as-is in Bash)
+    # The model pastes this value into double-quoted shell commands, so an
+    # unsafe one (is_safe_plugin_root) drops the line, as an empty one does.
     plugin_root_line = ""
-    if plugin_root:
+    if is_safe_plugin_root(plugin_root):
         cleaned_plugin_root = _sanitize_prompt_field(
             str(plugin_root), _REFRESH_PATH_TRUNCATION_LIMIT
         )
@@ -720,27 +722,27 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
     return None
 
 
-# Characters that must never reach the backtick-quoted plugin root in the
-# substitution sentence: a backtick would close the code span, and a control
-# character (newline included) could start a new line of instructions.
-_PLUGIN_ROOT_FORBIDDEN_RE = re.compile(r"[`\x00-\x1f\x7f]")
+# Team names longer than this are not substituted. Real ones are
+# session-<id8> (16), a full session UUID (36) or pact-<id8>.
+TEAM_NAME_MAX_LENGTH = 128
 
 
 def _safe_team_name(value: object) -> str:
-    """The team name if it is a safe single path component, else ""."""
-    return value if isinstance(value, str) and is_safe_path_component(value) else ""
-
-
-def _safe_plugin_root(value: object) -> str:
-    """The plugin root if it is an absolute path with no backtick or control
-    character, else ""."""
+    """The team name if it is a safe single path component that is not all
+    dashes and at most TEAM_NAME_MAX_LENGTH characters, else ""."""
     if (
         isinstance(value, str)
-        and os.path.isabs(value)
-        and not _PLUGIN_ROOT_FORBIDDEN_RE.search(value)
+        and is_safe_path_component(value)
+        and value.strip("-")
+        and len(value) <= TEAM_NAME_MAX_LENGTH
     ):
         return value
     return ""
+
+
+def _safe_plugin_root(value: object) -> str:
+    """The plugin root if it passes is_safe_plugin_root, else ""."""
+    return value if is_safe_plugin_root(value) else ""
 
 
 def format_session_substitutions(
@@ -756,8 +758,10 @@ def format_session_substitutions(
     Every value is checked before it reaches this LLM-facing sentence:
 
     - ``team_name`` must be a safe single path component
-      (``is_safe_path_component``); ``plugin_root`` must be an absolute path
-      with no backtick or control character. A value that fails is named as
+      (``is_safe_path_component``), not all dashes, and at most
+      TEAM_NAME_MAX_LENGTH characters; ``plugin_root`` must pass
+      ``is_safe_plugin_root`` (a positive allowlist, because the model pastes
+      it into double-quoted shell commands). A value that fails is named as
       unavailable, the same way an empty ``session_dir`` (no session id on
       stdin) is, rather than substituted.
     - ``lead_address`` is required (no default: a silent ``team-lead``
@@ -795,7 +799,7 @@ def format_session_substitutions(
         )
     else:
         plugin_sentence = (
-            'Plugin root unavailable (not an absolute path) — do not run '
+            'Plugin root unavailable (not a safe absolute path) — do not run '
             'commands that depend on {plugin_root} until next clean start.'
         )
     lead_sentence = (

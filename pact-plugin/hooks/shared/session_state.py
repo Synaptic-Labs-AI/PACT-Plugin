@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -191,6 +192,50 @@ def is_safe_path_component(value: str) -> bool:
 # Back-compat alias for callers that imported the pre-cycle-8 private
 # name. See the matching `_SAFE_PATH_COMPONENT_RE` alias above.
 _is_safe_path_component = is_safe_path_component
+
+
+# Plugin root allowlist (#1671 review, FUTURE-3 round 2). The value is pasted
+# by the model into DOUBLE-QUOTED shell commands (python3 "{plugin_root}/...")
+# and shown in backtick spans, so it is checked against a POSITIVE allowlist,
+# not a deny-list: ASCII letters, digits and `._/+@:~ -` (space included, for
+# home dirs with spaces), plus non-ASCII LETTERS and NUMBERS (Unicode
+# categories L* and N*, so /home/josé works). Everything else is rejected,
+# including $ ` " ' \ ! (shell expansion and quote breakout) and every
+# non-ASCII control, format or separator character (U+0085, U+2028, bidi
+# overrides, zero-width characters, non-ASCII spaces).
+PLUGIN_ROOT_MAX_LENGTH = 512
+_PLUGIN_ROOT_ASCII_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/+@:~ -"
+)
+
+
+def _is_plugin_root_char(char: str) -> bool:
+    if char in _PLUGIN_ROOT_ASCII_CHARS:
+        return True
+    return not char.isascii() and unicodedata.category(char)[0] in ("L", "N")
+
+
+def is_safe_plugin_root(value: object) -> bool:
+    """True iff ``value`` is a plugin root that is safe to substitute into a
+    double-quoted shell command or a backtick span: a str starting with "/",
+    at most PLUGIN_ROOT_MAX_LENGTH characters, every character on the
+    allowlist above. The single check for every plugin_root source: the
+    substitution sentence, the CLAUDE.md "- Plugin root:" line, and the
+    context file (on write and on read).
+
+    The characters are checked in NFC form, so a decomposed accented name
+    (macOS can report "e" + U+0301 for "é") passes when it composes to a
+    letter; a combining mark that composes to nothing is still rejected.
+    The value itself is not changed."""
+    if not (
+        isinstance(value, str)
+        and value.startswith("/")
+        and len(value) <= PLUGIN_ROOT_MAX_LENGTH
+    ):
+        return False
+    return all(
+        _is_plugin_root_char(char) for char in unicodedata.normalize("NFC", value)
+    )
 
 
 # --- Default dict factory -------------------------------------------------

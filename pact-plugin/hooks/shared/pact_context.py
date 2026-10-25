@@ -23,7 +23,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
-from .session_state import SESSION_ID_CONTROL_CHARS_RE, is_safe_path_component
+from .session_state import (
+    SESSION_ID_CONTROL_CHARS_RE,
+    is_safe_path_component,
+    is_safe_plugin_root,
+)
 # One-directional import: session_registry is a self-contained leaf (imports
 # nothing from shared.*), so this introduces NO circular import. Used by
 # resolve_agent_name Step 3.5 to recover a tmux teammate's friendly name.
@@ -421,7 +425,9 @@ def get_pact_context() -> dict:
             "team_name": team_name,
             "session_id": str(data.get("session_id", "")),
             "project_dir": str(data.get("project_dir", "")),
-            "plugin_root": str(data.get("plugin_root", "")),
+            # Defence in depth: the writers record only a safe value, so an
+            # unsafe one here means the file was edited; read it as "".
+            "plugin_root": _safe_plugin_root_or_empty(data.get("plugin_root", "")),
             "started_at": str(data.get("started_at", "")),
             "process_key": str(data.get("process_key", "")),
             # Allowlisted at the read boundary: anything outside
@@ -2203,6 +2209,19 @@ def _lookup_agent_in_team_config(
     return ""
 
 
+def _safe_plugin_root_or_empty(value: object) -> str:
+    """``value`` when it is a safe plugin root (is_safe_plugin_root), else "".
+    An unsafe value is logged to stderr, never echoed in full."""
+    if is_safe_plugin_root(value):
+        return value  # type: ignore[return-value]  # is_safe_plugin_root implies str
+    if value:
+        print(
+            "pact_context: rejecting unsafe plugin_root (using empty)",
+            file=sys.stderr,
+        )
+    return ""
+
+
 def _read_recorded_context(target: Path, session_id: str) -> dict:
     """The context dict recorded at ``target`` when it belongs to
     ``session_id``; {} when the file is absent, unreadable, malformed, not a
@@ -2283,7 +2302,10 @@ def build_context_cache(
         "team_name": team_name,
         "session_id": session_id,
         "project_dir": project_dir,
-        "plugin_root": plugin_root,
+        # Recorded only when safe (is_safe_plugin_root): the model reads
+        # this file directly (bootstrap.md's per-field fallback) and pastes
+        # the value into double-quoted shell commands.
+        "plugin_root": _safe_plugin_root_or_empty(plugin_root),
         "started_at": started_at or datetime.now(timezone.utc).isoformat(),
         "process_key": "",
         "harness": harness if isinstance(harness, str) else "",
@@ -2387,6 +2409,13 @@ def persist_context(target: Path, context: dict) -> None:
     """
     context_dir = target.parent
     try:
+        # The single disk-write sink: every writer (build_context_cache, and
+        # set_harness_stamp re-persisting a recorded dict) passes through
+        # here, so an unsafe plugin_root is never written, whatever its source.
+        if context.get("plugin_root") and not is_safe_plugin_root(
+            context["plugin_root"]
+        ):
+            context = {**context, "plugin_root": ""}
         serialized = json.dumps(context)
         try:
             if target.read_bytes() == serialized.encode("utf-8"):
