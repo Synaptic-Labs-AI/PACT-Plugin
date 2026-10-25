@@ -2321,6 +2321,9 @@ PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
 }
 
 
+_GH_REPO_PREFIX_RE = re.compile(r"(?:^|[;&|(\n])[ \t]*(?:[A-Za-z_]\w*=\S*[ \t]+)*?GH_REPO=([^\s;&|]+)[ \t]")
+
+
 def extract_privileged_flags(command: str, op_type: str | None) -> list[str]:
     """Scan a command for the privileged dash-flags bound on its op-class (#1042).
 
@@ -2475,6 +2478,13 @@ def extract_privileged_flags(command: str, op_type: str | None) -> list[str]:
             found.add(canonical)                 # boolean short; keep walking
             j += 1
         i += 2 if consumed_next else 1
+
+    # gh reads its repository from a GH_REPO assignment prefixing the command (run
+    # directly or through env, command, ...) exactly as from --repo, so that prefix
+    # is the same redirect.
+    if "--repo" in canonical_long_names:
+        for m in _GH_REPO_PREFIX_RE.finditer(command):
+            found.add("--repo=" + m.group(1))
 
     return sorted(found)
 

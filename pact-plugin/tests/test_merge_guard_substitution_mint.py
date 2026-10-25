@@ -1064,6 +1064,43 @@ class TestAPushScopeFlagNeedsItsOwnApproval:
         assert _runs(_mint_styled("git push -f --tags", APPROVAL_STYLES["inline"]), _FORCE + " --tags")
 
 
+GH_REPO_PREFIXES = {
+    "implicit-merge": (MERGE + "--squash", "GH_REPO=o/b " + MERGE + "--squash", "GH_REPO=o/c " + MERGE + "--squash"),
+    "numbered-merge": (MERGE + "5 --squash", "GH_REPO=o/b " + MERGE + "5 --squash", "GH_REPO=o/c " + MERGE + "5 --squash"),
+    "close": (_CLOSE_PR + "5 -d", "GH_REPO=o/b " + _CLOSE_PR + "5 -d", "GH_REPO=o/c " + _CLOSE_PR + "5 -d"),
+    "through-env": (MERGE + "5", "GH_REPO=o/b env " + MERGE + "5", "GH_REPO=o/c env " + MERGE + "5"),
+}
+
+
+class TestAGhRepoPrefixIsARepoRedirect:
+    """gh reads its repository from a GH_REPO prefix as from `-R`: a plain approval
+    does not cover it, and its own approval covers that repository only."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("plain,redirected,other", GH_REPO_PREFIXES.values(), ids=GH_REPO_PREFIXES.keys())
+    def test_a_plain_approval_does_not_cover_it(self, plain, redirected, other, style):
+        ctx = _mint_styled(plain, style)
+        assert _runs(ctx, plain)
+        assert not _runs(ctx, redirected)
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("plain,redirected,other", GH_REPO_PREFIXES.values(), ids=GH_REPO_PREFIXES.keys())
+    def test_its_own_approval_runs_that_repo_only(self, plain, redirected, other, style):
+        ctx = _mint_styled(redirected, style)
+        assert _runs(ctx, redirected)
+        assert not _runs(ctx, other)
+
+    @pytest.mark.parametrize("command", [
+        "echo GH_REPO=o/b; " + MERGE + "5",
+        "GH_REPO=o/b; " + MERGE + "5",
+        MERGE + '5 --body "GH_REPO=o/b gh notes"',
+    ], ids=["echoed", "not-exported", "in-a-body"])
+    def test_a_gh_repo_that_is_not_a_prefix_binds_nothing(self, command):
+        ctx = _mint_styled(command, APPROVAL_STYLES["inline"])
+        assert _runs(ctx, command)
+        assert _runs(_mint_styled(MERGE + "5", APPROVAL_STYLES["inline"]), command)
+
+
 class TestAnEvalOfALiteralCommandRuns:
     """An eval of a string the region reading locates nothing in (a close or a force
     push inside the quotes) binds its text, so the approved command runs and no
