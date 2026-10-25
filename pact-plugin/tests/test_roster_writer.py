@@ -79,28 +79,33 @@ def test_meta_join_binds_when_meta_exists_at_start(config):
     assert record["meta_present"] is True
 
 
-def test_ambiguous_same_type_intents_bind_nothing(config):
+def test_type_join_takes_the_latest_same_type_intent(config):
+    """Each spawn's Pre and Start run back to back (measured), so the latest
+    same-type spawn event is this start's own; an older unattached intent
+    (e.g. an orphan from a denied spawn) no longer makes it ambiguous."""
     write_roster(config, TEAM, [intent(TU1, "c1", "pact-backend-coder"),
                                 intent(TU2, "c2", "pact-backend-coder")])
-    assert not roster_writer.handle_subagent_start(
+    assert roster_writer.handle_subagent_start(
         subagent_start_frame(config, A1, "pact-backend-coder"))
-    assert _binds(config) == []
+    assert [(b["tu"], b["via"]) for b in _binds(config)] == [(TU2, "type")]
 
 
 def test_meta_name_mismatch_does_not_meta_join(config):
     write_roster(config, TEAM, [intent(TU1, "c1", "pact-backend-coder"),
                                 intent(TU2, "c2", "pact-backend-coder")])
     write_subagent_meta(config, A2, _meta("someone-else", TU2))
-    assert not roster_writer.handle_subagent_start(
+    roster_writer.handle_subagent_start(
         subagent_start_frame(config, A2, "pact-backend-coder"))
+    assert all(b["via"] != "meta" for b in _binds(config))
 
 
 def test_nested_spawn_depth_does_not_meta_join(config):
     write_roster(config, TEAM, [intent(TU1, "c1", "pact-backend-coder"),
                                 intent(TU2, "c2", "pact-backend-coder")])
     write_subagent_meta(config, A2, _meta("c2", TU2, depth=2))
-    assert not roster_writer.handle_subagent_start(
+    roster_writer.handle_subagent_start(
         subagent_start_frame(config, A2, "pact-backend-coder"))
+    assert all(b["via"] != "meta" for b in _binds(config))
 
 
 def test_type_join_ignores_other_types_and_stale_intents(config):

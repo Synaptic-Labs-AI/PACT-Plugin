@@ -4,7 +4,7 @@ Summary: The cloud roster: an append-only record, written by hooks on the
          lead's side of a spawn, that ties each spawned agent's NAME (from the
          lead's own Agent call) to its harness `agent_id`. Owns the file
          format, record validation, the append, and the fold that reads it.
-Used by: dispatch_gate.py (writes `intent`), roster_writer.py (writes `bind`
+Used by: dispatch_gate.py (writes `intent` and `foreign`), roster_writer.py (writes `bind`
          and `confirm`), shared/actor_identity.py (reads a name for an
          agent_id: R1) and shared/intentional_wait.py (reads the types an owner
          name was spawned with: R2). Design: docs/architecture/cloud-roster.md.
@@ -27,6 +27,19 @@ RECORDS (one compact JSON object per line, `v: 1`):
            meta_present}              the teammate's first turn.
   confirm {tu, aid, type?}            roster_writer, lead PostToolUse(Agent):
                                       the harness pairs tool_use_id and agentId.
+  foreign {tu, aid, type}             dispatch_gate, a NON-lead PreToolUse(Agent)
+                                      (a frame with an a<16hex> agent_id: a
+                                      nested spawn by `aid`). Names nobody; it
+                                      only marks a spawn of `type` in flight
+                                      that no intent describes.
+
+THE TYPE JOIN (roster_writer, SubagentStart): measured, each spawn's
+PreToolUse(Agent) and SubagentStart run back to back, for lead and nested
+spawns alike. So a SubagentStart binds only to the LATEST same-type spawn
+event (intent or foreign, in file order), and only when that event is a lead
+intent nothing has attached yet, inside the join window. After a foreign
+spawn of that type, nothing binds: a nested agent can never take a lead
+intent, orphaned or live (test-roster's live residual, task #90).
 
 FOLD (pure, in `load_roster`):
   1. The FIRST intent per tool_use_id wins; a later duplicate is ignored.
@@ -37,11 +50,16 @@ FOLD (pure, in `load_roster`):
   5. An agent_id attached to two tool_use_ids at the same strength is unbound.
      A confirmed attachment beats a bind-only one for the same agent_id.
   6. `types_for_name(n)` is the set of stripped types over ALL intents named n.
+  7. `foreign` records never attach to anything; they only appear in the
+     ordered spawn events the type join reads.
 
 WHAT A BINDING IS WORTH (enforced by the readers, shared/actor_identity.py):
 a CONFIRMED binding (the lead's PostToolUse pairing) names the agent even
 when its meta.json is gone; a bind-only binding (SubagentStart) names it only
-when meta.json carries the same name. A cloud roster file that exists but
+when meta.json carries the same name. A ROSTER NAME IS CLAIMABLE ONLY
+THROUGH A BINDING: an agent the roster does not bind, whose meta.json name is
+any intent's name, names nobody (`unattributed`), so a one-file meta edit
+cannot take a roster member's name. A cloud roster file that exists but
 cannot be used (`load_roster_state` reports it unloadable) names nobody: the
 reader resolves `unattributed` rather than fall back to meta.json.
 
@@ -72,11 +90,11 @@ meta.json consistently". ACCEPTED RESIDUALS (user decision Q1, design §7):
     confirm pairing its own id with a victim's tool_use_id before the
     victim's first handback. The victim's bind is displaced and it resolves
     meta-only (the pre-roster baseline). The forger usually resolves
-    meta-only too, under its own meta.json name: its id is then confirmed
-    for two spawns (its own and the victim's), which unbinds it (fold rule
-    5). Only a forger with no confirm of its own stays bound to the victim's
-    name, and then resolves `unattributed` unless it also edits its own
-    meta.json name;
+    `unattributed`: its id is then confirmed for two spawns (its own and
+    the victim's), which unbinds it (fold rule 5), and its own name is a
+    roster name it no longer holds a binding to. Only a forger with no
+    confirm of its own stays bound to the victim's name, and then resolves
+    `unattributed` unless it also edits its own meta.json name;
   - EMPTYING THE ROSTER, a sub-case of the two-file forge (residual 1).
     Deleting the roster file, or truncating it to empty, reads as "no
     records yet" (not unloadable), so every agent resolves meta-only again,
@@ -115,6 +133,7 @@ RECORD_VERSION = 1
 KIND_INTENT = "intent"
 KIND_BIND = "bind"
 KIND_CONFIRM = "confirm"
+KIND_FOREIGN = "foreign"
 
 BIND_VIA_META = "meta"
 BIND_VIA_TYPE = "type"
@@ -155,12 +174,37 @@ class Binding:
 
 
 @dataclass(frozen=True)
+class SpawnEvent:
+    """One spawn's PreToolUse(Agent) as recorded: a lead `intent` or a
+    `foreign` (nested) spawn, in file order."""
+
+    kind: str
+    tool_use_id: str
+    type: str
+    ts: str | None
+
+
+@dataclass(frozen=True)
 class Roster:
     """The folded roster. Build it with `load_roster`, not directly."""
 
     intents: dict = field(default_factory=dict)        # tool_use_id -> Intent
     bindings: dict = field(default_factory=dict)       # agent_id -> Binding
     attached: frozenset = frozenset()                  # tool_use_ids with any valid bind/confirm
+    spawn_events: tuple = ()                           # SpawnEvent, file order
+
+    def latest_spawn(self, agent_type: str) -> SpawnEvent | None:
+        """The last recorded spawn event whose type matches `agent_type`
+        (`PACT:` stripped on both sides), or None."""
+        wanted = strip_type(agent_type)
+        for event in reversed(self.spawn_events):
+            if strip_type(event.type) == wanted:
+                return event
+        return None
+
+    def intent_names(self) -> frozenset:
+        """Every name any intent records."""
+        return frozenset(i.name for i in self.intents.values())
 
     def binding_for(self, agent_id: Any) -> Binding | None:
         """The binding for `agent_id`, or None (unknown, or in conflict)."""
@@ -342,21 +386,29 @@ def _validated(raw: Any) -> dict | None:
         if type_value is not None and not type_ok:
             return None
         return raw
+    if kind == KIND_FOREIGN:
+        return raw if type_ok else None
     return None
 
 
 def fold(records: list) -> Roster:
     """Apply the fold rules (module docstring) to validated records in file order."""
     intents: dict = {}
+    events: list = []
+    foreign_seen: set = set()
     for r in records:
         if r["k"] == KIND_INTENT and r["tu"] not in intents:
             intents[r["tu"]] = Intent(r["tu"], r["name"], r["type"], r.get("ts"))
+            events.append(SpawnEvent(KIND_INTENT, r["tu"], r["type"], r.get("ts")))
+        elif r["k"] == KIND_FOREIGN and r["tu"] not in foreign_seen:
+            foreign_seen.add(r["tu"])
+            events.append(SpawnEvent(KIND_FOREIGN, r["tu"], r["type"], r.get("ts")))
 
     binds: dict = {}      # tu -> aid (first valid bind)
     confirms: dict = {}   # tu -> aid (first valid confirm)
     for r in records:
         intent = intents.get(r["tu"])
-        if intent is None or r["k"] == KIND_INTENT:
+        if intent is None or r["k"] not in (KIND_BIND, KIND_CONFIRM):
             continue
         record_type = r.get("type")
         if isinstance(record_type, str) and strip_type(record_type) != strip_type(intent.type):
@@ -385,4 +437,4 @@ def fold(records: list) -> Roster:
         intent = intents[tu]
         strength = STRENGTH_CONFIRMED if confirmed else STRENGTH_BOUND
         bindings[aid] = Binding(aid, tu, intent.name, intent.type, strength)
-    return Roster(intents, bindings, frozenset(attachment))
+    return Roster(intents, bindings, frozenset(attachment), tuple(events))

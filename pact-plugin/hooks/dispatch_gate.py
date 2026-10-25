@@ -37,7 +37,9 @@ prompt-fragment for the user-facing error.
 Cloud roster (no team config.json): after the decision is journaled, an
 admitted (non-DENY) named spawn on the lead's frame also appends an
 ``intent`` record (tool_use_id, name, type) to shared/cloud_roster.py's
-roster. It is a best-effort sink that cannot change the decision or output.
+roster, and a nested spawn (a non-lead frame with an agent_id) appends a
+``foreign`` record. It is a best-effort sink that cannot change the decision
+or output.
 
 Configuration:
   ``PACT_DISPATCH_INLINE_MISSION_MODE`` env-var (default ``"warn"``)
@@ -915,40 +917,49 @@ def _team_alignment_diagnosis() -> str:
         return ""
 
 
-def _record_roster_intent(decision: str, tool_input: dict, input_data: dict) -> None:
-    """Cloud only: append the roster `intent` for an admitted lead spawn.
+def _record_roster_spawn(decision: str, tool_input: dict, input_data: dict) -> None:
+    """Cloud only: append the roster record for this spawn.
 
     Best-effort sink, like ``_journal_decision``: it runs after the decision
     is made and journaled, writes only to the roster file, and swallows every
     error, so it can change neither the decision nor any emitted byte.
 
-    Written only when the decision is not DENY (a refused spawn must leave no
-    intent that the owner-to-type exemption lookup could read), the frame is
-    the lead's (a teammate's spawn is not a lead-written record), the team has
-    no config.json (``cloud_roster.applies``), and the call carries a usable
-    ``name`` and ``subagent_type``. The type is stored in the spelling the
-    lead used. See shared/cloud_roster.py and
+    - The LEAD's frame: an ``intent`` (tool_use_id, name, type), only when the
+      decision is not DENY (a refused spawn must leave no intent that the
+      owner-to-type exemption lookup could read) and the call carries a usable
+      ``name``. The type is stored in the spelling the lead used.
+    - A NON-lead frame with an a<16hex> ``agent_id`` (a nested spawn): a
+      ``foreign`` record (tool_use_id, the spawner's id, type), whatever the
+      decision. It names nobody; it tells roster_writer's type join that the
+      next same-type SubagentStart is not a lead spawn.
+
+    Nothing is written when the team has a config.json
+    (``cloud_roster.applies``). See shared/cloud_roster.py and
     docs/architecture/cloud-roster.md §3.3.
     """
     try:
-        if decision == "DENY" or not pact_context.is_lead(input_data):
-            return
         tool_use_id = input_data.get("tool_use_id")
-        if not (isinstance(tool_use_id, str)
-                and cloud_roster.TOOL_USE_ID.fullmatch(tool_use_id)):
-            return
-        name = subagent_meta.valid_name(tool_input.get("name"))
         agent_type = tool_input.get("subagent_type")
-        if name is None or not (isinstance(agent_type, str)
-                                and cloud_roster.TYPE_VALUE.fullmatch(agent_type)):
+        if not (isinstance(tool_use_id, str)
+                and cloud_roster.TOOL_USE_ID.fullmatch(tool_use_id)
+                and isinstance(agent_type, str)
+                and cloud_roster.TYPE_VALUE.fullmatch(agent_type)):
             return
+        if pact_context.is_lead(input_data):
+            name = subagent_meta.valid_name(tool_input.get("name"))
+            if decision == "DENY" or name is None:
+                return
+            record = {"k": cloud_roster.KIND_INTENT, "tu": tool_use_id,
+                      "name": name, "type": agent_type}
+        else:
+            spawner = subagent_meta.subagent_launcher_id(input_data)
+            if not spawner:
+                return
+            record = {"k": cloud_roster.KIND_FOREIGN, "tu": tool_use_id,
+                      "aid": spawner, "type": agent_type}
         team = pact_context.get_team_name()
-        if not cloud_roster.applies(team):
-            return
-        cloud_roster.append_record(team, {
-            "k": cloud_roster.KIND_INTENT, "tu": tool_use_id,
-            "name": name, "type": agent_type,
-        })
+        if cloud_roster.applies(team):
+            cloud_roster.append_record(team, record)
     except Exception:
         # Best-effort; the gate decision and output stand regardless.
         pass
@@ -987,7 +998,7 @@ def main() -> None:
         _emit_load_failure_deny("runtime", e)
 
     _journal_decision(decision, reason, rule, tool_input)
-    _record_roster_intent(decision, tool_input, input_data)
+    _record_roster_spawn(decision, tool_input, input_data)
 
     if decision == "ALLOW":
         print(_SUPPRESS_OUTPUT)

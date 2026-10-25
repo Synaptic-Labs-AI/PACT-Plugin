@@ -40,7 +40,12 @@ meta.json's:
                                  `dispute` = (roster name, meta name), so the
                                  advisory and journal show both claims and
                                  neither frames anyone;
-  - no binding for this id    -> meta.json's name, as before (unverified);
+  - no binding for this id    -> meta.json's name, as before (unverified),
+                                 UNLESS that name is any intent's name in the
+                                 roster: then NO name, source `unattributed`.
+                                 A roster name is claimable only through a
+                                 roster binding of this very agent_id, so a
+                                 one-file meta edit cannot take it;
   - the roster file exists but cannot be used (over the size cap, a
     symlink, unreadable, or junk with no valid record) -> NO name, source
     `unattributed`: disabling the roster must not restore a forged meta name.
@@ -234,7 +239,9 @@ def _resolve(input_data: Any, team_name: str) -> ActorIdentity:
         name = valid_name(meta.get("name"))
         raw = _first_raw([frame_type, *_meta_candidates(meta)], name)
         agent_type_value = _typed(raw, input_data)
-        binding, unloadable = _roster_binding(input_data, team_name, frame_type)
+        binding, unloadable, roster_names = _roster_binding(
+            input_data, team_name, frame_type
+        )
         if unloadable:
             # The cloud roster exists but cannot be read: identity unknown,
             # never a fallback to the (forgeable) meta.json name.
@@ -257,6 +264,11 @@ def _resolve(input_data: Any, team_name: str) -> ActorIdentity:
                     ROLE_TEAMMATE, None, agent_type_value, SOURCE_UNATTRIBUTED,
                     dispute=(binding.name, name),
                 )
+        elif name is not None and name in roster_names:
+            # A roster name is claimable only through a roster binding of this
+            # very agent_id: an unbound agent whose meta.json carries a name
+            # the lead spawned someone under is a one-file claim.
+            return ActorIdentity(ROLE_TEAMMATE, None, agent_type_value, SOURCE_UNATTRIBUTED)
         source = SOURCE_SUBAGENT_META if meta else SOURCE_SUBAGENT_NO_META
         return ActorIdentity(ROLE_TEAMMATE, name, agent_type_value, source)
 
@@ -278,7 +290,9 @@ def _resolve(input_data: Any, team_name: str) -> ActorIdentity:
 
 
 def _roster_binding(input_data: dict, team_name: str, frame_type: Any) -> tuple:
-    """(binding, unloadable) for this frame's agent_id from the cloud roster.
+    """(binding, unloadable, roster_names) for this frame's agent_id from the
+    cloud roster. roster_names is every intent name (empty when there is no
+    loadable cloud roster).
 
     binding is None when the roster does not apply (a team config exists:
     local, so the roster is never opened), is missing, has no binding for the
@@ -288,16 +302,17 @@ def _roster_binding(input_data: dict, team_name: str, frame_type: Any) -> tuple:
     (cloud_roster.load_roster_state).
     """
     if not cloud_roster.applies(team_name):
-        return None, False
+        return None, False, frozenset()
     roster, unloadable = cloud_roster.load_roster_state(team_name)
     if roster is None:
-        return None, unloadable
+        return None, unloadable, frozenset()
+    names = roster.intent_names()
     binding = roster.binding_for(input_data.get("agent_id"))
     if binding is None:
-        return None, False
+        return None, False, names
     if isinstance(frame_type, str) and _strip(frame_type) != _strip(binding.type):
-        return None, False
-    return binding, False
+        return None, False, names
+    return binding, False, names
 
 
 def typed_without_frame(raw: Any, cwd_hint: Any = None) -> str | None:

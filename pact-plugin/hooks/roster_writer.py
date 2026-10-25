@@ -20,10 +20,16 @@ SubagentStart binding, in order:
      SubagentStart fires, so this path does not fire today. It is kept for a
      harness that writes meta earlier, and every bind records `meta_present`
      so the shipped hook keeps measuring it.
-  2. type join: exactly one unattached intent of the frame's type from the
-     last 10 minutes. Measured: each spawn's PreToolUse and SubagentStart run
-     back to back, even for two spawns in one lead message, so the join is
-     unique in the common case.
+  2. type join: the LATEST spawn event of the frame's type (a lead intent or
+     a nested `foreign` spawn, in roster order) when it is an unattached lead
+     intent from the last 10 minutes. Measured: each spawn's PreToolUse and
+     SubagentStart run back to back, even for two spawns in one lead message
+     and for a nested spawn, so the latest same-type event is this start's
+     own spawn. After a foreign (nested) spawn of that type, nothing binds,
+     so a nested agent cannot take a lead intent; an older orphan intent
+     (a spawn another hook or the user denied) no longer blocks the join.
+     A lead-overlap race (Pre B, Pre C, Start B) binds B to C's intent; B's
+     meta name then disagrees (unattributed), and the confirms correct it.
   3. otherwise nothing; the confirm attaches it later. ACCEPTED RESIDUAL: until
      then that agent resolves meta-only, as before the roster.
 
@@ -101,7 +107,7 @@ def handle_subagent_start(frame: dict, teams_dir: str | None = None) -> bool:
 
     chosen, via = _meta_join(meta, unattached), cloud_roster.BIND_VIA_META
     if chosen is None:
-        chosen, via = _type_join(unattached), cloud_roster.BIND_VIA_TYPE
+        chosen, via = _type_join(roster, frame_type), cloud_roster.BIND_VIA_TYPE
     if chosen is None:
         return False
     return cloud_roster.append_record(team, {
@@ -123,15 +129,19 @@ def _meta_join(meta: dict, unattached: list):
     return None
 
 
-def _type_join(unattached: list):
-    """The single unattached same-type intent from the join window, or None."""
+def _type_join(roster, frame_type: str):
+    """The intent of the latest same-type spawn event, when that event is an
+    unattached lead intent written inside the join window; else None."""
+    event = roster.latest_spawn(frame_type)
+    if event is None or event.kind != cloud_roster.KIND_INTENT:
+        return None  # nothing recorded, or the latest is a nested spawn
+    if event.tool_use_id in roster.attached:
+        return None
+    written = cloud_roster.parse_timestamp(event.ts)
     now = datetime.now(timezone.utc)
-    recent = []
-    for intent in unattached:
-        written = cloud_roster.parse_timestamp(intent.ts)
-        if written is not None and timedelta(0) <= now - written <= _TYPE_JOIN_WINDOW:
-            recent.append(intent)
-    return recent[0] if len(recent) == 1 else None
+    if written is None or not timedelta(0) <= now - written <= _TYPE_JOIN_WINDOW:
+        return None
+    return roster.intent(event.tool_use_id)
 
 
 def handle_post_agent(frame: dict, teams_dir: str | None = None) -> bool:

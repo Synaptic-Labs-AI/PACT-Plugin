@@ -180,6 +180,7 @@ background subagent. No single frame carries a spawned agent's name, type and
 | Frame | Carries | Lacks |
 |---|---|---|
 | PreToolUse `Agent` (lead) | `tool_use_id`; `tool_input` {`description`, `name`, `prompt`, `run_in_background`, `subagent_type`} | `agent_id` |
+| PreToolUse `Agent` (nested: a subagent spawning) | the SPAWNER's `agent_id` and `agent_type`; `tool_use_id`; `tool_input` as above. Measured live (test-roster, 2.1.310, spawn depth 2): it runs immediately before the nested agent's SubagentStart. dispatch_gate records it as a cloud-roster `foreign` spawn | the nested agent's own id |
 | SubagentStart | `agent_id` (`a` + 16 hex), `agent_type` (the TYPE, e.g. `general-purpose`), `cwd`, `hook_event_name`, `prompt_id`, `scratchpad_dir`, `session_id`, `transcript_path` | `tool_use_id`, `name` |
 | PostToolUse `Agent` (lead), foreground | `tool_use_id`; `tool_response` {`agentId`, `agentType`, `status: "completed"`, usage fields} | — |
 | PostToolUse `Agent` (lead), background | `tool_use_id`; `tool_response` {`agentId`, `status: "async_launched"`, `isAsync`, `outputFile`} | `agentType` |

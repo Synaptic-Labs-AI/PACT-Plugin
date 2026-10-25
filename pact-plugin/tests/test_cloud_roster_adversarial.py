@@ -153,8 +153,8 @@ def test_residual_forged_confirm_preempts_the_victims_bind(cloud):
 def test_residual_forged_confirm_usually_unbinds_the_forger(cloud):
     """N2, the usual case: the forger was itself spawned and confirmed, so a
     second confirm for the victim's spawn binds its id twice and unbinds it
-    (fold rule 5). It resolves meta-only under its own name; the victim
-    degrades to meta-only."""
+    (fold rule 5). Unbound, its own name is a roster name it holds no binding
+    to, so it names nobody (task #101); the victim degrades to meta-only."""
     forger = "a" + "f" * 16
     write_roster(cloud, TEAM, [intent(TU1, "victim", "pact-backend-coder"),
                                intent(TU2, "forger", "pact-backend-coder"),
@@ -163,5 +163,5 @@ def test_residual_forged_confirm_usually_unbinds_the_forger(cloud):
     write_subagent_meta(cloud, forger, cloud_meta("forger", "pact-backend-coder"))
     forged = resolve_actor(
         cloud_subagent_frame(cloud, "pact-backend-coder", agent_id=forger), TEAM)
-    assert (forged.name, forged.source) == ("forger", "subagent_meta")
+    assert (forged.name, forged.source) == (None, SOURCE_UNATTRIBUTED)
     assert _actor(cloud).source == SOURCE_SUBAGENT_NO_META

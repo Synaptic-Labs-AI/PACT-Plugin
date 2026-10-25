@@ -190,11 +190,18 @@ class TestActorIdentityRoster:
         assert actor == ActorIdentity(ROLE_TEAMMATE, None, "pact-backend-coder",
                                       SOURCE_UNATTRIBUTED, dispute=("coder", "victim"))
 
-    def test_no_binding_falls_back_to_meta(self, cloud):
+    def test_no_binding_with_a_roster_name_is_unattributed(self, cloud):
+        """A roster name is claimable only through a binding (task #101)."""
         write_roster(cloud, TEAM, [intent(TU1, "coder", "pact-backend-coder")])
         write_subagent_meta(cloud, SUBAGENT_ID, cloud_meta("coder", "pact-backend-coder"))
         actor = resolve_actor(cloud_subagent_frame(cloud, "pact-backend-coder"), TEAM)
-        assert actor.source == SOURCE_SUBAGENT_META
+        assert (actor.name, actor.source) == (None, SOURCE_UNATTRIBUTED)
+
+    def test_no_binding_with_a_name_outside_the_roster_falls_back_to_meta(self, cloud):
+        write_roster(cloud, TEAM, [intent(TU1, "coder", "pact-backend-coder")])
+        write_subagent_meta(cloud, SUBAGENT_ID, cloud_meta("helper", "pact-backend-coder"))
+        actor = resolve_actor(cloud_subagent_frame(cloud, "pact-backend-coder"), TEAM)
+        assert (actor.name, actor.source) == ("helper", SOURCE_SUBAGENT_META)
 
     def test_binding_whose_type_disagrees_with_frame_is_ignored(self, cloud):
         _bound(cloud, "secretary", "pact-secretary")
@@ -400,7 +407,9 @@ class TestLifecycleR1:
         write_subagent_meta(cloud, SUBAGENT_ID, cloud_meta("secretary", "pact-backend-coder"))
         advisories = tlg.evaluate_lifecycle(
             _completion(cloud, "pact-backend-coder", "secretary"))
-        assert [r for r, _ in _completion_advisories(advisories)] == ["self_completion"]
+        # 'secretary' is a roster name and this agent holds no binding to it,
+        # so the meta claim names nobody (task #101): flagged, unresolved.
+        assert [r for r, _ in _completion_advisories(advisories)] == ["non_lead_completion"]
         assert writebacks == ["7"]
 
     def test_real_cloud_secretary_stays_exempt(self, cloud, writebacks):
