@@ -1006,6 +1006,10 @@ REPO_CHANGES = {
                               "env -i -u HOME GIT_WORK_TREE=/tmp/repoC git push --" + "force"),
     "git-dir-env-command-merge": (MERGE + "--squash", "env GIT_DIR=/tmp/repoB/.git " + MERGE + "--squash",
                                   "env GIT_DIR=/tmp/repoC/.git " + MERGE + "--squash"),
+    "set-default": (MERGE + "--squash", "gh repo set-default o/b && " + MERGE + "--squash",
+                    "gh repo set-default o/c && " + MERGE + "--squash"),
+    "set-default-semicolon": (MERGE + "--squash", "gh repo set-default o/b; " + MERGE + "--squash",
+                              "gh repo set-default o/c; " + MERGE + "--squash"),
 }
 SAME_REPO = {
     "config-flag": ("git push --" + "force", "git -c http.extraHeader=x push --" + "force"),
@@ -1015,11 +1019,11 @@ SAME_REPO = {
 
 
 class TestAnOpInAnotherRepoNeedsItsOwnApproval:
-    """An op on the current branch, run after `gh pr checkout`, inside a subshell cd,
-    or in a repository the git leg names (`-C`, `--git-dir`, `--work-tree`,
-    `GIT_DIR`, `GIT_WORK_TREE`, also after `env`), acts on another branch or repo: a
-    plain approval does not cover it, its own approval runs it, and that approval
-    does not cover the same command pointed elsewhere."""
+    """An op on the current branch, run after `gh pr checkout` or `gh repo
+    set-default`, inside a subshell cd, or in a repository the git leg names (`-C`,
+    `--git-dir`, `--work-tree`, `GIT_DIR`, `GIT_WORK_TREE`, also after `env`), acts
+    on another branch or repo: a plain approval does not cover it, its own approval
+    runs it, and that approval does not cover the same command pointed elsewhere."""
 
     @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
     @pytest.mark.parametrize("plain,moved,elsewhere", REPO_CHANGES.values(), ids=REPO_CHANGES.keys())

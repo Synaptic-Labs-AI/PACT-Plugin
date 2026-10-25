@@ -10070,7 +10070,7 @@ def _single_detectable_leg(command: str) -> str | None:
 
 _TARGET_CHANGING_LEG_RE = re.compile(
     r"^[({\s]*(?:[A-Za-z_]\w*=\S*\s+)*(?:command\s+)?"
-    r"(?:git(?:\s+-[Cc]\s+\S+|\s+--\S+)*\s+(?:checkout|switch)\b|gh\s+(?:pr\s+checkout|co)\b"
+    r"(?:git(?:\s+-[Cc]\s+\S+|\s+--\S+)*\s+(?:checkout|switch)\b|gh\s+(?:pr\s+checkout|co|repo\s+set-default)\b"
     r"|cd\b|pushd\b|popd\b)"
 )
 
@@ -10108,12 +10108,13 @@ def _leg_names_another_repo(leg: str) -> bool:
 
 def target_changes_before_guarded_leg(command: str) -> bool:
     """Whether the command's guarded leg runs somewhere other than the current branch
-    of the current repository: a leg before it changes the branch or directory (`git
-    checkout`, `git switch`, `gh pr checkout`, `cd`, `pushd`, `popd`, also inside a
-    subshell), or the guarded leg names another repository (`git -C`, `--git-dir`,
-    `--work-tree`, `GIT_DIR=`, `GIT_WORK_TREE=`, or either exported in an earlier
-    leg). An op on an implicit target (`gh pr merge --squash`, `git push --force`)
-    then acts on another branch or repo than the one the bare op would."""
+    of the current repository: a leg before it changes the branch, directory or gh's
+    default repository (`git checkout`, `git switch`, `gh pr checkout`, `gh repo
+    set-default`, `cd`, `pushd`, `popd`, also inside a subshell), or the guarded leg
+    names another repository (`git -C`, `--git-dir`, `--work-tree`, `GIT_DIR=`,
+    `GIT_WORK_TREE=`, or either exported in an earlier leg). An op on an implicit
+    target (`gh pr merge --squash`, `git push --force`) then acts on another branch
+    or repo than the one the bare op would."""
     guarded = _single_destructive_leg(command) or _single_detectable_leg(command)
     if guarded is None:
         return False
