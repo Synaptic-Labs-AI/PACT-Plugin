@@ -984,6 +984,55 @@ class TestAnImplicitCloseRuns:
         assert _mint_styled("git branch -" + "D", APPROVAL_STYLES["inline"]) is None
 
 
+REPO_CHANGES = {
+    "pr-checkout-merge": (MERGE + "--squash", "gh pr checkout 6 && " + MERGE + "--squash",
+                          "gh pr checkout 7 && " + MERGE + "--squash"),
+    "pr-checkout-force-push": ("git push --" + "force", "gh pr checkout 6 && git push --" + "force",
+                               "gh pr checkout 7 && git push --" + "force"),
+    "dash-c-dir": ("git push --" + "force", "git -C /tmp/repoB push --" + "force", "git -C /tmp/repoC push --" + "force"),
+    "git-dir": ("git push --" + "force", "git --git-dir=/tmp/repoB/.git push --" + "force",
+                "git --git-dir=/tmp/repoC/.git push --" + "force"),
+    "work-tree": ("git push --" + "force", "git --work-tree=/tmp/repoB push --" + "force",
+                  "git --work-tree=/tmp/repoC push --" + "force"),
+    "git-dir-env": ("git push --" + "force", "GIT_DIR=/tmp/repoB/.git git push --" + "force",
+                    "GIT_DIR=/tmp/repoC/.git git push --" + "force"),
+    "work-tree-env": ("git push --" + "force", "GIT_WORK_TREE=/tmp/repoB git push --" + "force",
+                      "GIT_WORK_TREE=/tmp/repoC git push --" + "force"),
+    "subshell-cd": ("git push --" + "force", "(cd /tmp/repoB && git push --" + "force)",
+                    "(cd /tmp/repoC && git push --" + "force)"),
+}
+SAME_REPO = {
+    "config-flag": ("git push --" + "force", "git -c http.extraHeader=x push --" + "force"),
+    "unrelated-env": ("git push --" + "force", "GIT_TRACE=1 git push --" + "force"),
+}
+
+
+class TestAnOpInAnotherRepoNeedsItsOwnApproval:
+    """An op on the current branch, run after `gh pr checkout`, inside a subshell cd,
+    or in a repository the git leg names (`-C`, `--git-dir`, `--work-tree`,
+    `GIT_DIR`, `GIT_WORK_TREE`), acts on another branch or repo: a plain approval
+    does not cover it, its own approval runs it, and that approval does not cover
+    the same command pointed elsewhere."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("plain,moved,elsewhere", REPO_CHANGES.values(), ids=REPO_CHANGES.keys())
+    def test_a_plain_approval_does_not_cover_it(self, plain, moved, elsewhere, style):
+        ctx = _mint_styled(plain, style)
+        assert _runs(ctx, plain)
+        assert not _runs(ctx, moved)
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("plain,moved,elsewhere", REPO_CHANGES.values(), ids=REPO_CHANGES.keys())
+    def test_its_own_approval_runs_it_and_no_other(self, plain, moved, elsewhere, style):
+        ctx = _mint_styled(moved, style)
+        assert _runs(ctx, moved)
+        assert not _runs(ctx, elsewhere)
+
+    @pytest.mark.parametrize("plain,same", SAME_REPO.values(), ids=SAME_REPO.keys())
+    def test_the_same_repo_still_runs(self, plain, same):
+        assert _runs(_mint_styled(plain, APPROVAL_STYLES["inline"]), same)
+
+
 class TestAnEvalOfALiteralCommandRuns:
     """An eval of a string the region reading locates nothing in (a close or a force
     push inside the quotes) binds its text, so the approved command runs and no

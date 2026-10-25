@@ -10045,19 +10045,48 @@ def _single_detectable_leg(command: str) -> str | None:
 
 
 _TARGET_CHANGING_LEG_RE = re.compile(
-    r"^(?:[A-Za-z_]\w*=\S*\s+)*(?:command\s+)?"
-    r"(?:git(?:\s+-[Cc]\s+\S+|\s+--\S+)*\s+(?:checkout|switch)\b|cd\b|pushd\b|popd\b)"
+    r"^[({\s]*(?:[A-Za-z_]\w*=\S*\s+)*(?:command\s+)?"
+    r"(?:git(?:\s+-[Cc]\s+\S+|\s+--\S+)*\s+(?:checkout|switch)\b|gh\s+(?:pr\s+checkout|co)\b"
+    r"|cd\b|pushd\b|popd\b)"
 )
 
 
+def _leg_names_another_repo(leg: str) -> bool:
+    """Whether a git leg runs in a repository it names itself: `git -C <dir>`,
+    `--git-dir`, `--work-tree`, or a `GIT_DIR=` / `GIT_WORK_TREE=` prefix."""
+    try:
+        words = shlex.split(leg.lstrip("({ \t"))
+    except ValueError:
+        return False
+    while words and re.match(r"^[A-Za-z_]\w*=", words[0]):
+        if words[0].split("=", 1)[0] in ("GIT_DIR", "GIT_WORK_TREE"):
+            return True
+        words = words[1:]
+    if words[:1] == ["command"]:
+        words = words[1:]
+    if words[:1] != ["git"]:
+        return False
+    for word in words[1:]:
+        if not word.startswith("-"):
+            return False
+        if word.startswith(("-C", "--git-dir", "--work-tree")):
+            return True
+    return False
+
+
 def target_changes_before_guarded_leg(command: str) -> bool:
-    """Whether a leg that changes the current branch or directory (`git checkout`,
-    `git switch`, `cd`, `pushd`, `popd`) runs before the command's guarded leg. An op
-    on an implicit target (`gh pr merge --squash`, `git push --force`) then acts on
-    another branch or repo than the one the bare op would."""
+    """Whether the command's guarded leg runs somewhere other than the current branch
+    of the current repository: a leg before it changes the branch or directory (`git
+    checkout`, `git switch`, `gh pr checkout`, `cd`, `pushd`, `popd`, also inside a
+    subshell), or the guarded leg names another repository (`git -C`, `--git-dir`,
+    `--work-tree`, `GIT_DIR=`, `GIT_WORK_TREE=`). An op on an implicit target (`gh pr
+    merge --squash`, `git push --force`) then acts on another branch or repo than the
+    one the bare op would."""
     guarded = _single_destructive_leg(command) or _single_detectable_leg(command)
     if guarded is None:
         return False
+    if _leg_names_another_repo(guarded):
+        return True
     for leg in (leg.strip() for leg in _split_into_legs(command)):
         if leg == guarded:
             return False
