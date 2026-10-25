@@ -10111,6 +10111,26 @@ def target_changes_before_guarded_leg(command: str) -> bool:
     return False
 
 
+_BARE_GH_REPO_EXPORT_RE = re.compile(r"(?:^|[;&|(\n])[ \t]*export[ \t]+(?:[^;&|\n]*[ \t])?GH_REPO(?=[ \t;&|)\n]|$)")
+
+
+def exported_gh_repo_before_guarded_leg(command: str) -> bool:
+    """Whether a leg before the command's guarded leg exports GH_REPO (`export
+    GH_REPO=o/b; gh pr merge 5`), which gh then reads as its repository. A GH_REPO
+    assigned without export is not passed to gh and does not count."""
+    guarded = _single_destructive_leg(command) or _single_detectable_leg(command)
+    start = command.find(guarded) if guarded else -1
+    if start <= 0 or "GH_REPO" not in command[:start]:
+        return False
+    head = command[:start]
+    if _BARE_GH_REPO_EXPORT_RE.search(head):
+        return True
+    found = _literal_assignments(head, "GH_REPO", exported=True)
+    if found is None:
+        return re.search(r"(?:^|[;&|(\n])[ \t]*export[ \t][^;&|\n]*GH_REPO=", head) is not None
+    return any(a.group(0).lstrip(" \t").startswith("export") for a in found)
+
+
 def is_compound_destructive_command(command: str) -> bool:
     """Detect an agent chaining MULTIPLE destructive operations into one command.
 

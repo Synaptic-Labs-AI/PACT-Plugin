@@ -66,6 +66,7 @@ try:
         _single_destructive_leg,
         _single_detectable_leg,
         target_changes_before_guarded_leg,
+        exported_gh_repo_before_guarded_leg,
     )
     # Re-exports consumed by the test suite through this module's namespace
     # (module-level seam: tests import these via merge_guard_pre).
@@ -531,6 +532,11 @@ def _token_matches_command(token: dict, command: str) -> bool:
     if (context.get("merge_implicit") or context.get("force_push_implicit")) and (
         target_changes_before_guarded_leg(command)
     ):
+        return False
+
+    # A merge or close token covers the repository gh reads by default: a command
+    # that first exports GH_REPO merges or closes in another one.
+    if context.get("operation_type") in ("merge", "close") and exported_gh_repo_before_guarded_leg(command):
         return False
 
     token_op = context.get("operation_type")

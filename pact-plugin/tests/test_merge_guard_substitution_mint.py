@@ -1101,6 +1101,46 @@ class TestAGhRepoPrefixIsARepoRedirect:
         assert _runs(_mint_styled(MERGE + "5", APPROVAL_STYLES["inline"]), command)
 
 
+EXPORTED_GH_REPOS = {
+    "numbered-merge": (MERGE + "5 --squash", "export GH_REPO=o/b; " + MERGE + "5 --squash",
+                       "export GH_REPO=o/c; " + MERGE + "5 --squash"),
+    "implicit-merge": (MERGE + "--squash", "export GH_REPO=o/b && " + MERGE + "--squash",
+                       "export GH_REPO=o/c && " + MERGE + "--squash"),
+    "close": (_CLOSE_PR + "5 -d", "export GH_REPO=o/b; " + _CLOSE_PR + "5 -d", "export GH_REPO=o/c; " + _CLOSE_PR + "5 -d"),
+    "bare-export": (MERGE + "5", "export GH_REPO; " + MERGE + "5", "export GH_REPO GH_HOST; " + MERGE + "5"),
+}
+
+
+class TestAnExportedGhRepoIsARepoRedirect:
+    """gh reads GH_REPO from its environment, so `export GH_REPO=…` in an earlier leg
+    redirects the merge or close: a plain approval does not cover it, and its own
+    approval runs that command only."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("plain,exported,other", EXPORTED_GH_REPOS.values(), ids=EXPORTED_GH_REPOS.keys())
+    def test_a_plain_approval_does_not_cover_it(self, plain, exported, other, style):
+        ctx = _mint_styled(plain, style)
+        assert _runs(ctx, plain)
+        assert not _runs(ctx, exported)
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("plain,exported,other", EXPORTED_GH_REPOS.values(), ids=EXPORTED_GH_REPOS.keys())
+    def test_its_own_approval_runs_it_and_no_other(self, plain, exported, other, style):
+        ctx = _mint_styled(exported, style)
+        assert _runs(ctx, exported)
+        assert not _runs(ctx, other)
+
+    @pytest.mark.parametrize("command", [
+        "GH_REPO=o/b; " + MERGE + "5",
+        MERGE + "5; export GH_REPO=o/b",
+        "GH_REPO=o/a; " + MERGE + "5; export GH_REPO=o/b",
+        "export GH_REPO_X=1; " + MERGE + "5",
+        "echo export GH_REPO=o/b; " + MERGE + "5",
+    ], ids=["not-exported", "exported-after", "unexported-before-exported-after", "other-name", "echoed"])
+    def test_a_plain_approval_still_covers_a_gh_repo_gh_does_not_read(self, command):
+        assert _runs(_mint_styled(MERGE + "5", APPROVAL_STYLES["inline"]), command)
+
+
 class TestAnEvalOfALiteralCommandRuns:
     """An eval of a string the region reading locates nothing in (a close or a force
     push inside the quotes) binds its text, so the approved command runs and no

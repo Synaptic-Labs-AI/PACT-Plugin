@@ -130,6 +130,8 @@ try:
         _single_detectable_leg,
         # An op on the current branch run after a checkout or cd binds its text.
         target_changes_before_guarded_leg,
+        # A merge or close after an exported GH_REPO binds its text.
+        exported_gh_repo_before_guarded_leg,
     )
     from shared.tool_response import extract_tool_response
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-loud catch-all
@@ -891,6 +893,9 @@ def _exact_text_reading(span: str, located: str) -> dict | None:
         # A close of the current branch's PR (`gh pr close --delete-branch`) names
         # no number the extractor reads, so no (op, target) binds it; its text does.
         or (ctx["operation_type"] == "close" and _target_value(ctx) is None)
+        # A merge or close run after `export GH_REPO=…` acts in that repository, which
+        # the op's own reading does not see; its text binds it.
+        or (ctx["operation_type"] in ("merge", "close") and exported_gh_repo_before_guarded_leg(span))
     ):
         return None
     return ctx
