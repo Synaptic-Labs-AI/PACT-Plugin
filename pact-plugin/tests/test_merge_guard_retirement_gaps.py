@@ -420,3 +420,36 @@ class TestAShellCMergeInAnotherRepoRetiresOnItsRun:
         _post(rig, cmd, _EMPTY, state="OPEN")
         assert _gh_calls(rig) == []
         assert _retired(rig)
+
+
+class TestAVariableEvalRetiresOnItsRun:
+    """An eval of an assigned variable runs the variable's value: a branch delete run
+    that way retires on its own success, as the plain command does, since git prints
+    its success line only on a terminal."""
+
+    _CMD = 'cmd="git branch -' + 'D topic"; eval '
+
+    def _write(self, rig, cmd):
+        from shared.merge_guard_common import normalize_command_text
+
+        assert write_token({"operation_type": "branch-delete", "bound_flags": [],
+                            "command_text": normalize_command_text(cmd)}, token_dir=rig["config"])
+
+    @pytest.mark.parametrize("tail", ['"$cmd"', "$cmd"])
+    def test_the_run_retires_the_token(self, rig, tail):
+        cmd = self._CMD + tail
+        self._write(rig, cmd)
+        _post(rig, cmd, _EMPTY)
+        assert _retired(rig)
+
+    @pytest.mark.parametrize("tail", [
+        '"$cmd" || true',
+        '"$cmd"; echo done',
+        '"$cmd" 2>&1 | tail -1',
+        '"$cmd" &',
+    ])
+    def test_a_run_whose_status_is_not_the_deletes_keeps_the_token(self, rig, tail):
+        cmd = self._CMD + tail
+        self._write(rig, cmd)
+        _post(rig, cmd, _EMPTY)
+        assert not _retired(rig)

@@ -116,6 +116,8 @@ try:
         shell_c_string,
         # A git alias's run retires as the command its value names.
         _rewrite_git_aliases,
+        # An eval of an assigned variable retires as the eval of its value.
+        _rewrite_variable_evals,
         # An if/elif/else or case whose branches run different guarded commands
         # binds its text: no one branch's (op, target) stands for the command.
         alternative_destructive_branch_count,
@@ -1395,9 +1397,15 @@ def _retire_exact_text_token(
                         check_pr_state(pr, cwd=cwd) != _CONFIRMING_STATE[op]
                     ):
                         continue
-            elif op not in _CONFIRMING_STATE:
-                pattern = LAYER1_SUCCESS_STDOUT_PATTERNS.get(op) if isinstance(op, str) else None
-                if pattern is not None and not (isinstance(stdout_text, str) and pattern in stdout_text):
+            elif isinstance(op, str) and op not in _CONFIRMING_STATE:
+                pattern = LAYER1_SUCCESS_STDOUT_PATTERNS.get(op)
+                # As in Layer 1, the run's own success stands in for a missing
+                # success line; an eval of an assigned variable is read as the
+                # eval of its value so its run can be the op's.
+                if pattern is not None and not (
+                    (isinstance(stdout_text, str) and pattern in stdout_text)
+                    or _run_succeeded_as_the_op(_rewrite_variable_evals(command), op, tool_response)
+                ):
                     continue
             try:
                 os.rename(path, path + ".consumed")
