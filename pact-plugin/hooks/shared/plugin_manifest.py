@@ -55,8 +55,14 @@ def _resolve_plugin_root() -> Optional[str]:
     cache is empty when the banner is emitted. Direct env read is the
     correct source at this ordering; a future "SSOT cleanup" refactor
     routing through pact_context would silently break the banner.
+
+    The value is NOT stripped: format_session_substitutions judges the raw
+    env value, so the banner must too, or a root with surrounding
+    whitespace ("/x/\\n") shows as "/x/" here and as "not a safe absolute
+    path" in the substitution sentence (#1671 security-rev, task #82).
+    A whitespace-only value is therefore "<unsafe>", not "<unset>".
     """
-    root = os.environ.get("CLAUDE_PLUGIN_ROOT", "").strip()
+    root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
     return root or None
 
 

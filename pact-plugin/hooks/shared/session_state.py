@@ -212,13 +212,23 @@ _is_safe_path_component = is_safe_path_component
 #     languages (Hawaiian okina, Ukrainian apostrophe) use them in names, and
 #     U+02EE, which looks like ".
 #   - U+01C0-U+01C3, the click letters, which look like | || ‡ !.
+#   - U+07F4-U+07F5, the NKo tone apostrophes, which look like '.
+#   - U+107B5-U+107B9, the modifier click letters (the superscript forms of
+#     the clicks above).
+#   - U+A717, MODIFIER LETTER DOT VERTICAL BAR, which looks like !.
 # Other modifier letters (Lm) stay allowed: Japanese names use U+30FC, U+3005,
 # U+309D and U+30FD (/home/ユーザー, /home/佐々木). RTL letters stay allowed too.
 PLUGIN_ROOT_MAX_LENGTH = 512
 _PLUGIN_ROOT_ASCII_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/+@:~ -"
 )
-_PLUGIN_ROOT_LOOKALIKE_RANGES = ((0x02B0, 0x02FF), (0x01C0, 0x01C3))
+_PLUGIN_ROOT_LOOKALIKE_RANGES = (
+    (0x01C0, 0x01C3),
+    (0x02B0, 0x02FF),
+    (0x07F4, 0x07F5),
+    (0xA717, 0xA717),
+    (0x107B5, 0x107B9),
+)
 
 
 def _is_plugin_root_char(char: str) -> bool:
