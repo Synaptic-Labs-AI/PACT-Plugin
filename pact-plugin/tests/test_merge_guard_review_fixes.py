@@ -2721,3 +2721,40 @@ def test_a_negation_count_that_lets_one_op_run_is_one_op(cmd, style):
 
     assert is_compound_destructive_command(cmd) is False
     assert _runs_after_approval(cmd, style)
+
+
+# A git alias given on the command line runs its value in the subcommand's place, or its shell
+# text for a `!` alias.
+INLINE_GIT_ALIAS_RUNS = [
+    ("alias for a force push", "git -c alias.x='push --force' x origin main"),
+    ("alias after -C", "git -c alias.pf='push --force' -C /tmp pf origin main"),
+    ("shell alias", "git -c alias.x='!git push --force' x origin main"),
+    ("alias of an alias", "git -c alias.x='y --force' -c alias.y=push x origin main"),
+]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", INLINE_GIT_ALIAS_RUNS, ids=[r[0] for r in INLINE_GIT_ALIAS_RUNS])
+def test_an_inline_git_alias_for_a_guarded_op_is_refused_then_runs(label, cmd, style):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("cmd", [
+    "git -c alias.x='log --oneline' x",
+    "git -c alias.x='push --force' status",
+    "git -c alias.status='push --force' status",
+], ids=["alias-for-a-read", "alias-not-used", "alias-shadowing-a-builtin"])
+def test_an_inline_git_alias_that_runs_nothing_guarded_is_allowed(cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+@pytest.mark.parametrize("cmd,runs", [
+    ("git -c alias.x='!git push --force' x origin main", "git push --force origin main"),
+    ("git -c alias.x='y --force' -c alias.y=push x origin main",
+     "git -c 'alias.x=y --force' -c alias.y=push push --force origin main"),
+], ids=["shell-alias", "alias-of-an-alias"])
+def test_an_inline_git_alias_reads_as_what_it_runs(cmd, runs):
+    from shared.merge_guard_common import rewritten_executed_command
+
+    assert rewritten_executed_command(cmd) == runs

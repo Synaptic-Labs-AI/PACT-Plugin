@@ -6693,6 +6693,64 @@ def _printed_output(body: str, depth: int, sequence: bool) -> str | None:
     return None if program is None else _printed_output(program, depth + 1, sequence)
 
 
+# git's global options that take the next word as their value.
+_GIT_VALUE_GLOBALS = frozenset({"-c", "-C", "--git-dir", "--work-tree", "--namespace", "--config-env"})
+# Subcommands git always runs as itself: an alias of one of these names is never used.
+_GIT_ALWAYS_BUILTIN = frozenset(
+    "add am apply archive bisect blame branch bundle cat-file checkout cherry-pick clean clone commit "
+    "config describe diff fetch for-each-ref format-patch gc grep init log ls-files ls-remote merge mv "
+    "notes pull push rebase reflog remote reset restore rev-parse revert rm shortlog show show-ref stash "
+    "status submodule switch symbolic-ref tag update-ref worktree".split()
+)
+
+
+def _git_alias_value(name: str, inline: dict[str, str]) -> str | None:
+    """The value of git alias `name`, or None."""
+    return inline.get(name)
+
+
+def _expand_git_alias(leg: str, depth: int = 0) -> str:
+    """`leg` with a git invocation whose subcommand is an alias replaced by what the alias
+    runs: its value in the subcommand's place, or for a `!` alias its shell text followed by
+    the remaining words. Unchanged when the leg is not such an invocation."""
+    word = _leg_command_word(leg)
+    tokens = _shell_tokenize(word) if word else None
+    if not word or not tokens or os.path.basename(tokens[0]) != "git" or depth >= _MAX_WRAPPER_DEPTH:
+        return leg
+    inline, i = {}, 1
+    while i < len(tokens) and tokens[i].startswith("-"):
+        if tokens[i] == "-c" and i + 1 < len(tokens) and tokens[i + 1].startswith("alias."):
+            key, _, value = tokens[i + 1][len("alias."):].partition("=")
+            inline[key.lower()] = value
+        i += 2 if tokens[i] in _GIT_VALUE_GLOBALS else 1
+    if i >= len(tokens) or tokens[i] in _GIT_ALWAYS_BUILTIN:
+        return leg
+    value = _git_alias_value(tokens[i].lower(), inline)
+    if not value:
+        return leg
+    rest = " ".join(shlex.quote(t) for t in tokens[i + 1:])
+    if value.startswith("!"):
+        expanded = (value[1:] + " " + rest).strip()
+    else:
+        expanded = " ".join(shlex.quote(t) for t in tokens[:i]) + " " + value + (" " + rest if rest else "")
+    return leg[:len(leg) - len(word)] + _expand_git_alias(expanded, depth + 1)
+
+
+def _rewrite_git_aliases(command: str) -> str:
+    """`command` with each git alias invocation replaced by what the alias runs."""
+    if "git" not in command:
+        return command
+    view = _mask_shell_quotes(command)
+    out, last = [], 0
+    for sep in [*_COMPOUND_OPS_RE.finditer(view), None]:
+        end = sep.start() if sep else len(command)
+        out.append(_expand_git_alias(command[last:end]))
+        if sep:
+            out.append(command[sep.start():sep.end()])
+            last = sep.end()
+    return "".join(out)
+
+
 # A `set --` leg giving the positional words literally, ended by `;`, `&&` or a newline.
 _SET_POSITIONALS_RE = re.compile(r"(?:^|(?<=[;&\n]))[ \t]*set[ \t]+--(?P<words>[^;&|\n]*)(?:;|&&|\n)")
 
@@ -6739,7 +6797,8 @@ def _rewrite_readable_evals(command: str) -> str:
     the shell ends the heredoc first; an unquoted substitution whose body holds a glob
     character, which the shell may expand to file names."""
     command = _PRINTED_STRING_RE.sub(lambda m: _substitution_printed_text(m.group("inner")) or m.group(0),
-                                     _rewrite_printed_assignments(_rewrite_set_positionals(command)))
+                                     _rewrite_printed_assignments(_rewrite_set_positionals(
+                                         _rewrite_git_aliases(command))))
     if "<<" not in command or not re.search(r"(?<![\w-])" + _RUNS_STRING, command):
         return command
 
