@@ -6728,14 +6728,16 @@ def set_command_directory(cwd: str | None) -> None:
     _COMMAND_DIRECTORY = cwd if isinstance(cwd, str) and cwd else None
 
 
-@functools.lru_cache(maxsize=8)
-def _git_config_aliases(cwd: str | None, git_dir: str | None = None) -> dict[str, str]:
+@functools.lru_cache(maxsize=32)
+def _git_config_aliases(cwd: str | None, git_dir: str | None = None,
+                        env: tuple[tuple[str, str], ...] = ()) -> dict[str, str]:
     """The aliases in the git config seen from `cwd` (the process's directory when None),
-    with `git_dir` as the repository when given, read with `git config`; empty when it
-    cannot be read in time."""
+    with `git_dir` as the repository when given and the git variables `env` set, read with
+    `git config`; empty when it cannot be read in time."""
     try:
         done = subprocess.run(["git", *(["--git-dir", git_dir] if git_dir else []), "config", "--get-regexp",
-                               r"^alias\."], cwd=cwd, capture_output=True, text=True, timeout=1.0, check=False)
+                               r"^alias\."], cwd=cwd, capture_output=True, text=True, timeout=1.0, check=False,
+                              env={**os.environ, **dict(env)} if env else None)
     except (OSError, subprocess.SubprocessError, ValueError):
         return {}
     aliases = {}
@@ -6757,25 +6759,92 @@ def _git_commands(cwd: str | None) -> frozenset[str]:
     return frozenset(done.stdout.split())
 
 
-def _git_alias_value(name: str, inline: dict[str, str], cwd: str | None, git_dir: str | None) -> str | None:
-    """The value of git alias `name` given inline or in the git config seen from `cwd` (and
-    `git_dir`), or None, including when `name` is a command git runs as itself."""
-    value = inline.get(name) or _git_config_aliases(cwd, git_dir).get(name)
+def _git_alias_value(name: str, inline: dict[str, str], cwd: str | None, git_dir: str | None,
+                     env: tuple[tuple[str, str], ...] = ()) -> str | None:
+    """The value of git alias `name` given inline or in the git config seen from `cwd` (with
+    `git_dir` and the git variables `env`), or None, including when `name` is a command git
+    runs as itself."""
+    value = inline.get(name) or _git_config_aliases(cwd, git_dir, env).get(name)
     return None if not value or name in _git_commands(cwd) else value
 
 
-def _expand_git_alias(leg: str, depth: int = 0, cwd: str | None = None) -> str:
+# The variables that change which git config an alias is read from.
+_GIT_ENV_NAME_RE = re.compile(r"GIT_DIR|GIT_WORK_TREE|GIT_CONFIG\w*")
+# A place git may run with: its directory (None: the command's own) and git variables.
+_GitPlace = tuple["str | None", tuple[tuple[str, str], ...]]
+_COMMAND_PLACE: _GitPlace = (None, ())
+# ponytail: a command moving through more places than this keeps the first ones; only a
+# constructed command reaches it.
+_MAX_GIT_PLACES = 8
+# Set while the union checks a candidate expansion, so that check reads one place only.
+_READING_ONE_PLACE = False
+
+
+def _git_env_assignments(words: list[str]) -> tuple[tuple[str, str], ...]:
+    """The literal assignments of git's config variables among `words`."""
+    found = []
+    for word in words:
+        name, eq, value = word.partition("=")
+        if eq and _GIT_ENV_NAME_RE.fullmatch(name) and not re.search(r"[$`]", value):
+            found.append((name, value))
+    return tuple(found)
+
+
+def _with_places(places: list[_GitPlace], more: list[_GitPlace]) -> list[_GitPlace]:
+    """`places` followed by those of `more` not already in it, at most _MAX_GIT_PLACES."""
+    return list(dict.fromkeys([*places, *more]))[:_MAX_GIT_PLACES]
+
+
+def _structural_view(command: str) -> "str | None":
+    """`command` with quoted spans, `$(…)`, `$((…))`, `<(…)`, `>(…)` and backtick spans
+    blanked, so the parentheses left are the shell's own grouping; None when a span is not
+    closed."""
+    view = list(_mask_shell_quotes(command))
+    i, n = 0, len(command)
+    while i < n:
+        if view[i] == "\\":
+            i += 2
+            continue
+        if "".join(view[i:i + 2]) in ("$(", "<(", ">("):
+            span, end = _extract_dollar_paren(command, i)
+        elif view[i] == "`":
+            span, end = _extract_backtick(command, i)
+        else:
+            i += 1
+            continue
+        if span is None:
+            return None
+        view[i:end] = " " * (end - i)
+        i = end
+    return "".join(view)
+
+
+def _expand_git_alias(leg: str, depth: int = 0, places: "list[_GitPlace] | None" = None) -> str:
     """`leg` with a git invocation whose subcommand is an alias replaced by what the alias
     runs: its value in the subcommand's place, or for a `!` alias its shell text followed by
-    the remaining words. The alias is read from the git config of `cwd` (the command's
-    directory when None), moved by `-C`, with the repository a `--git-dir` or a `GIT_DIR=`
-    prefix names. Unchanged when the leg is not such an invocation."""
+    the remaining words. The alias is read in each of `places` (the command's own directory
+    when None), moved by `-C`, with the repository a `--git-dir` names and the git variables
+    an assignment or `env` before git sets. Where the places read it differently, the first
+    reading that is guarded is used, else the first. Unchanged when the leg is not such an
+    invocation."""
+    places = places or [_COMMAND_PLACE]
+    if len(places) > 1 and not _READING_ONE_PLACE:
+        readings = list(dict.fromkeys(_expand_git_alias(leg, depth, [place]) for place in places))
+        return next((r for r in readings if _guarded_in_one_place(r)), readings[0])
+    cwd, env = places[0]
     word = _leg_command_word(leg)
     tokens = _shell_tokenize(word) if word else None
+    wrapper: list[str] = []
+    if tokens and tokens[0] == "env":
+        k = 1
+        while k < len(tokens) and (tokens[k].startswith("-") or "=" in tokens[k]):
+            k += 2 if tokens[k] in ("-u", "--unset", "-C", "--chdir", "-S", "--split-string") else 1
+        env = (*env, *_git_env_assignments(tokens[1:k]))
+        wrapper, tokens = tokens[:k], tokens[k:]
     if not word or not tokens or os.path.basename(tokens[0]) != "git" or depth >= _MAX_WRAPPER_DEPTH:
         return leg
-    git_dir = next((t[len("GIT_DIR="):] for t in _shell_tokenize(leg[:len(leg) - len(word)]) or []
-                    if t.startswith("GIT_DIR=")), None)
+    env = tuple(dict.fromkeys((*env, *_git_env_assignments(_shell_tokenize(leg[:len(leg) - len(word)]) or []))))
+    git_dir = None
     inline, i = {}, 1
     while i < len(tokens) and tokens[i].startswith("-"):
         if tokens[i] == "-c" and i + 1 < len(tokens) and tokens[i + 1].startswith("alias."):
@@ -6791,46 +6860,91 @@ def _expand_git_alias(leg: str, depth: int = 0, cwd: str | None = None) -> str:
     if i >= len(tokens) or tokens[i] in _GIT_ALWAYS_BUILTIN:
         return leg
     value = _git_alias_value(tokens[i].lower(), inline, cwd or _COMMAND_DIRECTORY,
-                             os.path.expanduser(git_dir) if git_dir else None)
+                             os.path.expanduser(git_dir) if git_dir else None, env)
     if not value:
         return leg
     rest = " ".join(shlex.quote(t) for t in tokens[i + 1:])
     if value.startswith("!"):
         expanded = (value[1:] + " " + rest).strip()
     else:
-        expanded = " ".join(shlex.quote(t) for t in tokens[:i]) + " " + value + (" " + rest if rest else "")
-    return leg[:len(leg) - len(word)] + _expand_git_alias(expanded, depth + 1, cwd)
+        lead = " ".join(shlex.quote(t) for t in [*wrapper, *tokens[:i]])
+        expanded = lead + " " + value + (" " + rest if rest else "")
+    return leg[:len(leg) - len(word)] + _expand_git_alias(expanded, depth + 1, [(cwd, env)])
+
+
+def _guarded_in_one_place(reading: str) -> bool:
+    """Whether one place's reading of a git leg is a guarded command."""
+    global _READING_ONE_PLACE
+    if _READING_ONE_PLACE:
+        return False
+    _READING_ONE_PLACE = True
+    try:
+        return is_dangerous_command(reading)
+    finally:
+        _READING_ONE_PLACE = False
 
 
 def _rewrite_git_aliases(command: str) -> str:
-    """`command` with each git alias invocation replaced by what the alias runs, each read
-    in the directory a literal `cd` earlier in the command moves to (inside a `( … )` only
-    until it closes). After a `cd` whose target is not literal, the command's own directory
-    is used."""
+    """`command` with each git alias invocation replaced by what the alias runs, read in
+    every place git may run with there (see _expand_git_alias). A literal `cd` joined to
+    what follows by `&&` moves there (inside a `( … )` only until it closes); a `cd` joined
+    otherwise, or whose target is not literal, adds its directory to the places, and so
+    does an assignment or `export` of a git config variable on its own leg. When the
+    parentheses cannot be read as the shell's grouping, every leg is read in every place
+    the command reaches."""
     if "git" not in command:
         return command
+    rewritten, ambiguous, reached = _rewrite_git_aliases_in(command, None)
+    return _rewrite_git_aliases_in(command, reached)[0] if ambiguous else rewritten
+
+
+def _rewrite_git_aliases_in(command: str, every: "list[_GitPlace] | None"):
+    """One pass of _rewrite_git_aliases: the rewritten command, whether its parentheses
+    were ambiguous, and every place reached. With `every`, each leg is read in all of it."""
     view = _mask_shell_quotes(command)
-    out, last, cwd, saved = [], 0, None, []
+    structure = _structural_view(command)
+    ambiguous = structure is None
+    out, last, places, saved, before = [], 0, [_COMMAND_PLACE], [], None
+    reached = list(places)
     for sep in [*_COMPOUND_OPS_RE.finditer(view), None]:
         end = sep.start() if sep else len(command)
-        leg = command[last:end]
-        inner = leg.strip()
-        opens = len(inner) - len(inner.lstrip("("))
-        saved.extend([cwd] * opens)
-        words = _shell_tokenize(inner.strip("() \t")) or []
+        leg, after = command[last:end], sep.group() if sep else None
+        parens = structure[last:end] if structure else ""
+        head = len(parens) - len(parens.lstrip("( \t"))
+        for _ in range(parens[:head].count("(")):
+            saved.append(places)
+        words = _shell_tokenize(leg.strip().strip("() \t")) or []
         if words[:1] == ["cd"]:
-            target = words[1] if len(words) == 2 else None
-            literal = target is not None and not any(ch in target for ch in "$`*?[")
-            cwd = os.path.join(cwd or _COMMAND_DIRECTORY or os.getcwd(),
-                               os.path.expanduser(target)) if literal else None
-        out.append(_expand_git_alias(leg, cwd=cwd))
-        for _ in range(len(inner) - len(inner.rstrip(")"))):
-            if saved:
-                cwd = saved.pop()
+            target = words[1] if len(words) == 2 and not any(ch in words[1] for ch in "$`*?[") else None
+            # `cd` moves logically, as the shell does: `a/../b` is `b`.
+            moved = [(os.path.normpath(os.path.join(cwd or _COMMAND_DIRECTORY or os.getcwd(),
+                                                    os.path.expanduser(target))), env)
+                     for cwd, env in places] if target is not None else [(None, env) for _, env in places]
+            certain = target is not None and after == "&&" and before in (None, ";", "&&", "\n")
+            places = moved if certain else _with_places(places, moved)
+        elif words and words[0] in ("export", "declare", "typeset", "readonly") or (
+                words and all(re.match(r"[A-Za-z_]\w*=", w) for w in words)):
+            assigned = _git_env_assignments(words)
+            if assigned:
+                places = _with_places(places, [(cwd, (*env, *assigned)) for cwd, env in places])
+        reached = _with_places(reached, places)
+        # A `)` closing nothing after at most one word ends a `case` pattern: the command
+        # starts after it. The leg runs before the parentheses after its first word close.
+        start, here = 0, places
+        for k, ch in enumerate(parens[head:], head):
+            if ch == "(":
+                saved.append(places)
+            elif ch == ")" and saved:
+                places = saved.pop()
+            elif ch == ")":
+                ambiguous = True
+                if len(re.sub(r"^\s*case\s+\S+\s+in\b", "", leg[start:k]).split()) <= 1:
+                    start = k + 1
+        out.append(leg[:start] + _expand_git_alias(leg[start:], places=every or here))
         if sep:
             out.append(command[sep.start():sep.end()])
-            last = sep.end()
-    return "".join(out)
+            last, before = sep.end(), after
+    return "".join(out), ambiguous or bool(saved), reached
 
 
 # A `set --` leg giving the positional words literally, ended by `;`, `&&` or a newline.

@@ -2769,7 +2769,7 @@ CONFIG_GIT_ALIASES = {"pf": "push --force", "pushn": "push", "sh": "!git push --
 def config_git_aliases(monkeypatch):
     import shared.merge_guard_common as mgc
 
-    monkeypatch.setattr(mgc, "_git_config_aliases", lambda cwd, git_dir=None: CONFIG_GIT_ALIASES)
+    monkeypatch.setattr(mgc, "_git_config_aliases", lambda cwd, git_dir=None, env=(): CONFIG_GIT_ALIASES)
     monkeypatch.setattr(mgc, "_git_commands", lambda cwd: frozenset({"status", "push", "log", "cherry"}))
 
 
@@ -2826,7 +2826,7 @@ def test_a_config_git_alias_is_read_from_the_directory_git_runs_in(monkeypatch):
     import shared.merge_guard_common as mgc
 
     monkeypatch.setattr(mgc, "_git_config_aliases",
-                        lambda cwd, git_dir=None: {"pf": "push --force"} if cwd == "/tmp" else {})
+                        lambda cwd, git_dir=None, env=(): {"pf": "push --force"} if cwd == "/tmp" else {})
     monkeypatch.setattr(mgc, "_git_commands", lambda cwd: frozenset())
     assert is_dangerous_command("git -C /tmp pf origin main") is True
     assert is_dangerous_command("git pf origin main") is False
@@ -2944,6 +2944,7 @@ ALIAS_REACHED_THROUGH_A_DIRECTORY = [
     ("GIT_DIR prefix", "GIT_DIR=../repoA/.git git pf origin main"),
     ("-C", "git -C ../repoA pf origin main"),
     ("alias of an alias", "cd ../repoA && git chain origin main"),
+    ("case arm", "cd ../repoA && case x in x) git pf origin main;; esac"),
 ]
 
 
@@ -2979,6 +2980,91 @@ def test_a_cd_whose_target_is_not_literal_falls_back_to_the_payload_directory(al
 
     mgc.set_command_directory(str(alias_repos / "repoA"))
     assert is_dangerous_command("cd \"$X\" && git pf origin main") is True
+
+
+# Where the directory or the git environment git runs with is not certain, the alias is
+# read from every candidate and is guarded if it is guarded in any of them. The payload
+# directory (repoA) defines `pf`; the guessed one (repoB) does not.
+DIRECTORY_NOT_CERTAIN = [
+    ("cd then semicolon", "cd ../repoB; git pf origin main"),
+    ("cd then or", "cd ../repoB || git pf origin main"),
+    ("cd then newline", "cd ../repoB\ngit pf origin main"),
+    ("cd in the background", "cd ../repoB & git pf origin main"),
+    ("cd after an or", "false || cd ../repoB && git pf origin main"),
+    ("subshell closed before a redirect", "(cd ../repoB && git status) 2>/dev/null; git pf origin main"),
+    ("unbalanced close", "cd ../repoB && case x in x) git pf origin main;; esac"),
+    ("unmatched close after the command", "cd ../repoB && git pf origin main)"),
+]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", DIRECTORY_NOT_CERTAIN, ids=[r[0] for r in DIRECTORY_NOT_CERTAIN])
+def test_an_alias_guarded_in_any_candidate_directory_is_refused_then_runs(label, cmd, style, alias_repos):
+    import shared.merge_guard_common as mgc
+
+    mgc.set_command_directory(str(alias_repos / "repoA"))
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+def test_an_alias_guarded_only_in_the_guessed_directory_is_refused_then_runs(style, alias_repos):
+    cmd = "cd ../repoA; git pf origin main"
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+def test_a_paren_inside_a_substitution_or_quotes_does_not_close_a_subshell(alias_repos):
+    import shared.merge_guard_common as mgc
+
+    mgc.set_command_directory(str(alias_repos / "repoA"))
+    # Inside the subshell git runs in repoB, which has no `pf`.
+    assert is_dangerous_command("(cd ../repoB && echo $(date) && git pf origin main)") is False
+    assert is_dangerous_command("(cd ../repoB && echo \")\" && git pf origin main)") is False
+    assert is_dangerous_command("(cd ../repoB && echo $((1+2)) && git pf origin main)") is False
+    assert is_dangerous_command("(cd ../repoB && echo `date` && git pf origin main)") is False
+    assert is_dangerous_command("(cd ../repoB && x=`case y in y) echo;; esac` && git pf origin main)") is False
+
+
+GIT_ENVIRONMENT_ELSEWHERE = [
+    ("export GIT_DIR", "export GIT_DIR=../repoA/.git; git pf origin main"),
+    ("assigned GIT_DIR", "GIT_DIR=../repoA/.git; export GIT_DIR; git pf origin main"),
+    ("env GIT_DIR", "env GIT_DIR=../repoA/.git git pf origin main"),
+    ("config env prefix", "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.x GIT_CONFIG_VALUE_0='push --force' git x origin main"),
+    ("exported config env", "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.x GIT_CONFIG_VALUE_0='push --force'; git x origin main"),
+]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", GIT_ENVIRONMENT_ELSEWHERE, ids=[r[0] for r in GIT_ENVIRONMENT_ELSEWHERE])
+def test_an_alias_reached_through_git_environment_is_refused_then_runs(label, cmd, style, alias_repos):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("cmd", [
+    "cd ../repoA && git ll",
+    "export GIT_DIR=../repoA/.git; git ll",
+    "cd ../repoA; git status",
+    "export GIT_DIR=\"$D\"; git pf origin main",
+], ids=["read-alias", "read-alias-with-env", "builtin", "env-not-literal"])
+def test_an_uncertain_directory_with_no_guarded_alias_stays_allowed(cmd, alias_repos):
+    assert is_dangerous_command(cmd) is False
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+def test_candidates_disagreeing_on_the_guarded_op_read_the_payload_directory_first(style, alias_repos):
+    import subprocess
+
+    import shared.merge_guard_common as mgc
+
+    subprocess.run(["git", "-C", str(alias_repos / "repoB"), "config", "alias.pf", "branch -D"], check=True)
+    mgc._git_config_aliases.cache_clear()
+    mgc.set_command_directory(str(alias_repos / "repoB"))
+    cmd = "cd ../repoA; git pf topic"
+    assert mgc._rewrite_git_aliases(cmd) == "cd ../repoA; git branch -D topic"
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
 
 
 # An eval of a variable reassigned by plain literal legs runs the last value before it.
