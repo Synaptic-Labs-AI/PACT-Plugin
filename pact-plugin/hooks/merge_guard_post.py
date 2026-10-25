@@ -1226,6 +1226,25 @@ def _run_succeeded_as_the_op(command: str, op_type: str, tool_response: object) 
         return False
 
 
+def _git_reports_ref_deleted(command: str, op_type: str, tool_response: object) -> bool:
+    """Whether git's own output, in the response's stdout or stderr, reports the
+    command's target ref deleted (` - [deleted]   feat/x`), which proves a remote
+    ref delete whose exit status is not its own (piped into tail, say). The line
+    must name exactly the ref the command deletes."""
+    if op_type != "remote-ref-delete" or not isinstance(tool_response, dict):
+        return False
+    target = extract_command_context(
+        _single_destructive_leg(command) or _single_detectable_leg(command) or command
+    ).get("target_ref")
+    if not isinstance(target, str) or not target:
+        return False
+    line = re.compile(r"^[ \t]*-[ \t]+\[deleted\][ \t]+" + re.escape(target) + r"[ \t]*$", re.M)
+    return any(
+        isinstance(tool_response.get(k), str) and line.search(tool_response[k])
+        for k in ("stdout", "stderr")
+    )
+
+
 def _pr_state(command: str, frame_cwd: object = None) -> str:
     """The state GitHub reports for the PR the command named (OPEN, MERGED or
     CLOSED), or "" when it cannot be read: any other answer, a URL, branch or implicit target, an -R/--repo target, a directory
@@ -1601,7 +1620,11 @@ def main():
             # An op with no row in the table (a remote ref delete) still retires
             # when the run's own success shows the op succeeded.
             if op_type not in LAYER1_SUCCESS_STDOUT_PATTERNS and not (
-                op_type and _run_succeeded_as_the_op(command, op_type, tool_response)
+                op_type
+                and (
+                    _run_succeeded_as_the_op(command, op_type, tool_response)
+                    or _git_reports_ref_deleted(command, op_type, tool_response)
+                )
             ):
                 print(_SUPPRESS_OUTPUT)
                 sys.exit(0)

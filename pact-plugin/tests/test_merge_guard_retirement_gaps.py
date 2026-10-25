@@ -310,3 +310,28 @@ class TestAHeredocBodyIsPartOfItsLeg:
         _mint(rig, cmd)
         _post(rig, cmd, _EMPTY)
         assert not _retired(rig)
+
+
+class TestGitsDeletedLineProvesAPipedRefDelete:
+    """A piped remote ref delete exits with the last stage's status, but git's own
+    ` - [deleted]  <ref>` line, passed through to stdout or stderr, proves it
+    for exactly the ref the command deletes."""
+
+    @pytest.mark.parametrize("key", ["stdout", "stderr"])
+    def test_the_line_for_the_target_retires_the_token(self, rig, key):
+        cmd = "git push origin --" + "delete feat/x 2>&1 | tail -3"
+        _mint(rig, cmd)
+        _post(rig, cmd, {**_EMPTY, key: "To ../remote.git\n - [deleted]         feat/x\n"})
+        assert _retired(rig)
+
+    @pytest.mark.parametrize("out", [
+        " - [deleted]         feat/xyz\n",
+        " - [deleted]         other/feat/x\n",
+        "error: unable to delete 'feat/x': remote ref does not exist\n",
+        "",
+    ])
+    def test_any_other_output_keeps_the_token(self, rig, out):
+        cmd = "git push origin --" + "delete feat/x 2>&1 | tail -3"
+        _mint(rig, cmd)
+        _post(rig, cmd, {**_EMPTY, "stdout": out})
+        assert not _retired(rig)
