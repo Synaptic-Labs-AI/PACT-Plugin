@@ -42,9 +42,12 @@ HOOKS_DIR = Path(__file__).parent.parent / "hooks"
 # shared/actor_identity.py hosts resolve_actor, the harness-data actor resolver;
 # task_lifecycle_gate hosts the self-completion advisory that consumes it;
 # dispatch_helpers hosts the dispatch-gate ownership predicates.
+# shared/subagent_meta.py hosts the frame-shape, membership and meta.json
+# readers that actor_identity uses, so it is held to the same bans.
 _AUTHORITY_FILES = (
     "shared/actor_identity.py",
     "shared/dispatch_helpers.py",
+    "shared/subagent_meta.py",
     "task_lifecycle_gate.py",
 )
 
@@ -70,14 +73,46 @@ _FORBIDDEN_AUTHORITY_CALLS = ("_registry_resolve", "resolve_agent_name")
 #     cloud lookup failed.
 # NOT global: task_lifecycle_gate legitimately calls frame_team_and_name for the
 # non-authority launch-record path (_extend_launch_records_on_claim).
+_STRICT_IDENTITY_HELPERS = (
+    "frame_team_and_name",
+    "teammate_launch_name",
+    "bind_launcher_identity",
+    "teammate_identity",
+)
 _STRICT_AUTHORITY_CALLS = {
-    "shared/actor_identity.py": (
-        "frame_team_and_name",
-        "teammate_launch_name",
-        "bind_launcher_identity",
-        "teammate_identity",
-    ),
+    "shared/actor_identity.py": _STRICT_IDENTITY_HELPERS,
+    "shared/subagent_meta.py": _STRICT_IDENTITY_HELPERS,
 }
+
+# Per-file MODULE import bans. The call bans above see only DIRECT calls, so a
+# later edit that makes a helper in background_work fall back to the registry
+# would pass them. These files therefore may not import the modules that host
+# registry-reaching helpers at all: background_work (frame_team_and_name,
+# bind_launcher_identity, ...) and turn_end_gate (teammate_identity, and an
+# import of background_work). Everything they need from there lives in the
+# registry-free shared/subagent_meta.py.
+_REGISTRY_REACHING_MODULES = ("background_work", "turn_end_gate")
+_MODULE_BANNED_FILES = ("shared/actor_identity.py", "shared/subagent_meta.py")
+
+
+def _module_imports(tree: ast.AST, modules) -> list[str]:
+    """Descriptions of every import (any shape, module-level or lazy inside a
+    function) whose module path or imported name has a component in `modules`."""
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if set(alias.name.split(".")) & set(modules):
+                    found.append(f"import {alias.name}")
+        elif isinstance(node, ast.ImportFrom):
+            parts = set((node.module or "").split("."))
+            names = {a.name for a in node.names}
+            if (parts | names) & set(modules):
+                found.append(
+                    f"from {node.module or '.'} import "
+                    + ", ".join(a.name for a in node.names)
+                )
+    return found
 
 # The ONLY hook files permitted to import the self-registration registry. Pairs
 # the POSITIVE 2-file authority no-import test with a NEGATIVE all-files scan: a
@@ -314,6 +349,37 @@ class TestTrustPartitionNoRegistryImport:
         assert _calls_named(ast.parse(src), names), (
             f"the strict call detector did NOT fire on {src!r}."
         )
+
+    @pytest.mark.parametrize("rel_file", _MODULE_BANNED_FILES)
+    def test_actor_files_do_not_import_registry_reaching_modules(self, rel_file):
+        """actor_identity and subagent_meta must not import background_work or
+        turn_end_gate, which host registry-reaching identity helpers. The call
+        bans cannot see a helper that LATER grows a registry fallback; the
+        module ban removes the route entirely."""
+        path = HOOKS_DIR / rel_file
+        assert path.exists(), f"authority file {rel_file} not found at {path}"
+        found = _module_imports(_parse(path), _REGISTRY_REACHING_MODULES)
+        assert found == [], (
+            f"{rel_file} imports a registry-reaching module: {found}. Move the "
+            f"helper it needs into shared/subagent_meta.py instead."
+        )
+
+    @pytest.mark.parametrize("src", [
+        "from . import background_work\n",
+        "from . import background_work, turn_end_gate\n",
+        "from .background_work import subagent_launcher_id\n",
+        "import shared.turn_end_gate\n",
+        "def f():\n    from . import turn_end_gate\n",
+    ])
+    def test_module_ban_detector_fires(self, src):
+        """Phantom-green guard for the module ban, including a lazy import."""
+        assert _module_imports(ast.parse(src), _REGISTRY_REACHING_MODULES)
+
+    def test_module_ban_detector_ignores_subagent_meta(self):
+        assert _module_imports(
+            ast.parse("from . import pact_context, subagent_meta\n"),
+            _REGISTRY_REACHING_MODULES,
+        ) == []
 
     def test_call_detector_ignores_unrelated_call(self):
         """Counter-case: an unrelated call (is_lead — the agent_type-direct role

@@ -49,6 +49,7 @@ from fixtures.role_frames import (
     captured_pretooluse_teammate_tmux,
 )
 from shared import background_work as bw
+from shared import subagent_meta
 from clock_shift.clock_shift_env import carry_clock_shift
 
 HOOKS_DIR = Path(__file__).resolve().parents[1] / "hooks"
@@ -582,7 +583,7 @@ class TestDenySetIsLive:
         (team_root / "teams" / TEAM / "config.json").write_text(json.dumps(
             {"leadSessionId": "lead-sid", "members": [{"name": stem}]}
         ))
-        monkeypatch.setattr(bw, "_known_agent_types", frozenset)
+        monkeypatch.setattr(subagent_meta, "known_agent_types", frozenset)
         assert bw.agent_type_names_a_member(stem, TEAM) is True, (
             "the deny set is the only thing refusing this match"
         )
@@ -599,7 +600,7 @@ class TestDenySetIsLive:
             {"leadSessionId": "lead-sid",
              "members": [{"name": n} for n in bw._PLATFORM_AGENT_TYPES]}
         ))
-        monkeypatch.setattr(bw, "_known_agent_types", frozenset)
+        monkeypatch.setattr(subagent_meta, "known_agent_types", frozenset)
         for name in bw._PLATFORM_AGENT_TYPES:
             assert bw.agent_type_names_a_member(name, TEAM) is False, name
 

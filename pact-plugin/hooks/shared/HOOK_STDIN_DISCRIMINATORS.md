@@ -67,7 +67,8 @@ Consequences, because code in this repo reasons on the old premise:
   field, which already differs per member in-process.
 - A caller needing identity from this field must VALIDATE it — membership in
   the team config's `members[]` `name` list — rather than trust its shape. See
-  `shared/background_work.py` :: `agent_type_names_a_member`, including its
+  `shared/subagent_meta.py` :: `agent_type_names_a_member` (re-exported by
+  `shared/background_work.py`), including its
   stated residual.
 
 **tmux is UNTESTED for this field on a `Bash` `PostToolUse` frame.** The tmux

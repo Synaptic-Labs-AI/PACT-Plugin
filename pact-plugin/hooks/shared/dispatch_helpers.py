@@ -165,7 +165,7 @@ def is_pact_specialist_owner(
     teammate" requires resolving the bare owner through team config to its
     agentType (the SAME owner→member→agentType resolution
     ``intentional_wait._is_exempt_agent_type`` uses), then checking registry
-    membership. Composes the two existing primitives — ``_iter_members`` (the
+    membership. Composes the two existing primitives — ``iter_team_members`` (the
     resolution SSOT) + ``is_registered_pact_specialist`` (the registry check) —
     rather than duplicating either.
 
@@ -175,9 +175,9 @@ def is_pact_specialist_owner(
     FAIL-OPEN: "not positively a pact specialist" → the gate returns None →
     does not fire, so an unresolvable owner never strands a dispatch.
 
-    The outer bare-except is load-bearing: ``_iter_members`` resolves the
+    The outer bare-except is load-bearing: ``iter_team_members`` resolves the
     config dir via ``get_claude_config_dir()`` (→ ``Path.home()``), which can
-    raise ``RuntimeError`` that ESCAPES ``_iter_members``'s own typed except —
+    raise ``RuntimeError`` that ESCAPES ``iter_team_members``'s own typed except —
     so a totally fail-closed helper must catch it here, not rely on a caller's
     outer guard.
     """
@@ -186,7 +186,7 @@ def is_pact_specialist_owner(
     if not isinstance(team_name, str) or not team_name:
         return False
     try:
-        for member in pact_context._iter_members(team_name, teams_dir):
+        for member in pact_context.iter_team_members(team_name, teams_dir):
             if member.get("name") == owner:
                 agent_type = member.get("agentType")
                 return (

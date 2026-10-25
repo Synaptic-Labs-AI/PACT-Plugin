@@ -6,15 +6,18 @@ Summary: `intentional_wait` metadata schema — the teammate-facing contract
          self-complete-exemption predicate for team-lead-side task-file inspection
          and audit tooling.
 Used by: teammate-authored metadata on Task records, team-lead inspection,
-         audit tooling, and the PostToolUse advisory gate
-         `task_lifecycle_gate.py`. The exemption predicate
-         (is_self_complete_exempt) is a pure function read by that advisory
-         gate (advisory-only — it cannot DENY; when a non-lead completes a
-         non-exempt task it emits a `self_completion` or `non_lead_completion`
-         advisory + a `completion_disputed` writeback) as well as by team-lead instructions and
-         audit consumers. No hook BLOCKS on it; the exemption is not enforced
-         (it stays instruction-level). See skills/pact-agent-teams/SKILL.md
-         and agents/pact-orchestrator.md for the contract.
+         audit tooling, and three hooks. The exemption predicate
+         (is_self_complete_exempt) is a pure function read by
+         `task_lifecycle_gate.py` (advisory-only — when a non-lead completes
+         a non-exempt task it emits a `self_completion` or
+         `non_lead_completion` advisory + a `completion_disputed`
+         writeback), `task_claim_gate.py` (claim nudges) and
+         `handoff_ordering_gate.py` (a completion-ordering warn, and the
+         carve-out of its dispatch-variety check). An exempt answer only
+         suppresses a check; nothing is granted on it, and the self-
+         completion exemption itself stays instruction-level. See
+         skills/pact-agent-teams/SKILL.md and agents/pact-orchestrator.md
+         for the contract.
 
 Contract: pure functions; never raise. Malformed flags fail loud — e.g.
 `wait_stale` returns True on any parse error so a broken flag cannot
@@ -39,9 +42,17 @@ Public surface:
 - canonical_since() — ISO-8601 UTC timestamp helper for the `since` field.
 - validate_wait(wait_metadata) — True iff the flag is well-formed.
 - wait_stale(wait_metadata) — True iff the flag has aged past threshold.
-- is_self_complete_exempt(task, team_name="", teams_dir=None) — True iff
-  the task is exempt from the team-lead-only-completion rule (by
-  team-config-resolved agentType, or signal-task pattern).
+- is_self_complete_exempt(task, team_name="", teams_dir=None, *,
+  actor_agent_type=None, actor_name=None) — True iff the task is exempt
+  from the team-lead-only-completion rule: by the owner's team-config
+  agentType (surface 1), by the completing actor's harness-derived type
+  where no team config exists (surface 1b, cloud), or by the signal-task
+  pattern (surface 2). It answers two questions. Without the actor
+  keywords it is TASK-level ("is this task exempt?"), which is how
+  task_claim_gate and handoff_ordering_gate call it. With them it is
+  COMPLETION-level ("may THIS actor complete this task?"), which is how
+  task_lifecycle_gate calls it: surfaces 1 and 1b then also require a
+  resolved actor name to equal the owner.
 - is_teachback_exempt(owner, team_name="", teams_dir=None) — True iff
   the owner's team-config agentType is in TEACHBACK_EXEMPT_AGENT_TYPES.
   Consumed by task_lifecycle_gate.work_addblockedby_missing.
@@ -86,7 +97,7 @@ DEFAULT_THRESHOLD_MINUTES = 30
 #   session with zero quality signal.
 #
 # Resolution is by team-config agentType lookup (see
-# `_is_exempt_agent_type` below + `_iter_members` upstream), NOT owner
+# `_is_exempt_agent_type` below + `iter_team_members` upstream), NOT owner
 # name. A secretary spawned under any name (`session-secretary`,
 # `team-secretary`, etc.) still reaches the carve-out as long as the
 # team-config records its agentType as `pact-secretary`.
@@ -115,7 +126,7 @@ SELF_COMPLETE_EXEMPT_AGENT_TYPES: frozenset = frozenset({
 # for these workflows; the ceremony is overhead.
 #
 # Resolution is by team-config agentType lookup (see
-# `_is_teachback_exempt_agent_type` below + `_iter_members` upstream), NOT
+# `_is_teachback_exempt_agent_type` below + `iter_team_members` upstream), NOT
 # owner name. A secretary spawned under any name (`session-secretary`,
 # `team-secretary`, etc.) still reaches the carve-out as long as the
 # team-config records its agentType as `pact-secretary`.
@@ -146,7 +157,7 @@ def _is_exempt_agent_type(
     inspect, exactly the failure mode lead-only-completion authority
     defends against.
 
-    Pure-after-I/O. Reads the team config via `_iter_members`, which is
+    Pure-after-I/O. Reads the team config via `iter_team_members`, which is
     itself fail-open `[]` on every error path (missing file, OSError,
     JSONDecodeError, non-dict members, etc.). The fail-open of the
     upstream becomes fail-closed for this predicate because we require
@@ -155,7 +166,7 @@ def _is_exempt_agent_type(
     NOT a hook predicate — pure helper for
     shared.intentional_wait.is_self_complete_exempt.
     Parameter shape is owner-or-role + team_name + teams_dir override, with
-    upstream-config-read delegation to `_iter_members`. The error semantics
+    upstream-config-read delegation to `iter_team_members`. The error semantics
     deliberately fail-CLOSE (return False to deny exemption) rather than
     fail-OPEN: denying exemption on a missing/malformed config is the
     conservative choice for this consumer — see the docstring header.
@@ -164,13 +175,13 @@ def _is_exempt_agent_type(
         owner: Task owner name (matched against member.name).
         team_name: Team name for config path. Empty string returns False.
         teams_dir: Override teams directory (for testing). When omitted,
-                   _iter_members uses ``~/.claude/teams/``.
+                   iter_team_members uses ``~/.claude/teams/``.
     """
     if not isinstance(owner, str) or not owner:
         return False
     if not isinstance(team_name, str) or not team_name:
         return False
-    for member in pact_context._iter_members(team_name, teams_dir):
+    for member in pact_context.iter_team_members(team_name, teams_dir):
         if member.get("name") == owner:
             agent_type = member.get("agentType")
             return (
@@ -208,13 +219,13 @@ def _is_teachback_exempt_agent_type(
         owner: Task owner name (matched against member.name).
         team_name: Team name for config path. Empty string returns False.
         teams_dir: Override teams directory (for testing). When omitted,
-                   _iter_members uses ``~/.claude/teams/``.
+                   iter_team_members uses ``~/.claude/teams/``.
     """
     if not isinstance(owner, str) or not owner:
         return False
     if not isinstance(team_name, str) or not team_name:
         return False
-    for member in pact_context._iter_members(team_name, teams_dir):
+    for member in pact_context.iter_team_members(team_name, teams_dir):
         if member.get("name") == owner:
             agent_type = member.get("agentType")
             return (
@@ -367,7 +378,10 @@ def is_self_complete_exempt(
     2. By signal-task metadata: task.metadata.completion_type == "signal" AND
        task.metadata.type in {"blocker", "algedonic"}. Mirrors the inline
        literal in agent_handoff_emitter / task_utils / session_resume.
-       Independent of `team_name`.
+       Independent of `team_name`. DELIBERATELY ACTOR-BLIND: surface 2
+       ignores `actor_name` and `actor_agent_type`, so any teammate may
+       complete a signal task, including one another member owns. The task
+       IS the signal; completing it is the act of raising it.
 
     Pure function; never raises on plain dicts (PACT task representation
     via json.loads); defaults to False on missing or malformed fields
@@ -393,12 +407,25 @@ def is_self_complete_exempt(
     `owner`: the team-config lookup must independently confirm the
     privileged agentType. Surface 1b does not trust `owner` for the type
     either: it trusts the harness-written hook frame and subagent
-    meta.json (same tier as the team config). `owner` only narrows 1b
-    (a resolved actor name must equal it). ACCEPTED RESIDUAL: an
-    exempt-type actor whose name is unresolved (meta.json missing) is
-    exempt even when completing another owner's task. No in-plugin
-    consumer reads this predicate at
-    runtime — instructions and audit tooling are the defense. Future
+    meta.json (same tier as the team config); where both offer a type,
+    the resolver prefers the frame, which a teammate cannot edit.
+    `owner` only narrows 1b (a resolved actor name must equal it). The
+    resolver also refuses a bare exempt type that a non-plugin agent
+    definition shadows (a project or user agent named `pact-secretary`),
+    see shared/actor_identity.py.
+
+    ACCEPTED RESIDUAL: an exempt-type actor whose name is unresolved (any
+    source: meta.json missing or unreadable, no `name` in it, a name that
+    fails the 1-128 character / no-control-character rule, or a frame-only
+    resolution) is exempt even when completing another owner's task.
+
+    Runtime consumers: task_lifecycle_gate (the self_completion /
+    non_lead_completion advisories), task_claim_gate (claim nudges and the
+    auto-claim candidate set) and handoff_ordering_gate (the completion-
+    ordering warn, and the carve-out of the dispatch-variety check, whose
+    shipped default can DENY). A True answer only ever SUPPRESSES a check;
+    it never grants a permission. A false True therefore removes a nudge,
+    an advisory or (dispatch-variety) a deny for that task. Future
     extensions adding new agentTypes to SELF_COMPLETE_EXEMPT_AGENT_TYPES
     must re-evaluate this boundary.
 
@@ -408,12 +435,13 @@ def is_self_complete_exempt(
                    (default) short-circuits surface 1 to False; surface 2
                    still applies.
         teams_dir: Override teams directory (for testing). Threaded to
-                   `_iter_members`.
+                   `iter_team_members`.
         actor_agent_type: Surface 1b — the completing actor's harness-derived
                    TYPE (keyword-only; None disables 1b).
         actor_name: Surfaces 1 and 1b — the completing actor's resolved name,
                    or None when unresolved (keyword-only). When set, it must
-                   equal task.owner for surface 1 or 1b to exempt.
+                   equal task.owner for surface 1 or 1b to exempt. Surface 2
+                   never reads it.
     """
     if not isinstance(task, dict):
         return False

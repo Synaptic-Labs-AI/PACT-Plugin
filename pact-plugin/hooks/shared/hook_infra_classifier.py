@@ -206,6 +206,7 @@ L3_CANDIDATE_HOOKS: frozenset[str] = frozenset({
 # derivation).
 _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
     "missed_wake_scan": frozenset({
+        "subagent_meta",  # background_work's module-level edge
         "background_launch", "background_work",
         "claude_md_drift", "claude_md_manager", "claude_md_markers",
         "constants", "failure_cause", "git_helpers", "intentional_wait", "pact_context",
@@ -219,12 +220,14 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # a function. pin_credit reached via claude_md_drift's write record,
          # imported inside a function.
     "teammate_idle": frozenset({
+        "subagent_meta",  # background_work's module-level edge
         "background_launch", "background_work",
         "constants", "error_output", "intentional_wait",
         "pact_context", "paths", "session_journal",
         "session_registry", "session_state", "state_file", "task_utils",
     }),
     "track_files": frozenset({
+        "subagent_meta",  # background_work's module-level edge
         "background_launch", "background_work",
         "claude_md_drift", "claude_md_manager", "claude_md_markers", "constants",
         "error_output", "failure_cause", "git_helpers", "intentional_wait", "pact_context",
@@ -247,6 +250,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # seam (emit_task_metadata_snapshot); its own transitive edges
          # (agent_handoff_marker, session_journal) were already here.
     "session_init": frozenset({
+        "subagent_meta",  # background_work's module-level edge
         "background_launch", "background_work", "backlog_store",
         "claude_md_manager", "claude_md_markers", "compaction_owner", "constants",
         "dispatch_helpers", "failure_cause",
@@ -291,6 +295,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
     }),  # compaction_owner reached via staging and settling the summary;
          # session_journal via compaction_owner's compaction_attributed event.
     "dispatch_gate": frozenset({
+        "subagent_meta",  # background_work's module-level edge
         "background_launch", "background_work", "claude_md_manager", "claude_md_markers",
         "constants", "dispatch_helpers", "failure_cause", "git_helpers",
         "intentional_wait", "pact_config", "pact_context", "paths", "pin_caps",
@@ -327,11 +332,12 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "session_registry", "session_state", "task_metadata_snapshot",
         "task_utils", "teachback_schema", "tool_response", "variety_scorer",
         "background_launch", "background_work", "state_file",
-        "actor_identity", "turn_end_gate", "turn_end_jobs",
+        "actor_identity", "subagent_meta",
     }),  # actor_identity reached via the self-completion rule's actor
-         # resolution (#1666 item 4); it imports background_work and
-         # turn_end_gate inside resolve_actor, and turn_end_jobs is
-         # turn_end_gate's own module-level edge.
+         # resolution (#1666 item 4); subagent_meta is its module-level
+         # edge (the registry-free frame and meta.json readers). Its own
+         # edges (pact_context, paths, state_file, session_state) were
+         # already in this closure.
          # task_metadata_snapshot reached via the lead-completion +
          # post-completion-backstop snapshot seams; its transitive edges
          # were already in this closure.
@@ -347,7 +353,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # #1023 SHRANK this closure: the carve-out's binding 5 no longer
          # imports bootstrap_marker_writer (it reads the gate-local
          # _secretary_in_members JOIN witness via the already-top-level
-         # pact_context._iter_members), so bootstrap_gate no longer reaches
+         # pact_context.iter_team_members), so bootstrap_gate no longer reaches
          # bootstrap_marker_writer's transitive closure. The former extras
          # claude_md_manager / session_resume / staleness / pin_caps were
          # reachable ONLY through that deleted edge (bootstrap_gate ->
@@ -356,6 +362,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # staleness -> pin_caps) and are now gone from this closure.
          # bootstrap_marker_writer's OWN closure (below) is unchanged.
     "bootstrap_marker_writer": frozenset({
+        "subagent_meta",  # background_work's module-level edge
         "background_launch", "background_work",
         "compaction_owner", "claude_md_manager", "claude_md_markers", "constants", "failure_cause",
         "gh_helpers", "git_helpers", "handoff_schema", "intentional_wait", "marker_schema",
@@ -382,17 +389,20 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # is the SOURCE edge that also grows bootstrap_gate's closure (which
          # imports bootstrap_marker_writer).
     "file_tracker": frozenset({
+        "subagent_meta",  # background_work's module-level edge
         "background_launch", "background_work", "constants", "intentional_wait",
         "pact_context", "paths", "session_journal", "session_registry",
         "session_state", "state_file", "task_utils",
     }),
     "peer_inject": frozenset({
+        "subagent_meta",  # background_work's module-level edge
         "background_launch", "background_work", "constants", "intentional_wait",
         "pact_context", "paths", "peer_context", "plugin_manifest",
         "session_journal", "session_registry", "session_state", "state_file",
         "task_utils",
     }),
     "validate_handoff": frozenset({
+        "subagent_meta",  # background_work's module-level edge
         "background_launch", "background_work", "constants", "error_output",
         "intentional_wait", "pact_context", "paths", "session_journal",
         "session_registry", "session_state", "state_file", "task_utils",
@@ -401,6 +411,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # check imports turn_end_gate, which reaches background_work and
          # state_file and their helpers.
     "stop_background_gate": frozenset({
+        "subagent_meta",  # background_work's module-level edge
         "background_launch", "background_work", "constants", "intentional_wait",
         "pact_context", "paths", "session_journal", "session_registry",
         "session_state", "state_file", "task_utils", "turn_end_gate",
@@ -419,11 +430,13 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
     }),  # post additionally reaches error_output (fail-loud alert) and
          # tool_response (the canonical-envelope extractor).
     "wait_filler_gate": frozenset({
+        "subagent_meta",  # background_work's module-level edge
         "background_launch", "background_work", "constants", "intentional_wait",
         "pact_context", "paths", "session_journal", "session_registry",
         "session_state", "state_file", "task_utils"
     }),
     "pin_caps_gate": frozenset({
+        "subagent_meta",  # background_work's module-level edge
         "background_launch", "background_work", "claude_md_drift", "claude_md_manager",
         "claude_md_markers", "constants", "edit_simulation", "failure_cause",
         "failure_log", "git_helpers", "intentional_wait", "pact_context", "paths",
@@ -444,6 +457,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "session_state", "task_utils", "teachback_schema", "variety_scorer",
     }),  # from the live derivation.
     "bootstrap_prompt_gate": frozenset({
+        "subagent_meta",  # background_work's module-level edge
         "background_launch", "background_work", "claude_md_manager",
         "claude_md_markers", "compaction_owner", "constants", "failure_cause",
         "gh_helpers", "git_helpers", "handoff_schema", "intentional_wait",

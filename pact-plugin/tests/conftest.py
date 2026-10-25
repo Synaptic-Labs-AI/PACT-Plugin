@@ -71,6 +71,7 @@ import session_init  # noqa: E402, F401
 import shared.background_work  # noqa: E402, F401
 import shared.task_metadata_snapshot  # noqa: E402, F401
 import shared.task_utils  # noqa: E402, F401
+import task_claim_gate  # noqa: E402, F401
 import task_lifecycle_gate  # noqa: E402, F401
 import teammate_idle  # noqa: E402, F401
 import track_files  # noqa: E402, F401

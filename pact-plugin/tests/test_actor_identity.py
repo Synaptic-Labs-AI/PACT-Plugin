@@ -237,8 +237,9 @@ def test_resolution_never_reaches_the_registry(config, monkeypatch):
 
     monkeypatch.setattr(background_work, "frame_team_and_name", forbidden)
     monkeypatch.setattr(pact_context, "resolve_agent_name", forbidden, raising=False)
-    for attr in ("resolve", "lookup", "read_registry"):
-        monkeypatch.setattr(session_registry, attr, forbidden, raising=False)
+    # session_registry's resolver is `resolve`; it must exist, so this patch
+    # fails loudly if the registry API is renamed rather than going vacuous.
+    monkeypatch.setattr(session_registry, "resolve", forbidden)
     # Make the totality wrapper visible: a swallowed AssertionError would
     # otherwise read as ROLE_UNKNOWN.
     write_team_config(config, TEAM, [{"name": "coder", "agentType": "pact-backend-coder"}])

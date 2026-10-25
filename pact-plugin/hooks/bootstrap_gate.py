@@ -423,7 +423,7 @@ def _secretary_in_members(team_name: str) -> bool:
     """Members[]-only JOIN witness: has the secretary actually joined the team
     roster? Sole consumer is _is_canonical_secretary_spawn binding 5.
 
-    Reads the team config members[] via the shared pact_context._iter_members
+    Reads the team config members[] via the shared pact_context.iter_team_members
     helper (already imported at this module's top level) and returns True iff a
     member's ``name`` equals _SECRETARY_NAME. This is a JOIN witness — distinct
     from bootstrap_marker_writer._team_has_secretary, which is a DISPATCH
@@ -441,8 +441,8 @@ def _secretary_in_members(team_name: str) -> bool:
     ``except Exception: return False`` rather than a typed tuple because the
     members[] read transitively calls pact_context.get_claude_config_dir() ->
     Path.home(), which raises RuntimeError when HOME is unresolvable. That
-    RuntimeError is composed BEFORE _iter_members' own typed try-block, so it
-    escapes _iter_members uncaught, and it is ALSO absent from binding 5's
+    RuntimeError is composed BEFORE iter_team_members' own typed try-block, so it
+    escapes iter_team_members uncaught, and it is ALSO absent from binding 5's
     outer typed except — without a broad wrap here it would propagate to
     main()'s degraded-DENY path and re-deadlock the secretary spawn (the wrong
     fail direction). A False return makes the carve-out FIRE (the safe
@@ -454,7 +454,7 @@ def _secretary_in_members(team_name: str) -> bool:
     try:
         return any(
             member.get("name") == _SECRETARY_NAME
-            for member in pact_context._iter_members(team_name)
+            for member in pact_context.iter_team_members(team_name)
         )
     except Exception:  # noqa: BLE001 — broad by design: Path.home() RuntimeError seam (see docstring)
         return False
@@ -561,7 +561,7 @@ def _is_canonical_secretary_spawn(input_data: dict) -> bool:
         if not expected_team:
             return False
         # Binding 5: members[]-only JOIN witness (#1023). _secretary_in_members
-        # is a gate-local helper reading shared.pact_context._iter_members (the
+        # is a gate-local helper reading shared.pact_context.iter_team_members (the
         # top-level-imported module) — NOT a cross-module import of
         # bootstrap_marker_writer._team_has_secretary (the DISPATCH witness,
         # which also accepts the inbox file and so re-deadlocked the spawn in

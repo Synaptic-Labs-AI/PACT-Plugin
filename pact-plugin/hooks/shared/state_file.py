@@ -63,7 +63,12 @@ def _contained_directory(path: Path, root: Path) -> Path:
     return Path(real_directory)
 
 
-def read_text(path: Path, root: Path) -> str:
+class TooLarge(ValueError):
+    """read_text's `max_bytes` bound was exceeded. Not an OSError, so a caller
+    that treats OSError as "absent" does not mistake an over-size file for one."""
+
+
+def read_text(path: Path, root: Path, *, max_bytes: int | None = None) -> str:
     """Return a state file's text, reading without a lock.
 
     `root` is the directory the file must stay under; a file whose directory
@@ -73,6 +78,11 @@ def read_text(path: Path, root: Path) -> str:
     reading its target. Undecodable bytes are replaced rather than raised, so
     a corrupt file parses as empty and the next write rewrites it clean.
     Raises FileNotFoundError when the file does not exist.
+
+    `max_bytes`, when given, bounds the READ itself: at most max_bytes + 1
+    bytes are read from the opened file, and TooLarge is raised when more
+    than max_bytes arrive. Bounding the read (not a prior stat) leaves no
+    window in which the file can grow past the bound.
     """
     path = Path(path)
     try:
@@ -81,7 +91,12 @@ def read_text(path: Path, root: Path) -> str:
         raise FileNotFoundError(str(refused)) from refused
     fd = os.open(str(directory / path.name), _READ_FLAGS)
     with os.fdopen(fd, "rb") as f:
-        data = f.read()
+        if max_bytes is None:
+            data = f.read()
+        else:
+            data = f.read(max_bytes + 1)
+            if len(data) > max_bytes:
+                raise TooLarge(f"over {max_bytes} bytes")
     return data.decode("utf-8", errors="replace")
 
 

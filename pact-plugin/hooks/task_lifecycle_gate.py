@@ -282,7 +282,12 @@ def _emit_load_failure_advisory(
 # ─── fail-closed wrapper around cross-package imports ─────────────────────────
 try:
     import shared.pact_context as pact_context
-    from shared.actor_identity import ROLE_TEAMMATE, ActorIdentity, resolve_actor
+    from shared.actor_identity import (
+        ROLE_TEAMMATE,
+        ActorIdentity,
+        resolve_actor,
+        valid_name,
+    )
     from shared.agent_handoff_marker import (
         already_emitted,
         handoff_already_emitted,
@@ -1525,7 +1530,7 @@ def evaluate_lifecycle(
         # is_teachback_exempt predicate. Common path (well-formed
         # dispatch with addBlockedBy provided) short-circuits at the
         # 3rd clause and never hits disk. Failure path (missing
-        # addBlockedBy) does hit disk via _iter_members, but this is
+        # addBlockedBy) does hit disk via iter_team_members, but this is
         # the rare misconfiguration path — amortized cost near zero.
         #
         # Cached short-circuit: `_teachback_exempt` is computed at most
@@ -2021,7 +2026,12 @@ def evaluate_lifecycle(
             task, team_name,
             actor_agent_type=actor.agent_type, actor_name=actor.name,
         )
-        for rule, msg, writeback in _completion_rule_B(actor, owner, task_id, exempt):
+        # owner="" written in THIS call (one TaskUpdate clearing the owner
+        # and completing) is not an unowned task: rule B still applies.
+        owner_cleared = not owner and tool_input.get("owner") == ""
+        for rule, msg, writeback in _completion_rule_B(
+            actor, owner, task_id, exempt, owner_cleared=owner_cleared
+        ):
             advisories.append((rule, msg))
             if writeback:
                 _writeback_dispute(task_id)
@@ -2452,7 +2462,12 @@ def evaluate_lifecycle(
 
 
 def _completion_rule_B(
-    actor: ActorIdentity, owner: str, task_id: Any, exempt: bool
+    actor: ActorIdentity,
+    owner: str,
+    task_id: Any,
+    exempt: bool,
+    *,
+    owner_cleared: bool = False,
 ) -> list[tuple[str, str, bool]]:
     """Rule B (role-level, #1666 item 4): only the lead completes tasks.
     Pure, no I/O.
@@ -2460,7 +2475,10 @@ def _completion_rule_B(
     Returns a list of (rule, message, writeback) tuples; ``writeback`` means
     the caller must mark the task ``completion_disputed``.
 
-      - lead / unknown frame, no owner, or exempt: silent.
+      - lead / unknown frame, or exempt: silent.
+      - no owner: silent, UNLESS ``owner_cleared`` (this same TaskUpdate set
+        owner=""), which is flagged as ``non_lead_completion``. Otherwise
+        TaskUpdate(owner="", status="completed") would escape the rule.
       - resolved actor name == owner: ``self_completion`` + writeback
         (message text unchanged from the original rule).
       - any other non-lead completion (a peer's task, an owner reassigned
@@ -2472,13 +2490,20 @@ def _completion_rule_B(
     TaskUpdate frames the lead carries a lead agent_type and no agent_id,
     and a subagent carries a non-lead agent_type and an a<16hex> agent_id.
 
-    RESIDUAL: ``owner == ""`` is silent, so TaskUpdate(owner="",
-    status="completed") escapes. Accepted: removing the guard would flag
-    teammates' unowned personal tracking tasks.
+    RESIDUAL: a task whose owner was already "" BEFORE this call stays
+    silent. Accepted: flagging it would flag teammates' unowned personal
+    tracking tasks. Clearing the owner in a separate earlier TaskUpdate
+    still escapes; the journal's per-write snapshot records that write.
+
+    The task owner is teammate-writable and unbounded, so it is echoed into
+    the message only when it passes ``valid_name`` (1-128 characters, no
+    control characters); otherwise a fixed placeholder stands in.
     """
-    if actor.role != ROLE_TEAMMATE or not owner or exempt:
+    if actor.role != ROLE_TEAMMATE or exempt:
         return []
-    if actor.name is not None and actor.name == owner:
+    if not owner and not owner_cleared:
+        return []
+    if owner and actor.name is not None and actor.name == owner:
         return [(
             "self_completion",
             f"PACT task_lifecycle_gate: teammate {actor.name!r} "
@@ -2495,13 +2520,23 @@ def _completion_rule_B(
     )
     return [(
         "non_lead_completion",
-        f"PACT task_lifecycle_gate: {who} completed Task {task_id}, owned by "
-        f"{owner!r}. Only the lead completes tasks — see "
+        f"PACT task_lifecycle_gate: {who} completed Task {task_id}, "
+        f"{_owner_phrase(owner)}. Only the lead completes tasks — see "
         "pact-completion-authority.md. Task marked "
         "metadata.completion_disputed=true; lead must re-complete "
         "intentionally to clear.",
         True,
     )]
+
+
+def _owner_phrase(owner: str) -> str:
+    """How the non_lead_completion message names the task's owner."""
+    if not owner:
+        return "after clearing its owner in the same call"
+    shown = valid_name(owner)
+    if shown is None:
+        return f"owned by an owner that cannot be shown ({len(owner)} characters)"
+    return f"owned by {shown!r}"
 
 
 # ─── journal emit ────────────────────────────────────────────────────────────

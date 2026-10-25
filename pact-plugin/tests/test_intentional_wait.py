@@ -455,7 +455,7 @@ class TestIsExemptAgentType:
     def test_missing_team_config_fails_closed(self, teams_dir):
         from shared.intentional_wait import _is_exempt_agent_type
 
-        # No config written — _iter_members returns []; no match; fail-closed.
+        # No config written — iter_team_members returns []; no match; fail-closed.
         assert _is_exempt_agent_type("session-secretary", "ghost-team", teams_dir) is False
 
     def test_malformed_team_config_fails_closed(self, teams_dir):
@@ -988,7 +988,7 @@ class TestIsTeachbackExempt:
     def test_missing_team_config_fails_closed(self, teams_dir):
         from shared.intentional_wait import is_teachback_exempt
 
-        # No config written — _iter_members returns []; no match; fail-closed.
+        # No config written — iter_team_members returns []; no match; fail-closed.
         assert is_teachback_exempt("secretary", "ghost-team", teams_dir) is False
 
     def test_owner_not_in_members_fails_closed(self, teams_dir):
@@ -1056,10 +1056,10 @@ class TestKnownReasonsLiteralRegressionGuard:
 
 class TestIsExemptAgentTypeDefaultTeamsDir:
     """teams_dir=None default-path coverage: when the override is omitted,
-    `_iter_members` must resolve via Path.home()/.claude/teams/. The 12-case
+    `iter_team_members` must resolve via Path.home()/.claude/teams/. The 12-case
     TestIsExemptAgentType class above passes teams_dir explicitly; this
     class exercises the production default path so a future regression that
-    bypasses `_iter_members` (e.g. inlines its own path) fails loudly.
+    bypasses `iter_team_members` (e.g. inlines its own path) fails loudly.
     """
 
     def test_default_teams_dir_resolves_via_path_home(self, tmp_path, monkeypatch):
@@ -1074,7 +1074,7 @@ class TestIsExemptAgentTypeDefaultTeamsDir:
             ]}),
             encoding="utf-8",
         )
-        # teams_dir omitted → exercises _iter_members default branch.
+        # teams_dir omitted → exercises iter_team_members default branch.
         assert _is_exempt_agent_type(
             "session-secretary", "default-path-team"
         ) is True
@@ -1112,10 +1112,10 @@ class TestIsExemptAgentTypeDefaultTeamsDir:
 
 class TestIsTeachbackExemptDefaultTeamsDir:
     """teams_dir=None default-path coverage for is_teachback_exempt: when
-    the override is omitted, the underlying `_iter_members` must resolve
+    the override is omitted, the underlying `iter_team_members` must resolve
     via Path.home()/.claude/teams/. TestIsTeachbackExempt above passes
     teams_dir explicitly; this class exercises the production default path
-    so a future regression that bypasses `_iter_members` (e.g. inlines its
+    so a future regression that bypasses `iter_team_members` (e.g. inlines its
     own path) fails loudly.
 
     Mirror of TestIsExemptAgentTypeDefaultTeamsDir for the self-complete
@@ -1134,7 +1134,7 @@ class TestIsTeachbackExemptDefaultTeamsDir:
             ]}),
             encoding="utf-8",
         )
-        # teams_dir omitted → exercises _iter_members default branch.
+        # teams_dir omitted → exercises iter_team_members default branch.
         assert is_teachback_exempt(
             "session-secretary", "default-path-team"
         ) is True
@@ -1199,8 +1199,8 @@ class TestIsExemptAgentTypeMixedTeamConfig:
     def test_first_member_match_wins_when_duplicate_names(self, teams_dir):
         # Pathological config (should never happen in production, but pin
         # the defensive behavior): if two members share a name, the first
-        # match short-circuits via _iter_members iteration order. Pin
-        # current behavior so a future _iter_members refactor surfaces
+        # match short-circuits via iter_team_members iteration order. Pin
+        # current behavior so a future iter_team_members refactor surfaces
         # any iteration-order change.
         from shared.intentional_wait import _is_exempt_agent_type
 
@@ -1228,11 +1228,11 @@ class TestIsExemptAgentTypeMixedTeamConfig:
         exempt set would pass the secretary-first test and silently
         permit non-secretary teammates to self-complete by colliding on
         a privileged name. The pair of tests together pin the
-        order-sensitivity of `_iter_members` iteration as a
+        order-sensitivity of `iter_team_members` iteration as a
         load-bearing invariant.
 
         Pathological config (should never happen in production); this
-        pins defensive behavior so a future _iter_members refactor that
+        pins defensive behavior so a future iter_team_members refactor that
         normalizes/dedupes member entries (e.g., a `set()` collapse)
         surfaces as an explicit test failure rather than silent
         privilege drift.
