@@ -751,3 +751,36 @@ class TestADryRunOrAutoApprovalRunsOnlyItself:
         ctx = _mint_styled(FORCE + "feat/x", style)
         assert "command_text" not in ctx
         assert _runs(ctx, FORCE + "feat/x")
+
+
+QUOTED_COMMAND_WITH_PROSE = {
+    "prose-names-another-target": (
+        lambda c: f"Run `{c}` now (it replaces {FORCE}dev)", FORCE + "main"),
+    "prose-names-another-op": (
+        lambda c: f"Run `{c}`; this is not {FORCE}main", MERGE + "5 --squash"),
+}
+
+
+class TestProseBesideAQuotedGuardedCommandBindsNothing:
+    """An option that quotes its guarded command in a code span names it there:
+    a guarded command its prose mentions is neither a second operation nor a
+    binding. An option whose command is only in prose still mints, and a flag the
+    prose adds to the quoted command still binds."""
+
+    @pytest.mark.parametrize("style,command", QUOTED_COMMAND_WITH_PROSE.values(),
+                             ids=QUOTED_COMMAND_WITH_PROSE.keys())
+    def test_the_quoted_command_mints_and_runs(self, style, command):
+        ctx = _mint_styled(command, style)
+        assert _runs(ctx, command)
+
+    def test_a_command_only_in_prose_still_mints(self):
+        ctx = _mint_styled(FORCE + "main", lambda c: f"Create it with `gh issue create --title t`; afterwards {c}")
+        assert _runs(ctx, FORCE + "main")
+
+    def test_an_empty_code_span_is_not_a_quoted_command(self):
+        ctx = _mint_styled(FORCE + "main", lambda c: f"Run `` `` first, then {c}")
+        assert _runs(ctx, FORCE + "main")
+
+    def test_a_flag_in_prose_still_binds_to_the_quoted_command(self):
+        ctx = _mint_styled(MERGE + "5", lambda c: f"Run `{c}` with --admin")
+        assert ctx["bound_flags"] == ["--admin"]

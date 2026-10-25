@@ -476,6 +476,17 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
     # `git commit -F -`) is not a command the approval runs, so it binds nothing.
     clicked_texts = selected_option_texts
     selected_option_texts = [_without_allowed_spans(t) for t in selected_option_texts]
+    # A clicked option that quotes a guarded command in a code span (the spans
+    # left after the line above) names its command there; its prose binds
+    # nothing, so a guarded command it mentions outside the span is neither a
+    # second operation nor a second binding.
+    quoted = [
+        [raw for raw, content in _code_spans(t) if content.strip()]
+        for t in selected_option_texts
+    ]
+    flag_texts = selected_option_texts
+    if any(quoted):
+        selected_option_texts = ["\n".join(raws) for raws in quoted if raws]
 
     # ── Step 3: distinct-(op,target) multiplicity over the CLICKED options ONLY
     # (pure-floor scope — the question prose is NOT cross-checked): ==1 mints, >1
@@ -538,7 +549,7 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
     ctx = extract_command_context(
         _extraction_surface(the_command),
         flag_scan_text=_leg_bounded_flag_scan_surface(
-            _strip_command_wrapper(" ".join(selected_option_texts)), the_command
+            _strip_command_wrapper(" ".join(flag_texts)), the_command
         ),
     )
     if _DRY_RUN_RE.search(the_command) or _AUTO_RE.search(the_command):
