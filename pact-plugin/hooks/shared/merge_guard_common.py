@@ -10135,9 +10135,13 @@ _EXPORTING = r"(?:export|(?:declare|typeset)(?:[ \t]+-[A-Za-z]+)*[ \t]+-[A-Za-z]
 
 def _exported_before_guarded_leg(command: str, names: tuple[str, ...]) -> bool:
     """Whether a leg before the command's guarded leg exports one of `names`, so the
-    guarded command reads it from its environment. A variable assigned without
-    export is not passed on and does not count."""
+    guarded command reads it from its environment: in the same command line, a
+    subshell or brace group, or the string a shell runs with -c. A variable assigned
+    without export is not passed on and does not count."""
     guarded = _single_destructive_leg(command) or _single_detectable_leg(command)
+    body = shell_c_string(guarded) if guarded else None
+    if body and body != guarded and _exported_before_guarded_leg(body, names):
+        return True
     start = command.find(guarded) if guarded else -1
     if start <= 0:
         return False
@@ -10146,12 +10150,12 @@ def _exported_before_guarded_leg(command: str, names: tuple[str, ...]) -> bool:
         if name not in head:
             continue
         # `export NAME` with no value exports a variable assigned earlier.
-        if re.search(r"(?:^|[;&|(\n])[ \t]*" + _EXPORTING + r"[ \t]+(?:[^;&|\n]*[ \t])?" + name
+        if re.search(r"(?:^|[;&|({\n])[ \t]*" + _EXPORTING + r"[ \t]+(?:[^;&|\n]*[ \t])?" + name
                      + r"(?=[ \t;&|)\n]|$)", head):
             return True
         found = _literal_assignments(head, name, exported=True)
         if found is None:
-            if re.search(r"(?:^|[;&|(\n])[ \t]*" + _EXPORTING + r"[ \t][^;&|\n]*" + name + "=", head):
+            if re.search(r"(?:^|[;&|({\n])[ \t]*" + _EXPORTING + r"[ \t][^;&|\n]*" + name + "=", head):
                 return True
         elif any(re.match(r"[ \t]*" + _EXPORTING + r"[ \t]", a.group(0)) for a in found):
             return True

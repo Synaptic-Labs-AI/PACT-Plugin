@@ -1162,6 +1162,48 @@ class TestAnExportedGhRepoIsARepoRedirect:
 
 
 
+
+SAME_SHELL_EXPORTS = {
+    "subshell": (MERGE + "--squash", "(export GH_REPO=o/b; " + MERGE + "--squash)",
+                 "(export GH_REPO=o/c; " + MERGE + "--squash)"),
+    "brace-group": (MERGE + "5", "{ export GH_REPO=o/b; " + MERGE + "5; }", "{ export GH_REPO=o/c; " + MERGE + "5; }"),
+    "brace-bare-export": (MERGE + "5", "GH_REPO=o/b; { export GH_REPO; " + MERGE + "5; }",
+                          "GH_REPO=o/c; { export GH_REPO; " + MERGE + "5; }"),
+    "bash-c": (MERGE + "5", "bash -c 'export GH_REPO=o/b; " + MERGE + "5'", "bash -c 'export GH_REPO=o/c; " + MERGE + "5'"),
+    "sh-lc-and": (_CLOSE_PR + "5 -d", 'sh -lc "export GH_REPO=o/b && ' + _CLOSE_PR + '5 -d"',
+                  'sh -lc "export GH_REPO=o/c && ' + _CLOSE_PR + '5 -d"'),
+    "eval": (MERGE + "5", 'eval "export GH_REPO=o/b; ' + MERGE + '5"', 'eval "export GH_REPO=o/c; ' + MERGE + '5"'),
+}
+
+
+class TestAnExportInTheOpsOwnShellIsARepoRedirect:
+    """An export in the same subshell, brace group or -c string as the merge or close
+    reaches gh as one in the same command line does: a plain approval does not cover
+    it, and its own approval runs that command only."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("plain,exported,other", SAME_SHELL_EXPORTS.values(), ids=SAME_SHELL_EXPORTS.keys())
+    def test_a_plain_approval_does_not_cover_it(self, plain, exported, other, style):
+        ctx = _mint_styled(plain, style)
+        assert _runs(ctx, plain)
+        assert not _runs(ctx, exported)
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("plain,exported,other", SAME_SHELL_EXPORTS.values(), ids=SAME_SHELL_EXPORTS.keys())
+    def test_its_own_approval_runs_it_and_no_other(self, plain, exported, other, style):
+        ctx = _mint_styled(exported, style)
+        assert _runs(ctx, exported)
+        assert not _runs(ctx, other)
+
+    @pytest.mark.parametrize("command", [
+        "(GH_REPO=o/b; " + MERGE + "5)",
+        "{ GH_REPO=o/b; " + MERGE + "5; }",
+        'bash -c "echo export GH_REPO=o/b; ' + MERGE + '5"',
+        "(" + MERGE + "5; export GH_REPO=o/b)",
+    ], ids=["subshell-not-exported", "brace-not-exported", "bash-c-echoed", "exported-after"])
+    def test_a_plain_approval_still_covers_a_gh_repo_gh_does_not_read(self, command):
+        assert _runs(_mint_styled(MERGE + "5", APPROVAL_STYLES["inline"]), command)
+
 EXPORTED_GIT_DIRS = {
     "git-dir": (_FORCE, "export GIT_DIR=/tmp/repoB/.git; " + _FORCE, "export GIT_DIR=/tmp/repoC/.git; " + _FORCE),
     "git-dir-and": (_FORCE, "export GIT_DIR=/tmp/repoB/.git && " + _FORCE, "export GIT_DIR=/tmp/repoC/.git && " + _FORCE),

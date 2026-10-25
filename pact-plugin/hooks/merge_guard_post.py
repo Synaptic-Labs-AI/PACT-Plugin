@@ -864,7 +864,11 @@ def _exact_text_reading(span: str, located: str) -> dict | None:
     else:
         inner = shell_c_string(leg)
         if inner is not None:
-            if is_compound_destructive_command(inner) or (pairs and not _inner_flags_differ(leg, inner)):
+            # A -c string that exports GH_REPO before its merge or close binds by text,
+            # as the same command run directly does.
+            if is_compound_destructive_command(inner) or (
+                pairs and not _inner_flags_differ(leg, inner) and not exported_gh_repo_before_guarded_leg(leg)
+            ):
                 return None
             body = inner
         else:
