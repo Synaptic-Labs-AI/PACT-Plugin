@@ -112,6 +112,8 @@ try:
         rewritten_executed_command,
         unreadable_evald_heredoc,
         shell_c_string,
+        # A git alias's run retires as the command its value names.
+        _rewrite_git_aliases,
         # An if/elif/else or case whose branches run different guarded commands
         # binds its text: no one branch's (op, target) stands for the command.
         alternative_destructive_branch_count,
@@ -1605,14 +1607,19 @@ def main():
             command = (
                 tool_input.get("command", "") if isinstance(tool_input, dict) else ""
             )
+            # A git alias runs the command its value names, which is how the
+            # classifier reads it, so its run retires as that command; an
+            # exact-command token still matches the text that was run.
+            runs = _rewrite_git_aliases(command) if isinstance(command, str) else command
             if (
                 isinstance(command, str)
                 and tool_response.get("interrupted") is not True
-                and not _op_did_not_run(command)
+                and not _op_did_not_run(runs)
             ):
                 _retire_exact_text_token(
                     command, input_data.get("cwd"), stdout_text=tool_response.get("stdout", "")
                 )
+            command = runs
 
             # Block 1 — Command-shape filter (SEC-S2: extends from merge-
             # only to all op_types in LAYER1_SUCCESS_STDOUT_PATTERNS).

@@ -364,3 +364,44 @@ class TestAnExactMergeInAnotherRepoIsNotReadHere:
                             "command_text": normalize_command_text(cmd)}, token_dir=rig["config"])
         _post(rig, cmd, _EMPTY, state="MERGED")
         assert _retired(rig)
+
+
+class TestAGitAliasRetiresAsTheCommandItRuns:
+    """A git alias given with -c runs the command its value names, and the
+    classifier reads it that way; retirement reads the same expansion, so the
+    aliased push retires on success and an aliased dry run keeps its token."""
+
+    def test_a_shell_alias_push_retires(self, rig):
+        cmd = "git -c alias.x='!git push --" + "force' x origin main"
+        assert write_token({"operation_type": "force-push", "bound_flags": [], "target_ref": "main"},
+                           token_dir=rig["config"])
+        _post(rig, cmd, _EMPTY)
+        assert _retired(rig)
+
+    @pytest.mark.parametrize("cmd", [
+        "git -c alias.pn='push -n --" + "force' pn origin main",
+        "git -c alias.x='!git push -n --" + "force' x origin main",
+    ])
+    def test_an_aliased_dry_run_keeps_its_token(self, rig, cmd):
+        from shared.merge_guard_common import normalize_command_text
+
+        assert write_token({"operation_type": "force-push", "bound_flags": [], "target_ref": "main",
+                            "command_text": normalize_command_text(cmd)}, token_dir=rig["config"])
+        _post(rig, cmd, _EMPTY)
+        assert not _retired(rig)
+
+    @pytest.mark.parametrize("cmd,retires", [
+        ("git px origin main", True),
+        ("git pn origin main", False),
+        ("git pxn origin main", False),
+    ])
+    def test_a_config_alias_retires_as_the_command_it_runs(self, rig, cmd, retires):
+        from shared.merge_guard_common import normalize_command_text
+
+        (rig["tmp"] / ".gitconfig").write_text(
+            "[alias]\n\tpn = push -n --" + "force\n"
+            "\tpx = \"!git push --" + "force\"\n\tpxn = \"!git push -n --" + "force\"\n")
+        assert write_token({"operation_type": "force-push", "bound_flags": [], "target_ref": "main",
+                            "command_text": normalize_command_text(cmd)}, token_dir=rig["config"])
+        _post(rig, cmd, _EMPTY)
+        assert _retired(rig) is retires
