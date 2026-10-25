@@ -180,8 +180,8 @@ def find_valid_token(token_dir: Path | None = None) -> tuple[dict, str] | tuple[
     current_session = get_session_id()
 
     now = time.time()
-    valid_token = None
-    valid_path = None
+    # The token and its path, kept as one pair so neither is ever set without the other.
+    found: tuple[dict, str] | None = None
     token_pattern = str(token_dir / f"{TOKEN_PREFIX}*")
 
     for token_path in glob.glob(token_pattern):
@@ -255,8 +255,7 @@ def find_valid_token(token_dir: Path | None = None) -> tuple[dict, str] | tuple[
                     continue
 
             # Valid token found
-            valid_token = token_data
-            valid_path = token_path
+            found = (token_data, token_path)
 
         except (json.JSONDecodeError, OSError, KeyError, AttributeError, TypeError):
             # Corrupted or malformed token — clean up
@@ -272,7 +271,7 @@ def find_valid_token(token_dir: Path | None = None) -> tuple[dict, str] | tuple[
     # construction; cleanup_orphan_tokens swallows all OSError paths.
     _cleanup_orphan_tokens(token_dir)
 
-    return valid_token, valid_path
+    return found or (None, None)
 
 
 def _safe_remove(path: str):
@@ -750,8 +749,9 @@ def check_merge_authorization(command: str, token_dir: Path | None = None) -> st
             "destructive op separately with its own approval."
         )
 
-    token, token_path = find_valid_token(token_dir)
-    if token is not None:
+    found = find_valid_token(token_dir)
+    if found[0] is not None:
+        token, token_path = found
         if _token_matches_command(token, command):
             # Consume the token — one approval = one operation
             # Uses rename for idempotent consumption: if a concurrent
