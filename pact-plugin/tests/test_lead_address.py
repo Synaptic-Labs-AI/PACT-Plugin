@@ -530,6 +530,8 @@ class TestFormatSessionSubstitutions:
     def test_unsafe_team_name_is_named_unavailable(self, team):
         text = format_session_substitutions(team, "/s", "/p", "main")
         assert "Team name unavailable" in text
+        reason = "(not set)" if team in ("", None) else "(not a safe name)"
+        assert f"Team name unavailable {reason}" in text
         assert "Use the name `" not in text
         if isinstance(team, str) and team:
             assert team not in text
@@ -549,6 +551,12 @@ class TestFormatSessionSubstitutions:
     def test_unsafe_plugin_root_is_named_unavailable(self, root):
         text = format_session_substitutions("t", "/s", root, "main")
         assert "Plugin root unavailable" in text
+        reason = "(not set)" if root in ("", None) else "(not a safe absolute path)"
+        assert f"Plugin root unavailable {reason}" in text
+        # It must defer to bootstrap.md's fallbacks, not forbid commands
+        # (test-rev #64: "do not run" pre-empted the last-resort fallback).
+        assert "ending with its Last-resort fallback for {plugin_root}." in text
+        assert "depend on {plugin_root}" not in text
         assert "wherever {plugin_root} appears in commands" not in text
         if isinstance(root, str) and root:
             assert root not in text

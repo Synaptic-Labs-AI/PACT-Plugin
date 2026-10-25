@@ -203,16 +203,33 @@ _is_safe_path_component = is_safe_path_component
 # including $ ` " ' \ ! (shell expansion and quote breakout) and every
 # non-ASCII control, format or separator character (U+0085, U+2028, bidi
 # overrides, zero-width characters, non-ASCII spaces).
+#
+# Two letter ranges are carved out of L*, because they look like the ASCII
+# punctuation the allowlist rejects and could make a model retype a lookalike
+# as the real character (#1671 security-rev, task #72):
+#   - U+02B0-U+02FF, the Spacing Modifier Letters block. It holds U+02BB and
+#     U+02BC, which look like ' and are REJECTED ON PURPOSE even though some
+#     languages (Hawaiian okina, Ukrainian apostrophe) use them in names, and
+#     U+02EE, which looks like ".
+#   - U+01C0-U+01C3, the click letters, which look like | || ‡ !.
+# Other modifier letters (Lm) stay allowed: Japanese names use U+30FC, U+3005,
+# U+309D and U+30FD (/home/ユーザー, /home/佐々木). RTL letters stay allowed too.
 PLUGIN_ROOT_MAX_LENGTH = 512
 _PLUGIN_ROOT_ASCII_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/+@:~ -"
 )
+_PLUGIN_ROOT_LOOKALIKE_RANGES = ((0x02B0, 0x02FF), (0x01C0, 0x01C3))
 
 
 def _is_plugin_root_char(char: str) -> bool:
     if char in _PLUGIN_ROOT_ASCII_CHARS:
         return True
-    return not char.isascii() and unicodedata.category(char)[0] in ("L", "N")
+    if char.isascii():
+        return False
+    codepoint = ord(char)
+    if any(low <= codepoint <= high for low, high in _PLUGIN_ROOT_LOOKALIKE_RANGES):
+        return False
+    return unicodedata.category(char)[0] in ("L", "N")
 
 
 def is_safe_plugin_root(value: object) -> bool:

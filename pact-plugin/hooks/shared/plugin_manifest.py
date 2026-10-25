@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Optional
 
 _UNSET = "<unset>"
+_UNSAFE = "<unsafe>"
 _UNKNOWN_META = "unknown"
 _PREFIX = "PACT plugin: "
 
@@ -79,6 +80,25 @@ def _read_manifest(plugin_root: str) -> Optional[dict]:
     return data
 
 
+def _root_display(plugin_root: Optional[str]) -> str:
+    """The root as shown in the banner: "<unset>" when there is none, the
+    root itself when it passes is_safe_plugin_root, else "<unsafe>".
+
+    The banner reaches additionalContext, so a root the allowlist rejects
+    (shell metacharacters, lookalike letters) must not be echoed raw
+    (#1671 security-rev, task #72). The import is local so a failure in the
+    heavier session_state import chain degrades to "<unsafe>" (fail closed
+    for the value, fail open for the banner) instead of breaking the module.
+    """
+    if not plugin_root:
+        return _UNSET
+    try:
+        from shared.session_state import is_safe_plugin_root
+    except Exception:  # noqa: BLE001 — fail closed on the displayed value
+        return _UNSAFE
+    return _sanitize(plugin_root) if is_safe_plugin_root(plugin_root) else _UNSAFE
+
+
 def format_plugin_banner() -> str:
     """Return a single-line diagnostic banner for additionalContext.
 
@@ -91,6 +111,9 @@ def format_plugin_banner() -> str:
     Fail-open (any read/parse/schema failure):
         "PACT plugin: unknown (root: {plugin_root_or_<unset>})"
 
+    A root that fails is_safe_plugin_root is shown as "<unsafe>" in both
+    forms; the manifest is still read from it.
+
     The outer blanket try/except guarantees totality against any future
     regression in the helpers — SessionStart is a hot path, and an
     uncaught exception here would break additionalContext delivery for
@@ -102,7 +125,7 @@ def format_plugin_banner() -> str:
         # contract applies to ALL banner inputs, not just the plugin-authored
         # name/version. CLAUDE_PLUGIN_ROOT is Claude-Code-managed, but routing
         # the env var through _sanitize keeps the invariant total.
-        root_display = _sanitize(plugin_root) if plugin_root else _UNSET
+        root_display = _root_display(plugin_root)
 
         if plugin_root is None:
             return f"{_PREFIX}{_UNKNOWN_META} (root: {root_display})"
