@@ -222,8 +222,10 @@ def append_line(path: Path, data: bytes, root: Path, *, max_file_bytes: int) -> 
     with a leading newline in the same single write, so the new record does
     not merge with the torn one and get skipped with it.
 
-    Returns False when the file already holds at least `max_file_bytes` bytes
-    (writing nothing) or the write is short. Raises OSError when the
+    THE CAP IS NEVER CROSSED. Returns False, writing nothing, when the file
+    plus this write (including any sealing newline) would exceed
+    `max_file_bytes`, so a reader that rejects a file over the same bound
+    never sees one. Also False when the write is short. Raises OSError when the
     directory resolves outside `root`, when a symlink sits at the path
     (O_NOFOLLOW), or on any I/O error. Never creates a directory: the file's
     directory must already exist. A new file is created with mode 0o600.
@@ -237,6 +239,8 @@ def append_line(path: Path, data: bytes, root: Path, *, max_file_bytes: int) -> 
             return False
         if size and data[:1] != b"\n" and os.pread(fd, 1, size - 1) != b"\n":
             data = b"\n" + data
+        if size + len(data) > max_file_bytes:
+            return False
         return os.write(fd, data) == len(data)
     finally:
         os.close(fd)

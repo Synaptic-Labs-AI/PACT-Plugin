@@ -135,11 +135,10 @@ def test_append_refuses_record_over_1024_bytes(config):
 
 def test_append_stops_at_the_file_cap(config, monkeypatch):
     make_cloud_team(config, TEAM)
-    monkeypatch.setattr(cloud_roster, "MAX_ROSTER_BYTES", 100)
     record = {"k": "intent", "tu": TU1, "name": "coder", "type": "pact-backend-coder"}
     assert cloud_roster.append_record(TEAM, record)
     size = roster_path(config, TEAM).stat().st_size
-    assert size >= 100  # one record already reaches the patched cap
+    monkeypatch.setattr(cloud_roster, "MAX_ROSTER_BYTES", size)  # file now AT the cap
     assert cloud_roster.append_record(TEAM, dict(record, tu=TU2)) is False
     assert roster_path(config, TEAM).stat().st_size == size
 

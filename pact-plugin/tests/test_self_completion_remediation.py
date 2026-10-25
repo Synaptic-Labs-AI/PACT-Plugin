@@ -321,10 +321,10 @@ def test_unreadable_agents_dir_is_not_a_shadow(team, tmp_path, monkeypatch):
     project = tmp_path / "proj"
     _agent_file(project / ".claude" / "agents", "impostor.md", "pact-secretary")
 
-    def boom(self, pattern):
+    def boom(*_args, **_kwargs):
         raise OSError("denied")
 
-    monkeypatch.setattr(Path, "rglob", boom)
+    monkeypatch.setattr(os, "walk", boom)
     assert resolve_actor(_cloud_secretary(team, project), TEAM).agent_type == "pact-secretary"
 
 

@@ -130,6 +130,9 @@ valid_name = subagent_meta.valid_name
 # directory, and how much of each file holds its frontmatter.
 _MAX_ANCESTORS = 64
 _MAX_DEFINITION_FILES = 256
+# Directory entries (files and folders) one agents-tree walk may visit. The
+# walk stops there, so a huge tree costs bounded work.
+_MAX_SCAN_ENTRIES = 4096
 _FRONTMATTER_BYTES = 4096
 
 
@@ -380,17 +383,43 @@ def _shadowed_by_other_definition(type_name: str, input_data: dict) -> bool:
     """True iff a non-plugin agent definition named `type_name` exists in a
     project `.claude/agents` (from the frame's cwd or CLAUDE_PROJECT_DIR up to
     the filesystem root) or the user `<config>/agents` directory. Any error
-    reading a directory counts as no definition there."""
+    reading a directory counts as no definition there.
+
+    BOUNDED AND FAIL-CLOSED. Each directory is walked lazily, in sorted order,
+    without following symlinked folders (so a symlink cycle cannot loop), and
+    the walk stops after _MAX_DEFINITION_FILES definition files or
+    _MAX_SCAN_ENTRIES entries. A walk that hits a limit before it finishes
+    counts as SHADOWED: an unfinished scan cannot prove the type is the
+    plugin's, and a True here only withholds an exemption.
+    """
     for agents_dir in _definition_dirs(input_data):
-        try:
-            files = sorted(agents_dir.rglob("*.md"))[:_MAX_DEFINITION_FILES]
-        except OSError:
-            continue
-        for path in files:
-            if _is_plugin_definition(path):
-                continue
-            if _definition_name(path) == type_name:
-                return True
+        found = _scan_for_definition(agents_dir, type_name)
+        if found is not False:
+            return True  # a match, or a capped (unfinished) scan
+    return False
+
+
+def _scan_for_definition(agents_dir: Path, type_name: str):
+    """True when a non-plugin definition named `type_name` is found under
+    `agents_dir`, None when a limit stopped the walk first, else False."""
+    files_seen = entries_seen = 0
+    try:
+        for root, dirs, names in os.walk(agents_dir, followlinks=False):
+            dirs.sort()
+            entries_seen += len(dirs) + len(names)
+            for name in sorted(names):
+                if not name.endswith(".md"):
+                    continue
+                files_seen += 1
+                if files_seen > _MAX_DEFINITION_FILES:
+                    return None
+                path = Path(root) / name
+                if not _is_plugin_definition(path) and _definition_name(path) == type_name:
+                    return True
+            if entries_seen > _MAX_SCAN_ENTRIES:
+                return None
+    except OSError:
+        return False
     return False
 
 

@@ -272,3 +272,82 @@ def test_unexpected_parse_failure_reads_as_unloadable(cloud, monkeypatch):
     assert cloud_roster.load_roster_state(TEAM) == (None, True)
     _meta_victim(cloud)
     assert _coder(cloud).source == SOURCE_UNATTRIBUTED
+
+
+# ─── Bugbot #1670: the append cap and the bounded shadow scan ────────────────
+
+
+def test_append_that_would_cross_the_cap_is_refused(cloud, monkeypatch):
+    """A file just under the cap must not be pushed over it: over the cap the
+    reader treats the roster as unloadable for the rest of the session."""
+    path = write_roster(cloud, TEAM, [intent(TU1, "coder", "pact-backend-coder")])
+    size = path.stat().st_size
+    record = {"k": "intent", "tu": TU2, "name": "b", "type": "t"}
+    monkeypatch.setattr(cloud_roster, "MAX_ROSTER_BYTES", size + 10)
+    assert cloud_roster.append_record(TEAM, record) is False
+    assert path.stat().st_size == size
+    assert cloud_roster.load_roster_state(TEAM)[1] is False
+
+
+def test_append_that_lands_exactly_on_the_cap_is_allowed(cloud, monkeypatch):
+    from shared import state_file
+
+    path = write_roster(cloud, TEAM, [intent(TU1, "coder", "pact-backend-coder")])
+    size = path.stat().st_size
+    data = b'{"x":1}\n'
+    assert state_file.append_line(path, data, cloud / "teams",
+                                  max_file_bytes=size + len(data))
+    assert path.stat().st_size == size + len(data)
+
+
+def test_torn_line_newline_counts_toward_the_cap(cloud):
+    from shared import state_file
+
+    path = write_roster(cloud, TEAM, [intent(TU1, "coder", "pact-backend-coder")])
+    path.write_text(path.read_text() + '{"torn')
+    size = path.stat().st_size
+    data = b'{"x":1}\n'
+    assert not state_file.append_line(path, data, cloud / "teams",
+                                      max_file_bytes=size + len(data))
+    assert path.stat().st_size == size
+
+
+def test_shadow_scan_stops_at_its_cap_and_fails_closed(tmp_path, monkeypatch):
+    """A huge agents tree is not walked to the end; reaching the cap counts
+    as shadowed (no exemption from an unfinished scan)."""
+    agents = tmp_path / "proj" / ".claude" / "agents"
+    agents.mkdir(parents=True)
+    for n in range(40):
+        (agents / f"a{n:03d}.md").write_text("---\nname: other\n---\n")
+    monkeypatch.setattr(actor_identity, "_MAX_DEFINITION_FILES", 10)
+    opened = []
+    real = actor_identity._definition_name
+    monkeypatch.setattr(actor_identity, "_definition_name",
+                        lambda p: opened.append(p) or real(p))
+    assert actor_identity.typed_without_frame("pact-secretary", str(tmp_path / "proj")) is None
+    assert len(opened) <= 10
+
+
+def test_shadow_scan_survives_a_symlink_cycle(tmp_path):
+    agents = tmp_path / "proj" / ".claude" / "agents"
+    (agents / "sub").mkdir(parents=True)
+    os.symlink(agents, agents / "sub" / "loop")
+    (agents / "sub" / "fine.md").write_text("---\nname: other\n---\n")
+    assert actor_identity.typed_without_frame(
+        "pact-secretary", str(tmp_path / "proj")) == "pact-secretary"
+
+
+def test_shadow_scan_still_finds_a_nested_shadow(tmp_path):
+    agents = tmp_path / "proj" / ".claude" / "agents"
+    (agents / "deep" / "er").mkdir(parents=True)
+    (agents / "deep" / "er" / "x.md").write_text(_DEFINITION)
+    assert actor_identity.typed_without_frame("pact-secretary", str(tmp_path / "proj")) is None
+
+
+def test_shadow_scan_caps_entries_in_a_tree_without_definitions(tmp_path, monkeypatch):
+    agents = tmp_path / "proj" / ".claude" / "agents"
+    agents.mkdir(parents=True)
+    for n in range(60):
+        (agents / f"d{n:02d}").mkdir()
+    monkeypatch.setattr(actor_identity, "_MAX_SCAN_ENTRIES", 20)
+    assert actor_identity.typed_without_frame("pact-secretary", str(tmp_path / "proj")) is None
