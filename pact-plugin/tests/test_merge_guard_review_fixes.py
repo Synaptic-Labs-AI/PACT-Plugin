@@ -3108,6 +3108,66 @@ def test_candidates_disagreeing_on_the_guarded_op_read_the_payload_directory_fir
     assert _runs_after_approval(cmd, style)
 
 
+# An eval of literal words runs them as a command line: a push that deletes, mirrors,
+# prunes, force-pushes with a lease or pushes to main is refused in that form too, and
+# the approval runs it once.
+EVAL_OF_A_GUARDED_PUSH = [
+    ("delete", "git push origin --de" + "lete topic"),
+    ("short delete", "git push origin -d topic"),
+    ("delete before the remote", "git push --de" + "lete origin topic"),
+    ("colon refspec", "git push origin :topic"),
+    ("mirror", "git push origin --mir" + "ror"),
+    ("prune", "git push origin --pru" + "ne"),
+    ("lease", "git push origin --for" + "ce-with-lease main"),
+    ("to main", "git push origin main"),
+]
+EVAL_FORMS = {
+    "single-quoted": "eval '{c}'",
+    "double-quoted": 'eval "{c}"',
+    "assigned": 'x="{c}"; eval "$x"',
+}
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("form", EVAL_FORMS.values(), ids=EVAL_FORMS.keys())
+@pytest.mark.parametrize("label,push", EVAL_OF_A_GUARDED_PUSH, ids=[r[0] for r in EVAL_OF_A_GUARDED_PUSH])
+def test_an_eval_of_a_guarded_push_is_refused_then_runs(label, push, form, style):
+    cmd = form.format(c=push)
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+def test_an_eval_of_a_variable_naming_a_literal_target_is_refused_then_runs(style):
+    cmd = "PR=5; c=\"gh pr " + "merge $PR --squash\"; eval \"$c\""
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+def test_an_eval_of_several_literal_words_runs_them_joined():
+    from shared.merge_guard_common import _rewrite_literal_evals
+
+    assert _rewrite_literal_evals("eval 'git push' 'origin --de" + "lete topic'") == "git push origin --de" + "lete topic"
+    assert is_dangerous_command("eval 'git push' 'origin --de" + "lete topic'") is True
+
+
+@pytest.mark.parametrize("cmd", [
+    "eval 'echo git push origin --de" + "lete topic'",
+    "eval 'git push origin topic'",
+    "eval \"git status\"",
+    "echo \"a; eval 'git push origin --de" + "lete topic'; b\"",
+], ids=["printed", "push-to-a-topic", "read", "eval-inside-quotes"])
+def test_an_eval_of_literal_words_that_run_nothing_guarded_is_allowed(cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+def test_an_eval_already_typed_as_written_keeps_its_reading():
+    from shared.merge_guard_common import _rewrite_literal_evals
+
+    cmd = "eval \"gh pr " + "merge --squash\""
+    assert _rewrite_literal_evals(cmd) == cmd
+
+
 # An eval of a variable reassigned by plain literal legs runs the last value before it.
 @pytest.mark.parametrize("cmd", [
     "c=\"gh pr " + "merge 5\"; c=\"gh pr view 5\"; eval \"$c\"",

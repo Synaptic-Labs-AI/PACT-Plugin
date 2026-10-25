@@ -7072,6 +7072,36 @@ def _rewrite_variable_evals(command: str) -> str:
     return _VARIABLE_EVAL_RE.sub(_value, command)
 
 
+# An eval leg whose words are literal: single-quoted, double-quoted with no command
+# substitution, or bare words with no quoting or expansion.
+_LITERAL_EVAL_RE = re.compile(
+    r"(?:^|(?<=[;&|(\n]))(?P<lead>[ \t]*)eval(?P<args>(?:[ \t]+(?:'[^']*'|\"[^\"`\\$]*(?:\$\{?\w+\}?[^\"`\\$]*)*\""
+    r"|[^\s;&|()<>'\"`\\$]+))+)(?=[ \t]*(?:$|[;&|)\n]))"
+)
+
+
+def _rewrite_literal_evals(command: str) -> str:
+    """`command` with each eval of literal words replaced by the command line eval runs:
+    the words unquoted and joined by spaces (`eval 'git push origin --delete x'` reads as
+    `git push origin --delete x`). A `$NAME` inside double quotes stays as written, as a
+    bare command's is read. An eval whose guarded command is typed as it stands keeps
+    that reading."""
+    if "eval" not in command:
+        return command
+    view = _mask_shell_quotes(command)
+
+    def _run(m: re.Match) -> str:
+        words = _shell_tokenize(m.group("args"))
+        if view[m.start("args") - 4] != "e" or not words:
+            return m.group(0)
+        # An eval whose guarded command is already typed as written keeps its reading.
+        if detect_command_operation_type(m.group(0).strip()) is not None:
+            return m.group(0)
+        return m.group("lead") + " ".join(words)
+
+    return _LITERAL_EVAL_RE.sub(_run, command)
+
+
 def _rewrite_readable_evals(command: str) -> str:
     """`command` with each readable eval replaced by the text it runs: the body as written
     when the substitution is double-quoted, or its words joined by single spaces when it is
@@ -7083,8 +7113,8 @@ def _rewrite_readable_evals(command: str) -> str:
     the shell ends the heredoc first; an unquoted substitution whose body holds a glob
     character, which the shell may expand to file names."""
     command = _PRINTED_STRING_RE.sub(lambda m: _substitution_printed_text(m.group("inner")) or m.group(0),
-                                     _rewrite_variable_evals(_rewrite_printed_assignments(
-                                         _rewrite_set_positionals(_rewrite_git_aliases(command)))))
+                                     _rewrite_literal_evals(_rewrite_variable_evals(_rewrite_printed_assignments(
+                                         _rewrite_set_positionals(_rewrite_git_aliases(command))))))
     if "<<" not in command or not re.search(r"(?<![\w-])" + _RUNS_STRING, command):
         return command
 
