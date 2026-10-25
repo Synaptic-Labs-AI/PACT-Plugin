@@ -128,6 +128,8 @@ try:
         # not via two parallel reimplementations that can rot apart.
         _single_destructive_leg,
         _single_detectable_leg,
+        # An op on the current branch run after a checkout or cd binds its text.
+        target_changes_before_guarded_leg,
     )
     from shared.tool_response import extract_tool_response
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-loud catch-all
@@ -749,6 +751,13 @@ def _target_is_a_variable(ctx: dict) -> bool:
     return isinstance(target, str) and "$" in target
 
 
+def _implicit_target(ctx: dict) -> bool:
+    """Whether the region reading's target is the current branch the op leaves
+    implicit (`gh pr merge --squash`, `git push --force`)."""
+    target = _target_value(ctx)
+    return isinstance(target, str) and "\x00" in target
+
+
 def _evald_target(span: str) -> str | None:
     """The target of the one guarded command `span` evals as a single string (`eval
     "gh pr close 5 --delete-branch"`, or a variable assigned it just before): its
@@ -876,6 +885,9 @@ def _exact_text_reading(span: str, located: str) -> dict | None:
         # A variable target (`gh pr merge "$PR"`, `PR=5; gh pr merge $PR`) binds by
         # text, so the command with another value assigned is not approved.
         or _target_is_a_variable(ctx)
+        # An op on the current branch after a checkout or cd (`git checkout feat/y &&
+        # gh pr merge --squash`) binds by text, so another branch's is not approved.
+        or (_implicit_target(ctx) and target_changes_before_guarded_leg(span))
     ):
         return None
     return ctx

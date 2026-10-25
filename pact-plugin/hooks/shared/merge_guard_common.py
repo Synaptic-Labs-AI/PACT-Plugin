@@ -10044,6 +10044,29 @@ def _single_detectable_leg(command: str) -> str | None:
     return detectable[0] if len(detectable) == 1 else None
 
 
+_TARGET_CHANGING_LEG_RE = re.compile(
+    r"^(?:[A-Za-z_]\w*=\S*\s+)*(?:command\s+)?"
+    r"(?:git(?:\s+-[Cc]\s+\S+|\s+--\S+)*\s+(?:checkout|switch)\b|cd\b|pushd\b|popd\b)"
+)
+
+
+def target_changes_before_guarded_leg(command: str) -> bool:
+    """Whether a leg that changes the current branch or directory (`git checkout`,
+    `git switch`, `cd`, `pushd`, `popd`) runs before the command's guarded leg. An op
+    on an implicit target (`gh pr merge --squash`, `git push --force`) then acts on
+    another branch or repo than the one the bare op would."""
+    guarded = _single_destructive_leg(command) or _single_detectable_leg(command)
+    if guarded is None:
+        return False
+    for leg in (leg.strip() for leg in _split_into_legs(command)):
+        if leg == guarded:
+            return False
+        # `git checkout [<tree>] -- <paths>` restores files and leaves the branch.
+        if _TARGET_CHANGING_LEG_RE.match(leg) and not re.search(r"\scheckout\b.*\s--(?:\s|$)", leg):
+            return True
+    return False
+
+
 def is_compound_destructive_command(command: str) -> bool:
     """Detect an agent chaining MULTIPLE destructive operations into one command.
 

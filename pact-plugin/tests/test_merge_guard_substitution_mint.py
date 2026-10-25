@@ -893,6 +893,35 @@ class TestAVariableTargetBindsItsText:
         assert ctx is not None and ctx.get("pr_number") == "5" and "command_text" not in ctx
 
 
+TARGET_CHANGING_APPROVALS = {
+    "checkout-merge": ("git checkout feat/y && " + MERGE + "--squash", "git checkout feat/z && " + MERGE + "--squash"),
+    "switch-force-push": ("git switch feat/y && git push --" + "force", "git switch main && git push --" + "force"),
+    "cd-merge": ("cd sub && " + MERGE + "--squash", "cd ../other && " + MERGE + "--squash"),
+}
+
+
+class TestAnApprovedBranchChangeBindsItsText:
+    """An approval of an op on the current branch that the command first changes
+    (`git checkout feat/y && gh pr merge --squash`) runs that command, and the same op
+    after a change to another branch or directory is refused."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("approved,other", TARGET_CHANGING_APPROVALS.values(), ids=TARGET_CHANGING_APPROVALS.keys())
+    def test_the_approved_command_runs_and_no_other(self, approved, other, style):
+        assert not _runs(None, approved)
+        ctx = _mint_styled(approved, style)
+        assert _runs(ctx, approved)
+        assert not _runs(ctx, other)
+
+    def test_an_explicit_target_after_a_checkout_keeps_its_target_binding(self):
+        ctx = _mint_styled("git checkout feat/y && " + MERGE + "5 --squash", APPROVAL_STYLES["inline"])
+        assert ctx is not None and "command_text" not in ctx and ctx.get("pr_number") == "5"
+
+    def test_an_implicit_op_with_no_branch_change_keeps_its_target_binding(self):
+        ctx = _mint_styled("git status && " + MERGE + "--squash", APPROVAL_STYLES["inline"])
+        assert ctx is not None and "command_text" not in ctx and ctx.get("merge_implicit")
+
+
 class TestAnEvalOfALiteralCommandRuns:
     """An eval of a string the region reading locates nothing in (a close or a force
     push inside the quotes) binds its text, so the approved command runs and no
