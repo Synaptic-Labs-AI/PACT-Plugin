@@ -2321,7 +2321,13 @@ PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
 }
 
 
-_GH_REPO_PREFIX_RE = re.compile(r"(?:^|[;&|(\n])[ \t]*(?:[A-Za-z_]\w*=\S*[ \t]+)*?GH_REPO=([^\s;&|]+)[ \t]")
+# `env` with its options (`-i`, `-u NAME`, `--`): the assignments after it reach the
+# command env runs, like a prefix.
+_ENV_COMMAND = r"(?:env(?:[ \t]+(?:-u[ \t]+\S+|--unset[ \t]+\S+|-\S*))*[ \t]+)"
+_GH_REPO_PREFIX_RE = re.compile(
+    r"(?:^|[;&|(\n])[ \t]*(?:[A-Za-z_]\w*=\S*[ \t]+)*?(?:(?:command[ \t]+)?" + _ENV_COMMAND
+    + r"(?:[A-Za-z_]\w*=\S*[ \t]+)*?)?GH_REPO=([^\s;&|]+)[ \t]"
+)
 
 
 def extract_privileged_flags(command: str, op_type: str | None) -> list[str]:
@@ -10071,16 +10077,24 @@ _TARGET_CHANGING_LEG_RE = re.compile(
 
 def _leg_names_another_repo(leg: str) -> bool:
     """Whether a git leg runs in a repository it names itself: `git -C <dir>`,
-    `--git-dir`, `--work-tree`, or a `GIT_DIR=` / `GIT_WORK_TREE=` prefix."""
+    `--git-dir`, `--work-tree`, or a `GIT_DIR=` / `GIT_WORK_TREE=` assignment, as a
+    prefix or after `env`."""
     try:
         words = shlex.split(leg.lstrip("({ \t"))
     except ValueError:
         return False
-    while words and re.match(r"^[A-Za-z_]\w*=", words[0]):
-        if words[0].split("=", 1)[0] in ("GIT_DIR", "GIT_WORK_TREE"):
-            return True
-        words = words[1:]
-    if words[:1] == ["command"]:
+    in_env = False
+    while words:
+        word = words[0]
+        if re.match(r"^[A-Za-z_]\w*=", word):
+            if word.split("=", 1)[0] in ("GIT_DIR", "GIT_WORK_TREE"):
+                return True
+        elif word in ("command", "env") and not in_env:
+            in_env = word == "env"
+        elif in_env and word in ("-u", "--unset"):
+            words = words[1:]
+        elif not (in_env and word.startswith("-")):
+            break
         words = words[1:]
     if words[:1] != ["git"]:
         return False

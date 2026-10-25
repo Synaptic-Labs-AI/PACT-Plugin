@@ -1000,19 +1000,26 @@ REPO_CHANGES = {
                       "GIT_WORK_TREE=/tmp/repoC git push --" + "force"),
     "subshell-cd": ("git push --" + "force", "(cd /tmp/repoB && git push --" + "force)",
                     "(cd /tmp/repoC && git push --" + "force)"),
+    "git-dir-env-command": ("git push --" + "force", "env GIT_DIR=/tmp/repoB/.git git push --" + "force",
+                            "env GIT_DIR=/tmp/repoC/.git git push --" + "force"),
+    "work-tree-env-options": ("git push --" + "force", "env -i -u HOME GIT_WORK_TREE=/tmp/repoB git push --" + "force",
+                              "env -i -u HOME GIT_WORK_TREE=/tmp/repoC git push --" + "force"),
+    "git-dir-env-command-merge": (MERGE + "--squash", "env GIT_DIR=/tmp/repoB/.git " + MERGE + "--squash",
+                                  "env GIT_DIR=/tmp/repoC/.git " + MERGE + "--squash"),
 }
 SAME_REPO = {
     "config-flag": ("git push --" + "force", "git -c http.extraHeader=x push --" + "force"),
     "unrelated-env": ("git push --" + "force", "GIT_TRACE=1 git push --" + "force"),
+    "unrelated-env-command": ("git push --" + "force", "env GIT_TRACE=1 git push --" + "force"),
 }
 
 
 class TestAnOpInAnotherRepoNeedsItsOwnApproval:
     """An op on the current branch, run after `gh pr checkout`, inside a subshell cd,
     or in a repository the git leg names (`-C`, `--git-dir`, `--work-tree`,
-    `GIT_DIR`, `GIT_WORK_TREE`), acts on another branch or repo: a plain approval
-    does not cover it, its own approval runs it, and that approval does not cover
-    the same command pointed elsewhere."""
+    `GIT_DIR`, `GIT_WORK_TREE`, also after `env`), acts on another branch or repo: a
+    plain approval does not cover it, its own approval runs it, and that approval
+    does not cover the same command pointed elsewhere."""
 
     @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
     @pytest.mark.parametrize("plain,moved,elsewhere", REPO_CHANGES.values(), ids=REPO_CHANGES.keys())
@@ -1069,6 +1076,9 @@ GH_REPO_PREFIXES = {
     "numbered-merge": (MERGE + "5 --squash", "GH_REPO=o/b " + MERGE + "5 --squash", "GH_REPO=o/c " + MERGE + "5 --squash"),
     "close": (_CLOSE_PR + "5 -d", "GH_REPO=o/b " + _CLOSE_PR + "5 -d", "GH_REPO=o/c " + _CLOSE_PR + "5 -d"),
     "through-env": (MERGE + "5", "GH_REPO=o/b env " + MERGE + "5", "GH_REPO=o/c env " + MERGE + "5"),
+    "env-command": (MERGE + "--squash", "env GH_REPO=o/b " + MERGE + "--squash", "env GH_REPO=o/c " + MERGE + "--squash"),
+    "env-options": (MERGE + "5", "env -i -u HOME X=1 GH_REPO=o/b " + MERGE + "5",
+                    "env -i -u HOME X=1 GH_REPO=o/c " + MERGE + "5"),
 }
 
 
@@ -1094,7 +1104,9 @@ class TestAGhRepoPrefixIsARepoRedirect:
         "echo GH_REPO=o/b; " + MERGE + "5",
         "GH_REPO=o/b; " + MERGE + "5",
         MERGE + '5 --body "GH_REPO=o/b gh notes"',
-    ], ids=["echoed", "not-exported", "in-a-body"])
+        "echo env GH_REPO=o/b; " + MERGE + "5",
+        "env -u GH_REPO " + MERGE + "5",
+    ], ids=["echoed", "not-exported", "in-a-body", "env-echoed", "env-unset"])
     def test_a_gh_repo_that_is_not_a_prefix_binds_nothing(self, command):
         ctx = _mint_styled(command, APPROVAL_STYLES["inline"])
         assert _runs(ctx, command)
