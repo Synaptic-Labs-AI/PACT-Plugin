@@ -1271,6 +1271,14 @@ def _run_succeeded_as_the_op(command: str, op_type: str, tool_response: object) 
         return False
 
 
+def _close_succeeded(command: str, op_type: str | None, tool_response: object) -> bool:
+    """Whether a PR close succeeded by the run's own status. Unlike a merge, which
+    can exit 0 into a merge queue or with --auto and leave the PR OPEN, a close
+    that exits 0 has done its work, so its token retires even when a lagging or
+    mismatched state read says otherwise."""
+    return op_type == "close" and _run_succeeded_as_the_op(command, op_type, tool_response)
+
+
 def _git_reports_ref_deleted(command: str, op_type: str, tool_response: object) -> bool:
     """Whether git's own output, in the response's stdout or stderr, reports the
     command's target ref deleted (` - [deleted]   feat/x`), which proves a remote
@@ -1383,10 +1391,12 @@ def _retire_exact_text_token(
                     )
                     from shared.gh_helpers import check_pr_state
 
-                    if check_pr_state(pr, cwd=cwd) != _CONFIRMING_STATE[op]:
+                    if not _close_succeeded(command, op, tool_response) and (
+                        check_pr_state(pr, cwd=cwd) != _CONFIRMING_STATE[op]
+                    ):
                         continue
             elif op not in _CONFIRMING_STATE:
-                pattern = LAYER1_SUCCESS_STDOUT_PATTERNS.get(op)
+                pattern = LAYER1_SUCCESS_STDOUT_PATTERNS.get(op) if isinstance(op, str) else None
                 if pattern is not None and not (isinstance(stdout_text, str) and pattern in stdout_text):
                     continue
             try:
@@ -1725,8 +1735,11 @@ def main():
                     # A readable state outranks the exit status: a merge that
                     # exits 0 into a merge queue or with --auto leaves the PR
                     # OPEN and keeps its token. Only an unreadable state falls
-                    # back to the run's own success.
-                    confirmed = expected_substring.lower() in stdout_text.lower()
+                    # back to the run's own success. A close has no deferred
+                    # form, so its successful run retires without the state.
+                    confirmed = expected_substring.lower() in stdout_text.lower() or _close_succeeded(
+                        command, op_type, tool_response
+                    )
                     if not confirmed:
                         state = _pr_state(command, input_data.get("cwd"))
                         confirmed = state == _CONFIRMING_STATE[op_type] or (

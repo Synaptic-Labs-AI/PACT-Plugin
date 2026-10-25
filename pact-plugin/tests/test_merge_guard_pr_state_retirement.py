@@ -133,9 +133,9 @@ class TestStateConfirmsRetirement:
         assert _gh_calls(rig) == ["pr view 1641 --json state --jq .state"]
         assert _retired(rig)
 
-    def test_close_closed_retires(self, rig):
-        cmd = f"{_CLOSE} 9"
-        _mint(rig, cmd)
+    def test_piped_close_closed_retires(self, rig):
+        cmd = f"{_CLOSE} 9 2>&1 | tail -3"
+        _mint(rig, f"{_CLOSE} 9")
         _post(rig, cmd, "", state="CLOSED")
         assert _gh_calls(rig) == ["pr view 9 --json state --jq .state"]
         assert _retired(rig)
@@ -170,7 +170,6 @@ class TestAReadableStateOutranksTheExitStatus:
         pytest.param(f"{_MERGE} 5 --squash", "OPEN", id="merge-queued"),
         pytest.param(f"{_MERGE} 5 --squash --auto", "OPEN", id="auto-merge"),
         pytest.param(f"{_MERGE} 5 --squash", "CLOSED", id="merge-closed"),
-        pytest.param(f"{_CLOSE} 5 --delete-branch", "MERGED", id="close-merged"),
     ])
     def test_a_state_that_is_not_the_ops_keeps_the_token(self, rig, cmd, state):
         _mint(rig, cmd)
@@ -187,6 +186,41 @@ class TestAReadableStateOutranksTheExitStatus:
         _mint(rig, cmd)
         _post(rig, cmd, "", **env)
         assert _retired(rig)
+
+
+class TestASuccessfulCloseRetiresWhateverTheStateSays:
+    """A close has no queued or --auto form: a close that exits 0 has done its
+    work, so its own success retires the token without asking GitHub, even when
+    a lagging state read would say OPEN."""
+
+    @pytest.mark.parametrize("state", ["OPEN", "MERGED"])
+    @pytest.mark.parametrize("cmd", [f"{_CLOSE} 5", f"{_CLOSE} 5 --delete-branch"])
+    def test_the_run_retires_the_token(self, rig, cmd, state):
+        _mint(rig, cmd)
+        _post(rig, cmd, "", state=state)
+        assert _gh_calls(rig) == []
+        assert _retired(rig)
+
+    @pytest.mark.parametrize("state", ["OPEN", "MERGED"])
+    def test_an_exact_command_token_retires_on_its_run(self, rig, state):
+        from shared.merge_guard_common import normalize_command_text
+
+        cmd = f"cat <<'EOF' | {_CLOSE} 5 --delete-branch --comment-file -\nSuperseded\nEOF"
+        assert write_token({"operation_type": "close", "pr_number": "5", "bound_flags": ["--delete-branch"],
+                            "command_text": normalize_command_text(cmd)}, token_dir=rig["config"])
+        _post(rig, cmd, "", state=state)
+        assert _gh_calls(rig) == []
+        assert _retired(rig)
+
+    @pytest.mark.parametrize("cmd", [
+        f"{_CLOSE} 5 --delete-branch || true",
+        f"{_CLOSE} 5 --delete-branch 2>&1 | tail -3",
+    ])
+    def test_a_run_whose_status_is_not_the_closes_still_asks_github(self, rig, cmd):
+        _mint(rig, f"{_CLOSE} 5 --delete-branch")
+        _post(rig, cmd, "", state="OPEN")
+        assert _gh_calls(rig) == ["pr view 5 --json state --jq .state"]
+        assert not _retired(rig)
 
 
 class TestDoubtKeepsToken:
