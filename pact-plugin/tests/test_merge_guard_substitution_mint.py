@@ -846,8 +846,12 @@ class TestAnEvalWithARunTimeTargetRuns:
         assert _runs(ctx, approved)
         assert not _runs(ctx, other)
 
-    def test_an_eval_with_no_target_stays_unmintable(self):
-        assert _mint_styled('eval "git branch -' + 'D"', APPROVAL_STYLES["inline"]) is None
+    def test_an_eval_with_no_target_mints_by_its_text_and_runs_once(self):
+        command = 'eval "git branch -' + 'D"'
+        ctx = _mint_styled(command, APPROVAL_STYLES["inline"])
+        assert ctx is not None and ctx.get("command_text") == command
+        assert _runs(ctx, command)
+        assert not _runs(ctx, 'eval "git branch -' + 'D topic"')
 
 
 _CLOSE = "gh pr " + "close "

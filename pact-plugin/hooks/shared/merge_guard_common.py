@@ -8753,7 +8753,8 @@ _REDIRECT_WITH_TARGET_RE = re.compile(r"^(?:\d*|&)(?:>>?|<)\S+$")
 
 def shell_c_string(command: str) -> str | None:
     """The string a POSIX shell leg runs with -c, unquoted as the shell receives it:
-    `bash -lc 'gh pr merge 5'` gives `gh pr merge 5`. `command` is one leg. Leading
+    `bash -lc 'gh pr merge 5'` gives `gh pr merge 5`. An eval leg gives the command line
+    its words make (`eval "gh pr merge 5 --admin"` gives `gh pr merge 5 --admin`). `command` is one leg. Leading
     NAME=VALUE words and the modeled exec wrappers (env, timeout, nice, sudo, ...) are
     walked past; the shell's own flags before -c may be bundled shorts (`-eu`, `-lc`),
     `-o NAME`, or --norc/--noprofile/--login/--posix; redirects may follow the string.
@@ -8841,6 +8842,8 @@ def _shell_c_argument(command: str, strict: bool, _depth: int = 0) -> str | None
     if head in _EXEC_WRAPPERS_RECURSE:
         nested = _wrapper_nested_command(leg, head) if _depth < _MAX_WRAPPER_DEPTH else None
         return _shell_c_argument(nested, strict, _depth + 1) if nested else None
+    if head == "eval":
+        return _eval_argument(leg, tokens, strict)
     if not _POSIX_SHELL_HEADS_RE.match(head):
         return None
     i, has_c = 1, False
@@ -8877,6 +8880,23 @@ def _shell_c_argument(command: str, strict: bool, _depth: int = 0) -> str | None
         else:
             return None
     return string
+
+
+def _eval_argument(leg: str, tokens: list[str], strict: bool) -> str | None:
+    """The command line an eval leg runs: its words, unquoted and joined by spaces, up to a
+    redirect. None when there are none or they start with an expansion (the variable
+    reader's case); with `strict`, also when a word holds a command substitution the
+    calling shell runs first."""
+    spans = _leg_token_spans(leg)
+    j = 1
+    while j < len(tokens) and not (_REDIRECT_OPERATOR_RE.match(tokens[j]) or _REDIRECT_WITH_TARGET_RE.match(tokens[j])):
+        j += 1
+    words = tokens[1:j]
+    if not words or words[0].startswith("$") or len(spans) != len(tokens):
+        return None
+    if strict and any(re.search(r"\$\(|`", re.sub(r"'[^']*'", "", leg[a:b])) for a, b in spans[1:j]):
+        return None
+    return " ".join(words)
 
 
 def _guarded_literals_beside_primitive(head: str, code: str, depth: int) -> list[str]:

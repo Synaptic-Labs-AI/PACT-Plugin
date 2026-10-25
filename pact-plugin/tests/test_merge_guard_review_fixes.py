@@ -995,7 +995,10 @@ SHELL_C_STRING_ROWS = [
     ("outer command substitution", 'bash -c "git push --force origin $(git branch --show-current)"', None),
     ("outer backtick", 'bash -c "gh pr merge `n`"', None),
     ("single-quoted substitution reaches the inner shell", "bash -c 'gh pr merge $(cat n)'", "gh pr merge $(cat n)"),
-    ("eval", "eval 'gh pr merge 5'", None),
+    ("eval", "eval 'gh pr merge 5'", "gh pr merge 5"),
+    ("eval, double quotes", 'eval "gh pr merge 5 --admin"', "gh pr merge 5 --admin"),
+    ("eval of a variable", 'eval "$c"', None),
+    ("eval of a substitution", 'eval "gh pr merge $(pick) --squash"', None),
     ("ssh", "ssh host -c 'x'", None),
     ("unknown long flag", "bash --rcfile x -c 'y'", None),
     ("unknown short flag", "bash -X -c 'y'", None),
@@ -3104,6 +3107,43 @@ def test_candidates_disagreeing_on_the_guarded_op_read_the_payload_directory_fir
     mgc.set_command_directory(str(alias_repos / "repoB"))
     cmd = "cd ../repoA; git pf topic"
     assert mgc._rewrite_git_aliases(cmd) == "cd ../repoA; git branch -D topic"
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+# An approval binds the flags and target a quoted eval string runs, as it does a -c
+# string's: a flag or target added inside the string needs its own approval.
+EVAL_STRING_ESCALATIONS = [
+    ("admin", 'eval "gh pr mer' + 'ge 5 --squash"', 'eval "gh pr mer' + 'ge 5 --squash --admin"'),
+    ("delete-branch", 'eval "gh pr mer' + 'ge 5 --squash"', 'eval "gh pr mer' + 'ge 5 --squash --delete-branch"'),
+    ("repo", 'eval "gh pr mer' + 'ge 5 --squash"', 'eval "gh pr mer' + 'ge 5 --squash --repo evil/other"'),
+    ("plain approval", "gh pr mer" + "ge 5 --squash", 'eval "gh pr mer' + 'ge 5 --squash --admin"'),
+    ("single quotes", "gh pr mer" + "ge 5 --squash", "eval 'gh pr mer" + "ge 5 --squash --admin'"),
+]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,approved,run", EVAL_STRING_ESCALATIONS, ids=[r[0] for r in EVAL_STRING_ESCALATIONS])
+def test_an_approval_does_not_reach_a_flag_added_inside_an_eval_string(label, approved, run, style):
+    from merge_guard_post import _mint_context_from_bundle
+    from merge_guard_pre import _token_matches_command
+
+    q = [{"question": "Run this?", "header": "Run", "multiSelect": False,
+          "options": [{"label": "Yes, run", "description": style(approved)},
+                      {"label": "No", "description": "Hold."}]}]
+    ctx = _mint_context_from_bundle(q, {"Run this?": "Yes, run"})[0]
+    assert ctx is not None and _token_matches_command({"context": ctx}, approved)
+    assert not _token_matches_command({"context": ctx}, run)
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("cmd", [
+    'eval "gh pr mer' + 'ge 5 --squash --admin"',
+    "eval 'gh pr mer" + "ge 5 --squash --delete-branch'",
+    'eval "gh pr mer' + 'ge 5 --squash --repo evil/other"',
+    'eval "git push --for' + 'ce --no-verify origin feat/x"',
+], ids=["admin", "delete-branch", "repo", "push-flag"])
+def test_a_flagged_eval_string_is_refused_then_runs(cmd, style):
     assert is_dangerous_command(cmd) is True
     assert _runs_after_approval(cmd, style)
 
