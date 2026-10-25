@@ -1049,13 +1049,16 @@ PUSH_SCOPES = {
     "all": (_FORCE, _FORCE + " --all", _FORCE + " --mirror"),
     "mirror": (_FORCE, _FORCE + " --mirror", _FORCE + " --tags"),
     "tags": (_FORCE, _FORCE + " --tags", _FORCE + " --all"),
+    "follow-tags": (_FORCE, _FORCE + " --follow-tags", _FORCE + " --tags"),
+    "repo-equals": (_FORCE, _FORCE + " --repo=/tmp/repoB", _FORCE + " --repo=/tmp/repoC"),
+    "repo-space": (_FORCE, _FORCE + " --repo /tmp/repoB", _FORCE + " --repo /tmp/repoC"),
 }
 
 
 class TestAPushScopeFlagNeedsItsOwnApproval:
-    """`--all`, `--mirror` and `--tags` widen what a force push rewrites: a plain
-    force-push approval does not cover them, and a scoped approval covers its own
-    scope only."""
+    """`--all`, `--mirror`, `--tags` and `--follow-tags` widen what a force push
+    rewrites, and `--repo` names where it goes: a plain force-push approval does not
+    cover them, and a scoped approval covers its own scope only."""
 
     @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
     @pytest.mark.parametrize("plain,scoped,other", PUSH_SCOPES.values(), ids=PUSH_SCOPES.keys())
@@ -1073,6 +1076,12 @@ class TestAPushScopeFlagNeedsItsOwnApproval:
 
     def test_the_short_force_flag_still_matches(self):
         assert _runs(_mint_styled("git push -f --tags", APPROVAL_STYLES["inline"]), _FORCE + " --tags")
+
+    def test_both_repo_spellings_name_the_same_destination(self):
+        assert _runs(_mint_styled(_FORCE + " --repo=/tmp/repoB", APPROVAL_STYLES["inline"]), _FORCE + " --repo /tmp/repoB")
+
+    def test_a_gh_repo_prefix_on_a_push_binds_nothing(self):
+        assert _runs(_mint_styled(_FORCE, APPROVAL_STYLES["inline"]), "GH_REPO=o/b " + _FORCE)
 
 
 GH_REPO_PREFIXES = {

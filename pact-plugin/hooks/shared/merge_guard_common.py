@@ -2247,6 +2247,11 @@ PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
         "--all":           (("--all",), False),
         "--mirror":        (("--mirror",), False),
         "--tags":          (("--tags",), False),
+        # --follow-tags pushes the annotated tags reachable from the pushed refs, which
+        # a force push can then overwrite, as with --tags.
+        "--follow-tags":   (("--follow-tags",), False),
+        # --repo names the destination, as the remote positional does.
+        "--repo":          (("--repo",), True),
     },
     "push-to-main": {
         # --force-with-lease: the lease push CAN rewrite history (unlike a plain push),
@@ -2488,7 +2493,7 @@ def extract_privileged_flags(command: str, op_type: str | None) -> list[str]:
     # gh reads its repository from a GH_REPO assignment prefixing the command (run
     # directly or through env, command, ...) exactly as from --repo, so that prefix
     # is the same redirect.
-    if "--repo" in canonical_long_names:
+    if op_type in ("merge", "close"):
         for m in _GH_REPO_PREFIX_RE.finditer(command):
             found.add("--repo=" + m.group(1))
 
