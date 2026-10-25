@@ -848,3 +848,29 @@ class TestAnEvalWithARunTimeTargetRuns:
 
     def test_an_eval_with_no_target_stays_unmintable(self):
         assert _mint_styled('eval "git branch -' + 'D"', APPROVAL_STYLES["inline"]) is None
+
+
+_CLOSE = "gh pr " + "close "
+LITERAL_EVALS = {
+    "eval-close-delete-branch": ('eval "' + _CLOSE + '5 --delete-branch"', 'eval "' + _CLOSE + '6 --delete-branch"'),
+    "eval-force-push": ('eval "' + FORCE + 'feat/x"', 'eval "' + FORCE + 'feat/y"'),
+    "single-quoted-eval-force-push": ("eval '" + FORCE + "feat/x'", FORCE + "feat/x"),
+}
+
+
+class TestAnEvalOfALiteralCommandRuns:
+    """An eval of a string the region reading locates nothing in (a close or a force
+    push inside the quotes) binds its text, so the approved command runs and no
+    other does."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("approved,other", LITERAL_EVALS.values(), ids=LITERAL_EVALS.keys())
+    def test_the_approved_command_runs_and_no_other(self, approved, other, style):
+        assert not _runs(None, approved)
+        ctx = _mint_styled(approved, style)
+        assert _runs(ctx, approved)
+        assert not _runs(ctx, other)
+
+    def test_an_eval_of_two_guarded_commands_stays_unmintable(self):
+        command = 'eval "' + FORCE + 'feat/x && ' + _CLOSE + '5 --delete-branch"'
+        assert _mint_styled(command, APPROVAL_STYLES["inline"]) is None

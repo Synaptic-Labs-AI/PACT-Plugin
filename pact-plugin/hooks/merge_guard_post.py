@@ -677,10 +677,12 @@ _ASSIGNED_EVAL_RE = re.compile(
 )
 
 
-def _run_time_target_in_eval(span: str) -> bool:
-    """Whether `span` evals a single string (`eval "gh pr merge $PR"`, or a variable
-    assigned it just before) whose guarded command's target is read at run time: a
-    variable, or the current branch it leaves implicit."""
+def _evald_target(span: str) -> str | None:
+    """The target of the one guarded command `span` evals as a single string (`eval
+    "gh pr close 5 --delete-branch"`, or a variable assigned it just before): its
+    literal target, or a run-time one (a variable, the current branch it leaves
+    implicit). None when `span` is not such an eval or its command names no
+    target."""
     m = _ASSIGNED_EVAL_RE.match(span)
     if m:
         text = m.group("dq") if m.group("dq") is not None else m.group("sq")
@@ -688,12 +690,12 @@ def _run_time_target_in_eval(span: str) -> bool:
         try:
             words = shlex.split(span)
         except ValueError:
-            return False
+            return None
         if len(words) != 2 or words[0] != "eval":
-            return False
+            return None
         text = words[1]
     target = _target_value(extract_command_context(text))
-    return isinstance(target, str) and any(mark in target for mark in _RUN_TIME_TARGET_MARKS)
+    return target if isinstance(target, str) else None
 
 
 def _inner_flags_differ(leg: str, inner: str) -> bool:
@@ -726,8 +728,9 @@ def _exact_text_reading(span: str, located: str) -> dict | None:
         command it runs (`${N:-5}`, a substitution): bound by its text alone;
       - an if/elif/else or case whose branches run different guarded commands:
         bound by its text alone;
-      - an eval of a string whose target is read at run time (`eval "gh pr merge
-        $PR"`, `eval "gh pr merge --squash"`): bound by its text alone;
+      - an eval of a single string the region reading binds nothing in, whose
+        command names a target (`eval "gh pr merge $PR"`, `eval "gh pr merge
+        --squash"`, `eval "gh pr close 5 --delete-branch"`): bound by its text alone;
       - a command the classifier judges after a rewrite (an eval of readable text,
         a file written then run, a literal variable, a script given a whole
         command) where the region reading binds nothing, read from the command
@@ -793,10 +796,11 @@ def _exact_text_reading(span: str, located: str) -> dict | None:
         ctx["operation_type"] in _TEXT_BOUND_OPS
         or ctx.get("pr_node_id")
         or "graphql_mutation" in ctx
-        # An eval of a string whose target is read at run time (a variable, an
-        # implicit current branch) has no (op, target) the region reading can see;
-        # its text binds it, as a bare command with a run-time target is bound.
-        or (not pairs and _run_time_target_in_eval(span))
+        # An eval of a string the region reading binds nothing in (a target read at
+        # run time, or a command it does not locate inside the quotes) has no
+        # (op, target) it can see; its text binds it, so the approval runs exactly
+        # the command shown.
+        or (not pairs and _evald_target(span) is not None)
     ):
         return None
     return ctx
