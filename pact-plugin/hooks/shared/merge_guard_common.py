@@ -6892,7 +6892,9 @@ def _rewrite_git_aliases(command: str) -> str:
     does an assignment or `export` of a git config variable on its own leg. When the
     parentheses cannot be read as the shell's grouping, every leg is read in every place
     the command reaches."""
-    if "git" not in command:
+    # A reading checked for one place is already expanded there; reading it again would
+    # judge an alias that place does not define in the command's own directory.
+    if "git" not in command or _READING_ONE_PLACE:
         return command
     rewritten, ambiguous, reached = _rewrite_git_aliases_in(command, None)
     return _rewrite_git_aliases_in(command, reached)[0] if ambiguous else rewritten

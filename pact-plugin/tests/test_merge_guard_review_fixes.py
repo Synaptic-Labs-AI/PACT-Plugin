@@ -3058,8 +3058,10 @@ def test_a_cd_to_a_variable_assigned_a_literal_moves_away_from_the_command_direc
     "[ -n \"$X\" ] && REPO=../repoB; cd \"$REPO\" && git pf origin main",
     "cd \"$REPO\" && git pf origin main; REPO=../repoB",
     "REPO=\"$HOME\"; cd \"$REPO\" && git pf origin main",
+    "cd ../repoB && cd \"$REPO\" && git pf origin main",
     "REPO=../repoB; [ -n \"$X\" ] && REPO=../nowhere; cd \"$REPO\" && git pf origin main",
-], ids=["not-assigned", "assigned-conditionally", "assigned-after", "assigned-a-variable", "two-candidate-values"])
+], ids=["not-assigned", "assigned-conditionally", "assigned-after", "assigned-a-variable", "after-another-cd",
+        "two-candidate-values"])
 def test_a_cd_to_a_variable_the_command_does_not_fix_keeps_the_command_directory(cmd, alias_repos):
     import shared.merge_guard_common as mgc
 
