@@ -722,3 +722,32 @@ class TestACommandThatPicksOneOfSeveralGuardedCommandsBindsItsText:
         assert live()
         rig._succeeded(command, tmp_path)
         assert not live()
+
+
+TEXT_BOUND_RUNS = {
+    "dry-run-force-push": ("git push --dry-run --" + "force origin feat/x", FORCE + "feat/x"),
+    "n-force-push": ("git push -n --" + "force origin feat/x", FORCE + "feat/x"),
+    "bundled-fn": ("git push -fn origin feat/x", "git push -f origin feat/x"),
+    "dry-run-ref-delete": ("git push --dry-run origin --" + "delete feat/x", "git push origin --" + "delete feat/x"),
+    "auto-merge": (MERGE + "5 --squash --auto", MERGE + "5 --squash"),
+}
+
+
+class TestADryRunOrAutoApprovalRunsOnlyItself:
+    """A dry run and an --auto merge are other operations than the real push or
+    merge an (op, target) token would also run, so their approval binds the
+    approved text: it runs as approved, and the real operation stays refused."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("approved,real", TEXT_BOUND_RUNS.values(), ids=TEXT_BOUND_RUNS.keys())
+    def test_the_approval_runs_itself_and_not_the_real_operation(self, approved, real, style):
+        assert not _runs(None, approved)
+        ctx = _mint_styled(approved, style)
+        assert _runs(ctx, approved)
+        assert not _runs(ctx, real)
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    def test_an_approval_of_the_real_push_keeps_its_target_binding(self, style):
+        ctx = _mint_styled(FORCE + "feat/x", style)
+        assert "command_text" not in ctx
+        assert _runs(ctx, FORCE + "feat/x")

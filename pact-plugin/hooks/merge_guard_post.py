@@ -535,15 +535,26 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
     # (_strip_command_wrapper, BEFORE the window's find-anchor, so the anchor sees
     # the same spacing the region parser produced — order is load-bearing) — the
     # #1042 set-equality stays EXACT, so an exec-time EXTRA flag still REFUSES. ──
-    return MintResult(
-        extract_command_context(
-            _extraction_surface(the_command),
-            flag_scan_text=_leg_bounded_flag_scan_surface(
-                _strip_command_wrapper(" ".join(selected_option_texts)), the_command
-            ),
+    ctx = extract_command_context(
+        _extraction_surface(the_command),
+        flag_scan_text=_leg_bounded_flag_scan_surface(
+            _strip_command_wrapper(" ".join(selected_option_texts)), the_command
         ),
-        None,
     )
+    if _DRY_RUN_RE.search(the_command) or _AUTO_RE.search(the_command):
+        # A dry run or an --auto merge is a different operation from the real one
+        # the (op, target) token would also run, so the approval binds the text of
+        # the code span that holds it. Unquoted prose has no span to bound the
+        # command, so a prose approval keeps its target binding.
+        spans = [
+            content.strip()
+            for text in selected_option_texts
+            for _raw, content in _code_spans(text)
+            if is_dangerous_command(content.strip())
+        ]
+        if len(spans) == 1:
+            ctx = {**ctx, "command_text": normalize_command_text(spans[0])}
+    return MintResult(ctx, None)
 
 
 _FENCED_BLOCK_RE = re.compile(r"```[^\n`]*\n(.*?)```", re.DOTALL)
@@ -1130,6 +1141,7 @@ def _top_level_legs(command: str) -> tuple[list[str], list[str]] | None:
 # --dry-run, or -n alone or bundled with git push's other flag-only short options
 # (`-fn`); a word like `-name` is not one.
 _DRY_RUN_RE = re.compile(r"(?<!\S)(?:--dry-run|-[46dfquv]*n[46dfquv]*)(?!\S)")
+_AUTO_RE = re.compile(r"(?<!\S)--auto(?!\S)")
 
 
 def _op_did_not_run(command: str) -> bool:
