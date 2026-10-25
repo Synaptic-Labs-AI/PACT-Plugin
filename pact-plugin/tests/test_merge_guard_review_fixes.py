@@ -2876,3 +2876,31 @@ def test_an_eval_of_a_literal_variable_reads_its_value(cmd, reads):
     from shared.merge_guard_common import _rewrite_variable_evals
 
     assert _rewrite_variable_evals(cmd) == (reads or cmd)
+
+
+# The rest of a heredoc's opening line is shell, not data: a guarded command a heredoc pipes
+# into runs.
+HEREDOC_PIPED_INTO_A_GUARDED_OP = [
+    ("merge with a body file", "cat <<'EOF' | gh pr " + "merge 5 --squash --body-file -\nbody text\nEOF"),
+    ("unquoted tag", "cat <<EOF | gh pr " + "merge 5 --squash\ny\nEOF"),
+    ("force push", "cat <<'EOF' | git push --force origin feat/x\nx\nEOF"),
+    ("close deleting the branch", "cat <<'EOF' | gh pr close 5 --delete-branch\ndone\nEOF"),
+]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", HEREDOC_PIPED_INTO_A_GUARDED_OP,
+                         ids=[r[0] for r in HEREDOC_PIPED_INTO_A_GUARDED_OP])
+def test_a_heredoc_piped_into_a_guarded_op_is_refused_then_runs(label, cmd, style):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("cmd", [
+    "cat <<'EOF' | grep \"gh pr " + "merge\"\ngh pr " + "merge 5\nEOF",
+    "cat <<'EOF' | gh pr view 5 --comments\nx\nEOF",
+    "cat <<'EOF' | tee out.txt\ngit push --force origin main\nEOF",
+    "gh pr comment 5 --body-file - <<'EOF'\nplease do not gh pr " + "merge 5 yet\nEOF",
+], ids=["grep-of-merge-text", "piped-into-a-view", "body-is-a-push-tee-d", "comment-body-mentions-merge"])
+def test_a_heredoc_piped_into_nothing_guarded_is_allowed(cmd):
+    assert is_dangerous_command(cmd) is False

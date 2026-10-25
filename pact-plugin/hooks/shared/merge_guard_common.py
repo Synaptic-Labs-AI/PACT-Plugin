@@ -5859,10 +5859,12 @@ def _strip_non_executable_content(command: str) -> str:
             routed = piped_to_shell or process_sub_to_shell
         if routed:
             return match.group(0)  # Preserve — this heredoc's output runs in a shell
-        return "<<HEREDOC_STRIPPED"
+        # The rest of the opening line is shell (`cat <<EOF | gh pr merge 5 …`): only
+        # the body is data.
+        return "<<HEREDOC_STRIPPED" + match.group("tail")
 
     result = re.sub(
-        r"<<-?\s*['\"]?(\w+)['\"]?.*?\n.*?\n\t*\1\b",
+        r"<<-?\s*['\"]?(\w+)['\"]?(?P<tail>[^\n]*)\n.*?\n\t*\1\b",
         _strip_heredoc,
         result,
         flags=re.DOTALL,
