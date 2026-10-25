@@ -2606,8 +2606,7 @@ def test_a_printed_sequence_of_two_merges_does_not_run_on_its_approval(style):
 @pytest.mark.parametrize("cmd", [
     "eval \"$(echo gh pr view 5; echo gh pr checks 5)\"",
     "eval \"$(echo gh pr view 5; gh pr list)\"",
-    "x=$(echo gh pr view 5; echo gh pr " + "merge 5 --squash); $x",
-], ids=["prints-two-views", "a-statement-that-does-not-print", "an-assignment-runs-one-command"])
+], ids=["prints-two-views", "a-statement-that-does-not-print"])
 def test_a_sequence_that_runs_nothing_guarded_is_allowed(cmd):
     assert is_dangerous_command(cmd) is False
 
@@ -2830,3 +2829,50 @@ def test_a_config_git_alias_is_read_from_the_directory_git_runs_in(monkeypatch):
     monkeypatch.setattr(mgc, "_git_commands", lambda cwd: frozenset())
     assert is_dangerous_command("git -C /tmp pf origin main") is True
     assert is_dangerous_command("git pf origin main") is False
+
+
+# A variable assigned print-only statements holds their outputs; an eval of it runs them, and
+# a literal value an eval runs counts its guarded commands.
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("cmd", [
+    "x=$(echo a; echo gh pr " + "merge 5 --squash); eval \"$x\"",
+    "x=$(echo a; echo gh pr " + "merge 5 --squash); eval $x",
+], ids=["quoted", "unquoted"])
+def test_an_eval_of_a_printed_sequence_variable_is_refused_then_runs(cmd, style):
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_dangerous_command(cmd) is True
+    assert is_compound_destructive_command(cmd) is False
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+def test_a_printed_sequence_variable_run_bare_is_refused_then_runs(style):
+    cmd = "x=$(echo gh pr view 5; echo gh pr " + "merge 5 --squash); $x"
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+def test_an_eval_of_a_printed_sequence_variable_that_runs_nothing_guarded_is_allowed():
+    assert is_dangerous_command("x=$(echo gh pr view 5; echo gh pr checks 5); eval \"$x\"") is False
+
+
+@pytest.mark.parametrize("cmd", [
+    "x=$(echo gh pr " + "merge 5 --squash; echo gh pr " + "merge 6 --squash); eval \"$x\"",
+    "x='gh pr " + "merge 5 --squash; gh pr " + "merge 6 --squash'; eval \"$x\"",
+], ids=["printed", "literal"])
+def test_an_eval_of_a_variable_holding_two_merges_is_compound(cmd):
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_compound_destructive_command(cmd) is True
+
+
+@pytest.mark.parametrize("cmd,reads", [
+    ("x='a  b'; eval \"$x\"", "x='a  b'; eval 'a  b'"),
+    ("x='a  b'; eval $x", "x='a  b'; eval 'a b'"),
+    ("x='a b'; x='c'; eval \"$x\"", None),
+], ids=["quoted-keeps-the-value", "unquoted-splits-into-words", "assigned-twice"])
+def test_an_eval_of_a_literal_variable_reads_its_value(cmd, reads):
+    from shared.merge_guard_common import _rewrite_variable_evals
+
+    assert _rewrite_variable_evals(cmd) == (reads or cmd)

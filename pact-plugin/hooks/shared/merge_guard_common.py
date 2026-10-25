@@ -6659,29 +6659,27 @@ _PRINTED_STRING_RE = re.compile(
 )
 
 
-def _substitution_printed_text(body: str, sequence: bool = True) -> str | None:
+def _substitution_printed_text(body: str) -> str | None:
     """The text a substitution body prints whole when all it does is print: an echo or a
     printf the leg reader can read (quoted words and plain formats included), a shell's -c
     (its positional words in place) or an eval whose program does one of these, or a
     sequence of such statements joined by `;`, `&&` or newlines, which prints their outputs
-    in turn (only when `sequence`). None for anything else, including a body that runs a
-    substitution of its own. The trailing newlines are dropped, as a substitution drops them."""
-    printed = _printed_output(body, 0, sequence)
+    in turn. None for anything else, including a body that runs a substitution of its own.
+    The trailing newlines are dropped, as a substitution drops them."""
+    printed = _printed_output(body, 0)
     return None if printed is None else printed.rstrip("\n")
 
 
-def _printed_output(body: str, depth: int, sequence: bool) -> str | None:
+def _printed_output(body: str, depth: int) -> str | None:
     """What `body` writes when all it does is print (see _substitution_printed_text), or None."""
     body = body.strip()
     view = _mask_shell_quotes(body)
     if "`" in body or any(ch in view for ch in "|<>") or re.search(r"(?<!&)&(?!&)", view):
         return None
     cuts = [m.span() for m in re.finditer(r";|&&|\n", view)]
-    if cuts and not sequence:
-        return None
     if cuts:
         starts, ends = [0] + [end for _, end in cuts], [start for start, _ in cuts] + [len(body)]
-        outputs = [_printed_output(body[a:b], depth, sequence) for a, b in zip(starts, ends) if body[a:b].strip()]
+        outputs = [_printed_output(body[a:b], depth) for a, b in zip(starts, ends) if body[a:b].strip()]
         return None if not outputs or None in outputs else "".join(o for o in outputs if o is not None)
     tokens = _shell_tokenize(body)
     if not tokens:
@@ -6691,7 +6689,7 @@ def _printed_output(body: str, depth: int, sequence: bool) -> str | None:
     if depth >= _MAX_WRAPPER_DEPTH:
         return None
     program = _string_runner_program(body, os.path.basename(tokens[0]), tokens)
-    return None if program is None else _printed_output(program, depth + 1, sequence)
+    return None if program is None else _printed_output(program, depth + 1)
 
 
 # git's global options that take the next word as their value.
@@ -6813,10 +6811,39 @@ def _rewrite_printed_assignments(command: str) -> str:
     printed text as a literal value instead, so `x=$(echo gh pr merge 5); $x` reads as the
     literal assignment it amounts to."""
     def _literal(m: re.Match) -> str:
-        printed = _substitution_printed_text(m.group("inner"), sequence=False)
+        printed = _substitution_printed_text(m.group("inner"))
         return m.group(0) if printed is None else m.group("name") + "=" + shlex.quote(printed)
 
     return _PRINTED_ASSIGNMENT_RE.sub(_literal, command)
+
+
+# `eval "$NAME"` or `eval $NAME`, the whole of an eval leg.
+_VARIABLE_EVAL_RE = re.compile(
+    r"(?<![\w-])eval[ \t]+(?P<q>\"?)\$(?:\{(?P<braced>[A-Za-z_]\w*)\}|(?P<bare>[A-Za-z_]\w*))(?P=q)"
+    r"(?=[ \t]*(?:$|[;&|)\n]))"
+)
+
+
+def _rewrite_variable_evals(command: str) -> str:
+    """`command` with each eval of a variable assigned once, earlier in the command and as
+    a leg of its own, a literal value replaced by the eval of that value: kept whole when
+    the expansion is quoted, split into words when it is not. Unchanged otherwise."""
+    if "eval" not in command:
+        return command
+
+    def _value(m: re.Match) -> str:
+        name = m.group("braced") or m.group("bare")
+        found = list(re.finditer(
+            r"(?:^|(?<=[;&|(\n]))[ \t]*" + name
+            + r"=(?P<v>'[^']*'|\"[^\"$`\\]*\"|[^\s;&|$`'\"\\()]*)(?=[ \t]*(?:$|[;&|\n]))",
+            command[:m.start()]))
+        if len(found) != 1 or len(re.findall(r"(?<![\w$])" + name + r"=", command)) != 1:
+            return m.group(0)
+        value = found[0].group("v")
+        value = value[1:-1] if value[:1] in ("'", '"') else value
+        return "eval " + shlex.quote(value if m.group("q") else " ".join(value.split()))
+
+    return _VARIABLE_EVAL_RE.sub(_value, command)
 
 
 def _rewrite_readable_evals(command: str) -> str:
@@ -6830,8 +6857,8 @@ def _rewrite_readable_evals(command: str) -> str:
     the shell ends the heredoc first; an unquoted substitution whose body holds a glob
     character, which the shell may expand to file names."""
     command = _PRINTED_STRING_RE.sub(lambda m: _substitution_printed_text(m.group("inner")) or m.group(0),
-                                     _rewrite_printed_assignments(_rewrite_set_positionals(
-                                         _rewrite_git_aliases(command))))
+                                     _rewrite_variable_evals(_rewrite_printed_assignments(
+                                         _rewrite_set_positionals(_rewrite_git_aliases(command)))))
     if "<<" not in command or not re.search(r"(?<![\w-])" + _RUNS_STRING, command):
         return command
 
@@ -9752,6 +9779,10 @@ def is_compound_destructive_command(command: str) -> bool:
     runs (`python3 -c '…run(["gh", "pr", "merge", "5"])'`) counts as one destructive
     leg, so `A && gh pr merge 6` with A such a program is compound.
     """
+    # An eval of a variable runs the variable's value: the guarded commands in it count.
+    evaluated = _rewrite_variable_evals(_rewrite_printed_assignments(command))
+    if evaluated != command and is_compound_destructive_command(evaluated):
+        return True
     # Legs come from the shared _split_into_legs SSOT (masked + FD-neutralized split
     # on _COMPOUND_OPS_RE, slices taken from `stripped`). A command with no operator
     # yields ONE leg, so the >=2 count below is False — identical to the prior
