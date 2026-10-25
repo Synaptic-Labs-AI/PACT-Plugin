@@ -268,6 +268,20 @@ class TestPluginBanner:
         banner = self._banner(monkeypatch, "")
         assert banner.endswith("(root: <unset>)")
 
+    @pytest.mark.parametrize("root", ["   ", "plugin"])
+    def test_unsafe_root_manifest_is_not_read(self, monkeypatch, tmp_path, root):
+        # #1671 security-rev (task #86): an unsafe root is never used as a
+        # path. "   " and "plugin" are relative, so a manifest planted under
+        # the cwd would otherwise be read and its name/version shown.
+        manifest = tmp_path / root / ".claude-plugin" / "plugin.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text('{"name": "PLANTED", "version": "6.6.6"}',
+                            encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        banner = self._banner(monkeypatch, root)
+        assert banner == "PACT plugin: unknown (root: <unsafe>)"
+        assert "PLANTED" not in banner and "6.6.6" not in banner
+
     @pytest.mark.parametrize("root", ["/x/\n", " /x", "/x/ \t", "   "])
     def test_banner_and_substitution_judge_the_raw_value(self, monkeypatch, root):
         # #1671 security-rev (task #82): the banner used to strip the env

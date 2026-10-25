@@ -216,6 +216,11 @@ _is_safe_path_component = is_safe_path_component
 #   - U+107B5-U+107B9, the modifier click letters (the superscript forms of
 #     the clicks above).
 #   - U+A717, MODIFIER LETTER DOT VERTICAL BAR, which looks like !.
+# These ranges are best-effort, and the list is closed on purpose (#1671 user
+# decision). The guarantee is that $ ` " \ ! and line breaks are rejected:
+# they are the only characters special inside the double-quoted shell sink.
+# Other confusable letters (for example U+A71D-U+A71F, U+A78B/U+A78C, U+0149)
+# are a known limit and are deliberately not chased.
 # Other modifier letters (Lm) stay allowed: Japanese names use U+30FC, U+3005,
 # U+309D and U+30FD (/home/ユーザー, /home/佐々木). RTL letters stay allowed too.
 PLUGIN_ROOT_MAX_LENGTH = 512

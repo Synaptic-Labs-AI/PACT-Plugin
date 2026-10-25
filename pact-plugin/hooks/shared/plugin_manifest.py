@@ -117,8 +117,8 @@ def format_plugin_banner() -> str:
     Fail-open (any read/parse/schema failure):
         "PACT plugin: unknown (root: {plugin_root_or_<unset>})"
 
-    A root that fails is_safe_plugin_root is shown as "<unsafe>" in both
-    forms; the manifest is still read from it.
+    A root that fails is_safe_plugin_root gives the fail-open form with
+    "<unsafe>"; the manifest is not read from it.
 
     The outer blanket try/except guarantees totality against any future
     regression in the helpers — SessionStart is a hot path, and an
@@ -133,7 +133,11 @@ def format_plugin_banner() -> str:
         # the env var through _sanitize keeps the invariant total.
         root_display = _root_display(plugin_root)
 
-        if plugin_root is None:
+        # An unset or unsafe root is never used as a path: a relative value
+        # such as "   " would read a manifest planted under the cwd
+        # (#1671 security-rev, task #86). root_display is <unsafe> also when
+        # the session_state import fails, so that case fails closed too.
+        if root_display in (_UNSET, _UNSAFE):
             return f"{_PREFIX}{_UNKNOWN_META} (root: {root_display})"
 
         data = _read_manifest(plugin_root)
