@@ -290,3 +290,23 @@ class TestARunThatDidNotDoTheOperationKeepsTheToken:
 
         assert not _op_did_not_run("find . -name x -exec sh -c 'gh pr " + "merge 5' \\;")
         assert _op_did_not_run("git push -qn --force origin feature")
+
+
+class TestAHeredocBodyIsPartOfItsLeg:
+    """A heredoc's body belongs to the leg that opens it, so a guarded command
+    followed only by its own heredoc is the command's last leg."""
+
+    @pytest.mark.parametrize("cmd", [
+        "gh pr " + "merge 5 --squash -R o/r --body-file - <<'EOF'\nMerged; see notes || later\nEOF",
+        "git push origin --" + "delete feat/x <<'EOF'\nunused\nEOF",
+    ])
+    def test_the_run_retires_the_token(self, rig, cmd):
+        _mint(rig, cmd)
+        _post(rig, cmd, _EMPTY)
+        assert _retired(rig)
+
+    def test_a_leg_after_the_heredoc_keeps_the_token(self, rig):
+        cmd = "gh pr " + "merge 5 --squash -R o/r --body-file - <<'EOF'\nbody\nEOF\necho done"
+        _mint(rig, cmd)
+        _post(rig, cmd, _EMPTY)
+        assert not _retired(rig)

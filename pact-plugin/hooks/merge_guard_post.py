@@ -1110,10 +1110,18 @@ def _state_check_dir(
     return True, path
 
 
+# A heredoc's body and closing marker, after the line that opens it.
+_HEREDOC_TAIL_RE = re.compile(
+    r"(<<-?[ \t]*['\"]?(\w+)['\"]?[^\n]*)\n(?:.*?\n)?\t*\2(?!\w)", re.DOTALL
+)
+
+
 def _top_level_legs(command: str) -> tuple[list[str], list[str]] | None:
     """The legs of `command` and the list operators between them (`;`, newline,
     `&&`, `||`, `|`, a background `&`), outside quotes. None when the command opens
-    a group or a substitution (`(`, `{`, `$(`, a backtick) or leaves a quote open."""
+    a group or a substitution (`(`, `{`, `$(`, a backtick) or leaves a quote open.
+    A heredoc's body is part of the leg that opens it, not later legs."""
+    command = _HEREDOC_TAIL_RE.sub(r"\1", command)
     legs, seps, start, i, quote = [], [], 0, 0, ""
     while i < len(command):
         ch = command[i]
