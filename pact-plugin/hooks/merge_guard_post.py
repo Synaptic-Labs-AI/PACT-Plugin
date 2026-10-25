@@ -677,6 +677,60 @@ _ASSIGNED_EVAL_RE = re.compile(
 )
 
 
+_LITERAL_ASSIGNMENT_RE = re.compile(r"""^([A-Za-z_]\w*)=("[^"`\\]*"|'[^']*'|[^\s;&|$`'"\\()]*)$""")
+_VARIABLE_REF_RE = re.compile(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
+
+
+def _resolved_evals(command: str) -> str:
+    """`command` with each eval of a single string whose variables earlier legs all
+    assign literal values replaced by the eval of the text those values give, so
+    `PR=5; c="gh pr merge $PR --squash"; eval "$c"` reads as `PR=5; c=...; eval
+    'gh pr merge 5 --squash'`. Only `;` and newlines may join the legs up to the
+    eval, so every assignment runs before it. Unchanged otherwise."""
+    if "eval" not in command or "<<" in command:
+        return command
+    split = _top_level_legs(command)
+    if split is None:
+        return command
+    legs, seps = split
+    env: dict[str, str] = {}
+
+    def expand(text: str) -> str | None:
+        names = [braced or bare for braced, bare in _VARIABLE_REF_RE.findall(text)]
+        if any(name not in env for name in names):
+            return None
+        return _VARIABLE_REF_RE.sub(lambda m: env[m.group(1) or m.group(2)], text)
+
+    changed = False
+    for k, leg in enumerate(legs):
+        if k and seps[k - 1] not in (";", "\n"):
+            break
+        word = leg.strip()
+        m = _LITERAL_ASSIGNMENT_RE.match(word)
+        if m:
+            name, value = m.groups()
+            text = value[1:-1] if value[:1] == "'" else expand(value[1:-1] if value[:1] == '"' else value)
+            if text is None:
+                env.pop(name, None)
+            else:
+                env[name] = text
+            continue
+        arg = word[4:].strip() if word.startswith(("eval ", "eval\t")) else ""
+        # eval parses its string again, so a single-quoted one expands too.
+        if arg[:1] in ("'", '"') and arg.endswith(arg[0]) and len(arg) > 1 and arg[0] not in arg[1:-1]:
+            text = expand(arg[1:-1])
+        elif arg and not any(ch in arg for ch in " \t'\"\\"):
+            text = expand(arg)
+        else:
+            text = None
+        if text is not None and text != arg:
+            legs[k] = leg[: len(leg) - len(leg.lstrip())] + "eval " + shlex.quote(text)
+            changed = True
+    if not changed:
+        return command
+    return legs[0] + "".join(sep + leg for sep, leg in zip(seps, legs[1:]))
+
+
 def _evald_target(span: str) -> str | None:
     """The target of the one guarded command `span` evals as a single string (`eval
     "gh pr close 5 --delete-branch"`, or a variable assigned it just before): its
@@ -1381,6 +1435,16 @@ def _retire_exact_text_token(
             if not _token_in_session(token_data, current_session):
                 continue
             op, pr = ctx.get("operation_type"), ctx.get("pr_number")
+            if op == "merge" and not (isinstance(pr, str) and pr.isascii() and pr.isdigit()):
+                # A merge bound by its text whose PR an earlier leg assigns a literal
+                # number (`PR=5; c="gh pr merge $PR"; eval "$c"`) follows the merge
+                # rule below, as the plain command does.
+                resolved = _resolved_evals(command)
+                named = extract_command_context(
+                    _single_destructive_leg(resolved) or _single_detectable_leg(resolved) or resolved
+                ).get("pr_number")
+                if resolved != command and isinstance(named, str) and named.isascii() and named.isdigit():
+                    pr = named
             if op in _CONFIRMING_STATE and isinstance(pr, str) and pr.isascii() and pr.isdigit():
                 if _REPO_REDIRECT_RE.search(command) or any(
                     str(f).startswith("--repo") for f in ctx.get("bound_flags") or []
@@ -1735,7 +1799,10 @@ def main():
             # (fail-closed-on-no-signal — no retirement degrades to
             # TTL/MAX_USES safety net, NOT bypass).
             expected_substring = LAYER1_SUCCESS_STDOUT_PATTERNS.get(op_type)
-            if expected_substring is not None and not _target_set_at_run_time(command):
+            # A merge whose PR an earlier leg assigns a literal number is judged as
+            # that number, so the merge rule below applies to it.
+            judged = _resolved_evals(command) if op_type == "merge" else command
+            if expected_substring is not None and not _target_set_at_run_time(judged):
                 stdout_text = tool_response.get("stdout", "")
                 if not isinstance(stdout_text, str):
                     print(_SUPPRESS_OUTPUT)
@@ -1753,9 +1820,9 @@ def main():
                         command, op_type, tool_response
                     )
                     if not confirmed:
-                        state = _pr_state(command, input_data.get("cwd"))
+                        state = _pr_state(judged, input_data.get("cwd"))
                         confirmed = state == _CONFIRMING_STATE[op_type] or (
-                            not state and _run_succeeded_as_the_op(command, op_type, tool_response)
+                            not state and _run_succeeded_as_the_op(_resolved_evals(command), op_type, tool_response)
                         )
                 else:
                     confirmed = expected_substring in stdout_text or _run_succeeded_as_the_op(

@@ -415,3 +415,67 @@ class TestLiteralAbsoluteCd:
         missing = rig["tmp"] / "missing"
         assert _state_check_dir(f"cd {missing} && {_MERGE} 5") == (False, None)
         assert _state_check_dir(f"cd {rig['tmp']} && {_MERGE} 5") == (True, str(rig["tmp"]))
+
+
+class TestAnEvaldMergeFollowsTheMergeRule:
+    """An eval'd merge whose PR the command itself names, directly or through a
+    variable an earlier leg assigns, keeps its token while the PR reads OPEN and
+    retires on MERGED or on an unreadable state after a successful run, as the plain
+    merge does. A PR named only by the environment keeps the run-time rule."""
+
+    _ASSIGNED = 'PR=5; c="' + _MERGE + ' $PR --squash"; eval "$c"'
+    _EVALD = 'c="' + _MERGE + ' 5 --squash"; eval "$c"'
+
+    def _write_text(self, rig, cmd):
+        from shared.merge_guard_common import normalize_command_text
+
+        assert write_token({"operation_type": "merge", "bound_flags": [],
+                            "command_text": normalize_command_text(cmd)}, token_dir=rig["config"])
+
+    @pytest.mark.parametrize("env,retires", [
+        pytest.param({"state": "OPEN"}, False, id="open"),
+        pytest.param({"state": "MERGED"}, True, id="merged"),
+        pytest.param({"state": "DRAFT"}, True, id="unreadable"),
+    ])
+    def test_an_assigned_pr_follows_the_merge_rule(self, rig, env, retires):
+        self._write_text(rig, self._ASSIGNED)
+        _post(rig, self._ASSIGNED, "", **env)
+        assert "pr view 5 --json state --jq .state" in _gh_calls(rig)
+        assert _retired(rig) is retires
+
+    @pytest.mark.parametrize("env,retires", [
+        pytest.param({"state": "OPEN"}, False, id="open"),
+        pytest.param({"state": "DRAFT"}, True, id="unreadable"),
+    ])
+    def test_a_variable_eval_follows_the_merge_rule(self, rig, env, retires):
+        assert write_token({"operation_type": "merge", "pr_number": "5", "bound_flags": []},
+                           token_dir=rig["config"])
+        _post(rig, self._EVALD, "", **env)
+        assert _retired(rig) is retires
+
+    def test_a_run_whose_status_is_not_the_merges_keeps_the_token(self, rig):
+        cmd = self._ASSIGNED + " || true"
+        self._write_text(rig, cmd)
+        _post(rig, cmd, "", state="DRAFT")
+        assert not _retired(rig)
+
+    def test_a_single_quoted_eval_reads_the_assigned_pr(self, rig):
+        """eval parses its string again, so a single-quoted `$PR` expands too."""
+        cmd = "PR=5; eval '" + _MERGE + " $PR --squash'"
+        self._write_text(rig, cmd)
+        _post(rig, cmd, "", state="OPEN")
+        assert "pr view 5 --json state --jq .state" in _gh_calls(rig)
+        assert not _retired(rig)
+
+    def test_an_assignment_after_an_or_is_not_read_as_the_pr(self, rig):
+        """`PR=6` after `||` may not run, so the PR is not taken from it."""
+        cmd = 'PR=5; true || PR=6; c="' + _MERGE + ' $PR --squash"; eval "$c"'
+        self._write_text(rig, cmd)
+        _post(rig, cmd, "", state="OPEN")
+        assert not any(call.startswith("pr view 6") for call in _gh_calls(rig))
+
+    def test_a_pr_from_the_environment_keeps_the_run_time_rule(self, rig):
+        cmd = 'eval "' + _MERGE + ' $PR --squash"'
+        self._write_text(rig, cmd)
+        _post(rig, cmd, "", state="OPEN")
+        assert _retired(rig)
