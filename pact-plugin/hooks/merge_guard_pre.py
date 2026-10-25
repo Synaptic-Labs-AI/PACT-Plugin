@@ -65,6 +65,7 @@ try:
         shell_c_string,
         _single_destructive_leg,
         _single_detectable_leg,
+        target_changes_before_guarded_leg,
     )
     # Re-exports consumed by the test suite through this module's namespace
     # (module-level seam: tests import these via merge_guard_pre).
@@ -524,6 +525,14 @@ def _token_matches_command(token: dict, command: str) -> bool:
     if "command_text" in context:
         command_text = context["command_text"]
         return isinstance(command_text, str) and normalize_command_text(command) == command_text
+
+    # A token for an op on the current branch (`gh pr merge --squash`) covers that
+    # branch only: a command that first checks out another branch or changes
+    # directory acts on another target and needs its own approval.
+    if (context.get("merge_implicit") or context.get("force_push_implicit")) and (
+        target_changes_before_guarded_leg(command)
+    ):
+        return False
 
     token_op = context.get("operation_type")
     # Derive (op, target, bound_flags) from the SINGLE destructive leg, not the

@@ -922,6 +922,39 @@ class TestAnApprovedBranchChangeBindsItsText:
         assert ctx is not None and "command_text" not in ctx and ctx.get("merge_implicit")
 
 
+IMPLICIT_APPROVALS = {
+    "merge-after-checkout": (MERGE + "--squash", "git checkout feat/y && " + MERGE + "--squash"),
+    "merge-after-new-branch": (MERGE + "--squash", "git checkout -b feat/y && " + MERGE + "--squash"),
+    "merge-after-switch": (MERGE + "--squash", "git switch feat/y; " + MERGE + "--squash"),
+    "merge-in-another-repo": (MERGE + "--squash", "cd ../other && " + MERGE + "--squash"),
+    "force-push-after-checkout": ("git push --" + "force", "git checkout main && git push --" + "force"),
+    "force-push-after-pushd": ("git push --" + "force", "pushd ../other && git push --" + "force"),
+}
+IMPLICIT_SAME_TARGET = {
+    "merge-after-file-restore": (MERGE + "--squash", "git checkout -- notes.txt && " + MERGE + "--squash"),
+    "merge-then-checkout": (MERGE + "--squash", MERGE + "--squash && git checkout main"),
+    "force-push-reordered": ("git push --" + "force origin", "git push origin --" + "force"),
+}
+
+
+class TestAnImplicitTargetIsTheBranchItRunsOn:
+    """An approval of an op on the current branch covers that branch: the op run
+    after a checkout, a switch or a cd acts on another branch or repo and needs its
+    own approval, while the same op on the same branch still runs."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("approved,other", IMPLICIT_APPROVALS.values(), ids=IMPLICIT_APPROVALS.keys())
+    def test_a_branch_or_directory_change_first_is_refused(self, approved, other, style):
+        ctx = _mint_styled(approved, style)
+        assert _runs(ctx, approved)
+        assert not _runs(ctx, other)
+
+    @pytest.mark.parametrize("approved,same", IMPLICIT_SAME_TARGET.values(), ids=IMPLICIT_SAME_TARGET.keys())
+    def test_the_same_branch_still_runs(self, approved, same):
+        ctx = _mint_styled(approved, APPROVAL_STYLES["inline"])
+        assert _runs(ctx, same)
+
+
 class TestAnEvalOfALiteralCommandRuns:
     """An eval of a string the region reading locates nothing in (a close or a force
     push inside the quotes) binds its text, so the approved command runs and no
