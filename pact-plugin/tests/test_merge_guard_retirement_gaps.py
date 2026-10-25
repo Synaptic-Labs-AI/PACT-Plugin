@@ -253,7 +253,7 @@ class TestARunThatDidNotDoTheOperationKeepsTheToken:
         "git push -fn origin feature",
         "git push --force -n origin feature",
         "git push --force origin feature &",
-        "git push --force origin feature & wait",
+        "git push --force origin feature & sleep 1",
     ])
     def test_the_token_is_kept(self, rig, cmd):
         _mint(rig, "git push --force origin feature")
@@ -276,6 +276,8 @@ class TestARunThatDidNotDoTheOperationKeepsTheToken:
         "git push --force origin feature",
         "git push --force origin feature 2>&1 | tail -3",
         "sleep 1 & git push --force origin feature",
+        "git push --force origin feature & wait",
+        "git push --force origin feature & wait $!",
         "git log -n 1 && git push --force origin feature",
     ])
     def test_the_operation_itself_still_retires(self, rig, cmd):

@@ -1144,9 +1144,19 @@ _DRY_RUN_RE = re.compile(r"(?<!\S)(?:--dry-run|-[46dfquv]*n[46dfquv]*)(?!\S)")
 _AUTO_RE = re.compile(r"(?<!\S)--auto(?!\S)")
 
 
+def _backgrounded(k: int, legs: list[str], seps: list[str]) -> bool:
+    """Whether leg `k` runs in the background past the command's end: it is
+    followed by `&`, and the next leg is not a `wait` (or `wait $!`) that waits
+    for it."""
+    if k >= len(seps) or seps[k] != "&":
+        return False
+    return k + 1 >= len(legs) or legs[k + 1].split() not in (["wait"], ["wait", "$!"])
+
+
 def _op_did_not_run(command: str) -> bool:
     """Whether a leg that holds the guarded op is a dry run or runs in the
-    background, so the command's success says nothing about the op. A shell's -c
+    background without a `wait` for it, so the command's success says nothing
+    about the op. A shell's -c
     string is read the same way."""
     try:
         inner = shell_c_string(command)
@@ -1158,7 +1168,7 @@ def _op_did_not_run(command: str) -> bool:
         legs, seps = split
         return any(
             detect_command_operation_type(leg) is not None
-            and (_DRY_RUN_RE.search(leg) or (k < len(seps) and seps[k] == "&"))
+            and (_DRY_RUN_RE.search(leg) or _backgrounded(k, legs, seps))
             for k, leg in enumerate(legs)
         )
     except Exception:  # noqa: BLE001 - doubt changes nothing here
