@@ -2242,6 +2242,11 @@ PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
     },
     "force-push": {
         "--no-verify":     (("--no-verify",), False),           # bypass pre-push hook
+        # Scope flags: each widens what the push rewrites (every branch, every ref,
+        # every tag), so a plain force-push approval does not cover them.
+        "--all":           (("--all",), False),
+        "--mirror":        (("--mirror",), False),
+        "--tags":          (("--tags",), False),
     },
     "push-to-main": {
         # --force-with-lease: the lease push CAN rewrite history (unlike a plain push),

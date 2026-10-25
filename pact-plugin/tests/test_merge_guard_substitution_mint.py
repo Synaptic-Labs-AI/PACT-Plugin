@@ -1033,6 +1033,37 @@ class TestAnOpInAnotherRepoNeedsItsOwnApproval:
         assert _runs(_mint_styled(plain, APPROVAL_STYLES["inline"]), same)
 
 
+_FORCE = "git push --" + "force"
+PUSH_SCOPES = {
+    "all": (_FORCE, _FORCE + " --all", _FORCE + " --mirror"),
+    "mirror": (_FORCE, _FORCE + " --mirror", _FORCE + " --tags"),
+    "tags": (_FORCE, _FORCE + " --tags", _FORCE + " --all"),
+}
+
+
+class TestAPushScopeFlagNeedsItsOwnApproval:
+    """`--all`, `--mirror` and `--tags` widen what a force push rewrites: a plain
+    force-push approval does not cover them, and a scoped approval covers its own
+    scope only."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("plain,scoped,other", PUSH_SCOPES.values(), ids=PUSH_SCOPES.keys())
+    def test_a_plain_approval_does_not_cover_a_scope(self, plain, scoped, other, style):
+        ctx = _mint_styled(plain, style)
+        assert _runs(ctx, plain)
+        assert not _runs(ctx, scoped)
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("plain,scoped,other", PUSH_SCOPES.values(), ids=PUSH_SCOPES.keys())
+    def test_a_scoped_approval_runs_its_scope_only(self, plain, scoped, other, style):
+        ctx = _mint_styled(scoped, style)
+        assert _runs(ctx, scoped)
+        assert not _runs(ctx, other)
+
+    def test_the_short_force_flag_still_matches(self):
+        assert _runs(_mint_styled("git push -f --tags", APPROVAL_STYLES["inline"]), _FORCE + " --tags")
+
+
 class TestAnEvalOfALiteralCommandRuns:
     """An eval of a string the region reading locates nothing in (a close or a force
     push inside the quotes) binds its text, so the approved command runs and no
