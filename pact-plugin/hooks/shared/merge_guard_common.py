@@ -10111,13 +10111,13 @@ def target_changes_before_guarded_leg(command: str) -> bool:
     of the current repository: a leg before it changes the branch or directory (`git
     checkout`, `git switch`, `gh pr checkout`, `cd`, `pushd`, `popd`, also inside a
     subshell), or the guarded leg names another repository (`git -C`, `--git-dir`,
-    `--work-tree`, `GIT_DIR=`, `GIT_WORK_TREE=`). An op on an implicit target (`gh pr
-    merge --squash`, `git push --force`) then acts on another branch or repo than the
-    one the bare op would."""
+    `--work-tree`, `GIT_DIR=`, `GIT_WORK_TREE=`, or either exported in an earlier
+    leg). An op on an implicit target (`gh pr merge --squash`, `git push --force`)
+    then acts on another branch or repo than the one the bare op would."""
     guarded = _single_destructive_leg(command) or _single_detectable_leg(command)
     if guarded is None:
         return False
-    if _leg_names_another_repo(guarded):
+    if _leg_names_another_repo(guarded) or _exported_before_guarded_leg(command, ("GIT_DIR", "GIT_WORK_TREE")):
         return True
     for leg in (leg.strip() for leg in _split_into_legs(command)):
         if leg == guarded:
@@ -10131,26 +10131,37 @@ def target_changes_before_guarded_leg(command: str) -> bool:
 # `export`, or `declare` / `typeset` with an `-x` flag: the forms that pass a variable to
 # the commands the shell runs.
 _EXPORTING = r"(?:export|(?:declare|typeset)(?:[ \t]+-[A-Za-z]+)*[ \t]+-[A-Za-z]*x[A-Za-z]*)"
-_BARE_GH_REPO_EXPORT_RE = re.compile(
-    r"(?:^|[;&|(\n])[ \t]*" + _EXPORTING + r"[ \t]+(?:[^;&|\n]*[ \t])?GH_REPO(?=[ \t;&|)\n]|$)"
-)
+
+
+def _exported_before_guarded_leg(command: str, names: tuple[str, ...]) -> bool:
+    """Whether a leg before the command's guarded leg exports one of `names`, so the
+    guarded command reads it from its environment. A variable assigned without
+    export is not passed on and does not count."""
+    guarded = _single_destructive_leg(command) or _single_detectable_leg(command)
+    start = command.find(guarded) if guarded else -1
+    if start <= 0:
+        return False
+    head = command[:start]
+    for name in names:
+        if name not in head:
+            continue
+        # `export NAME` with no value exports a variable assigned earlier.
+        if re.search(r"(?:^|[;&|(\n])[ \t]*" + _EXPORTING + r"[ \t]+(?:[^;&|\n]*[ \t])?" + name
+                     + r"(?=[ \t;&|)\n]|$)", head):
+            return True
+        found = _literal_assignments(head, name, exported=True)
+        if found is None:
+            if re.search(r"(?:^|[;&|(\n])[ \t]*" + _EXPORTING + r"[ \t][^;&|\n]*" + name + "=", head):
+                return True
+        elif any(re.match(r"[ \t]*" + _EXPORTING + r"[ \t]", a.group(0)) for a in found):
+            return True
+    return False
 
 
 def exported_gh_repo_before_guarded_leg(command: str) -> bool:
     """Whether a leg before the command's guarded leg exports GH_REPO (`export
-    GH_REPO=o/b; gh pr merge 5`), which gh then reads as its repository. A GH_REPO
-    assigned without export is not passed to gh and does not count."""
-    guarded = _single_destructive_leg(command) or _single_detectable_leg(command)
-    start = command.find(guarded) if guarded else -1
-    if start <= 0 or "GH_REPO" not in command[:start]:
-        return False
-    head = command[:start]
-    if _BARE_GH_REPO_EXPORT_RE.search(head):
-        return True
-    found = _literal_assignments(head, "GH_REPO", exported=True)
-    if found is None:
-        return re.search(r"(?:^|[;&|(\n])[ \t]*" + _EXPORTING + r"[ \t][^;&|\n]*GH_REPO=", head) is not None
-    return any(re.match(r"[ \t]*" + _EXPORTING + r"[ \t]", a.group(0)) for a in found)
+    GH_REPO=o/b; gh pr merge 5`), which gh then reads as its repository."""
+    return _exported_before_guarded_leg(command, ("GH_REPO",))
 
 
 def is_compound_destructive_command(command: str) -> bool:

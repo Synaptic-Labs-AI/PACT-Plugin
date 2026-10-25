@@ -1161,6 +1161,48 @@ class TestAnExportedGhRepoIsARepoRedirect:
         assert _runs(_mint_styled(MERGE + "5", APPROVAL_STYLES["inline"]), command)
 
 
+
+EXPORTED_GIT_DIRS = {
+    "git-dir": (_FORCE, "export GIT_DIR=/tmp/repoB/.git; " + _FORCE, "export GIT_DIR=/tmp/repoC/.git; " + _FORCE),
+    "git-dir-and": (_FORCE, "export GIT_DIR=/tmp/repoB/.git && " + _FORCE, "export GIT_DIR=/tmp/repoC/.git && " + _FORCE),
+    "bare-export": (_FORCE, "GIT_DIR=/tmp/repoB/.git; export GIT_DIR; " + _FORCE,
+                    "GIT_DIR=/tmp/repoC/.git; export GIT_DIR; " + _FORCE),
+    "work-tree-declare-x": (_FORCE, "declare -x GIT_WORK_TREE=/tmp/repoB; " + _FORCE,
+                            "declare -x GIT_WORK_TREE=/tmp/repoC; " + _FORCE),
+    "git-dir-typeset-x-merge": (MERGE + "--squash", "typeset -x GIT_DIR=/tmp/repoB/.git; " + MERGE + "--squash",
+                                "typeset -x GIT_DIR=/tmp/repoC/.git; " + MERGE + "--squash"),
+}
+
+
+class TestAnExportedGitDirIsARepoChange:
+    """git reads GIT_DIR and GIT_WORK_TREE from its environment, so exporting either in
+    an earlier leg moves an op on the current branch to another repository: a plain
+    approval does not cover it, and its own approval runs that command only."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("plain,exported,other", EXPORTED_GIT_DIRS.values(), ids=EXPORTED_GIT_DIRS.keys())
+    def test_a_plain_approval_does_not_cover_it(self, plain, exported, other, style):
+        ctx = _mint_styled(plain, style)
+        assert _runs(ctx, plain)
+        assert not _runs(ctx, exported)
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("plain,exported,other", EXPORTED_GIT_DIRS.values(), ids=EXPORTED_GIT_DIRS.keys())
+    def test_its_own_approval_runs_it_and_no_other(self, plain, exported, other, style):
+        ctx = _mint_styled(exported, style)
+        assert _runs(ctx, exported)
+        assert not _runs(ctx, other)
+
+    @pytest.mark.parametrize("command", [
+        "GIT_DIR=/tmp/repoB/.git; " + _FORCE,
+        _FORCE + "; export GIT_DIR=/tmp/repoB/.git",
+        "echo export GIT_DIR=/tmp/repoB/.git; " + _FORCE,
+        "declare GIT_WORK_TREE=/tmp/repoB; " + _FORCE,
+        "export GIT_TRACE=1; " + _FORCE,
+    ], ids=["not-exported", "exported-after", "echoed", "declared-not-exported", "other-name"])
+    def test_a_plain_approval_still_covers_a_git_dir_git_does_not_read(self, command):
+        assert _runs(_mint_styled(_FORCE, APPROVAL_STYLES["inline"]), command)
+
 class TestAnEvalOfALiteralCommandRuns:
     """An eval of a string the region reading locates nothing in (a close or a force
     push inside the quotes) binds its text, so the approved command runs and no
