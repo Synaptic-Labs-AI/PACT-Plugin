@@ -2758,3 +2758,75 @@ def test_an_inline_git_alias_reads_as_what_it_runs(cmd, runs):
     from shared.merge_guard_common import rewritten_executed_command
 
     assert rewritten_executed_command(cmd) == runs
+
+
+# A git alias from the user's git config runs its value too, unless git runs a command of that
+# name itself. The config is read with `git config`; when it cannot be read nothing changes.
+CONFIG_GIT_ALIASES = {"pf": "push --force", "pushn": "push", "sh": "!git push --force", "lg": "log --oneline",
+                      "status": "push --force", "cherry": "push --force"}
+
+
+@pytest.fixture
+def config_git_aliases(monkeypatch):
+    import shared.merge_guard_common as mgc
+
+    monkeypatch.setattr(mgc, "_git_config_aliases", lambda cwd: CONFIG_GIT_ALIASES)
+    monkeypatch.setattr(mgc, "_git_commands", lambda cwd: frozenset({"status", "push", "log", "cherry"}))
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("cmd", [
+    "git pf origin main",
+    "git pushn --force origin main",
+    "git sh origin main",
+    "git -C /tmp pf origin main",
+], ids=["force-push-alias", "push-alias-with-force", "shell-alias", "after-C"])
+def test_a_config_git_alias_for_a_guarded_op_is_refused_then_runs(cmd, style, config_git_aliases):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("cmd", ["git lg", "git status", "git cherry"],
+                         ids=["alias-for-a-read", "alias-shadowing-a-builtin", "alias-shadowing-a-git-command"])
+def test_a_config_git_alias_that_runs_nothing_guarded_is_allowed(cmd, config_git_aliases):
+    assert is_dangerous_command(cmd) is False
+
+
+def test_git_config_aliases_read_from_git_config(monkeypatch, tmp_path):
+    import shared.merge_guard_common as mgc
+
+    mgc._git_config_aliases.cache_clear()
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "alias.pf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "push --force")
+    try:
+        assert mgc._git_config_aliases(str(tmp_path))["pf"] == "push --force"
+    finally:
+        mgc._git_config_aliases.cache_clear()
+
+
+def test_an_unreadable_git_config_keeps_todays_reading(monkeypatch):
+    import shared.merge_guard_common as mgc
+
+    def fail(*args, **kwargs):
+        raise OSError("no git")
+
+    mgc._git_config_aliases.cache_clear()
+    mgc._git_commands.cache_clear()
+    monkeypatch.setattr(mgc.subprocess, "run", fail)
+    try:
+        assert mgc._git_config_aliases(None) == {}
+        assert mgc._git_commands(None) == frozenset()
+        assert is_dangerous_command("git pf origin main") is False
+    finally:
+        mgc._git_config_aliases.cache_clear()
+        mgc._git_commands.cache_clear()
+
+
+def test_a_config_git_alias_is_read_from_the_directory_git_runs_in(monkeypatch):
+    import shared.merge_guard_common as mgc
+
+    monkeypatch.setattr(mgc, "_git_config_aliases", lambda cwd: {"pf": "push --force"} if cwd == "/tmp" else {})
+    monkeypatch.setattr(mgc, "_git_commands", lambda cwd: frozenset())
+    assert is_dangerous_command("git -C /tmp pf origin main") is True
+    assert is_dangerous_command("git pf origin main") is False

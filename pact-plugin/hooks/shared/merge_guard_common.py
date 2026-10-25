@@ -189,6 +189,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import time
 import warnings
 from collections.abc import Sequence
@@ -6704,9 +6705,39 @@ _GIT_ALWAYS_BUILTIN = frozenset(
 )
 
 
-def _git_alias_value(name: str, inline: dict[str, str]) -> str | None:
-    """The value of git alias `name`, or None."""
-    return inline.get(name)
+@functools.lru_cache(maxsize=8)
+def _git_config_aliases(cwd: str | None) -> dict[str, str]:
+    """The aliases in the git config seen from `cwd` (the process's directory when None),
+    read with `git config`; empty when it cannot be read in time."""
+    try:
+        done = subprocess.run(["git", "config", "--get-regexp", r"^alias\."], cwd=cwd,
+                              capture_output=True, text=True, timeout=1.0, check=False)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {}
+    aliases = {}
+    for line in done.stdout.splitlines():
+        key, _, value = line.partition(" ")
+        aliases[key[len("alias."):].lower()] = value
+    return aliases
+
+
+@functools.lru_cache(maxsize=8)
+def _git_commands(cwd: str | None) -> frozenset[str]:
+    """The commands git runs before it looks at aliases (built in or `git-NAME` on its path);
+    empty when they cannot be listed in time."""
+    try:
+        done = subprocess.run(["git", "--list-cmds=main,others"], cwd=cwd,
+                              capture_output=True, text=True, timeout=1.0, check=False)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return frozenset()
+    return frozenset(done.stdout.split())
+
+
+def _git_alias_value(name: str, inline: dict[str, str], cwd: str | None) -> str | None:
+    """The value of git alias `name` given inline or in the git config seen from `cwd`, or
+    None, including when `name` is a command git runs as itself."""
+    value = inline.get(name) or _git_config_aliases(cwd).get(name)
+    return None if not value or name in _git_commands(cwd) else value
 
 
 def _expand_git_alias(leg: str, depth: int = 0) -> str:
@@ -6717,15 +6748,17 @@ def _expand_git_alias(leg: str, depth: int = 0) -> str:
     tokens = _shell_tokenize(word) if word else None
     if not word or not tokens or os.path.basename(tokens[0]) != "git" or depth >= _MAX_WRAPPER_DEPTH:
         return leg
-    inline, i = {}, 1
+    inline, cwd, i = {}, None, 1
     while i < len(tokens) and tokens[i].startswith("-"):
         if tokens[i] == "-c" and i + 1 < len(tokens) and tokens[i + 1].startswith("alias."):
             key, _, value = tokens[i + 1][len("alias."):].partition("=")
             inline[key.lower()] = value
+        if tokens[i] == "-C" and i + 1 < len(tokens):
+            cwd = os.path.join(cwd or os.getcwd(), os.path.expanduser(tokens[i + 1]))
         i += 2 if tokens[i] in _GIT_VALUE_GLOBALS else 1
     if i >= len(tokens) or tokens[i] in _GIT_ALWAYS_BUILTIN:
         return leg
-    value = _git_alias_value(tokens[i].lower(), inline)
+    value = _git_alias_value(tokens[i].lower(), inline, cwd)
     if not value:
         return leg
     rest = " ".join(shlex.quote(t) for t in tokens[i + 1:])
