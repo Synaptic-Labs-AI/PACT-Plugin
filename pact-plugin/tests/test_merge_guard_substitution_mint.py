@@ -781,8 +781,22 @@ class TestProseBesideAQuotedGuardedCommandBindsNothing:
         ctx = _mint_styled(FORCE + "main", lambda c: f"Run `` `` first, then {c}")
         assert _runs(ctx, FORCE + "main")
 
-    def test_a_flag_in_prose_still_binds_to_the_quoted_command(self):
-        ctx = _mint_styled(MERGE + "5", lambda c: f"Run `{c}` with --admin")
+    @pytest.mark.parametrize("prose", [
+        pytest.param(lambda c: f"Run `{c}` with --admin", id="with-admin"),
+        pytest.param(lambda c: f"Run `{c}` now, then delete the branch with --delete-branch later",
+                     id="delete-branch-later"),
+        pytest.param(lambda c: f"Run `{c}` (admin override with --admin if it is blocked)", id="admin-aside"),
+    ])
+    def test_a_flag_in_prose_binds_nothing(self, prose):
+        command = MERGE + "5 --squash"
+        ctx = _mint_styled(command, prose)
+        assert ctx["bound_flags"] == []
+        assert _runs(ctx, command)
+        assert not _runs(ctx, command + " --admin")
+        assert not _runs(ctx, command + " --delete-branch")
+
+    def test_a_prose_only_approval_keeps_its_flags(self):
+        ctx = _mint_styled(MERGE + "5", lambda c: f"Run {c} --admin now")
         assert ctx["bound_flags"] == ["--admin"]
 
 
