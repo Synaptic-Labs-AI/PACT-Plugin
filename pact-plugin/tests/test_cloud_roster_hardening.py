@@ -247,3 +247,28 @@ def test_unloadable_roster_advisory_names_no_one(cloud, monkeypatch):
     messages = [m for r, m in tlg.evaluate_lifecycle(frame) if r == "non_lead_completion"]
     assert len(messages) == 1
     assert "a teammate (name unresolved: unattributed)" in messages[0]
+
+
+def test_deeply_nested_line_cannot_disable_the_roster(cloud):
+    """#96 probe: a line that makes json.loads raise RecursionError is skipped
+    on its own; it must not turn the whole roster into 'no roster' and so
+    restore a forged meta name."""
+    write_roster(cloud, TEAM, [intent(TU1, "coder", "pact-backend-coder"),
+                               confirm(TU1, SUBAGENT_ID, "pact-backend-coder")],
+                 raw_lines=["[" * 200000])
+    _meta_victim(cloud)
+    actor = _coder(cloud)
+    assert actor.name != "victim"
+    assert actor.source == SOURCE_UNATTRIBUTED and actor.dispute == ("coder", "victim")
+
+
+def test_unexpected_parse_failure_reads_as_unloadable(cloud, monkeypatch):
+    write_roster(cloud, TEAM, [intent(TU1, "coder", "pact-backend-coder")])
+
+    def _boom(_text):
+        raise MemoryError("parse blew up")
+
+    monkeypatch.setattr(cloud_roster, "_parse_lines", _boom)
+    assert cloud_roster.load_roster_state(TEAM) == (None, True)
+    _meta_victim(cloud)
+    assert _coder(cloud).source == SOURCE_UNATTRIBUTED

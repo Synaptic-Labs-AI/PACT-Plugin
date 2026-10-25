@@ -71,8 +71,18 @@ meta.json consistently". ACCEPTED RESIDUALS (user decision Q1, design §7):
     Confirms are first-wins per tool_use_id, so a teammate can append a
     confirm pairing its own id with a victim's tool_use_id before the
     victim's first handback. The victim's bind is displaced and it resolves
-    meta-only (the pre-roster baseline); the forger resolves `unattributed`
-    unless it also edits its own meta.json name.
+    meta-only (the pre-roster baseline). The forger usually resolves
+    meta-only too, under its own meta.json name: its id is then confirmed
+    for two spawns (its own and the victim's), which unbinds it (fold rule
+    5). Only a forger with no confirm of its own stays bound to the victim's
+    name, and then resolves `unattributed` unless it also edits its own
+    meta.json name;
+  - EMPTYING THE ROSTER, a sub-case of the two-file forge (residual 1).
+    Deleting the roster file, or truncating it to empty, reads as "no
+    records yet" (not unloadable), so every agent resolves meta-only again,
+    and a meta.json edit then puts a forged name on an action. That takes a
+    write to both files, so it is the accepted two-file forge; no marker
+    record is kept to detect it.
 The real control is harness-side (a cloud TaskCompleted `teammate_name`, or a
 harness-held roster).
 
@@ -264,6 +274,7 @@ def load_roster_state(
     (padding, a symlink, junk) cannot restore a forged meta name (security
     review #70).
     """
+    present = False
     try:
         if not applies(team_name, teams_dir):
             return None, False
@@ -271,6 +282,7 @@ def load_roster_state(
         path = root / team_name / ROSTER_FILENAME
         if not os.path.lexists(path):
             return None, False
+        present = True
         try:
             text = state_file.read_text(path, root, max_bytes=MAX_ROSTER_BYTES)
         except (OSError, state_file.TooLarge):
@@ -280,17 +292,21 @@ def load_roster_state(
             return None, True
         return fold(records), False
     except Exception:  # noqa: BLE001 — totality is the contract
-        return None, False
+        # A roster file that is present but failed in an unforeseen way is
+        # unloadable, never "no roster": that would restore meta.json names.
+        return None, present
 
 
 def _parse_lines(text: str) -> list:
     records = []
     for line in text.splitlines():
+        # Per line, ANY failure skips only that line: a hostile line (e.g.
+        # deep nesting that raises RecursionError) must not take the whole
+        # roster down with it (security review #96).
         try:
-            raw = json.loads(line)
-        except ValueError:
+            record = _validated(json.loads(line))
+        except Exception:  # noqa: BLE001
             continue
-        record = _validated(raw)
         if record is not None:
             records.append(record)
     return records
