@@ -10119,7 +10119,7 @@ def _leg_names_another_repo(leg: str) -> bool:
     return False
 
 
-def target_changes_before_guarded_leg(command: str) -> bool:
+def target_changes_before_guarded_leg(command: str, branch: bool = True) -> bool:
     """Whether the command's guarded leg runs somewhere other than the current branch
     of the current repository: a leg before it changes the branch, directory or gh's
     default repository (`git checkout`, `git switch`, `gh pr checkout`, `gh repo
@@ -10127,17 +10127,26 @@ def target_changes_before_guarded_leg(command: str) -> bool:
     names another repository (`git -C`, `--git-dir`, `--work-tree`, `GIT_DIR=`,
     `GIT_WORK_TREE=`, or either exported in an earlier leg). An op on an implicit
     target (`gh pr merge --squash`, `git push --force`) then acts on another branch
-    or repo than the one the bare op would."""
+    or repo than the one the bare op would. With `branch` False a branch change does
+    not count: a numbered op (`gh pr merge 5`) names its pull request, so only a
+    change of repository moves it."""
     guarded = _single_destructive_leg(command) or _single_detectable_leg(command)
     if guarded is None:
         return False
+    # The string a shell runs with -c changes its own directory first.
+    body = shell_c_string(guarded)
+    if body and body != guarded and target_changes_before_guarded_leg(body, branch):
+        return True
     if _leg_names_another_repo(guarded) or _exported_before_guarded_leg(command, ("GIT_DIR", "GIT_WORK_TREE")):
         return True
     for leg in (leg.strip() for leg in _split_into_legs(command)):
         if leg == guarded:
             return False
         # `git checkout [<tree>] -- <paths>` restores files and leaves the branch.
-        if _TARGET_CHANGING_LEG_RE.match(leg) and not re.search(r"\scheckout\b.*\s--(?:\s|$)", leg):
+        change = _TARGET_CHANGING_LEG_RE.match(leg)
+        if not change or re.search(r"\scheckout\b.*\s--(?:\s|$)", leg):
+            continue
+        if branch or not re.search(r"(?:checkout|switch|\bco)$", change.group(0)):
             return True
     return False
 

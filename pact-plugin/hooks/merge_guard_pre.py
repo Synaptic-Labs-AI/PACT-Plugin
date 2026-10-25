@@ -535,8 +535,11 @@ def _token_matches_command(token: dict, command: str) -> bool:
         return False
 
     # A merge or close token covers the repository gh reads by default: a command
-    # that first exports GH_REPO or GH_HOST merges or closes in another one.
-    if context.get("operation_type") in ("merge", "close") and exported_gh_target_before_guarded_leg(command):
+    # that first exports GH_REPO or GH_HOST, changes directory or sets gh's default
+    # repository merges or closes in another one, even under a numbered token.
+    if context.get("operation_type") in ("merge", "close") and (
+        exported_gh_target_before_guarded_leg(command) or target_changes_before_guarded_leg(command, branch=False)
+    ):
         return False
 
     token_op = context.get("operation_type")

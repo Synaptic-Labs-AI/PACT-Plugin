@@ -1401,6 +1401,10 @@ class TestObsHExtractionSurfaceMintability:
         ctx, refusal = _h_mint("Run `%s` now" % compound)
         bare, _ = _h_mint("Run: " + leg)
         assert ctx is not None, "PARITY %s: quoted cd-prefix did not mint: %r" % (label, refusal)
+        if label in ("merge", "close") and bare is not None:
+            # A numbered merge or close after a cd also binds its text: its number
+            # names a pull request of the repository the cd moves to.
+            bare = dict(bare, command_text=mgc.normalize_command_text(compound))
         assert ctx.get(want_key) == want_val and ctx == bare, (
             "PARITY %s broke: ctx=%r bare=%r" % (label, ctx, bare)
         )

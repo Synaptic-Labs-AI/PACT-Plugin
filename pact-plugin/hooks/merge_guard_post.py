@@ -864,10 +864,11 @@ def _exact_text_reading(span: str, located: str) -> dict | None:
     else:
         inner = shell_c_string(leg)
         if inner is not None:
-            # A -c string that exports GH_REPO or GH_HOST before its merge or close
-            # binds by text, as the same command run directly does.
+            # A -c string that exports GH_REPO or GH_HOST, or changes repository, before
+            # its merge or close binds by text, as the same command run directly does.
             if is_compound_destructive_command(inner) or (
                 pairs and not _inner_flags_differ(leg, inner) and not exported_gh_target_before_guarded_leg(leg)
+                and not target_changes_before_guarded_leg(leg, branch=False)
             ):
                 return None
             body = inner
@@ -900,6 +901,9 @@ def _exact_text_reading(span: str, located: str) -> dict | None:
         # A merge or close run after `export GH_REPO=…` (or GH_HOST) acts in that
         # repository, which the op's own reading does not see; its text binds it.
         or (ctx["operation_type"] in ("merge", "close") and exported_gh_target_before_guarded_leg(span))
+        # So does one run after a change of directory or default repository (`cd
+        # ../other && gh pr merge 5`), whose number names a PR of that repository.
+        or (ctx["operation_type"] in ("merge", "close") and target_changes_before_guarded_leg(span, branch=False))
     ):
         return None
     return ctx
@@ -1217,6 +1221,7 @@ _REPO_REDIRECT_RE = re.compile(
     r"(?<![\w./-])pushd(?![\w./-])"
     r"|\bgit\b[^;&|\n]*\s-C"
     r"|(?<![\w])(?:GH_REPO|GH_HOST|GIT_DIR)="
+    r"|\bgh\s+repo\s+set-default\b"
 )
 _CD_WORD_RE = re.compile(r"(?<![\w./-])cd(?![\w./-])")
 # `&&` only: after `cd x;` or `cd x ||` the gh leg can run in the old directory.
@@ -1491,19 +1496,15 @@ def _retire_exact_text_token(
                 if resolved != command and isinstance(named, str) and named.isascii() and named.isdigit():
                     pr = named
             if op in _CONFIRMING_STATE and isinstance(pr, str) and pr.isascii() and pr.isdigit():
-                if _REPO_REDIRECT_RE.search(command) or any(
-                    str(f).startswith("--repo") for f in ctx.get("bound_flags") or []
-                ):
-                    # The PR is in a repo this directory's state cannot read; only
+                # The state is read where the command ran: the session's directory, or
+                # the one literal absolute `cd` before the op.
+                followable, cwd = _state_check_dir(command, frame_cwd)
+                if not followable or any(str(f).startswith("--repo") for f in ctx.get("bound_flags") or []):
+                    # The PR is in a repo this hook cannot read the state of; only
                     # the run's own success can confirm it.
                     if not _run_succeeded_as_the_op(command, op, tool_response):
                         continue
                 else:
-                    cwd = (
-                        frame_cwd
-                        if isinstance(frame_cwd, str) and os.path.isabs(frame_cwd) and os.path.isdir(frame_cwd)
-                        else None
-                    )
                     from shared.gh_helpers import check_pr_state
 
                     if not _close_succeeded(command, op, tool_response) and (

@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from merge_guard_post import _exact_text_reading, _mint_context_from_bundle
+from merge_guard_post import _exact_text_reading, _mint_context_from_bundle, _retire_exact_text_token
 from merge_guard_pre import _token_matches_command
 from shared.merge_guard_common import (
     is_compound_destructive_command,
@@ -1299,6 +1299,94 @@ class TestAnExportedGitDirIsARepoChange:
     ], ids=["not-exported", "exported-after", "echoed", "declared-not-exported", "other-name"])
     def test_a_plain_approval_still_covers_a_git_dir_git_does_not_read(self, command):
         assert _runs(_mint_styled(_FORCE, APPROVAL_STYLES["inline"]), command)
+
+
+_NUMBERED = MERGE + "5 --squash"
+NUMBERED_REPO_CHANGES = {
+    "cd": (_NUMBERED, "cd /tmp/other && " + _NUMBERED, "cd /tmp/third && " + _NUMBERED),
+    "subshell-cd": (_NUMBERED, "(cd /tmp/other && " + _NUMBERED + ")", "(cd /tmp/third && " + _NUMBERED + ")"),
+    "pushd": (_NUMBERED, "pushd /tmp/other && " + _NUMBERED, "pushd /tmp/third && " + _NUMBERED),
+    "set-default": (_NUMBERED, "gh repo set-default o/b && " + _NUMBERED, "gh repo set-default o/c && " + _NUMBERED),
+    "git-dir-prefix": (_NUMBERED, "GIT_DIR=/tmp/repoB/.git " + _NUMBERED, "GIT_DIR=/tmp/repoC/.git " + _NUMBERED),
+    "git-dir-env": (_NUMBERED, "env GIT_DIR=/tmp/repoB/.git " + _NUMBERED, "env GIT_DIR=/tmp/repoC/.git " + _NUMBERED),
+    "git-dir-export": (_NUMBERED, "export GIT_DIR=/tmp/repoB/.git; " + _NUMBERED,
+                       "export GIT_DIR=/tmp/repoC/.git; " + _NUMBERED),
+    "close": (_CLOSE_PR + "5 -d", "cd /tmp/other && " + _CLOSE_PR + "5 -d", "cd /tmp/third && " + _CLOSE_PR + "5 -d"),
+    "bash-c": (_NUMBERED, "bash -c 'cd /tmp/other && " + _NUMBERED + "'", "bash -c 'cd /tmp/third && " + _NUMBERED + "'"),
+    "same-repo-subdirectory": (_NUMBERED, "cd sub && " + _NUMBERED, "cd other && " + _NUMBERED),
+}
+
+
+class TestANumberedOpInAnotherRepoNeedsItsOwnApproval:
+    """A numbered merge or close names its pull request but not its repository: run
+    after a change of directory or of gh's default repository, or with GIT_DIR set,
+    the number names a PR of another repository. A plain numbered approval does not
+    cover it, and its own approval runs that command only."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("plain,moved,other", NUMBERED_REPO_CHANGES.values(), ids=NUMBERED_REPO_CHANGES.keys())
+    def test_a_plain_approval_does_not_cover_it(self, plain, moved, other, style):
+        ctx = _mint_styled(plain, style)
+        assert _runs(ctx, plain)
+        assert not _runs(ctx, moved)
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("plain,moved,other", NUMBERED_REPO_CHANGES.values(), ids=NUMBERED_REPO_CHANGES.keys())
+    def test_its_own_approval_runs_it_and_no_other(self, plain, moved, other, style):
+        ctx = _mint_styled(moved, style)
+        assert _runs(ctx, moved)
+        assert not _runs(ctx, other)
+
+    @pytest.mark.parametrize("command", [
+        "gh pr checkout 6 && " + _NUMBERED,
+        "gh co 6 && " + _NUMBERED,
+        "git checkout feat/x && " + _NUMBERED,
+        "git switch feat/x && " + _NUMBERED,
+        _NUMBERED + "; cd /tmp/other",
+        "echo cd /tmp/other; " + _NUMBERED,
+    ], ids=["pr-checkout", "co", "branch-checkout", "switch", "cd-after", "echoed"])
+    def test_a_plain_numbered_approval_still_covers_a_branch_change(self, command):
+        assert _runs(_mint_styled(_NUMBERED, APPROVAL_STYLES["inline"]), command)
+
+
+class TestANumberedOpInAnotherRepoRetiresOnThatReposState:
+    """The approval of a numbered op run after a change of repository retires on the
+    state of the PR in the repository it ran in: after one literal absolute `cd`
+    that directory's, as a plain numbered approval does in the session's directory.
+    After any other change the session directory's state is never read; the run's
+    own success retires it."""
+
+    _SUCCESS = {"stdout": "", "stderr": "", "interrupted": False}
+
+    def _retire(self, tmp_path, monkeypatch, command, state):
+        import shared.gh_helpers as gh
+
+        read = []
+        monkeypatch.setattr(gh, "check_pr_state", lambda pr, cwd=None: read.append(cwd) or state)
+        monkeypatch.setattr("merge_guard_post.get_session_id", lambda: "")
+        tokens = tmp_path / "tokens"
+        tokens.mkdir()
+        (tokens / "merge-authorized-1").write_text(json.dumps({"context": {
+            "operation_type": "merge", "pr_number": "5", "bound_flags": [],
+            "command_text": normalize_command_text(command)}}))
+        retired = _retire_exact_text_token(command, str(tmp_path / "session"), token_dir=tokens,
+                                           tool_response=self._SUCCESS)
+        return retired, read
+
+    @pytest.mark.parametrize("state,retired", [("MERGED", True), ("OPEN", False)])
+    @pytest.mark.parametrize("shape", ["cd {d} && {op}", "(cd {d} && {op})"], ids=["cd", "subshell-cd"])
+    def test_a_literal_cd_reads_that_directory(self, tmp_path, monkeypatch, shape, state, retired):
+        command = shape.format(d=tmp_path, op=MERGE + "5 --squash")
+        assert self._retire(tmp_path, monkeypatch, command, state) == (retired, [str(tmp_path)])
+
+    @pytest.mark.parametrize("command", [
+        "cd sub && " + MERGE + "5 --squash",
+        "gh repo set-default o/b && " + MERGE + "5 --squash",
+        "export GIT_DIR=/tmp/repoB/.git; " + MERGE + "5 --squash",
+        "export GH_REPO=o/b; " + MERGE + "5 --squash",
+    ], ids=["relative-cd", "set-default", "git-dir-export", "gh-repo-export"])
+    def test_any_other_change_never_reads_the_session_directory(self, tmp_path, monkeypatch, command):
+        assert self._retire(tmp_path, monkeypatch, command, "OPEN") == (True, [])
 
 class TestAnEvalOfALiteralCommandRuns:
     """An eval of a string the region reading locates nothing in (a close or a force
