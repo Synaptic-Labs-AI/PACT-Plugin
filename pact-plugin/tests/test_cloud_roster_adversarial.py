@@ -120,9 +120,31 @@ def test_forged_intent_never_exempts_a_completion(cloud):
         actor_agent_type="pact-backend-coder", actor_name="fresh")
 
 
-def test_truncated_roster_degrades_to_meta_only(cloud):
+def test_truncated_roster_names_no_one(cloud):
+    """A roster cut down to junk (no valid record) is unloadable: the actor is
+    unattributed, never the meta.json name (security review #70)."""
     path = write_roster(cloud, TEAM, _spawned_coder())
     path.write_text(path.read_text()[:40])
-    write_subagent_meta(cloud, SUBAGENT_ID, cloud_meta("coder", "pact-backend-coder"))
-    assert _actor(cloud).source == "subagent_meta"
-    assert cloud_roster.load_roster(TEAM).bindings == {}
+    write_subagent_meta(cloud, SUBAGENT_ID, cloud_meta("victim", "pact-backend-coder"))
+    actor = _actor(cloud)
+    assert actor.name is None and actor.source == SOURCE_UNATTRIBUTED
+    assert cloud_roster.load_roster_state(TEAM) == (None, True)
+
+
+def test_residual_forged_confirm_preempts_the_victims_bind(cloud):
+    """ACCEPTED RESIDUAL (N2, design §0.4): confirms are first-wins per
+    tool_use_id, so a forged confirm for the victim's spawn, appended before
+    the victim's first handback, displaces the victim's bind. The victim
+    degrades to meta-only (the pre-roster baseline); the forger is bound to
+    the victim's name but resolves unattributed unless it also edits its
+    meta.json (the accepted two-file forge)."""
+    forger = "a" + "f" * 16
+    write_roster(cloud, TEAM, [intent(TU1, "victim", "pact-backend-coder"),
+                               confirm(TU1, forger),
+                               bind(TU1, SUBAGENT_ID, "pact-backend-coder")])
+    assert _actor(cloud).source == SOURCE_SUBAGENT_NO_META
+    write_subagent_meta(cloud, forger, cloud_meta("forger", "pact-backend-coder"))
+    forged = resolve_actor(
+        cloud_subagent_frame(cloud, "pact-backend-coder", agent_id=forger), TEAM)
+    assert forged.source == SOURCE_UNATTRIBUTED
+    assert forged.dispute == ("victim", "forger")

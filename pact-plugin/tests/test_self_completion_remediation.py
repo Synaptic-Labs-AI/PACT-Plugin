@@ -248,9 +248,11 @@ def test_user_symlink_to_this_plugin_is_not_a_shadow(team):
 
 
 def test_user_symlink_to_an_installed_pact_copy_is_not_a_shadow(team, tmp_path):
-    """The installed links point into the plugin cache: an agents/ directory
-    whose plugin manifest names PACT."""
-    cache = tmp_path / "cache" / "PACT" / "9.9.9"
+    """The installed links point into the plugin cache under <config>/plugins:
+    an agents/ directory whose plugin manifest names PACT. (A PACT-named
+    manifest outside <config>/plugins is not enough: see
+    test_cloud_roster_hardening.py, security review #70.)"""
+    cache = team / "plugins" / "cache" / "pact-plugin" / "PACT" / "9.9.9"
     _agent_file(cache / "agents", "pact-secretary.md", "pact-secretary")
     (cache / ".claude-plugin").mkdir(parents=True)
     (cache / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": "PACT"}))

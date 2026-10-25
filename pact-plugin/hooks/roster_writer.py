@@ -36,6 +36,10 @@ Why a SubagentStart frame may write `bind`: its stdin is harness-written and
 announces a spawn. A teammate could cause one only by spawning a nested
 subagent, and the bind is still checked against a lead-written intent and its
 type; a later confirm overrides a wrong bind (cloud_roster fold rule 4).
+A bind-only binding also names nobody unless the agent's meta.json carries
+the same name (actor_identity step 4), so a type join that lands on the wrong
+agent (an orphan intent from a denied spawn, see cloud_roster N1) cannot put
+the intent's name on it.
 
 SACROSANCT: fail-open. Every path prints suppressOutput and exits 0; this hook
 never emits context or a decision.

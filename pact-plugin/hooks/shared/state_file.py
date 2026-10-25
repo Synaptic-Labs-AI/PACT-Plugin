@@ -52,7 +52,7 @@ DIR_MODE = 0o700
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
 _LOCK_FLAGS = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
 _TEMP_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
-_APPEND_FLAGS = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
+_APPEND_FLAGS = os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
 _LOCK_POLL_SECONDS = 0.02
 
 
@@ -217,8 +217,13 @@ def append_line(path: Path, data: bytes, root: Path, *, max_file_bytes: int) -> 
     line, well under PIPE_BUF), where O_APPEND makes each write land whole and
     in one piece on a local filesystem, so concurrent writers need no lock.
 
-    Returns False, writing nothing, when the file already holds at least
-    `max_file_bytes` bytes or the write is short. Raises OSError when the
+    A TORN TAIL IS SEALED FIRST. When the file is non-empty and its last byte
+    is not a newline (a crashed or short earlier write), `data` is written
+    with a leading newline in the same single write, so the new record does
+    not merge with the torn one and get skipped with it.
+
+    Returns False when the file already holds at least `max_file_bytes` bytes
+    (writing nothing) or the write is short. Raises OSError when the
     directory resolves outside `root`, when a symlink sits at the path
     (O_NOFOLLOW), or on any I/O error. Never creates a directory: the file's
     directory must already exist. A new file is created with mode 0o600.
@@ -227,8 +232,11 @@ def append_line(path: Path, data: bytes, root: Path, *, max_file_bytes: int) -> 
     target = _contained_directory(path, root) / path.name
     fd = os.open(str(target), _APPEND_FLAGS, FILE_MODE)
     try:
-        if os.fstat(fd).st_size >= max_file_bytes:
+        size = os.fstat(fd).st_size
+        if size >= max_file_bytes:
             return False
+        if size and data[:1] != b"\n" and os.pread(fd, 1, size - 1) != b"\n":
+            data = b"\n" + data
         return os.write(fd, data) == len(data)
     finally:
         os.close(fd)

@@ -27,13 +27,23 @@ config, the cloud roster ties the agent_id to the name the LEAD's own Agent
 call gave it (shared/cloud_roster.py). Step 4 compares that name with
 meta.json's:
   - they agree                -> the name, source `roster_verified`;
-  - meta.json has no name     -> the roster name, source `roster` (deleting
-                                 meta.json no longer erases the name);
+  - meta.json has no name     -> the roster name, source `roster`, but only
+                                 for a CONFIRMED binding (the lead's
+                                 PostToolUse pairing); deleting meta.json no
+                                 longer erases the name. A bind-only binding
+                                 (SubagentStart type join) names nobody on
+                                 its own: an orphan intent from a spawn that
+                                 another hook or the user denied can join the
+                                 wrong same-type agent, so it resolves
+                                 meta-only (no name);
   - they disagree             -> NO name, source `unattributed`, and
                                  `dispute` = (roster name, meta name), so the
                                  advisory and journal show both claims and
                                  neither frames anyone;
-  - no binding for this id    -> meta.json's name, as before (unverified).
+  - no binding for this id    -> meta.json's name, as before (unverified);
+  - the roster file exists but cannot be used (over the size cap, a
+    symlink, unreadable, or junk with no valid record) -> NO name, source
+    `unattributed`: disabling the roster must not restore a forged meta name.
 A teammate that edits only its own meta.json can no longer put another
 member's name on its completion. ACCEPTED RESIDUALS (design
 docs/architecture/cloud-roster.md §7): the roster is a file the same OS user
@@ -69,8 +79,9 @@ that says where the definition came from. So the bare type `pact-secretary`
 is also what a project or user agent named `pact-secretary` would produce.
 When the winning value is bare, names one of this plugin's agents, and a
 definition with that name exists that is not this plugin's own (a project
-`.claude/agents` file, or a user `<config>/agents` file that is not the
-plugin's symlink), the type is ambiguous and resolves to None. A `PACT:`
+`.claude/agents` file, or a user `<config>/agents` file that is not a
+symlink into this plugin or the `<config>/plugins` cache), the type is
+ambiguous and resolves to None. A `PACT:`
 prefix on the winning value is taken as plugin provenance and skips the check.
 """
 
@@ -223,20 +234,29 @@ def _resolve(input_data: Any, team_name: str) -> ActorIdentity:
         name = valid_name(meta.get("name"))
         raw = _first_raw([frame_type, *_meta_candidates(meta)], name)
         agent_type_value = _typed(raw, input_data)
-        binding = _roster_binding(input_data, team_name, frame_type)
+        binding, unloadable = _roster_binding(input_data, team_name, frame_type)
+        if unloadable:
+            # The cloud roster exists but cannot be read: identity unknown,
+            # never a fallback to the (forgeable) meta.json name.
+            return ActorIdentity(ROLE_TEAMMATE, None, agent_type_value, SOURCE_UNATTRIBUTED)
         if binding is not None:
             if name is None:
-                return ActorIdentity(
-                    ROLE_TEAMMATE, binding.name, agent_type_value, SOURCE_ROSTER
-                )
-            if name == binding.name:
+                if binding.strength == cloud_roster.STRENGTH_CONFIRMED:
+                    return ActorIdentity(
+                        ROLE_TEAMMATE, binding.name, agent_type_value, SOURCE_ROSTER
+                    )
+                # A bind-only (unconfirmed) binding names nobody on its own:
+                # the type join can attach an orphan intent to the wrong
+                # agent. Fall through to meta-only (no name).
+            elif name == binding.name:
                 return ActorIdentity(
                     ROLE_TEAMMATE, name, agent_type_value, SOURCE_ROSTER_VERIFIED
                 )
-            return ActorIdentity(
-                ROLE_TEAMMATE, None, agent_type_value, SOURCE_UNATTRIBUTED,
-                dispute=(binding.name, name),
-            )
+            else:
+                return ActorIdentity(
+                    ROLE_TEAMMATE, None, agent_type_value, SOURCE_UNATTRIBUTED,
+                    dispute=(binding.name, name),
+                )
         source = SOURCE_SUBAGENT_META if meta else SOURCE_SUBAGENT_NO_META
         return ActorIdentity(ROLE_TEAMMATE, name, agent_type_value, source)
 
@@ -257,25 +277,27 @@ def _resolve(input_data: Any, team_name: str) -> ActorIdentity:
     )
 
 
-def _roster_binding(input_data: dict, team_name: str, frame_type: Any):
-    """The cloud roster binding for this frame's agent_id, or None.
+def _roster_binding(input_data: dict, team_name: str, frame_type: Any) -> tuple:
+    """(binding, unloadable) for this frame's agent_id from the cloud roster.
 
-    None when the roster does not apply (a team config exists: local, so the
-    roster is never opened), has no binding for the id, or binds it to a type
-    that disagrees with the frame's own type (the frame is harness stdin; a
-    binding that contradicts it is ignored).
+    binding is None when the roster does not apply (a team config exists:
+    local, so the roster is never opened), is missing, has no binding for the
+    id, or binds it to a type that disagrees with the frame's own type (the
+    frame is harness stdin; a binding that contradicts it is ignored).
+    unloadable is True when a cloud roster file exists but cannot be used
+    (cloud_roster.load_roster_state).
     """
     if not cloud_roster.applies(team_name):
-        return None
-    roster = cloud_roster.load_roster(team_name)
+        return None, False
+    roster, unloadable = cloud_roster.load_roster_state(team_name)
     if roster is None:
-        return None
+        return None, unloadable
     binding = roster.binding_for(input_data.get("agent_id"))
     if binding is None:
-        return None
+        return None, False
     if isinstance(frame_type, str) and _strip(frame_type) != _strip(binding.type):
-        return None
-    return binding
+        return None, False
+    return binding, False
 
 
 def typed_without_frame(raw: Any, cwd_hint: Any = None) -> str | None:
@@ -387,7 +409,15 @@ def _definition_dirs(input_data: dict) -> list:
 def _is_plugin_definition(path: Path) -> bool:
     """True iff `path` is a symlink into a PACT plugin's `agents/` directory
     (the links symlinks.py installs into `<config>/agents`). A regular file is
-    a project or user definition, even when its text matches the plugin's."""
+    a project or user definition, even when its text matches the plugin's.
+
+    PROVENANCE IS BY LOCATION, NOT BY MANIFEST ALONE. The symlink's resolved
+    target must be this plugin's own `agents/` directory, or an `agents/`
+    directory under `<config>/plugins` (the plugin cache) whose manifest names
+    PACT. A target anywhere else is not plugin-owned, even beside a
+    `.claude-plugin/plugin.json` that says PACT: a cloned repository can
+    commit both the symlink and that manifest (security review #70).
+    """
     try:
         if not path.is_symlink():
             return False
@@ -395,6 +425,9 @@ def _is_plugin_definition(path: Path) -> bool:
         if target_dir == subagent_meta.plugin_agents_dir().resolve():
             return True
         if target_dir.name != "agents":
+            return False
+        plugins_root = (get_claude_config_dir() / "plugins").resolve()
+        if not target_dir.is_relative_to(plugins_root):
             return False
         manifest = target_dir.parent / ".claude-plugin" / "plugin.json"
         with open(manifest, encoding="utf-8") as f:
@@ -412,7 +445,8 @@ def _definition_name(path: Path) -> str | None:
             head = f.read(_FRONTMATTER_BYTES)
     except OSError:
         return None
-    lines = head.splitlines()
+    # A leading UTF-8 BOM is not part of the frontmatter fence.
+    lines = head.removeprefix("\ufeff").splitlines()
     if not lines or lines[0].strip() != "---":
         return None
     for line in lines[1:]:

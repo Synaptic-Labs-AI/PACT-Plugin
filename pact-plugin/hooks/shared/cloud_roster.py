@@ -38,6 +38,13 @@ FOLD (pure, in `load_roster`):
      A confirmed attachment beats a bind-only one for the same agent_id.
   6. `types_for_name(n)` is the set of stripped types over ALL intents named n.
 
+WHAT A BINDING IS WORTH (enforced by the readers, shared/actor_identity.py):
+a CONFIRMED binding (the lead's PostToolUse pairing) names the agent even
+when its meta.json is gone; a bind-only binding (SubagentStart) names it only
+when meta.json carries the same name. A cloud roster file that exists but
+cannot be used (`load_roster_state` reports it unloadable) names nobody: the
+reader resolves `unattributed` rather than fall back to meta.json.
+
 TAMPER RESISTANCE, STATED HONESTLY. Hooks and teammates run as the same OS
 user and no secret exists that a teammate cannot read, so nothing here
 PREVENTS a teammate from writing this file. The roster raises the cost of
@@ -48,7 +55,24 @@ meta.json consistently". ACCEPTED RESIDUALS (user decision Q1, design §7):
   - meta.json does not exist yet at SubagentStart (measured, WP0), so two
     same-type spawns whose SubagentStarts overlap stay unbound, and resolve
     meta-only as before, until the lead's PostToolUse confirm;
-  - unnamed and nested spawns are not recorded.
+  - unnamed and nested spawns are not recorded;
+  - ORPHAN INTENTS (N1). dispatch_gate writes the intent after ITS OWN
+    non-DENY decision. A later deny by another PreToolUse hook, or the user
+    refusing the Agent call, leaves an intent for a spawn that never ran.
+    Bounded: (a) for owner exemptions it is still the lead's own requested
+    name and type, so it cannot invent an exemption the lead did not ask
+    for; (b) a same-type orphan under 10 minutes old makes the next type join
+    ambiguous (nothing binds until the confirm), or joins a nested same-type
+    start, whose bind-only binding then names nobody unless meta agrees.
+    There is no expiry: nothing distinguishes a denied spawn from a
+    foreground agent still running before its first handback (its confirm
+    arrives only then);
+  - FORGED CONFIRM PRE-EMPTION (N2), a sub-case of the two-file forge.
+    Confirms are first-wins per tool_use_id, so a teammate can append a
+    confirm pairing its own id with a victim's tool_use_id before the
+    victim's first handback. The victim's bind is displaced and it resolves
+    meta-only (the pre-roster baseline); the forger resolves `unattributed`
+    unless it also edits its own meta.json name.
 The real control is harness-side (a cloud TaskCompleted `teammate_name`, or a
 harness-held roster).
 
@@ -223,21 +247,40 @@ def load_roster(team_name: str, teams_dir: str | None = None) -> Roster | None:
     """The folded roster, or None when it does not apply, is missing,
     unreadable, a symlink, or over MAX_ROSTER_BYTES. Lines that fail JSON or
     field validation are skipped. Never raises."""
+    return load_roster_state(team_name, teams_dir)[0]
+
+
+def load_roster_state(
+    team_name: str, teams_dir: str | None = None
+) -> tuple[Roster | None, bool]:
+    """(roster, unloadable). Never raises.
+
+    `unloadable` is True only when the roster applies (cloud), a file (or a
+    symlink) sits at the roster path, and it cannot be used: over
+    MAX_ROSTER_BYTES, a symlink, unreadable, or non-empty with no valid
+    record. A missing or empty file is not unloadable: it is a roster with no
+    records yet. Readers that resolve names treat unloadable as "identity
+    unknown" rather than falling back to meta.json, so disabling the roster
+    (padding, a symlink, junk) cannot restore a forged meta name (security
+    review #70).
+    """
     try:
         if not applies(team_name, teams_dir):
-            return None
+            return None, False
         root = teams_root(teams_dir)
-        text = state_file.read_text(
-            root / team_name / ROSTER_FILENAME, root, max_bytes=MAX_ROSTER_BYTES
-        )
-    except (OSError, state_file.TooLarge):
-        return None
-    except Exception:  # noqa: BLE001
-        return None
-    try:
-        return fold(_parse_lines(text))
-    except Exception:  # noqa: BLE001
-        return None
+        path = root / team_name / ROSTER_FILENAME
+        if not os.path.lexists(path):
+            return None, False
+        try:
+            text = state_file.read_text(path, root, max_bytes=MAX_ROSTER_BYTES)
+        except (OSError, state_file.TooLarge):
+            return None, True
+        records = _parse_lines(text)
+        if not records and text.strip():
+            return None, True
+        return fold(records), False
+    except Exception:  # noqa: BLE001 — totality is the contract
+        return None, False
 
 
 def _parse_lines(text: str) -> list:
