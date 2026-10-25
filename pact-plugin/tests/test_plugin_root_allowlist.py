@@ -226,6 +226,16 @@ class TestLookalikeBoundaries:
         "\U000107ba",   # MODIFIER LETTER SMALL S WITH CURL (Lm), just above
     ])
     def test_neighbours_still_pass(self, char):
+        # U+107B4 and U+107BA were added in Unicode 14. An older unicodedata
+        # (Python 3.9 ships Unicode 13) calls them unassigned (Cn), and the
+        # validator rejects them there, which is the correct fail-closed
+        # verdict. Only an unassigned code point is skipped; any other
+        # non-letter category still fails the assertion below.
+        if unicodedata.category(char) == "Cn":
+            pytest.skip(
+                f"U+{ord(char):04X} is unassigned in Unicode "
+                f"{unicodedata.unidata_version}; it is a letter from Unicode 14"
+            )
         assert unicodedata.category(char)[0] == "L"
         assert is_safe_plugin_root("/a" + char + "b")
 
