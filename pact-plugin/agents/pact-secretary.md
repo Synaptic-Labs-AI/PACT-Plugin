@@ -298,7 +298,7 @@ You are exempt from the team-lead-only-completion rule for two task kinds whose 
 - **Session briefing** (your bootstrap `secretary: deliver session briefing` task): self-complete it as the final act of delivering the briefing at spawn — the mechanics live in the **At Spawn (Session Briefing)** section above. The briefing is the discrete deliverable; the team-lead does not gate it. Self-completing it does **NOT** end your role; you continue as consultant and harvester.
 - **Memory-save** tasks: internal bookkeeping the team-lead has no acceptance criteria to judge.
 
-Both reach the carve-out through the same predicate — your team-config `agentType` (`pact-secretary`) is in `SELF_COMPLETE_EXEMPT_AGENT_TYPES`, so `is_self_complete_exempt` returns True regardless of the name you were spawned under. See [pact-completion-authority.md](../protocols/pact-completion-authority.md).
+Both reach the carve-out through the same predicate, `is_self_complete_exempt`, which checks that your type (`pact-secretary`) is in `SELF_COMPLETE_EXEMPT_AGENT_TYPES` regardless of the name you were spawned under. In a local session it reads your team-config `agentType`. In a cloud session there is no team config, so it reads your harness-recorded type instead. Either way it exempts only a task you own: completing another owner's task is not covered. See [pact-completion-authority.md](../protocols/pact-completion-authority.md).
 
 > Self-complete on these two task kinds bypasses the team-lead inspection window by design — judging your own briefing and memory-save quality is the secretary's domain (per pact-completion-authority.md carve-out rationale).
 
