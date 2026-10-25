@@ -1388,6 +1388,45 @@ class TestANumberedOpInAnotherRepoRetiresOnThatReposState:
     def test_any_other_change_never_reads_the_session_directory(self, tmp_path, monkeypatch, command):
         assert self._retire(tmp_path, monkeypatch, command, "OPEN") == (True, [])
 
+
+class TestAGroupedRunRetiresOnItsOwnSuccess:
+    """A text-bound approval of a command that is one subshell or brace group, whose
+    PR state cannot be read where it ran, retires when the group ran successfully
+    with the op as its last command, as the same command without the group does. A
+    run that did not succeed, or a group whose last command is not the op, keeps it."""
+
+    _SUCCESS = {"stdout": "", "stderr": "", "interrupted": False}
+
+    def _retire(self, tmp_path, monkeypatch, command, tool_response):
+        import shared.gh_helpers as gh
+
+        monkeypatch.setattr(gh, "check_pr_state", lambda pr, cwd=None: "OPEN")
+        monkeypatch.setattr("merge_guard_post.get_session_id", lambda: "")
+        (tmp_path / "merge-authorized-1").write_text(json.dumps({"context": {
+            "operation_type": "merge", "pr_number": "5", "bound_flags": [],
+            "command_text": normalize_command_text(command)}}))
+        return _retire_exact_text_token(command, None, token_dir=tmp_path, tool_response=tool_response)
+
+    @pytest.mark.parametrize("command", [
+        "{ export GH_REPO=o/b; " + MERGE + "5; }",
+        "(export GH_REPO=o/b; " + MERGE + "5)",
+        "(cd sub && " + MERGE + "5)",
+        "{ export GH_REPO=o/b\n" + MERGE + "5\n}",
+        "(export GH_REPO=o/b; echo ')'; " + MERGE + "5)",
+    ], ids=["brace-group", "subshell", "subshell-cd", "newline-brace-group", "quoted-paren"])
+    def test_a_successful_group_run_retires_it(self, tmp_path, monkeypatch, command):
+        assert self._retire(tmp_path, monkeypatch, command, self._SUCCESS)
+
+    @pytest.mark.parametrize("command,tool_response", [
+        ("{ export GH_REPO=o/b; " + MERGE + "5; }", {"stdout": "", "stderr": "", "interrupted": True}),
+        ("{ export GH_REPO=o/b; " + MERGE + "5; }", None),
+        ("(export GH_REPO=o/b; " + MERGE + "5 || true)", _SUCCESS),
+        ("(export GH_REPO=o/b; " + MERGE + "5; echo done)", _SUCCESS),
+        ("(export GH_REPO=o/b; " + MERGE + "5) && echo done", _SUCCESS),
+    ], ids=["interrupted", "no-response", "or-true", "op-not-last", "group-not-whole"])
+    def test_a_run_that_does_not_show_the_ops_success_keeps_it(self, tmp_path, monkeypatch, command, tool_response):
+        assert not self._retire(tmp_path, monkeypatch, command, tool_response)
+
 class TestAnEvalOfALiteralCommandRuns:
     """An eval of a string the region reading locates nothing in (a close or a force
     push inside the quotes) binds its text, so the approved command runs and no

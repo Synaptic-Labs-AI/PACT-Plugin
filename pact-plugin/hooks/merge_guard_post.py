@@ -1349,14 +1349,56 @@ def _op_did_not_run(command: str) -> bool:
         return False
 
 
+def _group_body(command: str) -> str | None:
+    """The body of a command that is one subshell `( … )` or one brace group `{ …; }`,
+    whose exit status is its last command's; None for anything else, including a
+    group followed by more commands. Quoted text is skipped."""
+    text = command.strip()
+    if text[:1] == "(":
+        opener, closer = "(", ")"
+    elif re.match(r"\{\s", text):
+        opener, closer = "{", "}"
+    else:
+        return None
+    depth, quote, i = 0, "", 0
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\" and quote == '"':
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch == "\\":
+            i += 2
+            continue
+        elif ch in "'\"":
+            quote = ch
+        elif ch == opener:
+            depth += 1
+        elif ch == closer:
+            depth -= 1
+            if depth == 0:
+                if i != len(text) - 1:
+                    return None
+                body = text[1:-1].rstrip(" \t")
+                if closer == "}":
+                    if not body.endswith((";", "\n")):
+                        return None
+                    body = body[:-1]
+                return body
+        i += 1
+    return None
+
+
 def _run_succeeded_as_the_op(command: str, op_type: str, tool_response: object) -> bool:
     """Whether this hook firing for `command` means its guarded op succeeded. The
     hook runs on PostToolUse only, and a failed command reaches PostToolUseFailure,
     so a response in the success shape (`stdout` text, not interrupted) means the
     command exited 0. That is the op's own status when the op runs in the
     foreground as the last leg, unnegated, no `||` before it could have skipped it,
-    and it is not a dry run. A shell's -c string is read the same way.
-    Any doubt is False."""
+    and it is not a dry run. A shell's -c string, and a command that is one
+    subshell or brace group, are read the same way. Any doubt is False."""
     if not (
         isinstance(tool_response, dict)
         and isinstance(tool_response.get("stdout"), str)
@@ -1367,6 +1409,9 @@ def _run_succeeded_as_the_op(command: str, op_type: str, tool_response: object) 
         inner = shell_c_string(command)
         if inner is not None:
             return _run_succeeded_as_the_op(inner, op_type, tool_response)
+        body = _group_body(command)
+        if body is not None:
+            return _run_succeeded_as_the_op(body, op_type, tool_response)
         split = _top_level_legs(command)
         if split is None:
             return False
