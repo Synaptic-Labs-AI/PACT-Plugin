@@ -3028,6 +3028,9 @@ CD_TO_AN_ASSIGNED_VARIABLE = [
     ("after an and", "REPO=../repoA && cd $REPO && git pf origin main"),
     ("beside a variable another program reads", "R=hello; mytool \"$R\"; cd ../repoA && git pf origin main"),
     ("exported", "export REPO=../repoA; cd \"$REPO\" && git pf origin main"),
+    ("declared exported", "declare -x REPO=../repoA; cd \"$REPO\" && git pf origin main"),
+    ("typeset exported", "typeset -x REPO=../repoA; cd \"$REPO\" && git pf origin main"),
+    ("declared", "declare REPO=../repoA; cd \"$REPO\" && git pf origin main"),
     ("reassigned", "REPO=../repoB; REPO=../repoA; cd \"$REPO\" && git pf origin main"),
     ("reassigned behind a test", "REPO=../repoB; [ -n \"$X\" ] && REPO=../repoA; cd \"$REPO\" && git pf origin main"),
     ("assigned behind a test", "[ -n \"$X\" ] && REPO=../repoA; cd \"$REPO\" && git pf origin main"),
@@ -3044,8 +3047,9 @@ def test_a_cd_to_a_variable_assigned_a_literal_reads_aliases_there(label, cmd, s
 @pytest.mark.parametrize("cmd", [
     "REPO=../repoB; cd \"$REPO\" && git pf origin main",
     "export REPO=../repoB; cd \"$REPO\" && git pf origin main",
+    "declare -x REPO=../repoB; cd \"$REPO\" && git pf origin main",
     "REPO=../repoA; REPO=../repoB; cd \"$REPO\" && git pf origin main",
-], ids=["assigned", "exported", "reassigned"])
+], ids=["assigned", "exported", "declared-exported", "reassigned"])
 def test_a_cd_to_a_variable_assigned_a_literal_moves_away_from_the_command_directory(cmd, alias_repos):
     import shared.merge_guard_common as mgc
 

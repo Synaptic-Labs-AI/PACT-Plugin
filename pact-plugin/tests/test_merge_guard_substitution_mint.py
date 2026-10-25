@@ -1108,6 +1108,11 @@ EXPORTED_GH_REPOS = {
                        "export GH_REPO=o/c && " + MERGE + "--squash"),
     "close": (_CLOSE_PR + "5 -d", "export GH_REPO=o/b; " + _CLOSE_PR + "5 -d", "export GH_REPO=o/c; " + _CLOSE_PR + "5 -d"),
     "bare-export": (MERGE + "5", "export GH_REPO; " + MERGE + "5", "export GH_REPO GH_HOST; " + MERGE + "5"),
+    "declare-x": (MERGE + "5", "declare -x GH_REPO=o/b; " + MERGE + "5", "declare -x GH_REPO=o/c; " + MERGE + "5"),
+    "typeset-x": (MERGE + "--squash", "typeset -x GH_REPO=o/b && " + MERGE + "--squash",
+                  "typeset -x GH_REPO=o/c && " + MERGE + "--squash"),
+    "combined-flags": (_CLOSE_PR + "5 -d", "declare -rx GH_REPO=o/b; " + _CLOSE_PR + "5 -d",
+                       "declare -rx GH_REPO=o/c; " + _CLOSE_PR + "5 -d"),
 }
 
 
@@ -1136,7 +1141,10 @@ class TestAnExportedGhRepoIsARepoRedirect:
         "GH_REPO=o/a; " + MERGE + "5; export GH_REPO=o/b",
         "export GH_REPO_X=1; " + MERGE + "5",
         "echo export GH_REPO=o/b; " + MERGE + "5",
-    ], ids=["not-exported", "exported-after", "unexported-before-exported-after", "other-name", "echoed"])
+        "declare GH_REPO=o/b; " + MERGE + "5",
+        "declare -r GH_REPO=o/b; " + MERGE + "5",
+    ], ids=["not-exported", "exported-after", "unexported-before-exported-after", "other-name", "echoed",
+            "declared-not-exported", "declared-read-only"])
     def test_a_plain_approval_still_covers_a_gh_repo_gh_does_not_read(self, command):
         assert _runs(_mint_styled(MERGE + "5", APPROVAL_STYLES["inline"]), command)
 

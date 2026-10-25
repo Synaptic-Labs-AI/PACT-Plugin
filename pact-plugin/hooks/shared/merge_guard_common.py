@@ -7038,9 +7038,12 @@ def _assignment_is_conditional(command: str, start: int) -> bool:
 
 def _literal_assignments(command: str, name: str, exported: bool = False) -> "list[re.Match] | None":
     """The literal assignments of `name` that are legs of their own in `command`, with the
-    value in group `v` (with `exported`, `export NAME=…` counts too); None when `name` is
-    also assigned some other way."""
-    assignment = (r"(?:^|(?<=[;&|(\n]))[ \t]*" + (r"(?:export[ \t]+)?" if exported else "") + name
+    value in group `v` (with `exported`, `export NAME=…` and a `declare`, `typeset`,
+    `local` or `readonly` assignment count too, with or without flags); None when `name`
+    is also assigned some other way."""
+    assignment = (r"(?:^|(?<=[;&|(\n]))[ \t]*"
+                  + (r"(?:(?:export|declare|typeset|local|readonly)(?:[ \t]+-[A-Za-z]+)*[ \t]+)?" if exported else "")
+                  + name
                   + r"=(?P<v>'[^']*'|\"[^\"$`\\]*\"|[^\s;&|$`'\"\\()]*)(?=[ \t]*(?:$|[;&|\n]))")
     found = list(re.finditer(assignment, command))
     return found if len(found) == len(re.findall(r"(?<![\w$])" + name + r"=", command)) else None
@@ -10111,7 +10114,12 @@ def target_changes_before_guarded_leg(command: str) -> bool:
     return False
 
 
-_BARE_GH_REPO_EXPORT_RE = re.compile(r"(?:^|[;&|(\n])[ \t]*export[ \t]+(?:[^;&|\n]*[ \t])?GH_REPO(?=[ \t;&|)\n]|$)")
+# `export`, or `declare` / `typeset` with an `-x` flag: the forms that pass a variable to
+# the commands the shell runs.
+_EXPORTING = r"(?:export|(?:declare|typeset)(?:[ \t]+-[A-Za-z]+)*[ \t]+-[A-Za-z]*x[A-Za-z]*)"
+_BARE_GH_REPO_EXPORT_RE = re.compile(
+    r"(?:^|[;&|(\n])[ \t]*" + _EXPORTING + r"[ \t]+(?:[^;&|\n]*[ \t])?GH_REPO(?=[ \t;&|)\n]|$)"
+)
 
 
 def exported_gh_repo_before_guarded_leg(command: str) -> bool:
@@ -10127,8 +10135,8 @@ def exported_gh_repo_before_guarded_leg(command: str) -> bool:
         return True
     found = _literal_assignments(head, "GH_REPO", exported=True)
     if found is None:
-        return re.search(r"(?:^|[;&|(\n])[ \t]*export[ \t][^;&|\n]*GH_REPO=", head) is not None
-    return any(a.group(0).lstrip(" \t").startswith("export") for a in found)
+        return re.search(r"(?:^|[;&|(\n])[ \t]*" + _EXPORTING + r"[ \t][^;&|\n]*GH_REPO=", head) is not None
+    return any(re.match(r"[ \t]*" + _EXPORTING + r"[ \t]", a.group(0)) for a in found)
 
 
 def is_compound_destructive_command(command: str) -> bool:
