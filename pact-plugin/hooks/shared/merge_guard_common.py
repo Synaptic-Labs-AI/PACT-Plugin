@@ -10183,20 +10183,64 @@ def _single_detectable_leg(command: str) -> str | None:
 _TARGET_CHANGING_LEG_RE = re.compile(
     r"^[({\s]*(?:[A-Za-z_]\w*=\S*\s+)*(?:command\s+)?"
     r"(?:git(?:\s+-[Cc]\s+\S+|\s+--\S+)*\s+(?:checkout|switch|remote\s+(?:set-url|add|rename)"
-    r"|config\b(?=[^\n]*\sremote\.\S+\.(?:url|pushurl)\b))\b"
+    r"|config)\b"
     r"|gh\s+(?:pr\s+checkout|co|repo\s+set-default)\b"
     r"|cd\b|pushd\b|popd\b)"
 )
 
+_GIT_CONFIG_SUBCOMMANDS = frozenset({"get", "list", "set", "unset", "rename-section", "remove-section", "edit"})
+_GIT_CONFIG_READ_MODES = frozenset(
+    {"get", "list", "--get", "--get-all", "--get-regexp", "--get-urlmatch", "-l", "--list",
+     "--get-color", "--get-colorbool"}
+)
+_GIT_CONFIG_WRITE_MODES = frozenset(
+    {"set", "unset", "rename-section", "remove-section", "edit", "--unset", "--unset-all",
+     "--replace-all", "--add", "--rename-section", "--remove-section", "-e", "--edit"}
+)
+_GIT_CONFIG_VALUE_OPTIONS = frozenset(
+    {"-f", "--file", "--blob", "--type", "--value", "--default", "--url", "--comment"}
+)
+# Section and variable names are case-insensitive; the remote's name is not, so any
+# name matches.
+_GIT_CONFIG_REMOTE_KEY_RE = re.compile(
+    r"(?i)^remote\..+\.(?:url|pushurl)$"
+)
+_GIT_CONFIG_REMOTE_SECTION_RE = re.compile(r"(?i)^remote(?:\.|$)")
 
-def _git_config_only_reads(leg: str) -> bool:
-    """Whether a `git config` leg naming a remote URL only reads it: `--get`, `--list`,
-    or the key with no value to set."""
-    if re.search(r"\s(?:--get(?:-all|-regexp|-urlmatch)?|-l|--list)\b", leg):
+
+def _git_config_changes_a_remote(leg: str) -> bool:
+    """Whether a `git config` leg may change where a remote points: it sets, unsets or
+    replaces `remote.<name>.url`/`pushurl`, renames or removes a `remote` section, or
+    opens the file in an editor.
+    Reads (`get`, `list`, `--get…`, `-l`, the key alone) change nothing."""
+    _, words = _assignments_reaching_command(leg.rstrip(" \t)};"))
+    i = 1
+    while i < len(words) and words[i].startswith("-"):
+        i += 2 if words[i] in ("-C", "-c") else 1
+    if i >= len(words) or words[i] != "config":
         return True
-    return not re.search(r"\s--unset(?:-all)?\b", leg) and re.search(
-        r"\.(?:url|pushurl)[\s)}]*$", leg
-    ) is not None
+    mode, names, i = None, [], i + 1
+    while i < len(words):
+        word = words[i]
+        if word in _GIT_CONFIG_VALUE_OPTIONS:
+            i += 1
+        elif word.startswith("-") and (word in _GIT_CONFIG_READ_MODES or word in _GIT_CONFIG_WRITE_MODES):
+            mode = mode or word
+        elif not word.startswith("-") or word == "-":
+            if mode is None and not names and word in _GIT_CONFIG_SUBCOMMANDS:
+                mode = word
+            else:
+                names.append(word)
+        i += 1
+    if mode in _GIT_CONFIG_READ_MODES:
+        return False
+    if mode in ("edit", "-e", "--edit"):
+        return True
+    if mode in ("rename-section", "remove-section", "--rename-section", "--remove-section"):
+        return any(_GIT_CONFIG_REMOTE_SECTION_RE.match(name) for name in names)
+    if mode is None and len(names) < 2:
+        return False
+    return bool(names) and _GIT_CONFIG_REMOTE_KEY_RE.match(names[0]) is not None
 
 
 def _leg_names_another_repo(leg: str) -> bool:
@@ -10217,16 +10261,16 @@ def _leg_names_another_repo(leg: str) -> bool:
 
 
 def target_changes_before_guarded_leg(command: str, branch: bool = True) -> bool:
-    """Whether the command's guarded leg runs somewhere other than the current branch
-    of the current repository: a leg before it changes the branch, directory or gh's
+    """Whether the command's guarded leg runs somewhere other than the current branch of
+    the current repository: a leg before it changes the branch, directory or gh's
     default repository (`git checkout`, `git switch`, `gh pr checkout`, `gh repo
-    set-default`, `git remote set-url`/`add`/`rename`, `git config remote.<name>.url`,
-    `cd`, `pushd`, `popd`, also inside a subshell), or the guarded leg names another
-    repository (`git -C`, `--git-dir`, `--work-tree`, `GIT_DIR=`, `GIT_WORK_TREE=`, or
-    either exported in an earlier leg). An op on an implicit target (`gh pr merge
-    --squash`, `git push --force`) then acts on another branch or repo than the one
-    the bare op would. With `branch` False a branch change does not count: a
-    numbered op (`gh pr merge 5`) names its pull request, so only a change of
+    set-default`, `git remote set-url`/`add`/`rename`, a `git config` that changes
+    `remote.<name>.url`, `cd`, `pushd`, `popd`, also inside a subshell), or the guarded
+    leg names another repository (`git -C`, `--git-dir`, `--work-tree`, `GIT_DIR=`,
+    `GIT_WORK_TREE=`, or either exported in an earlier leg). An op on an implicit target
+    (`gh pr merge --squash`, `git push --force`) then acts on another branch or repo
+    than the one the bare op would. With `branch` False a branch change does not count:
+    a numbered op (`gh pr merge 5`) names its pull request, so only a change of
     repository moves it."""
     guarded = _single_destructive_leg(command) or _single_detectable_leg(command)
     if guarded is None:
@@ -10245,7 +10289,7 @@ def target_changes_before_guarded_leg(command: str, branch: bool = True) -> bool
         change = _TARGET_CHANGING_LEG_RE.match(leg)
         if not change or re.search(r"\scheckout\b.*\s--(?:\s|$)|\sset-default\b.*\s(?:-v|--view)\b", leg):
             continue
-        if change.group(0).endswith("config") and _git_config_only_reads(leg):
+        if change.group(0).endswith("config") and not _git_config_changes_a_remote(leg):
             continue
         if branch or not re.search(r"(?:checkout|switch|\bco)$", change.group(0)):
             return True
