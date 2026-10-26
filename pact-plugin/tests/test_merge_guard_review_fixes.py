@@ -3399,3 +3399,19 @@ def test_two_guarded_commands_around_a_substitution_stay_compound(label, cmd):
 
     assert is_compound_destructive_command(cmd) is True
     assert not any(_runs_after_approval(cmd, style) for style in APPROVAL_STYLES.values())
+
+
+# An escaped `\$(` in an eval string inside a -c or eval string is live two levels
+# down; the click that shows such a command binds its exact text.
+NESTED_EVAL_ESCAPED = [
+    ("bash -c, eval", "bash -c 'eval \"echo \\$(" + _HD_PUSH + ")\"'"),
+    ("sh -c, eval", "sh -c 'eval \"echo \\$(" + _HD_PUSH + ")\"'"),
+    ("eval, eval", "eval 'eval \"echo \\$(" + _HD_PUSH + ")\"'"),
+]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", NESTED_EVAL_ESCAPED, ids=[r[0] for r in NESTED_EVAL_ESCAPED])
+def test_an_escaped_substitution_two_levels_down_is_refused_then_runs(label, cmd, style):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)

@@ -134,6 +134,8 @@ try:
         binds_a_masked_value,
         # A merge or close after an exported GH_REPO binds its text.
         exported_gh_target_before_guarded_leg,
+        # The pre-hook's token match: a click mints a token that match accepts.
+        _token_matches_command,
     )
     from shared.tool_response import extract_tool_response
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-loud catch-all
@@ -349,6 +351,44 @@ def _leg_bounded_flag_scan_surface(flag_scan_text: str, the_command: str) -> str
 
 
 def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
+    """The token a click mints: the one `_mint_context_by_reading` binds, unless the
+    clicked option shows exactly one command, in a code span, that the pre-hook refuses
+    as a single operation and would not run under that token (or there is none). That
+    command binds its exact text, so the approval runs it, and only it. Every refusal
+    other than finding no command stands."""
+    result = _mint_context_by_reading(questions, answers)
+    if result.refusal_reason not in (None, "no_command"):
+        return result
+    command = _clicked_refused_command(questions, answers)
+    if command is None or (
+        result.context is not None and _token_matches_command({"context": result.context}, command)
+    ):
+        return result
+    operation = extract_command_context(
+        _single_destructive_leg(command) or _single_detectable_leg(command) or command
+    ).get("operation_type") or detect_command_operation_type(command) or "guarded command"
+    return MintResult({"operation_type": operation, "command_text": normalize_command_text(command)}, None)
+
+
+def _clicked_refused_command(questions: list, answers: dict) -> str | None:
+    """The one command the clicked options show in code spans that the pre-hook refuses
+    as a single operation, or None when they show none or several."""
+    found: dict[str, str] = {}
+    for q in questions:
+        if not isinstance(q, dict) or q.get("multiSelect", False):
+            continue
+        text = _selected_option_text(q.get("options"), answers.get(q.get("question", "")))
+        for _raw, content in _code_spans(text or ""):
+            span = content.strip()
+            if span and is_dangerous_command(span):
+                found[normalize_command_text(span)] = span
+    if len(found) != 1:
+        return None
+    command = next(iter(found.values()))
+    return None if is_compound_destructive_command(command) else command
+
+
+def _mint_context_by_reading(questions: list, answers: dict) -> MintResult:
     """Decide whether an AskUserQuestion bundle authorizes exactly ONE destructive
     command; return a `MintResult(context, refusal_reason)` — `context` is the dict
     to mint, or None (with a `refusal_reason` code) to refuse.

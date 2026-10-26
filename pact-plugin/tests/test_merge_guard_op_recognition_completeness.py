@@ -45,6 +45,7 @@ from shared.merge_guard_common import (  # noqa: E402
 from merge_guard_pre import _token_matches_command as MATCH  # noqa: E402
 from merge_guard_pre import check_merge_authorization  # noqa: E402
 from merge_guard_post import (  # noqa: E402
+    _mint_context_by_reading,
     _mint_context_from_bundle,
     _target_value,
     write_token,
@@ -56,6 +57,16 @@ IMPLICIT = "\x00implicit"  # the implicit-remote marker used by remote-mass-dele
 # ---------------------------------------------------------------------------
 # Helpers — the real mint path and a token builder.
 # ---------------------------------------------------------------------------
+
+def _bundle(cmd_text):
+    """The questions and answers of a faithful click on `cmd_text`, as `mint` builds them."""
+    question = {
+        "question": "Proceed?",
+        "options": [{"label": "Yes, do it", "description": f"Run `{cmd_text}` now"}],
+        "multiSelect": False,
+    }
+    return [question], {"Proceed?": "Yes, do it"}
+
 
 def mint(cmd_text):
     """Drive the REAL mint path: place a faithful command in an affirmative
@@ -2186,18 +2197,24 @@ class TestApiMergeMintParity:
             "gh -R o/r api repos/o/r/pulls/5/merge && echo -X PUT",  # per-leg canary, tolerant matcher
         ],
     )
-    def test_non_faithful_api_merge_stays_unclassified_and_unmintable(self, cmd):
+    def test_non_faithful_api_merge_stays_unclassified_and_binds_no_merge(self, cmd):
         """No-new-under-block + additive purity: every non-faithful form stays
-        detect-None and unmintable. The per-leg canaries are the rows that would
+        detect-None and binds no merge. The per-leg canaries are the rows that would
         FAIL under a whole-command arm (a method keyword in a benign continuation
         leg must not classify the compound) — they hold under the tolerant client
         matcher too (Ruling-B widens only the in-leg client span, not the leg
-        isolation). The non-pulls row is read-floor-gated (D=True) but
-        deliberately unmintable — a PRE-EXISTING read-floor-breadth residual on a
-        path that is not the merges endpoint, not a #1096 regression."""
+        isolation). The non-pulls row is read-floor-gated (D=True), a PRE-EXISTING
+        read-floor-breadth residual on a path that is not the merges endpoint: its
+        click binds its exact text, runs only that text, and binds no (op, target)."""
         assert OP(cmd) is None, f"non-faithful API-merge form classified: {cmd!r}"
         ctx, _refusal = mint(cmd)
-        assert ctx is None, f"non-faithful API-merge form MINTED: {cmd!r}"
+        if not D(cmd):
+            assert ctx is None, f"non-faithful API-merge form MINTED: {cmd!r}"
+            return
+        assert ctx is not None and ctx.get("command_text") == cmd, f"gated form not bound by its text: {cmd!r}"
+        assert _target_value(ctx) is None and ctx.get("operation_type") != "merge"
+        assert MATCH({"context": ctx}, cmd)
+        assert not MATCH({"context": ctx}, "gh api -X PUT /repos/o/r/pulls/42/merge")
 
     @pytest.mark.parametrize(
         "cmd,expected_op",
@@ -2242,8 +2259,10 @@ class TestApiMergeMintParity:
                 "arm-disable shim did not restore the pre-fix detect surface — "
                 "the cured-spelling assertions would be vacuous"
             )
+            reading = _mint_context_by_reading(*_bundle(cmd)).context
+            assert reading is None, "the reading survived the detect-arm disable"
             ctx2, _ = mint(cmd)
-            assert ctx2 is None, "mint survived the detect-arm disable"
+            assert ctx2 is None or "pr_number" not in ctx2, "a merge target survived the detect-arm disable"
             ctl, _ = mint("gh pr merge 42")
             assert ctl is not None, "CLI-merge control must be unaffected by the shim"
         finally:
@@ -2260,10 +2279,14 @@ class TestApiMergeMintParity:
         assert ctx is not None
         monkeypatch.setattr(mgc, "_extract_api_merge_pr", lambda c: None)
         assert OP(cmd) == "merge"  # detect unaffected — isolates the extractor
-        ctx2, _ = mint(cmd)
-        assert ctx2 is None, (
-            "extractor neuter did not break the mint — the pr-target wiring "
+        reading = _mint_context_by_reading(*_bundle(cmd)).context
+        assert reading is None, (
+            "extractor neuter did not break the reading — the pr-target wiring "
             "assertions would be vacuous"
+        )
+        ctx2, _ = mint(cmd)
+        assert ctx2 is not None and ctx2.get("command_text") == cmd and "pr_number" not in ctx2, (
+            "the neutered click did not fall back to its exact text"
         )
         ctl, _ = mint("gh pr merge 42")
         assert ctl is not None, "CLI-merge control must be unaffected"

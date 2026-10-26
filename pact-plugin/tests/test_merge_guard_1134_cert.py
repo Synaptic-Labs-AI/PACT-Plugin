@@ -450,6 +450,16 @@ def _execute(cmd, tok):
             return e.code if isinstance(e.code, int) else _ALLOW
 
 
+def _reading(cmd):
+    """What the mint's own reading binds for a click on an option showing `cmd`, before
+    the exact-text fallback."""
+    q = [{"question": "Proceed?", "options": [
+        {"label": "Yes", "description": "Run `%s`" % cmd},
+        {"label": "Cancel", "description": "Abort"},
+    ]}]
+    return mgpost._mint_context_by_reading(q, {"Proceed?": "Yes"}).context
+
+
 def _won_key(ctx):
     """The single identity key bound in a token context (which-key-won)."""
     keys = [k for k in _TARGET_KEYS if ctx.get(k)]
@@ -738,15 +748,19 @@ class TestD2GatedButUnmintableKnownBad:
                     or cmd_ctx.get("protected_branch"))  # target_ref DROPPED
 
         monkeypatch.setattr(mgpost, "_target_value", _tv_without_target_ref)
-        # KNOWN-BAD in a FRESH dir: mint 0 -> the exec finds no token -> DENY. The faithful
-        # click is refused with no way to authorize = the gated-but-unmintable over-block.
+        # KNOWN-BAD in a FRESH dir: the reading binds nothing (the gated-but-unmintable
+        # over-block), the exec without a token is denied, and the click binds the row's
+        # exact text instead of its target_ref, which runs only that text.
         kb = tmp_path / "kb"
         kb.mkdir()
-        m2, _ = _mint(row, kb)
-        assert m2 == 0, "mint-target neuter did not stop the mint — the guard is inert"
+        assert _reading(row) is None, "mint-target neuter did not stop the reading — the guard is inert"
         assert _execute(row, kb) == _DENY, (
-            "gated-but-unmintable row was not denied — the round-trip cannot see the "
+            "gated row was not denied without a token — the round-trip cannot see the "
             "over-block it exists to catch"
+        )
+        m2, ctx2 = _mint(row, kb)
+        assert m2 == 1 and ctx2 is not None and ctx2.get("command_text") and not ctx2.get("target_ref"), (
+            "the neutered row did not fall back to its exact text"
         )
 
 

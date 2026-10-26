@@ -148,6 +148,19 @@ def _roundtrip(mint_cmd: str, exec_cmd: str, tok: Path):
     return minted, rc
 
 
+def _click_contexts(cmd: str):
+    """(what the mint's own reading binds, the token the click mints) for a click on an
+    option showing `cmd`. The click binds the command's exact text when the reading binds
+    nothing the pre-hook accepts for it."""
+    q = [{"question": "Proceed?", "options": [
+        {"label": "Yes", "description": "Run `%s`" % cmd},
+        {"label": "Cancel", "description": "Abort"},
+    ]}]
+    a = {"Proceed?": "Yes"}
+    return (merge_guard_post._mint_context_by_reading(q, a).context,
+            merge_guard_post._mint_context_from_bundle(q, a).context)
+
+
 ALLOW, DENY = 0, 2
 # The five FORCE spellings detect classifies as branch-delete (#1094 per-leg cure).
 _FORCE_SPELLINGS = [_D, "-Df", "-fD", "--delete --force", "--force --delete"]
@@ -290,15 +303,23 @@ class TestGatherCorrectness:
         assert minted == 1
         assert rc == ALLOW
 
-    def test_zero_positional_force_delete_is_unmintable_and_denied(self, tmp_path):
+    def test_zero_positional_force_delete_binds_its_exact_text(self, tmp_path):
         # `git branch -D` with NO branch names: no branch / no branch_set -> no
-        # (op,target) pair -> no token; the read side denies (gated, fail-closed).
+        # (op,target) pair, so the click binds the command's exact text. The read side
+        # refuses it without a token, runs it with its own, and never on another's.
         cmd = _GB + _D
         assert "branch" not in mgc.extract_command_context(cmd)
         assert "branch_set" not in mgc.extract_command_context(cmd)
+        reading, ctx = _click_contexts(cmd)
+        assert reading is None and ctx is not None and ctx.get("command_text") == cmd
+        assert _execute(cmd, tmp_path) == DENY
         minted, rc = _roundtrip(cmd, cmd, tmp_path)
-        assert minted == 0
-        assert rc == DENY
+        assert minted == 1
+        assert rc == ALLOW
+        other = tmp_path / "other"
+        other.mkdir()
+        assert _mint(_cmd(_D, ["solo"]), other) == 1
+        assert _execute(cmd, other) == DENY
 
 
 # ===========================================================================
@@ -345,10 +366,15 @@ class TestNonVacuity:
         # is ever produced, so the multi-branch delete has no target -> no mint -> deny.
         # `_command` (underscore prefix) = intentionally-unused positional: the stub must
         # match the real _extract_branch_delete_set(command) arity, but the neuter ignores it.
+        # The binding the extraction gives: the reading binds the branch set. Neutered, the
+        # reading binds nothing and the click falls back to the command's exact text.
+        multi = _cmd(_D, ["aa", "bb"])
+        reading, ctx = _click_contexts(multi)
+        assert reading and reading.get("branch_set") and ctx is not None and "command_text" not in ctx
         monkeypatch.setattr(mgc, "_extract_branch_delete_set", lambda _command: None)
-        minted, rc = _roundtrip(_cmd(_D, ["aa", "bb"]), _cmd(_D, ["aa", "bb"]), tmp_path)
-        assert minted == 0, "extraction neutered yet a branch_set token still minted"
-        assert rc == DENY
+        reading, ctx = _click_contexts(multi)
+        assert reading is None, "extraction neutered yet the reading still bound a branch_set"
+        assert ctx is not None and ctx.get("command_text") == multi and not ctx.get("branch_set")
         # Control: single-branch scalar path is independent of _extract_branch_delete_set.
         smint, src = _roundtrip(_cmd(_D, ["solo"]), _cmd(_D, ["solo"]), tmp_path)
         assert smint == 1 and src == ALLOW
@@ -363,27 +389,35 @@ class TestNonVacuity:
                     or cmd_ctx.get("target_ref")
                     or cmd_ctx.get("mass_target")
                     or cmd_ctx.get("protected_branch"))
+        # The binding the mint site gives: the reading binds the branch set. Neutered, the
+        # reading binds nothing (the gated-but-unmintable bug, before the exact-text
+        # fallback) and the click binds the command's exact text instead.
+        multi = _cmd(_D, ["aa", "bb"])
+        reading, ctx = _click_contexts(multi)
+        assert reading and reading.get("branch_set") and ctx is not None and "command_text" not in ctx
         monkeypatch.setattr(merge_guard_post, "_target_value", _target_value_without_branch_set)
-        minted, rc = _roundtrip(_cmd(_D, ["aa", "bb"]), _cmd(_D, ["aa", "bb"]), tmp_path)
-        assert minted == 0, "mint-site neutered yet a multi-branch token still minted (the gated-but-unmintable bug)"
-        assert rc == DENY
+        reading, ctx = _click_contexts(multi)
+        assert reading is None, "mint-site neutered yet the reading still bound a multi-branch target"
+        assert ctx is not None and ctx.get("command_text") == multi and not ctx.get("branch_set")
         # Control: single-branch uses the `branch` key, still present in _target_value.
         smint, src = _roundtrip(_cmd(_D, ["solo"]), _cmd(_D, ["solo"]), tmp_path)
         assert smint == 1 and src == ALLOW
 
     def test_read_arm_is_load_bearing(self, tmp_path, monkeypatch):
-        # Neuter site 3 (read arm): drop branch_set from the READ side's command context
-        # only (post/mint side untouched). The token mints WITH branch_set, but the read
-        # arm's branch_set clause can no longer match -> deny.
+        # Neuter site 3 (read arm): drop branch_set from the command context the token
+        # match reads (merge_guard_common's, which the mint also checks its token with).
+        # A token minted WITH branch_set before the neuter can no longer match -> deny.
+        multi = _cmd(_D, ["aa", "bb"])
+        minted = _mint(multi, tmp_path)
+        assert minted == 1
         _real_ecc = mgc.extract_command_context
 
         def _ecc_drop_branch_set(command, *a, **k):
             d = dict(_real_ecc(command, *a, **k))
             d.pop("branch_set", None)
             return d
-        monkeypatch.setattr(merge_guard_pre, "extract_command_context", _ecc_drop_branch_set)
-        minted, rc = _roundtrip(_cmd(_D, ["aa", "bb"]), _cmd(_D, ["aa", "bb"]), tmp_path)
-        assert minted == 1, "read-arm neuter must not affect the mint side (token should still mint)"
+        monkeypatch.setattr(mgc, "extract_command_context", _ecc_drop_branch_set)
+        rc = _execute(multi, tmp_path)
         assert rc == DENY, "read arm neutered yet a multi-branch token still authorized"
         # Control: single-branch matches on the scalar `branch` key, not branch_set.
         smint, src = _roundtrip(_cmd(_D, ["solo"]), _cmd(_D, ["solo"]), tmp_path)

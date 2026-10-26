@@ -1231,7 +1231,12 @@ class TestLegBoundedMintWindow:
         monkeypatch.setattr(post_mod, "_leg_bounded_flag_scan_surface", lambda text, cmd: text)
         tmp2 = tmp_path / "prefix-sim"
         tmp2.mkdir()
-        assert _invoke_post([_q(q, opts)], {q: "Yes, push"}, tmp2) == 0
+        # The mint checks its token against the pre-hook's match and falls back to the
+        # exact text, a second closer; the window is about the reading's binding, so its
+        # token is written as the reading binds it.
+        ctx = post_mod._mint_context_by_reading([_q(q, opts)], {q: "Yes, push"}).context
+        assert ctx is not None
+        _seed_token(tmp2, ctx)
         assert _token_bound_flags(tmp2) == ["--force-with-lease", "remote=origin"], (
             "full-text mutation did not restore the pre-fix echo-literal bind — "
             "the channel-closed canaries would be vacuous"

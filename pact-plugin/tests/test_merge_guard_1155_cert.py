@@ -203,17 +203,19 @@ class TestEndToEndTokenOracle:
         # command derives (merge,5), so the (close,5) token REFUSES — the observed
         # symptom (any token the user minted for the close spelling mismatched).
         baseline = load_baseline()
+        # The token match lives in merge_guard_common, so its seams are patched there;
+        # the danger gate is merge_guard_pre's own import.
         monkeypatch.setattr(
-            merge_guard_pre, "extract_command_context", baseline.extract_command_context
+            mgc, "extract_command_context", baseline.extract_command_context
         )
         monkeypatch.setattr(
             merge_guard_pre, "is_dangerous_command", baseline.is_dangerous_command
         )
         monkeypatch.setattr(
-            merge_guard_pre, "_single_destructive_leg", baseline._single_destructive_leg
+            mgc, "_single_destructive_leg", baseline._single_destructive_leg
         )
         monkeypatch.setattr(
-            merge_guard_pre, "_single_detectable_leg", baseline._single_detectable_leg
+            mgc, "_single_detectable_leg", baseline._single_detectable_leg
         )
         merge_guard_post.write_token(dict(self.CLOSE_TOKEN_CTX), token_dir=tmp_path)
         assert merge_guard_pre.check_merge_authorization(BITE, tmp_path) is not None, (

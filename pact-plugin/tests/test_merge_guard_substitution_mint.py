@@ -981,8 +981,12 @@ class TestAnImplicitCloseRuns:
         ctx = _mint_styled(_CLOSE_PR + "5 --delete-branch", APPROVAL_STYLES["inline"])
         assert _runs(ctx, _CLOSE_PR + "--delete-branch 5")
 
-    def test_a_target_less_branch_delete_stays_unmintable(self):
-        assert _mint_styled("git branch -" + "D", APPROVAL_STYLES["inline"]) is None
+    def test_a_target_less_branch_delete_binds_its_exact_text(self):
+        command = "git branch -" + "D"
+        ctx = _mint_styled(command, APPROVAL_STYLES["inline"])
+        assert ctx is not None and ctx.get("command_text") == command
+        assert _runs(ctx, command)
+        assert not _runs(ctx, command + " feat")
 
 
 REPO_CHANGES = {
