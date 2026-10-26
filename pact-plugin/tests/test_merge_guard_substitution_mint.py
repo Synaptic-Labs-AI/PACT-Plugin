@@ -569,9 +569,10 @@ TWO_QUOTED_BACKTICK_COMMANDS = {
 }
 MASKED_READINGS = {
     "force-backtick-target": (ROWS["force-backtick"],
-                              {"operation_type": "force-push", "bound_flags": [], "target_ref": "_"}),
+                              {"operation_type": "force-push", "bound_flags": ["remote=origin"], "target_ref": "_"}),
     "force-dollar-paren-target": (ROWS["force-dollar-paren"],
-                                  {"operation_type": "force-push", "bound_flags": [], "target_ref": "_"}),
+                                  {"operation_type": "force-push", "bound_flags": ["remote=origin"],
+                                   "target_ref": "_"}),
     "merge-dollar-paren-target": (ROWS["merge-dollar-paren"],
                                   {"operation_type": "merge", "bound_flags": [], "pr_number": "branch:_"}),
 }
@@ -1603,6 +1604,59 @@ class TestAQuotedFlagValueBindsByText:
 
         region = extract_command_context(_single_destructive_leg(quoted) or quoted)
         assert not _runs(region, quoted)
+
+
+_PUSH_FX = "git push --" + "force origin feat/x"
+PUSH_DESTINATIONS = {
+    "force-push-remote": (_PUSH_FX, "git push --" + "force upstream feat/x"),
+    "force-push-ssh-url": (_PUSH_FX, "git push --" + "force git@github.com:o/b.git feat/x"),
+    "force-push-https-url": (_PUSH_FX, "git push --" + "force https://github.com/o/b.git feat/x"),
+    "force-push-path": (_PUSH_FX, "git push --" + "force ../repoB feat/x"),
+    "force-push-set": ("git push --" + "force origin main feature", "git push --" + "force upstream main feature"),
+    "push-to-main": ("git push origin main", "git push upstream main"),
+    "lease-push-to-main": ("git push --force-with-lease origin main", "git push --force-with-lease upstream main"),
+    "ref-delete": ("git push origin --delete stale", "git push upstream --delete stale"),
+    "ref-delete-colon": ("git push origin :stale", "git push upstream :stale"),
+}
+SAME_DESTINATION_SPELLINGS = {
+    "short-force": (_PUSH_FX, "git push -f origin feat/x"),
+    "force-after-remote": (_PUSH_FX, "git push origin --" + "force feat/x"),
+    "force-last": (_PUSH_FX, "git push origin feat/x --" + "force"),
+    "push-option-between": (_PUSH_FX, "git push --" + "force -o ci.skip origin feat/x"),
+    "quoted-remote": (_PUSH_FX, 'git push --' + 'force "origin" feat/x'),
+}
+
+
+class TestAPushNamingItsRefsBindsItsDestination:
+    """A push that names its refs names its destination first: an approval for one
+    remote, URL or path does not cover the same refs pushed elsewhere, the other
+    destination's own approval runs it, and respellings of the same destination
+    still run."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("approved,elsewhere", PUSH_DESTINATIONS.values(), ids=PUSH_DESTINATIONS.keys())
+    def test_another_destination_needs_its_own_approval(self, approved, elsewhere, style):
+        ctx = _mint_styled(approved, style)
+        assert _runs(ctx, approved)
+        assert not _runs(ctx, elsewhere)
+        own = _mint_styled(elsewhere, style)
+        assert _runs(own, elsewhere)
+        assert not _runs(own, approved)
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("approved,respelled", SAME_DESTINATION_SPELLINGS.values(),
+                             ids=SAME_DESTINATION_SPELLINGS.keys())
+    def test_the_same_destination_respelled_still_runs(self, approved, respelled, style):
+        assert _runs(_mint_styled(approved, style), respelled)
+        assert _runs(_mint_styled(respelled, style), approved)
+
+    def test_a_push_with_no_refspec_keeps_its_remote_in_its_target(self):
+        from shared.merge_guard_common import extract_command_context
+
+        assert "remote=origin" not in extract_command_context("git push --" + "force origin")["bound_flags"]
+        assert _runs(_mint_styled("git push --" + "force origin", APPROVAL_STYLES["inline"]), "git push -f origin")
+        assert not _runs(_mint_styled("git push --" + "force origin", APPROVAL_STYLES["inline"]),
+                         "git push --" + "force upstream")
 
 class TestAnEvalOfALiteralCommandRuns:
     """An eval of a string the region reading locates nothing in (a close or a force

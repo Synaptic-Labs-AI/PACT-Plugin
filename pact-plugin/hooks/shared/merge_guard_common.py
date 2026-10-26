@@ -2773,6 +2773,15 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
     context["bound_flags"] = extract_privileged_flags(
         flag_scan_text if flag_scan_text is not None else command, op_type
     )
+    # A push that names its refs names its destination first (`git push --force origin
+    # feat/x`): the remote, URL or path binds, so the same refs pushed elsewhere need
+    # their own approval. It is read from the text the target is read from, so both
+    # sides agree. A push with no refspec carries its remote in its target.
+    if op_type in ("force-push", "push-to-main", "remote-ref-delete"):
+        after = _tokens_after_push(command)
+        positionals = _push_positionals(after) if after is not None else []
+        if len(positionals) >= 2:
+            context["bound_flags"] = sorted(set(context["bound_flags"]) | {"remote=" + positionals[0]})
     if op_type in ("merge", "close"):
         # close accepts {<number>|<url>|<branch>} — bind whichever the command
         # carries so EVERY faithful close form MINTS (not just the number form).

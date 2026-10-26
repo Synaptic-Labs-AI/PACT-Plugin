@@ -335,7 +335,7 @@ class TestReadArmExactMatchAuthorizes:
         AUTHORIZE (the abbreviation expands to the same canonical token) — the
         expansion does not introduce a spurious over-block on a faithful re-run."""
         assert _authorizes(
-            {"operation_type": "force-push", "target_ref": "main", "bound_flags": ["--no-verify"]},
+            {"operation_type": "force-push", "target_ref": "main", "bound_flags": ["--no-verify", "remote=origin"]},
             command,
         )
 
@@ -363,7 +363,7 @@ class TestReadArmExactMatchAuthorizes:
         must not over-block the faithful lease click the #1064 fix un-blocks."""
         assert _authorizes(
             {"operation_type": "push-to-main", "target_ref": "main",
-             "bound_flags": ["--force-with-lease"]},
+             "bound_flags": ["--force-with-lease", "remote=origin"]},
             "git push --force-with-lease origin main",
         )
 

@@ -280,8 +280,8 @@ class TestRemoteRefDeleteParityMintAndNonVacuity:
         must NOT authorize the command. If MATCH ignored the target, the green
         authorize assertion above would be meaningless."""
         cmd = "git push origin :feature"
-        assert MATCH(token("remote-ref-delete", target_ref="feature"), cmd) is True
-        assert MATCH(token("remote-ref-delete", target_ref="other"), cmd) is False
+        assert MATCH(token("remote-ref-delete", target_ref="feature", bound_flags=["remote=origin"]), cmd) is True
+        assert MATCH(token("remote-ref-delete", target_ref="other", bound_flags=["remote=origin"]), cmd) is False
 
     def test_cross_op_token_does_not_authorize_ref_delete(self):
         """A force-push token must NOT authorize a remote-ref-delete of the same
@@ -824,16 +824,13 @@ class TestAcceptedGrainAndAwarenessPins:
     DELIBERATE, ratified boundaries — they are NOT under-blocks, and pinning them
     prevents a future reader from mistaking the boundary for a bug."""
 
-    def test_cross_remote_same_named_single_ref_delete_shares_token_accepted_grain(self):
-        """§10 target-grain asymmetry: remote-ref-delete binds ref-ONLY (no remote,
-        per the force-push target_ref precedent), so a token minted for one remote
-        authorizes the SAME-named single-ref delete on a DIFFERENT remote within the
-        single-use window. This is an ACCEPTED honest-mistake grain by explicit
-        decision (the operator approved "delete ref feature"; the remote differs) —
-        documented here as accepted, NOT an under-block."""
-        tok = token("remote-ref-delete", target_ref="feature")
+    def test_a_same_named_single_ref_delete_on_another_remote_needs_its_own_approval(self):
+        """§10 target grain: remote-ref-delete binds the ref and the remote it is
+        deleted from, so a token minted for one remote does not authorize the
+        SAME-named single-ref delete on a DIFFERENT remote."""
+        tok = token("remote-ref-delete", target_ref="feature", bound_flags=["remote=origin"])
         assert MATCH(tok, "git push origin :feature") is True
-        assert MATCH(tok, "git push upstream :feature") is True  # ACCEPTED grain (ref-only bind)
+        assert MATCH(tok, "git push upstream :feature") is False
 
     def test_quoted_gh_api_field_value_collides_with_preexisting_var_strip(self):
         """AWARENESS PIN (pre-existing, OUT-of-scope): a gh-api field value written

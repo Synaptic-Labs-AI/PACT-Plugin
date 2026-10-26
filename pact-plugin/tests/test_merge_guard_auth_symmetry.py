@@ -578,7 +578,7 @@ class TestShellRedirectIsolation:
         destination re-derives to `main` and matches the token. (Previously this
         over-blocked; the fix re-derives the target from the executable prefix and
         the redirect filename can never become the ref — no #1032 under-block.)"""
-        self._seed_typed(tmp_path, {"operation_type": "force-push", "target_ref": "main"})
+        self._seed_typed(tmp_path, {"operation_type": "force-push", "target_ref": "main", "bound_flags": ["remote=origin"]})
         assert _authorize("git push --force origin main 2>&1", tmp_path) is None
         # Companion: WITHOUT the redirect the same token also authorizes.
         assert _authorize("git push --force origin main", tmp_path) is None
@@ -956,7 +956,8 @@ class TestLegBoundedMintWindow:
         q = "Proceed with this operation?"
         opts = [_opt("Yes, run it", f"On approval run: `{member}`"), _opt("Cancel", "Abort")]
         assert _invoke_post([_q(q, opts)], {q: "Yes, run it"}, tmp_path) == 0
-        assert _token_bound_flags(tmp_path) == []
+        # A push binds its destination; the echo literal binds nothing.
+        assert _token_bound_flags(tmp_path) == (["remote=origin"] if member.startswith("git push") else [])
         assert _authorize(member, tmp_path) is None
 
     def test_next_line_flag_literal_no_longer_binds(self, tmp_path):
@@ -969,7 +970,7 @@ class TestLegBoundedMintWindow:
             _opt("Cancel", "Abort"),
         ]
         assert _invoke_post([_q(q, opts)], {q: "Yes, push"}, tmp_path) == 0
-        assert _token_bound_flags(tmp_path) == []
+        assert _token_bound_flags(tmp_path) == ["remote=origin"]
         assert _authorize(cmd, tmp_path) is None
 
     # --- the closed escalation channel, per reachable op-class ---
@@ -995,7 +996,7 @@ class TestLegBoundedMintWindow:
         q = "Proceed?"
         opts = [_opt("Yes, run it", f"On approval run: `{member}`"), _opt("Cancel", "Abort")]
         assert _invoke_post([_q(q, opts)], {q: "Yes, run it"}, tmp_path) == 0
-        assert _token_bound_flags(tmp_path) == []
+        assert _token_bound_flags(tmp_path) == (["remote=origin"] if member.startswith("git push") else [])
         assert _authorize(escalated, tmp_path) is not None
 
     # --- close op-class: the emergent members are now not-dangerous per-leg ---
@@ -1183,7 +1184,7 @@ class TestLegBoundedMintWindow:
         q = "Push?"
         opts = [_opt("Yes, push", f"On approval run: `{cmd}` now"), _opt("Cancel", "Abort")]
         assert _invoke_post([_q(q, opts)], {q: "Yes, push"}, tmp_path) == 0
-        assert _token_bound_flags(tmp_path) == ["--force-with-lease"]
+        assert _token_bound_flags(tmp_path) == ["--force-with-lease", "remote=origin"]
         assert _authorize(cmd, tmp_path) is None
         assert _authorize("git push origin main", tmp_path) is not None
 
@@ -1197,7 +1198,7 @@ class TestLegBoundedMintWindow:
         q = "Push?"
         opts = [_opt("Yes, push", f"On approval run: `{member}`"), _opt("Cancel", "Abort")]
         assert _invoke_post([_q(q, opts)], {q: "Yes, push"}, tmp_path) == 0
-        assert _token_bound_flags(tmp_path) == ["--force-with-lease"]
+        assert _token_bound_flags(tmp_path) == ["--force-with-lease", "remote=origin"]
         assert _authorize(member, tmp_path) is None
 
     def test_compound_refuse_upstream_of_bind(self, tmp_path):
@@ -1223,7 +1224,7 @@ class TestLegBoundedMintWindow:
         opts = [_opt("Yes, push", f"On approval run: `{member}`"), _opt("Cancel", "Abort")]
         # direction 1 — fix present: bind [] and the escalation refuses
         assert _invoke_post([_q(q, opts)], {q: "Yes, push"}, tmp_path) == 0
-        assert _token_bound_flags(tmp_path) == []
+        assert _token_bound_flags(tmp_path) == ["remote=origin"]
         assert _authorize(escalated, tmp_path) is not None
         # direction 2 — pre-fix surface restored: the channel re-opens
         import merge_guard_post as post_mod
@@ -1231,7 +1232,7 @@ class TestLegBoundedMintWindow:
         tmp2 = tmp_path / "prefix-sim"
         tmp2.mkdir()
         assert _invoke_post([_q(q, opts)], {q: "Yes, push"}, tmp2) == 0
-        assert _token_bound_flags(tmp2) == ["--force-with-lease"], (
+        assert _token_bound_flags(tmp2) == ["--force-with-lease", "remote=origin"], (
             "full-text mutation did not restore the pre-fix echo-literal bind — "
             "the channel-closed canaries would be vacuous"
         )
@@ -1377,7 +1378,7 @@ class TestPrivilegedFlagReadFloorSeam:
         _seed_token(
             tmp_path,
             {"operation_type": "force-push", "target_ref": "main",
-             "bound_flags": ["--no-verify"]},
+             "bound_flags": ["--no-verify", "remote=origin"]},
         )
         assert _authorize("git push --no-verify origin main --force", tmp_path) is None
 

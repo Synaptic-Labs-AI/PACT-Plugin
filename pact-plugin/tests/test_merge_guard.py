@@ -982,7 +982,7 @@ class TestNUseBoundedToken:
         # Second approval (different op): authorizes MAX_USES force-pushes
         with patch("merge_guard_post.time") as mock_time:
             mock_time.time.return_value = time.time() + 1
-            write_token({"operation_type": "force-push", "target_ref": "main"}, token_dir=tmp_path)
+            write_token({"operation_type": "force-push", "target_ref": "main", "bound_flags": ["remote=origin"]}, token_dir=tmp_path)
         for _ in range(MAX_USES):
             assert check_merge_authorization(
                 "git push --force origin main", token_dir=tmp_path
@@ -4731,7 +4731,7 @@ class TestDirectPushToDefaultBranch:
         from merge_guard_post import write_token
         from merge_guard_pre import check_merge_authorization
 
-        write_token({"operation_type": "push-to-main", "target_ref": "main"},
+        write_token({"operation_type": "push-to-main", "target_ref": "main", "bound_flags": ["remote=origin"]},
                     token_dir=tmp_path)
 
         result = check_merge_authorization("git push origin main", token_dir=tmp_path)
@@ -9818,8 +9818,9 @@ class TestBenignContinuationGuarantee:
     # so they join merge / close in this guarantee. ``close`` carries
     # ``--delete-branch`` (its danger trigger), so its token context MUST bind
     # that flag — the read-side set-equality flag gate refuses otherwise — exactly
-    # as the mint side extracts it from the approval text. ``merge`` /
-    # ``force-push`` / ``branch-delete`` carry no privileged flag.
+    # as the mint side extracts it from the approval text. ``force-push`` binds its
+    # destination (``remote=origin``); ``merge`` / ``branch-delete`` carry no bound
+    # flag.
     _AUTHORIZED_OPS = [
         ("merge", "gh pr merge 5", {"operation_type": "merge", "pr_number": "5"}),
         (
@@ -9831,7 +9832,7 @@ class TestBenignContinuationGuarantee:
         (
             "force-push",
             "git push --force origin main",
-            {"operation_type": "force-push", "target_ref": "main"},
+            {"operation_type": "force-push", "target_ref": "main", "bound_flags": ["remote=origin"]},
         ),
         (
             "branch-delete",
@@ -10106,7 +10107,7 @@ class TestCrossOperationAuthorizationDenied:
         from merge_guard_post import write_token
         from merge_guard_pre import check_merge_authorization
 
-        write_token({"operation_type": "force-push", "target_ref": "feature"},
+        write_token({"operation_type": "force-push", "target_ref": "feature", "bound_flags": ["remote=origin"]},
                     token_dir=tmp_path)
         result = check_merge_authorization(
             "git push --force origin feature", token_dir=tmp_path
@@ -11300,7 +11301,7 @@ class TestLeaseToDefaultGateAndMint:
         ctx = self._mint(self.LEASE, tmp_path)
         assert ctx["operation_type"] == "push-to-main"
         assert ctx["target_ref"] == "main"
-        assert ctx["bound_flags"] == ["--force-with-lease"]
+        assert ctx["bound_flags"] == ["--force-with-lease", "remote=origin"]
         code, _out = self._pre(self.LEASE, tmp_path)
         assert code == 0
 
@@ -11312,7 +11313,7 @@ class TestLeaseToDefaultGateAndMint:
         ctx = self._mint(self.LEASE_VALUE, tmp_path)
         assert ctx["operation_type"] == "push-to-main"
         assert ctx["target_ref"] == "main"
-        assert ctx["bound_flags"] == ["--force-with-lease"]
+        assert ctx["bound_flags"] == ["--force-with-lease", "remote=origin"]
         code, _out = self._pre(self.LEASE_VALUE, tmp_path)
         assert code == 0
 
@@ -11321,7 +11322,7 @@ class TestLeaseToDefaultGateAndMint:
         push CAN rewrite history, so the minted plain token (bound_flags=[]) must
         not set-equal the executed {--force-with-lease}."""
         ctx = self._mint(self.PLAIN, tmp_path)
-        assert ctx["bound_flags"] == []
+        assert ctx["bound_flags"] == ["remote=origin"]
         code, out = self._pre(self.LEASE, tmp_path)
         assert code == 2
         assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
@@ -11330,7 +11331,7 @@ class TestLeaseToDefaultGateAndMint:
         """The symmetric direction: approve LEASE, execute PLAIN -> DENY (set-
         equality refuses dropped flags too; the operator re-approves)."""
         ctx = self._mint(self.LEASE, tmp_path)
-        assert ctx["bound_flags"] == ["--force-with-lease"]
+        assert ctx["bound_flags"] == ["--force-with-lease", "remote=origin"]
         code, out = self._pre(self.PLAIN, tmp_path)
         assert code == 2
         assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
@@ -12628,7 +12629,7 @@ class TestTokenLifecycleExtensions:
     # rule" applied to dict-key cardinality.
     # ------------------------------------------------------------------
 
-    def _write_session_token(self, tmp_path, op_type, session_id="test-session"):
+    def _write_session_token(self, tmp_path, op_type, session_id="test-session", **context):
         """Helper: directly write a token with the given op_type +
         session_id, bypassing write_token's sparse-context guard.
 
@@ -12645,7 +12646,7 @@ class TestTokenLifecycleExtensions:
         token_data = {
             "created_at": now,
             "expires_at": now + 300,
-            "context": {"operation_type": op_type},
+            "context": {"operation_type": op_type, **context},
             "session_id": session_id,
             "max_uses": MAX_USES,
             "uses_remaining": MAX_USES,
@@ -12866,7 +12867,7 @@ class TestTokenLifecycleExtensions:
         from merge_guard_post import main
 
         token = self._write_session_token(
-            tmp_path, "force-push", session_id="s-fp"
+            tmp_path, "force-push", session_id="s-fp", bound_flags=["remote=origin"]
         )
         envelope = json.dumps({
             "tool_name": "Bash",
@@ -12907,7 +12908,7 @@ class TestTokenLifecycleExtensions:
 
         # Phase 1 — positive
         self._write_session_token(
-            tmp_path, "force-push", session_id="s-pair-fp"
+            tmp_path, "force-push", session_id="s-pair-fp", bound_flags=["remote=origin"]
         )
         positive_envelope = json.dumps({
             "tool_name": "Bash",
@@ -12929,7 +12930,7 @@ class TestTokenLifecycleExtensions:
 
         # Phase 2 — negative: --force-with-lease is safe variant
         token2 = self._write_session_token(
-            tmp_path, "force-push", session_id="s-pair-fp"
+            tmp_path, "force-push", session_id="s-pair-fp", bound_flags=["remote=origin"]
         )
         token2_new = tmp_path / "merge-authorized-fp-phase2"
         token2.rename(token2_new)

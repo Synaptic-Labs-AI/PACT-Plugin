@@ -30,7 +30,7 @@ from pathlib import Path
 import pytest
 from merge_guard_post import write_token
 from merge_guard_pre import check_merge_authorization
-from shared.merge_guard_common import extract_command_context
+from shared.merge_guard_common import _single_destructive_leg, extract_command_context
 
 _PLUGIN = Path(__file__).resolve().parent.parent
 _HOOK = _PLUGIN / "hooks" / "merge_guard_post.py"
@@ -78,7 +78,7 @@ def _post(rig, command, response, state="MERGED", rc=0):
 
 
 def _mint(rig, command):
-    ctx = extract_command_context(command)
+    ctx = extract_command_context(_single_destructive_leg(command) or command)
     assert ctx.get("operation_type"), ctx
     assert write_token(ctx, token_dir=rig["config"])
 
@@ -373,7 +373,7 @@ class TestAGitAliasRetiresAsTheCommandItRuns:
 
     def test_a_shell_alias_push_retires(self, rig):
         cmd = "git -c alias.x='!git push --" + "force' x origin main"
-        assert write_token({"operation_type": "force-push", "bound_flags": [], "target_ref": "main"},
+        assert write_token({"operation_type": "force-push", "bound_flags": ["remote=origin"], "target_ref": "main"},
                            token_dir=rig["config"])
         _post(rig, cmd, _EMPTY)
         assert _retired(rig)

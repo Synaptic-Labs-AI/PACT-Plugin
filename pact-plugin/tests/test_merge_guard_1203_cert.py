@@ -535,6 +535,8 @@ class TestDimCNoCrossAuth:
             if ctx.get("force_push_implicit"):
                 ctx.pop("force_push_implicit")
                 ctx["target_ref"] = "main"    # runtime-resolve to the current branch
+                # ... pushed to the default remote, which the explicit push names
+                ctx["bound_flags"] = sorted(set(ctx.get("bound_flags", [])) | {"remote=origin"})
             return ctx
 
         monkeypatch.setattr(mgpost, "extract_command_context", _resolved)

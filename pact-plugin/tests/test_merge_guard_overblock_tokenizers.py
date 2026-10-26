@@ -408,7 +408,7 @@ class TestForcePushBranchDeleteDefensiveWrongTarget:
 
     def test_forcepush_matching_target_authorizes_companion(self, tmp_path):
         assert write_token(
-            {"operation_type": "force-push", "target_ref": "feature"}, token_dir=tmp_path
+            {"operation_type": "force-push", "target_ref": "feature", "bound_flags": ["remote=origin"]}, token_dir=tmp_path
         ) is not None
         assert check_merge_authorization(self._FP_EXEC, token_dir=tmp_path) is None  # AUTHORIZE
 
@@ -632,7 +632,7 @@ class TestFixADigitGluedRedirectUnderBlock:
         # Non-vacuity control: a token for the ACTUAL ref (`main2`) AUTHORIZES the
         # same exec -> the refusal above is target-discrimination, not a no-match.
         assert write_token(
-            {"operation_type": "force-push", "target_ref": "main2"}, token_dir=tmp_path
+            {"operation_type": "force-push", "target_ref": "main2", "bound_flags": ["remote=origin"]}, token_dir=tmp_path
         ) is not None
         assert check_merge_authorization(
             "git push --force origin main2>log", token_dir=tmp_path
@@ -643,7 +643,7 @@ class TestFixADigitGluedRedirectUnderBlock:
         # authorizes a token-`main` — so it is the DIGIT that shifts the target
         # (`main2>log` REFUSES, just above), not the bare `>` redirect.
         assert write_token(
-            {"operation_type": "force-push", "target_ref": "main"}, token_dir=tmp_path
+            {"operation_type": "force-push", "target_ref": "main", "bound_flags": ["remote=origin"]}, token_dir=tmp_path
         ) is not None
         assert check_merge_authorization(
             "git push --force origin main>log", token_dir=tmp_path

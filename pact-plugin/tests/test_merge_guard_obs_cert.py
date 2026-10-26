@@ -607,14 +607,14 @@ class TestObsGPushSetMintability:
         tok = _gtok(_PG + "origin main feature")
         assert _greads(tok, _PG + other) is False, "%s wrongly authorized" % label
 
-    def test_set_equality_authorizes_same_reorder_dup_and_remote_agnostic(self):
+    def test_set_equality_authorizes_same_reorder_dup_and_refuses_another_remote(self):
         tok = _gtok(_PG + "origin main feature")
         assert _greads(tok, _PG + "origin main feature") is True
         assert _greads(tok, _PG + "origin feature main") is True
         assert _greads(tok, _PG + "origin main feature feature") is True
-        # remote-AGNOSTIC (security-ratified Q5): mirrors the scalar target_ref,
-        # which already binds the ref only — no NEW equivalence class.
-        assert _greads(tok, _PG + "upstream main feature") is True
+        # The destination binds, as the scalar target_ref's does: the same refs
+        # pushed to another remote need their own approval.
+        assert _greads(tok, _PG + "upstream main feature") is False
 
     # ---- (b) SCOPE BOUNDARY — force-push / delete multi-ref stay unmintable ----
     @pytest.mark.parametrize(
@@ -691,13 +691,13 @@ class TestObsGPushSetMintability:
     # ---- (e) the REQUIRED 5th property: bound_flags negatives (a2 inheritance) ----
     def test_plain_set_token_refuses_lease_multi_ref(self):
         plain = _gtok(_PG + "origin main feature")
-        assert plain["context"].get("bound_flags") == []
+        assert plain["context"].get("bound_flags") == ["remote=origin"]
         lease_cmd = _PG + "--for" + "ce-with-lease origin main feature"
         # premise: the lease multi-ref classifies push-to-main with lease BOUND,
         # so the a2 set-equality (plain [] vs [--force-with-lease]) refuses.
         lease_ctx = _gctx(lease_cmd)
         assert lease_ctx.get("operation_type") == "push-to-main"
-        assert lease_ctx.get("bound_flags") == ["--for" + "ce-with-lease"]
+        assert lease_ctx.get("bound_flags") == ["--for" + "ce-with-lease", "remote=origin"]
         assert _greads(plain, lease_cmd) is False, (
             "a PLAIN push_set token authorized a history-rewriting lease push"
         )
@@ -1703,7 +1703,7 @@ class TestObsIForcePushSetMintability:
         assert _greads(force_tok, _PG + "--for" + "ce origin main") is False
         assert _greads(force_tok, _PG + "--for" + "ce origin main develop") is False
         assert _greads(force_tok, _PG + "--for" + "ce origin feature main") is True   # reorder
-        assert _greads(force_tok, _PG + "--for" + "ce upstream main feature") is True  # remote-agnostic
+        assert _greads(force_tok, _PG + "--for" + "ce upstream main feature") is False  # destination binds
 
     # ---- (C) READ-direction closure: pure token vs non-neutral executions ----
     @pytest.mark.parametrize(
@@ -1726,7 +1726,7 @@ class TestObsIForcePushSetMintability:
         nv_cmd = _PG + "--for" + "ce --no-verify origin main feature"
         nv = _gctx(nv_cmd)
         assert nv.get("force_push_set") == _i_pure_id()
-        assert nv.get("bound_flags") == ["--no-verify"]
+        assert nv.get("bound_flags") == ["--no-verify", "remote=origin"]
         assert _greads({"context": _gctx(_I_PURE)}, nv_cmd) is False  # plain refuses nv (a2)
         assert _greads({"context": nv}, nv_cmd) is True
 
