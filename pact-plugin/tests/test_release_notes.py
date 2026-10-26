@@ -184,6 +184,8 @@ _FENCE = "code fences"
 _HTML = "HTML blocks"
 _RULE = "a line of only = or -"
 _VHEAD = "a version heading must be exactly"
+_H12 = "inside a version section use ### or deeper"
+_DISCLOSURE = "<details> or <summary>"
 
 # The reason the checker gives for any byte outside the line-1 allowlist.
 _ALLOW = "may contain only printable ASCII, em dash or en dash"
@@ -326,7 +328,7 @@ _ALLOW = "may contain only printable ASCII, em dash or en dash"
         # HTML blocks.
         ("<pre> block", b"## v1.2.3: a\n\n<pre>\n## v1.2.2: x\n</pre>\n", _HTML),
         ("<script> block", b"## v1.2.3: a\n\nbody\n\n<script>alert(1)</script>\n", _HTML),
-        ("<details> block", b"## v1.2.3: a\n\n<details>\n\nhidden\n\n</details>\n", _HTML),
+        ("<details> block", b"## v1.2.3: a\n\n<details>\n\nhidden\n\n</details>\n", _DISCLOSURE),
         ("indented HTML block", b"## v1.2.3: a\n\n   <div>\nx\n", _HTML),
         # Setext underlines, thematic breaks, front matter.
         ("setext === underline", b"## v1.2.3: a\n\nTitle\n===\n\nbody\n", _RULE),
@@ -346,7 +348,28 @@ _ALLOW = "may contain only printable ASCII, em dash or en dash"
         ("quoted version heading", b"## v1.2.3: a\n\nbody\n\n> ## v1.2.2: x\n", _VHEAD),
         ("list-item version heading", b"## v1.2.3: a\n\nbody\n\n- ## v1.2.2: x\n", _VHEAD),
         ("indented-code version line", b"## v1.2.3: a\n\nbody\n\n    ## v1.2.2: x\n", _VHEAD),
-        ("non-numeric version", b"## v1.2.3: a\n\nbody\n\n## vNEXT: later\n\nleak\n", _VHEAD),
+        # `## vNEXT` is not version-like (no digit), but after the first
+        # section any non-version #/## heading is rejected (H-1).
+        ("non-numeric version", b"## v1.2.3: a\n\nbody\n\n## vNEXT: later\n\nleak\n", _H12),
+        # H-1: a non-version level-1/2 heading after the first section would
+        # render as its own section but be published in the one above.
+        (
+            "[Unreleased] between sections",
+            b"## v1.2.4: a\n\nx\n\n## [Unreleased]\n\nwip\n\n## v1.2.3: b\n\ny\n",
+            _H12,
+        ),
+        ("[Unreleased 1.2.4]", b"## v1.2.3: a\n\nbody\n\n## [Unreleased 1.2.4]\n\nwip\n", _H12),
+        ("## Upcoming", b"## v1.2.3: a\n\nbody\n\n## Upcoming\n\nwip\n", _H12),
+        ("## Version x.y.z", b"## v1.2.3: a\n\nbody\n\n## Version 1.2.2: x\n\nleak\n", _H12),
+        ("## Release x.y.z", b"## v1.2.3: a\n\nbody\n\n## Release 1.2.2\n\nleak\n", _H12),
+        ("# Title after a section", b"## v1.2.3: a\n\nbody\n\n# Title\n\nmore\n", _H12),
+        ("> ## Note after a section", b"## v1.2.3: a\n\nbody\n\n> ## Note\n", _H12),
+        ("## VSM in a section", b"## v1.2.3: a\n\nbody\n\n## VSM\n\nmore\n", _H12),
+        # H-2: collapsible HTML anywhere, even inline or in code spans.
+        ("inline <details>", b"## v1.2.3: a\n\ntext <details> more\n", _DISCLOSURE),
+        ("inline <summary>", b"## v1.2.3: a\n\nsee <Summary>x</Summary>\n", _DISCLOSURE),
+        # H-3: autolinks are not modelled; a line led by one is an HTML block.
+        ("line led by an autolink", b"## v1.2.3: a\n\n<https://example.com> docs\n", _HTML),
     ],
 )
 def test_checker_rejects(tmp_path, label, content, expected_reason):
@@ -390,15 +413,16 @@ def test_extraction_picks_one_section_trims_and_promotes(tmp_path):
 
 
 def test_section_ends_only_at_the_next_version_heading(tmp_path):
-    """A `## Something` subheading stays in the body; only `## vX.Y.Z: ` ends it.
+    """Subheadings (### and deeper) stay in the body; only `## vX.Y.Z: ` ends it.
 
-    `## Validation` starts with a V but is not version-like, so it is allowed.
+    `### Validation` starts with a V but is not version-like. (A `##`
+    subheading inside a section is rejected instead: see the reject table.)
     """
     root = _require_checkout()
     changelog = tmp_path / "CHANGELOG.md"
     changelog.write_bytes(
-        b"## v1.2.3: boundaries\n\n### Summary\n\n## Something\n\ntext\n\n"
-        b"## Validation\n\n#### Deep\n\nend\n\n"
+        b"## v1.2.3: boundaries\n\n### Summary\n\n### Something\n\ntext\n\n"
+        b"### Validation\n\n#### Deep\n\nend\n\n"
         b"## v1.2.2: older\n\nolder\n"
     )
     code, reason, _, body = _check(root, "1.2.3", changelog, tmp_path)
@@ -406,6 +430,29 @@ def test_section_ends_only_at_the_next_version_heading(tmp_path):
     assert body == (
         b"## Summary\n\n## Something\n\ntext\n\n## Validation\n\n### Deep\n\nend\n"
     )
+
+
+@pytest.mark.parametrize(
+    "label, content",
+    [
+        ("[Unreleased] above the newest version", b"## [Unreleased]\n\nwip\n\n## v1.2.3: a\n\nbody\n"),
+        ("### Notes inside a section", b"## v1.2.3: a\n\n### Notes\n\nbody\n"),
+        ("# comment in indented code", b"## v1.2.3: a\n\nRun:\n\n    # install it\n    make\n"),
+        # BB-5: these are not version headings.
+        ("- #1667 issue bullet", b"## v1.2.3: a\n\n- #1667 fix\n"),
+        ("#1667 at line start", b"## v1.2.3: a\n\n#1667 at line start\n"),
+        ("### VSM", b"## v1.2.3: a\n\n### VSM\n\nbody\n"),
+        ("### VS Code", b"## v1.2.3: a\n\n### VS Code\n\nbody\n"),
+    ],
+)
+def test_checker_accepts_grammar_edge_cases(tmp_path, label, content):
+    root = _require_checkout()
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_bytes(content)
+    code, reason, _, _ = _check(root, "1.2.3", changelog)
+    assert code == 0, f"{label}: {reason}"
+    code, versions = _list(root, changelog)
+    assert code == 0, f"{label}: {versions}"
 
 
 def test_list_mode_rejects_a_malformed_version_heading(tmp_path):

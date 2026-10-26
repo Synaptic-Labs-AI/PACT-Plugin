@@ -31,15 +31,16 @@
 #   deeper promoted one level (`### Summary` is published as `## Summary`).
 #   The file uses a restricted Markdown, so the checker never has to model
 #   Markdown to split sections the way GitHub renders them: no NUL, CR, HTML
-#   comment or HTML block, no code fence, no `===`/`---` line, and every
-#   version-like heading in the canonical form. The rules and extraction are
-#   defined once, in .github/scripts/check-release-notes.sh, and run twice:
-#   on every PR by pact-plugin/tests/test_release_notes.py (the current
-#   version's section and every other `## v` section), and here before
-#   release. CHANGELOG.md is read from the bump commit if that copy has a
-#   valid section for the version, otherwise from the tip of main (how
-#   v4.8.9-v4.8.11 were backfilled, and how a bad section that reached main
-#   is repaired: fix it on main and the next run uses that copy, with a
+#   comment, HTML block or <details>/<summary>, no code fence, no `===`/`---`
+#   line, every version-like heading in the canonical form, and no other
+#   `#`/`##` heading after the first version section. The rules and
+#   extraction are defined once, in .github/scripts/check-release-notes.sh,
+#   and run twice: on every PR by pact-plugin/tests/test_release_notes.py
+#   (the current version's section and every other `## v` section), and
+#   here before release. CHANGELOG.md is read from the bump commit if that
+#   copy has a valid section for the version, otherwise from the tip of main
+#   (how v4.8.9-v4.8.11 were backfilled, and how a bad section that reached
+#   main is repaired: fix it on main and the next run uses that copy, with a
 #   warning). No valid section anywhere stops the run before anything is
 #   created.
 #

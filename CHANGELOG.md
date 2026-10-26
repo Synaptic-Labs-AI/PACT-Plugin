@@ -11,9 +11,12 @@ becomes the tag message, followed by `### Summary`, `### What landed` and
 section split identical to what GitHub renders, the file uses a restricted
 Markdown: LF line endings; no HTML comments or HTML blocks; no fenced code
 blocks (no run of three backticks or three tildes anywhere; inline `code` is
-fine); no lines made only of `=` or `-`; and every heading that names a
-version is exactly `## vX.Y.Z: <summary>` at column 0.
-Every PR checks the whole file with `.github/scripts/check-release-notes.sh`.
+fine); no collapsible details or summary HTML tags; no line starting with
+`<` (write links as `[text](url)`); no lines made only of `=` or `-`; and
+every heading that names a version is exactly `## vX.Y.Z: <short summary>` at
+column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
+goes only above the newest version. Every PR checks the whole file with
+`.github/scripts/check-release-notes.sh`.
 
 ## v4.8.12: backlog ref checks over REST when GraphQL is blocked, and releases cut by CI (issue #1667)
 

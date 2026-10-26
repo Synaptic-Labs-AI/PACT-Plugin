@@ -43,20 +43,33 @@
 #   - No NUL byte and no carriage return anywhere (a NUL would be dropped
 #     silently by the shell; a CR would be published as is).
 #   - No HTML comment (`<!--`) anywhere: GitHub hides commented-out text.
+#   - No `<details` or `<summary` anywhere (any case, even in inline code):
+#     collapsible HTML can fold text away from the rendered page.
 #   - No code fence: no line contains ``` or ~~~ anywhere (inline `code`
 #     with single backticks is fine).
-#   - No HTML block: no line starts with `<` after 0-3 spaces.
+#   - No HTML block: no line starts with `<` after 0-3 spaces. Autolinks are
+#     not modelled, so a line cannot start with `<https://...>` either:
+#     write links as `[text](url)`.
 #   - No setext underline, thematic break or front matter: no line is only
 #     `=` characters or only `-` characters after 0-3 spaces.
 #   - Version headings are canonical: every line that looks like a heading
 #     naming a version must be exactly `## vX.Y.Z: <summary>` at column 0.
 #     "Looks like" means: after any indent (spaces or tabs, so indented code
-#     counts too) and any `>` / `-` / `*` / `+` / `1.` / `1)` prefixes, 1+ `#`,
-#     then optional `[`, then either a digit (with optional `v`/`V` before
-#     it) or `v`/`V` followed by anything but a lowercase letter. That
-#     catches `## V4.8.12:`, `##v4.8.12:`, `## [4.8.12] - date`,
-#     `# v4.8.12:`, `### v4.8.12:`, `## vNEXT`, an indented `## v...`,
-#     `> ## v...` and `- ## v...`, while `## Validation` stays a subheading.
+#     counts too) and any `>` / `-` / `*` / `+` / `1.` / `1)` prefixes, a
+#     heading (1-6 `#` then a space, tab or end of line) whose text starts
+#     with optional `[`, optional `v`/`V`, optional spaces, then a digit; or
+#     the no-space typo where `v<digit>` or a dotted number follows the `#`s
+#     directly. That catches `## V4.8.12:`, `##v4.8.12:`, `## [4.8.12] -
+#     date`, `# v4.8.12:`, `### v4.8.12:`, an indented `## v...`,
+#     `> ## v...` and `- ## v...`, while `- #1667 fix`, `## Validation` and
+#     `### VS Code` are not version headings. (A non-version `#`/`##`
+#     heading after the first section is caught by the next rule.)
+#   - Headings inside sections are level 3 or deeper. From the first version
+#     heading to the end of the file, a `#` or `##` heading (0-3 spaces, any
+#     `>` or list prefixes) that is not a canonical version heading is an
+#     error: GitHub would show it as a separate section, but it would be
+#     published inside the version above. Above the first version heading
+#     (the preamble), `## [Unreleased]` and similar headings are fine.
 #   - Exactly one heading line starts `## v<version>: `. None is "missing";
 #     two or more is "duplicate".
 #   - The heading minus `## ` is the annotated tag message verbatim, so it
@@ -126,6 +139,13 @@ if [ "$comments" -ne 0 ]; then
   echo "file contains an HTML comment ('<!--'); GitHub hides its text"
   exit 1
 fi
+# Collapsible HTML can fold text away from the rendered page; matched as a
+# plain case-insensitive substring, inline code spans included, on purpose.
+disclosure="$(grep -c -i -F -e '<details' -e '<summary' -- "$file" || true)"
+if [ "$disclosure" -ne 0 ]; then
+  echo "file contains <details> or <summary>; GitHub can fold text away behind it"
+  exit 1
+fi
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -138,7 +158,7 @@ awk -v mode="$mode" -v want="## v$version: " \
     -v count_out="$work/count" -v err_out="$work/error" -v list_out="$work/list" '
   function fail(msg) { if (err == "") err = "line " NR ": " msg; exit }
   BEGIN {
-    n = 0; in_section = 0; err = ""
+    n = 0; in_section = 0; seen_version = 0; err = ""
     printf "" > head_out; printf "" > body_out; printf "" > list_out
   }
   {
@@ -155,10 +175,37 @@ awk -v mode="$mode" -v want="## v$version: " \
       r = line
       sub(/^[ \t]*/, "", r)
       while (sub(/^(>|[-*+]|[0-9]+[.)])[ \t]*/, "", r)) {}
-      if (r ~ /^#+[ \t]*\[?[vV]?[ \t]*[0-9]/ || r ~ /^#+[ \t]*\[?[vV]([^a-z]|$)/)
+      # A heading is 1-6 # then a space, tab or end of line (CommonMark ATX),
+      # so `#1667` is text, not a heading. Version-like: a heading whose text
+      # starts with optional [, optional v/V, optional spaces, then a digit;
+      # or the no-space typo `##v1.2` / `#1.2.3` (a v or a dotted number
+      # right after the hashes; a bare `#1667` issue number is not one).
+      version_like = 0
+      if (match(r, /^#+/) && RLENGTH <= 6) {
+        hashes = RLENGTH; text = substr(r, hashes + 1)
+        if (text ~ /^([ \t]|$)/) {
+          sub(/^[ \t]*/, "", text)
+          if (text ~ /^\[?[vV]?[ \t]*[0-9]/) version_like = 1
+        } else if (text ~ /^\[?([vV][ \t]*[0-9]|[0-9]+\.[0-9])/) {
+          version_like = 1
+        }
+      }
+      if (version_like)
         fail("a version heading must be exactly \"## vX.Y.Z: <summary>\" at column 0")
     }
+    # After the first version heading, a level-1 or level-2 heading that is
+    # not a version heading would render as a separate section on GitHub
+    # but be published inside the version above it. 0-3 spaces of indent
+    # (CommonMark ATX limit, so `# comment` in indented code is fine), then
+    # the same >/list prefix stripping as above.
+    if (!canonical && seen_version && indent <= 3) {
+      h = rest
+      while (sub(/^(>|[-*+]|[0-9]+[.)])[ \t]*/, "", h)) {}
+      if (h ~ /^##?([ \t]|$)/)
+        fail("inside a version section use ### or deeper; put \"## [Unreleased]\" above the newest version")
+    }
     if (canonical) {
+      seen_version = 1
       in_section = 0
       if (mode == "list") {
         v = substr(line, 5); sub(/: .*/, "", v); print v > list_out
