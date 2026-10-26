@@ -589,8 +589,8 @@ class TestRemoteDeleteSplitBinding:
     """The two remote-delete classes get DIFFERENT bindings, and the asymmetry is
     deliberate:
 
-        remote-ref-delete   --mirror, --prune, --no-verify
-        remote-mass-delete  --no-verify only
+        remote-ref-delete   --mirror, --prune, --no-verify, --receive-pack, --exec
+        remote-mass-delete  --no-verify, --receive-pack, --exec
 
     WHY THESE ASSERTIONS ARE STRUCTURAL AND NOT BEHAVIORAL. A behavioral row here
     would be decorative by construction. The correct SPLIT binding and a defective
@@ -607,7 +607,7 @@ class TestRemoteDeleteSplitBinding:
     entry in the table must be load-bearing. So the shape itself is what gets
     asserted."""
 
-    def test_ref_delete_binds_all_three_modifiers(self):
+    def test_ref_delete_binds_its_modifiers(self):
         """--mirror/--prune are MODIFIERS on this class (the trigger is
         --delete/-d/empty-source colon), so they must be bound. This is the half
         that closes the escalation where approving a single-branch delete
@@ -615,14 +615,14 @@ class TestRemoteDeleteSplitBinding:
         from shared.merge_guard_common import PRIVILEGED_FLAGS
 
         bound = set(PRIVILEGED_FLAGS["remote-ref-delete"])
-        assert bound == {"--mirror", "--prune", "--no-verify"}, (
+        assert bound == {"--mirror", "--prune", "--no-verify", "--receive-pack", "--exec"}, (
             "remote-ref-delete's binding changed. --mirror/--prune are LOAD-BEARING "
             "here: without them a `git push origin :main` approval set-equals a "
             "`git push origin --mirror :main` execution, which deletes every remote "
             f"ref with no local counterpart. Found: {sorted(bound)}"
         )
 
-    def test_mass_delete_binds_only_no_verify(self):
+    def test_mass_delete_binds_no_scope_flag(self):
         """--mirror/--prune TRIGGER this class and are already folded into the
         mass_target identity, so binding them here would be inert. Asserted as an
         exact set so an 'improvement' that symmetrizes the two entries turns RED
@@ -630,7 +630,7 @@ class TestRemoteDeleteSplitBinding:
         from shared.merge_guard_common import PRIVILEGED_FLAGS
 
         bound = set(PRIVILEGED_FLAGS["remote-mass-delete"])
-        assert bound == {"--no-verify"}, (
+        assert bound == {"--no-verify", "--receive-pack", "--exec"}, (
             "remote-mass-delete's binding changed. --mirror/--prune are the "
             "op-TRIGGER for this class and are already embedded in the mass_target "
             "identity, so binding them here adds an entry that changes no outcome — "

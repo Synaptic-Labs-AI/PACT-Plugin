@@ -1622,7 +1622,9 @@ def _quoted_value_rows():
     approved value unquoted)."""
     from shared.merge_guard_common import PRIVILEGED_FLAGS
 
-    base = {"merge": MERGE + "5", "close": _CLOSE_PR + "5 -d", "force-push": "git push --" + "force"}
+    base = {"merge": MERGE + "5", "close": _CLOSE_PR + "5 -d", "force-push": "git push --" + "force",
+            "push-to-main": "git push origin main", "remote-ref-delete": "git push origin --delete stale",
+            "remote-mass-delete": "git push --mirror origin"}
     rows = {}
     for op, flags in PRIVILEGED_FLAGS.items():
         for canonical, (_aliases, takes_value) in flags.items():
@@ -1641,6 +1643,40 @@ def _quoted_value_rows():
 
 
 QUOTED_VALUES = _quoted_value_rows()
+
+# Each push class that takes the remote's program, in both spellings: (approved, the
+# same push naming another program, the push with no program).
+PUSH_PROGRAMS = {
+    "%s-%s-%s" % (op, flag, form): (cmd % (flag + sep + "prog-b"), cmd % (flag + sep + "prog-c"), cmd % "")
+    for op, cmd in (
+        ("force-push", "git push --" + "force %s origin feat/x"),
+        ("push-to-main", "git push %s origin main"),
+        ("remote-ref-delete", "git push %s origin --delete stale"),
+        ("remote-mass-delete", "git push --mirror %s origin"),
+    )
+    for flag in ("--receive-pack", "--exec")
+    for form, sep in (("eq", "="), ("space", " "))
+}
+
+
+class TestTheRemotesProgramIsPartOfThePush:
+    """`--receive-pack`/`--exec` name the program the remote runs to take the push: an
+    approval covers the program it names and no other, and a push approved without one
+    does not run with one."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("approved,other,plain", PUSH_PROGRAMS.values(), ids=PUSH_PROGRAMS.keys())
+    def test_its_own_approval_runs_it_and_no_other_program(self, approved, other, plain, style):
+        ctx = _mint_styled(approved, style)
+        assert _runs(ctx, approved)
+        assert not _runs(ctx, other)
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("approved,other,plain", PUSH_PROGRAMS.values(), ids=PUSH_PROGRAMS.keys())
+    def test_a_plain_approval_does_not_run_it(self, approved, other, plain, style):
+        ctx = _mint_styled(" ".join(plain.split()), style)
+        assert _runs(ctx, " ".join(plain.split()))
+        assert not _runs(ctx, approved)
 
 
 class TestAQuotedFlagValueBindsByText:

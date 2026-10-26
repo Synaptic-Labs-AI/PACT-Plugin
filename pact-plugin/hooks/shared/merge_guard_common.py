@@ -2252,6 +2252,9 @@ PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
         "--follow-tags":   (("--follow-tags",), False),
         # --repo names the destination, as the remote positional does.
         "--repo":          (("--repo",), True),
+        # --receive-pack/--exec name the program the remote runs to receive the push.
+        "--receive-pack":  (("--receive-pack",), True),
+        "--exec":          (("--exec",), True),
     },
     "push-to-main": {
         # --force-with-lease: the lease push CAN rewrite history (unlike a plain push),
@@ -2264,6 +2267,9 @@ PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
         # the same canonical bare token; intra-lease value variation is an accepted
         # residual (never authorizes plain<->lease or lease<->force escalation).
         "--force-with-lease": (("--force-with-lease",), False),
+        # --receive-pack/--exec name the program the remote runs to receive the push.
+        "--receive-pack":  (("--receive-pack",), True),
+        "--exec":          (("--exec",), True),
     },
     "branch-delete": {
         # No bound flags today: branch-delete's privileged effect is its op-trigger
@@ -2286,6 +2292,9 @@ PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
         "--prune":     (("--prune",), False),
         # bypasses the pre-push hook — a privilege, not a target change
         "--no-verify": (("--no-verify",), False),
+        # --receive-pack/--exec name the program the remote runs to receive the push.
+        "--receive-pack":  (("--receive-pack",), True),
+        "--exec":          (("--exec",), True),
     },
     "remote-mass-delete": {
         # DELIBERATELY NARROWER THAN ITS SIBLING, and the asymmetry is not cosmetic:
@@ -2313,6 +2322,9 @@ PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
         # REMEDY: if you coarsen mass_target, you MUST bind --mirror and --prune HERE in
         # the same commit. See test_mass_target_embeds_the_scope_flag_in_its_identity.
         "--no-verify": (("--no-verify",), False),
+        # --receive-pack/--exec name the program the remote runs to receive the push.
+        "--receive-pack":  (("--receive-pack",), True),
+        "--exec":          (("--exec",), True),
     },
     "branch-merge": {
         # No bound flags: merging a branch through the API has no privileged modifier.
