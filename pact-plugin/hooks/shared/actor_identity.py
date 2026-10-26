@@ -134,6 +134,8 @@ _MAX_DEFINITION_FILES = 256
 # walk stops there, so a huge tree costs bounded work.
 _MAX_SCAN_ENTRIES = 4096
 _FRONTMATTER_BYTES = 4096
+# Largest plugin.json read when checking a symlinked definition's provenance.
+_MANIFEST_MAX_BYTES = 16 * 1024
 
 
 @dataclass(frozen=True)
@@ -352,14 +354,6 @@ def _first_raw(candidates: list, name: str | None) -> str | None:
     return None
 
 
-def _meta_type(
-    meta: Any, frame_type: Any = None, name: str | None = None
-) -> str | None:
-    """First usable TYPE from a subagent meta.json, then `frame_type`; `PACT:`
-    stripped. Kept for the precedence tests; step 4 reads the frame FIRST."""
-    return _strip(_first_raw([*_meta_candidates(meta), frame_type], name))
-
-
 def _typed(raw: Any, input_data: dict) -> str | None:
     """`raw` as a TYPE (`PACT:` stripped), or None when it is ambiguous.
 
@@ -386,11 +380,18 @@ def _shadowed_by_other_definition(type_name: str, input_data: dict) -> bool:
     reading a directory counts as no definition there.
 
     BOUNDED AND FAIL-CLOSED. Each directory is walked lazily, in sorted order,
-    without following symlinked folders (so a symlink cycle cannot loop), and
-    the walk stops after _MAX_DEFINITION_FILES definition files or
+    and the walk stops after _MAX_DEFINITION_FILES definition files or
     _MAX_SCAN_ENTRIES entries. A walk that hits a limit before it finishes
     counts as SHADOWED: an unfinished scan cannot prove the type is the
     plugin's, and a True here only withholds an exemption.
+
+    SYMLINKED FOLDERS ARE FOLLOWED, ONCE EACH. Measured (CC 2.1.310): Claude
+    Code loads definitions through a symlinked subdirectory of
+    `.claude/agents`, so the scan must look there too. Each folder is
+    entered at most once, keyed on its (st_dev, st_ino), so a symlink cycle
+    or a second link to the same folder ends the descent instead of looping.
+    A definition FILE reached through a symlinked folder is not itself a
+    symlink, so `_is_plugin_definition` treats it as a project or user file.
     """
     for agents_dir in _definition_dirs(input_data):
         found = _scan_for_definition(agents_dir, type_name)
@@ -404,9 +405,15 @@ def _scan_for_definition(agents_dir: Path, type_name: str):
     `agents_dir`, None when a limit stopped the walk first, else False."""
     files_seen = entries_seen = 0
     try:
-        for root, dirs, names in os.walk(agents_dir, followlinks=False):
-            dirs.sort()
+        start = os.stat(agents_dir)
+        visited = {(start.st_dev, start.st_ino)}
+        for root, dirs, names in os.walk(agents_dir, followlinks=True):
             entries_seen += len(dirs) + len(names)
+            # Checked before this directory's names are sorted or read, so one
+            # huge directory costs its listing and nothing more.
+            if entries_seen > _MAX_SCAN_ENTRIES:
+                return None
+            dirs[:] = _unvisited_dirs(root, dirs, visited)
             for name in sorted(names):
                 if not name.endswith(".md"):
                     continue
@@ -416,11 +423,27 @@ def _scan_for_definition(agents_dir: Path, type_name: str):
                 path = Path(root) / name
                 if not _is_plugin_definition(path) and _definition_name(path) == type_name:
                     return True
-            if entries_seen > _MAX_SCAN_ENTRIES:
-                return None
     except OSError:
         return False
     return False
+
+
+def _unvisited_dirs(root: str, dirs: list, visited: set) -> list:
+    """`dirs` (sorted) without any folder already entered, by (st_dev,
+    st_ino) of its target, so followed symlinks never revisit a folder.
+    Marks the kept ones visited. A folder that cannot be stat'ed is dropped."""
+    kept = []
+    for name in sorted(dirs):
+        try:
+            target = os.stat(os.path.join(root, name))
+        except OSError:
+            continue
+        key = (target.st_dev, target.st_ino)
+        if key in visited:
+            continue
+        visited.add(key)
+        kept.append(name)
+    return kept
 
 
 def _definition_dirs(input_data: dict) -> list:
@@ -475,7 +498,7 @@ def _is_plugin_definition(path: Path) -> bool:
             return False
         manifest = target_dir.parent / ".claude-plugin" / "plugin.json"
         with open(manifest, encoding="utf-8") as f:
-            data = json.loads(f.read(_FRONTMATTER_BYTES * 4))
+            data = json.loads(f.read(_MANIFEST_MAX_BYTES))
         return isinstance(data, dict) and data.get("name") == "PACT"
     except (OSError, ValueError):
         return False

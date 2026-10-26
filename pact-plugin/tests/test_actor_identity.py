@@ -1,7 +1,7 @@
 """
 Location: pact-plugin/tests/test_actor_identity.py
 Summary: Unit tests for shared/actor_identity.resolve_actor: one test per
-         resolution step (design doc section 3.3), the _meta_type precedence,
+         resolution step (design doc section 3.3), the step-4 type precedence,
          the "a type is never derived from a name" rule, totality, and
          isolation from the session registry.
 Used by: the pact-plugin test suite.
@@ -149,26 +149,45 @@ def test_meta_path_that_is_a_directory_degrades_to_no_meta(config):
     assert actor.source == SOURCE_SUBAGENT_NO_META
 
 
-# ─── _meta_type precedence ───────────────────────────────────────────────────
+# ─── step 4 type precedence (_first_raw over frame, then meta) ──────────────
 
 
-def test_meta_type_local_shape_skips_agenttype_that_is_the_name():
+def _step4_type(meta, frame_type=None, name=None):
+    """The step-4 TYPE choice as resolve_actor makes it: the frame first,
+    then meta.json's candidates, `PACT:` stripped."""
+    raw = actor_identity._first_raw(
+        [frame_type, *actor_identity._meta_candidates(meta)], name
+    )
+    return actor_identity._strip(raw)
+
+
+def test_step4_type_local_shape_skips_agenttype_that_is_the_name():
     meta = {"agentType": "coder", "name": "coder", "spawnedAgentType": "PACT:pact-backend-coder"}
-    assert actor_identity._meta_type(meta, name="coder") == "pact-backend-coder"
+    assert _step4_type(meta, name="coder") == "pact-backend-coder"
 
 
-def test_meta_type_prefers_custom_over_spawned_over_agenttype():
+def test_step4_type_meta_prefers_custom_over_spawned_over_agenttype():
     meta = {"customAgentType": "a-type", "spawnedAgentType": "b-type", "agentType": "c-type"}
-    assert actor_identity._meta_type(meta) == "a-type"
+    assert _step4_type(meta) == "a-type"
     del meta["customAgentType"]
-    assert actor_identity._meta_type(meta) == "b-type"
+    assert _step4_type(meta) == "b-type"
     del meta["spawnedAgentType"]
-    assert actor_identity._meta_type(meta) == "c-type"
+    assert _step4_type(meta) == "c-type"
 
 
-def test_meta_type_empty_meta_falls_back_to_frame_type():
-    assert actor_identity._meta_type({}, frame_type="PACT:pact-auditor") == "pact-auditor"
-    assert actor_identity._meta_type({}, frame_type=None) is None
+def test_step4_type_frame_wins_over_meta():
+    meta = {"customAgentType": "a-type", "spawnedAgentType": "b-type"}
+    assert _step4_type(meta, frame_type="PACT:pact-auditor") == "pact-auditor"
+
+
+def test_step4_type_frame_equal_to_name_is_skipped():
+    meta = {"spawnedAgentType": "PACT:pact-backend-coder"}
+    assert _step4_type(meta, frame_type="coder", name="coder") == "pact-backend-coder"
+
+
+def test_step4_type_empty_meta_uses_frame_type():
+    assert _step4_type({}, frame_type="PACT:pact-auditor") == "pact-auditor"
+    assert _step4_type({}, frame_type=None) is None
 
 
 # ─── step 5: name@team ───────────────────────────────────────────────────────

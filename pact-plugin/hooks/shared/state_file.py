@@ -54,6 +54,10 @@ _LOCK_FLAGS = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
 _TEMP_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 _APPEND_FLAGS = os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
 _LOCK_POLL_SECONDS = 0.02
+# How long append_line waits for another appender's lock before giving up
+# (it then raises TimeoutError and writes nothing). A holder keeps the lock for
+# one small write, so this is only reached when a process holds it on purpose.
+_APPEND_LOCK_TIMEOUT_SECONDS = 2.0
 
 
 def _contained_directory(path: Path, root: Path) -> Path:
@@ -211,11 +215,12 @@ def write_text(path: Path, text: str, root: Path) -> None:
 
 
 def append_line(path: Path, data: bytes, root: Path, *, max_file_bytes: int) -> bool:
-    """Append `data` to an append-only log in ONE os.write, taking no lock.
+    """Append `data` to an append-only log in ONE os.write.
 
     For logs whose records are small and independent (each `data` one whole
     line, well under PIPE_BUF), where O_APPEND makes each write land whole and
-    in one piece on a local filesystem, so concurrent writers need no lock.
+    in one piece on a local filesystem. The only lock is the brief one the
+    cap needs (below); there is no sidecar lock file.
 
     A TORN TAIL IS SEALED FIRST. When the file is non-empty and its last byte
     is not a newline (a crashed or short earlier write), `data` is written
@@ -225,7 +230,14 @@ def append_line(path: Path, data: bytes, root: Path, *, max_file_bytes: int) -> 
     THE CAP IS NEVER CROSSED. Returns False, writing nothing, when the file
     plus this write (including any sealing newline) would exceed
     `max_file_bytes`, so a reader that rejects a file over the same bound
-    never sees one. Also False when the write is short. Raises OSError when the
+    never sees one. The size check, the torn-tail check and the write run
+    under an exclusive flock on the log's own descriptor, so concurrent
+    appenders (which all go through this function) cannot each see room and
+    together overshoot the cap. Readers take no lock: each record still
+    lands in one write. The wait for that lock is bounded
+    (_APPEND_LOCK_TIMEOUT_SECONDS); past it, TimeoutError (an OSError) is
+    raised and nothing is written. Also False when the write is short.
+    Raises OSError when the
     directory resolves outside `root`, when a symlink sits at the path
     (O_NOFOLLOW), or on any I/O error. Never creates a directory: the file's
     directory must already exist. A new file is created with mode 0o600.
@@ -234,6 +246,9 @@ def append_line(path: Path, data: bytes, root: Path, *, max_file_bytes: int) -> 
     target = _contained_directory(path, root) / path.name
     fd = os.open(str(target), _APPEND_FLAGS, FILE_MODE)
     try:
+        # Bounded wait (a holder keeps it for one write); held until os.close
+        # below, which releases it. Past the bound: TimeoutError (an OSError).
+        _acquire(fd, _APPEND_LOCK_TIMEOUT_SECONDS)
         size = os.fstat(fd).st_size
         if size >= max_file_bytes:
             return False

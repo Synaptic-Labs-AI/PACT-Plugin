@@ -328,11 +328,17 @@ def test_shadow_scan_stops_at_its_cap_and_fails_closed(tmp_path, monkeypatch):
     assert len(opened) <= 10
 
 
-def test_shadow_scan_survives_a_symlink_cycle(tmp_path):
+def test_shadow_scan_survives_a_symlink_cycle(tmp_path, monkeypatch):
+    """A symlink cycle is walked at most once. The small entries cap makes
+    that observable: a walk that re-enters the cycle runs ~40 levels deep
+    before the kernel's ELOOP stops it, which crosses the cap and reads as
+    shadowed (None). Without the cap, an unguarded walk passed this test too
+    (#1670 final test review, MA6)."""
     agents = tmp_path / "proj" / ".claude" / "agents"
     (agents / "sub").mkdir(parents=True)
     os.symlink(agents, agents / "sub" / "loop")
     (agents / "sub" / "fine.md").write_text("---\nname: other\n---\n")
+    monkeypatch.setattr(actor_identity, "_MAX_SCAN_ENTRIES", 20)
     assert actor_identity.typed_without_frame(
         "pact-secretary", str(tmp_path / "proj")) == "pact-secretary"
 
@@ -351,3 +357,127 @@ def test_shadow_scan_caps_entries_in_a_tree_without_definitions(tmp_path, monkey
         (agents / f"d{n:02d}").mkdir()
     monkeypatch.setattr(actor_identity, "_MAX_SCAN_ENTRIES", 20)
     assert actor_identity.typed_without_frame("pact-secretary", str(tmp_path / "proj")) is None
+
+
+def test_entries_cap_fires_before_a_huge_directory_is_read(tmp_path, monkeypatch):
+    """One directory over the entries cap stops the walk before any of its
+    files is opened (final review M3), and still counts as shadowed."""
+    agents = tmp_path / "proj" / ".claude" / "agents"
+    agents.mkdir(parents=True)
+    for n in range(30):
+        (agents / f"f{n:02d}.md").write_text("---\nname: other\n---\n")
+    monkeypatch.setattr(actor_identity, "_MAX_SCAN_ENTRIES", 20)
+    opened = []
+    real = actor_identity._definition_name
+    monkeypatch.setattr(
+        actor_identity, "_definition_name", lambda p: opened.append(p) or real(p)
+    )
+    assert actor_identity._scan_for_definition(agents, "pact-secretary") is None
+    assert opened == []
+
+
+# ─── M9: symlinked subdirectories are followed, once each ────────────────────
+# Measured live (CC 2.1.310): Claude Code loads a definition placed behind a
+# symlinked SUBDIRECTORY of .claude/agents, so the shadow scan must see it.
+
+
+def _project_agents(tmp_path):
+    agents = tmp_path / "proj" / ".claude" / "agents"
+    agents.mkdir(parents=True)
+    return agents
+
+
+def test_shadow_behind_a_symlinked_subdirectory_is_detected(tmp_path):
+    agents = _project_agents(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "pact-secretary.md").write_text(_DEFINITION)
+    os.symlink(elsewhere, agents / "vendor", target_is_directory=True)
+    assert actor_identity._scan_for_definition(agents, "pact-secretary") is True
+    assert actor_identity.typed_without_frame("pact-secretary", str(tmp_path / "proj")) is None
+
+
+def test_shadow_in_a_real_subdirectory_is_still_detected(tmp_path):
+    agents = _project_agents(tmp_path)
+    (agents / "realsub").mkdir()
+    (agents / "realsub" / "pact-secretary.md").write_text(_DEFINITION)
+    assert actor_identity._scan_for_definition(agents, "pact-secretary") is True
+
+
+def test_symlinked_subdirectory_without_a_shadow_stays_clean(tmp_path):
+    agents = _project_agents(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "other.md").write_text("---\nname: other\n---\n")
+    os.symlink(elsewhere, agents / "vendor", target_is_directory=True)
+    (agents / "topcontrol.md").write_text("---\nname: topcontrol\n---\n")
+    assert actor_identity._scan_for_definition(agents, "pact-secretary") is False
+
+
+def test_symlink_cycle_terminates_without_hitting_a_cap(tmp_path, monkeypatch):
+    """A link back to an ancestor is entered at most once, so the walk ends
+    with a clean False rather than running into a cap (which would read as
+    shadowed)."""
+    agents = _project_agents(tmp_path)
+    (agents / "sub").mkdir()
+    (agents / "sub" / "other.md").write_text("---\nname: other\n---\n")
+    os.symlink(agents, agents / "sub" / "loop", target_is_directory=True)
+    os.symlink(agents / "sub", agents / "again", target_is_directory=True)
+    monkeypatch.setattr(actor_identity, "_MAX_SCAN_ENTRIES", 50)
+    assert actor_identity._scan_for_definition(agents, "pact-secretary") is False
+
+
+# ─── the per-process load memo (final review M7) ─────────────────────────────
+
+
+def test_unchanged_roster_is_parsed_once_per_process(cloud, monkeypatch):
+    write_roster(cloud, TEAM, [intent(TU1, "coder", "pact-backend-coder")])
+    calls = []
+    real = cloud_roster._parse_lines
+    monkeypatch.setattr(
+        cloud_roster, "_parse_lines", lambda text: calls.append(1) or real(text)
+    )
+    first = cloud_roster.load_roster(TEAM)
+    second = cloud_roster.load_roster(TEAM)
+    assert first is second
+    assert len(calls) == 1
+
+
+def test_an_append_invalidates_the_memo(cloud):
+    write_roster(cloud, TEAM, [intent(TU1, "coder", "pact-backend-coder")])
+    assert cloud_roster.load_roster(TEAM).intent(TU2) is None
+    assert cloud_roster.append_record(
+        TEAM, {"k": "intent", "tu": TU2, "name": "b", "type": "t"}
+    )
+    assert cloud_roster.load_roster(TEAM).intent(TU2) is not None
+
+
+def test_a_same_size_rewrite_invalidates_the_memo(cloud):
+    """A rewrite that keeps the size changes mtime_ns (or the inode, when the
+    file is replaced), so the next load re-reads it."""
+    path = write_roster(cloud, TEAM, [intent(TU1, "coder", "pact-backend-coder")])
+    assert cloud_roster.load_roster(TEAM).intent(TU1).name == "coder"
+    text = path.read_text()
+    replacement = path.with_name("replacement.jsonl")
+    replacement.write_text(text.replace('"coder"', '"cOder"'))
+    os.replace(replacement, path)  # same size, new inode
+    assert path.stat().st_size == len(text)
+    assert cloud_roster.load_roster(TEAM).intent(TU1).name == "cOder"
+    stat = path.stat()
+    path.write_text(text)  # same size again, same inode
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+    assert cloud_roster.load_roster(TEAM).intent(TU1).name == "coder"
+
+
+def test_a_deleted_roster_is_not_served_from_the_memo(cloud):
+    path = write_roster(cloud, TEAM, [intent(TU1, "coder", "pact-backend-coder")])
+    assert cloud_roster.load_roster(TEAM) is not None
+    path.unlink()
+    assert cloud_roster.load_roster_state(TEAM) == (None, False)
+
+
+def test_clear_load_cache_forces_a_reread(cloud, monkeypatch):
+    write_roster(cloud, TEAM, [intent(TU1, "coder", "pact-backend-coder")])
+    first = cloud_roster.load_roster(TEAM)
+    cloud_roster.clear_load_cache()
+    assert cloud_roster.load_roster(TEAM) is not first

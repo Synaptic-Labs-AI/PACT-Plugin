@@ -70,18 +70,24 @@ framing another member from "edit your own meta.json" to "forge this file AND
 meta.json consistently". ACCEPTED RESIDUALS (user decision Q1, design §7):
   - a same-uid two-file forge (roster + meta.json) can still put a victim's
     name on an action, or add an intent that makes a fresh owner name exempt;
-  - meta.json does not exist yet at SubagentStart (measured, WP0), so two
-    same-type spawns whose SubagentStarts overlap stay unbound, and resolve
-    meta-only as before, until the lead's PostToolUse confirm;
-  - unnamed and nested spawns are not recorded;
+  - meta.json does not exist yet at SubagentStart (measured, WP0), so the
+    bind is a type join on the latest same-type spawn event. Two same-type
+    lead spawns whose SubagentStarts overlap (Pre B, Pre C, Start B) bind B
+    to C's intent; B's meta.json name then disagrees, so B resolves
+    `unattributed` until the lead's PostToolUse confirm corrects it;
+  - unnamed lead spawns are not recorded; nested spawns are recorded only as
+    `foreign` markers, which name nobody;
   - ORPHAN INTENTS (N1). dispatch_gate writes the intent after ITS OWN
     non-DENY decision. A later deny by another PreToolUse hook, or the user
     refusing the Agent call, leaves an intent for a spawn that never ran.
     Bounded: (a) for owner exemptions it is still the lead's own requested
     name and type, so it cannot invent an exemption the lead did not ask
-    for; (b) a same-type orphan under 10 minutes old makes the next type join
-    ambiguous (nothing binds until the confirm), or joins a nested same-type
-    start, whose bind-only binding then names nobody unless meta agrees.
+    for; (b) the type join reads only the LATEST same-type spawn event, so a
+    later lead intent or nested `foreign` of that type supersedes the
+    orphan. While it is still the latest event and under 10 minutes old, it
+    can take the bind of an UNNAMED same-type lead spawn (which records no
+    intent of its own); that bind-only binding names nobody, because the
+    unnamed agent's meta.json carries no matching name.
     There is no expiry: nothing distinguishes a denied spawn from a
     foreground agent still running before its first handback (its confirm
     arrives only then);
@@ -266,7 +272,7 @@ def applies(team_name: Any, teams_dir: str | None = None) -> bool:
     Never raises.
     """
     try:
-        if not isinstance(team_name, str) or not subagent_meta.SAFE_ID.match(team_name):
+        if not isinstance(team_name, str) or not subagent_meta.SAFE_ID.fullmatch(team_name):
             return False
         team_dir = teams_root(teams_dir) / team_name
         return team_dir.is_dir() and not os.path.lexists(team_dir / "config.json")
@@ -278,9 +284,11 @@ def append_record(team_name: str, record: dict, teams_dir: str | None = None) ->
     """Validate `record` and append it as one line. Never raises.
 
     Adds `v` and, when absent, `ts`. Returns False, writing nothing, when the
-    roster does not apply, the record is invalid or over MAX_RECORD_BYTES, the
-    file has reached MAX_ROSTER_BYTES, or on any I/O error. The team directory
-    is never created.
+    roster does not apply, the record is invalid or over MAX_RECORD_BYTES,
+    the append would take the file past MAX_ROSTER_BYTES (state_file.append_line
+    checks and writes under an exclusive lock, so racing writers cannot
+    make the file unloadable either), or on any I/O error. The team
+    directory is never created.
     """
     try:
         if not applies(team_name, teams_dir) or not isinstance(record, dict):
@@ -328,21 +336,49 @@ def load_roster_state(
             return None, False
         root = teams_root(teams_dir)
         path = root / team_name / ROSTER_FILENAME
-        if not os.path.lexists(path):
+        try:
+            stat = os.lstat(path)
+        except FileNotFoundError:
             return None, False
         present = True
-        try:
-            text = state_file.read_text(path, root, max_bytes=MAX_ROSTER_BYTES)
-        except (OSError, state_file.TooLarge):
-            return None, True
-        records = _parse_lines(text)
-        if not records and text.strip():
-            return None, True
-        return fold(records), False
+        key = (str(path), stat.st_ino, stat.st_size, stat.st_mtime_ns)
+        cached = _LOAD_CACHE.get(key)
+        if cached is None:
+            cached = _read_roster_state(path, root)
+            _LOAD_CACHE.clear()  # one roster per hook process; keep only the latest
+            _LOAD_CACHE[key] = cached
+        return cached
     except Exception:  # noqa: BLE001 — totality is the contract
         # A roster file that is present but failed in an unforeseen way is
         # unloadable, never "no roster": that would restore meta.json names.
         return None, present
+
+
+# Per-process memo for load_roster_state, keyed on the roster file's
+# (path, inode, size, mtime_ns) from one lstat. A hook can ask for the roster
+# many times in one run (task_claim_gate checks the exemption once per
+# candidate task), and an unchanged file folds to the same Roster. Any append
+# changes the size, so a write is seen by the next load. Every caller only
+# reads the returned Roster, so sharing one instance is safe.
+# clear_load_cache() empties it.
+_LOAD_CACHE: dict = {}
+
+
+def clear_load_cache() -> None:
+    """Forget every memoised roster load (tests; never needed by hooks)."""
+    _LOAD_CACHE.clear()
+
+
+def _read_roster_state(path: Path, root: Path) -> tuple[Roster | None, bool]:
+    """(roster, unloadable) for a roster file known to be present."""
+    try:
+        text = state_file.read_text(path, root, max_bytes=MAX_ROSTER_BYTES)
+    except (OSError, state_file.TooLarge):
+        return None, True
+    records = _parse_lines(text)
+    if not records and text.strip():
+        return None, True
+    return fold(records), False
 
 
 def _parse_lines(text: str) -> list:

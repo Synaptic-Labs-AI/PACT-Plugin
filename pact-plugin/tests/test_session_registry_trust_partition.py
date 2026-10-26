@@ -114,6 +114,11 @@ _MODULE_BANNED_FILES = (
 _ROSTER_APPEND_CALLERS = frozenset({"dispatch_gate.py", "roster_writer.py"})
 
 
+# Calls that import a module by name at runtime. The module ban above reads
+# Import nodes only, so _MODULE_BANNED_FILES may not make these calls at all.
+_DYNAMIC_IMPORT_CALLS = ("import_module", "__import__")
+
+
 def _module_imports(tree: ast.AST, modules) -> list[str]:
     """Descriptions of every import (any shape, module-level or lazy inside a
     function) whose module path or imported name has a component in `modules`."""
@@ -393,6 +398,29 @@ class TestTrustPartitionNoRegistryImport:
     def test_module_ban_detector_fires(self, src):
         """Phantom-green guard for the module ban, including a lazy import."""
         assert _module_imports(ast.parse(src), _REGISTRY_REACHING_MODULES)
+
+    @pytest.mark.parametrize("rel_file", _MODULE_BANNED_FILES)
+    def test_actor_files_make_no_dynamic_imports(self, rel_file):
+        """The module ban reads Import nodes, so a dynamic import
+        (importlib.import_module("shared.background_work") or __import__)
+        would pass it. These files import only statically (#1670 final test
+        review, MA7)."""
+        path = HOOKS_DIR / rel_file
+        assert path.exists(), f"authority file {rel_file} not found at {path}"
+        found = _calls_named(_parse(path), _DYNAMIC_IMPORT_CALLS)
+        assert found == [], (
+            f"{rel_file} makes a dynamic import {found}; the module ban cannot "
+            f"see its target. Import statically instead."
+        )
+
+    @pytest.mark.parametrize("src", [
+        "import importlib\nimportlib.import_module('shared.background_work')\n",
+        "from importlib import import_module\nimport_module('x')\n",
+        "def f():\n    return __import__('shared.turn_end_gate')\n",
+    ])
+    def test_dynamic_import_detector_fires(self, src):
+        """Phantom-green guard for the dynamic-import ban."""
+        assert _calls_named(ast.parse(src), _DYNAMIC_IMPORT_CALLS)
 
     def test_module_ban_detector_ignores_subagent_meta(self):
         assert _module_imports(
@@ -843,26 +871,39 @@ class TestRealTmuxRegisterPreMergeGatePlan:
 
 
 def _calls_cloud_roster_append(tree: ast.AST) -> bool:
-    """True iff the module calls `cloud_roster.append_record(...)` (attribute
-    form) or a bare `append_record` imported from cloud_roster."""
-    imported_bare = any(
-        isinstance(node, ast.ImportFrom)
-        and (node.module or "").split(".")[-1] == "cloud_roster"
-        and any(a.name == "append_record" for a in node.names)
-        for node in ast.walk(tree)
-    )
+    """True iff the module calls cloud_roster's `append_record`, under any
+    import spelling: `cloud_roster.append_record(...)`, a dotted
+    `shared.cloud_roster.append_record(...)`, the module bound to another name
+    (`import ... cloud_roster as cr`; `cr.append_record(...)`), or the function
+    imported bare or under another name (`from ...cloud_roster import
+    append_record as ar`; `ar(...)`). Aliases are tracked so a renamed import
+    cannot hide a writer (#1670 final test review, MA3)."""
+    module_names = {"cloud_roster"}   # names bound to the cloud_roster module
+    function_names: set = set()       # names bound to cloud_roster.append_record
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname and alias.name.split(".")[-1] == "cloud_roster":
+                    module_names.add(alias.asname)
+        elif isinstance(node, ast.ImportFrom):
+            from_roster = (node.module or "").split(".")[-1] == "cloud_roster"
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                if alias.name == "cloud_roster":
+                    module_names.add(bound)
+                elif from_roster and alias.name == "append_record":
+                    function_names.add(bound)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        if (
-            isinstance(func, ast.Attribute)
-            and func.attr == "append_record"
-            and isinstance(func.value, ast.Name)
-            and func.value.id == "cloud_roster"
-        ):
-            return True
-        if imported_bare and isinstance(func, ast.Name) and func.id == "append_record":
+        if isinstance(func, ast.Attribute) and func.attr == "append_record":
+            owner = func.value
+            if isinstance(owner, ast.Name) and owner.id in module_names:
+                return True
+            if isinstance(owner, ast.Attribute) and owner.attr == "cloud_roster":
+                return True
+        if isinstance(func, ast.Name) and func.id in function_names:
             return True
     return False
 
@@ -889,6 +930,11 @@ class TestCloudRosterWriterSet:
         "from shared import cloud_roster\ncloud_roster.append_record('t', {})\n",
         "from shared.cloud_roster import append_record\nappend_record('t', {})\n",
         "def f():\n    from . import cloud_roster\n    cloud_roster.append_record('t', {})\n",
+        # MA3: aliased and dotted spellings.
+        "from shared import cloud_roster as cr\ncr.append_record('t', {})\n",
+        "from shared.cloud_roster import append_record as ar\nar('t', {})\n",
+        "import shared.cloud_roster as cr\ncr.append_record('t', {})\n",
+        "import shared.cloud_roster\nshared.cloud_roster.append_record('t', {})\n",
     ])
     def test_append_detector_fires(self, src):
         assert _calls_cloud_roster_append(ast.parse(src))

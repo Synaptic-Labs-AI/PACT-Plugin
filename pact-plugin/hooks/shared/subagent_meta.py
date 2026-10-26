@@ -32,8 +32,9 @@ from .paths import get_claude_config_dir
 META_MAX_BYTES = 64 * 1024
 
 # A path-safe id: the frame's agent_id and session_id both pass this before
-# they are used to build a path.
-SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+# they are used to build a path. Always test it with .fullmatch: with .match,
+# `$` also matches before a trailing newline, so "id\n" would pass.
+SAFE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 # An Agent-tool subagent's `agent_id`: "a" followed by 16 lowercase hex.
 SUBAGENT_ID = re.compile(r"a[0-9a-f]{16}")
@@ -169,15 +170,22 @@ def subagent_launcher_id(input_data: Any) -> str:
     A subagent's id is "a" followed by 16 lowercase hex [LIVE] — the same shape
     `agent_type_names_a_member` refuses a membership match for.
 
-    AN ABSENT `agent_id` NAMES NO LAUNCHER HERE, AND THAT IS THE WHOLE
-    CONSERVATISM OF THIS PATH. Absence has been measured as the LEAD's own
-    signature on the lead's own frames, but it is only INFERRED for an
-    in-process teammate's spawn, which nobody has captured. Were that inference
-    wrong, reading absence as "the lead" would record a TEAMMATE's launch as
-    the lead's and refuse the lead a turn end it had every right to end — the
-    same cardinal defect this recorder exists to close, arriving from the other
-    side. So absence records NOTHING, which is an under-block and the
-    acceptable direction.
+    AN ABSENT OR OTHER-SHAPED `agent_id` RETURNS "", NEVER AN INFERRED ID.
+    Absence has been measured as the LEAD's own signature on the lead's own
+    frames, but it is only INFERRED for an in-process teammate's frame, which
+    nobody has captured. So "" means "not an Agent-tool subagent frame", and
+    it is never read as "the lead". Role is decided elsewhere, on
+    `agent_type` (pact_context.is_lead).
+
+    Each caller treats "" as "do nothing for this frame":
+      - background_work records no launch (reading absence as the lead would
+        record a teammate's launch as the lead's and refuse the lead a turn
+        end it had every right to end);
+      - the cloud roster writers (dispatch_gate's `foreign` record,
+        roster_writer's `bind`) write nothing;
+      - actor_identity does not take its subagent step (step 4), and
+        task_claim_gate's cloud tier stays a no-op.
+    Each is the under-acting direction.
     """
     agent_id = input_data.get("agent_id") if isinstance(input_data, dict) else None
     if not isinstance(agent_id, str):
@@ -200,7 +208,7 @@ def subagent_metadata(input_data: dict) -> dict:
     if not isinstance(input_data, dict):
         return {}
     agent_id = input_data.get("agent_id")
-    if not isinstance(agent_id, str) or not SAFE_ID.match(agent_id):
+    if not isinstance(agent_id, str) or not SAFE_ID.fullmatch(agent_id):
         return {}
     filename = f"agent-{agent_id}.meta.json"
     candidates = []
@@ -209,7 +217,7 @@ def subagent_metadata(input_data: dict) -> dict:
         candidates.append(Path(agent_transcript).parent / filename)
     transcript = input_data.get("transcript_path")
     session_id = input_data.get("session_id")
-    if _is_text(transcript) and isinstance(session_id, str) and SAFE_ID.match(session_id):
+    if _is_text(transcript) and isinstance(session_id, str) and SAFE_ID.fullmatch(session_id):
         candidates.append(Path(transcript).parent / session_id / "subagents" / filename)
     root = get_claude_config_dir() / "projects"
     for path in candidates:
