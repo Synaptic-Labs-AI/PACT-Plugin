@@ -116,7 +116,9 @@ meta.json consistently". ACCEPTED RESIDUALS (user decision Q1, design §7):
     append fail after state_file's 2 s bounded wait, so no new intent,
     bind or confirm lands. Agents spawned while it is held have no record,
     so they resolve meta-only, the same degradation as emptying the roster
-    (above), limited to those agents.
+    (above), limited to those agents. While it is held, each lead spawn is
+    also slower: every roster-writing hook on it (dispatch_gate's intent,
+    roster_writer's bind and confirm) waits about 2 s before giving up.
 The real control is harness-side (a cloud TaskCompleted `teammate_name`, or a
 harness-held roster).
 
