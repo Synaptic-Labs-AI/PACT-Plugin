@@ -6288,3 +6288,84 @@ def test_a_non_decimal_digit_ref_is_stored_verbatim_and_reads_unverifiable(
         "a non-addressable ref reached the tracker"))
     outcome = backlog.resolve_refs(["²", "https://github.com/o/r/issues/²"])
     assert all(state["state"] == "unverifiable" for state in outcome.values()), outcome
+
+
+def test_issue_comment_and_query_links_address_the_path_number(monkeypatch):
+    """A this-repo link with `#fragment` or `?query` is the issue in its PATH.
+
+    RED WHEN such a link reads foreign or unaddressable, when its number is
+    taken from the fragment, or when the write path stops collapsing it.
+    """
+    import argparse
+
+    comment = "https://github.com/owner/repo/issues/1666#issuecomment-1004"
+    query = "https://github.com/owner/repo/pull/1672?tab=files"
+    assert backlog._issue_number(comment) == 1666
+    assert backlog._issue_number("https://github.com/o/r/issues/12#34") == 12
+    assert backlog._ref_targets_repo(comment, "owner", "repo")
+    assert not backlog._ref_targets_repo(comment, "other", "repo")
+
+    monkeypatch.setenv("GH_REPO", "owner/repo")
+    for ref, expected in ((comment, "1666"), (query, "1672")):
+        assert backlog._field_updates(argparse.Namespace(ref=ref))["ref"] == expected
+    other = "https://github.com/other/repo/issues/1666#issuecomment-1"
+    assert backlog._field_updates(argparse.Namespace(ref=other))["ref"] == other
+
+    calls = []
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
+    monkeypatch.setattr(subprocess, "run", _refused_graphql_then_rest(calls))
+    outcome = backlog.resolve_refs([comment, query, other])
+    assert outcome[comment] == {"state": "done"}
+    assert outcome[query] == {"state": "done"}
+    assert outcome[other]["reason"] == backlog._REASON_FOREIGN_REF
+    looked_up = sorted(argv[2] for argv, _ in calls if argv[:3] != ["gh", "api", "graphql"])
+    assert looked_up == ["repos/owner/repo/issues/1666", "repos/owner/repo/issues/1672"]
+
+
+def test_a_non_link_ref_and_a_foreign_link_carry_different_reasons(monkeypatch):
+    """`12/` is not a link at all; `https://jira.../12` is a link elsewhere.
+
+    RED WHEN the two collapse into one reason, or either is looked up.
+    """
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail(
+        "an unaddressable ref reached the tracker"))
+
+    not_links = ["12/", "foo/12"]
+    links = ["https://jira.example.com/browse/12", "jira.example.com/browse/12",
+             "github.com/other/repo/issues/12"]
+    outcome = backlog.resolve_refs(not_links + links)
+    for ref in not_links:
+        assert outcome[ref] == {"state": "unverifiable",
+                                "reason": backlog._REASON_NOT_A_REF}, ref
+    for ref in links:
+        assert outcome[ref] == {"state": "unverifiable",
+                                "reason": backlog._REASON_FOREIGN_REF}, ref
+
+
+def test_a_slow_graphql_refusal_leaves_rest_only_the_remaining_budget(monkeypatch):
+    """ONE budget for the tracker check: a refusal that arrives after the
+    budget is spent leaves the REST phase nothing, so no REST call starts.
+
+    RED WHEN the REST phase restarts the clock after GraphQL returns, which
+    let a slow refusal stretch `show` to two budgets.
+    """
+    import time as time_module
+
+    calls = []
+    refused_then_rest = _refused_graphql_then_rest(calls)
+
+    def slow_refusal(command, **kwargs):
+        if command[:3] == ["gh", "api", "graphql"]:
+            time_module.sleep(0.25)
+        return refused_then_rest(command, **kwargs)
+
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
+    monkeypatch.setattr(subprocess, "run", slow_refusal)
+    monkeypatch.setattr(backlog, "_TRACKER_TIMEOUT_SECONDS", 0.2)
+
+    outcome = backlog.resolve_refs(["#1666", "#886"])
+
+    assert [argv for argv, _ in calls if argv[:3] != ["gh", "api", "graphql"]] == []
+    assert all(state["reason"] == backlog._REASON_CALL_INCOMPLETE
+               for state in outcome.values()), outcome

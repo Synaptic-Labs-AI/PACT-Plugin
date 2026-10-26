@@ -142,10 +142,18 @@ _REMOTE_SCHEMES = {"https", "http", "ssh", "git"}
 _SCP_REMOTE = re.compile(r"^git@([^:/\s]+):(.+)\Z")
 # A ref that names an issue or pull request of a github.com repository, as a
 # URL. Owner and name are compared to this repository's slug by the callers.
+# An optional `?query` and/or `#fragment` tail is accepted — an issue-comment
+# link is `.../issues/123#issuecomment-456` — and the number is ALWAYS group 3,
+# taken from the PATH, never from the tail.
 _GITHUB_REF_URL = re.compile(
-    r"^(?:https?://)?github\.com/([^/\s]+)/([^/\s]+)/(?:issues|pull)/(\d+)/?\Z",
+    r"^(?:https?://)?github\.com/([^/\s?#]+)/([^/\s?#]+)/(?:issues|pull)/(\d+)/?"
+    r"(?:[?#]\S*)?\Z",
     re.IGNORECASE,
 )
+# A ref shaped like a link: a scheme (`https://`), or a first segment that is a
+# dotted host (`github.com/...`, `jira.example.com/...`). Used only to choose
+# WHICH unverifiable reason an un-addressable ref gets.
+_URL_LIKE = re.compile(r"^(?:[A-Za-z][A-Za-z0-9+.-]*://|[^/\s]+\.[^/\s]+/)")
 _BARE_REF = re.compile(r"^#?(\d+)\Z")
 
 # The REST fallback, used only when the batched GraphQL query is refused as a
@@ -164,6 +172,7 @@ _REST_MIN_CALL_TIMEOUT = 0.5
 _REASON_CALL_INCOMPLETE = "the tracker call did not complete"
 _REASON_NOT_RESOLVED = "the tracker did not resolve this ref"
 _REASON_FOREIGN_REF = "the ref points outside this repository"
+_REASON_NOT_A_REF = "the ref is not an issue number or a link to this repository"
 _REASON_REST_CAP = f"too many refs to check over REST (cap {_REST_MAX_REFS})"
 
 # Sentinel for "the caller explicitly asked to clear this field", which None
@@ -780,10 +789,14 @@ def resolve_refs(
     # A URL to ANOTHER repository's issue ends in digits too, and querying
     # those digits here would report that number in THIS repository — a
     # wrong done or abandoned verdict about an unrelated ref. Refused first,
-    # so neither the GraphQL nor the REST path ever sees it.
+    # so neither the GraphQL nor the REST path ever sees it. A link that goes
+    # elsewhere and a string that is no link at all (`12/`, `foo/12`) are
+    # different mistakes, so they carry different reasons.
     for ref in sorted(addressable):
         if not _ref_targets_repo(ref, owner, name):
-            outcome[ref] = {"state": "unverifiable", "reason": _REASON_FOREIGN_REF}
+            reason = (_REASON_FOREIGN_REF if _URL_LIKE.match(ref.strip())
+                      else _REASON_NOT_A_REF)
+            outcome[ref] = {"state": "unverifiable", "reason": reason}
             del addressable[ref]
     if addressable:
         outcome.update(_resolve_refs_graphql(owner, name, addressable))
@@ -812,6 +825,14 @@ def _resolve_refs_graphql(
     )
     query = f'query {{ repository(owner: "{owner}", name: "{name}") {{ {selections} }} }}'
 
+    # ONE BUDGET for the whole tracker check, anchored at the GraphQL call's
+    # start: the call itself keeps its full `_TRACKER_TIMEOUT_SECONDS`, and a
+    # REST fallback gets only what is left, so a slow refusal cannot stretch
+    # `show` to two budgets. The slug lookup precedes this anchor; it can only
+    # cost a budget of its own when neither GH_REPO nor a github.com origin
+    # resolves and `gh repo view` runs — the old code's only slug path, so that
+    # worst case predates this fallback and is deliberately left outside it.
+    deadline = time.monotonic() + _TRACKER_TIMEOUT_SECONDS
     stdout = _run_capture(["gh", "api", "graphql", "-f", f"query={query}"])
     if stdout is None:
         for ref in addressable:
@@ -830,7 +851,7 @@ def _resolve_refs_graphql(
         return outcome
 
     if _graphql_request_failed(payload):
-        return _resolve_refs_rest(owner, name, addressable)
+        return _resolve_refs_rest(owner, name, addressable, deadline=deadline)
 
     # `or {}` alone defends against a FALSY value and not against a truthy
     # wrong-typed one, so a payload carrying `"data": 5` reached `(5).get` and
@@ -872,13 +893,16 @@ def _graphql_request_failed(payload: Any) -> bool:
 
 
 def _resolve_refs_rest(
-    owner: str, name: str, addressable: Dict[str, int]
+    owner: str, name: str, addressable: Dict[str, int],
+    *, deadline: Optional[float] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Per-ref REST lookups, in parallel, under ONE shared deadline.
 
     `gh api repos/{owner}/{name}/issues/{N}` answers for issues AND pull
-    requests. The deadline is `_TRACKER_TIMEOUT_SECONDS` from the start of
-    this phase; each call gets what is left of it (never less than
+    requests. `deadline` is a `time.monotonic()` value — the caller passes
+    the one tracker budget, already partly spent by the refused GraphQL call;
+    None means `_TRACKER_TIMEOUT_SECONDS` from now. Each call gets what is
+    left of it (never less than
     `_REST_MIN_CALL_TIMEOUT`), a call is never STARTED once it has passed, and
     a ref whose call has not finished by then reads as unverifiable. At most
     `_REST_MAX_REFS` refs are checked, in sorted order so the cut is
@@ -892,7 +916,8 @@ def _resolve_refs_rest(
     }
     if not checked:
         return outcome
-    deadline = time.monotonic() + _TRACKER_TIMEOUT_SECONDS
+    if deadline is None:
+        deadline = time.monotonic() + _TRACKER_TIMEOUT_SECONDS
     incomplete = {"state": "unverifiable", "reason": _REASON_CALL_INCOMPLETE}
 
     def fetch(ref: str) -> Dict[str, Any]:
@@ -1204,6 +1229,12 @@ def _issue_number(ref: Any) -> Optional[int]:
     """
     if not isinstance(ref, str):
         return None
+    # A github.com issue or pull link takes its number from the PATH, so an
+    # issue-comment link (`.../issues/123#issuecomment-456`) addresses #123 and
+    # a fragment's digits are never read as the number.
+    link = _GITHUB_REF_URL.match(ref.strip())
+    if link:
+        return int(link.group(3))
     digits = ref.strip().lstrip("#").rstrip("/").rsplit("/", 1)[-1]
     # isdecimal, NOT isdigit: isdigit also accepts superscripts such as '²',
     # which int() rejects with ValueError — a crash in every later `show`.
