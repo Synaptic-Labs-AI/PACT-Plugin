@@ -1019,6 +1019,8 @@ REPO_CHANGES = {
                               "gh repo set-default o/c; " + MERGE + "--squash"),
     "remote-set-url": (MERGE + "--squash", "git remote set-url origin git@github.com:o/b.git && " + MERGE + "--squash",
                        "git remote set-url origin git@github.com:o/c.git && " + MERGE + "--squash"),
+    "config-remote-url": (MERGE + "--squash", "git config remote.origin.url git@github.com:o/b.git && " + MERGE + "--squash",
+                          "git config remote.origin.url git@github.com:o/c.git && " + MERGE + "--squash"),
 }
 SAME_REPO = {
     "config-flag": ("git push --" + "force", "git -c http.extraHeader=x push --" + "force"),
@@ -1374,6 +1376,10 @@ NUMBERED_REPO_CHANGES = {
     "remote-add": (_NUMBERED, "git remote add upstream git@github.com:o/b.git && " + _NUMBERED,
                    "git remote add upstream git@github.com:o/c.git && " + _NUMBERED),
     "remote-rename": (_NUMBERED, "git remote rename origin old; " + _NUMBERED, "git remote rename origin older; " + _NUMBERED),
+    "config-remote-url": (_NUMBERED, "git config remote.origin.url git@github.com:o/b.git && " + _NUMBERED,
+                          "git config remote.origin.url git@github.com:o/c.git && " + _NUMBERED),
+    "config-unset-pushurl": (_NUMBERED, "git config --unset remote.origin.pushurl; " + _NUMBERED,
+                             "git config --unset remote.upstream.pushurl; " + _NUMBERED),
     "git-dir-prefix": (_NUMBERED, "GIT_DIR=/tmp/repoB/.git " + _NUMBERED, "GIT_DIR=/tmp/repoC/.git " + _NUMBERED),
     "git-dir-env": (_NUMBERED, "env GIT_DIR=/tmp/repoB/.git " + _NUMBERED, "env GIT_DIR=/tmp/repoC/.git " + _NUMBERED),
     "git-dir-export": (_NUMBERED, "export GIT_DIR=/tmp/repoB/.git; " + _NUMBERED,
@@ -1414,8 +1420,13 @@ class TestANumberedOpInAnotherRepoNeedsItsOwnApproval:
         "git remote -v && " + _NUMBERED,
         "gh repo set-default --view && " + _NUMBERED,
         "gh repo set-default -v; " + _NUMBERED,
+        "git config --get remote.origin.url && " + _NUMBERED,
+        "git config --get remote.origin.url github && " + _NUMBERED,
+        "git config remote.origin.url && " + _NUMBERED,
+        "git config -l; " + _NUMBERED,
+        "git config remote.origin.fetch +refs/heads/*:refs/remotes/origin/* && " + _NUMBERED,
     ], ids=["pr-checkout", "co", "branch-checkout", "switch", "cd-after", "echoed", "remote-list", "set-default-view",
-            "set-default-v"])
+            "set-default-v", "config-get", "config-get-value-pattern", "config-read-key", "config-list", "config-other-key"])
     def test_a_plain_numbered_approval_still_covers_a_branch_change(self, command):
         assert _runs(_mint_styled(_NUMBERED, APPROVAL_STYLES["inline"]), command)
 
@@ -1441,6 +1452,8 @@ EXPLICIT_GIT_REPO_CHANGES = {
                       "cd /tmp/repoC && git push --force-with-lease origin main"),
     "force-push-remote-set-url": (_PUSH_X, "git remote set-url origin git@github.com:o/b.git && " + _PUSH_X,
                                   "git remote set-url origin git@github.com:o/c.git && " + _PUSH_X),
+    "force-push-config-pushurl": (_PUSH_X, "git config remote.origin.pushurl git@github.com:o/b.git; " + _PUSH_X,
+                                  "git config remote.origin.pushurl git@github.com:o/c.git; " + _PUSH_X),
 }
 
 

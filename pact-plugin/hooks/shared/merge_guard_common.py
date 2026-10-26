@@ -10182,10 +10182,21 @@ def _single_detectable_leg(command: str) -> str | None:
 
 _TARGET_CHANGING_LEG_RE = re.compile(
     r"^[({\s]*(?:[A-Za-z_]\w*=\S*\s+)*(?:command\s+)?"
-    r"(?:git(?:\s+-[Cc]\s+\S+|\s+--\S+)*\s+(?:checkout|switch|remote\s+(?:set-url|add|rename))\b"
+    r"(?:git(?:\s+-[Cc]\s+\S+|\s+--\S+)*\s+(?:checkout|switch|remote\s+(?:set-url|add|rename)"
+    r"|config\b(?=[^\n]*\sremote\.\S+\.(?:url|pushurl)\b))\b"
     r"|gh\s+(?:pr\s+checkout|co|repo\s+set-default)\b"
     r"|cd\b|pushd\b|popd\b)"
 )
+
+
+def _git_config_only_reads(leg: str) -> bool:
+    """Whether a `git config` leg naming a remote URL only reads it: `--get`, `--list`,
+    or the key with no value to set."""
+    if re.search(r"\s(?:--get(?:-all|-regexp|-urlmatch)?|-l|--list)\b", leg):
+        return True
+    return not re.search(r"\s--unset(?:-all)?\b", leg) and re.search(
+        r"\.(?:url|pushurl)[\s)}]*$", leg
+    ) is not None
 
 
 def _leg_names_another_repo(leg: str) -> bool:
@@ -10209,13 +10220,14 @@ def target_changes_before_guarded_leg(command: str, branch: bool = True) -> bool
     """Whether the command's guarded leg runs somewhere other than the current branch
     of the current repository: a leg before it changes the branch, directory or gh's
     default repository (`git checkout`, `git switch`, `gh pr checkout`, `gh repo
-    set-default`, `git remote set-url`/`add`/`rename`, `cd`, `pushd`, `popd`, also
-    inside a subshell), or the guarded leg names another repository (`git -C`,
-    `--git-dir`, `--work-tree`, `GIT_DIR=`, `GIT_WORK_TREE=`, or either exported in
-    an earlier leg). An op on an implicit target (`gh pr merge --squash`, `git push
-    --force`) then acts on another branch or repo than the one the bare op would.
-    With `branch` False a branch change does not count: a numbered op (`gh pr merge
-    5`) names its pull request, so only a change of repository moves it."""
+    set-default`, `git remote set-url`/`add`/`rename`, `git config remote.<name>.url`,
+    `cd`, `pushd`, `popd`, also inside a subshell), or the guarded leg names another
+    repository (`git -C`, `--git-dir`, `--work-tree`, `GIT_DIR=`, `GIT_WORK_TREE=`, or
+    either exported in an earlier leg). An op on an implicit target (`gh pr merge
+    --squash`, `git push --force`) then acts on another branch or repo than the one
+    the bare op would. With `branch` False a branch change does not count: a
+    numbered op (`gh pr merge 5`) names its pull request, so only a change of
+    repository moves it."""
     guarded = _single_destructive_leg(command) or _single_detectable_leg(command)
     if guarded is None:
         return False
@@ -10232,6 +10244,8 @@ def target_changes_before_guarded_leg(command: str, branch: bool = True) -> bool
         # `gh repo set-default --view` only prints the default.
         change = _TARGET_CHANGING_LEG_RE.match(leg)
         if not change or re.search(r"\scheckout\b.*\s--(?:\s|$)|\sset-default\b.*\s(?:-v|--view)\b", leg):
+            continue
+        if change.group(0).endswith("config") and _git_config_only_reads(leg):
             continue
         if branch or not re.search(r"(?:checkout|switch|\bco)$", change.group(0)):
             return True
