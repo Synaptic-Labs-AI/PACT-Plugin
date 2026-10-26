@@ -2640,11 +2640,14 @@ def _substitution_bodies(command: str) -> list[str]:
             for s, e in _substitution_spans(command)]
 
 
-def _destructive_legs_on_substitutions(command: str, legs: list[str], destructive: list[str]) -> int:
+def _destructive_legs_on_substitutions(
+    command: str, legs: list[str], destructive: list[str], view: str | None = None
+) -> int:
     """How many of the destructive `legs` of `command` open a substitution or are a
     piece of one: an unquoted `x=$(echo hi; gh pr merge 5)` splits into legs at the `;`
-    inside it, and its guarded command is counted from the substitution's body."""
-    stripped = _strip_non_executable_content(_normalize_line_continuations(command))
+    inside it, and its guarded command is counted from the substitution's body. The legs
+    are slices of the stripped command, or of `view` when given."""
+    stripped = view if view is not None else _strip_non_executable_content(_normalize_line_continuations(command))
     subs = _substitution_spans(stripped)
     return sum(
         1 for (start, end), leg in zip(_slice_stripped_leg_spans(stripped), legs)
@@ -10605,15 +10608,39 @@ def is_compound_destructive_command(command: str) -> bool:
     destructive = _destructive_legs(command, legs)
     on_interpreters = sum(1 for leg in destructive if _INTERPRETER_WORD_RE.search(leg))
     interpreted = {normalize_command_text(c) for c in _interpreter_guarded_commands(command, 0)}
-    in_shells = sum(_shell_leg_destructive_count(leg) for leg in destructive)
+    # A shell's -c string or an eval's words are counted as written: the strip blanks a
+    # quoted string or heredoc body inside one that the inner shell runs, so such a leg
+    # can be destructive only as written.
+    written_legs = _legs_as_written(command, legs)
+    as_written = [
+        leg not in destructive and written != leg and _shell_c_argument(written, strict=False) is not None
+        and _leg_is_destructive(written)
+        for leg, written in zip(legs, written_legs)
+    ]
+    shell_counts = [
+        _shell_leg_destructive_count(written) if leg in destructive or flag else 0
+        for leg, written, flag in zip(legs, written_legs, as_written)
+    ]
+    in_shells = sum(shell_counts)
     # Only one branch of an if/elif/else or one arm of a case runs, and one leg of a
     # chain joined only by `||` succeeds.
-    in_shells -= _alternative_branch_walk(legs, [
-        _shell_leg_destructive_count(leg) if leg in destructive else 0 for leg in legs
-    ], _leg_operators(command))[0]
+    in_shells -= _alternative_branch_walk(legs, shell_counts, _leg_operators(command))[0]
     # Commands a substitution runs are counted from its body, as a program's are: legs
     # holding a substitution count as the larger of their own number and the body's.
     on_substitutions = _destructive_legs_on_substitutions(command, legs, destructive)
+    if any(as_written):
+        # Such a leg is on a substitution when it is a piece of one (inside its span, or
+        # closing more parentheses than it opens), or when the calling shell expands one
+        # in it before the inner shell runs.
+        stripped = _strip_non_executable_content(_normalize_line_continuations(command))
+        subs = _substitution_spans(stripped)
+        on_substitutions += sum(
+            1 for (start, end), written, flag in zip(_slice_stripped_leg_spans(stripped), written_legs, as_written)
+            if flag and (
+                _calling_shell_substitutes(written) or any(s < end and start < e for s, e in subs)
+                or _mask_shell_quotes(written).count(")") > _mask_shell_quotes(written).count("(")
+            )
+        )
     in_shells += max(on_substitutions, _substitution_destructive_count(command)) - on_substitutions
     in_shells += _literal_loop_extra_passes(command)
     return in_shells - on_interpreters + max(on_interpreters, len(interpreted)) >= 2
@@ -10848,6 +10875,30 @@ def _literal_loop_extra_passes(command: str) -> int:
     return extra
 
 
+_STRIPPED_TEXT_RE = re.compile(r"<<HEREDOC_STRIPPED|STRIPPED")
+
+
+def _legs_as_written(command: str, legs: list[str]) -> list[str]:
+    """Each of `legs` (the stripped command's) as written in `command` when the strip
+    blanked text in it: the written leg that starts with the text before the first blank,
+    the n-th such leg for the n-th stripped leg with that start. A leg the strip left
+    whole, or one with no such written leg, is returned as it is."""
+    written = _slice_stripped_legs(_strip_shell_comments(_normalize_line_continuations(command)))
+    seen: dict[str, int] = {}
+    out = []
+    for leg in legs:
+        blank = _STRIPPED_TEXT_RE.search(leg)
+        if blank is None:
+            out.append(leg)
+            continue
+        start = leg[:blank.start()].strip()
+        matches = [w for w in written if w.strip().startswith(start)]
+        n = seen.get(start, 0)
+        seen[start] = n + 1
+        out.append(matches[n] if start and n < len(matches) else leg)
+    return out
+
+
 def _shell_leg_destructive_count(leg: str, depth: int = 0) -> int:
     """1 for a destructive leg, or for a POSIX shell leg the destructive legs its -c
     string chains, as the bare command counts them: `bash -c 'gh pr merge 5 && git
@@ -10859,8 +10910,13 @@ def _shell_leg_destructive_count(leg: str, depth: int = 0) -> int:
         inner = " ".join(tokens[1:]) if tokens and tokens[0] == "eval" and len(tokens) > 1 else None
     if inner is None:
         return 1
-    inner_legs = _split_into_legs(inner)
+    # The string's legs as written: the strip would blank a quoted eval string that
+    # the inner shell runs.
+    view = _strip_shell_comments(_excise_heredoc_bodies_for_routing_scan(inner))
+    inner_legs = _slice_stripped_legs(view)
     inner_destructive = [part for part in inner_legs if _leg_is_destructive(part)]
-    return sum(
-        _shell_leg_destructive_count(part, depth + 1) for part in inner_destructive
-    ) + _literal_loop_extra_passes(inner)
+    count = sum(_shell_leg_destructive_count(part, depth + 1) for part in inner_destructive)
+    # The string's substitutions are counted from their bodies, as the bare command's are.
+    on_substitutions = _destructive_legs_on_substitutions(inner, inner_legs, inner_destructive, view)
+    count += max(on_substitutions, _substitution_destructive_count(inner, depth + 1)) - on_substitutions
+    return count + _literal_loop_extra_passes(inner)
