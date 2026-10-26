@@ -141,15 +141,13 @@ def test_a_relative_file_path_is_not_gated(tmp_path, relative):
 
 @pytest.mark.parametrize("pins", [12, 13])
 def test_a_write_to_dot_claude_over_an_unreadable_legacy_file_is_allowed_with_an_advisory(tmp_path, pins):
-    if os.geteuid() == 0:
-        pytest.skip("root reads a mode-000 file, so EACCES cannot be produced")
+    # A DIRECTORY at the legacy path: the resolver's exists() returns it and
+    # the baseline read raises a real OSError, as a mode-000 file does for a
+    # non-root user. Unlike mode bits it also fails when the suite runs as root.
     legacy = tmp_path / "CLAUDE.md"
-    legacy.write_text(_pins(13), encoding="utf-8")
-    legacy.chmod(0o000)
-    try:
-        assert _gate(tmp_path, tmp_path / ".claude" / "CLAUDE.md", _write(_pins(pins))) == "advisory"
-    finally:
-        legacy.chmod(0o644)
+    legacy.unlink(missing_ok=True)  # the suite-wide redirect seeds this path
+    legacy.mkdir()
+    assert _gate(tmp_path, tmp_path / ".claude" / "CLAUDE.md", _write(_pins(pins))) == "advisory"
 
 
 # ---------------------------------------------------------------------------

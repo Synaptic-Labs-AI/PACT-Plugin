@@ -320,8 +320,12 @@ def _row_change(claude_md: Path, before, call, expected):
     """The change and expected outcome for one row of the gate's family rows,
     with the file before written to `claude_md`."""
     if before == "unreadable":
-        claude_md.write_text(_pins(3), encoding="utf-8")
-        claude_md.chmod(0o000)
+        # A DIRECTORY in the file's place: the gate's read raises a real
+        # OSError, as a mode-000 file does for a non-root user, and unlike mode
+        # bits it also fails when the suite runs as root.
+        if claude_md.is_file():
+            claude_md.unlink()
+        claude_md.mkdir(exist_ok=True)
     else:
         claude_md.write_text(before, encoding="utf-8")
     tool, tool_input = call
@@ -361,20 +365,14 @@ def test_the_row_set_covers_every_family_with_an_allowed_and_a_denied_row():
 
 @pytest.mark.parametrize("name, before, call, expected", REAL_HOOK_ROWS, ids=[row[0] for row in REAL_HOOK_ROWS])
 def test_every_gated_frame_gets_the_leads_decision_and_text(seam, name, before, call, expected):
-    if before == "unreadable" and os.geteuid() == 0:
-        pytest.skip("root reads a mode-000 file, so EACCES cannot be produced")
     _lead_context(seam)
     claude_md = _claude_md(seam)
     results = {}
-    try:
-        for label, frame in _frames_to_compare(seam).items():
-            tool, tool_input = _row_change(claude_md, before, call, expected)
-            frame = {k: v for k, v in frame.items() if k != "_meta"}
-            frame.update(tool_name=tool, tool_input=tool_input, cwd=str(_project(seam)))
-            results[label] = _run(seam, frame)
-            claude_md.chmod(0o644)
-    finally:
-        claude_md.chmod(0o644)
+    for label, frame in _frames_to_compare(seam).items():
+        tool, tool_input = _row_change(claude_md, before, call, expected)
+        frame = {k: v for k, v in frame.items() if k != "_meta"}
+        frame.update(tool_name=tool, tool_input=tool_input, cwd=str(_project(seam)))
+        results[label] = _run(seam, frame)
     lead = results["lead"]
     assert lead[0] == ("deny" if expected is None else expected), (name, lead)
     count_denial = lead[0] == "deny" and lead[1].startswith("Pin count cap reached")
