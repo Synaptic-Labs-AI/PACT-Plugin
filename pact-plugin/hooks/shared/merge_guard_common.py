@@ -5347,12 +5347,6 @@ def _guarded_commands_directly(head: str, code: str, _depth: int = 0, found: lis
     return found
 
 
-def _code_runs_guarded_directly(head: str, code: str, _depth: int = 0) -> bool:
-    """True iff `head`'s program `code` passes a guarded command directly to an exec
-    primitive (see _guarded_commands_directly)."""
-    return bool(_guarded_commands_directly(head, code, _depth))
-
-
 def _runs_own_code(name: str, head: str) -> bool:
     """A bare call that runs its string argument as the interpreter's OWN code: eval in
     every language here, exec in Python only (elsewhere exec runs a shell command)."""

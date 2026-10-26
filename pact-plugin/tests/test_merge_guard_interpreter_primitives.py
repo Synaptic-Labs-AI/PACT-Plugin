@@ -205,15 +205,13 @@ def test_code_argument_direct_call_forms(label, executing, inert):
 
 def test_direct_call_rule_reads_a_later_argument_as_data():
     """The direct-call rule refuses only the command a primitive runs: a probe given
-    prose naming a guarded command runs `python3 probe.py`. (The whole -c leg is still
-    refused by the older primitive-plus-guarded-text rule, a known over-block whose
-    route is a script file.)"""
-    from shared.merge_guard_common import _code_runs_guarded_directly
+    prose naming a guarded command runs `python3 probe.py`."""
+    import shlex
 
     code = "import subprocess; subprocess.run(['python3', 'probe.py', 'note: " + D + "'])"
-    assert _code_runs_guarded_directly("python3", code) is False
+    assert is_dangerous_command("python3 -c " + shlex.quote(code)) is False
     direct = "import subprocess; subprocess.run(['gh', 'pr', 'merge', '5'])"
-    assert _code_runs_guarded_directly("python3", direct) is True
+    assert is_dangerous_command("python3 -c " + shlex.quote(direct)) is True
 
 
 # argv passed inside an options object: Deno.Command(cmd, {args: [...]}), Deno.run({cmd: [...]}).
