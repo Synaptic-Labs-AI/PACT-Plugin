@@ -232,7 +232,7 @@ jobs:
       # The trailing comment records the human-readable tag the SHA resolves to.
       # These majors run on Node24 (checkout@v4 / setup-python@v5 were Node20,
       # deprecated by GitHub — forced off by 2026-06-16, so re-pinned forward).
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           # Full history, because two certification files still load a base
           # commit's merge_guard_common.py with `git show <sha>` for their

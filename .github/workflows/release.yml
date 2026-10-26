@@ -41,8 +41,11 @@
 #
 # FAILURE IS LOUD
 #   The script runs under `set -euo pipefail`. A rejected tag push (for
-#   example a tag-protection ruleset that blocks GITHUB_TOKEN) or a failed
-#   release call fails the run; nothing is skipped silently.
+#   example a tag-protection ruleset that blocks GITHUB_TOKEN), a failed
+#   release call, a GitHub API error other than 404, a malformed version, or
+#   an existing tag that points at a different commit than the one that set
+#   its version all fail the run; nothing is skipped silently. Tags are never
+#   moved.
 
 name: release
 
@@ -66,11 +69,14 @@ concurrency:
 
 jobs:
   release:
+    # workflow_dispatch can be started on any branch. Only main is released,
+    # so a dispatch elsewhere does nothing rather than tag unmerged commits.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       # Pinned to a full commit SHA like tests.yml (supply-chain hardening);
       # the trailing comment records the tag the SHA resolves to.
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           # Full history and every tag: the walk reads old commits and
           # checks which v* tags already exist.
@@ -106,29 +112,61 @@ jobs:
             git rev-parse -q --verify "refs/tags/$1" >/dev/null
           }
 
-          # Every tag that already has a GitHub release (one paginated call).
-          gh api --paginate "repos/$REPO/releases?per_page=100" \
-            | jq -r '.[].tag_name' > "$work_dir/released"
+          # GET an API path into file $2. Returns 0 on success and 4 on
+          # HTTP 404. Any other failure (5xx, rate limit, auth) fails the run:
+          # a guessed answer here would become permanent release notes.
+          gh_get() {
+            local rc=0
+            gh api "$1" > "$2" 2> "$work_dir/gh_err" || rc=$?
+            [ "$rc" -eq 0 ] && return 0
+            grep -q '(HTTP 404)' "$work_dir/gh_err" && return 4
+            echo "::error::gh api $1 failed (exit $rc): $(head -c 500 "$work_dir/gh_err")"
+            exit 1
+          }
+
+          # Every tag that already has a GitHub release (one paginated call),
+          # and the subset whose release is still a draft.
+          gh api --paginate "repos/$REPO/releases?per_page=100" > "$work_dir/releases.json"
+          jq -r '.[].tag_name' "$work_dir/releases.json" > "$work_dir/released"
+          jq -r '.[] | select(.draft) | .tag_name' "$work_dir/releases.json" > "$work_dir/drafts"
 
           has_release() {
             grep -qxF -- "$1" "$work_dir/released"
           }
 
+          # A draft counts as an existing release (a person made it on
+          # purpose), but say so: it is not published until someone does.
+          warn_if_draft() {
+            if grep -qxF -- "$1" "$work_dir/drafts"; then
+              echo "::warning::$1 has only a DRAFT release; publish or delete it by hand"
+            fi
+          }
+
+          # The PR that produced commit $sha: merged, into main, with this
+          # exact commit as its merge commit. Anything else is not this
+          # release's PR, whatever number a commit subject claims.
+          # shellcheck disable=SC2016  # $sha is a jq variable, not a shell one
+          pr_filter='if type == "array" then . else [.] end
+            | [.[] | select(type == "object" and .merged_at != null
+                and .merge_commit_sha == $sha and .base.ref == "main")][0] // empty'
+
           # Writes title, number and body for the PR behind commit $1 into
           # $work_dir/{title,number,body}. Text stays in files.
           load_pr() {
-            local sha="$1" pr_json="" number=""
-            # Prefer the PR whose merge commit IS this commit, then any merged PR.
-            pr_json="$(gh api "repos/$REPO/commits/$sha/pulls" 2>/dev/null \
-              | jq -c --arg sha "$sha" 'if type == "array" then
-                  ([.[] | select(.merge_commit_sha == $sha)] + [.[] | select(.merged_at != null)])[0] // empty
-                else empty end' 2>/dev/null || true)"
+            local sha="$1" pr_json="" number="" rc
+            rc=0; gh_get "repos/$REPO/commits/$sha/pulls" "$work_dir/api" || rc=$?
+            if [ "$rc" -eq 0 ]; then
+              pr_json="$(jq -c --arg sha "$sha" "$pr_filter" "$work_dir/api")"
+            fi
             if [ -z "$pr_json" ]; then
-              # Fallback: the "(#N)" a squash merge leaves at the end of the subject.
+              # Fallback: the "(#N)" a squash merge leaves at the end of the
+              # subject, checked against the same filter.
               number="$(git log -1 --format=%s "$sha" | sed -nE 's/.*\(#([0-9]+)\)[[:space:]]*$/\1/p')"
               if [ -n "$number" ]; then
-                pr_json="$(gh api "repos/$REPO/pulls/$number" 2>/dev/null \
-                  | jq -c 'select(type == "object" and .number != null)' 2>/dev/null || true)"
+                rc=0; gh_get "repos/$REPO/pulls/$number" "$work_dir/api" || rc=$?
+                if [ "$rc" -eq 0 ]; then
+                  pr_json="$(jq -c --arg sha "$sha" "$pr_filter" "$work_dir/api")"
+                fi
               fi
             fi
             if [ -n "$pr_json" ]; then
@@ -136,12 +174,40 @@ jobs:
               printf '%s' "$pr_json" | jq -j '.title // "" | gsub("[\r\n]+"; " ")' > "$work_dir/title"
               printf '%s' "$pr_json" | jq -r '.body // ""' > "$work_dir/body"
             else
-              echo "::warning::no PR found for $sha; using the commit message"
-              printf '%s' "$number" > "$work_dir/number"
-              git log -1 --format=%s "$sha" | sed -E 's/[[:space:]]*\(#[0-9]+\)[[:space:]]*$//' \
-                | tr -d '\n' > "$work_dir/title"
+              # No PR verifiably produced this commit: use the commit message
+              # as it stands, and add no PR number of our own.
+              echo "::warning::no merged PR into main has $sha as its merge commit; using the commit message"
+              : > "$work_dir/number"
+              git log -1 --format=%s "$sha" | tr -d '\n' > "$work_dir/title"
               git log -1 --format=%b "$sha" > "$work_dir/body"
             fi
+          }
+
+          # Create the release for tag $1 with --latest=$2. Right after a tag
+          # push, GitHub's tag lookup can lag the git receive, and gh then
+          # aborts with "tag ... doesn't exist ..., aborting due to
+          # --verify-tag flag" before creating anything. Only that case is
+          # retried, with backoff 2/4/8/16s (5 attempts). Any other failure,
+          # or running out of attempts, fails the run.
+          create_release() {
+            local attempt rc delay=2
+            for attempt in 1 2 3 4 5; do
+              rc=0
+              gh release create "$1" --repo "$REPO" --verify-tag \
+                --notes-file "$work_dir/body" --latest="$2" 2> "$work_dir/gh_err" || rc=$?
+              [ "$rc" -eq 0 ] && return 0
+              cat "$work_dir/gh_err" >&2
+              if ! grep -q 'aborting due to --verify-tag flag' "$work_dir/gh_err"; then
+                echo "::error::gh release create $1 failed (exit $rc)"
+                exit 1
+              fi
+              [ "$attempt" -eq 5 ] && break
+              echo "$1: tag not visible to the API yet (attempt $attempt); retrying in ${delay}s"
+              sleep "$delay"
+              delay=$((delay * 2))
+            done
+            echo "::error::$1 is still not visible to the API after 5 attempts; the tag is pushed, so the next run creates the release"
+            exit 1
           }
 
           # --- Where the walk starts -------------------------------------
@@ -157,8 +223,8 @@ jobs:
             version="$(version_at "$sha")"
             [ -n "$version" ] || continue
             [ "$version" != "$(version_at "$sha^")" ] || continue
-            if ! printf '%s' "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-              echo "::error::$sha sets an unexpected version '$version'"
+            if ! [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::$sha sets an unexpected version: $(printf '%q' "$version")"
               exit 1
             fi
             # Only versions above the start, and only the first commit that
@@ -182,12 +248,27 @@ jobs:
           } | highest_of)"
           echo "Latest will be v$latest_version"
 
+          # Every existing tag must point at the commit that set its version.
+          # Checked for all versions BEFORE anything is created, so a mismatch
+          # stops the whole run with nothing half done. A tag is never moved:
+          # a wrong one is fixed by a person.
+          while read -r sha version <&3; do
+            tag="v$version"
+            tag_exists "$tag" || continue
+            tag_sha="$(git rev-parse "refs/tags/$tag^{commit}")"
+            if [ "$tag_sha" != "$sha" ]; then
+              echo "::error::$tag points at $tag_sha, but version $version was set by $sha. Not moving it; fix the tag by hand."
+              exit 1
+            fi
+          done 3< "$work_dir/bumps"
+
           # --- Create what is missing --------------------------------------
           # The list is read on fd 3 so no command in the loop can eat it from stdin.
           while read -r sha version <&3; do
             tag="v$version"
             if tag_exists "$tag" && has_release "$tag"; then
               echo "$tag: tag and release exist; skipping"
+              warn_if_draft "$tag"
               continue
             fi
 
@@ -210,11 +291,11 @@ jobs:
 
             if has_release "$tag"; then
               echo "$tag: release exists"
+              warn_if_draft "$tag"
               continue
             fi
             if [ "$version" = "$latest_version" ]; then latest=true; else latest=false; fi
-            gh release create "$tag" --repo "$REPO" --verify-tag \
-              --notes-file "$work_dir/body" --latest="$latest"
+            create_release "$tag" "$latest"
             echo "$tag" >> "$work_dir/released"
             echo "$tag: release created (latest=$latest)"
           done 3< "$work_dir/bumps"
