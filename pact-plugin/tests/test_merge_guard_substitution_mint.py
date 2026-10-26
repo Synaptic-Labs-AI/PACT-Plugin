@@ -1246,6 +1246,38 @@ class TestAGhHostIsATargetChange:
     def test_a_plain_approval_still_covers_a_gh_host_gh_does_not_read(self, command):
         assert _runs(_mint_styled(MERGE + "5", APPROVAL_STYLES["inline"]), command)
 
+
+GH_CONFIG_DIRS = {
+    "prefix": (MERGE + "--squash", "GH_CONFIG_DIR=/tmp/ghb " + MERGE + "--squash",
+               "GH_CONFIG_DIR=/tmp/ghc " + MERGE + "--squash"),
+    "env": (MERGE + "5", "env GH_CONFIG_DIR=/tmp/ghb " + MERGE + "5", "env GH_CONFIG_DIR=/tmp/ghc " + MERGE + "5"),
+    "export": (_CLOSE_PR + "5 -d", "export GH_CONFIG_DIR=/tmp/ghb; " + _CLOSE_PR + "5 -d",
+               "export GH_CONFIG_DIR=/tmp/ghc; " + _CLOSE_PR + "5 -d"),
+}
+
+
+class TestAGhConfigDirIsATargetChange:
+    """gh reads its hosts and credentials from GH_CONFIG_DIR, so a different one can
+    act as another account or host: a plain approval does not cover it, and its own
+    approval runs that config only."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("plain,moved,other", GH_CONFIG_DIRS.values(), ids=GH_CONFIG_DIRS.keys())
+    def test_a_plain_approval_does_not_cover_it(self, plain, moved, other, style):
+        ctx = _mint_styled(plain, style)
+        assert _runs(ctx, plain)
+        assert not _runs(ctx, moved)
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("plain,moved,other", GH_CONFIG_DIRS.values(), ids=GH_CONFIG_DIRS.keys())
+    def test_its_own_approval_runs_it_and_no_other(self, plain, moved, other, style):
+        ctx = _mint_styled(moved, style)
+        assert _runs(ctx, moved)
+        assert not _runs(ctx, other)
+
+    def test_a_gh_config_dir_gh_does_not_read_binds_nothing(self):
+        assert _runs(_mint_styled(MERGE + "5", APPROVAL_STYLES["inline"]), "GH_CONFIG_DIR=/tmp/ghb; " + MERGE + "5")
+
 SAME_SHELL_EXPORTS = {
     "subshell": (MERGE + "--squash", "(export GH_REPO=o/b; " + MERGE + "--squash)",
                  "(export GH_REPO=o/c; " + MERGE + "--squash)"),

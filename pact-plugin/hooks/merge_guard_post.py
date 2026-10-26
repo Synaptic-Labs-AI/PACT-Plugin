@@ -865,8 +865,9 @@ def _exact_text_reading(span: str, located: str) -> dict | None:
     else:
         inner = shell_c_string(leg)
         if inner is not None:
-            # A -c string that exports GH_REPO or GH_HOST, or changes repository, before
-            # its merge or close binds by text, as the same command run directly does.
+            # A -c string that exports GH_REPO, GH_HOST or GH_CONFIG_DIR, or changes
+            # repository, before its merge or close binds by text, as the same command
+            # run directly does.
             if is_compound_destructive_command(inner) or (
                 pairs and not _inner_flags_differ(leg, inner) and not exported_gh_target_before_guarded_leg(leg)
                 and not target_changes_before_guarded_leg(leg, branch=False)
@@ -899,8 +900,9 @@ def _exact_text_reading(span: str, located: str) -> dict | None:
         # A close of the current branch's PR (`gh pr close --delete-branch`) names
         # no number the extractor reads, so no (op, target) binds it; its text does.
         or (ctx["operation_type"] == "close" and _target_value(ctx) is None)
-        # A merge or close run after `export GH_REPO=…` (or GH_HOST) acts in that
-        # repository, which the op's own reading does not see; its text binds it.
+        # A merge or close run after `export GH_REPO=…` (or GH_HOST, GH_CONFIG_DIR)
+        # acts in that repository, which the op's own reading does not see; its text
+        # binds it.
         or (ctx["operation_type"] in ("merge", "close") and exported_gh_target_before_guarded_leg(span))
         # So does an op on a named PR or branch run after a change of directory or
         # repository (`cd ../other && gh pr merge 5`, `git -C ../other branch -D

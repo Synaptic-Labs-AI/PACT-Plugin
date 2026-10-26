@@ -2326,8 +2326,9 @@ PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
 }
 
 
-# The variables gh reads its target from: the repository, and the host it is on.
-_GH_TARGET_VARIABLES = ("GH_REPO", "GH_HOST")
+# The variables gh reads its target from: the repository, the host it is on, and the
+# config directory that holds the host and its credentials.
+_GH_TARGET_VARIABLES = ("GH_REPO", "GH_HOST", "GH_CONFIG_DIR")
 
 
 def _unmasked_legs(command: str) -> list[str]:
@@ -2583,15 +2584,16 @@ def extract_privileged_flags(command: str, op_type: str | None) -> list[str]:
 
     # gh reads its repository from a GH_REPO assignment prefixing the command (run
     # directly or through env, command, ...) exactly as from --repo, so that prefix
-    # is the same redirect. A GH_HOST prefix moves it to another host, so it binds
-    # by its value too.
+    # is the same redirect. A GH_HOST or GH_CONFIG_DIR prefix moves it to another
+    # host or account, so each binds by its value too.
     if op_type in ("merge", "close"):
         for leg in _unmasked_legs(command):
             assigned, _ = _assignments_reaching_command(leg)
             if "GH_REPO" in assigned:
                 found.add("--repo=" + assigned["GH_REPO"])
-            if "GH_HOST" in assigned:
-                found.add("GH_HOST=" + assigned["GH_HOST"])
+            for name in _GH_TARGET_VARIABLES[1:]:
+                if name in assigned:
+                    found.add(name + "=" + assigned[name])
 
     return sorted(found)
 
@@ -10293,9 +10295,9 @@ def _exported_before_guarded_leg(command: str, names: tuple[str, ...]) -> bool:
 
 
 def exported_gh_target_before_guarded_leg(command: str) -> bool:
-    """Whether a leg before the command's guarded leg exports GH_REPO or GH_HOST
-    (`export GH_REPO=o/b; gh pr merge 5`), which gh then reads as its repository or
-    host."""
+    """Whether a leg before the command's guarded leg exports GH_REPO, GH_HOST or
+    GH_CONFIG_DIR (`export GH_REPO=o/b; gh pr merge 5`), which gh then reads as its
+    repository, host or config."""
     return _exported_before_guarded_leg(command, _GH_TARGET_VARIABLES)
 
 

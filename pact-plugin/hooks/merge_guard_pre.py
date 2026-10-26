@@ -536,9 +536,9 @@ def _token_matches_command(token: dict, command: str) -> bool:
         return False
 
     # A token covers the repository the command runs in by default: a merge or close
-    # after an export of GH_REPO or GH_HOST, or any op on a named PR or branch after a
-    # change of directory or repository (`git -C ../other branch -D feat/x`), acts in
-    # another one, even under a token that names its target.
+    # after an export of GH_REPO, GH_HOST or GH_CONFIG_DIR, or any op on a named PR or
+    # branch after a change of directory or repository (`git -C ../other branch -D
+    # feat/x`), acts in another one, even under a token that names its target.
     op = context.get("operation_type")
     if (op in ("merge", "close") and exported_gh_target_before_guarded_leg(command)) or (
         op in REPO_RELATIVE_OPS and target_changes_before_guarded_leg(command, branch=False)
