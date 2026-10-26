@@ -26,12 +26,13 @@
 #
 #   The heading minus `## ` is the annotated tag message, verbatim, and is an
 #   allowlist: printable ASCII, em dash and en dash only. The section runs to
-#   the next `## v<digit>` heading (fenced code never ends it). Its body is
+#   the next `## vX.Y.Z: ` heading. Its body is
 #   free Markdown and becomes the release body, with headings of level 3 or
 #   deeper promoted one level (`### Summary` is published as `## Summary`).
-#   The file may not contain a NUL byte, a carriage return or an HTML
-#   comment, and its code fences follow CommonMark: every fence closes and
-#   none holds a `## v<digit>` line. The rules and the extraction are
+#   The file uses a restricted Markdown, so the checker never has to model
+#   Markdown to split sections the way GitHub renders them: no NUL, CR, HTML
+#   comment or HTML block, no code fence, no `===`/`---` line, and every
+#   version-like heading in the canonical form. The rules and extraction are
 #   defined once, in .github/scripts/check-release-notes.sh, and run twice:
 #   on every PR by pact-plugin/tests/test_release_notes.py (the current
 #   version's section and every other `## v` section), and here before

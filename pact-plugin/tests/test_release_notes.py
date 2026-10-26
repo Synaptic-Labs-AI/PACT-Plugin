@@ -179,6 +179,12 @@ def test_v4812_extraction_matches_the_published_notes(tmp_path):
 
 _GOOD = b"## v1.2.3: short summary\n\n### Summary\n\nText.\n"
 
+# Reasons the checker gives for the restricted-grammar rules.
+_FENCE = "code fences"
+_HTML = "HTML blocks"
+_RULE = "a line of only = or -"
+_VHEAD = "a version heading must be exactly"
+
 # The reason the checker gives for any byte outside the line-1 allowlist.
 _ALLOW = "may contain only printable ASCII, em dash or en dash"
 
@@ -186,7 +192,7 @@ _ALLOW = "may contain only printable ASCII, em dash or en dash"
 @pytest.mark.parametrize(
     "label, content, expected_reason",
     [
-        ("missing colon", b"## v1.2.3 short summary\n\nbody\n", "not in the form '## v1.2.3: <summary>'"),
+        ("missing colon", b"## v1.2.3 short summary\n\nbody\n", _VHEAD),
         ("heading names another version", b"## v1.2.4: summary\n\nbody\n", "no section for v1.2.3"),
         ("no heading", b"v1.2.3: summary\n\nbody\n", "no section for v1.2.3"),
         ("empty summary", b"## v1.2.3:    \n\nbody\n", "empty summary"),
@@ -256,35 +262,36 @@ _ALLOW = "may contain only printable ASCII, em dash or en dash"
             b"## v1.2.3: summary\n\n\n## v1.2.2: older\n\nbody\n",
             "no release notes",
         ),
-        # Code fences (CommonMark). Reviewer repro (a): a ~~~ fence shown
-        # inside a ``` block, with an example version heading in it.
+        # Earlier fence repros: all rejected now, since fences are refused.
+        # Reviewer repro (a): a ~~~ fence shown inside a ``` block, with an
+        # example version heading in it.
         (
             "version heading inside nested example fences",
             b"## v1.2.3: a\n\n```\n~~~\n## v0.0.1: example heading\n~~~\n```\n\n"
             b"### What landed\n\n- IMPORTANT BULLET\n",
-            "heading inside the code fence",
+            _FENCE,
         ),
         # Repro (c): an indented fence around a column-0 version heading.
         (
             "indented fence around a version heading",
             b"## v1.2.3: a\n\n  ```\n## v1.2.2: inside\n  ```\n\nafter\n",
-            "heading inside the code fence",
+            _FENCE,
         ),
         (
             "closing line with an info string does not close",
             b"## v1.2.3: a\n\n```\ncode\n``` not-a-close\n\n## v1.2.2: b\n\nx\n",
-            "heading inside the code fence",
+            _FENCE,
         ),
-        ("unclosed fence", b"## v1.2.3: a\n\nbody\n\n```\ncode\n", "never closed"),
+        ("unclosed fence", b"## v1.2.3: a\n\nbody\n\n```\ncode\n", _FENCE),
         (
             "unclosed fence before the next section",
             b"## v1.2.3: a\n\n```\ncode\n\n## v1.2.2: b\n\nx\n",
-            "heading inside the code fence",
+            _FENCE,
         ),
         (
             "version heading indented 1-3 spaces",
             b"## v1.2.3: a\n\nbody\n\n  ## v1.2.2: b\n\nx\n",
-            "must start at column 0",
+            _VHEAD,
         ),
         # HTML comments: GitHub hides their text.
         (
@@ -300,9 +307,46 @@ _ALLOW = "may contain only printable ASCII, em dash or en dash"
         (
             "malformed heading beside a valid one",
             b"## v1.2.3: valid\n\nnotes\n\n## v1.2.3 also this\n\nmore\n",
-            "not in the form",
+            _VHEAD,
         ),
         ("CRLF in the body", b"## v1.2.3: a\n\nbody line\r\nmore\n", "carriage return"),
+        # The restricted grammar: constructs the checker refuses to model.
+        # Code fences, wherever they appear (closes D-1 and D-3 by construction).
+        (
+            "fence opened on a list-marker line (markerfence)",
+            b"## v1.2.3: lists\n\n- ```\n  x\n  ```\n\n### What landed\n\n- BULLET\n",
+            _FENCE,
+        ),
+        ("fence after a numbered marker", b"## v1.2.3: a\n\n1. ```\n   x\n   ```\n", _FENCE),
+        ("top-level fence", b"## v1.2.3: a\n\n```\ncode\n```\n", _FENCE),
+        ("tilde fence", b"## v1.2.3: a\n\n~~~\ncode\n~~~\n", _FENCE),
+        ("inline triple backtick", b"## v1.2.3: a\n\nuse ```x``` here\n", _FENCE),
+        ("fence with an info string", b"## v1.2.3: a\n\n```py\nx = 1\n```\n", _FENCE),
+        ("fence in the preamble", b"```\nx\n```\n\n## v1.2.3: a\n\nbody\n", _FENCE),
+        # HTML blocks.
+        ("<pre> block", b"## v1.2.3: a\n\n<pre>\n## v1.2.2: x\n</pre>\n", _HTML),
+        ("<script> block", b"## v1.2.3: a\n\nbody\n\n<script>alert(1)</script>\n", _HTML),
+        ("<details> block", b"## v1.2.3: a\n\n<details>\n\nhidden\n\n</details>\n", _HTML),
+        ("indented HTML block", b"## v1.2.3: a\n\n   <div>\nx\n", _HTML),
+        # Setext underlines, thematic breaks, front matter.
+        ("setext === underline", b"## v1.2.3: a\n\nTitle\n===\n\nbody\n", _RULE),
+        ("setext --- underline", b"## v1.2.3: a\n\nTitle\n---\n\nbody\n", _RULE),
+        ("front matter", b"---\ntitle: x\n---\n\n## v1.2.3: a\n\nbody\n", _RULE),
+        ("thematic break", b"## v1.2.3: a\n\nbody\n\n ----- \n\nmore\n", _RULE),
+        # Version headings that are not canonical (D-2, widened).
+        ("capital V", b"## v1.2.3: a\n\nbody\n\n## V1.2.2: caps\n\nleak\n", _VHEAD),
+        ("no space after ##", b"## v1.2.3: a\n\nbody\n\n##v1.2.2: nospace\n\nleak\n", _VHEAD),
+        (
+            "Keep a Changelog bracket form",
+            b"## v1.2.3: a\n\nbody\n\n## [1.2.2] - 2026-10-26\n\nleak\n",
+            _VHEAD,
+        ),
+        ("h1 version heading", b"## v1.2.3: a\n\nbody\n\n# v1.2.2: h1\n\nleak\n", _VHEAD),
+        ("h3 version heading", b"## v1.2.3: a\n\nbody\n\n### v1.2.2: h3\n\nleak\n", _VHEAD),
+        ("quoted version heading", b"## v1.2.3: a\n\nbody\n\n> ## v1.2.2: x\n", _VHEAD),
+        ("list-item version heading", b"## v1.2.3: a\n\nbody\n\n- ## v1.2.2: x\n", _VHEAD),
+        ("indented-code version line", b"## v1.2.3: a\n\nbody\n\n    ## v1.2.2: x\n", _VHEAD),
+        ("non-numeric version", b"## v1.2.3: a\n\nbody\n\n## vNEXT: later\n\nleak\n", _VHEAD),
     ],
 )
 def test_checker_rejects(tmp_path, label, content, expected_reason):
@@ -346,70 +390,22 @@ def test_extraction_picks_one_section_trims_and_promotes(tmp_path):
 
 
 def test_section_ends_only_at_the_next_version_heading(tmp_path):
-    """A `## Something` line, and anything inside a fence, stay in the body.
+    """A `## Something` subheading stays in the body; only `## vX.Y.Z: ` ends it.
 
-    Inside a fence nothing is promoted. (A `## v<digit>` line inside a fence
-    is rejected instead: see the reject table.)
+    `## Validation` starts with a V but is not version-like, so it is allowed.
     """
     root = _require_checkout()
     changelog = tmp_path / "CHANGELOG.md"
     changelog.write_bytes(
         b"## v1.2.3: boundaries\n\n### Summary\n\n## Something\n\ntext\n\n"
-        b"```\n### not promoted\n## not a heading in a fence\n```\n\n"
-        b"~~~\n## Also inside\n~~~\n\nend\n\n"
+        b"## Validation\n\n#### Deep\n\nend\n\n"
         b"## v1.2.2: older\n\nolder\n"
     )
     code, reason, _, body = _check(root, "1.2.3", changelog, tmp_path)
     assert code == 0, reason
     assert body == (
-        b"## Summary\n\n## Something\n\ntext\n\n"
-        b"```\n### not promoted\n## not a heading in a fence\n```\n\n"
-        b"~~~\n## Also inside\n~~~\n\nend\n"
+        b"## Summary\n\n## Something\n\ntext\n\n## Validation\n\n### Deep\n\nend\n"
     )
-
-
-@pytest.mark.parametrize(
-    "label, fenced_block",
-    [
-        # Reviewer repro (b): before CommonMark tracking, each of these left
-        # the parser "inside a fence", so the next version's heading was
-        # ignored and later sections were absorbed. They are valid nested
-        # fences, accepted and published exactly as GitHub renders them.
-        ("backtick block showing a lone ~~~", b"```\n~~~\n```\n"),
-        ("four-backtick block showing a lone ```", b"````\n```\n````\n"),
-        ("backtick block showing a tilde fence", b"```markdown\n~~~\ncode\n~~~\n```\n"),
-        ("longer closing run", b"```\ncode\n`````\n"),
-        ("indented fence", b"  ~~~\n### not promoted\n  ~~~\n"),
-    ],
-)
-def test_valid_nested_fences_are_published_exactly(tmp_path, label, fenced_block):
-    root = _require_checkout()
-    changelog = tmp_path / "CHANGELOG.md"
-    changelog.write_bytes(
-        b"## v1.2.3: fences\n\nbefore\n\n" + fenced_block + b"\nafter\n\n"
-        b"## v1.2.2: older\n\nolder body\n"
-    )
-    code, reason, _, body = _check(root, "1.2.3", changelog, tmp_path)
-    assert code == 0, f"{label}: {reason}"
-    assert body == b"before\n\n" + fenced_block + b"\nafter\n", label
-    code, versions = _list(root, changelog)
-    assert (code, versions) == (0, ["1.2.3", "1.2.2"]), f"{label}: {versions}"
-
-
-def test_list_item_fence_indented_four_spaces_is_published_as_written(tmp_path):
-    """Pins the one documented divergence from CommonMark.
-
-    A fence indented 4+ spaces inside a list item is code on GitHub but plain
-    text to the checker. Its lines are never boundaries or promoted, so the
-    body is published byte for byte as written, which is how GitHub shows it.
-    """
-    root = _require_checkout()
-    block = b"1. Item:\n\n    ```\n    ### looks like a heading\n    ## v9.9.9: and a version\n    ```\n"
-    changelog = tmp_path / "CHANGELOG.md"
-    changelog.write_bytes(b"## v1.2.3: list fence\n\n" + block + b"\n## v1.2.2: older\n\nx\n")
-    code, reason, _, body = _check(root, "1.2.3", changelog, tmp_path)
-    assert code == 0, reason
-    assert body == block
 
 
 def test_list_mode_rejects_a_malformed_version_heading(tmp_path):

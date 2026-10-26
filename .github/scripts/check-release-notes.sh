@@ -25,37 +25,40 @@
 #
 # THE SECTION
 #   A version's section starts at its heading line `## v<version>: <summary>`
-#   (at column 0) and ends just before the next column-0 line that starts
-#   `## v` and a digit, or at the end of the file. Any other line, including a
-#   `## Something` line, is part of the body.
+#   (at column 0) and ends just before the next such canonical heading, or
+#   at the end of the file. Any other line, including a `## Something`
+#   subheading, is part of the body.
 #
-# CODE FENCES (CommonMark rules, so the split matches what GitHub renders)
-#   A fence opens on a line indented 0-3 spaces followed by 3 or more ` or ~
-#   (for `, the rest of the line has no backtick). It closes only on a line
-#   indented 0-3 spaces with the SAME character, at least as many, and then
-#   only whitespace. Everything between is code: never a section boundary,
-#   never promoted. A fence nested in another (a ```` block showing ```) is
-#   fine. FAIL CLOSED, anywhere in the file: a `## v<digit>` line inside a
-#   fence, a `## v<digit>` heading indented 1-3 spaces (GitHub shows it as a
-#   heading, but it would not split sections here), and a fence still open
-#   at the end of the file.
-#   Known divergence: a fence indented 4 or more spaces inside a list item
-#   is code on GitHub but plain text here. Such lines are never boundaries
-#   (column 0 only) and never promoted (0-3 spaces only), so they are
-#   published exactly as written, which is how GitHub shows them.
+# A RESTRICTED GRAMMAR, ON PURPOSE
+#   The checker splits sections on raw lines while GitHub renders Markdown.
+#   Rather than model Markdown (code fences, list and quote containers, HTML
+#   blocks, setext headings), it REFUSES the constructs where the two could
+#   disagree about what is a heading, what is code and what is hidden.
+#   Release notes have never needed any of them. Every rule holds for the
+#   whole file, in both modes, so a bad line anywhere fails the PR check
+#   (--list) and the release job (which then falls back to the copy on main).
 #
 # THE RULES
 #   - <version> is X.Y.Z (digits only).
-#   - The file contains no NUL byte and no carriage return anywhere (a NUL
-#     would be dropped silently by the shell; a CR would be published as is).
-#   - The file contains no HTML comment (`<!--`): GitHub hides commented-out
-#     text, so a section inside one would be published unseen.
-#   - The fence rules above hold for the whole file.
+#   - No NUL byte and no carriage return anywhere (a NUL would be dropped
+#     silently by the shell; a CR would be published as is).
+#   - No HTML comment (`<!--`) anywhere: GitHub hides commented-out text.
+#   - No code fence: no line contains ``` or ~~~ anywhere (inline `code`
+#     with single backticks is fine).
+#   - No HTML block: no line starts with `<` after 0-3 spaces.
+#   - No setext underline, thematic break or front matter: no line is only
+#     `=` characters or only `-` characters after 0-3 spaces.
+#   - Version headings are canonical: every line that looks like a heading
+#     naming a version must be exactly `## vX.Y.Z: <summary>` at column 0.
+#     "Looks like" means: after any indent (spaces or tabs, so indented code
+#     counts too) and any `>` / `-` / `*` / `+` / `1.` / `1)` prefixes, 1+ `#`,
+#     then optional `[`, then either a digit (with optional `v`/`V` before
+#     it) or `v`/`V` followed by anything but a lowercase letter. That
+#     catches `## V4.8.12:`, `##v4.8.12:`, `## [4.8.12] - date`,
+#     `# v4.8.12:`, `### v4.8.12:`, `## vNEXT`, an indented `## v...`,
+#     `> ## v...` and `- ## v...`, while `## Validation` stays a subheading.
 #   - Exactly one heading line starts `## v<version>: `. None is "missing";
-#     two or more is "duplicate"; any other heading naming this version
-#     (e.g. `## v<version> summary`) is an error even beside a valid one.
-#     In --list mode every `## v<digit>` heading must have the
-#     `## vX.Y.Z: ` form.
+#     two or more is "duplicate".
 #   - The heading minus `## ` is the annotated tag message verbatim, so it
 #     is an ALLOWLIST: printable ASCII (bytes 0x20-0x7E), the em dash U+2014
 #     (E2 80 94) and the en dash U+2013 (E2 80 93) only, with a non-blank
@@ -63,12 +66,12 @@
 #     invalid-UTF-8, invisible, bidi or tag character a terminal, web page
 #     or LLM reader could show differently from what a reviewer saw.
 #   - The body (the section after its heading, leading and trailing blank
-#     lines trimmed) has a non-space character. It is otherwise free-form
-#     Markdown, rendered and sanitised by GitHub.
+#     lines trimmed) has a non-space character. Within these rules it is
+#     free-form Markdown, rendered and sanitised by GitHub.
 #
 # THE RELEASE BODY
 #   The body as written in CHANGELOG.md, with each heading of level 3 or
-#   deeper (indented 0-3 spaces, outside a fence) promoted by one level
+#   deeper (indented 0-3 spaces) promoted by one level
 #   (`### Summary` becomes `## Summary`), so a release reads like the
 #   hand-cut ones. It ends with exactly one newline.
 #
@@ -127,75 +130,49 @@ fi
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-# One pass over the whole file, the only place fences are modelled: track
-# CommonMark fences, enforce the fence rules, list or count version
-# headings, and copy this version's heading and its section (headings
-# already promoted) out. A heading for a different version, e.g. v4.8.1
-# when asked for v4.8.12, is told apart by the character after the version.
-awk -v mode="$mode" -v want="## v$version: " -v loose="## v$version" \
+# One pass over the whole file: enforce the grammar on every line, list or
+# count the canonical version headings, and copy this version's heading and
+# its section (headings already promoted) out. No Markdown is modelled.
+awk -v mode="$mode" -v want="## v$version: " \
     -v head_out="$work/heading" -v body_out="$work/section" \
     -v count_out="$work/count" -v err_out="$work/error" -v list_out="$work/list" '
-  function fail(msg) { if (err == "") err = msg }
-  # Sets fchar/flen when rest (indent removed) opens a fence.
-  function opens(rest,    info) {
-    if (match(rest, /^`+/) && RLENGTH >= 3) {
-      info = substr(rest, RLENGTH + 1)
-      if (index(info, "`") == 0) { fchar = "`"; flen = RLENGTH; return 1 }
-      return 0
-    }
-    if (match(rest, /^~+/) && RLENGTH >= 3) { fchar = "~"; flen = RLENGTH; return 1 }
-    return 0
-  }
-  function closes(rest,    ok) {
-    if (fence_char == "`") ok = match(rest, /^`+/); else ok = match(rest, /^~+/)
-    if (!ok || RLENGTH < fence_len) return 0
-    return substr(rest, RLENGTH + 1) ~ /^[ \t]*$/
-  }
-  function emit(text) { if (in_section) print text > body_out }
+  function fail(msg) { if (err == "") err = "line " NR ": " msg; exit }
   BEGIN {
-    n = 0; bad = 0; in_section = 0; fence_char = ""; fence_len = 0; err = ""
+    n = 0; in_section = 0; err = ""
     printf "" > head_out; printf "" > body_out; printf "" > list_out
   }
   {
     line = $0
     match(line, /^ */); indent = RLENGTH; rest = substr(line, indent + 1)
-    if (fence_char != "") {
-      if (indent <= 3 && closes(rest)) { fence_char = ""; emit(line); next }
-      if (indent <= 3 && rest ~ /^## v[0-9]/) {
-        fail("line " NR ": a \"## v\" heading inside the code fence opened on line " fence_line)
-        exit
-      }
-      emit(line); next
+    if (index(line, "```") || index(line, "~~~"))
+      fail("code fences (``` or ~~~) are not allowed in CHANGELOG.md")
+    if (indent <= 3 && rest ~ /^</)
+      fail("HTML blocks (a line starting with <) are not allowed in CHANGELOG.md")
+    if (indent <= 3 && rest ~ /^(=+|-+)[ \t]*$/)
+      fail("a line of only = or - (setext heading, rule or front matter) is not allowed")
+    canonical = (line ~ /^## v[0-9]+\.[0-9]+\.[0-9]+: /)
+    if (!canonical) {
+      r = line
+      sub(/^[ \t]*/, "", r)
+      while (sub(/^(>|[-*+]|[0-9]+[.)])[ \t]*/, "", r)) {}
+      if (r ~ /^#+[ \t]*\[?[vV]?[ \t]*[0-9]/ || r ~ /^#+[ \t]*\[?[vV]([^a-z]|$)/)
+        fail("a version heading must be exactly \"## vX.Y.Z: <summary>\" at column 0")
     }
-    if (indent <= 3 && opens(rest)) {
-      fence_char = fchar; fence_len = flen; fence_line = NR; emit(line); next
-    }
-    if (line ~ /^## v[0-9]/) {
+    if (canonical) {
       in_section = 0
       if (mode == "list") {
-        if (line !~ /^## v[0-9]+\.[0-9]+\.[0-9]+: /) {
-          fail("line " NR ": a version heading must be \"## vX.Y.Z: <summary>\"")
-          exit
-        }
         v = substr(line, 5); sub(/: .*/, "", v); print v > list_out
       } else if (index(line, want) == 1) {
         n++
         if (n == 1) { print line > head_out; in_section = 1 }
-      } else if (index(line, loose) == 1 && substr(line, length(loose) + 1, 1) !~ /[0-9.]/) {
-        bad++
       }
       next
     }
-    if (indent >= 1 && indent <= 3 && rest ~ /^## v[0-9]/) {
-      fail("line " NR ": a \"## v\" heading must start at column 0")
-      exit
-    }
     if (indent <= 3 && rest ~ /^###+([ \t]|$)/) line = substr(line, 1, indent) substr(rest, 2)
-    emit(line)
+    if (in_section) print line > body_out
   }
   END {
-    if (err == "" && fence_char != "") fail("the code fence opened on line " fence_line " is never closed")
-    print n, bad > count_out
+    print n > count_out
     printf "%s", err > err_out
   }
 ' "$file"
@@ -214,11 +191,7 @@ if [ "$mode" = "list" ]; then
   exit 0
 fi
 
-read -r n bad < "$work/count"
-if [ "$bad" -gt 0 ]; then
-  echo "a heading for v$version is not in the form '## v$version: <summary>'"
-  exit 1
-fi
+read -r n < "$work/count"
 if [ "$n" -eq 0 ]; then
   echo "no section for v$version (a line starting '## v$version: ')"
   exit 1
