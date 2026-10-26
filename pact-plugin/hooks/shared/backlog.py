@@ -2,8 +2,9 @@
 Location: pact-plugin/hooks/shared/backlog.py
 Summary: WRITE side and CLI of the cross-session backlog — item mutations,
          atomic save, corrupt-file repair, batched pact-memory resolution,
-         one batched tracker query (with a bounded per-ref REST fallback when
-         GraphQL is refused), and the reconciliation that reports drift.
+         one batched tracker query for this repository, bounded per-ref REST
+         calls when GraphQL is refused and for links to other github.com
+         repositories, and the reconciliation that reports drift.
 Used by: commands/next.md, invoked as a direct script —
          python3 {plugin_root}/hooks/shared/backlog.py <subcommand>.
          NOT a lifecycle hook: this file MUST NOT be registered in hooks.json.
@@ -798,8 +799,10 @@ def resolve_refs(
 
     With NO slug for this project, a github.com link with a valid owner and
     name is still checked in the repository it names — the link alone says
-    which one. Every other ref (a bare number, which needs this repository's
-    slug, and every non-link kind) reads `no tracker configured`.
+    which one. Every other ref that is not opaque — a bare number, which
+    needs this repository's slug, another host's link, an invalid-slug link,
+    a non-ref string, an out-of-range number — reads `no tracker configured`;
+    an opaque ref (a Linear key, free text) keeps its default reason.
 
     Every entry comes back with a `state` of `done`, `abandoned`, `closed`,
     `open` or `unverifiable`. Unverifiable covers a ref no tracker here can
@@ -964,9 +967,10 @@ def _resolve_refs_rest(
     requests. Refs that name the same issue share ONE call and its answer.
 
     ORDER AND CAP: distinct issues are checked `primary` (this repository;
-    None when it has no slug) first, then by owner, name and number — numerically, so the cut is
-    deterministic and predictable. At most `_REST_MAX_REFS` calls are made;
-    refs past the cap are reported with the cap as their reason.
+    None when it has no slug) first, then by owner, name and number —
+    numerically, so the cut is deterministic and predictable. At most
+    `_REST_MAX_REFS` calls are made; refs past the cap are reported with the
+    cap as their reason.
 
     `deadline` is a `time.monotonic()` value — the one tracker budget, already
     partly spent by a refused GraphQL call. With less than
@@ -1264,7 +1268,7 @@ def _repo_slug(project_path: Any = None) -> Optional[Tuple[str, str]]:
     local = _local_repo_slug(project_path)
     if local is not None:
         return local
-    return _gh_repo_view_slug()
+    return _gh_repo_view_slug(project_path)
 
 
 def _local_repo_slug(project_path: Any = None) -> Optional[Tuple[str, str]]:
@@ -1307,12 +1311,18 @@ def _origin_repo_slug(project_path: Any = None) -> Optional[Tuple[str, str]]:
 
 def _git_anchor(project_path: Any) -> Optional[List[str]]:
     """`git` arguments anchoring a call on `project_path`: `[]` for None (the
-    process CWD), `["-C", path]` for an absolute str, and None — refuse — for
-    anything else. The same gate `_branch_and_worktree_names` applies: a
-    relative path would silently resolve against the CWD."""
+    process CWD), `["-C", path]` for an absolute str naming an existing
+    directory, and None — refuse — for anything else. A relative path would
+    silently resolve against the CWD; and a path that does not exist (a
+    moved or deleted project) would make every rung fail and leave only
+    `gh repo view`, which must not then read the CWD's repository instead.
+    `os.path.isdir` also answers False for a path holding a NUL byte, which
+    could never reach an argv. Existence only, not a `.git` test: `git -C`
+    also accepts a repository's subdirectory and a worktree."""
     if project_path is None:
         return []
-    if isinstance(project_path, str) and project_path and Path(project_path).is_absolute():
+    if (isinstance(project_path, str) and project_path
+            and Path(project_path).is_absolute() and os.path.isdir(project_path)):
         return ["-C", project_path]
     return None
 
@@ -1398,8 +1408,11 @@ def _valid_slug(owner: Any, name: Any) -> bool:
     )
 
 
-def _gh_repo_view_slug() -> Optional[Tuple[str, str]]:
+def _gh_repo_view_slug(project_path: Optional[str] = None) -> Optional[Tuple[str, str]]:
     """The last rung: ask `gh repo view` (a GraphQL call; may need network).
+
+    Run IN `project_path` when one is given, never the process CWD: gh reads
+    the repository it is run in, and the CWD may be an unrelated checkout.
 
     GITHUB.COM ONLY. `gh repo view` resolves the repository from the git
     remotes, which may be a GitHub Enterprise host; every tracker call pins
@@ -1407,7 +1420,9 @@ def _gh_repo_view_slug() -> Optional[Tuple[str, str]]:
     repository of the same name. The `url` field names the host, and only
     `github.com` is accepted.
     """
-    stdout = _run_capture(["gh", "repo", "view", "--json", "nameWithOwner,url"])
+    command = ["gh", "repo", "view", "--json", "nameWithOwner,url"]
+    stdout = (_run_capture(command) if project_path is None
+              else _run_capture(command, cwd=project_path))
     if stdout is None:
         return None
     payload = _parse_json(stdout)
@@ -1429,8 +1444,13 @@ def _gh_repo_view_slug() -> Optional[Tuple[str, str]]:
 
 
 def _is_github_url(url: Any) -> bool:
-    """`url` is an http(s) URL on github.com itself (not a subdomain, not GHE)."""
-    if not isinstance(url, str):
+    """`url` is an http(s) URL on github.com itself (not a subdomain, not GHE).
+
+    A backslash or an `@` is refused outright, as for remotes (S-F6): GitHub's
+    web URL never carries userinfo, and `urlsplit` reads
+    `https://evil.com@github.com/...` as github.com.
+    """
+    if not isinstance(url, str) or "\\" in url or "@" in url:
         return False
     try:
         parts = urlsplit(url.strip())
@@ -1441,7 +1461,8 @@ def _is_github_url(url: Any) -> bool:
 
 
 def _run_capture(
-    command: Sequence[str], timeout: float = _TRACKER_TIMEOUT_SECONDS
+    command: Sequence[str], timeout: float = _TRACKER_TIMEOUT_SECONDS,
+    *, cwd: Optional[str] = None,
 ) -> Optional[str]:
     """Run a `gh` or `git` command; return its stdout, or None when there is none.
 
@@ -1458,6 +1479,8 @@ def _run_capture(
 
     `timeout` exists for the per-ref REST calls, which share ONE deadline and
     so each get what is left of it. Every other caller takes the default.
+    `cwd` anchors a command that reads the repository it runs in
+    (`gh repo view`) on the project instead of the process CWD.
     """
     env = {key: value for key, value in os.environ.items() if key != "GH_HOST"}
     try:
@@ -1468,6 +1491,7 @@ def _run_capture(
             errors="replace",
             timeout=timeout,
             env=env,
+            cwd=cwd,
         )
     except (subprocess.TimeoutExpired, OSError, ValueError):
         return None

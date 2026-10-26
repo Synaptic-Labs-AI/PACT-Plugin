@@ -51,7 +51,7 @@ first and checked to be the opposite of what the arm asserts.
   unparseable GraphQL goes to REST      test_unparseable_graphql_output_never_falls_back
   `reconcile` drops project_path        test_reconcile_anchors_the_slug_lookup_on_the_stored_project_path
   urlsplit ValueError escapes           test_slug_and_ref_parsers_refuse_what_they_cannot_read
-  `_classify_ref` non-str guard gone   test_slug_and_ref_parsers_refuse_what_they_cannot_read
+  `_classify_ref` non-str guard gone    test_slug_and_ref_parsers_refuse_what_they_cannot_read
 
   R2 rows (this file's own arms, and arms R2 made discriminating again):
   the write path reads the CWD origin   test_the_write_path_reads_the_backlogs_own_origin_not_the_cwd
@@ -77,6 +77,12 @@ first and checked to be the opposite of what the arm asserts.
   no slug short-circuits foreign links  test_r3_a_foreign_link_is_checked_even_with_no_local_slug
                                         test_r3_an_unusable_project_path_still_checks_a_foreign_link
   `_same_repo` turns case-sensitive     test_r3_same_repo_is_the_one_comparison_and_issue_number_is_gone
+  `primary` None crashes the cut key    test_r3_a_foreign_link_is_checked_even_with_no_local_slug
+
+  R4 rows:
+  `_git_anchor` accepts a broken path   test_r4_a_broken_absolute_project_path_yields_no_slug_and_no_cwd_read
+  gh repo view drops its cwd            test_r4_gh_repo_view_runs_in_the_project_not_the_process_cwd
+  `_is_github_url` allows userinfo      test_r4_gh_repo_view_url_with_userinfo_or_backslash_is_refused
 
 The R1 arms (`test_r1_*`) carry the mutations batch R1 ran against them; they
 are not re-listed here except where R2 changed the arm. Deliberately NOT a
@@ -260,7 +266,7 @@ def test_r1_remote_forms_added_and_ambiguous_ones_refused():
         assert backlog._slug_from_remote_url(url) is None, url
 
 
-def test_gh_repo_env_is_github_only_and_validated(monkeypatch):
+def test_gh_repo_env_is_github_only_and_validated(monkeypatch, tmp_path):
     """RED WHEN GH_REPO stops taking precedence, or a non-github host or an
     invalid slug is accepted from it."""
     assert backlog._slug_from_gh_repo("o/r") == ("o", "r")
@@ -273,7 +279,9 @@ def test_gh_repo_env_is_github_only_and_validated(monkeypatch):
     monkeypatch.setenv("GH_REPO", "env-owner/env-repo")
     monkeypatch.setattr(backlog, "_run_capture", lambda *a, **k: pytest.fail(
         "a subprocess ran although GH_REPO settled the slug"))
-    assert backlog._repo_slug("/abs/project") == ("env-owner", "env-repo")
+    # A real directory: since S-R3-1 a project_path that does not exist is
+    # unusable and yields no slug before GH_REPO is read.
+    assert backlog._repo_slug(str(tmp_path)) == ("env-owner", "env-repo")
 
 
 def test_local_repo_slug_reads_origin_of_project_path_with_real_git(
@@ -381,6 +389,74 @@ def test_r3_gh_repo_view_is_accepted_only_for_a_github_com_url(monkeypatch):
                 "https://[::1/owner/repo", None, 5):
         assert answer({**slug, "url": url}) is None, url
     assert answer(slug) is None, "no url at all must not be trusted"
+
+
+def test_r4_a_broken_absolute_project_path_yields_no_slug_and_no_cwd_read(
+    monkeypatch, tmp_path,
+):
+    """S-R3-1: an absolute project_path that no longer exists, or holds a NUL
+    byte, is unusable: no slug, and `gh repo view` never runs — it would have
+    read whatever repository the process CWD sits in.
+
+    RED WHEN `_git_anchor` accepts such a path again, so the chain falls
+    through to a CWD-anchored `gh repo view`.
+    """
+    monkeypatch.setattr(backlog, "_gh_repo_view_slug", lambda *a, **k: pytest.fail(
+        "a broken project_path fell through to gh repo view"))
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail(
+        "a broken project_path reached a subprocess"))
+    for bad in (str(tmp_path / "moved-away"), str(tmp_path) + "/a\x00b"):
+        assert backlog._git_anchor(bad) is None, bad
+        assert backlog._repo_slug(bad) is None, bad
+        outcome = backlog.resolve_refs(["#1"], project_path=bad)
+        assert outcome["#1"]["reason"] == backlog._REASON_NO_TRACKER, bad
+    assert backlog._git_anchor(str(tmp_path)) == ["-C", str(tmp_path)]
+
+
+def test_r4_gh_repo_view_runs_in_the_project_not_the_process_cwd(monkeypatch, tmp_path):
+    """S-R3-1: for an existing directory whose origin cannot be read (not a
+    repository), `gh repo view` runs with `cwd=project_path`, so it fails
+    there instead of answering for the CWD's repository. With no
+    project_path it runs in the CWD, as it always did.
+
+    RED WHEN the cwd is dropped from the gh repo view call.
+    """
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    seen = []
+    answer = {"stdout": ""}
+
+    def fake_run(command, **kwargs):
+        seen.append((list(command), kwargs.get("cwd")))
+        if command[0] == "git":
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+        return subprocess.CompletedProcess(command, 1, stdout=answer["stdout"], stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert backlog._repo_slug(str(plain)) is None
+    gh = [cwd for argv, cwd in seen if argv[:3] == ["gh", "repo", "view"]]
+    assert gh == [str(plain)], seen
+
+    seen.clear()
+    answer["stdout"] = json.dumps({"nameWithOwner": "o/r", "url": "https://github.com/o/r"})
+    assert backlog._repo_slug(None) == ("o", "r")
+    assert [cwd for argv, cwd in seen if argv[:3] == ["gh", "repo", "view"]] == [None]
+
+
+def test_r4_gh_repo_view_url_with_userinfo_or_backslash_is_refused(monkeypatch):
+    """S-R3-2: `urlsplit` reads `https://evil.com@github.com/...` (and its
+    backslash variant) as github.com. GitHub's web URL never carries
+    userinfo, so any `@` or backslash is refused, as for remotes.
+
+    RED WHEN `_is_github_url` trusts urlsplit's host for such a URL.
+    """
+    for url in ("https://evil.com@github.com/o/r", "https://evil.com\\@github.com/o/r",
+                "https://user:pw@github.com/o/r", "https://github.com\\o/r"):
+        assert not backlog._is_github_url(url), url
+        monkeypatch.setattr(backlog, "_run_capture", lambda *a, _u=url, **k: json.dumps(
+            {"nameWithOwner": "o/r", "url": _u}))
+        assert backlog._gh_repo_view_slug() is None, url
+    assert backlog._is_github_url("https://github.com/o/r")
 
 
 def test_reconcile_anchors_the_slug_lookup_on_the_stored_project_path(
