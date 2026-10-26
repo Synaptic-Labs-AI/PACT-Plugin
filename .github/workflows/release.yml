@@ -29,7 +29,9 @@
 #   the next `## v<digit>` heading (fenced code never ends it). Its body is
 #   free Markdown and becomes the release body, with headings of level 3 or
 #   deeper promoted one level (`### Summary` is published as `## Summary`).
-#   The file may not contain a NUL byte. The rules and the extraction are
+#   The file may not contain a NUL byte, a carriage return or an HTML
+#   comment, and its code fences follow CommonMark: every fence closes and
+#   none holds a `## v<digit>` line. The rules and the extraction are
 #   defined once, in .github/scripts/check-release-notes.sh, and run twice:
 #   on every PR by pact-plugin/tests/test_release_notes.py (the current
 #   version's section and every other `## v` section), and here before

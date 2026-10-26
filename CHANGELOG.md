@@ -7,8 +7,10 @@ is that version's GitHub release: when a version bump reaches `main`,
 Format: a section starts with `## v<version>: <short summary>`, where the
 summary is printable ASCII, em dash or en dash only and the text after `## `
 becomes the tag message, followed by `### Summary`, `### What landed` and
-`### Why`. A section ends at the next `## v<digit>` heading. Every PR checks
-the current version's section with `.github/scripts/check-release-notes.sh`.
+`### Why`. A section ends at the next `## v<digit>` heading. The file uses LF
+line endings, has no HTML comments, closes every code fence, and puts no
+`## v<digit>` line inside one. Every PR checks the whole file with
+`.github/scripts/check-release-notes.sh`.
 
 ## v4.8.12: backlog ref checks over REST when GraphQL is blocked, and releases cut by CI (issue #1667)
 
