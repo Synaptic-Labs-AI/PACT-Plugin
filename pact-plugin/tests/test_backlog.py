@@ -750,7 +750,7 @@ def test_partial_success_yields_per_ref_unverifiable(monkeypatch):
             command, 1, stdout=_partial_success_envelope(ordered), stderr="gh: NOT_FOUND"
         )
 
-    monkeypatch.setattr(backlog, "_repo_slug", lambda: ("owner", "repo"))
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     outcome = backlog.resolve_refs(refs)
@@ -772,7 +772,7 @@ def test_every_tracker_call_carries_an_explicit_timeout(monkeypatch):
         captured["timeout"] = kwargs.get("timeout")
         return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
 
-    monkeypatch.setattr(backlog, "_repo_slug", lambda: ("owner", "repo"))
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
     monkeypatch.setattr(subprocess, "run", fake_run)
     backlog.resolve_refs(["#1"])
 
@@ -785,7 +785,7 @@ def test_an_unreachable_tracker_is_unverifiable_not_a_clean_pass(monkeypatch):
     def fake_run(command, **kwargs):
         raise subprocess.TimeoutExpired(command, 5)
 
-    monkeypatch.setattr(backlog, "_repo_slug", lambda: ("owner", "repo"))
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     outcome = backlog.resolve_refs(["#1"])
@@ -799,7 +799,7 @@ def test_no_tracker_configured_is_supported_end_to_end(monkeypatch):
     RED WHEN a ref-less item is flagged, which would make it second-class, or
     when an unresolvable ref passes silently.
     """
-    monkeypatch.setattr(backlog, "_repo_slug", lambda: None)
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: None)
 
     outcome = backlog.resolve_refs(["#1"])
     assert outcome["#1"]["state"] == "unverifiable"
@@ -1682,7 +1682,7 @@ def test_reconcile_emits_every_drift_class(monkeypatch, tmp_path):
     ]
     data = _backlog(tmp_path, items=items)
 
-    monkeypatch.setattr(backlog, "resolve_refs", lambda refs: {
+    monkeypatch.setattr(backlog, "resolve_refs", lambda refs, **_: {
         "#1": {"state": "open"}, "#2": {"state": "closed"}})
     monkeypatch.setattr(backlog, "resolve_memory_ids", lambda ids, *_: {i: None for i in ids})
     # Arity-agnostic: this stub stands in for a collaborator whose signature is
@@ -2881,7 +2881,7 @@ def test_a_malformed_tracker_payload_is_unverifiable_not_a_crash(monkeypatch):
     a `resolve_refs` that returned `unverifiable` unconditionally would satisfy
     every other assertion here.
     """
-    monkeypatch.setattr(backlog, "_repo_slug", lambda: ("owner", "repo"))
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
 
     def _state(stdout):
         monkeypatch.setattr(
@@ -2911,7 +2911,12 @@ def test_a_malformed_repo_slug_payload_yields_no_tracker(monkeypatch):
     honest answer for all three.
 
     RED WHEN either type check is removed.
+
+    Reaches the `gh repo view` rung: no GH_REPO and no project_path, so the
+    network-free rungs are skipped and this payload is the only source.
     """
+    monkeypatch.delenv("GH_REPO", raising=False)
+
     def _slug(stdout):
         monkeypatch.setattr(backlog, "_run_capture", lambda command: stdout)
         return backlog._repo_slug()
@@ -3122,7 +3127,7 @@ def test_the_query_requests_every_field_the_outcome_logic_reads(monkeypatch):
             (arg for arg in command if arg.startswith("query=")), None)
         return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
 
-    monkeypatch.setattr(backlog, "_repo_slug", lambda: ("owner", "repo"))
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
     monkeypatch.setattr(subprocess, "run", fake_run)
     backlog.resolve_refs(["#1"])
 
@@ -3786,7 +3791,7 @@ def _recording_refs(monkeypatch, states=None):
     """
     calls = []
 
-    def fake(refs):
+    def fake(refs, **_):
         calls.append(sorted(refs))
         return {ref: dict(states or {"state": "unverifiable", "reason": "x"})
                 for ref in refs}
@@ -5593,18 +5598,27 @@ def test_next_md_states_the_note_cap_the_writer_enforces():
     )
 
 
-def test_write_time_ref_normalisation_collapses_only_what_the_tracker_resolves():
+def test_write_time_ref_normalisation_collapses_only_what_the_tracker_resolves(
+    monkeypatch,
+):
     """The matrix, at the single choke point both `add` and `set` route
-    through. A resolvable ref — bare number, #-prefixed, a GitHub URL —
-    stores the BARE NUMBER. Everything else stores BYTE-IDENTICAL: the
+    through. A ref that certainly addresses THIS repository — bare number,
+    #-prefixed, a GitHub URL whose owner/name match this repo's slug — stores
+    the BARE NUMBER. Everything else stores BYTE-IDENTICAL: the
     `owner/repo#N` qualifier IS the meaning (collapsing it would re-target
-    the ref to this repo's tracker), a Linear key is opaque, and an arbitrary
-    string is the user's own pointer.
+    the ref to this repo's tracker), a URL to ANOTHER repository likewise, a
+    URL from another tracker ending in digits likewise, a Linear key is
+    opaque, and an arbitrary string is the user's own pointer.
+
+    The slug comes from the network-free rungs only; GH_REPO pins it here.
 
     RED WHEN the resolver's reach extends past 'digits this tracker can
-    address', or when `none` stops clearing.
+    address', when another repository's URL collapses, or when `none` stops
+    clearing.
     """
     import argparse
+
+    monkeypatch.setenv("GH_REPO", "owner/repo")
 
     def stored(ref):
         return backlog._field_updates(argparse.Namespace(ref=ref))["ref"]
@@ -5614,6 +5628,7 @@ def test_write_time_ref_normalisation_collapses_only_what_the_tracker_resolves()
         ("#1602", "1602"),
         ("https://github.com/owner/repo/issues/1602", "1602"),
         ("https://github.com/owner/repo/pull/1602/", "1602"),
+        ("https://github.com/Owner/Repo/issues/1602", "1602"),  # GitHub ignores case
     ]
     for given, expected in collapses:
         assert stored(given) == expected, (
@@ -5622,6 +5637,8 @@ def test_write_time_ref_normalisation_collapses_only_what_the_tracker_resolves()
 
     byte_identical = [
         "other-owner/other-repo#175",  # the qualifier is the meaning
+        "https://github.com/other-owner/other-repo/issues/1602",  # another repo
+        "https://jira.example.com/browse/1602",  # another tracker, digits last
         "ENG-123",                     # an opaque tracker key
         "the user's own pointer",      # an arbitrary string
     ]
@@ -5632,6 +5649,13 @@ def test_write_time_ref_normalisation_collapses_only_what_the_tracker_resolves()
 
     assert stored("none") is backlog._CLEAR, "--ref none stopped clearing"
     assert stored(None) is None, "an unpassed --ref stopped leaving the field alone"
+
+    # NO SLUG, NO COLLAPSE: with no network-free slug a URL cannot be shown to
+    # address this repository, so it is stored verbatim rather than guessed at.
+    monkeypatch.delenv("GH_REPO")
+    monkeypatch.setattr(backlog, "_run_capture", lambda *a, **k: None)
+    url = "https://github.com/owner/repo/issues/1602"
+    assert stored(url) == url, "a URL collapsed with no slug to compare it to"
 
 
 def test_add_stores_a_hash_ref_as_the_bare_number(tmp_path, monkeypatch):
@@ -5990,3 +6014,277 @@ class TestBacklogTeachExamples:
         assert r.stdout == ""
         assert "error:" in r.stderr
         assert self._EXAMPLES["show"] in r.stderr
+
+
+# ---------------------------------------------------------------------------
+# REST fallback when GraphQL is refused (#1667) — CODE-phase verification arms
+# ---------------------------------------------------------------------------
+
+# Recorded in a Claude Code cloud session (gh 2.89.0), trimmed to the read
+# fields plus one irrelevant field.
+_GRAPHQL_REFUSED_STDOUT = json.dumps({
+    "message": "GitHub GraphQL is not available from Claude Code sessions; "
+               "use the REST API (gh api repos/{owner}/{repo}/...).",
+    "documentation_url": "https://docs.anthropic.com/",
+})
+_REST_BODIES = {
+    1666: {"number": 1666, "state": "closed", "state_reason": "completed"},
+    1004: {"number": 1004, "state": "closed", "state_reason": "not_planned"},
+    886: {"number": 886, "state": "closed", "state_reason": "duplicate"},
+    1667: {"number": 1667, "state": "open", "state_reason": None},
+    1672: {"number": 1672, "state": "closed", "state_reason": None,
+           "pull_request": {"merged_at": "2026-10-02T16:32:00Z"}},
+    1626: {"number": 1626, "state": "closed", "state_reason": None,
+           "pull_request": {"merged_at": None}},
+    1661: {"number": 1661, "state": "open", "state_reason": None,
+           "pull_request": {"merged_at": None}},
+}
+_REST_NOT_FOUND = {"message": "Not Found", "status": "404"}
+
+
+def _refused_graphql_then_rest(calls):
+    """A `subprocess.run` fake: GraphQL refused as a whole, REST answers from
+    `_REST_BODIES` (404 body for anything else). Records every argv+timeout."""
+
+    def fake_run(command, **kwargs):
+        calls.append((list(command), kwargs.get("timeout")))
+        if command[:3] == ["gh", "api", "graphql"]:
+            return subprocess.CompletedProcess(
+                command, 1, stdout=_GRAPHQL_REFUSED_STDOUT, stderr="gh: (HTTP 403)")
+        number = int(command[2].rsplit("/", 1)[-1])
+        body = _REST_BODIES.get(number, _REST_NOT_FOUND)
+        return subprocess.CompletedProcess(
+            command, 0 if number in _REST_BODIES else 1,
+            stdout=json.dumps(body), stderr="")
+
+    return fake_run
+
+
+def test_slug_from_remote_url_accepts_github_forms_and_refuses_the_rest():
+    """RED WHEN an accepted github.com form stops parsing, or a non-github
+    host, a dot-only name or a malformed path starts parsing."""
+    accepted = [
+        "https://github.com/o/r",
+        "https://github.com/o/r.git",
+        "https://github.com/o/r/",
+        "https://user@github.com/o/r",
+        "https://user:tok@GitHub.com/o/r.git",
+        "http://github.com/o/r",
+        "ssh://git@github.com/o/r.git",
+        "ssh://git@github.com:22/o/r",
+        "git@github.com:o/r.git",
+        "git://github.com/o/r",
+        "  https://github.com/o/r\n",
+    ]
+    for url in accepted:
+        assert backlog._slug_from_remote_url(url) == ("o", "r"), url
+
+    refused = [
+        None, "", "not a url", '{"message": "x"}',
+        "https://gitlab.com/o/r", "https://github.example.com/o/r",
+        "http://127.0.0.1:8080/git/o/r", "ftp://github.com/o/r",
+        "https://github.com/o", "https://github.com/o/r/extra",
+        "https://github.com/o/..", "https://github.com/./r",
+        'https://github.com/o/r"x', "https://github.com/o/r x",
+        "me@github.com:o/r",
+    ]
+    for url in refused:
+        assert backlog._slug_from_remote_url(url) is None, url
+
+
+def test_gh_repo_env_is_github_only_and_validated(monkeypatch):
+    """RED WHEN GH_REPO stops taking precedence, or a non-github host or an
+    invalid slug is accepted from it."""
+    assert backlog._slug_from_gh_repo("o/r") == ("o", "r")
+    assert backlog._slug_from_gh_repo("github.com/o/r") == ("o", "r")
+    assert backlog._slug_from_gh_repo("ghe.example.com/o/r") is None
+    assert backlog._slug_from_gh_repo("o") is None
+    assert backlog._slug_from_gh_repo("o/..") is None
+    assert backlog._slug_from_gh_repo("") is None
+
+    monkeypatch.setenv("GH_REPO", "env-owner/env-repo")
+    monkeypatch.setattr(backlog, "_run_capture", lambda *a, **k: pytest.fail(
+        "a subprocess ran although GH_REPO settled the slug"))
+    assert backlog._repo_slug("/abs/project") == ("env-owner", "env-repo")
+
+
+def test_local_repo_slug_reads_origin_of_project_path_with_real_git(
+    tmp_path, monkeypatch,
+):
+    """The real seam: `git -C project_path remote get-url origin`, not the CWD.
+
+    RED WHEN the origin read is dropped, unanchored, or the credential in the
+    URL leaks into the returned slug.
+    """
+    monkeypatch.delenv("GH_REPO", raising=False)
+    repo = tmp_path / "proj"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin",
+         "https://user:secret-token@github.com/Real-Owner/real-repo.git"],
+        check=True)
+    # Isolate from harness-level URL rewrites so the stored URL is what is read.
+    monkeypatch.delenv("GIT_CONFIG_PARAMETERS", raising=False)
+
+    assert backlog._local_repo_slug(str(repo)) == ("Real-Owner", "real-repo")
+    assert backlog._local_repo_slug("relative/path") is None
+    # No project_path: git runs in the process CWD, as `gh repo view` did.
+    monkeypatch.chdir(repo)
+    assert backlog._local_repo_slug(None) == ("Real-Owner", "real-repo")
+
+
+def test_node_from_rest_maps_every_bucket_through_ref_outcome():
+    """RED WHEN a REST body lands in a different bucket than the GraphQL node
+    for the same ref would, or an error body reads as anything but None."""
+    expected = {
+        1666: {"state": "done"},
+        1004: {"state": "abandoned", "reason": "not_planned"},
+        886: {"state": "abandoned", "reason": "duplicate"},
+        1667: {"state": "open"},
+        1672: {"state": "done"},
+        1626: {"state": "abandoned", "reason": "closed unmerged"},
+        1661: {"state": "open"},
+    }
+    for number, body in _REST_BODIES.items():
+        node = backlog._node_from_rest(body)
+        assert node is not None, number
+        if "pull_request" in body:
+            assert "merged" in node, f"PR #{number} node lost its `merged` key"
+        assert backlog._ref_outcome(node) == expected[number], number
+
+    assert backlog._ref_outcome(backlog._node_from_rest(
+        {"state": "closed", "state_reason": None})) == {"state": "closed"}
+    for bad in (_REST_NOT_FOUND, {"message": "not enabled for this session"},
+                [1], None, {"state": 5}, {"state": ""}):
+        assert backlog._node_from_rest(bad) is None, bad
+
+
+def test_graphql_request_failed_is_shape_only():
+    """RED WHEN a success, a partial success or an empty body triggers the
+    fallback, or a refusal body does not."""
+    assert backlog._graphql_request_failed(json.loads(_GRAPHQL_REFUSED_STDOUT))
+    assert backlog._graphql_request_failed({"message": "Bad credentials"})
+    for not_refused in (
+        {}, {"data": None}, {"data": {}, "errors": [{"message": "x"}]},
+        {"data": {"repository": {}}, "message": "x"}, {"message": 5}, [1], "x",
+    ):
+        assert not backlog._graphql_request_failed(not_refused), not_refused
+
+
+def test_refused_graphql_falls_back_to_rest_per_ref(monkeypatch):
+    """End to end through `resolve_refs` with the recorded refusal body.
+
+    RED WHEN the fallback does not fire, a REST call lacks a bounded timeout,
+    or a 404 reads as anything but unverifiable.
+    """
+    calls = []
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
+    monkeypatch.setattr(subprocess, "run", _refused_graphql_then_rest(calls))
+
+    refs = ["#1666", "#886", "#1672", "#1626", "#1667", "#999999"]
+    outcome = backlog.resolve_refs(refs)
+
+    assert outcome["#1666"] == {"state": "done"}
+    assert outcome["#886"] == {"state": "abandoned", "reason": "duplicate"}
+    assert outcome["#1672"] == {"state": "done"}
+    assert outcome["#1626"] == {"state": "abandoned", "reason": "closed unmerged"}
+    assert outcome["#1667"] == {"state": "open"}
+    assert outcome["#999999"]["state"] == "unverifiable"
+
+    rest = [(argv, timeout) for argv, timeout in calls if argv[:3] != ["gh", "api", "graphql"]]
+    assert len(rest) == len(refs), "expected one REST call per ref"
+    for argv, timeout in rest:
+        assert argv[:2] == ["gh", "api"] and argv[2].startswith("repos/owner/repo/issues/")
+        assert timeout is not None and 0 < timeout <= backlog._TRACKER_TIMEOUT_SECONDS
+
+
+def test_graphql_success_never_calls_rest(monkeypatch):
+    """RED WHEN a body carrying `data` triggers per-ref calls."""
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(
+            command, 0, stdout=json.dumps(
+                {"data": {"repository": {"r0": {"state": "OPEN", "stateReason": None}}}}),
+            stderr="")
+
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert backlog.resolve_refs(["#1"]) == {"#1": {"state": "open"}}
+    assert len(calls) == 1 and calls[0][:3] == ["gh", "api", "graphql"]
+
+
+def test_rest_fallback_caps_refs_and_reports_the_overflow(monkeypatch):
+    """RED WHEN more than `_REST_MAX_REFS` calls are made or an overflow ref is
+    dropped silently instead of carrying the cap reason."""
+    calls = []
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
+    monkeypatch.setattr(subprocess, "run", _refused_graphql_then_rest(calls))
+
+    refs = [f"#{n}" for n in range(1, backlog._REST_MAX_REFS + 3)]
+    outcome = backlog.resolve_refs(refs)
+
+    rest = [argv for argv, _ in calls if argv[:3] != ["gh", "api", "graphql"]]
+    assert len(rest) == backlog._REST_MAX_REFS
+    capped = [ref for ref, state in outcome.items()
+              if state.get("reason") == backlog._REASON_REST_CAP]
+    assert len(capped) == 2, outcome
+    assert str(backlog._REST_MAX_REFS) in backlog._REASON_REST_CAP
+
+
+def test_rest_fallback_never_starts_a_call_past_the_deadline(monkeypatch):
+    """A spent deadline makes every ref `did not complete`, with no REST call
+    and no hang. RED WHEN a call starts after the deadline."""
+    calls = []
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
+    monkeypatch.setattr(subprocess, "run", _refused_graphql_then_rest(calls))
+    monkeypatch.setattr(backlog, "_TRACKER_TIMEOUT_SECONDS", 0)
+
+    outcome = backlog.resolve_refs(["#1666", "#886"])
+
+    assert all(state == {"state": "unverifiable",
+                         "reason": backlog._REASON_CALL_INCOMPLETE}
+               for state in outcome.values()), outcome
+    assert [argv for argv, _ in calls if argv[:3] != ["gh", "api", "graphql"]] == []
+
+
+def test_refs_pointing_outside_this_repository_are_never_looked_up(monkeypatch):
+    """RED WHEN another repository's URL, or another tracker's URL ending in
+    digits, is queried as this repository's issue of the same number."""
+    calls = []
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
+    monkeypatch.setattr(subprocess, "run", _refused_graphql_then_rest(calls))
+
+    foreign = ["https://github.com/other/repo/issues/1666",
+               "https://jira.example.com/browse/1666"]
+    own = ["https://github.com/OWNER/repo/pull/1672", "1666"]
+    outcome = backlog.resolve_refs(foreign + own)
+
+    for ref in foreign:
+        assert outcome[ref] == {"state": "unverifiable",
+                                "reason": backlog._REASON_FOREIGN_REF}, ref
+    assert outcome[own[0]] == {"state": "done"}
+    assert outcome[own[1]] == {"state": "done"}
+    looked_up = sorted(argv[2] for argv, _ in calls if argv[:3] != ["gh", "api", "graphql"])
+    assert looked_up == ["repos/owner/repo/issues/1666", "repos/owner/repo/issues/1672"]
+
+
+def test_a_non_decimal_digit_ref_is_stored_verbatim_and_reads_unverifiable(
+    monkeypatch,
+):
+    """'²' passes str.isdigit() but int() rejects it. Stored verbatim on write,
+    and the read path reports it unverifiable instead of raising ValueError.
+
+    RED WHEN `_issue_number` goes back to isdigit(), which crashes `show`.
+    """
+    import argparse
+
+    assert backlog._field_updates(argparse.Namespace(ref="²"))["ref"] == "²"
+    assert backlog._field_updates(argparse.Namespace(ref="#1²"))["ref"] == "#1²"
+    assert backlog._issue_number("²") is None
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: pytest.fail(
+        "a non-addressable ref reached the tracker"))
+    outcome = backlog.resolve_refs(["²", "https://github.com/o/r/issues/²"])
+    assert all(state["state"] == "unverifiable" for state in outcome.values()), outcome

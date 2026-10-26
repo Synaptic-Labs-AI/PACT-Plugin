@@ -58,7 +58,8 @@ python3 "{plugin_root}/hooks/shared/backlog.py" show
 ```
 
 This resolves every drift class in one pass: refs against the tracker in a
-single batched query, `plan` paths against the project root, `memory` ids
+single batched query (falling back to bounded per-ref REST calls where GraphQL
+is refused), `plan` paths against the project root, `memory` ids
 against the store, staleness, and dangling relational ids.
 
 `show` OMITS `done` AND `dropped` ITEMS BY DEFAULT and says how many it hid, on
