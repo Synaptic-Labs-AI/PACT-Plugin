@@ -1329,12 +1329,16 @@ class TestObsHExtractionSurfaceMintability:
         ctx, refusal = _h_mint("Run `%s` now" % compound)
         assert ctx is not None, "quoted cd-prefix %s did not mint: %r" % (label, refusal)
         assert ctx.get(want_key) == want_val
-        # THE THEOREM: dict-equality with the bare-leg mint on the same bytes.
+        # The bare-leg mint's (op, target, flags), plus the compound's text: a push
+        # after a cd names a ref of the repository the cd moves to, so the approval
+        # runs the compound and not the bare leg.
         bare, _ = _h_mint("Run: " + leg)
-        assert ctx == bare, "token-space changed: compound=%r bare=%r" % (ctx, bare)
+        assert bare is not None
+        assert ctx == dict(bare, command_text=mgc.normalize_command_text(compound)), (
+            "token-space changed: compound=%r bare=%r" % (ctx, bare))
         # round-trip through the REAL (byte-untouched) read side.
         assert _h_reads(ctx, compound) is True
-        assert _h_reads(ctx, leg) is True
+        assert _h_reads(ctx, leg) is False
 
     @pytest.mark.parametrize(
         "label,exec_cmd",
@@ -1401,9 +1405,9 @@ class TestObsHExtractionSurfaceMintability:
         ctx, refusal = _h_mint("Run `%s` now" % compound)
         bare, _ = _h_mint("Run: " + leg)
         assert ctx is not None, "PARITY %s: quoted cd-prefix did not mint: %r" % (label, refusal)
-        if label in ("merge", "close") and bare is not None:
-            # A numbered merge or close after a cd also binds its text: its number
-            # names a pull request of the repository the cd moves to.
+        if bare is not None:
+            # An op on a named PR or branch after a cd also binds its text: its target
+            # names a pull request or branch of the repository the cd moves to.
             bare = dict(bare, command_text=mgc.normalize_command_text(compound))
         assert ctx.get(want_key) == want_val and ctx == bare, (
             "PARITY %s broke: ctx=%r bare=%r" % (label, ctx, bare)
@@ -1473,11 +1477,13 @@ class TestObsHRealMintExecuteRetireRoundTrip:
         assert minted == 1, "the faithful quoted cd-prefix click did not mint"
         assert rc == _G_ALLOW
 
-    def test_compound_token_authorizes_bare_leg_and_vice_versa(self, tmp_path):
+    def test_compound_and_bare_tokens_each_run_only_their_own_command(self, tmp_path):
+        # The push after a cd may name a ref of another repository, so neither
+        # approval covers the other command.
         minted, rc = _g_roundtrip(_H_CMD, _H_LEG, tmp_path)
-        assert minted == 1 and rc == _G_ALLOW
+        assert minted == 1 and rc == _G_DENY
         minted, rc = _g_roundtrip(_H_LEG, _H_CMD, tmp_path)
-        assert minted == 1 and rc == _G_ALLOW
+        assert minted == 1 and rc == _G_DENY
 
     def test_deny_rows_minted_first(self, tmp_path):
         minted, rc = _g_roundtrip(_H_CMD, _H_CMDS, tmp_path)

@@ -9326,13 +9326,15 @@ class TestGitGlobalFlagBypass:
     # --- Token matching: branch delete with git global flags ---
 
     def test_token_branch_match_with_C_flag(self):
-        """Typed branch-delete token matching works past a git -C flag."""
+        """A branch-delete past a git -C flag reads its branch, but a token minted
+        without the -C does not run it: the branch is one of the repository -C names."""
         from merge_guard_pre import _token_matches_command
+        from shared.merge_guard_common import extract_command_context
 
+        command = "git -C /tmp/repo branch -D feature"
+        assert extract_command_context(command).get("branch") == "feature"
         token = {"context": {"operation_type": "branch-delete", "branch": "feature"}}
-        assert _token_matches_command(
-            token, "git -C /tmp/repo branch -D feature"
-        )
+        assert not _token_matches_command(token, command)
 
     def test_token_branch_mismatch_with_C_flag(self):
         """Typed branch-delete token mismatch detected past a git -C flag."""
@@ -9344,13 +9346,15 @@ class TestGitGlobalFlagBypass:
         )
 
     def test_token_branch_delete_force_with_git_dir(self):
-        """Typed branch-delete token matches --delete --force past --git-dir."""
+        """A --delete --force past --git-dir reads its branch, but a token minted
+        without the --git-dir does not run it: the branch is one of that repository."""
         from merge_guard_pre import _token_matches_command
+        from shared.merge_guard_common import extract_command_context
 
+        command = "git --git-dir=/tmp/.git branch --delete --force feature"
+        assert extract_command_context(command).get("branch") == "feature"
         token = {"context": {"operation_type": "branch-delete", "branch": "feature"}}
-        assert _token_matches_command(
-            token, "git --git-dir=/tmp/.git branch --delete --force feature"
-        )
+        assert not _token_matches_command(token, command)
 
 
 # =============================================================================

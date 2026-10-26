@@ -10151,6 +10151,13 @@ def target_changes_before_guarded_leg(command: str, branch: bool = True) -> bool
     return False
 
 
+# The ops whose target names a pull request or branch but not the repository it is in,
+# so a change of repository before one acts on a same-named target elsewhere.
+REPO_RELATIVE_OPS = frozenset(
+    {"merge", "close", "force-push", "branch-delete", "remote-ref-delete", "remote-mass-delete", "push-to-main"}
+)
+
+
 # `export`, or `declare` / `typeset` with an `-x` flag: the forms that pass a variable to
 # the commands the shell runs.
 _EXPORTING = r"(?:export|(?:declare|typeset)(?:[ \t]+-[A-Za-z]+)*[ \t]+-[A-Za-z]*x[A-Za-z]*)"

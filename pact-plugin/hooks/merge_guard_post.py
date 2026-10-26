@@ -130,6 +130,7 @@ try:
         _single_detectable_leg,
         # An op on the current branch run after a checkout or cd binds its text.
         target_changes_before_guarded_leg,
+        REPO_RELATIVE_OPS,
         # A merge or close after an exported GH_REPO binds its text.
         exported_gh_target_before_guarded_leg,
     )
@@ -901,9 +902,10 @@ def _exact_text_reading(span: str, located: str) -> dict | None:
         # A merge or close run after `export GH_REPO=…` (or GH_HOST) acts in that
         # repository, which the op's own reading does not see; its text binds it.
         or (ctx["operation_type"] in ("merge", "close") and exported_gh_target_before_guarded_leg(span))
-        # So does one run after a change of directory or default repository (`cd
-        # ../other && gh pr merge 5`), whose number names a PR of that repository.
-        or (ctx["operation_type"] in ("merge", "close") and target_changes_before_guarded_leg(span, branch=False))
+        # So does an op on a named PR or branch run after a change of directory or
+        # repository (`cd ../other && gh pr merge 5`, `git -C ../other branch -D
+        # feat/x`), whose target names one of that repository.
+        or (ctx["operation_type"] in REPO_RELATIVE_OPS and target_changes_before_guarded_leg(span, branch=False))
     ):
         return None
     return ctx

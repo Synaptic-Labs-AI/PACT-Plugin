@@ -719,7 +719,9 @@ class TestD2GatedButUnmintableKnownBad:
     on a known-bad. `_target_value` referenced call-time via the module."""
 
     def test_dropping_target_ref_makes_a_gated_row_unmintable(self, tmp_path, monkeypatch):
-        row = _PREFIX + _PG + "origin --delete feature"  # remote-ref-delete -> target_ref
+        # remote-ref-delete -> target_ref. A benign prefix that does not change the
+        # repository: after a `cd`, the mint binds the command's text instead.
+        row = "echo start && " + _PG + "origin --delete feature"
         # VACUITY GUARD in its OWN dir (its token must not leak into the known-bad exec).
         vac = tmp_path / "vac"
         vac.mkdir()

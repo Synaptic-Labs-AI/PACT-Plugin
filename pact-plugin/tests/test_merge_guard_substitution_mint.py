@@ -1349,6 +1349,59 @@ class TestANumberedOpInAnotherRepoNeedsItsOwnApproval:
         assert _runs(_mint_styled(_NUMBERED, APPROVAL_STYLES["inline"]), command)
 
 
+
+_PUSH_X = "git push --" + "force origin feat/x"
+_DELETE_X = "git branch -" + "D feat/x"
+EXPLICIT_GIT_REPO_CHANGES = {
+    "force-push-cd": (_PUSH_X, "cd /tmp/repoB && " + _PUSH_X, "cd /tmp/repoC && " + _PUSH_X),
+    "force-push-dash-c": (_PUSH_X, "git -C /tmp/repoB push --" + "force origin feat/x",
+                          "git -C /tmp/repoC push --" + "force origin feat/x"),
+    "force-push-git-dir": (_PUSH_X, "GIT_DIR=/tmp/repoB/.git " + _PUSH_X, "GIT_DIR=/tmp/repoC/.git " + _PUSH_X),
+    "force-push-export": (_PUSH_X, "export GIT_DIR=/tmp/repoB/.git; " + _PUSH_X,
+                          "export GIT_DIR=/tmp/repoC/.git; " + _PUSH_X),
+    "force-push-env": (_PUSH_X, "env GIT_WORK_TREE=/tmp/repoB " + _PUSH_X, "env GIT_WORK_TREE=/tmp/repoC " + _PUSH_X),
+    "branch-delete-cd": (_DELETE_X, "cd /tmp/repoB && " + _DELETE_X, "cd /tmp/repoC && " + _DELETE_X),
+    "branch-delete-dash-c": (_DELETE_X, "git -C /tmp/repoB branch -" + "D feat/x", "git -C /tmp/repoC branch -" + "D feat/x"),
+    "ref-delete-cd": ("git push origin --delete stale", "cd /tmp/repoB && git push origin --delete stale",
+                      "cd /tmp/repoC && git push origin --delete stale"),
+    "mass-delete-cd": ("git push --mirror origin", "cd /tmp/repoB && git push --mirror origin",
+                       "cd /tmp/repoC && git push --mirror origin"),
+    "lease-push-cd": ("git push --force-with-lease origin main", "cd /tmp/repoB && git push --force-with-lease origin main",
+                      "cd /tmp/repoC && git push --force-with-lease origin main"),
+}
+
+
+class TestAGitOpOnANamedTargetInAnotherRepoNeedsItsOwnApproval:
+    """A git op that names its branch or ref but not its repository, run after a change
+    of directory or repository, acts on a same-named target elsewhere: a plain
+    approval does not cover it, and its own approval runs that command only. A branch
+    change before it does not move it."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("plain,moved,other", EXPLICIT_GIT_REPO_CHANGES.values(),
+                             ids=EXPLICIT_GIT_REPO_CHANGES.keys())
+    def test_a_plain_approval_does_not_cover_it(self, plain, moved, other, style):
+        ctx = _mint_styled(plain, style)
+        assert _runs(ctx, plain)
+        assert not _runs(ctx, moved)
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("plain,moved,other", EXPLICIT_GIT_REPO_CHANGES.values(),
+                             ids=EXPLICIT_GIT_REPO_CHANGES.keys())
+    def test_its_own_approval_runs_it_and_no_other(self, plain, moved, other, style):
+        ctx = _mint_styled(moved, style)
+        assert _runs(ctx, moved)
+        assert not _runs(ctx, other)
+
+    @pytest.mark.parametrize("plain,command", [
+        (_PUSH_X, "git checkout feat/x && " + _PUSH_X),
+        (_DELETE_X, "git checkout main && " + _DELETE_X),
+        (_DELETE_X, "git switch main && " + _DELETE_X),
+        (_PUSH_X, _PUSH_X + "; cd /tmp/repoB"),
+    ], ids=["checkout-push", "checkout-delete", "switch-delete", "cd-after"])
+    def test_a_plain_approval_still_covers_a_branch_change(self, plain, command):
+        assert _runs(_mint_styled(plain, APPROVAL_STYLES["inline"]), command)
+
 class TestANumberedOpInAnotherRepoRetiresOnThatReposState:
     """The approval of a numbered op run after a change of repository retires on the
     state of the PR in the repository it ran in: after one literal absolute `cd`

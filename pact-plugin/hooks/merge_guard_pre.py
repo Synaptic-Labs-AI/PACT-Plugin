@@ -66,6 +66,7 @@ try:
         _single_destructive_leg,
         _single_detectable_leg,
         target_changes_before_guarded_leg,
+        REPO_RELATIVE_OPS,
         exported_gh_target_before_guarded_leg,
     )
     # Re-exports consumed by the test suite through this module's namespace
@@ -534,11 +535,13 @@ def _token_matches_command(token: dict, command: str) -> bool:
     ):
         return False
 
-    # A merge or close token covers the repository gh reads by default: a command
-    # that first exports GH_REPO or GH_HOST, changes directory or sets gh's default
-    # repository merges or closes in another one, even under a numbered token.
-    if context.get("operation_type") in ("merge", "close") and (
-        exported_gh_target_before_guarded_leg(command) or target_changes_before_guarded_leg(command, branch=False)
+    # A token covers the repository the command runs in by default: a merge or close
+    # after an export of GH_REPO or GH_HOST, or any op on a named PR or branch after a
+    # change of directory or repository (`git -C ../other branch -D feat/x`), acts in
+    # another one, even under a token that names its target.
+    op = context.get("operation_type")
+    if (op in ("merge", "close") and exported_gh_target_before_guarded_leg(command)) or (
+        op in REPO_RELATIVE_OPS and target_changes_before_guarded_leg(command, branch=False)
     ):
         return False
 
