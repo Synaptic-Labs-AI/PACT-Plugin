@@ -99,6 +99,28 @@ _GOOD = b"# v1.2.3: short summary\n\n## Summary\n\nText.\n"
         ("escape and bell", b"# v1.2.3: \x1b]0;x\x07t \x1b[31mred\n\nbody\n", "control character"),
         ("tab", b"# v1.2.3: a\tb\n\nbody\n", "control character"),
         ("C1 CSI as UTF-8", b"# v1.2.3: a \xc2\x9b31m\n\nbody\n", "control character"),
+        # Not valid UTF-8 (iconv), including the lone 8-bit CSI byte.
+        ("lone 8-bit CSI 0x9b", b"# v1.2.3: a \x9b31m\n\nbody\n", "not valid UTF-8"),
+        ("byte 0xff", b"# v1.2.3: a \xff\n\nbody\n", "not valid UTF-8"),
+        ("truncated sequence", b"# v1.2.3: a \xe2\x80\n\nbody\n", "not valid UTF-8"),
+        ("overlong encoding", b"# v1.2.3: a \xc0\xaf\n\nbody\n", "not valid UTF-8"),
+        ("surrogate", b"# v1.2.3: a \xed\xa0\x80\n\nbody\n", "not valid UTF-8"),
+        ("past U+10FFFF", b"# v1.2.3: a \xf4\x90\x80\x80\n\nbody\n", "not valid UTF-8"),
+        # Invisible and reordering format characters.
+        ("RLO U+202E", "# v1.2.3: a \u202e b\n\nbody\n".encode(), "format character"),
+        ("LRE U+202A", "# v1.2.3: a \u202a b\n\nbody\n".encode(), "format character"),
+        ("LRI U+2066", "# v1.2.3: a \u2066 b\n\nbody\n".encode(), "format character"),
+        ("PDI U+2069", "# v1.2.3: a \u2069 b\n\nbody\n".encode(), "format character"),
+        ("LRM U+200E", "# v1.2.3: a \u200e b\n\nbody\n".encode(), "format character"),
+        ("RLM U+200F", "# v1.2.3: a \u200f b\n\nbody\n".encode(), "format character"),
+        ("ALM U+061C", "# v1.2.3: a \u061c b\n\nbody\n".encode(), "format character"),
+        ("ZWSP U+200B", "# v1.2.3: a \u200b b\n\nbody\n".encode(), "format character"),
+        ("ZWJ U+200D", "# v1.2.3: a \u200d b\n\nbody\n".encode(), "format character"),
+        ("word joiner U+2060", "# v1.2.3: a \u2060 b\n\nbody\n".encode(), "format character"),
+        ("BOM U+FEFF", "# v1.2.3: a \ufeff b\n\nbody\n".encode(), "format character"),
+        ("line separator U+2028", "# v1.2.3: a \u2028 b\n\nbody\n".encode(), "format character"),
+        ("paragraph separator U+2029", "# v1.2.3: a \u2029 b\n\nbody\n".encode(), "format character"),
+        ("soft hyphen U+00AD", "# v1.2.3: a \u00ad b\n\nbody\n".encode(), "format character"),
         ("line 2 not blank", b"# v1.2.3: summary\nbody\nmore\n", "line 2 must be blank"),
         ("no body", b"# v1.2.3: summary\n\n   \n", "no release notes"),
         ("empty file", b"", "line 1 must start"),
@@ -114,12 +136,35 @@ def test_checker_rejects(tmp_path, label, content, expected_reason):
 
 
 def test_checker_accepts_well_formed_and_non_ascii(tmp_path):
-    """UTF-8 text such as an em dash is not a control character."""
+    """Ordinary UTF-8 is not a control or format character.
+
+    The neighbours of the rejected ranges (U+2010 hyphen, U+2026 ellipsis,
+    U+202F narrow no-break space) are here so an off-by-one in a byte range
+    shows up as a failure.
+    """
     root = _require_checkout()
     notes = tmp_path / "v1.2.3.md"
-    notes.write_bytes(_GOOD.replace(b"short summary", "em — dash café".encode("utf-8")))
+    summary = "em \u2014 dash caf\u00e9 \u00a0nbsp \u2010 \u2026 \u202f \u4e2d \U0001f600"
+    notes.write_bytes(_GOOD.replace(b"short summary", summary.encode("utf-8")))
     code, reason = _check(root, "1.2.3", notes)
     assert code == 0, reason
+
+
+def test_checker_accepts_a_large_body(tmp_path):
+    """A body far past the 64 KB pipe buffer must be accepted, every time.
+
+    The body check once piped `tail` into `grep -q` under pipefail; grep
+    exiting on its first match sent tail SIGPIPE, and the check then
+    rejected valid notes at random (a 200 KB body: 20 rejections in 20
+    runs). Ten runs here make a regression all but certain to show.
+    """
+    root = _require_checkout()
+    notes = tmp_path / "v1.2.3.md"
+    notes.write_bytes(b"# v1.2.3: big\n\n" + (b"x" * 79 + b"\n") * 2600)
+    assert notes.stat().st_size > 200_000
+    for attempt in range(10):
+        code, reason = _check(root, "1.2.3", notes)
+        assert code == 0, f"attempt {attempt}: {reason}"
 
 
 def test_checker_refuses_a_version_that_is_not_semver(tmp_path):
