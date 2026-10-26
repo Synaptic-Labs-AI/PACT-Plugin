@@ -173,6 +173,14 @@
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/peer_inject.py\""
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/roster_writer.py\""
+          }
+        ]
       }
     ],
     "SessionEnd": [
@@ -250,6 +258,15 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/bootstrap_marker_writer.py\""
+          }
+        ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/roster_writer.py\""
           }
         ]
       },

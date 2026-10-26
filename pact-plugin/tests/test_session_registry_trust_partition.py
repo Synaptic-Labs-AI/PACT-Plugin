@@ -4,8 +4,9 @@ These are the CROSS-FILE / STRUCTURAL contracts that the registry's own unit
 suite (test_session_registry.py) cannot express:
 
   * TRUST PARTITION (load-bearing security): the registry is LABELING-ONLY. The
-    authority surfaces — trustworthy_actor_name (dispatch_helpers) + the
-    self-completion path (task_lifecycle_gate) — MUST NOT import or call the
+    authority surfaces — actor_identity.resolve_actor (the self-completion
+    actor resolver) + dispatch_helpers + the self-completion path
+    (task_lifecycle_gate) — MUST NOT import or call the
     registry resolver. The registry value is self-asserted/forgeable; feeding it
     to a who-acted/is-allowed check re-opens the confused-deputy hole that the
     harness-managed agent_id signal closes. Enforced by an AST no-import test
@@ -37,11 +38,21 @@ import pytest
 HOOKS_DIR = Path(__file__).parent.parent / "hooks"
 
 # The authority surfaces that MUST NOT consume the registry resolver. Keyed by
-# the file (relative to hooks/) whose import graph is scanned. dispatch_helpers
-# hosts trustworthy_actor_name; task_lifecycle_gate hosts the self-completion
-# advisory that consumes it.
+# the file (relative to hooks/) whose import graph is scanned.
+# shared/actor_identity.py hosts resolve_actor, the harness-data actor resolver;
+# task_lifecycle_gate hosts the self-completion advisory that consumes it;
+# dispatch_helpers hosts the dispatch-gate ownership predicates.
+# shared/subagent_meta.py hosts the frame-shape, membership and meta.json
+# readers that actor_identity uses, so it is held to the same bans.
+# shared/cloud_roster.py hosts the cloud roster that actor_identity and the
+# owner-type exemption read, and roster_writer.py writes its bind/confirm
+# records from harness frames; both are held to the same bans (#1670).
 _AUTHORITY_FILES = (
+    "roster_writer.py",
+    "shared/actor_identity.py",
+    "shared/cloud_roster.py",
     "shared/dispatch_helpers.py",
+    "shared/subagent_meta.py",
     "task_lifecycle_gate.py",
 )
 
@@ -57,6 +68,75 @@ _REGISTRY_SYMBOL_TOKENS = ("_registry_resolve", "resolve")  # the resolver alias
 # session_registry — invisible to the no-import test above. Forbidding the call
 # name closes that transitive-reintroduction path structurally.
 _FORBIDDEN_AUTHORITY_CALLS = ("_registry_resolve", "resolve_agent_name")
+
+# Per-file STRICTER call bans, on top of _FORBIDDEN_AUTHORITY_CALLS. The actor
+# resolver must not reach ANY registry-backed identity helper:
+#   * frame_team_and_name / teammate_launch_name / bind_launcher_identity
+#     (background_work) fall back to the self-asserted registry under tmux;
+#   * turn_end_gate.teammate_identity is registry-free today, but it needs the
+#     local-only taskKind/teamName meta fields, so using it would hide why a
+#     cloud lookup failed.
+# NOT global: task_lifecycle_gate legitimately calls frame_team_and_name for the
+# non-authority launch-record path (_extend_launch_records_on_claim).
+_STRICT_IDENTITY_HELPERS = (
+    "frame_team_and_name",
+    "teammate_launch_name",
+    "bind_launcher_identity",
+    "teammate_identity",
+)
+_STRICT_AUTHORITY_CALLS = {
+    "roster_writer.py": _STRICT_IDENTITY_HELPERS,
+    "shared/actor_identity.py": _STRICT_IDENTITY_HELPERS,
+    "shared/cloud_roster.py": _STRICT_IDENTITY_HELPERS,
+    "shared/subagent_meta.py": _STRICT_IDENTITY_HELPERS,
+}
+
+# Per-file MODULE import bans. The call bans above see only DIRECT calls, so a
+# later edit that makes a helper in background_work fall back to the registry
+# would pass them. These files therefore may not import the modules that host
+# registry-reaching helpers at all: background_work (frame_team_and_name,
+# bind_launcher_identity, ...) and turn_end_gate (teammate_identity, and an
+# import of background_work). Everything they need from there lives in the
+# registry-free shared/subagent_meta.py.
+_REGISTRY_REACHING_MODULES = ("background_work", "turn_end_gate")
+_MODULE_BANNED_FILES = (
+    "roster_writer.py",
+    "shared/actor_identity.py",
+    "shared/cloud_roster.py",
+    "shared/subagent_meta.py",
+)
+
+# The ONLY hook modules that may WRITE the cloud roster (call
+# cloud_roster.append_record): dispatch_gate (the lead's `intent`, after its
+# decision) and roster_writer (the harness-frame `bind` / `confirm`). Every
+# reader trusts these records as lead-side, so a new writer anywhere else
+# would let a teammate-reachable code path mint them (#1670, design §5.1).
+_ROSTER_APPEND_CALLERS = frozenset({"dispatch_gate.py", "roster_writer.py"})
+
+
+# Calls that import a module by name at runtime. The module ban above reads
+# Import nodes only, so _MODULE_BANNED_FILES may not make these calls at all.
+_DYNAMIC_IMPORT_CALLS = ("import_module", "__import__")
+
+
+def _module_imports(tree: ast.AST, modules) -> list[str]:
+    """Descriptions of every import (any shape, module-level or lazy inside a
+    function) whose module path or imported name has a component in `modules`."""
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if set(alias.name.split(".")) & set(modules):
+                    found.append(f"import {alias.name}")
+        elif isinstance(node, ast.ImportFrom):
+            parts = set((node.module or "").split("."))
+            names = {a.name for a in node.names}
+            if (parts | names) & set(modules):
+                found.append(
+                    f"from {node.module or '.'} import "
+                    + ", ".join(a.name for a in node.names)
+                )
+    return found
 
 # The ONLY hook files permitted to import the self-registration registry. Pairs
 # the POSITIVE 2-file authority no-import test with a NEGATIVE all-files scan: a
@@ -149,6 +229,23 @@ def _registry_imports(tree: ast.AST) -> list[str]:
     return found
 
 
+def _calls_named(tree: ast.AST, names) -> list[tuple[str, int]]:
+    """Return (name, lineno) for every Call whose callee name (bare or
+    attribute) is in ``names``."""
+    found: list[tuple[str, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fn = node.func
+            name = (
+                fn.id if isinstance(fn, ast.Name)
+                else fn.attr if isinstance(fn, ast.Attribute)
+                else None
+            )
+            if name in names:
+                found.append((name, node.lineno))
+    return found
+
+
 def _forbidden_resolver_calls(tree: ast.AST) -> list[tuple[str, int]]:
     """Return (name, lineno) for every Call whose callee name is in
     ``_FORBIDDEN_AUTHORITY_CALLS`` — matching BOTH a bare name
@@ -185,7 +282,7 @@ class TestTrustPartitionNoRegistryImport:
         assert offending == [], (
             f"{rel_file} imports the self-registration registry: {offending}. "
             f"The registry is LABELING-ONLY — its value is self-asserted and "
-            f"forgeable. An authority surface (trustworthy_actor_name / the "
+            f"forgeable. An authority surface (actor_identity.resolve_actor / the "
             f"self-completion gate) consuming it re-opens the confused-deputy "
             f"hole. Authority checks MUST read the harness-managed agent_id, "
             f"never the registry."
@@ -249,6 +346,87 @@ class TestTrustPartitionNoRegistryImport:
             f"the forbidden-resolver-call detector did NOT fire on {src!r} — the "
             f"transitive trust-partition check would miss this call shape."
         )
+
+    @pytest.mark.parametrize("rel_file", sorted(_STRICT_AUTHORITY_CALLS))
+    def test_authority_file_does_not_call_registry_backed_identity_helpers(self, rel_file):
+        """The per-file stricter ban: the actor resolver must not call any
+        identity helper that reaches the registry (or hides a cloud miss)."""
+        path = HOOKS_DIR / rel_file
+        assert path.exists(), f"authority file {rel_file} not found at {path}"
+        bad_calls = _calls_named(_parse(path), _STRICT_AUTHORITY_CALLS[rel_file])
+        assert bad_calls == [], (
+            f"{rel_file} calls a registry-backed identity helper: {bad_calls}. "
+            f"The actor resolver is an authority surface and must resolve from "
+            f"harness data only (frame, team config, subagent meta.json)."
+        )
+
+    @pytest.mark.parametrize("src", [
+        "frame_team_and_name(input_data)\n",
+        "background_work.frame_team_and_name(input_data)\n",
+        "background_work.teammate_launch_name(input_data, team)\n",
+        "bind_launcher_identity(input_data)\n",
+        "turn_end_gate.teammate_identity(input_data, team)\n",
+    ])
+    def test_strict_call_detector_fires_on_synthetic_call(self, src):
+        """Phantom-green guard for the per-file stricter ban."""
+        names = _STRICT_AUTHORITY_CALLS["shared/actor_identity.py"]
+        assert _calls_named(ast.parse(src), names), (
+            f"the strict call detector did NOT fire on {src!r}."
+        )
+
+    @pytest.mark.parametrize("rel_file", _MODULE_BANNED_FILES)
+    def test_actor_files_do_not_import_registry_reaching_modules(self, rel_file):
+        """actor_identity and subagent_meta must not import background_work or
+        turn_end_gate, which host registry-reaching identity helpers. The call
+        bans cannot see a helper that LATER grows a registry fallback; the
+        module ban removes the route entirely."""
+        path = HOOKS_DIR / rel_file
+        assert path.exists(), f"authority file {rel_file} not found at {path}"
+        found = _module_imports(_parse(path), _REGISTRY_REACHING_MODULES)
+        assert found == [], (
+            f"{rel_file} imports a registry-reaching module: {found}. Move the "
+            f"helper it needs into shared/subagent_meta.py instead."
+        )
+
+    @pytest.mark.parametrize("src", [
+        "from . import background_work\n",
+        "from . import background_work, turn_end_gate\n",
+        "from .background_work import subagent_launcher_id\n",
+        "import shared.turn_end_gate\n",
+        "def f():\n    from . import turn_end_gate\n",
+    ])
+    def test_module_ban_detector_fires(self, src):
+        """Phantom-green guard for the module ban, including a lazy import."""
+        assert _module_imports(ast.parse(src), _REGISTRY_REACHING_MODULES)
+
+    @pytest.mark.parametrize("rel_file", _MODULE_BANNED_FILES)
+    def test_actor_files_make_no_dynamic_imports(self, rel_file):
+        """The module ban reads Import nodes, so a dynamic import
+        (importlib.import_module("shared.background_work") or __import__)
+        would pass it. These files import only statically (#1670 final test
+        review, MA7)."""
+        path = HOOKS_DIR / rel_file
+        assert path.exists(), f"authority file {rel_file} not found at {path}"
+        found = _calls_named(_parse(path), _DYNAMIC_IMPORT_CALLS)
+        assert found == [], (
+            f"{rel_file} makes a dynamic import {found}; the module ban cannot "
+            f"see its target. Import statically instead."
+        )
+
+    @pytest.mark.parametrize("src", [
+        "import importlib\nimportlib.import_module('shared.background_work')\n",
+        "from importlib import import_module\nimport_module('x')\n",
+        "def f():\n    return __import__('shared.turn_end_gate')\n",
+    ])
+    def test_dynamic_import_detector_fires(self, src):
+        """Phantom-green guard for the dynamic-import ban."""
+        assert _calls_named(ast.parse(src), _DYNAMIC_IMPORT_CALLS)
+
+    def test_module_ban_detector_ignores_subagent_meta(self):
+        assert _module_imports(
+            ast.parse("from . import pact_context, subagent_meta\n"),
+            _REGISTRY_REACHING_MODULES,
+        ) == []
 
     def test_call_detector_ignores_unrelated_call(self):
         """Counter-case: an unrelated call (is_lead — the agent_type-direct role
@@ -689,4 +867,79 @@ class TestRealTmuxRegisterPreMergeGatePlan:
         raise NotImplementedError(
             "execute the TURNKEY PRE-MERGE RUNBOOK (class docstring) under a live "
             "tmux teammateMode flip"
+        )
+
+
+def _calls_cloud_roster_append(tree: ast.AST) -> bool:
+    """True iff the module calls cloud_roster's `append_record`, under any
+    import spelling: `cloud_roster.append_record(...)`, a dotted
+    `shared.cloud_roster.append_record(...)`, the module bound to another name
+    (`import ... cloud_roster as cr`; `cr.append_record(...)`), or the function
+    imported bare or under another name (`from ...cloud_roster import
+    append_record as ar`; `ar(...)`). Aliases are tracked so a renamed import
+    cannot hide a writer (#1670 final test review, MA3)."""
+    module_names = {"cloud_roster"}   # names bound to the cloud_roster module
+    function_names: set = set()       # names bound to cloud_roster.append_record
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname and alias.name.split(".")[-1] == "cloud_roster":
+                    module_names.add(alias.asname)
+        elif isinstance(node, ast.ImportFrom):
+            from_roster = (node.module or "").split(".")[-1] == "cloud_roster"
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                if alias.name == "cloud_roster":
+                    module_names.add(bound)
+                elif from_roster and alias.name == "append_record":
+                    function_names.add(bound)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "append_record":
+            owner = func.value
+            if isinstance(owner, ast.Name) and owner.id in module_names:
+                return True
+            if isinstance(owner, ast.Attribute) and owner.attr == "cloud_roster":
+                return True
+        if isinstance(func, ast.Name) and func.id in function_names:
+            return True
+    return False
+
+
+class TestCloudRosterWriterSet:
+    """Only dispatch_gate and roster_writer write the cloud roster (#1670)."""
+
+    def test_only_sanctioned_modules_call_cloud_roster_append(self):
+        callers = set()
+        for path in HOOKS_DIR.rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            rel = path.relative_to(HOOKS_DIR).as_posix()
+            if rel == "shared/cloud_roster.py":
+                continue
+            if _calls_cloud_roster_append(_parse(path)):
+                callers.add(rel)
+        assert callers == _ROSTER_APPEND_CALLERS, (
+            f"cloud_roster.append_record callers changed: {sorted(callers)}. Readers trust "
+            "roster records as lead-side; add a writer only with a security review."
+        )
+
+    @pytest.mark.parametrize("src", [
+        "from shared import cloud_roster\ncloud_roster.append_record('t', {})\n",
+        "from shared.cloud_roster import append_record\nappend_record('t', {})\n",
+        "def f():\n    from . import cloud_roster\n    cloud_roster.append_record('t', {})\n",
+        # MA3: aliased and dotted spellings.
+        "from shared import cloud_roster as cr\ncr.append_record('t', {})\n",
+        "from shared.cloud_roster import append_record as ar\nar('t', {})\n",
+        "import shared.cloud_roster as cr\ncr.append_record('t', {})\n",
+        "import shared.cloud_roster\nshared.cloud_roster.append_record('t', {})\n",
+    ])
+    def test_append_detector_fires(self, src):
+        assert _calls_cloud_roster_append(ast.parse(src))
+
+    def test_append_detector_ignores_list_append(self):
+        assert not _calls_cloud_roster_append(
+            ast.parse("x = []\nx.append(1)\nx.append_record(2)\n")
         )

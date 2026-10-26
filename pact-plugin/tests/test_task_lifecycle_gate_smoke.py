@@ -32,6 +32,15 @@ import pytest
 
 
 import task_lifecycle_gate as tlg  # noqa: E402
+from fixtures.actor_frames import (  # noqa: E402
+    SUBAGENT_ID,
+    cloud_meta,
+    cloud_subagent_frame,
+    inprocess_frame,
+    write_subagent_meta,
+    write_team_config,
+)
+from shared.paths import get_claude_config_dir  # noqa: E402
 
 
 # ─── helpers ───────────────────────────────────────────────────────────────
@@ -115,55 +124,64 @@ def test_work_task_create_without_addblockedby(pact_context, capsys):
 # ─── S4: self_completion — teammate self-completes → advisory + FS writeback ────
 
 
-def test_self_completion_writeback(tmp_path, monkeypatch, pact_context):
-    pact_context(team_name="test-team", session_id="test-session")
-
-    # Stage a fake task on disk under HOME/.claude/tasks/test-team/.
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    tasks_dir = tmp_path / ".claude" / "tasks" / "test-team"
+def _stage_task(config_root: Path, task_id: str, owner: str) -> Path:
+    tasks_dir = config_root / "tasks" / "test-team"
     tasks_dir.mkdir(parents=True, exist_ok=True)
-    task_path = tasks_dir / "99.json"
-    task_payload = {
-        "id": "99",
-        "subject": "implement foo",
-        "owner": "backend-coder-3",
-        "metadata": {},
-    }
-    task_path.write_text(json.dumps(task_payload), encoding="utf-8")
+    task_path = tasks_dir / f"{task_id}.json"
+    task_path.write_text(json.dumps({
+        "id": task_id, "subject": "implement foo", "owner": owner, "metadata": {},
+    }), encoding="utf-8")
+    return task_path
 
-    # agent_id=name@team format → trustworthy_actor_name returns "backend-coder-3".
-    payload = {
-        "tool_name": "TaskUpdate",
-        "agent_id": "backend-coder-3@test-team",
-        "tool_input": {"taskId": "99", "status": "completed"},
-        "tool_response": {
-            "task": {
-                "id": "99",
-                "subject": "implement foo",
-                "owner": "backend-coder-3",
-                "metadata": {
-                    "handoff": {  # well-formed handoff; this test isolates the self_completion advisory
-                        "produced": "x",
-                        "decisions": "x",
-                        "reasoning_chain": "x",
-                        "uncertainty": "x",
-                        "integration": "x",
-                        "open_questions": "x",
-                    }
-                },
+
+def _completed(frame: dict, task_id: str, owner: str) -> dict:
+    frame["tool_input"] = {"taskId": task_id, "status": "completed"}
+    frame["tool_response"] = {"task": {
+        "id": task_id, "subject": "implement foo", "owner": owner,
+        "metadata": {
+            "handoff": {  # well-formed handoff; this test isolates the self_completion advisory
+                "produced": "x", "decisions": "x", "reasoning_chain": "x",
+                "uncertainty": "x", "integration": "x", "open_questions": "x",
             }
         },
-    }
-    advisories = tlg.evaluate_lifecycle(payload)
+    }}
+    return frame
+
+
+def _assert_writeback(advisories, task_path: Path) -> None:
     assert any(rule == "self_completion" for rule, _ in advisories), (
         f"expected self_completion advisory, got: {advisories}"
     )
-
     # Writeback must have landed on disk with both markers.
     written = json.loads(task_path.read_text(encoding="utf-8"))
     assert written["metadata"]["completion_disputed"] is True
     assert written["metadata"]["gate_writeback"] is True
+
+
+def test_self_completion_writeback_inprocess(pact_context):
+    """In-process teammate (agent_type = its name, a<name>-<16hex> id, team
+    config member) self-completes → advisory + on-disk writeback."""
+    pact_context(team_name="test-team", session_id="test-session")
+    root = get_claude_config_dir()
+    task_path = _stage_task(root, "99", "backend-coder-3")
+    write_team_config(root, "test-team", [
+        {"name": "backend-coder-3", "agentType": "pact-backend-coder"},
+    ])
+    payload = _completed(inprocess_frame(root, "backend-coder-3"), "99", "backend-coder-3")
+    _assert_writeback(tlg.evaluate_lifecycle(payload), task_path)
+
+
+def test_self_completion_writeback_cloud(pact_context):
+    """Cloud teammate (type in agent_type, a<16hex> id, meta.json, no team
+    config) self-completes → advisory + on-disk writeback."""
+    pact_context(team_name="test-team", session_id="test-session")
+    root = get_claude_config_dir()
+    task_path = _stage_task(root, "99", "backend-coder-3")
+    write_subagent_meta(root, SUBAGENT_ID, cloud_meta("backend-coder-3", "pact-backend-coder"))
+    payload = _completed(
+        cloud_subagent_frame(root, "pact-backend-coder"), "99", "backend-coder-3"
+    )
+    _assert_writeback(tlg.evaluate_lifecycle(payload), task_path)
 
 
 # ─── S5: self_completion recursion-marker self-skip ─────────────────────────────
@@ -171,24 +189,16 @@ def test_self_completion_writeback(tmp_path, monkeypatch, pact_context):
 
 def test_recursion_marker_self_skip(pact_context):
     pact_context(team_name="test-team", session_id="test-session")
-    payload = {
-        "tool_name": "TaskUpdate",
-        "agent_id": "backend-coder-3@test-team",
-        "tool_input": {
-            "taskId": "99",
-            "status": "completed",
-            # gate_writeback=True → step ① short-circuit
-            "metadata": {"gate_writeback": True, "completion_disputed": True},
-        },
-        "tool_response": {
-            "task": {
-                "id": "99",
-                "subject": "implement foo",
-                "owner": "backend-coder-3",
-                "metadata": {"gate_writeback": True, "completion_disputed": True},
-            }
-        },
-    }
+    root = get_claude_config_dir()
+    write_subagent_meta(root, SUBAGENT_ID, cloud_meta("backend-coder-3", "pact-backend-coder"))
+    payload = _completed(
+        cloud_subagent_frame(root, "pact-backend-coder"), "99", "backend-coder-3"
+    )
+    # gate_writeback=True → step ① short-circuit, even though this actor
+    # would otherwise draw self_completion.
+    marker = {"gate_writeback": True, "completion_disputed": True}
+    payload["tool_input"]["metadata"] = dict(marker)
+    payload["tool_response"]["task"]["metadata"] = dict(marker)
     advisories = tlg.evaluate_lifecycle(payload)
     assert advisories == [], (
         f"expected silent skip on recursion marker, got: {advisories}"

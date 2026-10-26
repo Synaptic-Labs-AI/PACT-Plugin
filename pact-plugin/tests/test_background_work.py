@@ -867,10 +867,10 @@ class TestTheAgentIdShapeDecidesBeforeTheTypeChecks:
         """`teams/../config.json` exists and names the member, so only the
         team-name check refuses it."""
         import json
-        from shared.pact_context import _iter_members
+        from shared.pact_context import iter_team_members
 
         (self.root / "config.json").write_text(json.dumps({"members": [{"name": "claude"}]}))
-        assert [m["name"] for m in _iter_members("..")] == ["claude"], "control: the path resolves"
+        assert [m["name"] for m in iter_team_members("..")] == ["claude"], "control: the path resolves"
         assert agent_type_names_a_member("claude", "..", agent_id=f"aclaude-{HEX16}") is False
 
     @pytest.mark.parametrize(
@@ -884,13 +884,13 @@ class TestTheAgentIdShapeDecidesBeforeTheTypeChecks:
         naming the member, so only the team-name check refuses it. An empty
         team reads no config at all, so that case is a guard, not a proof."""
         import json
-        from shared.pact_context import _iter_members
+        from shared.pact_context import iter_team_members
 
         if config_under_root:
             path = self.root / config_under_root
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps({"members": [{"name": "claude"}]}))
-            assert [m["name"] for m in _iter_members(team)] == ["claude"], "control: the path resolves"
+            assert [m["name"] for m in iter_team_members(team)] == ["claude"], "control: the path resolves"
         assert agent_type_names_a_member("claude", team) is False
 
     @pytest.mark.parametrize("agent_id", [{"id": "x"}, 12345, [f"a{HEX16}"]])
@@ -912,7 +912,7 @@ class TestTheAgentIdShapeDecidesBeforeTheTypeChecks:
                     sites.append((path.relative_to(hooks).as_posix(),
                                   ast.unparse(passed) if passed is not None else None))
         assert sorted(p for p, _ in sites) == [
-            "peer_inject.py", "shared/background_work.py",
+            "peer_inject.py", "shared/actor_identity.py", "shared/background_work.py",
             "shared/background_work.py", "shared/turn_end_gate.py",
         ], sites
         assert all(v == "input_data.get('agent_id')" for _, v in sites), sites

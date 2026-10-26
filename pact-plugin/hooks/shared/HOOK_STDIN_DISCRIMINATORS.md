@@ -67,7 +67,8 @@ Consequences, because code in this repo reasons on the old premise:
   field, which already differs per member in-process.
 - A caller needing identity from this field must VALIDATE it — membership in
   the team config's `members[]` `name` list — rather than trust its shape. See
-  `shared/background_work.py` :: `agent_type_names_a_member`, including its
+  `shared/subagent_meta.py` :: `agent_type_names_a_member` (re-exported by
+  `shared/background_work.py`), including its
   stated residual.
 
 **tmux is UNTESTED for this field on a `Bash` `PostToolUse` frame.** The tmux
@@ -167,6 +168,38 @@ on this event reached the model. Only the key set was recorded, not the value
 types, and no teammate's failure frame was captured, so whether one carries
 `agent_id` is unmeasured. Fixture: `tests/fixtures/role_frames.py` ::
 `captured_posttoolusefailure_bash_headless`.
+
+### Agent spawn frames: what each one carries (the cloud roster's join)
+
+Measured 2026-10-25 on Claude Code 2.1.310 from a child headless session that
+spawned two foreground `general-purpose` subagents in one message and one
+background subagent. No single frame carries a spawned agent's name, type and
+`agent_id` together, so `shared/cloud_roster.py` joins them through
+`tool_use_id`:
+
+| Frame | Carries | Lacks |
+|---|---|---|
+| PreToolUse `Agent` (lead) | `tool_use_id`; `tool_input` {`description`, `name`, `prompt`, `run_in_background`, `subagent_type`} | `agent_id` |
+| PreToolUse `Agent` (nested: a subagent spawning) | the SPAWNER's `agent_id` and `agent_type`; `tool_use_id`; `tool_input` as above. Measured live (test-roster, 2.1.310, spawn depth 2): it runs immediately before the nested agent's SubagentStart. dispatch_gate records it as a cloud-roster `foreign` spawn | the nested agent's own id |
+| SubagentStart | `agent_id` (`a` + 16 hex), `agent_type` (the TYPE, e.g. `general-purpose`), `cwd`, `hook_event_name`, `prompt_id`, `scratchpad_dir`, `session_id`, `transcript_path` | `tool_use_id`, `name` |
+| PostToolUse `Agent` (lead), foreground | `tool_use_id`; `tool_response` {`agentId`, `agentType`, `status: "completed"`, usage fields} | — |
+| PostToolUse `Agent` (lead), background | `tool_use_id`; `tool_response` {`agentId`, `status: "async_launched"`, `isAsync`, `outputFile`} | `agentType` |
+
+Order and timing, as measured:
+
+- Each spawn's PreToolUse and SubagentStart ran back to back, even for the
+  two spawns in one message: Pre(p1), Start(p1), Pre(p2), Start(p2).
+- A foreground spawn's PostToolUse fires only when the agent first hands
+  back.
+- A background spawn's PostToolUse fires at launch, BEFORE its
+  SubagentStart.
+- The subagent's `agent-<agent_id>.meta.json` did NOT exist yet at
+  SubagentStart. The `subagents/` folder was missing at the first spawn. The
+  file appears before the agent's first tool call. Its `toolUseId` equals the
+  lead's `tool_use_id`, for all three spawns.
+
+`roster_writer.py` records `meta_present` on each SubagentStart bind, so a
+later platform change that writes meta.json earlier shows up in the field.
 
 ### UserPromptSubmit has no teammate fire path
 

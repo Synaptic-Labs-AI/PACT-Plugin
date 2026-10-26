@@ -17,7 +17,7 @@ pre-assigned (owner set) but `pending`, so the TEAMMATE flips it to
 fix asks the teammate to claim-before-work; this hook is the mechanical
 defense-in-depth for when the prose is missed.
 
-THREE BEHAVIORAL TIERS, keyed on a STRUCTURAL signal (never a mode flag):
+FOUR BEHAVIORAL TIERS, keyed on a STRUCTURAL signal (never a mode flag):
   • Lead frame            — is_lead(stdin) (agent_type ∈ LEAD_AGENT_TYPES) → NO-OP
                             (cheapest early-exit; the highest-frequency actor).
   • Teammate, in-process  — session_id == leadSessionId → identity collapses on
@@ -29,6 +29,16 @@ THREE BEHAVIORAL TIERS, keyed on a STRUCTURAL signal (never a mode flag):
                             disambiguates identity via the registry → enforce:
                             M1 advisory floor / M2 conditional auto-heal of the
                             single owned-unblocked-pending task.
+  • Teammate, cloud       — no config.json (cloud_roster.applies) and an
+                            Agent-tool subagent frame (agent_id a<16hex>) →
+                            the cloud roster attributes the actor: a
+                            roster-backed name (source roster_verified or
+                            roster) gets the task-specific nudge for its own
+                            tasks; any other resolution gets the generic
+                            advisory, F3 relevance-guarded. NUDGE ONLY: NEVER
+                            auto-flips (no _atomic_claim), because the name is
+                            the roster's, a file the same OS user can write.
+                            Every other unknown-topology frame stays a NO-OP.
 
 M1 + M2 (both implemented; the split is the single-candidate branch):
   • M1 (advisory floor)   — complete, working, fail-open, never-deny advisory
@@ -126,6 +136,12 @@ try:
     )
     from shared.intentional_wait import is_self_complete_exempt
     from shared.session_state import is_safe_path_component
+    from shared import cloud_roster, subagent_meta
+    from shared.actor_identity import (
+        SOURCE_ROSTER,
+        SOURCE_ROSTER_VERIFIED,
+        resolve_actor,
+    )
     from shared.agent_handoff_marker import sanitize_path_component
     _IMPORTS_OK = True
 except BaseException:  # noqa: BLE001 — fail-OPEN catch-all (this gate never denies)
@@ -436,8 +452,10 @@ def _evaluate(stdin: dict) -> str | None:
         # in a known team, so the most conservative fail-safe (total NO-OP) is
         # correct; confirmed-in-process is a KNOWN, safe state where the
         # attribution-free nudge is warranted. The extra suppression on the
-        # unknown path is intentional, not an oversight.
-        return None  # unknown topology → fail-safe total NO-OP (no advisory)
+        # unknown path is intentional, not an oversight. The one exception is
+        # the cloud shape (no config.json at all), which _evaluate_cloud
+        # attributes through the cloud roster; it still never auto-flips.
+        return _evaluate_cloud(stdin, team_name)
     in_process = pact_context.is_lead_session_frame(
         stdin, team_name, lead_session_id=lead_session_id
     )
@@ -461,15 +479,7 @@ def _evaluate(stdin: dict) -> str | None:
             return _GENERIC_CLAIM_NUDGE
         return None
 
-    mine = [
-        t
-        for t in tasks
-        if t.get("owner") == confident_name
-        and t.get("status") == "pending"
-        and _is_unblocked(t, by_id)  # §7 — all blockers completed
-        and not is_teachback_subject(t.get("subject") or "")
-        and not is_self_complete_exempt(t, team_name)
-    ]
+    mine = _owned_claimable(tasks, by_id, confident_name, team_name)
 
     # F1 idempotency: nothing claimable → NO-OP. After a flip the task is
     # in_progress (not pending) → never re-nagged, never re-flipped.
@@ -488,6 +498,62 @@ def _evaluate(stdin: dict) -> str | None:
 
     # len(mine) > 1: multiple owned-unblocked-pending → list, NEVER guess.
     return _claim_nudge_multi([str(t.get("id")) for t in mine])
+
+
+def _owned_claimable(tasks: list, by_id: dict, name: str, team_name: str) -> list:
+    """Tasks owned by `name` that are `pending`, unblocked (§7), not a
+    teachback task and not self-complete-exempt: the claim candidates."""
+    return [
+        t
+        for t in tasks
+        if t.get("owner") == name
+        and t.get("status") == "pending"
+        and _is_unblocked(t, by_id)  # §7 — all blockers completed
+        and not is_teachback_subject(t.get("subject") or "")
+        and not is_self_complete_exempt(t, team_name)
+    ]
+
+
+# Resolution sources whose name the cloud roster backs (shared/actor_identity).
+# Empty when the imports failed (main() then never reaches _evaluate).
+_ROSTER_BACKED_SOURCES = (
+    frozenset({SOURCE_ROSTER_VERIFIED, SOURCE_ROSTER}) if _IMPORTS_OK else frozenset()
+)
+
+
+def _evaluate_cloud(stdin: dict, team_name: str) -> str | None:
+    """The cloud tier (no team config): nudge only, NEVER auto-claim.
+
+    Runs only when the team has no config.json (cloud_roster.applies) and the
+    frame is an Agent-tool subagent's (agent_id a<16hex>); every other
+    unknown-topology frame keeps the total NO-OP. The actor is resolved from
+    harness data and the cloud roster (actor_identity.resolve_actor). A name
+    the roster backs gets the task-specific nudge for that owner's claimable
+    tasks; any other resolution (unbound, unattributed, meta-only) gets the
+    generic, attribution-free advisory under the F3 relevance guard, because
+    a meta.json name is the teammate's own claim.
+
+    No write happens on this path: the roster is a file the same OS user can
+    write, so its name is good enough to address a nudge but not to flip a
+    task (the tmux tier's M2 auto-heal is not extended here).
+    """
+    if not cloud_roster.applies(team_name):
+        return None
+    if not subagent_meta.subagent_launcher_id(stdin):
+        return None
+    tasks = list(iter_team_task_jsons(team_name))
+    by_id = {str(t.get("id")): t for t in tasks if t.get("id") is not None}
+    actor = resolve_actor(stdin, team_name)
+    if actor.source in _ROSTER_BACKED_SOURCES and actor.name:
+        mine = _owned_claimable(tasks, by_id, actor.name, team_name)
+        if not mine:
+            return None
+        if len(mine) == 1:
+            return _claim_nudge_single(str(mine[0].get("id")))
+        return _claim_nudge_multi([str(t.get("id")) for t in mine])
+    if _any_unclaimed_claim_candidate(tasks, by_id, team_name):
+        return _GENERIC_CLAIM_NUDGE
+    return None
 
 
 def main() -> None:

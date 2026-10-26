@@ -49,6 +49,17 @@ import task_lifecycle_gate as tlg  # noqa: E402
 # below are coupled to the EXACT constant the gate appends — a substring check
 # against this import is non-vacuous (revert the advisory-site append → RED).
 from shared.teachback_schema import TEACHBACK_SCHEMA_ECHO  # noqa: E402
+from fixtures.actor_frames import (  # noqa: E402
+    SUBAGENT_ID,
+    cloud_meta,
+    cloud_subagent_frame,
+    inprocess_frame,
+    plain_frame,
+    tmux_frame,
+    write_subagent_meta,
+    write_team_config,
+)
+from fixtures.actor_frames import lead_frame as actor_lead_frame  # noqa: E402
 
 
 # =============================================================================
@@ -880,169 +891,222 @@ def test_allowlist_pin_catches_a_foreign_rule_name():
 # =============================================================================
 
 
-def test_silent_when_secretary_self_completes(tmp_path, monkeypatch, pact_context):
-    """Secretary's team-config agentType is in SELF_COMPLETE_EXEMPT_AGENT_TYPES
-    → no advisory. Spawn name is `session-secretary` (production shape);
-    the carve-out resolves via team config, not owner-name match."""
-    # Wire pact_context to read tmp_path-rooted team config.
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+_HANDOFF = {
+    "produced": "x", "decisions": "x", "reasoning_chain": "x",
+    "uncertainty": "x", "integration": "x", "open_questions": "x",
+}
+
+
+def _with_task(frame: dict, task_id: str, owner: str, metadata: dict | None = None,
+               subject: str = "implement foo") -> dict:
+    """Attach the post-state task to a completion frame's tool_response."""
+    meta = {"handoff": dict(_HANDOFF)}
+    meta.update(metadata or {})
+    frame["tool_input"] = {"taskId": task_id, "status": "completed"}
+    frame["tool_response"] = {"task": {
+        "id": task_id, "subject": subject, "owner": owner, "metadata": meta,
+    }}
+    return frame
+
+
+def _config_root():
+    from shared.paths import get_claude_config_dir
+    return get_claude_config_dir()
+
+
+_COMPLETION_RULES = frozenset({
+    "self_completion", "non_lead_completion", "self_completion_unverified",
+})
+
+
+def _completion_rules(advisories) -> list[str]:
+    """Every completion-rule advisory, so a silent-path test also fails on a
+    non_lead_completion (a startswith("self_completion") filter would hide it)."""
+    return [rule for rule, _ in advisories if rule in _COMPLETION_RULES]
+
+
+@pytest.fixture
+def writebacks(monkeypatch):
+    """Record _writeback_dispute calls instead of writing task files."""
+    calls: list = []
+    monkeypatch.setattr(tlg, "_writeback_dispute", lambda task_id: calls.append(task_id) or True)
+    return calls
+
+
+def test_silent_when_secretary_self_completes_inprocess(pact_context, writebacks):
+    """In-process secretary: the team config records agentType=pact-secretary
+    (surface 1). Spawn name is `session-secretary` (production shape)."""
     pact_context(team_name="test-team", session_id="test-session")
-    team_dir = tmp_path / ".claude" / "teams" / "test-team"
-    team_dir.mkdir(parents=True, exist_ok=True)
-    (team_dir / "config.json").write_text(
-        json.dumps({
-            "team_name": "test-team",
-            "members": [
-                {"name": "session-secretary", "agentType": "pact-secretary"},
-            ],
-        }),
-        encoding="utf-8",
+    root = _config_root()
+    write_team_config(root, "test-team", [
+        {"name": "session-secretary", "agentType": "pact-secretary"},
+    ])
+    payload = _with_task(inprocess_frame(root, "session-secretary"), "5",
+                         "session-secretary", subject="save institutional memory")
+    decision: dict = {}
+    advisories = tlg.evaluate_lifecycle(payload, decision=decision)
+    assert decision["actor"]["source"] == "inprocess_id"
+    assert decision["actor"]["owner_match"] is True
+    assert _completion_rules(advisories) == []
+    assert writebacks == []
+
+
+def test_silent_when_secretary_self_completes_cloud(pact_context, writebacks):
+    """Cloud secretary: NO team config, only the platform's meta.json.
+    Regression test for the surface 1b fallback: the actor resolves to the
+    owner, so without 1b this completion would draw a false advisory."""
+    pact_context(team_name="test-team", session_id="test-session")
+    root = _config_root()
+    write_subagent_meta(root, SUBAGENT_ID, cloud_meta("secretary", "pact-secretary"))
+    payload = _with_task(cloud_subagent_frame(root, "pact-secretary"), "5", "secretary")
+    decision: dict = {}
+    advisories = tlg.evaluate_lifecycle(payload, decision=decision)
+    assert decision["actor"]["name"] == "secretary"
+    assert decision["actor"]["source"] == "subagent_meta"
+    assert decision["actor"]["owner_match"] is True
+    assert _completion_rules(advisories) == []
+    assert writebacks == []
+
+
+def test_advisory_when_cloud_teammate_self_completes(pact_context, writebacks):
+    """Cloud, non-exempt type: the actor resolves from meta.json and the
+    self-completion advisory fires with a writeback. Silent before #1666
+    item 4, because no frame carried name@team."""
+    pact_context(team_name="test-team", session_id="test-session")
+    root = _config_root()
+    write_subagent_meta(root, SUBAGENT_ID, cloud_meta("backend-coder", "pact-backend-coder"))
+    payload = _with_task(cloud_subagent_frame(root, "pact-backend-coder"), "7", "backend-coder")
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert _completion_rules(advisories) == ["self_completion"]
+    assert any("self-completed" in msg for _, msg in advisories)
+    assert writebacks == ["7"]
+
+
+def test_advisory_when_owner_named_secretary_without_agenttype(pact_context, writebacks):
+    """Trust-boundary defense: a member NAMED `secretary` whose team config
+    records a non-exempt agentType is not exempt; its self-completion
+    draws the advisory."""
+    pact_context(team_name="test-team", session_id="test-session")
+    root = _config_root()
+    write_team_config(root, "test-team", [
+        {"name": "secretary", "agentType": "pact-backend-coder"},
+    ])
+    payload = _with_task(inprocess_frame(root, "secretary"), "9", "secretary",
+                         subject="spoof attempt")
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert _completion_rules(advisories) == ["self_completion"]
+    assert writebacks == ["9"]
+
+
+def test_silent_when_signal_task_self_completes(pact_context, writebacks):
+    """Signal task (metadata.completion_type='signal' AND metadata.type in
+    {'blocker','algedonic'}) is exempt via is_self_complete_exempt surface 2."""
+    pact_context(team_name="test-team", session_id="test-session")
+    root = _config_root()
+    write_team_config(root, "test-team", [
+        {"name": "backend-coder-3", "agentType": "pact-backend-coder"},
+    ])
+    payload = _with_task(
+        inprocess_frame(root, "backend-coder-3"), "6", "backend-coder-3",
+        metadata={"completion_type": "signal", "type": "blocker"}, subject="signal: ack",
     )
-    payload = {
-        "tool_name": "TaskUpdate",
-        "agent_id": "session-secretary@test-team",
-        "tool_input": {"taskId": "5", "status": "completed"},
-        "tool_response": {
-            "task": {
-                "id": "5",
-                "subject": "save institutional memory",
-                "owner": "session-secretary",
-                "metadata": {
-                    "handoff": {
-                        "produced": "x",
-                        "decisions": "x",
-                        "reasoning_chain": "x",
-                        "uncertainty": "x",
-                        "integration": "x",
-                        "open_questions": "x",
-                    }
-                },
-            }
-        },
-    }
     advisories = tlg.evaluate_lifecycle(payload)
-    assert not any(rule == "self_completion" for rule, _ in advisories)
+    assert _completion_rules(advisories) == []
+    assert writebacks == []
 
 
-def test_advisory_when_owner_named_secretary_without_agenttype(
-    tmp_path, monkeypatch, pact_context
-):
-    """Trust-boundary defense: a teammate spoofing owner='secretary'
-    without the team config recording the privileged agentType DOES
-    trigger the self-completion advisory. Pre-#682 this test would have
-    been silent (owner-name carve-out); post-#682 the carve-out keys on
-    team-config agentType, so the spoof is caught."""
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+def test_silent_when_lead_frame_completes(pact_context, writebacks):
     pact_context(team_name="test-team", session_id="test-session")
-    team_dir = tmp_path / ".claude" / "teams" / "test-team"
-    team_dir.mkdir(parents=True, exist_ok=True)
-    (team_dir / "config.json").write_text(
-        json.dumps({
-            "team_name": "test-team",
-            "members": [
-                {"name": "backend-coder-1", "agentType": "pact-backend-coder"},
-            ],
-        }),
-        encoding="utf-8",
-    )
-    payload = {
-        "tool_name": "TaskUpdate",
-        "agent_id": "secretary@test-team",
-        "tool_input": {"taskId": "9", "status": "completed"},
-        "tool_response": {
-            "task": {
-                "id": "9",
-                "subject": "spoof attempt",
-                "owner": "secretary",
-                "metadata": {},
-            }
-        },
-    }
+    payload = _with_task(actor_lead_frame(), "7", "backend-coder-3")
     advisories = tlg.evaluate_lifecycle(payload)
-    assert any(rule == "self_completion" for rule, _ in advisories)
+    assert _completion_rules(advisories) == []
+    assert writebacks == []
 
 
-def test_silent_when_signal_task_self_completes(pact_context):
-    """Signal task (metadata.completion_type='signal' AND
-    metadata.type in {'blocker','algedonic'}) is exempted by
-    is_self_complete_exempt(task) per shared.intentional_wait L201-L204.
-    """
+def test_silent_when_plain_frame_completes(pact_context, writebacks):
+    """No agent_type (plain / non-PACT primary) → role unknown → silent."""
     pact_context(team_name="test-team", session_id="test-session")
-    payload = {
-        "tool_name": "TaskUpdate",
-        "agent_id": "backend-coder-3@test-team",
-        "tool_input": {"taskId": "6", "status": "completed"},
-        "tool_response": {
-            "task": {
-                "id": "6",
-                "subject": "signal: ack",
-                "owner": "backend-coder-3",
-                "metadata": {
-                    "completion_type": "signal",
-                    "type": "blocker",
-                    "handoff": {
-                        "produced": "x",
-                        "decisions": "x",
-                        "reasoning_chain": "x",
-                        "uncertainty": "x",
-                        "integration": "x",
-                        "open_questions": "x",
-                    },
-                },
-            }
-        },
-    }
+    payload = _with_task(plain_frame(), "7", "backend-coder-3")
     advisories = tlg.evaluate_lifecycle(payload)
-    assert not any(rule == "self_completion" for rule, _ in advisories)
+    assert _completion_rules(advisories) == []
+    assert writebacks == []
 
 
-def test_skips_when_actor_unresolvable(
-    pact_context,
-):
-    """Documents an intentional deviation from architect §5.3: that
-    spec says when ``trustworthy_actor_name`` returns None (no
-    agent_id, or no ``@`` in agent_id), the gate should still emit a
-    self-completion advisory.
-
-    The CURRENT implementation (task_lifecycle_gate.py condition
-    ``actor is not None``) skips the advisory in that case.
-
-    This test encodes the CURRENT skip behavior so a future change
-    surfaces the deviation deliberately. Resolution tracked in a
-    follow-up issue (filed at stage-ready). DO NOT 'fix' the gate to
-    satisfy this test — fix the test only if the architect §5.3
-    reconciliation lands.
-    """
+def test_non_lead_completion_when_teammate_name_unresolved(pact_context, writebacks):
+    """Rule B, decision 2: a non-lead frame whose name cannot be resolved
+    (cloud, meta.json missing, non-exempt type) is still a non-lead, so it
+    gets the full non_lead_completion advisory and a completion_disputed
+    writeback; the message says the name was unresolved."""
     pact_context(team_name="test-team", session_id="test-session")
-    payload = {
-        "tool_name": "TaskUpdate",
-        # No agent_id at all → trustworthy_actor_name returns None.
-        "tool_input": {"taskId": "7", "status": "completed"},
-        "tool_response": {
-            "task": {
-                "id": "7",
-                "subject": "implement foo",
-                "owner": "backend-coder-3",
-                "metadata": {
-                    "handoff": {
-                        "produced": "x",
-                        "decisions": "x",
-                        "reasoning_chain": "x",
-                        "uncertainty": "x",
-                        "integration": "x",
-                        "open_questions": "x",
-                    }
-                },
-            }
-        },
-    }
+    root = _config_root()
+    payload = _with_task(cloud_subagent_frame(root, "pact-backend-coder"), "7", "backend-coder-3")
     advisories = tlg.evaluate_lifecycle(payload)
-    # Architect §5.3 would expect a self_completion advisory; current impl skips. Assert SKIP.
-    assert not any(rule == "self_completion" for rule, _ in advisories), (
-        "If self_completion fired here, the gate has been changed to match architect "
-        "§5.3 (advisory-emit on unresolvable actor). Confirm the change "
-        "was intentional and update this test + close the follow-up issue."
-    )
+    assert _completion_rules(advisories) == ["non_lead_completion"]
+    assert any("name unresolved: subagent_no_meta" in m for _, m in advisories)
+    assert writebacks == ["7"]
+
+
+def test_silent_when_unresolved_actor_has_exempt_frame_type(pact_context, writebacks):
+    """Same as above, but the frame type is exempt (cloud secretary whose
+    meta.json is missing): surface 1b with actor_name None → silent."""
+    pact_context(team_name="test-team", session_id="test-session")
+    root = _config_root()
+    payload = _with_task(cloud_subagent_frame(root, "PACT:pact-secretary"), "7", "secretary")
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert _completion_rules(advisories) == []
+    assert writebacks == []
+
+
+def test_non_lead_completion_when_teammate_completes_peers_task(pact_context, writebacks):
+    """Rule B: a teammate completing a peer's task is flagged, naming both."""
+    pact_context(team_name="test-team", session_id="test-session")
+    root = _config_root()
+    write_team_config(root, "test-team", [
+        {"name": "backend-coder-3", "agentType": "pact-backend-coder"},
+    ])
+    payload = _with_task(inprocess_frame(root, "backend-coder-3"), "7", "frontend-coder-1")
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert _completion_rules(advisories) == ["non_lead_completion"]
+    msg = next(m for r, m in advisories if r == "non_lead_completion")
+    assert "'backend-coder-3'" in msg and "'frontend-coder-1'" in msg
+    assert "Only the lead completes tasks" in msg
+    assert writebacks == ["7"]
+
+
+def test_non_lead_completion_when_owner_reassigned_in_the_completing_call(pact_context, writebacks):
+    """Rule B closes rule A's one-call escape: TaskUpdate(owner='other',
+    status='completed') leaves owner='other' in the post-state, so the
+    actor is not the owner and the completion is flagged."""
+    pact_context(team_name="test-team", session_id="test-session")
+    root = _config_root()
+    write_subagent_meta(root, SUBAGENT_ID, cloud_meta("backend-coder", "pact-backend-coder"))
+    payload = _with_task(cloud_subagent_frame(root, "pact-backend-coder"), "7", "other")
+    payload["tool_input"]["owner"] = "other"
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert _completion_rules(advisories) == ["non_lead_completion"]
+    assert writebacks == ["7"]
+
+
+def test_silent_when_teammate_completes_unowned_task_documented_residual(pact_context, writebacks):
+    """Accepted residual under rule B: an empty owner (a teammate's unowned
+    personal tracking task, or TaskUpdate(owner='', status='completed')) is
+    silent, so personal tracking tasks are not flagged."""
+    pact_context(team_name="test-team", session_id="test-session")
+    root = _config_root()
+    write_subagent_meta(root, SUBAGENT_ID, cloud_meta("backend-coder", "pact-backend-coder"))
+    payload = _with_task(cloud_subagent_frame(root, "pact-backend-coder"), "7", "")
+    assert _completion_rules(tlg.evaluate_lifecycle(payload)) == []
+    assert writebacks == []
+
+
+def test_silent_when_tmux_teammate_has_no_team(writebacks):
+    """Documents the tmux gap: a tmux teammate's own process has no lead
+    context, so no team resolves, owner stays empty and the rule is silent."""
+    payload = _with_task(tmux_frame(), "7", "backend-coder-3")
+    payload["tool_response"] = {}
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert _completion_rules(advisories) == []
+    assert writebacks == []
 
 
 # =============================================================================
@@ -1050,33 +1114,66 @@ def test_skips_when_actor_unresolvable(
 # =============================================================================
 
 
-def test_silent_when_lead_completes_teammates_task(pact_context):
-    """team-lead@test-team completing a teammate's task → not self_completion."""
+def test_silent_when_lead_completes_teammates_task(pact_context, writebacks):
+    """The CAPTURED lead completion frame (no agent_id; the task comes from
+    the disk fallback) completing a teammate's task → silent."""
+    from fixtures.role_frames import captured_lead_posttooluse_taskupdate_completed
+
+    pact_context(team_name="test-team", session_id="test-session")
+    frame = captured_lead_posttooluse_taskupdate_completed()
+    task_id = frame["tool_input"]["taskId"]
+    (_config_root() / "tasks" / "test-team" / f"{task_id}.json").write_text(json.dumps({
+        "id": task_id, "subject": "implement foo", "owner": "backend-coder-3",
+        "status": "completed", "metadata": {"handoff": dict(_HANDOFF)},
+    }), encoding="utf-8")
+    decision: dict = {}
+    advisories = tlg.evaluate_lifecycle(frame, decision=decision)
+    assert decision["actor"]["role"] == "lead"
+    assert _completion_rules(advisories) == []
+    assert writebacks == []
+
+
+# =============================================================================
+# lifecycle_decision.actor observability
+# =============================================================================
+
+
+def test_decision_actor_has_six_keys_and_no_agent_id(pact_context, writebacks):
+    pact_context(team_name="test-team", session_id="test-session")
+    root = _config_root()
+    write_subagent_meta(root, SUBAGENT_ID, cloud_meta("backend-coder", "pact-backend-coder"))
+    payload = _with_task(cloud_subagent_frame(root, "pact-backend-coder"), "7", "backend-coder")
+    decision: dict = {}
+    tlg.evaluate_lifecycle(payload, decision=decision)
+    actor = decision["actor"]
+    assert set(actor) == {"role", "source", "name", "agent_type", "task_id", "owner_match"}
+    assert actor == {
+        "role": "teammate", "source": "subagent_meta", "name": "backend-coder",
+        "agent_type": "pact-backend-coder", "task_id": "7", "owner_match": True,
+    }
+    assert SUBAGENT_ID not in json.dumps(actor)
+
+
+def test_decision_actor_absent_on_non_completion_write(pact_context):
     pact_context(team_name="test-team", session_id="test-session")
     payload = {
-        "tool_name": "TaskUpdate",
-        "agent_id": "team-lead@test-team",
-        "tool_input": {"taskId": "8", "status": "completed"},
-        "tool_response": {
-            "task": {
-                "id": "8",
-                "subject": "implement foo",
-                "owner": "backend-coder-3",
-                "metadata": {
-                    "handoff": {
-                        "produced": "x",
-                        "decisions": "x",
-                        "reasoning_chain": "x",
-                        "uncertainty": "x",
-                        "integration": "x",
-                        "open_questions": "x",
-                    }
-                },
-            }
-        },
+        "tool_name": "TaskUpdate", "agent_type": "pact-backend-coder",
+        "tool_input": {"taskId": "7", "status": "in_progress"}, "tool_response": {},
     }
-    advisories = tlg.evaluate_lifecycle(payload)
-    assert not any(rule == "self_completion" for rule, _ in advisories)
+    decision: dict = {}
+    tlg.evaluate_lifecycle(payload, decision=decision)
+    assert "actor" not in decision
+
+
+def test_journal_event_carries_actor_only_when_given(monkeypatch):
+    events: list = []
+    monkeypatch.setattr(tlg, "append_event_checked", lambda event, _label: events.append(event))
+    actor = {"role": "lead", "source": "lead_frame", "name": None,
+             "agent_type": None, "task_id": "7", "owner_match": False}
+    tlg._journal_lifecycle_decision({"tool_name": "TaskUpdate"}, [], actor=actor)
+    tlg._journal_lifecycle_decision({"tool_name": "TaskUpdate"}, [])
+    assert events[0]["actor"] == actor
+    assert "actor" not in events[1]
 
 
 # =============================================================================
@@ -4125,7 +4222,8 @@ def test_M2_value_error_in_task_read_does_not_suppress_gate(
 # =============================================================================
 
 
-def _raise_runtime_failure(_input_data):
+def _raise_runtime_failure(_input_data, **_kwargs):
+    # **_kwargs: main() passes evaluate_lifecycle(input_data, decision=...).
     raise RuntimeError("simulated evaluate failure")
 
 

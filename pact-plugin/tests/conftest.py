@@ -71,6 +71,7 @@ import session_init  # noqa: E402, F401
 import shared.background_work  # noqa: E402, F401
 import shared.task_metadata_snapshot  # noqa: E402, F401
 import shared.task_utils  # noqa: E402, F401
+import task_claim_gate  # noqa: E402, F401
 import task_lifecycle_gate  # noqa: E402, F401
 import teammate_idle  # noqa: E402, F401
 import track_files  # noqa: E402, F401
@@ -910,3 +911,47 @@ def memory_store(tmp_path):
         return path
 
     return _make
+
+
+@pytest.fixture(autouse=True)
+def _confine_agent_definition_scan(tmp_path, monkeypatch):
+    """Keep the shadow-definition scan inside the test's own tree. Runs for
+    EVERY test (autouse).
+
+    ``actor_identity._definition_dirs`` walks from the frame's cwd up to the
+    filesystem root looking for ``.claude/agents``. A test's cwd lives under
+    pytest's basetemp, so on a machine where an ancestor of basetemp holds an
+    agents directory (TMPDIR under ``$HOME``, or ``HOME=/tmp``), the walk
+    reaches the operator's real ``~/.claude/agents``. PACT itself installs
+    ``pact-*.md`` symlinks there, and with the config root redirected by
+    ``_isolate_config_root_to_tmp`` those links point outside the test's
+    plugin cache, so they read as non-plugin shadows and flip the verdict of
+    every bare-type test (#1670 final test review, MA2: 15 tests).
+
+    The wrapper keeps the REAL scan and drops only the directories outside
+    ``tmp_path`` and the redirected config root, so every directory a test
+    builds is still scanned. A test that needs another root patches
+    ``_definition_dirs`` itself, which replaces this wrapper for that test.
+    """
+    try:
+        from shared import actor_identity
+        from shared.paths import get_claude_config_dir
+    except Exception:  # noqa: BLE001 — a broken import fails its own tests
+        yield
+        return
+    real = actor_identity._definition_dirs
+
+    def _confined(input_data):
+        roots = [tmp_path.resolve(), get_claude_config_dir().resolve()]
+        kept = []
+        for directory in real(input_data):
+            try:
+                resolved = directory.resolve()
+            except OSError:
+                continue
+            if any(resolved == root or root in resolved.parents for root in roots):
+                kept.append(directory)
+        return kept
+
+    monkeypatch.setattr(actor_identity, "_definition_dirs", _confined)
+    yield
