@@ -2932,13 +2932,15 @@ def test_a_malformed_repo_slug_payload_yields_no_tracker(monkeypatch):
             lambda command: None if command[0] == "git" else stdout)
         return backlog._repo_slug()
 
-    assert _slug('{"nameWithOwner": "owner/repo"}') == ("owner", "repo"), (
+    assert _slug('{"nameWithOwner": "owner/repo", "url": "https://github.com/owner/repo"}'
+                 ) == ("owner", "repo"), (
         "control: a well-formed slug did not resolve — the rest is vacuous"
     )
     for label, stdout in (
         ("a top-level array", '[1]'),
         ("a top-level number", '5'),
-        ("nameWithOwner is a scalar", '{"nameWithOwner": 5}'),
+        ("nameWithOwner is a scalar",
+         '{"nameWithOwner": 5, "url": "https://github.com/owner/repo"}'),
     ):
         assert _slug(stdout) is None, label
 

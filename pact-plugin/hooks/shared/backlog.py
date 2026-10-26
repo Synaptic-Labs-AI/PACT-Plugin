@@ -126,6 +126,9 @@ _STALE_AFTER = timedelta(days=14)
 # check, anchored when the batched GraphQL call starts: the per-ref REST calls
 # (a refused GraphQL query, or a link to another repository) get only what is
 # left of it, whatever the speed of the refusal.
+# The repo-slug lookup runs BEFORE that anchor, outside the budget. Its
+# network-free rungs (GH_REPO, the origin remote) cost next to nothing; only
+# its last rung, `gh repo view`, can cost a budget of its own.
 _TRACKER_TIMEOUT_SECONDS = 5
 
 # Characters a repository owner or name may hold. Everything else is refused
@@ -788,8 +791,15 @@ def resolve_refs(
     refused AS A WHOLE (GraphQL blocked, as in Claude Code cloud sessions),
     and a github.com link to ANOTHER repository, which is looked up in that
     repository. Both share a cap and ONE deadline, created here before the
-    GraphQL call, so the whole check costs at most one budget plus one REST
-    call's floor.
+    GraphQL call, so the check itself costs at most one budget plus one REST
+    call's floor. The repo-slug lookup runs before that anchor: its
+    network-free rungs are near-instant, and only its last rung, `gh repo
+    view`, can cost a budget of its own on top.
+
+    With NO slug for this project, a github.com link with a valid owner and
+    name is still checked in the repository it names — the link alone says
+    which one. Every other ref (a bare number, which needs this repository's
+    slug, and every non-link kind) reads `no tracker configured`.
 
     Every entry comes back with a `state` of `done`, `abandoned`, `closed`,
     `open` or `unverifiable`. Unverifiable covers a ref no tracker here can
@@ -810,56 +820,49 @@ def resolve_refs(
         return outcome
 
     repo = _repo_slug(project_path)
-    if repo is None:
-        for ref in candidates:
-            outcome[ref] = {"state": "unverifiable", "reason": _REASON_NO_TRACKER}
-        return outcome
-
-    owner, name = repo
     own: Dict[str, int] = {}
     rest_targets: Dict[str, Tuple[str, str, int]] = {}
     for ref, kind in candidates.items():
-        target = _ref_target(kind, owner, name)
+        target = _ref_target(kind, repo)
         if isinstance(target, str):
             outcome[ref] = {"state": "unverifiable", "reason": target}
-        elif target[:2] == (owner, name):
+        elif repo is not None and target[:2] == repo:
             own[ref] = target[2]
         else:
             rest_targets[ref] = target
 
     deadline = time.monotonic() + _TRACKER_TIMEOUT_SECONDS
-    if own:
-        fast = _resolve_refs_graphql(owner, name, own)
+    if own and repo is not None:
+        fast = _resolve_refs_graphql(repo[0], repo[1], own)
         if fast is None:
-            rest_targets.update({ref: (owner, name, number)
-                                 for ref, number in own.items()})
+            rest_targets.update({ref: (*repo, number) for ref, number in own.items()})
         else:
             outcome.update(fast)
     if rest_targets:
-        outcome.update(_resolve_refs_rest(
-            rest_targets, deadline=deadline, primary=(owner, name)))
+        outcome.update(_resolve_refs_rest(rest_targets, deadline=deadline, primary=repo))
     return outcome
 
 
 def _ref_target(
-    kind: _RefKind, owner: str, name: str
+    kind: _RefKind, repo: Optional[Tuple[str, str]]
 ) -> Union[str, Tuple[str, str, int]]:
     """Where one classified ref is looked up: `(owner, name, number)`, or the
     unverifiable reason (a str) when it cannot be looked up at all.
 
-    A bare number and a link to THIS repository (owner and name compared
-    case-insensitively, as GitHub does) get this repository's slug, so the
-    caller can tell them from a link to another github.com repository, which
-    keeps its own owner and name — but only when they pass `_valid_slug`,
-    because they become a REST path. Anything else carries its reason.
+    A bare number and a link to THIS repository (`_same_repo`) get this
+    repository's slug `repo`, so the caller can tell them from a link to
+    another github.com repository, which keeps its own owner and name — but
+    only when they pass `_valid_slug`, because they become a REST path.
+    With no `repo` (None), only such a link can be looked up; every other ref
+    reads `no tracker configured`. Anything else carries its reason.
     """
-    if kind.kind == _KIND_BARE:
-        return (owner, name, kind.number)
+    if repo is not None and _same_repo(kind, *repo):
+        return (*repo, kind.number)
+    if kind.kind == _KIND_GITHUB and _valid_slug(kind.owner, kind.name):
+        return (kind.owner, kind.name, kind.number)
+    if repo is None:
+        return _REASON_NO_TRACKER
     if kind.kind == _KIND_GITHUB:
-        if (kind.owner.lower(), kind.name.lower()) == (owner.lower(), name.lower()):
-            return (owner, name, kind.number)
-        if _valid_slug(kind.owner, kind.name):
-            return (kind.owner, kind.name, kind.number)
         return _REASON_FOREIGN_REF
     return {
         _KIND_LINK: _REASON_FOREIGN_REF,
@@ -952,7 +955,7 @@ def _graphql_request_failed(payload: Any) -> bool:
 
 def _resolve_refs_rest(
     targets: Dict[str, Tuple[str, str, int]],
-    *, deadline: float, primary: Tuple[str, str],
+    *, deadline: float, primary: Optional[Tuple[str, str]],
 ) -> Dict[str, Dict[str, Any]]:
     """Per-ref REST lookups, in parallel, under ONE shared deadline.
 
@@ -960,8 +963,8 @@ def _resolve_refs_rest(
     as. `gh api repos/{owner}/{name}/issues/{N}` answers for issues AND pull
     requests. Refs that name the same issue share ONE call and its answer.
 
-    ORDER AND CAP: distinct issues are checked `primary` (this repository)
-    first, then by owner, name and number — numerically, so the cut is
+    ORDER AND CAP: distinct issues are checked `primary` (this repository;
+    None when it has no slug) first, then by owner, name and number — numerically, so the cut is
     deterministic and predictable. At most `_REST_MAX_REFS` calls are made;
     refs past the cap are reported with the cap as their reason.
 
@@ -979,7 +982,7 @@ def _resolve_refs_rest(
         by_issue.setdefault(key, []).append(ref)
     slugs = {(owner.lower(), name.lower(), number): (owner, name)
              for owner, name, number in targets.values()}
-    primary_key = (primary[0].lower(), primary[1].lower())
+    primary_key = (primary[0].lower(), primary[1].lower()) if primary else None
     ordered = sorted(by_issue, key=lambda key: (key[:2] != primary_key, key))
     checked, overflow = ordered[:_REST_MAX_REFS], ordered[_REST_MAX_REFS:]
 
@@ -1172,22 +1175,21 @@ def _looks_like_link(text: str) -> bool:
             and labels[-1].isalpha() and len(labels[-1]) >= 2)
 
 
-def _issue_number(ref: Any) -> Optional[int]:
-    """The issue number a bare ref or a github.com issue/pull link carries,
-    whichever repository the link names; None for anything else."""
-    return _classify_ref(ref).number
-
-
-def _ref_targets_repo(ref: Any, owner: str, name: str) -> bool:
-    """The ref addresses an issue or pull request of `owner/name`: a bare
-    `N` or `#N`, or a github.com link whose owner and name match
-    (case-insensitively, as GitHub does)."""
-    kind = _classify_ref(ref)
+def _same_repo(kind: _RefKind, owner: str, name: str) -> bool:
+    """A classified ref addresses an issue or pull request of `owner/name`:
+    a bare `N` or `#N`, or a github.com link whose owner and name match
+    (case-insensitively, as GitHub does). THE one comparison of a ref with a
+    repository, shared by the read, write and branch-linkage paths."""
     if kind.kind == _KIND_BARE:
         return True
     return kind.kind == _KIND_GITHUB and (
         (kind.owner.lower(), kind.name.lower()) == (owner.lower(), name.lower())
     )
+
+
+def _ref_targets_repo(ref: Any, owner: str, name: str) -> bool:
+    """`_same_repo` for a raw ref."""
+    return _same_repo(_classify_ref(ref), owner, name)
 
 
 _UNPARSEABLE = object()
@@ -1397,14 +1399,23 @@ def _valid_slug(owner: Any, name: Any) -> bool:
 
 
 def _gh_repo_view_slug() -> Optional[Tuple[str, str]]:
-    """The last rung: ask `gh repo view` (a GraphQL call; may need network)."""
-    stdout = _run_capture(["gh", "repo", "view", "--json", "nameWithOwner"])
+    """The last rung: ask `gh repo view` (a GraphQL call; may need network).
+
+    GITHUB.COM ONLY. `gh repo view` resolves the repository from the git
+    remotes, which may be a GitHub Enterprise host; every tracker call pins
+    `--hostname github.com`, so a GHE slug would query an unrelated github.com
+    repository of the same name. The `url` field names the host, and only
+    `github.com` is accepted.
+    """
+    stdout = _run_capture(["gh", "repo", "view", "--json", "nameWithOwner,url"])
     if stdout is None:
         return None
     payload = _parse_json(stdout)
     # A payload that parsed to an array reached `.get` and a numeric
     # nameWithOwner reached `.partition`, both AttributeError, neither caught.
     if not isinstance(payload, dict):
+        return None
+    if not _is_github_url(payload.get("url")):
         return None
     slug = payload.get("nameWithOwner")
     if not isinstance(slug, str):
@@ -1415,6 +1426,18 @@ def _gh_repo_view_slug() -> Optional[Tuple[str, str]]:
     # the characters a repository slug may contain. A slug carrying a quote or
     # a brace would otherwise reshape the query.
     return (owner, name) if _valid_slug(owner, name) else None
+
+
+def _is_github_url(url: Any) -> bool:
+    """`url` is an http(s) URL on github.com itself (not a subdomain, not GHE)."""
+    if not isinstance(url, str):
+        return False
+    try:
+        parts = urlsplit(url.strip())
+        host = parts.hostname or ""
+    except ValueError:
+        return False
+    return parts.scheme.lower() in {"https", "http"} and host.lower() == _GITHUB_HOST
 
 
 def _run_capture(
@@ -1741,10 +1764,7 @@ def _branch_token(ref: Any, slug: Optional[Tuple[str, str]]) -> str:
     repository or tracker keeps its full text, so its digits are never matched
     against this project's branch names by coincidence."""
     kind = _classify_ref(ref)
-    if kind.kind == _KIND_BARE or (
-        slug is not None and kind.kind == _KIND_GITHUB
-        and _ref_targets_repo(ref, *slug)
-    ):
+    if kind.kind == _KIND_BARE or (slug is not None and _same_repo(kind, *slug)):
         return str(kind.number)
     return str(ref)
 

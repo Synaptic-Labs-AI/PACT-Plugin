@@ -51,7 +51,7 @@ first and checked to be the opposite of what the arm asserts.
   unparseable GraphQL goes to REST      test_unparseable_graphql_output_never_falls_back
   `reconcile` drops project_path        test_reconcile_anchors_the_slug_lookup_on_the_stored_project_path
   urlsplit ValueError escapes           test_slug_and_ref_parsers_refuse_what_they_cannot_read
-  `_issue_number` non-str guard gone    test_slug_and_ref_parsers_refuse_what_they_cannot_read
+  `_classify_ref` non-str guard gone   test_slug_and_ref_parsers_refuse_what_they_cannot_read
 
   R2 rows (this file's own arms, and arms R2 made discriminating again):
   the write path reads the CWD origin   test_the_write_path_reads_the_backlogs_own_origin_not_the_cwd
@@ -68,6 +68,15 @@ first and checked to be the opposite of what the arm asserts.
   a foreign slug skips `_valid_slug`    test_hostile_foreign_slugs_never_reach_a_rest_argv
   an undecodable origin parses a slug   test_a_non_utf8_origin_url_yields_no_slug_and_no_crash
   the fake drops worker-thread calls    test_rest_fake_records_from_every_worker_thread
+
+  R3 rows:
+  gh repo view host check removed       test_r3_gh_repo_view_is_accepted_only_for_a_github_com_url
+  gh repo view stops requesting url     test_r3_gh_repo_view_is_accepted_only_for_a_github_com_url
+  host check accepts any *github.com    test_r3_gh_repo_view_is_accepted_only_for_a_github_com_url
+  no-slug invalid link reads foreign    test_r3_a_foreign_link_is_checked_even_with_no_local_slug
+  no slug short-circuits foreign links  test_r3_a_foreign_link_is_checked_even_with_no_local_slug
+                                        test_r3_an_unusable_project_path_still_checks_a_foreign_link
+  `_same_repo` turns case-sensitive     test_r3_same_repo_is_the_one_comparison_and_issue_number_is_gone
 
 The R1 arms (`test_r1_*`) carry the mutations batch R1 ran against them; they
 are not re-listed here except where R2 changed the arm. Deliberately NOT a
@@ -347,6 +356,33 @@ def test_r1_an_unusable_project_path_yields_no_slug_at_all(monkeypatch):
         assert backlog._local_repo_slug(bad) is None, bad
 
 
+def test_r3_gh_repo_view_is_accepted_only_for_a_github_com_url(monkeypatch):
+    """R3-GHE / BB-3: `gh repo view` resolves from the git remotes, which may
+    be a GitHub Enterprise host, while every tracker call pins github.com. Its
+    slug is accepted only when the `url` it reports is on github.com.
+
+    RED WHEN the host check is dropped (a GHE slug then queries an unrelated
+    github.com repository), or `url` is no longer requested.
+    """
+    seen = []
+
+    def answer(payload):
+        def fake(command, **kwargs):
+            seen.append(list(command))
+            return json.dumps(payload)
+        monkeypatch.setattr(backlog, "_run_capture", fake)
+        return backlog._gh_repo_view_slug()
+
+    slug = {"nameWithOwner": "owner/repo"}
+    assert answer({**slug, "url": "https://github.com/owner/repo"}) == ("owner", "repo")
+    assert seen[-1] == ["gh", "repo", "view", "--json", "nameWithOwner,url"]
+    for url in ("https://ghe.example.com/owner/repo", "https://gist.github.com/owner/repo",
+                "https://github.com.evil.com/owner/repo", "ssh://github.com/owner/repo",
+                "https://[::1/owner/repo", None, 5):
+        assert answer({**slug, "url": url}) is None, url
+    assert answer(slug) is None, "no url at all must not be trusted"
+
+
 def test_reconcile_anchors_the_slug_lookup_on_the_stored_project_path(
     monkeypatch, tmp_path,
 ):
@@ -382,7 +418,7 @@ def test_slug_and_ref_parsers_refuse_what_they_cannot_read(monkeypatch):
     assert backlog._slug_from_gh_repo("github.com/o/r/extra") is None
     assert backlog._local_repo_slug(42) is None
     for not_a_ref in (None, 12, ["#1"]):
-        assert backlog._issue_number(not_a_ref) is None, not_a_ref
+        assert backlog._classify_ref(not_a_ref).number is None, not_a_ref
 
     for stdout in (None, "not json"):
         monkeypatch.setattr(backlog, "_run_capture", lambda *a, _s=stdout, **k: _s)
@@ -447,7 +483,7 @@ def test_r1_an_over_long_or_huge_ref_never_crashes_or_stalls(monkeypatch):
     started = time.monotonic()
     for ref in hostile:
         assert backlog._classify_ref(ref).kind == "not_a_ref", ref[:20]
-        assert backlog._issue_number(ref) is None
+        assert backlog._classify_ref(ref).number is None
     assert time.monotonic() - started < 2.0
 
     _this_repo(monkeypatch)
@@ -504,11 +540,11 @@ def test_a_non_decimal_digit_ref_is_stored_verbatim_and_reads_unverifiable(
     """'²' passes str.isdigit() but int() rejects it. Stored verbatim on write,
     and the read path reports it unverifiable instead of raising ValueError.
 
-    RED WHEN `_issue_number` goes back to isdigit(), which crashes `show`.
+    RED WHEN `_classify_ref` goes back to isdigit(), which crashes `show`.
     """
     assert backlog._field_updates(argparse.Namespace(ref="²"))["ref"] == "²"
     assert backlog._field_updates(argparse.Namespace(ref="#1²"))["ref"] == "#1²"
-    assert backlog._issue_number("²") is None
+    assert backlog._classify_ref("²").number is None
     monkeypatch.setattr(backlog, "_repo_slug", lambda *_: pytest.fail(
         "a non-addressable ref reached the tracker"))
     outcome = backlog.resolve_refs(["²", "https://github.com/o/r/issues/²"])
@@ -593,6 +629,52 @@ def test_r1_a_link_to_another_github_repository_is_checked_there(monkeypatch):
     assert _rest_paths(calls) == ["repos/upstream/thing/issues/1004"]
 
 
+def test_r3_a_foreign_link_is_checked_even_with_no_local_slug(monkeypatch):
+    """BB-2: a github.com link names its own repository, so it is checked
+    there even when this project has no slug. A bare number needs this
+    repository's slug, and so does every non-link kind: they read `no
+    tracker configured`, and no GraphQL call is made.
+
+    RED WHEN a missing slug short-circuits every ref again, or a bare number
+    or an invalid-slug link is looked up with no slug.
+    """
+    calls = []
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *a, **k: None)
+    monkeypatch.setattr(subprocess, "run", _tracker(calls))
+
+    foreign = "https://github.com/upstream/thing/pull/1672/files"
+    no_tracker = ["#1666", "https://github.com/up%20stream/thing/issues/1",
+                  "https://jira.example.com/browse/12", "12/", "#99999999999"]
+    outcome = backlog.resolve_refs([foreign, "ENG-1"] + no_tracker)
+
+    assert outcome[foreign] == {"state": "done"}
+    for ref in no_tracker:
+        assert outcome[ref] == {"state": "unverifiable",
+                                "reason": backlog._REASON_NO_TRACKER}, ref
+    assert outcome["ENG-1"]["reason"] == backlog._REASON_NO_RESOLUTION
+    assert [argv for argv, _ in calls if _is_graphql(argv)] == []
+    assert _rest_paths(calls) == ["repos/upstream/thing/issues/1672"]
+
+
+def test_r3_an_unusable_project_path_still_checks_a_foreign_link(monkeypatch):
+    """BB-2 with B-F7: an unusable `project_path` gives no slug (and never
+    reaches `gh repo view`), but a foreign link is still checked where it
+    points.
+
+    RED WHEN the unusable path suppresses the foreign lookup, or falls
+    through to `gh repo view`.
+    """
+    calls = []
+    monkeypatch.setattr(backlog, "_gh_repo_view_slug", lambda: pytest.fail(
+        "an unusable project_path fell through to gh repo view"))
+    monkeypatch.setattr(subprocess, "run", _tracker(calls))
+    foreign = "https://github.com/upstream/thing/issues/1004"
+    outcome = backlog.resolve_refs([foreign, "#1"], project_path="relative/path")
+    assert outcome[foreign] == {"state": "abandoned", "reason": "not_planned"}
+    assert outcome["#1"]["reason"] == backlog._REASON_NO_TRACKER
+    assert _rest_paths(calls) == ["repos/upstream/thing/issues/1004"]
+
+
 def test_issue_comment_and_query_links_address_the_path_number(monkeypatch):
     """A this-repo link with `#fragment` or `?query` is the issue in its PATH.
 
@@ -601,8 +683,8 @@ def test_issue_comment_and_query_links_address_the_path_number(monkeypatch):
     """
     comment = "https://github.com/owner/repo/issues/1666#issuecomment-1004"
     query = "https://github.com/owner/repo/pull/1672?tab=files"
-    assert backlog._issue_number(comment) == 1666
-    assert backlog._issue_number("https://github.com/o/r/issues/12#34") == 12
+    assert backlog._classify_ref(comment).number == 1666
+    assert backlog._classify_ref("https://github.com/o/r/issues/12#34").number == 12
     assert backlog._ref_targets_repo(comment, "owner", "repo")
     assert not backlog._ref_targets_repo(comment, "other", "repo")
 
@@ -1665,3 +1747,23 @@ def test_r1_abandoned_flags_match_digits_only_for_this_repository(monkeypatch):
     assert flagged("https://github.com/owner/repo/issues/1234") == []
     assert len(flagged("https://github.com/other/repo/issues/1234")) == 1
     assert len(flagged("https://jira.example.com/browse/1234")) == 1
+
+
+def test_r3_same_repo_is_the_one_comparison_and_issue_number_is_gone():
+    """N2 / N3: `_same_repo` is the single ref-to-repository comparison
+    (bare numbers always, github links case-insensitively on owner and
+    name, nothing else), and the `_issue_number` wrapper no longer exists.
+
+    RED WHEN the comparison turns case-sensitive, admits another kind, or
+    `_issue_number` comes back as a second reading of a ref.
+    """
+    same = backlog._same_repo
+    kind = backlog._classify_ref
+    assert same(kind("#12"), "owner", "repo")
+    assert same(kind("https://github.com/OWNER/Repo/issues/12"), "owner", "repo")
+    assert not same(kind("https://github.com/other/repo/issues/12"), "owner", "repo")
+    assert not same(kind("https://github.com/owner/repo2/issues/12"), "owner", "repo")
+    for ref in ("https://jira.example.com/browse/12", "12/", "ENG-1", "#99999999999"):
+        assert not same(kind(ref), "owner", "repo"), ref
+    assert backlog._branch_token("https://github.com/OWNER/repo/pull/12", ("owner", "repo")) == "12"
+    assert not hasattr(backlog, "_issue_number")
