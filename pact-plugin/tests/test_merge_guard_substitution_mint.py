@@ -1405,6 +1405,13 @@ NUMBERED_REPO_CHANGES = {
                     "git config -f .git/config remote.origin.url git@github.com:o/c.git && " + _NUMBERED),
     "config-value-named-get": (_NUMBERED, "git config remote.origin.url get && " + _NUMBERED,
                                "git config remote.origin.url list && " + _NUMBERED),
+    "config-insteadof": (_NUMBERED, "git config url.git@github.com:o/b.git.insteadOf git@github.com:o/a.git && "
+                         + _NUMBERED, "git config url.git@github.com:o/c.git.insteadOf git@github.com:o/a.git && "
+                         + _NUMBERED),
+    "config-set-insteadof": (_NUMBERED, "git config set url.git@github.com:o/b.git.InsteadOf o/a && " + _NUMBERED,
+                             "git config set url.git@github.com:o/c.git.InsteadOf o/a && " + _NUMBERED),
+    "config-remove-url-section": (_NUMBERED, "git config remove-section url.git@github.com:o/b.git && " + _NUMBERED,
+                                  "git config remove-section url.git@github.com:o/c.git && " + _NUMBERED),
     "git-dir-prefix": (_NUMBERED, "GIT_DIR=/tmp/repoB/.git " + _NUMBERED, "GIT_DIR=/tmp/repoC/.git " + _NUMBERED),
     "git-dir-env": (_NUMBERED, "env GIT_DIR=/tmp/repoB/.git " + _NUMBERED, "env GIT_DIR=/tmp/repoC/.git " + _NUMBERED),
     "git-dir-export": (_NUMBERED, "export GIT_DIR=/tmp/repoB/.git; " + _NUMBERED,
@@ -1457,10 +1464,11 @@ class TestANumberedOpInAnotherRepoNeedsItsOwnApproval:
         "git config unset user.name && " + _NUMBERED,
         "git config remove-section user && " + _NUMBERED,
         "git -C . config --get remote.origin.url && " + _NUMBERED,
+        "git config get url.git@github.com:o/b.git.insteadOf && " + _NUMBERED,
     ], ids=["pr-checkout", "co", "branch-checkout", "switch", "cd-after", "echoed", "remote-list", "set-default-view",
             "set-default-v", "config-get", "config-get-value-pattern", "config-read-key", "config-list", "config-other-key",
             "config-get-subcommand", "config-get-all-subcommand", "config-list-subcommand", "config-get-key-case",
-            "config-unset-other-key", "config-remove-other-section", "config-get-dash-c"])
+            "config-unset-other-key", "config-remove-other-section", "config-get-dash-c", "config-get-insteadof"])
     def test_a_plain_numbered_approval_still_covers_a_branch_change(self, command):
         assert _runs(_mint_styled(_NUMBERED, APPROVAL_STYLES["inline"]), command)
 
@@ -1492,6 +1500,9 @@ EXPLICIT_GIT_REPO_CHANGES = {
                                         "git config unset remote.upstream.pushurl && " + _PUSH_X),
     "force-push-config-key-case": (_PUSH_X, "git config remote.origin.PushURL git@github.com:o/b.git; " + _PUSH_X,
                                    "git config remote.origin.PushURL git@github.com:o/c.git; " + _PUSH_X),
+    "force-push-config-pushinsteadof": (_PUSH_X, "git config url.git@github.com:o/b.git.pushInsteadOf git@github.com:o/a.git; "
+                                        + _PUSH_X, "git config url.git@github.com:o/c.git.pushInsteadOf git@github.com:o/a.git; "
+                                        + _PUSH_X),
 }
 
 
