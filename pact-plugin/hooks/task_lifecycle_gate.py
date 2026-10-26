@@ -77,7 +77,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from typing import NoReturn
+from typing import Any, NoReturn
 
 
 _SUPPRESS_OUTPUT = json.dumps({"suppressOutput": True})
@@ -282,6 +282,12 @@ def _emit_load_failure_advisory(
 # ─── fail-closed wrapper around cross-package imports ─────────────────────────
 try:
     import shared.pact_context as pact_context
+    from shared.actor_identity import (
+        ROLE_TEAMMATE,
+        ActorIdentity,
+        resolve_actor,
+        valid_name,
+    )
     from shared.agent_handoff_marker import (
         already_emitted,
         handoff_already_emitted,
@@ -296,7 +302,6 @@ try:
         is_owner_bearing_write,
         is_pact_specialist_owner,
         variety_stamp_as_of_write,
-        trustworthy_actor_name,
     )
     from shared.handoff_schema import (
         HANDOFF_SCHEMA_ECHO,
@@ -1385,7 +1390,9 @@ def _resolve_required_band_via_blocks(
     return _band_from_total(total)
 
 
-def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
+def evaluate_lifecycle(
+    input_data: dict, *, decision: dict | None = None
+) -> list[tuple[str, str]]:
     """Return list of (rule, message) advisory tuples. Empty list → ALLOW
     silently.
 
@@ -1393,6 +1400,11 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
     ``"teachback_addblocks_missing"``, ``"self_completion"``) used in
     journal events; the ``message`` element is the human-readable
     advisory text emitted via additionalContext.
+
+    ``decision`` (keyword-only out-parameter): when a dict is passed, the
+    completion block writes ``decision["actor"]`` (the resolved actor plus
+    ``task_id`` and ``owner_match``) for the lifecycle_decision journal
+    event. Callers that do not pass it are unaffected.
     """
     advisories: list[tuple[str, str]] = []
     tool_name = input_data.get("tool_name", "")
@@ -1518,7 +1530,7 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
         # is_teachback_exempt predicate. Common path (well-formed
         # dispatch with addBlockedBy provided) short-circuits at the
         # 3rd clause and never hits disk. Failure path (missing
-        # addBlockedBy) does hit disk via _iter_members, but this is
+        # addBlockedBy) does hit disk via iter_team_members, but this is
         # the rare misconfiguration path — amortized cost near zero.
         #
         # Cached short-circuit: `_teachback_exempt` is computed at most
@@ -1989,26 +2001,41 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
             # (teammate idles on awaiting_lead_completion) has no automated net
             # today; it is tracked as a separate follow-up.
 
-        # Teammate self-completion check. Carve-out is a single boolean
-        # via is_self_complete_exempt(task, team_name) — the predicate is
-        # the SSOT for both surfaces (team-config agentType + signal-task).
-        actor = trustworthy_actor_name(input_data)
-        if (
-            actor is not None
-            and owner
-            and owner == actor
-            and not is_self_complete_exempt(task, team_name)
+        # Lead-only completion check (#1666 item 4, rule B): any non-lead
+        # completing an owned, non-exempt task is flagged. The actor comes
+        # from harness data only (frame agent_type/agent_id, team config,
+        # subagent meta.json, and in the cloud the lead-written cloud roster)
+        # via shared.actor_identity — never the session registry. The
+        # carve-out is is_self_complete_exempt: surface 1
+        # (owner's team-config agentType), 1b (the actor's harness-derived
+        # type, for the cloud where no team config exists) and surface 2
+        # (signal tasks).
+        #
+        # TMUX IS A DOCUMENTED GAP, NOT COVERED: a tmux teammate's own
+        # process has no lead context, so team_name (and so owner) is empty
+        # here and the rule is silent. tmux is untested in this repo (#878).
+        # A TaskCompleted-based check (harness teammate_name) is the
+        # follow-up.
+        actor = resolve_actor(input_data, team_name)
+        if decision is not None:
+            decision["actor"] = {
+                **actor.journal_view(),
+                "task_id": str(task_id),
+                "owner_match": bool(owner and owner == actor.name),
+            }
+        exempt = is_self_complete_exempt(
+            task, team_name,
+            actor_agent_type=actor.agent_type, actor_name=actor.name,
+        )
+        # owner="" written in THIS call (one TaskUpdate clearing the owner
+        # and completing) is not an unowned task: rule B still applies.
+        owner_cleared = not owner and tool_input.get("owner") == ""
+        for rule, msg, writeback in _completion_rule_B(
+            actor, owner, task_id, exempt, owner_cleared=owner_cleared
         ):
-            advisories.append((
-                "self_completion",
-                f"PACT task_lifecycle_gate: teammate {actor!r} "
-                f"self-completed Task {task_id} without carve-out. "
-                "Lead-only completion authority — see "
-                "pact-completion-authority.md. Task marked "
-                "metadata.completion_disputed=true; lead must re-complete "
-                "intentionally to clear.",
-            ))
-            _writeback_dispute(task_id)
+            advisories.append((rule, msg))
+            if writeback:
+                _writeback_dispute(task_id)
 
     # ④ TaskUpdate write-time rules — R3 + R5 fire when a teammate writes
     # metadata.teachback_submit (NOT at completion). Co-located: both rules
@@ -2432,11 +2459,110 @@ def evaluate_lifecycle(input_data: dict) -> list[tuple[str, str]]:
     return advisories
 
 
+# ─── completion rule ─────────────────────────────────────────────────────────
+
+
+def _completion_rule_B(
+    actor: ActorIdentity,
+    owner: str,
+    task_id: Any,
+    exempt: bool,
+    *,
+    owner_cleared: bool = False,
+) -> list[tuple[str, str, bool]]:
+    """Rule B (role-level, #1666 item 4): only the lead completes tasks.
+    Pure, no I/O.
+
+    Returns a list of (rule, message, writeback) tuples; ``writeback`` means
+    the caller must mark the task ``completion_disputed``.
+
+      - lead / unknown frame, or exempt: silent.
+      - no owner: silent, UNLESS ``owner_cleared`` (this same TaskUpdate set
+        owner=""), which is flagged as ``non_lead_completion``. Otherwise
+        TaskUpdate(owner="", status="completed") would escape the rule.
+      - resolved actor name == owner: ``self_completion`` + writeback
+        (message text unchanged from the original rule).
+      - any other non-lead completion (a peer's task, an owner reassigned
+        in the same call, or an unresolved name): ``non_lead_completion``
+        + writeback. The role is keyed on agent_type, so a missing name
+        changes only the message.
+
+    The role decision was gated on probe P2 (design section 9.2): on real
+    TaskUpdate frames the lead carries a lead agent_type and no agent_id,
+    and a subagent carries a non-lead agent_type and an a<16hex> agent_id.
+
+    RESIDUAL: a task whose owner was already "" BEFORE this call stays
+    silent. Accepted: flagging it would flag teammates' unowned personal
+    tracking tasks. Clearing the owner in a separate earlier TaskUpdate
+    still escapes; the journal's per-write snapshot records that write.
+
+    The task owner is teammate-writable and unbounded, so it is echoed into
+    the message only when it passes ``valid_name`` (1-128 characters, no
+    control characters); otherwise a fixed placeholder stands in.
+    """
+    if actor.role != ROLE_TEAMMATE or exempt:
+        return []
+    if not owner and not owner_cleared:
+        return []
+    if owner and actor.name is not None and actor.name == owner:
+        return [(
+            "self_completion",
+            f"PACT task_lifecycle_gate: teammate {actor.name!r} "
+            f"self-completed Task {task_id} without carve-out. "
+            "Lead-only completion authority — see "
+            "pact-completion-authority.md. Task marked "
+            "metadata.completion_disputed=true; lead must re-complete "
+            "intentionally to clear.",
+            True,
+        )]
+    who = _who_phrase(actor)
+    return [(
+        "non_lead_completion",
+        f"PACT task_lifecycle_gate: {who} completed Task {task_id}, "
+        f"{_owner_phrase(owner)}. Only the lead completes tasks — see "
+        "pact-completion-authority.md. Task marked "
+        "metadata.completion_disputed=true; lead must re-complete "
+        "intentionally to clear.",
+        True,
+    )]
+
+
+def _who_phrase(actor: ActorIdentity) -> str:
+    """How the non_lead_completion message names the completing actor.
+
+    A cloud actor whose roster name and meta.json name disagree (source
+    `unattributed`) is named by both claims, so the advisory frames neither.
+    Both names already passed ``valid_name``.
+    """
+    if actor.name is not None:
+        return f"teammate {actor.name!r}"
+    if actor.dispute is not None:
+        roster_name, meta_name = actor.dispute
+        return (
+            f"a teammate (identity disputed: roster says {roster_name!r}, "
+            f"meta.json says {meta_name!r})"
+        )
+    return f"a teammate (name unresolved: {actor.source})"
+
+
+def _owner_phrase(owner: str) -> str:
+    """How the non_lead_completion message names the task's owner."""
+    if not owner:
+        return "after clearing its owner in the same call"
+    shown = valid_name(owner)
+    if shown is None:
+        return f"owned by an owner that cannot be shown ({len(owner)} characters)"
+    return f"owned by {shown!r}"
+
+
 # ─── journal emit ────────────────────────────────────────────────────────────
 
 
 def _journal_lifecycle_decision(
-    input_data: dict, advisories: list[tuple[str, str]]
+    input_data: dict,
+    advisories: list[tuple[str, str]],
+    *,
+    actor: dict | None = None,
 ) -> None:
     """Emit a free-form 'lifecycle_decision' journal event. Best-effort —
     fail-open if journal append fails (matches existing append_event policy).
@@ -2444,10 +2570,15 @@ def _journal_lifecycle_decision(
     Each advisory is a (rule, message) tuple; the journal records both the
     behavioral rule identifiers and the human-readable messages so
     downstream tooling can group by rule without parsing prose.
+
+    ``actor`` (completions only) is the resolved actor view: role, source,
+    name, agent_type, task_id, owner_match. It never holds agent_id,
+    session ids or paths. Omitted from the event when None.
     """
     try:
         rules = [rule for rule, _ in advisories]
         messages = [msg for _, msg in advisories]
+        extra = {"actor": actor} if actor is not None else {}
         event = make_event(
             "lifecycle_decision",
             tool_name=input_data.get("tool_name", ""),
@@ -2455,6 +2586,7 @@ def _journal_lifecycle_decision(
             rules=rules,
             advisories=messages,
             verdict="advisory" if advisories else "allow",
+            **extra,
         )
         # Bool captured (see append_event_checked): this is the per-invocation
         # decision record, so a dropped one reads downstream as a turn in which
@@ -2527,13 +2659,14 @@ def main() -> None:
         # degrades SILENTLY to is_lead and a canonical-frame emit is lost with no
         # record. Do not move this call and do not make it lazy.
         pact_context.init(input_data)
-        advisories = evaluate_lifecycle(input_data)
+        decision: dict = {}
+        advisories = evaluate_lifecycle(input_data, decision=decision)
     except Exception as e:  # noqa: BLE001 — runtime catch-all → advisory
         _emit_load_failure_advisory("runtime", e, input_data)
         return  # unreachable; helper exits
 
     _extend_launch_records_on_claim(input_data)
-    _journal_lifecycle_decision(input_data, advisories)
+    _journal_lifecycle_decision(input_data, advisories, actor=decision.get("actor"))
 
     if not advisories:
         print(_SUPPRESS_OUTPUT)

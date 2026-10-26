@@ -23,7 +23,7 @@ WHY THIS MODULE IS SELF-CONTAINED (zero ``shared.*`` imports):
 
 TRUST BOUNDARY (load-bearing): the registry value is SELF-ASSERTED by the
     teammate and therefore FORGEABLE. This registry is LABELING-ONLY. It
-    MUST NOT feed any authority/trust check (e.g. trustworthy_actor_name /
+    MUST NOT feed any authority/trust check (e.g. actor_identity.resolve_actor /
     the self-completion gate). Feeding a self-asserted value to a
     "who-acted / is-allowed" predicate re-opens the confused-deputy hole
     that the harness-managed agent_id signal closes. members[]-validation on

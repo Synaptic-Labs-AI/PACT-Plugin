@@ -635,7 +635,7 @@ def _setup_pact_session_with_team(monkeypatch, tmp_path, team_name="t1",
     a matching team config at ~/.claude/teams/{team_name}/config.json.
 
     Mirrors _setup_pact_session but adds the team-config sidecar that the
-    members[] readers consume via shared.pact_context._iter_members — the gate
+    members[] readers consume via shared.pact_context.iter_team_members — the gate
     carve-out's _secretary_in_members JOIN witness (#1023) and the marker
     writer's _team_has_secretary DISPATCH witness alike. The monkeypatched
     Path.home means the team config lands under tmp_path.
@@ -889,7 +889,7 @@ class TestCanonicalSecretarySpawnCarveOut:
         """A members[] read error in the JOIN witness → carve-out FIRES (allow).
 
         #1023: the join witness is the gate-local _secretary_in_members, which
-        reads pact_context._iter_members and wraps its body in a broad
+        reads pact_context.iter_team_members and wraps its body in a broad
         ``except Exception: return False``. A read error therefore makes the
         witness return False → binding 5 (`not False`) is True → the carve-out
         fires → the canonical secretary spawn is ALLOWED (result is None).
@@ -902,7 +902,7 @@ class TestCanonicalSecretarySpawnCarveOut:
         the re-deadlock that the pre-#1023 typed-except-DENY direction caused
         on the Path.home() RuntimeError seam.
 
-        We monkeypatch pact_context._iter_members (the witness's data source)
+        We monkeypatch pact_context.iter_team_members (the witness's data source)
         to RAISE, exercising _secretary_in_members's broad-except arm
         end-to-end — NOT stubbing _secretary_in_members itself, which would
         bypass the very except clause this test must prove.
@@ -917,7 +917,7 @@ class TestCanonicalSecretarySpawnCarveOut:
         def _boom(team_name, teams_dir=None):
             raise OSError("simulated disk error")
 
-        monkeypatch.setattr(ctx_module, "_iter_members", _boom)
+        monkeypatch.setattr(ctx_module, "iter_team_members", _boom)
 
         result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
         assert result is None
@@ -1342,7 +1342,7 @@ class TestPrematureInboxCarveOutRegression:
         def _boom(team_name, teams_dir=None):
             raise OSError("simulated witness read error")
 
-        monkeypatch.setattr(ctx_module, "_iter_members", _boom)
+        monkeypatch.setattr(ctx_module, "iter_team_members", _boom)
 
         # (a) plain Edit — fails binding 1 (tool_name != Agent) → DENY,
         # the witness is never consulted.
@@ -1397,7 +1397,7 @@ class TestSecretaryInMembersUnit:
         assert _secretary_in_members("t1") is False
 
     def test_false_on_iter_members_raising(self, monkeypatch, tmp_path):
-        """A raising _iter_members → broad-except returns False (totality /
+        """A raising iter_team_members → broad-except returns False (totality /
         never-raises). This is the load-bearing safe direction: a False return
         makes binding 5's `not False` fire the carve-out (architect D-record:
         the Path.home() RuntimeError seam must not propagate to main()'s
@@ -1419,7 +1419,7 @@ class TestSecretaryInMembersUnit:
         def _boom(team_name, teams_dir=None):
             raise RuntimeError("unresolvable HOME seam")
 
-        monkeypatch.setattr(ctx_module, "_iter_members", _boom)
+        monkeypatch.setattr(ctx_module, "iter_team_members", _boom)
         # Must NOT raise; must return False.
         assert _secretary_in_members("t1") is False
 
@@ -3222,7 +3222,7 @@ class TestImportDiscipline:
     own top level, so a reciprocal top-level import here would deadlock
     module load. #1023 decoupled the carve-out onto a gate-local
     members[]-only JOIN witness (_secretary_in_members, reading
-    shared.pact_context._iter_members), so the gate no longer references
+    shared.pact_context.iter_team_members), so the gate no longer references
     bootstrap_marker_writer AT ALL. That is a STRICTLY STRONGER invariant
     than the old local-import-only rule: with zero gate→marker_writer edges
     the cycle cannot exist in any form. This pin enforces the stronger
@@ -3238,7 +3238,7 @@ class TestImportDiscipline:
         ``importlib.import_module`` call. The whole AST is walked (no
         function/class boundary stop) because, post-#1023, even a LOCAL
         import is forbidden: the carve-out's JOIN witness reads
-        pact_context._iter_members directly and never crosses into
+        pact_context.iter_team_members directly and never crosses into
         bootstrap_marker_writer.
 
         AST-based (not a source grep) so it catches every import idiom,
@@ -3264,7 +3264,7 @@ class TestImportDiscipline:
                             f"bootstrap_gate.py has `import {alias.name}` at "
                             f"line {node.lineno}. Post-#1023 the gate must NOT "
                             f"import bootstrap_marker_writer in ANY scope — the "
-                            f"carve-out reads pact_context._iter_members "
+                            f"carve-out reads pact_context.iter_team_members "
                             f"directly via the gate-local _secretary_in_members "
                             f"JOIN witness."
                         )
@@ -3277,7 +3277,7 @@ class TestImportDiscipline:
                         f"bootstrap_gate.py has `from {module} import ...` at "
                         f"line {node.lineno}. Post-#1023 the gate must NOT "
                         f"import bootstrap_marker_writer in ANY scope — the "
-                        f"carve-out reads pact_context._iter_members directly "
+                        f"carve-out reads pact_context.iter_team_members directly "
                         f"via the gate-local _secretary_in_members JOIN witness."
                     )
             # `__import__('bootstrap_marker_writer')` /
@@ -3735,7 +3735,7 @@ class TestCanonicalSecretarySpawnAdversarial:
         _secretary_in_members's broad except → witness False → binding 5
         (`not False`) → carve-out fires → ALLOW (result is None).
 
-        We monkeypatch pact_context._iter_members (the witness's data source)
+        We monkeypatch pact_context.iter_team_members (the witness's data source)
         to raise, exercising the witness's broad-except arm end-to-end — not
         stubbing the witness, which would bypass the except being proven. The
         broad except is uniform: there is no longer a "listed vs unlisted"
@@ -3751,7 +3751,7 @@ class TestCanonicalSecretarySpawnAdversarial:
         def _raiser(team_name, teams_dir=None):
             raise exc_type("simulated")
 
-        monkeypatch.setattr(ctx_module, "_iter_members", _raiser)
+        monkeypatch.setattr(ctx_module, "iter_team_members", _raiser)
         result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
         assert result is None
 
@@ -3779,7 +3779,7 @@ class TestCanonicalSecretarySpawnAdversarial:
         def _raiser(team_name, teams_dir=None):
             raise RuntimeError("Path.home() seam — unresolvable HOME")
 
-        monkeypatch.setattr(ctx_module, "_iter_members", _raiser)
+        monkeypatch.setattr(ctx_module, "iter_team_members", _raiser)
 
         # No pytest.raises: the predicate must NOT raise. The witness swallows
         # the RuntimeError → False → binding 5 (`not False`) → True.
@@ -3812,7 +3812,7 @@ class TestCanonicalSecretarySpawnAdversarial:
         def _raiser(team_name, teams_dir=None):
             raise RuntimeError("genuine bug in the members[] read")
 
-        monkeypatch.setattr(ctx_module, "_iter_members", _raiser)
+        monkeypatch.setattr(ctx_module, "iter_team_members", _raiser)
 
         exit_code, output = _run_main(
             _canonical_secretary_input(team_name="t1"), capsys
@@ -3865,7 +3865,7 @@ class TestCanonicalSecretarySpawnAdversarial:
     ):
         """get_team_name returning a non-string (dict) is handled WITHOUT
         raising. The dict is truthy so it passes the empty-SSOT guard, then
-        _secretary_in_members(dict) → _iter_members(dict) raises TypeError
+        _secretary_in_members(dict) → iter_team_members(dict) raises TypeError
         (cannot build a path from a dict) → the witness's broad except → False
         → binding 5 (`not False`) → carve-out fires → ALLOW (result is None).
 
@@ -4080,7 +4080,7 @@ class TestCanonicalSecretarySpawnAdversarial:
         def _raiser(team_name, teams_dir=None):
             raise OSError(sensitive)
 
-        monkeypatch.setattr(ctx_module, "_iter_members", _raiser)
+        monkeypatch.setattr(ctx_module, "iter_team_members", _raiser)
 
         result = _check_tool_allowed(_canonical_secretary_input(team_name="t1"))
         # Carve-out fires (allow) → no deny string emitted → no leak surface.

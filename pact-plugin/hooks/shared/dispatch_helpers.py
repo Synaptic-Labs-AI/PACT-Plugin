@@ -24,8 +24,6 @@ Exposes:
     dispatch_site emit records can never drift apart.
   - has_task_assigned(team_name, name) — task-assigned check (one of
     the dispatch_gate rules; rejects spawn before TaskCreate)
-  - trustworthy_actor_name(input_data) — actor resolution for the
-    task_lifecycle_gate self-completion rule
   - SOLO_EXEMPT — research/exploration agents that bypass dispatch_gate
 
 Module-load discipline (architect §5.6):
@@ -167,7 +165,7 @@ def is_pact_specialist_owner(
     teammate" requires resolving the bare owner through team config to its
     agentType (the SAME owner→member→agentType resolution
     ``intentional_wait._is_exempt_agent_type`` uses), then checking registry
-    membership. Composes the two existing primitives — ``_iter_members`` (the
+    membership. Composes the two existing primitives — ``iter_team_members`` (the
     resolution SSOT) + ``is_registered_pact_specialist`` (the registry check) —
     rather than duplicating either.
 
@@ -177,9 +175,9 @@ def is_pact_specialist_owner(
     FAIL-OPEN: "not positively a pact specialist" → the gate returns None →
     does not fire, so an unresolvable owner never strands a dispatch.
 
-    The outer bare-except is load-bearing: ``_iter_members`` resolves the
+    The outer bare-except is load-bearing: ``iter_team_members`` resolves the
     config dir via ``get_claude_config_dir()`` (→ ``Path.home()``), which can
-    raise ``RuntimeError`` that ESCAPES ``_iter_members``'s own typed except —
+    raise ``RuntimeError`` that ESCAPES ``iter_team_members``'s own typed except —
     so a totally fail-closed helper must catch it here, not rely on a caller's
     outer guard.
     """
@@ -188,7 +186,7 @@ def is_pact_specialist_owner(
     if not isinstance(team_name, str) or not team_name:
         return False
     try:
-        for member in pact_context._iter_members(team_name, teams_dir):
+        for member in pact_context.iter_team_members(team_name, teams_dir):
             if member.get("name") == owner:
                 agent_type = member.get("agentType")
                 return (
@@ -416,36 +414,3 @@ def has_task_assigned(team_name: str, name: str) -> bool:
         if data.get("status") in ("pending", "in_progress"):
             return True
     return False
-
-
-# ─── actor resolution (for the self-completion rule) ──────────────────────
-
-def trustworthy_actor_name(input_data: dict) -> str | None:
-    """Extract actor name from harness-trustworthy ``agent_id`` ONLY.
-
-    Bypasses ``resolve_agent_name``'s Step 1 (agent_name) and Step 4
-    (agent_type) fallbacks because they are not strong enough trust
-    signals for the self-completion check (architect §5.3 / PREPARE
-    §10).
-
-    Trust contract: ``agent_id`` is harness-set and lives at the top
-    level of the hook stdin JSON, not inside ``tool_input`` — a teammate
-    cannot collide with it via crafted tool arguments. Format is
-    ``"name@team_name"``.
-
-    Returns the ``name`` portion, or None if ``agent_id`` is missing or
-    malformed (no ``@``). Caller (task_lifecycle_gate self-completion
-    rule) treats None as "actor unresolvable — DO NOT exempt from the
-    self-completion advisory".
-
-    Pure function: no FS, no I/O, no exceptions.
-    """
-    if not isinstance(input_data, dict):
-        return None
-    agent_id = input_data.get("agent_id")
-    if not isinstance(agent_id, str) or "@" not in agent_id:
-        return None
-    name, _, team = agent_id.partition("@")
-    if not name or not team:
-        return None
-    return name

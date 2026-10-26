@@ -238,7 +238,7 @@ def _team_has_secretary(team_name: str) -> bool:
     bootstrap_prompt_gate owns the user-visible advisory.
 
     PRIMARY (CLI byte-identical): the members[] check via the shared
-    ``pact_context._iter_members`` helper, so the JSON-shape adversarial-input
+    ``pact_context.iter_team_members`` helper, so the JSON-shape adversarial-input
     semantics (missing config, malformed JSON, non-list members, non-dict
     member entries, missing keys) match those of the id-keyed
     ``pact_context._lookup_agent_in_team_config`` consumer byte-for-byte. The
@@ -266,7 +266,7 @@ def _team_has_secretary(team_name: str) -> bool:
     is wrapped so an unexpected FS error degrades to the existing silent-False
     semantic).
     """
-    for member in pact_context._iter_members(team_name):
+    for member in pact_context.iter_team_members(team_name):
         if member.get("name") == _SECRETARY_NAME:
             return True
     # Config-less fallback: the secretary's inbox file is the witness

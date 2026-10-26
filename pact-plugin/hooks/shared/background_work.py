@@ -87,7 +87,6 @@ the counter every tick and Layer 2 can never reach three.
 from __future__ import annotations
 
 import json
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -102,6 +101,18 @@ from . import state_file
 from .intentional_wait import canonical_since, validate_wait
 from .pact_context import get_team_name
 from .paths import get_claude_config_dir
+# The frame-shape and membership helpers live in the registry-free
+# `subagent_meta` module, so the actor resolver (an authority surface) can
+# use them without importing this module, which reaches the session registry.
+# Re-exported here under their historical names for existing callers.
+from .subagent_meta import (  # noqa: F401  # re-export: moved to subagent_meta
+    PLATFORM_AGENT_TYPES as _PLATFORM_AGENT_TYPES,
+    SUBAGENT_ID as _SUBAGENT_ID,
+    agent_type_names_a_member,
+    known_agent_types as _known_agent_types,
+    names_a_member as _names_a_member,
+    subagent_launcher_id,
+)
 
 REGISTRY_FILENAME = "background_work.json"
 UNFLAGGED_IDLE_FILENAME = "unflagged_background_idle.json"
@@ -1062,110 +1073,6 @@ def save_unflagged_idle_counts(counts: dict, team_name: str | None = None) -> bo
 # re-exported at the top of this module.
 
 
-# Platform-supplied agent types that are NOT this plugin's agents. Hard-coded
-# because they come from the harness rather than from a file we can enumerate.
-# This list going stale is a real exposure — see the residual note on
-# `agent_type_names_a_member`.
-_PLATFORM_AGENT_TYPES = frozenset(
-    {"general-purpose", "Explore", "Plan", "statusline-setup"}
-)
-
-# An Agent-tool subagent's `agent_id`.
-_SUBAGENT_ID = re.compile(r"a[0-9a-f]{16}")
-
-
-def _known_agent_types() -> frozenset:
-    """Agent-type stems this plugin ships, DERIVED AT RUNTIME from agents/.
-
-    Derived rather than listed so that adding an agent file cannot silently
-    open a collision with a teammate name. A hard-coded copy would go stale
-    the day someone adds one, and the failure would be a mis-bind rather than
-    an error.
-    """
-    try:
-        agents_dir = Path(__file__).resolve().parents[2] / "agents"
-        return frozenset(p.stem for p in agents_dir.glob("*.md"))
-    except (OSError, IndexError):
-        return frozenset()
-
-
-def agent_type_names_a_member(
-    agent_type: Any, team_name: str, *, agent_id: Any = None
-) -> bool:
-    """True iff the frame's `agent_type` is an IDENTITY rather than a TYPE.
-
-    MEASURED 2026-09-11 on a live in-process Agent-Teams teammate PostToolUse
-    Bash frame: `agent_type` carried the teammate's own NAME, not the
-    `pact-`-prefixed agentType its team config records. `agent_name` was
-    absent and `agent_id` carried no `@`, so no other route resolves. See
-    `tests/fixtures/role_frames.py` ::
-    captured_posttooluse_teammate_inprocess_bash_background.
-
-    The test is MEMBERSHIP in the team config the platform wrote at spawn —
-    a lookup in authoritative local state, not string surgery. Step 4 already
-    strips this field today; this validates the value before trusting it.
-
-    THE FRAME'S `agent_id` SHAPE IS READ FIRST. An in-process teammate's frame
-    carries "a" + `agent_type` + "-" + 16 lowercase hex, and an Agent-tool
-    subagent's carries "a" + 16 lowercase hex. A subagent-shaped id is never a
-    member, whatever its type. A teammate-shaped id is built from `agent_type`
-    and compared whole, never parsed, and goes to membership without the deny
-    set, so a member named after an agent type is not refused on its own
-    frame. Any other id, or none, takes the type checks below.
-
-    RESIDUAL, STATED RATHER THAN CLAIMED AWAY, on a frame without a recognized
-    `agent_id`. `classify_session_role` treats any `agent_type` outside
-    `LEAD_AGENT_TYPES` as a teammate, so a generic Agent-tool subagent reaches
-    this code. The deny set below reduces the collision to perverse naming — a
-    member would have to be NAMED after a real agent type, and such a member is
-    refused on that frame — but an UNKNOWN FUTURE PLATFORM TYPE colliding with
-    a member name remains possible, and that case fails toward MIS-BIND rather
-    than silence, which is the worse direction: a launch would be attributed
-    to a teammate who did not make it. This is an accepted exposure, not an
-    eliminated one.
-
-    TMUX IS UNTESTED, NOT COVERED. Under tmux the frame reportedly carries the
-    real type and no `agent_id`, so this returns False and the caller falls through to the
-    registry, which works there because the in-process self-guard does not
-    fire. That rests on one captured PreToolUse frame and NO Bash PostToolUse
-    frame. It was UNEXERCISED during development because the development
-    machine had no tmux teams — which bounds the VERIFICATION, not the
-    behaviour. This plugin ships to consumers who may run tmux teams, so do
-    not read "no teams to test against" as "a path nobody takes".
-    """
-    if not isinstance(agent_type, str) or not agent_type:
-        return False
-    if isinstance(agent_id, str):
-        if _SUBAGENT_ID.fullmatch(agent_id):
-            return False
-        if re.fullmatch(re.escape(f"a{agent_type}-") + "[0-9a-f]{16}", agent_id):
-            return _names_a_member(agent_type, team_name)
-    from .session_state import is_safe_path_component
-
-    if not is_safe_path_component(team_name):
-        return False
-    if agent_type in _PLATFORM_AGENT_TYPES:
-        return False
-    if agent_type in _known_agent_types():
-        return False
-    from .pact_context import _iter_members
-
-    return any(
-        isinstance(m, dict) and m.get("name") == agent_type
-        for m in _iter_members(team_name)
-    )
-
-
-def _names_a_member(name: Any, team: str) -> bool:
-    """True iff `name` is a member in `team`'s config. `team` may come from stdin."""
-    from .pact_context import _iter_members
-    from .session_state import is_safe_path_component
-
-    if not isinstance(name, str) or not name or not is_safe_path_component(team):
-        return False
-    return any(m.get("name") == name for m in _iter_members(team))
-
-
 def frame_team_and_name(input_data: Any) -> "tuple[str, str]":
     """(team, member name) for the frame's own session, "" for each part unresolved.
 
@@ -1233,14 +1140,14 @@ def teammate_is_separate_process(team_name: Any, member_name: Any) -> bool:
     """
     if not isinstance(team_name, str) or not isinstance(member_name, str) or not member_name:
         return False
-    from .pact_context import _iter_members
+    from .pact_context import iter_team_members
     from .session_state import is_safe_path_component
 
     if not is_safe_path_component(team_name):
         return False
     return any(
         m.get("name") == member_name and m.get("backendType") == "tmux"
-        for m in _iter_members(team_name)
+        for m in iter_team_members(team_name)
     )
 
 
@@ -1432,28 +1339,6 @@ def bind_launcher_identity(
     if not task_ids:
         return None
     return agent_name, session_id, task_ids, anchor_completed
-
-
-def subagent_launcher_id(input_data: Any) -> str:
-    """The Agent-tool subagent's own `agent_id` on this frame, or "".
-
-    A subagent's id is "a" followed by 16 lowercase hex [LIVE] — the same shape
-    `agent_type_names_a_member` refuses a membership match for.
-
-    AN ABSENT `agent_id` NAMES NO LAUNCHER HERE, AND THAT IS THE WHOLE
-    CONSERVATISM OF THIS PATH. Absence has been measured as the LEAD's own
-    signature on the lead's own frames, but it is only INFERRED for an
-    in-process teammate's spawn, which nobody has captured. Were that inference
-    wrong, reading absence as "the lead" would record a TEAMMATE's launch as
-    the lead's and refuse the lead a turn end it had every right to end — the
-    same cardinal defect this recorder exists to close, arriving from the other
-    side. So absence records NOTHING, which is an under-block and the
-    acceptable direction.
-    """
-    agent_id = input_data.get("agent_id") if isinstance(input_data, dict) else None
-    if not isinstance(agent_id, str):
-        return ""
-    return agent_id if _SUBAGENT_ID.fullmatch(agent_id) else ""
 
 
 def record_background_launch(input_data: Any, now: datetime | None = None) -> bool:
