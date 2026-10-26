@@ -1257,7 +1257,7 @@ def _resolve_aligned_team_name(
     (empty persisted context) resolves to the computed name, NOT "".
 
     PURE / FS-read-only / NEVER raises. The whole scan is wrapped in a TRUE
-    ``except Exception`` (NOT the typed-tuple ``_iter_members`` precedent at
+    ``except Exception`` (NOT the typed-tuple ``iter_team_members`` precedent at
     the ``members[]`` reader). The genuine raise sources the bare except must
     catch are:
       * ``get_claude_config_dir()`` -> ``Path.home()`` can raise
@@ -2064,7 +2064,7 @@ def is_canonical_journal_frame(input_data: dict) -> bool:
         return False
 
 
-def _iter_members(
+def iter_team_members(
     team_name: str,
     teams_dir: str | None = None,
 ) -> list[dict]:
@@ -2120,7 +2120,7 @@ def _lookup_agent_in_team_config(
     """
     Look up agent name from team config file by agent id.
 
-    Scans ``_iter_members(team_name, teams_dir)`` for an entry where
+    Scans ``iter_team_members(team_name, teams_dir)`` for an entry where
     ``member["id"] == agent_id`` and returns its name.
 
     Args:
@@ -2131,7 +2131,7 @@ def _lookup_agent_in_team_config(
     Returns:
         Agent name if found, empty string otherwise
     """
-    for member in _iter_members(team_name, teams_dir):
+    for member in iter_team_members(team_name, teams_dir):
         if member.get("id") == agent_id:
             return str(member.get("name", ""))
     return ""

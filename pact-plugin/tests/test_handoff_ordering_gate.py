@@ -50,7 +50,7 @@ _DEFAULT_MEMBERS = [
 
 def _seed_team_config(tmp_path, monkeypatch, team, members=None):
     """Make the corrected gate predicate resolvable in-test:
-      (a) write ~/.claude/teams/{team}/config.json so pact_context._iter_members
+      (a) write ~/.claude/teams/{team}/config.json so pact_context.iter_team_members
           resolves bare owners → agentType, and
       (b) seed a plugin root with agents/pact-*.md for each member's pact-*
           agentType + point the context's plugin_root at it + clear the
@@ -506,7 +506,7 @@ class TestDispatchVarietyTrigger:
     def test_silent_when_team_config_missing(
         self, tmp_path, monkeypatch, pact_context,
     ):
-        """FAIL-OPEN: no team config on disk → _iter_members returns [] →
+        """FAIL-OPEN: no team config on disk → iter_team_members returns [] →
         is_pact_specialist_owner False → gate silent. Consumer-wide-safe: an
         unresolvable config never strands a dispatch."""
         _ctx(pact_context, monkeypatch, tmp_path)
@@ -976,9 +976,9 @@ class TestIsPactSpecialistOwner:
         assert is_pact_specialist_owner(None, TEAM) is False
 
     def test_false_and_never_raises_on_iter_members_exception(self, monkeypatch):
-        """The bare-except fail-closed wrap: if _iter_members raises (e.g. the
+        """The bare-except fail-closed wrap: if iter_team_members raises (e.g. the
         get_claude_config_dir→Path.home RuntimeError seam that ESCAPES
-        _iter_members' own typed except), the helper returns False and never
+        iter_team_members' own typed except), the helper returns False and never
         propagates — so the gate fail-OPENS rather than crashing."""
         import shared.pact_context as ctx_module
         from shared.dispatch_helpers import is_pact_specialist_owner
@@ -986,7 +986,7 @@ class TestIsPactSpecialistOwner:
         def _raise(team_name, teams_dir=None):
             raise RuntimeError("simulated config-dir resolution failure")
 
-        monkeypatch.setattr(ctx_module, "_iter_members", _raise)
+        monkeypatch.setattr(ctx_module, "iter_team_members", _raise)
         assert is_pact_specialist_owner("backend-coder", TEAM) is False
 
 
