@@ -1321,11 +1321,13 @@ _HEREDOC_TAIL_RE = re.compile(
 )
 
 
-def _top_level_legs(command: str) -> tuple[list[str], list[str]] | None:
+def _top_level_legs(command: str, groups: bool = False) -> tuple[list[str], list[str]] | None:
     """The legs of `command` and the list operators between them (`;`, newline,
     `&&`, `||`, `|`, a background `&`), outside quotes. None when the command opens
     a group or a substitution (`(`, `{`, `$(`, a backtick) or leaves a quote open.
-    A heredoc's body is part of the leg that opens it, not later legs."""
+    With `groups`, a balanced subshell, brace group or substitution is part of the
+    leg it is in instead. A heredoc's body is part of the leg that opens it, not
+    later legs."""
     command = _HEREDOC_TAIL_RE.sub(r"\1", command)
     legs, seps, start, i, quote = [], [], 0, 0, ""
     while i < len(command):
@@ -1341,6 +1343,12 @@ def _top_level_legs(command: str) -> tuple[list[str], list[str]] | None:
             continue
         elif ch in "'\"":
             quote = ch
+        elif groups and ch in "({`":
+            end = _group_end(command, i)
+            if end is None:
+                return None
+            i = end + 1
+            continue
         elif ch in "(){}`":
             return None
         elif ch in ";\n|&":
@@ -1360,6 +1368,51 @@ def _top_level_legs(command: str) -> tuple[list[str], list[str]] | None:
         return None
     legs.append(command[start:])
     return legs, seps
+
+
+def _group_end(command: str, start: int) -> int | None:
+    """The index of the `)`, `}` or backtick that closes the group, substitution or
+    backtick span opened at `start`, outside quotes; None when it is not closed."""
+    opener = command[start]
+    if opener == "`":
+        i = start + 1
+        while i < len(command):
+            if command[i] == "\\":
+                i += 2
+                continue
+            if command[i] == "`":
+                return i
+            i += 1
+        return None
+    closer = ")" if opener == "(" else "}"
+    depth, quote, i = 0, "", start
+    while i < len(command):
+        ch = command[i]
+        if quote:
+            if ch == "\\" and quote == '"':
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch == "\\":
+            i += 2
+            continue
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "`":
+            end = _group_end(command, i)
+            if end is None:
+                return None
+            i = end + 1
+            continue
+        elif ch == opener:
+            depth += 1
+        elif ch == closer:
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return None
 
 
 # --dry-run, or -n alone or bundled with git push's other flag-only short options
@@ -1448,7 +1501,9 @@ def _run_succeeded_as_the_op(command: str, op_type: str, tool_response: object) 
     command exited 0. That is the op's own status when the op runs in the
     foreground as the last leg, unnegated, no `||` before it could have skipped it,
     and it is not a dry run. A shell's -c string, and a command that is one
-    subshell or brace group, are read the same way. Any doubt is False."""
+    subshell or brace group, are read the same way, and a group or substitution
+    inside a leg (`(set -a); GH_REPO=o/b gh pr merge 5`, `x=$(…); gh pr merge 5`)
+    is part of that leg. Any doubt is False."""
     if not (
         isinstance(tool_response, dict)
         and isinstance(tool_response.get("stdout"), str)
@@ -1462,7 +1517,7 @@ def _run_succeeded_as_the_op(command: str, op_type: str, tool_response: object) 
         body = _group_body(command)
         if body is not None:
             return _run_succeeded_as_the_op(body, op_type, tool_response)
-        split = _top_level_legs(command)
+        split = _top_level_legs(command, groups=True)
         if split is None:
             return False
         legs, seps = split
@@ -1471,6 +1526,8 @@ def _run_succeeded_as_the_op(command: str, op_type: str, tool_response: object) 
             seps.pop()
         if "||" in seps or legs[-1].lstrip().startswith("!") or _DRY_RUN_RE.search(legs[-1]):
             return False
+        if len(legs) > 1 and _group_body(legs[-1]) is not None:
+            return _run_succeeded_as_the_op(legs[-1], op_type, tool_response)
         return detect_command_operation_type(legs[-1]) == op_type
     except Exception:  # noqa: BLE001 - any doubt keeps the token
         return False

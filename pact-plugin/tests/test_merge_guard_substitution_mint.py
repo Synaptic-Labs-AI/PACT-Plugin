@@ -1719,6 +1719,80 @@ class TestAGroupedRunRetiresOnItsOwnSuccess:
         assert not self._retire(tmp_path, monkeypatch, command, tool_response)
 
 
+class TestAGroupBeforeTheOpRetiresOnItsOwnSuccess:
+    """A command whose op runs after a subshell, brace group or substitution
+    (`(set -a); GH_REPO=o/b gh pr merge 5`, `x=$(…); gh pr merge 5`) retires its
+    approval when it runs successfully, as the same command without the group does, whichever token its
+    approval minted. A run whose success does not show the op's keeps it."""
+
+    _SUCCESS = {"stdout": "", "stderr": "", "interrupted": False}
+
+    def _run_after_approval(self, tmp_path, monkeypatch, command, tool_response):
+        import io
+
+        import merge_guard_post
+        import shared.gh_helpers as gh
+        from merge_guard_post import write_token
+
+        monkeypatch.setattr(gh, "check_pr_state", lambda pr, cwd=None: "")
+        monkeypatch.setattr("merge_guard_post.get_session_id", lambda: "")
+        monkeypatch.setattr("merge_guard_post.TOKEN_DIR", tmp_path)
+        ctx = _mint_styled(command, APPROVAL_STYLES["inline"])
+        assert ctx is not None
+        write_token(ctx, token_dir=tmp_path)
+        envelope = {"session_id": "s1", "hook_event_name": "PostToolUse", "tool_name": "Bash",
+                    "tool_input": {"command": command}, "tool_response": tool_response}
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(envelope)))
+        with pytest.raises(SystemExit):
+            merge_guard_post.main()
+        return [t.name for t in tmp_path.glob("merge-authorized-*") if not t.name.endswith(".consumed")]
+
+    @pytest.mark.parametrize("command", [
+        "(set -a); GH_REPO=o/b " + MERGE + "5",
+        "{ set -a; }; GH_REPO=o/b " + MERGE + "5",
+        "(set -a) && GH_REPO=o/b " + MERGE + "5",
+        "(cd .); GH_REPO=o/b " + MERGE + "5",
+        "(true); " + MERGE + "5 --repo o/b",
+        "(set -a); GH_REPO=o/b " + _CLOSE_PR + "5 -d",
+        "x=$(true); GH_REPO=o/b " + MERGE + "5",
+        "x=`true`; GH_REPO=o/b " + MERGE + "5",
+        "GH_REPO=$(echo o/b) " + MERGE + "5",
+        "x=$(true); " + MERGE + "5 --repo o/b",
+        "(x=`true`); GH_REPO=o/b " + MERGE + "5",
+        "GH_REPO=o/b " + MERGE + "5",
+        "set -a; GH_REPO=o/b; " + MERGE + "5",
+        "export GH_REPO=o/b; " + MERGE + "5",
+        MERGE + "5 --repo o/b",
+        MERGE + "5",
+    ], ids=["subshell-set-a", "brace-set-a", "subshell-and", "subshell-cd", "subshell-repo-flag", "close",
+            "substitution", "backtick", "substituted-value", "substitution-repo-flag", "backtick-in-group",
+            "prefix", "set-a", "export", "repo-flag", "plain"])
+    def test_a_successful_run_retires_it(self, tmp_path, monkeypatch, command):
+        assert self._run_after_approval(tmp_path, monkeypatch, command, self._SUCCESS) == []
+
+    @pytest.mark.parametrize("command,tool_response", [
+        ("(set -a); GH_REPO=o/b " + MERGE + "5", {"stdout": "", "stderr": "", "interrupted": True}),
+        ("(set -a); GH_REPO=o/b " + MERGE + "5 || true", _SUCCESS),
+        ("(set -a); GH_REPO=o/b " + MERGE + "5; echo done", _SUCCESS),
+        ("(set -a); (GH_REPO=o/b " + MERGE + "5; echo done)", _SUCCESS),
+        ("x=$(true); GH_REPO=o/b " + MERGE + "5; echo done", _SUCCESS),
+        ("x=$(true); GH_REPO=o/b " + MERGE + "5 || true", _SUCCESS),
+    ], ids=["interrupted", "or-true", "op-not-last", "op-not-last-in-final-group", "substitution-op-not-last",
+            "substitution-or-true"])
+    def test_a_run_that_does_not_show_the_ops_success_keeps_it(self, tmp_path, monkeypatch, command, tool_response):
+        assert len(self._run_after_approval(tmp_path, monkeypatch, command, tool_response)) == 1
+
+    @pytest.mark.parametrize("command", [
+        "(set -a; GH_REPO=o/b " + MERGE + "5",
+        "x=$(true; GH_REPO=o/b " + MERGE + "5",
+        "x=`true; GH_REPO=o/b " + MERGE + "5",
+    ], ids=["open-group", "open-substitution", "open-backtick"])
+    def test_an_unclosed_group_shows_no_success(self, command):
+        from merge_guard_post import _run_succeeded_as_the_op
+
+        assert not _run_succeeded_as_the_op(command, "merge", self._SUCCESS)
+
+
 def _quoted_value_rows():
     """One row per bound value-taking flag on each op that has one, in both quotings, plus
     the gh target variables: (approved, the same command naming another value, the
