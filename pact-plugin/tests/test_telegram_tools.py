@@ -181,7 +181,7 @@ class TestSessionPrefix:
     def test_get_project_name_cwd_is_home(self):
         """Should return 'unknown' when cwd is the home directory."""
         home = os.path.expanduser("~")
-        with patch.dict("os.environ", {}, clear=True), \
+        with patch.dict("os.environ", {"HOME": home}, clear=True), \
              patch("os.getcwd", return_value=home):
             assert _get_project_name() == "unknown"
 
@@ -194,7 +194,7 @@ class TestSessionPrefix:
     def test_prepend_session_prefix_unknown(self):
         """Should use 'unknown' when project dir not set and cwd is home."""
         home = os.path.expanduser("~")
-        with patch.dict("os.environ", {}, clear=True), \
+        with patch.dict("os.environ", {"HOME": home}, clear=True), \
              patch("os.getcwd", return_value=home):
             result = _prepend_session_prefix("Hello")
         assert result == "<b>[unknown]</b>\nHello"
