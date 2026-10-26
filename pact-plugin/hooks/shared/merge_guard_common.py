@@ -5494,6 +5494,22 @@ _HEREDOC_BODY_RE = re.compile(
 )
 
 
+_HEREDOC_WORD_RE = re.compile(r"(?<!<)(<<-?\s*)((?:\w|\\\w|'\w*'|\"\w*\")+)")
+
+
+def _requote_heredoc_delimiters(command: str) -> str:
+    """Rewrite a partly quoted or backslashed heredoc delimiter word (`<<E"OF"`,
+    `<<E'O'F`, `<<\\EOF`) in the fully quoted form the heredoc grammar reads
+    (`<<'EOF'`). Any quoting in the word quotes the whole delimiter, so the body
+    stays inert and the closing line is the word with its quoting removed."""
+    def _requote(m: re.Match[str]) -> str:
+        word = m.group(2)
+        if not any(ch in word for ch in "'\"\\"):
+            return m.group(0)
+        return m.group(1) + "'" + re.sub(r"['\"\\]", "", word) + "'"
+    return _HEREDOC_WORD_RE.sub(_requote, command)
+
+
 def _heredoc_body_substitutions(opener: str, body: str) -> list[str]:
     """The command substitutions the shell runs in a heredoc body: each `$(…)` and
     backtick span, as written, when the delimiter word in `opener` (the `<<` text up to
@@ -5528,6 +5544,7 @@ def _heredoc_body_substitutions(opener: str, body: str) -> list[str]:
 def _excise_heredoc_bodies_for_routing_scan(command: str) -> str:
     if "<<" not in command:          # cheap short-circuit (perf: common case)
         return command
+    command = _requote_heredoc_delimiters(command)
 
     def _repl(m: "re.Match") -> str:
         preceding = command[: m.start()].rstrip()
@@ -5969,6 +5986,7 @@ def _strip_non_executable_content(command: str) -> str:
     Returns:
         The command with non-executable content replaced by placeholders
     """
+    command = _requote_heredoc_delimiters(command)
     result = command
 
     # Output-side execution-routing flags — computed ONCE for ALL stdout-

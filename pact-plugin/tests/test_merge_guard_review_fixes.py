@@ -3274,6 +3274,15 @@ UNQUOTED_HEREDOC_RUNS = [
     ("eval in the span", "cat <<EOF > notes.md\nsee $(eval '" + _HD_PUSH + "') here\nEOF"),
     ("bash -c in the span", "cat <<EOF > notes.md\nsee " + _HD_BT + "bash -c '" + _HD_PUSH + "'" + _HD_BT
      + " here\nEOF"),
+    ("tab-stripping delimiter, dollar-paren", "cat <<-EOF > notes.md\n\trun $(" + _HD_PUSH + ")\n\tEOF"),
+    ("here-string", "cat <<<\"$(" + _HD_PUSH + ")\""),
+    ("here-string backtick", "cat <<<\"" + _HD_BT + _HD_MERGE + _HD_BT + "\""),
+    ("heredoc inside a dollar-paren", "x=$(cat <<EOF\n$(" + _HD_PUSH + ")\nEOF\n)"),
+    ("substitution inside arithmetic", "cat <<EOF > notes.md\ntotal $((1 + $(" + _HD_PUSH + ")))\nEOF"),
+    ("process substitution in backticks", "cat <<EOF > notes.md\nrun " + _HD_BT + "cat <(" + _HD_PUSH + ")"
+     + _HD_BT + "\nEOF"),
+    ("shell fed a backslash delimiter", "bash <<\\EOF\n" + _HD_PUSH + "\nEOF"),
+    ("shell fed a partly quoted delimiter", "bash <<E\"OF\"\n" + _HD_PUSH + "\nEOF"),
 ]
 
 QUOTED_OR_INERT_HEREDOC = [
@@ -3291,6 +3300,16 @@ QUOTED_OR_INERT_HEREDOC = [
     ("a variable", "cat <<EOF > notes.md\nbranch $BRANCH\nEOF"),
     ("a read in the span", "cat <<EOF > notes.md\nhead $(git rev-parse HEAD)\nEOF"),
     ("an unclosed span", "cat <<EOF > notes.md\nrun $(" + _HD_PUSH + " later\nEOF"),
+    ("partly double-quoted delimiter", "cat <<E\"OF\" > notes.md\nrun $(" + _HD_PUSH + ")\nEOF"),
+    ("partly single-quoted delimiter, bare prose", "cat <<E'O'F > notes.md\nrun $(" + _HD_PUSH + ")\nEOF"),
+    ("backslash delimiter, bare prose", "cat <<\\EOF > notes.md\nrun " + _HD_BT + _HD_PUSH + _HD_BT + "\nEOF"),
+    ("partly quoted delimiter, eval in the span", "cat <<E\"OF\" > notes.md\nsee $(eval '" + _HD_PUSH
+     + "') here\nEOF"),
+    ("quoted heredoc inside a dollar-paren", "x=$(cat <<'EOF'\n$(" + _HD_PUSH + ")\nEOF\n)"),
+    ("arithmetic only", "cat <<EOF > notes.md\ntotal $((1 + 2))\nEOF"),
+    ("process substitution at the body's level", "cat <<EOF > notes.md\nrun <(" + _HD_PUSH + ") later\nEOF"),
+    ("an honest date", "python3 - <<EOF\nprint('built $(date)')\nEOF"),
+    ("an honest date in backticks", "python3 - <<EOF\nprint('built " + _HD_BT + "date" + _HD_BT + "')\nEOF"),
 ]
 
 
