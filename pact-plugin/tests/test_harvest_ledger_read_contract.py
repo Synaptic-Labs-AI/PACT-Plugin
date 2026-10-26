@@ -32,6 +32,7 @@ prose around it. A phrase pin over the same text disarms silently when the text
 is correctly reworded, which is a green check that has stopped checking.
 """
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -337,7 +338,8 @@ class TestExistenceCountSurvivesTruncation:
 
         done = subprocess.run(
             ["/bin/sh", "-c", command],
-            capture_output=True, text=True, env=carry_clock_shift({"PATH": "/usr/bin:/bin"}),
+            capture_output=True, text=True,
+            env=carry_clock_shift({"PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"]}),
         )
         assert done.returncode in (0, 1), done.stderr
         assert done.stdout.strip() == "1", (
