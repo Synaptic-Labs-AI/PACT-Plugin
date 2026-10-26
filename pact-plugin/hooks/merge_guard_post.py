@@ -131,6 +131,7 @@ try:
         # An op on the current branch run after a checkout or cd binds its text.
         target_changes_before_guarded_leg,
         REPO_RELATIVE_OPS,
+        binds_a_masked_value,
         # A merge or close after an exported GH_REPO binds its text.
         exported_gh_target_before_guarded_leg,
     )
@@ -908,6 +909,9 @@ def _exact_text_reading(span: str, located: str) -> dict | None:
         # repository (`cd ../other && gh pr merge 5`, `git -C ../other branch -D
         # feat/x`), whose target names one of that repository.
         or (ctx["operation_type"] in REPO_RELATIVE_OPS and target_changes_before_guarded_leg(span, branch=False))
+        # A quoted value of a bound flag (`--repo="o/b"`) reads as a placeholder that
+        # every value shares; its text binds it.
+        or binds_a_masked_value(ctx)
     ):
         return None
     return ctx

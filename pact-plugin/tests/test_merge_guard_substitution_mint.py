@@ -1552,6 +1552,58 @@ class TestAGroupedRunRetiresOnItsOwnSuccess:
     def test_a_run_that_does_not_show_the_ops_success_keeps_it(self, tmp_path, monkeypatch, command, tool_response):
         assert not self._retire(tmp_path, monkeypatch, command, tool_response)
 
+
+def _quoted_value_rows():
+    """One row per bound value-taking flag on each op that has one, in both quotings, plus
+    the gh target variables: (approved, the same command naming another value, the
+    approved value unquoted)."""
+    from shared.merge_guard_common import PRIVILEGED_FLAGS
+
+    base = {"merge": MERGE + "5", "close": _CLOSE_PR + "5 -d", "force-push": "git push --" + "force"}
+    rows = {}
+    for op, flags in PRIVILEGED_FLAGS.items():
+        for canonical, (_aliases, takes_value) in flags.items():
+            if takes_value:
+                assert op in base, "a value-taking flag on %s has no row" % op
+                for name, q in (("dq", '"'), ("sq", "'")):
+                    rows["%s%s-%s" % (op, canonical, name)] = (
+                        "%s %s=%svb%s" % (base[op], canonical, q, q),
+                        "%s %s=%svc%s" % (base[op], canonical, q, q),
+                        "%s %s=vb" % (base[op], canonical),
+                    )
+    for variable in ("GH_REPO", "GH_HOST", "GH_CONFIG_DIR"):
+        rows[variable] = ('%s="vb" %s5' % (variable, MERGE), '%s="vc" %s5' % (variable, MERGE),
+                          "%s=vb %s5" % (variable, MERGE))
+    return rows
+
+
+QUOTED_VALUES = _quoted_value_rows()
+
+
+class TestAQuotedFlagValueBindsByText:
+    """A quoted `=` value of a bound flag reads as a placeholder every value shares, so
+    the approval binds the command's text: it runs the approved value and refuses
+    another, and the same value written unquoted still mints and runs on its own."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("quoted,other,unquoted", QUOTED_VALUES.values(), ids=QUOTED_VALUES.keys())
+    def test_its_own_approval_runs_it_and_no_other_value(self, quoted, other, unquoted, style):
+        ctx = _mint_styled(quoted, style)
+        assert _runs(ctx, quoted)
+        assert not _runs(ctx, other)
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("quoted,other,unquoted", QUOTED_VALUES.values(), ids=QUOTED_VALUES.keys())
+    def test_the_unquoted_value_still_mints_on_its_own(self, quoted, other, unquoted, style):
+        assert _runs(_mint_styled(unquoted, style), unquoted)
+
+    @pytest.mark.parametrize("quoted,other,unquoted", QUOTED_VALUES.values(), ids=QUOTED_VALUES.keys())
+    def test_a_region_token_does_not_run_a_quoted_value(self, quoted, other, unquoted):
+        from shared.merge_guard_common import extract_command_context, _single_destructive_leg
+
+        region = extract_command_context(_single_destructive_leg(quoted) or quoted)
+        assert not _runs(region, quoted)
+
 class TestAnEvalOfALiteralCommandRuns:
     """An eval of a string the region reading locates nothing in (a close or a force
     push inside the quotes) binds its text, so the approved command runs and no

@@ -67,6 +67,7 @@ try:
         _single_detectable_leg,
         target_changes_before_guarded_leg,
         REPO_RELATIVE_OPS,
+        binds_a_masked_value,
         exported_gh_target_before_guarded_leg,
     )
     # Re-exports consumed by the test suite through this module's namespace
@@ -590,6 +591,10 @@ def _token_matches_command(token: dict, command: str) -> bool:
     # (over-block-safe; tokens expire after TOKEN_TTL, so no backward-compat is needed).
     # bound_flags is an attribute checked here, never part of pair identity.
     if set(context.get("bound_flags", [])) != set(cmd.get("bound_flags", [])):
+        return False
+    # A flag value read as the inert-text placeholder (a quoted `--repo="o/b"`) reads
+    # alike for every value, so only a token bound to the command's text runs it.
+    if binds_a_masked_value(cmd):
         return False
     # The same holds for the command a wrapper runs: a shell's -c string, an
     # interpreter program, or the command the classifier reads after a rewrite. The

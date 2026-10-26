@@ -10229,6 +10229,16 @@ def target_changes_before_guarded_leg(command: str, branch: bool = True) -> bool
     return False
 
 
+def binds_a_masked_value(context: dict) -> bool:
+    """Whether a bound flag's value was read as the inert-text placeholder, as a quoted
+    `--repo="o/b"` or `GH_REPO='o/b'` is: every quoted value then reads alike, so the
+    (op, target, flags) reading cannot tell one repository or commit from another."""
+    return any(
+        isinstance(flag, str) and "=" in flag and flag.split("=", 1)[1] == "STRIPPED"
+        for flag in context.get("bound_flags") or []
+    )
+
+
 # The ops whose target names a pull request or branch but not the repository it is in,
 # so a change of repository before one acts on a same-named target elsewhere.
 REPO_RELATIVE_OPS = frozenset(
