@@ -1155,6 +1155,12 @@ EXPORTED_GH_REPOS = {
                   "typeset -x GH_REPO=o/c && " + MERGE + "--squash"),
     "combined-flags": (_CLOSE_PR + "5 -d", "declare -rx GH_REPO=o/b; " + _CLOSE_PR + "5 -d",
                        "declare -rx GH_REPO=o/c; " + _CLOSE_PR + "5 -d"),
+    "allexport": (MERGE + "5", "set -a; GH_REPO=o/b; " + MERGE + "5", "set -a; GH_REPO=o/c; " + MERGE + "5"),
+    "allexport-long": (MERGE + "--squash", "set -o allexport; GH_REPO=o/b && " + MERGE + "--squash",
+                       "set -o allexport; GH_REPO=o/c && " + MERGE + "--squash"),
+    "allexport-bundled": (MERGE + "5", "set -ea; GH_REPO=o/b; " + MERGE + "5", "set -ea; GH_REPO=o/c; " + MERGE + "5"),
+    "allexport-among-options": (MERGE + "5", "set -e -a; GH_HOST=ghe.example.com; " + MERGE + "5",
+                                "set -e -a; GH_HOST=ghe.other.com; " + MERGE + "5"),
 }
 
 
@@ -1185,8 +1191,13 @@ class TestAnExportedGhRepoIsARepoRedirect:
         "echo export GH_REPO=o/b; " + MERGE + "5",
         "declare GH_REPO=o/b; " + MERGE + "5",
         "declare -r GH_REPO=o/b; " + MERGE + "5",
+        "set -a; set +a; GH_REPO=o/b; " + MERGE + "5",
+        "GH_REPO=o/b; set -a; " + MERGE + "5",
+        "set -euo pipefail; GH_REPO=o/b; " + MERGE + "5",
+        "set +o allexport; GH_REPO=o/b; " + MERGE + "5",
     ], ids=["not-exported", "exported-after", "unexported-before-exported-after", "other-name", "echoed",
-            "declared-not-exported", "declared-read-only"])
+            "declared-not-exported", "declared-read-only", "allexport-turned-off", "assigned-before-allexport",
+            "other-set-options", "allexport-off"])
     def test_a_plain_approval_still_covers_a_gh_repo_gh_does_not_read(self, command):
         assert _runs(_mint_styled(MERGE + "5", APPROVAL_STYLES["inline"]), command)
 
@@ -1285,6 +1296,7 @@ EXPORTED_GIT_DIRS = {
                             "declare -x GIT_WORK_TREE=/tmp/repoC; " + _FORCE),
     "git-dir-typeset-x-merge": (MERGE + "--squash", "typeset -x GIT_DIR=/tmp/repoB/.git; " + MERGE + "--squash",
                                 "typeset -x GIT_DIR=/tmp/repoC/.git; " + MERGE + "--squash"),
+    "git-dir-allexport": (_FORCE, "set -a; GIT_DIR=/tmp/repoB/.git; " + _FORCE, "set -a; GIT_DIR=/tmp/repoC/.git; " + _FORCE),
 }
 
 

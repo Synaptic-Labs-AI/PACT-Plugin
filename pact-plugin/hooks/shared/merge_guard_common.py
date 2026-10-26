@@ -10239,11 +10239,33 @@ REPO_RELATIVE_OPS = frozenset(
 _EXPORTING = r"(?:export|(?:declare|typeset)(?:[ \t]+-[A-Za-z]+)*[ \t]+-[A-Za-z]*x[A-Za-z]*)"
 
 
+# `set -a` / `set -o allexport` (also among other options, `set -ea`) and its `+` reverse:
+# while it is on, every assignment the shell makes is exported.
+_SET_OPTIONS = r"(?:^|[;&|({\n])[ \t]*set(?:[ \t]+[-+][A-Za-z]+|[ \t]+[-+]o[ \t]+\w+)*?[ \t]+"
+_ALLEXPORT_ON_RE = re.compile(_SET_OPTIONS + r"(?:-[A-Za-z]*a[A-Za-z]*|-o[ \t]+allexport)(?=[ \t;&|)\n]|$)")
+_ALLEXPORT_OFF_RE = re.compile(_SET_OPTIONS + r"(?:\+[A-Za-z]*a[A-Za-z]*|\+o[ \t]+allexport)(?=[ \t;&|)\n]|$)")
+
+
+def _assigned_while_allexport(head: str, name: str) -> bool:
+    """Whether `head` assigns `name` in a leg of its own while `set -a` is on."""
+    ons = [m.end() for m in _ALLEXPORT_ON_RE.finditer(head)]
+    if not ons:
+        return False
+    offs = [m.end() for m in _ALLEXPORT_OFF_RE.finditer(head)]
+    for assignment in re.finditer(
+        r"(?:^|[;&|({\n])[ \t]*(?:(?:declare|typeset|local|readonly)(?:[ \t]+-[A-Za-z]+)*[ \t]+)?" + name + "=", head
+    ):
+        on = max((p for p in ons if p <= assignment.start()), default=None)
+        if on is not None and not any(on < p <= assignment.start() for p in offs):
+            return True
+    return False
+
+
 def _exported_before_guarded_leg(command: str, names: tuple[str, ...]) -> bool:
     """Whether a leg before the command's guarded leg exports one of `names`, so the
     guarded command reads it from its environment: in the same command line, a
     subshell or brace group, or the string a shell runs with -c. A variable assigned
-    without export is not passed on and does not count."""
+    without export is not passed on and does not count, unless `set -a` is on."""
     guarded = _single_destructive_leg(command) or _single_detectable_leg(command)
     body = shell_c_string(guarded) if guarded else None
     if body and body != guarded and _exported_before_guarded_leg(body, names):
@@ -10264,6 +10286,8 @@ def _exported_before_guarded_leg(command: str, names: tuple[str, ...]) -> bool:
             if re.search(r"(?:^|[;&|({\n])[ \t]*" + _EXPORTING + r"[ \t][^;&|\n]*" + name + "=", head):
                 return True
         elif any(re.match(r"[ \t]*" + _EXPORTING + r"[ \t]", a.group(0)) for a in found):
+            return True
+        if _assigned_while_allexport(head, name):
             return True
     return False
 
