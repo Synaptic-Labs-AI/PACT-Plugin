@@ -569,17 +569,14 @@ def _unreadable_project(tmp_path):
     natural product case: `ensure_dot_claude_parent` succeeds, the
     `file_lock` sidecar opens, `Path.exists` returns True, and the failure
     lands on `read_text` with the absolute path attached to the exception.
+
+    CLAUDE.md is a DIRECTORY, not a `chmod 000` file. Both reach the same
+    handler for a non-root user, but root reads a mode-000 file, so only the
+    directory keeps these arms running when the suite runs as root.
     """
     project_dir = tmp_path / "project"
-    (project_dir / ".claude").mkdir(parents=True)
     target = project_dir / ".claude" / "CLAUDE.md"
-    target.write_text(
-        "<!-- SESSION_START -->\n"
-        "## Current Session\n"
-        "<!-- SESSION_END -->\n",
-        encoding="utf-8",
-    )
-    target.chmod(0o000)
+    target.mkdir(parents=True)
     return project_dir, target
 
 
@@ -597,19 +594,16 @@ class TestUpdateSessionInfoFailureSignal:
     mislabelled arm overstates what the suite covers.
     """
 
-    @pytest.mark.skipif(
-        os.geteuid() == 0,
-        reason="root reads a chmod 000 file, so the read never fails",
-    )
     def test_p1_natural_read_failure_emits_no_path_fragment(
         self, tmp_path, monkeypatch
     ):
         """P1, PRODUCT ARM. A filename-carrying NATURAL failure emits no
         path fragment.
 
-        REACHABILITY: reached with no injection. A `chmod 000` CLAUDE.md in
-        a searchable parent passes lock acquisition and `Path.exists`, then
-        fails at `read_text` with the absolute path attached.
+        REACHABILITY: reached with no injection. A CLAUDE.md that is a
+        directory, in a searchable parent, passes lock acquisition and
+        `Path.exists`, then fails at `read_text` with the absolute path
+        attached (see `_unreadable_project` for why not `chmod 000`).
 
         THE POSITIVE CAUSE ASSERTION IS LOAD-BEARING, and not decoration.
         The outer `OSError` arm returns `Could not acquire lock ... (path
@@ -621,16 +615,13 @@ class TestUpdateSessionInfoFailureSignal:
         """
         from shared.session_resume import update_session_info
 
-        project_dir, target = _unreadable_project(tmp_path)
+        project_dir, _target = _unreadable_project(tmp_path)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
-        try:
-            result = update_session_info("sess-123", "pact-sess123")
-        finally:
-            target.chmod(0o600)
+        result = update_session_info("sess-123", "pact-sess123")
 
         assert result is not None
         assert result.startswith(
-            "Session info failed: PermissionError (EACCES)"
+            "Session info failed: IsADirectoryError (EISDIR)"
         ), f"Arm measured a different handler: {result!r}"
         assert "/" not in result
         assert str(tmp_path) not in result
@@ -665,10 +656,6 @@ class TestUpdateSessionInfoFailureSignal:
         assert "0xff" not in result
         assert "/" not in result
 
-    @pytest.mark.skipif(
-        os.geteuid() == 0,
-        reason="root reads a chmod 000 file, so the read never fails",
-    )
     def test_p3_presence_control_signal_is_emitted_at_all(
         self, tmp_path, monkeypatch
     ):
@@ -695,20 +682,13 @@ class TestUpdateSessionInfoFailureSignal:
         """
         from shared.session_resume import update_session_info
 
-        project_dir, target = _unreadable_project(tmp_path)
+        project_dir, _target = _unreadable_project(tmp_path)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
-        try:
-            result = update_session_info("sess-123", "pact-sess123")
-        finally:
-            target.chmod(0o600)
+        result = update_session_info("sess-123", "pact-sess123")
 
         assert isinstance(result, str)
         assert result != ""
 
-    @pytest.mark.skipif(
-        os.geteuid() == 0,
-        reason="root reads a chmod 000 file, so the read never fails",
-    )
     def test_p4_routing_contract_the_word_failed_survives(
         self, tmp_path, monkeypatch
     ):
@@ -739,12 +719,9 @@ class TestUpdateSessionInfoFailureSignal:
         """
         from shared.session_resume import update_session_info
 
-        project_dir, target = _unreadable_project(tmp_path)
+        project_dir, _target = _unreadable_project(tmp_path)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
-        try:
-            result = update_session_info("sess-123", "pact-sess123")
-        finally:
-            target.chmod(0o600)
+        result = update_session_info("sess-123", "pact-sess123")
 
         assert result is not None
         assert "failed" in result.lower(), (

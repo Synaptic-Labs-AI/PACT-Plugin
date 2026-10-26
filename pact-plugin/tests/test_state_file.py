@@ -12,6 +12,7 @@ Used by: the suite. No module-level sys.path.insert — path setup is
 from __future__ import annotations
 
 import ast
+import errno
 import fcntl
 import json
 import os
@@ -363,6 +364,43 @@ def test_a_file_directly_in_its_root_still_writes(tmp_path):
     root = tmp_path / "session-tracking"
     state_file.write_text(root / "session.json", '{"files": []}', root)
     assert state_file.read_text(root / "session.json", root) == '{"files": []}'
+
+
+@pytest.mark.parametrize("reader", ["read_text", "_current_text"])
+def test_a_directory_at_the_path_raises_and_leaks_no_descriptor(reader, tmp_path, monkeypatch):
+    """`os.open` succeeds on a directory and `os.fdopen` then raises
+    IsADirectoryError without closing the fd it was handed. Both readers must
+    still raise IsADirectoryError, unchanged, and must close that fd.
+
+    The fd is captured from the real `os.open` and probed with `os.fstat`
+    straight after the call: EBADF means it was closed. RED WHEN the fdopen
+    in either reader is no longer wrapped (the fd stays open).
+    """
+    root = tmp_path / "root"
+    target = root / "state.json"
+    target.mkdir(parents=True)
+
+    opened = []
+    real_open = os.open
+
+    def recording_open(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if os.fspath(path).endswith("state.json"):
+            opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(os, "open", recording_open)
+    with pytest.raises(IsADirectoryError):
+        if reader == "read_text":
+            state_file.read_text(target, root)
+        else:
+            state_file._current_text(target)
+    monkeypatch.undo()
+
+    assert len(opened) == 1, f"control: expected one open of the target, got {opened}"
+    with pytest.raises(OSError) as closed:
+        os.fstat(opened[0])
+    assert closed.value.errno == errno.EBADF, f"the fd was left open: {closed.value!r}"
 
 
 # ---------------------------------------------------------------------------

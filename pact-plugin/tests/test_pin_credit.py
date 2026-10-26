@@ -315,16 +315,17 @@ def test_a_record_over_one_megabyte_gives_none(store):
 
 
 def test_an_unreadable_record_gives_none(store):
-    if os.geteuid() == 0:
-        pytest.skip("root reads a mode-000 file")
+    # A DIRECTORY in the record's place: reading it raises a real OSError, as a
+    # mode-000 file does for a non-root user. Unlike mode bits it also fails
+    # when the suite runs as root.
     session_dir, base = store
     _decide(LEAD, base, B13, NO_3)
-    _record_file(session_dir).chmod(0o000)
-    try:
-        assert pin_credit.read(LEAD, "lead", base, _digest(NO_3)) == pin_credit.Credit.none()
-        assert _decide(LEAD, base, NO_3, MOVED).verdict == "DENY"
-    finally:
-        _record_file(session_dir).chmod(0o600)
+    record = _record_file(session_dir)
+    assert record.is_file(), "control: the first decision wrote a record"
+    record.unlink()
+    record.mkdir()
+    assert pin_credit.read(LEAD, "lead", base, _digest(NO_3)) == pin_credit.Credit.none()
+    assert _decide(LEAD, base, NO_3, MOVED).verdict == "DENY"
 
 
 def test_no_session_dir_gives_none_and_writes_nothing(tmp_path, monkeypatch, pact_context):

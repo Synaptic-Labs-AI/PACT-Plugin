@@ -32,6 +32,8 @@ Used by: pytest (the working_memory edge-path gate).
 import os
 from pathlib import Path
 
+import pytest
+
 # The canonical minimal-CLAUDE.md seeder, consolidated in fixtures/ (this
 # file's local definition seeded byte-identical default-arm content; see
 # fixtures/claude_md_seed.py).
@@ -147,6 +149,10 @@ class TestReadOnlyDirectoryFailSafe:
     REFUSES the write (fails safe) instead of truncating. Narrow config (bind
     mounts, restrictive umask) but real."""
 
+    # The subject is a REAL read-only directory that still lets the lock sidecar
+    # open: only mode bits give that, and uid 0 ignores them. The stubbed
+    # failure at the same site is covered by the fchmod tests above.
+    @pytest.mark.requires_non_root
     def test_readonly_dir_refuses_atomic_write_at_write_site_and_leaves_file_intact(
         self, tmp_path, monkeypatch
     ):
