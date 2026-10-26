@@ -990,6 +990,10 @@ class TestAnImplicitCloseRuns:
 
 
 REPO_CHANGES = {
+    "env-chdir-merge": (MERGE + "--squash", "env -C /tmp/repoB " + MERGE + "--squash",
+                        "env -C /tmp/repoC " + MERGE + "--squash"),
+    "env-chdir-force-push": ("git push --" + "force", "env --chdir=/tmp/repoB git push --" + "force",
+                             "env --chdir=/tmp/repoC git push --" + "force"),
     "env-checkout-merge": (MERGE + "--squash", "env git checkout feat/y && " + MERGE + "--squash",
                            "env git checkout feat/z && " + MERGE + "--squash"),
     "nice-checkout-force-push": ("git push --" + "force", "nice -n 5 git checkout feat/y && git push --" + "force",
@@ -1432,6 +1436,8 @@ NUMBERED_REPO_CHANGES = {
                        "export GIT_DIR=/tmp/repoC/.git; " + _NUMBERED),
     "git-dir-function-export": (_NUMBERED, "f() { export GIT_DIR=/tmp/repoB/.git; }; f; " + _NUMBERED,
                                 "f() { export GIT_DIR=/tmp/repoC/.git; }; f; " + _NUMBERED),
+    "env-chdir": (_NUMBERED, "env -C /tmp/repoB " + _NUMBERED, "env -C /tmp/repoC " + _NUMBERED),
+    "env-chdir-attached": (_NUMBERED, "env -C/tmp/repoB " + _NUMBERED, "env -C/tmp/repoC " + _NUMBERED),
     "close": (_CLOSE_PR + "5 -d", "cd /tmp/other && " + _CLOSE_PR + "5 -d", "cd /tmp/third && " + _CLOSE_PR + "5 -d"),
     "bash-c": (_NUMBERED, "bash -c 'cd /tmp/other && " + _NUMBERED + "'", "bash -c 'cd /tmp/third && " + _NUMBERED + "'"),
     "same-repo-subdirectory": (_NUMBERED, "cd sub && " + _NUMBERED, "cd other && " + _NUMBERED),
@@ -1485,11 +1491,14 @@ class TestANumberedOpInAnotherRepoNeedsItsOwnApproval:
         "nice git config list; " + _NUMBERED,
         "env git checkout feat/y && " + _NUMBERED,
         "env echo cd /tmp/other; " + _NUMBERED,
+        "env -C /tmp/other true; " + _NUMBERED,
+        "env FOO=1 " + _NUMBERED,
     ], ids=["pr-checkout", "co", "branch-checkout", "switch", "cd-after", "echoed", "remote-list", "set-default-view",
             "set-default-v", "config-get", "config-get-value-pattern", "config-read-key", "config-list", "config-other-key",
             "config-get-subcommand", "config-get-all-subcommand", "config-list-subcommand", "config-get-key-case",
             "config-unset-other-key", "config-remove-other-section", "config-get-dash-c", "config-get-insteadof",
-            "env-config-get", "nice-config-list", "env-branch-checkout", "env-echoed"])
+            "env-config-get", "nice-config-list", "env-branch-checkout", "env-echoed",
+            "env-chdir-earlier-leg", "env-no-chdir"])
     def test_a_plain_numbered_approval_still_covers_a_branch_change(self, command):
         assert _runs(_mint_styled(_NUMBERED, APPROVAL_STYLES["inline"]), command)
 
@@ -1506,6 +1515,10 @@ EXPLICIT_GIT_REPO_CHANGES = {
                           "export GIT_DIR=/tmp/repoC/.git; " + _PUSH_X),
     "force-push-function-export": (_PUSH_X, "f() { export GIT_DIR=/tmp/repoB/.git; }; f; " + _PUSH_X,
                                    "f() { export GIT_DIR=/tmp/repoC/.git; }; f; " + _PUSH_X),
+    "force-push-env-chdir": (_PUSH_X, "env -C /tmp/repoB " + _PUSH_X, "env -C /tmp/repoC " + _PUSH_X),
+    "force-push-env-chdir-long": (_PUSH_X, "env --chdir=/tmp/repoB " + _PUSH_X, "env --chdir=/tmp/repoC " + _PUSH_X),
+    "branch-delete-env-chdir": (_DELETE_X, "env -C /tmp/repoB " + _DELETE_X, "env -C /tmp/repoC " + _DELETE_X),
+    "force-push-env-chdir-ignore-env": (_PUSH_X, "env -C /tmp/repoB -i " + _PUSH_X, "env -C /tmp/repoC -i " + _PUSH_X),
     "force-push-env": (_PUSH_X, "env GIT_WORK_TREE=/tmp/repoB " + _PUSH_X, "env GIT_WORK_TREE=/tmp/repoC " + _PUSH_X),
     "branch-delete-cd": (_DELETE_X, "cd /tmp/repoB && " + _DELETE_X, "cd /tmp/repoC && " + _DELETE_X),
     "branch-delete-dash-c": (_DELETE_X, "git -C /tmp/repoB branch -" + "D feat/x", "git -C /tmp/repoC branch -" + "D feat/x"),

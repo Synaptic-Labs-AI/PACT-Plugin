@@ -2383,9 +2383,15 @@ def _assignments_reaching_command(leg: str) -> "tuple[dict[str, str], list[str]]
     return (found if command else {}), command
 
 
+# The key under which _walk_assignments records an `env -C <dir>` / `--chdir`; no
+# variable name can take it.
+ENV_CHDIR = "\x00chdir"
+
+
 def _walk_assignments(words: list[str], found: dict[str, str], depth: int) -> list[str]:
     """Record the assignments before `words`' command into `found` and return the
-    command's words, stepping through env and the modeled exec wrappers."""
+    command's words, stepping through env and the modeled exec wrappers. env's
+    `-C <dir>` / `--chdir=<dir>` is recorded under ENV_CHDIR."""
     i = 0
     while i < len(words) and re.match(r"^[A-Za-z_]\w*=", words[i]):
         name, value = words[i].split("=", 1)
@@ -2416,14 +2422,20 @@ def _walk_assignments(words: list[str], found: dict[str, str], depth: int) -> li
                 j += 1
                 break
             if word in ("-i", "--ignore-environment"):
+                chdir = found.get(ENV_CHDIR)
                 found.clear()
+                if chdir is not None:
+                    found[ENV_CHDIR] = chdir
             elif word in ("-u", "--unset") and j + 1 < len(words):
                 found.pop(words[j + 1], None)
                 j += 1
             elif word.startswith(("-u", "--unset=")) and len(word) > 2:
                 found.pop(word.split("=", 1)[1] if word.startswith("--") else word[2:], None)
-            elif word in ("-C", "--chdir"):
+            elif word in ("-C", "--chdir") and j + 1 < len(words):
+                found[ENV_CHDIR] = words[j + 1]
                 j += 1
+            elif word.startswith(("-C", "--chdir=")):
+                found[ENV_CHDIR] = word.split("=", 1)[1] if word.startswith("--") else word[2:]
             elif not word.startswith("-"):
                 break
             j += 1
@@ -10405,9 +10417,11 @@ def _git_config_changes_a_remote(
 def _leg_names_another_repo(leg: str) -> bool:
     """Whether a git leg runs in a repository it names itself: `git -C <dir>`,
     `--git-dir`, `--work-tree`, or a `GIT_DIR=` / `GIT_WORK_TREE=` assignment that
-    reaches the command (as a prefix, through env, or past an exec wrapper)."""
+    reaches the command (as a prefix, through env, or past an exec wrapper). An
+    `env -C <dir>` / `--chdir` running the leg names another directory for any
+    command, git or gh."""
     assigned, words = _assignments_reaching_command(leg)
-    if "GIT_DIR" in assigned or "GIT_WORK_TREE" in assigned:
+    if "GIT_DIR" in assigned or "GIT_WORK_TREE" in assigned or ENV_CHDIR in assigned:
         return True
     if not words or os.path.basename(words[0]) != "git":
         return False
