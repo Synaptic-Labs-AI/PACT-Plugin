@@ -674,14 +674,16 @@ class TestC4AnchorDriftDetector:
 # runtime and far below a real blowup; every millisecond of the gap between those
 # two is free, and narrowing it buys nothing while costing flakiness.
 #
-# MEASURED (this module, moderately loaded): the slowest single call is ~600 ms.
-# The previous bounds were 1000 ms and 2000 ms — a margin of under 2x — and a
-# preceding comment claimed the runtime was "single-digit ms even at n=8000",
-# which is false and is what made those bounds look generous. Under a loaded
-# suite they failed at 1006.5 ms against 1000 ms, and 2040.6 ms against 2000 ms:
-# both under 3% over, i.e. pure load, not regression.
-_LINEAR_BOUND_MS = 8000.0        # ~13x the slowest honest call
-_LINEAR_BOUND_WIDE_MS = 12000.0  # for the heavier echo/printf cases
+# MEASURED (this module, quiet machine, CPU time): the slowest single call under
+# _LINEAR_BOUND_MS is ~1,300 ms (f3_scanner at n=16000, `$` run), and the
+# slowest under _LINEAR_BOUND_WIDE_MS is ~660 ms (echo many-args at n=16000).
+# An earlier figure here said ~600 ms and a ~13x margin; both were wrong. The
+# previous bounds were 1000 ms and 2000 ms, and a preceding comment claimed
+# "single-digit ms even at n=8000", which is false and is what made those bounds
+# look generous. Under a loaded suite they failed at 1006.5 ms against 1000 ms,
+# and 2040.6 ms against 2000 ms: both under 3% over, i.e. pure load, not regression.
+_LINEAR_BOUND_MS = 8000.0        # ~6x the slowest honest call
+_LINEAR_BOUND_WIDE_MS = 12000.0  # ~18x the slowest honest wide-bound call (echo/printf)
 
 # Re-sample only when a sample looks bad. Timing noise is ONE-SIDED — load can
 # only make a run slower — so the MINIMUM is the robust estimator and the mean is
@@ -693,13 +695,18 @@ _RESAMPLE_TIMES = 3
 
 
 def _elapsed_ms(cmd):
-    """Milliseconds for one classification, robust to a transient load spike."""
+    """CPU milliseconds for one classification, robust to a transient load spike.
+
+    CPU time (``time.process_time``), not wall clock: the classification is pure
+    CPU, so backtracking shows on either clock, but wall clock also counts the
+    time the process waits for a core, and concurrent suites failed these bounds
+    on honest code. CPU time does not count that wait."""
     import time
 
     def _once():
-        start = time.perf_counter()
+        start = time.process_time()
         D(cmd)
-        return (time.perf_counter() - start) * 1000.0
+        return (time.process_time() - start) * 1000.0
 
     best = _once()
     if best > _RESAMPLE_ABOVE_MS:
