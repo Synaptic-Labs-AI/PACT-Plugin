@@ -852,10 +852,11 @@ class TestWriteContext:
         """Should log to stderr and not raise on write errors."""
         import shared.pact_context as ctx_module
 
-        # Point to a path where we can't write (non-existent parent with no perms)
+        # Point to a path whose parent is a regular FILE, so the directory
+        # create raises a real OSError. A chmod-000 parent would not fail when
+        # the suite runs as root; a file in the directory's place does.
         ctx_file = tmp_path / "readonly" / "pact-session-context.json"
-        (tmp_path / "readonly").mkdir()
-        (tmp_path / "readonly").chmod(0o000)
+        (tmp_path / "readonly").write_text("not a directory", encoding="utf-8")
         monkeypatch.setattr(ctx_module, "_context_path", ctx_file)
 
         # Should not raise
@@ -864,9 +865,6 @@ class TestWriteContext:
             session_id="test-session",
             project_dir="/test",
         )
-
-        # Restore permissions for cleanup
-        (tmp_path / "readonly").chmod(0o755)
 
         # Should have logged to stderr
         captured = capsys.readouterr()
@@ -905,19 +903,20 @@ class TestGetPactContextEdgeCases:
     """Additional edge case tests for get_pact_context()."""
 
     def test_returns_empty_on_read_protected_file(self, monkeypatch, tmp_path, capsys):
-        """Should return empty strings when context file has no read permission."""
+        """Should return empty strings when the context file cannot be read.
+
+        The file is a DIRECTORY, not a chmod-000 file: the read raises a real
+        OSError that is not FileNotFoundError, which is the branch that logs,
+        and unlike mode bits it also fails when the suite runs as root.
+        """
         import shared.pact_context as ctx_module
 
         ctx_file = tmp_path / "pact-session-context.json"
-        ctx_file.write_text(json.dumps({"team_name": "secret"}), encoding="utf-8")
-        ctx_file.chmod(0o000)
+        ctx_file.mkdir()
         monkeypatch.setattr(ctx_module, "_context_path", ctx_file)
         monkeypatch.setattr(ctx_module, "_cache", None)
 
         result = ctx_module.get_pact_context()
-
-        # Restore permissions for cleanup
-        ctx_file.chmod(0o644)
 
         assert result["team_name"] == ""
         assert result["session_id"] == ""
@@ -2855,6 +2854,7 @@ class TestHealContextIfMissing:
         assert not target.exists()
         assert "self-heal failed" in capsys.readouterr().err
 
+    @pytest.mark.requires_non_root  # the subject IS the mode-bit failure at mkstemp
     def test_unwritable_session_dir_real_oserror_returns_false(
             self, monkeypatch, tmp_path, capsys):
         """TOTAL under a REAL permission failure (no mocked seam): the
@@ -2870,10 +2870,6 @@ class TestHealContextIfMissing:
         through persist_context's mkdir/mkstemp sequence."""
         import shared.pact_context as ctx_module
         from fixtures.role_frames import lead_frame_qualified
-
-        if hasattr(os, "geteuid") and os.geteuid() == 0:
-            pytest.skip("running as root — mode bits are not enforced, "
-                        "the PermissionError cannot be provoked")
 
         target = self._absent_context(monkeypatch, tmp_path)
         session_dir = target.parent

@@ -55,6 +55,8 @@ from clock_shift import clock_shift_census  # noqa: E402
 # for the same reason the clock_shift import is).
 from fixtures.claude_md_seed import seed_claude_md  # noqa: E402
 from fixtures.hf_cache import hf_cache_env  # noqa: E402
+from fixtures.root_guard import MARKER as _NON_ROOT_MARKER  # noqa: E402
+from fixtures.root_guard import non_root_skip_reason  # noqa: E402
 
 # These copy names from shared modules at first import; loading them here keeps a test patch from being copied.
 # tests/test_conftest_import_guard.py derives which modules need a line here.
@@ -160,9 +162,29 @@ def pytest_configure(config):
     # fail direction of `setdefault` here is ALLOW, and it is silent.
     os.environ[_MEMORY_DIR_ENV] = _SESSION_MEMORY_DIR
 
+    # UNLIKE THE TWO ABOVE, THIS MARKER SKIPS. Under uid 0 the failure such a
+    # test builds with chmod cannot exist, so there is nothing to deselect by
+    # choice. The rationale and the decision live in tests/fixtures/root_guard.py.
+    config.addinivalue_line(
+        "markers",
+        f"{_NON_ROOT_MARKER}: the test provokes a permission failure with file "
+        "mode bits, which uid 0 bypasses, so it is SKIPPED when the suite runs "
+        "as root. Prefer a mode-free fault (a directory where a file is "
+        "expected) that keeps the test running under root.",
+    )
+
     # CLOCK-SHIFT CENSUS. Inert unless PACT_TEST_CLOCK_SHIFT_SECONDS is set; the
     # sweep command is in tests/clock_shift/clock_shift_shim.py.
     clock_shift_census.install()
+
+
+def pytest_runtest_setup(item):
+    """Skip a `requires_non_root` test when the suite runs as root."""
+    if item.get_closest_marker(_NON_ROOT_MARKER) is None:
+        return
+    reason = non_root_skip_reason()
+    if reason:
+        pytest.skip(reason)
 
 
 def pytest_sessionfinish(session):

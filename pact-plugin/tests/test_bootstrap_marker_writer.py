@@ -812,20 +812,21 @@ class TestAdversarialTeamConfig:
         assert _team_has_secretary(_TEAM_NAME) is False
 
     def test_team_config_unreadable_returns_false(self, monkeypatch, tmp_path):
-        """Permission-denied on read → caught by the OSError clause."""
+        """An unreadable config → caught by the OSError clause.
+
+        config.json is a DIRECTORY, not a chmod-000 file: its read raises a
+        real OSError, and unlike mode bits it also fails when the suite runs
+        as root. A secretary-roster file sits INSIDE it, so a reader that
+        somehow got past the failure would find a secretary and return True.
+        """
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         team_dir = tmp_path / ".claude" / "teams" / _TEAM_NAME
-        team_dir.mkdir(parents=True, exist_ok=True)
         cfg = team_dir / "config.json"
-        cfg.write_text(json.dumps({"members": [{"name": "secretary"}]}),
-                       encoding="utf-8")
-        os.chmod(cfg, 0o000)
-        try:
-            from bootstrap_marker_writer import _team_has_secretary
-            assert _team_has_secretary(_TEAM_NAME) is False
-        finally:
-            # Restore so tmp_path teardown succeeds.
-            os.chmod(cfg, 0o600)
+        cfg.mkdir(parents=True)
+        (cfg / "members.json").write_text(
+            json.dumps({"members": [{"name": "secretary"}]}), encoding="utf-8")
+        from bootstrap_marker_writer import _team_has_secretary
+        assert _team_has_secretary(_TEAM_NAME) is False
 
 
 # =============================================================================

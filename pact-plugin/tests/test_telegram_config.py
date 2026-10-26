@@ -144,16 +144,17 @@ class TestParseEnvFile:
         assert result == {}
 
     def test_raises_config_error_on_read_failure(self, tmp_path):
-        """Should raise ConfigError when file cannot be read."""
-        env_file = tmp_path / ".env"
-        env_file.write_text("KEY=value")
-        env_file.chmod(0o000)
+        """Should raise ConfigError when file cannot be read.
 
-        try:
-            with pytest.raises(ConfigError, match="Cannot read config file"):
-                parse_env_file(env_file)
-        finally:
-            env_file.chmod(0o644)
+        The unreadable file is a DIRECTORY, not a chmod-000 file: it passes the
+        exists() check and its read raises a real OSError, and unlike mode bits
+        it also fails when the suite runs as root.
+        """
+        env_file = tmp_path / ".env"
+        env_file.mkdir()
+
+        with pytest.raises(ConfigError, match="Cannot read config file"):
+            parse_env_file(env_file)
 
     def test_strips_whitespace_from_keys_and_values(self, tmp_path):
         """Should strip leading/trailing whitespace from keys and values."""

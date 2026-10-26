@@ -374,18 +374,16 @@ class TestAppendEvent:
 
         event = make_event("test")
 
-        # Force a write error by making the parent read-only
+        # Force a write error by putting a regular FILE where the session
+        # directory goes, so the directory create raises a real OSError. A
+        # read-only directory would not fail when the suite runs as root.
         journal_dir = Path(session_dir)
-        journal_dir.mkdir(parents=True)
-        os.chmod(str(journal_dir), 0o444)
+        journal_dir.parent.mkdir(parents=True, exist_ok=True)
+        journal_dir.write_text("not a directory")
 
-        try:
-            result = append_event(event)
-            # Should return False, not raise
-            assert result is False
-        finally:
-            # Restore permissions for cleanup
-            os.chmod(str(journal_dir), 0o755)
+        result = append_event(event)
+        # Should return False, not raise
+        assert result is False
 
     def test_auto_sets_ts_when_missing(self, journal_home, team_name):
         """P0: Auto-sets timestamp when ts is not in the event dict."""
@@ -440,7 +438,7 @@ class TestAppendEvent:
 
         Direct unit test of the underlying primitive used by append_event(). The
         function is currently exercised indirectly via append_event's fail-open
-        path (test_fail_open_on_write_error uses chmod 0o444 on the parent dir),
+        path (test_fail_open_on_write_error puts a file where the session dir goes),
         but a direct test pins the contract: any OSError from os.open must be
         swallowed and surface as a False return -- never propagate.
 

@@ -4336,13 +4336,13 @@ def test_exit_three_gives_different_advice_for_unreadable_and_unparseable(tmp_pa
     _write(unparseable, f"{name}.json", "{ not json at all")
     code_bad, out_bad = _run_cli(unparseable, "show", "--no-reconcile")
 
+    # A DIRECTORY in the store file's place, as in
+    # test_repair_refuses_what_it_cannot_read_and_leaves_it_in_place: it reaches
+    # the same unreadable branch as a chmod-000 file, and unlike mode bits it
+    # also fails when the suite runs as root.
     unreadable = tmp_path / "unreadable"
-    _write(unreadable, f"{name}.json", "{}")
-    (unreadable / f"{name}.json").chmod(0o000)
-    try:
-        code_unread, out_unread = _run_cli(unreadable, "show", "--no-reconcile")
-    finally:
-        (unreadable / f"{name}.json").chmod(0o644)
+    (unreadable / f"{name}.json").mkdir(parents=True)
+    code_unread, out_unread = _run_cli(unreadable, "show", "--no-reconcile")
 
     assert code_bad == code_unread == 3, (
         f"both states must exit 3 by design: unparseable={code_bad}, "

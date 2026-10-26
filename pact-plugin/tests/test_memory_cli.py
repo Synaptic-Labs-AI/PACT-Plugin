@@ -2351,6 +2351,10 @@ class TestCliSaveVerificationE2E:
         assert err_output["ok"] is False
         assert err_output["error"] == "SYSTEM_ERROR"
 
+    # The subject is a database that OPENS but rejects the INSERT, in a child
+    # process: only mode bits give that, and uid 0 ignores them. The SYSTEM_ERROR
+    # exit itself stays covered under root by the directory-as-db test above.
+    @pytest.mark.requires_non_root
     def test_save_exits_2_on_readonly_db(self, cli_script_path, cli_db):
         """Save exits 2 when the database file is read-only.
 
@@ -3536,6 +3540,11 @@ class TestTheExitStatusSurvivesAReaderLessPipe:
             "sys.exit(3 if on_null else 0)\n"
         )
         env = dict(os.environ)
+        # CONDITION 1 NEEDS A BLOCK-BUFFERED STDOUT, so the child must not
+        # inherit PYTHONUNBUFFERED. With it set (as in some cloud containers)
+        # the pending write goes straight to the reader-less pipe and raises
+        # BrokenPipeError before the import, so the arm never measures anything.
+        env.pop("PYTHONUNBUFFERED", None)
 
         rc, _out, err = _spawn_with_readerless_pipes(
             ["-c", child], env, break_stdout=True, break_stderr=False

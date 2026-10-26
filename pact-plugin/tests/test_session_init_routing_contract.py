@@ -292,6 +292,9 @@ class TestSymlinkStatusRouting:
         (plugin_root / "agents" / "pact-example.md").write_text("body")
         return plugin_root
 
+    # Mode bits are the only fault that leaves the project readable while its
+    # writes fail at the step this class names; uid 0 ignores them.
+    @pytest.mark.requires_non_root
     def test_failure_status_reaches_system_messages(self, tmp_path, home, project):
         plugin_root = self._plugin_root(tmp_path, None)
         agents_dst = home / ".claude" / "agents"
@@ -359,6 +362,9 @@ class TestProjectMemoryStatusRouting:
     EXPECTED: the two tests stay green.
     """
 
+    # Mode bits are the only fault that leaves the project readable while its
+    # writes fail at the step this class names; uid 0 ignores them.
+    @pytest.mark.requires_non_root
     def test_failure_status_reaches_system_messages(self, home, project):
         # MEASURED: the resolver returns `<project>/.claude/CLAUDE.md` here, so
         # the step that fails in a sealed project is `ensure_dot_claude_parent`
@@ -418,6 +424,9 @@ class TestMigrationStatusRouting:
         "## Working Memory\n"
     )
 
+    # Mode bits are the only fault that leaves the project readable while its
+    # writes fail at the step this class names; uid 0 ignores them.
+    @pytest.mark.requires_non_root
     def test_failure_status_reaches_system_messages(self, home, project):
         (project / "CLAUDE.md").write_text(self.UNMIGRATED)
         os.chmod(project, 0o500)  # the lock sidecar cannot be written
@@ -518,6 +527,9 @@ class TestPinnedStalenessStatusRouting:
     EXPECTED: the two tests stay green.
     """
 
+    # Mode bits are the only fault that leaves the project readable while its
+    # writes fail at the step this class names; uid 0 ignores them.
+    @pytest.mark.requires_non_root
     def test_failure_status_reaches_system_messages(self, home, project):
         (project / "CLAUDE.md").write_text(_STALE_PIN_DOC)
         os.chmod(project, 0o500)  # the staleness write path cannot lock
@@ -667,6 +679,9 @@ class TestProjectMemoryInnerHandlerRouting:
     ``TestProjectMemoryStatusRouting`` stays green.
     """
 
+    # Mode bits are the only fault that leaves the project readable while its
+    # writes fail at the step this class names; uid 0 ignores them.
+    @pytest.mark.requires_non_root
     def test_inner_write_failure_reaches_system_messages(self, home, project):
         # THE TARGET IS `<project>/.claude/CLAUDE.md`, NOT `<project>/CLAUDE.md`.
         # That is measured, and it decides the whole fixture. Seal the `.claude`

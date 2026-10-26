@@ -132,8 +132,26 @@ def _retention(cmd):
 
 
 def _control_false(cmd):
-    """Benign / never-blocked: False on both (proves closures are not blanket-freeing)."""
-    assert D_BASE(cmd) is False and D(cmd) is False, "benign control not False==both: %r" % (cmd,)
+    """Benign / never-blocked: False on both (proves closures are not blanket-freeing).
+
+    Not @requires_history: the HEAD half always runs, because a benign form that HEAD
+    blocks is an over-block whether or not the base commit is reachable. The base half
+    runs only when it is (a shallow clone lacks c21eae19, and D_BASE is then None).
+    """
+    assert D(cmd) is False, "benign control blocked at HEAD (over-block): %r" % (cmd,)
+    if D_BASE is not None:
+        assert D_BASE(cmd) is False, "benign control not False at c21eae19 base: %r" % (cmd,)
+
+
+def _caught_at_head(cmd):
+    """Like _retention, but for an arm that must still run without history.
+
+    The HEAD half is the under-block check and always runs; the base half is the
+    non-vacuity check and runs only when c21eae19 is reachable.
+    """
+    assert D(cmd) is True, "UNDER-BLOCK opened at HEAD (a real danger was freed): %r" % (cmd,)
+    if D_BASE is not None:
+        assert D_BASE(cmd) is True, "vacuous: not caught at c21eae19 base: %r" % (cmd,)
 
 
 # =========================================================================================
@@ -363,7 +381,7 @@ class TestBindingInvariant:
 
     def test_leg_locality_executing_tail_stays_caught(self):
         # An inert first leg does not swallow an executing destructive tail (leg-locality).
-        _retention('mycmd "safe" && %s' % BDR)
+        _caught_at_head('mycmd "safe" && %s' % BDR)
 
 
 # =========================================================================================
