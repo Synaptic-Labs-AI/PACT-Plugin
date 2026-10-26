@@ -29,11 +29,12 @@
 #   Markdown, and the file may not contain a NUL byte. The rules are defined
 #   once, in .github/scripts/check-release-notes.sh, and checked twice: on
 #   every PR by pact-plugin/tests/test_release_notes.py (the current
-#   version's file), and here before release. The file is read from the bump commit if that copy
-#   is valid, otherwise from the tip of main (how v4.8.9-v4.8.11 were
-#   backfilled, and how a bad file that reached main is repaired: fix it on
-#   main and the next run uses that copy, with a warning). No valid copy
-#   anywhere stops the run before anything is created.
+#   version's file), and here before release. The file is read from the
+#   bump commit if that copy is valid, otherwise from the tip of main (how
+#   v4.8.9-v4.8.11 were backfilled, and how a bad file that reached main is
+#   repaired: fix it on main and the next run uses that copy, with a
+#   warning). No valid copy anywhere stops the run before anything is
+#   created.
 #
 # WHO AUTHORS THE TAGS AND RELEASES (optional RELEASE_TOKEN)
 #   Without a `RELEASE_TOKEN` secret, tags and releases are made by
