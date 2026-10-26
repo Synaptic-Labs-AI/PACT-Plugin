@@ -65,11 +65,23 @@ class TestFormatPluginBanner:
     def test_env_empty_string(self, monkeypatch):
         from shared.plugin_manifest import format_plugin_banner
 
-        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "   ")
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "")
 
         banner = format_plugin_banner()
 
         assert banner == "PACT plugin: unknown (root: <unset>)"
+
+    def test_env_whitespace_only_is_unsafe_not_unset(self, monkeypatch):
+        # The raw value is judged, not a stripped one, matching
+        # format_session_substitutions, which calls "   " set-but-unsafe
+        # (#1671 security-rev, task #82).
+        from shared.plugin_manifest import format_plugin_banner
+
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "   ")
+
+        banner = format_plugin_banner()
+
+        assert banner == "PACT plugin: unknown (root: <unsafe>)"
 
     def test_plugin_json_missing(self, tmp_path, monkeypatch):
         from shared.plugin_manifest import format_plugin_banner

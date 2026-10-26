@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -191,6 +192,88 @@ def is_safe_path_component(value: str) -> bool:
 # Back-compat alias for callers that imported the pre-cycle-8 private
 # name. See the matching `_SAFE_PATH_COMPONENT_RE` alias above.
 _is_safe_path_component = is_safe_path_component
+
+
+# Plugin root allowlist (#1671 review, FUTURE-3 round 2). The value is pasted
+# by the model into DOUBLE-QUOTED shell commands (python3 "{plugin_root}/...")
+# and shown in backtick spans, so it is checked against a POSITIVE allowlist,
+# not a deny-list: ASCII letters, digits and `._/+@:~ -` (space included, for
+# home dirs with spaces, but never as the last character), plus non-ASCII LETTERS and NUMBERS (Unicode
+# categories L* and N*, so /home/josé works). Everything else is rejected,
+# including $ ` " ' \ ! (shell expansion and quote breakout) and every
+# non-ASCII control, format or separator character (U+0085, U+2028, bidi
+# overrides, zero-width characters, non-ASCII spaces).
+#
+# Two letter ranges are carved out of L*, because they look like the ASCII
+# punctuation the allowlist rejects and could make a model retype a lookalike
+# as the real character (#1671 security-rev, task #72):
+#   - U+02B0-U+02FF, the Spacing Modifier Letters block. It holds U+02BB and
+#     U+02BC, which look like ' and are REJECTED ON PURPOSE even though some
+#     languages (Hawaiian okina, Ukrainian apostrophe) use them in names, and
+#     U+02EE, which looks like ".
+#   - U+01C0-U+01C3, the click letters, which look like | || ‡ !.
+#   - U+07F4-U+07F5, the NKo tone apostrophes, which look like '.
+#   - U+107B5-U+107B9, the modifier click letters (the superscript forms of
+#     the clicks above).
+#   - U+A717, MODIFIER LETTER DOT VERTICAL BAR, which looks like !.
+# These ranges are best-effort, and the list is closed on purpose (#1671 user
+# decision). The guarantee is that $ ` " \ ! and line breaks are rejected:
+# they are the only characters special inside the double-quoted shell sink.
+# Other confusable letters (for example U+A71D-U+A71F, U+A78B/U+A78C, U+0149)
+# are a known limit and are deliberately not chased.
+# Other modifier letters (Lm) stay allowed: Japanese names use U+30FC, U+3005,
+# U+309D and U+30FD (/home/ユーザー, /home/佐々木). RTL letters stay allowed too.
+PLUGIN_ROOT_MAX_LENGTH = 512
+_PLUGIN_ROOT_ASCII_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/+@:~ -"
+)
+_PLUGIN_ROOT_LOOKALIKE_RANGES = (
+    (0x01C0, 0x01C3),
+    (0x02B0, 0x02FF),
+    (0x07F4, 0x07F5),
+    (0xA717, 0xA717),
+    (0x107B5, 0x107B9),
+)
+
+
+def _is_plugin_root_char(char: str) -> bool:
+    if char in _PLUGIN_ROOT_ASCII_CHARS:
+        return True
+    if char.isascii():
+        return False
+    codepoint = ord(char)
+    if any(low <= codepoint <= high for low, high in _PLUGIN_ROOT_LOOKALIKE_RANGES):
+        return False
+    return unicodedata.category(char)[0] in ("L", "N")
+
+
+def is_safe_plugin_root(value: object) -> bool:
+    """True iff ``value`` is a plugin root that is safe to substitute into a
+    double-quoted shell command or a backtick span: a str starting with "/",
+    not ending in a space, at most PLUGIN_ROOT_MAX_LENGTH characters, every
+    character on the allowlist above. The single check for every
+    plugin_root sink, four in all: the substitution sentence, the CLAUDE.md
+    "- Plugin root:" line, the context file (on write and on read), and the
+    SessionStart banner (plugin_manifest.format_plugin_banner).
+
+    A trailing space is refused because the CLAUDE.md line strips its value
+    and the sentence does not: "/opt/x " would be shown as two different
+    paths (final review M8). A leading space already fails the "/" check.
+
+    The characters are checked in NFC form, so a decomposed accented name
+    (macOS can report "e" + U+0301 for "é") passes when it composes to a
+    letter; a combining mark that composes to nothing is still rejected.
+    The value itself is not changed."""
+    if not (
+        isinstance(value, str)
+        and value.startswith("/")
+        and not value.endswith(" ")
+        and len(value) <= PLUGIN_ROOT_MAX_LENGTH
+    ):
+        return False
+    return all(
+        _is_plugin_root_char(char) for char in unicodedata.normalize("NFC", value)
+    )
 
 
 # --- Default dict factory -------------------------------------------------

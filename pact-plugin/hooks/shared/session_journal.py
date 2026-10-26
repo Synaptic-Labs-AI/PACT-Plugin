@@ -478,8 +478,15 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # paths and emits a non-str source. Both writers add `prev_session_dir`,
     # the session dir the project CLAUDE.md named before this one, when there
     # is one and it is not this session's own; session_resume walks it to
-    # reach a claim behind sessions that did nothing.
-    "session_start": {"source": str, "prev_session_dir": str, "entrypoint": str},
+    # reach a claim behind sessions that did nothing. session_init writes
+    # `lead_address` on lead frames: the in-hook reading of the cloud signal
+    # (docs/architecture/session-start-lead-address.md §4.3).
+    "session_start": {
+        "source": str,
+        "prev_session_dir": str,
+        "entrypoint": str,
+        "lead_address": str,
+    },
     # dispatch_decision's optional diagnostic surface: the literal Agent()
     # spawn args (team_name is WHAT THE LEAD TYPED) plus resolved_team (the
     # resolver-resolved live store — the two diverge exactly when the typed

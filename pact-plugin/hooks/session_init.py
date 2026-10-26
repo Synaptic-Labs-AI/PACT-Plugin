@@ -102,6 +102,7 @@ from shared.pact_context import (
     _resolve_aligned_team_name,
     build_context_cache,
     classify_session_role,
+    cloud_team_default,
     current_process_key,
     describe_team_alignment,
     generate_team_name,
@@ -110,6 +111,7 @@ from shared.pact_context import (
     init,
     is_lead,
     persist_context,
+    resolve_lead_address,
     strip_pact_namespace,
 )
 from shared.dispatch_helpers import is_registered_pact_specialist
@@ -675,6 +677,11 @@ def _saved_context(session_id: str, project_dir: str) -> dict:
 # not reach the hook subprocess (predicted dead; unmeasured firing), and no
 # input ships that no measurement observed firing. The transcript IS measured
 # live (the field rides ordinary transcript lines from the sixth onward).
+# The #1662 env ruling was re-opened for CLAUDE_CODE_REMOTE ONLY (#1666;
+# docs/architecture/session-start-lead-address.md §4): it is read solely
+# through pact_context.is_cloud_session(), for the cloud team-name resolver
+# default and the lead address. It is NOT a harness-stamp input, and
+# CLAUDE_CODE_ENTRYPOINT stays excluded.
 _NON_TTY_ENTRYPOINTS = frozenset({"remote", "claude-desktop"})
 
 # Bounded scan depth for _read_transcript_entrypoint. The entrypoint field is
@@ -1945,7 +1952,9 @@ def main():
         # journal diagnostic below. MONOTONIC carry-forward: a stamp already
         # recorded for this session (saved, from any earlier fire) survives;
         # the transcript can only SET non_tty where nothing was recorded.
-        # Env-var input is excluded by design (see _NON_TTY_ENTRYPOINTS).
+        # Env-var input is excluded by design (see _NON_TTY_ENTRYPOINTS; the
+        # CLAUDE_CODE_REMOTE read below feeds only the team default and the
+        # lead address, never this stamp).
         transcript_entrypoint = (
             "" if session_id_was_missing
             else _read_transcript_entrypoint(input_data.get("transcript_path"))
@@ -1958,9 +1967,14 @@ def main():
             # get_session_dir(), which is empty until the context module is
             # initialised. Never on the sentinel path: it must not touch disk.
             init(input_data)
+            # A cloud session's platform team is named by the full session
+            # id (#1666 item 2): cloud_team_default supplies it as the
+            # resolver DEFAULT (None locally, so the default is unchanged).
+            # A compaction keeps its saved team either way.
             default = (
                 saved.get("team_name") or team_name
-                if source == "compact" else team_name
+                if source == "compact"
+                else (cloud_team_default(session_id) or team_name)
             )
             # Only a lead frame records (and so can match) its claude
             # process's key. A /clear starts a new session id in the same
@@ -1978,6 +1992,20 @@ def main():
 
         if not session_id_was_missing:
             _record_worktree_identity(session_id, project_dir)
+
+        # The lead's SendMessage address (#1666 item 1): "main" in a cloud
+        # session, "team-lead" locally. Recomputed on every SessionStart (not
+        # carried), so a session moved from cloud to local reads team-lead
+        # again. Harmless on the sentinel path: nothing persists there.
+        # Why the env here, while bootstrap_prompt_gate prefers the recorded
+        # value (pact_context.get_lead_address): this hook is the WRITER of
+        # the recorded value. SessionStart is where the harness is re-read,
+        # and recording the env-derived value here is what makes the record
+        # correct for every later reader. The prompt gate fires on later
+        # turns, so it reads that record and uses the env only when nothing
+        # valid is recorded. The two agree unless the env changes
+        # mid-session, and the next SessionStart corrects the record then.
+        lead_address = resolve_lead_address()
 
         if not session_id_was_missing:
             try:
@@ -2005,6 +2033,7 @@ def main():
                     # reading: None keeps the key this session recorded.
                     process_key=(process_key or None) if frame_is_lead else None,
                     harness=harness,
+                    lead_address=lead_address,
                 )
                 if frame_is_lead and _ctx_result is not None:
                     persist_context(*_ctx_result)
@@ -2070,6 +2099,10 @@ def main():
                 # transcript read yielded nothing rather than written empty).
                 if transcript_entrypoint:
                     _start_fields["entrypoint"] = transcript_entrypoint
+                # The in-hook reading of the cloud signal (#1666): on a
+                # startup fire nothing is carried, so this field records
+                # whether CLAUDE_CODE_REMOTE reached the SessionStart hook.
+                _start_fields["lead_address"] = lead_address
                 append_event(
                     make_event(
                         "session_start",
@@ -2085,9 +2118,10 @@ def main():
         # Build context message based on source (post-collapse: the team always
         # exists — the platform pre-creates exactly one team per session).
         # Session placeholder variable substitution instructions tell the orchestrator how to
-        # replace {team_name}, {session_dir}, and {plugin_root} in command snippets.
+        # replace {team_name}, {session_dir}, {plugin_root} and {lead_address} in
+        # command snippets and spawn prompts.
         _substitutions = format_session_substitutions(
-            team_name, session_dir, plugin_root
+            team_name, session_dir, plugin_root, lead_address
         )
         # Single platform-managed directive for every session source. The
         # platform pre-creates exactly one team per session (Claude Code
