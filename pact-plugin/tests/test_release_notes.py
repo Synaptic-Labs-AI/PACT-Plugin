@@ -443,6 +443,9 @@ def test_section_ends_only_at_the_next_version_heading(tmp_path):
         ("#1667 at line start", b"## v1.2.3: a\n\n#1667 at line start\n"),
         ("### VSM", b"## v1.2.3: a\n\n### VSM\n\nbody\n"),
         ("### VS Code", b"## v1.2.3: a\n\n### VS Code\n\nbody\n"),
+        # I-1: seven #s are not an ATX heading (CommonMark allows 1-6), so a
+        # version-like text after them is plain text, not a version heading.
+        ("seven hashes", b"## v1.2.3: a\n\n####### 1.2.3 not a heading\n\nbody\n"),
     ],
 )
 def test_checker_accepts_grammar_edge_cases(tmp_path, label, content):
