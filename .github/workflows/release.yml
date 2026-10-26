@@ -1,0 +1,220 @@
+# PACT plugin releases — tags and GitHub releases, cut by CI.
+#
+# WHAT THIS DOES
+#   On every push to `main` (and on demand), finds each first-parent commit
+#   on `main` that changed "version" in pact-plugin/.claude-plugin/plugin.json
+#   and makes sure that version has:
+#     1. an annotated tag `v<version>` on that commit, with the message
+#        `v<version>: <PR title> (#N)`, made as github-actions[bot]; and
+#     2. a GitHub release for that tag whose notes are the PR body.
+#   Whatever is missing is created, oldest version first. Whatever exists is
+#   left alone, so a run with nothing missing is a no-op and a failed run is
+#   repaired by the next one (self-healing, idempotent).
+#
+# WHY CI CUTS RELEASES
+#   Releases used to be cut by hand after each merge. Cloud Claude Code
+#   sessions get HTTP 403 both when they push a tag and when they create a
+#   release, so releases made from those sessions were silently never cut.
+#   The workflow's own GITHUB_TOKEN can do both, so the release now follows
+#   the version bump that every PR already carries.
+#
+# WHY THE WALK STARTS WHERE IT DOES
+#   The walk always starts after FLOOR_TAG, the last release cut by hand, so
+#   history before it is never touched. It does not start after the newest
+#   tag, because then a release missing BELOW the newest tag (a run that
+#   pushed a tag and failed before its release, or a release deleted by hand)
+#   would never be repaired. Walking from the floor is cheap: one rev-list
+#   limited to plugin.json, two `git show` reads per release, and one
+#   paginated API call for the release list; tags are checked locally.
+#
+# WHY ONLY THE HIGHEST VERSION IS "LATEST"
+#   A backfill run can create several releases at once. Each one is created
+#   with --latest=false except the highest version across all tags, so an old
+#   version filled in late never takes the Latest badge from a newer one.
+#
+# UNTRUSTED INPUT
+#   PR titles and bodies are written by contributors. They reach the shell
+#   only through files and variables (git tag -F, --notes-file), never
+#   through `${{ }}` interpolation inside `run:` and never through eval.
+#   The only `${{ }}` values below are GitHub-controlled (repository name,
+#   token) and are passed in through `env:`.
+#
+# FAILURE IS LOUD
+#   The script runs under `set -euo pipefail`. A rejected tag push (for
+#   example a tag-protection ruleset that blocks GITHUB_TOKEN) or a failed
+#   release call fails the run; nothing is skipped silently.
+
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# contents: write pushes tags and creates releases. pull-requests: read looks
+# up the PR behind each version-bump commit. Nothing broader.
+permissions:
+  contents: write
+  pull-requests: read
+
+# Never run two release jobs at once (both would try to create the same tag),
+# and never cancel one mid-way: a queued run waits, then sees what the first
+# one made and skips it.
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned to a full commit SHA like tests.yml (supply-chain hardening);
+      # the trailing comment records the tag the SHA resolves to.
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          # Full history and every tag: the walk reads old commits and
+          # checks which v* tags already exist.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Create missing tags and releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          # The last release cut by hand. The walk never goes before it.
+          FLOOR_TAG: v4.8.8
+          PLUGIN_JSON: pact-plugin/.claude-plugin/plugin.json
+          BOT_NAME: github-actions[bot]
+          BOT_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          set -euo pipefail
+
+          work_dir="$(mktemp -d)"
+          trap 'rm -rf "$work_dir"' EXIT
+
+          # "version" from plugin.json at a commit; empty if absent.
+          version_at() {
+            git show "$1:$PLUGIN_JSON" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true
+          }
+
+          # Highest of the lines on stdin (sort -V order); blank lines ignored.
+          highest_of() {
+            sed '/^$/d' | sort -V | tail -n 1
+          }
+
+          tag_exists() {
+            git rev-parse -q --verify "refs/tags/$1" >/dev/null
+          }
+
+          # Every tag that already has a GitHub release (one paginated call).
+          gh api --paginate "repos/$REPO/releases?per_page=100" \
+            | jq -r '.[].tag_name' > "$work_dir/released"
+
+          has_release() {
+            grep -qxF -- "$1" "$work_dir/released"
+          }
+
+          # Writes title, number and body for the PR behind commit $1 into
+          # $work_dir/{title,number,body}. Text stays in files.
+          load_pr() {
+            local sha="$1" pr_json="" number=""
+            # Prefer the PR whose merge commit IS this commit, then any merged PR.
+            pr_json="$(gh api "repos/$REPO/commits/$sha/pulls" 2>/dev/null \
+              | jq -c --arg sha "$sha" 'if type == "array" then
+                  ([.[] | select(.merge_commit_sha == $sha)] + [.[] | select(.merged_at != null)])[0] // empty
+                else empty end' 2>/dev/null || true)"
+            if [ -z "$pr_json" ]; then
+              # Fallback: the "(#N)" a squash merge leaves at the end of the subject.
+              number="$(git log -1 --format=%s "$sha" | sed -nE 's/.*\(#([0-9]+)\)[[:space:]]*$/\1/p')"
+              if [ -n "$number" ]; then
+                pr_json="$(gh api "repos/$REPO/pulls/$number" 2>/dev/null \
+                  | jq -c 'select(type == "object" and .number != null)' 2>/dev/null || true)"
+              fi
+            fi
+            if [ -n "$pr_json" ]; then
+              printf '%s' "$pr_json" | jq -r '.number' > "$work_dir/number"
+              printf '%s' "$pr_json" | jq -j '.title // "" | gsub("[\r\n]+"; " ")' > "$work_dir/title"
+              printf '%s' "$pr_json" | jq -r '.body // ""' > "$work_dir/body"
+            else
+              echo "::warning::no PR found for $sha; using the commit message"
+              printf '%s' "$number" > "$work_dir/number"
+              git log -1 --format=%s "$sha" | sed -E 's/[[:space:]]*\(#[0-9]+\)[[:space:]]*$//' \
+                | tr -d '\n' > "$work_dir/title"
+              git log -1 --format=%b "$sha" > "$work_dir/body"
+            fi
+          }
+
+          # --- Where the walk starts -------------------------------------
+          tag_exists "$FLOOR_TAG" || { echo "::error::floor tag $FLOOR_TAG is missing"; exit 1; }
+          start_tag="$FLOOR_TAG"
+          start_sha="$(git rev-parse "$start_tag^{commit}")"
+          start_version="${start_tag#v}"
+          echo "Walking main after $start_tag ($start_sha)"
+
+          # --- Version-bump commits, oldest first --------------------------
+          : > "$work_dir/bumps"
+          for sha in $(git rev-list --first-parent --reverse "$start_sha..HEAD" -- "$PLUGIN_JSON"); do
+            version="$(version_at "$sha")"
+            [ -n "$version" ] || continue
+            [ "$version" != "$(version_at "$sha^")" ] || continue
+            if ! printf '%s' "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::$sha sets an unexpected version '$version'"
+              exit 1
+            fi
+            # Only versions above the start, and only the first commit that
+            # set each version (a later revert-and-reapply is not a release).
+            [ "$(printf '%s\n%s\n' "$start_version" "$version" | highest_of)" = "$version" ] || continue
+            [ "$version" != "$start_version" ] || continue
+            awk -v v="$version" '$2 == v { found = 1 } END { exit !found }' "$work_dir/bumps" && continue
+            echo "$sha $version" >> "$work_dir/bumps"
+          done
+
+          if [ ! -s "$work_dir/bumps" ]; then
+            echo "No version bumps after $start_tag; nothing to do."
+            exit 0
+          fi
+
+          # The one version that may be marked Latest: the highest across
+          # every existing tag and every version found above.
+          latest_version="$( {
+            git tag -l 'v*' | sed -nE 's/^v([0-9]+\.[0-9]+\.[0-9]+)$/\1/p'
+            cut -d' ' -f2 "$work_dir/bumps"
+          } | highest_of)"
+          echo "Latest will be v$latest_version"
+
+          # --- Create what is missing --------------------------------------
+          # The list is read on fd 3 so no command in the loop can eat it from stdin.
+          while read -r sha version <&3; do
+            tag="v$version"
+            if tag_exists "$tag" && has_release "$tag"; then
+              echo "$tag: tag and release exist; skipping"
+              continue
+            fi
+
+            load_pr "$sha"
+
+            if tag_exists "$tag"; then
+              echo "$tag: tag exists; creating the release only"
+            else
+              number="$(cat "$work_dir/number")"
+              {
+                printf '%s: %s' "$tag" "$(cat "$work_dir/title")"
+                if [ -n "$number" ]; then printf ' (#%s)' "$number"; fi
+                printf '\n'
+              } > "$work_dir/tag_message"
+              git -c user.name="$BOT_NAME" -c user.email="$BOT_EMAIL" \
+                tag -a "$tag" -F "$work_dir/tag_message" "$sha"
+              git push origin "refs/tags/$tag"
+              echo "$tag: tagged $sha and pushed"
+            fi
+
+            if has_release "$tag"; then
+              echo "$tag: release exists"
+              continue
+            fi
+            if [ "$version" = "$latest_version" ]; then latest=true; else latest=false; fi
+            gh release create "$tag" --repo "$REPO" --verify-tag \
+              --notes-file "$work_dir/body" --latest="$latest"
+            echo "$tag" >> "$work_dir/released"
+            echo "$tag: release created (latest=$latest)"
+          done 3< "$work_dir/bumps"
