@@ -1006,6 +1006,12 @@ REPO_CHANGES = {
                               "env -i -u HOME GIT_WORK_TREE=/tmp/repoC git push --" + "force"),
     "git-dir-env-command-merge": (MERGE + "--squash", "env GIT_DIR=/tmp/repoB/.git " + MERGE + "--squash",
                                   "env GIT_DIR=/tmp/repoC/.git " + MERGE + "--squash"),
+    "git-dir-wrapper-env": ("git push --" + "force", "nice env GIT_DIR=/tmp/repoB/.git git push --" + "force",
+                            "nice env GIT_DIR=/tmp/repoC/.git git push --" + "force"),
+    "work-tree-env-split-string": ("git push --" + "force", "env -S 'GIT_WORK_TREE=/tmp/repoB' git push --" + "force",
+                                   "env -S 'GIT_WORK_TREE=/tmp/repoC' git push --" + "force"),
+    "dash-c-after-wrapper": ("git push --" + "force", "timeout 60 git -C /tmp/repoB push --" + "force",
+                             "timeout 60 git -C /tmp/repoC push --" + "force"),
     "set-default": (MERGE + "--squash", "gh repo set-default o/b && " + MERGE + "--squash",
                     "gh repo set-default o/c && " + MERGE + "--squash"),
     "set-default-semicolon": (MERGE + "--squash", "gh repo set-default o/b; " + MERGE + "--squash",
@@ -1094,6 +1100,12 @@ GH_REPO_PREFIXES = {
     "env-command": (MERGE + "--squash", "env GH_REPO=o/b " + MERGE + "--squash", "env GH_REPO=o/c " + MERGE + "--squash"),
     "env-options": (MERGE + "5", "env -i -u HOME X=1 GH_REPO=o/b " + MERGE + "5",
                     "env -i -u HOME X=1 GH_REPO=o/c " + MERGE + "5"),
+    "wrapper-env": (MERGE + "--squash", "nice env GH_REPO=o/b " + MERGE + "--squash",
+                    "nice env GH_REPO=o/c " + MERGE + "--squash"),
+    "wrapper-with-options-env": (MERGE + "5", "nice -n 5 env GH_REPO=o/b " + MERGE + "5",
+                                 "nice -n 5 env GH_REPO=o/c " + MERGE + "5"),
+    "env-split-string": (MERGE + "5", "env -S 'GH_REPO=o/b' " + MERGE + "5", "env -S 'GH_REPO=o/c' " + MERGE + "5"),
+    "env-split-whole-command": (MERGE + "5", "env -S 'GH_REPO=o/b " + MERGE + "5'", "env -S 'GH_REPO=o/c " + MERGE + "5'"),
 }
 
 
@@ -1121,7 +1133,10 @@ class TestAGhRepoPrefixIsARepoRedirect:
         MERGE + '5 --body "GH_REPO=o/b gh notes"',
         "echo env GH_REPO=o/b; " + MERGE + "5",
         "env -u GH_REPO " + MERGE + "5",
-    ], ids=["echoed", "not-exported", "in-a-body", "env-echoed", "env-unset"])
+        "GH_REPO=o/b env -u GH_REPO " + MERGE + "5",
+        "GH_REPO=o/b env -i " + MERGE + "5",
+    ], ids=["echoed", "not-exported", "in-a-body", "env-echoed", "env-unset", "prefix-then-env-unset",
+            "prefix-then-env-cleared"])
     def test_a_gh_repo_that_is_not_a_prefix_binds_nothing(self, command):
         ctx = _mint_styled(command, APPROVAL_STYLES["inline"])
         assert _runs(ctx, command)

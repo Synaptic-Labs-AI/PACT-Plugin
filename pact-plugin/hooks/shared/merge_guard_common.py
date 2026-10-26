@@ -2326,18 +2326,104 @@ PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
 }
 
 
-# `env` with its options (`-i`, `-u NAME`, `--`): the assignments after it reach the
-# command env runs, like a prefix.
-_ENV_COMMAND = r"(?:env(?:[ \t]+(?:-u[ \t]+\S+|--unset[ \t]+\S+|-\S*))*[ \t]+)"
 # The variables gh reads its target from: the repository, and the host it is on.
 _GH_TARGET_VARIABLES = ("GH_REPO", "GH_HOST")
-_GH_TARGET_PREFIX_RES = {
-    name: re.compile(
-        r"(?:^|[;&|(\n])[ \t]*(?:[A-Za-z_]\w*=\S*[ \t]+)*?(?:(?:command[ \t]+)?" + _ENV_COMMAND
-        + r"(?:[A-Za-z_]\w*=\S*[ \t]+)*?)?" + name + r"=([^\s;&|]+)[ \t]"
-    )
-    for name in _GH_TARGET_VARIABLES
-}
+
+
+def _unmasked_legs(command: str) -> list[str]:
+    """`command`'s legs split at unquoted `;`, `&`, `|`, parentheses and newlines, with
+    their quoted text left as written."""
+    legs, start, i, quote = [], 0, 0, ""
+    while i < len(command):
+        ch = command[i]
+        if quote:
+            if ch == "\\" and quote == '"':
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch == "\\":
+            i += 2
+            continue
+        elif ch in "'\"":
+            quote = ch
+        elif ch in ";&|()\n":
+            legs.append(command[start:i])
+            start = i + 1
+        i += 1
+    legs.append(command[start:])
+    return [leg for leg in legs if leg.strip()]
+
+
+def _assignments_reaching_command(leg: str) -> "tuple[dict[str, str], list[str]]":
+    """The variables a leg's command receives by assignment, and that command's words:
+    `NAME=v cmd`, also through `env` (its `-i`, `-u NAME` and `--`, and `-S '…'` read as
+    the words it splits into) and through the exec wrappers the classifier walks past
+    (`nice`, `timeout 60`, `command`, …). A leg with no command after its assignments
+    passes nothing on. Unbalanced quoting reads no assignments."""
+    try:
+        words = shlex.split(leg.lstrip("({ \t"))
+    except ValueError:
+        return {}, leg.split()
+    found: dict[str, str] = {}
+    command = _walk_assignments(words, found, 0)
+    return (found if command else {}), command
+
+
+def _walk_assignments(words: list[str], found: dict[str, str], depth: int) -> list[str]:
+    """Record the assignments before `words`' command into `found` and return the
+    command's words, stepping through env and the modeled exec wrappers."""
+    i = 0
+    while i < len(words) and re.match(r"^[A-Za-z_]\w*=", words[i]):
+        name, value = words[i].split("=", 1)
+        found[name] = value
+        i += 1
+    words = words[i:]
+    if not words or depth >= _MAX_WRAPPER_DEPTH:
+        return words
+    head = os.path.basename(words[0])
+    if head == "env":
+        j = 1
+        while j < len(words):
+            word = words[j]
+            split, rest = None, []
+            if word in ("-S", "--split-string") and j + 1 < len(words):
+                split, rest = words[j + 1], words[j + 2:]
+            elif word.startswith("--split-string="):
+                split, rest = word.split("=", 1)[1], words[j + 1:]
+            elif word.startswith("-S") and len(word) > 2:
+                split, rest = word[2:], words[j + 1:]
+            if split is not None:
+                try:
+                    words = words[:j] + shlex.split(split) + rest
+                except ValueError:
+                    return words[j:]
+                continue
+            if word == "--":
+                j += 1
+                break
+            if word in ("-i", "--ignore-environment"):
+                found.clear()
+            elif word in ("-u", "--unset") and j + 1 < len(words):
+                found.pop(words[j + 1], None)
+                j += 1
+            elif word.startswith(("-u", "--unset=")) and len(word) > 2:
+                found.pop(word.split("=", 1)[1] if word.startswith("--") else word[2:], None)
+            elif word in ("-C", "--chdir"):
+                j += 1
+            elif not word.startswith("-"):
+                break
+            j += 1
+        return _walk_assignments(words[j:], found, depth + 1)
+    if head in _WRAPPER_GRAMMAR:
+        nested = _wrapper_nested_command(shlex.join(words), head)
+        if nested is None:
+            return words
+        try:
+            return _walk_assignments(shlex.split(nested), found, depth + 1)
+        except ValueError:
+            return words
+    return words
 
 
 def extract_privileged_flags(command: str, op_type: str | None) -> list[str]:
@@ -2500,10 +2586,12 @@ def extract_privileged_flags(command: str, op_type: str | None) -> list[str]:
     # is the same redirect. A GH_HOST prefix moves it to another host, so it binds
     # by its value too.
     if op_type in ("merge", "close"):
-        for m in _GH_TARGET_PREFIX_RES["GH_REPO"].finditer(command):
-            found.add("--repo=" + m.group(1))
-        for m in _GH_TARGET_PREFIX_RES["GH_HOST"].finditer(command):
-            found.add("GH_HOST=" + m.group(1))
+        for leg in _unmasked_legs(command):
+            assigned, _ = _assignments_reaching_command(leg)
+            if "GH_REPO" in assigned:
+                found.add("--repo=" + assigned["GH_REPO"])
+            if "GH_HOST" in assigned:
+                found.add("GH_HOST=" + assigned["GH_HOST"])
 
     return sorted(found)
 
@@ -10091,26 +10179,12 @@ _TARGET_CHANGING_LEG_RE = re.compile(
 
 def _leg_names_another_repo(leg: str) -> bool:
     """Whether a git leg runs in a repository it names itself: `git -C <dir>`,
-    `--git-dir`, `--work-tree`, or a `GIT_DIR=` / `GIT_WORK_TREE=` assignment, as a
-    prefix or after `env`."""
-    try:
-        words = shlex.split(leg.lstrip("({ \t"))
-    except ValueError:
-        return False
-    in_env = False
-    while words:
-        word = words[0]
-        if re.match(r"^[A-Za-z_]\w*=", word):
-            if word.split("=", 1)[0] in ("GIT_DIR", "GIT_WORK_TREE"):
-                return True
-        elif word in ("command", "env") and not in_env:
-            in_env = word == "env"
-        elif in_env and word in ("-u", "--unset"):
-            words = words[1:]
-        elif not (in_env and word.startswith("-")):
-            break
-        words = words[1:]
-    if words[:1] != ["git"]:
+    `--git-dir`, `--work-tree`, or a `GIT_DIR=` / `GIT_WORK_TREE=` assignment that
+    reaches the command (as a prefix, through env, or past an exec wrapper)."""
+    assigned, words = _assignments_reaching_command(leg)
+    if "GIT_DIR" in assigned or "GIT_WORK_TREE" in assigned:
+        return True
+    if not words or os.path.basename(words[0]) != "git":
         return False
     for word in words[1:]:
         if not word.startswith("-"):
