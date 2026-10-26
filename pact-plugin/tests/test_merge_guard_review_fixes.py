@@ -3252,3 +3252,75 @@ def test_an_eval_of_a_variable_last_assigned_a_view_is_allowed(cmd):
 def test_an_eval_whose_value_may_be_a_merge_is_refused_then_runs(cmd, style):
     assert is_dangerous_command(cmd) is True
     assert _runs_after_approval(cmd, style)
+
+
+# A heredoc whose delimiter has no quoting has the shell run every `$(…)` and backtick
+# span in its body before the program reads it, at the body's own level whatever quotes
+# the prose holds. A quoted delimiter (`'EOF'`, `"EOF"`, `\EOF`, `E'O'F`) expands nothing.
+_HD_PUSH = "git push " + "--force origin main"
+_HD_MERGE = "gh pr " + "merge 5 --squash"
+_HD_BT = "`"
+
+UNQUOTED_HEREDOC_RUNS = [
+    ("incident", "python3 - <<EOF\nprint('note: run " + _HD_BT + "echo <(" + _HD_PUSH + ")" + _HD_BT
+     + " later')\nEOF"),
+    ("tab-stripping delimiter", "python3 - <<-EOF\n\tprint('x " + _HD_BT + _HD_PUSH + _HD_BT + "')\n\tEOF"),
+    ("dollar-paren", "python3 - <<EOF\nprint('$(" + _HD_PUSH + ")')\nEOF"),
+    ("into a file", "cat <<EOF > notes.md\nthen run " + _HD_BT + _HD_MERGE + _HD_BT + "\nEOF"),
+    ("unmatched apostrophe before the span", "python3 - <<EOF\nprint(\"don't run " + _HD_BT + _HD_PUSH
+     + _HD_BT + " yet\")\nEOF"),
+    ("lone apostrophe in prose", "cat <<EOF > notes.md\nit's fine: $(" + _HD_MERGE + ")\nEOF"),
+    ("process substitution in the span", "cat <<EOF > notes.md\n$(cat <(" + _HD_PUSH + "))\nEOF"),
+    ("eval in the span", "cat <<EOF > notes.md\nsee $(eval '" + _HD_PUSH + "') here\nEOF"),
+    ("bash -c in the span", "cat <<EOF > notes.md\nsee " + _HD_BT + "bash -c '" + _HD_PUSH + "'" + _HD_BT
+     + " here\nEOF"),
+]
+
+QUOTED_OR_INERT_HEREDOC = [
+    ("single-quoted delimiter", "python3 - <<'EOF'\nprint('note: run " + _HD_BT + "echo <(" + _HD_PUSH + ")"
+     + _HD_BT + " later')\nEOF"),
+    ("double-quoted delimiter", 'python3 - <<"EOF"\nprint(\'note: run ' + _HD_BT + "echo <(" + _HD_PUSH + ")"
+     + _HD_BT + " later')\nEOF"),
+    ("backslash delimiter", "python3 - <<\\EOF\nprint('note: run " + _HD_BT + "echo <(" + _HD_PUSH + ")"
+     + _HD_BT + " later')\nEOF"),
+    ("partly quoted delimiter", "python3 - <<E'O'F\nprint('note: run " + _HD_BT + "echo <(" + _HD_PUSH + ")"
+     + _HD_BT + " later')\nEOF"),
+    ("escaped backtick", "cat <<EOF > notes.md\nrun \\" + _HD_BT + _HD_PUSH + "\\" + _HD_BT + " later\nEOF"),
+    ("escaped dollar", "cat <<EOF > notes.md\nrun \\$(" + _HD_PUSH + ") later\nEOF"),
+    ("prose only", "cat <<EOF > notes.md\nnever run " + _HD_PUSH + " by hand\nEOF"),
+    ("a variable", "cat <<EOF > notes.md\nbranch $BRANCH\nEOF"),
+    ("a read in the span", "cat <<EOF > notes.md\nhead $(git rev-parse HEAD)\nEOF"),
+    ("an unclosed span", "cat <<EOF > notes.md\nrun $(" + _HD_PUSH + " later\nEOF"),
+]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", UNQUOTED_HEREDOC_RUNS, ids=[r[0] for r in UNQUOTED_HEREDOC_RUNS])
+def test_a_guarded_command_an_unquoted_heredoc_body_runs_is_refused_then_runs(label, cmd, style):
+    assert is_dangerous_command(cmd) is True
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("label,cmd", QUOTED_OR_INERT_HEREDOC, ids=[r[0] for r in QUOTED_OR_INERT_HEREDOC])
+def test_a_heredoc_body_the_shell_does_not_run_stays_allowed(label, cmd):
+    assert is_dangerous_command(cmd) is False
+
+
+@pytest.mark.parametrize("label,cmd,runs", [
+    *[(label, cmd, True) for label, cmd in UNQUOTED_HEREDOC_RUNS],
+    *[(label, cmd, False) for label, cmd in QUOTED_OR_INERT_HEREDOC],
+], ids=[r[0] for r in UNQUOTED_HEREDOC_RUNS + QUOTED_OR_INERT_HEREDOC])
+def test_the_rows_match_what_bash_runs(label, cmd, runs, tmp_path):
+    """Ground truth: each row run by real bash with every guarded command replaced by a
+    `touch` of a marker and every program by `cat`, in an empty directory. Nothing
+    guarded is ever executed."""
+    import subprocess
+
+    marker = tmp_path / "ran"
+    harmless = (cmd.replace(_HD_PUSH, f"touch {marker}").replace(_HD_MERGE, f"touch {marker}")
+                .replace("python3 - ", "cat ").replace("> notes.md", "> /dev/null")
+                .replace("git rev-parse HEAD", "echo HEAD"))
+    assert "git push" not in harmless and "gh pr" not in harmless
+    subprocess.run(["bash", "-c", harmless], cwd=tmp_path, capture_output=True, timeout=20,
+                   env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)})
+    assert marker.exists() is runs

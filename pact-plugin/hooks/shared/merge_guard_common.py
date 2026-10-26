@@ -5494,6 +5494,37 @@ _HEREDOC_BODY_RE = re.compile(
 )
 
 
+def _heredoc_body_substitutions(opener: str, body: str) -> list[str]:
+    """The command substitutions the shell runs in a heredoc body: each `$(…)` and
+    backtick span, as written, when the delimiter word in `opener` (the `<<` text up to
+    the end of the word) has no quoting at all; none when it is quoted in any way
+    (`<<'EOF'`, `<<"EOF"`, `<<\\EOF`, `<<E'O'F`), since the shell then expands nothing.
+    At the body's own level quotes are literal characters and do not stop expansion, so
+    the spans are found quote-blind; only a backslash escapes `$` or a backtick there."""
+    if any(ch in opener for ch in "'\"\\"):
+        return []
+    spans: list[str] = []
+    i, n = 0, len(body)
+    while i < n:
+        ch = body[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if body.startswith("$(", i):
+            span, end = _extract_dollar_paren(body, i)
+        elif ch == "`":
+            span, end = _extract_backtick(body, i)
+        else:
+            i += 1
+            continue
+        if span is None:
+            # The shell refuses an unclosed span and runs nothing after it.
+            break
+        spans.append(span)
+        i = end
+    return spans
+
+
 def _excise_heredoc_bodies_for_routing_scan(command: str) -> str:
     if "<<" not in command:          # cheap short-circuit (perf: common case)
         return command
@@ -5502,7 +5533,10 @@ def _excise_heredoc_bodies_for_routing_scan(command: str) -> str:
         preceding = command[: m.start()].rstrip()
         if _shell_reads_stdin(preceding):
             return m.group(0)        # shell-fed heredoc: body executes — keep
-        return m.group(1) + "HEREDOC_BODY_EXCISED\n" + m.group(3)
+        opener = m.group(1)
+        runs = _heredoc_body_substitutions(opener[:opener.index(m.group(2)) + len(m.group(2)) + 1],
+                                           m.group(0)[len(opener):-len(m.group(3))])
+        return opener + "HEREDOC_BODY_EXCISED\n" + "".join(span + "\n" for span in runs) + m.group(3)
 
     return _HEREDOC_BODY_RE.sub(_repl, command)
 
@@ -5999,8 +6033,13 @@ def _strip_non_executable_content(command: str) -> str:
         if routed:
             return match.group(0)  # Preserve — this heredoc's output runs in a shell
         # The rest of the opening line is shell (`cat <<EOF | gh pr merge 5 …`): only
-        # the body is data.
-        return "<<HEREDOC_STRIPPED" + match.group("tail")
+        # the body is data, except the substitutions an unquoted body has the shell
+        # run, each kept on a line of its own.
+        whole = match.group(0)
+        body_start = whole.index("\n") + 1
+        runs = _heredoc_body_substitutions(whole[:match.start("tail") - match.start()],
+                                           whole[body_start:whole.rindex("\n") + 1])
+        return "<<HEREDOC_STRIPPED" + match.group("tail") + "".join("\n" + span for span in runs)
 
     result = re.sub(
         r"<<-?\s*['\"]?(\w+)['\"]?(?P<tail>[^\n]*)\n.*?\n\t*\1\b",
