@@ -48,9 +48,15 @@ from shared.claude_md_manager import (
 )
 from shared.failure_cause import failure_cause
 from shared.handoff_schema import resolve_handoff_field
-from shared.pact_context import _build_session_path, get_session_dir, project_slug
+from shared.pact_context import (
+    LEAD_ADDRESS_LOCAL,
+    LEAD_ADDRESSES,
+    _build_session_path,
+    get_session_dir,
+    project_slug,
+)
 from shared.paths import get_claude_config_dir
-from shared.session_state import is_safe_path_component
+from shared.session_state import is_safe_path_component, is_safe_plugin_root
 from shared.stale_session import recorded_session_id, session_block_rows
 from shared.task_utils import iter_team_task_jsons
 from shared.session_journal import (
@@ -209,8 +215,10 @@ def _session_block_text(
         session_dir_line = f"- Session dir: `{cleaned_session_dir}`\n"
 
     # Build plugin root line (no abbreviation — needs to be usable as-is in Bash)
+    # The model pastes this value into double-quoted shell commands, so an
+    # unsafe one (is_safe_plugin_root) drops the line, as an empty one does.
     plugin_root_line = ""
-    if plugin_root:
+    if is_safe_plugin_root(plugin_root):
         cleaned_plugin_root = _sanitize_prompt_field(
             str(plugin_root), _REFRESH_PATH_TRUNCATION_LIMIT
         )
@@ -714,28 +722,116 @@ def _extract_prev_session_dir(project_dir: str) -> str | None:
     return None
 
 
+# Team names longer than this are not substituted. Real ones are
+# session-<id8> (16), a full session UUID (36) or pact-<id8>.
+TEAM_NAME_MAX_LENGTH = 128
+
+
+def _safe_team_name(value: object) -> str:
+    """The team name if it is a safe single path component that is not all
+    dashes and at most TEAM_NAME_MAX_LENGTH characters, else ""."""
+    if (
+        isinstance(value, str)
+        and is_safe_path_component(value)
+        and value.strip("-")
+        and len(value) <= TEAM_NAME_MAX_LENGTH
+    ):
+        return value
+    return ""
+
+
+def _safe_plugin_root(value: object) -> str:
+    """The plugin root if it passes is_safe_plugin_root, else ""."""
+    return value if is_safe_plugin_root(value) else ""
+
+
+def _is_set(value: object) -> bool:
+    """True when a placeholder value was supplied at all: not None and not
+    an empty string. Separates "not set" from "set but failed the check" in
+    the unavailable wording of format_session_substitutions."""
+    return value is not None and value != ""
+
+
 def format_session_substitutions(
-    team_name: str, session_dir: str, plugin_root: str
+    team_name: str,
+    session_dir: str,
+    plugin_root: str,
+    lead_address: str,
 ) -> str:
     """The sentence telling the orchestrator which values replace the
-    {team_name}, {session_dir} and {plugin_root} placeholders in commands.
+    {team_name}, {session_dir}, {plugin_root} and {lead_address} placeholders
+    in commands, spawn prompts and task text.
 
-    An empty session_dir (no session id on stdin) is named as unavailable
-    rather than substituted.
+    Every value is checked before it reaches this LLM-facing sentence:
+
+    - ``team_name`` must be a safe single path component
+      (``is_safe_path_component``), not all dashes, and at most
+      TEAM_NAME_MAX_LENGTH characters; ``plugin_root`` must pass
+      ``is_safe_plugin_root`` (a positive allowlist, because the model pastes
+      it into double-quoted shell commands). A value that fails is named as
+      unavailable rather than substituted, and the sentence says why: "not
+      set" for an empty value, "not a safe ..." for a value that failed the
+      check. An empty ``session_dir`` (no session id or project dir) is named
+      as not set the same way.
+    - An unavailable ``plugin_root`` points the model at bootstrap.md's
+      fallbacks (CLAUDE.md, then pact-session-context.json, then the
+      Last-resort fallback for {plugin_root} symlink traversal), which
+      resolve to safe values. The sentence carries no quote characters, so
+      it passes the same marker checks as a substituted value. An unavailable team name or session dir has no
+      safe fallback, so commands that depend on it wait for a clean start.
+    - ``lead_address`` is required (no default: a silent ``team-lead``
+      default would misroute a cloud session, #1666 item 1) and allowlisted.
+      Any value outside LEAD_ADDRESSES (a non-str one included, checked first
+      so an unhashable value cannot raise) is replaced by ``team-lead``, so
+      only one of two fixed strings reaches the sentence.
     """
-    if session_dir:
-        return (
-            f'Session placeholder variables (substitute before running commands): '
+    if not isinstance(lead_address, str) or lead_address not in LEAD_ADDRESSES:
+        lead_address = LEAD_ADDRESS_LOCAL
+    team_was_set = _is_set(team_name)
+    plugin_root_was_set = _is_set(plugin_root)
+    team_name = _safe_team_name(team_name)
+    plugin_root = _safe_plugin_root(plugin_root)
+
+    if team_name:
+        team_sentence = (
             f'Use the name `{team_name}` wherever {{team_name}} appears in commands. '
+        )
+    else:
+        reason = 'not a safe name' if team_was_set else 'not set'
+        team_sentence = (
+            f'Team name unavailable ({reason}) — do not run commands that '
+            'depend on {team_name} until next clean start. '
+        )
+    if session_dir:
+        session_sentence = (
             f'Use `{session_dir}` wherever {{session_dir}} appears in commands. '
+        )
+    else:
+        session_sentence = (
+            'Session dir unavailable (not set: no session id or project dir) — '
+            'do not run commands that depend on {session_dir} until next clean start. '
+        )
+    if plugin_root:
+        plugin_sentence = (
             f'Use `{plugin_root}` wherever {{plugin_root}} appears in commands.'
         )
+    else:
+        reason = 'not a safe absolute path' if plugin_root_was_set else 'not set'
+        plugin_sentence = (
+            f'Plugin root unavailable ({reason}) — resolve {{plugin_root}} '
+            'through the fallbacks in bootstrap.md, ending with its '
+            'Last-resort fallback for {plugin_root}.'
+        )
+    lead_sentence = (
+        f' Use `{lead_address}` wherever {{lead_address}} appears in spawn '
+        f'prompts and task text.'
+    )
     return (
-        f'Session placeholder variables (substitute before running commands): '
-        f'Use the name `{team_name}` wherever {{team_name}} appears in commands. '
-        f'Session dir unavailable (session_id missing from stdin) — '
-        f'do not run commands that depend on {{session_dir}} until next clean start. '
-        f'Use `{plugin_root}` wherever {{plugin_root}} appears in commands.'
+        'Session placeholder variables (substitute before running commands): '
+        + team_sentence
+        + session_sentence
+        + plugin_sentence
+        + lead_sentence
     )
 
 

@@ -475,7 +475,9 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
             except OSError:
                 pass
         parts = [
-            format_session_substitutions(team, session_dir, plugin_root)
+            format_session_substitutions(
+                team, session_dir, plugin_root, pact_context.get_lead_address()
+            )
             + " These replace any session values earlier in this conversation."
         ]
         if claim:

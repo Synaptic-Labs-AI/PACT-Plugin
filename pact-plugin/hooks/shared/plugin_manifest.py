@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Optional
 
 _UNSET = "<unset>"
+_UNSAFE = "<unsafe>"
 _UNKNOWN_META = "unknown"
 _PREFIX = "PACT plugin: "
 
@@ -54,8 +55,14 @@ def _resolve_plugin_root() -> Optional[str]:
     cache is empty when the banner is emitted. Direct env read is the
     correct source at this ordering; a future "SSOT cleanup" refactor
     routing through pact_context would silently break the banner.
+
+    The value is NOT stripped: format_session_substitutions judges the raw
+    env value, so the banner must too, or a root with surrounding
+    whitespace ("/x/\\n") shows as "/x/" here and as "not a safe absolute
+    path" in the substitution sentence (#1671 security-rev, task #82).
+    A whitespace-only value is therefore "<unsafe>", not "<unset>".
     """
-    root = os.environ.get("CLAUDE_PLUGIN_ROOT", "").strip()
+    root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
     return root or None
 
 
@@ -79,6 +86,25 @@ def _read_manifest(plugin_root: str) -> Optional[dict]:
     return data
 
 
+def _root_display(plugin_root: Optional[str]) -> str:
+    """The root as shown in the banner: "<unset>" when there is none, the
+    root itself when it passes is_safe_plugin_root, else "<unsafe>".
+
+    The banner reaches additionalContext, so a root the allowlist rejects
+    (shell metacharacters, lookalike letters) must not be echoed raw
+    (#1671 security-rev, task #72). The import is local so a failure in the
+    heavier session_state import chain degrades to "<unsafe>" (fail closed
+    for the value, fail open for the banner) instead of breaking the module.
+    """
+    if not plugin_root:
+        return _UNSET
+    try:
+        from shared.session_state import is_safe_plugin_root
+    except Exception:  # noqa: BLE001 — fail closed on the displayed value
+        return _UNSAFE
+    return _sanitize(plugin_root) if is_safe_plugin_root(plugin_root) else _UNSAFE
+
+
 def format_plugin_banner() -> str:
     """Return a single-line diagnostic banner for additionalContext.
 
@@ -91,6 +117,9 @@ def format_plugin_banner() -> str:
     Fail-open (any read/parse/schema failure):
         "PACT plugin: unknown (root: {plugin_root_or_<unset>})"
 
+    A root that fails is_safe_plugin_root gives the fail-open form with
+    "<unsafe>"; the manifest is not read from it.
+
     The outer blanket try/except guarantees totality against any future
     regression in the helpers — SessionStart is a hot path, and an
     uncaught exception here would break additionalContext delivery for
@@ -102,9 +131,13 @@ def format_plugin_banner() -> str:
         # contract applies to ALL banner inputs, not just the plugin-authored
         # name/version. CLAUDE_PLUGIN_ROOT is Claude-Code-managed, but routing
         # the env var through _sanitize keeps the invariant total.
-        root_display = _sanitize(plugin_root) if plugin_root else _UNSET
+        root_display = _root_display(plugin_root)
 
-        if plugin_root is None:
+        # An unset or unsafe root is never used as a path: a relative value
+        # such as "   " would read a manifest planted under the cwd
+        # (#1671 security-rev, task #86). root_display is <unsafe> also when
+        # the session_state import fails, so that case fails closed too.
+        if root_display in (_UNSET, _UNSAFE):
             return f"{_PREFIX}{_UNKNOWN_META} (root: {root_display})"
 
         data = _read_manifest(plugin_root)

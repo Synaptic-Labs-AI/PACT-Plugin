@@ -1757,6 +1757,7 @@ class TestWriteContextIntegration:
             started_at=None,  # a startup records now; only a compaction keeps the value on disk
             process_key=ANY,
             harness=ANY,
+            lead_address="team-lead",  # local env (conftest scrub)
         )
 
     def test_missing_session_id_falls_back_to_unknown_and_warns(self, monkeypatch, tmp_path, capsys):
@@ -3143,6 +3144,7 @@ class TestPluginRootEnvWiring:
             started_at=None,
             process_key=ANY,
             harness=ANY,
+            lead_address="team-lead",  # local env (conftest scrub)
         )
 
     def test_plugin_root_env_flows_to_update_session_info(
