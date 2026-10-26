@@ -1537,6 +1537,75 @@ class TestAGitOpOnANamedTargetInAnotherRepoNeedsItsOwnApproval:
     def test_a_plain_approval_still_covers_a_branch_change(self, plain, command):
         assert _runs(_mint_styled(plain, APPROVAL_STYLES["inline"]), command)
 
+_FORCE_F = "git push -" + "f"
+_FORCE_ORIGIN = _FORCE + " origin"
+PUSH_ROUTING_CHANGES = {
+    "branch-u": ("git branch -u upstream/x", "git branch -u fork/x"),
+    "set-upstream-to": ("git branch --set-upstream-to=upstream/x", "git branch --set-upstream-to=fork/x"),
+    "set-upstream-to-space": ("git branch --set-upstream-to upstream/x", "git branch --set-upstream-to fork/x"),
+    "unset-upstream": ("git branch --unset-upstream", "git branch --unset-upstream feat/y"),
+    "config-branch-remote": ("git config branch.feat/x.remote upstream", "git config branch.feat/x.remote fork"),
+    "config-set-branch-remote": ("git config set branch.feat/x.remote upstream", "git config set branch.feat/x.remote fork"),
+    "config-unset-branch-remote": ("git config --unset branch.feat/x.remote", "git config --unset branch.feat/y.remote"),
+    "config-push-remote": ("git config branch.feat/x.pushRemote upstream", "git config branch.feat/x.pushRemote fork"),
+    "config-push-remote-case": ("git config Branch.feat/x.PUSHREMOTE upstream", "git config Branch.feat/x.PUSHREMOTE fork"),
+    "config-push-default-remote": ("git config remote.pushDefault upstream", "git config remote.pushDefault fork"),
+    "config-global-push-default-remote": ("git config --global remote.pushdefault upstream",
+                                          "git config --global remote.pushdefault fork"),
+    "config-remove-branch-section": ("git config remove-section branch.feat/x", "git config remove-section branch.feat/y"),
+}
+IMPLICIT_PUSHES = {"bare": _FORCE, "short": _FORCE_F, "remote": _FORCE_ORIGIN}
+
+
+def _routing_rows(changes):
+    return {
+        "%s-%s" % (name, push): (cmd, "%s && %s" % (leg, cmd), "%s && %s" % (other, cmd))
+        for name, (leg, other) in changes.items()
+        for push, cmd in IMPLICIT_PUSHES.items()
+    }
+
+
+PUSH_ROUTING_ROWS = _routing_rows(PUSH_ROUTING_CHANGES)
+
+
+class TestAnUpstreamOrPushRoutingChangeMovesAPushNamingNoRef:
+    """A force push that names no ref goes where the branch's upstream and push
+    settings send it: a leg before it that changes them moves it. A plain approval does
+    not cover it, and its own approval runs that command only. A read of the settings,
+    a push naming its ref, and gh's own merge are not moved."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("plain,moved,other", PUSH_ROUTING_ROWS.values(), ids=PUSH_ROUTING_ROWS.keys())
+    def test_a_plain_approval_does_not_cover_it(self, plain, moved, other, style):
+        ctx = _mint_styled(plain, style)
+        assert _runs(ctx, plain)
+        assert not _runs(ctx, moved)
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("plain,moved,other", PUSH_ROUTING_ROWS.values(), ids=PUSH_ROUTING_ROWS.keys())
+    def test_its_own_approval_runs_it_and_no_other(self, plain, moved, other, style):
+        ctx = _mint_styled(moved, style)
+        assert _runs(ctx, moved)
+        assert not _runs(ctx, other)
+
+    @pytest.mark.parametrize("plain,command", [
+        (_FORCE, "git config --get branch.feat/x.remote && " + _FORCE),
+        (_FORCE, "git config get remote.pushDefault && " + _FORCE),
+        (_FORCE, "git config branch.feat/x.pushRemote && " + _FORCE),
+        (_FORCE, "git config branch.feat/x.description wip && " + _FORCE),
+        (_FORCE, "git branch -vv && " + _FORCE),
+        (_FORCE, "git branch --track feat/y upstream/y && " + _FORCE),
+        (_PUSH_X, "git branch -u upstream/x && " + _PUSH_X),
+        (_PUSH_X, "git config branch.feat/x.remote upstream && " + _PUSH_X),
+        (MERGE + "--squash", "git branch -u upstream/x && " + MERGE + "--squash"),
+        (MERGE + "--squash", "git config remote.pushDefault upstream && " + MERGE + "--squash"),
+        (_NUMBERED, "git config branch.feat/x.remote upstream && " + _NUMBERED),
+    ], ids=["config-get", "config-get-subcommand", "config-read-key", "config-other-key", "branch-list", "branch-track",
+            "named-ref-push-branch-u", "named-ref-push-config", "gh-merge-branch-u", "gh-merge-config", "numbered-merge"])
+    def test_a_plain_approval_still_covers_it(self, plain, command):
+        assert _runs(_mint_styled(plain, APPROVAL_STYLES["inline"]), command)
+
+
 class TestANumberedOpInAnotherRepoRetiresOnThatReposState:
     """The approval of a numbered op run after a change of repository retires on the
     state of the PR in the repository it ran in: after one literal absolute `cd`

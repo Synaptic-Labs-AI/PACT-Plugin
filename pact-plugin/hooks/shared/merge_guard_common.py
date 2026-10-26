@@ -10329,7 +10329,7 @@ def _single_detectable_leg(command: str) -> str | None:
 _TARGET_CHANGING_LEG_RE = re.compile(
     r"^[({\s]*(?:[A-Za-z_]\w*=\S*\s+)*(?:command\s+)?"
     r"(?:git(?:\s+-[Cc]\s+\S+|\s+--\S+)*\s+(?:checkout|switch|remote\s+(?:set-url|add|rename)"
-    r"|config)\b"
+    r"|config|branch(?=[^\n]*\s(?:-u|--set-upstream-to|--unset-upstream)\b))\b"
     r"|gh\s+(?:pr\s+checkout|co|repo\s+set-default)\b"
     r"|cd\b|pushd\b|popd\b)"
 )
@@ -10352,13 +10352,23 @@ _GIT_CONFIG_REMOTE_KEY_RE = re.compile(
     r"(?i)^(?:remote\..+\.(?:url|pushurl)|url\..+\.(?:insteadof|pushinsteadof))$"
 )
 _GIT_CONFIG_REMOTE_SECTION_RE = re.compile(r"(?i)^(?:remote|url)(?:\.|$)")
+# The keys that pick the remote a push naming no ref goes to.
+_GIT_CONFIG_PUSH_ROUTING_KEY_RE = re.compile(
+    r"(?i)^(?:branch\..+\.(?:remote|pushremote)|remote\.pushdefault)$"
+)
+_GIT_CONFIG_PUSH_ROUTING_SECTION_RE = re.compile(r"(?i)^branch(?:\.|$)")
 
 
-def _git_config_changes_a_remote(leg: str) -> bool:
+def _git_config_changes_a_remote(
+    leg: str,
+    key_re: "re.Pattern[str]" = _GIT_CONFIG_REMOTE_KEY_RE,
+    section_re: "re.Pattern[str]" = _GIT_CONFIG_REMOTE_SECTION_RE,
+) -> bool:
     """Whether a `git config` leg may change where a remote points: it sets, unsets or
     replaces `remote.<name>.url`/`pushurl` or `url.<base>.insteadOf`/`pushInsteadOf`,
     renames or removes a `remote` or `url` section, or opens the file in an editor.
-    Reads (`get`, `list`, `--get…`, `-l`, the key alone) change nothing."""
+    Reads (`get`, `list`, `--get…`, `-l`, the key alone) change nothing. `key_re` and
+    `section_re` name other keys and sections to read the same way."""
     _, words = _assignments_reaching_command(leg.rstrip(" \t)};"))
     i = 1
     while i < len(words) and words[i].startswith("-"):
@@ -10383,10 +10393,10 @@ def _git_config_changes_a_remote(leg: str) -> bool:
     if mode in ("edit", "-e", "--edit"):
         return True
     if mode in ("rename-section", "remove-section", "--rename-section", "--remove-section"):
-        return any(_GIT_CONFIG_REMOTE_SECTION_RE.match(name) for name in names)
+        return any(section_re.match(name) for name in names)
     if mode is None and len(names) < 2:
         return False
-    return bool(names) and _GIT_CONFIG_REMOTE_KEY_RE.match(names[0]) is not None
+    return bool(names) and key_re.match(names[0]) is not None
 
 
 def _leg_names_another_repo(leg: str) -> bool:
@@ -10417,7 +10427,9 @@ def target_changes_before_guarded_leg(command: str, branch: bool = True) -> bool
     An op on an implicit target (`gh pr merge --squash`, `git push --force`) then acts
     on another branch or repo than the one the bare op would. With `branch` False a
     branch change does not count: a numbered op (`gh pr merge 5`) names its pull
-    request, so only a change of repository moves it."""
+    request, so only a change of repository moves it. Before a force push naming no ref,
+    `git branch -u`/`--set-upstream-to`/`--unset-upstream` or a `git config` of
+    `branch.<b>.remote`/`pushRemote` or `remote.pushDefault` also counts."""
     guarded = _single_destructive_leg(command) or _single_detectable_leg(command)
     if guarded is None:
         return False
@@ -10435,7 +10447,16 @@ def target_changes_before_guarded_leg(command: str, branch: bool = True) -> bool
         change = _TARGET_CHANGING_LEG_RE.match(leg)
         if not change or re.search(r"\scheckout\b.*\s--(?:\s|$)|\sset-default\b.*\s(?:-v|--view)\b", leg):
             continue
-        if change.group(0).endswith("config") and not _git_config_changes_a_remote(leg):
+        # An upstream or push-routing change moves only a force push that names no
+        # ref: it picks that push's remote. A push naming its ref, and gh, do not read it.
+        routes = change.group(0).endswith("branch") or (
+            change.group(0).endswith("config") and not _git_config_changes_a_remote(leg)
+        )
+        if routes and not (
+            (change.group(0).endswith("branch") or _git_config_changes_a_remote(
+                leg, _GIT_CONFIG_PUSH_ROUTING_KEY_RE, _GIT_CONFIG_PUSH_ROUTING_SECTION_RE))
+            and extract_command_context(guarded).get("force_push_implicit") is not None
+        ):
             continue
         if branch or not re.search(r"(?:checkout|switch|\bco)$", change.group(0)):
             return True
