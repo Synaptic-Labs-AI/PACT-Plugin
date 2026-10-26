@@ -45,6 +45,7 @@ from fixtures.role_frames import (
     captured_teammate_sessionstart,
     constructed_pretooluse_teammate_inprocess,
 )
+from fixtures.unreadable_path import replace_with_directory
 from test_pin_caps_gate import REAL_HOOK_ROWS, _pins  # noqa: E402 — sibling harness reuse
 
 HOOK = Path(__file__).resolve().parents[1] / "hooks" / "pin_caps_gate.py"
@@ -323,9 +324,7 @@ def _row_change(claude_md: Path, before, call, expected):
         # A DIRECTORY in the file's place: the gate's read raises a real
         # OSError, as a mode-000 file does for a non-root user, and unlike mode
         # bits it also fails when the suite runs as root.
-        if claude_md.is_file():
-            claude_md.unlink()
-        claude_md.mkdir(exist_ok=True)
+        replace_with_directory(claude_md)  # idempotent: runs once per frame
     else:
         claude_md.write_text(before, encoding="utf-8")
     tool, tool_input = call

@@ -369,7 +369,12 @@ class TestAppendEvent:
         assert result is False
 
     def test_fail_open_on_write_error(self, session_dir):
-        """P0: Returns False on write error, no exception raised."""
+        """P0: Returns False on write error, no exception raised.
+
+        The outer-except arm: the failure is raised by the session-dir mkdir,
+        before `_atomic_write` runs. The write-failure arm is
+        test_fail_open_when_the_journal_write_itself_fails below.
+        """
         from shared.session_journal import append_event, make_event
 
         event = make_event("test")
@@ -384,6 +389,24 @@ class TestAppendEvent:
         result = append_event(event)
         # Should return False, not raise
         assert result is False
+
+    def test_fail_open_when_the_journal_write_itself_fails(self, journal_file):
+        """P0: the write-failure arm. The session directory exists, so the
+        mkdir succeeds, and the JOURNAL FILE is a directory, so `os.open`
+        inside `_atomic_write` raises EISDIR and `_atomic_write` returns
+        False. append_event must pass that False on, not report success.
+
+        test_fail_open_on_write_error above fails earlier, at the mkdir, and so
+        lands in append_event's outer `except`; only this arm reaches the
+        `if not _atomic_write(...)` check. A directory, not mode bits, so it
+        also fails when the suite runs as root.
+        """
+        from shared.session_journal import append_event, make_event
+
+        journal_file.mkdir(parents=True)
+
+        assert append_event(make_event("test")) is False
+        assert journal_file.is_dir(), "control: the journal path is still the directory"
 
     def test_auto_sets_ts_when_missing(self, journal_home, team_name):
         """P0: Auto-sets timestamp when ts is not in the event dict."""
@@ -437,9 +460,11 @@ class TestAppendEvent:
         """F4: _atomic_write fails open (returns False) when os.open raises OSError.
 
         Direct unit test of the underlying primitive used by append_event(). The
-        function is currently exercised indirectly via append_event's fail-open
-        path (test_fail_open_on_write_error puts a file where the session dir goes),
-        but a direct test pins the contract: any OSError from os.open must be
+        function is also exercised through append_event by
+        test_fail_open_when_the_journal_write_itself_fails (the journal file is a
+        directory, so this os.open raises EISDIR); test_fail_open_on_write_error
+        fails earlier, at the session-dir mkdir, and never reaches it. A direct
+        test pins the contract: any OSError from os.open must be
         swallowed and surface as a False return -- never propagate.
 
         Patch path: the string form `"shared.session_journal.os.open"` is the

@@ -28,6 +28,7 @@ from pathlib import Path
 
 import pytest
 
+from fixtures.unreadable_path import replace_with_directory  # noqa: E402
 from helpers import make_claude_md_with_pins, make_pin_entry, point_resolver_at  # noqa: E402
 
 HOOK = Path(__file__).resolve().parent.parent / "hooks" / "pin_caps_gate.py"
@@ -585,8 +586,7 @@ class TestPinCapsGate_RealHook:
             # A DIRECTORY in the file's place: the gate's read raises a real
             # OSError, as a mode-000 file does for a non-root user, and unlike
             # mode bits it also fails when the suite runs as root.
-            claude_md.unlink(missing_ok=True)  # the suite-wide redirect seeds this path
-            claude_md.mkdir()
+            replace_with_directory(claude_md)
         else:
             claude_md.write_text(before, encoding="utf-8")
         tool, tool_input = call

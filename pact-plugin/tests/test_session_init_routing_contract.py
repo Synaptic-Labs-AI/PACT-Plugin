@@ -79,7 +79,9 @@ one collaborator to leave live and patches the others. A test that patched its
 own status source exercises the consumer branch alone: it cannot fire on a
 reword of the status source, which is the only mutation these arms exist to catch.
 The failure and the ordinary states are built from real filesystem conditions
-(a read-only directory, an orphan marker, a stale pin), not from an injected
+(a directory or a file where the other is expected, a read-only directory
+for the one arm no mode-free fault reaches, an orphan marker, a stale pin),
+not from an injected
 exception, so each arm below is a PRODUCT arm and not a harness arm.
 ============================================================================
 
@@ -292,27 +294,29 @@ class TestSymlinkStatusRouting:
         (plugin_root / "agents" / "pact-example.md").write_text("body")
         return plugin_root
 
-    # Mode bits are the only fault that leaves the project readable while its
-    # writes fail at the step this class names; uid 0 ignores them.
-    @pytest.mark.requires_non_root
     def test_failure_status_reaches_system_messages(self, tmp_path, home, project):
+        # THE FAULT USES NO MODE BITS, so this arm also runs as root. The
+        # destination holds a link that points elsewhere, so the loop takes the
+        # repoint branch, and a DIRECTORY sits at the repoint's temporary path.
+        # Removing that path with unlink() then raises a real OSError, the
+        # agents loop catches it and counts the file: the same `agents failed`
+        # status a write-denied destination gives. A read-only destination
+        # directory reached the same counter through `symlink_to` instead.
         plugin_root = self._plugin_root(tmp_path, None)
         agents_dst = home / ".claude" / "agents"
         agents_dst.mkdir()
-        os.chmod(agents_dst, 0o500)  # the link write fails, the loop counts it
-        try:
-            with patch.dict(os.environ,
-                            {"CLAUDE_PLUGIN_ROOT": str(plugin_root)},
-                            clear=False), \
-                 patch.object(Path, "home", staticmethod(lambda: home)):
-                from shared.symlinks import setup_plugin_symlinks
-                message = setup_plugin_symlinks()
+        (agents_dst / "pact-example.md").symlink_to(tmp_path / "elsewhere.md")
+        (agents_dst / "pact-example.md.pact-swap-tmp").mkdir()
+        with patch.dict(os.environ,
+                        {"CLAUDE_PLUGIN_ROOT": str(plugin_root)},
+                        clear=False), \
+             patch.object(Path, "home", staticmethod(lambda: home)):
+            from shared.symlinks import setup_plugin_symlinks
+            message = setup_plugin_symlinks()
 
-            system_message, context = _route(
-                home, project, live="setup_plugin_symlinks",
-                env={"CLAUDE_PLUGIN_ROOT": str(plugin_root)})
-        finally:
-            os.chmod(agents_dst, 0o700)
+        system_message, context = _route(
+            home, project, live="setup_plugin_symlinks",
+            env={"CLAUDE_PLUGIN_ROOT": str(plugin_root)})
 
         _assert_routes_to_system_messages(message, system_message, context)
 
@@ -362,25 +366,24 @@ class TestProjectMemoryStatusRouting:
     EXPECTED: the two tests stay green.
     """
 
-    # Mode bits are the only fault that leaves the project readable while its
-    # writes fail at the step this class names; uid 0 ignores them.
-    @pytest.mark.requires_non_root
     def test_failure_status_reaches_system_messages(self, home, project):
         # MEASURED: the resolver returns `<project>/.claude/CLAUDE.md` here, so
-        # the step that fails in a sealed project is `ensure_dot_claude_parent`
-        # creating `.claude`, NOT lock acquisition. Its OSError reaches the
-        # OUTER handler either way, which is what this arm measures.
-        os.chmod(project, 0o500)
-        try:
-            from shared.claude_md_manager import ensure_project_memory_md
-            with patch.dict(os.environ,
-                            {"CLAUDE_PROJECT_DIR": str(project)}, clear=False):
-                message = ensure_project_memory_md()
+        # the step that fails is `ensure_dot_claude_parent` making `.claude`,
+        # NOT lock acquisition. Its OSError reaches the OUTER handler, which is
+        # what this arm measures.
+        # THE FAULT USES NO MODE BITS, so this arm also runs as root: a regular
+        # FILE where `.claude` goes. The resolver still answers `new_default`
+        # (no `.claude/CLAUDE.md`, no legacy file), and `ensure_dot_claude_parent`
+        # raises OSError on a parent that is not a directory, the same step a
+        # sealed project fails at.
+        (project / ".claude").write_text("not a directory")
+        from shared.claude_md_manager import ensure_project_memory_md
+        with patch.dict(os.environ,
+                        {"CLAUDE_PROJECT_DIR": str(project)}, clear=False):
+            message = ensure_project_memory_md()
 
-            system_message, context = _route(
-                home, project, live="ensure_project_memory_md")
-        finally:
-            os.chmod(project, 0o700)
+        system_message, context = _route(
+            home, project, live="ensure_project_memory_md")
 
         _assert_routes_to_system_messages(message, system_message, context)
 
@@ -424,22 +427,21 @@ class TestMigrationStatusRouting:
         "## Working Memory\n"
     )
 
-    # Mode bits are the only fault that leaves the project readable while its
-    # writes fail at the step this class names; uid 0 ignores them.
-    @pytest.mark.requires_non_root
     def test_failure_status_reaches_system_messages(self, home, project):
+        # The lock sidecar cannot be opened. THE FAULT USES NO MODE BITS, so
+        # this arm also runs as root: a DIRECTORY at the sidecar path, so
+        # `file_lock`'s os.open raises a real OSError (EISDIR) at once, not a
+        # timeout. That lands in the same lock-failure handler a sealed
+        # project did, the one whose status ends in `migration skipped`.
         (project / "CLAUDE.md").write_text(self.UNMIGRATED)
-        os.chmod(project, 0o500)  # the lock sidecar cannot be written
-        try:
-            from shared.claude_md_manager import migrate_to_managed_structure
-            with patch.dict(os.environ,
-                            {"CLAUDE_PROJECT_DIR": str(project)}, clear=False):
-                message = migrate_to_managed_structure()
+        (project / ".CLAUDE.md.lock").mkdir()
+        from shared.claude_md_manager import migrate_to_managed_structure
+        with patch.dict(os.environ,
+                        {"CLAUDE_PROJECT_DIR": str(project)}, clear=False):
+            message = migrate_to_managed_structure()
 
-            system_message, context = _route(
-                home, project, live="migrate_to_managed_structure")
-        finally:
-            os.chmod(project, 0o700)
+        system_message, context = _route(
+            home, project, live="migrate_to_managed_structure")
 
         _assert_routes_to_system_messages(message, system_message, context)
 
@@ -527,21 +529,19 @@ class TestPinnedStalenessStatusRouting:
     EXPECTED: the two tests stay green.
     """
 
-    # Mode bits are the only fault that leaves the project readable while its
-    # writes fail at the step this class names; uid 0 ignores them.
-    @pytest.mark.requires_non_root
     def test_failure_status_reaches_system_messages(self, home, project):
+        # The staleness write path cannot lock. THE FAULT USES NO MODE BITS, so
+        # this arm also runs as root: a DIRECTORY at the lock sidecar path, so
+        # `file_lock`'s os.open raises a real OSError (EISDIR) at once. That
+        # reaches the write-failure handler a sealed project reached.
         (project / "CLAUDE.md").write_text(_STALE_PIN_DOC)
-        os.chmod(project, 0o500)  # the staleness write path cannot lock
-        try:
-            from staleness import check_pinned_staleness
-            message = check_pinned_staleness(
-                claude_md_path=project / "CLAUDE.md")
+        (project / ".CLAUDE.md.lock").mkdir()
+        from staleness import check_pinned_staleness
+        message = check_pinned_staleness(
+            claude_md_path=project / "CLAUDE.md")
 
-            system_message, context = _route(
-                home, project, live="check_pinned_staleness")
-        finally:
-            os.chmod(project, 0o700)
+        system_message, context = _route(
+            home, project, live="check_pinned_staleness")
 
         _assert_routes_to_system_messages(message, system_message, context)
 
@@ -679,8 +679,14 @@ class TestProjectMemoryInnerHandlerRouting:
     ``TestProjectMemoryStatusRouting`` stays green.
     """
 
-    # Mode bits are the only fault that leaves the project readable while its
-    # writes fail at the step this class names; uid 0 ignores them.
+    # THE ONE ARM IN THIS FILE THAT KEEPS THE MARKER: no mode-free fault
+    # reaches the inner handler. It needs the lock to succeed and then the write
+    # to fail, with the target ABSENT to every `exists()` check, or the status
+    # source returns None first. The write is a temp create under a random name
+    # followed by a rename onto the leaf ENTRY, and a rename replaces whatever
+    # can sit there unseen (nothing, a dangling link, a link loop). Only a
+    # directory that refuses entries fails it, and that is mode bits, which
+    # uid 0 ignores. The OUTER handler arm above runs as root.
     @pytest.mark.requires_non_root
     def test_inner_write_failure_reaches_system_messages(self, home, project):
         # THE TARGET IS `<project>/.claude/CLAUDE.md`, NOT `<project>/CLAUDE.md`.

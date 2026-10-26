@@ -3334,6 +3334,14 @@ class TestTheExitStatusSurvivesAReaderLessPipe:
         env = dict(os.environ)
         env["PACT_TEST_MEMORY_DIR"] = str(store)
         env.pop("PYTEST_CURRENT_TEST", None)
+        # THE DEFECT NEEDS A BLOCK-BUFFERED STDOUT: the envelope must still be
+        # pending when the interpreter flushes it during finalization. With
+        # PYTHONUNBUFFERED inherited (set in some cloud containers) the write
+        # meets the reader-less pipe at the call, the guarded print absorbs it,
+        # and nothing is left to fail at shutdown. MEASURED: with it set, this
+        # arm stays green with `_neutralise_unwritable_std_streams` removed, so
+        # it would certify nothing. Same precondition as the import arm below.
+        env.pop("PYTHONUNBUFFERED", None)
 
         rc, _out, err = _spawn_with_readerless_pipes(
             [cli_script_path, "list"], env, break_stdout=True, break_stderr=False

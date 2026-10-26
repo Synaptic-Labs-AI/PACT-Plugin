@@ -815,16 +815,14 @@ class TestAdversarialTeamConfig:
         """An unreadable config → caught by the OSError clause.
 
         config.json is a DIRECTORY, not a chmod-000 file: its read raises a
-        real OSError, and unlike mode bits it also fails when the suite runs
-        as root. A secretary-roster file sits INSIDE it, so a reader that
-        somehow got past the failure would find a secretary and return True.
+        real OSError (IsADirectoryError, not FileNotFoundError), and unlike
+        mode bits it also fails when the suite runs as root. The arm is red
+        if the reader's except clause is narrowed so that error escapes.
         """
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         team_dir = tmp_path / ".claude" / "teams" / _TEAM_NAME
         cfg = team_dir / "config.json"
         cfg.mkdir(parents=True)
-        (cfg / "members.json").write_text(
-            json.dumps({"members": [{"name": "secretary"}]}), encoding="utf-8")
         from bootstrap_marker_writer import _team_has_secretary
         assert _team_has_secretary(_TEAM_NAME) is False
 

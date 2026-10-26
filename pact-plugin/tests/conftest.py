@@ -162,9 +162,12 @@ def pytest_configure(config):
     # fail direction of `setdefault` here is ALLOW, and it is silent.
     os.environ[_MEMORY_DIR_ENV] = _SESSION_MEMORY_DIR
 
-    # UNLIKE THE TWO ABOVE, THIS MARKER SKIPS. Under uid 0 the failure such a
-    # test builds with chmod cannot exist, so there is nothing to deselect by
-    # choice. The rationale and the decision live in tests/fixtures/root_guard.py.
+    # UNLIKE `requires_embedding_backend` AND `claude_md_ambient` ABOVE, THIS
+    # MARKER SKIPS THE TEST. The first is left for the operator to deselect, and
+    # the second only opts a test out of the CLAUDE.md redirect; each still
+    # runs the test. Under uid 0 the failure a `requires_non_root` test builds
+    # with chmod cannot exist, so there is nothing to deselect by choice. The
+    # rationale and the decision live in tests/fixtures/root_guard.py.
     config.addinivalue_line(
         "markers",
         f"{_NON_ROOT_MARKER}: the test provokes a permission failure with file "

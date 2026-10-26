@@ -44,7 +44,7 @@ import fcntl  # Unix-only; PACT supports macOS/Linux.
 import os
 import time
 from pathlib import Path
-from typing import Any, Callable, Tuple
+from typing import Any, BinaryIO, Callable, Tuple
 
 FILE_MODE = 0o600
 DIR_MODE = 0o700
@@ -77,6 +77,21 @@ class TooLarge(ValueError):
     that treats OSError as "absent" does not mistake an over-size file for one."""
 
 
+def _reader(fd: int) -> BinaryIO:
+    """A binary file object that owns `fd`, closing `fd` if one cannot be made.
+
+    `os.open` succeeds on a directory, and `os.fdopen` then raises
+    IsADirectoryError WITHOUT closing the descriptor it was handed, so a caller
+    that let that exception escape would leak one fd per failed read. The
+    exception is re-raised unchanged, so callers see the same type as before.
+    """
+    try:
+        return os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def read_text(path: Path, root: Path, *, max_bytes: int | None = None) -> str:
     """Return a state file's text, reading without a lock.
 
@@ -99,7 +114,7 @@ def read_text(path: Path, root: Path, *, max_bytes: int | None = None) -> str:
     except OSError as refused:
         raise FileNotFoundError(str(refused)) from refused
     fd = os.open(str(directory / path.name), _READ_FLAGS)
-    with os.fdopen(fd, "rb") as f:
+    with _reader(fd) as f:
         if max_bytes is None:
             data = f.read()
         else:
@@ -115,7 +130,7 @@ def _current_text(path: Path) -> str:
         fd = os.open(str(path), _READ_FLAGS)
     except FileNotFoundError:
         return ""
-    with os.fdopen(fd, "rb") as f:
+    with _reader(fd) as f:
         data = f.read()
     return data.decode("utf-8", errors="replace")
 

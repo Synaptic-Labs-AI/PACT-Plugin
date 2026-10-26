@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from fixtures.unreadable_path import replace_with_directory
 from shared.claude_md_manager import MEMORY_END_MARKER, MEMORY_START_MARKER
 from test_pin_caps_gate import HOOK, SNIPPET, _edit, _frame, _outcome, _pins, _run_hook, _write  # noqa: E402 — sibling harness reuse
 
@@ -145,8 +146,7 @@ def test_a_write_to_dot_claude_over_an_unreadable_legacy_file_is_allowed_with_an
     # the baseline read raises a real OSError, as a mode-000 file does for a
     # non-root user. Unlike mode bits it also fails when the suite runs as root.
     legacy = tmp_path / "CLAUDE.md"
-    legacy.unlink(missing_ok=True)  # the suite-wide redirect seeds this path
-    legacy.mkdir()
+    replace_with_directory(legacy)
     assert _gate(tmp_path, tmp_path / ".claude" / "CLAUDE.md", _write(_pins(pins))) == "advisory"
 
 
