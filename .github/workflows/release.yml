@@ -44,17 +44,28 @@
 #   warning). No valid section anywhere stops the run before anything is
 #   created.
 #
-# WHO AUTHORS THE TAGS AND RELEASES (optional RELEASE_TOKEN)
-#   Without a `RELEASE_TOKEN` secret, tags and releases are made by
-#   github-actions[bot] with the workflow's GITHUB_TOKEN. With one, the
-#   checkout, the tag push and the release calls all use it, and the tag's
-#   tagger is the token owner (`gh api user`; email
+# THE TOKEN (RELEASE_TOKEN is required for backfills)
+#   Pushing a tag sends its commit's tree, and if that commit's
+#   `.github/workflows/` differs from the tip of main, GitHub counts the push
+#   as creating or updating workflow files. The built-in GITHUB_TOKEN is
+#   ALWAYS refused that ("refusing to allow a GitHub App to create or update
+#   workflow ... without `workflows` permission"). So a `RELEASE_TOKEN`
+#   secret is REQUIRED whenever a tag lands on such a commit, which in
+#   practice is any backfill or older release. Create it as a fine-grained
+#   personal access token on this repository only, with:
+#     Contents: Read and write   (push tags, create releases)
+#     Workflows: Read and write  (push tags whose commits carry other
+#                                 workflow files)
+#   Without it, only tags on commits whose workflows match main can be
+#   pushed, as github-actions[bot]; any other push stops the run with an
+#   ::error:: naming the tag and this fix.
+#   With it, the checkout, the tag push and the release calls all use it,
+#   and the tag's tagger is the token owner (`gh api user`; email
 #   `<id>+<login>@users.noreply.github.com`), so authorship matches the
-#   releases cut by hand. RELEASE_TOKEN should be a fine-grained personal
-#   access token with Contents: read and write on this repository only. If
-#   it is set but `gh api user` fails, the run fails rather than silently
-#   tagging as the bot. An unset secret reads as an empty string, so
-#   `secrets.RELEASE_TOKEN || github.token` falls back to the bot token.
+#   releases cut by hand. If it is set but `gh api user` fails, the run
+#   fails rather than silently tagging as the bot. An unset secret reads as
+#   an empty string, so `secrets.RELEASE_TOKEN || github.token` falls back
+#   to the bot token.
 #   Two consequences of setting it:
 #   - Tags and releases made with GITHUB_TOKEN start no other workflows;
 #     ones made with RELEASE_TOKEN do. No workflow here listens for them
@@ -67,8 +78,9 @@
 # WHY CI CUTS RELEASES
 #   Cloud Claude Code sessions get HTTP 403 both when they push a tag and
 #   when they create a release, so releases made from those sessions were
-#   silently never cut. A workflow token can do both, so the release now
-#   follows the version bump (and notes file) that every PR carries.
+#   silently never cut. A workflow run can do both (with RELEASE_TOKEN for
+#   tags on commits whose workflow files differ from main, see above), so
+#   the release now follows the version bump that every PR carries.
 #
 # WHY THE WALK STARTS WHERE IT DOES
 #   The walk always starts after FLOOR_TAG, the last release cut by hand, so
@@ -91,8 +103,9 @@
 #   repository name and tokens, passed in through `env:` and `with:`.
 #
 # FAILURE IS LOUD
-#   The script runs under `set -euo pipefail`. A rejected tag push (for
-#   example a tag-protection ruleset), a failed release call, a missing or
+#   The script runs under `set -euo pipefail`. A rejected tag push (a
+#   missing RELEASE_TOKEN for a workflow-changing tag, explained by name, or
+#   a tag-protection ruleset), a failed release call, a missing or
 #   malformed notes file, a malformed version, a failed token-owner lookup,
 #   or an existing tag that points at a different commit than the one that
 #   set its version all fail the run; nothing is skipped silently. Tags are
@@ -257,6 +270,25 @@ jobs:
             TAGGER_EMAIL="$id+$login@users.noreply.github.com"
           }
 
+          # Push tag $1. git's stderr goes to a file (no pipe) so a refusal can
+          # be explained: the built-in token may never push a tag whose commit
+          # carries workflow files that differ from main's. That case, worded
+          # "without `workflows` permission" for the GitHub App token and
+          # "without `workflow` scope" for a classic PAT, gets an error that
+          # names the fix. Any other failure stops the run too.
+          push_tag() {
+            local rc=0
+            git push origin "refs/tags/$1" 2> "$work_dir/push_err" || rc=$?
+            cat "$work_dir/push_err" >&2
+            [ "$rc" -eq 0 ] && return 0
+            if grep -q -E 'without .?workflows?.? (permission|scope)' "$work_dir/push_err"; then
+              echo "::error::pushing tag $1 needs a RELEASE_TOKEN secret with Workflows: Read and write (and Contents: Read and write): the tagged commit's .github/workflows differs from main, and the built-in GITHUB_TOKEN may not push workflow files. See \"THE TOKEN\" at the top of release.yml."
+            else
+              echo "::error::git push of tag $1 failed (exit $rc)"
+            fi
+            exit 1
+          }
+
           # Create the release for tag $1 with --latest=$2. Right after a tag
           # push, GitHub's tag lookup can lag the git receive, and gh then
           # aborts with "tag ... doesn't exist ..., aborting due to
@@ -367,7 +399,7 @@ jobs:
             else
               git -c user.name="$TAGGER_NAME" -c user.email="$TAGGER_EMAIL" \
                 tag -a "$tag" --cleanup=verbatim -F "$work_dir/notes/$tag.msg" "$sha"
-              git push origin "refs/tags/$tag"
+              push_tag "$tag"
               echo "$tag: tagged $sha and pushed"
             fi
 
