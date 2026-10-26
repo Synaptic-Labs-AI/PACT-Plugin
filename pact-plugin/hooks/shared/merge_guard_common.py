@@ -8909,7 +8909,7 @@ def _interpreter_guarded_commands(command: str, depth: int) -> list[str]:
 
 
 # A POSIX shell's name as a word anywhere in a command: the cheap test before a -c read.
-_SHELL_WORD_RE = re.compile(r"(?<![\w.-])(?:sh|bash|zsh|dash|ash|ksh(?:93)?|rksh|mksh|hush|lash|msh)(?![\w.-])")
+_SHELL_WORD_RE = re.compile(r"(?<![\w.-])(?:sh|bash|zsh|dash|ash|ksh(?:93)?|rksh|mksh|hush|lash|msh|eval)(?![\w.-])")
 
 
 @functools.lru_cache(maxsize=256)
@@ -9094,12 +9094,11 @@ def _shell_c_argument(command: str, strict: bool, _depth: int = 0) -> str | None
     j = i + 1
     while j < len(tokens) and not (_REDIRECT_OPERATOR_RE.match(tokens[j]) or _REDIRECT_WITH_TARGET_RE.match(tokens[j])):
         j += 1                                           # the string's positional words
-    string = _with_positional_words(tokens[i], tokens[i + 1:j]) if j > i + 1 else tokens[i]
+    program = _shell_word_value(leg[spans[i][0]:spans[i][1]])
+    string = _with_positional_words(program, tokens[i + 1:j]) if j > i + 1 else program
     if not strict:
-        return tokens[i] if string is None else string
-    if string is None or any(
-        re.search(r"\$\(|`", re.sub(r"'[^']*'", "", leg[spans[k][0]:spans[k][1]])) for k in range(i, j)
-    ):
+        return program if string is None else string
+    if string is None or any(_calling_shell_substitutes(leg[spans[k][0]:spans[k][1]]) for k in range(i, j)):
         return None
     rest = tokens[j:]
     while rest:
@@ -9110,6 +9109,57 @@ def _shell_c_argument(command: str, strict: bool, _depth: int = 0) -> str | None
         else:
             return None
     return string
+
+
+def _shell_word_value(raw: str) -> str:
+    """The value one shell word passes on: its quotes removed, and each backslash the
+    shell removes (unquoted, before any character; in double quotes, before `$`, a
+    backtick, `"`, a backslash or a newline, a backslash-newline pair vanishing). shlex
+    keeps the backslash of a double-quoted `\\$`, so `bash -c "… \\$(gh pr merge 5) …"`
+    would read as escaped what the inner shell runs."""
+    out: list[str] = []
+    i, n, quote = 0, len(raw), ""
+    while i < n:
+        ch = raw[i]
+        if quote == "'":
+            if ch == "'":
+                quote = ""
+            else:
+                out.append(ch)
+        elif ch == "\\" and i + 1 < n and (not quote or raw[i + 1] in '$`"\\\n'):
+            if raw[i + 1] != "\n":
+                out.append(raw[i + 1])
+            i += 2
+            continue
+        elif ch in "'\"" and not quote:
+            quote = ch
+        elif ch == '"' and quote == '"':
+            quote = ""
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _calling_shell_substitutes(raw: str) -> bool:
+    """Whether the shell running one word expands a `$(…)` or backtick in it first: one
+    outside single quotes and not escaped by a backslash."""
+    i, n, quote = 0, len(raw), ""
+    while i < n:
+        ch = raw[i]
+        if quote == "'":
+            quote = "" if ch == "'" else quote
+        elif ch == "\\":
+            i += 2
+            continue
+        elif ch == "`" or raw.startswith("$(", i):
+            return True
+        elif ch in "'\"" and not quote:
+            quote = ch
+        elif ch == '"' and quote == '"':
+            quote = ""
+        i += 1
+    return False
 
 
 def _eval_argument(leg: str, tokens: list[str], strict: bool) -> str | None:
@@ -9124,9 +9174,9 @@ def _eval_argument(leg: str, tokens: list[str], strict: bool) -> str | None:
     words = tokens[1:j]
     if not words or words[0].startswith("$") or len(spans) != len(tokens):
         return None
-    if strict and any(re.search(r"\$\(|`", re.sub(r"'[^']*'", "", leg[a:b])) for a, b in spans[1:j]):
+    if strict and any(_calling_shell_substitutes(leg[a:b]) for a, b in spans[1:j]):
         return None
-    return " ".join(words)
+    return " ".join(_shell_word_value(leg[a:b]) for a, b in spans[1:j])
 
 
 def _guarded_literals_beside_primitive(head: str, code: str, depth: int) -> list[str]:

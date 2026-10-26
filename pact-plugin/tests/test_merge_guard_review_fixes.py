@@ -3283,6 +3283,11 @@ UNQUOTED_HEREDOC_RUNS = [
      + _HD_BT + "\nEOF"),
     ("shell fed a backslash delimiter", "bash <<\\EOF\n" + _HD_PUSH + "\nEOF"),
     ("shell fed a partly quoted delimiter", "bash <<E\"OF\"\n" + _HD_PUSH + "\nEOF"),
+    ("double-quoted -c, escaped dollar", 'bash -c "cat <<EOF\n\\$(' + _HD_PUSH + ')\nEOF"'),
+    ("double-quoted -c, escaped backticks", 'bash -c "cat <<EOF\n\\' + _HD_BT + _HD_PUSH + '\\' + _HD_BT
+     + '\nEOF"'),
+    ("single-quoted -c", "bash -c 'cat <<EOF\n$(" + _HD_PUSH + ")\nEOF'"),
+    ("eval of a double-quoted string, escaped dollar", 'eval "cat <<EOF\n\\$(' + _HD_PUSH + ')\nEOF"'),
 ]
 
 QUOTED_OR_INERT_HEREDOC = [
@@ -3308,6 +3313,8 @@ QUOTED_OR_INERT_HEREDOC = [
     ("quoted heredoc inside a dollar-paren", "x=$(cat <<'EOF'\n$(" + _HD_PUSH + ")\nEOF\n)"),
     ("arithmetic only", "cat <<EOF > notes.md\ntotal $((1 + 2))\nEOF"),
     ("process substitution at the body's level", "cat <<EOF > notes.md\nrun <(" + _HD_PUSH + ") later\nEOF"),
+    ("double-quoted -c, quoted delimiter", 'bash -c "cat <<\'EOF\'\n\\$(' + _HD_PUSH + ')\nEOF"'),
+    ("double-quoted -c, bare prose", 'bash -c "cat <<EOF\nnever ' + _HD_PUSH + '\nEOF"'),
     ("an honest date", "python3 - <<EOF\nprint('built $(date)')\nEOF"),
     ("an honest date in backticks", "python3 - <<EOF\nprint('built " + _HD_BT + "date" + _HD_BT + "')\nEOF"),
 ]

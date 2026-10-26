@@ -850,7 +850,9 @@ def _exact_text_reading(span: str, located: str) -> dict | None:
         if is_compound_destructive_command(rewritten):
             return None
         body = rewritten
-    elif _has_command_substitution(span):
+    # A `\$(` or `\`` escaped in the calling shell's double quotes is the -c string's
+    # or eval's own substitution, read with the string below.
+    elif _has_command_substitution(re.sub(r"\\[$`]", "", span)):
         body = _mask_substitutions(leg)
         if body is None:
             return None
