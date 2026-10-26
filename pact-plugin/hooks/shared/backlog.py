@@ -1259,9 +1259,12 @@ def _repo_slug(project_path: Any = None) -> Optional[Tuple[str, str]]:
     Its cost is a constant rather than a per-ref one. None means no tracker is
     configured, which is a fully supported state.
 
-    A `project_path` that is given but unusable (not an absolute str) yields
-    None outright: `gh repo view` runs in the process CWD, the very anchor the
-    origin rung refuses, so falling through to it would read another project.
+    A `project_path` that is given but unusable (not an absolute path to an
+    existing directory) yields None outright, before any rung: there is no
+    project for `gh repo view` to run in, and running it in the process CWD
+    would read another project. When a usable path is given, `gh repo view`
+    runs IN it (`cwd=project_path`); only with no `project_path` at all does
+    it run in the process CWD.
     """
     if _git_anchor(project_path) is None:
         return None
@@ -1794,16 +1797,16 @@ def _branch_token(ref: Any, slug: Optional[Tuple[str, str]]) -> str:
 
 
 def _branch_and_worktree_names(project_path: Any = None) -> Optional[List[str]]:
-    # ABSOLUTE STR ONLY. A truthy non-string fails safe already — `git -C 5`
-    # exits 128 with empty stdout, so `_run_capture` returns None. The
-    # dangerous value is a truthy RELATIVE string: `"."` resolves to the
-    # process CWD and git reports THAT repository's branches, producing
-    # abandoned-work flags computed against the wrong project. Anything
-    # else degrades to None, which `_abandoned_flags` reads as no flags.
-    if not (isinstance(project_path, str) and project_path
-            and Path(project_path).is_absolute()):
+    # AN ABSOLUTE PATH TO AN EXISTING DIRECTORY ONLY — `_git_anchor`, the gate
+    # the slug chain uses. The dangerous value is a truthy RELATIVE string:
+    # `"."` resolves to the process CWD and git reports THAT repository's
+    # branches, producing abandoned-work flags computed against the wrong
+    # project. None is refused here too: `_git_anchor` maps it to the CWD
+    # (`[]`), which this reader must never read. Anything refused degrades to
+    # None, which `_abandoned_flags` reads as no flags, with no git call.
+    at = _git_anchor(project_path)
+    if not at:
         return None
-    at = ["-C", project_path]
     branches = _run_capture(["git", *at, "branch", "--format=%(refname:short)"])
     worktrees = _run_capture(["git", *at, "worktree", "list", "--porcelain"])
     if branches is None and worktrees is None:

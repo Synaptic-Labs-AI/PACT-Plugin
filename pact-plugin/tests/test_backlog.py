@@ -4034,6 +4034,34 @@ def test_a_relative_project_path_yields_no_branch_names():
         )
 
 
+def test_a_missing_or_absent_project_path_reads_no_branches_and_runs_no_git(
+    monkeypatch, tmp_path,
+):
+    """N5: the branch reader shares `_git_anchor` with the slug chain. A
+    missing absolute path (a moved or deleted project) and no project_path at
+    all both yield None WITHOUT a git call — the old absolute-only check let a
+    missing path reach git, which failed only by accident, and None must never
+    mean the process CWD here. A relative path is refused too; an existing
+    directory is still read (the control).
+
+    RED WHEN the reader goes back to its own absolute-only check, or treats
+    None as "run in the CWD".
+    """
+    seen = []
+
+    def recording(command, **kwargs):
+        seen.append(list(command))
+        return ""
+
+    monkeypatch.setattr(backlog, "_run_capture", recording)
+    for unusable in (str(tmp_path / "moved-away"), None, ".", "relative/path"):
+        assert backlog._branch_and_worktree_names(unusable) is None, unusable
+    assert seen == [], f"an unusable project_path reached git: {seen}"
+
+    assert backlog._branch_and_worktree_names(str(tmp_path)) is not None
+    assert seen and all(cmd[:3] == ["git", "-C", str(tmp_path)] for cmd in seen), seen
+
+
 def test_a_non_string_ref_is_reported_by_the_schema_check(tmp_path):
     """RED WHEN `_validate_item`'s `ref` type rule is removed.
 

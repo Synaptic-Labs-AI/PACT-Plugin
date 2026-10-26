@@ -83,6 +83,7 @@ first and checked to be the opposite of what the arm asserts.
   `_git_anchor` accepts a broken path   test_r4_a_broken_absolute_project_path_yields_no_slug_and_no_cwd_read
   gh repo view drops its cwd            test_r4_gh_repo_view_runs_in_the_project_not_the_process_cwd
   `_is_github_url` allows userinfo      test_r4_gh_repo_view_url_with_userinfo_or_backslash_is_refused
+  `_run_capture` drops cwd              test_r4_gh_repo_view_runs_in_the_project_not_the_process_cwd
 
 The R1 arms (`test_r1_*`) carry the mutations batch R1 ran against them; they
 are not re-listed here except where R2 changed the arm. Deliberately NOT a
