@@ -24,11 +24,12 @@
 #     ...
 #
 #   Line 1 minus its leading `# ` is the annotated tag message, verbatim.
-#   Everything after the blank line 2 is the release body. The rules (no
-#   control characters in line 1, among others) are defined once, in
-#   .github/scripts/check-release-notes.sh, and checked twice: on every PR by
-#   pact-plugin/tests/test_release_notes.py (the current version's file), and
-#   here before release. The file is read from the bump commit if that copy
+#   Everything after the blank line 2 is the release body. Line 1 is an
+#   allowlist: printable ASCII, em dash and en dash only. The body is free
+#   Markdown, and the file may not contain a NUL byte. The rules are defined
+#   once, in .github/scripts/check-release-notes.sh, and checked twice: on
+#   every PR by pact-plugin/tests/test_release_notes.py (the current
+#   version's file), and here before release. The file is read from the bump commit if that copy
 #   is valid, otherwise from the tip of main (how v4.8.9-v4.8.11 were
 #   backfilled, and how a bad file that reached main is repaired: fix it on
 #   main and the next run uses that copy, with a warning). No valid copy

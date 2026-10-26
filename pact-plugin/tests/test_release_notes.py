@@ -87,6 +87,9 @@ def test_every_committed_notes_file_is_valid():
 
 _GOOD = b"# v1.2.3: short summary\n\n## Summary\n\nText.\n"
 
+# The reason the checker gives for any byte outside the line-1 allowlist.
+_ALLOW = "may contain only printable ASCII, em dash or en dash"
+
 
 @pytest.mark.parametrize(
     "label, content, expected_reason",
@@ -95,32 +98,53 @@ _GOOD = b"# v1.2.3: short summary\n\n## Summary\n\nText.\n"
         ("wrong version", b"# v1.2.4: summary\n\nbody\n", "line 1 must start"),
         ("no heading", b"v1.2.3: summary\n\nbody\n", "line 1 must start"),
         ("empty summary", b"# v1.2.3:    \n\nbody\n", "empty summary"),
-        ("carriage return", b"# v1.2.3: summary\r\n\nbody\n", "control character"),
-        ("escape and bell", b"# v1.2.3: \x1b]0;x\x07t \x1b[31mred\n\nbody\n", "control character"),
-        ("tab", b"# v1.2.3: a\tb\n\nbody\n", "control character"),
-        ("C1 CSI as UTF-8", b"# v1.2.3: a \xc2\x9b31m\n\nbody\n", "control character"),
-        # Not valid UTF-8 (iconv), including the lone 8-bit CSI byte.
-        ("lone 8-bit CSI 0x9b", b"# v1.2.3: a \x9b31m\n\nbody\n", "not valid UTF-8"),
-        ("byte 0xff", b"# v1.2.3: a \xff\n\nbody\n", "not valid UTF-8"),
-        ("truncated sequence", b"# v1.2.3: a \xe2\x80\n\nbody\n", "not valid UTF-8"),
-        ("overlong encoding", b"# v1.2.3: a \xc0\xaf\n\nbody\n", "not valid UTF-8"),
-        ("surrogate", b"# v1.2.3: a \xed\xa0\x80\n\nbody\n", "not valid UTF-8"),
-        ("past U+10FFFF", b"# v1.2.3: a \xf4\x90\x80\x80\n\nbody\n", "not valid UTF-8"),
+        ("carriage return", b"# v1.2.3: summary\r\n\nbody\n", _ALLOW),
+        ("escape and bell", b"# v1.2.3: \x1b]0;x\x07t \x1b[31mred\n\nbody\n", _ALLOW),
+        ("tab", b"# v1.2.3: a\tb\n\nbody\n", _ALLOW),
+        ("C1 CSI as UTF-8", b"# v1.2.3: a \xc2\x9b31m\n\nbody\n", _ALLOW),
+        # Not valid UTF-8, including the lone 8-bit CSI byte.
+        ("lone 8-bit CSI 0x9b", b"# v1.2.3: a \x9b31m\n\nbody\n", _ALLOW),
+        ("byte 0xff", b"# v1.2.3: a \xff\n\nbody\n", _ALLOW),
+        ("truncated sequence", b"# v1.2.3: a \xe2\x80\n\nbody\n", _ALLOW),
+        ("overlong encoding", b"# v1.2.3: a \xc0\xaf\n\nbody\n", _ALLOW),
+        ("surrogate", b"# v1.2.3: a \xed\xa0\x80\n\nbody\n", _ALLOW),
+        ("past U+10FFFF", b"# v1.2.3: a \xf4\x90\x80\x80\n\nbody\n", _ALLOW),
         # Invisible and reordering format characters.
-        ("RLO U+202E", "# v1.2.3: a \u202e b\n\nbody\n".encode(), "format character"),
-        ("LRE U+202A", "# v1.2.3: a \u202a b\n\nbody\n".encode(), "format character"),
-        ("LRI U+2066", "# v1.2.3: a \u2066 b\n\nbody\n".encode(), "format character"),
-        ("PDI U+2069", "# v1.2.3: a \u2069 b\n\nbody\n".encode(), "format character"),
-        ("LRM U+200E", "# v1.2.3: a \u200e b\n\nbody\n".encode(), "format character"),
-        ("RLM U+200F", "# v1.2.3: a \u200f b\n\nbody\n".encode(), "format character"),
-        ("ALM U+061C", "# v1.2.3: a \u061c b\n\nbody\n".encode(), "format character"),
-        ("ZWSP U+200B", "# v1.2.3: a \u200b b\n\nbody\n".encode(), "format character"),
-        ("ZWJ U+200D", "# v1.2.3: a \u200d b\n\nbody\n".encode(), "format character"),
-        ("word joiner U+2060", "# v1.2.3: a \u2060 b\n\nbody\n".encode(), "format character"),
-        ("BOM U+FEFF", "# v1.2.3: a \ufeff b\n\nbody\n".encode(), "format character"),
-        ("line separator U+2028", "# v1.2.3: a \u2028 b\n\nbody\n".encode(), "format character"),
-        ("paragraph separator U+2029", "# v1.2.3: a \u2029 b\n\nbody\n".encode(), "format character"),
-        ("soft hyphen U+00AD", "# v1.2.3: a \u00ad b\n\nbody\n".encode(), "format character"),
+        ("RLO U+202E", "# v1.2.3: a \u202e b\n\nbody\n".encode(), _ALLOW),
+        ("LRE U+202A", "# v1.2.3: a \u202a b\n\nbody\n".encode(), _ALLOW),
+        ("LRI U+2066", "# v1.2.3: a \u2066 b\n\nbody\n".encode(), _ALLOW),
+        ("PDI U+2069", "# v1.2.3: a \u2069 b\n\nbody\n".encode(), _ALLOW),
+        ("LRM U+200E", "# v1.2.3: a \u200e b\n\nbody\n".encode(), _ALLOW),
+        ("RLM U+200F", "# v1.2.3: a \u200f b\n\nbody\n".encode(), _ALLOW),
+        ("ALM U+061C", "# v1.2.3: a \u061c b\n\nbody\n".encode(), _ALLOW),
+        ("ZWSP U+200B", "# v1.2.3: a \u200b b\n\nbody\n".encode(), _ALLOW),
+        ("ZWJ U+200D", "# v1.2.3: a \u200d b\n\nbody\n".encode(), _ALLOW),
+        ("word joiner U+2060", "# v1.2.3: a \u2060 b\n\nbody\n".encode(), _ALLOW),
+        ("BOM U+FEFF", "# v1.2.3: a \ufeff b\n\nbody\n".encode(), _ALLOW),
+        ("line separator U+2028", "# v1.2.3: a \u2028 b\n\nbody\n".encode(), _ALLOW),
+        ("paragraph separator U+2029", "# v1.2.3: a \u2029 b\n\nbody\n".encode(), _ALLOW),
+        ("soft hyphen U+00AD", "# v1.2.3: a \u00ad b\n\nbody\n".encode(), _ALLOW),
+        ("past U+10FFFF, lead F5", b"# v1.2.3: a \xf5\x80\x80\x80\n\nbody\n", _ALLOW),
+        ("past U+10FFFF, 5-byte F8", b"# v1.2.3: a \xf8\x88\x80\x80\x80\n\nbody\n", _ALLOW),
+        ("TAG character U+E0041", "# v1.2.3: a \U000e0041 b\n\nbody\n".encode(), _ALLOW),
+        ("DEL", b"# v1.2.3: a\x7fb\n\nbody\n", _ALLOW),
+        # Ordinary non-ASCII text is outside the allowlist too.
+        ("accented letter", "# v1.2.3: caf\u00e9\n\nbody\n".encode(), _ALLOW),
+        ("no-break space U+00A0", "# v1.2.3: a\u00a0b\n\nbody\n".encode(), _ALLOW),
+        ("CJK", "# v1.2.3: a \u4e2d\n\nbody\n".encode(), _ALLOW),
+        ("emoji", "# v1.2.3: a \U0001f600\n\nbody\n".encode(), _ALLOW),
+        ("narrow no-break space U+202F", "# v1.2.3: a\u202fb\n\nbody\n".encode(), _ALLOW),
+        # Byte neighbours of the two allowed dashes (E2 80 93 / E2 80 94),
+        # and the two-byte prefix they share left on its own.
+        ("hyphen U+2010", "# v1.2.3: a \u2010 b\n\nbody\n".encode(), _ALLOW),
+        ("figure dash U+2012", "# v1.2.3: a \u2012 b\n\nbody\n".encode(), _ALLOW),
+        ("horizontal bar U+2015", "# v1.2.3: a \u2015 b\n\nbody\n".encode(), _ALLOW),
+        ("stray E2 80", b"# v1.2.3: a \xe2\x80 b\n\nbody\n", _ALLOW),
+        ("stray E2", b"# v1.2.3: a \xe2 b\n\nbody\n", _ALLOW),
+        # NUL anywhere in the file.
+        ("NUL in line 1", b"# v1.2.3: a\x00b\n\nbody\n", "NUL byte"),
+        ("NUL in the body", b"# v1.2.3: summary\n\nbody\x00more\n", "NUL byte"),
+        ("NUL-only body", b"# v1.2.3: summary\n\n\x00\n", "NUL byte"),
         ("line 2 not blank", b"# v1.2.3: summary\nbody\nmore\n", "line 2 must be blank"),
         ("no body", b"# v1.2.3: summary\n\n   \n", "no release notes"),
         ("empty file", b"", "line 1 must start"),
@@ -135,16 +159,11 @@ def test_checker_rejects(tmp_path, label, content, expected_reason):
     assert expected_reason in reason, f"{label}: unexpected reason {reason!r}"
 
 
-def test_checker_accepts_well_formed_and_non_ascii(tmp_path):
-    """Ordinary UTF-8 is not a control or format character.
-
-    The neighbours of the rejected ranges (U+2010 hyphen, U+2026 ellipsis,
-    U+202F narrow no-break space) are here so an off-by-one in a byte range
-    shows up as a failure.
-    """
+def test_checker_accepts_ascii_and_the_two_dashes(tmp_path):
+    """The allowlist: printable ASCII (all of it), em dash and en dash."""
     root = _require_checkout()
     notes = tmp_path / "v1.2.3.md"
-    summary = "em \u2014 dash caf\u00e9 \u00a0nbsp \u2010 \u2026 \u202f \u4e2d \U0001f600"
+    summary = "plain ASCII !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~ 0-9 \u2014 em \u2013 en \u2014\u2013"
     notes.write_bytes(_GOOD.replace(b"short summary", summary.encode("utf-8")))
     code, reason = _check(root, "1.2.3", notes)
     assert code == 0, reason
