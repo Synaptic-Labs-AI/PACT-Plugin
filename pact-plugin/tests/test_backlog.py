@@ -5643,7 +5643,8 @@ def test_write_time_ref_normalisation_collapses_only_what_the_tracker_resolves(
     URL from another tracker ending in digits likewise, a Linear key is
     opaque, and an arbitrary string is the user's own pointer.
 
-    The slug comes from the network-free rungs only; GH_REPO pins it here.
+    The slug comes from the `origin` remote only (A-F3: never GH_REPO, which
+    a stored ref outlives); `_origin_repo_slug` is pinned here.
 
     RED WHEN the resolver's reach extends past 'digits this tracker can
     address', when another repository's URL collapses, or when `none` stops
@@ -5651,7 +5652,8 @@ def test_write_time_ref_normalisation_collapses_only_what_the_tracker_resolves(
     """
     import argparse
 
-    monkeypatch.setenv("GH_REPO", "owner/repo")
+    real_origin_slug = backlog._origin_repo_slug
+    monkeypatch.setattr(backlog, "_origin_repo_slug", lambda *_: ("owner", "repo"))
 
     def stored(ref):
         return backlog._field_updates(argparse.Namespace(ref=ref))["ref"]
@@ -5685,7 +5687,7 @@ def test_write_time_ref_normalisation_collapses_only_what_the_tracker_resolves(
 
     # NO SLUG, NO COLLAPSE: with no network-free slug a URL cannot be shown to
     # address this repository, so it is stored verbatim rather than guessed at.
-    monkeypatch.delenv("GH_REPO")
+    monkeypatch.setattr(backlog, "_origin_repo_slug", real_origin_slug)
     monkeypatch.setattr(backlog, "_run_capture", lambda *a, **k: None)
     url = "https://github.com/owner/repo/issues/1602"
     assert stored(url) == url, "a URL collapsed with no slug to compare it to"
@@ -6108,6 +6110,7 @@ def test_slug_from_remote_url_accepts_github_forms_and_refuses_the_rest():
         "git@github.com:o/r.git",
         "git://github.com/o/r",
         "  https://github.com/o/r\n",
+        "me@github.com:o/r",  # B-F14: any non-empty scp user
     ]
     for url in accepted:
         assert backlog._slug_from_remote_url(url) == ("o", "r"), url
@@ -6119,7 +6122,6 @@ def test_slug_from_remote_url_accepts_github_forms_and_refuses_the_rest():
         "https://github.com/o", "https://github.com/o/r/extra",
         "https://github.com/o/..", "https://github.com/./r",
         'https://github.com/o/r"x', "https://github.com/o/r x",
-        "me@github.com:o/r",
     ]
     for url in refused:
         assert backlog._slug_from_remote_url(url) is None, url
@@ -6144,7 +6146,8 @@ def test_gh_repo_env_is_github_only_and_validated(monkeypatch):
 def test_local_repo_slug_reads_origin_of_project_path_with_real_git(
     tmp_path, monkeypatch,
 ):
-    """The real seam: `git -C project_path remote get-url origin`, not the CWD.
+    """The real seam: `git -C project_path config --get remote.origin.url`,
+    not the CWD.
 
     RED WHEN the origin read is dropped, unanchored, or the credential in the
     URL leaks into the returned slug.
@@ -6285,23 +6288,29 @@ def test_rest_fallback_never_starts_a_call_past_the_deadline(monkeypatch):
 
 def test_refs_pointing_outside_this_repository_are_never_looked_up(monkeypatch):
     """RED WHEN another repository's URL, or another tracker's URL ending in
-    digits, is queried as this repository's issue of the same number."""
+    digits, is queried as this repository's issue of the same number.
+
+    A-F9 (pin flipped by design): a github.com link to ANOTHER repository is
+    looked up in THAT repository, never in this one; only a link no tracker
+    here can address (another host) keeps the outside-this-repository reason.
+    """
     calls = []
     monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
     monkeypatch.setattr(subprocess, "run", _refused_graphql_then_rest(calls))
 
-    foreign = ["https://github.com/other/repo/issues/1666",
-               "https://jira.example.com/browse/1666"]
+    other_repo = "https://github.com/other/repo/issues/1666"
+    other_host = "https://jira.example.com/browse/1666"
     own = ["https://github.com/OWNER/repo/pull/1672", "1666"]
-    outcome = backlog.resolve_refs(foreign + own)
+    outcome = backlog.resolve_refs([other_repo, other_host] + own)
 
-    for ref in foreign:
-        assert outcome[ref] == {"state": "unverifiable",
-                                "reason": backlog._REASON_FOREIGN_REF}, ref
+    assert outcome[other_host] == {"state": "unverifiable",
+                                   "reason": backlog._REASON_FOREIGN_REF}
+    assert outcome[other_repo] == {"state": "done"}
     assert outcome[own[0]] == {"state": "done"}
     assert outcome[own[1]] == {"state": "done"}
     looked_up = sorted(argv[2] for argv, _ in calls if argv[:3] != ["gh", "api", "graphql"])
-    assert looked_up == ["repos/owner/repo/issues/1666", "repos/owner/repo/issues/1672"]
+    assert looked_up == ["repos/other/repo/issues/1666",
+                         "repos/owner/repo/issues/1666", "repos/owner/repo/issues/1672"]
 
 
 def test_a_non_decimal_digit_ref_is_stored_verbatim_and_reads_unverifiable(
@@ -6338,7 +6347,7 @@ def test_issue_comment_and_query_links_address_the_path_number(monkeypatch):
     assert backlog._ref_targets_repo(comment, "owner", "repo")
     assert not backlog._ref_targets_repo(comment, "other", "repo")
 
-    monkeypatch.setenv("GH_REPO", "owner/repo")
+    monkeypatch.setattr(backlog, "_origin_repo_slug", lambda *_: ("owner", "repo"))
     for ref, expected in ((comment, "1666"), (query, "1672")):
         assert backlog._field_updates(argparse.Namespace(ref=ref))["ref"] == expected
     other = "https://github.com/other/repo/issues/1666#issuecomment-1"
@@ -6350,9 +6359,11 @@ def test_issue_comment_and_query_links_address_the_path_number(monkeypatch):
     outcome = backlog.resolve_refs([comment, query, other])
     assert outcome[comment] == {"state": "done"}
     assert outcome[query] == {"state": "done"}
-    assert outcome[other]["reason"] == backlog._REASON_FOREIGN_REF
+    # A-F9 (pin flipped by design): looked up in its own repository.
+    assert outcome[other] == {"state": "done"}
     looked_up = sorted(argv[2] for argv, _ in calls if argv[:3] != ["gh", "api", "graphql"])
-    assert looked_up == ["repos/owner/repo/issues/1666", "repos/owner/repo/issues/1672"]
+    assert looked_up == ["repos/other/repo/issues/1666",
+                         "repos/owner/repo/issues/1666", "repos/owner/repo/issues/1672"]
 
 
 def test_a_non_link_ref_and_a_foreign_link_carry_different_reasons(monkeypatch):
@@ -6365,8 +6376,10 @@ def test_a_non_link_ref_and_a_foreign_link_carry_different_reasons(monkeypatch):
         "an unaddressable ref reached the tracker"))
 
     not_links = ["12/", "foo/12"]
+    # A-F9: a github.com link to another repository with a VALID slug is now
+    # looked up there, so the github.com arm here uses an invalid slug.
     links = ["https://jira.example.com/browse/12", "jira.example.com/browse/12",
-             "github.com/other/repo/issues/12"]
+             "github.com/other%20x/repo/issues/12"]
     outcome = backlog.resolve_refs(not_links + links)
     for ref in not_links:
         assert outcome[ref] == {"state": "unverifiable",
@@ -6719,6 +6732,9 @@ def test_a_rest_call_hanging_mid_flight_does_not_hold_resolve_refs(monkeypatch):
     monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
     monkeypatch.setattr(subprocess, "run", _blocking_rest(calls, release, {1666}))
     monkeypatch.setattr(backlog, "_TRACKER_TIMEOUT_SECONDS", 0.15)
+    # A-F5: with less than one call floor left no REST call starts at all, so
+    # the floor is shrunk below the budget for this arm to start the calls.
+    monkeypatch.setattr(backlog, "_REST_MIN_CALL_TIMEOUT", 0.05)
     try:
         started = time_module.monotonic()
         outcome = backlog.resolve_refs(["#1666", "#886", "#1672"])
@@ -6901,22 +6917,31 @@ def test_unparseable_graphql_output_never_falls_back(monkeypatch):
 
 
 def test_rest_resolution_called_directly_keeps_its_contract(monkeypatch):
-    """`_resolve_refs_rest` with no `deadline` takes a full budget of its own,
-    and with nothing to check makes no call and starts no pool.
+    """`_resolve_refs_rest` takes a REQUIRED deadline (A-F6: one budget,
+    anchored in `resolve_refs` only), and with nothing to check makes no call
+    and starts no pool. Every `gh api` call names github.com (S-F1).
 
-    RED WHEN a None deadline is treated as already spent (every ref would read
-    incomplete) or an empty batch submits to an executor.
+    RED WHEN an empty batch submits to an executor, the deadline gains a
+    default again, or `--hostname github.com` is dropped.
     """
+    import time as time_module
+
     calls = []
     monkeypatch.setattr(subprocess, "run", _refused_graphql_then_rest(calls))
+    deadline = time_module.monotonic() + backlog._TRACKER_TIMEOUT_SECONDS
+    primary = ("owner", "repo")
 
-    assert backlog._resolve_refs_rest("owner", "repo", {}) == {}
+    assert backlog._resolve_refs_rest({}, deadline=deadline, primary=primary) == {}
     assert calls == []
+    with pytest.raises(TypeError):
+        backlog._resolve_refs_rest({}, primary=primary)
 
-    outcome = backlog._resolve_refs_rest("owner", "repo", {"#1666": 1666})
+    outcome = backlog._resolve_refs_rest(
+        {"#1666": ("owner", "repo", 1666)}, deadline=deadline, primary=primary)
     assert outcome == {"#1666": {"state": "done"}}
     (argv, timeout), = calls
-    assert argv == ["gh", "api", "repos/owner/repo/issues/1666"]
+    assert argv == ["gh", "api", "repos/owner/repo/issues/1666",
+                    "--hostname", "github.com"]
     assert backlog._REST_MIN_CALL_TIMEOUT <= timeout <= backlog._TRACKER_TIMEOUT_SECONDS
 
 
@@ -6960,3 +6985,437 @@ def test_slug_and_ref_parsers_refuse_what_they_cannot_read(monkeypatch):
     for stdout in (None, "not json"):
         monkeypatch.setattr(backlog, "_run_capture", lambda *a, _s=stdout, **k: _s)
         assert backlog._gh_repo_view_slug() is None, stdout
+
+
+# ---------------------------------------------------------------------------
+# Peer-review remediation R1 (PR #1674) — verification arms
+#
+# One arm (or a few) per behaviour change in batch R1 of
+# docs/review/backlog-rest-fallback-review.md, labelled with the finding ID.
+# Grouped here on purpose; R2 reorganises the file.
+# ---------------------------------------------------------------------------
+
+
+def _recording_tracker(calls, graphql_stdout=None, rest_delay=0.0):
+    """A `subprocess.run` fake. GraphQL answers `graphql_stdout` (default: the
+    recorded refusal); REST answers from `_REST_BODIES` after `rest_delay`
+    seconds. Records `(argv, kwargs)` for every call, thread-safely."""
+    import threading
+    import time as time_module
+
+    lock = threading.Lock()
+
+    def fake_run(command, **kwargs):
+        with lock:
+            calls.append((list(command), kwargs))
+        if command[:3] == ["gh", "api", "graphql"]:
+            stdout = _GRAPHQL_REFUSED_STDOUT if graphql_stdout is None else graphql_stdout
+            return subprocess.CompletedProcess(command, 1, stdout=stdout, stderr="")
+        time_module.sleep(rest_delay)
+        number = int(command[2].rsplit("/", 1)[-1])
+        body = _REST_BODIES.get(number, _REST_NOT_FOUND)
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(body), stderr="")
+
+    return fake_run
+
+
+def _rest_paths(calls):
+    return sorted(argv[2] for argv, _ in calls if argv[:3] != ["gh", "api", "graphql"])
+
+
+def test_r1_classify_ref_is_the_one_reading_of_a_ref():
+    """A-F7 / B-F1 / B-F13 / S-F3 / B-F12: every ref kind, in one table.
+
+    RED WHEN a kind moves: www.github.com or a PR tab link stops being a
+    github link, an out-of-range number is looked up, `v1.2/12` reads as a
+    link, or a Linear key stops being opaque.
+    """
+    gh = "https://github.com/o/r"
+    table = [
+        ("#12", ("bare", 12, "", "")),
+        (" 12 ", ("bare", 12, "", "")),
+        ("#2147483647", ("bare", 2**31 - 1, "", "")),
+        ("#2147483648", ("out_of_range", None, "", "")),
+        ("#12345678901", ("out_of_range", None, "", "")),
+        (f"{gh}/issues/7", ("github", 7, "o", "r")),
+        ("https://www.github.com/o/r/issues/7", ("github", 7, "o", "r")),
+        ("WWW.GITHUB.COM/O/R/pull/7", ("github", 7, "O", "R")),
+        (f"{gh}/pull/7/files", ("github", 7, "o", "r")),
+        (f"{gh}/pull/7/commits?x=1", ("github", 7, "o", "r")),
+        (f"{gh}/pull/7/checks#y", ("github", 7, "o", "r")),
+        (f"{gh}/issues/99999999999", ("out_of_range", None, "", "")),
+        ("https://jira.example.com/browse/12", ("link", None, "", "")),
+        ("jira.example.com/browse/12", ("link", None, "", "")),
+        (f"{gh}/discussions/12", ("link", None, "", "")),
+        ("v1.2/12", ("not_a_ref", None, "", "")),
+        ("12/", ("not_a_ref", None, "", "")),
+        ("foo/12", ("not_a_ref", None, "", "")),
+        ("x" * 600 + "/12", ("not_a_ref", None, "", "")),
+        ("ENG-123", ("opaque", None, "", "")),
+        ("owner/repo#12", ("opaque", None, "", "")),
+        ("²", ("opaque", None, "", "")),
+        (None, ("opaque", None, "", "")),
+    ]
+    for ref, expected in table:
+        assert tuple(backlog._classify_ref(ref)) == expected, ref
+
+
+def test_r1_an_over_long_or_huge_ref_never_crashes_or_stalls(monkeypatch):
+    """S-F2 / S-F3 / B-F2: a 5000-digit ref used to raise ValueError from
+    int() (CPython's 4300-digit limit) in every `show`, and a long dotted
+    first segment backtracked quadratically in the old link regex.
+
+    RED WHEN either reaches a regex or int() again: this arm then raises or
+    takes seconds instead of milliseconds.
+    """
+    import time as time_module
+
+    hostile = ["#" + "9" * 5000, "foo/" + "9" * 5000, "." * 40000 + " /1",
+               "a." * 20000 + "/1"]
+    started = time_module.monotonic()
+    for ref in hostile:
+        assert backlog._classify_ref(ref).kind == "not_a_ref", ref[:20]
+        assert backlog._issue_number(ref) is None
+    assert time_module.monotonic() - started < 0.5
+
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail(
+        "a non-addressable ref reached the tracker"))
+    outcome = backlog.resolve_refs(hostile)
+    assert all(state == {"state": "unverifiable", "reason": backlog._REASON_NOT_A_REF}
+               for state in outcome.values()), outcome
+
+
+def test_r1_a_ref_over_the_length_cap_is_refused_on_write(tmp_path, monkeypatch, capsys):
+    """S-F2: `add`/`set` refuse a ref past `_REF_MAX_LENGTH` with the refusal
+    exit code and a clear message; nothing is written, nothing truncated.
+
+    RED WHEN an over-long ref is stored (truncated or whole), or a ref at the
+    limit is refused.
+    """
+    path = _backlog_file(tmp_path, monkeypatch, [])
+    too_long = "x" * (backlog._REF_MAX_LENGTH + 1)
+
+    assert backlog.main(["add", "Thing", "--ref", too_long]) == backlog._EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "refused" in err and str(backlog._REF_MAX_LENGTH) in err
+    assert not path.exists() or json.loads(path.read_text(encoding="utf-8"))["items"] == []
+
+    at_limit = "x" * backlog._REF_MAX_LENGTH
+    assert backlog.main(["add", "Thing", "--ref", at_limit]) == backlog._EXIT_OK
+    item = json.loads(path.read_text(encoding="utf-8"))["items"][0]
+    assert item["ref"] == at_limit
+
+    assert backlog.main(["set", item["id"], "--ref", too_long]) == backlog._EXIT_REFUSED
+    assert json.loads(path.read_text(encoding="utf-8"))["items"][0]["ref"] == at_limit
+
+
+def test_r1_an_out_of_range_number_never_enters_the_batched_query(monkeypatch):
+    """S-F8 / B-F2b: a number past GraphQL's Int would fail the WHOLE batched
+    document, leaving every other ref unresolved. It is refused up front with
+    its own reason, and the query carries only in-range numbers.
+
+    RED WHEN the bound is lost and the number is interpolated into the query.
+    """
+    calls = []
+    answer = json.dumps({"data": {"repository": {
+        "r0": {"state": "CLOSED", "stateReason": "COMPLETED"}}}})
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
+    monkeypatch.setattr(subprocess, "run", _recording_tracker(calls, graphql_stdout=answer))
+
+    outcome = backlog.resolve_refs(["#1666", "#99999999999"])
+    assert outcome["#1666"] == {"state": "done"}
+    assert outcome["#99999999999"] == {"state": "unverifiable",
+                                       "reason": backlog._REASON_NUMBER_RANGE}
+    (argv, _), = calls
+    assert "99999999999" not in " ".join(argv)
+
+
+def test_r1_a_link_to_another_github_repository_is_checked_there(monkeypatch):
+    """A-F9: a github.com link to another repository is looked up in THAT
+    repository over REST — even when the batched GraphQL query succeeds for
+    this repository's refs — and never enters the GraphQL query. A link whose
+    owner or name is not a valid slug is not looked up at all.
+
+    RED WHEN a foreign link is queried in this repository, is folded into the
+    GraphQL batch, or an invalid slug reaches a REST path.
+    """
+    calls = []
+    answer = json.dumps({"data": {"repository": {
+        "r0": {"state": "OPEN", "stateReason": None}}}})
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
+    monkeypatch.setattr(subprocess, "run", _recording_tracker(calls, graphql_stdout=answer))
+
+    foreign = "https://github.com/upstream/thing/issues/1004"
+    invalid = "https://github.com/up%20stream/thing/issues/1004"
+    outcome = backlog.resolve_refs(["#1667", foreign, invalid])
+
+    assert outcome["#1667"] == {"state": "open"}
+    assert outcome[foreign] == {"state": "abandoned", "reason": "not_planned"}
+    assert outcome[invalid] == {"state": "unverifiable",
+                                "reason": backlog._REASON_FOREIGN_REF}
+    graphql = [argv for argv, _ in calls if argv[:3] == ["gh", "api", "graphql"]]
+    assert len(graphql) == 1 and "upstream" not in " ".join(graphql[0])
+    assert _rest_paths(calls) == ["repos/upstream/thing/issues/1004"]
+
+
+def test_r1_rest_calls_are_one_per_issue_in_numeric_order_this_repo_first(monkeypatch):
+    """B-F6: refs naming the same issue share ONE call and its answer; the
+    cap cuts in numeric order (not string order, where '#10' < '#2'), with
+    this repository's issues before another repository's.
+
+    RED WHEN duplicates each take a call and a cap slot, or the cut is
+    lexicographic or puts a foreign repository first.
+    """
+    calls = []
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
+    monkeypatch.setattr(subprocess, "run", _recording_tracker(calls))
+    monkeypatch.setattr(backlog, "_REST_MAX_REFS", 3)
+
+    same = ["#1666", "1666", "https://github.com/OWNER/repo/issues/1666"]
+    refs = same + ["#886", "#1004", "https://github.com/aaa/first/issues/1",
+                   "#1667"]
+    outcome = backlog.resolve_refs(refs)
+
+    for ref in same:
+        assert outcome[ref] == {"state": "done"}, ref
+    assert _rest_paths(calls) == ["repos/owner/repo/issues/1004",
+                                  "repos/owner/repo/issues/1666",
+                                  "repos/owner/repo/issues/886"]
+    for ref in ("#1667", "https://github.com/aaa/first/issues/1"):
+        assert outcome[ref] == {"state": "unverifiable",
+                                "reason": backlog._REASON_REST_CAP}, ref
+    outcome[same[0]]["state"] = "mutated"
+    assert outcome[same[1]] == {"state": "done"}, "fanned-out entries share one dict"
+
+
+def test_r1_no_rest_call_starts_with_less_than_one_floor_left(monkeypatch):
+    """A-F5: with less than `_REST_MIN_CALL_TIMEOUT` left of the budget, no
+    call is started — such a call could not change the outcome, and the
+    interpreter would still wait for it at exit.
+
+    RED WHEN the pool starts calls on a spent budget.
+    """
+    import time as time_module
+
+    calls = []
+    monkeypatch.setattr(subprocess, "run", _recording_tracker(calls))
+    deadline = time_module.monotonic() + backlog._REST_MIN_CALL_TIMEOUT / 2
+    outcome = backlog._resolve_refs_rest(
+        {"#1666": ("owner", "repo", 1666)}, deadline=deadline, primary=("owner", "repo"))
+    assert calls == []
+    assert outcome == {"#1666": {"state": "unverifiable",
+                                 "reason": backlog._REASON_CALL_INCOMPLETE}}
+
+
+def test_r1_an_answer_inside_the_last_call_floor_is_used(monkeypatch):
+    """B-F4: the wait runs to the deadline PLUS one call floor — the latest a
+    started call can finish — so an answer that lands just past the deadline
+    is used instead of discarded (the interpreter waits for it anyway).
+
+    RED WHEN the wait ends at the bare deadline again.
+    """
+    import time as time_module
+
+    calls = []
+    # The answer lands at 0.35 s: past the 0.25 s deadline, inside its floor.
+    monkeypatch.setattr(subprocess, "run", _recording_tracker(calls, rest_delay=0.35))
+    monkeypatch.setattr(backlog, "_REST_MIN_CALL_TIMEOUT", 0.2)
+    outcome = backlog._resolve_refs_rest(
+        {"#1666": ("owner", "repo", 1666)},
+        deadline=time_module.monotonic() + 0.25, primary=("owner", "repo"))
+    assert outcome == {"#1666": {"state": "done"}}
+
+
+def test_r1_a_thread_that_cannot_start_leaves_its_refs_incomplete(monkeypatch):
+    """B-F5: `submit` raising RuntimeError (a container's thread limit) must
+    not escape `show`. What was submitted resolves; the rest read incomplete.
+
+    RED WHEN the RuntimeError propagates out of `resolve_refs`.
+    """
+    import concurrent.futures
+
+    calls = []
+    submitted = []
+
+    class OneThreadOnly(concurrent.futures.ThreadPoolExecutor):
+        def submit(self, *args, **kwargs):
+            if submitted:
+                raise RuntimeError("can't start new thread")
+            submitted.append(args)
+            return super().submit(*args, **kwargs)
+
+    monkeypatch.setattr(backlog, "ThreadPoolExecutor", OneThreadOnly)
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
+    monkeypatch.setattr(subprocess, "run", _recording_tracker(calls))
+
+    outcome = backlog.resolve_refs(["#886", "#1666"])
+    assert outcome["#886"] == {"state": "abandoned", "reason": "duplicate"}
+    assert outcome["#1666"] == {"state": "unverifiable",
+                                "reason": backlog._REASON_CALL_INCOMPLETE}
+
+
+def test_r1_every_gh_api_call_names_github_and_gh_host_is_scrubbed(monkeypatch):
+    """S-F1: `gh api` takes its host from GH_HOST, not from the slug, so every
+    call carries `--hostname github.com`, and GH_HOST never reaches a child.
+
+    RED WHEN either guard is dropped and GH_HOST could redirect the verdicts.
+    """
+    calls = []
+    monkeypatch.setenv("GH_HOST", "example.invalid")
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
+    monkeypatch.setattr(subprocess, "run", _recording_tracker(calls))
+
+    backlog.resolve_refs(["#1666", "https://github.com/up/stream/issues/886"])
+    assert len(calls) == 3
+    for argv, kwargs in calls:
+        assert argv[-2:] == ["--hostname", "github.com"], argv
+        assert "GH_HOST" not in kwargs["env"], argv
+
+
+def test_r1_run_capture_survives_nul_bytes_and_undecodable_output():
+    """B-F3 / S-F4: a NUL byte in an argv (a hand-edited `project_path`)
+    raises ValueError from subprocess, and non-UTF-8 output raised
+    UnicodeDecodeError — both crashed `show`. Real subprocesses, no fakes.
+
+    RED WHEN `_run_capture` lets either escape.
+    """
+    assert backlog._run_capture(["git", "-C", "/no\x00such", "status"]) is None
+    script = "import sys; sys.stdout.buffer.write(b'ok \\xff')"
+    assert backlog._run_capture([sys.executable, "-c", script]) == "ok �"
+    assert backlog._origin_repo_slug("/no\x00such") is None
+
+
+def test_r1_deeply_nested_json_is_unparseable_not_a_crash(monkeypatch):
+    """S-F7: json.loads raises RecursionError, not ValueError, on deeply
+    nested input. Treated like any unparseable body.
+
+    RED WHEN RecursionError escapes `resolve_refs` or `_gh_repo_view_slug`.
+    """
+    nested = "[" * 200000
+    assert backlog._parse_json(nested) is backlog._UNPARSEABLE
+    calls = []
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
+    monkeypatch.setattr(subprocess, "run", _recording_tracker(calls, graphql_stdout=nested))
+    outcome = backlog.resolve_refs(["#1666"])
+    assert outcome["#1666"] == {"state": "unverifiable",
+                                "reason": backlog._REASON_NO_RESOLUTION}
+    monkeypatch.setattr(backlog, "_run_capture", lambda *a, **k: nested)
+    assert backlog._gh_repo_view_slug() is None
+
+
+def test_r1_origin_is_read_raw_not_through_insteadof(tmp_path, monkeypatch):
+    """S-F5: `git remote get-url` applies `url.<base>.insteadOf`, so a rule in
+    the project's config could point the slug at another repository. The raw
+    `remote.origin.url` is read instead. Real git, hermetic config.
+
+    RED WHEN the origin read goes back through insteadOf.
+    """
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.delenv("GIT_CONFIG_COUNT", raising=False)
+    monkeypatch.delenv("GIT_CONFIG_PARAMETERS", raising=False)
+    repo = _repo(tmp_path / "proj")
+    git = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True)
+    git("remote", "add", "origin", "https://github.com/real/repo.git")
+    git("config", "url.https://github.com/attacker/.insteadOf", "https://github.com/real/")
+
+    rewritten = subprocess.run(["git", "-C", str(repo), "remote", "get-url", "origin"],
+                               capture_output=True, text=True).stdout
+    assert "attacker" in rewritten, "control: the rewrite rule is live"
+    assert backlog._origin_repo_slug(str(repo)) == ("real", "repo")
+
+
+def test_r1_remote_forms_added_and_ambiguous_ones_refused():
+    """B-F14 / S-F6: GitHub's SSH-over-443 host, `git+ssh://` and any scp user
+    are github.com; a backslash or a second `@` makes urlsplit and git
+    disagree on the host, so such a URL is refused.
+
+    RED WHEN an added form stops parsing or an ambiguous one parses.
+    """
+    for url in ("ssh://git@ssh.github.com:443/o/r.git", "git@ssh.github.com:o/r",
+                "git+ssh://git@github.com/o/r", "org-123@github.com:o/r.git"):
+        assert backlog._slug_from_remote_url(url) == ("o", "r"), url
+    for url in ("https://evil.com\\@github.com/o/r", "https://a@b@github.com/o/r",
+                "git@github.com:o\\r", "https://ssh.example.com/o/r"):
+        assert backlog._slug_from_remote_url(url) is None, url
+
+
+def test_r1_an_unusable_project_path_yields_no_slug_at_all(monkeypatch):
+    """B-F7: a given but unusable `project_path` (relative, empty, not a str)
+    refuses the origin rung because it would read the CWD — and `gh repo
+    view`, which runs in the CWD, must not be reached either.
+
+    RED WHEN `_repo_slug` falls through to `gh repo view` for such a path.
+    """
+    monkeypatch.setenv("GH_REPO", "owner/repo")
+    monkeypatch.setattr(backlog, "_gh_repo_view_slug", lambda: pytest.fail(
+        "an unusable project_path fell through to gh repo view"))
+    for bad in ("relative/path", "", 42):
+        assert backlog._repo_slug(bad) is None, bad
+        assert backlog._local_repo_slug(bad) is None, bad
+
+
+def test_r1_write_time_collapse_ignores_gh_repo(monkeypatch):
+    """A-F3: a stored ref outlives GH_REPO, so a link collapses to a bare
+    number only when it matches the `origin` slug. With GH_REPO pointing
+    upstream and origin at a fork, an upstream link is stored verbatim.
+
+    RED WHEN the write path consults GH_REPO again.
+    """
+    import argparse
+
+    monkeypatch.setenv("GH_REPO", "upstream/repo")
+    monkeypatch.setattr(backlog, "_origin_repo_slug", lambda *_: ("fork", "repo"))
+
+    def stored(ref):
+        return backlog._field_updates(argparse.Namespace(ref=ref))["ref"]
+
+    upstream = "https://github.com/upstream/repo/issues/5"
+    assert stored(upstream) == upstream
+    assert stored("https://github.com/fork/repo/pull/5/files") == "5"
+    assert stored("#99999999999") == "#99999999999", "out of range is not collapsed"
+
+
+def test_r1_abandoned_flags_match_digits_only_for_this_repository(monkeypatch):
+    """A-F8: the branch linkage takes a ref's number only when the ref is
+    THIS repository's; a foreign or Jira link keeps its full text, so its
+    digits never match a local branch by coincidence.
+
+    RED WHEN a foreign link's digits are matched against branch names again.
+    """
+    monkeypatch.setattr(backlog, "_branch_and_worktree_names",
+                        lambda *_: ["feat/1234-thing"])
+    monkeypatch.setattr(backlog, "_local_repo_slug", lambda *_: ("owner", "repo"))
+
+    def flagged(ref):
+        return backlog._abandoned_flags(
+            [_item(status="active", ref=ref, touched=_OLD)], "/abs/project")
+
+    assert flagged("#1234") == []
+    assert flagged("https://github.com/owner/repo/issues/1234") == []
+    assert len(flagged("https://github.com/other/repo/issues/1234")) == 1
+    assert len(flagged("https://jira.example.com/browse/1234")) == 1
+
+
+def test_r1_refusal_returns_none_and_resolve_refs_owns_the_fallback(monkeypatch):
+    """A-F2 / A-F4: `_resolve_refs_graphql` only speaks GraphQL — a refusal
+    is None — and every reason `show` prints is a `_REASON_*` constant.
+
+    RED WHEN the GraphQL function dispatches to REST itself again, or a
+    reason drifts back to an inline literal.
+    """
+    calls = []
+    monkeypatch.setattr(subprocess, "run", _recording_tracker(calls))
+    assert backlog._resolve_refs_graphql("owner", "repo", {"#1666": 1666}) is None
+    assert _rest_paths(calls) == []
+
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: None)
+    outcome = backlog.resolve_refs(["#1", "ENG-1"])
+    assert outcome == {
+        "#1": {"state": "unverifiable", "reason": backlog._REASON_NO_TRACKER},
+        "ENG-1": {"state": "unverifiable", "reason": backlog._REASON_NO_RESOLUTION},
+    }
+    source = Path(backlog.__file__).read_text(encoding="utf-8")
+    body = source.split("def resolve_refs(", 1)[1].split("\ndef _resolve_refs_rest(", 1)[0]
+    assert '"reason": "' not in body, "an inline reason literal is back"

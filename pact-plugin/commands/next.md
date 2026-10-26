@@ -59,7 +59,8 @@ python3 "{plugin_root}/hooks/shared/backlog.py" show
 
 This resolves every drift class in one pass: refs against the tracker in a
 single batched query (falling back to bounded per-ref REST calls where GraphQL
-is refused), `plan` paths against the project root, `memory` ids
+is refused; a github.com link to another repository is checked in that
+repository over REST), `plan` paths against the project root, `memory` ids
 against the store, staleness, and dangling relational ids.
 
 `show` OMITS `done` AND `dropped` ITEMS BY DEFAULT and says how many it hid, on
@@ -138,7 +139,7 @@ asks. Each row carries its own verdict; do not read one from the heading:
 | ref is closed as COMPLETED | ASK | propose marking it `done` |
 | ref was closed WITHOUT the work being done | ASK | propose `dropped`, NEVER `done`. A tracker closing a ticket as not-planned IS a decision against the work, arriving from outside — which is what `dropped` records. `done` would record the opposite of what happened, and proposing nothing leaves the item ranked forever |
 | ref is closed with NO stated reason | ASK | ask which happened; propose neither `done` nor `dropped` until they say |
-| ref is unverifiable | ASK | check the ref by hand, or clear it |
+| ref is unverifiable | ASK | the flag's reason says why. A link to another tracker or host ("points outside this repository"), a string that is no ref, or an out-of-range number will read unverifiable on every run: check it by hand, or clear it. A call that did not complete, or a ref the tracker did not resolve (missing, or a repository this session cannot reach), may resolve on a later run: say so, and ask before clearing |
 | `blocked_by` names a SETTLED item (`done` or `dropped`) | ASK | propose unblocking it — the flag names the blocker's status, and neither will clear on its own |
 | a relational field holds non-id entries | ASK | the entries are not ids at all; ask what was meant before removing them |
 | a relational field names an unknown id | ASK | the id WAS the record, so nothing is recoverable, and a failed lookup cannot tell a mistype from a deletion |

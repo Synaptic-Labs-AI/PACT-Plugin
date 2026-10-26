@@ -34,7 +34,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
 from urllib.parse import urlsplit
 
 # Make the package-path import (`from shared.X import Y`) resolvable when this
@@ -118,13 +118,14 @@ _EXIT_USAGE = 64
 # to diverge, that is the day a second constant is earned.
 _STALE_AFTER = timedelta(days=14)
 
-# The tracker is a constant cost, not a per-item one: one batched round trip
-# measures flat at roughly a third of a second from 1 ref to 25. The timeout is
-# mandatory because `gh` runs to the caller's kill ceiling against an
-# unreachable host rather than giving up on its own.
-# It bounds each tracker call on the fast path, and it is also the ONE shared
-# deadline for the whole REST fallback phase (per-ref calls in parallel), which
-# starts only after a fast refusal of the batched GraphQL query.
+# On the fast path the tracker is a constant cost, not a per-item one: one
+# batched round trip measures flat at roughly a third of a second from 1 ref
+# to 25. The timeout is mandatory because `gh` runs to the caller's kill
+# ceiling against an unreachable host rather than giving up on its own.
+# It bounds each fast-path call, and it is also ONE budget for the whole ref
+# check, anchored when the batched GraphQL call starts: the per-ref REST calls
+# (a refused GraphQL query, or a link to another repository) get only what is
+# left of it, whatever the speed of the refusal.
 _TRACKER_TIMEOUT_SECONDS = 5
 
 # Characters a repository owner or name may hold. Everything else is refused
@@ -133,46 +134,70 @@ _TRACKER_TIMEOUT_SECONDS = 5
 # `$` also matches before a trailing newline, so `$` would accept "owner\n".
 _SLUG_CHARS = re.compile(r"^[A-Za-z0-9._-]+\Z")
 
-# The only host the slug chain and the ref guard accept. GitHub Enterprise and
-# every other host fall through rather than being read as this tracker.
+# The only host the slug chain and the ref classifier accept. GitHub Enterprise
+# and every other host fall through rather than being read as this tracker.
 _GITHUB_HOST = "github.com"
-# Remote-URL schemes `_slug_from_remote_url` parses, plus the scp-like form,
-# which needs the literal `git@` prefix so arbitrary text never matches.
-_REMOTE_SCHEMES = {"https", "http", "ssh", "git"}
-_SCP_REMOTE = re.compile(r"^git@([^:/\s]+):(.+)\Z")
+# Hosts a REMOTE may name for github.com: `ssh.github.com` is GitHub's own
+# SSH-over-443 endpoint (`ssh://git@ssh.github.com:443/O/N`), the same service.
+_GITHUB_REMOTE_HOSTS = {_GITHUB_HOST, f"ssh.{_GITHUB_HOST}"}
+# Appended to every `gh api` call. `gh api` takes its host from GH_HOST, not
+# from the slug, so without this an environment with GH_HOST set would send
+# github.com refs to another host and let its answers decide the verdicts.
+_GH_API_HOST_ARGS = ("--hostname", _GITHUB_HOST)
+# Remote-URL schemes `_slug_from_remote_url` parses, plus the scp-like form
+# `user@host:path`, which needs a non-empty user and the `@` so arbitrary text
+# (a sentence, a JSON body) never parses as a remote.
+_REMOTE_SCHEMES = {"https", "http", "ssh", "git", "git+ssh"}
+_SCP_REMOTE = re.compile(r"^[^@\s/:\\]+@([^:/\s]+):(.+)\Z")
 # A ref that names an issue or pull request of a github.com repository, as a
-# URL. Owner and name are compared to this repository's slug by the callers.
-# An optional `?query` and/or `#fragment` tail is accepted — an issue-comment
-# link is `.../issues/123#issuecomment-456` — and the number is ALWAYS group 3,
-# taken from the PATH, never from the tail.
+# link. Owner and name are compared to this repository's slug by the callers.
+# Accepted around the number: `www.`, which GitHub redirects; a pull request's
+# `/files`, `/commits` or `/checks` tab; and an optional `?query` and/or
+# `#fragment` tail — an issue-comment link is `.../issues/123#issuecomment-456`.
+# The number is ALWAYS group 3, taken from the PATH, never from the tail.
+# LINEAR TIME: every class excludes the separator that follows it, so a
+# failed match never backtracks across a segment.
 _GITHUB_REF_URL = re.compile(
-    r"^(?:https?://)?github\.com/([^/\s?#]+)/([^/\s?#]+)/(?:issues|pull)/(\d+)/?"
-    r"(?:[?#]\S*)?\Z",
+    r"^(?:https?://)?(?:www\.)?" + re.escape(_GITHUB_HOST)
+    + r"/([^/\s?#]+)/([^/\s?#]+)/(?:issues|pull)/(\d+)"
+    r"(?:/(?:files|commits|checks))?/?(?:[?#]\S*)?\Z",
     re.IGNORECASE,
 )
-# A ref shaped like a link: a scheme (`https://`), or a first segment that is a
-# dotted host (`github.com/...`, `jira.example.com/...`). Used only to choose
-# WHICH unverifiable reason an un-addressable ref gets.
-_URL_LIKE = re.compile(r"^(?:[A-Za-z][A-Za-z0-9+.-]*://|[^/\s]+\.[^/\s]+/)")
+# A ref that starts with a URL scheme. A scheme-less link (`jira.example.com/x`)
+# is recognised by `_looks_like_link` without a regex.
+_URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _BARE_REF = re.compile(r"^#?(\d+)\Z")
 
-# The REST fallback, used only when the batched GraphQL query is refused as a
-# whole. Measured in a cloud session: ~0.45 s per call, so 16 refs one at a
-# time took 6.6 s (past the budget) and 8 workers took 1.36 s. The cap bounds
-# the call count; refs past it are reported, never silently dropped.
+# Ref bounds. A ref longer than this is refused on `add`/`set` and read as not
+# a ref without any regex work, so one bad item cannot stall or crash `show`.
+_REF_MAX_LENGTH = 512
+# An issue number is at most 10 digits and fits GraphQL's 32-bit Int. A number
+# outside it is not looked up: in the batched query it would make GraphQL
+# reject the WHOLE document, so every other ref would go unresolved too.
+_ISSUE_NUMBER_MAX_DIGITS = 10
+_ISSUE_NUMBER_MAX = 2**31 - 1
+
+# The per-ref REST path: used when the batched GraphQL query is refused as a
+# whole, and always for links to another github.com repository. Measured in a
+# cloud session: ~0.45 s per call, so 16 refs one at a time took 6.6 s (past
+# the budget) and 8 workers took 1.36 s. The cap bounds the call count (one
+# call per distinct issue); refs past it are reported, never silently dropped.
 _REST_MAX_REFS = 25
 _REST_MAX_WORKERS = 8
 # The least a REST call is given even when the shared deadline is nearly spent,
-# so a call that does start has time to answer. A call is never started once
-# the deadline has passed.
+# so a call that does start has time to answer. With less than this left, no
+# call is started at all.
 _REST_MIN_CALL_TIMEOUT = 0.5
 
 # Reason strings a reader of `show` sees. Shared literals, so the GraphQL and
 # REST paths cannot drift apart on what the same condition is called.
+_REASON_NO_RESOLUTION = "no tracker resolution for this ref"
+_REASON_NO_TRACKER = "no tracker configured"
 _REASON_CALL_INCOMPLETE = "the tracker call did not complete"
 _REASON_NOT_RESOLVED = "the tracker did not resolve this ref"
 _REASON_FOREIGN_REF = "the ref points outside this repository"
 _REASON_NOT_A_REF = "the ref is not an issue number or a link to this repository"
+_REASON_NUMBER_RANGE = "the issue number is out of range"
 _REASON_REST_CAP = f"too many refs to check over REST (cap {_REST_MAX_REFS})"
 
 # Sentinel for "the caller explicitly asked to clear this field", which None
@@ -755,60 +780,101 @@ def resolve_memory_ids(
 def resolve_refs(
     refs: Sequence[str], *, project_path: Any = None
 ) -> Dict[str, Dict[str, Any]]:
-    """Resolve every ref against this repository's tracker.
+    """Resolve every ref against the tracker it names.
 
-    THE FAST PATH IS ONE BATCHED QUERY for every ref — never a call per ref.
-    Only when that query is refused AS A WHOLE (GraphQL blocked, as in Claude
-    Code cloud sessions) does it fall back to per-ref REST calls, bounded by a
-    cap and one shared deadline (`_resolve_refs_rest`).
+    THE FAST PATH IS ONE BATCHED QUERY for every ref to THIS repository —
+    never a call per ref. Per-ref REST calls (`_resolve_refs_rest`) are used
+    only for what that query cannot answer: every ref, when the query is
+    refused AS A WHOLE (GraphQL blocked, as in Claude Code cloud sessions),
+    and a github.com link to ANOTHER repository, which is looked up in that
+    repository. Both share a cap and ONE deadline, created here before the
+    GraphQL call, so the whole check costs at most one budget plus one REST
+    call's floor.
 
     Every entry comes back with a `state` of `done`, `abandoned`, `closed`,
-    `open` or `unverifiable`. Unverifiable covers a ref this tracker cannot
-    address, a ref that points at another repository, a ref that does not
-    exist, an absent `gh`, and an unreachable host — the caller reports it as
-    such rather than as a clean pass.
+    `open` or `unverifiable`. Unverifiable covers a ref no tracker here can
+    address (another host's link, a string that is no ref), an out-of-range
+    number, a ref that does not exist, an absent `gh`, and an unreachable host
+    — the caller reports it as such rather than as a clean pass.
 
     `project_path` anchors the `origin` remote read on this project.
     """
     outcome: Dict[str, Dict[str, Any]] = {
-        ref: {"state": "unverifiable", "reason": "no tracker resolution for this ref"}
+        ref: {"state": "unverifiable", "reason": _REASON_NO_RESOLUTION}
         for ref in refs
     }
-    numbered = {ref: _issue_number(ref) for ref in refs}
-    addressable = {ref: number for ref, number in numbered.items() if number is not None}
-    if not addressable:
+    classified = {ref: _classify_ref(ref) for ref in refs}
+    candidates = {ref: kind for ref, kind in classified.items()
+                  if kind.kind != _KIND_OPAQUE}
+    if not candidates:
         return outcome
 
     repo = _repo_slug(project_path)
     if repo is None:
-        for ref in addressable:
-            outcome[ref] = {"state": "unverifiable", "reason": "no tracker configured"}
+        for ref in candidates:
+            outcome[ref] = {"state": "unverifiable", "reason": _REASON_NO_TRACKER}
         return outcome
 
     owner, name = repo
-    # A URL to ANOTHER repository's issue ends in digits too, and querying
-    # those digits here would report that number in THIS repository — a
-    # wrong done or abandoned verdict about an unrelated ref. Refused first,
-    # so neither the GraphQL nor the REST path ever sees it. A link that goes
-    # elsewhere and a string that is no link at all (`12/`, `foo/12`) are
-    # different mistakes, so they carry different reasons.
-    for ref in sorted(addressable):
-        if not _ref_targets_repo(ref, owner, name):
-            reason = (_REASON_FOREIGN_REF if _URL_LIKE.match(ref.strip())
-                      else _REASON_NOT_A_REF)
-            outcome[ref] = {"state": "unverifiable", "reason": reason}
-            del addressable[ref]
-    if addressable:
-        outcome.update(_resolve_refs_graphql(owner, name, addressable))
+    own: Dict[str, int] = {}
+    rest_targets: Dict[str, Tuple[str, str, int]] = {}
+    for ref, kind in candidates.items():
+        target = _ref_target(kind, owner, name)
+        if isinstance(target, str):
+            outcome[ref] = {"state": "unverifiable", "reason": target}
+        elif target[:2] == (owner, name):
+            own[ref] = target[2]
+        else:
+            rest_targets[ref] = target
+
+    deadline = time.monotonic() + _TRACKER_TIMEOUT_SECONDS
+    if own:
+        fast = _resolve_refs_graphql(owner, name, own)
+        if fast is None:
+            rest_targets.update({ref: (owner, name, number)
+                                 for ref, number in own.items()})
+        else:
+            outcome.update(fast)
+    if rest_targets:
+        outcome.update(_resolve_refs_rest(
+            rest_targets, deadline=deadline, primary=(owner, name)))
     return outcome
+
+
+def _ref_target(
+    kind: _RefKind, owner: str, name: str
+) -> Union[str, Tuple[str, str, int]]:
+    """Where one classified ref is looked up: `(owner, name, number)`, or the
+    unverifiable reason (a str) when it cannot be looked up at all.
+
+    A bare number and a link to THIS repository (owner and name compared
+    case-insensitively, as GitHub does) get this repository's slug, so the
+    caller can tell them from a link to another github.com repository, which
+    keeps its own owner and name — but only when they pass `_valid_slug`,
+    because they become a REST path. Anything else carries its reason.
+    """
+    if kind.kind == _KIND_BARE:
+        return (owner, name, kind.number)
+    if kind.kind == _KIND_GITHUB:
+        if (kind.owner.lower(), kind.name.lower()) == (owner.lower(), name.lower()):
+            return (owner, name, kind.number)
+        if _valid_slug(kind.owner, kind.name):
+            return (kind.owner, kind.name, kind.number)
+        return _REASON_FOREIGN_REF
+    return {
+        _KIND_LINK: _REASON_FOREIGN_REF,
+        _KIND_OUT_OF_RANGE: _REASON_NUMBER_RANGE,
+    }.get(kind.kind, _REASON_NOT_A_REF)
 
 
 def _resolve_refs_graphql(
     owner: str, name: str, addressable: Dict[str, int]
-) -> Dict[str, Dict[str, Any]]:
-    """The fast path: ONE batched GraphQL query, or the REST fallback when
-    that query is refused as a whole. Returns an entry only for refs it could
-    speak to; the caller's default covers the rest.
+) -> Optional[Dict[str, Dict[str, Any]]]:
+    """The fast path: ONE batched GraphQL query for refs to THIS repository.
+
+    Returns None when the query is refused AS A WHOLE (`_graphql_request_failed`),
+    so the caller can fall back to REST. Otherwise returns an entry only for
+    refs it could speak to; the caller's default covers the rest.
 
     STDOUT IS THE RESULT, NOT THE RETURN CODE. `gh api graphql` exits 1 on
     PARTIAL success with every field that did resolve present on stdout, so a
@@ -825,15 +891,9 @@ def _resolve_refs_graphql(
     )
     query = f'query {{ repository(owner: "{owner}", name: "{name}") {{ {selections} }} }}'
 
-    # ONE BUDGET for the whole tracker check, anchored at the GraphQL call's
-    # start: the call itself keeps its full `_TRACKER_TIMEOUT_SECONDS`, and a
-    # REST fallback gets only what is left, so a slow refusal cannot stretch
-    # `show` to two budgets. The slug lookup precedes this anchor; it can only
-    # cost a budget of its own when neither GH_REPO nor a github.com origin
-    # resolves and `gh repo view` runs — the old code's only slug path, so that
-    # worst case predates this fallback and is deliberately left outside it.
-    deadline = time.monotonic() + _TRACKER_TIMEOUT_SECONDS
-    stdout = _run_capture(["gh", "api", "graphql", "-f", f"query={query}"])
+    stdout = _run_capture(
+        ["gh", "api", "graphql", "-f", f"query={query}", *_GH_API_HOST_ARGS]
+    )
     if stdout is None:
         for ref in addressable:
             # NOT "tracker unreachable". `_run_capture` returns None for THREE
@@ -845,13 +905,11 @@ def _resolve_refs_graphql(
             outcome[ref] = {"state": "unverifiable", "reason": _REASON_CALL_INCOMPLETE}
         return outcome
 
-    try:
-        payload = json.loads(stdout)
-    except ValueError:
+    payload = _parse_json(stdout)
+    if payload is _UNPARSEABLE:
         return outcome
-
     if _graphql_request_failed(payload):
-        return _resolve_refs_rest(owner, name, addressable, deadline=deadline)
+        return None
 
     # `or {}` alone defends against a FALSY value and not against a truthy
     # wrong-typed one, so a payload carrying `"data": 5` reached `(5).get` and
@@ -893,65 +951,99 @@ def _graphql_request_failed(payload: Any) -> bool:
 
 
 def _resolve_refs_rest(
-    owner: str, name: str, addressable: Dict[str, int],
-    *, deadline: Optional[float] = None,
+    targets: Dict[str, Tuple[str, str, int]],
+    *, deadline: float, primary: Tuple[str, str],
 ) -> Dict[str, Dict[str, Any]]:
     """Per-ref REST lookups, in parallel, under ONE shared deadline.
 
-    `gh api repos/{owner}/{name}/issues/{N}` answers for issues AND pull
-    requests. `deadline` is a `time.monotonic()` value — the caller passes
-    the one tracker budget, already partly spent by the refused GraphQL call;
-    None means `_TRACKER_TIMEOUT_SECONDS` from now. Each call gets what is
-    left of it (never less than
-    `_REST_MIN_CALL_TIMEOUT`), a call is never STARTED once it has passed, and
-    a ref whose call has not finished by then reads as unverifiable. At most
-    `_REST_MAX_REFS` refs are checked, in sorted order so the cut is
-    deterministic; the rest are reported with the cap as their reason.
-    Nothing here can block past the deadline plus one call's floor.
-    """
-    ordered = sorted(addressable)
-    checked, overflow = ordered[:_REST_MAX_REFS], ordered[_REST_MAX_REFS:]
-    outcome: Dict[str, Dict[str, Any]] = {
-        ref: {"state": "unverifiable", "reason": _REASON_REST_CAP} for ref in overflow
-    }
-    if not checked:
-        return outcome
-    if deadline is None:
-        deadline = time.monotonic() + _TRACKER_TIMEOUT_SECONDS
-    incomplete = {"state": "unverifiable", "reason": _REASON_CALL_INCOMPLETE}
+    `targets` maps each ref to the `(owner, name, number)` it is looked up
+    as. `gh api repos/{owner}/{name}/issues/{N}` answers for issues AND pull
+    requests. Refs that name the same issue share ONE call and its answer.
 
-    def fetch(ref: str) -> Dict[str, Any]:
+    ORDER AND CAP: distinct issues are checked `primary` (this repository)
+    first, then by owner, name and number — numerically, so the cut is
+    deterministic and predictable. At most `_REST_MAX_REFS` calls are made;
+    refs past the cap are reported with the cap as their reason.
+
+    `deadline` is a `time.monotonic()` value — the one tracker budget, already
+    partly spent by a refused GraphQL call. With less than
+    `_REST_MIN_CALL_TIMEOUT` left, no call is started and every checked ref
+    reads incomplete. Otherwise each call gets what is left (never less than
+    that floor), a queued call is never STARTED once the deadline has passed,
+    and the wait ends at the deadline plus one floor — the latest a started
+    call can finish — so a result that arrives is used, not discarded.
+    """
+    by_issue: Dict[Tuple[str, str, int], List[str]] = {}
+    for ref, (owner, name, number) in sorted(targets.items()):
+        key = (owner.lower(), name.lower(), number)
+        by_issue.setdefault(key, []).append(ref)
+    slugs = {(owner.lower(), name.lower(), number): (owner, name)
+             for owner, name, number in targets.values()}
+    primary_key = (primary[0].lower(), primary[1].lower())
+    ordered = sorted(by_issue, key=lambda key: (key[:2] != primary_key, key))
+    checked, overflow = ordered[:_REST_MAX_REFS], ordered[_REST_MAX_REFS:]
+
+    outcome: Dict[str, Dict[str, Any]] = {}
+    for key in overflow:
+        for ref in by_issue[key]:
+            outcome[ref] = {"state": "unverifiable", "reason": _REASON_REST_CAP}
+    results = _run_rest_lookups(
+        {key: (*slugs[key], key[2]) for key in checked}, deadline
+    )
+    for key in checked:
+        for ref in by_issue[key]:
+            outcome[ref] = dict(results[key])
+    return outcome
+
+
+def _run_rest_lookups(
+    lookups: Dict[Any, Tuple[str, str, int]], deadline: float
+) -> Dict[Any, Dict[str, Any]]:
+    """Run each `(owner, name, number)` lookup in a bounded thread pool and
+    return one outcome per key; anything not finished in time is incomplete.
+    """
+    incomplete = {"state": "unverifiable", "reason": _REASON_CALL_INCOMPLETE}
+    results: Dict[Any, Dict[str, Any]] = {key: incomplete for key in lookups}
+    if not lookups or deadline - time.monotonic() < _REST_MIN_CALL_TIMEOUT:
+        return results
+
+    def fetch(owner: str, name: str, number: int) -> Dict[str, Any]:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            return dict(incomplete)
+            return incomplete
         stdout = _run_capture(
-            ["gh", "api", f"repos/{owner}/{name}/issues/{addressable[ref]}"],
+            ["gh", "api", f"repos/{owner}/{name}/issues/{number}",
+             *_GH_API_HOST_ARGS],
             timeout=max(remaining, _REST_MIN_CALL_TIMEOUT),
         )
         if stdout is None:
-            return dict(incomplete)
-        try:
-            node = _node_from_rest(json.loads(stdout))
-        except ValueError:
-            node = None
+            return incomplete
+        node = _node_from_rest(_parse_json(stdout))
         if node is None:
             return {"state": "unverifiable", "reason": _REASON_NOT_RESOLVED}
         return _ref_outcome(node)
 
-    executor = ThreadPoolExecutor(max_workers=min(_REST_MAX_WORKERS, len(checked)))
+    executor = ThreadPoolExecutor(max_workers=min(_REST_MAX_WORKERS, len(lookups)))
+    futures = {}
     try:
-        futures = {executor.submit(fetch, ref): ref for ref in checked}
-        finished, _ = wait(futures, timeout=max(0.0, deadline - time.monotonic()))
-        for future, ref in futures.items():
-            if future in finished and future.exception() is None:
-                outcome[ref] = future.result()
-            else:
-                outcome[ref] = dict(incomplete)
+        try:
+            for key, lookup in lookups.items():
+                futures[executor.submit(fetch, *lookup)] = key
+        except RuntimeError:
+            # A worker thread could not be started (a container's thread or
+            # pid limit). What was submitted still runs; the rest stay
+            # incomplete rather than crashing `show`.
+            pass
+        remaining = max(0.0, deadline - time.monotonic())
+        finished, _ = wait(futures, timeout=remaining + _REST_MIN_CALL_TIMEOUT)
+        for future in finished:
+            if future.exception() is None:
+                results[futures[future]] = future.result()
     finally:
-        # Queued refs never start once the deadline has passed; a call already
-        # running is bounded by its own subprocess timeout.
+        # Queued lookups never start once the deadline has passed; a call
+        # already running is bounded by its own subprocess timeout.
         executor.shutdown(wait=False, cancel_futures=True)
-    return outcome
+    return results
 
 
 def _node_from_rest(payload: Any) -> Optional[Dict[str, Any]]:
@@ -990,22 +1082,125 @@ def _node_from_rest(payload: Any) -> Optional[Dict[str, Any]]:
     return node
 
 
-def _ref_targets_repo(ref: str, owner: str, name: str) -> bool:
-    """The ref addresses an issue or pull request of `owner/name`.
+# Kinds `_classify_ref` returns. OPAQUE is a ref with no numeric tail at all
+# (a Linear key, free text): not this tracker's to judge, so it keeps the
+# default reason. NOT_A_REF ends in digits but is neither a number nor a link
+# (`12/`, `foo/12`), or is over-long. LINK is a link this tracker cannot
+# address (another host, a github.com page that is no issue or pull request).
+_KIND_BARE = "bare"
+_KIND_GITHUB = "github"
+_KIND_LINK = "link"
+_KIND_NOT_A_REF = "not_a_ref"
+_KIND_OUT_OF_RANGE = "out_of_range"
+_KIND_OPAQUE = "opaque"
 
-    Admits a bare `N` or `#N`, and a github.com issue or pull URL whose owner
-    and name match (case-insensitively, as GitHub does). Anything else — a URL
-    to another repository, a Jira or Linear URL that happens to end in digits —
-    does not, and is reported unverifiable rather than looked up here.
+
+class _RefKind(NamedTuple):
+    """What a ref is. `number` is set for BARE and GITHUB; `owner` and `name`
+    for GITHUB only, exactly as written in the link (not yet compared)."""
+
+    kind: str
+    number: Optional[int] = None
+    owner: str = ""
+    name: str = ""
+
+
+def _classify_ref(ref: Any) -> _RefKind:
+    """THE ONE READING of a ref, shared by the read path (`resolve_refs`), the
+    write path (`_normalise_ref`) and `_abandoned_flags`, so they cannot drift.
+    Pure, and linear in the ref's length.
+
+    - BARE: `N` or `#N`.
+    - GITHUB: a github.com issue or pull link (`_GITHUB_REF_URL`), with the
+      owner and name as written; the caller decides whether they are this
+      repository.
+    - OUT_OF_RANGE: either of those with a number past 10 digits or 2**31-1.
+    - LINK: any other link (a scheme, or a dotted host before the first `/`)
+      whose last segment is digits — another tracker's URL.
+    - NOT_A_REF: any other string whose last segment is digits, and any ref
+      longer than `_REF_MAX_LENGTH`, which is refused before any regex runs.
+    - OPAQUE: everything else, including non-strings.
     """
-    stripped = ref.strip() if isinstance(ref, str) else ""
-    if _BARE_REF.match(stripped):
+    if not isinstance(ref, str):
+        return _RefKind(_KIND_OPAQUE)
+    text = ref.strip()
+    if len(text) > _REF_MAX_LENGTH:
+        return _RefKind(_KIND_NOT_A_REF)
+    bare = _BARE_REF.match(text)
+    if bare:
+        number = _bounded_issue_number(bare.group(1))
+        return (_RefKind(_KIND_BARE, number) if number is not None
+                else _RefKind(_KIND_OUT_OF_RANGE))
+    link = _GITHUB_REF_URL.match(text)
+    if link:
+        number = _bounded_issue_number(link.group(3))
+        if number is None:
+            return _RefKind(_KIND_OUT_OF_RANGE)
+        return _RefKind(_KIND_GITHUB, number, link.group(1), link.group(2))
+    # isdecimal, NOT isdigit: isdigit also accepts superscripts such as '²'.
+    tail = text.lstrip("#").rstrip("/").rsplit("/", 1)[-1]
+    if not tail.isdecimal():
+        return _RefKind(_KIND_OPAQUE)
+    return _RefKind(_KIND_LINK if _looks_like_link(text) else _KIND_NOT_A_REF)
+
+
+def _bounded_issue_number(digits: str) -> Optional[int]:
+    """`digits` as an issue number, or None when it is out of range.
+
+    The length is checked BEFORE `int()`: past 4300 digits `int()` raises
+    ValueError (CPython's int-string limit), and past 2**31-1 the number is
+    outside GraphQL's Int, which would fail the whole batched query.
+    """
+    if len(digits) > _ISSUE_NUMBER_MAX_DIGITS:
+        return None
+    number = int(digits)
+    return number if number <= _ISSUE_NUMBER_MAX else None
+
+
+def _looks_like_link(text: str) -> bool:
+    """A URL scheme (`https://`), or a first segment that is a dotted host
+    ending in a letters-only label (`jira.example.com/...`). Not a regex, so
+    a long dotted string cannot backtrack; `v1.2/12` is not a link."""
+    if _URL_SCHEME.match(text):
         return True
-    match = _GITHUB_REF_URL.match(stripped)
-    return bool(match) and (
-        match.group(1).lower() == owner.lower()
-        and match.group(2).lower() == name.lower()
+    head, slash, _ = text.partition("/")
+    if not slash or any(char.isspace() for char in head):
+        return False
+    host = head.rsplit("@", 1)[-1].split(":", 1)[0]
+    labels = host.split(".")
+    return (len(labels) >= 2 and all(labels)
+            and labels[-1].isalpha() and len(labels[-1]) >= 2)
+
+
+def _issue_number(ref: Any) -> Optional[int]:
+    """The issue number a bare ref or a github.com issue/pull link carries,
+    whichever repository the link names; None for anything else."""
+    return _classify_ref(ref).number
+
+
+def _ref_targets_repo(ref: Any, owner: str, name: str) -> bool:
+    """The ref addresses an issue or pull request of `owner/name`: a bare
+    `N` or `#N`, or a github.com link whose owner and name match
+    (case-insensitively, as GitHub does)."""
+    kind = _classify_ref(ref)
+    if kind.kind == _KIND_BARE:
+        return True
+    return kind.kind == _KIND_GITHUB and (
+        (kind.owner.lower(), kind.name.lower()) == (owner.lower(), name.lower())
     )
+
+
+_UNPARSEABLE = object()
+
+
+def _parse_json(text: str) -> Any:
+    """`json.loads`, or `_UNPARSEABLE`. RecursionError as well as ValueError:
+    deeply nested JSON raises the former, and the body comes from a host this
+    code does not control."""
+    try:
+        return json.loads(text)
+    except (ValueError, RecursionError):
+        return _UNPARSEABLE
 
 
 # A closed ref is NOT evidence the work was done. GitHub closes an issue for
@@ -1057,7 +1252,13 @@ def _repo_slug(project_path: Any = None) -> Optional[Tuple[str, str]]:
     EMPTY stdout) it yields None — which is why it is no longer the first rung.
     Its cost is a constant rather than a per-ref one. None means no tracker is
     configured, which is a fully supported state.
+
+    A `project_path` that is given but unusable (not an absolute str) yields
+    None outright: `gh repo view` runs in the process CWD, the very anchor the
+    origin rung refuses, so falling through to it would read another project.
     """
+    if _git_anchor(project_path) is None:
+        return None
     local = _local_repo_slug(project_path)
     if local is not None:
         return local
@@ -1069,30 +1270,49 @@ def _local_repo_slug(project_path: Any = None) -> Optional[Tuple[str, str]]:
 
     1. `GH_REPO`, the same override `gh` itself honours first, so a fork
        checkout that points it upstream queries the repository it means.
-    2. The `origin` remote, read with `git -C project_path` so the answer is
-       about THIS project and not whatever repository the process CWD sits in.
-       With no `project_path` (None) git runs in the process CWD — the same
-       anchor `gh repo view` always had — so such a caller still gets the
-       network-free slug. A non-None value that is not an absolute str is
-       refused, the gate `_branch_and_worktree_names` applies: a relative path
-       would silently resolve against the CWD.
+    2. The `origin` remote (`_origin_repo_slug`).
 
-    Shared by the read path (first rungs of `_repo_slug`) and the write path
-    (`_normalise_ref`), which must never touch the network. The remote URL can
-    carry a credential, so it is parsed and dropped: it never reaches output.
+    A `project_path` that is given but unusable yields None before either rung.
     """
+    if _git_anchor(project_path) is None:
+        return None
     from_env = _slug_from_gh_repo(os.environ.get("GH_REPO"))
     if from_env is not None:
         return from_env
-    if project_path is None:
-        anchor: List[str] = []
-    elif (isinstance(project_path, str) and project_path
-          and Path(project_path).is_absolute()):
-        anchor = ["-C", project_path]
-    else:
+    return _origin_repo_slug(project_path)
+
+
+def _origin_repo_slug(project_path: Any = None) -> Optional[Tuple[str, str]]:
+    """The slug of the `origin` remote of `project_path`, or None. No network.
+
+    Read RAW with `git config --get remote.origin.url`: `git remote get-url`
+    applies `url.<base>.insteadOf`, so a rewrite rule in the repository's
+    config could point the slug at another repository. With no `project_path`
+    (None) git runs in the process CWD — the anchor `gh repo view` always had.
+
+    The write path (`_normalise_ref`) uses THIS rung alone, never `GH_REPO`:
+    a stored ref outlives the environment variable, so collapsing a link
+    against a transient override would re-target it once the override is gone.
+    The remote URL can carry a credential, so it is parsed and dropped: it
+    never reaches output.
+    """
+    anchor = _git_anchor(project_path)
+    if anchor is None:
         return None
-    url = _run_capture(["git", *anchor, "remote", "get-url", "origin"])
+    url = _run_capture(["git", *anchor, "config", "--get", "remote.origin.url"])
     return _slug_from_remote_url(url)
+
+
+def _git_anchor(project_path: Any) -> Optional[List[str]]:
+    """`git` arguments anchoring a call on `project_path`: `[]` for None (the
+    process CWD), `["-C", path]` for an absolute str, and None — refuse — for
+    anything else. The same gate `_branch_and_worktree_names` applies: a
+    relative path would silently resolve against the CWD."""
+    if project_path is None:
+        return []
+    if isinstance(project_path, str) and project_path and Path(project_path).is_absolute():
+        return ["-C", project_path]
+    return None
 
 
 def _slug_from_gh_repo(value: Any) -> Optional[Tuple[str, str]]:
@@ -1120,20 +1340,25 @@ def _slug_from_remote_url(url: Any) -> Optional[Tuple[str, str]]:
     """`(owner, name)` from a github.com remote URL, or None. Pure.
 
     Accepted: `https://` and `http://` (with or without `user[:token]@`),
-    `ssh://git@github.com[:port]/`, `git://github.com/` and the scp form
-    `git@github.com:O/N`. One trailing `/` and one `.git` are stripped, and
-    exactly two path segments must remain. Any other host — GitHub Enterprise,
-    a loopback proxy, another forge — returns None and the chain falls through
-    to `gh repo view`, which is what ran before this rung existed.
+    `ssh://` and `git+ssh://` (`[user@]host[:port]`), `git://`, and the scp
+    form `user@host:O/N` with any non-empty user. The host is `github.com` or
+    GitHub's SSH-over-443 host `ssh.github.com`. One trailing `/` and one
+    `.git` are stripped, and exactly two path segments must remain. Any other
+    host — GitHub Enterprise, a loopback proxy, another forge — returns None
+    and the chain falls through to `gh repo view`.
 
-    The scp form needs the literal `git@` prefix, so arbitrary text (a JSON
-    error body, a sentence) never parses as a remote.
+    Refused outright: a URL with a backslash or more than one `@`. Python's
+    `urlsplit` and git disagree on where such a host ends
+    (`https://evil.com\\@github.com/o/n` is github.com to one, not the other),
+    so neither reading is trusted.
     """
     if not isinstance(url, str):
         return None
     url = url.strip()
+    if "\\" in url or url.count("@") > 1:
+        return None
     scp = _SCP_REMOTE.match(url)
-    if scp is not None:
+    if scp is not None and "://" not in url:
         host, path = scp.group(1), scp.group(2)
     else:
         try:
@@ -1144,7 +1369,7 @@ def _slug_from_remote_url(url: Any) -> Optional[Tuple[str, str]]:
         if parts.scheme.lower() not in _REMOTE_SCHEMES:
             return None
         path = parts.path
-    if host.lower() != _GITHUB_HOST:
+    if host.lower() not in _GITHUB_REMOTE_HOSTS:
         return None
     path = path[1:] if path.startswith("/") else path
     path = path[:-1] if path.endswith("/") else path
@@ -1176,13 +1401,9 @@ def _gh_repo_view_slug() -> Optional[Tuple[str, str]]:
     stdout = _run_capture(["gh", "repo", "view", "--json", "nameWithOwner"])
     if stdout is None:
         return None
-    try:
-        payload = json.loads(stdout)
-    except ValueError:
-        return None
-    # ValueError covers unparseable bytes and nothing else: a payload that
-    # parsed to an array reached `.get` and a numeric nameWithOwner reached
-    # `.partition`, both AttributeError, neither caught.
+    payload = _parse_json(stdout)
+    # A payload that parsed to an array reached `.get` and a numeric
+    # nameWithOwner reached `.partition`, both AttributeError, neither caught.
     if not isinstance(payload, dict):
         return None
     slug = payload.get("nameWithOwner")
@@ -1199,47 +1420,35 @@ def _gh_repo_view_slug() -> Optional[Tuple[str, str]]:
 def _run_capture(
     command: Sequence[str], timeout: float = _TRACKER_TIMEOUT_SECONDS
 ) -> Optional[str]:
-    """Run a tracker command and return its stdout, or None when there is none.
+    """Run a `gh` or `git` command; return its stdout, or None when there is none.
 
-    Non-zero exit is NOT a failure here: stdout carries the resolved fields
-    even when one ref in the batch was bad. Only an empty stdout, a missing
-    binary or a timeout is a failure.
+    Non-zero exit is NOT a failure here: `gh api graphql` prints the resolved
+    fields even when one ref in the batch was bad, and a REST error body is
+    still a body. Only an empty stdout, a missing binary, a timeout, or an
+    argv the OS refuses (an OSError, or a ValueError for a NUL byte, which can
+    come from a hand-edited `project_path`) is a failure.
 
-    `timeout` exists for the REST fallback, whose calls share ONE deadline and
+    Output is decoded with `errors="replace"`, so a non-UTF-8 byte (say in a
+    remote URL) cannot raise UnicodeDecodeError out of `show`. `GH_HOST` is
+    removed from the child's environment: the tracker is github.com, and
+    `gh repo view` would otherwise resolve against another host.
+
+    `timeout` exists for the per-ref REST calls, which share ONE deadline and
     so each get what is left of it. Every other caller takes the default.
     """
+    env = {key: value for key, value in os.environ.items() if key != "GH_HOST"}
     try:
         result = subprocess.run(
             list(command),
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=timeout,
+            env=env,
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+    except (subprocess.TimeoutExpired, OSError, ValueError):
         return None
     return result.stdout if result.stdout.strip() else None
-
-
-def _issue_number(ref: Any) -> Optional[int]:
-    """The issue number a ref addresses, or None when this tracker cannot.
-
-    A ref is an opaque string by design — a bare number, a Linear key, a URL
-    and null are all valid — so anything this resolver cannot address is
-    reported unverifiable rather than treated as absent.
-    """
-    if not isinstance(ref, str):
-        return None
-    # A github.com issue or pull link takes its number from the PATH, so an
-    # issue-comment link (`.../issues/123#issuecomment-456`) addresses #123 and
-    # a fragment's digits are never read as the number.
-    link = _GITHUB_REF_URL.match(ref.strip())
-    if link:
-        return int(link.group(3))
-    digits = ref.strip().lstrip("#").rstrip("/").rsplit("/", 1)[-1]
-    # isdecimal, NOT isdigit: isdigit also accepts superscripts such as '²',
-    # which int() rejects with ValueError — a crash in every later `show`.
-    # isdecimal is exactly the set int() accepts and `\d` (_BARE_REF) matches.
-    return int(digits) if digits.isdecimal() else None
 
 
 # ---------------------------------------------------------------------------
@@ -1509,16 +1718,35 @@ def _abandoned_flags(
     names = _branch_and_worktree_names(project_path)
     if names is None:
         return []
+    # Only a link needs the slug, and reading it costs a git call.
+    slug = (_local_repo_slug(project_path)
+            if any(_classify_ref(item.get("ref")).kind == _KIND_GITHUB
+                   for item in tracked)
+            else None)
     flags = []
     for item in tracked:
-        number = _issue_number(item.get("ref"))
-        token = str(number) if number is not None else str(item.get("ref"))
+        token = _branch_token(item.get("ref"), slug)
         if not any(token in name for name in names):
             flags.append(
                 f"{_label(item)}: active, but no branch or worktree carries "
                 f"{item.get('ref')} — work may have been abandoned"
             )
     return flags
+
+
+def _branch_token(ref: Any, slug: Optional[Tuple[str, str]]) -> str:
+    """What a branch or worktree name must contain to carry `ref`: its issue
+    number when the ref addresses THIS repository (a bare number, or a link
+    whose owner and name match `slug`), else the ref itself. A link to another
+    repository or tracker keeps its full text, so its digits are never matched
+    against this project's branch names by coincidence."""
+    kind = _classify_ref(ref)
+    if kind.kind == _KIND_BARE or (
+        slug is not None and kind.kind == _KIND_GITHUB
+        and _ref_targets_repo(ref, *slug)
+    ):
+        return str(kind.number)
+    return str(ref)
 
 
 def _branch_and_worktree_names(project_path: Any = None) -> Optional[List[str]]:
@@ -1815,6 +2043,12 @@ def _field_updates(
     so the repository a URL is compared against is this project's.
     """
     ref = getattr(args, "ref", None)
+    if ref is not None and len(ref) > _REF_MAX_LENGTH:
+        # REFUSED, never truncated: a truncated ref is a different ref.
+        raise BacklogWriteError(
+            f"the ref is {len(ref)} characters long; the limit is "
+            f"{_REF_MAX_LENGTH}. Nothing was written."
+        )
     normalised_ref = None if ref is None else (
         _CLEAR if ref.lower() == "none" else _normalise_ref(ref, project_path)
     )
@@ -1835,30 +2069,37 @@ def _normalise_ref(ref: str, project_path: Any = None) -> str:
     """The ref as stored: the bare number when it certainly addresses THIS
     repository, else byte-identical.
 
-    Collapses only `N`, `#N`, and a github.com issue or pull URL whose owner
-    and name match this repository's slug. Everything else — a URL to another
-    repository, a Jira or Linear URL ending in digits, `owner/repo#N`, a Linear
-    key, an arbitrary string — is stored verbatim, because the qualifier IS
-    the meaning: collapsing it would silently re-target the ref at this
-    repository's issue of the same number. The read side then reports such a
-    ref as pointing outside this repository.
+    Collapses only `N`, `#N`, and a github.com issue or pull link whose owner
+    and name match this repository's `origin` slug (`_classify_ref` decides
+    what the ref is, as it does on the read side). Everything else — a link to
+    another repository, a Jira or Linear URL ending in digits, `owner/repo#N`,
+    a Linear key, an out-of-range number, an arbitrary string — is stored
+    verbatim, because the qualifier IS the meaning: collapsing it would
+    silently re-target the ref at this repository's issue of the same number.
+    The read side looks a link to another github.com repository up in THAT
+    repository.
 
-    NO NETWORK ON A WRITE: the slug comes from `_local_repo_slug` only
-    (`GH_REPO`, then the `origin` remote via `git -C`), never `gh repo view`.
-    When it cannot be resolved that way, a URL is stored verbatim. Write-time
-    only; existing stores normalise on their next touch, never by migration.
+    NO NETWORK ON A WRITE, AND NO GH_REPO: the slug comes from the `origin`
+    remote only (`_origin_repo_slug`), never `gh repo view`, and never the
+    transient `GH_REPO`, which a stored ref outlives. When the origin slug
+    cannot be read, a link is stored verbatim. Write-time only; existing
+    stores normalise on their next touch, never by migration.
+
+    STORES WRITTEN BEFORE THIS RULE may already hold bare numbers collapsed
+    from links to OTHER repositories or trackers: the old write path took any
+    URL's trailing digits. The qualifier is gone, so no read can recover it —
+    such a ref is checked as this repository's issue of that number, and a
+    done or abandoned verdict on it is worth re-checking by hand.
     """
-    stripped = ref.strip()
-    bare = _BARE_REF.match(stripped)
-    if bare:
-        return str(int(bare.group(1)))
-    url = _GITHUB_REF_URL.match(stripped)
-    if not url:
+    kind = _classify_ref(ref)
+    if kind.kind == _KIND_BARE:
+        return str(kind.number)
+    if kind.kind != _KIND_GITHUB:
         return ref
-    slug = _local_repo_slug(project_path)
-    if slug is None or not _ref_targets_repo(stripped, *slug):
+    slug = _origin_repo_slug(project_path)
+    if slug is None or not _ref_targets_repo(ref, *slug):
         return ref
-    return str(int(url.group(3)))
+    return str(kind.number)
 
 
 def _list_field(args: argparse.Namespace, name: str) -> Any:
