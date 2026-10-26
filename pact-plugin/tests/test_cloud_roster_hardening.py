@@ -481,3 +481,30 @@ def test_clear_load_cache_forces_a_reread(cloud, monkeypatch):
     first = cloud_roster.load_roster(TEAM)
     cloud_roster.clear_load_cache()
     assert cloud_roster.load_roster(TEAM) is not first
+
+
+def test_memo_key_size_alone_invalidates(cloud):
+    """An append that leaves mtime_ns unchanged (coarse-mtime filesystems, or
+    a restored mtime) is still seen: the size is part of the key."""
+    path = write_roster(cloud, TEAM, [intent(TU1, "coder", "pact-backend-coder")])
+    stat = path.stat()
+    assert cloud_roster.load_roster(TEAM).intent(TU2) is None
+    assert cloud_roster.append_record(
+        TEAM, {"k": "intent", "tu": TU2, "name": "b", "type": "t"})
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert path.stat().st_mtime_ns == stat.st_mtime_ns
+    assert cloud_roster.load_roster(TEAM).intent(TU2) is not None
+
+
+def test_memo_key_inode_alone_invalidates(cloud):
+    """A file replaced by one of the same size and the same mtime_ns is still
+    seen: the inode is part of the key."""
+    path = write_roster(cloud, TEAM, [intent(TU1, "coder", "pact-backend-coder")])
+    stat = path.stat()
+    assert cloud_roster.load_roster(TEAM).intent(TU1).name == "coder"
+    replacement = path.with_name("replacement.jsonl")
+    replacement.write_text(path.read_text().replace('"coder"', '"cOder"'))
+    os.utime(replacement, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    os.replace(replacement, path)
+    assert (path.stat().st_size, path.stat().st_mtime_ns) == (stat.st_size, stat.st_mtime_ns)
+    assert cloud_roster.load_roster(TEAM).intent(TU1).name == "cOder"

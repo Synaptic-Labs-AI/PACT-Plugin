@@ -95,6 +95,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -385,6 +386,12 @@ def _shadowed_by_other_definition(type_name: str, input_data: dict) -> bool:
     counts as SHADOWED: an unfinished scan cannot prove the type is the
     plugin's, and a True here only withholds an exemption.
 
+    ONLY REGULAR FILES ARE READ. Every definition and manifest is opened
+    non-blocking and fstat'ed first, so a FIFO named `*.md` cannot stall the
+    hook. A non-plugin `*.md` that is not a regular file counts as SHADOWED:
+    its name cannot be read, and a FIFO can still feed Claude Code a
+    definition when it loads the folder.
+
     SYMLINKED FOLDERS ARE FOLLOWED, ONCE EACH. Measured (CC 2.1.310): Claude
     Code loads definitions through a symlinked subdirectory of
     `.claude/agents`, so the scan must look there too. Each folder is
@@ -421,7 +428,15 @@ def _scan_for_definition(agents_dir: Path, type_name: str):
                 if files_seen > _MAX_DEFINITION_FILES:
                     return None
                 path = Path(root) / name
-                if not _is_plugin_definition(path) and _definition_name(path) == type_name:
+                if _is_plugin_definition(path):
+                    continue
+                try:
+                    if _definition_name(path) == type_name:
+                        return True
+                except _NotRegularFile:
+                    # A FIFO, socket or device named *.md: its content cannot
+                    # be read without blocking, and a FIFO can still feed
+                    # Claude Code a definition. Unknown, so SHADOWED.
                     return True
     except OSError:
         return False
@@ -497,19 +512,45 @@ def _is_plugin_definition(path: Path) -> bool:
         if not target_dir.is_relative_to(plugins_root):
             return False
         manifest = target_dir.parent / ".claude-plugin" / "plugin.json"
-        with open(manifest, encoding="utf-8") as f:
-            data = json.loads(f.read(_MANIFEST_MAX_BYTES))
+        data = json.loads(_read_regular(manifest, _MANIFEST_MAX_BYTES))
         return isinstance(data, dict) and data.get("name") == "PACT"
-    except (OSError, ValueError):
-        return False
+    except (OSError, ValueError, _NotRegularFile):
+        return False  # a non-regular manifest proves nothing: not plugin-owned
+
+
+class _NotRegularFile(Exception):
+    """The path names something other than a regular file (a FIFO, socket,
+    device or directory), so its content was not read."""
+
+
+def _read_regular(path: Path, limit: int) -> bytes:
+    """Up to `limit` bytes of `path`, only when it is a REGULAR file.
+
+    Opened with O_NONBLOCK, so a FIFO (which a plain open() would wait on
+    until some process opens it for writing) returns at once; the fstat on
+    the opened descriptor then refuses anything that is not a regular file
+    (_NotRegularFile). A stat BEFORE the open classifies kinds that cannot be
+    opened at all (a socket fails with ENXIO); the fstat AFTER it closes the
+    swap window. Symlinks are followed, as for any definition file.
+    Raises OSError on a stat, open or read error."""
+    if not stat.S_ISREG(os.stat(path).st_mode):
+        raise _NotRegularFile(str(path))
+    fd = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise _NotRegularFile(str(path))
+        return os.read(fd, limit)
+    finally:
+        os.close(fd)
 
 
 def _definition_name(path: Path) -> str | None:
     """The `name:` in an agent file's frontmatter; the file stem when the
-    frontmatter has no name; None when the file has no frontmatter."""
+    frontmatter has no name; None when the file has no frontmatter or cannot
+    be read. Raises _NotRegularFile when `path` is not a regular file (the
+    caller decides what that means; the shadow scan treats it as shadowed)."""
     try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            head = f.read(_FRONTMATTER_BYTES)
+        head = _read_regular(path, _FRONTMATTER_BYTES).decode("utf-8", errors="replace")
     except OSError:
         return None
     # A leading UTF-8 BOM is not part of the frontmatter fence.

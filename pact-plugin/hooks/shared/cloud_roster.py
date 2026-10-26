@@ -110,7 +110,13 @@ meta.json consistently". ACCEPTED RESIDUALS (user decision Q1, design §7):
     records yet" (not unloadable), so every agent resolves meta-only again,
     and a meta.json edit then puts a forged name on an action. That takes a
     write to both files, so it is the accepted two-file forge; no marker
-    record is kept to detect it.
+    record is kept to detect it;
+  - HOLDING THE ROSTER LOCK, the same degradation. A same-uid process that
+    opens the roster and holds its flock without writing makes every
+    append fail after state_file's 2 s bounded wait, so no new intent,
+    bind or confirm lands. Agents spawned while it is held have no record,
+    so they resolve meta-only, the same degradation as emptying the roster
+    (above), limited to those agents.
 The real control is harness-side (a cloud TaskCompleted `teammate_name`, or a
 harness-held roster).
 
