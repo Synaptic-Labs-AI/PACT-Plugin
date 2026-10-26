@@ -24,10 +24,15 @@
 #     ...
 #
 #   Line 1 minus its leading `# ` is the annotated tag message, verbatim.
-#   Everything after the blank line 2 is the release body. The file is read
-#   from the bump commit, or from the tip of main if the bump commit predates
-#   it (how v4.8.9-v4.8.11 were backfilled). A missing file, or a line 1 that
-#   is not `# v<ver>: <summary>`, stops the run before anything is created.
+#   Everything after the blank line 2 is the release body. The rules (no
+#   control characters in line 1, among others) are defined once, in
+#   .github/scripts/check-release-notes.sh, and checked twice: on every PR by
+#   pact-plugin/tests/test_release_notes.py (the current version's file), and
+#   here before release. The file is read from the bump commit if that copy
+#   is valid, otherwise from the tip of main (how v4.8.9-v4.8.11 were
+#   backfilled, and how a bad file that reached main is repaired: fix it on
+#   main and the next run uses that copy, with a warning). No valid copy
+#   anywhere stops the run before anything is created.
 #
 # WHO AUTHORS THE TAGS AND RELEASES (optional RELEASE_TOKEN)
 #   Without a `RELEASE_TOKEN` secret, tags and releases are made by
@@ -40,6 +45,14 @@
 #   it is set but `gh api user` fails, the run fails rather than silently
 #   tagging as the bot. An unset secret reads as an empty string, so
 #   `secrets.RELEASE_TOKEN || github.token` falls back to the bot token.
+#   Two consequences of setting it:
+#   - Tags and releases made with GITHUB_TOKEN start no other workflows;
+#     ones made with RELEASE_TOKEN do. No workflow here listens for them
+#     today, but any future `on: push: tags` or `on: release` workflow will
+#     run, with secrets, on every release this workflow cuts.
+#   - Anyone with write access who starts this workflow by hand on main
+#     makes tags authored as the token owner. That adds no capability: only
+#     what is already on main can be released (the job's `if:` gate).
 #
 # WHY CI CUTS RELEASES
 #   Cloud Claude Code sessions get HTTP 403 both when they push a tag and
@@ -162,37 +175,56 @@ jobs:
             fi
           }
 
-          # Reads $NOTES_DIR/v$2.md from bump commit $1, else from HEAD, and
-          # splits it into $work_dir/notes/v$2.msg (line 1 minus "# ", the
-          # tag message) and $work_dir/notes/v$2.body (line 3 on, the release
-          # notes). Text stays in files and variables; nothing is evaluated.
+          # The notes rules live in ONE place, shared with the PR-time test
+          # (pact-plugin/tests/test_release_notes.py). Run by explicit path
+          # with bash: it is read from this checkout of main, the same trust
+          # level as this workflow file.
+          check_notes() {
+            bash "$GITHUB_WORKSPACE/.github/scripts/check-release-notes.sh" "$@"
+          }
+          if [ ! -f "$GITHUB_WORKSPACE/.github/scripts/check-release-notes.sh" ]; then
+            echo "::error::.github/scripts/check-release-notes.sh is missing from the checkout"
+            exit 1
+          fi
+
+          # Picks the notes for version $2 (bump commit $1) and splits them
+          # into $work_dir/notes/v$2.msg (line 1 minus "# ", the tag message)
+          # and $work_dir/notes/v$2.body (line 3 on, the release notes).
+          # A VALID copy at the bump commit wins. If the bump commit's copy is
+          # invalid but HEAD's is valid, HEAD's is used with a warning, so a
+          # bad file that reached main is fixed by fixing it on main. Missing
+          # everywhere, or invalid everywhere, stops the run. Text stays in
+          # files and variables; nothing is evaluated.
           load_notes() {
-            local sha="$1" version="$2" path src line1 summary
+            local sha="$1" version="$2" path src="" bump_reason="" head_reason="" line1
             path="$NOTES_DIR/v$version.md"
             if git cat-file -e "$sha:$path" 2>/dev/null; then
-              src="$sha"
-            elif git cat-file -e "HEAD:$path" 2>/dev/null; then
-              src="HEAD"
-            else
-              echo "::error::v$version needs $path, but neither its bump commit $sha nor HEAD has it"
+              git show "$sha:$path" > "$work_dir/notes/bump"
+              if bump_reason="$(check_notes "$version" "$work_dir/notes/bump")"; then
+                src="$sha"
+                cp "$work_dir/notes/bump" "$work_dir/notes/raw"
+              fi
+            fi
+            if [ -z "$src" ] && git cat-file -e "HEAD:$path" 2>/dev/null; then
+              git show "HEAD:$path" > "$work_dir/notes/head"
+              if head_reason="$(check_notes "$version" "$work_dir/notes/head")"; then
+                src="HEAD"
+                cp "$work_dir/notes/head" "$work_dir/notes/raw"
+                if [ -n "$bump_reason" ]; then
+                  echo "::warning::$path at bump commit $sha is invalid ($bump_reason); using the valid copy on HEAD"
+                fi
+              fi
+            fi
+            if [ -z "$src" ]; then
+              if [ -z "$bump_reason" ] && [ -z "$head_reason" ]; then
+                echo "::error::v$version needs $path, but neither its bump commit $sha nor HEAD has it"
+              else
+                echo "::error::v$version has no valid $path (bump commit: ${bump_reason:-absent}; HEAD: ${head_reason:-absent})"
+              fi
               exit 1
             fi
-            git show "$src:$path" > "$work_dir/notes/raw"
             line1="$(sed -n 1p "$work_dir/notes/raw")"
-            summary="${line1#"# v$version: "}"
-            if [[ $line1 != "# v$version: "* || $line1 == *$'\r'* || ! $summary =~ [^[:space:]] ]]; then
-              echo "::error::$path line 1 must be '# v$version: <summary>', got: $(printf '%q' "$line1")"
-              exit 1
-            fi
-            if [ -n "$(sed -n 2p "$work_dir/notes/raw")" ]; then
-              echo "::error::$path line 2 must be blank"
-              exit 1
-            fi
             tail -n +3 "$work_dir/notes/raw" > "$work_dir/notes/v$version.body"
-            if ! grep -q '[^[:space:]]' "$work_dir/notes/v$version.body"; then
-              echo "::error::$path has no release notes after line 2"
-              exit 1
-            fi
             printf '%s\n' "${line1#"# "}" > "$work_dir/notes/v$version.msg"
             echo "v$version: notes from $src:$path"
           }
