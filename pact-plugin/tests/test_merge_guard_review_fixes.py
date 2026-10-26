@@ -3343,3 +3343,52 @@ def test_the_rows_match_what_bash_runs(label, cmd, runs, tmp_path):
     subprocess.run(["bash", "-c", harmless], cwd=tmp_path, capture_output=True, timeout=20,
                    env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)})
     assert marker.exists() is runs
+
+
+# A substitution the shell does not quote is split into legs at a `;`, `&&`, `||`, `|` or
+# newline inside it, so a guarded command that is not its first statement sits in a leg
+# that is a piece of it. That is one operation, which one click approves and runs.
+SUBSTITUTION_ONE_OP = [
+    ("assignment, after a statement", "x=$(echo hi; " + _HD_PUSH + ")"),
+    ("assignment, after a cd", "x=$(cd /tmp && " + _HD_PUSH + ")"),
+    ("assignment, after a ||", "x=$(echo hi || " + _HD_PUSH + ")"),
+    ("assignment, after a pipe", "x=$(true | " + _HD_PUSH + ")"),
+    ("assignment, on its own line", "x=$(\n" + _HD_PUSH + "\n)"),
+    ("assignment, backticks", "x=" + _HD_BT + "echo hi; " + _HD_PUSH + _HD_BT),
+    ("assignment, nested", "x=$(echo $(echo hi; " + _HD_PUSH + "))"),
+    ("assignment after another", "y=1 x=$(echo hi; " + _HD_MERGE + ")"),
+    ("heredoc, after a statement", "cat <<EOF\n$(echo hi; " + _HD_PUSH + ")\nEOF"),
+    ("heredoc, after a &&", "cat <<EOF\n$(echo hi && " + _HD_PUSH + ")\nEOF"),
+    ("heredoc, on its own line", "cat <<EOF\n$(\n" + _HD_PUSH + "\n)\nEOF"),
+    ("heredoc, first statement", "cat <<EOF\n$(" + _HD_PUSH + "; echo hi)\nEOF"),
+    ("python heredoc, after a statement", "python3 - <<EOF\nprint(\"$(echo hi; " + _HD_PUSH + ")\")\nEOF"),
+    ("double-quoted, after a statement", "echo \"$(echo hi; " + _HD_PUSH + ")\""),
+]
+
+SUBSTITUTION_TWO_OPS = [
+    ("two in one substitution", "x=$(" + _HD_MERGE + "; " + _HD_PUSH + ")"),
+    ("two after a statement", "x=$(echo hi; " + _HD_MERGE + "; " + _HD_PUSH + ")"),
+    ("one before, one inside", _HD_MERGE + " && x=$(echo hi; " + _HD_PUSH + ")"),
+    ("one inside, one after", "x=$(echo hi; " + _HD_MERGE + ") && " + _HD_PUSH),
+    ("two in a heredoc span", "cat <<EOF\n$(echo hi; " + _HD_MERGE + "; " + _HD_PUSH + ")\nEOF"),
+    ("two heredoc spans", "cat <<EOF\n$(echo hi; " + _HD_MERGE + ")\n$(echo hi; " + _HD_PUSH + ")\nEOF"),
+    ("one nested, one beside", "x=$(echo $(echo hi; " + _HD_MERGE + "); " + _HD_PUSH + ")"),
+]
+
+
+@pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+@pytest.mark.parametrize("label,cmd", SUBSTITUTION_ONE_OP, ids=[r[0] for r in SUBSTITUTION_ONE_OP])
+def test_one_guarded_command_inside_a_substitution_is_refused_then_runs(label, cmd, style):
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_dangerous_command(cmd) is True
+    assert is_compound_destructive_command(cmd) is False
+    assert _runs_after_approval(cmd, style)
+
+
+@pytest.mark.parametrize("label,cmd", SUBSTITUTION_TWO_OPS, ids=[r[0] for r in SUBSTITUTION_TWO_OPS])
+def test_two_guarded_commands_around_a_substitution_stay_compound(label, cmd):
+    from shared.merge_guard_common import is_compound_destructive_command
+
+    assert is_compound_destructive_command(cmd) is True
+    assert not any(_runs_after_approval(cmd, style) for style in APPROVAL_STYLES.values())

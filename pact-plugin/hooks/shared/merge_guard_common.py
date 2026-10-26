@@ -2610,30 +2610,47 @@ def extract_privileged_flags(command: str, op_type: str | None) -> list[str]:
     return sorted(found)
 
 
-def _substitution_bodies(command: str) -> list[str]:
-    """The bodies of the substitutions (`$(…)`, `<(…)`, `>(…)`, backticks) the shell runs
-    in `command`, outermost only: unquoted, or unescaped in double quotes."""
+def _substitution_spans(command: str) -> list[tuple[int, int]]:
+    """The (start, end) offsets of the substitutions (`$(…)`, `<(…)`, `>(…)`, backticks)
+    the shell runs in `command`, outermost only: unquoted, or unescaped in double quotes."""
     if "(" not in command and "`" not in command:
         return []
     view = _mask_quotes_keeping_substitutions(command)
-    bodies, i, n = [], 0, len(command)
+    spans, i, n = [], 0, len(command)
     while i < n:
         if view[i] == "\\":
             i += 2
             continue
         if view.startswith(("$(", "<(", ">("), i):
             span, end = _extract_dollar_paren(command, i)
-            body = None if span is None else span[2:-1]
         elif view[i] == "`":
             span, end = _extract_backtick(command, i)
-            body = None if span is None else span[1:-1]
         else:
             i += 1
             continue
-        if body is not None:
-            bodies.append(body)
+        if span is not None:
+            spans.append((i, end))
         i = max(end, i + 1)
-    return bodies
+    return spans
+
+
+def _substitution_bodies(command: str) -> list[str]:
+    """The bodies of the substitutions `_substitution_spans` finds in `command`."""
+    return [command[s + 1:e - 1] if command[s] == "`" else command[s + 2:e - 1]
+            for s, e in _substitution_spans(command)]
+
+
+def _destructive_legs_on_substitutions(command: str, legs: list[str], destructive: list[str]) -> int:
+    """How many of the destructive `legs` of `command` open a substitution or are a
+    piece of one: an unquoted `x=$(echo hi; gh pr merge 5)` splits into legs at the `;`
+    inside it, and its guarded command is counted from the substitution's body."""
+    stripped = _strip_non_executable_content(_normalize_line_continuations(command))
+    subs = _substitution_spans(stripped)
+    return sum(
+        1 for (start, end), leg in zip(_slice_stripped_leg_spans(stripped), legs)
+        if leg in destructive
+        and (re.search(r"[$<>]\(|`", leg) or any(s < end and start < e for s, e in subs))
+    )
 
 
 def _substitution_destructive_count(command: str, depth: int = 0) -> int:
@@ -2645,7 +2662,7 @@ def _substitution_destructive_count(command: str, depth: int = 0) -> int:
     for body in _substitution_bodies(_strip_shell_comments(_excise_heredoc_bodies_for_routing_scan(command))):
         destructive = [leg for leg in _split_into_legs(body) if _leg_is_destructive(leg)]
         count = sum(_shell_leg_destructive_count(leg) for leg in destructive)
-        nested = sum(1 for leg in destructive if re.search(r"[$<>]\(|`", leg))
+        nested = _destructive_legs_on_substitutions(body, _split_into_legs(body), destructive)
         count += max(nested, _substitution_destructive_count(body, depth + 1)) - nested
         total += count or (1 if _is_dangerous_at_depth(body, depth + 1) else 0)
     return total
@@ -10184,6 +10201,22 @@ def _split_into_legs(command: str) -> list[str]:
     return _slice_stripped_legs(stripped)
 
 
+def _legs_cut_to_substitutions(command: str) -> list[str]:
+    """The legs of `command`, a leg that starts inside a substitution and runs to its end
+    cut before the substitution's closing `)` or backtick: an unquoted `x=$(echo hi;
+    gh pr merge 5)` has the legs `x=$(echo hi` and `gh pr merge 5`."""
+    stripped = _strip_non_executable_content(_normalize_line_continuations(command))
+    subs = _substitution_spans(stripped)
+    legs = []
+    for start, end in _slice_stripped_leg_spans(stripped):
+        for s, e in subs:
+            if s < start < e <= end:
+                end = e - 1
+                break
+        legs.append(stripped[start:end])
+    return legs
+
+
 def _single_destructive_leg(command: str) -> str | None:
     """The UNIQUE is_dangerous_command leg of a command, or None.
 
@@ -10216,7 +10249,7 @@ def _single_destructive_leg(command: str) -> str | None:
     command = _rewrite_readable_evals(command)
     dangerous = [
         leg.strip()
-        for leg in _split_into_legs(command)
+        for leg in _legs_cut_to_substitutions(command)
         if is_dangerous_command(leg.strip())
     ]
     return dangerous[0] if len(dangerous) == 1 else None
@@ -10237,7 +10270,7 @@ def _single_detectable_leg(command: str) -> str | None:
     """
     detectable = [
         leg.strip()
-        for leg in _split_into_legs(command)
+        for leg in _legs_cut_to_substitutions(command)
         if detect_command_operation_type(leg.strip()) is not None
     ]
     return detectable[0] if len(detectable) == 1 else None
@@ -10502,7 +10535,7 @@ def is_compound_destructive_command(command: str) -> bool:
     ], _leg_operators(command))[0]
     # Commands a substitution runs are counted from its body, as a program's are: legs
     # holding a substitution count as the larger of their own number and the body's.
-    on_substitutions = sum(1 for leg in destructive if re.search(r"[$<>]\(|`", leg))
+    on_substitutions = _destructive_legs_on_substitutions(command, legs, destructive)
     in_shells += max(on_substitutions, _substitution_destructive_count(command)) - on_substitutions
     in_shells += _literal_loop_extra_passes(command)
     return in_shells - on_interpreters + max(on_interpreters, len(interpreted)) >= 2
