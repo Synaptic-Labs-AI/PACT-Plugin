@@ -1553,6 +1553,10 @@ PUSH_ROUTING_CHANGES = {
     "config-global-push-default-remote": ("git config --global remote.pushdefault upstream",
                                           "git config --global remote.pushdefault fork"),
     "config-remove-branch-section": ("git config remove-section branch.feat/x", "git config remove-section branch.feat/y"),
+    "config-push-default": ("git config push.default matching", "git config push.default current"),
+    "config-set-push-default-case": ("git config set Push.Default matching", "git config set Push.Default current"),
+    "config-branch-merge": ("git config branch.feat/x.merge refs/heads/main", "git config branch.feat/x.merge refs/heads/dev"),
+    "config-unset-branch-merge": ("git config unset branch.feat/x.merge", "git config unset branch.feat/y.merge"),
 }
 IMPLICIT_PUSHES = {"bare": _FORCE, "short": _FORCE_F, "remote": _FORCE_ORIGIN}
 
@@ -1600,8 +1604,13 @@ class TestAnUpstreamOrPushRoutingChangeMovesAPushNamingNoRef:
         (MERGE + "--squash", "git branch -u upstream/x && " + MERGE + "--squash"),
         (MERGE + "--squash", "git config remote.pushDefault upstream && " + MERGE + "--squash"),
         (_NUMBERED, "git config branch.feat/x.remote upstream && " + _NUMBERED),
+        (_FORCE, "git config --get push.default && " + _FORCE),
+        (_FORCE, "git config push.followTags true && " + _FORCE),
+        (_PUSH_X, "git config push.default matching && " + _PUSH_X),
+        (MERGE + "--squash", "git config branch.feat/x.merge refs/heads/main && " + MERGE + "--squash"),
     ], ids=["config-get", "config-get-subcommand", "config-read-key", "config-other-key", "branch-list", "branch-track",
-            "named-ref-push-branch-u", "named-ref-push-config", "gh-merge-branch-u", "gh-merge-config", "numbered-merge"])
+            "named-ref-push-branch-u", "named-ref-push-config", "gh-merge-branch-u", "gh-merge-config", "numbered-merge",
+            "config-get-push-default", "config-other-push-key", "named-ref-push-default", "gh-merge-branch-merge"])
     def test_a_plain_approval_still_covers_it(self, plain, command):
         assert _runs(_mint_styled(plain, APPROVAL_STYLES["inline"]), command)
 

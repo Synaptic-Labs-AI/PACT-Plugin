@@ -10352,9 +10352,9 @@ _GIT_CONFIG_REMOTE_KEY_RE = re.compile(
     r"(?i)^(?:remote\..+\.(?:url|pushurl)|url\..+\.(?:insteadof|pushinsteadof))$"
 )
 _GIT_CONFIG_REMOTE_SECTION_RE = re.compile(r"(?i)^(?:remote|url)(?:\.|$)")
-# The keys that pick the remote a push naming no ref goes to.
+# The keys that pick the remote a push naming no ref goes to, and the ref it updates.
 _GIT_CONFIG_PUSH_ROUTING_KEY_RE = re.compile(
-    r"(?i)^(?:branch\..+\.(?:remote|pushremote)|remote\.pushdefault)$"
+    r"(?i)^(?:branch\..+\.(?:remote|pushremote|merge)|remote\.pushdefault|push\.default)$"
 )
 _GIT_CONFIG_PUSH_ROUTING_SECTION_RE = re.compile(r"(?i)^branch(?:\.|$)")
 
@@ -10429,7 +10429,8 @@ def target_changes_before_guarded_leg(command: str, branch: bool = True) -> bool
     branch change does not count: a numbered op (`gh pr merge 5`) names its pull
     request, so only a change of repository moves it. Before a force push naming no ref,
     `git branch -u`/`--set-upstream-to`/`--unset-upstream` or a `git config` of
-    `branch.<b>.remote`/`pushRemote` or `remote.pushDefault` also counts."""
+    `branch.<b>.remote`/`pushRemote`/`merge`, `remote.pushDefault` or
+    `push.default` also counts."""
     guarded = _single_destructive_leg(command) or _single_detectable_leg(command)
     if guarded is None:
         return False
@@ -10448,7 +10449,8 @@ def target_changes_before_guarded_leg(command: str, branch: bool = True) -> bool
         if not change or re.search(r"\scheckout\b.*\s--(?:\s|$)|\sset-default\b.*\s(?:-v|--view)\b", leg):
             continue
         # An upstream or push-routing change moves only a force push that names no
-        # ref: it picks that push's remote. A push naming its ref, and gh, do not read it.
+        # ref: it picks that push's remote and the ref it updates. A push naming its
+        # ref, and gh, do not read it.
         routes = change.group(0).endswith("branch") or (
             change.group(0).endswith("config") and not _git_config_changes_a_remote(leg)
         )
