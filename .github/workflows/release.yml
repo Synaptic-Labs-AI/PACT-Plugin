@@ -45,20 +45,49 @@
 #   created.
 #
 # THE TOKEN (RELEASE_TOKEN is required for backfills)
-#   Pushing a tag sends its commit's tree, and if that commit's
-#   `.github/workflows/` differs from the tip of main, GitHub counts the push
-#   as creating or updating workflow files. The built-in GITHUB_TOKEN is
-#   ALWAYS refused that ("refusing to allow a GitHub App to create or update
-#   workflow ... without `workflows` permission"). So a `RELEASE_TOKEN`
-#   secret is REQUIRED whenever a tag lands on such a commit, which in
-#   practice is any backfill or older release. Create it as a fine-grained
-#   personal access token on this repository only, with:
+#   GitHub checks the commit a new tag points at: if that commit's
+#   `.github/workflows/` differs from the default branch's, creating the tag
+#   counts as creating or updating workflow files, which needs workflows
+#   permission. The built-in GITHUB_TOKEN never has it, so it is ALWAYS
+#   refused ("refusing to allow a GitHub App to create or update workflow
+#   ... without `workflows` permission"). A `RELEASE_TOKEN` is therefore
+#   REQUIRED whenever a tag lands on such a commit, which in practice is any
+#   backfill or older release. It needs, on this repository only:
 #     Contents: Read and write   (push tags, create releases)
-#     Workflows: Read and write  (push tags whose commits carry other
-#                                 workflow files)
+#     Workflows: Read and write  (tags on commits whose workflow files
+#                                 differ from the default branch)
 #   Without it, only tags on commits whose workflows match main can be
 #   pushed, as github-actions[bot]; any other push stops the run with an
 #   ::error:: naming the tag and this fix.
+#
+#   WHERE IT LIVES (one-time setup, REQUIRED). A token with Workflows write
+#   must not be readable by a workflow on an arbitrary branch: a repository
+#   secret is passed to workflows on ANY branch, so anyone with write access
+#   could push a branch whose workflow sends it out. So:
+#   1. Create an environment named `release` (Settings -> Environments ->
+#      New environment -> release) and set Deployment branches and tags to
+#      "Selected branches and tags" -> `main`. Required reviewers are
+#      optional (they would pause every release run for an approval).
+#   2. Add RELEASE_TOKEN as a secret of THAT environment.
+#   3. Do NOT also keep a repository secret named RELEASE_TOKEN; delete one
+#      if it exists. A repository copy stays readable from any branch.
+#   The job declares `environment: release`, so its steps see the
+#   environment's secret, and the environment refuses to run jobs from any
+#   ref but main, so no branch workflow can read the token. The job's
+#   `if: github.ref == 'refs/heads/main'` stays as a second guard.
+#   `environment: release` alone protects nothing: if the environment does
+#   not exist, GitHub creates it on first use with NO branch restriction and
+#   no secret. RELEASE_TOKEN then reads as an empty string,
+#   `secrets.RELEASE_TOKEN || github.token` falls back to GITHUB_TOKEN, and
+#   a backfill push fails with the ::error:: above. Every run also records a
+#   deployment to `release` (harmless; it is how environments are tracked).
+#
+#   WHOSE TOKEN. Prefer a dedicated least-privilege account, or a GitHub App,
+#   with Contents and Workflows write on this repository and no admin or
+#   ruleset-bypass rights, over a maintainer's personal token. A personal
+#   token must be fine-grained, limited to this repository, and set to
+#   expire. (This workflow does not mint GitHub App tokens itself.)
+#
 #   With it, the checkout, the tag push and the release calls all use it,
 #   and the tag's tagger is the token owner (`gh api user`; email
 #   `<id>+<login>@users.noreply.github.com`), so authorship matches the
@@ -134,6 +163,9 @@ jobs:
     # workflow_dispatch can be started on any branch. Only main is released,
     # so a dispatch elsewhere does nothing rather than tag unmerged commits.
     if: github.ref == 'refs/heads/main'
+    # RELEASE_TOKEN lives in this environment, limited to main (see THE
+    # TOKEN above); the `if:` stays as a second guard.
+    environment: release
     runs-on: ubuntu-latest
     steps:
       # Pinned to a full commit SHA like tests.yml (supply-chain hardening);
