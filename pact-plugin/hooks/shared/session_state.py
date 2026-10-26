@@ -198,7 +198,7 @@ _is_safe_path_component = is_safe_path_component
 # by the model into DOUBLE-QUOTED shell commands (python3 "{plugin_root}/...")
 # and shown in backtick spans, so it is checked against a POSITIVE allowlist,
 # not a deny-list: ASCII letters, digits and `._/+@:~ -` (space included, for
-# home dirs with spaces), plus non-ASCII LETTERS and NUMBERS (Unicode
+# home dirs with spaces, but never as the last character), plus non-ASCII LETTERS and NUMBERS (Unicode
 # categories L* and N*, so /home/josé works). Everything else is rejected,
 # including $ ` " ' \ ! (shell expansion and quote breakout) and every
 # non-ASCII control, format or separator character (U+0085, U+2028, bidi
@@ -250,10 +250,15 @@ def _is_plugin_root_char(char: str) -> bool:
 def is_safe_plugin_root(value: object) -> bool:
     """True iff ``value`` is a plugin root that is safe to substitute into a
     double-quoted shell command or a backtick span: a str starting with "/",
-    at most PLUGIN_ROOT_MAX_LENGTH characters, every character on the
-    allowlist above. The single check for every plugin_root source: the
-    substitution sentence, the CLAUDE.md "- Plugin root:" line, and the
-    context file (on write and on read).
+    not ending in a space, at most PLUGIN_ROOT_MAX_LENGTH characters, every
+    character on the allowlist above. The single check for every
+    plugin_root sink, four in all: the substitution sentence, the CLAUDE.md
+    "- Plugin root:" line, the context file (on write and on read), and the
+    SessionStart banner (plugin_manifest.format_plugin_banner).
+
+    A trailing space is refused because the CLAUDE.md line strips its value
+    and the sentence does not: "/opt/x " would be shown as two different
+    paths (final review M8). A leading space already fails the "/" check.
 
     The characters are checked in NFC form, so a decomposed accented name
     (macOS can report "e" + U+0301 for "é") passes when it composes to a
@@ -262,6 +267,7 @@ def is_safe_plugin_root(value: object) -> bool:
     if not (
         isinstance(value, str)
         and value.startswith("/")
+        and not value.endswith(" ")
         and len(value) <= PLUGIN_ROOT_MAX_LENGTH
     ):
         return False

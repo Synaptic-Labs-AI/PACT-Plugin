@@ -7,10 +7,12 @@ value goes through one check, shared.session_state.is_safe_plugin_root:
   1. the substitution sentence (session_resume.format_session_substitutions);
   2. the CLAUDE.md "- Plugin root:" line (session_resume._session_block_text);
   3. pact-session-context.json, on write (build_context_cache and the
-     persist_context sink) and on read (get_pact_context).
+     persist_context sink) and on read (get_pact_context);
+  4. the SessionStart banner (plugin_manifest.format_plugin_banner).
 Real install paths (a space, version dots, a non-ASCII home dir) must render
 byte-identically; shell metacharacters, non-ASCII controls/format/separator
-characters and over-long paths must not reach any of the three.
+characters, a trailing space and over-long paths must not reach any of the
+four, and every sink shows a real root as the same string.
 Used by: the full-suite merge gate (`cd pact-plugin && python3 -m pytest -q`).
 """
 
@@ -83,6 +85,9 @@ HOSTILE_ROOTS = [
     "/" + "a" * PLUGIN_ROOT_MAX_LENGTH,  # one over the cap
     "relative/path",
     "~/plugins",
+    " /leading/space",
+    "/trailing/space ",   # final review M8: CLAUDE.md would strip it
+    "/opt/my plugin ",
     "",
 ]
 
@@ -301,3 +306,32 @@ class TestPluginBanner:
         assert banner.endswith("(root: <unsafe>)")
         sentence = format_session_substitutions("pact-x", "/s", root, "team-lead")
         assert "Plugin root unavailable (not a safe absolute path)" in sentence
+
+
+class TestAllSinksAgree:
+    """Final review M8: a root every sink accepts is shown as the SAME string
+    by all four (the CLAUDE.md line strips its value, so a root with a
+    trailing space used to appear there as a different path)."""
+
+    @pytest.mark.parametrize("root", REAL_ROOTS)
+    def test_every_sink_shows_the_same_root(self, tmp_path, monkeypatch, root):
+        from shared.plugin_manifest import format_plugin_banner
+
+        sentence = format_session_substitutions("pact-x", "/s", root, "team-lead")
+        assert f"Use `{root}` wherever {{plugin_root}}" in sentence
+        block = _session_block_text(SESSION_ID, "pact-x", "/s", root, "2026")
+        assert f"- Plugin root: `{root}`" in block
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", root)
+        assert format_plugin_banner().endswith(f"(root: {root})")
+
+    @pytest.mark.parametrize("root", ["/opt/my plugin ", "/x/ ", " /x"])
+    def test_whitespace_edged_root_is_refused_by_every_sink(self, monkeypatch, root):
+        from shared.plugin_manifest import format_plugin_banner
+
+        assert not is_safe_plugin_root(root)
+        sentence = format_session_substitutions("pact-x", "/s", root, "team-lead")
+        assert "Plugin root unavailable (not a safe absolute path)" in sentence
+        block = _session_block_text(SESSION_ID, "pact-x", "/s", root, "2026")
+        assert "Plugin root" not in block
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", root)
+        assert format_plugin_banner().endswith("(root: <unsafe>)")
