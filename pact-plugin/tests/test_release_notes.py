@@ -3,30 +3,33 @@
 WHAT THIS EXISTS TO STOP
 ------------------------
 ``.github/workflows/release.yml`` tags and releases each version bump on main,
-taking the tag message and release body from
-``.github/release-notes/v<version>.md``. If a malformed notes file merges, the
-release job refuses it after the fact, and every later release waits behind it
-until main is fixed. This test runs on every PR (tests.yml runs the suite), so
-the current version's notes file is checked before it can merge.
+taking the tag message and release body from that version's section of the
+root ``CHANGELOG.md``. If a malformed section merges, the release job refuses
+it after the fact, and every later release waits behind it until main is
+fixed. This test runs on every PR (tests.yml runs the suite), so the current
+version's section, and every other version section, is checked before it can
+merge.
 
 ONE DEFINITION OF THE RULES
 ---------------------------
-The rules live only in ``.github/scripts/check-release-notes.sh``. The release
-workflow calls that script, and so does this test, so the PR-time check and
-the release-time check cannot drift apart. This module does not restate the
-rules; the negative table below only proves the script still rejects each
-class of mistake (a script that accepts everything would otherwise pass the
-positive checks).
+The rules and the extraction live only in
+``.github/scripts/check-release-notes.sh``. The release workflow calls that
+script, and so does this test, so the PR-time check and the release-time
+extraction cannot drift apart. This module does not restate the rules; the
+negative table below only proves the script still rejects each class of
+mistake (a script that accepts everything would otherwise pass the positive
+checks).
 """
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
 import pytest
 
 _CHECKER_REL = Path(".github") / "scripts" / "check-release-notes.sh"
-_NOTES_DIR_REL = Path(".github") / "release-notes"
+_CHANGELOG_REL = Path("CHANGELOG.md")
 _PLUGIN_JSON_REL = Path("pact-plugin") / ".claude-plugin" / "plugin.json"
 
 
@@ -34,7 +37,7 @@ def _source_repo_root():
     """Repo root by a positive marker, or None outside a checkout.
 
     Same marker as test_local_lint_parity.py and test_ci_collection_scope.py,
-    so "not a checkout" (skip) is never confused with "notes file missing"
+    so "not a checkout" (skip) is never confused with "changelog missing"
     (failure).
     """
     for base in Path(__file__).resolve().parents:
@@ -50,42 +53,124 @@ def _require_checkout():
     return root
 
 
-def _check(root, version, path):
-    """Run the shared checker; return (exit code, reason on stdout)."""
-    result = subprocess.run(
-        ["/bin/bash", str(root / _CHECKER_REL), version, str(path)],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    return result.returncode, result.stdout.strip()
+def _check(root, version, path, out_dir=None):
+    """Run the shared checker; return (exit code, reason, message, body).
+
+    With ``out_dir`` the checker also extracts, and message and body are the
+    bytes it wrote; otherwise they are None.
+    """
+    args = ["/bin/bash", str(root / _CHECKER_REL), version, str(path)]
+    if out_dir is not None:
+        args += [str(out_dir / "msg"), str(out_dir / "body")]
+    result = subprocess.run(args, capture_output=True, text=True, timeout=30)
+    message = body = None
+    if out_dir is not None and result.returncode == 0:
+        message = (out_dir / "msg").read_bytes()
+        body = (out_dir / "body").read_bytes()
+    return result.returncode, result.stdout.strip(), message, body
 
 
-def test_current_version_has_valid_release_notes():
-    """The version this PR ships must have a notes file the release job accepts."""
+def test_current_version_has_a_valid_changelog_section():
+    """The version this PR ships must have a section the release job accepts."""
     root = _require_checkout()
     version = json.loads((root / _PLUGIN_JSON_REL).read_text(encoding="utf-8"))["version"]
-    notes = root / _NOTES_DIR_REL / f"v{version}.md"
-    assert notes.is_file(), (
-        f"plugin.json is at {version}, so this PR must add {notes.relative_to(root)} "
-        f"(see the header of .github/workflows/release.yml for the format)"
+    changelog = root / _CHANGELOG_REL
+    assert changelog.is_file(), "the repository must have a root CHANGELOG.md"
+    code, reason, _, _ = _check(root, version, changelog)
+    assert code == 0, (
+        f"plugin.json is at {version}, so CHANGELOG.md needs a valid "
+        f"'## v{version}: <summary>' section (see the header of "
+        f".github/workflows/release.yml): {reason}"
     )
-    code, reason = _check(root, version, notes)
-    assert code == 0, f"{notes.relative_to(root)} is not valid release notes: {reason}"
 
 
-def test_every_committed_notes_file_is_valid():
-    """A later fix to an older file must also stay valid: the release job may read it."""
+def test_every_changelog_version_section_is_valid():
+    """A later edit to an older section must stay valid: the release job may read it."""
     root = _require_checkout()
-    files = sorted((root / _NOTES_DIR_REL).glob("v*.md"))
-    assert files, "expected at least one committed release-notes file"
-    for notes in files:
-        version = notes.stem[1:]
-        code, reason = _check(root, version, notes)
-        assert code == 0, f"{notes.relative_to(root)}: {reason}"
+    text = (root / _CHANGELOG_REL).read_text(encoding="utf-8")
+    versions, fenced = [], False
+    for line in text.splitlines():
+        if line.startswith(("```", "~~~")):
+            fenced = not fenced
+        elif not fenced and re.match(r"## v[0-9]", line):
+            match = re.match(r"## v([0-9]+\.[0-9]+\.[0-9]+): ", line)
+            assert match, f"malformed version heading in CHANGELOG.md: {line!r}"
+            versions.append(match.group(1))
+    assert versions, "expected at least one '## v<version>: ' section"
+    for version in versions:
+        code, reason, _, _ = _check(root, version, root / _CHANGELOG_REL)
+        assert code == 0, f"CHANGELOG.md v{version}: {reason}"
 
 
-_GOOD = b"# v1.2.3: short summary\n\n## Summary\n\nText.\n"
+# v4.8.12's release body as it will be published: the per-version notes file
+# before the move to CHANGELOG.md (.github/release-notes/v4.8.12.md at
+# b505d81, line 3 on), with one intended wording change (the release.yml
+# bullet now names CHANGELOG.md sections instead of that file). Extraction
+# from CHANGELOG.md must reproduce it byte for byte.
+_V4812_MESSAGE = (
+    "v4.8.12: backlog ref checks over REST when GraphQL is blocked, "
+    "and releases cut by CI (issue #1667)\n"
+)
+_V4812_BODY = (
+    '## Summary\n'
+    '\n'
+    'In Claude Code cloud sessions the session proxy refuses GitHub '
+    'GraphQL, so every ref in `/PACT:next` read `unverifiable` '
+    '(#1667). `hooks/shared/backlog.py` keeps GraphQL as the fast path '
+    'and adds REST, both as a fallback and for links to other '
+    'repositories. This release also moves tagging and releasing into '
+    'CI, because cloud sessions get HTTP 403 when they push a tag or '
+    'create a release — which is why v4.8.9–v4.8.11 were merged '
+    'without tags or releases.\n'
+    '\n'
+    '## What landed\n'
+    '\n'
+    '- Repo slug without GraphQL: `GH_REPO`, then the raw `origin` '
+    'URL, then `gh repo view` run inside the project and used only '
+    'when it answers github.com. Ambiguous remotes are refused and the '
+    'remote URL is never echoed.\n'
+    '- REST fallback on a whole-request GraphQL error body: refs '
+    'de-duplicated and checked over `gh api --hostname github.com`, up '
+    'to 8 in parallel and at most 25, under the same 5 s deadline as '
+    'GraphQL. Pending or capped refs read `unverifiable` with a '
+    'reason; `GH_HOST` is removed from every child environment.\n'
+    '- REST bodies are converted to the GraphQL node shape, so '
+    '`_ref_outcome` decides every bucket on both paths; one pure '
+    '`_classify_ref` drives read, write and abandoned-work checks, '
+    'with bounded issue numbers and linear-time link detection.\n'
+    '- Tests: tracker tests moved to `test_backlog_rest_fallback.py` '
+    'behind a `_backlog_tracker_guard.py` that fails any real `gh` '
+    'call; 155 → 214 tests, 100% line and branch coverage of the new '
+    'tracker functions, 43 of 44 mutations caught.\n'
+    '- `.github/workflows/release.yml`: on every push to main it gives '
+    'each `plugin.json` version bump since v4.8.8 an annotated tag and '
+    'a release — tag message and notes from '
+    "that version's section of `CHANGELOG.md`, only the highest version "
+    'marked Latest. It is idempotent, stops on a tag pointing at the '
+    'wrong commit or a missing or invalid `CHANGELOG.md` section, and '
+    'authors as the owner of an optional `RELEASE_TOKEN`.\n'
+    '\n'
+    '## Why\n'
+    '\n'
+    'A tracker check that is always `unverifiable` in the cloud gives '
+    '`/PACT:next` nothing to reconcile. The REST path was checked live '
+    'in a cloud session: real refs, including other-repo and comment '
+    'links, resolved in about 1 s with correct outcomes. Release '
+    'automation closes the other cloud gap for good: the first run '
+    'after this merge creates v4.8.9, v4.8.10 and v4.8.11, then '
+    'v4.8.12 as Latest.\n'
+)
+
+
+def test_v4812_extraction_matches_the_published_notes(tmp_path):
+    root = _require_checkout()
+    code, reason, message, body = _check(root, "4.8.12", root / _CHANGELOG_REL, tmp_path)
+    assert code == 0, reason
+    assert message == _V4812_MESSAGE.encode("utf-8")
+    assert body == _V4812_BODY.encode("utf-8")
+
+
+_GOOD = b"## v1.2.3: short summary\n\n### Summary\n\nText.\n"
 
 # The reason the checker gives for any byte outside the line-1 allowlist.
 _ALLOW = "may contain only printable ASCII, em dash or en dash"
@@ -94,67 +179,83 @@ _ALLOW = "may contain only printable ASCII, em dash or en dash"
 @pytest.mark.parametrize(
     "label, content, expected_reason",
     [
-        ("missing colon", b"# v1.2.3 short summary\n\nbody\n", "line 1 must start"),
-        ("wrong version", b"# v1.2.4: summary\n\nbody\n", "line 1 must start"),
-        ("no heading", b"v1.2.3: summary\n\nbody\n", "line 1 must start"),
-        ("empty summary", b"# v1.2.3:    \n\nbody\n", "empty summary"),
-        ("carriage return", b"# v1.2.3: summary\r\n\nbody\n", _ALLOW),
-        ("escape and bell", b"# v1.2.3: \x1b]0;x\x07t \x1b[31mred\n\nbody\n", _ALLOW),
-        ("tab", b"# v1.2.3: a\tb\n\nbody\n", _ALLOW),
-        ("C1 CSI as UTF-8", b"# v1.2.3: a \xc2\x9b31m\n\nbody\n", _ALLOW),
+        ("missing colon", b"## v1.2.3 short summary\n\nbody\n", "must be '## v1.2.3: <summary>'"),
+        ("heading names another version", b"## v1.2.4: summary\n\nbody\n", "no section for v1.2.3"),
+        ("no heading", b"v1.2.3: summary\n\nbody\n", "no section for v1.2.3"),
+        ("empty summary", b"## v1.2.3:    \n\nbody\n", "empty summary"),
+        ("carriage return", b"## v1.2.3: summary\r\n\nbody\n", _ALLOW),
+        ("escape and bell", b"## v1.2.3: \x1b]0;x\x07t \x1b[31mred\n\nbody\n", _ALLOW),
+        ("tab", b"## v1.2.3: a\tb\n\nbody\n", _ALLOW),
+        ("C1 CSI as UTF-8", b"## v1.2.3: a \xc2\x9b31m\n\nbody\n", _ALLOW),
         # Not valid UTF-8, including the lone 8-bit CSI byte.
-        ("lone 8-bit CSI 0x9b", b"# v1.2.3: a \x9b31m\n\nbody\n", _ALLOW),
-        ("byte 0xff", b"# v1.2.3: a \xff\n\nbody\n", _ALLOW),
-        ("truncated sequence", b"# v1.2.3: a \xe2\x80\n\nbody\n", _ALLOW),
-        ("overlong encoding", b"# v1.2.3: a \xc0\xaf\n\nbody\n", _ALLOW),
-        ("surrogate", b"# v1.2.3: a \xed\xa0\x80\n\nbody\n", _ALLOW),
-        ("past U+10FFFF", b"# v1.2.3: a \xf4\x90\x80\x80\n\nbody\n", _ALLOW),
+        ("lone 8-bit CSI 0x9b", b"## v1.2.3: a \x9b31m\n\nbody\n", _ALLOW),
+        ("byte 0xff", b"## v1.2.3: a \xff\n\nbody\n", _ALLOW),
+        ("truncated sequence", b"## v1.2.3: a \xe2\x80\n\nbody\n", _ALLOW),
+        ("overlong encoding", b"## v1.2.3: a \xc0\xaf\n\nbody\n", _ALLOW),
+        ("surrogate", b"## v1.2.3: a \xed\xa0\x80\n\nbody\n", _ALLOW),
+        ("past U+10FFFF", b"## v1.2.3: a \xf4\x90\x80\x80\n\nbody\n", _ALLOW),
         # Invisible and reordering format characters.
-        ("RLO U+202E", "# v1.2.3: a \u202e b\n\nbody\n".encode(), _ALLOW),
-        ("LRE U+202A", "# v1.2.3: a \u202a b\n\nbody\n".encode(), _ALLOW),
-        ("LRI U+2066", "# v1.2.3: a \u2066 b\n\nbody\n".encode(), _ALLOW),
-        ("PDI U+2069", "# v1.2.3: a \u2069 b\n\nbody\n".encode(), _ALLOW),
-        ("LRM U+200E", "# v1.2.3: a \u200e b\n\nbody\n".encode(), _ALLOW),
-        ("RLM U+200F", "# v1.2.3: a \u200f b\n\nbody\n".encode(), _ALLOW),
-        ("ALM U+061C", "# v1.2.3: a \u061c b\n\nbody\n".encode(), _ALLOW),
-        ("ZWSP U+200B", "# v1.2.3: a \u200b b\n\nbody\n".encode(), _ALLOW),
-        ("ZWJ U+200D", "# v1.2.3: a \u200d b\n\nbody\n".encode(), _ALLOW),
-        ("word joiner U+2060", "# v1.2.3: a \u2060 b\n\nbody\n".encode(), _ALLOW),
-        ("BOM U+FEFF", "# v1.2.3: a \ufeff b\n\nbody\n".encode(), _ALLOW),
-        ("line separator U+2028", "# v1.2.3: a \u2028 b\n\nbody\n".encode(), _ALLOW),
-        ("paragraph separator U+2029", "# v1.2.3: a \u2029 b\n\nbody\n".encode(), _ALLOW),
-        ("soft hyphen U+00AD", "# v1.2.3: a \u00ad b\n\nbody\n".encode(), _ALLOW),
-        ("past U+10FFFF, lead F5", b"# v1.2.3: a \xf5\x80\x80\x80\n\nbody\n", _ALLOW),
-        ("past U+10FFFF, 5-byte F8", b"# v1.2.3: a \xf8\x88\x80\x80\x80\n\nbody\n", _ALLOW),
-        ("TAG character U+E0041", "# v1.2.3: a \U000e0041 b\n\nbody\n".encode(), _ALLOW),
-        ("DEL", b"# v1.2.3: a\x7fb\n\nbody\n", _ALLOW),
+        ("RLO U+202E", "## v1.2.3: a \u202e b\n\nbody\n".encode(), _ALLOW),
+        ("LRE U+202A", "## v1.2.3: a \u202a b\n\nbody\n".encode(), _ALLOW),
+        ("LRI U+2066", "## v1.2.3: a \u2066 b\n\nbody\n".encode(), _ALLOW),
+        ("PDI U+2069", "## v1.2.3: a \u2069 b\n\nbody\n".encode(), _ALLOW),
+        ("LRM U+200E", "## v1.2.3: a \u200e b\n\nbody\n".encode(), _ALLOW),
+        ("RLM U+200F", "## v1.2.3: a \u200f b\n\nbody\n".encode(), _ALLOW),
+        ("ALM U+061C", "## v1.2.3: a \u061c b\n\nbody\n".encode(), _ALLOW),
+        ("ZWSP U+200B", "## v1.2.3: a \u200b b\n\nbody\n".encode(), _ALLOW),
+        ("ZWJ U+200D", "## v1.2.3: a \u200d b\n\nbody\n".encode(), _ALLOW),
+        ("word joiner U+2060", "## v1.2.3: a \u2060 b\n\nbody\n".encode(), _ALLOW),
+        ("BOM U+FEFF", "## v1.2.3: a \ufeff b\n\nbody\n".encode(), _ALLOW),
+        ("line separator U+2028", "## v1.2.3: a \u2028 b\n\nbody\n".encode(), _ALLOW),
+        ("paragraph separator U+2029", "## v1.2.3: a \u2029 b\n\nbody\n".encode(), _ALLOW),
+        ("soft hyphen U+00AD", "## v1.2.3: a \u00ad b\n\nbody\n".encode(), _ALLOW),
+        ("past U+10FFFF, lead F5", b"## v1.2.3: a \xf5\x80\x80\x80\n\nbody\n", _ALLOW),
+        ("past U+10FFFF, 5-byte F8", b"## v1.2.3: a \xf8\x88\x80\x80\x80\n\nbody\n", _ALLOW),
+        ("TAG character U+E0041", "## v1.2.3: a \U000e0041 b\n\nbody\n".encode(), _ALLOW),
+        ("DEL", b"## v1.2.3: a\x7fb\n\nbody\n", _ALLOW),
         # Ordinary non-ASCII text is outside the allowlist too.
-        ("accented letter", "# v1.2.3: caf\u00e9\n\nbody\n".encode(), _ALLOW),
-        ("no-break space U+00A0", "# v1.2.3: a\u00a0b\n\nbody\n".encode(), _ALLOW),
-        ("CJK", "# v1.2.3: a \u4e2d\n\nbody\n".encode(), _ALLOW),
-        ("emoji", "# v1.2.3: a \U0001f600\n\nbody\n".encode(), _ALLOW),
-        ("narrow no-break space U+202F", "# v1.2.3: a\u202fb\n\nbody\n".encode(), _ALLOW),
+        ("accented letter", "## v1.2.3: caf\u00e9\n\nbody\n".encode(), _ALLOW),
+        ("no-break space U+00A0", "## v1.2.3: a\u00a0b\n\nbody\n".encode(), _ALLOW),
+        ("CJK", "## v1.2.3: a \u4e2d\n\nbody\n".encode(), _ALLOW),
+        ("emoji", "## v1.2.3: a \U0001f600\n\nbody\n".encode(), _ALLOW),
+        ("narrow no-break space U+202F", "## v1.2.3: a\u202fb\n\nbody\n".encode(), _ALLOW),
         # Byte neighbours of the two allowed dashes (E2 80 93 / E2 80 94),
         # and the two-byte prefix they share left on its own.
-        ("hyphen U+2010", "# v1.2.3: a \u2010 b\n\nbody\n".encode(), _ALLOW),
-        ("figure dash U+2012", "# v1.2.3: a \u2012 b\n\nbody\n".encode(), _ALLOW),
-        ("horizontal bar U+2015", "# v1.2.3: a \u2015 b\n\nbody\n".encode(), _ALLOW),
-        ("stray E2 80", b"# v1.2.3: a \xe2\x80 b\n\nbody\n", _ALLOW),
-        ("stray E2", b"# v1.2.3: a \xe2 b\n\nbody\n", _ALLOW),
+        ("hyphen U+2010", "## v1.2.3: a \u2010 b\n\nbody\n".encode(), _ALLOW),
+        ("figure dash U+2012", "## v1.2.3: a \u2012 b\n\nbody\n".encode(), _ALLOW),
+        ("horizontal bar U+2015", "## v1.2.3: a \u2015 b\n\nbody\n".encode(), _ALLOW),
+        ("stray E2 80", b"## v1.2.3: a \xe2\x80 b\n\nbody\n", _ALLOW),
+        ("stray E2", b"## v1.2.3: a \xe2 b\n\nbody\n", _ALLOW),
         # NUL anywhere in the file.
-        ("NUL in line 1", b"# v1.2.3: a\x00b\n\nbody\n", "NUL byte"),
-        ("NUL in the body", b"# v1.2.3: summary\n\nbody\x00more\n", "NUL byte"),
-        ("NUL-only body", b"# v1.2.3: summary\n\n\x00\n", "NUL byte"),
-        ("line 2 not blank", b"# v1.2.3: summary\nbody\nmore\n", "line 2 must be blank"),
-        ("no body", b"# v1.2.3: summary\n\n   \n", "no release notes"),
-        ("empty file", b"", "line 1 must start"),
+        ("NUL in line 1", b"## v1.2.3: a\x00b\n\nbody\n", "NUL byte"),
+        ("NUL in the body", b"## v1.2.3: summary\n\nbody\x00more\n", "NUL byte"),
+        ("NUL-only body", b"## v1.2.3: summary\n\n\x00\n", "NUL byte"),
+        ("no body", b"## v1.2.3: summary\n\n   \n", "no release notes"),
+        ("empty file", b"", "no section for v1.2.3"),
+        # Section structure.
+        (
+            "duplicate section",
+            b"## v1.2.3: one\n\nbody\n\n## v1.2.3: two\n\nbody\n",
+            "duplicate section",
+        ),
+        (
+            "missing section among others",
+            b"# Changelog\n\n## v1.2.4: newer\n\nx\n\n## v1.2.2: older\n\ny\n",
+            "no section for v1.2.3",
+        ),
+        ("version prefix only (v1.2.30)", b"## v1.2.30: other\n\nbody\n", "no section for v1.2.3"),
+        (
+            "empty body before the next heading",
+            b"## v1.2.3: summary\n\n\n## v1.2.2: older\n\nbody\n",
+            "no release notes",
+        ),
     ],
 )
 def test_checker_rejects(tmp_path, label, content, expected_reason):
     root = _require_checkout()
-    notes = tmp_path / "v1.2.3.md"
-    notes.write_bytes(content)
-    code, reason = _check(root, "1.2.3", notes)
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_bytes(content)
+    code, reason, _, _ = _check(root, "1.2.3", changelog)
     assert code == 1, f"{label}: expected rejection, got exit {code} ({reason})"
     assert expected_reason in reason, f"{label}: unexpected reason {reason!r}"
 
@@ -162,11 +263,55 @@ def test_checker_rejects(tmp_path, label, content, expected_reason):
 def test_checker_accepts_ascii_and_the_two_dashes(tmp_path):
     """The allowlist: printable ASCII (all of it), em dash and en dash."""
     root = _require_checkout()
-    notes = tmp_path / "v1.2.3.md"
+    changelog = tmp_path / "CHANGELOG.md"
     summary = "plain ASCII !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~ 0-9 \u2014 em \u2013 en \u2014\u2013"
-    notes.write_bytes(_GOOD.replace(b"short summary", summary.encode("utf-8")))
-    code, reason = _check(root, "1.2.3", notes)
+    changelog.write_bytes(_GOOD.replace(b"short summary", summary.encode("utf-8")))
+    code, reason, message, _ = _check(root, "1.2.3", changelog, tmp_path)
     assert code == 0, reason
+    assert message == f"v1.2.3: {summary}\n".encode("utf-8")
+
+
+def test_extraction_picks_one_section_trims_and_promotes(tmp_path):
+    """Only this version's section; blank edges trimmed; ### promoted to ##.
+
+    A body may follow its heading without a blank line, and the neighbouring
+    sections (one newer above, one older below) contribute nothing.
+    """
+    root = _require_checkout()
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_bytes(
+        b"# Changelog\n\nPreamble.\n\n"
+        b"## v1.2.4: newer\n\n### Summary\n\nnewer body\n\n"
+        b"## v1.2.3: this one\n### Summary\n\nline\n\n#### Detail\n\nmore\n\n\n"
+        b"## v1.2.2: older\n\n### Summary\n\nolder body\n"
+    )
+    code, reason, message, body = _check(root, "1.2.3", changelog, tmp_path)
+    assert code == 0, reason
+    assert message == b"v1.2.3: this one\n"
+    assert body == b"## Summary\n\nline\n\n### Detail\n\nmore\n"
+
+
+def test_section_ends_only_at_the_next_version_heading(tmp_path):
+    """A `## Something` line, and anything inside a fence, stay in the body.
+
+    Inside a fence nothing is promoted and a `## v...` line does not end the
+    section.
+    """
+    root = _require_checkout()
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_bytes(
+        b"## v1.2.3: boundaries\n\n### Summary\n\n## Something\n\ntext\n\n"
+        b"```\n### not promoted\n## v9.9.9: not a heading in a fence\n```\n\n"
+        b"~~~\n## Also inside\n~~~\n\nend\n\n"
+        b"## v1.2.2: older\n\nolder\n"
+    )
+    code, reason, _, body = _check(root, "1.2.3", changelog, tmp_path)
+    assert code == 0, reason
+    assert body == (
+        b"## Summary\n\n## Something\n\ntext\n\n"
+        b"```\n### not promoted\n## v9.9.9: not a heading in a fence\n```\n\n"
+        b"~~~\n## Also inside\n~~~\n\nend\n"
+    )
 
 
 def test_checker_accepts_a_large_body(tmp_path):
@@ -178,17 +323,20 @@ def test_checker_accepts_a_large_body(tmp_path):
     runs). Ten runs here make a regression all but certain to show.
     """
     root = _require_checkout()
-    notes = tmp_path / "v1.2.3.md"
-    notes.write_bytes(b"# v1.2.3: big\n\n" + (b"x" * 79 + b"\n") * 2600)
-    assert notes.stat().st_size > 200_000
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_bytes(
+        b"## v1.2.3: big\n\n" + (b"x" * 79 + b"\n") * 2600 + b"\n## v1.2.2: older\n\ny\n"
+    )
+    assert changelog.stat().st_size > 200_000
     for attempt in range(10):
-        code, reason = _check(root, "1.2.3", notes)
+        code, reason, _, body = _check(root, "1.2.3", changelog, tmp_path)
         assert code == 0, f"attempt {attempt}: {reason}"
+        assert body == (b"x" * 79 + b"\n") * 2600
 
 
 def test_checker_refuses_a_version_that_is_not_semver(tmp_path):
     root = _require_checkout()
-    notes = tmp_path / "v1.2.md"
-    notes.write_bytes(_GOOD)
-    code, reason = _check(root, "1.2", notes)
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_bytes(_GOOD)
+    code, reason, _, _ = _check(root, "1.2", changelog)
     assert code == 1 and "not X.Y.Z" in reason

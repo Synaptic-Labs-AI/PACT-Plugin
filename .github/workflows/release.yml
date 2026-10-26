@@ -10,30 +10,34 @@
 #   left alone, so a run with nothing missing is a no-op and a failed run is
 #   repaired by the next one (self-healing, idempotent).
 #
-# EVERY VERSION-BUMPING PR MUST ADD ITS RELEASE NOTES
+# EVERY VERSION-BUMPING PR MUST ADD ITS SECTION TO CHANGELOG.md
 #   The tag message and the release notes are hand-written, as they were when
-#   releases were cut by hand. They live in `.github/release-notes/v<ver>.md`:
+#   releases were cut by hand. They live in the root CHANGELOG.md, newest
+#   first, one section per version:
 #
-#     # v<ver>: <short lowercase summary, e.g. lint-aware local merge gate>
+#     ## v<ver>: <short lowercase summary, e.g. lint-aware local merge gate>
 #     <blank line>
-#     ## Summary
+#     ### Summary
 #     ...
-#     ## What landed
+#     ### What landed
 #     ...
-#     ## Why
+#     ### Why
 #     ...
 #
-#   Line 1 minus its leading `# ` is the annotated tag message, verbatim.
-#   Everything after the blank line 2 is the release body. Line 1 is an
-#   allowlist: printable ASCII, em dash and en dash only. The body is free
-#   Markdown, and the file may not contain a NUL byte. The rules are defined
-#   once, in .github/scripts/check-release-notes.sh, and checked twice: on
-#   every PR by pact-plugin/tests/test_release_notes.py (the current
-#   version's file), and here before release. The file is read from the
-#   bump commit if that copy is valid, otherwise from the tip of main (how
-#   v4.8.9-v4.8.11 were backfilled, and how a bad file that reached main is
-#   repaired: fix it on main and the next run uses that copy, with a
-#   warning). No valid copy anywhere stops the run before anything is
+#   The heading minus `## ` is the annotated tag message, verbatim, and is an
+#   allowlist: printable ASCII, em dash and en dash only. The section runs to
+#   the next `## v<digit>` heading (fenced code never ends it). Its body is
+#   free Markdown and becomes the release body, with headings of level 3 or
+#   deeper promoted one level (`### Summary` is published as `## Summary`).
+#   The file may not contain a NUL byte. The rules and the extraction are
+#   defined once, in .github/scripts/check-release-notes.sh, and run twice:
+#   on every PR by pact-plugin/tests/test_release_notes.py (the current
+#   version's section and every other `## v` section), and here before
+#   release. CHANGELOG.md is read from the bump commit if that copy has a
+#   valid section for the version, otherwise from the tip of main (how
+#   v4.8.9-v4.8.11 were backfilled, and how a bad section that reached main
+#   is repaired: fix it on main and the next run uses that copy, with a
+#   warning). No valid section anywhere stops the run before anything is
 #   created.
 #
 # WHO AUTHORS THE TAGS AND RELEASES (optional RELEASE_TOKEN)
@@ -135,7 +139,7 @@ jobs:
           # The last release cut by hand. The walk never goes before it.
           FLOOR_TAG: v4.8.8
           PLUGIN_JSON: pact-plugin/.claude-plugin/plugin.json
-          NOTES_DIR: .github/release-notes
+          NOTES_FILE: CHANGELOG.md
           BOT_NAME: github-actions[bot]
           BOT_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
         run: |
@@ -189,45 +193,40 @@ jobs:
             exit 1
           fi
 
-          # Picks the notes for version $2 (bump commit $1) and splits them
-          # into $work_dir/notes/v$2.msg (line 1 minus "# ", the tag message)
-          # and $work_dir/notes/v$2.body (line 3 on, the release notes).
-          # A VALID copy at the bump commit wins. If the bump commit's copy is
-          # invalid but HEAD's is valid, HEAD's is used with a warning, so a
-          # bad file that reached main is fixed by fixing it on main. Missing
-          # everywhere, or invalid everywhere, stops the run. Text stays in
-          # files and variables; nothing is evaluated.
+          # Picks version $2's section of $NOTES_FILE (bump commit $1) and
+          # has the checker extract it into $work_dir/notes/v$2.msg (the tag
+          # message) and $work_dir/notes/v$2.body (the release body).
+          # A VALID section at the bump commit wins. If the bump commit's copy
+          # lacks a valid section but HEAD's has one, HEAD's is used with a
+          # warning, so a bad section that reached main is fixed by fixing it
+          # on main. Missing everywhere, or invalid everywhere, stops the run.
+          # Text stays in files and variables; nothing is evaluated.
           load_notes() {
-            local sha="$1" version="$2" path src="" bump_reason="" head_reason="" line1
-            path="$NOTES_DIR/v$version.md"
+            local sha="$1" version="$2" path="$NOTES_FILE" src="" bump_reason="" head_reason=""
+            local msg="$work_dir/notes/v$version.msg" body="$work_dir/notes/v$version.body"
             if git cat-file -e "$sha:$path" 2>/dev/null; then
               git show "$sha:$path" > "$work_dir/notes/bump"
-              if bump_reason="$(check_notes "$version" "$work_dir/notes/bump")"; then
+              if bump_reason="$(check_notes "$version" "$work_dir/notes/bump" "$msg" "$body")"; then
                 src="$sha"
-                cp "$work_dir/notes/bump" "$work_dir/notes/raw"
               fi
             fi
             if [ -z "$src" ] && git cat-file -e "HEAD:$path" 2>/dev/null; then
               git show "HEAD:$path" > "$work_dir/notes/head"
-              if head_reason="$(check_notes "$version" "$work_dir/notes/head")"; then
+              if head_reason="$(check_notes "$version" "$work_dir/notes/head" "$msg" "$body")"; then
                 src="HEAD"
-                cp "$work_dir/notes/head" "$work_dir/notes/raw"
                 if [ -n "$bump_reason" ]; then
-                  echo "::warning::$path at bump commit $sha is invalid ($bump_reason); using the valid copy on HEAD"
+                  echo "::warning::$path at bump commit $sha has no valid v$version section ($bump_reason); using the valid copy on HEAD"
                 fi
               fi
             fi
             if [ -z "$src" ]; then
               if [ -z "$bump_reason" ] && [ -z "$head_reason" ]; then
-                echo "::error::v$version needs $path, but neither its bump commit $sha nor HEAD has it"
+                echo "::error::v$version needs a section in $path, but neither its bump commit $sha nor HEAD has the file"
               else
-                echo "::error::v$version has no valid $path (bump commit: ${bump_reason:-absent}; HEAD: ${head_reason:-absent})"
+                echo "::error::v$version has no valid section in $path (bump commit: ${bump_reason:-absent}; HEAD: ${head_reason:-absent})"
               fi
               exit 1
             fi
-            line1="$(sed -n 1p "$work_dir/notes/raw")"
-            tail -n +3 "$work_dir/notes/raw" > "$work_dir/notes/v$version.body"
-            printf '%s\n' "${line1#"# "}" > "$work_dir/notes/v$version.msg"
             echo "v$version: notes from $src:$path"
           }
 
