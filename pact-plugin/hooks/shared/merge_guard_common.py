@@ -10445,7 +10445,12 @@ def target_changes_before_guarded_leg(command: str, branch: bool = True) -> bool
             return False
         # `git checkout [<tree>] -- <paths>` restores files and leaves the branch;
         # `gh repo set-default --view` only prints the default.
-        change = _TARGET_CHANGING_LEG_RE.match(leg)
+        # A leg run through env or an exec wrapper (`env FOO=1 git checkout x`,
+        # `timeout 60 git config …`) changes the target as the bare leg does.
+        _, words = _assignments_reaching_command(leg)
+        change = _TARGET_CHANGING_LEG_RE.match(leg) or (
+            _TARGET_CHANGING_LEG_RE.match(shlex.join(words)) if words else None
+        )
         if not change or re.search(r"\scheckout\b.*\s--(?:\s|$)|\sset-default\b.*\s(?:-v|--view)\b", leg):
             continue
         # An upstream or push-routing change moves only a force push that names no

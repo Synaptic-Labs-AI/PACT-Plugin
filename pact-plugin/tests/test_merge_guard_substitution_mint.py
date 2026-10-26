@@ -986,6 +986,10 @@ class TestAnImplicitCloseRuns:
 
 
 REPO_CHANGES = {
+    "env-checkout-merge": (MERGE + "--squash", "env git checkout feat/y && " + MERGE + "--squash",
+                           "env git checkout feat/z && " + MERGE + "--squash"),
+    "nice-checkout-force-push": ("git push --" + "force", "nice -n 5 git checkout feat/y && git push --" + "force",
+                                 "nice -n 5 git checkout feat/z && git push --" + "force"),
     "pr-checkout-merge": (MERGE + "--squash", "gh pr checkout 6 && " + MERGE + "--squash",
                           "gh pr checkout 7 && " + MERGE + "--squash"),
     "pr-checkout-force-push": ("git push --" + "force", "gh pr checkout 6 && git push --" + "force",
@@ -1376,6 +1380,12 @@ NUMBERED_REPO_CHANGES = {
     "remote-add": (_NUMBERED, "git remote add upstream git@github.com:o/b.git && " + _NUMBERED,
                    "git remote add upstream git@github.com:o/c.git && " + _NUMBERED),
     "remote-rename": (_NUMBERED, "git remote rename origin old; " + _NUMBERED, "git remote rename origin older; " + _NUMBERED),
+    "env-remote-set-url": (_NUMBERED, "env FOO=1 git remote set-url origin git@github.com:o/b.git && " + _NUMBERED,
+                           "env FOO=1 git remote set-url origin git@github.com:o/c.git && " + _NUMBERED),
+    "timeout-config-url": (_NUMBERED, "timeout 60 git config remote.origin.url git@github.com:o/b.git && " + _NUMBERED,
+                           "timeout 60 git config remote.origin.url git@github.com:o/c.git && " + _NUMBERED),
+    "env-split-string-set-url": (_NUMBERED, "env -S 'git remote set-url origin git@github.com:o/b.git' && " + _NUMBERED,
+                                 "env -S 'git remote set-url origin git@github.com:o/c.git' && " + _NUMBERED),
     "config-remote-url": (_NUMBERED, "git config remote.origin.url git@github.com:o/b.git && " + _NUMBERED,
                           "git config remote.origin.url git@github.com:o/c.git && " + _NUMBERED),
     "config-unset-pushurl": (_NUMBERED, "git config --unset remote.origin.pushurl; " + _NUMBERED,
@@ -1465,10 +1475,15 @@ class TestANumberedOpInAnotherRepoNeedsItsOwnApproval:
         "git config remove-section user && " + _NUMBERED,
         "git -C . config --get remote.origin.url && " + _NUMBERED,
         "git config get url.git@github.com:o/b.git.insteadOf && " + _NUMBERED,
+        "env git config --get remote.origin.url && " + _NUMBERED,
+        "nice git config list; " + _NUMBERED,
+        "env git checkout feat/y && " + _NUMBERED,
+        "env echo cd /tmp/other; " + _NUMBERED,
     ], ids=["pr-checkout", "co", "branch-checkout", "switch", "cd-after", "echoed", "remote-list", "set-default-view",
             "set-default-v", "config-get", "config-get-value-pattern", "config-read-key", "config-list", "config-other-key",
             "config-get-subcommand", "config-get-all-subcommand", "config-list-subcommand", "config-get-key-case",
-            "config-unset-other-key", "config-remove-other-section", "config-get-dash-c", "config-get-insteadof"])
+            "config-unset-other-key", "config-remove-other-section", "config-get-dash-c", "config-get-insteadof",
+            "env-config-get", "nice-config-list", "env-branch-checkout", "env-echoed"])
     def test_a_plain_numbered_approval_still_covers_a_branch_change(self, command):
         assert _runs(_mint_styled(_NUMBERED, APPROVAL_STYLES["inline"]), command)
 
@@ -1553,6 +1568,9 @@ PUSH_ROUTING_CHANGES = {
     "config-global-push-default-remote": ("git config --global remote.pushdefault upstream",
                                           "git config --global remote.pushdefault fork"),
     "config-remove-branch-section": ("git config remove-section branch.feat/x", "git config remove-section branch.feat/y"),
+    "env-branch-u": ("env FOO=1 git branch -u upstream/x", "env FOO=1 git branch -u fork/x"),
+    "sudo-config-push-remote": ("sudo -u me git config branch.feat/x.pushRemote upstream",
+                                "sudo -u me git config branch.feat/x.pushRemote fork"),
     "config-push-default": ("git config push.default matching", "git config push.default current"),
     "config-set-push-default-case": ("git config set Push.Default matching", "git config set Push.Default current"),
     "config-branch-merge": ("git config branch.feat/x.merge refs/heads/main", "git config branch.feat/x.merge refs/heads/dev"),
@@ -1604,13 +1622,16 @@ class TestAnUpstreamOrPushRoutingChangeMovesAPushNamingNoRef:
         (MERGE + "--squash", "git branch -u upstream/x && " + MERGE + "--squash"),
         (MERGE + "--squash", "git config remote.pushDefault upstream && " + MERGE + "--squash"),
         (_NUMBERED, "git config branch.feat/x.remote upstream && " + _NUMBERED),
+        (_FORCE, "timeout 5 git branch -vv && " + _FORCE),
+        (MERGE + "--squash", "env FOO=1 git checkout -- file.txt && " + MERGE + "--squash"),
         (_FORCE, "git config --get push.default && " + _FORCE),
         (_FORCE, "git config push.followTags true && " + _FORCE),
         (_PUSH_X, "git config push.default matching && " + _PUSH_X),
         (MERGE + "--squash", "git config branch.feat/x.merge refs/heads/main && " + MERGE + "--squash"),
     ], ids=["config-get", "config-get-subcommand", "config-read-key", "config-other-key", "branch-list", "branch-track",
             "named-ref-push-branch-u", "named-ref-push-config", "gh-merge-branch-u", "gh-merge-config", "numbered-merge",
-            "config-get-push-default", "config-other-push-key", "named-ref-push-default", "gh-merge-branch-merge"])
+            "config-get-push-default", "config-other-push-key", "named-ref-push-default", "gh-merge-branch-merge",
+            "timeout-branch-list", "env-checkout-paths"])
     def test_a_plain_approval_still_covers_it(self, plain, command):
         assert _runs(_mint_styled(plain, APPROVAL_STYLES["inline"]), command)
 
