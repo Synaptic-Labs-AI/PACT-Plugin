@@ -420,6 +420,38 @@ afternoon.
   the top-level type check removed      test_a_top_level_non_object_reaches_the_named_path_machinery
   the title TYPE check removed          test_a_non_string_title_is_reported_and_the_block_still_renders
   `_SLUG_CHARS` anchored on `$`         test_a_repo_slug_with_a_trailing_newline_is_refused
+  in-process `gh` guard removed         test_the_tracker_guard_trips_on_an_unstubbed_gh_call
+  REST `merged_at` stops meaning MERGED test_the_outcome_table_lands_every_row_in_the_same_bucket_on_both_paths
+  REST PR node loses its `merged` key   test_the_outcome_table_lands_every_row_in_the_same_bucket_on_both_paths
+  `duplicate` leaves the abandoned set  test_the_outcome_table_lands_every_row_in_the_same_bucket_on_both_paths
+  a no-reason close reads as done       test_no_record_reads_done_unless_it_says_completed_or_merged
+  the REST pool waits for its workers   test_a_rest_call_hanging_mid_flight_does_not_hold_resolve_refs
+  a REST call runs with no timeout      test_the_show_process_exits_within_budget_while_gh_hangs
+  bad REST JSON escapes as exception    test_one_failing_rest_call_does_not_take_its_neighbours_with_it
+  a worker exception is re-raised       test_one_failing_rest_call_does_not_take_its_neighbours_with_it
+  no-stdout REST reads not-resolved     test_one_failing_rest_call_does_not_take_its_neighbours_with_it
+  the trigger matches on wording        test_a_refusal_shaped_error_body_falls_back_and_still_ends_unverifiable
+  unparseable GraphQL goes to REST      test_unparseable_graphql_output_never_falls_back
+  a None REST deadline reads as spent   test_rest_resolution_called_directly_keeps_its_contract
+  an empty REST batch starts a pool     test_rest_resolution_called_directly_keeps_its_contract
+  `reconcile` drops project_path        test_reconcile_anchors_the_slug_lookup_on_the_stored_project_path
+  urlsplit ValueError escapes           test_slug_and_ref_parsers_refuse_what_they_cannot_read
+  `_issue_number` non-str guard gone    test_slug_and_ref_parsers_refuse_what_they_cannot_read
+
+The #1667 TEST-phase rows above were each run against an unmutated green tree,
+one mutation at a time, with the value the mutant returns predicted first and
+checked to be the opposite of what the arm asserts. A mutation that would NOT
+flip its arm was replaced rather than recorded: dropping the `stdout is None`
+early return in the REST worker sends None into `json.loads`, which raises
+TypeError, which the pool reports as `did not complete` — the verdict the arm
+already asserts. It proves nothing, so the row instead maps that case to
+`did not resolve`. Three rows here are exception kills (worker exception
+re-raised, urlsplit ValueError, the non-str guard); each stated property IS
+that no exception escapes, which is the licence above. The `gh` guard row was
+killed twice over: the arm saw no raise, AND the PATH tripwire caught the call.
+The outcome table's GraphQL rows were also run against the pre-#1667 module
+(8e027e5~1, loaded as a copy) and passed unchanged: they pin the mapping that
+existed, not one the change introduced.
 
 The source-gate pair is the reason this record exists. Twenty-four arms all
 killed their mutations while the launch-source gate sat entirely unpinned:
@@ -432,6 +464,7 @@ arms are missing, and neither substitutes for the other.
 import importlib.util
 import inspect
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -6369,3 +6402,561 @@ def test_a_slow_graphql_refusal_leaves_rest_only_the_remaining_budget(monkeypatc
     assert [argv for argv, _ in calls if argv[:3] != ["gh", "api", "graphql"]] == []
     assert all(state["reason"] == backlog._REASON_CALL_INCOMPLETE
                for state in outcome.values()), outcome
+
+
+# ---------------------------------------------------------------------------
+# REST fallback (#1667) — TEST-phase arms
+#
+# The CODE-phase arms above are kept as they are. This section adds what they
+# leave open: a hermeticity guard for the whole module, ONE outcome table
+# driven through BOTH resolution paths end to end, the closed-is-not-done
+# invariant over every state a tracker can report, a REST call that hangs
+# mid-flight (in process AND through the real CLI process exit), per-ref
+# failure isolation inside the REST pool, and the `project_path` thread from
+# `reconcile` down to the slug lookup.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="session")
+def _gh_tripwire_dir(tmp_path_factory):
+    """A `gh` that records being run, first on PATH for every child process.
+
+    The in-process guard below cannot see a CHILD process — the CLI arms spawn
+    `python backlog.py ...`, which would reach the real `gh` (and the network)
+    if a fixture ever carried a live ref. This one can: it writes a marker the
+    per-test guard checks, and exits 1 with no stdout, which every caller
+    already reads as "no answer".
+    """
+    directory = tmp_path_factory.mktemp("gh-tripwire")
+    marker = directory / "ran"
+    script = directory / "gh"
+    script.write_text(
+        "#!/bin/sh\n"
+        f"echo \"$*\" >> '{marker}'\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return directory, marker
+
+
+@pytest.fixture(autouse=True)
+def _no_real_tracker(monkeypatch, _gh_tripwire_dir):
+    """Every test in this module is hermetic with respect to the tracker.
+
+    1. `GH_REPO` is removed, so a developer or CI shell that sets it cannot
+       settle the slug and route an arm past the rung it means to exercise.
+    2. Any IN-PROCESS `subprocess.run` of `gh` that no test stubbed fails the
+       test by name. An arm that installs its own fake replaces this guard for
+       its own duration, which is the point: only an UNSTUBBED call trips it.
+    3. Any CHILD-process `gh` lands on the tripwire above and fails the test at
+       teardown.
+
+    RED WHEN a test reaches a real `gh`. Measured when this guard was added:
+    with a logging `gh` and `git` on PATH the whole module made zero `gh`
+    calls, and the only `git remote get-url origin` reads came from the real
+    seam arm — so the guard pins a property the suite already had.
+    """
+    directory, marker = _gh_tripwire_dir
+    monkeypatch.delenv("GH_REPO", raising=False)
+    monkeypatch.setenv("PATH", f"{directory}{os.pathsep}{os.environ.get('PATH', '')}")
+    real_run = subprocess.run
+
+    def guarded_run(command, *args, **kwargs):
+        head = command[0] if isinstance(command, (list, tuple)) and command else command
+        if isinstance(head, str) and os.path.basename(head) == "gh":
+            pytest.fail(f"an unstubbed `gh` call reached subprocess.run: {command!r}")
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", guarded_run)
+    if marker.exists():
+        marker.unlink()
+    yield
+    if marker.exists():
+        ran = marker.read_text(encoding="utf-8")
+        marker.unlink()
+        pytest.fail(f"a child process ran the real `gh`: {ran!r}")
+
+
+def test_the_tracker_guard_trips_on_an_unstubbed_gh_call():
+    """The guard is armed: an unstubbed `gh` call fails, it is not silently run.
+
+    RED WHEN the in-process guard is removed — the call would then reach the
+    tripwire `gh` (exit 1) and `_run_capture` would return None quietly.
+    """
+    with pytest.raises(pytest.fail.Exception, match="unstubbed `gh`"):
+        backlog._run_capture(["gh", "api", "graphql"])
+
+
+# ONE TABLE, TWO PATHS. Each row is a single tracker fact stated twice: as the
+# GraphQL node the batched query returns and as the REST body
+# `gh api repos/{o}/{n}/issues/{N}` returns for the SAME issue or PR. Both
+# must land in the SAME bucket — that is the closed-is-not-done authority
+# staying single. The issue numbers are synthetic and exist only to key rows.
+_OUTCOME_ROWS = [
+    # (label, graphql node, REST body, expected outcome)
+    ("open issue",
+     {"state": "OPEN", "stateReason": None},
+     {"state": "open", "state_reason": None},
+     {"state": "open"}),
+    ("reopened issue",
+     {"state": "OPEN", "stateReason": "REOPENED"},
+     {"state": "open", "state_reason": "reopened"},
+     {"state": "open"}),
+    ("closed completed",
+     {"state": "CLOSED", "stateReason": "COMPLETED"},
+     {"state": "closed", "state_reason": "completed"},
+     {"state": "done"}),
+    ("closed not_planned",
+     {"state": "CLOSED", "stateReason": "NOT_PLANNED"},
+     {"state": "closed", "state_reason": "not_planned"},
+     {"state": "abandoned", "reason": "not_planned"}),
+    ("closed duplicate",
+     {"state": "CLOSED", "stateReason": "DUPLICATE"},
+     {"state": "closed", "state_reason": "duplicate"},
+     {"state": "abandoned", "reason": "duplicate"}),
+    ("closed issue, no reason",
+     {"state": "CLOSED", "stateReason": None},
+     {"state": "closed", "state_reason": None},
+     {"state": "closed"}),
+    ("closed issue, unknown reason",
+     {"state": "CLOSED", "stateReason": "SOMETHING_NEW"},
+     {"state": "closed", "state_reason": "something_new"},
+     {"state": "closed"}),
+    ("merged PR",
+     {"state": "MERGED", "merged": True},
+     {"state": "closed", "state_reason": None,
+      "pull_request": {"merged_at": "2026-10-26T04:37:12Z"}},
+     {"state": "done"}),
+    ("closed unmerged PR",
+     {"state": "CLOSED", "merged": False},
+     {"state": "closed", "state_reason": None,
+      "pull_request": {"merged_at": None}},
+     {"state": "abandoned", "reason": "closed unmerged"}),
+    ("open PR",
+     {"state": "OPEN", "merged": False},
+     {"state": "open", "state_reason": None,
+      "pull_request": {"merged_at": None}},
+     {"state": "open"}),
+]
+_ROW_BY_NUMBER = {index + 100: row for index, row in enumerate(_OUTCOME_ROWS)}
+
+
+def _graphql_answers_from_table(calls):
+    """A `subprocess.run` fake: the batched query answered from the table.
+
+    Reads each alias's issue NUMBER back out of the query the module built, so
+    it follows whatever alias scheme the code uses — and runs unchanged
+    against the pre-#1667 module, whose query has the same shape.
+    """
+    def fake_run(command, **kwargs):
+        calls.append(list(command))
+        assert command[:3] == ["gh", "api", "graphql"], f"unexpected call {command}"
+        query = next(arg for arg in command if arg.startswith("query="))
+        repository = {
+            alias: _ROW_BY_NUMBER[int(number)][1]
+            for alias, number in re.findall(
+                r"\b(r\d+): issueOrPullRequest\(number: (\d+)\)", query)
+        }
+        return subprocess.CompletedProcess(
+            command, 0, stdout=json.dumps({"data": {"repository": repository}}),
+            stderr="")
+    return fake_run
+
+
+def _refused_graphql_rest_from_table(calls):
+    """A `subprocess.run` fake: GraphQL refused as a whole (the recorded cloud
+    body), each REST call answered from the table. Thread-safe: list.append."""
+    def fake_run(command, **kwargs):
+        calls.append(list(command))
+        if command[:3] == ["gh", "api", "graphql"]:
+            return subprocess.CompletedProcess(
+                command, 1, stdout=_GRAPHQL_REFUSED_STDOUT, stderr="gh: (HTTP 403)")
+        number = int(command[2].rsplit("/", 1)[-1])
+        return subprocess.CompletedProcess(
+            command, 0, stdout=json.dumps(_ROW_BY_NUMBER[number][2]), stderr="")
+    return fake_run
+
+
+def _table_outcomes_via_graphql(module, monkeypatch):
+    calls = []
+    monkeypatch.setattr(module, "_repo_slug", lambda *a, **k: ("owner", "repo"))
+    monkeypatch.setattr(subprocess, "run", _graphql_answers_from_table(calls))
+    refs = [f"#{number}" for number in _ROW_BY_NUMBER]
+    outcome = module.resolve_refs(refs)
+    assert len(calls) == 1, f"the fast path made {len(calls)} calls, not one"
+    return {int(ref[1:]): state for ref, state in outcome.items()}
+
+
+def _table_outcomes_via_rest(monkeypatch):
+    calls = []
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *a, **k: ("owner", "repo"))
+    monkeypatch.setattr(subprocess, "run", _refused_graphql_rest_from_table(calls))
+    refs = [f"#{number}" for number in _ROW_BY_NUMBER]
+    outcome = backlog.resolve_refs(refs)
+    rest = [argv for argv in calls if argv[:3] != ["gh", "api", "graphql"]]
+    assert len(rest) == len(refs), f"expected one REST call per ref, got {len(rest)}"
+    return {int(ref[1:]): state for ref, state in outcome.items()}
+
+
+def test_the_outcome_table_lands_every_row_in_the_same_bucket_on_both_paths(
+    monkeypatch,
+):
+    """Every row, end to end through `resolve_refs`, once per path.
+
+    The GraphQL half pins `_ref_outcome`'s mapping as it stood BEFORE #1667:
+    its rows were run against the pre-change module (8e027e5~1) loaded as a
+    copy, and passed there unchanged. The REST half pins that the adapter
+    reproduces that mapping exactly.
+
+    RED WHEN any bucket moves on either path: a `merged_at` that stops making
+    a PR `done`, a closed-unmerged PR losing its `merged` key and reading
+    `closed`, `duplicate` dropping out of the abandoned set, or `completed`
+    stopping being the only reason that means done.
+    """
+    expected = {number: row[3] for number, row in _ROW_BY_NUMBER.items()}
+    via_graphql = _table_outcomes_via_graphql(backlog, monkeypatch)
+    via_rest = _table_outcomes_via_rest(monkeypatch)
+
+    for number, row in _ROW_BY_NUMBER.items():
+        label = row[0]
+        assert via_graphql[number] == expected[number], f"GraphQL, {label}"
+        assert via_rest[number] == expected[number], f"REST, {label}"
+
+
+def _evidence_of_done(node_or_body, rest):
+    """What a tracker record must SAY for `done` to be the honest verdict."""
+    if rest:
+        pull = node_or_body.get("pull_request")
+        merged = isinstance(pull, dict) and bool(pull.get("merged_at"))
+        reason = str(node_or_body.get("state_reason") or "").lower()
+        state = str(node_or_body.get("state") or "").lower()
+    else:
+        merged = str(node_or_body.get("state") or "").lower() == "merged"
+        reason = str(node_or_body.get("stateReason") or "").lower()
+        state = str(node_or_body.get("state") or "").lower()
+    return merged or (state == "closed" and reason == "completed")
+
+
+def test_no_record_reads_done_unless_it_says_completed_or_merged():
+    """The closed-is-not-done invariant over EVERY combination, both shapes.
+
+    A table pins the rows someone thought of; this loop pins the property over
+    the cross product of states, reasons and PR markers, including impossible
+    ones (an open issue claiming `completed`, a PR with `merged_at` and state
+    `open`), because an invariant that only holds on plausible input is not
+    the invariant.
+
+    RED WHEN any combination reads `done` without a `completed` close or a
+    merge — e.g. `closed` alone mapped to done, or a falsy `merged` key read
+    as merged.
+    """
+    reasons = [None, "completed", "not_planned", "duplicate", "reopened", "other", ""]
+    checked = 0
+    for state in ("open", "closed"):
+        for reason in reasons:
+            for pull in (None, {"merged_at": None}, {"merged_at": "2026-01-01T00:00:00Z"},
+                         {}, "junk"):
+                body = {"state": state, "state_reason": reason}
+                if pull is not None:
+                    body["pull_request"] = pull
+                node = backlog._node_from_rest(body)
+                verdict = backlog._ref_outcome(node)
+                checked += 1
+                if verdict["state"] == "done":
+                    assert _evidence_of_done(body, rest=True), body
+                elif _evidence_of_done(body, rest=True):
+                    pytest.fail(f"evidence of done did not read done: {body} -> {verdict}")
+
+    for state in ("OPEN", "CLOSED", "MERGED", ""):
+        for reason in reasons:
+            for merged in (None, True, False):
+                node = {"state": state, "stateReason": reason.upper() if reason else reason}
+                if merged is not None:
+                    node["merged"] = merged
+                verdict = backlog._ref_outcome(node)
+                checked += 1
+                if verdict["state"] == "done":
+                    assert _evidence_of_done(node, rest=False), node
+    assert checked == 2 * 7 * 5 + 4 * 7 * 3, "the cross product shrank"
+
+
+def _blocking_rest(calls, release, hang_numbers, hang_cap=1.0):
+    """GraphQL refused; REST answers from `_REST_BODIES` except the numbers in
+    `hang_numbers`, which block until `release` is set — capped at `hang_cap`
+    seconds, so code that waited for a hung worker turns a red arm into a
+    bounded one instead of a stuck suite."""
+    answer = _refused_graphql_then_rest(calls)
+
+    def fake_run(command, **kwargs):
+        if command[:3] != ["gh", "api", "graphql"]:
+            number = int(command[2].rsplit("/", 1)[-1])
+            if number in hang_numbers:
+                calls.append((list(command), kwargs.get("timeout")))
+                release.wait(timeout=hang_cap)
+                raise subprocess.TimeoutExpired(command, kwargs.get("timeout"))
+        return answer(command, **kwargs)
+
+    return fake_run
+
+
+def test_a_rest_call_hanging_mid_flight_does_not_hold_resolve_refs(monkeypatch):
+    """A call that STARTED and then hangs is abandoned at the shared deadline.
+
+    The CODE-phase arm covers a deadline already spent (no call starts); this
+    one starts the call. `resolve_refs` must return at about the deadline, the
+    hung ref must read `did not complete`, and the refs that answered must
+    keep their verdicts.
+
+    RED WHEN the coordinator waits for its workers (`shutdown(wait=True)`, or
+    the pool used as a context manager), or `wait()` loses its timeout: the
+    return then takes the fake's full 1 s cap, not ~0.15 s.
+    """
+    import threading
+    import time as time_module
+
+    calls = []
+    release = threading.Event()
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
+    monkeypatch.setattr(subprocess, "run", _blocking_rest(calls, release, {1666}))
+    monkeypatch.setattr(backlog, "_TRACKER_TIMEOUT_SECONDS", 0.15)
+    try:
+        started = time_module.monotonic()
+        outcome = backlog.resolve_refs(["#1666", "#886", "#1672"])
+        elapsed = time_module.monotonic() - started
+    finally:
+        release.set()
+
+    assert elapsed < 0.6, f"resolve_refs waited {elapsed:.2f}s on a hung call"
+    assert outcome["#1666"] == {"state": "unverifiable",
+                                "reason": backlog._REASON_CALL_INCOMPLETE}
+    assert outcome["#886"] == {"state": "abandoned", "reason": "duplicate"}
+    assert outcome["#1672"] == {"state": "done"}
+
+
+_HANGING_GH = """#!/bin/sh
+case "$*" in
+  "api graphql"*)
+    printf '%s' '{GRAPHQL}'
+    exit 1 ;;
+  "api repos/"*)
+    exec sleep 30 ;;
+esac
+exit 1
+"""
+
+
+def test_the_show_process_exits_within_budget_while_gh_hangs(tmp_path):
+    """END TO END: the real CLI process, a real hanging `gh`, a real exit.
+
+    Non-daemon pool threads are JOINED at interpreter exit, so returning from
+    `resolve_refs` on time is not enough: the PROCESS must also end. It can
+    only because each REST call carries its own subprocess timeout, which
+    kills the hung `gh` at most `_REST_MIN_CALL_TIMEOUT` past the deadline.
+    The budget is shrunk to 0.3 s inside the child, so the bound is about
+    0.3 + 0.5 s plus interpreter start-up; the assertion allows 5 s against a
+    `gh` that would otherwise sleep 30 s.
+
+    RED WHEN a REST call runs without a timeout (or with an unbounded one):
+    the child then lives until the outer 15 s cap, not ~1 s.
+    """
+    import time as time_module
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    gh = fake_bin / "gh"
+    gh.write_text(_HANGING_GH.replace("{GRAPHQL}", _GRAPHQL_REFUSED_STDOUT),
+                  encoding="utf-8")
+    gh.chmod(0o755)
+    store, project = _cli_store(tmp_path, items=[_item(ref="#5")])
+
+    # Loaded by FILE PATH: backlog.py bootstraps its own `hooks/` import root,
+    # so the child needs no path setup of its own (tests/test_path_setup_pin.py
+    # forbids per-file path mutation, codegen strings included).
+    child = (
+        "import importlib.util, sys\n"
+        f"spec = importlib.util.spec_from_file_location('backlog', {BACKLOG_CLI!r})\n"
+        "backlog = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(backlog)\n"
+        "backlog._TRACKER_TIMEOUT_SECONDS = 0.3\n"
+        f"sys.exit(backlog.main(['--backlog-dir', {str(store)!r}, 'show']))\n"
+    )
+    env = dict(os.environ, GH_REPO="owner/repo",
+               PATH=f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    started = time_module.monotonic()
+    try:
+        result = subprocess.run([sys.executable, "-c", child], cwd=project, env=env,
+                                capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired:
+        pytest.fail("`show` did not exit within 15 s while `gh` hung")
+    elapsed = time_module.monotonic() - started
+
+    assert elapsed < 5.0, f"`show` took {elapsed:.2f}s to exit while `gh` hung"
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert backlog._REASON_CALL_INCOMPLETE in result.stdout + result.stderr, (
+        "the hung ref was not reported as incomplete — the arm did not reach "
+        "the REST call it claims to bound:\n" + result.stdout + result.stderr)
+
+
+def test_one_failing_rest_call_does_not_take_its_neighbours_with_it(monkeypatch):
+    """Per-ref isolation inside the pool, one row per way a call can fail.
+
+    - TimeoutExpired / empty stdout -> `did not complete` (`_run_capture` None)
+    - unparseable stdout            -> `did not resolve` (the ValueError arm)
+    - an exception `_run_capture` does not catch -> `did not complete`
+      (the `future.exception()` arm), never an exception out of `show`
+
+    RED WHEN any of those branches is removed or merged into another, or a
+    single bad ref turns its neighbours unverifiable.
+    """
+    calls = []
+    answer = _refused_graphql_then_rest(calls)
+
+    def fake_run(command, **kwargs):
+        if command[:3] != ["gh", "api", "graphql"]:
+            number = int(command[2].rsplit("/", 1)[-1])
+            if number == 1:
+                raise subprocess.TimeoutExpired(command, kwargs.get("timeout"))
+            if number == 2:
+                return subprocess.CompletedProcess(command, 0, stdout="   ", stderr="")
+            if number == 3:
+                return subprocess.CompletedProcess(command, 0, stdout="{not json",
+                                                   stderr="")
+            if number == 4:
+                raise RuntimeError("a failure _run_capture does not catch")
+        return answer(command, **kwargs)
+
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    outcome = backlog.resolve_refs(["#1", "#2", "#3", "#4", "#1666", "#1626"])
+
+    incomplete = {"state": "unverifiable", "reason": backlog._REASON_CALL_INCOMPLETE}
+    assert outcome["#1"] == incomplete
+    assert outcome["#2"] == incomplete
+    assert outcome["#3"] == {"state": "unverifiable",
+                             "reason": backlog._REASON_NOT_RESOLVED}
+    assert outcome["#4"] == incomplete
+    assert outcome["#1666"] == {"state": "done"}
+    assert outcome["#1626"] == {"state": "abandoned", "reason": "closed unmerged"}
+
+
+def test_a_refusal_shaped_error_body_falls_back_and_still_ends_unverifiable(
+    monkeypatch,
+):
+    """SHAPE-ONLY trigger, its accepted false positive, end to end.
+
+    A rate-limit or bad-credentials body has the refusal's shape (`message`,
+    no `data`), so it DOES fall back. REST then fails the same way, and every
+    ref must end `did not resolve` — never `open`, never an exception — with
+    exactly one REST call per ref, so the false positive costs one bounded
+    window and nothing else.
+
+    RED WHEN an error body reaching `_node_from_rest` maps to a bucket, or the
+    fallback stops firing on a refusal-shaped body.
+    """
+    calls = []
+    limited = json.dumps({"message": "API rate limit exceeded for user ID 1.",
+                          "documentation_url": "https://docs.github.com/"})
+
+    def fake_run(command, **kwargs):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 1, stdout=limited,
+                                           stderr="gh: (HTTP 403)")
+
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    refs = ["#1", "#2", "#3"]
+    outcome = backlog.resolve_refs(refs)
+
+    assert all(outcome[ref] == {"state": "unverifiable",
+                                "reason": backlog._REASON_NOT_RESOLVED}
+               for ref in refs), outcome
+    rest = [argv for argv in calls if argv[:3] != ["gh", "api", "graphql"]]
+    assert sorted(argv[2] for argv in rest) == [
+        "repos/owner/repo/issues/1", "repos/owner/repo/issues/2",
+        "repos/owner/repo/issues/3"]
+
+
+def test_unparseable_graphql_output_never_falls_back(monkeypatch):
+    """Output that is not JSON at all is not a refusal: no REST call, and the
+    refs keep the default unverifiable reason.
+
+    RED WHEN unparseable output is routed into the REST fallback or raises.
+    """
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 1, stdout="<html>502</html>",
+                                           stderr="")
+
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    outcome = backlog.resolve_refs(["#1"])
+    assert outcome["#1"]["state"] == "unverifiable"
+    assert outcome["#1"]["reason"] == "no tracker resolution for this ref"
+    assert len(calls) == 1 and calls[0][:3] == ["gh", "api", "graphql"]
+
+
+def test_rest_resolution_called_directly_keeps_its_contract(monkeypatch):
+    """`_resolve_refs_rest` with no `deadline` takes a full budget of its own,
+    and with nothing to check makes no call and starts no pool.
+
+    RED WHEN a None deadline is treated as already spent (every ref would read
+    incomplete) or an empty batch submits to an executor.
+    """
+    calls = []
+    monkeypatch.setattr(subprocess, "run", _refused_graphql_then_rest(calls))
+
+    assert backlog._resolve_refs_rest("owner", "repo", {}) == {}
+    assert calls == []
+
+    outcome = backlog._resolve_refs_rest("owner", "repo", {"#1666": 1666})
+    assert outcome == {"#1666": {"state": "done"}}
+    (argv, timeout), = calls
+    assert argv == ["gh", "api", "repos/owner/repo/issues/1666"]
+    assert backlog._REST_MIN_CALL_TIMEOUT <= timeout <= backlog._TRACKER_TIMEOUT_SECONDS
+
+
+def test_reconcile_anchors_the_slug_lookup_on_the_stored_project_path(
+    monkeypatch, tmp_path,
+):
+    """`reconcile` -> `_ref_flags` -> `resolve_refs` -> `_repo_slug` carries the
+    backlog's own `project_path`, so `origin` is read from THIS project and not
+    from whatever repository the process CWD sits in.
+
+    RED WHEN any link in that chain drops `project_path` (the slug lookup then
+    receives None and falls back to the CWD).
+    """
+    seen = []
+
+    def recording_slug(project_path=None):
+        seen.append(project_path)
+        return None
+
+    monkeypatch.setattr(backlog, "_repo_slug", recording_slug)
+    data = _backlog(tmp_path, items=[_item(ref="#7")])
+    backlog.reconcile(data)
+
+    assert seen == [str(tmp_path)], seen
+
+
+def test_slug_and_ref_parsers_refuse_what_they_cannot_read(monkeypatch):
+    """The defensive returns the tables above do not reach.
+
+    RED WHEN a malformed remote URL raises out of `_slug_from_remote_url`
+    (urlsplit raises ValueError on an unclosed IPv6 bracket), a non-string
+    ref reaches `.strip()`, or a failed or non-JSON `gh repo view` yields
+    anything but None.
+    """
+    assert backlog._slug_from_remote_url("https://[::1/o/r") is None
+    assert backlog._slug_from_gh_repo("github.com/o/r/extra") is None
+    assert backlog._local_repo_slug(42) is None
+    for not_a_ref in (None, 12, ["#1"]):
+        assert backlog._issue_number(not_a_ref) is None, not_a_ref
+
+    for stdout in (None, "not json"):
+        monkeypatch.setattr(backlog, "_run_capture", lambda *a, _s=stdout, **k: _s)
+        assert backlog._gh_repo_view_slug() is None, stdout
