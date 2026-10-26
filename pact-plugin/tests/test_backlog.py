@@ -384,6 +384,8 @@ afternoon.
   the shipped defect, 08b4f5b8^       test_an_all_settled_backlog_makes_no_tracker_call
   ref set unfiltered, 6c99af63^       test_a_ref_set_mixing_a_string_and_an_int_does_not_raise
   project_path guard removed          test_a_relative_project_path_yields_no_branch_names
+  branch reader treats None as the CWD    test_a_missing_or_absent_project_path_reads_no_branches_and_runs_no_git
+  branch reader back to absolute-only     test_a_missing_or_absent_project_path_reads_no_branches_and_runs_no_git
   the `ref` type rule removed         test_a_non_string_ref_is_reported_by_the_schema_check
   the `ref` type rule removed         test_a_bad_field_on_one_item_locks_writes_to_every_other_item
   the date rule becomes type-only     test_an_unparseable_date_is_reported_not_just_a_wrong_type
