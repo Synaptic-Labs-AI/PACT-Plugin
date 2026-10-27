@@ -172,6 +172,17 @@ TRAP_SINGLE_RUN = [
     ("a printed trap handler on EXIT", "trap \"$(printf %s '" + _FP + "')\" EXIT", 1),
     ("a backtick-printed trap handler on EXIT", "trap \"`printf %s '" + _FP + "'`\" EXIT", 1),
     ("a printed trap handler variable on EXIT", "c=$(printf %s '" + _FP + "'); trap \"$c\" EXIT", 1),
+    # A cleanup trap shares the op's shell, so its rm is not a second operation.
+    ("a cleanup trap removing a temp file", "tmp=$(mktemp); trap 'rm -f \"$tmp\"' EXIT; " + _FP, 1),
+    ("a cleanup trap removing a temp dir", "t=$(mktemp -d); trap 'rm -rf \"$t\"' EXIT; " + _FP, 1),
+    ("a double-quoted cleanup trap", "tmp=$(mktemp); trap \"rm -f $tmp\" EXIT; " + _FP, 1),
+    ("a cleanup trap of a fixed path", "trap 'rm -f /tmp/x' EXIT; " + _FP, None),
+    ("a cleanup trap before a merge", "tmp=$(mktemp); trap 'rm -f \"$tmp\"' EXIT; " + _MG + " 5 --squash", 1),
+    ("a cleanup trap before a branch delete", "tmp=$(mktemp); trap 'rm -f \"$tmp\"' EXIT; git branch " + "-D feat", None),
+    ("a cleanup trap on EXIT, INT and TERM", "trap 'rm -f x' EXIT INT TERM; " + _FP, 1),
+    ("a cleanup function trapped on EXIT, INT and TERM", "cleanup() { rm -f x; }; trap cleanup EXIT INT TERM; " + _FP, 1),
+    ("a looping cleanup function trapped on EXIT", "cleanup() { for f in a b; do rm -f $f; done; }; trap cleanup EXIT; " + _FP, 1),
+    ("a looping cleanup trap", "trap 'for f in a b; do rm -f $f; done' EXIT; " + _FP, 1),
     ("a trap handler that retries", "trap 'for i in 1 2; do " + _FP + " && break; done' EXIT", 1),
 ]
 TRAP_INERT = ["trap 'rm -f tmp' EXIT", "trap - EXIT", "trap 'echo " + _FP + "' EXIT", "trap -p",

@@ -11309,6 +11309,7 @@ def _fan_out_extra(command: str) -> int:
     # Shell functions whose body holds a guarded leg, the functions each body calls, and
     # the legs that are bodies.
     guarded_functions: set[str] = set()
+    op_functions: set[str] = set()      # those whose body runs a guarded command (not a bare rm)
     body_calls: dict[str, set[str]] = {}
     repeating_bodies: set[str] = set()
     in_body = [False] * len(legs)
@@ -11341,8 +11342,10 @@ def _fan_out_extra(command: str) -> int:
             end = j if _CLOSE_BRACE_LEG_RE.match(legs[j]) else j + 1
             body = (written[i][head.end():] if head else first) + "".join(
                 f" {joins[x] or ';'} {written[x]}" for x in range(i + 1, end))
-            if _repeat_extra(body):
-                repeating_bodies.add(name)
+            if is_dangerous_command(body):
+                op_functions.add(name)
+                if _repeat_extra(body):
+                    repeating_bodies.add(name)
         i = j + 1
     recursive: set[str] = set(repeating_bodies)
     for name in body_calls:
@@ -11386,8 +11389,9 @@ def _fan_out_extra(command: str) -> int:
             if not args or args[0].startswith("-"):
                 continue
             handler_legs = _slice_stripped_legs(args[0])
-            ops_run = sum(1 for h in handler_legs if _leg_is_destructive(h))
-            guarded = ops_run or any(_leg_heads(h)[:1] and _leg_heads(h)[0] in guarded_functions
+            # Only guarded commands count: a cleanup `rm` in a handler is not an operation.
+            ops_run = sum(1 for h in handler_legs if is_dangerous_command(h))
+            guarded = ops_run or any(_leg_heads(h)[:1] and _leg_heads(h)[0] in op_functions
                                      for h in handler_legs)
             if guarded and (_repeat_extra(args[0]) or not set(args[1:]) <= {"EXIT", "0", "SIGEXIT"}):
                 return 1
