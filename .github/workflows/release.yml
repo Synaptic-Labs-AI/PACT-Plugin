@@ -8,7 +8,9 @@
 #     2. a GitHub release for that tag (no title, so GitHub shows the tag).
 #   Whatever is missing is created, oldest version first. Whatever exists is
 #   left alone, so a run with nothing missing is a no-op and a failed run is
-#   repaired by the next one (self-healing, idempotent).
+#   repaired by the next one (self-healing, idempotent). One limit: once main's
+#   .github/workflows changes after a bump commit, that version's tag can be
+#   pushed only with RELEASE_TOKEN (see THE TOKEN below).
 #
 # EVERY VERSION-BUMPING PR MUST ADD ITS SECTION TO CHANGELOG.md
 #   The tag message and the release notes are hand-written, as they were when
@@ -44,21 +46,28 @@
 #   warning). No valid section anywhere stops the run before anything is
 #   created.
 #
-# THE TOKEN (RELEASE_TOKEN is required for backfills)
+# THE TOKEN (RELEASE_TOKEN is required once workflows drift from a bump)
 #   GitHub checks the commit a new tag points at: if that commit's
 #   `.github/workflows/` differs from the default branch's, creating the tag
 #   counts as creating or updating workflow files, which needs workflows
 #   permission. The built-in GITHUB_TOKEN never has it, so it is ALWAYS
 #   refused ("refusing to allow a GitHub App to create or update workflow
 #   ... without `workflows` permission"). A `RELEASE_TOKEN` is therefore
-#   REQUIRED whenever a tag lands on such a commit, which in practice is any
-#   backfill or older release. It needs, on this repository only:
+#   REQUIRED whenever main's .github/workflows has changed since the bump
+#   commit being tagged. Drift decides this, not age: an old bump on
+#   unchanged workflows tags fine without it, and a fresh one needs it if a
+#   workflow-editing PR merged before its release run succeeded (every
+#   backfill so far, and any repair after a workflow change). It needs, on
+#   this repository only:
 #     Contents: Read and write   (push tags, create releases)
 #     Workflows: Read and write  (tags on commits whose workflow files
 #                                 differ from the default branch)
-#   Without it, only tags on commits whose workflows match main can be
-#   pushed, as github-actions[bot]; any other push stops the run with an
-#   ::error:: naming the tag and this fix.
+#   Without it, the run checks every tag it still has to push before it
+#   creates anything: if any of them is on a commit whose workflows differ
+#   from the commit the run is on, it stops with one ::error:: listing those
+#   tags and this fix. Releases whose tag already exists are not affected
+#   (they push nothing). A refused push is still explained by name, as a
+#   backstop.
 #
 #   WHERE IT LIVES (one-time setup, REQUIRED). A token with Workflows write
 #   must not be readable by a workflow on an arbitrary branch: a repository
@@ -77,24 +86,28 @@
 #   `if: github.ref == 'refs/heads/main'` stays as a second guard.
 #   `environment: release` alone protects nothing: if the environment does
 #   not exist, GitHub creates it on first use with NO branch restriction and
-#   no secret. RELEASE_TOKEN then reads as an empty string,
+#   no secret. An unset secret reads as an empty string, so
 #   `secrets.RELEASE_TOKEN || github.token` falls back to GITHUB_TOKEN, and
-#   a backfill push fails with the ::error:: above. Every run also records a
-#   deployment to `release` (harmless; it is how environments are tracked).
+#   a tag on a drifted commit stops the run with the ::error:: above. Each
+#   run without RELEASE_TOKEN says so with a ::notice::, and each run reads
+#   the `release` environment and warns if it has no branch restriction (a
+#   best-effort check: if the token may not read the environment, a
+#   ::notice:: says it was skipped; it never fails the run). Every run also
+#   records a deployment to `release` (harmless; it is how environments are
+#   tracked).
 #
-#   WHOSE TOKEN. Prefer a dedicated least-privilege account, or a GitHub App,
-#   with Contents and Workflows write on this repository and no admin or
-#   ruleset-bypass rights, over a maintainer's personal token. A personal
-#   token must be fine-grained, limited to this repository, and set to
-#   expire. (This workflow does not mint GitHub App tokens itself.)
+#   WHOSE TOKEN. A fine-grained personal access token, limited to this
+#   repository, with the two permissions above and an expiry date. Prefer
+#   one owned by a dedicated least-privilege account (no admin or
+#   ruleset-bypass rights) over a maintainer's own. The workflow needs a
+#   token that can be stored as a secret and that `gh api user` resolves to
+#   a user (the tagger), which a fine-grained PAT is.
 #
 #   With it, the checkout, the tag push and the release calls all use it,
 #   and the tag's tagger is the token owner (`gh api user`; email
 #   `<id>+<login>@users.noreply.github.com`), so authorship matches the
 #   releases cut by hand. If it is set but `gh api user` fails, the run
-#   fails rather than silently tagging as the bot. An unset secret reads as
-#   an empty string, so `secrets.RELEASE_TOKEN || github.token` falls back
-#   to the bot token.
+#   fails rather than silently tagging as the bot.
 #   Two consequences of setting it:
 #   - Tags and releases made with GITHUB_TOKEN start no other workflows;
 #     ones made with RELEASE_TOKEN do. No workflow here listens for them
@@ -132,9 +145,10 @@
 #   repository name and tokens, passed in through `env:` and `with:`.
 #
 # FAILURE IS LOUD
-#   The script runs under `set -euo pipefail`. A rejected tag push (a
-#   missing RELEASE_TOKEN for a workflow-changing tag, explained by name, or
-#   a tag-protection ruleset), a failed release call, a missing or
+#   The script runs under `set -euo pipefail`. Tags that need RELEASE_TOKEN
+#   while it is missing (listed before anything is created), a rejected tag
+#   push (an under-scoped RELEASE_TOKEN, explained by name, or a
+#   tag-protection ruleset), a failed release call, a missing or
 #   malformed notes file, a malformed version, a failed token-owner lookup,
 #   or an existing tag that points at a different commit than the one that
 #   set its version all fail the run; nothing is skipped silently. Tags are
@@ -152,8 +166,10 @@ permissions:
   contents: write
 
 # Never run two release jobs at once (both would try to create the same tag),
-# and never cancel one mid-way: a queued run waits, then sees what the first
-# one made and skips it.
+# and never cancel one mid-way. GitHub keeps at most one run pending per
+# group: a newer pending run replaces (cancels) an older one, and a run
+# waiting for an environment approval holds the group too. That is safe:
+# every run rechecks all of history and skips what already exists.
 concurrency:
   group: release-main
   cancel-in-progress: false
@@ -177,7 +193,11 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
           # The persisted credential is what `git push` uses, so the tag push
-          # is made by RELEASE_TOKEN's owner when that secret is set.
+          # is made by RELEASE_TOKEN's owner when that secret is set. It stays
+          # in .git/config for the whole job, so the next step's code can read
+          # it. That is acceptable: the job runs only on main, and its only
+          # other code is check-release-notes.sh from this same checkout of
+          # main, the same trust level as this workflow file.
           token: ${{ secrets.RELEASE_TOKEN || github.token }}
 
       - name: Create missing tags and releases
@@ -197,6 +217,26 @@ jobs:
           work_dir="$(mktemp -d)"
           trap 'rm -rf "$work_dir"' EXIT
           mkdir "$work_dir/notes"
+
+          # The setup a missing RELEASE_TOKEN calls for, worded once for
+          # every error that names it.
+          TOKEN_SETUP="a RELEASE_TOKEN secret (fine-grained token, this repository only, Contents: Read and write + Workflows: Read and write) stored in the \`release\` environment limited to main, NOT as a repository secret"
+
+          if [ "$USE_RELEASE_TOKEN" != "true" ]; then
+            echo "::notice::running without RELEASE_TOKEN (using GITHUB_TOKEN as github-actions[bot]); tags on commits whose .github/workflows differs from main cannot be pushed"
+          fi
+
+          # Best effort: warn if the `release` environment has no branch
+          # restriction, since then any branch's workflow could read its
+          # secret. A token that may not read the environment skips the check
+          # with a notice. This never fails the run.
+          if gh api "repos/$REPO/environments/release" > "$work_dir/env.json" 2> "$work_dir/env_err"; then
+            if jq -e '.deployment_branch_policy == null' "$work_dir/env.json" >/dev/null; then
+              echo "::warning::the \`release\` environment has no deployment branch restriction, so a workflow on any branch can read its RELEASE_TOKEN; limit it to main (Settings -> Environments -> release)"
+            fi
+          else
+            echo "::notice::skipped the \`release\` environment branch-restriction check: the API read failed ($(head -c 200 "$work_dir/env_err" | tr -d '\r\n%'))"
+          fi
 
           # "version" from plugin.json at a commit; empty if absent.
           version_at() {
@@ -303,18 +343,25 @@ jobs:
           }
 
           # Push tag $1. git's stderr goes to a file (no pipe) so a refusal can
-          # be explained: the built-in token may never push a tag whose commit
-          # carries workflow files that differ from main's. That case, worded
+          # be explained: a tag whose commit carries workflow files that
+          # differ from main's needs Workflows write. That refusal, worded
           # "without `workflows` permission" for the GitHub App token and
           # "without `workflow` scope" for a classic PAT, gets an error that
-          # names the fix. Any other failure stops the run too.
+          # names the fix, which depends on whether RELEASE_TOKEN is set. The
+          # pre-pass below already stops a run without RELEASE_TOKEN before
+          # such a push, so this is the backstop. Any other failure stops the
+          # run too.
           push_tag() {
             local rc=0
             git push origin "refs/tags/$1" 2> "$work_dir/push_err" || rc=$?
             cat "$work_dir/push_err" >&2
             [ "$rc" -eq 0 ] && return 0
             if grep -q -E 'without .?workflows?.? (permission|scope)' "$work_dir/push_err"; then
-              echo "::error::pushing tag $1 needs a RELEASE_TOKEN secret with Workflows: Read and write (and Contents: Read and write): the tagged commit's .github/workflows differs from main, and the built-in GITHUB_TOKEN may not push workflow files. See \"THE TOKEN\" at the top of release.yml."
+              if [ "$USE_RELEASE_TOKEN" = "true" ]; then
+                echo "::error::pushing tag $1 was refused: RELEASE_TOKEN is set but lacks Workflows: Read and write (fine-grained token; a classic token needs the \`workflow\` scope), or its owner lacks that access. The tagged commit's .github/workflows differs from main. Give the token that permission. See \"THE TOKEN\" at the top of release.yml."
+              else
+                echo "::error::pushing tag $1 needs ${TOKEN_SETUP}: the tagged commit's .github/workflows differs from main, and the built-in GITHUB_TOKEN may not push it. See \"THE TOKEN\" at the top of release.yml."
+              fi
             else
               echo "::error::git push of tag $1 failed (exit $rc)"
             fi
@@ -392,8 +439,15 @@ jobs:
           #     version (a tag is never moved; a wrong one is fixed by a
           #     person);
           #   - every version that still needs a tag or a release must have a
-          #     well-formed notes file.
+          #     well-formed notes file;
+          #   - without RELEASE_TOKEN, no tag still to be pushed may sit on a
+          #     commit whose .github/workflows differs from this run's commit
+          #     (GitHub refuses that push to GITHUB_TOKEN). These are collected
+          #     and reported together after the loop, so notes errors still
+          #     surface first. Tags that already exist push nothing and are
+          #     never blocked.
           need_tag=false
+          : > "$work_dir/drifted"
           while read -r sha version <&3; do
             tag="v$version"
             if tag_exists "$tag"; then
@@ -405,9 +459,18 @@ jobs:
               has_release "$tag" && continue
             else
               need_tag=true
+              if [ "$USE_RELEASE_TOKEN" != "true" ] &&
+                ! git diff --quiet "$sha" HEAD -- .github/workflows; then
+                echo "$tag" >> "$work_dir/drifted"
+              fi
             fi
             load_notes "$sha" "$version"
           done 3< "$work_dir/bumps"
+
+          if [ -s "$work_dir/drifted" ]; then
+            echo "::error::cannot push $(paste -sd' ' "$work_dir/drifted") without ${TOKEN_SETUP}: each tagged commit's .github/workflows differs from main, and GitHub refuses that push to the built-in GITHUB_TOKEN. Nothing was created. Add the secret, then rerun this workflow on main. See \"THE TOKEN\" at the top of release.yml."
+            exit 1
+          fi
 
           TAGGER_NAME=""
           TAGGER_EMAIL=""
