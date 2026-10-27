@@ -92,7 +92,8 @@
 #   run without RELEASE_TOKEN says so with a ::notice::, and each run reads
 #   the `release` environment and warns if it has no branch restriction (a
 #   best-effort check: if the token may not read the environment, a
-#   ::notice:: says it was skipped; it never fails the run). Every run also
+#   ::notice:: says it was skipped and asks for a check by hand; it never
+#   fails the run). Every run also
 #   records a deployment to `release` (harmless; it is how environments are
 #   tracked).
 #
@@ -235,7 +236,7 @@ jobs:
               echo "::warning::the \`release\` environment has no deployment branch restriction, so a workflow on any branch can read its RELEASE_TOKEN; limit it to main (Settings -> Environments -> release)"
             fi
           else
-            echo "::notice::skipped the \`release\` environment branch-restriction check: the API read failed ($(head -c 200 "$work_dir/env_err" | tr -d '\r\n%'))"
+            echo "::notice::skipped the \`release\` environment branch-restriction check: the API read failed ($(head -c 200 "$work_dir/env_err" | tr -d '\r\n%')); check by hand that Settings -> Environments -> release limits deployment branches to main only"
           fi
 
           # "version" from plugin.json at a commit; empty if absent.
