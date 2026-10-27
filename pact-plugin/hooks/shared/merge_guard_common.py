@@ -2421,6 +2421,18 @@ def _walk_assignments(words: list[str], found: dict[str, str], depth: int) -> li
             if word == "--":
                 j += 1
                 break
+            if re.match(r"^-[i0v][^-]", word):
+                # A short-option cluster (`-iC dir`, `-iC/tmp/b`, `-vi`) reads as its
+                # options one by one; a value-taking option takes the rest of the word.
+                split_words, k = [], 1
+                while k < len(word):
+                    if word[k] in "CuS":
+                        split_words.append("-" + word[k:])
+                        break
+                    split_words.append("-" + word[k])
+                    k += 1
+                words = words[:j] + split_words + words[j + 1:]
+                continue
             if word in ("-i", "--ignore-environment"):
                 chdir = found.get(ENV_CHDIR)
                 found.clear()
