@@ -112,6 +112,7 @@ try:
         # (op, target, flags), and the token binds the command's normalized text.
         interpreter_command_context,
         normalize_command_text,
+        exact_text_matches,
         # The command the classifier judges after rewriting this one (an eval of
         # readable text, a file written then run, a literal variable, a script
         # given a whole command); the mint reads that command, binding its text.
@@ -1633,7 +1634,6 @@ def _retire_exact_text_token(
     cannot read such a command, so Layer 1 below never sees it. Any doubt keeps the
     token; the TTL and MAX_USES bound still apply. Never raises."""
     try:
-        text = normalize_command_text(command)
         current_session = get_session_id()
         for path in glob.glob(str((token_dir or TOKEN_DIR) / f"{TOKEN_PREFIX}*")):
             if path.endswith(".consumed") or USE_MARKER_SUFFIX in os.path.basename(path):
@@ -1644,7 +1644,12 @@ def _retire_exact_text_token(
             except (OSError, json.JSONDecodeError):
                 continue
             ctx = token_data.get("context") if isinstance(token_data, dict) else None
-            if not isinstance(ctx, dict) or ctx.get("command_text") != text:
+            if not isinstance(ctx, dict):
+                continue
+            approved = ctx.get("command_text")
+            if not isinstance(approved, str) or not exact_text_matches(
+                approved, command, frame_cwd if isinstance(frame_cwd, str) else None
+            ):
                 continue
             if not _token_in_session(token_data, current_session):
                 continue

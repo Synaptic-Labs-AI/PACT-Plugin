@@ -9033,6 +9033,52 @@ def normalize_command_text(command: str) -> str:
     return " ".join(_normalize_line_continuations(command).split())
 
 
+# A leading `cd <dir> &&` or `cd <dir>;` step: the dir single-quoted, double-quoted
+# without expansions, or a bare word with no shell metacharacter.
+_LEADING_CD_RE = re.compile(
+    r"""cd[ \t]+(?P<dir>'[^']*'|"[^"$`\\]*"|[^\s;&|$`'"\\()<>*?\[]+)[ \t]*(?:&&|;)[ \t]*"""
+)
+
+
+def _cd_dir_resolves_to(word: str, cwd: str) -> bool:
+    """Whether `cd <word>` from `cwd` lands in `cwd`. The word is unquoted and
+    nothing else is expanded: it must be absolute, `~` or `~/...` (the home
+    directory, unquoted), or start with `.` (relative to cwd). A bare relative name is
+    looked up through CDPATH, and `-` names the previous directory, so neither
+    counts."""
+    if word[:1] in ("'", '"'):
+        word = word[1:-1]
+    elif word == "~" or word.startswith("~/"):
+        word = os.path.expanduser(word)
+    if not word or "$" in word or word.startswith("-"):
+        return False
+    if not (word.startswith("/") or word == "." or word == ".." or word.startswith(("./", "../"))):
+        return False
+    target = word if word.startswith("/") else os.path.join(cwd, word)
+    return os.path.realpath(target) == os.path.realpath(cwd)
+
+
+def exact_text_matches(command_text: str, command: str, cwd: str | None) -> bool:
+    """Whether an exact-command approval covers `command`. The approved text
+    must equal the command's, or reduce to it by dropping leading `cd <dir> &&`
+    or `cd <dir>;` steps whose dir is the directory the command runs in. The
+    harness drops such a step before a hook sees the command, and from that
+    directory the step changes nothing, so the command runs what was approved."""
+    text = normalize_command_text(command)
+    if text == command_text:
+        return True
+    if not isinstance(cwd, str) or not cwd:
+        return False
+    rest = command_text
+    while True:
+        m = _LEADING_CD_RE.match(rest)
+        if m is None or not _cd_dir_resolves_to(m.group("dir"), cwd):
+            return False
+        rest = rest[m.end():]
+        if rest == text:
+            return True
+
+
 def interpreter_command_context(command: str) -> dict | None:
     """The extract_command_context of the ONE guarded command the interpreter programs
     in `command` pass to an exec primitive, read the way is_dangerous_command reads them
@@ -11577,7 +11623,7 @@ def _token_matches_command(token: dict, command: str) -> bool:
     # nothing else: no other target, flag or command can match it.
     if "command_text" in context:
         command_text = context["command_text"]
-        return isinstance(command_text, str) and normalize_command_text(command) == command_text
+        return isinstance(command_text, str) and exact_text_matches(command_text, command, _COMMAND_DIRECTORY)
 
     # A token for an op on the current branch (`gh pr merge --squash`) covers that
     # branch only: a command that first checks out another branch or changes
