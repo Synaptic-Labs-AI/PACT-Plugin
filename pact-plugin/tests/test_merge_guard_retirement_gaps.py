@@ -323,6 +323,14 @@ class TestAFailedCallRetiresUnlessItsOpFailed:
          "Exit code 1\nfatal: The current branch main has no upstream branch.", "MERGED"),
         ("bash -c 'git push -q --" + "force origin feat/x'; ./other.sh", "Exit code 1\nfatal: other failed", "MERGED"),
         ("bash -c 'git push -q --" + "force origin feat/x' && ./other.sh", "Exit code 1\nfatal: other failed", "MERGED"),
+        ("git push -q --" + "force origin feat/x && git push -q --tags",
+         "Exit code 1\nTo github.com:o/r.git\n ! [rejected]        v1 -> v1 (already exists)\n"
+         "error: failed to push some refs to 'github.com:o/r.git'", "MERGED"),
+        ("git push -q --" + "force origin feat/x && git push -q origin other",
+         "Exit code 1\nTo github.com:o/r.git\n ! [rejected]        other -> other (fetch first)\n"
+         "error: failed to push some refs to 'github.com:o/r.git'", "MERGED"),
+        ("git push -q --" + "force origin feat/x; ./notify.sh",
+         "Exit code 1\nerror: failed to push some refs to 'github.com:o/r.git'\nnotify: failed", "MERGED"),
         ("git push -q --" + "force && ./notify.sh", "Exit code 128\nfatal: 'origin' does not appear to be a git repository",
          "MERGED"),
     ], ids=["force-push-tail", "force-push-subshell", "implicit-force-push", "push-to-main", "quiet", "quiet-long",
@@ -341,7 +349,8 @@ class TestAFailedCallRetiresUnlessItsOpFailed:
             "quiet-push-then-pull-auth-failed", "url-push-then-pull-of-another-url-unreachable",
             "push-then-tool-unreachable", "earlier-leg-unreachable", "quiet-push-then-script-unreadable",
             "quiet-push-then-subshell-git-unreachable", "quiet-push-then-shell-c-no-upstream",
-            "shell-c-push-then-another-leg", "shell-c-push-and-then-another-leg", "remote-less-push-then-tool-bad-remote"])
+            "shell-c-push-then-another-leg", "shell-c-push-and-then-another-leg", "push-then-tags-rejected",
+            "push-then-other-branch-rejected", "unnamed-failed-to-push-beside-a-step", "remote-less-push-then-tool-bad-remote"])
     def test_an_op_whose_failure_is_not_shown_retires_it(self, rig, cmd, error, state):
         _mint(rig, cmd)
         _post_failure(rig, cmd, error, state=state)
@@ -390,10 +399,9 @@ class TestAFailedCallRetiresUnlessItsOpFailed:
         "git push -q --" + "force origin feat/x; ./notify.sh",
     ], ids=["alone", "beside-failing-step"])
     @pytest.mark.parametrize("line", [
-        "error: failed to push some refs to 'github.com:o/r.git'",
         "fatal: 'origin' does not appear to be a git repository",
         "error: src refspec feat/x does not match any",
-    ], ids=["failed-to-push", "own-remote-missing", "src-refspec"])
+    ], ids=["own-remote-missing", "src-refspec"])
     def test_a_push_failure_line_keeps_it_beside_another_step(self, rig, cmd, line):
         _mint(rig, cmd)
         _post_failure(rig, cmd, "Exit code 1\n" + line + "\nnotify: failed")
@@ -423,12 +431,46 @@ class TestAFailedCallRetiresUnlessItsOpFailed:
          "Exit code 1\nfatal: unable to access 'https://github.com/o/r.git/': Could not resolve host"),
         ("git push -q --" + "force https://github.com/o/r.git feat/x; git pull",
          "Exit code 1\nfatal: Authentication failed for 'https://github.com/o/r.git/'"),
+        ("git push -q --" + "force origin feat/x", "Exit code 1\nerror: failed to push some refs to 'github.com:o/r.git'"),
+        ("git push -q --" + "force origin feat/x; ./notify.sh",
+         "Exit code 1\n ! [rejected]        feat/x -> feat/x (fetch first)\n"
+         "error: failed to push some refs to 'github.com:o/r.git'\nnotify: failed"),
     ], ids=["branch-missing-beside", "ref-delete-failed-beside", "generic-fatal-only-leg", "generic-error-only-leg-in-shell-c",
-            "url-push-unreachable-before-git", "url-push-auth-failed-before-git"])
+            "url-push-unreachable-before-git", "url-push-auth-failed-before-git", "failed-to-push-only-leg",
+            "own-ref-rejected-beside-a-step"])
     def test_the_ops_own_failure_keeps_it(self, rig, cmd, error):
         _mint(rig, cmd)
         _post_failure(rig, cmd, error)
         assert not _retired(rig)
+
+    @pytest.mark.parametrize("cmd,error,retires", [
+        ("bash -c 'git push -q --" + "force origin feat/x' && ./notify.sh", _NOTIFY, True),
+        ("eval 'git push -q --" + "force origin feat/x' && ./notify.sh", _NOTIFY, True),
+        ("trap 'git push -q --" + "force origin feat/x' EXIT; ./notify.sh", _NOTIFY, True),
+        ("bash -c 'git push -q --" + "force origin feat/x && ./deploy.sh'",
+         "Exit code 1\nerror: deploy target unreachable", True),
+        ("bash -c 'git push -q --" + "force origin feat/x' && ./notify.sh",
+         "Exit code 1\n ! [rejected]        feat/x -> feat/x (fetch first)\nnotify: failed", False),
+    ], ids=["bash-c", "eval", "trap", "bash-c-compound", "bash-c-own-rejection-kept"])
+    def test_an_exact_command_token_follows_the_same_decision(self, rig, cmd, error, retires):
+        from shared.merge_guard_common import normalize_command_text
+
+        assert write_token({"operation_type": "force-push", "bound_flags": ["remote=origin"], "target_ref": "feat/x",
+                            "command_text": normalize_command_text(cmd)}, token_dir=rig["config"])
+        _post_failure(rig, cmd, error)
+        assert _retired(rig) is retires
+
+    def test_an_exact_command_merge_in_another_repo_retires_on_the_decision(self, rig):
+        """No success signal can be read again for a merge whose repo the hook cannot
+        read, so the failure path's own decision retires its exact-command token."""
+        from shared.merge_guard_common import normalize_command_text
+
+        cmd = "bash -c '" + _MERGE + " 5 --squash --repo o/r' && ./notify.sh"
+        ctx = extract_command_context("bash -c '" + _MERGE + " 5 --squash --repo o/r'")
+        assert ctx.get("operation_type") == "merge", ctx
+        assert write_token({**ctx, "command_text": normalize_command_text(cmd)}, token_dir=rig["config"])
+        _post_failure(rig, cmd, _NOTIFY, state="")
+        assert _retired(rig)
 
     def test_a_retired_token_no_longer_runs_the_command_and_a_new_approval_does(self, rig):
         cmd = "git push -q --" + "force origin feat/x && ./notify.sh"

@@ -1981,11 +1981,12 @@ def _op_is_only_leg(command: str) -> bool:
 def _failure_output_shows_op_failed(command: str, op_type: str, output: str) -> bool:
     """Whether a failed call's output shows its guarded op's own failure: for a
     push, git's refused line (`!`) for the op's ref (any ref for a push that names
-    none), a failure line only a push prints, or a bad-remote, network, access or
-    upstream line quoting the remote the push names; for a branch delete, an
-    `error:` line naming the branch; for a merge or close, gh's failure line. Any
-    other `fatal:` or `error:` line, and an unquoted remote line, counts only when
-    the op is the command's only leg, since another leg could have printed it.
+    none), a failure line only a push prints that names the op's ref, or a
+    bad-remote, network, access or upstream line quoting the remote the push names;
+    for a branch delete, an `error:` line naming the branch; for a merge or close,
+    gh's failure line. Any other `fatal:` or `error:` line, and an unquoted remote
+    line, counts only when the op is the command's only leg, since another leg
+    could have printed it.
     Colour codes are read past; splitlines() also ends a line at a carriage return."""
     lines = _ANSI_RE.sub("", output).splitlines()
     if op_type in ("merge", "close"):
@@ -2011,7 +2012,7 @@ def _failure_output_shows_op_failed(command: str, op_type: str, output: str) -> 
 
     return any(
         (only_leg and (_GIT_FAILURE_LINE_RE.match(line) or _GIT_REMOTE_ACCESS_RE.match(line)))
-        or _GIT_PUSH_FAILURE_RE.match(line)
+        or (_GIT_PUSH_FAILURE_RE.match(line) and isinstance(ref, str) and _names(line, ref))
         or quotes_own_remote(line)
         or (line.lstrip().startswith("!") and (not isinstance(ref, str) or _names(line, ref)))
         for line in lines
@@ -2052,14 +2053,18 @@ def _retire_after_failed_call(input_data: dict) -> None:
             or input_data.get("is_interrupt") is True
         ):
             return
-        # An eval of an assigned variable runs its value, as the success path reads it.
-        runs = _rewrite_variable_evals(_rewrite_git_aliases(command))
+        # Read as the mint reads it: an eval of an assigned variable runs its value, and
+        # a trap's handler, a printed string or a set of positionals run what they hold.
+        runs = _rewrite_readable_evals(command)
         op_type = detect_command_operation_type(runs)
         if (
             op_type
             and not _op_did_not_run(runs)
             and not _failed_call_keeps_token(runs, op_type, output, input_data.get("cwd"))
         ):
+            # A token bound to the command's text (a string run by `bash -c`, eval or a
+            # trap) retires on the same decision, as on the success path.
+            _retire_exact_text_token(command, input_data.get("cwd"))
             _retire_token_for_command(runs, op_type)
     except Exception:  # noqa: BLE001 - any doubt keeps the token
         return
