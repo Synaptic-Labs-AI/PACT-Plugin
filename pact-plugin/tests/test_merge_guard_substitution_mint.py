@@ -1592,6 +1592,9 @@ PUSH_ROUTING_CHANGES = {
     "env-branch-u": ("env FOO=1 git branch -u upstream/x", "env FOO=1 git branch -u fork/x"),
     "sudo-config-push-remote": ("sudo -u me git config branch.feat/x.pushRemote upstream",
                                 "sudo -u me git config branch.feat/x.pushRemote fork"),
+    "push-set-upstream-short": ("git push -u upstream feat/x", "git push -u fork feat/x"),
+    "push-set-upstream-long": ("git push --set-upstream upstream feat/x", "git push --set-upstream fork feat/x"),
+    "push-set-upstream-bundled": ("git push -qu upstream feat/x", "git push -qu fork feat/x"),
     "config-push-default": ("git config push.default matching", "git config push.default current"),
     "config-set-push-default-case": ("git config set Push.Default matching", "git config set Push.Default current"),
     "config-branch-merge": ("git config branch.feat/x.merge refs/heads/main", "git config branch.feat/x.merge refs/heads/dev"),
@@ -1645,6 +1648,9 @@ class TestAnUpstreamOrPushRoutingChangeMovesAPushNamingNoRef:
         (_NUMBERED, "git config branch.feat/x.remote upstream && " + _NUMBERED),
         (_FORCE, "timeout 5 git branch -vv && " + _FORCE),
         (MERGE + "--squash", "env FOO=1 git checkout -- file.txt && " + MERGE + "--squash"),
+        (_FORCE, "git push origin feat/x && " + _FORCE),
+        (_PUSH_X, "git push -u upstream feat/x && " + _PUSH_X),
+        (MERGE + "--squash", "git push -u upstream feat/x && " + MERGE + "--squash"),
         (_FORCE, "git config --get push.default && " + _FORCE),
         (_FORCE, "git config push.followTags true && " + _FORCE),
         (_PUSH_X, "git config push.default matching && " + _PUSH_X),
@@ -1652,7 +1658,8 @@ class TestAnUpstreamOrPushRoutingChangeMovesAPushNamingNoRef:
     ], ids=["config-get", "config-get-subcommand", "config-read-key", "config-other-key", "branch-list", "branch-track",
             "named-ref-push-branch-u", "named-ref-push-config", "gh-merge-branch-u", "gh-merge-config", "numbered-merge",
             "config-get-push-default", "config-other-push-key", "named-ref-push-default", "gh-merge-branch-merge",
-            "timeout-branch-list", "env-checkout-paths"])
+            "timeout-branch-list", "env-checkout-paths",
+            "push-without-upstream", "named-ref-push-set-upstream", "gh-merge-push-set-upstream"])
     def test_a_plain_approval_still_covers_it(self, plain, command):
         assert _runs(_mint_styled(plain, APPROVAL_STYLES["inline"]), command)
 
