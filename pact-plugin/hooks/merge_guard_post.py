@@ -131,6 +131,8 @@ try:
         # not via two parallel reimplementations that can rot apart.
         _single_destructive_leg,
         _single_detectable_leg,
+        _split_into_legs,
+        _assignments_reaching_command,
         # An op on the current branch run after a checkout or cd binds its text.
         target_changes_before_guarded_leg,
         REPO_RELATIVE_OPS,
@@ -1946,28 +1948,46 @@ def _names(line: str, name: str) -> bool:
     return re.search(r"(?<![\w/.-])(?:refs/heads/)?" + re.escape(name) + r"(?![\w/.-])", line) is not None
 
 
+def _git_runs_after_guarded_leg(command: str) -> bool:
+    """Whether a leg after the command's guarded leg runs git, so a `fatal:` or
+    `error:` line in the output may be that leg's and not the op's. A command whose
+    guarded leg cannot be placed counts as one."""
+    guarded = _single_destructive_leg(command) or _single_detectable_leg(command)
+    legs = [leg.strip() for leg in _split_into_legs(command)]
+    if guarded is None or guarded not in legs:
+        return True  # unplaceable: the safe answer retires (and index() below can't raise)
+    for leg in legs[legs.index(guarded) + 1:]:
+        _, words = _assignments_reaching_command(leg)
+        if words and os.path.basename(words[0]) == "git":
+            return True
+    return False
+
+
 def _failure_output_shows_op_failed(command: str, op_type: str, output: str) -> bool:
     """Whether a failed call's output shows its guarded op's own failure: for a
     push, git's refused line (`!`) for the op's ref (any ref for a push that names
     none) or a `fatal:`/`error:` line; for a branch delete, a `fatal:` line or an
-    `error:` line naming the branch; for a merge or close, gh's failure line. Colour
-    codes are read past; splitlines() also ends a line at a carriage return."""
+    `error:` line naming the branch; for a merge or close, gh's failure line. A
+    `fatal:` or `error:` line not naming the op's target counts only when no later
+    leg runs git, which could have printed it. Colour codes are read past;
+    splitlines() also ends a line at a carriage return."""
     lines = _ANSI_RE.sub("", output).splitlines()
     ctx = extract_command_context(
         _single_destructive_leg(command) or _single_detectable_leg(command) or command
     )
     if op_type in ("merge", "close"):
         return any(_GH_FAILURE_LINE_RE.search(line) for line in lines)
+    later_git = _git_runs_after_guarded_leg(command)
     if op_type == "branch-delete":
         branch = ctx.get("branch")
         return any(
-            line.startswith("fatal:")
+            (line.startswith("fatal:") and not later_git)
             or (line.startswith("error:") and (not isinstance(branch, str) or _names(line, branch)))
             for line in lines
         )
     ref = ctx.get("target_ref")
     return any(
-        _GIT_FAILURE_LINE_RE.match(line)
+        (_GIT_FAILURE_LINE_RE.match(line) and not later_git)
         or (line.lstrip().startswith("!") and (not isinstance(ref, str) or _names(line, ref)))
         for line in lines
     )
@@ -2008,7 +2028,8 @@ def _retire_after_failed_call(input_data: dict) -> None:
             or input_data.get("is_interrupt") is True
         ):
             return
-        runs = _rewrite_git_aliases(command)
+        # An eval of an assigned variable runs its value, as the success path reads it.
+        runs = _rewrite_variable_evals(_rewrite_git_aliases(command))
         op_type = detect_command_operation_type(runs)
         if (
             op_type

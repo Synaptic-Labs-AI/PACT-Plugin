@@ -274,12 +274,20 @@ class TestAFailedCallRetiresUnlessItsOpFailed:
         ("git push --" + "force origin feat/x && false", "Exit code 1\n ! [rejected] feat/y -> feat/y (stale info)", "MERGED"),
         ("git branch -q -" + "D feat/x && git checkout other",
          "Exit code 1\nerror: pathspec 'other' did not match any file(s) known to git", "MERGED"),
+        ("git push --" + "force origin feat/x && git pull", "Exit code 1\nfatal: couldn't find remote ref main", "MERGED"),
+        ("git push -q --" + "force origin feat/x && git pull", "Exit code 1\nfatal: couldn't find remote ref main", "MERGED"),
+        ("(git push -q --" + "force origin feat/x; env FOO=1 git pull)", "Exit code 1\nerror: cannot pull with rebase", "MERGED"),
+        ("git branch -q -" + "D feat/x && git fetch", "Exit code 128\nfatal: not a git repository", "MERGED"),
+        ("c='git push -q --" + "force origin feat/x'; eval " + '"$c"' + " && git pull",
+         "Exit code 1\nfatal: couldn't find remote ref main", "MERGED"),
     ], ids=["force-push-tail", "force-push-subshell", "implicit-force-push", "push-to-main", "quiet", "quiet-long",
             "porcelain", "implicit-quiet", "merge-non-tty", "merge-json", "close-non-tty", "branch-delete-quiet",
             "ref-delete-quiet", "new-branch", "crlf", "colour", "other-ref-rejected", "success-then-later-fatal",
             "truncated", "merge-line", "merge-colour", "implicit-merge-line", "implicit-merge-silent", "close-line",
             "ref-delete-line", "mass-delete-line", "branch-delete-line", "branch-delete-then-other-error",
-            "other-ref-rejected-only", "branch-delete-quiet-then-other-error"])
+            "other-ref-rejected-only", "branch-delete-quiet-then-other-error", "push-then-git-fatal",
+            "quiet-push-then-git-fatal", "quiet-push-then-wrapped-git-error", "quiet-branch-delete-then-git-fatal",
+            "evald-quiet-push-then-git-fatal"])
     def test_an_op_whose_failure_is_not_shown_retires_it(self, rig, cmd, error, state):
         _mint(rig, cmd)
         _post_failure(rig, cmd, error, state=state)
@@ -292,8 +300,9 @@ class TestAFailedCallRetiresUnlessItsOpFailed:
          False, "MERGED"),
         ("git push --" + "force origin feat/x && ./notify.sh", "Exit code 128\nfatal: unable to access 'https://x/'",
          False, "MERGED"),
-        ("git push --" + "force origin feat/x && git pull", "Exit code 1\nfatal: couldn't find remote ref main",
+        ("git push -q --" + "force origin feat/x && ./notify.sh", "Exit code 128\nfatal: unable to access 'https://x/'",
          False, "MERGED"),
+        ("git branch -q -" + "D feat/x && ./notify.sh", "Exit code 128\nfatal: not a git repository", False, "MERGED"),
         ("git push --" + "force origin feat/x && false",
          "Exit code 1\r\n\x1b[31m ! [rejected]        feat/x -> feat/x (stale info)\x1b[m\r\n", False, "MERGED"),
         ("git push --" + "force && false", "Exit code 1\n ! [rejected] main -> main (non-fast-forward)", False, "MERGED"),
@@ -315,7 +324,7 @@ class TestAFailedCallRetiresUnlessItsOpFailed:
          "Exit code 1\nerror: unable to delete 'stale': remote ref does not exist", False, "MERGED"),
         ("git push origin --delete stale && false",
          "Exit code 1\nTo github.com:o/r.git\n ! [remote rejected] stale (permission denied)", False, "MERGED"),
-    ], ids=["rejected", "porcelain-rejected", "no-network", "later-fatal-no-success", "rejected-crlf-colour",
+    ], ids=["rejected", "porcelain-rejected", "no-network", "quiet-push-fatal-alone", "quiet-branch-delete-fatal-alone", "rejected-crlf-colour",
             "implicit-rejected", "truncated-rejected", "interrupted", "dry-run", "merge-not-mergeable", "merge-graphql",
             "merge-http", "merge-silent-open", "close-silent-open", "branch-missing", "ref-delete-failed",
             "ref-delete-remote-rejected"])
