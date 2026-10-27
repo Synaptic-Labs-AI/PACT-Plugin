@@ -91,10 +91,11 @@
 #   `secrets.RELEASE_TOKEN || github.token` falls back to GITHUB_TOKEN, and
 #   a tag on a drifted commit stops the run with the ::error:: above. Each
 #   run without RELEASE_TOKEN says so with a ::notice::, and each run reads
-#   the `release` environment with the built-in token (actions: read; the
-#   RELEASE_TOKEN permissions above are all it needs) and warns unless the
-#   environment allows exactly the branch `main`: no restriction, "protected
-#   branches", or any other or extra pattern all warn. This is best effort:
+#   the `release` environment with the built-in token, through its
+#   actions: read permission (RELEASE_TOKEN needs nothing beyond the two
+#   permissions above), and warns unless the environment allows exactly the
+#   branch `main`: no restriction, "protected branches", an empty list, or
+#   any other or extra pattern all warn. This is best effort:
 #   if a read fails, a ::notice:: says the check was skipped and asks for a
 #   check by hand; it never fails the run. Every run also records a
 #   deployment to `release` (harmless; it is how environments are tracked).
@@ -238,8 +239,10 @@ jobs:
           # the branch `main`, since any other ref it allows could run a
           # workflow that reads its secret. The reads use the built-in token
           # (actions: read) on purpose, so RELEASE_TOKEN needs no extra
-          # permission. Any failed read or unexpected reply skips the check
-          # with a notice. This never fails the run.
+          # permission. A failed read or an unparsable reply skips the check
+          # with a notice; a policy shape it does not recognise, or a custom
+          # list that is empty or not exactly `main`, warns. This never fails
+          # the run.
           env_check_skipped() {
             echo "::notice::skipped the \`release\` environment branch-restriction check: $1 ($(head -c 200 "$work_dir/env_err" | tr -d '\r\n%')); check by hand that Settings -> Environments -> release limits deployment branches to main only"
           }
@@ -274,7 +277,7 @@ jobs:
                   return 0
                 fi
                 [ "$policy" = "main-only" ] ||
-                  reason="has branch or tag patterns other than exactly the branch main"
+                  reason="is not limited to exactly the branch main"
                 ;;
               *) reason="has a deployment branch policy this check does not recognise" ;;
             esac
