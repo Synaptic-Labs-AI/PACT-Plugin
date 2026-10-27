@@ -112,6 +112,7 @@ import subprocess
 import sys
 import threading
 import time
+from typing import Callable, cast
 
 import pytest
 
@@ -1088,8 +1089,9 @@ def test_node_from_rest_maps_every_bucket_through_ref_outcome():
             assert "merged" in node, f"PR #{number} node lost its `merged` key"
         assert backlog._ref_outcome(node) == expected[number], number
 
-    assert backlog._ref_outcome(backlog._node_from_rest(
-        {"state": "closed", "state_reason": None})) == {"state": "closed"}
+    closed = backlog._node_from_rest({"state": "closed", "state_reason": None})
+    assert closed is not None
+    assert backlog._ref_outcome(closed) == {"state": "closed"}
     for bad in (_REST_NOT_FOUND, {"message": "not enabled for this session"},
                 [1], None, {"state": 5}, {"state": ""}):
         assert backlog._node_from_rest(bad) is None, bad
@@ -1261,7 +1263,9 @@ def test_no_record_reads_done_unless_it_says_completed_or_merged():
                 body = {"state": state, "state_reason": reason}
                 if pull is not None:
                     body["pull_request"] = pull
-                verdict = backlog._ref_outcome(backlog._node_from_rest(body))
+                node = backlog._node_from_rest(body)
+                assert node is not None, body
+                verdict = backlog._ref_outcome(node)
                 checked += 1
                 if verdict["state"] == "done":
                     assert _evidence_of_done(body, rest=True), body
@@ -1682,7 +1686,8 @@ def test_rest_resolution_called_directly_keeps_its_contract(monkeypatch):
     assert backlog._resolve_refs_rest({}, deadline=deadline, primary=primary) == {}
     assert calls == []
     with pytest.raises(TypeError):
-        backlog._resolve_refs_rest({}, primary=primary)
+        # Cast so the type checker allows the missing keyword this arm is about.
+        cast(Callable[..., object], backlog._resolve_refs_rest)({}, primary=primary)
 
     outcome = backlog._resolve_refs_rest(
         {"#1666": ("owner", "repo", 1666)}, deadline=deadline, primary=primary)
