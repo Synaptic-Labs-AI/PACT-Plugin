@@ -132,7 +132,6 @@ try:
         _single_destructive_leg,
         _single_detectable_leg,
         _split_into_legs,
-        _assignments_reaching_command,
         # The mint's reading of a printed or eval'd string, for the dry-run check.
         _rewrite_readable_evals,
         # An op on the current branch run after a checkout or cd binds its text.
@@ -1912,17 +1911,17 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _GIT_FAILURE_LINE_RE = re.compile(r"^(?:fatal|error):")
 # A push's own failure lines, which name no ref.
 _GIT_PUSH_FAILURE_RE = re.compile(
-    r"^(?:error: failed to push some refs|error: unable to delete '|error: src refspec .* does not match"
-    r"|fatal: The current branch .* has no upstream)"
+    r"^(?:error: failed to push some refs|error: unable to delete '|error: src refspec .* does not match)"
 )
 # A bad remote's line, which any git command reaching that remote prints.
 _GIT_NO_REMOTE_RE = re.compile(r"^fatal: '(.*)' does not appear to be a git repository")
-# A network or access failure, which any git command reaching a remote prints,
-# with the remote's URL when it names one.
+# A network, access or upstream failure, which other git commands print too, with
+# the remote's URL when it names one.
 _GIT_REMOTE_ACCESS_RE = re.compile(
     r"^(?:fatal: unable to access '([^']*)'|fatal: repository '([^']*)' not found"
     r"|fatal: Authentication failed for '([^']*)'"
-    r"|fatal: Could not read from remote repository|remote: Repository not found)"
+    r"|fatal: Could not read from remote repository|remote: Repository not found"
+    r"|fatal: The current branch .* has no upstream)"
 )
 # gh's failure lines for a PR (`X Pull request #5 is not mergeable: …`, `GraphQL: …`,
 # `HTTP 404: Not Found`, `no pull requests found for branch "x"`).
@@ -1969,42 +1968,32 @@ def _names(line: str, name: str) -> bool:
     return re.search(r"(?<![\w/.-])(?:refs/heads/)?" + re.escape(name) + r"(?![\w/.-])", line) is not None
 
 
-def _op_legs(command: str) -> tuple[bool, bool]:
-    """For the command, or the string a shell's -c runs: whether it is a single
-    leg, so any line in its output is the op's own, and whether a leg after the
-    guarded one runs git. An op that cannot be placed counts as followed by git."""
+def _op_is_only_leg(command: str) -> bool:
+    """Whether the command is a single leg, and the string a shell's -c runs in it
+    is a single leg too, so any line in its output is the op's own. Any other leg,
+    before or after, may print git's lines through a wrapper, subshell or script."""
+    if len(_split_into_legs(command)) != 1:
+        return False
     inner = shell_c_string(command)
-    text = command if inner is None else inner
-    legs = [leg.strip() for leg in _split_into_legs(text)]
-    if len(legs) == 1:
-        return True, False
-    guarded = _single_destructive_leg(text) or _single_detectable_leg(text)
-    if guarded is None or guarded not in legs:
-        return False, True
-    for leg in legs[legs.index(guarded) + 1:]:
-        _, words = _assignments_reaching_command(leg)
-        if words and os.path.basename(words[0]) == "git":
-            return False, True
-    return False, False
+    return inner is None or len(_split_into_legs(inner)) == 1
 
 
 def _failure_output_shows_op_failed(command: str, op_type: str, output: str) -> bool:
     """Whether a failed call's output shows its guarded op's own failure: for a
     push, git's refused line (`!`) for the op's ref (any ref for a push that names
-    none), a failure line only a push prints, a bad-remote line quoting the
-    op's remote (any remote for a push that binds none), or a network or access
-    failure when no later leg runs git or the line quotes the op's remote URL; for
-    a branch delete, an `error:` line naming the branch; for a merge or close, gh's
-    failure line. Any other `fatal:` or `error:` line counts only when the op is
-    the command's only leg, since another leg could have printed it. Colour codes
-    are read past; splitlines() also ends a line at a carriage return."""
+    none), a failure line only a push prints, or a bad-remote, network, access or
+    upstream line quoting the remote the push names; for a branch delete, an
+    `error:` line naming the branch; for a merge or close, gh's failure line. Any
+    other `fatal:` or `error:` line, and an unquoted remote line, counts only when
+    the op is the command's only leg, since another leg could have printed it.
+    Colour codes are read past; splitlines() also ends a line at a carriage return."""
     lines = _ANSI_RE.sub("", output).splitlines()
     if op_type in ("merge", "close"):
         return any(_GH_FAILURE_LINE_RE.search(line) for line in lines)
     ctx = extract_command_context(
         _single_destructive_leg(command) or _single_detectable_leg(command) or command
     )
-    only_leg, later_git = _op_legs(command)
+    only_leg = _op_is_only_leg(command)
     if op_type == "branch-delete":
         branch = ctx.get("branch")
         return any(
@@ -2013,24 +2002,17 @@ def _failure_output_shows_op_failed(command: str, op_type: str, output: str) -> 
             for line in lines
         )
     ref = ctx.get("target_ref")
-    remotes = [str(f)[len("remote="):] for f in ctx.get("bound_flags") or [] if str(f).startswith("remote=")]
+    own = [str(f)[len("remote="):].rstrip("/") for f in ctx.get("bound_flags") or [] if str(f).startswith("remote=")]
 
-    def names_remote(line: str) -> bool:
-        m = _GIT_NO_REMOTE_RE.match(line)
-        return m is not None and (not remotes or m.group(1) in remotes)
-
-    def access_failed(line: str) -> bool:
-        m = _GIT_REMOTE_ACCESS_RE.match(line)
-        if m is None:
-            return False
-        url = next((g for g in m.groups() if g), "").rstrip("/")
-        return not later_git or (bool(url) and url in [r.rstrip("/") for r in remotes])
+    def quotes_own_remote(line: str) -> bool:
+        m = _GIT_NO_REMOTE_RE.match(line) or _GIT_REMOTE_ACCESS_RE.match(line)
+        quoted = next((g for g in m.groups() if g), "") if m else ""
+        return bool(quoted) and quoted.rstrip("/") in own
 
     return any(
-        (_GIT_FAILURE_LINE_RE.match(line) and only_leg)
+        (only_leg and (_GIT_FAILURE_LINE_RE.match(line) or _GIT_REMOTE_ACCESS_RE.match(line)))
         or _GIT_PUSH_FAILURE_RE.match(line)
-        or names_remote(line)
-        or access_failed(line)
+        or quotes_own_remote(line)
         or (line.lstrip().startswith("!") and (not isinstance(ref, str) or _names(line, ref)))
         for line in lines
     )

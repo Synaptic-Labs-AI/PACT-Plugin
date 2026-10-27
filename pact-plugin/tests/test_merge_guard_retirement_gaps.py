@@ -228,9 +228,9 @@ class TestAFailedCallRetiresUnlessItsOpFailed:
     PostToolUseFailure. Its token retires when the op's own success line shows.
     For a merge or close whose PR state reads, that state alone decides. Otherwise
     the token stays only when the op's own failure shows: a line naming its
-    target, a failure line only a push prints, a network or access failure when no
-    later leg runs git or the line quotes the push's URL, or any `fatal:`/`error:`
-    line when the op is the call's only leg. So a quiet, porcelain, non-TTY, coloured or
+    target, a failure line only a push prints, a remote line quoting the remote the
+    push names, or any `fatal:`/`error:` or remote line when the op is the call's
+    only leg. So a quiet, porcelain, non-TTY, coloured or
     truncated success leaves no second op, and another step's failure line never
     keeps a token whose op succeeded."""
 
@@ -312,6 +312,19 @@ class TestAFailedCallRetiresUnlessItsOpFailed:
          "Exit code 128\nfatal: Authentication failed for 'https://github.com/o/r.git/'", "MERGED"),
         ("git push -q --" + "force https://github.com/o/r.git feat/x && git pull",
          "Exit code 1\nfatal: unable to access 'https://github.com/o/other.git/': Could not resolve host", "MERGED"),
+        ("git push --" + "force origin feat/x && ./notify.sh", "Exit code 128\nfatal: unable to access 'https://x/'", "MERGED"),
+        ("git fetch; git push -q --" + "force origin feat/x",
+         "Exit code 1\nfatal: unable to access 'https://github.com/o/r.git/': Could not resolve host", "MERGED"),
+        ("git push -q --" + "force origin feat/x && ./sync.sh", "Exit code 128\nfatal: Could not read from remote repository.",
+         "MERGED"),
+        ("git push -q --" + "force origin feat/x && (git fetch)",
+         "Exit code 128\nfatal: unable to access 'https://github.com/o/r.git/': Could not resolve host", "MERGED"),
+        ("git push -q --" + "force origin feat/x && sh -c 'git pull'",
+         "Exit code 1\nfatal: The current branch main has no upstream branch.", "MERGED"),
+        ("bash -c 'git push -q --" + "force origin feat/x'; ./other.sh", "Exit code 1\nfatal: other failed", "MERGED"),
+        ("bash -c 'git push -q --" + "force origin feat/x' && ./other.sh", "Exit code 1\nfatal: other failed", "MERGED"),
+        ("git push -q --" + "force && ./notify.sh", "Exit code 128\nfatal: 'origin' does not appear to be a git repository",
+         "MERGED"),
     ], ids=["force-push-tail", "force-push-subshell", "implicit-force-push", "push-to-main", "quiet", "quiet-long",
             "porcelain", "implicit-quiet", "merge-non-tty", "merge-json", "close-non-tty", "branch-delete-quiet",
             "ref-delete-quiet", "new-branch", "crlf", "colour", "other-ref-rejected", "success-then-later-fatal",
@@ -325,7 +338,10 @@ class TestAFailedCallRetiresUnlessItsOpFailed:
             "earlier-leg-error-in-shell-c", "merged-then-failed-line", "merged-then-error-line",
             "merged-then-other-http", "closed-then-unable-line", "merged-state-outranks-failure-line",
             "quiet-push-then-pull-unreachable", "quiet-push-then-fetch-unreadable", "quiet-push-then-fetch-repo-missing",
-            "quiet-push-then-pull-auth-failed", "url-push-then-pull-of-another-url-unreachable"])
+            "quiet-push-then-pull-auth-failed", "url-push-then-pull-of-another-url-unreachable",
+            "push-then-tool-unreachable", "earlier-leg-unreachable", "quiet-push-then-script-unreadable",
+            "quiet-push-then-subshell-git-unreachable", "quiet-push-then-shell-c-no-upstream",
+            "shell-c-push-then-another-leg", "shell-c-push-and-then-another-leg", "remote-less-push-then-tool-bad-remote"])
     def test_an_op_whose_failure_is_not_shown_retires_it(self, rig, cmd, error, state):
         _mint(rig, cmd)
         _post_failure(rig, cmd, error, state=state)
@@ -336,10 +352,8 @@ class TestAFailedCallRetiresUnlessItsOpFailed:
         ("git push --porcelain --" + "force origin feat/x && false",
          "Exit code 1\nTo github.com:o/r.git\n!\trefs/heads/feat/x:refs/heads/feat/x\t[rejected] (stale info)\nDone",
          False, "MERGED"),
-        ("git push --" + "force origin feat/x && ./notify.sh", "Exit code 128\nfatal: unable to access 'https://x/'",
-         False, "MERGED"),
-        ("git push -q --" + "force origin feat/x && ./notify.sh", "Exit code 128\nfatal: unable to access 'https://x/'",
-         False, "MERGED"),
+        ("git push --" + "force origin feat/x", "Exit code 128\nfatal: unable to access 'https://x/'", False, "MERGED"),
+        ("git push -q --" + "force origin feat/x", "Exit code 128\nfatal: unable to access 'https://x/'", False, "MERGED"),
         ("git branch -q -" + "D feat/x", "Exit code 128\nfatal: not a git repository", False, "MERGED"),
         ("git push --" + "force origin feat/x && false",
          "Exit code 1\r\n\x1b[31m ! [rejected]        feat/x -> feat/x (stale info)\x1b[m\r\n", False, "MERGED"),
@@ -377,19 +391,30 @@ class TestAFailedCallRetiresUnlessItsOpFailed:
     ], ids=["alone", "beside-failing-step"])
     @pytest.mark.parametrize("line", [
         "error: failed to push some refs to 'github.com:o/r.git'",
-        "fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host: github.com",
-        "fatal: Could not read from remote repository.",
         "fatal: 'origin' does not appear to be a git repository",
         "error: src refspec feat/x does not match any",
-        "fatal: The current branch feat/x has no upstream branch.",
-        "remote: Repository not found.",
-        "fatal: Authentication failed for 'https://github.com/o/r.git/'",
-    ], ids=["failed-to-push", "unable-to-access", "could-not-read", "no-such-remote", "src-refspec", "no-upstream",
-            "repo-not-found", "auth-failed"])
+    ], ids=["failed-to-push", "own-remote-missing", "src-refspec"])
     def test_a_push_failure_line_keeps_it_beside_another_step(self, rig, cmd, line):
         _mint(rig, cmd)
         _post_failure(rig, cmd, "Exit code 1\n" + line + "\nnotify: failed")
         assert not _retired(rig)
+
+    @pytest.mark.parametrize("line", [
+        "fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host: github.com",
+        "fatal: Could not read from remote repository.",
+        "fatal: The current branch feat/x has no upstream branch.",
+        "remote: Repository not found.",
+        "fatal: Authentication failed for 'https://github.com/o/r.git/'",
+    ], ids=["unable-to-access", "could-not-read", "no-upstream", "repo-not-found", "auth-failed"])
+    def test_a_remote_line_keeps_it_only_when_the_push_is_the_only_leg(self, rig, line):
+        alone = "git push -q --" + "force origin feat/x"
+        _mint(rig, alone)
+        _post_failure(rig, alone, "Exit code 1\n" + line)
+        assert not _retired(rig)
+        beside = alone + "; ./notify.sh"
+        _mint(rig, beside)
+        _post_failure(rig, beside, "Exit code 1\n" + line + "\nnotify: failed")
+        assert _retired(rig)
 
     @pytest.mark.parametrize("cmd,error", [
         ("git branch -q -" + "D feat/x; ./notify.sh", "Exit code 1\nerror: branch 'feat/x' not found.\nnotify: failed"),
