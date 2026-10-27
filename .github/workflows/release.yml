@@ -585,7 +585,7 @@ jobs:
               printf '%s\n' \
                 "       git show $d_src:$NOTES_FILE | sed -n '/^## ${d_tag//./\\.}: /{s/^## //p;q;}' > $d_tag.msg" \
                 "       git tag -a $d_tag $d_sha --cleanup=verbatim -F $d_tag.msg"
-              skipped_tags="$skipped_tags $d_tag"
+              skipped_tags="$skipped_tags refs/tags/$d_tag"
             done 4< "$work_dir/drifted"
             printf '%s\n' \
               "       git push origin$skipped_tags" \
