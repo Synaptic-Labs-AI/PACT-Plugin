@@ -253,7 +253,7 @@ class TestAnApprovalWithNoSuccessSignalRunsOnce:
     """A token whose op has no stdout success line and no PR number to read back
     retires on the successful run itself, through the real hooks: the approved
     command runs once, and a second run is refused. A failed run (the platform
-    sends PostToolUseFailure, which this hook does not receive) keeps the token."""
+    sends PostToolUseFailure, whose output shows no success line) keeps the token."""
 
     def _hook(self, name: str, payload: dict, root: Path) -> subprocess.CompletedProcess:
         return subprocess.run(

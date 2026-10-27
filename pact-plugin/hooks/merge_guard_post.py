@@ -3,8 +3,11 @@
 Location: pact-plugin/hooks/merge_guard_post.py
 Summary: PostToolUse hook matching AskUserQuestion + Bash — writes a short-lived
          authorization token on AskUserQuestion approval; retires the consuming
-         token on successful `gh pr merge` Bash invocation.
-Used by: hooks.json PostToolUse hook (matcher: AskUserQuestion|Bash)
+         token on successful `gh pr merge` Bash invocation. On PostToolUseFailure
+         (Bash) it retires the token only when the call's output shows the guarded
+         op itself succeeded before a later step failed.
+Used by: hooks.json PostToolUse hook (matcher: AskUserQuestion|Bash) and
+         PostToolUseFailure hook (matcher: Bash)
 
 This hook is part of the merge guard system. Two PostToolUse branches:
 
@@ -1495,9 +1498,9 @@ def _group_body(command: str) -> str | None:
 
 
 def _run_succeeded_as_the_op(command: str, op_type: str, tool_response: object) -> bool:
-    """Whether this hook firing for `command` means its guarded op succeeded. The
-    hook runs on PostToolUse only, and a failed command reaches PostToolUseFailure,
-    so a response in the success shape (`stdout` text, not interrupted) means the
+    """Whether this hook firing for `command` means its guarded op succeeded. It is
+    read on PostToolUse only, and a failed command reaches PostToolUseFailure, so a
+    response in the success shape (`stdout` text, not interrupted) means the
     command exited 0. That is the op's own status when the op runs in the
     foreground as the last leg, unnegated, no `||` before it could have skipped it,
     and it is not a dry run. A shell's -c string, and a command that is one
@@ -1887,6 +1890,70 @@ def _retire_token_for_command(
     return False
 
 
+# gh's result line for a PR (`✓ Squashed and merged pull request #5 (…)`,
+# `✓ Closed pull request o/r#5 (…)`).
+_GH_RESULT_RE = re.compile(r"(?im)\b(merged|closed) pull request (?:[\w.-]+/[\w.-]+)?#(\d+)\b")
+# git push's line for a ref it updated (`+ a1...b2 feat/x -> feat/x (forced update)`,
+# `   a1..b2  main -> main`, ` * [new branch] x -> x`); a rejected ref's line starts `!`.
+_GIT_PUSH_UPDATE_RE = re.compile(r"(?m)^(?!\s*!).*?->\s*(\S+)")
+_GIT_DELETED_RE = re.compile(r"(?m)^[ \t]*-[ \t]+\[deleted\]")
+
+
+def _failure_output_shows_success(command: str, op_type: str, output: str) -> bool:
+    """Whether a failed call's output shows its guarded op itself succeeded: gh's
+    merged or closed line for the op's PR, git push's update line for the op's ref
+    (any ref for a push that names none), git's deleted line for a remote ref, or
+    `Deleted branch <b>` for the op's branch. Anything else keeps the token."""
+    ctx = extract_command_context(
+        _single_destructive_leg(command) or _single_detectable_leg(command) or command
+    )
+    if op_type in ("merge", "close"):
+        verb = "merged" if op_type == "merge" else "closed"
+        pr = ctx.get("pr_number")
+        return any(
+            m.group(1).lower() == verb and (pr is None or m.group(2) == pr)
+            for m in _GH_RESULT_RE.finditer(output)
+        )
+    if op_type in ("force-push", "push-to-main"):
+        ref = ctx.get("target_ref")
+        updated = {m.group(1).removeprefix("refs/heads/") for m in _GIT_PUSH_UPDATE_RE.finditer(output)}
+        return bool(updated) if not isinstance(ref, str) else ref.removeprefix("refs/heads/") in updated
+    if op_type == "remote-ref-delete":
+        return _git_reports_ref_deleted(command, op_type, {"stderr": output})
+    if op_type == "remote-mass-delete":
+        return _GIT_DELETED_RE.search(output) is not None
+    if op_type == "branch-delete":
+        branch = ctx.get("branch")
+        return isinstance(branch, str) and re.search(
+            r"(?m)^Deleted branch " + re.escape(branch) + r" \(", output
+        ) is not None
+    return False
+
+
+def _retire_after_failed_call(input_data: dict) -> None:
+    """A Bash call whose guarded op succeeded and whose later step failed ends in
+    PostToolUseFailure. Its `error` text carries the call's stdout and stderr; when
+    they show the op's own success, the op ran, so its token retires and the
+    approval runs that op once. Never raises."""
+    try:
+        tool_input = input_data.get("tool_input")
+        command = tool_input.get("command") if isinstance(tool_input, dict) else None
+        output = input_data.get("error")
+        if (
+            input_data.get("tool_name") != "Bash"
+            or not isinstance(command, str)
+            or not isinstance(output, str)
+            or input_data.get("is_interrupt") is True
+        ):
+            return
+        runs = _rewrite_git_aliases(command)
+        op_type = detect_command_operation_type(runs)
+        if op_type and not _op_did_not_run(runs) and _failure_output_shows_success(runs, op_type, output):
+            _retire_token_for_command(runs, op_type)
+    except Exception:  # noqa: BLE001 - any doubt keeps the token
+        return
+
+
 def main():
     """Main entry point for the PostToolUse hook."""
     try:
@@ -1897,6 +1964,11 @@ def main():
             sys.exit(0)
 
         pact_context.init(input_data)
+        # A failed call is not a successful run: only its output can retire a token.
+        if input_data.get("hook_event_name") == "PostToolUseFailure":
+            _retire_after_failed_call(input_data)
+            print(_SUPPRESS_OUTPUT)
+            sys.exit(0)
         tool_input = input_data.get("tool_input", {})
         # The command's git aliases are read from the directory it runs in.
         set_command_directory(input_data.get("cwd"))

@@ -15,8 +15,8 @@ What these arms add:
 - gh's exit status is read, not only its output: a failing gh that prints
   MERGED keeps the token, as does a state GitHub never returns.
 - Only merge and close ask gh. Force-push, branch-delete and push-to-main never do.
-- merge_guard_post is not registered on PostToolUseFailure, so a failed bare
-  merge never reaches retirement at all.
+- On PostToolUseFailure the hook retires a token only when the failed call's
+  output shows the guarded op itself succeeded before a later step failed.
 """
 
 from __future__ import annotations
@@ -175,18 +175,108 @@ class TestOnlyMergeAndCloseAskGh:
 
 
 class TestRegistration:
-    def test_merge_guard_post_runs_on_post_tool_use_only(self):
-        """A failed bare merge goes to PostToolUseFailure. Registered there, the
-        hook would reach retirement on a merge that never happened."""
+    def test_merge_guard_post_runs_on_success_and_on_a_failed_bash_call(self):
+        """A call whose op succeeded and whose later step failed goes to
+        PostToolUseFailure, where only the call's output can retire the token."""
         hooks = json.loads((_PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
         events = {
-            event
+            (event, group.get("matcher"))
             for event, groups in hooks.items()
             for group in groups
             for hook in group.get("hooks", [])
             if "merge_guard_post.py" in hook.get("command", "")
         }
-        assert events == {"PostToolUse"}, events
+        assert events == {("PostToolUse", "AskUserQuestion|Bash"), ("PostToolUseFailure", "Bash")}, events
+
+
+def _post_failure(rig, command, error, interrupted=False):
+    """Fire the hook with a PostToolUseFailure Bash frame: the captured key set,
+    whose `error` holds "Exit code N" then the call's stdout and stderr."""
+    payload = {
+        "hook_event_name": "PostToolUseFailure",
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+        "error": error,
+        "is_interrupt": interrupted,
+        "duration_ms": 12,
+        "tool_use_id": "toolu_x",
+    }
+    env = {
+        "PATH": os.pathsep.join([str(rig["bin"]), "/usr/bin", "/bin"]),
+        "HOME": str(rig["tmp"]),
+        "CLAUDE_CONFIG_DIR": str(rig["config"]),
+        "FAKE_GH_LOG": str(rig["log"]),
+        "FAKE_GH_STATE": "MERGED",
+    }
+    proc = subprocess.run(
+        [sys.executable, str(_HOOK)], input=json.dumps(payload), capture_output=True,
+        text=True, env=env, cwd=str(rig["tmp"]), timeout=30, check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {"suppressOutput": True}, proc.stdout
+
+
+_FORCED = "To github.com:o/r.git\n + 1a2b3c4...5d6e7f8 feat/x -> feat/x (forced update)"
+_REJECTED = "To github.com:o/r.git\n ! [rejected]        feat/x -> feat/x (stale info)\nerror: failed to push some refs"
+
+
+class TestAFailedCallRetiresOnlyWhenItsOpSucceeded:
+    """A call whose guarded op succeeded and whose later step failed reaches
+    PostToolUseFailure. Its output shows the op's own success line, so its token
+    retires and the approval runs one op. A call whose op failed, or whose output
+    shows another target's success, keeps the token for its retry."""
+
+    @pytest.mark.parametrize("cmd,error", [
+        ("git push --" + "force origin feat/x && ./notify.sh", "Exit code 1\n" + _FORCED),
+        ("(git push --" + "force origin feat/x; false)", "Exit code 1\n" + _FORCED),
+        ("git push --" + "force && false", "Exit code 1\n" + _FORCED),
+        ("git push origin main && false",
+         "Exit code 1\nTo github.com:o/r.git\n   1a2b3c4..5d6e7f8  main -> main"),
+        (_MERGE + " 5 --squash && ./post-merge-check.sh",
+         "Exit code 2\n\u2713 Squashed and merged pull request #5 (Fix things)\ncheck failed"),
+        (_MERGE + " --squash && false", "Exit code 1\n\u2713 Merged pull request o/r#7 (x)"),
+        ("gh pr close 5 -d && false", "Exit code 1\n\u2713 Closed pull request #5 (x)\n\u2713 Deleted branch x"),
+        ("git push origin --delete stale && false", "Exit code 1\nTo github.com:o/r.git\n - [deleted]         stale"),
+        ("git push --mirror origin && false", "Exit code 1\nTo github.com:o/r.git\n - [deleted]         old"),
+        ("git branch -" + "D feat/x && false", "Exit code 1\nDeleted branch feat/x (was 1a2b3c4)."),
+    ], ids=["force-push-tail", "force-push-subshell", "implicit-force-push", "push-to-main", "merge", "implicit-merge",
+            "close", "ref-delete", "mass-delete", "branch-delete"])
+    def test_the_ops_own_success_line_retires_it(self, rig, cmd, error):
+        _mint(rig, cmd)
+        _post_failure(rig, cmd, error)
+        assert _retired(rig)
+        assert _gh_calls(rig) == []
+
+    @pytest.mark.parametrize("cmd,error,interrupted", [
+        ("git push --" + "force origin feat/x && ./notify.sh", "Exit code 1\n" + _REJECTED, False),
+        ("git push --" + "force origin feat/x && ./notify.sh", "Exit code 128\nfatal: unable to access", False),
+        ("git push --" + "force origin feat/x && ./notify.sh",
+         "Exit code 1\n + 1a2b...5d6e feat/y -> feat/y (forced update)", False),
+        ("git push --" + "force origin feat/x && ./notify.sh", "Exit code 1\n" + _FORCED, True),
+        ("git push -" + "n --force origin feat/x && false", "Exit code 1\n" + _FORCED, False),
+        (_MERGE + " 5 --squash && ./post-merge-check.sh", "Exit code 1\nX Pull request #5 is not mergeable", False),
+        (_MERGE + " 5 --squash && false", "Exit code 1\n\u2713 Squashed and merged pull request #6 (other)", False),
+        (_MERGE + " 5 --squash && false", "Exit code 1\n\u2713 Closed pull request #5 (x)", False),
+        ("git branch -" + "D feat/x && false", "Exit code 1\nerror: branch 'feat/x' not found.", False),
+        ("git branch -" + "D feat/x && false", "Exit code 1\nDeleted branch feat/y (was 1a2b3c4).", False),
+        ("git push origin --delete stale && false", "Exit code 1\nerror: unable to delete 'stale'", False),
+        ("git push --" + "force origin feat/x && false", "Exit code 1", False),
+    ], ids=["rejected", "no-network", "other-ref", "interrupted", "dry-run", "merge-failed", "other-pr", "closed-not-merged",
+            "branch-missing", "other-branch", "ref-delete-failed", "no-output"])
+    def test_a_failed_op_keeps_it(self, rig, cmd, error, interrupted):
+        _mint(rig, cmd)
+        _post_failure(rig, cmd, error, interrupted)
+        assert not _retired(rig)
+
+    def test_a_retired_token_no_longer_runs_the_command_and_a_new_approval_does(self, rig):
+        cmd = "git push --" + "force origin feat/x && ./notify.sh"
+        _mint(rig, cmd)
+        assert check_merge_authorization(cmd, token_dir=rig["config"]) is None
+        _post_failure(rig, cmd, "Exit code 1\n" + _FORCED)
+        assert _retired(rig)
+        assert check_merge_authorization(cmd, token_dir=rig["config"]) is not None
+        _mint(rig, cmd)
+        assert check_merge_authorization(cmd, token_dir=rig["config"]) is None
 
 
 class TestAnUnconfirmableTargetRetiresOnItsOwnSuccess:

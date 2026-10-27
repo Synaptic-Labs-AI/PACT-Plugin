@@ -269,9 +269,8 @@ class TestDoubtKeepsToken:
         f"cd ~/other && {_MERGE} 5 --squash",
     ])
     def test_an_unpiped_run_retires_on_its_own_success(self, rig, cmd):
-        """A failed command reaches PostToolUseFailure, which this hook is not
-        registered on, so this event says the merge, the command's last leg,
-        exited 0. The approval covers that one run, whatever the target."""
+        """A failed command reaches PostToolUseFailure, never PostToolUse, so
+        this event says the merge, the command's last leg, exited 0. The approval covers that one run, whatever the target."""
         repo = rig["tmp"] / "repo"
         repo.mkdir()
         cmd = cmd.format(repo=repo)
