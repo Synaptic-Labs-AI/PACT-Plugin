@@ -66,20 +66,25 @@
 #                                   differ from the default branch)
 #     after which a run on main tags and releases it; or
 #   - its annotated tag pushed by hand from a maintainer machine, on the
-#     commit that set the version (the warning names it), with the
-#     CHANGELOG.md heading line minus `## ` as the message:
-#       git tag -a <tag> <sha> -m '<heading>'
+#     commit that set the version, with the CHANGELOG.md heading line
+#     minus `## ` as the message, made exactly as this workflow makes it.
+#     The job log prints these commands filled in for each skipped tag:
+#       git show <src>:CHANGELOG.md | sed -n '/^## <tag>: /{s/^## //p;q;}' > <tag>.msg
+#       git tag -a <tag> <sha> --cleanup=verbatim -F <tag>.msg
+#     where <sha> is the bump commit and <src> the commit whose
+#     CHANGELOG.md copy the run used (dots in <tag> escaped as `\.`).
+#     Do not use `-m '<heading>'`: the shell mangles apostrophes.
 #     Pushing a tag does not start this workflow: then run it on main
 #     (Actions -> release -> Run workflow), or wait for the next push to
 #     main. That run creates only the release, which the built-in token
 #     may do.
 #   Without the token, the run checks every tag it still has to push before
 #   it creates anything. Drifted ones are SKIPPED, untouched (nothing
-#   created; any draft release is left as is), with one ::warning:: listing
-#   each with its commit and both fixes; every other
-#   version, and every release whose tag already exists, is still created,
-#   and the run succeeds. With the token nothing is skipped. A refused push
-#   is still explained by name, as a backstop.
+#   created; any draft release is left as is), with one short ::warning::
+#   listing each with its commit, and both fixes in the job log. Every
+#   other version, and every release whose tag already exists, is still
+#   created, and the run succeeds. With the token nothing is skipped. A
+#   refused push is still explained by name, as a backstop.
 #
 #   WHERE IT LIVES (one-time setup, REQUIRED if you add the token). A token
 #   with Workflows write must not be readable by a workflow on an arbitrary
@@ -356,6 +361,10 @@ jobs:
           # warning, so a bad section that reached main is fixed by fixing it
           # on main. Missing everywhere, or invalid everywhere, stops the run.
           # Text stays in files and variables; nothing is evaluated.
+          # Sets NOTES_SRC to the full sha of the commit whose copy was used,
+          # so the hand-tagging commands printed for a skipped tag read the
+          # very same copy.
+          NOTES_SRC=""
           load_notes() {
             local sha="$1" version="$2" path="$NOTES_FILE" src="" bump_reason="" head_reason=""
             local msg="$work_dir/notes/v$version.msg" body="$work_dir/notes/v$version.body"
@@ -382,6 +391,7 @@ jobs:
               fi
               exit 1
             fi
+            NOTES_SRC="$(git rev-parse "$src^{commit}")"
             echo "v$version: notes from $src:$path"
           }
 
@@ -519,6 +529,7 @@ jobs:
           : > "$work_dir/drifted"
           while read -r sha version <&3; do
             tag="v$version"
+            is_drifted=false
             if tag_exists "$tag"; then
               tag_sha="$(git rev-parse "refs/tags/$tag^{commit}")"
               if [ "$tag_sha" != "$sha" ]; then
@@ -535,7 +546,7 @@ jobs:
               git diff --quiet "$sha" HEAD -- .github/workflows || drift_rc=$?
               case "$drift_rc" in
                 0) need_tag=true ;;
-                1) echo "$tag $sha" >> "$work_dir/drifted" ;;
+                1) is_drifted=true ;;
                 *)
                   echo "::error::git diff of .github/workflows between $sha and HEAD failed (exit $drift_rc) while checking $tag"
                   exit 1
@@ -543,6 +554,10 @@ jobs:
               esac
             fi
             load_notes "$sha" "$version"
+            # Row: tag, bump commit, commit whose CHANGELOG.md copy was used.
+            if [ "$is_drifted" = true ]; then
+              echo "$tag $sha $NOTES_SRC" >> "$work_dir/drifted"
+            fi
           done 3< "$work_dir/bumps"
 
           # Not an error: every other version is still released. Once these
@@ -552,9 +567,30 @@ jobs:
           # a tag on any other commit fails every later run (see the
           # pre-pass above). A draft release does not create a tag, so a
           # skipped version may have one; it is left as is.
+          # The annotation stays short; the full fix goes to the log as
+          # plain lines, with every command filled in. Only validated tags
+          # and full shas are printed, never CHANGELOG.md text. The
+          # commands read the heading from the very copy this run used and
+          # tag with -F and --cleanup=verbatim, as this workflow does, so
+          # the tag message is the same bytes (apostrophes included).
           if [ -s "$work_dir/drifted" ]; then
             skipped_list="$(awk '{ printf "%s%s at %s", (NR > 1 ? ", " : ""), $1, $2 }' "$work_dir/drifted")"
-            echo "::warning::skipped ${skipped_list} (nothing created; any draft release is left as is): each bump commit's .github/workflows differs from main, and GitHub refuses that tag push to the built-in GITHUB_TOKEN. To release them, either add ${TOKEN_SETUP}, and rerun this workflow on main; or, from a maintainer machine, tag each one on the commit shown with \`git tag -a <tag> <sha> -m '<CHANGELOG.md heading line minus ## >'\` and push the tags; then run this workflow on main (Actions -> release -> Run workflow) or wait for the next push to main, since pushing a tag does not start it. That run creates only their releases, which needs no token. See \"THE TOKEN\" at the top of release.yml."
+            echo "::warning::skipped ${skipped_list} (nothing created; any draft release is left as is): their bump commits' .github/workflows differs from main, so GitHub refuses those tag pushes to the built-in GITHUB_TOKEN. The job log lists the two ways to release them."
+            printf '%s\n' \
+              "To release the skipped versions, do ONE of:" \
+              "  1. Add ${TOKEN_SETUP}, then rerun this workflow on main." \
+              "  2. In an up-to-date clone of this repository, on a maintainer machine, run:"
+            skipped_tags=""
+            while read -r d_tag d_sha d_src <&4; do
+              printf '%s\n' \
+                "       git show $d_src:$NOTES_FILE | sed -n '/^## ${d_tag//./\\.}: /{s/^## //p;q;}' > $d_tag.msg" \
+                "       git tag -a $d_tag $d_sha --cleanup=verbatim -F $d_tag.msg"
+              skipped_tags="$skipped_tags $d_tag"
+            done 4< "$work_dir/drifted"
+            printf '%s\n' \
+              "       git push origin$skipped_tags" \
+              "     Pushing a tag does not start this workflow: then run it on main (Actions -> release -> Run workflow), or wait for the next push to main. That run creates only the releases, which needs no token." \
+              "See \"THE TOKEN\" at the top of release.yml."
           fi
 
           is_skipped() {
