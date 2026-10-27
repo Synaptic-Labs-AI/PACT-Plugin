@@ -635,12 +635,16 @@ class TestCarrier4NonRegression:
 class TestC4AnchorDriftDetector:
     def test_anchor_uses_m_excluding_class(self):
         # DESIGN-INTENT DRIFT-DETECTOR — the char class `[a-ln-zA-Z]` in the bundled-flag SHORT ARM
-        # `-[a-ln-zA-Z]*m` deliberately EXCLUDES lowercase `m`. That exclusion is LOAD-BEARING:
-        # it makes the cluster match stop at the message `m` with NO backtracking, so the pattern is
-        # UNBOUNDED (closes even the absurd -aa..am cluster — zero residual over-block) AND PROVABLY
-        # LINEAR. A greedy `-[A-Za-z]*m` / `-[a-zA-Z]*m` (INCLUDING m) backtracks to "find" the m ->
-        # O(n^2) = a ReDoS over-block-BY-TIMEOUT; a bounded `-[a-ln-zA-Z]{0,N}m` would leave an
-        # absurd-cluster residual over-block. A future reader must NOT "simplify"/bound this class.
+        # `-[a-ln-zA-Z]*m` deliberately EXCLUDES lowercase `m`. That exclusion makes the cluster
+        # match stop at the FIRST `m` with no backtracking, so the pattern can stay UNBOUNDED (it
+        # closes even the absurd -aa..am cluster: zero residual over-block) in a single pass. An
+        # m-INCLUDING class (`-[A-Za-z]*m` / `-[a-zA-Z]*m`) instead runs to the end of the token and
+        # backtracks to its LAST `m`. That is NOT a ReDoS here: the anchor starts at a literal `-`,
+        # so it tries one start per token, and measured on CPU time across 16 witness shapes the
+        # m-including revert changed no growth rate, only a constant factor (about 2x on long
+        # m-heavy tokens). No timing test can see a constant factor that size, so THIS PIN, not
+        # TestReDoSLinearity, is the guard for the class. A bounded `-[a-ln-zA-Z]{0,N}m` would
+        # leave an absurd-cluster residual over-block. Do NOT "simplify" or bound this class.
         #
         # REALIGNED for the fold (F1): the positive check pins the m-EXCLUDING SHORT ARM
         # `-[a-ln-zA-Z]*m` — the load-bearing linear/unbounded invariant — NOT the full anchor string.
@@ -660,7 +664,7 @@ class TestC4AnchorDriftDetector:
         assert src.count(short_arm) >= 2, \
             "the m-excluding SHORT ARM must appear at BOTH the commit AND tag carriers; found %d" % src.count(short_arm)
         assert r"-[A-Za-z]*m" not in src and r"-[a-zA-Z]*m" not in src, \
-            "the anchor must NOT use an m-INCLUDING class (backtracking -> ReDoS/over-block-by-timeout)"
+            "the anchor must NOT use an m-INCLUDING class (it backtracks to the last m; only this pin guards the class)"
         assert r"-[a-ln-zA-Z]{0," not in src, \
             "the anchor cluster must be UNBOUNDED (a bounded {0,N} leaves an absurd-cluster residual over-block)"
 
@@ -716,15 +720,18 @@ def _elapsed_ms(cmd):
 
 
 class TestReDoSLinearity:
-    # A hang blocks a faithful click -> ReDoS is an over-block. Both the C4 anchor cluster and
-    # the FIX-R body must be linear. The bound is sized against the REGRESSION (orders of
+    # A hang blocks a faithful click -> ReDoS is an over-block. The classifier's cost on a huge
+    # bundled cluster and on the FIX-R body's pathological runs must stay far below a blowup.
+    # The bound is sized against the REGRESSION (orders of
     # magnitude), not against typical runtime -- see the _elapsed_ms header for the measured
     # numbers. An earlier version of this comment claimed single-digit ms at n=8000; the real
     # figure is ~450ms, and that false premise is what made a sub-2x bound look generous.
     @pytest.mark.parametrize("n", [2000, 8000])
     def test_c4_anchor_cluster_linear(self, n):
-        # A huge VALID bundled cluster AND a pathological NO-`m` cluster (the input that forces a
-        # greedy m-including variant to backtrack the whole run). C4 handles both in linear time.
+        # A huge VALID bundled cluster AND a NO-`m` cluster: the whole classifier's CPU cost on each
+        # must stay under the bound. This arm does NOT guard the C4 anchor's m-excluding class: the
+        # m-including revert changes this witness's cost by a constant factor only, which no bound
+        # with this margin can see. TestC4AnchorDriftDetector's source pin is that class's guard.
         assert _elapsed_ms('git commit -%sm "run %s"' % ("a" * n, BD)) < _LINEAR_BOUND_MS, "valid cluster n=%d" % n
         assert _elapsed_ms('git commit -%sx "run %s"' % ("a" * n, BD)) < _LINEAR_BOUND_MS, "no-m cluster n=%d" % n
 
