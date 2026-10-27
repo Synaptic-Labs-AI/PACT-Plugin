@@ -7365,11 +7365,13 @@ def _rewrite_literal_evals(command: str) -> str:
     return _LITERAL_EVAL_RE.sub(_run, command)
 
 
-# A trap leg whose handler is a literal string: single-quoted, or double-quoted with no
-# substitution or escape (a `$NAME` stays as written, as in a bare command).
+# A trap leg whose handler is a literal string: single-quoted, double-quoted with no
+# substitution or escape (a `$NAME` stays as written, as in a bare command), or one
+# double-quoted substitution.
 _LITERAL_TRAP_RE = re.compile(
     r"(?:^|(?<=[;&|(\n]))(?P<lead>[ \t]*(?:(?:do|then|else|\{)[ \t]+)*)(?P<kw>trap)(?:[ \t]+--)?"
-    r"[ \t]+(?P<handler>'[^']*'|\"[^\"`\\$]*(?:\$\{?\w+\}?[^\"`\\$]*)*\")(?P<signals>(?:[ \t]+[A-Za-z0-9_+-]+)+)(?=[ \t]*(?:$|[;&|)\n]))"
+    r"[ \t]+(?P<handler>'[^']*'|\"\$\((?:[^()'\"]|'[^']*'|\"[^\"()]*\")*\)\"|\"`[^`\"]*`\""
+    r"|\"[^\"`\\$]*(?:\$\{?\w+\}?[^\"`\\$]*)*\")(?P<signals>(?:[ \t]+[A-Za-z0-9_+-]+)+)(?=[ \t]*(?:$|[;&|)\n]))"
 )
 
 
@@ -7377,6 +7379,9 @@ def _rewrite_trap_handlers(command: str) -> str:
     """`command` with each trap of a literal handler string that runs a guarded command
     read as a function holding the handler, which the trap then runs: `trap 'git push -f
     origin main' EXIT` reads as `_trap1() { git push -f origin main; }; trap _trap1 EXIT`.
+    A handler that is one quoted variable runs the literal value assigned to it before
+    the trap (_assigned_literals), or reads as an `if` over each value it may hold there.
+    A handler that is one substitution runs what it prints (_substitution_printed_text).
     The handler is code the shell runs when the trap fires, so it is judged and counted as
     a function body (_fan_out_extra counts a handler on a signal other than EXIT as
     repeating). A handler that runs nothing guarded (`rm -f tmp`) is left as data."""
@@ -7387,6 +7392,17 @@ def _rewrite_trap_handlers(command: str) -> str:
 
     def _read(m: re.Match) -> str:
         body = m.group("handler")[1:-1].strip().rstrip(";").rstrip()
+        # `trap "$(printf %s '…')" EXIT` runs what the substitution prints, as an eval of it.
+        sub = re.fullmatch(r"\$\((.*)\)|`(.*)`", body, re.DOTALL) if m.group("handler")[0] == '"' else None
+        if sub:
+            body = _substitution_printed_text(sub.group(1) if sub.group(1) is not None else sub.group(2)) or ""
+        # `trap "$NAME" EXIT` runs the literal value NAME holds there.
+        var = re.fullmatch(r"\$(?:\{(\w+)\}|(\w+))", body) if m.group("handler")[0] == '"' and not sub else None
+        if var:
+            values = _assigned_literals(command, var.group(1) or var.group(2), m.start())
+            branches = "".join(f"; elif :; then {v}" for v in values[1:-1])
+            body = ("" if None in values else values[0] if len(values) == 1
+                    else f"if :; then {values[0]}{branches}; else {values[-1]}; fi")
         if view[m.start("kw")] != "t" or not body or not is_dangerous_command(body):
             return m.group(0)
         name = f"_trap{next(names)}"

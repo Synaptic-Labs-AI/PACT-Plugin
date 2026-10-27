@@ -148,6 +148,16 @@ TRAP_FAN_OUT = [
     ("a trap handler on EXIT and INT", "trap '" + _FP + "' EXIT INT", 1),
     ("a trap set in a loop plus the op", "for i in 1 2; do trap '" + _FP + "' EXIT; done; " + _FP, 2),
     ("a trap handler that loops", "trap 'for i in 1 2; do " + _FP + "; done' EXIT", 2),
+    ("a trap handler variable running the op twice", "c='" + _FP + "; " + _FP + "'; trap \"$c\" EXIT", 2),
+    ("a trap handler variable plus the op", "c='" + _FP + "'; trap \"$c\" EXIT; " + _FP, 2),
+    ("a trap handler variable on a signal raised twice", "c='" + _FP + "'; trap \"$c\" USR1; kill -USR1 $$; kill -USR1 $$", 2),
+    # Either value may run, so the handler counts both, though this oracle run is one:
+    ("a trap handler variable with two values", "c='" + _FP + "'; [ -d . ] && c='" + _FP + " x'; trap \"$c\" EXIT", 1),
+    ("a printed trap handler plus the op", "trap \"$(printf %s '" + _FP + "')\" EXIT; " + _FP, 2),
+    ("a backtick-printed trap handler plus the op", "trap \"`printf %s '" + _FP + "'`\" EXIT; " + _FP, 2),
+    ("a printed trap handler on a signal raised twice", "trap \"$(printf %s '" + _FP + "')\" USR1; kill -USR1 $$; kill -USR1 $$", 2),
+    ("a printed trap handler running the op twice", "trap \"$(printf %s '" + _FP + "; " + _FP + "')\" EXIT", 2),
+    ("a printed trap handler variable plus the op", "c=$(printf %s '" + _FP + "'); trap \"$c\" EXIT; " + _FP, 2),
     ("an unread trap handler plus the op", "trap \"" + _FP + " `true`\" EXIT; " + _FP, 2),
 ]
 TRAP_SINGLE_RUN = [
@@ -156,10 +166,17 @@ TRAP_SINGLE_RUN = [
     ("trap -- with a handler on EXIT", "trap -- '" + _FP + "' EXIT", 1),
     ("a trap handler on EXIT, then echo", "trap '" + _FP + "' EXIT; echo hi", 1),
     ("a double-quoted trap handler reading a variable", "B=main; trap \"" + _FP_TO + " $B\" EXIT", None),
+    ("a trap handler variable on EXIT", "c='" + _FP + "'; trap \"$c\" EXIT", 1),
+    ("a braced trap handler variable on EXIT", "c='" + _FP + "'; trap \"${c}\" EXIT", 1),
+    ("an exported trap handler variable on EXIT", "export c='" + _FP + "'; trap \"$c\" EXIT", 1),
+    ("a printed trap handler on EXIT", "trap \"$(printf %s '" + _FP + "')\" EXIT", 1),
+    ("a backtick-printed trap handler on EXIT", "trap \"`printf %s '" + _FP + "'`\" EXIT", 1),
+    ("a printed trap handler variable on EXIT", "c=$(printf %s '" + _FP + "'); trap \"$c\" EXIT", 1),
     ("a trap handler that retries", "trap 'for i in 1 2; do " + _FP + " && break; done' EXIT", 1),
 ]
 TRAP_INERT = ["trap 'rm -f tmp' EXIT", "trap - EXIT", "trap 'echo " + _FP + "' EXIT", "trap -p",
-              "trap 'rm -f tmp' INT TERM"]
+              "trap 'rm -f tmp' INT TERM", "c='rm -f tmp'; trap \"$c\" EXIT", "trap \"$c\" EXIT",
+              "trap \"$(printf %s 'rm -f tmp')\" EXIT"]
 FAN_OUT += TRAP_FAN_OUT
 
 SINGLE_RUN = [
