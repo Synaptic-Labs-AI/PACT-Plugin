@@ -34,6 +34,7 @@ import glob
 import json
 import os
 import re
+import secrets
 import shlex
 import sys
 import time
@@ -1220,7 +1221,9 @@ def write_token(context: dict, token_dir: Path | None = None) -> str | None:
     if session_id:
         token_data["session_id"] = session_id
 
-    token_path = token_dir / f"merge-authorized-{timestamp}"
+    # A random suffix makes every token's name its own, so two tokens minted in one
+    # second never share a name, nor do their `.consumed` records.
+    token_path = token_dir / f"merge-authorized-{timestamp}-{secrets.token_hex(4)}"
 
     # Layer 5 (invariant I-1): atomically retire any prior unused token
     # immediately before the new one is created. Placement BEFORE the
@@ -1245,8 +1248,8 @@ def write_token(context: dict, token_dir: Path | None = None) -> str | None:
             raise
         return str(token_path)
     except FileExistsError:
-        # Extremely unlikely race — try with microsecond suffix
-        token_path = token_dir / f"merge-authorized-{timestamp}-{int(now * 1000) % 1000}"
+        # Extremely unlikely collision — try once more with a fresh suffix
+        token_path = token_dir / f"merge-authorized-{timestamp}-{secrets.token_hex(4)}"
         try:
             fd = os.open(str(token_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             try:

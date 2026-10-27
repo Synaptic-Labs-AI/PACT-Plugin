@@ -24,6 +24,7 @@ Summary: GOOD-FAITH over-block sweep certification (PR #1195 OBS). Certifies aga
 import ast
 import io
 import json
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -786,17 +787,15 @@ def _g_live_token_ids(tok):
     `os.rename`, which PRESERVES its inode, while a mint is an `O_EXCL` create
     that allocates a NEW one. So a name-keyed diff counts a retirement as a
     mint, AND is blind to a mint that reuses the name the retirement just
-    vacated — which second-granularity token names make the ordinary case
-    rather than a rare one. Those two errors cancel often enough to look
-    correct: a same-second pair reads 1 by counting the retirement while the
-    real token is invisible. Neither error is reachable by narrowing the glob,
+    vacated, which second-granular token names once made the ordinary case.
+    Those two errors cancel often enough to look correct: a same-name pair
+    reads 1 by counting the retirement while the real token is invisible. Neither error is reachable by narrowing the glob,
     because the defect is the identity, not the filter.
 
     Non-tokens are dropped by EXCLUSION, never by matching an expected token
     shape. An inclusion pattern such as `merge-authorized-<digits>` silently
-    drops the millisecond-disambiguated fallback name that `write_token` falls
-    back to on collision — a real token — and would go on dropping every later
-    shape nobody thought to add. Exclusion can only ever over-count, which
+    drops the random-suffixed name every `write_token` token carries, and would
+    go on dropping every later shape nobody thought to add. Exclusion can only ever over-count, which
     fails loudly; inclusion under-counts, which does not.
     """
     ids = set()
@@ -894,13 +893,14 @@ def _g_write_token_that_retires_then_fails_to_create(fired):
 
 
 def _g_token_shape(name):
-    """`merge-authorized-1785902062.consumed` -> `.consumed`.
+    """`merge-authorized-1785902062-1a2b3c4d.consumed` -> `.consumed`.
 
-    Strips the prefix and the epoch stamp so two directories seeded moments
-    apart compare on WHICH ARTIFACTS EXIST rather than on when they were made.
-    A live token yields `''`, a retirement `'.consumed'`, a use marker `'.use-1'`.
+    Strips the prefix, the epoch stamp and the random suffix so two directories
+    seeded moments apart compare on WHICH ARTIFACTS EXIST rather than on when they
+    were made. A live token yields `''`, a retirement `'.consumed'`, a use marker
+    `'.use-1'`.
     """
-    return name[len(mgc.TOKEN_PREFIX):].lstrip("0123456789")
+    return re.sub(r"^\d+(?:-[0-9a-f]+)?", "", name[len(mgc.TOKEN_PREFIX):])
 
 
 class TestObsGStubTracksTheRealFailurePath:

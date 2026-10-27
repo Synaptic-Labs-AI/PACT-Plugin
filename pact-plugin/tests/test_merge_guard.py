@@ -2254,42 +2254,53 @@ class TestTokenEdgeCases:
         result = write_token({"operation_type": "merge"}, token_dir=readonly_dir)
         assert result is None
 
+    def test_two_tokens_minted_in_one_second_keep_both_records(self, tmp_path):
+        """Each token's name is its own, so a second mint in the same second, which
+        retires the first token, and the second token's own retirement leave two
+        `.consumed` records instead of one renamed onto the other."""
+        from merge_guard_post import write_token
+
+        now = time.time()
+        with patch("merge_guard_post.time") as mock_time:
+            mock_time.time.return_value = now
+            first = write_token({"operation_type": "merge", "pr_number": "5"}, token_dir=tmp_path)
+            second = write_token({"operation_type": "merge", "pr_number": "6"}, token_dir=tmp_path)
+        assert first and second and first != second
+        os.rename(second, second + ".consumed")
+        assert sorted(p.name for p in tmp_path.glob("merge-authorized-*")) == sorted(
+            [Path(first).name + ".consumed", Path(second).name + ".consumed"])
+
     def test_write_token_collision_uses_fallback(self, tmp_path):
-        """O_EXCL fallback path remains reachable for true same-microsecond races.
+        """O_EXCL fallback path remains reachable when a token's name is taken.
 
-        Layer 5 (invariant I-1) retires unused tokens before O_EXCL, so an
-        unused pre-existing token cannot cause O_EXCL to fail under normal
-        use. The microsecond-suffix fallback path is still needed for the
-        true race between cleanup completion and O_EXCL, or for any
-        scenario where cleanup is bypassed (e.g., concurrent writer in a
-        different process landed a file in the microsecond window).
+        Layer 5 (invariant I-1) retires unused tokens before O_EXCL, and every
+        name carries a random suffix, so a collision needs both a cleanup that
+        did not run and a repeated suffix. The fallback still covers it: one more
+        try with a fresh suffix.
 
-        Simulate the latter by stubbing cleanup_unused_tokens to no-op
-        for the duration of one write_token call — this models a
-        cleanup-failure or concurrent-race scenario and pins the O_EXCL
+        Simulate it by stubbing cleanup_unused_tokens to no-op and fixing the
+        suffixes for the duration of one write_token call, which pins the O_EXCL
         fallback behavior independently of Layer 5.
         """
         import merge_guard_post
         from merge_guard_post import write_token
 
-        # Pre-create the file that write_token will try to create
+        # Pre-create the file that write_token will try to create first
         now = time.time()
         timestamp = int(now)
-        preexisting = tmp_path / f"merge-authorized-{timestamp}"
+        preexisting = tmp_path / f"merge-authorized-{timestamp}-aaaaaaaa"
         preexisting.write_text("taken")
 
-        # Stub Layer 5 cleanup so the collision survives to O_EXCL. This
-        # mirrors a transient cleanup failure or a true concurrent-writer
-        # race on the microsecond window.
         with patch.object(merge_guard_post, "_cleanup_unused_tokens", lambda _td: None), \
-             patch("merge_guard_post.time") as mock_time:
+             patch("merge_guard_post.time") as mock_time, \
+             patch("merge_guard_post.secrets.token_hex", side_effect=["aaaaaaaa", "bbbbbbbb"]):
             mock_time.time.return_value = now
             result = write_token({"test": True, "operation_type": "merge"}, token_dir=tmp_path)
 
-        # Must succeed with fallback name (not None)
+        # Must succeed with the fallback name (not None)
         assert result is not None
         assert Path(result).exists()
-        assert Path(result) != preexisting
+        assert Path(result) == tmp_path / f"merge-authorized-{timestamp}-bbbbbbbb"
 
 
 # =============================================================================
@@ -5204,23 +5215,23 @@ class TestTokenWriteExceptionHandling:
         unused token. This test pins the double-collision returns-None
         behavior independently of Layer 5 by stubbing cleanup so the
         collision survives to O_EXCL (mirroring a transient cleanup
-        failure or a concurrent same-microsecond race).
+        failure or a concurrent writer that drew the same suffixes).
         """
         import merge_guard_post
         from merge_guard_post import write_token
 
         now = time.time()
         timestamp = int(now)
-        ms_suffix = int(now * 1000) % 1000
 
         # Pre-create both the primary and fallback files
-        primary = tmp_path / f"merge-authorized-{timestamp}"
-        fallback = tmp_path / f"merge-authorized-{timestamp}-{ms_suffix}"
+        primary = tmp_path / f"merge-authorized-{timestamp}-aaaaaaaa"
+        fallback = tmp_path / f"merge-authorized-{timestamp}-bbbbbbbb"
         primary.write_text("taken")
         fallback.write_text("taken")
 
         with patch.object(merge_guard_post, "_cleanup_unused_tokens", lambda _td: None), \
-             patch("merge_guard_post.time") as mock_time:
+             patch("merge_guard_post.time") as mock_time, \
+             patch("merge_guard_post.secrets.token_hex", side_effect=["aaaaaaaa", "bbbbbbbb"]):
             mock_time.time.return_value = now
             result = write_token({"test": True, "operation_type": "merge"}, token_dir=tmp_path)
 
