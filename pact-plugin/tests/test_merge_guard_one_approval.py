@@ -135,6 +135,7 @@ LOOPS_OVER_SEVERAL = {
     "inside-a-shell-c-string": "bash -c 'for p in 5 6; do " + MERGE + "$p; done'",
     "inner-loop-over-two": "for d in x; do for p in 5 6; do " + MERGE + '"$p"; done; done',
     "merge-after-an-inner-loop": "for p in 5 6; do for f in x; do echo; done; " + MERGE + '"$p"; done',
+    "list-not-literal": "for p in $(gh pr list -q .number); do " + MERGE + '"$p"; done',
 }
 LOOPS_RUN_ONCE = {
     "one-word": "for p in 5; do " + MERGE + '"$p"; done',
@@ -169,9 +170,8 @@ class TestALoopOverSeveralWordsIsSeveralOperations:
 
     @pytest.mark.parametrize("command", [
         "for p in 5 6; do gh pr view \"$p\"; done",
-        "for p in $(gh pr list -q .number); do " + MERGE + '"$p"; done',
-    ], ids=["view-loop", "list-not-literal"])
-    def test_a_view_loop_or_an_unread_list_counts_as_before(self, command):
+    ], ids=["view-loop"])
+    def test_a_view_loop_counts_as_before(self, command):
         from shared.merge_guard_common import is_compound_destructive_command
 
         assert is_compound_destructive_command(command) is False

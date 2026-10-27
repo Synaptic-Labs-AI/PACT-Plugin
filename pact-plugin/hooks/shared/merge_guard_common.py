@@ -10664,7 +10664,7 @@ def is_compound_destructive_command(command: str) -> bool:
             )
         )
     in_shells += max(on_substitutions, _substitution_destructive_count(command)) - on_substitutions
-    in_shells += _literal_loop_extra_passes(command)
+    in_shells += _repeat_extra(command)
     return in_shells - on_interpreters + max(on_interpreters, len(interpreted)) >= 2
 
 
@@ -10852,6 +10852,213 @@ def _destructive_legs(command: str, legs: list[str]) -> list[str]:
     return [leg for leg in legs if _leg_is_destructive(leg)]
 
 
+_FIND_EXEC_RE = re.compile(r"\s-(?:exec|execdir|ok|okdir)(?![\w-])")
+_SHELL_FUNCTION_DEF_RE = re.compile(
+    r"^\s*(?:function\s+(?P<kw>[A-Za-z_][\w.-]*)\s*(?:\(\s*\))?|(?P<name>[A-Za-z_][\w.-]*)\s*\(\s*\))\s*\{"
+)
+_CLOSE_BRACE_LEG_RE = re.compile(r"\s*\}")
+
+
+def _leg_heads(leg: str) -> list[str]:
+    """The command words a leg runs through: its own head, then the head of the command
+    each exec wrapper it starts with runs (`env`, `nohup`, `timeout 5`, `xargs -I{}`, ...)."""
+    heads: list[str] = []
+    word = _leg_command_word(_LEADING_KEYWORDS_RE.sub("", leg))
+    for _ in range(_MAX_WRAPPER_DEPTH):
+        if not word:
+            break
+        tokens = _shell_tokenize(word) or word.split()
+        if not tokens:
+            break
+        head = os.path.basename(tokens[0])
+        heads.append(head)
+        if head not in _EXEC_WRAPPERS_RECURSE or head not in _WRAPPER_GRAMMAR:
+            break
+        word = _wrapper_nested_command(word, head)
+    return heads
+
+
+_REPEATING_RUNNERS = frozenset({"xargs", "parallel", "watch"})
+_AWK_HEADS = frozenset({"awk", "gawk", "mawk", "nawk"})
+
+
+def _awk_runs_per_record(leg: str) -> bool:
+    """Whether an awk leg (as written) runs a command once per input record: its program
+    calls system() or pipes to a command outside a BEGIN or END block. A program read from
+    a file (-f) cannot be read, so it counts as per record."""
+    tokens = _shell_tokenize(leg.strip()) or []
+    k = 1
+    while k < len(tokens) and tokens[k].startswith("-"):
+        if tokens[k] in ("-f", "--file") or tokens[k].startswith("-f"):
+            return True
+        k += 2 if tokens[k] in ("-F", "-v", "--assign", "--field-separator") else 1
+    if k >= len(tokens):
+        return True
+    program = tokens[k]
+    for block in re.finditer(r"\b(?:BEGIN|END)\s*\{", program):
+        depth, j = 1, block.end()
+        while j < len(program) and depth:
+            depth += {"{": 1, "}": -1}.get(program[j], 0)
+            j += 1
+        program = program[:block.start()] + " " * (j - block.start()) + program[j:]
+    return bool(re.search(r"\bsystem\s*\(|\|&?\s*[\"\w$]", program))
+
+
+def _feeds_one_literal_word(leg: str) -> bool:
+    """Whether `leg` (as written) is an echo or a printf of `%s` / `%s\\n` that prints
+    exactly one literal word, so an xargs it pipes into runs its command once."""
+    tokens = _shell_tokenize(leg.strip())
+    if not tokens:
+        return False
+    if tokens[0] == "echo" and len(tokens) == 2:
+        word = tokens[1]
+    elif tokens[0] == "printf" and len(tokens) == 3 and tokens[1] in ("%s", "%s\\n"):
+        word = tokens[2]
+    elif tokens[0] == "printf" and len(tokens) == 2 and "%" not in tokens[1]:
+        word = tokens[1]
+    else:
+        return False
+    return bool(word) and not re.search(r"[\s$`*?\[{\\]", word) and not word.startswith("-")
+
+
+_LOOP_EXIT_LEG_RE = re.compile(r"\s*(?:break|exit|return)(?![\w-])")
+
+
+def _loop_repeats(legs: list[str], after_and_or: list[bool], i: int, functions: "set[str]",
+                  bounded: bool) -> bool:
+    """Whether the loop opened at `legs[i]` can run a guarded leg of its body (itself, or
+    as a call to one of the guarded shell `functions`) to success more than once. A failed
+    attempt is not an operation, so a body whose guarded leg is followed by a success exit
+    (`op && break`, `if op; then break`) runs one successful op, and a body holding an
+    unconditional `break` / `exit` / `return` runs once. A guarded leg behind `then`, in a
+    `case`, or on the right of `&&` / `||` runs only when its guard holds: in a `bounded`
+    loop (a for over literal words) that counts once, and anywhere else the text cannot
+    say how often the guard holds, so it repeats. A guarded op that is a plain while
+    condition runs again on each success, so it repeats too; an until condition or a
+    negated while condition ends the loop on its first success."""
+    head = _LEADING_KEYWORDS_RE.sub("", legs[i])
+    depth, branch = 0, 0
+    repeats = bool(re.match(r"\s*while\s+(?!!)", head)) and _leg_is_destructive(head)
+    for k in range(i + 1, len(legs)):
+        raw = legs[k]
+        part = _LEADING_KEYWORDS_RE.sub("", raw)
+        if _DONE_LEG_RE.match(part):
+            if depth == 0:
+                break
+            depth -= 1
+        elif _LOOP_HEAD_LEG_RE.match(part):
+            depth += 1
+        if re.match(r"\s*(?:then|case)(?![\w-])", raw):
+            branch += 1
+        elif re.match(r"\s*(?:fi|esac)(?![\w-])", raw):
+            branch -= 1
+        if _LOOP_EXIT_LEG_RE.match(part) and not depth and not branch and not after_and_or[k]:
+            return False
+        heads = _leg_heads(raw)
+        if not (_leg_is_destructive(part) or (heads and heads[0] in functions)):
+            continue
+        if bounded and (branch or after_and_or[k]):
+            continue
+        following = _LEADING_KEYWORDS_RE.sub("", legs[k + 1]) if k + 1 < len(legs) else ""
+        exits = bool(_LOOP_EXIT_LEG_RE.match(following))
+        if exits and (after_and_or[k + 1] or re.match(r"\s*if\s", part)):
+            continue
+        repeats = True
+    return repeats
+
+
+def _fan_out_extra(command: str) -> int:
+    """1 when the shell can run a guarded command in `command` more than once, else 0: a
+    guarded leg run by find -exec / -execdir / -ok / -okdir or by xargs (once per item), a
+    guarded leg in a loop that can run it to success more than once (_loop_repeats: a
+    while, until, select or C-style for loop, or a for loop over a non-literal list or over
+    several literal words), a guarded op that is a plain while condition, and a shell
+    function holding a guarded leg that is called more than once or from such a loop, a
+    guarded command GNU parallel or watch runs, and an awk program that runs one per input
+    record (_awk_runs_per_record). An
+    until condition or a negated while condition ends the loop on its first success. One
+    approval runs one operation, so such a command counts as more than one. xargs fed one
+    literal word by echo or printf runs once."""
+    stripped = _strip_non_executable_content(_normalize_line_continuations(command))
+    spans = _slice_stripped_leg_spans(stripped)
+    legs = [stripped[a:b] for a, b in spans]
+    ops = [stripped[end:start].strip() for (_, end), (start, _) in zip(spans, spans[1:])]
+    after_and_or = [False] + [op in ("&&", "||") for op in ops]
+    written = _slice_stripped_legs(_strip_shell_comments(_normalize_line_continuations(command)))
+    # Shell functions whose body holds a guarded leg, and the legs that are their bodies.
+    guarded_functions: set[str] = set()
+    in_body = [False] * len(legs)
+    i = 0
+    while i < len(legs):
+        m = _SHELL_FUNCTION_DEF_RE.match(legs[i])
+        if m is None:
+            i += 1
+            continue
+        name = m.group("kw") or m.group("name")
+        first = legs[i][m.end():]
+        depth, j, guarded = 1, i, _leg_is_destructive(first)
+        while depth and j + 1 < len(legs):
+            j += 1
+            part = _LEADING_KEYWORDS_RE.sub("", legs[j])
+            if _CLOSE_BRACE_LEG_RE.match(legs[j]):
+                depth -= 1
+                continue
+            depth += part.count("{") - part.count("}")
+            guarded = guarded or _leg_is_destructive(part)
+        for k in range(i, j + 1):
+            in_body[k] = True
+        if guarded:
+            guarded_functions.add(name)
+        i = j + 1
+    calls: dict[str, int] = {}
+    loops: list[bool] = []          # one entry per open loop: True when it can repeat
+    for k, raw in enumerate(legs):
+        part = _LEADING_KEYWORDS_RE.sub("", raw)
+        if _DONE_LEG_RE.match(part):
+            if loops:
+                loops.pop()
+            continue
+        if _LOOP_HEAD_LEG_RE.match(part):
+            m = _FOR_IN_LEG_RE.match(part)
+            literal = m is not None and not re.search(r"[$`*?\[{]", m.group("words"))
+            one_word = literal and m is not None and len(_shell_tokenize(m.group("words")) or []) <= 1
+            loops.append(not one_word and _loop_repeats(legs, after_and_or, k, guarded_functions, literal))
+            # A guarded loop condition is read by _loop_repeats, or repeats with an outer loop.
+            if _leg_is_destructive(part) and any(loops):
+                return 1
+            continue
+        repeating = any(loops)
+        if in_body[k]:
+            continue
+        heads = _leg_heads(raw)
+        called = heads[0] if heads and heads[0] in guarded_functions else None
+        if called:
+            calls[called] = calls.get(called, 0) + 1
+            if repeating or calls[called] > 1:
+                return 1
+        # An awk program is blanked by the strip, so it is read as written.
+        as_written = written[k] if len(written) == len(legs) else raw
+        if heads and heads[-1] in _AWK_HEADS and _leg_is_destructive(as_written) and _awk_runs_per_record(as_written):
+            return 1
+        if not _leg_is_destructive(part):
+            continue
+        if "xargs" in heads and not (
+            k and ops[k - 1] == "|" and len(written) == len(legs) and _feeds_one_literal_word(written[k - 1])
+        ):
+            return 1
+        if _REPEATING_RUNNERS.intersection(heads) - {"xargs"}:
+            return 1
+        if repeating or ("find" in heads and _FIND_EXEC_RE.search(raw)):
+            return 1
+    return 0
+
+
+def _repeat_extra(command: str) -> int:
+    """The guarded runs `command` adds past one per leg: a literal for loop's passes, or 1
+    for any other way the shell can repeat a guarded command (_fan_out_extra)."""
+    return max(_literal_loop_extra_passes(command), _fan_out_extra(command))
+
+
 def _literal_loop_extra_passes(command: str) -> int:
     """The destructive legs a `for NAME in W1 W2 …; do …; done` loop over literal words
     runs past its first pass: `for p in 5 6; do gh pr merge "$p"; done` runs two merges,
@@ -10941,7 +11148,7 @@ def _shell_leg_destructive_count(leg: str, depth: int = 0) -> int:
     # The string's substitutions are counted from their bodies, as the bare command's are.
     on_substitutions = _destructive_legs_on_substitutions(inner, inner_legs, inner_destructive, view)
     count += max(on_substitutions, _substitution_destructive_count(inner, depth + 1)) - on_substitutions
-    return count + _literal_loop_extra_passes(inner)
+    return count + _repeat_extra(inner)
 
 
 def _both_present_equal(token_val: object, cmd_val: object) -> bool:

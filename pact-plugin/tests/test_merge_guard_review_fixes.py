@@ -2045,7 +2045,7 @@ def test_an_eval_running_one_guarded_command_runs_once_approved(cmd, style):
 # A command that opens a compound command's body (`do`, `then`, `{`, `(`, an `if` or
 # `while` condition) is a command like any other: its -c string, eval or program is read.
 AFTER_KEYWORD_RUNS = [
-    ("sh -c in a loop body", "for i in 1 2; do sh -c 'gh pr " + "merge 5'; done"),
+    ("sh -c in a loop body", "for i in 1; do sh -c 'gh pr " + "merge 5'; done"),
     ("sh -c after then", "if true; then sh -c 'gh pr " + "merge 5'; fi"),
     ("bash -c in a while body", 'while true; do bash -c "git push --' + 'force origin main"; break; done'),
     ("sh -c in a group", "{ sh -c 'gh pr " + "merge 5'; }"),
