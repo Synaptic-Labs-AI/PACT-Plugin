@@ -617,24 +617,46 @@ class TestAGuardedCommandThatIsTheSubstitutionRunsOnce:
     @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
     @pytest.mark.parametrize("command,stdout", QUOTED_BACKTICK_RUNS.values(), ids=QUOTED_BACKTICK_RUNS.keys())
     def test_the_approval_runs_the_command_once(self, command, stdout, style, tmp_path):
-        rig = TestAnApprovalWithNoSuccessSignalRunsOnce()
-        (tmp_path / ".claude").mkdir()
-        assert not rig._runs(command, tmp_path)
-        q = [{"question": "Run this?", "header": "Run", "multiSelect": False,
-              "options": [{"label": "Yes, run", "description": style(command)},
-                          {"label": "No", "description": "Hold."}]}]
-        post = rig._hook("merge_guard_post.py", {
-            "hook_event_name": "PostToolUse", "tool_name": "AskUserQuestion",
-            "tool_input": {"questions": q}, "tool_response": {"answers": {"Run this?": "Yes, run"}},
-        }, tmp_path)
-        assert "token written" in post.stderr, post.stderr
-        assert rig._runs(command, tmp_path)
-        assert not rig._runs(MERGE + "777", tmp_path)
-        rig._hook("merge_guard_post.py", {
-            "hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": command},
-            "tool_response": {"stdout": stdout, "stderr": "", "interrupted": False},
-        }, tmp_path)
-        assert not rig._runs(command, tmp_path)
+        _runs_once_then_retires(command, stdout, style, tmp_path)
+
+
+def _runs_once_then_retires(command: str, stdout: str, style, tmp_path: Path) -> None:
+    """Refused, then minted in `style`, run once with an unrelated merge still refused,
+    and refused again after one successful run that printed `stdout`."""
+    rig = TestAnApprovalWithNoSuccessSignalRunsOnce()
+    (tmp_path / ".claude").mkdir()
+    assert not rig._runs(command, tmp_path)
+    q = [{"question": "Run this?", "header": "Run", "multiSelect": False,
+          "options": [{"label": "Yes, run", "description": style(command)},
+                      {"label": "No", "description": "Hold."}]}]
+    post = rig._hook("merge_guard_post.py", {
+        "hook_event_name": "PostToolUse", "tool_name": "AskUserQuestion",
+        "tool_input": {"questions": q}, "tool_response": {"answers": {"Run this?": "Yes, run"}},
+    }, tmp_path)
+    assert "token written" in post.stderr, post.stderr
+    assert rig._runs(command, tmp_path)
+    assert not rig._runs(MERGE + "777", tmp_path)
+    rig._hook("merge_guard_post.py", {
+        "hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": command},
+        "tool_response": {"stdout": stdout, "stderr": "", "interrupted": False},
+    }, tmp_path)
+    assert not rig._runs(command, tmp_path)
+
+
+RETIRED_AFTER_ONE_RUN = {
+    "trap-loop-forced-push-to-main": ("trap 'for i in 1 2; do " + FORCE + "main && break; done' EXIT", ""),
+    "echo-n-substitution-run-by-bash-c": ('bash -c "$(echo -n \'' + MERGE + '5 --squash\')"', "\u2713 Merged pull request #5"),
+}
+
+
+class TestAnApprovalTheMintReadsThroughRetiresOnItsRun:
+    """A command the mint reads through a trap's loop or a printing substitution
+    retires on its one successful run in every approval style, as its plain form does."""
+
+    @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
+    @pytest.mark.parametrize("command,stdout", RETIRED_AFTER_ONE_RUN.values(), ids=RETIRED_AFTER_ONE_RUN.keys())
+    def test_one_successful_run_retires_the_approval(self, command, stdout, style, tmp_path):
+        _runs_once_then_retires(command, stdout, style, tmp_path)
 
 
 DATA_MENTIONS = {

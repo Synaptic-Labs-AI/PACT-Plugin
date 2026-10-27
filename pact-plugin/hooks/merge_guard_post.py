@@ -133,6 +133,8 @@ try:
         _single_detectable_leg,
         _split_into_legs,
         _assignments_reaching_command,
+        # The mint's reading of a printed or eval'd string, for the dry-run check.
+        _rewrite_readable_evals,
         # An op on the current branch run after a checkout or cd binds its text.
         target_changes_before_guarded_leg,
         REPO_RELATIVE_OPS,
@@ -1439,8 +1441,11 @@ def _op_did_not_run(command: str) -> bool:
     """Whether a leg that holds the guarded op is a dry run or runs in the
     background without a `wait` for it, so the command's success says nothing
     about the op. A shell's -c
-    string is read the same way."""
+    string is read the same way, and a string a shell runs from a substitution
+    that only prints (`bash -c "$(echo -n '…')"`) is read as the mint reads it,
+    so the echo's -n is not the op's dry-run flag."""
     try:
+        command = _rewrite_readable_evals(command)
         inner = shell_c_string(command)
         if inner is not None:
             return _op_did_not_run(inner)
@@ -1817,7 +1822,9 @@ def _retire_token_for_command(
         # PRE side's _token_matches_command; for Layer 1 retirement,
         # op_type match + session-scope is the minimum to retire (a
         # subsequent op of the same type would need a fresh token anyway).
-        if ctx.get("operation_type") != op_type:
+        # The mint binds the op its leg reads as, which can differ from the whole
+        # command's class (a forced push to main inside a trap's loop).
+        if ctx.get("operation_type") not in (op_type, cmd_ctx.get("operation_type")):
             continue
         # #1097: target-aware ONLY when the token carries a target (every PRODUCTION-
         # minted token does — _collect_pairs mints no pair without a non-None
