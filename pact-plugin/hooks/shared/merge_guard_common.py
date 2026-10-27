@@ -7208,7 +7208,7 @@ def _rewrite_set_positionals(command: str) -> str:
 
 # NAME=$(…) or NAME="$(…)": an assignment of a substitution's output.
 _PRINTED_ASSIGNMENT_RE = re.compile(
-    r"(?P<name>[A-Za-z_]\w*)=(?P<q>\"?)\$\((?P<inner>(?:[^()'\"]|'[^']*'|\"[^\"()]*\")*)\)(?P=q)"
+    r"(?<!\w)(?P<name>[A-Za-z_]\w*)=(?P<q>\"?)\$\((?P<inner>(?:[^()'\"]|'[^']*'|\"[^\"()]*\")*)\)(?P=q)"
 )
 
 
@@ -9389,7 +9389,7 @@ def _in_php_exec_code(text: str, pos: int) -> bool:
     return _is_php_exec_leg(text[start:])
 
 
-_QUOTED_ASSIGNMENT_RE = re.compile(r"""[A-Za-z_]\w*=["']""")
+_QUOTED_ASSIGNMENT_RE = re.compile(r"""(?<!\w)[A-Za-z_]\w*=["']""")
 
 
 def _has_shell_quoted_assignment(leg: str) -> bool:
