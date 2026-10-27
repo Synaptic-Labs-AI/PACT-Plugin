@@ -65,9 +65,10 @@
 #   Without it, the run checks every tag it still has to push before it
 #   creates anything: if any of them is on a commit whose workflows differ
 #   from the commit the run is on, it stops with one ::error:: listing those
-#   tags and this fix. Releases whose tag already exists are not affected
-#   (they push nothing). A refused push is still explained by name, as a
-#   backstop.
+#   tags and this fix. Releases whose tag already exists push nothing, so
+#   they are never listed as blocked, but they wait too: the error stops the
+#   whole run, repairs included. A refused push is still explained by name,
+#   as a backstop.
 #
 #   WHERE IT LIVES (one-time setup, REQUIRED). A token with Workflows write
 #   must not be readable by a workflow on an arbitrary branch: a repository
@@ -90,12 +91,13 @@
 #   `secrets.RELEASE_TOKEN || github.token` falls back to GITHUB_TOKEN, and
 #   a tag on a drifted commit stops the run with the ::error:: above. Each
 #   run without RELEASE_TOKEN says so with a ::notice::, and each run reads
-#   the `release` environment and warns if it has no branch restriction (a
-#   best-effort check: if the token may not read the environment, a
-#   ::notice:: says it was skipped and asks for a check by hand; it never
-#   fails the run). Every run also
-#   records a deployment to `release` (harmless; it is how environments are
-#   tracked).
+#   the `release` environment with the built-in token (actions: read; the
+#   RELEASE_TOKEN permissions above are all it needs) and warns unless the
+#   environment allows exactly the branch `main`: no restriction, "protected
+#   branches", or any other or extra pattern all warn. This is best effort:
+#   if a read fails, a ::notice:: says the check was skipped and asks for a
+#   check by hand; it never fails the run. Every run also records a
+#   deployment to `release` (harmless; it is how environments are tracked).
 #
 #   WHOSE TOKEN. A fine-grained personal access token, limited to this
 #   repository, with the two permissions above and an expiry date. Prefer
@@ -162,9 +164,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# contents: write pushes tags and creates releases. Nothing broader.
+# contents: write pushes tags and creates releases. actions: read (read-only)
+# lets the built-in token read the `release` environment's branch policy for
+# the best-effort check below. Nothing broader.
 permissions:
   contents: write
+  actions: read
 
 # Never run two release jobs at once (both would try to create the same tag),
 # and never cancel one mid-way. GitHub keeps at most one run pending per
@@ -204,6 +209,8 @@ jobs:
       - name: Create missing tags and releases
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          # Used only for the `release` environment check (actions: read).
+          BUILTIN_TOKEN: ${{ github.token }}
           USE_RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN != '' }}
           REPO: ${{ github.repository }}
           # The last release cut by hand. The walk never goes before it.
@@ -227,17 +234,55 @@ jobs:
             echo "::notice::running without RELEASE_TOKEN (using GITHUB_TOKEN as github-actions[bot]); tags on commits whose .github/workflows differs from main cannot be pushed"
           fi
 
-          # Best effort: warn if the `release` environment has no branch
-          # restriction, since then any branch's workflow could read its
-          # secret. A token that may not read the environment skips the check
+          # Best effort: warn unless the `release` environment allows exactly
+          # the branch `main`, since any other ref it allows could run a
+          # workflow that reads its secret. The reads use the built-in token
+          # (actions: read) on purpose, so RELEASE_TOKEN needs no extra
+          # permission. Any failed read or unexpected reply skips the check
           # with a notice. This never fails the run.
-          if gh api "repos/$REPO/environments/release" > "$work_dir/env.json" 2> "$work_dir/env_err"; then
-            if jq -e '.deployment_branch_policy == null' "$work_dir/env.json" >/dev/null; then
-              echo "::warning::the \`release\` environment has no deployment branch restriction, so a workflow on any branch can read its RELEASE_TOKEN; limit it to main (Settings -> Environments -> release)"
+          env_check_skipped() {
+            echo "::notice::skipped the \`release\` environment branch-restriction check: $1 ($(head -c 200 "$work_dir/env_err" | tr -d '\r\n%')); check by hand that Settings -> Environments -> release limits deployment branches to main only"
+          }
+          check_release_env() {
+            local policy reason=""
+            : > "$work_dir/env_err"
+            if ! GH_TOKEN="$BUILTIN_TOKEN" gh api "repos/$REPO/environments/release" \
+                > "$work_dir/env.json" 2> "$work_dir/env_err" ||
+              ! policy="$(jq -r '.deployment_branch_policy as $p
+                  | if $p == null then "none"
+                    elif $p.protected_branches == true then "protected"
+                    elif $p.custom_branch_policies == true then "custom"
+                    else "unknown" end' "$work_dir/env.json" 2>> "$work_dir/env_err")"; then
+              env_check_skipped "the environment read failed"
+              return 0
             fi
-          else
-            echo "::notice::skipped the \`release\` environment branch-restriction check: the API read failed ($(head -c 200 "$work_dir/env_err" | tr -d '\r\n%')); check by hand that Settings -> Environments -> release limits deployment branches to main only"
-          fi
+            case "$policy" in
+              none) reason="has no deployment branch restriction" ;;
+              protected) reason="allows every protected branch, not only main" ;;
+              custom)
+                # Exactly one policy, the branch `main`. A policy without a
+                # `type` predates tag policies, so it is a branch policy.
+                if ! GH_TOKEN="$BUILTIN_TOKEN" gh api --paginate \
+                    "repos/$REPO/environments/release/deployment-branch-policies?per_page=100" \
+                    > "$work_dir/policies.json" 2> "$work_dir/env_err" ||
+                  ! policy="$(jq -s -r '[.[].branch_policies[]]
+                      | if length == 1 and .[0].name == "main"
+                          and (.[0].type // "branch") == "branch"
+                        then "main-only" else "other" end' \
+                      "$work_dir/policies.json" 2>> "$work_dir/env_err")"; then
+                  env_check_skipped "the branch-policy read failed"
+                  return 0
+                fi
+                [ "$policy" = "main-only" ] ||
+                  reason="has branch or tag patterns other than exactly the branch main"
+                ;;
+              *) reason="has a deployment branch policy this check does not recognise" ;;
+            esac
+            if [ -n "$reason" ]; then
+              echo "::warning::the \`release\` environment $reason, so a workflow on another ref could read its RELEASE_TOKEN; limit it to the branch main only (Settings -> Environments -> release -> Deployment branches and tags)"
+            fi
+          }
+          check_release_env
 
           # "version" from plugin.json at a commit; empty if absent.
           version_at() {
