@@ -10368,9 +10368,9 @@ _GIT_CONFIG_REMOTE_KEY_RE = re.compile(
     r"(?i)^(?:remote\..+\.(?:url|pushurl)|url\..+\.(?:insteadof|pushinsteadof))$"
 )
 _GIT_CONFIG_REMOTE_SECTION_RE = re.compile(r"(?i)^(?:remote|url)(?:\.|$)")
-# The keys that pick the remote a push naming no ref goes to, and the ref it updates.
+# The keys that pick the remote a push naming no ref goes to, and the refs it updates.
 _GIT_CONFIG_PUSH_ROUTING_KEY_RE = re.compile(
-    r"(?i)^(?:branch\..+\.(?:remote|pushremote|merge)|remote\.pushdefault|push\.default)$"
+    r"(?i)^(?:branch\..+\.(?:remote|pushremote|merge)|remote\.pushdefault|push\.default|remote\..+\.push)$"
 )
 _GIT_CONFIG_PUSH_ROUTING_SECTION_RE = re.compile(r"(?i)^branch(?:\.|$)")
 

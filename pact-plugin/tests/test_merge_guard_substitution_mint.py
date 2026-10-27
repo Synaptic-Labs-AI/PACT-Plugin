@@ -1595,6 +1595,15 @@ PUSH_ROUTING_CHANGES = {
     "push-set-upstream-short": ("git push -u upstream feat/x", "git push -u fork feat/x"),
     "push-set-upstream-long": ("git push --set-upstream upstream feat/x", "git push --set-upstream fork feat/x"),
     "push-set-upstream-bundled": ("git push -qu upstream feat/x", "git push -qu fork feat/x"),
+    "config-remote-push": ("git config remote.origin.push refs/heads/feat/x:refs/heads/main",
+                           "git config remote.origin.push refs/heads/feat/x:refs/heads/dev"),
+    "config-add-remote-push": ("git config --add remote.origin.push refs/heads/feat/x:refs/heads/main",
+                               "git config --add remote.origin.push refs/heads/feat/x:refs/heads/dev"),
+    "config-replace-all-remote-push": ("git config --replace-all remote.origin.push refs/heads/x:refs/heads/main",
+                                       "git config --replace-all remote.origin.push refs/heads/x:refs/heads/dev"),
+    "config-unset-remote-push": ("git config unset remote.origin.push", "git config unset remote.upstream.push"),
+    "config-remote-push-case": ("git config Remote.origin.PUSH refs/heads/x:refs/heads/main",
+                                "git config Remote.origin.PUSH refs/heads/x:refs/heads/dev"),
     "config-push-default": ("git config push.default matching", "git config push.default current"),
     "config-set-push-default-case": ("git config set Push.Default matching", "git config set Push.Default current"),
     "config-branch-merge": ("git config branch.feat/x.merge refs/heads/main", "git config branch.feat/x.merge refs/heads/dev"),
@@ -1651,6 +1660,8 @@ class TestAnUpstreamOrPushRoutingChangeMovesAPushNamingNoRef:
         (_FORCE, "git push origin feat/x && " + _FORCE),
         (_PUSH_X, "git push -u upstream feat/x && " + _PUSH_X),
         (MERGE + "--squash", "git push -u upstream feat/x && " + MERGE + "--squash"),
+        (_FORCE, "git config --get remote.origin.push && " + _FORCE),
+        (_PUSH_X, "git config remote.origin.push refs/heads/feat/x:refs/heads/main && " + _PUSH_X),
         (_FORCE, "git config --get push.default && " + _FORCE),
         (_FORCE, "git config push.followTags true && " + _FORCE),
         (_PUSH_X, "git config push.default matching && " + _PUSH_X),
@@ -1659,7 +1670,8 @@ class TestAnUpstreamOrPushRoutingChangeMovesAPushNamingNoRef:
             "named-ref-push-branch-u", "named-ref-push-config", "gh-merge-branch-u", "gh-merge-config", "numbered-merge",
             "config-get-push-default", "config-other-push-key", "named-ref-push-default", "gh-merge-branch-merge",
             "timeout-branch-list", "env-checkout-paths",
-            "push-without-upstream", "named-ref-push-set-upstream", "gh-merge-push-set-upstream"])
+            "push-without-upstream", "named-ref-push-set-upstream", "gh-merge-push-set-upstream",
+            "config-get-remote-push", "named-ref-push-remote-push"])
     def test_a_plain_approval_still_covers_it(self, plain, command):
         assert _runs(_mint_styled(plain, APPROVAL_STYLES["inline"]), command)
 
