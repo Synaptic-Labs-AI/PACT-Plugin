@@ -4,8 +4,8 @@ Location: pact-plugin/hooks/merge_guard_post.py
 Summary: PostToolUse hook matching AskUserQuestion + Bash — writes a short-lived
          authorization token on AskUserQuestion approval; retires the consuming
          token on successful `gh pr merge` Bash invocation. On PostToolUseFailure
-         (Bash) it retires the token only when the call's output shows the guarded
-         op itself succeeded before a later step failed.
+         (Bash) it retires the token once the guarded op has run, unless the
+         call's output shows that op's own failure.
 Used by: hooks.json PostToolUse hook (matcher: AskUserQuestion|Bash) and
          PostToolUseFailure hook (matcher: Bash)
 
@@ -1897,6 +1897,16 @@ _GH_RESULT_RE = re.compile(r"(?im)\b(merged|closed) pull request (?:[\w.-]+/[\w.
 # `   a1..b2  main -> main`, ` * [new branch] x -> x`); a rejected ref's line starts `!`.
 _GIT_PUSH_UPDATE_RE = re.compile(r"(?m)^(?!\s*!).*?->\s*(\S+)")
 _GIT_DELETED_RE = re.compile(r"(?m)^[ \t]*-[ \t]+\[deleted\]")
+# A terminal colour code, which a coloured run's output carries.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+# git's own failure lines (`fatal: unable to access …`, `error: failed to push some refs`).
+_GIT_FAILURE_LINE_RE = re.compile(r"^(?:fatal|error):")
+# gh's failure lines for a PR (`X Pull request #5 is not mergeable: …`, `GraphQL: …`,
+# `HTTP 404: Not Found`, `no pull requests found for branch "x"`).
+_GH_FAILURE_LINE_RE = re.compile(
+    r"(?i)^\s*(?:[X\u2717\u00d7]\s|GraphQL:|HTTP \d{3}\b|(?:failed|could not|unable|error)\b)"
+    r"|\bnot mergeable\b|\bno pull requests? found\b"
+)
 
 
 def _failure_output_shows_success(command: str, op_type: str, output: str) -> bool:
@@ -1904,6 +1914,7 @@ def _failure_output_shows_success(command: str, op_type: str, output: str) -> bo
     merged or closed line for the op's PR, git push's update line for the op's ref
     (any ref for a push that names none), git's deleted line for a remote ref, or
     `Deleted branch <b>` for the op's branch. Anything else keeps the token."""
+    output = _ANSI_RE.sub("", output)
     ctx = extract_command_context(
         _single_destructive_leg(command) or _single_detectable_leg(command) or command
     )
@@ -1930,11 +1941,62 @@ def _failure_output_shows_success(command: str, op_type: str, output: str) -> bo
     return False
 
 
+def _names(line: str, name: str) -> bool:
+    """Whether `line` names the ref or branch `name` as a word of its own."""
+    return re.search(r"(?<![\w/.-])(?:refs/heads/)?" + re.escape(name) + r"(?![\w/.-])", line) is not None
+
+
+def _failure_output_shows_op_failed(command: str, op_type: str, output: str) -> bool:
+    """Whether a failed call's output shows its guarded op's own failure: for a
+    push, git's refused line (`!`) for the op's ref (any ref for a push that names
+    none) or a `fatal:`/`error:` line; for a branch delete, a `fatal:` line or an
+    `error:` line naming the branch; for a merge or close, gh's failure line. Colour
+    codes are read past; splitlines() also ends a line at a carriage return."""
+    lines = _ANSI_RE.sub("", output).splitlines()
+    ctx = extract_command_context(
+        _single_destructive_leg(command) or _single_detectable_leg(command) or command
+    )
+    if op_type in ("merge", "close"):
+        return any(_GH_FAILURE_LINE_RE.search(line) for line in lines)
+    if op_type == "branch-delete":
+        branch = ctx.get("branch")
+        return any(
+            line.startswith("fatal:")
+            or (line.startswith("error:") and (not isinstance(branch, str) or _names(line, branch)))
+            for line in lines
+        )
+    ref = ctx.get("target_ref")
+    return any(
+        _GIT_FAILURE_LINE_RE.match(line)
+        or (line.lstrip().startswith("!") and (not isinstance(ref, str) or _names(line, ref)))
+        for line in lines
+    )
+
+
+def _failed_call_keeps_token(command: str, op_type: str, output: str, frame_cwd: object) -> bool:
+    """Whether a failed call's token stays for a retry: never when the op's own
+    success line shows; else when its own failure shows; else, for a merge or close
+    whose PR state can be read, when that state is not the one the op produces. Any
+    other doubt retires it."""
+    if _failure_output_shows_success(command, op_type, output):
+        return False
+    if _failure_output_shows_op_failed(command, op_type, output):
+        return True
+    if op_type in _CONFIRMING_STATE:
+        state = _pr_state(_merge_reading(command) if op_type == "merge" else command, frame_cwd)
+        return bool(state) and state != _CONFIRMING_STATE[op_type]
+    return False
+
+
 def _retire_after_failed_call(input_data: dict) -> None:
-    """A Bash call whose guarded op succeeded and whose later step failed ends in
-    PostToolUseFailure. Its `error` text carries the call's stdout and stderr; when
-    they show the op's own success, the op ran, so its token retires and the
-    approval runs that op once. Never raises."""
+    """A Bash call whose guarded op ran and whose later step failed ends in
+    PostToolUseFailure. Its `error` text carries the call's stdout and stderr, cut to
+    its head and tail when long. A quiet, porcelain, coloured or truncated success
+    prints no success line, so the token retires unless the output or the PR state
+    shows the op failed (_failed_call_keeps_token): one approval, one op. A failed op
+    whose failure does not show, or an op an earlier `&&` leg kept from running,
+    costs one re-approval. An interrupted call or a dry run keeps the token. Never
+    raises."""
     try:
         tool_input = input_data.get("tool_input")
         command = tool_input.get("command") if isinstance(tool_input, dict) else None
@@ -1948,7 +2010,11 @@ def _retire_after_failed_call(input_data: dict) -> None:
             return
         runs = _rewrite_git_aliases(command)
         op_type = detect_command_operation_type(runs)
-        if op_type and not _op_did_not_run(runs) and _failure_output_shows_success(runs, op_type, output):
+        if (
+            op_type
+            and not _op_did_not_run(runs)
+            and not _failed_call_keeps_token(runs, op_type, output, input_data.get("cwd"))
+        ):
             _retire_token_for_command(runs, op_type)
     except Exception:  # noqa: BLE001 - any doubt keeps the token
         return
