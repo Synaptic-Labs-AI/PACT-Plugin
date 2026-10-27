@@ -10,7 +10,9 @@
 #   left alone, so a run with nothing missing is a no-op and a failed run is
 #   repaired by the next one (self-healing, idempotent). One limit: once main's
 #   .github/workflows changes after a bump commit, that version's tag can be
-#   pushed only with RELEASE_TOKEN (see THE TOKEN below).
+#   pushed only with RELEASE_TOKEN or by hand. Without the token such a
+#   version is skipped with a warning and everything else is still released
+#   (see THE TOKEN below).
 #
 # EVERY VERSION-BUMPING PR MUST ADD ITS SECTION TO CHANGELOG.md
 #   The tag message and the release notes are hand-written, as they were when
@@ -46,34 +48,39 @@
 #   warning). No valid section anywhere stops the run before anything is
 #   created.
 #
-# THE TOKEN (RELEASE_TOKEN is required once workflows drift from a bump)
+# THE TOKEN (RELEASE_TOKEN is optional; it backfills drifted versions)
 #   GitHub checks the commit a new tag points at: if that commit's
 #   `.github/workflows/` differs from the default branch's, creating the tag
 #   counts as creating or updating workflow files, which needs workflows
 #   permission. The built-in GITHUB_TOKEN never has it, so it is ALWAYS
 #   refused ("refusing to allow a GitHub App to create or update workflow
-#   ... without `workflows` permission"). A `RELEASE_TOKEN` is therefore
-#   REQUIRED whenever main's .github/workflows has changed since the bump
-#   commit being tagged. Drift decides this, not age: an old bump on
-#   unchanged workflows tags fine without it, and a fresh one needs it if a
+#   ... without `workflows` permission"). Such a version is DRIFTED. Drift
+#   decides this, not age: an old bump on unchanged workflows tags fine
+#   with the built-in token, and a fresh one is drifted if a
 #   workflow-editing PR merged before its release run succeeded (every
-#   backfill so far, and any repair after a workflow change). It needs, on
-#   this repository only:
-#     Contents: Read and write   (push tags, create releases)
-#     Workflows: Read and write  (tags on commits whose workflow files
-#                                 differ from the default branch)
-#   Without it, the run checks every tag it still has to push before it
-#   creates anything: if any of them is on a commit whose workflows differ
-#   from the commit the run is on, it stops with one ::error:: listing those
-#   tags and this fix. Releases whose tag already exists push nothing, so
-#   they are never listed as blocked, but they wait too: the error stops the
-#   whole run, repairs included. A refused push is still explained by name,
-#   as a backstop.
+#   backfill so far, and any repair after a workflow change).
+#   Normal releases need no RELEASE_TOKEN. A drifted version needs either:
+#   - a `RELEASE_TOKEN` with, on this repository only:
+#       Contents: Read and write   (push tags, create releases)
+#       Workflows: Read and write  (tags on commits whose workflow files
+#                                   differ from the default branch)
+#     after which a run on main tags and releases it; or
+#   - its annotated tag pushed by hand from a maintainer machine, with the
+#     CHANGELOG.md heading minus `## ` as the message, on the commit that
+#     set the version. The next run then creates only the release, which
+#     the built-in token may do.
+#   Without the token, the run checks every tag it still has to push before
+#   it creates anything. Drifted ones are SKIPPED, untouched (no tag, no
+#   release), with one ::warning:: listing them and both fixes; every other
+#   version, and every release whose tag already exists, is still created,
+#   and the run succeeds. With the token nothing is skipped. A refused push
+#   is still explained by name, as a backstop.
 #
-#   WHERE IT LIVES (one-time setup, REQUIRED). A token with Workflows write
-#   must not be readable by a workflow on an arbitrary branch: a repository
-#   secret is passed to workflows on ANY branch, so anyone with write access
-#   could push a branch whose workflow sends it out. So:
+#   WHERE IT LIVES (one-time setup, REQUIRED if you add the token). A token
+#   with Workflows write must not be readable by a workflow on an arbitrary
+#   branch: a repository secret is passed to workflows on ANY branch, so
+#   anyone with write access could push a branch whose workflow sends it
+#   out. So:
 #   1. Create an environment named `release` (Settings -> Environments ->
 #      New environment -> release) and set Deployment branches and tags to
 #      "Selected branches and tags" -> `main`. Required reviewers are
@@ -89,7 +96,7 @@
 #   not exist, GitHub creates it on first use with NO branch restriction and
 #   no secret. An unset secret reads as an empty string, so
 #   `secrets.RELEASE_TOKEN || github.token` falls back to GITHUB_TOKEN, and
-#   a tag on a drifted commit stops the run with the ::error:: above. Each
+#   a drifted version is skipped with the ::warning:: above. Each
 #   run without RELEASE_TOKEN says so with a ::notice::, and each run reads
 #   the `release` environment with the built-in token, through its
 #   actions: read permission (RELEASE_TOKEN needs nothing beyond the two
@@ -141,6 +148,10 @@
 #   A backfill run can create several releases at once. Each one is created
 #   with --latest=false except the highest version across all tags, so an old
 #   version filled in late never takes the Latest badge from a newer one.
+#   Skipped (drifted) versions count when picking the highest: if the
+#   highest is skipped, no release made by that run is Latest, and an older
+#   one is never promoted in its place. Its own release takes the badge once
+#   its tag exists and a later run creates it.
 #
 # UNTRUSTED INPUT
 #   Notes files are committed text. They reach git and gh only through files
@@ -149,13 +160,14 @@
 #   repository name and tokens, passed in through `env:` and `with:`.
 #
 # FAILURE IS LOUD
-#   The script runs under `set -euo pipefail`. Tags that need RELEASE_TOKEN
-#   while it is missing (listed before anything is created), a rejected tag
-#   push (an under-scoped RELEASE_TOKEN, explained by name, or a
-#   tag-protection ruleset), a failed release call, a missing or
-#   malformed notes file, a malformed version, a failed token-owner lookup,
-#   or an existing tag that points at a different commit than the one that
-#   set its version all fail the run; nothing is skipped silently. Tags are
+#   The script runs under `set -euo pipefail`. A rejected tag push (an
+#   under-scoped RELEASE_TOKEN, explained by name, or a tag-protection
+#   ruleset), a failed release call, a missing or malformed notes section
+#   (checked for skipped versions too, before anything is created), a
+#   malformed version, a failed token-owner lookup, or an existing tag that
+#   points at a different commit than the one that set its version all
+#   fail the run. The one thing skipped is a drifted version without
+#   RELEASE_TOKEN, and never silently: a ::warning:: names it. Tags are
 #   never moved.
 
 name: release
@@ -232,7 +244,7 @@ jobs:
           TOKEN_SETUP="a RELEASE_TOKEN secret (fine-grained token, this repository only, Contents: Read and write + Workflows: Read and write) stored in the \`release\` environment limited to main, NOT as a repository secret"
 
           if [ "$USE_RELEASE_TOKEN" != "true" ]; then
-            echo "::notice::running without RELEASE_TOKEN (using GITHUB_TOKEN as github-actions[bot]); tags on commits whose .github/workflows differs from main cannot be pushed"
+            echo "::notice::running without RELEASE_TOKEN (using GITHUB_TOKEN as github-actions[bot]); normal releases work, but a version whose bump commit's .github/workflows differs from main is skipped until its tag is pushed by hand or RELEASE_TOKEN is added"
           fi
 
           # Best effort: warn unless the `release` environment allows exactly
@@ -397,9 +409,9 @@ jobs:
           # "without `workflows` permission" for the GitHub App token and
           # "without `workflow` scope" for a classic PAT, gets an error that
           # names the fix, which depends on whether RELEASE_TOKEN is set. The
-          # pre-pass below already stops a run without RELEASE_TOKEN before
-          # such a push, so this is the backstop. Any other failure stops the
-          # run too.
+          # pre-pass below already skips such a tag in a run without
+          # RELEASE_TOKEN, so this is the backstop. Any other failure stops
+          # the run too.
           push_tag() {
             local rc=0
             git push origin "refs/tags/$1" 2> "$work_dir/push_err" || rc=$?
@@ -489,12 +501,14 @@ jobs:
           #     person);
           #   - every version that still needs a tag or a release must have a
           #     well-formed notes file;
-          #   - without RELEASE_TOKEN, no tag still to be pushed may sit on a
-          #     commit whose .github/workflows differs from this run's commit
-          #     (GitHub refuses that push to GITHUB_TOKEN). These are collected
-          #     and reported together after the loop, so notes errors still
-          #     surface first. Tags that already exist push nothing and are
-          #     never blocked.
+          #   - without RELEASE_TOKEN, a tag still to be pushed on a commit
+          #     whose .github/workflows differs from this run's commit is
+          #     DRIFTED: GitHub refuses that push to GITHUB_TOKEN. Drifted
+          #     versions are collected here and SKIPPED below (no tag, no
+          #     release), with one warning after the loop, so the rest of the
+          #     run still goes ahead. Their notes are still checked, because
+          #     a tag pushed by hand later needs them for its release. Tags
+          #     that already exist push nothing and are never skipped.
           need_tag=false
           : > "$work_dir/drifted"
           while read -r sha version <&3; do
@@ -506,19 +520,32 @@ jobs:
                 exit 1
               fi
               has_release "$tag" && continue
+            elif [ "$USE_RELEASE_TOKEN" != "true" ] &&
+              ! git diff --quiet "$sha" HEAD -- .github/workflows; then
+              echo "$tag" >> "$work_dir/drifted"
             else
               need_tag=true
-              if [ "$USE_RELEASE_TOKEN" != "true" ] &&
-                ! git diff --quiet "$sha" HEAD -- .github/workflows; then
-                echo "$tag" >> "$work_dir/drifted"
-              fi
             fi
             load_notes "$sha" "$version"
           done 3< "$work_dir/bumps"
 
+          # Not an error: every other version is still released. Once these
+          # tags exist (pushed by hand, or by a run with RELEASE_TOKEN), a
+          # later run creates their releases with the built-in token.
           if [ -s "$work_dir/drifted" ]; then
-            echo "::error::cannot push $(paste -sd' ' "$work_dir/drifted") without ${TOKEN_SETUP}: each tagged commit's .github/workflows differs from main, and GitHub refuses that push to the built-in GITHUB_TOKEN. Nothing was created. Add the secret, then rerun this workflow on main. See \"THE TOKEN\" at the top of release.yml."
-            exit 1
+            echo "::warning::skipped $(paste -sd' ' "$work_dir/drifted") (no tag, no release): each bump commit's .github/workflows differs from main, and GitHub refuses that tag push to the built-in GITHUB_TOKEN. To release them, either add ${TOKEN_SETUP} and rerun this workflow on main, or push those annotated tags (message = the CHANGELOG.md heading minus \`## \`) from a maintainer machine; the next run then creates only their releases, which needs no token. See \"THE TOKEN\" at the top of release.yml."
+          fi
+
+          is_skipped() {
+            grep -qxF -- "$1" "$work_dir/drifted"
+          }
+
+          # Latest stays the highest version overall, even when it is
+          # skipped: then no release made by this run is Latest (an older
+          # one is never promoted), and the release made once its tag
+          # exists takes the badge.
+          if is_skipped "v$latest_version"; then
+            echo "v$latest_version is skipped, so no release made by this run is marked Latest"
           fi
 
           TAGGER_NAME=""
@@ -532,6 +559,10 @@ jobs:
           # The list is read on fd 3 so no command in the loop can eat it from stdin.
           while read -r sha version <&3; do
             tag="v$version"
+            if is_skipped "$tag"; then
+              echo "$tag: skipped (drifted; see the warning above)"
+              continue
+            fi
             if tag_exists "$tag" && has_release "$tag"; then
               echo "$tag: tag and release exist; skipping"
               warn_if_draft "$tag"
