@@ -406,15 +406,12 @@ class TestAFailedCallRetiresUnlessItsOpFailed:
         "remote: Repository not found.",
         "fatal: Authentication failed for 'https://github.com/o/r.git/'",
     ], ids=["unable-to-access", "could-not-read", "no-upstream", "repo-not-found", "auth-failed"])
-    def test_a_remote_line_keeps_it_only_when_the_push_is_the_only_leg(self, rig, line):
-        alone = "git push -q --" + "force origin feat/x"
-        _mint(rig, alone)
-        _post_failure(rig, alone, "Exit code 1\n" + line)
-        assert not _retired(rig)
-        beside = alone + "; ./notify.sh"
-        _mint(rig, beside)
-        _post_failure(rig, beside, "Exit code 1\n" + line + "\nnotify: failed")
-        assert _retired(rig)
+    @pytest.mark.parametrize("beside", [False, True], ids=["alone-kept", "beside-a-step-retired"])
+    def test_a_remote_line_keeps_it_only_when_the_push_is_the_only_leg(self, rig, line, beside):
+        cmd = "git push -q --" + "force origin feat/x" + ("; ./notify.sh" if beside else "")
+        _mint(rig, cmd)
+        _post_failure(rig, cmd, "Exit code 1\n" + line + ("\nnotify: failed" if beside else ""))
+        assert _retired(rig) is beside
 
     @pytest.mark.parametrize("cmd,error", [
         ("git branch -q -" + "D feat/x; ./notify.sh", "Exit code 1\nerror: branch 'feat/x' not found.\nnotify: failed"),
