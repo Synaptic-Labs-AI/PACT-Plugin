@@ -693,7 +693,8 @@ def test_a_shell_running_a_written_file_with_flags_or_arguments_is_judged_as_its
     from shared.merge_guard_common import rewritten_executed_command
 
     assert is_dangerous_command(cmd) is True
-    assert rewritten_executed_command(cmd).endswith(M)
+    rewritten = rewritten_executed_command(cmd)
+    assert rewritten is not None and rewritten.endswith(M)
 
 
 HEREDOC_WRITER_FORMS_DENY = [
@@ -719,7 +720,8 @@ def test_a_heredoc_written_by_cat_or_tee_then_run_is_judged_as_its_text(label, c
     from shared.merge_guard_common import rewritten_executed_command
 
     assert is_dangerous_command(cmd) is True
-    assert rewritten_executed_command(cmd).count(M) == 1
+    rewritten = rewritten_executed_command(cmd)
+    assert rewritten is not None and rewritten.count(M) == 1
 
 
 @pytest.mark.parametrize("label,cmd", HEREDOC_APPENDS_KEEP_EARLIER_TEXT,
@@ -733,7 +735,8 @@ def test_a_heredoc_only_printed_keeps_its_text_in_the_report():
 
     for cat in ("cat", "cat -n"):
         cmd = f"{cat} <<'EOF'\nnote {M}\nEOF\necho 'echo hi' > f; bash f"
-        assert f"note {M}" in rewritten_executed_command(cmd)
+        rewritten = rewritten_executed_command(cmd)
+        assert rewritten is not None and f"note {M}" in rewritten
 
 
 @pytest.mark.parametrize("label,cmd", HEREDOC_WRITER_FORMS_ALLOW, ids=[r[0] for r in HEREDOC_WRITER_FORMS_ALLOW])
@@ -758,6 +761,7 @@ def test_a_heredoc_written_script_is_reported_running_its_command_once(label, cm
 
     assert is_dangerous_command(cmd) is True
     rewritten = rewritten_executed_command(cmd)
+    assert rewritten is not None
     assert rewritten.count(runs) == 1
     assert is_compound_destructive_command(rewritten) is False
     result = _mint(cmd)
@@ -769,7 +773,9 @@ def test_a_heredoc_written_script_running_two_commands_stays_compound():
 
     cmd = f"cat > /tmp/m.sh <<'EOF'\n{M}\n{M[:-1]}6\nEOF\nbash /tmp/m.sh"
     assert is_dangerous_command(cmd) is True
-    assert is_compound_destructive_command(rewritten_executed_command(cmd)) is True
+    rewritten = rewritten_executed_command(cmd)
+    assert rewritten is not None
+    assert is_compound_destructive_command(rewritten) is True
 
 
 @pytest.mark.parametrize("label,cmd", INTERPRETER_FILE_RUN_DENY, ids=[r[0] for r in INTERPRETER_FILE_RUN_DENY])
@@ -779,7 +785,8 @@ def test_an_interpreter_running_a_file_the_command_wrote_is_judged_as_its_progra
     assert is_dangerous_command(cmd) is True
     rewritten = rewritten_executed_command(cmd)
     assert rewritten is not None and "<<'PACT_FILE_RUN'\n" in rewritten
-    assert interpreter_command_context(rewritten)["operation_type"] in ("merge", "force-push")
+    ctx = interpreter_command_context(rewritten)
+    assert ctx is not None and ctx["operation_type"] in ("merge", "force-push")
 
 
 @pytest.mark.parametrize("label,cmd,rewritten", INTERPRETER_FILE_RUN_ALLOW,

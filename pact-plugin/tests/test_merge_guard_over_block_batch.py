@@ -93,7 +93,9 @@ def _execute(cmd: str, tmp_path) -> int:
          patch("sys.stdout", io.StringIO()):
         with pytest.raises(SystemExit) as exc_info:
             pre_main()
-    return exc_info.value.code
+    code = exc_info.value.code
+    assert isinstance(code, int), code
+    return code
 
 
 # ===========================================================================
@@ -402,6 +404,7 @@ class TestMintWindowAnchorFaithfulShapes:
         (an under-bind would mint [] → the faithful re-exec would DENY)."""
         n, ctx = _mint_ctx(desc, tmp_path)
         assert n == 1
+        assert ctx is not None
         assert ctx["bound_flags"] == ["--admin"], (
             f"faithful shape under-bound the truncation-recovery flag: {desc!r}"
         )
@@ -417,6 +420,7 @@ class TestMintWindowAnchorFaithfulShapes:
         as the boundary of the faithful-shape guarantee above."""
         n, ctx = _mint_ctx(f"On approval run: {{{self.TRUNC}}}", tmp_path)
         assert n == 1
+        assert ctx is not None
         assert ctx["bound_flags"] == []  # safe over-block: no --admin bound
         # over-block direction only: the faithful execution DENIES (never authorizes)
         assert _authorize(self.TRUNC, tmp_path) is not None

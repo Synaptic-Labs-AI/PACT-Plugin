@@ -453,6 +453,7 @@ class TestACommandHeldInAVariableForAScriptRuns:
         ctx = _mint_styled(command, style)
         assert _runs(ctx, command)
         op, field, value = SCRIPT_VARIABLE_TARGETS[key]
+        assert ctx is not None
         assert (ctx["operation_type"], ctx[field]) == (op, value)
 
     @pytest.mark.parametrize("command", DATA_VARIABLES.values(), ids=DATA_VARIABLES.keys())
@@ -750,6 +751,7 @@ class TestADryRunOrAutoApprovalRunsOnlyItself:
     @pytest.mark.parametrize("style", APPROVAL_STYLES.values(), ids=APPROVAL_STYLES.keys())
     def test_an_approval_of_the_real_push_keeps_its_target_binding(self, style):
         ctx = _mint_styled(FORCE + "feat/x", style)
+        assert ctx is not None
         assert "command_text" not in ctx
         assert _runs(ctx, FORCE + "feat/x")
 
@@ -791,6 +793,7 @@ class TestProseBesideAQuotedGuardedCommandBindsNothing:
     def test_a_flag_in_prose_binds_nothing(self, prose):
         command = MERGE + "5 --squash"
         ctx = _mint_styled(command, prose)
+        assert ctx is not None
         assert ctx["bound_flags"] == []
         assert _runs(ctx, command)
         assert not _runs(ctx, command + " --admin")
@@ -798,6 +801,7 @@ class TestProseBesideAQuotedGuardedCommandBindsNothing:
 
     def test_a_prose_only_approval_keeps_its_flags(self):
         ctx = _mint_styled(MERGE + "5", lambda c: f"Run {c} --admin now")
+        assert ctx is not None
         assert ctx["bound_flags"] == ["--admin"]
 
 

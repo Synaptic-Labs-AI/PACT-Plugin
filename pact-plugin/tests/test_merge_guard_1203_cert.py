@@ -395,6 +395,7 @@ class TestDimAMintForcePush:
         assert _execute(cmd, tmp_path) == _DENY, "gated row ALLOWED with no token: %r" % cmd
         minted, ctx = _mint(cmd, tmp_path)
         assert minted == 1, "OVER-BLOCK persists — implicit force-push gates but does NOT mint: %r" % cmd
+        assert ctx is not None
         assert ctx.get("operation_type") == "force-push", "wrong op: %r" % ctx.get("operation_type")
         assert _won_key(ctx) == "force_push_implicit", (
             "implicit force-push bound the wrong key: %r (expected force_push_implicit): %r"
@@ -418,6 +419,7 @@ class TestDimAMintMerge:
         assert _execute(cmd, tmp_path) == _DENY, "gated bare merge ALLOWED with no token: %r" % cmd
         minted, ctx = _mint(cmd, tmp_path)
         assert minted == 1, "OVER-BLOCK persists — bare merge gates but does NOT mint: %r" % cmd
+        assert ctx is not None
         assert ctx.get("operation_type") == "merge", "wrong op: %r" % ctx.get("operation_type")
         assert _won_key(ctx) == "merge_implicit", (
             "bare merge bound the wrong key: %r (expected merge_implicit): %r" % (_won_key(ctx), cmd)
@@ -472,6 +474,7 @@ class TestDimBOffTokenRoundTrip:
         assert _execute(cmd, tmp_path) == _DENY, "gate not live at exec time (no token): %r" % cmd
         minted, ctx = _mint(cmd, tmp_path)
         assert minted == 1, "did not mint: %r" % cmd
+        assert ctx is not None
         sentinel = ctx.get("force_push_implicit") or ctx.get("merge_implicit")
         # force_push_implicit may be the plain sentinel (truly-implicit 0-positional) OR a
         # cycle-4 netstring-qualified `SENTINEL + <_canonical_join([positional])>` (1-positional).

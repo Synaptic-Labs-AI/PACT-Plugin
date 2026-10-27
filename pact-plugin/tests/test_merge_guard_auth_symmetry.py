@@ -97,7 +97,9 @@ def _invoke_post(questions: list, answers: dict, tmp) -> int:
          patch("sys.stdin", io.StringIO(envelope)):
         with pytest.raises(SystemExit) as exc:
             _post_main()
-    return exc.value.code
+    code = exc.value.code
+    assert isinstance(code, int), code
+    return code
 
 
 def _invoke_pre(command: str, tmp) -> tuple[int, str]:
@@ -113,7 +115,9 @@ def _invoke_pre(command: str, tmp) -> tuple[int, str]:
          patch("sys.stdout", out):
         with pytest.raises(SystemExit) as exc:
             _pre_main()
-    return exc.value.code, out.getvalue()
+    code = exc.value.code
+    assert isinstance(code, int), code
+    return code, out.getvalue()
 
 
 def _authorize(command: str, tmp) -> str | None:

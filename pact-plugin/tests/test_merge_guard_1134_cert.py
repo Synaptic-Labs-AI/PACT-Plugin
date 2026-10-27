@@ -708,6 +708,7 @@ class TestD2Mintability:
             "gated row did NOT mint — the cardinal gated-but-unmintable OVER-BLOCK: %r" % row
         )
         # which-key-won, OFF THE TOKEN (whole-command extract binds nothing on compounds).
+        assert ctx is not None
         assert ctx.get("operation_type") == op, (
             "token bound the wrong op: got %r, expected %r for %r"
             % (ctx.get("operation_type"), op, row)
@@ -782,6 +783,7 @@ class TestD2MintPinCloseAndBranchDelete:
             "GATE-PINNED BUT NOT MINT-PINNED — %s in a non-first leg gates but does not "
             "mint (the exclusion the 4-tuple probe hid): %r" % (op, cmd)
         )
+        assert ctx is not None
         assert ctx.get("operation_type") == op, (
             "token bound wrong op: got %r expected %r for %r"
             % (ctx.get("operation_type"), op, cmd)
@@ -824,6 +826,7 @@ class TestCloseUrlBranchNowGateAndMint:
             "OVER-BLOCK persists — the faithful close form gates but does NOT mint "
             "(gated-but-unmintable): %r" % cmd
         )
+        assert ctx is not None
         assert ctx.get("operation_type") == "close", (
             "token bound the wrong op: %r for %r" % (ctx.get("operation_type"), cmd)
         )
@@ -879,6 +882,7 @@ class TestCloseRepoValueMisbindClosed:
         assert D(cmd) is True, "faithful --repo close form not gated: %r" % cmd
         minted, ctx = _mint(cmd, tmp_path)
         assert minted == 1, "faithful --repo close form did not mint: %r" % cmd
+        assert ctx is not None
         assert ctx.get("operation_type") == "close"
         assert ctx.get("pr_number") == "branch:feature", (
             "MIS-BIND: --repo value shadowed the branch positional — bound %r, expected "
@@ -953,6 +957,7 @@ class TestCloseHostWidenGateAndMint:
             "OVER-BLOCK persists — widened-host close gates but does NOT mint "
             "(gated-but-unmintable): %r" % cmd
         )
+        assert ctx is not None
         assert ctx.get("operation_type") == "close", (
             "token bound the wrong op: %r for %r" % (ctx.get("operation_type"), cmd)
         )
@@ -1086,6 +1091,7 @@ class TestMergeExtractorUnchangedByCloseFold:
         # Behavioral backstop through the REAL post hook: merge still mints the positional.
         cmd = _GH + "merge 42 --comment 99 --admin"
         minted, ctx = _mint(cmd, tmp_path)
+        assert ctx is not None
         assert minted == 1 and ctx.get("pr_number") == "42", (
             "merge no longer mints the positional PR through the real hook: minted=%s pr=%r"
             % (minted, ctx.get("pr_number") if ctx else None)

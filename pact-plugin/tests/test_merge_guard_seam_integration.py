@@ -224,7 +224,9 @@ class TestSeamMainEntryPoints:
              patch("sys.stdin", io.StringIO(self._post_envelope(questions, answers))):
             with pytest.raises(SystemExit) as exc:
                 _post_main()
-        return exc.value.code
+        code = exc.value.code
+        assert isinstance(code, int), code
+        return code
 
     def _run_pre(self, command, tmp) -> tuple[int, str]:
         out = io.StringIO()
@@ -233,7 +235,9 @@ class TestSeamMainEntryPoints:
              patch("sys.stdout", out):
             with pytest.raises(SystemExit) as exc:
                 _pre_main()
-        return exc.value.code, out.getvalue()
+        code = exc.value.code
+        assert isinstance(code, int), code
+        return code, out.getvalue()
 
     @pytest.mark.parametrize("pr", ["252", "1029"])
     def test_main_to_main_conforming_authorizes(self, tmp_path, pr):
@@ -357,7 +361,9 @@ class TestNoMintAdvisory1052:
              patch("sys.stdout", out):
             with pytest.raises(SystemExit) as exc:
                 _post_main()
-        return exc.value.code, out.getvalue()
+        code = exc.value.code
+        assert isinstance(code, int), code
+        return code, out.getvalue()
 
     def _pre_envelope(self, command) -> str:
         return json.dumps({
@@ -373,7 +379,9 @@ class TestNoMintAdvisory1052:
              patch("sys.stdout", out):
             with pytest.raises(SystemExit) as exc:
                 _pre_main()
-        return exc.value.code, out.getvalue()
+        code = exc.value.code
+        assert isinstance(code, int), code
+        return code, out.getvalue()
 
     @staticmethod
     def _additional_context(stdout: str) -> str | None:

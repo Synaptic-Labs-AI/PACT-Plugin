@@ -121,18 +121,21 @@ GHAPI_DEL = "gh " + "api " + _DEL                # gh-api destructive DELETE
 # ── Bidirectional assertion helpers (non-vacuity baked in) ───────────────────────────────
 def _closure(cmd):
     """OVER-BLOCK CLOSURE: over-blocked at base (non-vacuous) -> freed at HEAD."""
+    assert D_BASE is not None
     assert D_BASE(cmd) is True, "vacuous: not over-blocked at c21eae19 base: %r" % (cmd,)
     assert D(cmd) is False, "over-block NOT closed at HEAD (faithful click still blocked): %r" % (cmd,)
 
 
 def _retention(cmd):
     """RETENTION: caught at base (non-vacuous) AND still caught at HEAD (no under-block)."""
+    assert D_BASE is not None
     assert D_BASE(cmd) is True, "vacuous: not caught at c21eae19 base: %r" % (cmd,)
     assert D(cmd) is True, "UNDER-BLOCK opened at HEAD (a real danger was freed): %r" % (cmd,)
 
 
 def _control_false(cmd):
     """Benign / never-blocked: False on both (proves closures are not blanket-freeing)."""
+    assert D_BASE is not None
     assert D_BASE(cmd) is False and D(cmd) is False, "benign control not False==both: %r" % (cmd,)
 
 
@@ -462,6 +465,7 @@ class TestMonotonicity:
     @pytest.mark.parametrize("cmd", _MONOTONICITY_BATTERY)
     def test_no_new_over_block(self, cmd):
         # If it was NOT over-blocked at base, the strip must not newly block it.
+        assert D_BASE is not None
         if D_BASE(cmd) is False:
             assert D(cmd) is False, "MONOTONICITY VIOLATION: strip created a new over-block: %r" % (cmd,)
 
@@ -486,6 +490,7 @@ class TestIsDangerousByteIdentity:
     @requires_history
     @pytest.mark.parametrize("cmd", _BYTE_IDENTITY_BATTERY)
     def test_pre_existing_battery_unchanged(self, cmd):
+        assert D_BASE is not None
         assert D_BASE(cmd) == D(cmd), \
             "shared-predicate extraction changed a pre-existing classification: %r" % (cmd,)
 
