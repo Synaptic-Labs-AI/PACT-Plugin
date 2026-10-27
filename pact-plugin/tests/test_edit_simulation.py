@@ -115,6 +115,7 @@ def test_an_old_string_that_matches_nowhere_changes_nothing():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("pins, expected", [(13, "deny"), (12, "allow")])
+@pytest.mark.claude_md_ambient  # §11.3.1 (a)/M3: counting outcome needs the no-CLAUDE.md world
 def test_an_edit_that_creates_the_file_is_counted_by_its_own_pins(tmp_path, pins, expected):
     target = tmp_path / ".claude" / "CLAUDE.md"
     assert not target.exists()

@@ -5,6 +5,8 @@ This conftest.py is intentionally thin. It owns:
 - sys.path setup for tests/, hooks/, skills/pact-memory/ (and its scripts/
   dir), skills/pact-coding-standards/scripts/, and plugin-level scripts/
 - the genuinely cross-cutting ``pact_context`` fixture
+- the suite-wide CLAUDE.md resolution redirect (``_isolate_claude_md_target``,
+  opt-out via the ``claude_md_ambient`` marker)
 
 Concern-specific helpers live in tests/fixtures/<concern>.py and are
 imported directly by the test files that need them (direct-import
@@ -72,6 +74,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 # The clock-shift census; tests/ is on sys.path from the insert above.
 from clock_shift import clock_shift_census  # noqa: E402
 
+# Direct-import helpers for the CLAUDE.md redirect fixture below; tests/ is
+# on sys.path from the insert above, so these sit after it (E402-suppressed
+# for the same reason the clock_shift import is).
+from fixtures.claude_md_seed import seed_claude_md  # noqa: E402
+from fixtures.hf_cache import hf_cache_env  # noqa: E402
+from fixtures.root_guard import MARKER as _NON_ROOT_MARKER  # noqa: E402
+from fixtures.root_guard import non_root_skip_reason  # noqa: E402
+
 # These copy names from shared modules at first import; loading them here keeps a test patch from being copied.
 # tests/test_conftest_import_guard.py derives which modules need a line here.
 import agent_handoff_emitter  # noqa: E402, F401
@@ -87,6 +97,7 @@ import session_init  # noqa: E402, F401
 import shared.background_work  # noqa: E402, F401
 import shared.task_metadata_snapshot  # noqa: E402, F401
 import shared.task_utils  # noqa: E402, F401
+import task_claim_gate  # noqa: E402, F401
 import task_lifecycle_gate  # noqa: E402, F401
 import teammate_idle  # noqa: E402, F401
 import track_files  # noqa: E402, F401
@@ -132,6 +143,24 @@ def pytest_configure(config):
         "from a local cache. On a COLD cache that read is a network "
         "download — deselect in a sandboxed or offline environment.",
     )
+    config.addinivalue_line(
+        "markers",
+        "claude_md_ambient: this test's subject REQUIRES the ambient/"
+        "scrub-only CLAUDE.md world, so the suite-wide tmp redirect skips it "
+        "— the redirect would pre-empt or pollute exactly what the test "
+        "measures. Census classes (the parenthesized suffix tags at each "
+        "marker site resolve HERE): (a) resolution/absence/fall-through "
+        "outcome arms — the no-CLAUDE.md world is the precondition; "
+        "(b) created-file lifecycle arms — no seed at either location can "
+        "coexist with create-when-missing or neither-exists asserts; "
+        "(d) refusal-path subjects — the test engineers an ambient refusal "
+        "and asserts it; (f) CPD-presence sensitivity — behavior differs "
+        "when CLAUDE_PROJECT_DIR is declared at all; M3 marker-count "
+        "baselines — a count derives from the tree the test builds alone. "
+        "Applying the marker to a module opts out every test in it; apply "
+        "to a single test only when its subject needs the ambient world and "
+        "its siblings' does not.",
+    )
 
     # RELOCATE THE MEMORY STORE BEFORE COLLECTION BEGINS.
     #
@@ -157,9 +186,32 @@ def pytest_configure(config):
     # fail direction of `setdefault` here is ALLOW, and it is silent.
     os.environ[_MEMORY_DIR_ENV] = _SESSION_MEMORY_DIR
 
+    # UNLIKE `requires_embedding_backend` AND `claude_md_ambient` ABOVE, THIS
+    # MARKER SKIPS THE TEST. The first is left for the operator to deselect, and
+    # the second only opts a test out of the CLAUDE.md redirect; each still
+    # runs the test. Under uid 0 the failure a `requires_non_root` test builds
+    # with chmod cannot exist, so there is nothing to deselect by choice. The
+    # rationale and the decision live in tests/fixtures/root_guard.py.
+    config.addinivalue_line(
+        "markers",
+        f"{_NON_ROOT_MARKER}: the test provokes a permission failure with file "
+        "mode bits, which uid 0 bypasses, so it is SKIPPED when the suite runs "
+        "as root. Prefer a mode-free fault (a directory where a file is "
+        "expected) that keeps the test running under root.",
+    )
+
     # CLOCK-SHIFT CENSUS. Inert unless PACT_TEST_CLOCK_SHIFT_SECONDS is set; the
     # sweep command is in tests/clock_shift/clock_shift_shim.py.
     clock_shift_census.install()
+
+
+def pytest_runtest_setup(item):
+    """Skip a `requires_non_root` test when the suite runs as root."""
+    if item.get_closest_marker(_NON_ROOT_MARKER) is None:
+        return
+    reason = non_root_skip_reason()
+    if reason:
+        pytest.skip(reason)
 
 
 def pytest_sessionfinish(session):
@@ -357,6 +409,95 @@ def _scrub_claude_project_dir_env():
         os.environ.pop("CLAUDE_PROJECT_DIR", None)
     else:
         os.environ["CLAUDE_PROJECT_DIR"] = original
+
+
+@pytest.fixture(autouse=True)
+def _scrub_claude_code_remote_env():
+    """Pop + restore ``os.environ['CLAUDE_CODE_REMOTE']`` around every test.
+    Runs for EVERY test (autouse).
+
+    ``CLAUDE_CODE_REMOTE`` is the cloud-harness signal (#1666), read only by
+    ``pact_context.is_cloud_session()``. It flips the startup team-name
+    default from ``session-<id8>`` to the full session id and the recorded
+    lead address from ``team-lead`` to ``main``. A cloud container exports
+    it as ``true``, so without this scrub the suite's local expectations
+    would depend on where it runs. POP at setup, restore the ambient value at
+    teardown — same posture as ``_scrub_claude_project_dir_env``. Tests that
+    exercise the cloud path call ``monkeypatch.setenv("CLAUDE_CODE_REMOTE",
+    "true")``, which overrides the scrub for that test.
+    """
+    _UNSET = object()
+    original = os.environ.pop("CLAUDE_CODE_REMOTE", _UNSET)
+    yield
+    if original is _UNSET:
+        os.environ.pop("CLAUDE_CODE_REMOTE", None)
+    else:
+        os.environ["CLAUDE_CODE_REMOTE"] = original
+
+
+@pytest.fixture(autouse=True)
+def _isolate_claude_md_target(
+    # The scrub pops at setup; this fixture sets; the dependency parameter
+    # forces pop-then-set: pytest orders the two setups by this edge, so the
+    # scrub can never pop this fixture's redirect — regardless of definition
+    # order in this file or its future reorganization.
+    _scrub_claude_project_dir_env,
+    request,
+    tmp_path,
+    monkeypatch,
+):
+    """Redirect every CLAUDE.md resolution to a per-test tmp tree.
+
+    BOTH halves are required, and the second is the point: setting
+    ``CLAUDE_PROJECT_DIR`` alone does NOT isolate, because the display
+    resolver probes the env dir and CONTINUES when no CLAUDE.md is found
+    there, falling through to the git walk and back onto the live file.
+    Seeding a CLAUDE.md at the env dir is what makes the first probe
+    succeed and terminate resolution before the walk. THE SEED TARGETS THE
+    LEGACY SLOT — ``tmp_path/CLAUDE.md`` (``preferred=False``), never
+    ``tmp_path/.claude``: the legacy slot is the LOWER-precedence probe, so
+    a test seeding either location itself wins its own world back
+    (preferred by probe order, legacy by same-path overwrite), never
+    creating ``tmp_path/.claude`` keeps world-builder and absence arms
+    intact, and the fixture's file exists only as the FALLBACK for tests
+    that build nothing — the population this redirect protects. Measured
+    at the resolver: CPD + legacy-only seed terminates branch 1 in-tmp
+    (base=CPD); the git walk never runs.
+
+    A third half rides the same inheritance: ``hf_cache_env`` pins the
+    HuggingFace cache for every spawned child (the only way to reach a child
+    is this process's environment; measured without it: 59 model-load
+    attempts from children, each a cold-cache download wherever no warm
+    cache exists — i.e. CI). The helper deliberately reads
+    ``os.environ``/``os.path.expanduser`` rather than ``Path.home()``, which
+    ``_isolate_config_root_to_tmp`` patches.
+
+    Opt-out: items marked ``claude_md_ambient`` need the ambient/scrub-only
+    CLAUDE.md world for their subject and skip this redirect. The census
+    classes behind each marker site — (a) absence/resolution outcomes,
+    (b) created-file lifecycle arms, (d) refusal-path subjects, (f)
+    CPD-presence sensitivity, M3 marker-count baselines — are DEFINED in
+    the marker's registration text in ``pytest_configure``; the suffix
+    tags at the marker sites resolve there.
+    ``grep claude_md_ambient pact-plugin/tests`` lists every opt-out.
+
+    Teardown interplay: this fixture's ``monkeypatch`` undo REMOVES the
+    variable, then the scrub's teardown restores the pre-suite ambient
+    value. A test that sets the variable itself — by ``monkeypatch.setenv``
+    or by direct assignment — overrides the redirect for its own body only;
+    the scrub re-baselines the next test.
+    """
+    if request.node.get_closest_marker("claude_md_ambient"):
+        return
+    # Legacy-slot seed (preferred=False): the lower-precedence probe — see
+    # the docstring. Never create tmp_path/.claude here.
+    seed_claude_md(tmp_path, preferred=False)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    # The model cache rides the same inheritance (measured rationale was
+    # test_memory_cli.py:130-135): the only way to reach spawned children is
+    # this process's environment, so the pin belongs here, once.
+    for key, value in hf_cache_env().items():
+        monkeypatch.setenv(key, value)
 
 
 @pytest.fixture(autouse=True)
@@ -813,3 +954,47 @@ def memory_store(tmp_path):
         return path
 
     return _make
+
+
+@pytest.fixture(autouse=True)
+def _confine_agent_definition_scan(tmp_path, monkeypatch):
+    """Keep the shadow-definition scan inside the test's own tree. Runs for
+    EVERY test (autouse).
+
+    ``actor_identity._definition_dirs`` walks from the frame's cwd up to the
+    filesystem root looking for ``.claude/agents``. A test's cwd lives under
+    pytest's basetemp, so on a machine where an ancestor of basetemp holds an
+    agents directory (TMPDIR under ``$HOME``, or ``HOME=/tmp``), the walk
+    reaches the operator's real ``~/.claude/agents``. PACT itself installs
+    ``pact-*.md`` symlinks there, and with the config root redirected by
+    ``_isolate_config_root_to_tmp`` those links point outside the test's
+    plugin cache, so they read as non-plugin shadows and flip the verdict of
+    every bare-type test (#1670 final test review, MA2: 15 tests).
+
+    The wrapper keeps the REAL scan and drops only the directories outside
+    ``tmp_path`` and the redirected config root, so every directory a test
+    builds is still scanned. A test that needs another root patches
+    ``_definition_dirs`` itself, which replaces this wrapper for that test.
+    """
+    try:
+        from shared import actor_identity
+        from shared.paths import get_claude_config_dir
+    except Exception:  # noqa: BLE001 — a broken import fails its own tests
+        yield
+        return
+    real = actor_identity._definition_dirs
+
+    def _confined(input_data):
+        roots = [tmp_path.resolve(), get_claude_config_dir().resolve()]
+        kept = []
+        for directory in real(input_data):
+            try:
+                resolved = directory.resolve()
+            except OSError:
+                continue
+            if any(resolved == root or root in resolved.parents for root in roots):
+                kept.append(directory)
+        return kept
+
+    monkeypatch.setattr(actor_identity, "_definition_dirs", _confined)
+    yield

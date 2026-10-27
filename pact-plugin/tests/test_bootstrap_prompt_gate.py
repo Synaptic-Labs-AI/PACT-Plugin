@@ -169,6 +169,7 @@ class TestCheckBootstrapNeeded:
         assert 'Skill("PACT:bootstrap")' in result
         assert f"PACT_SESSION_DIR={session_dir}" in result
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (f): CPD-presence sensitivity (scrub-docstring named test)
     def test_returns_none_when_no_session_dir(self, monkeypatch):
         """No session dir → None (non-PACT session)."""
         from bootstrap_prompt_gate import _check_bootstrap_needed
@@ -267,6 +268,7 @@ class TestMainEntryPoint:
         _, output = _run_main(_make_input(), capsys)
         assert output == _SUPPRESS_EXPECTED
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (f): CPD-presence sensitivity (scrub-docstring named test)
     def test_suppress_for_non_pact_session(self, capsys, monkeypatch):
         """Non-PACT session (no context) → suppressOutput."""
         import shared.pact_context as ctx_module

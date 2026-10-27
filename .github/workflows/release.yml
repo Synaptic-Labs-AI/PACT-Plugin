@@ -1,0 +1,647 @@
+# PACT plugin releases — tags and GitHub releases, cut by CI.
+#
+# WHAT THIS DOES
+#   On every push to `main` (and on demand), finds each first-parent commit
+#   on `main` that changed "version" in pact-plugin/.claude-plugin/plugin.json
+#   and makes sure that version has:
+#     1. an annotated tag `v<version>` on that commit; and
+#     2. a GitHub release for that tag (no title, so GitHub shows the tag).
+#   Whatever is missing is created, oldest version first. Whatever exists is
+#   left alone, so a run with nothing missing is a no-op and a failed run is
+#   repaired by the next one (self-healing, idempotent). One limit: once main's
+#   .github/workflows changes after a bump commit, that version's tag can be
+#   pushed only with RELEASE_TOKEN or by hand. Without the token such a
+#   version is skipped with a warning and everything else is still released
+#   (see THE TOKEN below).
+#
+# EVERY VERSION-BUMPING PR MUST ADD ITS SECTION TO CHANGELOG.md
+#   The tag message and the release notes are hand-written, as they were when
+#   releases were cut by hand. They live in the root CHANGELOG.md, newest
+#   first, one section per version:
+#
+#     ## v<ver>: <short lowercase summary, e.g. lint-aware local merge gate>
+#     <blank line>
+#     ### Summary
+#     ...
+#     ### What landed
+#     ...
+#     ### Why
+#     ...
+#
+#   The heading minus `## ` is the annotated tag message, verbatim, and is an
+#   allowlist: printable ASCII, em dash and en dash only. The section runs to
+#   the next `## vX.Y.Z: ` heading. Its body is
+#   free Markdown and becomes the release body, with headings of level 3 or
+#   deeper promoted one level (`### Summary` is published as `## Summary`).
+#   The file uses a restricted Markdown, so the checker never has to model
+#   Markdown to split sections the way GitHub renders them: no NUL, CR, HTML
+#   comment, HTML block or <details>/<summary>, no code fence, no `===`/`---`
+#   line, every version-like heading in the canonical form, and no other
+#   `#`/`##` heading after the first version section. The rules and
+#   extraction are defined once, in .github/scripts/check-release-notes.sh,
+#   and run twice: on every PR by pact-plugin/tests/test_release_notes.py
+#   (the current version's section and every other `## v` section), and
+#   here before release. CHANGELOG.md is read from the bump commit if that
+#   copy has a valid section for the version, otherwise from the tip of main
+#   (how v4.8.9-v4.8.11 were backfilled, and how a bad section that reached
+#   main is repaired: fix it on main and the next run uses that copy, with a
+#   warning). No valid section anywhere stops the run before anything is
+#   created.
+#
+# THE TOKEN (RELEASE_TOKEN is optional; it backfills drifted versions)
+#   GitHub checks the commit a new tag points at: if that commit's
+#   `.github/workflows/` differs from the default branch's, creating the tag
+#   counts as creating or updating workflow files, which needs workflows
+#   permission. The built-in GITHUB_TOKEN never has it, so it is ALWAYS
+#   refused ("refusing to allow a GitHub App to create or update workflow
+#   ... without `workflows` permission"). Such a version is DRIFTED. Drift
+#   decides this, not age: an old bump on unchanged workflows tags fine
+#   with the built-in token, and a fresh one is drifted if a
+#   workflow-editing PR merged before its release run succeeded (every
+#   backfill so far, and any repair after a workflow change).
+#   Normal releases need no RELEASE_TOKEN. A drifted version needs either:
+#   - a `RELEASE_TOKEN` with, on this repository only:
+#       Contents: Read and write   (push tags, create releases)
+#       Workflows: Read and write  (tags on commits whose workflow files
+#                                   differ from the default branch)
+#     after which a run on main tags and releases it; or
+#   - its annotated tag pushed by hand from a maintainer machine, on the
+#     commit that set the version, with the CHANGELOG.md heading line
+#     minus `## ` as the message, made exactly as this workflow makes it.
+#     The job log prints these commands filled in for each skipped tag:
+#       git show <src>:CHANGELOG.md | sed -n '/^## <tag>: /{s/^## //p;q;}' > <tag>.msg
+#       git tag -a <tag> <sha> --cleanup=verbatim -F <tag>.msg
+#     where <sha> is the bump commit and <src> the commit whose
+#     CHANGELOG.md copy the run used (dots in <tag> escaped as `\.`).
+#     Do not use `-m '<heading>'`: the shell mangles apostrophes.
+#     Pushing a tag does not start this workflow: then run it on main
+#     (Actions -> release -> Run workflow), or wait for the next push to
+#     main. That run creates only the release, which the built-in token
+#     may do.
+#   Without the token, the run checks every tag it still has to push before
+#   it creates anything. Drifted ones are SKIPPED, untouched (nothing
+#   created; any draft release is left as is), with one short ::warning::
+#   listing each with its commit, and both fixes in the job log. Every
+#   other version, and every release whose tag already exists, is still
+#   created, and the run succeeds. With the token nothing is skipped. A
+#   refused push is still explained by name, as a backstop.
+#
+#   WHERE IT LIVES (one-time setup, REQUIRED if you add the token). A token
+#   with Workflows write must not be readable by a workflow on an arbitrary
+#   branch: a repository secret is passed to workflows on ANY branch, so
+#   anyone with write access could push a branch whose workflow sends it
+#   out. So:
+#   1. Create an environment named `release` (Settings -> Environments ->
+#      New environment -> release) and set Deployment branches and tags to
+#      "Selected branches and tags" -> `main`. Required reviewers are
+#      optional (they would pause every release run for an approval).
+#   2. Add RELEASE_TOKEN as a secret of THAT environment.
+#   3. Do NOT also keep a repository secret named RELEASE_TOKEN; delete one
+#      if it exists. A repository copy stays readable from any branch.
+#   The job declares `environment: release`, so its steps see the
+#   environment's secret, and the environment refuses to run jobs from any
+#   ref but main, so no branch workflow can read the token. The job's
+#   `if: github.ref == 'refs/heads/main'` stays as a second guard.
+#   `environment: release` alone protects nothing: if the environment does
+#   not exist, GitHub creates it on first use with NO branch restriction and
+#   no secret. An unset secret reads as an empty string, so
+#   `secrets.RELEASE_TOKEN || github.token` falls back to GITHUB_TOKEN, and
+#   a drifted version is skipped with the ::warning:: above. Each
+#   run without RELEASE_TOKEN says so with a ::notice::, and each run reads
+#   the `release` environment with the built-in token, through its
+#   actions: read permission (RELEASE_TOKEN needs nothing beyond the two
+#   permissions above), and warns unless the environment allows exactly the
+#   branch `main`: no restriction, "protected branches", an empty list, or
+#   any other or extra pattern all warn. This is best effort:
+#   if a read fails, a ::notice:: says the check was skipped and asks for a
+#   check by hand; it never fails the run. Every run also records a
+#   deployment to `release` (harmless; it is how environments are tracked).
+#
+#   WHOSE TOKEN. A fine-grained personal access token, limited to this
+#   repository, with the two permissions above and an expiry date. Prefer
+#   one owned by a dedicated least-privilege account (no admin or
+#   ruleset-bypass rights) over a maintainer's own. The workflow needs a
+#   token that can be stored as a secret and that `gh api user` resolves to
+#   a user (the tagger), which a fine-grained PAT is.
+#
+#   With it, the checkout, the tag push and the release calls all use it,
+#   and the tag's tagger is the token owner (`gh api user`; email
+#   `<id>+<login>@users.noreply.github.com`), so authorship matches the
+#   releases cut by hand. If it is set but `gh api user` fails, the run
+#   fails rather than silently tagging as the bot.
+#   Two consequences of setting it:
+#   - Tags and releases made with GITHUB_TOKEN start no other workflows;
+#     ones made with RELEASE_TOKEN do. No workflow here listens for them
+#     today, but any future `on: push: tags` or `on: release` workflow will
+#     run, with secrets, on every release this workflow cuts.
+#   - Anyone with write access who starts this workflow by hand on main
+#     makes tags authored as the token owner. That adds no capability: only
+#     what is already on main can be released (the job's `if:` gate).
+#
+# WHY CI CUTS RELEASES
+#   Cloud Claude Code sessions get HTTP 403 both when they push a tag and
+#   when they create a release, so releases made from those sessions were
+#   silently never cut. A workflow run can do both (with RELEASE_TOKEN for
+#   tags on commits whose workflow files differ from main, see above), so
+#   the release now follows the version bump that every PR carries.
+#
+# WHY THE WALK STARTS WHERE IT DOES
+#   The walk always starts after FLOOR_TAG, the last release cut by hand, so
+#   history before it is never touched. It does not start after the newest
+#   tag, because then a release missing BELOW the newest tag (a run that
+#   pushed a tag and failed before its release, or a release deleted by hand)
+#   would never be repaired. Walking from the floor is cheap: one rev-list
+#   limited to plugin.json, a few `git show` reads per release, and one
+#   paginated API call for the release list; tags are checked locally.
+#
+# WHY ONLY THE HIGHEST VERSION IS "LATEST"
+#   A backfill run can create several releases at once. Each one is created
+#   with --latest=false except the highest version across all tags, so an old
+#   version filled in late never takes the Latest badge from a newer one.
+#   Skipped (drifted) versions count when picking the highest: if the
+#   highest is skipped, no release made by that run is Latest, and an older
+#   one is never promoted in its place. Its own release takes the badge once
+#   its tag exists and a later run creates it.
+#
+# UNTRUSTED INPUT
+#   Notes files are committed text. They reach git and gh only through files
+#   (git tag -F, --notes-file), never through `${{ }}` interpolation inside
+#   `run:` and never through eval. The only `${{ }}` values below are the
+#   repository name and tokens, passed in through `env:` and `with:`.
+#
+# FAILURE IS LOUD
+#   The script runs under `set -euo pipefail`. A rejected tag push (an
+#   under-scoped RELEASE_TOKEN, explained by name, or a tag-protection
+#   ruleset), a failed release call, a missing or malformed notes section
+#   (checked for skipped versions too, before anything is created), a
+#   malformed version, a failed token-owner lookup, or an existing tag that
+#   points at a different commit than the one that set its version all
+#   fail the run. The one thing skipped is a drifted version without
+#   RELEASE_TOKEN, and never silently: a ::warning:: names it. Tags are
+#   never moved.
+
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# contents: write pushes tags and creates releases. actions: read (read-only)
+# lets the built-in token read the `release` environment's branch policy for
+# the best-effort check below. Nothing broader.
+permissions:
+  contents: write
+  actions: read
+
+# Never run two release jobs at once (both would try to create the same tag),
+# and never cancel one mid-way. GitHub keeps at most one run pending per
+# group: a newer pending run replaces (cancels) an older one, and a run
+# waiting for an environment approval holds the group too. That is safe:
+# every run rechecks all of history and skips what already exists.
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # workflow_dispatch can be started on any branch. Only main is released,
+    # so a dispatch elsewhere does nothing rather than tag unmerged commits.
+    if: github.ref == 'refs/heads/main'
+    # RELEASE_TOKEN lives in this environment, limited to main (see THE
+    # TOKEN above); the `if:` stays as a second guard.
+    environment: release
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned to a full commit SHA like tests.yml (supply-chain hardening);
+      # the trailing comment records the tag the SHA resolves to.
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          # Full history and every tag: the walk reads old commits and
+          # checks which v* tags already exist.
+          fetch-depth: 0
+          fetch-tags: true
+          # The persisted credential is what `git push` uses, so the tag push
+          # is made by RELEASE_TOKEN's owner when that secret is set. It stays
+          # in .git/config for the whole job, so the next step's code can read
+          # it. That is acceptable: the job runs only on main, and its only
+          # other code is check-release-notes.sh from this same checkout of
+          # main, the same trust level as this workflow file.
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+
+      - name: Create missing tags and releases
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+          # Used only for the `release` environment check (actions: read).
+          BUILTIN_TOKEN: ${{ github.token }}
+          USE_RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN != '' }}
+          REPO: ${{ github.repository }}
+          # The last release cut by hand. The walk never goes before it.
+          FLOOR_TAG: v4.8.8
+          PLUGIN_JSON: pact-plugin/.claude-plugin/plugin.json
+          NOTES_FILE: CHANGELOG.md
+          BOT_NAME: github-actions[bot]
+          BOT_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          set -euo pipefail
+
+          work_dir="$(mktemp -d)"
+          trap 'rm -rf "$work_dir"' EXIT
+          mkdir "$work_dir/notes"
+
+          # The setup a missing RELEASE_TOKEN calls for, worded once for
+          # every message that names it.
+          TOKEN_SETUP="a RELEASE_TOKEN secret (fine-grained token, this repository only, Contents: Read and write + Workflows: Read and write) stored in the \`release\` environment limited to main, NOT as a repository secret"
+
+          if [ "$USE_RELEASE_TOKEN" != "true" ]; then
+            echo "::notice::running without RELEASE_TOKEN (using GITHUB_TOKEN as github-actions[bot]); normal releases work, but a version whose bump commit's .github/workflows differs from main is skipped until its tag is pushed by hand or RELEASE_TOKEN is added"
+          fi
+
+          # Best effort: warn unless the `release` environment allows exactly
+          # the branch `main`, since any other ref it allows could run a
+          # workflow that reads its secret. The reads use the built-in token
+          # (actions: read) on purpose, so RELEASE_TOKEN needs no extra
+          # permission. A failed read or an unparsable reply skips the check
+          # with a notice; a policy shape it does not recognise, or a custom
+          # list that is empty or not exactly `main`, warns. This never fails
+          # the run.
+          env_check_skipped() {
+            echo "::notice::skipped the \`release\` environment branch-restriction check: $1 ($(head -c 200 "$work_dir/env_err" | tr -d '\r\n%')); check by hand that Settings -> Environments -> release limits deployment branches to main only"
+          }
+          check_release_env() {
+            local policy reason=""
+            : > "$work_dir/env_err"
+            if ! GH_TOKEN="$BUILTIN_TOKEN" gh api "repos/$REPO/environments/release" \
+                > "$work_dir/env.json" 2> "$work_dir/env_err" ||
+              ! policy="$(jq -r '.deployment_branch_policy as $p
+                  | if $p == null then "none"
+                    elif $p.protected_branches == true then "protected"
+                    elif $p.custom_branch_policies == true then "custom"
+                    else "unknown" end' "$work_dir/env.json" 2>> "$work_dir/env_err")"; then
+              env_check_skipped "the environment read failed"
+              return 0
+            fi
+            case "$policy" in
+              none) reason="has no deployment branch restriction" ;;
+              protected) reason="allows every protected branch, not only main" ;;
+              custom)
+                # Exactly one policy, the branch `main`. A policy without a
+                # `type` predates tag policies, so it is a branch policy.
+                if ! GH_TOKEN="$BUILTIN_TOKEN" gh api --paginate \
+                    "repos/$REPO/environments/release/deployment-branch-policies?per_page=100" \
+                    > "$work_dir/policies.json" 2> "$work_dir/env_err" ||
+                  ! policy="$(jq -s -r '[.[].branch_policies[]]
+                      | if length == 1 and .[0].name == "main"
+                          and (.[0].type // "branch") == "branch"
+                        then "main-only" else "other" end' \
+                      "$work_dir/policies.json" 2>> "$work_dir/env_err")"; then
+                  env_check_skipped "the branch-policy read failed"
+                  return 0
+                fi
+                [ "$policy" = "main-only" ] ||
+                  reason="is not limited to exactly the branch main"
+                ;;
+              *) reason="has a deployment branch policy this check does not recognise" ;;
+            esac
+            if [ -n "$reason" ]; then
+              echo "::warning::the \`release\` environment $reason, so a workflow on another ref could read its RELEASE_TOKEN; limit it to the branch main only (Settings -> Environments -> release -> Deployment branches and tags)"
+            fi
+          }
+          check_release_env
+
+          # "version" from plugin.json at a commit; empty if absent.
+          version_at() {
+            git show "$1:$PLUGIN_JSON" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true
+          }
+
+          # Highest of the lines on stdin (sort -V order); blank lines ignored.
+          highest_of() {
+            sed '/^$/d' | sort -V | tail -n 1
+          }
+
+          tag_exists() {
+            git rev-parse -q --verify "refs/tags/$1" >/dev/null
+          }
+
+          # Every tag that already has a GitHub release (one paginated call),
+          # and the subset whose release is still a draft.
+          gh api --paginate "repos/$REPO/releases?per_page=100" > "$work_dir/releases.json"
+          jq -r '.[].tag_name' "$work_dir/releases.json" > "$work_dir/released"
+          jq -r '.[] | select(.draft) | .tag_name' "$work_dir/releases.json" > "$work_dir/drafts"
+
+          has_release() {
+            grep -qxF -- "$1" "$work_dir/released"
+          }
+
+          # A draft counts as an existing release (a person made it on
+          # purpose), but say so: it is not published until someone does.
+          warn_if_draft() {
+            if grep -qxF -- "$1" "$work_dir/drafts"; then
+              echo "::warning::$1 has only a DRAFT release; publish or delete it by hand"
+            fi
+          }
+
+          # The notes rules live in ONE place, shared with the PR-time test
+          # (pact-plugin/tests/test_release_notes.py). Run by explicit path
+          # with bash: it is read from this checkout of main, the same trust
+          # level as this workflow file.
+          check_notes() {
+            bash "$GITHUB_WORKSPACE/.github/scripts/check-release-notes.sh" "$@"
+          }
+          if [ ! -f "$GITHUB_WORKSPACE/.github/scripts/check-release-notes.sh" ]; then
+            echo "::error::.github/scripts/check-release-notes.sh is missing from the checkout"
+            exit 1
+          fi
+
+          # Picks version $2's section of $NOTES_FILE (bump commit $1) and
+          # has the checker extract it into $work_dir/notes/v$2.msg (the tag
+          # message) and $work_dir/notes/v$2.body (the release body).
+          # A VALID section at the bump commit wins. If the bump commit's copy
+          # lacks a valid section but HEAD's has one, HEAD's is used with a
+          # warning, so a bad section that reached main is fixed by fixing it
+          # on main. Missing everywhere, or invalid everywhere, stops the run.
+          # Text stays in files and variables; nothing is evaluated.
+          # Sets NOTES_SRC to the full sha of the commit whose copy was used,
+          # so the hand-tagging commands printed for a skipped tag read the
+          # very same copy.
+          NOTES_SRC=""
+          load_notes() {
+            local sha="$1" version="$2" path="$NOTES_FILE" src="" bump_reason="" head_reason=""
+            local msg="$work_dir/notes/v$version.msg" body="$work_dir/notes/v$version.body"
+            if git cat-file -e "$sha:$path" 2>/dev/null; then
+              git show "$sha:$path" > "$work_dir/notes/bump"
+              if bump_reason="$(check_notes "$version" "$work_dir/notes/bump" "$msg" "$body")"; then
+                src="$sha"
+              fi
+            fi
+            if [ -z "$src" ] && git cat-file -e "HEAD:$path" 2>/dev/null; then
+              git show "HEAD:$path" > "$work_dir/notes/head"
+              if head_reason="$(check_notes "$version" "$work_dir/notes/head" "$msg" "$body")"; then
+                src="HEAD"
+                if [ -n "$bump_reason" ]; then
+                  echo "::warning::$path at bump commit $sha has no valid v$version section ($bump_reason); using the valid copy on HEAD"
+                fi
+              fi
+            fi
+            if [ -z "$src" ]; then
+              if [ -z "$bump_reason" ] && [ -z "$head_reason" ]; then
+                echo "::error::v$version needs a section in $path, but neither its bump commit $sha nor HEAD has the file"
+              else
+                echo "::error::v$version has no valid section in $path (bump commit: ${bump_reason:-absent}; HEAD: ${head_reason:-absent})"
+              fi
+              exit 1
+            fi
+            NOTES_SRC="$(git rev-parse "$src^{commit}")"
+            echo "v$version: notes from $src:$path"
+          }
+
+          # Sets TAGGER_NAME and TAGGER_EMAIL. With RELEASE_TOKEN, the token
+          # owner (a failed lookup fails the run); without it, the bot.
+          set_tagger() {
+            local login id
+            if [ "$USE_RELEASE_TOKEN" != "true" ]; then
+              TAGGER_NAME="$BOT_NAME"
+              TAGGER_EMAIL="$BOT_EMAIL"
+              return 0
+            fi
+            if ! gh api user > "$work_dir/user.json" 2> "$work_dir/gh_err"; then
+              echo "::error::RELEASE_TOKEN is set but 'gh api user' failed: $(head -c 500 "$work_dir/gh_err")"
+              exit 1
+            fi
+            login="$(jq -r '.login // empty' "$work_dir/user.json")"
+            id="$(jq -r '.id // empty' "$work_dir/user.json")"
+            if ! [[ $login =~ ^[A-Za-z0-9-]+$ && $id =~ ^[0-9]+$ ]]; then
+              echo "::error::RELEASE_TOKEN owner lookup returned an unexpected login or id"
+              exit 1
+            fi
+            TAGGER_NAME="$login"
+            TAGGER_EMAIL="$id+$login@users.noreply.github.com"
+          }
+
+          # Push tag $1. git's stderr goes to a file (no pipe) so a refusal can
+          # be explained: a tag whose commit carries workflow files that
+          # differ from main's needs Workflows write. That refusal, worded
+          # "without `workflows` permission" for the GitHub App token and
+          # "without `workflow` scope" for a classic PAT, gets an error that
+          # names the fix, which depends on whether RELEASE_TOKEN is set. The
+          # pre-pass below already skips such a tag in a run without
+          # RELEASE_TOKEN, so this is the backstop. Any other failure stops
+          # the run too.
+          push_tag() {
+            local rc=0
+            git push origin "refs/tags/$1" 2> "$work_dir/push_err" || rc=$?
+            cat "$work_dir/push_err" >&2
+            [ "$rc" -eq 0 ] && return 0
+            if grep -q -E 'without .?workflows?.? (permission|scope)' "$work_dir/push_err"; then
+              if [ "$USE_RELEASE_TOKEN" = "true" ]; then
+                echo "::error::pushing tag $1 was refused: RELEASE_TOKEN is set but lacks Workflows: Read and write (fine-grained token; a classic token needs the \`workflow\` scope), or its owner lacks that access. The tagged commit's .github/workflows differs from main. Give the token that permission. See \"THE TOKEN\" at the top of release.yml."
+              else
+                echo "::error::pushing tag $1 needs ${TOKEN_SETUP}: the tagged commit's .github/workflows differs from main, and the built-in GITHUB_TOKEN may not push it. Or push the tag by hand; a rerun on the current main skips it with a warning. See \"THE TOKEN\" at the top of release.yml."
+              fi
+            else
+              echo "::error::git push of tag $1 failed (exit $rc)"
+            fi
+            exit 1
+          }
+
+          # Create the release for tag $1 with --latest=$2. Right after a tag
+          # push, GitHub's tag lookup can lag the git receive, and gh then
+          # aborts with "tag ... doesn't exist ..., aborting due to
+          # --verify-tag flag" before creating anything. Only that case is
+          # retried, with backoff 2/4/8/16s (5 attempts). Any other failure,
+          # or running out of attempts, fails the run.
+          create_release() {
+            local attempt rc delay=2
+            for attempt in 1 2 3 4 5; do
+              rc=0
+              gh release create "$1" --repo "$REPO" --verify-tag \
+                --notes-file "$work_dir/notes/$1.body" --latest="$2" 2> "$work_dir/gh_err" || rc=$?
+              [ "$rc" -eq 0 ] && return 0
+              cat "$work_dir/gh_err" >&2
+              if ! grep -q 'aborting due to --verify-tag flag' "$work_dir/gh_err"; then
+                echo "::error::gh release create $1 failed (exit $rc)"
+                exit 1
+              fi
+              [ "$attempt" -eq 5 ] && break
+              echo "$1: tag not visible to the API yet (attempt $attempt); retrying in ${delay}s"
+              sleep "$delay"
+              delay=$((delay * 2))
+            done
+            echo "::error::$1 is still not visible to the API after 5 attempts; the tag is pushed, so the next run creates the release"
+            exit 1
+          }
+
+          # --- Where the walk starts -------------------------------------
+          tag_exists "$FLOOR_TAG" || { echo "::error::floor tag $FLOOR_TAG is missing"; exit 1; }
+          start_tag="$FLOOR_TAG"
+          start_sha="$(git rev-parse "$start_tag^{commit}")"
+          start_version="${start_tag#v}"
+          echo "Walking main after $start_tag ($start_sha)"
+
+          # --- Version-bump commits, oldest first --------------------------
+          : > "$work_dir/bumps"
+          for sha in $(git rev-list --first-parent --reverse "$start_sha..HEAD" -- "$PLUGIN_JSON"); do
+            version="$(version_at "$sha")"
+            [ -n "$version" ] || continue
+            [ "$version" != "$(version_at "$sha^")" ] || continue
+            if ! [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::$sha sets an unexpected version: $(printf '%q' "$version")"
+              exit 1
+            fi
+            # Only versions above the start, and only the first commit that
+            # set each version (a later revert-and-reapply is not a release).
+            [ "$(printf '%s\n%s\n' "$start_version" "$version" | highest_of)" = "$version" ] || continue
+            [ "$version" != "$start_version" ] || continue
+            awk -v v="$version" '$2 == v { found = 1 } END { exit !found }' "$work_dir/bumps" && continue
+            echo "$sha $version" >> "$work_dir/bumps"
+          done
+
+          if [ ! -s "$work_dir/bumps" ]; then
+            echo "No version bumps after $start_tag; nothing to do."
+            exit 0
+          fi
+
+          # The one version that may be marked Latest: the highest across
+          # every existing tag and every version found above.
+          latest_version="$( {
+            git tag -l 'v*' | sed -nE 's/^v([0-9]+\.[0-9]+\.[0-9]+)$/\1/p'
+            cut -d' ' -f2 "$work_dir/bumps"
+          } | highest_of)"
+          echo "Latest will be v$latest_version"
+
+          # Checked for all versions BEFORE anything is created, so a problem
+          # stops the whole run with nothing half done:
+          #   - every existing tag must point at the commit that set its
+          #     version (a tag is never moved; a wrong one is fixed by a
+          #     person);
+          #   - every version that still needs a tag or a release must have a
+          #     well-formed notes file;
+          #   - without RELEASE_TOKEN, a tag still to be pushed on a commit
+          #     whose .github/workflows differs from this run's commit is
+          #     DRIFTED: GitHub refuses that push to GITHUB_TOKEN. Drifted
+          #     versions are collected here, with their bump commits, and
+          #     SKIPPED below (nothing created; any draft release is left as
+          #     is), with one warning after the loop, so the rest of the
+          #     run still goes ahead. Their notes are still checked, because
+          #     a tag pushed by hand later needs them for its release. Tags
+          #     that already exist push nothing and are never skipped.
+          need_tag=false
+          : > "$work_dir/drifted"
+          while read -r sha version <&3; do
+            tag="v$version"
+            is_drifted=false
+            if tag_exists "$tag"; then
+              tag_sha="$(git rev-parse "refs/tags/$tag^{commit}")"
+              if [ "$tag_sha" != "$sha" ]; then
+                echo "::error::$tag points at $tag_sha, but version $version was set by $sha. Not moving it; fix the tag by hand."
+                exit 1
+              fi
+              has_release "$tag" && continue
+            elif [ "$USE_RELEASE_TOKEN" = "true" ]; then
+              need_tag=true
+            else
+              # 0 = same workflows, 1 = drifted; any other exit is a git
+              # failure, which must not pass for drift and skip a version.
+              drift_rc=0
+              git diff --quiet "$sha" HEAD -- .github/workflows || drift_rc=$?
+              case "$drift_rc" in
+                0) need_tag=true ;;
+                1) is_drifted=true ;;
+                *)
+                  echo "::error::git diff of .github/workflows between $sha and HEAD failed (exit $drift_rc) while checking $tag"
+                  exit 1
+                  ;;
+              esac
+            fi
+            load_notes "$sha" "$version"
+            # Row: tag, bump commit, commit whose CHANGELOG.md copy was used.
+            if [ "$is_drifted" = true ]; then
+              echo "$tag $sha $NOTES_SRC" >> "$work_dir/drifted"
+            fi
+          done 3< "$work_dir/bumps"
+
+          # Not an error: every other version is still released. Once these
+          # tags exist (pushed by hand, or by a run with RELEASE_TOKEN), a
+          # later run on main creates their releases with the built-in
+          # token. Each tag is listed with the bump commit it must point at:
+          # a tag on any other commit fails every later run (see the
+          # pre-pass above). A draft release does not create a tag, so a
+          # skipped version may have one; it is left as is.
+          # The annotation stays short; the full fix goes to the log as
+          # plain lines, with every command filled in. Only validated tags
+          # and full shas are printed, never CHANGELOG.md text. The
+          # commands read the heading from the very copy this run used and
+          # tag with -F and --cleanup=verbatim, as this workflow does, so
+          # the tag message is the same bytes (apostrophes included).
+          if [ -s "$work_dir/drifted" ]; then
+            skipped_list="$(awk '{ printf "%s%s at %s", (NR > 1 ? ", " : ""), $1, $2 }' "$work_dir/drifted")"
+            echo "::warning::skipped ${skipped_list} (nothing created; any draft release is left as is): their bump commits' .github/workflows differs from main, so GitHub refuses those tag pushes to the built-in GITHUB_TOKEN. The job log lists the two ways to release them."
+            printf '%s\n' \
+              "To release the skipped versions, do ONE of:" \
+              "  1. Add ${TOKEN_SETUP}, then rerun this workflow on main." \
+              "  2. In an up-to-date clone of this repository, on a maintainer machine, run:"
+            skipped_tags=""
+            while read -r d_tag d_sha d_src <&4; do
+              printf '%s\n' \
+                "       git show $d_src:$NOTES_FILE | sed -n '/^## ${d_tag//./\\.}: /{s/^## //p;q;}' > $d_tag.msg" \
+                "       git tag -a $d_tag $d_sha --cleanup=verbatim -F $d_tag.msg"
+              skipped_tags="$skipped_tags refs/tags/$d_tag"
+            done 4< "$work_dir/drifted"
+            printf '%s\n' \
+              "       git push origin$skipped_tags" \
+              "     Pushing a tag does not start this workflow: then run it on main (Actions -> release -> Run workflow), or wait for the next push to main. That run creates only the releases, which needs no token." \
+              "See \"THE TOKEN\" at the top of release.yml."
+          fi
+
+          is_skipped() {
+            awk -v t="$1" '$1 == t { found = 1 } END { exit !found }' "$work_dir/drifted"
+          }
+
+          # Latest stays the highest version overall, even when it is
+          # skipped: then no release made by this run is Latest (an older
+          # one is never promoted), and the release made once its tag
+          # exists takes the badge.
+          if is_skipped "v$latest_version"; then
+            echo "v$latest_version is skipped, so no release made by this run is marked Latest"
+          fi
+
+          TAGGER_NAME=""
+          TAGGER_EMAIL=""
+          if [ "$need_tag" = true ]; then
+            set_tagger
+            echo "Tags will be made by $TAGGER_NAME <$TAGGER_EMAIL>"
+          fi
+
+          # --- Create what is missing --------------------------------------
+          # The list is read on fd 3 so no command in the loop can eat it from stdin.
+          while read -r sha version <&3; do
+            tag="v$version"
+            if is_skipped "$tag"; then
+              echo "$tag: skipped (drifted; see the warning above)"
+              continue
+            fi
+            if tag_exists "$tag" && has_release "$tag"; then
+              echo "$tag: tag and release exist; skipping"
+              warn_if_draft "$tag"
+              continue
+            fi
+
+            if tag_exists "$tag"; then
+              echo "$tag: tag exists; creating the release only"
+            else
+              git -c user.name="$TAGGER_NAME" -c user.email="$TAGGER_EMAIL" \
+                tag -a "$tag" --cleanup=verbatim -F "$work_dir/notes/$tag.msg" "$sha"
+              push_tag "$tag"
+              echo "$tag: tagged $sha and pushed"
+            fi
+
+            if has_release "$tag"; then
+              echo "$tag: release exists"
+              warn_if_draft "$tag"
+              continue
+            fi
+            if [ "$version" = "$latest_version" ]; then latest=true; else latest=false; fi
+            create_release "$tag" "$latest"
+            echo "$tag" >> "$work_dir/released"
+            echo "$tag: release created (latest=$latest)"
+          done 3< "$work_dir/bumps"

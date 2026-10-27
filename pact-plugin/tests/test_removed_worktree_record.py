@@ -44,6 +44,11 @@ from shared.pact_context import _build_session_path, project_slug
 from shared.paths import get_claude_config_dir
 import shared.project_scope as project_scope
 
+# claude_md_ambient (module-wide): the worktree-identity escape-guard
+# exemption is this module's subject; it needs the ambient resolution the
+# suite-wide redirect would remove. See tests/conftest.py.
+pytestmark = pytest.mark.claude_md_ambient
+
 SID = "aabb1122-0000-0000-0000-00000000c0de"
 SEED = "# Project Memory\n\n## Retrieved Context\n\n## Working Memory\n"
 

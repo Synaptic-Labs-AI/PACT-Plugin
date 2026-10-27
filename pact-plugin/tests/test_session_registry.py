@@ -394,7 +394,7 @@ class TestRegistryTeachExamples:
         assert "error:" in r.stderr
         assert self._EXAMPLE in r.stderr
 
-    def test_pasted_example_executes_hermetically(self, tmp_path, monkeypatch):
+    def test_pasted_example_executes_hermetically(self, tmp_path):
         # The one live paste-execute the bar allows: hermetic by
         # construction — CLAUDE_CONFIG_DIR redirected into the sandbox and
         # $CLAUDE_CODE_SESSION_ID removed, so register() takes its documented
@@ -404,10 +404,22 @@ class TestRegistryTeachExamples:
             k: v for k, v in os.environ.items()
             if k != "CLAUDE_CODE_SESSION_ID"
         }
-        env["CLAUDE_CONFIG_DIR"] = str(tmp_path)
+        # REBIND (§11.3.1 class (c)): the emptiness census below counts this
+        # test's own sandbox; the suite-wide redirect seeds tmp_path/CLAUDE.md
+        # (legacy slot) at the parent, so the sandbox moves one level down.
+        # The narrowing is deliberate, not a coverage loss: what the old
+        # tmp_path-wide census could additionally have caught is an ambient
+        # CLAUDE.md write by the child, and that write stays refused by the
+        # production pytest guard (_refuse_ambient_target_under_pytest fires
+        # on the inherited PYTEST_CURRENT_TEST before resolution) — so the
+        # sandbox-scoped census keeps the test's subject, the example runs
+        # hermetically and writes nothing, without watching the parent.
+        sandbox = tmp_path / "registry-example"
+        sandbox.mkdir()
+        env["CLAUDE_CONFIG_DIR"] = str(sandbox)
         r = subprocess.run(
             self._EXAMPLE, shell=True, capture_output=True, text=True, env=env,
         )
         assert r.returncode == 0, r.stderr
         assert "Permission denied" not in r.stderr
-        assert list(tmp_path.rglob("*")) == []
+        assert list(sandbox.rglob("*")) == []

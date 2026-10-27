@@ -517,8 +517,6 @@ class TestTheMarkerWriterCannotPreemptTheRecording:
         assert _block(proj) == before
 
 
-_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
-
 # sitecustomize sources, loaded by every hook process _with_site starts.
 # This one: the rename that would put a new CLAUDE.md in place raises EIO.
 _EIO_ON_REPLACE = """
@@ -780,7 +778,8 @@ class TestATransientRewriteFailureLeavesTheRecordingOpen:
         assert len(_events(home, lead, "session_start")) == 1
         assert md.is_dir()
 
-    @pytest.mark.skipif(_ROOT, reason="root ignores directory permissions")
+    # A readable directory that refuses a write: only mode bits give that.
+    @pytest.mark.requires_non_root
     def test_a_directory_that_refuses_the_write_closes_the_recording(self, tmp_path):
         """EACCES from the write itself, with the lock file already there: the
         same refusal as a lock that cannot be created, so the same outcome."""
@@ -801,7 +800,8 @@ class TestATransientRewriteFailureLeavesTheRecordingOpen:
         assert len(_events(home, lead, "session_start")) == 1
         assert _block(proj) == before
 
-    @pytest.mark.skipif(_ROOT, reason="root ignores directory permissions")
+    # A readable directory that refuses a write: only mode bits give that.
+    @pytest.mark.requires_non_root
     def test_a_lock_that_cannot_be_created_closes_the_recording(self, tmp_path):
         """EACCES creating the lock file: the path itself is unusable, so the
         skip stands and the lead is recorded without the rewrite."""

@@ -23,7 +23,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
-from .session_state import SESSION_ID_CONTROL_CHARS_RE, is_safe_path_component
+from .session_state import (
+    SESSION_ID_CONTROL_CHARS_RE,
+    is_safe_path_component,
+    is_safe_plugin_root,
+)
 # One-directional import: session_registry is a self-contained leaf (imports
 # nothing from shared.*), so this introduces NO circular import. Used by
 # resolve_agent_name Step 3.5 to recover a tmux teammate's friendly name.
@@ -112,6 +116,9 @@ _EMPTY_CONTEXT = {
     # non-TTY harness — remote/cloud or Desktop). MONOTONIC by contract: writers
     # may only SET it, never clear or change it; nothing gates on it in v1.
     "harness": "",
+    # Lead's SendMessage address (#1666 item 1): "team-lead" locally, "main" in
+    # a cloud session. "" = not recorded; readers fall back to the env value.
+    "lead_address": "",
 }
 
 # Read-boundary path-safety guard for team_name. The persisted value is minted
@@ -369,7 +376,8 @@ def get_pact_context() -> dict:
     """
     Read session context from the context file.
 
-    Returns dict with keys: team_name, session_id, project_dir, plugin_root, started_at.
+    Returns dict with keys: team_name, session_id, project_dir, plugin_root,
+    started_at, process_key, lead_address (allowlisted; "" when not recorded).
     All values are strings. Returns empty strings for all keys on any error
     (file missing, malformed JSON, permission denied). A missing file is the
     normal state of a session with no PACT context (a plain session, or a
@@ -417,9 +425,14 @@ def get_pact_context() -> dict:
             "team_name": team_name,
             "session_id": str(data.get("session_id", "")),
             "project_dir": str(data.get("project_dir", "")),
-            "plugin_root": str(data.get("plugin_root", "")),
+            # Defence in depth: the writers record only a safe value, so an
+            # unsafe one here means the file was edited; read it as "".
+            "plugin_root": _safe_plugin_root_or_empty(data.get("plugin_root", "")),
             "started_at": str(data.get("started_at", "")),
             "process_key": str(data.get("process_key", "")),
+            # Allowlisted at the read boundary: anything outside
+            # LEAD_ADDRESSES (tampered, older file without the key) reads "".
+            "lead_address": _valid_lead_address(data.get("lead_address")),
         }
         return _cache
     except FileNotFoundError:
@@ -1257,7 +1270,7 @@ def _resolve_aligned_team_name(
     (empty persisted context) resolves to the computed name, NOT "".
 
     PURE / FS-read-only / NEVER raises. The whole scan is wrapped in a TRUE
-    ``except Exception`` (NOT the typed-tuple ``_iter_members`` precedent at
+    ``except Exception`` (NOT the typed-tuple ``iter_team_members`` precedent at
     the ``members[]`` reader). The genuine raise sources the bare except must
     catch are:
       * ``get_claude_config_dir()`` -> ``Path.home()`` can raise
@@ -1657,7 +1670,10 @@ def generate_team_name(input_data: dict) -> str:
     # all — the platform owns teardown of its own session-* namespace, so
     # this prefix change cannot expose the live team dir to reaping. The
     # [a-f0-9-] charset constraint is retained because the tasks skip-set's
-    # allowlist still relies on it.
+    # allowlist still relies on it. Exception: in a cloud session
+    # `cloud_team_default` passes the platform's full session id as the
+    # resolver *default*; that id is adopted, not minted, and satisfies the
+    # same `[a-f0-9-]` charset.
     raw_id = input_data.get("session_id")
     session_id = str(raw_id) if raw_id else ""
     if session_id:
@@ -1665,6 +1681,62 @@ def generate_team_name(input_data: dict) -> str:
     else:
         suffix = secrets.token_hex(4)
     return f"session-{suffix}"
+
+
+# Cloud harness signal (#1666). The ONLY env read of CLAUDE_CODE_REMOTE in
+# PACT; see docs/architecture/session-start-lead-address.md §4 for the
+# re-opened #1662 ruling and its scope (team default + lead address only;
+# never a harness-stamp input). Absent/other value -> local behaviour.
+CLOUD_SESSION_ENV = "CLAUDE_CODE_REMOTE"
+LEAD_ADDRESS_LOCAL = "team-lead"
+LEAD_ADDRESS_CLOUD = "main"
+LEAD_ADDRESSES = frozenset({LEAD_ADDRESS_LOCAL, LEAD_ADDRESS_CLOUD})
+# A cloud session id is a lowercase UUID (8-4-4-4-12 hex). The strict shape
+# rejects degenerate ids such as "-" or "--" that the [a-f0-9-] charset alone
+# admits; any other id falls back to generate_team_name.
+_FULL_SESSION_ID_RE = re.compile(
+    r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}"
+)
+
+
+def is_cloud_session() -> bool:
+    """True iff this process runs in a cloud session (CLAUDE_CODE_REMOTE=true)."""
+    return os.environ.get(CLOUD_SESSION_ENV, "").strip().lower() == "true"
+
+
+def cloud_team_default(session_id: str) -> str | None:
+    """The resolver default for a cloud session: the full session id, which
+    the platform uses as the team name there. None when not cloud, or when
+    the id is not a lowercase UUID that is also a safe single path component
+    (caller falls back to generate_team_name)."""
+    if not is_cloud_session():
+        return None
+    sid = str(session_id or "")
+    if (
+        sid
+        and not _is_unknown_or_missing_session(sid)
+        and _FULL_SESSION_ID_RE.fullmatch(sid)
+        and is_safe_path_component(sid)
+    ):
+        return sid
+    return None
+
+
+def resolve_lead_address() -> str:
+    """The lead's SendMessage address for this harness, from the environment."""
+    return LEAD_ADDRESS_CLOUD if is_cloud_session() else LEAD_ADDRESS_LOCAL
+
+
+def _valid_lead_address(value: object) -> str:
+    """Read-boundary allowlist: an allowlisted value, else ""."""
+    return value if isinstance(value, str) and value in LEAD_ADDRESSES else ""
+
+
+def get_lead_address() -> str:
+    """Recorded lead address for this session; when none is recorded (or the
+    recorded value is not allowlisted), the environment-derived value. Never
+    returns anything outside LEAD_ADDRESSES."""
+    return get_pact_context().get("lead_address") or resolve_lead_address()
 
 
 def _is_unknown_or_missing_session(raw_id: object) -> bool:
@@ -2064,7 +2136,7 @@ def is_canonical_journal_frame(input_data: dict) -> bool:
         return False
 
 
-def _iter_members(
+def iter_team_members(
     team_name: str,
     teams_dir: str | None = None,
 ) -> list[dict]:
@@ -2120,7 +2192,7 @@ def _lookup_agent_in_team_config(
     """
     Look up agent name from team config file by agent id.
 
-    Scans ``_iter_members(team_name, teams_dir)`` for an entry where
+    Scans ``iter_team_members(team_name, teams_dir)`` for an entry where
     ``member["id"] == agent_id`` and returns its name.
 
     Args:
@@ -2131,10 +2203,36 @@ def _lookup_agent_in_team_config(
     Returns:
         Agent name if found, empty string otherwise
     """
-    for member in _iter_members(team_name, teams_dir):
+    for member in iter_team_members(team_name, teams_dir):
         if member.get("id") == agent_id:
             return str(member.get("name", ""))
     return ""
+
+
+def _safe_plugin_root_or_empty(value: object) -> str:
+    """``value`` when it is a safe plugin root (is_safe_plugin_root), else "".
+    An unsafe value is logged to stderr, never echoed in full."""
+    if is_safe_plugin_root(value):
+        return value  # type: ignore[return-value]  # is_safe_plugin_root implies str
+    if value:
+        print(
+            "pact_context: rejecting unsafe plugin_root (using empty)",
+            file=sys.stderr,
+        )
+    return ""
+
+
+def _read_recorded_context(target: Path, session_id: str) -> dict:
+    """The context dict recorded at ``target`` when it belongs to
+    ``session_id``; {} when the file is absent, unreadable, malformed, not a
+    dict, or written for another session. Never raises."""
+    try:
+        recorded = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    if not isinstance(recorded, dict) or recorded.get("session_id") != session_id:
+        return {}
+    return recorded
 
 
 def build_context_cache(
@@ -2145,6 +2243,7 @@ def build_context_cache(
     started_at: str | None = None,
     process_key: str | None = None,
     harness: str = "",
+    lead_address: str | None = None,
 ) -> tuple[Path, dict] | None:
     """Build the session context dict + path and populate the in-process cache.
 
@@ -2152,8 +2251,9 @@ def build_context_cache(
     builds the ``context`` dict, resolves the session-scoped ``target`` path,
     and populates the module-level ``_cache`` / ``_context_path`` so same-process
     readers (``get_session_dir()`` and ``append_event()``'s implicit
-    path-resolution) work immediately. Its one disk read: when ``process_key``
-    is None it reads ``target`` to carry forward the key recorded there.
+    path-resolution) work immediately. Its one disk read: when the caller
+    leaves ``process_key``, ``harness`` or ``lead_address`` unset, it reads
+    ``target`` once and carries the values recorded there for THIS session.
 
     Returns ``(target, context)`` so a caller can pass them straight to
     ``persist_context()``; returns ``None`` when the session-scoped path cannot
@@ -2187,6 +2287,11 @@ def build_context_cache(
             value already recorded for this session wins over a fresh "" read
             (set_harness_stamp owns same-value idempotence; this parameter
             only threads the value through the cache/persist seam).
+        lead_address: The lead's SendMessage address ("team-lead" / "main").
+            An allowlisted value is recorded as given (session_init recomputes
+            it every SessionStart). None (every write_context rewriter) keeps
+            the value recorded for THIS session, else derives it from the
+            environment. NOT monotonic, unlike ``harness``.
 
     Returns:
         ``(target, context)`` on success, or ``None`` if the path is uncomputable.
@@ -2197,10 +2302,14 @@ def build_context_cache(
         "team_name": team_name,
         "session_id": session_id,
         "project_dir": project_dir,
-        "plugin_root": plugin_root,
+        # Recorded only when safe (is_safe_plugin_root): the model reads
+        # this file directly (bootstrap.md's per-field fallback) and pastes
+        # the value into double-quoted shell commands.
+        "plugin_root": _safe_plugin_root_or_empty(plugin_root),
         "started_at": started_at or datetime.now(timezone.utc).isoformat(),
         "process_key": "",
         "harness": harness if isinstance(harness, str) else "",
+        "lead_address": "",
     }
 
     # Use _context_path if already set (from init() or test fixture),
@@ -2221,34 +2330,46 @@ def build_context_cache(
         )
         return None
 
+    # ONE guarded read of the context already recorded at the target, shared
+    # by the three carries below (process_key, harness, lead_address), and
+    # skipped when the caller threads all three values. It is used only when
+    # it was written for THIS session: a file left by another session (or
+    # unreadable, malformed, or not a dict) carries nothing.
+    needs_carry = (
+        process_key is None or not harness or not _valid_lead_address(lead_address)
+    )
+    recorded = _read_recorded_context(target, session_id) if needs_carry else {}
+
     if process_key is None:
-        try:
-            recorded = json.loads(target.read_text(encoding="utf-8"))
-            if recorded.get("session_id") == session_id:
-                process_key = str(recorded.get("process_key", ""))
-        except (OSError, ValueError, TypeError, AttributeError):
-            process_key = ""
+        process_key = str(recorded.get("process_key", "")) if recorded else ""
     context["process_key"] = process_key or ""
 
     # HARNESS carry-forward (monotonic never-clear, the same discipline the
-    # process_key read above applies): when the caller threads NO harness
-    # value ("" — write_context, the realign healer, any rebuild-after-stamp
+    # process_key carry applies): when the caller threads NO harness value
+    # ("" — write_context, the realign healer, any rebuild-after-stamp
     # writer), a non-empty harness already recorded for THIS session is kept.
     # Without this, write_context (which rebuilds the context from parameters)
     # would blank the stamp on its next rewrite — violating the never-clear
     # contract set_harness_stamp declares. Callers that DO thread a value
     # (session_init, monotonic: saved-or-transcript) are unaffected — the
-    # carry only fires on the parameter's default.
+    # carry only fires on the parameter's default. Like the other two carries,
+    # it requires the recorded session_id to match, so a stamp is never
+    # inherited from a different session's file.
     if not harness:
-        try:
-            recorded_harness = json.loads(target.read_text(encoding="utf-8")).get(
-                "harness", ""
-            )
-            if isinstance(recorded_harness, str) and recorded_harness:
-                harness = recorded_harness
-        except (OSError, ValueError, TypeError, AttributeError):
-            pass
+        recorded_harness = recorded.get("harness", "")
+        if isinstance(recorded_harness, str) and recorded_harness:
+            harness = recorded_harness
     context["harness"] = harness if isinstance(harness, str) else ""
+
+    # LEAD ADDRESS (#1666 item 1). An allowlisted value from the caller wins
+    # (session_init recomputes it every SessionStart). None -- every
+    # write_context rewriter -- keeps the value recorded for THIS session, and
+    # with nothing valid recorded (the healer's absent file) derives it from
+    # the environment, so a rewrite never blanks it.
+    resolved_address = _valid_lead_address(lead_address) or _valid_lead_address(
+        recorded.get("lead_address")
+    )
+    context["lead_address"] = resolved_address or resolve_lead_address()
 
     # Populate the in-process cache UNCONDITIONALLY (Option A). The cache is the
     # process's own working truth; disk persistence is an independent side-effect.
@@ -2288,6 +2409,13 @@ def persist_context(target: Path, context: dict) -> None:
     """
     context_dir = target.parent
     try:
+        # The single disk-write sink: every writer (build_context_cache, and
+        # set_harness_stamp re-persisting a recorded dict) passes through
+        # here, so an unsafe plugin_root is never written, whatever its source.
+        if context.get("plugin_root") and not is_safe_plugin_root(
+            context["plugin_root"]
+        ):
+            context = {**context, "plugin_root": ""}
         serialized = json.dumps(context)
         try:
             if target.read_bytes() == serialized.encode("utf-8"):
@@ -2573,8 +2701,8 @@ def heal_context_if_missing(input_data: dict) -> bool:
          mirrors session_init's session_id_was_missing persist gate
 
     Heal = write_context(_resolve_aligned_team_name(str(raw_id),
-    default=generate_team_name(input_data)), str(raw_id), CLAUDE_PROJECT_DIR,
-    CLAUDE_PLUGIN_ROOT) — the existing build+cache+persist seam: atomic write
+    default=cloud_team_default(str(raw_id)) or generate_team_name(input_data)),
+    str(raw_id), CLAUDE_PROJECT_DIR, CLAUDE_PLUGIN_ROOT) — the existing build+cache+persist seam: atomic write
     (mkstemp+rename), 0o600, and build_context_cache resets _cache so THIS
     process's subsequent get_team_name()/get_session_dir() calls see the
     healed values.
@@ -2625,9 +2753,12 @@ def heal_context_if_missing(input_data: dict) -> bool:
         # the heal path. Thread the computed name as the resolver default so a
         # cold heal (real dir not yet present) still writes a valid computed
         # name, while a gate-time heal (real dir present) writes the aligned
-        # name and converges the context in one prompt.
+        # name and converges the context in one prompt. In a cloud session
+        # the default is the full session id (#1666 item 2), the same helper
+        # session_init's startup default uses.
         aligned_team = _resolve_aligned_team_name(
-            str(raw_id), default=generate_team_name(input_data)
+            str(raw_id),
+            default=cloud_team_default(str(raw_id)) or generate_team_name(input_data),
         )
         write_context(
             aligned_team,

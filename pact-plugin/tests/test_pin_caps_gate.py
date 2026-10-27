@@ -28,6 +28,7 @@ from pathlib import Path
 
 import pytest
 
+from fixtures.unreadable_path import replace_with_directory  # noqa: E402
 from helpers import make_claude_md_with_pins, make_pin_entry, point_resolver_at  # noqa: E402
 
 HOOK = Path(__file__).resolve().parent.parent / "hooks" / "pin_caps_gate.py"
@@ -582,10 +583,10 @@ class TestPinCapsGate_RealHook:
     def test_real_hook(self, tmp_path, name, before, call, expected):
         claude_md = tmp_path / "CLAUDE.md"
         if before == "unreadable":
-            if os.geteuid() == 0:
-                pytest.skip("root reads a mode-000 file, so EACCES cannot be produced")
-            claude_md.write_text(_pins(3), encoding="utf-8")
-            claude_md.chmod(0o000)
+            # A DIRECTORY in the file's place: the gate's read raises a real
+            # OSError, as a mode-000 file does for a non-root user, and unlike
+            # mode bits it also fails when the suite runs as root.
+            replace_with_directory(claude_md)
         else:
             claude_md.write_text(before, encoding="utf-8")
         tool, tool_input = call
@@ -596,10 +597,7 @@ class TestPinCapsGate_RealHook:
             else:
                 text = tool_input["content"]
             tool, tool_input = _write(text.replace("## Working Memory", "<!-- pinned: 2026-04-21 -->\n### New\nbody\n\n## Working Memory", 1))
-        try:
-            assert _outcome(_run_hook(tmp_path, _frame(claude_md, tool, tool_input))) == expected
-        finally:
-            claude_md.chmod(0o644)
+        assert _outcome(_run_hook(tmp_path, _frame(claude_md, tool, tool_input))) == expected
 
     @pytest.mark.parametrize("call, expected", [
         (_edit("### Pin5\n", "### Pin5 renamed\n"), "allow"),

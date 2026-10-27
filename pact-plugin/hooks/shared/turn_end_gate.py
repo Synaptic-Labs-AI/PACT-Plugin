@@ -26,6 +26,9 @@ from pathlib import Path
 from typing import Any
 
 from . import background_work, pact_context, state_file, turn_end_jobs
+# Re-exported: subagent_metadata moved to the registry-free subagent_meta
+# module (actor_identity reads it from there); callers here keep the old name.
+from .subagent_meta import META_MAX_BYTES, subagent_metadata  # noqa: F401  # re-export: moved to subagent_meta
 from .paths import get_claude_config_dir
 from .session_journal import append_event_checked, make_event
 from .task_utils import iter_team_task_jsons
@@ -49,10 +52,8 @@ VERDICT_ALLOW_NO_JOB = "allow_no_job"
 
 MAX_LISTED_JOBS = 5
 JOB_LABEL_MAX_CHARS = 80
-META_MAX_BYTES = 64 * 1024
 
 _UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]+")
-_SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 LEAD_BLOCK_TEXT = (
     "Background work is still running in this session and nothing is "
@@ -280,43 +281,12 @@ def teammate_identity(input_data: Any, team: str) -> str:
     return ""
 
 
-def subagent_metadata(input_data: dict) -> dict:
-    """The platform's `agent-<agent_id>.meta.json` for a subagent frame, or {}.
-
-    Looked for beside `agent_transcript_path`, then in the session's
-    `subagents` folder beside `transcript_path`. Read only from under the
-    config root's `projects` folder, and only when at most META_MAX_BYTES.
-    """
-    agent_id = input_data.get("agent_id")
-    if not isinstance(agent_id, str) or not _SAFE_ID.match(agent_id):
-        return {}
-    filename = f"agent-{agent_id}.meta.json"
-    candidates = []
-    agent_transcript = input_data.get("agent_transcript_path")
-    if _is_text(agent_transcript):
-        candidates.append(Path(agent_transcript).parent / filename)
-    transcript = input_data.get("transcript_path")
-    session_id = input_data.get("session_id")
-    if _is_text(transcript) and isinstance(session_id, str) and _SAFE_ID.match(session_id):
-        candidates.append(Path(transcript).parent / session_id / "subagents" / filename)
-    root = get_claude_config_dir() / "projects"
-    for path in candidates:
-        try:
-            if os.lstat(path).st_size > META_MAX_BYTES:
-                return {}
-            data = json.loads(state_file.read_text(path, root))
-        except (OSError, ValueError):
-            continue
-        return data if isinstance(data, dict) else {}
-    return {}
-
-
 def _is_member(name: Any, team: str) -> bool:
     if not _is_text(name):
         return False
     return any(
         isinstance(m, dict) and m.get("name") == name
-        for m in pact_context._iter_members(team)
+        for m in pact_context.iter_team_members(team)
     )
 
 

@@ -912,11 +912,10 @@ def test_emitted_equals_journaled_except_where_a_block_applies(
 # ══════════════════════════════════════════════════════════════════════════
 
 
-@pytest.mark.skipif(
-    os.geteuid() == 0,
-    reason="mode 0o000 does not deny root, so the unreadable-store leg cannot "
-           "be constructed; the test would pass or fail for the wrong reason",
-)
+# The subject is a PermissionError on the store (asserted below with
+# os.listdir, and named by the advice): only mode bits give that, and uid 0
+# ignores them, so the test would pass or fail for the wrong reason as root.
+@pytest.mark.requires_non_root
 def test_unreadable_store_denies_while_the_owner_matching_task_survives(
     tmp_path, monkeypatch, capsys
 ):

@@ -369,23 +369,44 @@ class TestAppendEvent:
         assert result is False
 
     def test_fail_open_on_write_error(self, session_dir):
-        """P0: Returns False on write error, no exception raised."""
+        """P0: Returns False on write error, no exception raised.
+
+        The outer-except arm: the failure is raised by the session-dir mkdir,
+        before `_atomic_write` runs. The write-failure arm is
+        test_fail_open_when_the_journal_write_itself_fails below.
+        """
         from shared.session_journal import append_event, make_event
 
         event = make_event("test")
 
-        # Force a write error by making the parent read-only
+        # Force a write error by putting a regular FILE where the session
+        # directory goes, so the directory create raises a real OSError. A
+        # read-only directory would not fail when the suite runs as root.
         journal_dir = Path(session_dir)
-        journal_dir.mkdir(parents=True)
-        os.chmod(str(journal_dir), 0o444)
+        journal_dir.parent.mkdir(parents=True, exist_ok=True)
+        journal_dir.write_text("not a directory")
 
-        try:
-            result = append_event(event)
-            # Should return False, not raise
-            assert result is False
-        finally:
-            # Restore permissions for cleanup
-            os.chmod(str(journal_dir), 0o755)
+        result = append_event(event)
+        # Should return False, not raise
+        assert result is False
+
+    def test_fail_open_when_the_journal_write_itself_fails(self, journal_file):
+        """P0: the write-failure arm. The session directory exists, so the
+        mkdir succeeds, and the JOURNAL FILE is a directory, so `os.open`
+        inside `_atomic_write` raises EISDIR and `_atomic_write` returns
+        False. append_event must pass that False on, not report success.
+
+        test_fail_open_on_write_error above fails earlier, at the mkdir, and so
+        lands in append_event's outer `except`; only this arm reaches the
+        `if not _atomic_write(...)` check. A directory, not mode bits, so it
+        also fails when the suite runs as root.
+        """
+        from shared.session_journal import append_event, make_event
+
+        journal_file.mkdir(parents=True)
+
+        assert append_event(make_event("test")) is False
+        assert journal_file.is_dir(), "control: the journal path is still the directory"
 
     def test_auto_sets_ts_when_missing(self, journal_home, team_name):
         """P0: Auto-sets timestamp when ts is not in the event dict."""
@@ -439,9 +460,11 @@ class TestAppendEvent:
         """F4: _atomic_write fails open (returns False) when os.open raises OSError.
 
         Direct unit test of the underlying primitive used by append_event(). The
-        function is currently exercised indirectly via append_event's fail-open
-        path (test_fail_open_on_write_error uses chmod 0o444 on the parent dir),
-        but a direct test pins the contract: any OSError from os.open must be
+        function is also exercised through append_event by
+        test_fail_open_when_the_journal_write_itself_fails (the journal file is a
+        directory, so this os.open raises EISDIR); test_fail_open_on_write_error
+        fails earlier, at the session-dir mkdir, and never reaches it. A direct
+        test pins the contract: any OSError from os.open must be
         swallowed and surface as a False return -- never propagate.
 
         Patch path: the string form `"shared.session_journal.os.open"` is the
@@ -4269,6 +4292,7 @@ class TestValidateOptionalFieldTypes:
             "source": str,
             "prev_session_dir": str,
             "entrypoint": str,
+            "lead_address": str,
         }
         base = {"session_id": "s", "project_dir": "/tmp/proj"}
         assert _validate_event_schema(make_event(
@@ -4279,6 +4303,11 @@ class TestValidateOptionalFieldTypes:
             "session_start", entrypoint="remote", **base))[0]
         assert not _validate_event_schema(make_event(
             "session_start", entrypoint=42, **base))[0]
+        # `lead_address`: the in-hook reading of the cloud signal (#1666).
+        assert _validate_event_schema(make_event(
+            "session_start", lead_address="main", **base))[0]
+        assert not _validate_event_schema(make_event(
+            "session_start", lead_address=["main"], **base))[0]
 
     def test_compaction_attributed_latency_declared_optional(self):
         """compaction_attributed has `latency_s: float`, the seconds from staging

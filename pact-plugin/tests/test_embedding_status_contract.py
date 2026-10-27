@@ -352,6 +352,7 @@ class TestCliStderrStaysCleanOnTheFaultPath:
             timeout=120, env=env,
         )
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (f): CPD-presence sensitivity — with CPD declared the child files under the tmp project while its location stays in the repo, and the location-divergence warning breaks the stderr-purity assertion
     def test_fault_is_reported_on_stdout_and_stderr_stays_empty(self, memory_store):
         proc = self._run_cli_save_with_a_forced_fault(memory_store("probe.db"))
 

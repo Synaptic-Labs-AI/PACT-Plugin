@@ -46,6 +46,10 @@ from pathlib import Path
 
 import pytest
 
+# The canonical minimal-CLAUDE.md seeder, consolidated in fixtures/ (moved
+# verbatim from the comprehensive sibling; see fixtures/claude_md_seed.py).
+from fixtures.claude_md_seed import seed_claude_md
+
 # spawn is macOS's default and the most portable start method; pin it explicitly
 # so the suite behaves identically wherever it runs (fork would inherit parent
 # interpreter state and can be flaky under pytest).
@@ -85,19 +89,6 @@ def _sync_worker(args):
     )
 
 
-def _seed_claude_md(home: Path) -> Path:
-    """Create a minimal project CLAUDE.md with an empty Working Memory section."""
-    claude_dir = home / ".claude"
-    claude_dir.mkdir(parents=True, exist_ok=True)
-    claude_md = claude_dir / "CLAUDE.md"
-    claude_md.write_text(
-        "# Project\n\n## Working Memory\n"
-        "<!-- Auto-managed by pact-memory skill. -->\n\n",
-        encoding="utf-8",
-    )
-    return claude_md
-
-
 class TestConcurrentSyncLostUpdate:
     """The lock prevents the #877-class lost update across real processes."""
 
@@ -110,7 +101,7 @@ class TestConcurrentSyncLostUpdate:
         under the lock the writers serialize and both entries survive. RED on
         reverted code, GREEN with the lock.
         """
-        claude_md = _seed_claude_md(tmp_path)
+        claude_md = seed_claude_md(tmp_path)
         barrier = _MP.Barrier(2)
         procs = [
             _MP.Process(target=_sync_worker, args=((str(tmp_path), wid, barrier),))
@@ -188,8 +179,7 @@ class TestFailOpenOnTimeout:
         """
         from scripts import working_memory as wm
 
-        claude_md = _seed_claude_md(tmp_path)
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        claude_md = seed_claude_md(tmp_path)
 
         from contextlib import contextmanager
 
@@ -217,8 +207,7 @@ class TestFailOpenOnTimeout:
         """Same fail-open contract for the retrieved-context sync site."""
         from scripts import working_memory as wm
 
-        claude_md = _seed_claude_md(tmp_path)
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        claude_md = seed_claude_md(tmp_path)
 
         from contextlib import contextmanager
 

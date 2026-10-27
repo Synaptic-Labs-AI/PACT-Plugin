@@ -1540,6 +1540,7 @@ class TestNonDenialOverTheEnvironment:
             cwd=str(fixture_dir), env=carry_clock_shift(env), timeout=600,
         )
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (b)/(d): pathological-target arm
     def test_claude_md_is_a_directory(self, tmp_path):
         """`read_text` on a directory raises `IsADirectoryError`, an `OSError`."""
         (tmp_path / "CLAUDE.md").mkdir()
@@ -1563,6 +1564,7 @@ class TestNonDenialOverTheEnvironment:
             # unrelated error in a later test.
             target.chmod(0o644)
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (b)/(d): pathological-target arm
     def test_claude_md_is_a_broken_symlink(self, tmp_path):
         """Reaches a DIFFERENT path from the two arms around it, and the
         difference is stated so nobody reads this as a third read-failure case.
@@ -1591,6 +1593,7 @@ class TestNonDenialOverTheEnvironment:
             "above certify nothing"
         )
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (b)/(d): pathological-target arm
     def test_the_os_error_message_is_length_bounded_but_NOT_redacted(
         self, tmp_path
     ):

@@ -18,6 +18,11 @@ import scripts.memory_api as memory_api  # noqa: E402
 import scripts.working_memory as wm  # noqa: E402
 import staleness  # noqa: E402
 
+# claude_md_ambient (module-wide): git-anchor env handling is this module's
+# subject; the suite-wide tmp redirect would pre-empt the branches under
+# test. See tests/conftest.py.
+pytestmark = pytest.mark.claude_md_ambient
+
 _PLUGIN = Path(__file__).resolve().parent.parent
 _SEED = "# Project Memory\n\n## Working Memory\n"
 _IDENTITY = ("-c", "user.email=t@example.invalid", "-c", "user.name=t")

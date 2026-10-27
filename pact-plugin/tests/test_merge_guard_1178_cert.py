@@ -26,6 +26,14 @@ Summary: COMPREHENSIVE BIDIRECTIONAL certification for #1178 — the positional-
          flips it False. The danger-inside-the-quoted-arg construction is what makes a
          "stays caught" pin fail precisely when the fix wrongly strips a preserved arg.
 
+         HISTORY: every D_BASE assertion needs c21eae19 in the clone. CI clones full
+         history (fetch-depth 0), so all of them run there. A SHALLOW clone lacks the
+         commit, and every row that calls D_BASE then SKIPS with the @requires_history
+         reason, visible in `pytest -rs`; none passes silently. The benign controls and
+         the leg-locality arm are split in two for this: a HEAD-only test that always
+         runs (an over-block or under-block at HEAD needs no history to be wrong) and a
+         @requires_history twin that holds their base half.
+
          THE HEAD-DISPLACEMENT SUB-CLASS (P0, co-equal with currently-caught-stays-caught):
          a leading env-assignment or redirect prefix that displaces the head token
          (`FOO=bar bash -c "danger"`, `2>&1 bash -c "danger"`, `LC_ALL=C curl -X DELETE
@@ -95,8 +103,9 @@ def _load_classifier(sha):
 
 _BASE = _load_classifier(_BASE_SHA)
 # None-safe: a bare `_BASE.is_dangerous_command` would AttributeError at import when the
-# parent source is unavailable (unreachable base commit). D_BASE is only ever called by the
-# @requires_history-guarded differential rows.
+# parent source is unavailable (unreachable base commit). D_BASE is only ever called by
+# @requires_history rows, including the base-half twins of the HEAD-only controls and
+# leg-locality arm, so in a shallow clone every base assertion is a visible skip.
 D_BASE = _BASE.is_dangerous_command if _BASE is not None else None
 
 requires_history = pytest.mark.skipif(
@@ -117,6 +126,16 @@ CURL_DEL = "curl " + _DEL                        # curl destructive DELETE
 WGET_DEL = "wget " + "--method=" + "DELETE"      # wget destructive DELETE
 GHAPI_DEL = "gh " + "api " + _DEL                # gh-api destructive DELETE
 
+# Shared by a HEAD-only test and its @requires_history base-half twin.
+_LEG_LOCALITY = 'mycmd "safe" && %s' % BDR       # inert first leg, executing destructive tail
+_BENIGN_CONTROLS = [
+    ("benign mycmd",     'mycmd "hello world"'),
+    ("benign trailer",   'git commit --trailer "Ref: #123"'),
+    ("benign assignee",  'gh issue create --title "ok" --assignee "alice"'),
+    ("benign logger",    'logger "deploy complete"'),
+    ("benign bash -c",   'bash -c "echo hi"'),
+]
+
 
 # ── Bidirectional assertion helpers (non-vacuity baked in) ───────────────────────────────
 def _closure(cmd):
@@ -133,10 +152,20 @@ def _retention(cmd):
     assert D(cmd) is True, "UNDER-BLOCK opened at HEAD (a real danger was freed): %r" % (cmd,)
 
 
-def _control_false(cmd):
-    """Benign / never-blocked: False on both (proves closures are not blanket-freeing)."""
-    assert D_BASE is not None
-    assert D_BASE(cmd) is False and D(cmd) is False, "benign control not False==both: %r" % (cmd,)
+def _control_false_at_head(cmd):
+    """Benign / never-blocked, HEAD half: proves closures are not blanket-freeing.
+
+    Not @requires_history: a benign form that HEAD blocks is an over-block whether or
+    not the base commit is reachable. The base half is a separate @requires_history test.
+    """
+    assert D(cmd) is False, "benign control blocked at HEAD (over-block): %r" % (cmd,)
+
+
+def _caught_at_head(cmd):
+    """RETENTION, HEAD half: the under-block check, for an arm that must run without
+    history. The base half (non-vacuity) is a separate @requires_history test.
+    """
+    assert D(cmd) is True, "UNDER-BLOCK opened at HEAD (a real danger was freed): %r" % (cmd,)
 
 
 # =========================================================================================
@@ -370,6 +399,8 @@ class TestHeadDisplacementHttpClient:
 # =========================================================================================
 # CLASS C — BINDING INVARIANT (P0). Dangerous legs are NEVER stripped, so the target-bearing
 # quoted value survives for mint/read binding (#1042). Caught on both AND target preserved.
+# The leg-locality arm asserts its HEAD half unconditionally and its base half in a
+# @requires_history twin, so a shallow clone shows that half as a skip.
 # =========================================================================================
 class TestBindingInvariant:
     @requires_history
@@ -389,7 +420,14 @@ class TestBindingInvariant:
 
     def test_leg_locality_executing_tail_stays_caught(self):
         # An inert first leg does not swallow an executing destructive tail (leg-locality).
-        _retention('mycmd "safe" && %s' % BDR)
+        _caught_at_head(_LEG_LOCALITY)
+
+    @requires_history
+    def test_leg_locality_executing_tail_caught_at_base(self):
+        # The base half: the same form was caught at c21eae19, so the HEAD pin is not vacuous.
+        assert D_BASE is not None
+        assert D_BASE(_LEG_LOCALITY) is True, (
+            "vacuous: not caught at c21eae19 base: %r" % (_LEG_LOCALITY,))
 
 
 # =========================================================================================
@@ -428,15 +466,16 @@ class TestResidualPins:
 # controls behave per their (inert or self-contained) head.
 # =========================================================================================
 class TestControls:
-    @pytest.mark.parametrize("label,cmd", [
-        ("benign mycmd",     'mycmd "hello world"'),
-        ("benign trailer",   'git commit --trailer "Ref: #123"'),
-        ("benign assignee",  'gh issue create --title "ok" --assignee "alice"'),
-        ("benign logger",    'logger "deploy complete"'),
-        ("benign bash -c",   'bash -c "echo hi"'),
-    ])
+    @pytest.mark.parametrize("label,cmd", _BENIGN_CONTROLS)
     def test_benign_false_both(self, label, cmd):
-        _control_false(cmd)
+        # HEAD half; the base half is test_benign_false_at_base below.
+        _control_false_at_head(cmd)
+
+    @requires_history
+    @pytest.mark.parametrize("label,cmd", _BENIGN_CONTROLS)
+    def test_benign_false_at_base(self, label, cmd):
+        assert D_BASE is not None
+        assert D_BASE(cmd) is False, "benign control not False at c21eae19 base: %r" % (cmd,)
 
     @requires_history
     def test_env_wrapper_form_caught(self):

@@ -14,6 +14,13 @@ appears to work, an interactive shell function may be rewriting `grep` to
 import re
 from pathlib import Path
 
+import pytest
+
+# claude_md_ambient (module-wide): the prose-root refusal is this module's
+# subject and is orthogonal to the CLAUDE.md resolution redirect; marked so
+# the redirect is explicitly not applied here. See tests/conftest.py.
+pytestmark = pytest.mark.claude_md_ambient
+
 PLUGIN_ROOT = Path(__file__).parent.parent
 
 # The census population. NOT the nine dirs the model gate walks, and no
@@ -316,7 +323,9 @@ def test_arm3_finds_no_bare_config_root():
 # Prose assertions
 
 
-PLACEHOLDER_TOKENS = ("{team_name}", "{session_dir}", "{plugin_root}", "{config_dir}")
+PLACEHOLDER_TOKENS = (
+    "{team_name}", "{session_dir}", "{plugin_root}", "{lead_address}", "{config_dir}",
+)
 PAIR = ("commands/bootstrap.md", "agents/pact-orchestrator.md")
 
 
@@ -333,7 +342,8 @@ def test_placeholder_declaration_present_in_both_carriers():
         text = (PLUGIN_ROOT / rel).read_text(encoding="utf-8")
         assert any(all(t in line for t in PLACEHOLDER_TOKENS) for line in text.splitlines()), (
             f"{rel} no longer declares the placeholder token set. Both carriers "
-            "must name all four tokens together; substitution is manual textual "
+            f"must name all {len(PLACEHOLDER_TOKENS)} tokens {PLACEHOLDER_TOKENS} "
+            "together; substitution is manual textual "
             "replacement and an agent reading only one file must still learn it."
         )
 

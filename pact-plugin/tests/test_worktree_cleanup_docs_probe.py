@@ -24,10 +24,15 @@ This skill ships to consumers, so the system binary is the honest subject. A
 consumer whose `find` is a different implementation is outside what is measured
 here.
 
-EUID: the mode-000 arms depend on the process not being root. As root the
-permission bits do not bite and those arms fail LOUDLY on the marker value
-rather than passing silently, so no skip is registered for them — read this
-line before deleting an arm that reddens on a root CI runner.
+EUID: the unreadable-docs, nested-unreadable, parent-000 and parent-400 arms
+depend on the process not being root. As root the permission bits do not bite,
+so they would report DIR_PRESENT/0/N and fail on a value that measures uid 0,
+not the probe. They carry `requires_non_root` (tests/conftest.py) and run on
+every non-root runner, which is where CI measures them. Dropping privileges
+instead was weighed and rejected: pytest's tmp dirs are 0700 root, and the
+parent-400/parent-100 arms pin OWNER permission bits, so the whole tree would
+have to leave tmp_path and be chowned to the unprivileged uid. parent-100 keeps
+running as root because its expected triple holds there too.
 """
 
 import os
@@ -215,12 +220,25 @@ STATES = [
 ]
 
 
+# The arms whose permission bits do not bind uid 0; see EUID in the module docstring.
+ROOT_BYPASSED = {"unreadable-docs", "nested-unreadable", "parent-000", "parent-400"}
+assert ROOT_BYPASSED <= {name for name, _, _ in STATES}, "a root-bypassed id left STATES"
+
+
+def _state_params():
+    return [
+        pytest.param(
+            setup, expected, id=name,
+            marks=[pytest.mark.requires_non_root] if name in ROOT_BYPASSED else [],
+        )
+        for name, setup, expected in STATES
+    ]
+
+
 class TestDocsProbeSeparatesTheStates:
     """Every state an empty listing can mean, and what the probe reports."""
 
-    @pytest.mark.parametrize(
-        "setup,expected", [(s, e) for _, s, e in STATES], ids=[i for i, _, _ in STATES]
-    )
+    @pytest.mark.parametrize("setup,expected", _state_params())
     def test_probe_reports_the_expected_triple(self, probe, worktree, setup, expected):
         setup(worktree)
         assert probe(worktree) == expected

@@ -93,6 +93,7 @@ class TestEnsureProjectMemoryMd:
         # Content should be unchanged
         assert (tmp_path / "CLAUDE.md").read_text() == "existing content"
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a)+(b): display-file resolution/lifecycle arm
     def test_creates_project_claude_md(self, tmp_path, monkeypatch):
         """Should create .claude/CLAUDE.md (new default) with memory sections."""
         from shared.claude_md_manager import ensure_project_memory_md
@@ -111,6 +112,7 @@ class TestEnsureProjectMemoryMd:
         assert "## Retrieved Context" in content
         assert "## Working Memory" in content
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a)+(b): display-file resolution/lifecycle arm
     def test_created_file_contains_session_markers(self, tmp_path, monkeypatch):
         """Should include session markers in the created file."""
         from shared.claude_md_manager import ensure_project_memory_md
@@ -123,6 +125,7 @@ class TestEnsureProjectMemoryMd:
         assert "<!-- SESSION_START -->" in content
         assert "<!-- SESSION_END -->" in content
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a)+(b): display-file resolution/lifecycle arm
     def test_returns_none_when_dot_claude_exists(self, tmp_path, monkeypatch):
         """Should return None and not overwrite when .claude/CLAUDE.md already exists."""
         from shared.claude_md_manager import ensure_project_memory_md
@@ -173,6 +176,7 @@ class TestEnsureProjectMemoryMd:
         assert dot_claude_file.read_text() == "preferred"
         assert legacy.read_text() == "legacy"
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a)+(b): display-file resolution/lifecycle arm
     def test_created_file_has_secure_permissions(self, tmp_path, monkeypatch):
         """Newly created .claude/CLAUDE.md should be 0o600; .claude/ dir should be 0o700."""
         import stat
@@ -318,6 +322,7 @@ class TestResolveProjectClaudeMdPath:
         assert source == "dot_claude"
         assert path != legacy
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a): absence arm — needs the no-CLAUDE.md world
     def test_returns_new_default_when_neither_exists(self, tmp_path):
         """When neither file exists, points to .claude/CLAUDE.md as the new default."""
         from shared.claude_md_manager import resolve_project_claude_md_path
@@ -330,6 +335,7 @@ class TestResolveProjectClaudeMdPath:
         assert not path.exists()
         assert not (tmp_path / ".claude").exists()
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a)+(b): display-file resolution/lifecycle arm
     def test_accepts_string_project_dir(self, tmp_path):
         """Accepts string paths in addition to Path objects."""
         from shared.claude_md_manager import resolve_project_claude_md_path
@@ -1845,6 +1851,7 @@ class TestMigrateToManagedStructure:
 
         assert result is None
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a): absence arm — needs the no-CLAUDE.md world
     def test_returns_none_when_file_missing(self, tmp_path, monkeypatch):
         """Returns None when file doesn't exist (new_default source)."""
         from shared.claude_md_manager import migrate_to_managed_structure
@@ -2032,6 +2039,7 @@ class TestMigrateToManagedStructure:
 class TestEnsureProjectMemoryMdNewMarkers:
     """Verify that ensure_project_memory_md() template includes #404 markers."""
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a)+(b): display-file resolution/lifecycle arm
     def test_created_file_has_managed_boundary(self, tmp_path, monkeypatch):
         """Newly created project CLAUDE.md must have PACT_MANAGED markers."""
         from shared.claude_md_manager import ensure_project_memory_md
@@ -2044,6 +2052,7 @@ class TestEnsureProjectMemoryMdNewMarkers:
         assert _MANAGED_START in content
         assert _MANAGED_END in content
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a)+(b): display-file resolution/lifecycle arm
     def test_created_file_has_memory_boundary(self, tmp_path, monkeypatch):
         """Newly created project CLAUDE.md must have PACT_MEMORY markers."""
         from shared.claude_md_manager import ensure_project_memory_md
@@ -2056,6 +2065,7 @@ class TestEnsureProjectMemoryMdNewMarkers:
         assert _MEMORY_START in content
         assert _MEMORY_END in content
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a)+(b): display-file resolution/lifecycle arm
     def test_created_file_has_new_top_heading(self, tmp_path, monkeypatch):
         """Template heading is the single canonical H1
         '# PACT Framework and Managed Project Memory'."""
@@ -2073,6 +2083,7 @@ class TestEnsureProjectMemoryMdNewMarkers:
         assert len(top_level_headings) == 1
         assert top_level_headings[0] == "# PACT Framework and Managed Project Memory"
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a)+(b): display-file resolution/lifecycle arm
     def test_created_file_memory_sections_inside_boundary(self, tmp_path, monkeypatch):
         """Memory sections in new file must be inside PACT_MEMORY boundary."""
         from shared.claude_md_manager import ensure_project_memory_md
@@ -2089,6 +2100,7 @@ class TestEnsureProjectMemoryMdNewMarkers:
         assert "## Pinned Context" in memory_region
         assert "## Working Memory" in memory_region
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a)+(b): display-file resolution/lifecycle arm
     def test_created_file_marker_ordering(self, tmp_path, monkeypatch):
         """Markers in newly created file must follow the canonical order."""
         from shared.claude_md_manager import ensure_project_memory_md
@@ -2112,6 +2124,7 @@ class TestEnsureProjectMemoryMdNewMarkers:
         assert positions["memory_start"] < positions["memory_end"]
         assert positions["memory_end"] < positions["managed_end"]
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a)+(b): display-file resolution/lifecycle arm
     def test_created_file_no_interior_h1_inside_memory_boundary(
         self, tmp_path, monkeypatch
     ):
@@ -2760,6 +2773,7 @@ class TestEnsureProjectMemoryMdOSErrorOnMkdir:
     ``target_dir.mkdir`` fails (e.g., read-only filesystem).
     """
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (a)+(b): display-file resolution/lifecycle arm
     def test_oserror_during_mkdir_returns_failure_message(self, tmp_path, monkeypatch):
         from shared.claude_md_manager import ensure_project_memory_md
 

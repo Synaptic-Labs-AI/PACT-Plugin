@@ -2238,20 +2238,21 @@ class TestTokenEdgeCases:
         assert not (tmp_path / "merge-authorized-99999").exists()
 
     def test_write_token_returns_none_on_readonly_dir(self, tmp_path):
-        """write_token returns None when directory is not writable."""
+        """write_token returns None when directory is not writable.
+
+        The token "directory" is a regular FILE, so the O_EXCL create inside it
+        raises a real OSError. A chmod-0o444 directory would not fail when the
+        suite runs as root; a file in the directory's place does.
+        """
         from merge_guard_post import write_token
 
         readonly_dir = tmp_path / "readonly"
-        readonly_dir.mkdir()
-        os.chmod(str(readonly_dir), 0o444)
+        readonly_dir.write_text("not a directory")
 
-        try:
-            # Use a valid context (operation_type satisfies sparse-context guard);
-            # the test exercises the readonly-dir failure path, not the guard.
-            result = write_token({"operation_type": "merge"}, token_dir=readonly_dir)
-            assert result is None
-        finally:
-            os.chmod(str(readonly_dir), 0o755)
+        # Use a valid context (operation_type satisfies sparse-context guard);
+        # the test exercises the unwritable-dir failure path, not the guard.
+        result = write_token({"operation_type": "merge"}, token_dir=readonly_dir)
+        assert result is None
 
     def test_write_token_collision_uses_fallback(self, tmp_path):
         """O_EXCL fallback path remains reachable for true same-microsecond races.

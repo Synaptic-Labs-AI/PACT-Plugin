@@ -111,17 +111,17 @@ def test_a_damaged_or_missing_record_gives_todays_verdict(at_13, damage):
     record = at_13.session_dir / "claude-md-pin-credit" / "lead.json"
     assert record.exists()
     if damage == "unreadable":
-        record.chmod(0o000)
+        # A DIRECTORY in the record's place: opening it to read raises a real
+        # OSError. A chmod-000 file would be read anyway when the suite runs as
+        # root, the credit would hold, and this arm would fail for the wrong reason.
+        record.unlink()
+        record.mkdir()
     elif damage == "corrupt":
         record.write_text("{not json", encoding="utf-8")
     else:
         record.unlink()
-    try:
-        assert _gate(at_13, READD_3) == "deny"
-        assert _gate(at_13, {"old_string": "secret body 5", "new_string": "secret body five"}) == "allow"
-    finally:
-        if record.exists():
-            record.chmod(0o600)
+    assert _gate(at_13, READD_3) == "deny"
+    assert _gate(at_13, {"old_string": "secret body 5", "new_string": "secret body five"}) == "allow"
 
 
 TWELVE_INDENTED_LINE = "  ### Sub heading\n"

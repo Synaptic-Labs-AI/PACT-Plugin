@@ -1757,6 +1757,7 @@ class TestWriteContextIntegration:
             started_at=None,  # a startup records now; only a compaction keeps the value on disk
             process_key=ANY,
             harness=ANY,
+            lead_address="team-lead",  # local env (conftest scrub)
         )
 
     def test_missing_session_id_falls_back_to_unknown_and_warns(self, monkeypatch, tmp_path, capsys):
@@ -2525,6 +2526,7 @@ class TestExtractPrevSessionDirDualLocation:
 
         assert result == str(sanitised)
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (b): dual-location read arm
     def test_reads_dot_claude_when_only_dot_claude_exists(self, tmp_path, monkeypatch):
         """Reads .claude/CLAUDE.md when it is the only location present."""
         from session_init import _extract_prev_session_dir
@@ -3142,6 +3144,7 @@ class TestPluginRootEnvWiring:
             started_at=None,
             process_key=ANY,
             harness=ANY,
+            lead_address="team-lead",  # local env (conftest scrub)
         )
 
     def test_plugin_root_env_flows_to_update_session_info(

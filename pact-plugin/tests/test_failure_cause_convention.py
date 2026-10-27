@@ -121,6 +121,7 @@ class TestFailureCauseHelper:
 class TestRoutedProducersEmitNoPath:
     """One arm for each routed producer that carried the leak."""
 
+    @pytest.mark.claude_md_ambient  # §11.3.1 (b): producer drives production session code resolving the display file
     def test_ensure_project_memory_md_inner(self, tmp_path, monkeypatch):
         """HARNESS ARM. Injects at `_atomic_write_text`.
 
@@ -217,25 +218,19 @@ class TestRoutedProducersEmitNoPath:
     def test_update_session_info(self, tmp_path, monkeypatch):
         """PRODUCT ARM. Natural read failure, no injection.
 
-        REACHABILITY IS MEASURED: a `chmod 000` CLAUDE.md in a searchable
-        parent passes lock acquisition and `Path.exists`, then fails at
-        `read_text` with the absolute path attached.
+        REACHABILITY IS MEASURED: a CLAUDE.md that is a DIRECTORY, in a
+        searchable parent, passes lock acquisition and `Path.exists`, then
+        fails at `read_text` with the absolute path attached. A `chmod 000`
+        file reaches the same handler for a non-root user, but root reads it.
         MUTANT: restore `{str(e)[:50]}`.
         """
         from shared.session_resume import update_session_info
 
-        if os.geteuid() == 0:
-            pytest.skip("root reads a chmod 000 file, so the read never fails")
         target = tmp_path / ".claude" / "CLAUDE.md"
-        target.parent.mkdir()
-        target.write_text("<!-- SESSION_START -->\n<!-- SESSION_END -->\n")
-        target.chmod(0o000)
+        target.mkdir(parents=True)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
-        try:
-            result = update_session_info("sess-1", "team-1")
-        finally:
-            target.chmod(0o600)
-        _assert_convention(result, "PermissionError (EACCES)")
+        result = update_session_info("sess-1", "team-1")
+        _assert_convention(result, "IsADirectoryError (EISDIR)")
         assert result.startswith("Session info failed:")
 
 

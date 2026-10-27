@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from fixtures.unreadable_path import replace_with_directory
 from shared.claude_md_manager import MEMORY_END_MARKER, MEMORY_START_MARKER
 from test_pin_caps_gate import HOOK, SNIPPET, _edit, _frame, _outcome, _pins, _run_hook, _write  # noqa: E402 — sibling harness reuse
 
@@ -141,15 +142,12 @@ def test_a_relative_file_path_is_not_gated(tmp_path, relative):
 
 @pytest.mark.parametrize("pins", [12, 13])
 def test_a_write_to_dot_claude_over_an_unreadable_legacy_file_is_allowed_with_an_advisory(tmp_path, pins):
-    if os.geteuid() == 0:
-        pytest.skip("root reads a mode-000 file, so EACCES cannot be produced")
+    # A DIRECTORY at the legacy path: the resolver's exists() returns it and
+    # the baseline read raises a real OSError, as a mode-000 file does for a
+    # non-root user. Unlike mode bits it also fails when the suite runs as root.
     legacy = tmp_path / "CLAUDE.md"
-    legacy.write_text(_pins(13), encoding="utf-8")
-    legacy.chmod(0o000)
-    try:
-        assert _gate(tmp_path, tmp_path / ".claude" / "CLAUDE.md", _write(_pins(pins))) == "advisory"
-    finally:
-        legacy.chmod(0o644)
+    replace_with_directory(legacy)
+    assert _gate(tmp_path, tmp_path / ".claude" / "CLAUDE.md", _write(_pins(pins))) == "advisory"
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +319,7 @@ def test_same_path_never_raises(tmp_path, monkeypatch):
     assert staleness.same_path(tmp_path, tmp_path) is False
 
 
+@pytest.mark.claude_md_ambient  # §11.3.1 (a)/M3: counter/absence outcome
 def test_assume_present_counts_a_missing_candidate_only_when_asked(tmp_path):
     from staleness import _find_existing_claude_md
 

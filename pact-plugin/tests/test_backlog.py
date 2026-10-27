@@ -384,6 +384,8 @@ afternoon.
   the shipped defect, 08b4f5b8^       test_an_all_settled_backlog_makes_no_tracker_call
   ref set unfiltered, 6c99af63^       test_a_ref_set_mixing_a_string_and_an_int_does_not_raise
   project_path guard removed          test_a_relative_project_path_yields_no_branch_names
+  branch reader treats None as the CWD    test_a_missing_or_absent_project_path_reads_no_branches_and_runs_no_git
+  branch reader back to absolute-only     test_a_missing_or_absent_project_path_reads_no_branches_and_runs_no_git
   the `ref` type rule removed         test_a_non_string_ref_is_reported_by_the_schema_check
   the `ref` type rule removed         test_a_bad_field_on_one_item_locks_writes_to_every_other_item
   the date rule becomes type-only     test_an_unparseable_date_is_reported_not_just_a_wrong_type
@@ -421,6 +423,9 @@ afternoon.
   the title TYPE check removed          test_a_non_string_title_is_reported_and_the_block_still_renders
   `_SLUG_CHARS` anchored on `$`         test_a_repo_slug_with_a_trailing_newline_is_refused
 
+The REST-fallback rows (#1667 and its review cycles) are recorded in
+tests/test_backlog_rest_fallback.py, next to the arms they name.
+
 The source-gate pair is the reason this record exists. Twenty-four arms all
 killed their mutations while the launch-source gate sat entirely unpinned:
 deleting the launch-source check from the call site left the whole file
@@ -439,8 +444,12 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 from shared import backlog
 from shared import backlog_store
+
+from _backlog_tracker_guard import _gh_tripwire_dir, _no_real_tracker  # noqa: F401  # fixture re-export: the autouse tracker guard applies to this module only by being imported here
 
 HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
 SHARED_DIR = HOOKS_DIR / "shared"
@@ -748,7 +757,7 @@ def test_partial_success_yields_per_ref_unverifiable(monkeypatch):
             command, 1, stdout=_partial_success_envelope(ordered), stderr="gh: NOT_FOUND"
         )
 
-    monkeypatch.setattr(backlog, "_repo_slug", lambda: ("owner", "repo"))
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     outcome = backlog.resolve_refs(refs)
@@ -770,7 +779,7 @@ def test_every_tracker_call_carries_an_explicit_timeout(monkeypatch):
         captured["timeout"] = kwargs.get("timeout")
         return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
 
-    monkeypatch.setattr(backlog, "_repo_slug", lambda: ("owner", "repo"))
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
     monkeypatch.setattr(subprocess, "run", fake_run)
     backlog.resolve_refs(["#1"])
 
@@ -783,7 +792,7 @@ def test_an_unreachable_tracker_is_unverifiable_not_a_clean_pass(monkeypatch):
     def fake_run(command, **kwargs):
         raise subprocess.TimeoutExpired(command, 5)
 
-    monkeypatch.setattr(backlog, "_repo_slug", lambda: ("owner", "repo"))
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     outcome = backlog.resolve_refs(["#1"])
@@ -797,7 +806,7 @@ def test_no_tracker_configured_is_supported_end_to_end(monkeypatch):
     RED WHEN a ref-less item is flagged, which would make it second-class, or
     when an unresolvable ref passes silently.
     """
-    monkeypatch.setattr(backlog, "_repo_slug", lambda: None)
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: None)
 
     outcome = backlog.resolve_refs(["#1"])
     assert outcome["#1"]["state"] == "unverifiable"
@@ -1628,6 +1637,7 @@ def test_the_alert_channel_is_gated_on_the_launch_source(monkeypatch, tmp_path):
 # --------------------------------------------------------------------------
 # the write-side guards and the reconciliation, both previously unprotected
 # --------------------------------------------------------------------------
+@pytest.mark.claude_md_ambient  # §11.3.1 (f): CPD-presence sensitivity (scrub-docstring named test)
 def test_an_unresolvable_project_id_refuses_to_write(monkeypatch, tmp_path):
     """A None project id must fail LOUDLY and never write under a default name.
 
@@ -1679,7 +1689,7 @@ def test_reconcile_emits_every_drift_class(monkeypatch, tmp_path):
     ]
     data = _backlog(tmp_path, items=items)
 
-    monkeypatch.setattr(backlog, "resolve_refs", lambda refs: {
+    monkeypatch.setattr(backlog, "resolve_refs", lambda refs, **_: {
         "#1": {"state": "open"}, "#2": {"state": "closed"}})
     monkeypatch.setattr(backlog, "resolve_memory_ids", lambda ids, *_: {i: None for i in ids})
     # Arity-agnostic: this stub stands in for a collaborator whose signature is
@@ -2013,8 +2023,8 @@ def test_a_repo_slug_with_a_trailing_newline_is_refused():
 
     A DIFFERENT regex from the item-id anchor in backlog_store.py, despite the
     shared rationale — the sibling arm covers that one and leaves this one
-    bare. Every other slug reference in this file stubs `_repo_slug`, so the
-    guard is never reached through them.
+    bare. The slug parsers are exercised directly in
+    tests/test_backlog_rest_fallback.py; this arm pins only the anchor.
 
     THIS PINS HYGIENE, NOT A VULNERABILITY: a raw newline inside a GraphQL
     string literal is a syntax error, so the residue degrades a query rather
@@ -2878,7 +2888,7 @@ def test_a_malformed_tracker_payload_is_unverifiable_not_a_crash(monkeypatch):
     a `resolve_refs` that returned `unverifiable` unconditionally would satisfy
     every other assertion here.
     """
-    monkeypatch.setattr(backlog, "_repo_slug", lambda: ("owner", "repo"))
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
 
     def _state(stdout):
         monkeypatch.setattr(
@@ -2908,18 +2918,31 @@ def test_a_malformed_repo_slug_payload_yields_no_tracker(monkeypatch):
     honest answer for all three.
 
     RED WHEN either type check is removed.
+
+    Reaches the `gh repo view` rung ALONE: GH_REPO is unset, and the stub
+    answers the origin read (`git config --get remote.origin.url`) with no
+    output, so the origin rung yields nothing and this payload is seen only by
+    the last rung. Without that split the origin rung would receive the same
+    payload and refuse it as a remote, and the arm would pass through the
+    wrong rung.
     """
+    monkeypatch.delenv("GH_REPO", raising=False)
+
     def _slug(stdout):
-        monkeypatch.setattr(backlog, "_run_capture", lambda command: stdout)
+        monkeypatch.setattr(
+            backlog, "_run_capture",
+            lambda command: None if command[0] == "git" else stdout)
         return backlog._repo_slug()
 
-    assert _slug('{"nameWithOwner": "owner/repo"}') == ("owner", "repo"), (
+    assert _slug('{"nameWithOwner": "owner/repo", "url": "https://github.com/owner/repo"}'
+                 ) == ("owner", "repo"), (
         "control: a well-formed slug did not resolve — the rest is vacuous"
     )
     for label, stdout in (
         ("a top-level array", '[1]'),
         ("a top-level number", '5'),
-        ("nameWithOwner is a scalar", '{"nameWithOwner": 5}'),
+        ("nameWithOwner is a scalar",
+         '{"nameWithOwner": 5, "url": "https://github.com/owner/repo"}'),
     ):
         assert _slug(stdout) is None, label
 
@@ -3119,7 +3142,7 @@ def test_the_query_requests_every_field_the_outcome_logic_reads(monkeypatch):
             (arg for arg in command if arg.startswith("query=")), None)
         return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
 
-    monkeypatch.setattr(backlog, "_repo_slug", lambda: ("owner", "repo"))
+    monkeypatch.setattr(backlog, "_repo_slug", lambda *_: ("owner", "repo"))
     monkeypatch.setattr(subprocess, "run", fake_run)
     backlog.resolve_refs(["#1"])
 
@@ -3783,7 +3806,7 @@ def _recording_refs(monkeypatch, states=None):
     """
     calls = []
 
-    def fake(refs):
+    def fake(refs, **_):
         calls.append(sorted(refs))
         return {ref: dict(states or {"state": "unverifiable", "reason": "x"})
                 for ref in refs}
@@ -3935,7 +3958,15 @@ def _cli_store(tmp_path, items, **top):
     store = tmp_path / "store"
     payload = _backlog(project, items=items)
     payload.update(top)
-    _write(store, f"{backlog.store_path().stem}.json", payload)
+    # Under the name an IN-PROCESS caller resolves — derived from the test
+    # process's CWD, which is wherever pytest was launched. From a directory
+    # with no project id (`/`) that name does not exist; such a run can still
+    # use every subprocess caller below, so the in-process copy is skipped
+    # rather than failing the whole fixture on the launch directory.
+    try:
+        _write(store, f"{backlog.store_path().stem}.json", payload)
+    except backlog.BacklogWriteError:
+        pass
     # AND under the name a subprocess run with `cwd=project` resolves. The id
     # comes from the CWD OF THE PROCESS THAT RESOLVES IT, so a caller passing
     # `cwd=` otherwise gets a store the CLI never opens — and `load_or_create`
@@ -4003,6 +4034,34 @@ def test_a_relative_project_path_yields_no_branch_names():
             f"control: an absolute path returned {names!r}, so the Nones above "
             f"prove nothing about the guard"
         )
+
+
+def test_a_missing_or_absent_project_path_reads_no_branches_and_runs_no_git(
+    monkeypatch, tmp_path,
+):
+    """N5: the branch reader shares `_git_anchor` with the slug chain. A
+    missing absolute path (a moved or deleted project) and no project_path at
+    all both yield None WITHOUT a git call — the old absolute-only check let a
+    missing path reach git, which failed only by accident, and None must never
+    mean the process CWD here. A relative path is refused too; an existing
+    directory is still read (the control).
+
+    RED WHEN the reader goes back to its own absolute-only check, or treats
+    None as "run in the CWD".
+    """
+    seen = []
+
+    def recording(command, **kwargs):
+        seen.append(list(command))
+        return ""
+
+    monkeypatch.setattr(backlog, "_run_capture", recording)
+    for unusable in (str(tmp_path / "moved-away"), None, ".", "relative/path"):
+        assert backlog._branch_and_worktree_names(unusable) is None, unusable
+    assert seen == [], f"an unusable project_path reached git: {seen}"
+
+    assert backlog._branch_and_worktree_names(str(tmp_path)) is not None
+    assert seen and all(cmd[:3] == ["git", "-C", str(tmp_path)] for cmd in seen), seen
 
 
 def test_a_non_string_ref_is_reported_by_the_schema_check(tmp_path):
@@ -4333,13 +4392,13 @@ def test_exit_three_gives_different_advice_for_unreadable_and_unparseable(tmp_pa
     _write(unparseable, f"{name}.json", "{ not json at all")
     code_bad, out_bad = _run_cli(unparseable, "show", "--no-reconcile")
 
+    # A DIRECTORY in the store file's place, as in
+    # test_repair_refuses_what_it_cannot_read_and_leaves_it_in_place: it reaches
+    # the same unreadable branch as a chmod-000 file, and unlike mode bits it
+    # also fails when the suite runs as root.
     unreadable = tmp_path / "unreadable"
-    _write(unreadable, f"{name}.json", "{}")
-    (unreadable / f"{name}.json").chmod(0o000)
-    try:
-        code_unread, out_unread = _run_cli(unreadable, "show", "--no-reconcile")
-    finally:
-        (unreadable / f"{name}.json").chmod(0o644)
+    (unreadable / f"{name}.json").mkdir(parents=True)
+    code_unread, out_unread = _run_cli(unreadable, "show", "--no-reconcile")
 
     assert code_bad == code_unread == 3, (
         f"both states must exit 3 by design: unparseable={code_bad}, "
@@ -4510,6 +4569,7 @@ def test_a_two_sided_exclusive_pair_flags_once_in_either_visit_order():
         )
 
 
+@pytest.mark.claude_md_ambient  # §11.3.1 (f): CPD-presence sensitivity (scrub-docstring named test)
 def test_a_usage_error_and_a_refusal_exit_DIFFERENTLY(tmp_path):
     """ONE RUN, VARIED INPUTS, BOTH CODES — and that is the whole design.
 
@@ -5589,18 +5649,29 @@ def test_next_md_states_the_note_cap_the_writer_enforces():
     )
 
 
-def test_write_time_ref_normalisation_collapses_only_what_the_tracker_resolves():
+def test_write_time_ref_normalisation_collapses_only_what_the_tracker_resolves(
+    monkeypatch,
+):
     """The matrix, at the single choke point both `add` and `set` route
-    through. A resolvable ref — bare number, #-prefixed, a GitHub URL —
-    stores the BARE NUMBER. Everything else stores BYTE-IDENTICAL: the
+    through. A ref that certainly addresses THIS repository — bare number,
+    #-prefixed, a GitHub URL whose owner/name match this repo's slug — stores
+    the BARE NUMBER. Everything else stores BYTE-IDENTICAL: the
     `owner/repo#N` qualifier IS the meaning (collapsing it would re-target
-    the ref to this repo's tracker), a Linear key is opaque, and an arbitrary
-    string is the user's own pointer.
+    the ref to this repo's tracker), a URL to ANOTHER repository likewise, a
+    URL from another tracker ending in digits likewise, a Linear key is
+    opaque, and an arbitrary string is the user's own pointer.
+
+    The slug comes from the `origin` remote only (A-F3: never GH_REPO, which
+    a stored ref outlives); `_origin_repo_slug` is pinned here.
 
     RED WHEN the resolver's reach extends past 'digits this tracker can
-    address', or when `none` stops clearing.
+    address', when another repository's URL collapses, or when `none` stops
+    clearing.
     """
     import argparse
+
+    real_origin_slug = backlog._origin_repo_slug
+    monkeypatch.setattr(backlog, "_origin_repo_slug", lambda *_: ("owner", "repo"))
 
     def stored(ref):
         return backlog._field_updates(argparse.Namespace(ref=ref))["ref"]
@@ -5610,6 +5681,7 @@ def test_write_time_ref_normalisation_collapses_only_what_the_tracker_resolves()
         ("#1602", "1602"),
         ("https://github.com/owner/repo/issues/1602", "1602"),
         ("https://github.com/owner/repo/pull/1602/", "1602"),
+        ("https://github.com/Owner/Repo/issues/1602", "1602"),  # GitHub ignores case
     ]
     for given, expected in collapses:
         assert stored(given) == expected, (
@@ -5618,6 +5690,8 @@ def test_write_time_ref_normalisation_collapses_only_what_the_tracker_resolves()
 
     byte_identical = [
         "other-owner/other-repo#175",  # the qualifier is the meaning
+        "https://github.com/other-owner/other-repo/issues/1602",  # another repo
+        "https://jira.example.com/browse/1602",  # another tracker, digits last
         "ENG-123",                     # an opaque tracker key
         "the user's own pointer",      # an arbitrary string
     ]
@@ -5628,6 +5702,13 @@ def test_write_time_ref_normalisation_collapses_only_what_the_tracker_resolves()
 
     assert stored("none") is backlog._CLEAR, "--ref none stopped clearing"
     assert stored(None) is None, "an unpassed --ref stopped leaving the field alone"
+
+    # NO SLUG, NO COLLAPSE: with no network-free slug a URL cannot be shown to
+    # address this repository, so it is stored verbatim rather than guessed at.
+    monkeypatch.setattr(backlog, "_origin_repo_slug", real_origin_slug)
+    monkeypatch.setattr(backlog, "_run_capture", lambda *a, **k: None)
+    url = "https://github.com/owner/repo/issues/1602"
+    assert stored(url) == url, "a URL collapsed with no slug to compare it to"
 
 
 def test_add_stores_a_hash_ref_as_the_bare_number(tmp_path, monkeypatch):

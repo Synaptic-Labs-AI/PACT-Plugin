@@ -812,20 +812,19 @@ class TestAdversarialTeamConfig:
         assert _team_has_secretary(_TEAM_NAME) is False
 
     def test_team_config_unreadable_returns_false(self, monkeypatch, tmp_path):
-        """Permission-denied on read → caught by the OSError clause."""
+        """An unreadable config → caught by the OSError clause.
+
+        config.json is a DIRECTORY, not a chmod-000 file: its read raises a
+        real OSError (IsADirectoryError, not FileNotFoundError), and unlike
+        mode bits it also fails when the suite runs as root. The arm is red
+        if the reader's except clause is narrowed so that error escapes.
+        """
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         team_dir = tmp_path / ".claude" / "teams" / _TEAM_NAME
-        team_dir.mkdir(parents=True, exist_ok=True)
         cfg = team_dir / "config.json"
-        cfg.write_text(json.dumps({"members": [{"name": "secretary"}]}),
-                       encoding="utf-8")
-        os.chmod(cfg, 0o000)
-        try:
-            from bootstrap_marker_writer import _team_has_secretary
-            assert _team_has_secretary(_TEAM_NAME) is False
-        finally:
-            # Restore so tmp_path teardown succeeds.
-            os.chmod(cfg, 0o600)
+        cfg.mkdir(parents=True)
+        from bootstrap_marker_writer import _team_has_secretary
+        assert _team_has_secretary(_TEAM_NAME) is False
 
 
 # =============================================================================
@@ -1690,12 +1689,13 @@ class TestConcurrentTwoHealerRace:
 
         # Exactly one well-formed context file with the expected content,
         # whichever healer won the rename race. `harness` joined the schema
-        # with the non-TTY stamp work — every context carries it.
+        # with the non-TTY stamp work — every context carries it; so does
+        # `lead_address` (#1666 item 1).
         assert ctx.exists(), "at least one healer must land the file"
         content = json.loads(ctx.read_text(encoding="utf-8"))
         assert set(content.keys()) == {
             "team_name", "session_id", "project_dir", "plugin_root",
-            "started_at", "process_key", "harness",
+            "started_at", "process_key", "harness", "lead_address",
         }
         assert content["team_name"] == "session-deadbeef"
         assert content["session_id"] == session_id

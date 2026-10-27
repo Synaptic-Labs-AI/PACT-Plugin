@@ -437,6 +437,71 @@ _CAPTURED_FRAMES_JSON = r'''
 
 _CAPTURED_FRAMES = json.loads(_CAPTURED_FRAMES_JSON)
 
+# Agent-tool SUBAGENT TaskUpdate / TaskCompleted frames, captured 2026-10-24
+# on Claude Code 2.1.310 (cloud container) by the self-completion-actor TEST
+# phase, probe P2 (design docs/architecture/self-completion-actor.md §9.2).
+# Source: a child `claude -p --settings <scratch> --setting-sources project`
+# whose only hooks were a keys-and-shapes recorder. Plugin untouched.
+_P2_META = {
+    "capture_method": (
+        "live Agent-tool SUBAGENT frame, captured 2026-10-24 on Claude Code "
+        "2.1.310 (cloud) by probe P2: a headless child claude -p with a "
+        "scratch --settings keys-and-shapes recorder; plugin untouched. KEY SET "
+        "IS REAL AND VERBATIM. EVERY VALUE IS SYNTHETIC."
+    ),
+    "authority": (
+        "The key set, plus recorded facts: agent_type is the subagent's TYPE "
+        "('general-purpose'), not its name (its name lived only in "
+        "meta.json); agent_id matches a<16 hex>; session_id and "
+        "transcript_path equal the spawning lead's; no teammate_name or "
+        "team_name key. meta.json existed at the subagent's FIRST PreToolUse "
+        "(keys: agentType description isBuiltIn name requestNonInteractive "
+        "requestShape spawnDepth toolUseId; agentType a TYPE)."
+    ),
+    "synthetic_values": (
+        "agent_id, session_id, ids, paths and tool_response are synthetic; "
+        "the capture did not record tool_response's content or effort's type."
+    ),
+}
+_P2_COMMON = {
+    "agent_id": "a0123456789abcdef",
+    "agent_type": "general-purpose",
+    "cwd": "<cwd>",
+    "hook_event_name": "PreToolUse",
+    "prompt_id": "<synthetic>",
+    "scratchpad_dir": "<scratchpad_dir>",
+    "session_id": "6dcc0612-0000-4000-8000-000000000000",
+    "transcript_path": "<transcript_path>",
+}
+_CAPTURED_FRAMES.update({
+    "pretooluse_subagent_taskupdate_first_call": {
+        "_meta": dict(_P2_META), **_P2_COMMON,
+        "effort": {"level": "<synthetic>"},
+        "permission_mode": "<synthetic>",
+        "tool_input": {"owner": "<owner>", "status": "completed", "taskId": "2"},
+        "tool_name": "TaskUpdate",
+        "tool_use_id": "toolu_<synthetic>",
+    },
+    "posttooluse_subagent_taskupdate_completed": {
+        "_meta": dict(_P2_META), **_P2_COMMON,
+        "hook_event_name": "PostToolUse",
+        "duration_ms": 0,
+        "effort": {"level": "<synthetic>"},
+        "permission_mode": "<synthetic>",
+        "tool_input": {"owner": "<owner>", "status": "completed", "taskId": "2"},
+        "tool_name": "TaskUpdate",
+        "tool_response": {},
+        "tool_use_id": "toolu_<synthetic>",
+    },
+    "taskcompleted_subagent": {
+        "_meta": dict(_P2_META), **_P2_COMMON,
+        "hook_event_name": "TaskCompleted",
+        "task_description": "<elided>",
+        "task_id": "2",
+        "task_subject": "<synthetic>",
+    },
+})
+
 
 def captured_frame(label):
     """Return a deep copy of the captured frame stored under ``label``.
@@ -656,3 +721,24 @@ def constructed_pretooluse_teammate_inprocess(tool_name="Edit"):
     if tool_name == "Write":
         frame.update(tool_name="Write", tool_input={"file_path": "<abs path>", "content": "<content>"})
     return frame
+
+
+def captured_pretooluse_subagent_taskupdate_first_call():
+    """Real Agent-tool subagent PreToolUse(TaskUpdate) KEY SET, its first
+    tool call (CC 2.1.310, probe P2). agent_type is a TYPE; agent_id is
+    a<16 hex>; meta.json already existed. Every value is synthetic."""
+    return captured_frame("pretooluse_subagent_taskupdate_first_call")
+
+
+def captured_posttooluse_subagent_taskupdate_completed():
+    """Real Agent-tool subagent PostToolUse(TaskUpdate, status=completed) KEY
+    SET (CC 2.1.310, probe P2). The frame the self-completion rule reads for
+    a cloud teammate. Every value is synthetic; tool_response content was
+    not recorded."""
+    return captured_frame("posttooluse_subagent_taskupdate_completed")
+
+
+def captured_taskcompleted_subagent():
+    """Real Agent-tool subagent TaskCompleted KEY SET (CC 2.1.310, probe P2):
+    agent_id and agent_type present, no teammate_name or team_name."""
+    return captured_frame("taskcompleted_subagent")
