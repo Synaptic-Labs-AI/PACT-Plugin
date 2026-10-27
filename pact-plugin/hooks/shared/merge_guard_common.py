@@ -10939,55 +10939,136 @@ def _feeds_one_literal_word(leg: str) -> bool:
     return _one_literal_word(word)
 
 
-# Filters that pass on at most one record of their input.
+# Filters that pass on at most one line of their input.
 _ONE_RECORD_FILTERS = (
     ["head", "-1"], ["head", "-n", "1"], ["head", "-n1"], ["head", "--lines=1"],
     ["head", "-c", "1"], ["head", "-c1"],
     ["tail", "-1"], ["tail", "-n", "1"], ["tail", "-n1"],
     ["sed", "-n", "1p"], ["sed", "1q"], ["awk", "NR==1"],
 )
-# Commands that print exactly one line.
+# Commands that print exactly one line. A rev-parse rev must name one rev: no leading
+# `-` (an option such as --all), no range (`..`, `^`) and no `:` path.
 _ONE_LINE_PRODUCERS_RE = re.compile(
-    r"git rev-parse --abbrev-ref [^\s$`*?\[{]+|git branch --show-current"
+    r"git rev-parse --abbrev-ref (?!-)(?:(?!\.\.)[^\s$`*?\[{^:])+|git branch --show-current"
     r"|gh pr view(?: [^\s$`*?\[{-][^\s$`*?\[{]*)? --json number (?:-q|--jq) \.number"
 )
 _STATUS_ZERO_TEST_RE = re.compile(
-    r"\s*(?:if\s+)?(?:\[\s+\$\?\s+(?:-eq|==?)\s+0\s+\]|test\s+\$\?\s+(?:-eq|==?)\s+0"
+    r"\s*(?:if\s+)?(?:\[\s+(\"?)\$\?\1\s+(?:-eq|==?)\s+0\s+\]|test\s+(\"?)\$\?\2\s+(?:-eq|==?)\s+0"
     r"|\(\(\s*\$\?\s*==\s*0\s*\)\))\s*$"
 )
 _LOOP_PREFIX_RE = re.compile(r"^\s*(?:(?:time(?:\s+-p)?|!)\s+)+")
+# One element of the first JSON document jq reads, by index, then by field or index.
+_JQ_INDEX_PATH_RE = re.compile(r"\.\[\d+\](?:\.[A-Za-z_]\w*|\[\d+\])*")
+# gh --json fields whose value is one line of text, so `jq -r` prints it on one line.
+_GH_ONE_LINE_FIELDS = frozenset({"number", "id", "url", "state", "headRefName", "baseRefName"})
+_XARGS_VALUE_OPTIONS = frozenset({"-I", "-L", "-n", "-P", "-s", "-d", "-a", "-E"})
 
 
 def _one_literal_word(word: str) -> bool:
     return bool(word) and not re.search(r"[\s$`*?\[{\\]", word) and not word.startswith("-")
 
 
-def _feeds_one_record(leg: str) -> bool:
-    """Whether `leg` (as written), piped into xargs, gives it at most one record: an echo
-    or a printf of `%s` / `%s\\n` printing one literal word, a filter passing on one record
-    (`head -1`, `tail -n 1`, `sed -n 1p`, `awk 'NR==1'`, `head -c 1`, ...), `grep -m1` over
-    its input, `jq` of one index (`.[0]`), or a command that prints exactly one line
+def _emits_one_json_document(leg: str) -> bool:
+    """Whether `leg` (as written) is a gh command printing its --json output as is: one
+    JSON document."""
+    tokens = _shell_tokenize(leg.strip()) or []
+    return (tokens[:1] == ["gh"] and tokens[1:2] != ["api"]
+            and any(t == "--json" or t.startswith("--json=") for t in tokens)
+            and not any(t in ("-q", "--jq", "-t", "--template", "--paginate")
+                        or t.startswith(("--jq=", "--template=")) for t in tokens))
+
+
+_PRINTED_LITERAL_RE = re.compile(
+    r"\s*(?P<cmd>echo|printf)[ \t]+(?:'(?P<fmt>%s(?:\\n)?)'[ \t]+)?'(?P<text>[^']*)'\s*")
+
+
+def _printed_literal(leg: str) -> str | None:
+    """The text `leg` (as written) prints when it is an echo or a printf of one
+    single-quoted literal (a printf may give it a `%s` or `%s\\n` format), or None. A
+    printf format's `\\n` is expanded; any other escape, a `%` in a format, or a
+    backslash in an echo (bash and zsh print it differently) gives None."""
+    m = _PRINTED_LITERAL_RE.fullmatch(leg)
+    if m is None:
+        return None
+    text = m.group("text")
+    if m.group("cmd") == "echo":
+        return None if m.group("fmt") or "\\" in text else text + "\n"
+    if m.group("fmt"):
+        return text + ("\n" if m.group("fmt").endswith("n") else "")
+    if "%" in text or re.search(r"\\(?!n)", text):
+        return None
+    return text.replace("\\n", "\n")
+
+
+def _one_document_scalar(text: str, path: str) -> bool:
+    """Whether `text` holds exactly one JSON document in which `path` (_JQ_INDEX_PATH_RE)
+    names a number, a boolean, null or a one-line string, so jq prints it on one line."""
+    decoder, docs, i = json.JSONDecoder(), [], 0
+    while True:
+        while i < len(text) and text[i] in " \t\n\r":
+            i += 1
+        if i == len(text):
+            break
+        try:
+            doc, i = decoder.raw_decode(text, i)
+        except ValueError:
+            return False
+        docs.append(doc)
+    if len(docs) != 1:
+        return False
+    value = docs[0]
+    for index, name in re.findall(r"\[(\d+)\]|\.([A-Za-z_]\w*)", path):
+        if index and isinstance(value, list) and int(index) < len(value):
+            value = value[int(index)]
+        elif name and isinstance(value, dict) and name in value:
+            value = value[name]
+        else:
+            return False
+    return not isinstance(value, (list, dict)) and not (isinstance(value, str) and "\n" in value)
+
+
+def _feeds_one_record(leg: str, upstream: str) -> str:
+    """What `leg` (as written), piped into xargs, gives it: "word" for an echo or a printf
+    of one literal word (_feeds_one_literal_word), "line" for one line of text, else "".
+    One line comes from a filter passing on one line (`head -1`, `tail -n 1`, `sed -n 1p`,
+    `awk 'NR==1'`, `head -c 1`, ...), `grep -m1` with only -i -E -F -w -x -v over its
+    input, `jq -c` (or `jq -r` of a one-line gh field) of one element of the single JSON
+    document an `upstream` gh --json prints, `jq -c` / `jq -r` of a path naming a scalar in
+    the one JSON document a literal `upstream` echo or printf prints (_printed_literal), or a command that prints exactly one line
     (_ONE_LINE_PRODUCERS_RE). A file, a variable or any other feed is not bounded."""
     tokens = _shell_tokenize(leg.strip())
     if not tokens:
-        return False
+        return ""
     if tokens in _ONE_RECORD_FILTERS:
-        return True
+        return "line"
     if tokens[0] == "grep":
-        rest = tokens[1:]
-        if "-m" in rest and rest[rest.index("-m") + 1:rest.index("-m") + 2] == ["1"]:
-            rest = rest[:rest.index("-m")] + rest[rest.index("-m") + 2:]
-        elif "-m1" in rest:
-            rest.remove("-m1")
-        else:
-            return False
-        return len([t for t in rest if not t.startswith("-")]) == 1
+        max_one, operands, k = False, 0, 1
+        while k < len(tokens):
+            tok = tokens[k]
+            if tok in ("-m1", "--max-count=1"):
+                max_one = True
+            elif tok in ("-m", "--max-count") and tokens[k + 1:k + 2] == ["1"]:
+                max_one, k = True, k + 1
+            elif tok.startswith("-") and not re.fullmatch(r"-[iEFwxv]+", tok):
+                return ""
+            elif not tok.startswith("-"):
+                operands += 1
+            k += 1
+        return "line" if max_one and operands == 1 else ""
     if tokens[0] == "jq":
-        rest = [t for t in tokens[1:] if t not in ("-r", "-c", "--raw-output", "--compact-output")]
-        return len(rest) == 1 and re.fullmatch(r"\.\[\d+\]", rest[0]) is not None
+        flags = {t for t in tokens[1:] if t.startswith("-")}
+        paths = [t for t in tokens[1:] if not t.startswith("-")]
+        if (not flags or not flags <= {"-r", "-c", "-rc", "-cr", "--raw-output", "--compact-output"}
+                or len(paths) != 1 or not _JQ_INDEX_PATH_RE.fullmatch(paths[0])):
+            return ""
+        if not _emits_one_json_document(upstream):
+            printed = _printed_literal(upstream)
+            return "line" if printed is not None and _one_document_scalar(printed, paths[0]) else ""
+        raw = bool(flags & {"-r", "-rc", "-cr", "--raw-output"})
+        return "line" if not raw or paths[0].rsplit(".", 1)[-1] in _GH_ONE_LINE_FIELDS else ""
     if _ONE_LINE_PRODUCERS_RE.fullmatch(" ".join(tokens)):
-        return True
-    return _feeds_one_literal_word(leg)
+        return "line"
+    return "word" if _feeds_one_literal_word(leg) else ""
 
 
 def _here_string_one_word(leg: str) -> bool:
@@ -11002,42 +11083,115 @@ def _here_string_one_word(leg: str) -> bool:
     return False
 
 
+def _xargs_runs_once(written: list[str], joins: list[str], k: int) -> bool:
+    """Whether the xargs in `written[k]` (legs as written; `joins[k]` is the operator
+    before leg k) runs its command once: it reads one literal word from a here-string or a
+    pipe (_feeds_one_record "word") and does not split it on a delimiter (-d) or read a
+    file (-a), or it reads one line from a pipe (_feeds_one_record "line") and runs once
+    per line (only -I, -i, -r, -t, -x, -L 1, -l). The pipe is its input only when the leg
+    has no stdin redirect of its own."""
+    tokens = _shell_tokenize(written[k].strip()) or []
+    names = [os.path.basename(t) for t in tokens]
+    if "xargs" not in names:
+        return False
+    options: list[str] = []
+    i = names.index("xargs") + 1
+    while i < len(tokens) and tokens[i].startswith("-") and tokens[i] not in ("-", "--"):
+        value = tokens[i + 1] if tokens[i] in _XARGS_VALUE_OPTIONS and i + 1 < len(tokens) else ""
+        options.append(tokens[i] + value)
+        i += 2 if value else 1
+    word_ok = not any(o.startswith(("-d", "-a", "--delimiter", "--arg-file")) for o in options)
+    if _here_string_one_word(written[k]):
+        return word_ok
+    if joins[k] != "|" or any(re.match(r"\d*<", t) for t in tokens):
+        return False
+    upstream = written[k - 2] if k >= 2 and joins[k - 1] == "|" else ""
+    kind = _feeds_one_record(written[k - 1], upstream)
+    line_ok = all(o.startswith(("-I", "-i")) or o in ("-L1", "-l", "-l1", "--no-run-if-empty", "--verbose")
+                  or re.fullmatch(r"-[rtx]+", o) for o in options)
+    return (kind == "word" and word_ok) or (kind == "line" and line_ok)
+
+
 def _find_runs_once(leg: str) -> bool:
-    """Whether a find leg (as written) runs its command once: `-maxdepth 0` on a single
-    start path, or one `-exec … {} +` action, which batches every match into one run. An
-    -execdir `+` runs once per directory, and -ok / -okdir run once per match."""
-    tokens = _shell_tokenize(leg.strip()) or leg.split()
+    """Whether a find leg (as written) runs its one action's command once, and that
+    command does not repeat (_repeat_extra) inside its own text: `-maxdepth 0` (every
+    -maxdepth 0) on a single literal start path, or one `-exec … {} +` action, which
+    batches every match into one run. An -execdir `+` runs once per directory, and -ok /
+    -okdir run once per match."""
+    # A `\;` terminator ends the leg, which keeps only its backslash.
+    tokens = _shell_tokenize(leg.strip().removesuffix("\\")) or leg.split()
     if "find" not in tokens:
         return False
     rest = tokens[tokens.index("find") + 1:]
+    while rest[:1] and rest[0] in ("-L", "-H", "-P"):
+        rest = rest[1:]
     starts = 0
     while starts < len(rest) and not (rest[starts].startswith("-") or rest[starts] in ("(", "!", ")")):
         starts += 1
-    if starts == 1 and any(rest[k] == "-maxdepth" and k + 1 < len(rest) and rest[k + 1] == "0"
-                           for k in range(len(rest))):
-        return True
     actions = [k for k, tok in enumerate(rest) if tok in ("-exec", "-execdir", "-ok", "-okdir")]
-    if len(actions) != 1 or rest[actions[0]] != "-exec":
+    if len(actions) != 1:
         return False
     end = next((k for k in range(actions[0] + 1, len(rest)) if rest[k] in (";", "+")), None)
-    return end is not None and rest[end] == "+" and rest[end - 1] == "{}"
+    if any(_repeat_extra(tok) for tok in rest[actions[0] + 1:len(rest) if end is None else end]):
+        return False
+    depths = [rest[k + 1] for k in range(len(rest) - 1) if rest[k] == "-maxdepth"]
+    if starts == 1 and depths and set(depths) == {"0"} and not re.search(r"[*?\[{$`]", rest[0]):
+        return True
+    return end is not None and rest[actions[0]] == "-exec" and rest[end] == "+" and rest[end - 1] == "{}"
 
 
 _LOOP_EXIT_LEG_RE = re.compile(r"\s*(?:break|exit|return)(?![\w-])")
+_IF_LEG_RE = re.compile(r"\s*if\s")
 
 
-def _loop_repeats(legs: list[str], after_and_or: list[bool], i: int, functions: "set[str]",
-                  bounded: bool) -> bool:
+def _exit_levels(part: str) -> int:
+    """How many enclosing loops a break / exit / return leg leaves: `break N` leaves N,
+    `break` one, and exit or return all of them. 0 for any other leg."""
+    m = re.match(r"\s*(break|exit|return)(?![\w-])\s*(\d*)", part)
+    if m is None:
+        return 0
+    return int(m.group(2) or 1) if m.group(1) == "break" else 1 << 30
+
+
+def _then_branch_exits(legs: list[str], joins: list[str], j: int, depth: int) -> bool:
+    """Whether the then branch of the `if` opened at `legs[j]` reaches a break / exit /
+    return leaving more than `depth` loops on every path through it."""
+    nest = loops = 0
+    for m in range(j + 1, len(legs)):
+        raw = legs[m]
+        if not nest and re.match(r"\s*(?:elif|else|fi)(?![\w-])", raw):
+            return False
+        part = _LEADING_KEYWORDS_RE.sub("", raw)
+        if _IF_LEG_RE.match(part):
+            nest += 1
+        elif re.match(r"\s*fi(?![\w-])", raw):
+            nest -= 1
+        if _LOOP_HEAD_LEG_RE.match(part):
+            loops += 1
+        elif _DONE_LEG_RE.match(part):
+            loops -= 1
+        if not nest and not loops and joins[m] not in ("&&", "||") and _exit_levels(part) > depth:
+            return True
+    return False
+
+
+def _loop_repeats(legs: list[str], written: list[str], joins: list[str], i: int,
+                  functions: "set[str]", bounded: bool) -> bool:
     """Whether the loop opened at `legs[i]` can run a guarded leg of its body (itself, or
-    as a call to one of the guarded shell `functions`) to success more than once. A failed
+    as a call to one of the guarded shell `functions`) to success more than once. `written`
+    holds the same legs as written and `joins[k]` the operator before leg k. A failed
     attempt is not an operation, so a body whose guarded leg is followed by a success exit
-    (`op && break`, `if op; then break`) runs one successful op, and a body holding an
-    unconditional `break` / `exit` / `return` runs once. A guarded leg behind `then`, in a
-    `case`, or on the right of `&&` / `||` runs only when its guard holds: in a `bounded`
-    loop (a for over literal words) that counts once, and anywhere else the text cannot
-    say how often the guard holds, so it repeats. A guarded op that is a plain while
-    condition runs again on each success, so it repeats too; an until condition or a
-    negated while condition ends the loop on its first success."""
+    (`op && break`, `if op; then …; break`, or `op; [ $? -eq 0 ] && break`) runs one
+    successful op, and a body holding an unconditional `break` / `exit` / `return` runs
+    once. An exit counts only when it leaves this loop: a plain break inside a nested
+    loop leaves the inner loop alone (`break 2` leaves two). `op || break` and
+    `if ! op; then break` exit on failure, so they repeat. A guarded leg behind `then`, in
+    a `case`, or on the right of `&&` / `||` runs only when its guard holds: in a
+    `bounded` loop (a for over literal words) that counts once, and anywhere else the text
+    cannot say how often the guard holds, so it repeats. A guarded op that is a plain
+    while condition runs again on each success, so it repeats too; an until condition or
+    a negated while condition ends the loop on its first success."""
+    and_or = [j in ("&&", "||") for j in joins]
     head = _LOOP_PREFIX_RE.sub("", _LEADING_KEYWORDS_RE.sub("", legs[i]))
     depth, branch = 0, 0
     repeats = bool(re.match(r"\s*while\s+(?!!)", head)) and _leg_is_destructive(head)
@@ -11054,23 +11208,24 @@ def _loop_repeats(legs: list[str], after_and_or: list[bool], i: int, functions: 
             branch += 1
         elif re.match(r"\s*(?:fi|esac)(?![\w-])", raw):
             branch -= 1
-        if _LOOP_EXIT_LEG_RE.match(part) and not depth and not branch and not after_and_or[k]:
+        if _exit_levels(part) > depth and not branch and not and_or[k]:
             return False
-        heads = _leg_heads(raw)
+        heads = _leg_heads(written[k])
         if not (_leg_is_destructive(part) or (heads and heads[0] in functions)):
             continue
-        if bounded and (branch or after_and_or[k]):
+        if bounded and (branch or and_or[k]):
             continue
-        following = _LEADING_KEYWORDS_RE.sub("", legs[k + 1]) if k + 1 < len(legs) else ""
-        exits = bool(_LOOP_EXIT_LEG_RE.match(following))
-        if exits and (after_and_or[k + 1] or re.match(r"\s*if\s", part)):
+        following = _LEADING_KEYWORDS_RE.sub("", written[k + 1]) if k + 1 < len(legs) else ""
+        if _exit_levels(following) > depth and joins[k + 1] == "&&":
+            continue
+        if re.match(r"\s*if\s+(?!!)", part) and _then_branch_exits(written, joins, k, depth):
             continue
         # `op; [ $? -eq 0 ] && break` (or `test $? = 0`, `(( $? == 0 ))`, `if [ $? -eq 0 ];
-        # then break`): the status test right after the op is the op's own success exit.
-        then = _LEADING_KEYWORDS_RE.sub("", legs[k + 2]) if k + 2 < len(legs) else ""
-        if (not after_and_or[k + 1] and _STATUS_ZERO_TEST_RE.match(following)
-                and _LOOP_EXIT_LEG_RE.match(then)
-                and (after_and_or[k + 2] or re.match(r"\s*if\s", following))):
+        # then …; break`): the status test right after the op is the op's own success exit.
+        then = _LEADING_KEYWORDS_RE.sub("", written[k + 2]) if k + 2 < len(legs) else ""
+        if (k + 1 < len(legs) and not and_or[k + 1] and _STATUS_ZERO_TEST_RE.match(following)
+                and ((joins[k + 2:k + 3] == ["&&"] and _exit_levels(then) > depth)
+                     or (_IF_LEG_RE.match(following) and _then_branch_exits(written, joins, k + 1, depth)))):
             continue
         repeats = True
     return repeats
@@ -11087,18 +11242,25 @@ def _fan_out_extra(command: str) -> int:
     record (_awk_runs_per_record). An
     until condition or a negated while condition ends the loop on its first success. One
     approval runs one operation, so such a command counts as more than one. A loop head
-    may carry a `time` or `!` prefix. A function that calls itself repeats, and a trap
-    registering one is one more call of it. xargs fed one record (_feeds_one_record, or a
-    one-word here-string) runs once, and so does a find that _find_runs_once reads."""
+    may carry a `time` or `!` prefix. A function on a call cycle (it calls itself, directly
+    or through other functions) repeats, and so does one whose body repeats its op. A trap
+    is one more run of its handler at exit, and a handler on any other signal can run
+    again. xargs that _xargs_runs_once reads
+    runs once, and so does a find that _find_runs_once reads."""
     stripped = _strip_non_executable_content(_normalize_line_continuations(command))
     spans = _slice_stripped_leg_spans(stripped)
     legs = [stripped[a:b] for a, b in spans]
     ops = [stripped[end:start].strip() for (_, end), (start, _) in zip(spans, spans[1:])]
-    after_and_or = [False] + [op in ("&&", "||") for op in ops]
+    joins = [""] + ops
     written = _slice_stripped_legs(_strip_shell_comments(_normalize_line_continuations(command)))
-    # Shell functions whose body holds a guarded leg, and the legs that are their bodies.
+    aligned = len(written) == len(legs)
+    if not aligned:
+        written = legs
+    # Shell functions whose body holds a guarded leg, the functions each body calls, and
+    # the legs that are bodies.
     guarded_functions: set[str] = set()
-    recursive: set[str] = set()
+    body_calls: dict[str, set[str]] = {}
+    repeating_bodies: set[str] = set()
     in_body = [False] * len(legs)
     i = 0
     while i < len(legs):
@@ -11109,7 +11271,7 @@ def _fan_out_extra(command: str) -> int:
         name = m.group("kw") or m.group("name")
         first = legs[i][m.end():]
         depth, j, guarded = 1, i, _leg_is_destructive(first)
-        calls_itself = False
+        called: set[str] = set(_leg_heads(first)[:1])
         while depth and j + 1 < len(legs):
             j += 1
             part = _LEADING_KEYWORDS_RE.sub("", legs[j])
@@ -11118,15 +11280,33 @@ def _fan_out_extra(command: str) -> int:
                 continue
             depth += part.count("{") - part.count("}")
             guarded = guarded or _leg_is_destructive(part)
-            calls_itself = calls_itself or (_leg_heads(legs[j])[:1] == [name])
-        if calls_itself:
-            recursive.add(name)
+            called.update(_leg_heads(written[j])[:1])
+        body_calls[name] = called
         for k in range(i, j + 1):
             in_body[k] = True
         if guarded:
             guarded_functions.add(name)
+            # A body that repeats its own guarded op (a loop, xargs, find) repeats it per call.
+            head = _SHELL_FUNCTION_DEF_RE.match(written[i])
+            end = j if _CLOSE_BRACE_LEG_RE.match(legs[j]) else j + 1
+            body = (written[i][head.end():] if head else first) + "".join(
+                f" {joins[x] or ';'} {written[x]}" for x in range(i + 1, end))
+            if _repeat_extra(body):
+                repeating_bodies.add(name)
         i = j + 1
+    recursive: set[str] = set(repeating_bodies)
+    for name in body_calls:
+        seen, todo = set(), list(body_calls[name])
+        while todo:
+            callee = todo.pop()
+            if callee == name:
+                recursive.add(name)
+                break
+            if callee in body_calls and callee not in seen:
+                seen.add(callee)
+                todo.extend(body_calls[callee])
     calls: dict[str, int] = {}
+    direct_ops = trap_ops = 0
     loops: list[bool] = []          # one entry per open loop: True when it can repeat
     for k, raw in enumerate(legs):
         part = _LOOP_PREFIX_RE.sub("", _LEADING_KEYWORDS_RE.sub("", raw))
@@ -11138,7 +11318,7 @@ def _fan_out_extra(command: str) -> int:
             m = _FOR_IN_LEG_RE.match(part)
             literal = m is not None and not re.search(r"[$`*?\[{]", m.group("words"))
             one_word = literal and m is not None and len(_shell_tokenize(m.group("words")) or []) <= 1
-            loops.append(not one_word and _loop_repeats(legs, after_and_or, k, guarded_functions, literal))
+            loops.append(not one_word and _loop_repeats(legs, written, joins, k, guarded_functions, literal))
             # A guarded loop condition is read by _loop_repeats, or repeats with an outer loop.
             if _leg_is_destructive(part) and any(loops):
                 return 1
@@ -11147,32 +11327,40 @@ def _fan_out_extra(command: str) -> int:
         if in_body[k]:
             continue
         heads = _leg_heads(raw)
-        as_written = written[k] if len(written) == len(legs) else raw
-        called = heads[0] if heads and heads[0] in guarded_functions else None
+        as_written = written[k]
+        handler_legs = [as_written]
         if heads[:1] == ["trap"]:
-            # A trap registers its handler to run when the signal or exit comes: one more call.
-            handler = (_shell_tokenize(as_written.strip()) or ["", ""])[1:2]
-            words = (_shell_tokenize(handler[0]) or []) if handler else []
-            called = words[0] if words and words[0] in guarded_functions else None
-        if called:
-            calls[called] = calls.get(called, 0) + 1
-            if repeating or calls[called] > 1 or called in recursive:
+            # A trap runs its handler once more at exit, and again on each other signal.
+            args = (_shell_tokenize(as_written.strip()) or [""])[1:]
+            args = args[1:] if args[:1] == ["--"] else args
+            if not args or args[0].startswith("-"):
+                continue
+            handler_legs = _slice_stripped_legs(args[0])
+            ops_run = sum(1 for h in handler_legs if _leg_is_destructive(h))
+            guarded = ops_run or any(_leg_heads(h)[:1] and _leg_heads(h)[0] in guarded_functions
+                                     for h in handler_legs)
+            if guarded and (_repeat_extra(args[0]) or not set(args[1:]) <= {"EXIT", "0", "SIGEXIT"}):
                 return 1
+            trap_ops += ops_run
+        for h in handler_legs:
+            callee = (_leg_heads(h) or [""])[0]
+            if callee in guarded_functions:
+                calls[callee] = calls.get(callee, 0) + 1
+                if repeating or calls[callee] > 1 or callee in recursive:
+                    return 1
         # An awk program is blanked by the strip, so it is read as written.
         if heads and heads[-1] in _AWK_HEADS and _leg_is_destructive(as_written) and _awk_runs_per_record(as_written):
             return 1
         if not _leg_is_destructive(part):
             continue
-        if "xargs" in heads and not (
-            (k and ops[k - 1] == "|" and len(written) == len(legs) and _feeds_one_record(written[k - 1]))
-            or _here_string_one_word(as_written)
-        ):
+        direct_ops += 1
+        if "xargs" in heads and not (aligned and _xargs_runs_once(written, joins, k)):
             return 1
         if _REPEATING_RUNNERS.intersection(heads) - {"xargs"}:
             return 1
         if repeating or ("find" in heads and _FIND_EXEC_RE.search(raw) and not _find_runs_once(as_written)):
             return 1
-    return 0
+    return 1 if trap_ops and trap_ops + direct_ops + sum(calls.values()) > 1 else 0
 
 
 def _repeat_extra(command: str) -> int:
