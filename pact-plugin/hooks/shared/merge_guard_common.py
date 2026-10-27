@@ -10344,7 +10344,7 @@ def _single_detectable_leg(command: str) -> str | None:
 _TARGET_CHANGING_LEG_RE = re.compile(
     r"^[({\s]*(?:[A-Za-z_]\w*=\S*\s+)*(?:command\s+)?"
     r"(?:git(?:\s+-[Cc]\s+\S+|\s+--\S+)*\s+(?:checkout|switch|remote\s+(?:set-url|add|rename)"
-    r"|config|branch(?=[^\n]*\s(?:-u|--set-upstream-to|--unset-upstream)\b)"
+    r"|config|branch(?=[^\n]*\s(?:-u|--set-upstream-to|--unset-upstream|-m|-M|--move)\b)"
     r"|push(?=[^\n]*\s(?:-[A-Za-z]*u[A-Za-z]*|--set-upstream)(?:\s|$)))\b"
     r"|gh\s+(?:pr\s+checkout|co|repo\s+set-default)\b"
     r"|cd\b|pushd\b|popd\b)"
@@ -10475,7 +10475,12 @@ def target_changes_before_guarded_leg(command: str, branch: bool = True) -> bool
         # setting in git config) moves only a force push that names no ref: it picks
         # that push's remote and the ref it updates. A push naming its ref, and gh, do
         # not read it.
-        sets_upstream = change.group(0).endswith(("branch", "push"))
+        # Renaming a branch (`git branch -m`/`-M`) is a branch change, as a checkout
+        # is: the text cannot tell whether the branch renamed is the current one.
+        renames = change.group(0).endswith("branch") and not re.search(
+            r"\s(?:-u|--set-upstream-to|--unset-upstream)\b", leg
+        )
+        sets_upstream = change.group(0).endswith(("branch", "push")) and not renames
         routes = sets_upstream or (
             change.group(0).endswith("config") and not _git_config_changes_a_remote(leg)
         )
@@ -10485,7 +10490,7 @@ def target_changes_before_guarded_leg(command: str, branch: bool = True) -> bool
             and extract_command_context(guarded).get("force_push_implicit") is not None
         ):
             continue
-        if branch or not re.search(r"(?:checkout|switch|\bco)$", change.group(0)):
+        if branch or not (renames or re.search(r"(?:checkout|switch|\bco)$", change.group(0))):
             return True
     return False
 

@@ -990,6 +990,16 @@ class TestAnImplicitCloseRuns:
 
 
 REPO_CHANGES = {
+    "branch-rename-force-push": ("git push --" + "force", "git branch -M main && git push --" + "force",
+                                 "git branch -M dev && git push --" + "force"),
+    "branch-rename-two-args-force-push": ("git push --" + "force", "git branch -m old new && git push --" + "force",
+                                          "git branch -m old other && git push --" + "force"),
+    "branch-rename-force-push-remote": ("git push --" + "force origin", "git branch --move main && git push --" + "force origin",
+                                        "git branch --move dev && git push --" + "force origin"),
+    "branch-rename-merge": (MERGE + "--squash", "git branch -m main && " + MERGE + "--squash",
+                            "git branch -m dev && " + MERGE + "--squash"),
+    "branch-rename-two-args-merge": (MERGE + "--squash", "git branch -M old new && " + MERGE + "--squash",
+                                     "git branch -M old other && " + MERGE + "--squash"),
     "env-chdir-merge": (MERGE + "--squash", "env -C /tmp/repoB " + MERGE + "--squash",
                         "env -C /tmp/repoC " + MERGE + "--squash"),
     "env-chdir-force-push": ("git push --" + "force", "env --chdir=/tmp/repoB git push --" + "force",
@@ -1662,6 +1672,11 @@ class TestAnUpstreamOrPushRoutingChangeMovesAPushNamingNoRef:
         (MERGE + "--squash", "git push -u upstream feat/x && " + MERGE + "--squash"),
         (_FORCE, "git config --get remote.origin.push && " + _FORCE),
         (_PUSH_X, "git config remote.origin.push refs/heads/feat/x:refs/heads/main && " + _PUSH_X),
+        (_FORCE, "git branch --show-current && " + _FORCE),
+        (_FORCE, "git rev-parse @{u} && " + _FORCE),
+        (_FORCE, "git branch -c copy && " + _FORCE),
+        (_PUSH_X, "git branch -M main && " + _PUSH_X),
+        (_NUMBERED, "git branch -M main && " + _NUMBERED),
         (_FORCE, "git config --get push.default && " + _FORCE),
         (_FORCE, "git config push.followTags true && " + _FORCE),
         (_PUSH_X, "git config push.default matching && " + _PUSH_X),
@@ -1671,7 +1686,9 @@ class TestAnUpstreamOrPushRoutingChangeMovesAPushNamingNoRef:
             "config-get-push-default", "config-other-push-key", "named-ref-push-default", "gh-merge-branch-merge",
             "timeout-branch-list", "env-checkout-paths",
             "push-without-upstream", "named-ref-push-set-upstream", "gh-merge-push-set-upstream",
-            "config-get-remote-push", "named-ref-push-remote-push"])
+            "config-get-remote-push", "named-ref-push-remote-push",
+            "branch-show-current", "rev-parse-upstream", "branch-copy", "named-ref-push-branch-rename",
+            "numbered-merge-branch-rename"])
     def test_a_plain_approval_still_covers_it(self, plain, command):
         assert _runs(_mint_styled(plain, APPROVAL_STYLES["inline"]), command)
 
