@@ -139,6 +139,29 @@ FAN_OUT = [
     ("a function whose body runs find -exec", "f() { find . -name '*.txt' -exec " + _FP + " \\; ; }; f", 2),
 ]
 
+# A trap's literal handler is code the shell runs when the trap fires.
+TRAP_FAN_OUT = [
+    ("a trap handler running the op twice", "trap '" + _FP + "; " + _FP + "' EXIT", 2),
+    ("a trap handler plus the op", "trap '" + _FP + "' EXIT; " + _FP, 2),
+    ("a trap handler on a signal raised twice", "trap '" + _FP + "' USR1; kill -USR1 $$; kill -USR1 $$", 2),
+    # A handler on any signal but EXIT can run again, though this oracle run is one:
+    ("a trap handler on EXIT and INT", "trap '" + _FP + "' EXIT INT", 1),
+    ("a trap set in a loop plus the op", "for i in 1 2; do trap '" + _FP + "' EXIT; done; " + _FP, 2),
+    ("a trap handler that loops", "trap 'for i in 1 2; do " + _FP + "; done' EXIT", 2),
+    ("an unread trap handler plus the op", "trap \"" + _FP + " `true`\" EXIT; " + _FP, 2),
+]
+TRAP_SINGLE_RUN = [
+    ("a trap handler on EXIT", "trap '" + _FP + "' EXIT", 1),
+    ("a double-quoted trap handler on EXIT", "trap \"" + _FP + "\" EXIT", 1),
+    ("trap -- with a handler on EXIT", "trap -- '" + _FP + "' EXIT", 1),
+    ("a trap handler on EXIT, then echo", "trap '" + _FP + "' EXIT; echo hi", 1),
+    ("a double-quoted trap handler reading a variable", "B=main; trap \"" + _FP_TO + " $B\" EXIT", None),
+    ("a trap handler that retries", "trap 'for i in 1 2; do " + _FP + " && break; done' EXIT", 1),
+]
+TRAP_INERT = ["trap 'rm -f tmp' EXIT", "trap - EXIT", "trap 'echo " + _FP + "' EXIT", "trap -p",
+              "trap 'rm -f tmp' INT TERM"]
+FAN_OUT += TRAP_FAN_OUT
+
 SINGLE_RUN = [
     ("plain", _FP, 1),
     ("function called once", "f() { " + _FP + "; }; f", 1),
@@ -202,6 +225,8 @@ SINGLE_RUN = [
     ("a function whose body retries", "f() { for i in 1 2; do " + _FP + " && break; done; }; f", 1),
 ]
 
+SINGLE_RUN += TRAP_SINGLE_RUN
+
 STYLES = {
     "inline": lambda c: f"Run `{c}` now",
     "double-backtick": lambda c: f"Run `` {c} `` now",
@@ -249,6 +274,11 @@ def test_the_rows_match_how_often_bash_runs_the_op(label, command, runs, tmp_pat
     subprocess.run(["bash", "-c", harmless], cwd=tmp_path, capture_output=True, timeout=20, input="",
                    env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)})
     assert (os.path.getsize(log) if log.exists() else 0) == runs
+
+
+@pytest.mark.parametrize("command", TRAP_INERT)
+def test_a_trap_that_runs_nothing_guarded_is_not_gated(command):
+    assert is_dangerous_command(command) is False
 
 
 def test_watch_does_not_ride_a_token_for_the_command_it_repeats(tmp_path):

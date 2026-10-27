@@ -7365,6 +7365,36 @@ def _rewrite_literal_evals(command: str) -> str:
     return _LITERAL_EVAL_RE.sub(_run, command)
 
 
+# A trap leg whose handler is a literal string: single-quoted, or double-quoted with no
+# substitution or escape (a `$NAME` stays as written, as in a bare command).
+_LITERAL_TRAP_RE = re.compile(
+    r"(?:^|(?<=[;&|(\n]))(?P<lead>[ \t]*(?:(?:do|then|else|\{)[ \t]+)*)(?P<kw>trap)(?:[ \t]+--)?"
+    r"[ \t]+(?P<handler>'[^']*'|\"[^\"`\\$]*(?:\$\{?\w+\}?[^\"`\\$]*)*\")(?P<signals>(?:[ \t]+[A-Za-z0-9_+-]+)+)(?=[ \t]*(?:$|[;&|)\n]))"
+)
+
+
+def _rewrite_trap_handlers(command: str) -> str:
+    """`command` with each trap of a literal handler string that runs a guarded command
+    read as a function holding the handler, which the trap then runs: `trap 'git push -f
+    origin main' EXIT` reads as `_trap1() { git push -f origin main; }; trap _trap1 EXIT`.
+    The handler is code the shell runs when the trap fires, so it is judged and counted as
+    a function body (_fan_out_extra counts a handler on a signal other than EXIT as
+    repeating). A handler that runs nothing guarded (`rm -f tmp`) is left as data."""
+    if "trap" not in command:
+        return command
+    view = _mask_shell_quotes(command)
+    names = iter(range(1, len(command)))
+
+    def _read(m: re.Match) -> str:
+        body = m.group("handler")[1:-1].strip().rstrip(";").rstrip()
+        if view[m.start("kw")] != "t" or not body or not is_dangerous_command(body):
+            return m.group(0)
+        name = f"_trap{next(names)}"
+        return f"{m.group('lead')}{name}() {{ {body}; }}; trap {name}{m.group('signals')}"
+
+    return _LITERAL_TRAP_RE.sub(_read, command)
+
+
 def _rewrite_readable_evals(command: str) -> str:
     """`command` with each readable eval replaced by the text it runs: the body as written
     when the substitution is double-quoted, or its words joined by single spaces when it is
@@ -7377,7 +7407,7 @@ def _rewrite_readable_evals(command: str) -> str:
     character, which the shell may expand to file names."""
     command = _PRINTED_STRING_RE.sub(lambda m: _substitution_printed_text(m.group("inner")) or m.group(0),
                                      _rewrite_literal_evals(_rewrite_variable_evals(_rewrite_printed_assignments(
-                                         _rewrite_set_positionals(_rewrite_git_aliases(command))))))
+                                         _rewrite_set_positionals(_rewrite_git_aliases(_rewrite_trap_handlers(command)))))))
     if "<<" not in command or not re.search(r"(?<![\w-])" + _RUNS_STRING, command):
         return command
 
@@ -10623,6 +10653,10 @@ def is_compound_destructive_command(command: str) -> bool:
     # An eval of a variable runs the variable's value: the guarded commands in it count.
     evaluated = _rewrite_variable_evals(_rewrite_printed_assignments(command))
     if evaluated != command and is_compound_destructive_command(evaluated):
+        return True
+    # A trap's literal handler string is code the shell runs: its guarded commands count.
+    trapped = _rewrite_trap_handlers(command)
+    if trapped != command and is_compound_destructive_command(trapped):
         return True
     # Legs come from the shared _split_into_legs SSOT (masked + FD-neutralized split
     # on _COMPOUND_OPS_RE, slices taken from `stripped`). A command with no operator
