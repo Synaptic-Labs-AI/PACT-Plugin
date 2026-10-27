@@ -2386,6 +2386,9 @@ def _assignments_reaching_command(leg: str) -> "tuple[dict[str, str], list[str]]
 # The key under which _walk_assignments records an `env -C <dir>` / `--chdir`; no
 # variable name can take it.
 ENV_CHDIR = "\x00chdir"
+# env's other options that take the next word as their value: BSD -P altpath, FreeBSD
+# -L/-U user[/class], GNU -a/--argv0 name.
+_ENV_OTHER_VALUE_OPTIONS = frozenset({"-P", "-L", "-U", "-a", "--argv0"})
 
 
 def _walk_assignments(words: list[str], found: dict[str, str], depth: int) -> list[str]:
@@ -2426,7 +2429,7 @@ def _walk_assignments(words: list[str], found: dict[str, str], depth: int) -> li
                 # options one by one; a value-taking option takes the rest of the word.
                 split_words, k = [], 1
                 while k < len(word):
-                    if word[k] in "CuS":
+                    if word[k] in "CuSPaLU":
                         split_words.append("-" + word[k:])
                         break
                     split_words.append("-" + word[k])
@@ -2448,6 +2451,8 @@ def _walk_assignments(words: list[str], found: dict[str, str], depth: int) -> li
                 j += 1
             elif word.startswith(("-C", "--chdir=")):
                 found[ENV_CHDIR] = word.split("=", 1)[1] if word.startswith("--") else word[2:]
+            elif word in _ENV_OTHER_VALUE_OPTIONS and j + 1 < len(words):
+                j += 1
             elif not word.startswith("-"):
                 break
             j += 1

@@ -1008,6 +1008,10 @@ REPO_CHANGES = {
                                      "env -iC /tmp/repoC git push --" + "force"),
     "env-chdir-cluster-merge": (MERGE + "--squash", "env -iC /tmp/repoB " + MERGE + "--squash",
                                 "env -iC /tmp/repoC " + MERGE + "--squash"),
+    "env-altpath-chdir-force-push": ("git push --" + "force", "env -P /usr/bin -C /tmp/repoB git push --" + "force",
+                                     "env -P /usr/bin -C /tmp/repoC git push --" + "force"),
+    "env-altpath-glued-cluster-chdir": ("git push --" + "force", "env -iP/usr/bin -C /tmp/repoB git push --" + "force",
+                                        "env -iP/usr/bin -C /tmp/repoC git push --" + "force"),
     "env-checkout-merge": (MERGE + "--squash", "env git checkout feat/y && " + MERGE + "--squash",
                            "env git checkout feat/z && " + MERGE + "--squash"),
     "nice-checkout-force-push": ("git push --" + "force", "nice -n 5 git checkout feat/y && git push --" + "force",
@@ -1454,6 +1458,9 @@ NUMBERED_REPO_CHANGES = {
     "env-chdir-attached": (_NUMBERED, "env -C/tmp/repoB " + _NUMBERED, "env -C/tmp/repoC " + _NUMBERED),
     "env-chdir-cluster": (_NUMBERED, "env -iC /tmp/repoB " + _NUMBERED, "env -iC /tmp/repoC " + _NUMBERED),
     "env-chdir-long-cluster": (_NUMBERED, "env -viC /tmp/repoB " + _NUMBERED, "env -viC /tmp/repoC " + _NUMBERED),
+    "env-altpath-chdir": (_NUMBERED, "env -P /usr/bin -C /tmp/repoB " + _NUMBERED, "env -P /usr/bin -C /tmp/repoC " + _NUMBERED),
+    "env-argv0-chdir": (_NUMBERED, "env -a gh -C /tmp/repoB " + _NUMBERED, "env -a gh -C /tmp/repoC " + _NUMBERED),
+    "env-user-class-chdir": (_NUMBERED, "env -U me -C /tmp/repoB " + _NUMBERED, "env -U me -C /tmp/repoC " + _NUMBERED),
     "close": (_CLOSE_PR + "5 -d", "cd /tmp/other && " + _CLOSE_PR + "5 -d", "cd /tmp/third && " + _CLOSE_PR + "5 -d"),
     "bash-c": (_NUMBERED, "bash -c 'cd /tmp/other && " + _NUMBERED + "'", "bash -c 'cd /tmp/third && " + _NUMBERED + "'"),
     "same-repo-subdirectory": (_NUMBERED, "cd sub && " + _NUMBERED, "cd other && " + _NUMBERED),
@@ -1511,12 +1518,16 @@ class TestANumberedOpInAnotherRepoNeedsItsOwnApproval:
         "env FOO=1 " + _NUMBERED,
         "env -vi " + _NUMBERED,
         "env -iu FOO " + _NUMBERED,
+        "env -P /usr/bin " + _NUMBERED,
+        "env -iP /usr/bin " + _NUMBERED,
+        "env --argv0 gh " + _NUMBERED,
     ], ids=["pr-checkout", "co", "branch-checkout", "switch", "cd-after", "echoed", "remote-list", "set-default-view",
             "set-default-v", "config-get", "config-get-value-pattern", "config-read-key", "config-list", "config-other-key",
             "config-get-subcommand", "config-get-all-subcommand", "config-list-subcommand", "config-get-key-case",
             "config-unset-other-key", "config-remove-other-section", "config-get-dash-c", "config-get-insteadof",
             "env-config-get", "nice-config-list", "env-branch-checkout", "env-echoed",
-            "env-chdir-earlier-leg", "env-no-chdir", "env-flag-cluster", "env-unset-cluster"])
+            "env-chdir-earlier-leg", "env-no-chdir", "env-flag-cluster", "env-unset-cluster",
+            "env-altpath", "env-altpath-cluster", "env-argv0"])
     def test_a_plain_numbered_approval_still_covers_a_branch_change(self, command):
         assert _runs(_mint_styled(_NUMBERED, APPROVAL_STYLES["inline"]), command)
 
@@ -1539,6 +1550,14 @@ EXPLICIT_GIT_REPO_CHANGES = {
     "force-push-env-chdir-ignore-env": (_PUSH_X, "env -C /tmp/repoB -i " + _PUSH_X, "env -C /tmp/repoC -i " + _PUSH_X),
     "force-push-env-chdir-cluster": (_PUSH_X, "env -iC /tmp/repoB " + _PUSH_X, "env -iC /tmp/repoC " + _PUSH_X),
     "force-push-env-chdir-cluster-glued": (_PUSH_X, "env -iC/tmp/repoB " + _PUSH_X, "env -iC/tmp/repoC " + _PUSH_X),
+    "force-push-env-altpath-chdir": (_PUSH_X, "env -P /usr/bin -C /tmp/repoB " + _PUSH_X,
+                                     "env -P /usr/bin -C /tmp/repoC " + _PUSH_X),
+    "force-push-env-altpath-cluster-chdir": (_PUSH_X, "env -iP /usr/bin -C /tmp/repoB " + _PUSH_X,
+                                             "env -iP /usr/bin -C /tmp/repoC " + _PUSH_X),
+    "force-push-env-argv0-chdir": (_PUSH_X, "env --argv0 name -C /tmp/repoB " + _PUSH_X,
+                                   "env --argv0 name -C /tmp/repoC " + _PUSH_X),
+    "branch-delete-env-login-class-chdir": (_DELETE_X, "env -L me -C /tmp/repoB " + _DELETE_X,
+                                            "env -L me -C /tmp/repoC " + _DELETE_X),
     "force-push-env": (_PUSH_X, "env GIT_WORK_TREE=/tmp/repoB " + _PUSH_X, "env GIT_WORK_TREE=/tmp/repoC " + _PUSH_X),
     "branch-delete-cd": (_DELETE_X, "cd /tmp/repoB && " + _DELETE_X, "cd /tmp/repoC && " + _DELETE_X),
     "branch-delete-dash-c": (_DELETE_X, "git -C /tmp/repoB branch -" + "D feat/x", "git -C /tmp/repoC branch -" + "D feat/x"),
@@ -1675,6 +1694,10 @@ class TestAnUpstreamOrPushRoutingChangeMovesAPushNamingNoRef:
         (MERGE + "--squash", "git branch -u upstream/x && " + MERGE + "--squash"),
         (MERGE + "--squash", "git config remote.pushDefault upstream && " + MERGE + "--squash"),
         (_NUMBERED, "git config branch.feat/x.remote upstream && " + _NUMBERED),
+        (_FORCE, "git config --get push.default && " + _FORCE),
+        (_FORCE, "git config push.followTags true && " + _FORCE),
+        (_PUSH_X, "git config push.default matching && " + _PUSH_X),
+        (MERGE + "--squash", "git config branch.feat/x.merge refs/heads/main && " + MERGE + "--squash"),
         (_FORCE, "timeout 5 git branch -vv && " + _FORCE),
         (MERGE + "--squash", "env FOO=1 git checkout -- file.txt && " + MERGE + "--squash"),
         (_FORCE, "git push origin feat/x && " + _FORCE),
@@ -1687,10 +1710,7 @@ class TestAnUpstreamOrPushRoutingChangeMovesAPushNamingNoRef:
         (_FORCE, "git branch -c copy && " + _FORCE),
         (_PUSH_X, "git branch -M main && " + _PUSH_X),
         (_NUMBERED, "git branch -M main && " + _NUMBERED),
-        (_FORCE, "git config --get push.default && " + _FORCE),
-        (_FORCE, "git config push.followTags true && " + _FORCE),
-        (_PUSH_X, "git config push.default matching && " + _PUSH_X),
-        (MERGE + "--squash", "git config branch.feat/x.merge refs/heads/main && " + MERGE + "--squash"),
+        (_FORCE, "env -iP/opt/Cellar/bin " + _FORCE),
     ], ids=["config-get", "config-get-subcommand", "config-read-key", "config-other-key", "branch-list", "branch-track",
             "named-ref-push-branch-u", "named-ref-push-config", "gh-merge-branch-u", "gh-merge-config", "numbered-merge",
             "config-get-push-default", "config-other-push-key", "named-ref-push-default", "gh-merge-branch-merge",
@@ -1698,7 +1718,7 @@ class TestAnUpstreamOrPushRoutingChangeMovesAPushNamingNoRef:
             "push-without-upstream", "named-ref-push-set-upstream", "gh-merge-push-set-upstream",
             "config-get-remote-push", "named-ref-push-remote-push",
             "branch-show-current", "rev-parse-upstream", "branch-copy", "named-ref-push-branch-rename",
-            "numbered-merge-branch-rename"])
+            "numbered-merge-branch-rename", "env-altpath-cluster-holding-c"])
     def test_a_plain_approval_still_covers_it(self, plain, command):
         assert _runs(_mint_styled(plain, APPROVAL_STYLES["inline"]), command)
 
