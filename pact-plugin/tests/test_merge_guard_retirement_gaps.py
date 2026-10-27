@@ -15,8 +15,9 @@ What these arms add:
 - gh's exit status is read, not only its output: a failing gh that prints
   MERGED keeps the token, as does a state GitHub never returns.
 - Only merge and close ask gh. Force-push, branch-delete and push-to-main never do.
-- On PostToolUseFailure the hook retires a token only when the failed call's
-  output shows the guarded op itself succeeded before a later step failed.
+- On PostToolUseFailure the hook keeps a token only when a readable PR state
+  shows the merge or close did not happen, or, failing a state, when the output
+  shows the op's own failure.
 """
 
 from __future__ import annotations
@@ -224,11 +225,13 @@ _NOTIFY = "Exit code 1\nnotify: failed"
 
 class TestAFailedCallRetiresUnlessItsOpFailed:
     """A call whose guarded op ran and whose later step failed reaches
-    PostToolUseFailure. Its token retires when the op's own success line shows;
-    otherwise it stays only when the op's own failure shows, or, for a merge or
-    close, when GitHub reports the PR in another state. So a quiet, porcelain,
-    non-TTY, coloured or truncated success leaves no second op, and a later step's
-    failure line never keeps a token whose op visibly succeeded."""
+    PostToolUseFailure. Its token retires when the op's own success line shows.
+    For a merge or close whose PR state reads, that state alone decides. Otherwise
+    the token stays only when the op's own failure shows: a line naming its
+    target, a failure line only a push prints, or any `fatal:`/`error:` line when
+    the op is the call's only leg. So a quiet, porcelain, non-TTY, coloured or
+    truncated success leaves no second op, and another step's failure line never
+    keeps a token whose op succeeded."""
 
     @pytest.mark.parametrize("cmd,error,state", [
         ("git push --" + "force origin feat/x && ./notify.sh", "Exit code 1\n" + _FORCED, "MERGED"),
@@ -280,6 +283,24 @@ class TestAFailedCallRetiresUnlessItsOpFailed:
         ("git branch -q -" + "D feat/x && git fetch", "Exit code 128\nfatal: not a git repository", "MERGED"),
         ("c='git push -q --" + "force origin feat/x'; eval " + '"$c"' + " && git pull",
          "Exit code 1\nfatal: couldn't find remote ref main", "MERGED"),
+        ("git push -q --" + "force origin feat/x && ./deploy.sh", "Exit code 1\nerror: deploy target unreachable", "MERGED"),
+        ("git push -q --" + "force origin feat/x && cargo build",
+         "Exit code 101\n   Compiling x v0.1.0\nerror: could not compile `x` (bin \"x\") due to 1 previous error", "MERGED"),
+        ("git push -q --" + "force origin feat/x && ./post.sh", "Exit code 1\nfatal: hook config missing", "MERGED"),
+        ("git push --" + "force origin feat/x && ./deploy.sh", "Exit code 1\n" + _FORCED + "\nerror: deploy failed", "MERGED"),
+        ("git push -q --" + "force origin feat/x && git fetch upstream",
+         "Exit code 128\nfatal: 'upstream' does not appear to be a git repository", "MERGED"),
+        ("git push -q origin --delete feat/x && git pull", "Exit code 1\nfatal: no tracking information", "MERGED"),
+        ("git branch -q -" + "D feat/x && ./notify.sh", "Exit code 1\nerror: notify failed", "MERGED"),
+        ("./prep.sh; git push -q --" + "force origin feat/x; ./notify.sh",
+         "Exit code 1\nerror: prep failed\nnotify: failed", "MERGED"),
+        ("bash -c './prep.sh; git push -q --" + "force origin feat/x'", "Exit code 1\nerror: prep failed", "MERGED"),
+        (_MERGE + " 5 --squash && ./notify.sh", "Exit code 1\nfailed to send notification", "MERGED"),
+        (_MERGE + " 5 --squash && ./notify.sh", "Exit code 1\nError: webhook returned 500", "MERGED"),
+        (_MERGE + " 5 --squash && gh issue comment 9 -b done",
+         "Exit code 1\nHTTP 404: Not Found (https://api.github.com/repos/o/r/issues/9/comments)", "MERGED"),
+        ("gh pr close 5 && ./notify.sh", "Exit code 1\nUnable to reach chat server", "CLOSED"),
+        (_MERGE + " 5 --squash && false", "Exit code 1\nX Pull request #5 is not mergeable: checks failing", "MERGED"),
     ], ids=["force-push-tail", "force-push-subshell", "implicit-force-push", "push-to-main", "quiet", "quiet-long",
             "porcelain", "implicit-quiet", "merge-non-tty", "merge-json", "close-non-tty", "branch-delete-quiet",
             "ref-delete-quiet", "new-branch", "crlf", "colour", "other-ref-rejected", "success-then-later-fatal",
@@ -287,7 +308,11 @@ class TestAFailedCallRetiresUnlessItsOpFailed:
             "ref-delete-line", "mass-delete-line", "branch-delete-line", "branch-delete-then-other-error",
             "other-ref-rejected-only", "branch-delete-quiet-then-other-error", "push-then-git-fatal",
             "quiet-push-then-git-fatal", "quiet-push-then-wrapped-git-error", "quiet-branch-delete-then-git-fatal",
-            "evald-quiet-push-then-git-fatal"])
+            "evald-quiet-push-then-git-fatal", "quiet-push-then-tool-error", "quiet-push-then-cargo-error",
+            "quiet-push-then-tool-fatal", "push-line-then-tool-error", "quiet-push-then-other-remote-missing",
+            "quiet-ref-delete-then-git-fatal", "quiet-branch-delete-then-tool-error", "earlier-leg-error",
+            "earlier-leg-error-in-shell-c", "merged-then-failed-line", "merged-then-error-line",
+            "merged-then-other-http", "closed-then-unable-line", "merged-state-outranks-failure-line"])
     def test_an_op_whose_failure_is_not_shown_retires_it(self, rig, cmd, error, state):
         _mint(rig, cmd)
         _post_failure(rig, cmd, error, state=state)
@@ -302,7 +327,7 @@ class TestAFailedCallRetiresUnlessItsOpFailed:
          False, "MERGED"),
         ("git push -q --" + "force origin feat/x && ./notify.sh", "Exit code 128\nfatal: unable to access 'https://x/'",
          False, "MERGED"),
-        ("git branch -q -" + "D feat/x && ./notify.sh", "Exit code 128\nfatal: not a git repository", False, "MERGED"),
+        ("git branch -q -" + "D feat/x", "Exit code 128\nfatal: not a git repository", False, "MERGED"),
         ("git push --" + "force origin feat/x && false",
          "Exit code 1\r\n\x1b[31m ! [rejected]        feat/x -> feat/x (stale info)\x1b[m\r\n", False, "MERGED"),
         ("git push --" + "force && false", "Exit code 1\n ! [rejected] main -> main (non-fast-forward)", False, "MERGED"),
@@ -312,11 +337,11 @@ class TestAFailedCallRetiresUnlessItsOpFailed:
         ("git push --" + "force origin feat/x && ./notify.sh", "Exit code 1\n" + _FORCED, True, "MERGED"),
         ("git push -" + "n --force origin feat/x && false", "Exit code 1\n" + _FORCED, False, "MERGED"),
         (_MERGE + " 5 --squash && ./post-merge-check.sh", "Exit code 1\nX Pull request #5 is not mergeable: checks failing",
-         False, "MERGED"),
+         False, ""),
         (_MERGE + " 5 --squash && false",
          "Exit code 1\nGraphQL: Could not resolve to a PullRequest with the number of 5. (repository.pullRequest)",
-         False, "MERGED"),
-        (_MERGE + " 5 --squash && false", "Exit code 1\nHTTP 404: Not Found (https://api.github.com/graphql)", False, "MERGED"),
+         False, ""),
+        (_MERGE + " 5 --squash && false", "Exit code 1\nHTTP 404: Not Found (https://api.github.com/graphql)", False, ""),
         (_MERGE + " 5 --squash && ./notify.sh", _NOTIFY, False, "OPEN"),
         ("gh pr close 5 --delete-branch && ./notify.sh", _NOTIFY, False, "OPEN"),
         ("git branch -" + "D feat/x && false", "Exit code 1\nerror: branch 'feat/x' not found.", False, "MERGED"),
@@ -331,6 +356,35 @@ class TestAFailedCallRetiresUnlessItsOpFailed:
     def test_a_visible_failure_of_the_op_keeps_it(self, rig, cmd, error, interrupted, state):
         _mint(rig, cmd)
         _post_failure(rig, cmd, error, interrupted, state=state)
+        assert not _retired(rig)
+
+    @pytest.mark.parametrize("cmd", [
+        "git push -q --" + "force origin feat/x",
+        "git push -q --" + "force origin feat/x; ./notify.sh",
+    ], ids=["alone", "beside-failing-step"])
+    @pytest.mark.parametrize("line", [
+        "error: failed to push some refs to 'github.com:o/r.git'",
+        "fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host: github.com",
+        "fatal: Could not read from remote repository.",
+        "fatal: 'origin' does not appear to be a git repository",
+        "error: src refspec feat/x does not match any",
+        "fatal: The current branch feat/x has no upstream branch.",
+    ], ids=["failed-to-push", "unable-to-access", "could-not-read", "no-such-remote", "src-refspec", "no-upstream"])
+    def test_a_push_failure_line_keeps_it_beside_another_step(self, rig, cmd, line):
+        _mint(rig, cmd)
+        _post_failure(rig, cmd, "Exit code 1\n" + line + "\nnotify: failed")
+        assert not _retired(rig)
+
+    @pytest.mark.parametrize("cmd,error", [
+        ("git branch -q -" + "D feat/x; ./notify.sh", "Exit code 1\nerror: branch 'feat/x' not found.\nnotify: failed"),
+        ("git push -q origin --delete feat/x; ./notify.sh",
+         "Exit code 1\nerror: unable to delete 'feat/x': remote ref does not exist\nnotify: failed"),
+        ("git push -q --" + "force origin feat/x", "Exit code 1\nfatal: the remote end hung up unexpectedly"),
+        ("bash -c 'git push -q --" + "force origin feat/x'", "Exit code 1\nerror: RPC failed"),
+    ], ids=["branch-missing-beside", "ref-delete-failed-beside", "generic-fatal-only-leg", "generic-error-only-leg-in-shell-c"])
+    def test_the_ops_own_failure_keeps_it(self, rig, cmd, error):
+        _mint(rig, cmd)
+        _post_failure(rig, cmd, error)
         assert not _retired(rig)
 
     def test_a_retired_token_no_longer_runs_the_command_and_a_new_approval_does(self, rig):
