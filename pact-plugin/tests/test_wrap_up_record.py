@@ -48,7 +48,8 @@ def _stub_gh(bindir: Path, *, stdout: str = "", stderr: str = "", rc: int = 0) -
     gh.chmod(0o755)
 
 
-def _run(tmp_path: Path, session_dir: str | None = None) -> subprocess.CompletedProcess:
+def _run(tmp_path: Path, session_dir: str | None = None,
+         cwd: Path | None = None) -> subprocess.CompletedProcess:
     sd = session_dir if session_dir is not None else str(tmp_path / "session")
     if session_dir is None:
         Path(sd).mkdir(parents=True, exist_ok=True)
@@ -59,7 +60,7 @@ def _run(tmp_path: Path, session_dir: str | None = None) -> subprocess.Completed
     })
     return subprocess.run(
         [sys.executable, str(CLI), "--session-dir", sd],
-        capture_output=True, text=True, env=env, cwd=str(tmp_path),
+        capture_output=True, text=True, env=env, cwd=str(cwd or tmp_path),
         timeout=60, check=False,
     )
 
@@ -500,3 +501,110 @@ def test_the_schema_types_pr_source(tmp_path):
     valid, reason = _validate_event_schema(
         make_event("session_end", source="wrap-up", pr_state="NONE", pr_source=1))
     assert valid is False and "pr_source" in reason
+
+
+# ---------------------------------------------------------------------------
+# Step 6 reruns the record from the PR's worktree after a review-sourced one.
+# The rerun must still reach the merged PR, and inside that worktree it is a
+# cwd read.
+# ---------------------------------------------------------------------------
+
+def _worktree(path: Path, branch: str, remote_url: str) -> Path:
+    """A git checkout on `branch` whose only remote has `remote_url`. Nothing
+    is fetched or pushed: the URL is only read back by `git config`."""
+    path.mkdir(parents=True, exist_ok=True)
+    for args in (["init", "-q"], ["checkout", "-q", "-b", branch],
+                 ["remote", "add", "origin", remote_url]):
+        subprocess.run(["git", *args], cwd=path, check=True, capture_output=True)
+    return path
+
+
+def test_a_rerun_after_a_review_sourced_record_still_reads_the_merged_pr(tmp_path):
+    """The reported sequence: a record read from the review, then the rerun
+    step 6 asks for. The first record is this run's own, not a wrap-up that
+    closed the PR, so the rerun must not turn it into NONE."""
+    _stub_gh_two_reads(tmp_path / "bin", numbered_stdout=PR_JSON.replace("{state}", "MERGED"))
+    _review(tmp_path / "session", 61)
+
+    first = _run(tmp_path)
+    second = _run(tmp_path)
+
+    assert _lines(first)["pr_source"] == "review"
+    assert (_lines(second)["pr_state"], _lines(second)["pr_number"]) == ("MERGED", "61")
+    assert [e["pr_state"] for e in _session_ends(tmp_path)] == ["MERGED", "MERGED"]
+
+
+def test_a_rerun_inside_the_prs_worktree_is_cwd_sourced(tmp_path):
+    """Run from the PR's own worktree, the reviewed PR is the cwd's PR even when
+    gh finds no PR for the branch: step 6 then takes the MERGED branch."""
+    _stub_gh_two_reads(tmp_path / "bin", numbered_stdout=PR_JSON.replace("{state}", "MERGED"))
+    _review(tmp_path / "session", 61)
+    worktree = _worktree(tmp_path / "wt", "feat/x", "git@github.com:own/repo-x.git")
+
+    first = _run(tmp_path)
+    second = _run(tmp_path, cwd=worktree)
+
+    assert _lines(first)["pr_source"] == "review"
+    assert _lines(second) == {
+        "pr_state": "MERGED", "pr_number": "61", "branch": "feat/x",
+        "head_owner": "own", "head_repo": "repo-x", "pr_source": "cwd",
+    }
+    assert _session_ends(tmp_path)[-1]["pr_source"] == "cwd"
+
+
+@pytest.mark.parametrize("branch,url", [
+    ("feat/x", "https://github.com/other/repo-x.git"),
+    ("feat/y", "https://github.com/own/repo-x.git"),
+    ("feat/x", "https://github.com/own/repo-xy.git"),
+    ("feat/x2", "https://github.com/own/repo-x.git"),
+], ids=["same branch in another repo", "the repo on another branch",
+        "a repo name that only starts the same", "a branch name that only starts the same"])
+def test_a_checkout_that_is_not_the_prs_worktree_stays_review_sourced(tmp_path, branch, url):
+    _stub_gh_two_reads(tmp_path / "bin", numbered_stdout=PR_JSON.replace("{state}", "MERGED"))
+    _review(tmp_path / "session", 61)
+
+    result = _run(tmp_path, cwd=_worktree(tmp_path / "wt", branch, url))
+
+    assert (_lines(result)["pr_state"], _lines(result)["pr_source"]) == ("MERGED", "review")
+
+
+def test_a_review_sourced_record_still_counts_as_wrap_up_for_the_session_hooks(tmp_path):
+    """Steps 1-4 ran, so the session hooks keep reading a review-sourced
+    MERGED record as a wrap-up of that PR."""
+    _stub_gh_two_reads(tmp_path / "bin", numbered_stdout=PR_JSON.replace("{state}", "MERGED"))
+    _review(tmp_path / "session", 61)
+
+    _run(tmp_path)
+
+    assert wrap_up_closed(_session_ends(tmp_path), 61, "2026-04-17T12:00:00Z") is True
+
+
+def test_a_record_without_a_source_still_closes_the_reviewed_pr(tmp_path):
+    """A wrap-up record written before pr_source existed counts as closing."""
+    _stub_gh_two_reads(tmp_path / "bin", numbered_stdout=PR_JSON.replace("{state}", "MERGED"))
+    _review(tmp_path / "session", 61, ts="2026-04-17T12:00:00Z")
+    with (tmp_path / "session" / "session-journal.jsonl").open("a") as journal:
+        journal.write(json.dumps({"v": 1, "type": "session_end", "source": "wrap-up",
+                                  "pr_state": "MERGED", "pr_number": 61,
+                                  "ts": "2026-04-17T13:00:00Z"}) + "\n")
+
+    result = _run(tmp_path)
+
+    assert _lines(result)["pr_state"] == "NONE"
+    assert len(_argv(tmp_path)) == 1
+
+
+@pytest.mark.parametrize("remote_url", [
+    "https://github.com/up/repo-x",
+    "git@github.com:own/repo-x.git",
+], ids=["the base repo", "the head fork"])
+def test_a_fork_prs_worktree_matches_either_repo(tmp_path, remote_url):
+    """A PR from a fork: the review names the base repo and gh the head fork.
+    A checkout of the head branch with a remote on either one is the worktree."""
+    _stub_gh_two_reads(tmp_path / "bin", numbered_stdout=PR_JSON.replace("{state}", "MERGED"))
+    _review(tmp_path / "session", 61, pr_url="https://github.com/up/repo-x/pull/61")
+
+    result = _run(tmp_path, cwd=_worktree(tmp_path / "wt", "feat/x", remote_url))
+
+    assert (_lines(result)["pr_state"], _lines(result)["pr_source"]) == ("MERGED", "cwd")
+    assert "up/repo-x" in _argv(tmp_path)[-1]
