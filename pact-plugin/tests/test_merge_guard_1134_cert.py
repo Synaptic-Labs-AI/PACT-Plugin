@@ -450,6 +450,16 @@ def _execute(cmd, tok):
             return e.code if isinstance(e.code, int) else _ALLOW
 
 
+def _reading(cmd):
+    """What the mint's own reading binds for a click on an option showing `cmd`, before
+    the exact-text fallback."""
+    q = [{"question": "Proceed?", "options": [
+        {"label": "Yes", "description": "Run `%s`" % cmd},
+        {"label": "Cancel", "description": "Abort"},
+    ]}]
+    return mgpost._mint_context_by_reading(q, {"Proceed?": "Yes"}).context
+
+
 def _won_key(ctx):
     """The single identity key bound in a token context (which-key-won)."""
     keys = [k for k in _TARGET_KEYS if ctx.get(k)]
@@ -698,6 +708,7 @@ class TestD2Mintability:
             "gated row did NOT mint — the cardinal gated-but-unmintable OVER-BLOCK: %r" % row
         )
         # which-key-won, OFF THE TOKEN (whole-command extract binds nothing on compounds).
+        assert ctx is not None
         assert ctx.get("operation_type") == op, (
             "token bound the wrong op: got %r, expected %r for %r"
             % (ctx.get("operation_type"), op, row)
@@ -719,7 +730,9 @@ class TestD2GatedButUnmintableKnownBad:
     on a known-bad. `_target_value` referenced call-time via the module."""
 
     def test_dropping_target_ref_makes_a_gated_row_unmintable(self, tmp_path, monkeypatch):
-        row = _PREFIX + _PG + "origin --delete feature"  # remote-ref-delete -> target_ref
+        # remote-ref-delete -> target_ref. A benign prefix that does not change the
+        # repository: after a `cd`, the mint binds the command's text instead.
+        row = "echo start && " + _PG + "origin --delete feature"
         # VACUITY GUARD in its OWN dir (its token must not leak into the known-bad exec).
         vac = tmp_path / "vac"
         vac.mkdir()
@@ -736,15 +749,19 @@ class TestD2GatedButUnmintableKnownBad:
                     or cmd_ctx.get("protected_branch"))  # target_ref DROPPED
 
         monkeypatch.setattr(mgpost, "_target_value", _tv_without_target_ref)
-        # KNOWN-BAD in a FRESH dir: mint 0 -> the exec finds no token -> DENY. The faithful
-        # click is refused with no way to authorize = the gated-but-unmintable over-block.
+        # KNOWN-BAD in a FRESH dir: the reading binds nothing (the gated-but-unmintable
+        # over-block), the exec without a token is denied, and the click binds the row's
+        # exact text instead of its target_ref, which runs only that text.
         kb = tmp_path / "kb"
         kb.mkdir()
-        m2, _ = _mint(row, kb)
-        assert m2 == 0, "mint-target neuter did not stop the mint — the guard is inert"
+        assert _reading(row) is None, "mint-target neuter did not stop the reading — the guard is inert"
         assert _execute(row, kb) == _DENY, (
-            "gated-but-unmintable row was not denied — the round-trip cannot see the "
+            "gated row was not denied without a token — the round-trip cannot see the "
             "over-block it exists to catch"
+        )
+        m2, ctx2 = _mint(row, kb)
+        assert m2 == 1 and ctx2 is not None and ctx2.get("command_text") and not ctx2.get("target_ref"), (
+            "the neutered row did not fall back to its exact text"
         )
 
 
@@ -766,6 +783,7 @@ class TestD2MintPinCloseAndBranchDelete:
             "GATE-PINNED BUT NOT MINT-PINNED — %s in a non-first leg gates but does not "
             "mint (the exclusion the 4-tuple probe hid): %r" % (op, cmd)
         )
+        assert ctx is not None
         assert ctx.get("operation_type") == op, (
             "token bound wrong op: got %r expected %r for %r"
             % (ctx.get("operation_type"), op, cmd)
@@ -808,6 +826,7 @@ class TestCloseUrlBranchNowGateAndMint:
             "OVER-BLOCK persists — the faithful close form gates but does NOT mint "
             "(gated-but-unmintable): %r" % cmd
         )
+        assert ctx is not None
         assert ctx.get("operation_type") == "close", (
             "token bound the wrong op: %r for %r" % (ctx.get("operation_type"), cmd)
         )
@@ -863,6 +882,7 @@ class TestCloseRepoValueMisbindClosed:
         assert D(cmd) is True, "faithful --repo close form not gated: %r" % cmd
         minted, ctx = _mint(cmd, tmp_path)
         assert minted == 1, "faithful --repo close form did not mint: %r" % cmd
+        assert ctx is not None
         assert ctx.get("operation_type") == "close"
         assert ctx.get("pr_number") == "branch:feature", (
             "MIS-BIND: --repo value shadowed the branch positional — bound %r, expected "
@@ -937,6 +957,7 @@ class TestCloseHostWidenGateAndMint:
             "OVER-BLOCK persists — widened-host close gates but does NOT mint "
             "(gated-but-unmintable): %r" % cmd
         )
+        assert ctx is not None
         assert ctx.get("operation_type") == "close", (
             "token bound the wrong op: %r for %r" % (ctx.get("operation_type"), cmd)
         )
@@ -1070,6 +1091,7 @@ class TestMergeExtractorUnchangedByCloseFold:
         # Behavioral backstop through the REAL post hook: merge still mints the positional.
         cmd = _GH + "merge 42 --comment 99 --admin"
         minted, ctx = _mint(cmd, tmp_path)
+        assert ctx is not None
         assert minted == 1 and ctx.get("pr_number") == "42", (
             "merge no longer mints the positional PR through the real hook: minted=%s pr=%r"
             % (minted, ctx.get("pr_number") if ctx else None)
@@ -1134,18 +1156,17 @@ class TestMergeShadowGuardIsLoadBearing:
 
 
 class TestD2RoundTripIsPipelineBlindWithoutTheGate:
-    """DOCUMENTED TRAP — do NOT 'simplify' D2 to mint + self-authorize ALLOW. Under an
-    _PER_LEG_OPS revert the row goes UNGATED yet mint+exec still returns (1, ALLOW): the
-    mint uses the fix-independent _extraction_surface and the exec ALLOWs because the row
-    is no longer gated. This asserts that blindness EXPLICITLY, so the exec-without-token
-    DENY in TestD2Mintability is understood as the fix-coupled leg, not a redundant one."""
+    """Under an _PER_LEG_OPS revert the row goes UNGATED. The mint binds nothing for a
+    command the pre-hook allows, so mint+exec returns (0, ALLOW): the round trip shows the
+    revert only as a missing token, and the exec-without-token DENY in TestD2Mintability
+    stays the fix-coupled leg."""
 
-    def test_mint_plus_allow_survives_the_fix_revert(self, tmp_path, monkeypatch):
+    def test_the_reverted_row_mints_nothing_and_runs_ungated(self, tmp_path, monkeypatch):
         row = _PREFIX + _PG + "origin --delete feature"
         monkeypatch.setattr(mgc, "_PER_LEG_OPS", ("push-to-main", "force-push"))
         assert D(row) is False, "expected the revert to ungate the row (vacuity guard)"
         minted, _ = _mint(row, tmp_path)
-        assert minted == 1, "mint is fix-independent (uses _extraction_surface) — expected 1"
+        assert minted == 0, "the mint binds nothing for a command the pre-hook allows"
         assert _execute(row, tmp_path) == _ALLOW, (
             "expected ALLOW-because-ungated under the revert — this is the blindness the "
             "exec-without-token DENY exists to close"

@@ -36,10 +36,16 @@ Assertion strategy (CI-robust — NOT exact-ms; design §7.2)
 ----------------------------------------------------------
 Two mutually reinforcing assertions per case:
 
-* **Absolute wall-clock ceiling** (PRIMARY discriminator). The unbounded/quadratic
+* **Absolute CPU-time ceiling** (PRIMARY discriminator). The unbounded/quadratic
   form is ~1.8 s (gh detect) to ~7.3 s (gh read) at N=4000. The ceiling sits
   clear of linear and below quadratic, so it cannot flap on a slow machine yet
   still trips on a regression.
+
+  TIMED ON CPU TIME (``time.process_time``), NOT WALL CLOCK. The work is pure
+  CPU, so the two clocks agree on a quiet machine, and backtracking burns CPU
+  either way. Wall clock also counts the time the process waits for a core,
+  so concurrent suites failed these ceilings on honest code; CPU time does not
+  count that wait.
 
   BOUNDED COSTS ARE QUOTED AT ``N_LARGE`` BELOW, NOT AT N=4000. Every figure
   in this module once described N=4000 while the arms ran at 8000, which
@@ -53,7 +59,7 @@ Two mutually reinforcing assertions per case:
 Counter-test-by-revert (non-vacuity)
 ------------------------------------
 Restore the unbounded ``*`` form (the shared prefix constants) and re-run: the
-ratio returns to ~4x AND the N=4000 wall-clock blows past the ceiling => the
+ratio returns to ~4x AND the N=4000 CPU time blows past the ceiling => the
 targeted case goes RED. Expected cardinality: reverting the shared constants
 (``_GIT_GLOBAL_FLAGS`` / ``_GH_GLOBAL_FLAGS``) reds the corresponding git / gh
 cases.
@@ -103,12 +109,12 @@ _CEIL_GIT = 2.0
 
 
 def _best_time(fn, arg, k=_K):
-    """Minimum wall-clock of ``fn(arg)`` over k runs (suppresses upward noise)."""
+    """Minimum CPU time of ``fn(arg)`` over k runs (suppresses upward noise)."""
     best = float("inf")
     for _ in range(k):
-        t0 = time.perf_counter()
+        t0 = time.process_time()
         fn(arg)
-        dt = time.perf_counter() - t0
+        dt = time.process_time() - t0
         if dt < best:
             best = dt
     return best
@@ -214,14 +220,14 @@ def test_global_flag_prefix_scaling_is_subquadratic(fn, build, abs_ceiling, rati
     the gh prefix (review m-3), and the push-flag walk
     (structural-linearity pin, §12.2). Restoring an unbounded `*` form on a
     MULTI-anchor witness (git/gh) makes the ratio ~4x and the N=4000
-    wall-clock exceed the ceiling => RED. The push-flag-walk witness is
+    CPU time exceed the ceiling => RED. The push-flag-walk witness is
     single-anchor (already linear, defense-in-depth) so it stays GREEN under
     revert — its non-vacuity lives in TestFlagTokenBoundary's >K-residual flip."""
     t_small, t_large = _measure_scaling(fn, build)
     ratio = (t_large / t_small) if t_small > 0 else float("inf")
     witness = build(1)
 
-    # PRIMARY: generous absolute wall-clock ceiling (flake-resistant).
+    # PRIMARY: generous absolute CPU-time ceiling (flake-resistant).
     assert t_large < abs_ceiling, (
         f"{fn.__name__} on {witness!r}*{N_LARGE}: {t_large * 1000:.1f} ms exceeds "
         f"{abs_ceiling * 1000:.0f} ms ceiling — unbounded O(n^2) backtracking regression?"

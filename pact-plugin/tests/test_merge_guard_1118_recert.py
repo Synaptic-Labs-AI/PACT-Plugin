@@ -183,8 +183,8 @@ class TestMintDivergenceRestored:
 class TestHeldWriteBattery:
     HELD = {
         "pr_merge":        (f"gh pr {M} 1116 --squash", M),
-        "merges_body":     (f"gh api repos/o/r/{M}s -f base=main -f head=x", None),
-        "merges_input":    (f"gh api repos/o/r/{M}s --input body.json", None),
+        "merges_body":     (f"gh api repos/o/r/{M}s -f base=main -f head=x", "branch-merge"),
+        "merges_input":    (f"gh api repos/o/r/{M}s --input body.json", "branch-merge"),
         "delete_gitrefs":  (f"gh api -X DELETE repos/o/r/{GR}/heads/x", "branch-delete"),
         "put_protection":  ("gh api -X PUT repos/o/r/branches/main/protection -f x=y", "branch-protection"),
         "contents_main":   (f"gh api -X PUT repos/o/r/contents/f.txt -f branch=main --jq '.{M}able'", None),
@@ -301,15 +301,10 @@ class TestStructuralGroupIndexGuards:
 # ======================================================================================
 # YELLOW-2 (from the Task #21 review) — graphql-mutation residual is a DOCUMENTED, UNCHANGED gap
 # ======================================================================================
-class TestGraphqlMutationResidualDocumented:
-    def test_graphql_mutation_under_block_residual_unchanged(self):
-        # The graphql-mutation gap (a `-f query='mutation{...}'` bypasses REST-path matching) is a
-        # SEPARATE tracked residual, deliberately NOT closed by #1118. Pin it as is_dangerous=False
-        # at PATCH so the documented residual cannot silently drift (over- OR under-block) unnoticed.
+class TestGraphqlMutationIsRead:
+    def test_a_graphql_merge_mutation_is_refused(self):
+        # A `-f query='mutation{...}'` that calls a merge mutation is the request: the query
+        # value is read, so the merge is refused (and typed, so an approval can mint it).
         cmd = f"gh api graphql -f query='mutation{{ {M}PullRequest(input:{{}}) {{ number }} }}'"
-        assert PATCH.is_dangerous_command(cmd) is False
-
-    def test_graphql_mutation_residual_is_preexisting(self):
-        # Unchanged across base and PATCH — confirms #1118 neither introduced nor closed it.
-        cmd = f"gh api graphql -f query='mutation{{ {M}PullRequest(input:{{}}) {{ number }} }}'"
-        assert _BASE.is_dangerous_command(cmd) == PATCH.is_dangerous_command(cmd) is False
+        assert PATCH.is_dangerous_command(cmd) is True
+        assert PATCH.detect_command_operation_type(cmd) == "merge"

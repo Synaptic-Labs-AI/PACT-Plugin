@@ -24,6 +24,7 @@ Summary: GOOD-FAITH over-block sweep certification (PR #1195 OBS). Certifies aga
 import ast
 import io
 import json
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -607,14 +608,14 @@ class TestObsGPushSetMintability:
         tok = _gtok(_PG + "origin main feature")
         assert _greads(tok, _PG + other) is False, "%s wrongly authorized" % label
 
-    def test_set_equality_authorizes_same_reorder_dup_and_remote_agnostic(self):
+    def test_set_equality_authorizes_same_reorder_dup_and_refuses_another_remote(self):
         tok = _gtok(_PG + "origin main feature")
         assert _greads(tok, _PG + "origin main feature") is True
         assert _greads(tok, _PG + "origin feature main") is True
         assert _greads(tok, _PG + "origin main feature feature") is True
-        # remote-AGNOSTIC (security-ratified Q5): mirrors the scalar target_ref,
-        # which already binds the ref only — no NEW equivalence class.
-        assert _greads(tok, _PG + "upstream main feature") is True
+        # The destination binds, as the scalar target_ref's does: the same refs
+        # pushed to another remote need their own approval.
+        assert _greads(tok, _PG + "upstream main feature") is False
 
     # ---- (b) SCOPE BOUNDARY — force-push / delete multi-ref stay unmintable ----
     @pytest.mark.parametrize(
@@ -691,13 +692,13 @@ class TestObsGPushSetMintability:
     # ---- (e) the REQUIRED 5th property: bound_flags negatives (a2 inheritance) ----
     def test_plain_set_token_refuses_lease_multi_ref(self):
         plain = _gtok(_PG + "origin main feature")
-        assert plain["context"].get("bound_flags") == []
+        assert plain["context"].get("bound_flags") == ["remote=origin"]
         lease_cmd = _PG + "--for" + "ce-with-lease origin main feature"
         # premise: the lease multi-ref classifies push-to-main with lease BOUND,
         # so the a2 set-equality (plain [] vs [--force-with-lease]) refuses.
         lease_ctx = _gctx(lease_cmd)
         assert lease_ctx.get("operation_type") == "push-to-main"
-        assert lease_ctx.get("bound_flags") == ["--for" + "ce-with-lease"]
+        assert lease_ctx.get("bound_flags") == ["--for" + "ce-with-lease", "remote=origin"]
         assert _greads(plain, lease_cmd) is False, (
             "a PLAIN push_set token authorized a history-rewriting lease push"
         )
@@ -786,17 +787,15 @@ def _g_live_token_ids(tok):
     `os.rename`, which PRESERVES its inode, while a mint is an `O_EXCL` create
     that allocates a NEW one. So a name-keyed diff counts a retirement as a
     mint, AND is blind to a mint that reuses the name the retirement just
-    vacated — which second-granularity token names make the ordinary case
-    rather than a rare one. Those two errors cancel often enough to look
-    correct: a same-second pair reads 1 by counting the retirement while the
-    real token is invisible. Neither error is reachable by narrowing the glob,
+    vacated, which second-granular token names once made the ordinary case.
+    Those two errors cancel often enough to look correct: a same-name pair
+    reads 1 by counting the retirement while the real token is invisible. Neither error is reachable by narrowing the glob,
     because the defect is the identity, not the filter.
 
     Non-tokens are dropped by EXCLUSION, never by matching an expected token
     shape. An inclusion pattern such as `merge-authorized-<digits>` silently
-    drops the millisecond-disambiguated fallback name that `write_token` falls
-    back to on collision — a real token — and would go on dropping every later
-    shape nobody thought to add. Exclusion can only ever over-count, which
+    drops the random-suffixed name every `write_token` token carries, and would
+    go on dropping every later shape nobody thought to add. Exclusion can only ever over-count, which
     fails loudly; inclusion under-counts, which does not.
     """
     ids = set()
@@ -894,13 +893,14 @@ def _g_write_token_that_retires_then_fails_to_create(fired):
 
 
 def _g_token_shape(name):
-    """`merge-authorized-1785902062.consumed` -> `.consumed`.
+    """`merge-authorized-1785902062-1a2b3c4d.consumed` -> `.consumed`.
 
-    Strips the prefix and the epoch stamp so two directories seeded moments
-    apart compare on WHICH ARTIFACTS EXIST rather than on when they were made.
-    A live token yields `''`, a retirement `'.consumed'`, a use marker `'.use-1'`.
+    Strips the prefix, the epoch stamp and the random suffix so two directories
+    seeded moments apart compare on WHICH ARTIFACTS EXIST rather than on when they
+    were made. A live token yields `''`, a retirement `'.consumed'`, a use marker
+    `'.use-1'`.
     """
-    return name[len(mgc.TOKEN_PREFIX):].lstrip("0123456789")
+    return re.sub(r"^\d+(?:-[0-9a-f]+)?", "", name[len(mgc.TOKEN_PREFIX):])
 
 
 class TestObsGStubTracksTheRealFailurePath:
@@ -1329,12 +1329,16 @@ class TestObsHExtractionSurfaceMintability:
         ctx, refusal = _h_mint("Run `%s` now" % compound)
         assert ctx is not None, "quoted cd-prefix %s did not mint: %r" % (label, refusal)
         assert ctx.get(want_key) == want_val
-        # THE THEOREM: dict-equality with the bare-leg mint on the same bytes.
+        # The bare-leg mint's (op, target, flags), plus the compound's text: a push
+        # after a cd names a ref of the repository the cd moves to, so the approval
+        # runs the compound and not the bare leg.
         bare, _ = _h_mint("Run: " + leg)
-        assert ctx == bare, "token-space changed: compound=%r bare=%r" % (ctx, bare)
+        assert bare is not None
+        assert ctx == dict(bare, command_text=mgc.normalize_command_text(compound)), (
+            "token-space changed: compound=%r bare=%r" % (ctx, bare))
         # round-trip through the REAL (byte-untouched) read side.
         assert _h_reads(ctx, compound) is True
-        assert _h_reads(ctx, leg) is True
+        assert _h_reads(ctx, leg) is False
 
     @pytest.mark.parametrize(
         "label,exec_cmd",
@@ -1401,6 +1405,10 @@ class TestObsHExtractionSurfaceMintability:
         ctx, refusal = _h_mint("Run `%s` now" % compound)
         bare, _ = _h_mint("Run: " + leg)
         assert ctx is not None, "PARITY %s: quoted cd-prefix did not mint: %r" % (label, refusal)
+        if bare is not None:
+            # An op on a named PR or branch after a cd also binds its text: its target
+            # names a pull request or branch of the repository the cd moves to.
+            bare = dict(bare, command_text=mgc.normalize_command_text(compound))
         assert ctx.get(want_key) == want_val and ctx == bare, (
             "PARITY %s broke: ctx=%r bare=%r" % (label, ctx, bare)
         )
@@ -1469,11 +1477,13 @@ class TestObsHRealMintExecuteRetireRoundTrip:
         assert minted == 1, "the faithful quoted cd-prefix click did not mint"
         assert rc == _G_ALLOW
 
-    def test_compound_token_authorizes_bare_leg_and_vice_versa(self, tmp_path):
+    def test_compound_and_bare_tokens_each_run_only_their_own_command(self, tmp_path):
+        # The push after a cd may name a ref of another repository, so neither
+        # approval covers the other command.
         minted, rc = _g_roundtrip(_H_CMD, _H_LEG, tmp_path)
-        assert minted == 1 and rc == _G_ALLOW
+        assert minted == 1 and rc == _G_DENY
         minted, rc = _g_roundtrip(_H_LEG, _H_CMD, tmp_path)
-        assert minted == 1 and rc == _G_ALLOW
+        assert minted == 1 and rc == _G_DENY
 
     def test_deny_rows_minted_first(self, tmp_path):
         minted, rc = _g_roundtrip(_H_CMD, _H_CMDS, tmp_path)
@@ -1693,7 +1703,7 @@ class TestObsIForcePushSetMintability:
         assert _greads(force_tok, _PG + "--for" + "ce origin main") is False
         assert _greads(force_tok, _PG + "--for" + "ce origin main develop") is False
         assert _greads(force_tok, _PG + "--for" + "ce origin feature main") is True   # reorder
-        assert _greads(force_tok, _PG + "--for" + "ce upstream main feature") is True  # remote-agnostic
+        assert _greads(force_tok, _PG + "--for" + "ce upstream main feature") is False  # destination binds
 
     # ---- (C) READ-direction closure: pure token vs non-neutral executions ----
     @pytest.mark.parametrize(
@@ -1716,7 +1726,7 @@ class TestObsIForcePushSetMintability:
         nv_cmd = _PG + "--for" + "ce --no-verify origin main feature"
         nv = _gctx(nv_cmd)
         assert nv.get("force_push_set") == _i_pure_id()
-        assert nv.get("bound_flags") == ["--no-verify"]
+        assert nv.get("bound_flags") == ["--no-verify", "remote=origin"]
         assert _greads({"context": _gctx(_I_PURE)}, nv_cmd) is False  # plain refuses nv (a2)
         assert _greads({"context": nv}, nv_cmd) is True
 

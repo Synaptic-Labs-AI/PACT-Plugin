@@ -211,7 +211,9 @@ class TestStructuralNegatives:
 
     def test_shortlog_has_no_short_flags(self):
         # the -e (grep: value) vs --email (shortlog: boolean) collision — per-verb keying.
-        arm = mgc._READ_VERB_SPECS[("git", "shortlog")].flag_arm.pattern
+        flag_arm = mgc._READ_VERB_SPECS[("git", "shortlog")].flag_arm
+        assert flag_arm is not None
+        arm = flag_arm.pattern
         assert "-[SG]" not in arm and "-[ef]" not in arm and "-e" not in arm
 
     def test_flag_arms_are_single_capture_group(self):

@@ -5155,7 +5155,7 @@ class TestValidateOptionalFieldTypes:
         """session_end.warning wrong-type is rejected live (#433 cycle-7 N1).
 
         COUNTER-TEST BY REVERT target: removing
-        `"session_end": {"warning": str}` from `_OPTIONAL_FIELDS_BY_TYPE`
+        `"session_end": {"warning": str, "source": str}` from `_OPTIONAL_FIELDS_BY_TYPE`
         in shared/session_journal.py flips this test to pass-as-OK
         because `_validate_event_schema` has no declared optional
         fields for `session_end` and the int value sails through the
@@ -5187,6 +5187,17 @@ class TestValidateOptionalFieldTypes:
         ok, reason = _validate_event_schema(good)
         assert ok is True, f"valid warning should pass; got {reason!r}"
         assert reason == "ok"
+
+    def test_validate_session_end_source(self):
+        """`source` is optional and must be a str: wrap-up step 5 writes
+        source="wrap-up", and session_end.check_unpaused_pr compares it."""
+        from shared.session_journal import _validate_event_schema, make_event
+
+        ok, reason = _validate_event_schema(make_event("session_end", source="wrap-up"))
+        assert (ok, reason) == (True, "ok")
+        ok, reason = _validate_event_schema(make_event("session_end", source=1))
+        assert ok is False
+        assert "source" in reason and "must be str" in reason
 
     # ---------------------------------------------------------------------
     # session_consolidated schema activation + optional-field tests (#453)
@@ -5766,3 +5777,80 @@ class TestJournalTeachExamples:
         assert result.stdout == ""
         assert "error:" in result.stderr
         assert self._EXAMPLES["write"] in result.stderr
+
+
+def _wrap_up_end(**fields):
+    event = {"type": "session_end", "source": "wrap-up", "pr_state": "MERGED",
+             "pr_number": 42, "ts": "2026-04-17T13:00:00Z"}
+    event.update(fields)
+    return event
+
+
+class TestWrapUpClosed:
+    """The one predicate for "wrap-up ran for this merged PR"."""
+
+    SINCE = "2026-04-17T12:00:00Z"
+
+    def _closed(self, events, pr_number=42, since_ts=SINCE):
+        from shared.session_journal import wrap_up_closed
+
+        return wrap_up_closed(events, pr_number, since_ts)
+
+    def test_a_merged_wrap_up_for_the_pr_after_since_qualifies(self):
+        assert self._closed([_wrap_up_end()]) is True
+
+    def test_a_wrap_up_at_since_qualifies(self):
+        assert self._closed([_wrap_up_end(ts=self.SINCE)]) is True
+
+    def test_mixed_z_and_offset_spellings_compare_as_instants(self):
+        assert self._closed([_wrap_up_end(ts="2026-04-17T12:00:00+00:00")]) is True
+
+    def test_no_since_accepts_any_time(self):
+        assert self._closed([_wrap_up_end(ts="2020-01-01T00:00:00Z")], since_ts=None) is True
+
+    @pytest.mark.parametrize("event", [
+        pytest.param(_wrap_up_end(ts="2026-04-17T11:59:59Z"), id="before-since"),
+        pytest.param(_wrap_up_end(pr_state="OPEN"), id="state-open"),
+        pytest.param(_wrap_up_end(pr_state="CLOSED"), id="state-closed"),
+        pytest.param(_wrap_up_end(pr_state="NONE"), id="state-none"),
+        pytest.param(_wrap_up_end(pr_state="UNKNOWN"), id="state-unknown"),
+        pytest.param(_wrap_up_end(pr_state="merged"), id="state-lowercase"),
+        pytest.param({k: v for k, v in _wrap_up_end().items() if k != "pr_state"}, id="no-state"),
+        pytest.param(_wrap_up_end(pr_number=43), id="other-pr"),
+        pytest.param(_wrap_up_end(pr_number="42"), id="str-number-in-event"),
+        pytest.param(_wrap_up_end(pr_number=True), id="bool-number-in-event"),
+        pytest.param({k: v for k, v in _wrap_up_end().items() if k != "pr_number"}, id="no-number"),
+        pytest.param(_wrap_up_end(source=None), id="no-source"),
+        pytest.param(_wrap_up_end(source="pause"), id="other-source"),
+        pytest.param(_wrap_up_end(type="session_paused"), id="other-type"),
+        pytest.param(_wrap_up_end(ts="garbage"), id="unparseable-ts"),
+        pytest.param(_wrap_up_end(ts=5), id="int-ts"),
+        pytest.param(_wrap_up_end(ts=None), id="no-ts"),
+        pytest.param(_wrap_up_end(ts="2026-04-17T13:00:00"), id="naive-ts"),
+    ])
+    def test_a_non_qualifying_event_does_not_match(self, event):
+        assert self._closed([event]) is False
+
+    @pytest.mark.parametrize("pr_number", ["42", True, None, 42.0])
+    def test_a_non_int_caller_number_never_matches(self, pr_number):
+        assert self._closed([_wrap_up_end(pr_number=1)], pr_number=pr_number) is False
+        assert self._closed([_wrap_up_end()], pr_number=pr_number) is False
+
+    def test_a_bool_caller_number_does_not_match_pr_one(self):
+        assert self._closed([_wrap_up_end(pr_number=1)], pr_number=True) is False
+
+    def test_an_unparseable_since_never_qualifies(self):
+        assert self._closed([_wrap_up_end()], since_ts="garbage") is False
+
+    def test_any_qualifying_event_among_others_is_enough(self):
+        events = [_wrap_up_end(pr_state="OPEN"), _wrap_up_end(pr_number=7), _wrap_up_end()]
+        assert self._closed(events) is True
+
+    def test_the_session_end_schema_accepts_the_record_and_rejects_a_str_number(self):
+        from shared.session_journal import _validate_event_schema
+
+        ok = make_event("session_end", source="wrap-up", pr_state="MERGED", pr_number=42)
+        assert _validate_event_schema(ok) == (True, "ok")
+        bad = make_event("session_end", source="wrap-up", pr_state="MERGED", pr_number="42")
+        valid, reason = _validate_event_schema(bad)
+        assert valid is False and "pr_number" in reason

@@ -182,11 +182,16 @@ security check; the primary check is I-3 TTL expiry (bounded by TOKEN_TTL).
 
 from __future__ import annotations
 
+import ast
+import functools
 import glob
+import json
 import os
 import re
 import shlex
+import subprocess
 import time
+import warnings
 from collections.abc import Sequence
 from pathlib import Path
 from typing import NamedTuple
@@ -513,9 +518,16 @@ _CLOSE_LITERAL_ARMS = (
 # safety is preserved BY CONSTRUCTION, not by denylist-emptiness: an isolated API
 # leg is method-less hence detect-negative, so tier 2 abstains → symmetric
 # whole-command bind (the safe direction) — see TestEmergentDangerClassIsCloseOnly.
+# A gh-api merge endpoint, as a whole PATH segment: `merge` (a pull request), `merges` (a
+# branch into a branch) or `merge-upstream` (upstream into a fork's branch).
+_GH_API_MERGE_PATH = r".*/(?:merges?|merge-upstream)(?![\w-])"
+
 _API_LITERAL_ARMS = (
-    # API-based merge bypasses (require mutating HTTP method to avoid blocking reads)
-    re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:PUT|PATCH|POST)\b).*merge", re.IGNORECASE),
+    # API-based merge bypasses (require mutating HTTP method to avoid blocking reads).
+    # The gh-api arms read `merge` only as an endpoint PATH segment (`/pulls/<n>/merge`,
+    # `/merges`, `/merge-upstream`), never inside a field name: `-f delete_branch_on_merge=true` is a repo
+    # settings change, not a merge.
+    re.compile(_GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+(?:PUT|PATCH|POST)\b)" + _GH_API_MERGE_PATH, re.IGNORECASE),
     re.compile(r"\bcurl\b(?=.*(?:-X|--request)\s+(?:PUT|PATCH|POST)\b).*api.*merge", re.IGNORECASE),
     # API-based branch deletion via DELETE to git/refs endpoint.
     # HOST-AGNOSTIC (#1061): the curl arms drop the literal `.*api.*` substring so a
@@ -551,7 +563,7 @@ _API_LITERAL_ARMS = (
     # cause gh api to default to POST. Dangerous when targeting git/refs or merge.
     # Negative lookahead excludes explicit GET (which overrides implicit POST).
     re.compile(_GH_API_PREFIX + r"(?!.*(?:-X|--method)\s+GET\b)(?=.*(?:-f|-F|--field|--raw-field|--input)\s).*git/refs", re.IGNORECASE),
-    re.compile(_GH_API_PREFIX + r"(?!.*(?:-X|--method)\s+GET\b)(?=.*(?:-f|-F|--field|--raw-field|--input)\s).*merge", re.IGNORECASE),
+    re.compile(_GH_API_PREFIX + r"(?!.*(?:-X|--method)\s+GET\b)(?=.*(?:-f|-F|--field|--raw-field|--input)\s)" + _GH_API_MERGE_PATH, re.IGNORECASE),
     # curl implicit POST: --data/-d/--data-raw/--data-binary flags cause curl to
     # default to POST. Dangerous when targeting git/refs or merge API endpoints.
     # Negative lookahead excludes explicit GET (which overrides implicit POST).
@@ -565,8 +577,8 @@ _API_LITERAL_ARMS = (
     # Alternative HTTP clients: wget with --method flag
     re.compile(r"\bwget\b(?=.*--method=(?:DELETE|PATCH|POST|PUT)\b).*git/refs", re.IGNORECASE),
     re.compile(r"\bwget\b(?=.*--method=(?:DELETE|PATCH|POST|PUT)\b).*merge", re.IGNORECASE),
+    # GraphQL merge mutations are read by _graphql_merge_mutation, beside these arms.
     # Known API detection gaps (defense-in-depth, not a security boundary):
-    # - GraphQL mutations: gh api graphql -f query='mutation { ... }' bypasses REST-path matching
     # - gh alias: aliases can hide API calls (tracked in #270)
 )
 
@@ -671,6 +683,9 @@ def detect_command_operation_type(command: str) -> str | None:
         _lop = _flag_condition_danger_op(_leg)
         if _lop in _PER_LEG_OPS:
             return _lop
+    mutation = _graphql_input_mutation(command)
+    if mutation is not None:
+        return "branch-merge" if mutation in _BRANCH_MERGE_MUTATIONS else "merge"
     return None
 
 
@@ -783,11 +798,17 @@ def _detect_op_pass(
     # None->merge; that is the whole point of the arm. Only NON-merge inputs are
     # unchanged.) Recognition predicate: tolerant IGNORECASE client (_GH_API_PREFIX, so a
     # `gh -R o/r api` global-flag spelling also mints) + IGNORECASE PUT/PATCH/POST +
-    # case-SENSITIVE pulls/<N>/merge path. DELETE excluded; the implicit-POST (-f/--data,
-    # no method keyword) spelling is a deliberate residual, per the git/refs detect arm.
+    # case-SENSITIVE pulls/<N>/merge path. DELETE excluded; the implicit-POST spelling (a gh api
+    # body field flag and no GET) is a POST too, so it is recognized the same way.
     for _leg in raw_legs:
         if _api_merge_leg_endpoint(_leg) is not None:
             return "merge"
+    for _leg in raw_legs:
+        mutation = _graphql_merge_mutation(_leg)
+        if mutation is not None:
+            return "branch-merge" if mutation in _BRANCH_MERGE_MUTATIONS else "merge"
+        if _gh_api_branch_merge_leg(_leg) or _update_branch_target(_leg) is not None:
+            return "branch-merge"
     # branch-delete: git branch -D / --delete --force / --force --delete. Matched
     # PER-LEG over the shared _BRANCH_DELETE_LITERAL_ARMS SSOT (#1094) — the same
     # arm tuple the read floor consumes, over the same leg substrate
@@ -1299,7 +1320,7 @@ def _api_merge_leg_endpoint(leg: str) -> str | None:
     # The capturing _PULLS_MERGE_PR_RE is used only for EXTRACTION (the walk + fallback).
     if not re.search(r"pulls/\d+/merge\b", leg):
         return None
-    if not re.search(r"\b(?:PUT|PATCH|POST)\b", leg, re.IGNORECASE):
+    if not (re.search(r"\b(?:PUT|PATCH|POST)\b", leg, re.IGNORECASE) or _gh_api_implicit_post(leg)):
         return None
     # Recognized. Extract the ENDPOINT-position PR.
     stripped = _strip_non_executable_content(leg)
@@ -1334,6 +1355,176 @@ def _api_merge_leg_endpoint(leg: str) -> str | None:
     # gh-api-only per Option B: curl/wget never reach this walk — they classify None at
     # the client gate above — so there is no exotic-curl residual to accept.)
     return None
+
+
+def _gh_api_implicit_post(leg: str) -> bool:
+    """Whether a gh api leg is an implicit POST: a body field flag and no GET method,
+    the same condition as the implicit-POST read arm."""
+    return bool(
+        re.search(r"(?:^|\s)(?:-f|-F|--field|--raw-field|--input)\s", leg)
+        and not re.search(r"(?:-X|--method)\s+GET\b", leg, re.IGNORECASE)
+    )
+
+
+# A gh api call that merges a branch into another (`POST repos/O/R/merges`, or
+# `POST repos/O/R/merge-upstream` from the upstream repository): the endpoint as the last
+# path segment, sent with a mutating method, explicit or implicit.
+_GH_API_MERGES_ENDPOINT_RE = re.compile(r"/(?:merges|merge-upstream)(?=$|[\s'\"?])")
+
+
+def _gh_api_branch_merge_leg(leg: str) -> bool:
+    """Whether a leg is a gh api call to the branch-merge endpoint."""
+    return bool(
+        re.search(_GH_API_PREFIX, leg, re.IGNORECASE)
+        and _GH_API_MERGES_ENDPOINT_RE.search(leg)
+        and (
+            re.search(r"(?:-X|--method)\s+(?:PUT|PATCH|POST)\b", leg, re.IGNORECASE)
+            or _gh_api_implicit_post(leg)
+        )
+    )
+
+
+# GraphQL mutations that merge: a gh api graphql request whose query calls one of them
+# merges a pull request (directly, by auto-merge or through the merge queue) or merges into
+# a branch. The query value is the request, so it is read.
+_GRAPHQL_MERGE_MUTATION_RE = re.compile(
+    r"\b(mergePullRequest|enablePullRequestAutoMerge|enqueuePullRequest|mergeBranch"
+    r"|updatePullRequestBranch)\s*\("
+)
+_GH_API_GRAPHQL_RE = re.compile(_GH_API_PREFIX + r".*\sgraphql(?![\w./-])")
+_GRAPHQL_STRING_RE = re.compile(r'"(?:\\.|[^"\\])*"')
+
+
+def _graphql_merge_mutation(leg: str) -> str | None:
+    """The merge mutation a gh api graphql leg's query calls, or None. A mutation name
+    inside a GraphQL string literal (a comment body) is data."""
+    if not _GH_API_GRAPHQL_RE.search(leg):
+        return None
+    tokens = _shell_tokenize(leg) or [leg]
+    for tok in tokens:
+        m = _GRAPHQL_MERGE_MUTATION_RE.search(_GRAPHQL_STRING_RE.sub('""', tok))
+        if m:
+            return m.group(1)
+    return None
+
+
+# `gh api graphql --input -` (or `--input <(…)`): the request body comes from stdin or a
+# process substitution, which the guard reads when the command writes it literally.
+_GH_API_GRAPHQL_INPUT_RE = re.compile(
+    _GH_API_PREFIX + r"[^\n;&|]*\sgraphql(?![\w./-])[^\n;&|]*?\s--input(?:\s+|=)"
+    r"(?:(?P<stdin>-)(?=\s|$)|(?P<proc><)(?=\())"
+)
+_HERE_INPUT_RE = re.compile(
+    r"\A[^\n;&|]*?(?:<<<\s*(?P<word>'[^']*'|\"(?:[^\"\\]|\\.)*\"|\S+)"
+    r"|<<-?\s*(?P<q>['\"]?)(?P<tag>\w+)(?P=q)[^\n]*\n(?P<body>.*?)\n(?P=tag)(?=\s|$))",
+    re.DOTALL,
+)
+
+
+def _graphql_input_query(command: str) -> str | None:
+    """The GraphQL query a `gh api graphql --input` call reads from text the guard can see,
+    or None: a heredoc or here-string on its own command, an echo or printf piped into it,
+    or `--input <(echo|printf …)`. A JSON body gives its `query` field. A body in a file
+    the guard cannot read is not judged."""
+    if "graphql" not in command or "--input" not in command:
+        return None
+    m = _GH_API_GRAPHQL_INPUT_RE.search(command)
+    if m is None or _executed_surface_view(command)[m.start()] == " ":
+        return None
+    text = None
+    if m.group("proc") is not None:
+        span, _ = _extract_dollar_paren(command, m.start("proc"))
+        words = (_shell_tokenize(span[2:-1]) or []) if span else []
+        if words and words[0] in ("echo", "printf"):
+            text = _printed_text(words)
+    else:
+        here = _HERE_INPUT_RE.match(command[m.end():])
+        if here and here.group("body") is not None:
+            text = here.group("body")
+        elif here:
+            word = _shell_tokenize(here.group("word")) or []
+            text = word[0] if word else None
+        else:
+            before = command[:m.start()].rstrip()
+            if before.endswith("|") and not before.endswith("||"):
+                leg = re.split(r"[;&\n]|\|\|", before[:-1])[-1]
+                words = _shell_tokenize(leg) or []
+                if words and words[0] in ("echo", "printf"):
+                    text = _printed_text(words)
+    if not text:
+        return None
+    try:
+        body = json.loads(text)
+    except ValueError:
+        return text
+    return body.get("query") if isinstance(body, dict) and isinstance(body.get("query"), str) else None
+
+
+def _graphql_input_mutation(command: str) -> str | None:
+    """The merge mutation a readable `gh api graphql --input` body calls, or None."""
+    query = _graphql_input_query(command)
+    if query is None:
+        return None
+    m = _GRAPHQL_MERGE_MUTATION_RE.search(_GRAPHQL_STRING_RE.sub('""', query))
+    return m.group(1) if m else None
+
+
+def _graphql_input_value(command: str, key: str) -> str | None:
+    """The string value of `key` in a GraphQL merge mutation's input, or None."""
+    query = _graphql_input_query(command)
+    for tok in ([query] if query else []) + (_shell_tokenize(command) or [command]):
+        if _GRAPHQL_MERGE_MUTATION_RE.search(tok):
+            m = re.search(r"\b" + key + r'\s*:\s*"([^"\\]+)"', tok)
+            if m:
+                return m.group(1)
+    return None
+
+
+# Updating a pull request's branch merges its base into it: `gh pr update-branch [N]`, or
+# `PUT …/pulls/N/update-branch` through gh api.
+_GH_PR_UPDATE_BRANCH_RE = re.compile(_GH_PREFIX + r"pr\s+update-branch(?![\w-])")
+_GH_API_UPDATE_BRANCH_RE = re.compile(
+    _GH_API_PREFIX + r"(?=.*(?:-X|--method)\s+PUT\b).*/pulls/(\d+)/update-branch(?![\w-])",
+    re.IGNORECASE,
+)
+_BRANCH_MERGE_MUTATIONS = frozenset({"mergeBranch", "updatePullRequestBranch"})
+
+
+def _update_branch_target(leg: str) -> str | None:
+    """`""` or the pull request number when a leg updates a pull request's branch (merges
+    its base into it), else None."""
+    api = _GH_API_UPDATE_BRANCH_RE.search(leg)
+    if api:
+        return api.group(1)
+    if not _GH_PR_UPDATE_BRANCH_RE.search(leg):
+        return None
+    tokens = _shell_tokenize(leg) or []
+    if "update-branch" in tokens:
+        rest = tokens[tokens.index("update-branch") + 1:]
+        return next((tok for tok in rest if tok.isdigit()), "")
+    return ""
+
+
+def _extract_branch_merge_base(command: str) -> str | None:
+    """The branch a branch merge lands on: the REST `base=` (merges) or `branch=`
+    (merge-upstream) field, or the GraphQL `base:`."""
+    tokens = _shell_tokenize(command) or []
+    for i, tok in enumerate(tokens[:-1]):
+        if tok in ("-f", "-F", "--field", "--raw-field"):
+            key, _, value = tokens[i + 1].partition("=")
+            if key in ("base", "branch") and value:
+                return value
+    return _graphql_input_value(command, "base")
+
+
+def _is_graphql_merge_query(match: re.Match) -> bool:
+    """Whether a `key=value` match is a gh api graphql field value whose query calls a
+    merge mutation (judged on the text from the start of its command to the value)."""
+    before = match.string[: match.start()]
+    if not re.search(r"(?:^|\s)(?:-f|-F|--field|--raw-field)\s+$", before):
+        return False
+    start = max(before.rfind(sep) for sep in (";", "&", "|", "\n")) + 1
+    return _graphql_merge_mutation(before[start:] + match.group(0)) is not None
 
 
 def _extract_api_merge_pr(command: str) -> str | None:
@@ -2051,6 +2242,19 @@ PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
     },
     "force-push": {
         "--no-verify":     (("--no-verify",), False),           # bypass pre-push hook
+        # Scope flags: each widens what the push rewrites (every branch, every ref,
+        # every tag), so a plain force-push approval does not cover them.
+        "--all":           (("--all",), False),
+        "--mirror":        (("--mirror",), False),
+        "--tags":          (("--tags",), False),
+        # --follow-tags pushes the annotated tags reachable from the pushed refs, which
+        # a force push can then overwrite, as with --tags.
+        "--follow-tags":   (("--follow-tags",), False),
+        # --repo names the destination, as the remote positional does.
+        "--repo":          (("--repo",), True),
+        # --receive-pack/--exec name the program the remote runs to receive the push.
+        "--receive-pack":  (("--receive-pack",), True),
+        "--exec":          (("--exec",), True),
     },
     "push-to-main": {
         # --force-with-lease: the lease push CAN rewrite history (unlike a plain push),
@@ -2063,6 +2267,9 @@ PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
         # the same canonical bare token; intra-lease value variation is an accepted
         # residual (never authorizes plain<->lease or lease<->force escalation).
         "--force-with-lease": (("--force-with-lease",), False),
+        # --receive-pack/--exec name the program the remote runs to receive the push.
+        "--receive-pack":  (("--receive-pack",), True),
+        "--exec":          (("--exec",), True),
     },
     "branch-delete": {
         # No bound flags today: branch-delete's privileged effect is its op-trigger
@@ -2085,6 +2292,9 @@ PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
         "--prune":     (("--prune",), False),
         # bypasses the pre-push hook — a privilege, not a target change
         "--no-verify": (("--no-verify",), False),
+        # --receive-pack/--exec name the program the remote runs to receive the push.
+        "--receive-pack":  (("--receive-pack",), True),
+        "--exec":          (("--exec",), True),
     },
     "remote-mass-delete": {
         # DELIBERATELY NARROWER THAN ITS SIBLING, and the asymmetry is not cosmetic:
@@ -2112,6 +2322,12 @@ PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
         # REMEDY: if you coarsen mass_target, you MUST bind --mirror and --prune HERE in
         # the same commit. See test_mass_target_embeds_the_scope_flag_in_its_identity.
         "--no-verify": (("--no-verify",), False),
+        # --receive-pack/--exec name the program the remote runs to receive the push.
+        "--receive-pack":  (("--receive-pack",), True),
+        "--exec":          (("--exec",), True),
+    },
+    "branch-merge": {
+        # No bound flags: merging a branch through the API has no privileged modifier.
     },
     "branch-protection": {
         # No bound flags: branch-protection's privileged effect (weakening protection)
@@ -2120,6 +2336,136 @@ PRIVILEGED_FLAGS: dict[str, dict[str, tuple[tuple[str, ...], bool]]] = {
         # bound flag, so the set-equality bind is untouched.
     },
 }
+
+
+# The variables gh reads its target from: the repository, the host it is on, and the
+# config directory that holds the host and its credentials.
+_GH_TARGET_VARIABLES = ("GH_REPO", "GH_HOST", "GH_CONFIG_DIR")
+
+
+def _unmasked_legs(command: str) -> list[str]:
+    """`command`'s legs split at unquoted `;`, `&`, `|`, parentheses and newlines, with
+    their quoted text left as written."""
+    legs, start, i, quote = [], 0, 0, ""
+    while i < len(command):
+        ch = command[i]
+        if quote:
+            if ch == "\\" and quote == '"':
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch == "\\":
+            i += 2
+            continue
+        elif ch in "'\"":
+            quote = ch
+        elif ch in ";&|()\n":
+            legs.append(command[start:i])
+            start = i + 1
+        i += 1
+    legs.append(command[start:])
+    return [leg for leg in legs if leg.strip()]
+
+
+def _assignments_reaching_command(leg: str) -> "tuple[dict[str, str], list[str]]":
+    """The variables a leg's command receives by assignment, and that command's words:
+    `NAME=v cmd`, also through `env` (its `-i`, `-u NAME` and `--`, and `-S '…'` read as
+    the words it splits into) and through the exec wrappers the classifier walks past
+    (`nice`, `timeout 60`, `command`, …). A leg with no command after its assignments
+    passes nothing on. Unbalanced quoting reads no assignments."""
+    try:
+        words = shlex.split(leg.lstrip("({ \t"))
+    except ValueError:
+        return {}, leg.split()
+    found: dict[str, str] = {}
+    command = _walk_assignments(words, found, 0)
+    return (found if command else {}), command
+
+
+# The key under which _walk_assignments records an `env -C <dir>` / `--chdir`; no
+# variable name can take it.
+ENV_CHDIR = "\x00chdir"
+# env's other options that take the next word as their value: BSD -P altpath, FreeBSD
+# -L/-U user[/class], GNU -a/--argv0 name.
+_ENV_OTHER_VALUE_OPTIONS = frozenset({"-P", "-L", "-U", "-a", "--argv0"})
+
+
+def _walk_assignments(words: list[str], found: dict[str, str], depth: int) -> list[str]:
+    """Record the assignments before `words`' command into `found` and return the
+    command's words, stepping through env and the modeled exec wrappers. env's
+    `-C <dir>` / `--chdir=<dir>` is recorded under ENV_CHDIR."""
+    i = 0
+    while i < len(words) and re.match(r"^[A-Za-z_]\w*=", words[i]):
+        name, value = words[i].split("=", 1)
+        found[name] = value
+        i += 1
+    words = words[i:]
+    if not words or depth >= _MAX_WRAPPER_DEPTH:
+        return words
+    head = os.path.basename(words[0])
+    if head == "env":
+        j = 1
+        while j < len(words):
+            word = words[j]
+            split, rest = None, []
+            if word in ("-S", "--split-string") and j + 1 < len(words):
+                split, rest = words[j + 1], words[j + 2:]
+            elif word.startswith("--split-string="):
+                split, rest = word.split("=", 1)[1], words[j + 1:]
+            elif word.startswith("-S") and len(word) > 2:
+                split, rest = word[2:], words[j + 1:]
+            if split is not None:
+                try:
+                    words = words[:j] + shlex.split(split) + rest
+                except ValueError:
+                    return words[j:]
+                continue
+            if word == "--":
+                j += 1
+                break
+            if re.match(r"^-[i0v][^-]", word):
+                # A short-option cluster (`-iC dir`, `-iC/tmp/b`, `-vi`) reads as its
+                # options one by one; a value-taking option takes the rest of the word.
+                split_words, k = [], 1
+                while k < len(word):
+                    if word[k] in "CuSPaLU":
+                        split_words.append("-" + word[k:])
+                        break
+                    split_words.append("-" + word[k])
+                    k += 1
+                words = words[:j] + split_words + words[j + 1:]
+                continue
+            if word in ("-i", "--ignore-environment"):
+                chdir = found.get(ENV_CHDIR)
+                found.clear()
+                if chdir is not None:
+                    found[ENV_CHDIR] = chdir
+            elif word in ("-u", "--unset") and j + 1 < len(words):
+                found.pop(words[j + 1], None)
+                j += 1
+            elif word.startswith(("-u", "--unset=")) and len(word) > 2:
+                found.pop(word.split("=", 1)[1] if word.startswith("--") else word[2:], None)
+            elif word in ("-C", "--chdir") and j + 1 < len(words):
+                found[ENV_CHDIR] = words[j + 1]
+                j += 1
+            elif word.startswith(("-C", "--chdir=")):
+                found[ENV_CHDIR] = word.split("=", 1)[1] if word.startswith("--") else word[2:]
+            elif word in _ENV_OTHER_VALUE_OPTIONS and j + 1 < len(words):
+                j += 1
+            elif not word.startswith("-"):
+                break
+            j += 1
+        return _walk_assignments(words[j:], found, depth + 1)
+    if head in _WRAPPER_GRAMMAR:
+        nested = _wrapper_nested_command(shlex.join(words), head)
+        if nested is None:
+            return words
+        try:
+            return _walk_assignments(shlex.split(nested), found, depth + 1)
+        except ValueError:
+            return words
+    return words
 
 
 def extract_privileged_flags(command: str, op_type: str | None) -> list[str]:
@@ -2277,7 +2623,116 @@ def extract_privileged_flags(command: str, op_type: str | None) -> list[str]:
             j += 1
         i += 2 if consumed_next else 1
 
+    # gh reads its repository from a GH_REPO assignment prefixing the command (run
+    # directly or through env, command, ...) exactly as from --repo, so that prefix
+    # is the same redirect. A GH_HOST or GH_CONFIG_DIR prefix moves it to another
+    # host or account, so each binds by its value too.
+    if op_type in ("merge", "close"):
+        for leg in _unmasked_legs(command):
+            assigned, _ = _assignments_reaching_command(leg)
+            if "GH_REPO" in assigned:
+                found.add("--repo=" + assigned["GH_REPO"])
+            for name in _GH_TARGET_VARIABLES[1:]:
+                if name in assigned:
+                    found.add(name + "=" + assigned[name])
+
     return sorted(found)
+
+
+def _substitution_spans(command: str) -> list[tuple[int, int]]:
+    """The (start, end) offsets of the substitutions (`$(…)`, `<(…)`, `>(…)`, backticks)
+    the shell runs in `command`, outermost only: unquoted, or unescaped in double quotes."""
+    if "(" not in command and "`" not in command:
+        return []
+    view = _mask_quotes_keeping_substitutions(command)
+    spans, i, n = [], 0, len(command)
+    while i < n:
+        if view[i] == "\\":
+            i += 2
+            continue
+        if view.startswith(("$(", "<(", ">("), i):
+            span, end = _extract_dollar_paren(command, i)
+        elif view[i] == "`":
+            span, end = _extract_backtick(command, i)
+        else:
+            i += 1
+            continue
+        if span is not None:
+            spans.append((i, end))
+        i = max(end, i + 1)
+    return spans
+
+
+def _substitution_bodies(command: str) -> list[str]:
+    """The bodies of the substitutions `_substitution_spans` finds in `command`."""
+    return [command[s + 1:e - 1] if command[s] == "`" else command[s + 2:e - 1]
+            for s, e in _substitution_spans(command)]
+
+
+def _destructive_legs_on_substitutions(
+    command: str, legs: list[str], destructive: list[str], view: str | None = None
+) -> int:
+    """How many of the destructive `legs` of `command` open a substitution or are a
+    piece of one: an unquoted `x=$(echo hi; gh pr merge 5)` splits into legs at the `;`
+    inside it, and its guarded command is counted from the substitution's body. The legs
+    are slices of the stripped command, or of `view` when given."""
+    stripped = view if view is not None else _strip_non_executable_content(_normalize_line_continuations(command))
+    subs = _substitution_spans(stripped)
+    return sum(
+        1 for (start, end), leg in zip(_slice_stripped_leg_spans(stripped), legs)
+        if leg in destructive
+        and (re.search(r"[$<>]\(|`", leg) or any(s < end and start < e for s, e in subs))
+    )
+
+
+def _substitution_destructive_count(command: str, depth: int = 0) -> int:
+    """How many guarded commands the substitutions `command` runs hold, counted in each
+    body as the bare command is counted, nested substitutions included."""
+    if depth >= _MAX_WRAPPER_DEPTH:
+        return 0
+    total = 0
+    for body in _substitution_bodies(_strip_shell_comments(_excise_heredoc_bodies_for_routing_scan(command))):
+        destructive = [leg for leg in _split_into_legs(body) if _leg_is_destructive(leg)]
+        count = sum(_shell_leg_destructive_count(leg) for leg in destructive)
+        nested = _destructive_legs_on_substitutions(body, _split_into_legs(body), destructive)
+        count += max(nested, _substitution_destructive_count(body, depth + 1)) - nested
+        count += _repeat_extra(body)
+        total += count or (1 if _is_dangerous_at_depth(body, depth + 1) else 0)
+    return total
+
+
+def _guarded_substitution_body(command: str) -> str | None:
+    """The body of the one substitution (`$(…)`, `<(…)`, `>(…)`, backticks) that holds a
+    guarded operation, when that body is exactly one guarded command and nothing outside
+    the substitutions is guarded; else None."""
+    if "(" not in command and "`" not in command:
+        return None
+    view = _mask_quotes_keeping_substitutions(command)
+    outside, bodies, i, n = list(command), [], 0, len(command)
+    while i < n:
+        if view[i] == "\\":
+            i += 2
+            continue
+        if view.startswith(("$(", "<(", ">("), i):
+            span, end = _extract_dollar_paren(command, i)
+            body = None if span is None else span[2:-1]
+        elif view[i] == "`":
+            span, end = _extract_backtick(command, i)
+            body = None if span is None else span[1:-1]
+        else:
+            i += 1
+            continue
+        if body is None:
+            return None
+        bodies.append(body)
+        outside[i:end] = " " * (end - i)
+        i = end
+    guarded = [b for b in bodies if detect_command_operation_type(b) is not None]
+    if len(guarded) != 1 or detect_command_operation_type("".join(outside)) is not None:
+        return None
+    if _single_destructive_leg(guarded[0]) != guarded[0].strip():
+        return None
+    return guarded[0]
 
 
 def extract_command_context(command: str, flag_scan_text: str | None = None) -> dict:
@@ -2352,8 +2807,25 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
     command = _normalize_line_continuations(command)
     if flag_scan_text is not None:
         flag_scan_text = _normalize_line_continuations(flag_scan_text)
+    # A script given a whole guarded command, literally or through a literal variable, is
+    # read as that command, so its target binds; one given several binds none of them.
+    script_arg = (_script_argv_guarded_command(command)
+                  or _script_argv_guarded_command(_expand_literal_variables(command)))
+    if script_arg is not None:
+        if is_compound_destructive_command(script_arg):
+            return context
+        return extract_command_context(script_arg, flag_scan_text)
+    # A guarded command run by a substitution is read as that command, so its target binds.
+    body = _guarded_substitution_body(command)
+    if body is not None:
+        return extract_command_context(body, flag_scan_text)
     op_type = detect_command_operation_type(command)
     if op_type is None:
+        # A guarded command written through a variable (`CMD=gh; $CMD pr merge 5`) is read
+        # with its variables expanded, as the refusal reads it.
+        expanded = _expand_literal_variables(command)
+        if expanded != command:
+            return extract_command_context(expanded, flag_scan_text)
         return context
     context["operation_type"] = op_type
     # bound_flags is computed HERE (the single call site) so both arms inherit it
@@ -2363,6 +2835,15 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
     context["bound_flags"] = extract_privileged_flags(
         flag_scan_text if flag_scan_text is not None else command, op_type
     )
+    # A push that names its refs names its destination first (`git push --force origin
+    # feat/x`): the remote, URL or path binds, so the same refs pushed elsewhere need
+    # their own approval. It is read from the text the target is read from, so both
+    # sides agree. A push with no refspec carries its remote in its target.
+    if op_type in ("force-push", "push-to-main", "remote-ref-delete"):
+        after = _tokens_after_push(command)
+        positionals = _push_positionals(after) if after is not None else []
+        if len(positionals) >= 2:
+            context["bound_flags"] = sorted(set(context["bound_flags"]) | {"remote=" + positionals[0]})
     if op_type in ("merge", "close"):
         # close accepts {<number>|<url>|<branch>} — bind whichever the command
         # carries so EVERY faithful close form MINTS (not just the number form).
@@ -2497,6 +2978,29 @@ def extract_command_context(command: str, flag_scan_text: str | None = None) -> 
         protected_branch = _extract_protection_branch(command)
         if protected_branch is not None:
             context["protected_branch"] = protected_branch
+    elif op_type == "branch-merge":
+        base = _extract_branch_merge_base(command)
+        if base is not None:
+            context["target_ref"] = base
+        else:
+            pr = next((t for leg in _split_into_legs(command)
+                       if (t := _update_branch_target(leg))), None)
+            if pr:
+                context["pr_number"] = pr
+    if op_type in ("merge", "branch-merge") and not (
+            {"pr_number", "target_ref"} & context.keys()):
+        # A GraphQL merge names its pull request by node id, a key no numeric merge
+        # token carries.
+        node_id = _graphql_input_value(command, "pullRequestId")
+        if node_id is not None:
+            context["pr_node_id"] = node_id
+    if op_type in ("merge", "branch-merge"):
+        # A merge sent as a GraphQL mutation names that mutation, so the approval side can
+        # bind it by its text even when its input carries no id.
+        mutation = _graphql_input_mutation(command) or next(
+            (name for leg in _split_into_legs(command) if (name := _graphql_merge_mutation(leg))), None)
+        if mutation is not None:
+            context["graphql_mutation"] = mutation
     return context
 
 
@@ -2767,6 +3271,2209 @@ def _has_pipe_to_shell(command: str) -> bool:
     )
 
 
+# An interpreter reads its PROGRAM from stdin when it gets no code argument: no -c/-e/-r/-m
+# and no script path, only flags or a lone `-`. Its stdin feed (a pipe into it, a here-string,
+# a heredoc) is then that interpreter's code, and it can run a shell exactly when it names an
+# exec primitive.
+# The interpreter heads, as one alternation: the single source for the stdin feed pattern,
+# the head finder and _INTERPRETER_HEADS. Same per-FAMILY anchoring as
+# _SHELL_STRING_EXECUTORS (python-config is no head); a versioned or suffixed binary
+# (php8.2, perl5.36, node18, python3.13t) is the same interpreter.
+_INTERPRETER_HEAD_ALTERNATION = (
+    r"python[0-9.]*t?|pypy[0-9.]*t?|perl[0-9.]*|ruby[0-9.]*|nodejs[0-9.]*|node[0-9.]*"
+    r"|php[0-9.]*(?:-cgi)?|bun|deno|lua[0-9.]*|luajit|R|Rscript|osascript|tclsh[0-9.]*|wish[0-9.]*"
+    r"|awk|gawk|mawk|nawk"
+)
+_STDIN_INTERPRETER = (
+    r"(?<![\w./-])(?:[^\s|;&<>()]*/)?"
+    r"(?P<head>" + _INTERPRETER_HEAD_ALTERNATION + r")"
+    r"(?P<sub>[ \t]+(?:eval|run)(?=[ \t]))?"         # deno's eval / run subcommand
+    r"(?P<flags>(?:[ \t]+-[\w-]*)*)"
+    r"(?:[ \t]+-(?:[ \t]+[^\s<>|;&()]+)+)?[ \t]*"   # `-` then the program's argv
+)
+_CODE_ARG_FLAGS = frozenset({"-c", "-e", "-E", "-r", "-m", "-f", "--eval", "--command"})
+_FED_HEREDOC_RE = re.compile(
+    _STDIN_INTERPRETER + r"<<-?[ \t]*(?P<q>['\"]?)(?P<tag>\w+)(?P=q)[^\n]*\n(?P<body>.*?)\n[ \t]*(?P=tag)[ \t]*(?:\n|$)",
+    re.DOTALL,
+)
+_FED_HERESTRING_RE = re.compile(
+    _STDIN_INTERPRETER + r"<<<[ \t]*(?P<body>'[^']*'|\"(?:[^\"\\]|\\.)*\"|\S+)"
+)
+_PIPE_INTO_INTERPRETER_RE = re.compile(r"\|[ \t]*" + _STDIN_INTERPRETER + r"(?=$|[;&|)\n])")
+
+
+def _reads_program_from_stdin(m: re.Match) -> bool:
+    """No code argument: no -c/-e/… flag and not deno's `eval` subcommand."""
+    if (m.group("sub") or "").strip() == "eval":
+        return False
+    return not any(f in _CODE_ARG_FLAGS for f in m.group("flags").split())
+
+
+def _stdin_fed_code(command: str) -> list[tuple[str, str]]:
+    """(interpreter head, program text) for each program an interpreter reads from stdin
+    in this command: each heredoc or here-string body after an interpreter given no code
+    argument, and, for a pipe into one, the quoted text upstream of it (what `echo '…'`
+    or `printf '…'` emits) plus any heredoc body (`cat <<EOF | python3`)."""
+    code = [(m.group("head"), m.group("body")) for m in _FED_HEREDOC_RE.finditer(command)
+            if _reads_program_from_stdin(m)]
+    code += [(m.group("head"), _unquote_literal(m.group("body")))
+             for m in _FED_HERESTRING_RE.finditer(command)
+             if _reads_program_from_stdin(m)]
+    if not _PIPE_INTO_INTERPRETER_RE.search(_executed_surface_view(command)):
+        return code
+    # A pipe feeds an interpreter only what its OWN pipeline produces: take the quoted
+    # text and heredoc bodies of that pipeline, not of other commands in the line.
+    view, heredocs = _pipeline_view(command)
+    start = 0
+    for sep in [*_PIPELINE_SEPARATOR_RE.finditer(view), None]:
+        end = sep.start() if sep else len(command)
+        for m in _PIPE_INTO_INTERPRETER_RE.finditer(view[start:end]):
+            if not _reads_program_from_stdin(m):
+                continue
+            head = m.group("head")
+            code += [(head, _unquote_literal(q)) for q in _STRING_LITERAL_RE.findall(command[start:end])]
+            code += [(head, h.group("body")) for h in heredocs if start <= h.start() < end]
+        start = sep.end() if sep else end
+    return code
+
+
+# Separators between pipelines: `;`, `&&`, `||`, a background `&`, a newline. A single
+# `|` joins commands INTO a pipeline and is not one.
+_PIPELINE_SEPARATOR_RE = re.compile(r"&&|\|\||;|(?<![|>&<])&(?![&>])|\n")
+
+
+def _pipeline_view(command: str) -> tuple[str, list]:
+    """`command` with quoted text and heredoc bodies blanked, same length, so pipeline
+    separators are found only in shell structure; plus the heredoc matches."""
+    view = list(_leg_slicing_view(command))
+    heredocs = list(_ANY_HEREDOC_RE.finditer(command))
+    for h in heredocs:
+        for k in range(h.start("body"), h.end()):
+            view[k] = " "
+    return "".join(view), heredocs
+
+
+# A shell comment: `#` at the start of a word, through the end of the line. Run on a
+# view with quoted text and heredoc bodies blanked, so a `#` inside them never counts.
+_COMMENT_RE = re.compile(r"(?:^|(?<=[\s;&|(]))#[^\n]*", re.MULTILINE)
+_PRINT_ONLY_HEADS = frozenset({"echo", "printf"})
+
+
+def _code_arg_programs(command: str) -> list[tuple[str, str]]:
+    """(interpreter head, program text) for each program given on an interpreter's
+    command line (-c / -e / -r / deno eval / an awk program), wherever the interpreter
+    sits in the command (after sudo, env, uv run, …). Quoted text, heredoc bodies and
+    shell comments are never read as a head, and neither is a word `echo` or `printf`
+    only prints."""
+    out = []
+    view = _COMMENT_RE.sub(lambda c: " " * len(c.group()), _pipeline_view(command)[0])
+    for m in _INTERPRETER_WORD_RE.finditer(view):
+        leg_start = max((op.end() for op in _COMPOUND_OPS_RE.finditer(view, 0, m.start())), default=0)
+        words = view[leg_start:m.start()].split()
+        if words and os.path.basename(words[0]) in _PRINT_ONLY_HEADS:
+            continue
+        end = _COMPOUND_OPS_RE.search(view, m.end())
+        tokens = _shell_tokenize(command[m.start():end.start() if end else len(command)])
+        if not tokens:
+            continue
+        head = os.path.basename(tokens[0])
+        program = _program_from_tokens(head, tokens)
+        if program:
+            out.append((head, program))
+    return out
+
+
+def _unquote_literal(text: str) -> str:
+    return text[1:-1] if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"" else text
+
+
+_ANY_HEREDOC_RE = re.compile(
+    r"<<-?[ \t]*(['\"]?)(?P<tag>\w+)\1[^\n]*\n(?P<body>.*?)\n[ \t]*(?P=tag)[ \t]*(?:\n|$)", re.DOTALL
+)
+# A call whose name names an exec primitive, then its first argument. Guarded text passed
+# anywhere else (a variable, a later argument, a data structure) is data to this rule.
+_PRIMITIVE_CALL_RE = re.compile(r"(?<![\w$])((?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*)(?:[ \t]*\([ \t]*|[ \t]+)")
+# Tcl's `exec` takes a bare command line, not a literal: `exec sh -c "…"` in statement
+# position (line start, after `;`, or inside `[…]`).
+_TCL_EXEC_RE = re.compile(r"(?m)(?:^|[;\[{])[ \t]*exec[ \t]+([^;\]\n]+)")
+_STRING_LITERAL_RE = re.compile(r"""'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`[^`]*`""")
+# A triple-quoted literal may span lines, and is tried first, so a call written inside a
+# docstring is masked as data rather than read as code.
+_QUOTED_LITERAL_RE = re.compile(
+    r"\"\"\"(?s:.*?)\"\"\"|'''(?s:.*?)'''|'(?:[^'\\\n]|\\.)*'|\"(?:[^\"\\\n]|\\.)*\""
+)
+# In a Python program a `#` comment is blanked as well, whichever of comment or literal
+# starts first, so a quote written in a comment does not open a literal.
+_PYTHON_HEAD_RE = re.compile(r"^(?:python|pypy)")
+_PYTHON_MASKED_RE = re.compile(r"#[^\n]*|" + _QUOTED_LITERAL_RE.pattern)
+# A string literal with an optional prefix (f"…", r'…', b"…", rf"…"): group tdq/tsq/sq/dq
+# is the text between the quotes. A triple-quoted literal may span lines, and is tried
+# first, so `"""x"""` is not read as the empty literal `""`. An f-string's {…}
+# placeholders stay in the text.
+_PREFIXED_LITERAL_RE = re.compile(
+    r"(?<![\w$])(?:[rRbBuUfF]{1,2})?(?:\"\"\"(?P<tdq>(?s:.*?))\"\"\"|'''(?P<tsq>(?s:.*?))'''"
+    r"|'(?P<sq>(?:[^'\\\n]|\\.)*)'|\"(?P<dq>(?:[^\"\\\n]|\\.)*)\")"
+    r"|(?<![\w$])`(?P<bq>[^`]*)`"
+)
+# Interpreters whose bare backtick span runs a shell command; in JavaScript a backtick is
+# a template string, which runs only when tagged with `$` (Bun.$`…`, zx's $`…`).
+_BACKTICK_EXEC_HEAD_RE = re.compile(r"^(?:perl[0-9.]*|ruby[0-9.]*|php[0-9.]*(?:-cgi)?)$")
+_DIRECT_CALL_MAX_DEPTH = 2
+
+
+@functools.lru_cache(maxsize=64)
+def _mask_string_literals(code: str, head: str = "") -> str:
+    """`code` with the content of every '…' and "…" literal blanked, same length, so call
+    names and backticks written INSIDE a string (data) are not read as code. For a
+    Python `head`, `#` comments are blanked whole."""
+    pattern = _PYTHON_MASKED_RE if _PYTHON_HEAD_RE.match(head) else _QUOTED_LITERAL_RE
+    return pattern.sub(_blank_literal, code)
+
+
+def _blank_literal(m: re.Match) -> str:
+    """A masked literal keeps its quote characters; a masked comment is all blanks."""
+    text = m.group(0)
+    if text.startswith("#"):
+        return " " * len(text)
+    return text[0] + " " * (len(text) - 2) + text[-1]
+
+
+def _skip(pattern: str, text: str, i: int) -> int:
+    """Offset past `pattern` matched at text[i], or i when it does not match: an int
+    where `re.match(...).end()` would be Optional, for patterns that can match the empty
+    string."""
+    m = re.compile(pattern).match(text, i)
+    return m.end() if m else i
+
+
+# How many readings one expression may produce when names in it reach several values.
+_MAX_READINGS = 16
+# How many names deep a value is followed (`a = b + "x"; b = "gh "`); a name whose
+# value is itself built from the name stops here.
+_MAX_NAME_DEPTH = 3
+
+
+def _with_each(readings: list, options: list) -> list:
+    """Each reading extended by each option, at most _MAX_READINGS of them."""
+    return [r + [o] for r in readings for o in options][:_MAX_READINGS]
+
+
+def _literal_list_at(text: str, i: int, head: str = "", _depth: int = 0) -> tuple[list[list[str]], int] | None:
+    """The readings of a `[…]` list, `(…)` tuple or R `c(…)` vector starting at text[i],
+    each the elements it spells, and the offset after it. A bare-name element reads as
+    each literal string its reaching assignments give it (`g = "gh"; [g, "pr", …]`). A
+    spread element (`*a`, `...a`) and, in an R `c(…)`, a name whose value is a vector
+    splice in that list's elements, as does a spread of a literal list (`*["pr", …]`).
+    A call's argument list read as a rest parameter (`*args`, `...a`, `@_`) skips the
+    arguments the named parameters take: whole arguments, or the leading elements of a
+    spread that fills those slots (the whole spread is read when one of its readings is
+    shorter than the slots left). A Python call's keyword arguments are never elements. A later non-literal element (`str(pr)`, a variable
+    with no literal value) reads as `X`; a leading one reads as `gh` when `"pr"` follows
+    it, and otherwise the list is not read. None also when an element is neither."""
+    opener = re.match(r"\[|c?\(", text[i:])
+    if not opener:
+        return None
+    reach = _python_reaching(text) if opener.group() == "(" and _PYTHON_HEAD_RE.match(head) else None
+    skip = reach.vararg_skip.get(i, 0) if reach else (_rest_skips(text, head).get(i, 0) if opener.group() == "(" else 0)
+    closer = "]" if opener.group() == "[" else ")"
+    readings: list[list[str]] = [[]]
+    count, i = 0, i + opener.end()
+    while True:
+        i = _skip(r"\s*", text, i)
+        if text[i:i + 1] == closer:
+            return readings, i + 1
+        keyword = re.match(r"\*\*|[A-Za-z_]\w*\s*=(?!=)", text[i:]) if reach else None
+        lit = None if keyword else _STRING_LITERAL_RE.match(text, i)
+        spread = None if keyword or lit else re.match(r"\*(?!\*)|\.\.\.", text[i:])
+        if keyword or (skip > 0 and not spread):         # a keyword or a named argument: not in the rest
+            skip -= 0 if keyword else 1
+            end = _expression_end(_mask_string_literals(text), i + (keyword.end() if keyword else 0))
+            i = _skip(r"\s*,?", text, end)
+            continue
+        at = i + spread.end() if spread else i
+        spelled = _literal_list_at(text, at, head, _depth + 1) if spread and _depth < _MAX_NAME_DEPTH else None
+        named = None if lit or spelled or _depth >= _MAX_NAME_DEPTH else _named_values_at(head, text, at)
+        lists = spelled[0] if spelled else (
+            _named_lists(head, text, named[0], _depth) if named and (spread or opener.group() == "c(") else []
+        )
+        values = _named_strings(head, text, named[0], _depth + 1) if named and not lists else []
+        if lists and skip > 0:                           # a spread fills the named slots first
+            lists = [items[skip:] for items in lists] if all(len(items) >= skip for items in lists) else lists
+            skip = 0
+        if lit:
+            readings, end = _with_each(readings, [lit.group(0)[1:-1]]), lit.end()
+        elif lists:
+            readings = [r + items for r in readings for items in lists][:_MAX_READINGS]
+            end = spelled[1] if spelled else (named[1] if named else at)
+        elif named and values:
+            readings, end = _with_each(readings, values), named[1]
+        else:
+            end = _operand_end(text, i)
+            if end < 0 or (not count and not _leads_a_gh_pr_argv(head, text, i, end)):
+                return None
+            readings = _with_each(readings, ["X" if count else "gh"])
+        count += 1
+        i = _skip(r"\s*,?", text, end)
+
+
+def _named_strings(head: str, code: str, offsets: list[int], _depth: int = 0) -> list[str]:
+    """The string texts the values at these offsets spell, in order, without repeats."""
+    out: list[str] = []
+    for off in offsets:
+        expr = _string_expr_at(code, off, head, _depth)
+        out += [text for text in (expr[0] if expr else []) if text not in out]
+    return out[:_MAX_READINGS]
+
+
+def _named_lists(head: str, code: str, offsets: list[int], _depth: int = 0) -> list[list[str]]:
+    """The element readings of the list values at these offsets, without repeats."""
+    out: list[list[str]] = []
+    for off in offsets:
+        lst = _list_expr_at(code, off, head, _depth + 1)
+        out += [items for items in (lst[0] if lst else []) if items not in out]
+    return out[:_MAX_READINGS]
+
+
+def _copied_values_at(head: str, code: str, i: int) -> tuple[list[int], int] | None:
+    """For a Python `list(name)` / `tuple(name)` at code[i], the values `name` holds and
+    the offset past the call: the copy holds the same elements."""
+    call = re.match(r"(?:list|tuple)\s*\(\s*", code[i:]) if _PYTHON_HEAD_RE.match(head) else None
+    named = _named_values_at(head, code, i + call.end()) if call else None
+    close = re.match(r"\s*\)", code[named[1]:]) if named else None
+    return (named[0], named[1] + close.end()) if named and close else None
+
+
+def _list_expr_at(code: str, i: int, head: str = "", _depth: int = 0) -> tuple[list[list[str]], int] | None:
+    """The readings of a list expression starting at code[i]: list literals, names whose
+    values are lists (also as Python `list(name)` / `tuple(name)`) and calls to a Python
+    function that returns one, joined with `+` (`A + ["5"]`). None when no operand is a
+    list."""
+    readings: list[list[str]] = [[]]
+    while True:
+        i = _skip(r"\s*", code, i)
+        lst = _literal_list_at(code, i, head, _depth)
+        named = None if lst or _depth >= _MAX_NAME_DEPTH else (
+            _named_values_at(head, code, i, _NAME_OPERAND_RE) or _returned_values_at(head, code, i)
+            or _member_values_at(head, code, i) or _copied_values_at(head, code, i)
+        )
+        lists = _named_lists(head, code, named[0], _depth) if named else []
+        if lst:
+            options, i = lst[0], lst[1]
+        elif lists and named:
+            options, i = lists, named[1]
+        else:
+            return None
+        readings = [r + items for r in readings for items in options][:_MAX_READINGS]
+        plus = re.match(r"\s*\+\s*", code[i:])
+        if not plus:
+            return readings, i
+        i += plus.end()
+
+
+# gh or hub as a word, in any case: `GH`, `/opt/homebrew/bin/gh`, `which("hub")`.
+_GH_WORD_RE = re.compile(r"(?<![A-Za-z0-9])(?:gh|hub)(?![A-Za-z0-9])", re.IGNORECASE)
+
+
+def _leads_a_gh_pr_argv(head: str, text: str, start: int, end: int) -> bool:
+    """True iff the unresolved leading list element text[start:end] is gh resolved at
+    run time (`shutil.which("gh")`, `os.environ.get("GH", "gh")`, a name `gh`): the
+    next element is the literal `"pr"`, and the element's text names gh or hub, or,
+    for a bare name, the name or a value assigned to it does. The rest of the argv is
+    then judged as `gh pr …` is."""
+    nxt = _STRING_LITERAL_RE.match(text, _skip(r"\s*,\s*", text, end))
+    if not nxt or nxt.group(0)[1:-1] != "pr":
+        return False
+    source = text[start:end]
+    named = _named_values_at(head, text, start)
+    for offset in named[0] if named else []:
+        source += " " + text[offset:].partition("\n")[0].partition(";")[0]
+    return bool(_GH_WORD_RE.search(source))
+
+
+_OBJECT_ARGV_KEY_RE = re.compile(r"(?<![\w$])[\"']?(?:args|cmd)[\"']?\s*:\s*")
+
+
+def _object_argv_at(code: str, i: int, head: str = "") -> list[list[str]]:
+    """The readings of the literal `args:` / `cmd:` list at the top level of the object
+    literal starting at code[i], or [] when there is none or the object's bounds are
+    unclear. Braces and keys inside string literals do not count."""
+    if code[i:i + 1] != "{":
+        return []
+    masked = _mask_string_literals(code)
+    depth, j = 0, i
+    while j < len(masked):
+        if masked[j] in "{[(":
+            depth += 1
+        elif masked[j] in "}])":
+            depth -= 1
+            if depth == 0:
+                break
+        elif depth == 1:
+            key = _OBJECT_ARGV_KEY_RE.match(masked, j)
+            if key:
+                lst = _literal_list_at(code, key.end(), head)
+                return lst[0] if lst else []
+        j += 1
+    return []
+
+
+def _literal_body(m: re.Match) -> str:
+    """The text a string literal spells, with backslash escapes resolved (`\\"` -> `"`)."""
+    body = next(g for g in m.group("tdq", "tsq", "sq", "dq", "bq") if g is not None)
+    return re.sub(r"\\(.)", r"\1", body)
+
+
+def _balanced_end(code: str, i: int) -> int:
+    """Offset just past the bracket group opening at code[i] (string contents masked),
+    or -1 when it does not close."""
+    masked, depth = _mask_string_literals(code), 0
+    for j in range(i, len(masked)):
+        if masked[j] in "([{":
+            depth += 1
+        elif masked[j] in ")]}":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+    return -1
+
+
+_OPERAND_RE = re.compile(r"[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*|\d+")
+_OPERAND_ATTR_RE = re.compile(r"\s*\.\s*[A-Za-z_$][\w$]*")
+
+
+def _operand_end(code: str, i: int) -> int:
+    """Offset past one non-literal operand at code[i] (a name, attribute chain or number,
+    followed by any calls, subscripts and attributes: `sys.argv[1]`, `pr["number"]`,
+    `str(n).strip()`), or -1 when there is none or a bracket does not close."""
+    operand = _OPERAND_RE.match(code, i)
+    if not operand:
+        return -1
+    i = operand.end()
+    while True:
+        if code[i:i + 1] in ("(", "["):
+            i = _balanced_end(code, i)
+            if i < 0:
+                return -1
+            continue
+        attr = _OPERAND_ATTR_RE.match(code, i)
+        if not attr:
+            return i
+        i = attr.end()
+
+
+def _string_expr_at(code: str, i: int, head: str = "", _depth: int = 0) -> tuple[list[str], int] | None:
+    """The readings of a string-valued argument expression starting at code[i], each the
+    text it spells: string literals (any prefix; an f-string keeps its {…}), joined with
+    `+` to each other or to other operands, `% …` applied to a literal (the literal's
+    text), `shlex.split(<literal>)`, and `"<sep>".join([…])` (one reading per reading of
+    the list). A name operand reads as each literal value its reaching assignments give
+    it (`base = "gh pr "; base + "merge 5"`), a call to a function the Python program
+    defines as each value it returns, and any other operand as `X`. A
+    `.format(…)` ends the expression after its literal, which keeps the literal's text.
+    None when no string literal or literal-valued name takes part."""
+    readings, saw_literal = [""], False
+    while True:
+        i = _skip(r"\s*", code, i)
+        split = re.match(r"shlex\s*\.\s*split\s*\(\s*", code[i:])
+        lit = _PREFIXED_LITERAL_RE.match(code, i + (split.end() if split else 0))
+        if lit:
+            text, i, saw_literal = _literal_body(lit), lit.end(), True
+            if split:
+                close = re.match(r"\s*\)", code[i:])
+                if not close:
+                    return None
+                i += close.end()
+            texts = [text]
+            joiner = re.match(r"\s*\.\s*join\s*\(\s*", code[i:])
+            if joiner:
+                lst = _literal_list_at(code, i + joiner.end(), head)
+                close = re.match(r"\s*\)", code[lst[1]:]) if lst else None
+                if not lst or not close:
+                    return None
+                texts, i = [text.join(items) for items in lst[0]], lst[1] + close.end()
+            readings = [r + t for r in readings for t in texts][:_MAX_READINGS]
+        else:
+            named = (
+                _named_values_at(head, code, i, _NAME_OPERAND_RE) or _returned_values_at(head, code, i)
+                or _member_values_at(head, code, i)
+            ) if _depth < _MAX_NAME_DEPTH else None
+            values = _named_strings(head, code, named[0], _depth + 1) if named else []
+            if named and values:
+                readings = [r + v for r in readings for v in values][:_MAX_READINGS]
+                i, saw_literal = named[1], True
+            else:
+                end = _operand_end(code, i)
+                if end < 0:
+                    break
+                i = end
+                readings = [r + "X" for r in readings]
+        percent = re.match(r"\s*%\s*", code[i:])
+        if percent and saw_literal:
+            nxt = i + percent.end()
+            lit2 = _PREFIXED_LITERAL_RE.match(code, nxt)
+            end = lit2.end() if lit2 else (
+                _balanced_end(code, nxt) if code[nxt:nxt + 1] in "([{" else _operand_end(code, nxt)
+            )
+            if end > 0:
+                i = end
+            break
+        plus = re.match(r"\s*\+\s*", code[i:])
+        if not plus:
+            break
+        i += plus.end()
+    if not saw_literal:
+        return None
+    return readings, i
+
+
+def _first_argument_command(code: str, pos: int, head: str = "") -> str | None:
+    """The first of `_argument_commands`, or None."""
+    cmds = _argument_commands(code, pos, head=head)
+    return cmds[0] if cmds else None
+
+
+# A call argument or list element that is a bare variable name (`run(cmd)`,
+# `system($c)`, `[g, "pr"]`), up to the comma or bracket that ends it.
+_BARE_NAME_ARG_RE = re.compile(r"(?P<name>[$@]?[A-Za-z_]\w*)(?=\s*[,)\]])")
+# A name operand of a `+` expression: followed by `+`, the end of the argument, or the
+# end of its statement.
+_NAME_OPERAND_RE = re.compile(r"(?P<name>[$@]?[A-Za-z_]\w*)(?=[ \t]*(?:[+,)\]};\n]|$))")
+
+
+# `name = value`, outside string literals; `==`, `=~` and `=>` are not assignments.
+_ASSIGNMENT_RE = re.compile(r"(?<![\w$@.])(?P<name>[$@]?[A-Za-z_]\w*)\s*=(?![=~>])\s*")
+
+
+# Literal forms that may hold a comment opener, per family: a JS template (a URL in
+# it), a lua long string, ruby %w/%q/%Q/%i lists, and perl q/qq/qw/qr/m and s/tr/y
+# forms. Each `(?P<d…>)` group is a delimiter its own literal closes on.
+_PERL_LITERALS = (
+    r"(?<![\w$@%&])(?:qq|qw|qr|q|m)\s*(?:\[[^\]]*\]|\([^)]*\)|\{[^}]*\}|<[^>]*>"
+    r"|(?P<dq>[^\w\s(\[{<])(?:(?!(?P=dq)).)*(?P=dq))"
+    r"|(?<![\w$@%&])(?:s|tr|y)\s*(?P<ds>[^\w\s(\[{<])(?:(?!(?P=ds)).)*(?P=ds)(?:(?!(?P=ds)).)*(?P=ds)[a-z]*"
+)
+_RUBY_LITERALS = (
+    r"%[wWqQiI](?:\[[^\]]*\]|\([^)]*\)|\{[^}]*\}|<[^>]*>"
+    r"|(?P<dr>[^\w\s(\[{<])(?:(?!(?P=dr)).)*(?P=dr))"
+)
+# Per head family, its own literal forms and its comments. One leftmost match decides,
+# so a literal that starts first stays a literal and a comment that starts first is a
+# comment. The assignment index blanks both, so a commented-out assignment is not a
+# value; the call scan does not use this mask. Python's `#` comments are already
+# blanked by _mask_string_literals for a Python head.
+_INDEX_COMMENT_RES = tuple(
+    (re.compile(head_re), re.compile("|".join(part for part in (literals, comments, _QUOTED_LITERAL_RE.pattern) if part)))
+    for head_re, literals, comments in (
+        (r"^(?:node|nodejs|bun|deno)", r"`(?:[^`\\]|\\.)*`", r"/\*(?s:.*?)\*/|//[^\n]*"),
+        (r"^php", "", r"/\*(?s:.*?)\*/|//[^\n]*|#(?!\[)[^\n]*"),
+        (r"^perl", _PERL_LITERALS, r"(?:(?m:^)|(?<=[\s;]))#(?!\{)[^\n]*"),
+        (r"^ruby", _RUBY_LITERALS, r"(?:(?m:^)|(?<=[\s;]))#(?!\{)[^\n]*"),
+        (r"^(?:R$|Rscript|tclsh|wish)", "", r"(?:(?m:^)|(?<=[\s;]))#(?!\{)[^\n]*"),
+        (r"^(?:lua|luajit)", r"\[(?P<ll>=*)\[(?s:.*?)\](?P=ll)\]", r"--\[(?P<lc>=*)\[(?s:.*?)\](?P=lc)\]|--[^\n]*"),
+        (r"^osascript", "", r"\(\*(?s:.*?)\*\)|--[^\n]*"),
+    )
+)
+# A `/` earlier on the line may open a regex (`=~ / #/`, `split / #/`), which this
+# view does not delimit, so a `#` after it is not taken as a comment: the line stays
+# readable.
+_SLASH_GUARDED_RE = re.compile(r"^(?:perl|ruby)")
+
+
+def _blank_kept_lines(m: re.Match) -> str:
+    """A masked comment is blanks with its line breaks kept; a literal keeps its quotes."""
+    text = m.group(0)
+    if text[0] in "\"'":
+        return _blank_literal(m)
+    return re.sub(r"[^\n]", " ", text)
+
+
+@functools.lru_cache(maxsize=64)
+def _index_view(code: str, head: str) -> str:
+    """`code` with string literals and, for a known head, its own literal forms and its
+    comments blanked, same length: the text the assignment index and the scope finder
+    read."""
+    guarded = bool(_SLASH_GUARDED_RE.match(head))
+
+    def blank(m: re.Match) -> str:
+        text = m.group(0)
+        if guarded and text.startswith("#") and "/" in code[code.rfind("\n", 0, m.start()) + 1:m.start()]:
+            return text
+        return _blank_kept_lines(m)
+
+    for head_re, pattern in _INDEX_COMMENT_RES:
+        if head_re.match(head):
+            return pattern.sub(blank, code)
+    return _mask_string_literals(code, head)
+
+
+# R assigns with `<-` and, to the enclosing environment, `<<-`; TypeScript annotates a
+# declaration's type before its `=`.
+_R_ASSIGNMENT_RE = re.compile(r"(?<![\w.])(?P<name>[A-Za-z_.][\w.]*)\s*(?P<op><<-|<-|=(?![=~>]))\s*")
+_TS_ASSIGNMENT_RE = re.compile(
+    r"(?<![\w$@.])(?P<name>[A-Za-z_$][\w$]*)\s*(?::\s*[\w$.]+(?:<[^<>=;\n]*>)?(?:\[\])*\s*)?=(?![=>])\s*"
+)
+_R_HEAD_RE = re.compile(r"^(?:R$|Rscript)")
+
+
+def _assignment_re(head: str) -> re.Pattern:
+    """The assignment pattern for a head's language."""
+    if _R_HEAD_RE.match(head):
+        return _R_ASSIGNMENT_RE
+    return _TS_ASSIGNMENT_RE if _JS_HEAD_RE.match(head) else _ASSIGNMENT_RE
+
+
+@functools.lru_cache(maxsize=64)
+def _enclosing_assignments(code: str, head: str) -> frozenset:
+    """The offsets of R `<<-` assignments, which assign in the enclosing environment."""
+    if not _R_HEAD_RE.match(head):
+        return frozenset()
+    return frozenset(m.start() for m in _R_ASSIGNMENT_RE.finditer(_index_view(code, head)) if m.group("op") == "<<-")
+
+
+@functools.lru_cache(maxsize=64)
+def _assignments(code: str, head: str = "") -> dict[str, tuple[list[int], list[int]]]:
+    """Per assigned name, the offsets of its assignments and of their values, in order,
+    found once per program. Assignments inside string literals or comments do not count."""
+    found: dict[str, tuple[list[int], list[int]]] = {}
+    for m in _assignment_re(head).finditer(_index_view(code, head)):
+        starts, values = found.setdefault(m.group("name"), ([], []))
+        starts.append(m.start())
+        values.append(m.end())
+    return found
+
+
+# A binding whose value cannot be read: a parameter, a loop or `with` target, an import,
+# a def or class name, a tuple target.
+_OPAQUE = -1
+_PY_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+_PY_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+_PY_TRY = tuple(t for t in (getattr(ast, "Try", None), getattr(ast, "TryStar", None)) if t)
+_PY_MATCH = getattr(ast, "Match", ())
+
+
+def _env_union(*envs: dict) -> dict:
+    """Per name, the union of its definitions across environments."""
+    out: dict = {}
+    for env in envs:
+        for name, defs in env.items():
+            out[name] = out.get(name, frozenset()) | defs
+    return out
+
+
+class _PyScope:
+    """A Python scope: the module, a def or a lambda (a class body is processed inside
+    the scope that encloses it)."""
+
+    def __init__(self, node, parent):
+        self.node, self.parent = node, parent
+        self.defs: dict = {}            # name -> every definition anywhere in the scope
+        self.locals: set = set()
+        self.free_memo: dict = {}
+
+
+class _PyReach:
+    """For a parsed Python program, the definitions that may reach each name it reads,
+    keyed by the read's character offset: reaching definitions per scope, in one forward
+    pass per scope. A literal assignment replaces a name's definitions, an extension
+    (`+=`, `x = x + …`, `.append`) keeps them, branches and loops take the union, and
+    an unreadable binding is _OPAQUE. A name free in a def reads the enclosing scope at
+    the def's direct call sites (every definition in that scope when it has none), and
+    a `global` or `nonlocal` write joins the caller at those call sites. A parameter
+    reads the argument passed for it at every call of its function by name (its default
+    where a call omits it) and each element of a literal list `map(f, [...])` passes it,
+    a `for` target over a literal list reads each element, and `returns` maps each call
+    by name to the values its function returns."""
+
+    def __init__(self, code: str, tree: ast.Module):
+        self.code = code
+        self.starts = [0] + [m.end() for m in re.finditer(r"\r\n|\r|\n", code)]
+        self.uses: dict = {}
+        self.callsites: dict = {}      # (id(scope), function name) -> [environment]
+        self.pending: list = []        # (def node, enclosing scope)
+        self.lambdas: list = []        # (lambda node, enclosing scope)
+        self.functions: dict = {}      # name -> def nodes
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self.functions.setdefault(node.name, []).append(node)
+        self.calls: dict = {}          # function name -> call nodes, anywhere in the program
+        self.returns: dict = {}        # call offset -> offsets of its function's return values
+        self.mapped: dict = {}         # function name -> literal elements `map(f, [...])` passes it
+        self.vararg_skip: dict = {}    # call `(` offset -> named arguments before its `*args`
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "map"
+                and len(node.args) == 2 and isinstance(node.args[0], ast.Name) and node.args[0].id in self.functions
+                and self._literal_elements(node.args[1]) is not None
+            ):
+                self.mapped.setdefault(node.args[0].id, []).extend(self._literal_elements(node.args[1]) or [])
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in self.functions:
+                self.calls.setdefault(node.func.id, []).append(node)
+                self.returns[self._offset(node)] = frozenset(
+                    self._offset(r.value) for fn in self.functions[node.func.id]
+                    for r in self._own_nodes(fn.body) if isinstance(r, ast.Return) and r.value is not None
+                )
+        self.outer_writes = {id(fn): self._outer_writes(fn) for fns in self.functions.values() for fn in fns}
+        module = _PyScope(tree, None)
+        self._block(tree.body, {}, module, module)
+        while self.pending or self.lambdas:
+            if self.pending:
+                fn, outer = self.pending.pop(0)
+                self._function(fn, outer)
+            else:
+                lam, outer = self.lambdas.pop(0)
+                self._lambda(lam, outer)
+
+    @staticmethod
+    def _literal_elements(node) -> list | None:
+        """The elements of a list or tuple literal, or None (a `*` element reads nothing)."""
+        return list(node.elts) if isinstance(node, (ast.List, ast.Tuple)) else None
+
+    # -- offsets ------------------------------------------------------------------------
+    def _offset(self, node) -> int:
+        start = self.starts[node.lineno - 1]
+        line = self.code[start:start + node.col_offset]
+        if line.isascii():
+            return start + node.col_offset
+        return start + len(line.encode()[:node.col_offset].decode("utf-8", "ignore"))
+
+    # -- what a scope binds ---------------------------------------------------------------
+    @staticmethod
+    def _target_names(target) -> list:
+        if isinstance(target, ast.Name):
+            return [target.id]
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return [n for elt in target.elts for n in _PyReach._target_names(elt)]
+        if isinstance(target, ast.Starred):
+            return _PyReach._target_names(target.value)
+        return []
+
+    @staticmethod
+    def _own_nodes(stmts):
+        """Every node under these statements outside nested defs, lambdas and classes
+        (whose names are yielded, not their bodies)."""
+        stack = list(stmts)
+        while stack:
+            node = stack.pop()
+            yield node
+            if isinstance(node, _PY_SCOPES):
+                continue
+            stack.extend(ast.iter_child_nodes(node))
+
+    def _bindings(self, stmts) -> dict:
+        """name -> the definitions these statements give it, outside nested scopes."""
+        out: dict = {}
+        for node in self._own_nodes(stmts):
+            if isinstance(node, ast.Assign):
+                for t in node.targets:
+                    for name in self._target_names(t):
+                        out.setdefault(name, set()).add(self._offset(node.value) if isinstance(t, ast.Name) else _OPAQUE)
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                for name in self._target_names(node.target):
+                    out.setdefault(name, set()).add(self._offset(node.value))
+            elif isinstance(node, (ast.For, ast.AsyncFor)):
+                for name in self._target_names(node.target):
+                    out.setdefault(name, set()).add(_OPAQUE)
+            elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+                for name in self._target_names(node.optional_vars):
+                    out.setdefault(name, set()).add(_OPAQUE)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    out.setdefault((alias.asname or alias.name).split(".")[0], set()).add(_OPAQUE)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) or (
+                isinstance(node, ast.ExceptHandler) and node.name
+            ):
+                out.setdefault(node.name, set()).add(_OPAQUE)
+            elif isinstance(node, ast.NamedExpr):
+                out.setdefault(node.target.id, set()).add(self._offset(node.value))
+        return out
+
+    def _outer_writes(self, fn) -> dict:
+        """For a def's `global` / `nonlocal` names, the definitions it writes to them."""
+        declared = {n for node in self._own_nodes(fn.body) if isinstance(node, (ast.Global, ast.Nonlocal)) for n in node.names}
+        written = self._bindings(fn.body)
+        return {name: frozenset(written.get(name, ())) for name in declared}
+
+    # -- lookups --------------------------------------------------------------------------
+    def _lookup(self, name: str, env: dict, scope: _PyScope) -> frozenset:
+        if name in env:
+            return env[name]
+        if scope.parent is None or name in scope.locals:
+            return frozenset()
+        return self._free(scope, name)
+
+    def _free(self, scope: _PyScope, name: str) -> frozenset:
+        """A name free in a def or lambda: the enclosing scope at the def's direct call
+        sites, or every definition of it there when it has none."""
+        if name in scope.free_memo:
+            return scope.free_memo[name]
+        scope.free_memo[name] = frozenset()             # a cycle reads as nothing
+        outer = scope.parent
+        envs = [] if isinstance(scope.node, ast.Lambda) else self.callsites.get((id(outer), scope.node.name), [])
+        if envs:
+            found = frozenset().union(*(self._lookup(name, env, outer) for env in envs))
+        else:
+            found = frozenset(outer.defs.get(name, ()))
+            if not found and outer.parent is not None and name not in outer.locals:
+                found = self._free(outer, name)
+        scope.free_memo[name] = found
+        return found
+
+    # -- expressions ----------------------------------------------------------------------
+    def _read(self, node, env: dict, scope: _PyScope, opaque=frozenset()) -> tuple[list, list]:
+        """Record the definitions reaching each name read under node; return the names of
+        the functions it calls directly, and the walrus bindings it makes."""
+        called, stack = [], [(node, opaque)]
+        walrus = []
+        while stack:
+            n, bound = stack.pop()
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+                self.uses[self._offset(n)] = frozenset({_OPAQUE}) if n.id in bound else self._lookup(n.id, env, scope)
+                continue
+            if isinstance(n, ast.Lambda):
+                stack.extend((d, bound) for d in n.args.defaults + [d for d in n.args.kw_defaults if d is not None])
+                self.lambdas.append((n, scope))
+                continue
+            if isinstance(n, _PY_COMPREHENSIONS):
+                names = {x for g in n.generators for x in self._target_names(g.target)}
+                stack.extend((c, bound | names) for c in ast.iter_child_nodes(n))
+                continue
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
+                called.append(n.func.id)
+            if isinstance(n, ast.NamedExpr):
+                walrus.append((n.target.id, self._offset(n.value)))
+            stack.extend((c, bound) for c in ast.iter_child_nodes(n))
+        for name in called:
+            if name in self.functions:
+                self.callsites.setdefault((id(scope), name), []).append(dict(env))
+        return called, walrus
+
+    def _effects(self, read, env: dict) -> dict:
+        """Apply a statement's walrus bindings and its callees' global/nonlocal writes."""
+        called, walrus = read
+        for name, off in walrus:
+            env[name] = frozenset({off})
+        for callee in called:
+            for fn in self.functions.get(callee, []):
+                for name, defs in self.outer_writes[id(fn)].items():
+                    env[name] = env.get(name, frozenset()) | defs
+        return env
+
+    # -- statements -----------------------------------------------------------------------
+    def _block(self, stmts, env: dict, scope: _PyScope, defs_scope: _PyScope) -> dict:
+        env = dict(env)
+        for st in stmts:
+            env = self._stmt(st, env, scope, defs_scope)
+        return env
+
+    def _assign_defs(self, defs_scope: _PyScope, name: str, defs) -> None:
+        defs_scope.defs.setdefault(name, set()).update(defs)
+
+    def _stmt(self, st, env: dict, scope: _PyScope, defs_scope: _PyScope) -> dict:
+        if isinstance(st, ast.Assign):
+            read = self._read(st.value, env, scope)
+            for t in st.targets:
+                if not isinstance(t, ast.Name):
+                    self._read(t, env, scope)
+            value, rhs = self._offset(st.value), st.value
+            extended = (
+                rhs.left.id
+                if isinstance(rhs, ast.BinOp) and isinstance(rhs.op, ast.Add) and isinstance(rhs.left, ast.Name)
+                else None
+            )
+            for t in st.targets:
+                for name in self._target_names(t):
+                    if extended == name and isinstance(t, ast.Name):
+                        continue                         # `x = x + …` extends x
+                    defs = frozenset({value}) if isinstance(t, ast.Name) else frozenset({_OPAQUE})
+                    env[name] = defs
+                    self._assign_defs(defs_scope, name, defs)
+            return self._effects(read, env)
+        if isinstance(st, ast.AnnAssign):
+            read = self._read(st.value, env, scope) if st.value is not None else ([], [])
+            if st.value is not None and isinstance(st.target, ast.Name):
+                env[st.target.id] = frozenset({self._offset(st.value)})
+                self._assign_defs(defs_scope, st.target.id, env[st.target.id])
+            return self._effects(read, env)
+        if isinstance(st, ast.AugAssign):
+            return self._effects(self._read(st, env, scope), env)   # extends: definitions kept
+        if isinstance(st, (ast.Import, ast.ImportFrom)):
+            for alias in st.names:
+                name = (alias.asname or alias.name).split(".")[0]
+                env[name] = frozenset({_OPAQUE})
+                self._assign_defs(defs_scope, name, env[name])
+            return env
+        if isinstance(st, ast.Delete):
+            for t in st.targets:
+                for name in self._target_names(t):
+                    env[name] = frozenset()
+            return env
+        if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for d in st.decorator_list + st.args.defaults + [d for d in st.args.kw_defaults if d is not None]:
+                self._read(d, env, scope)
+            env[st.name] = frozenset({_OPAQUE})
+            self._assign_defs(defs_scope, st.name, env[st.name])
+            self.pending.append((st, scope))
+            return env
+        if isinstance(st, ast.ClassDef):
+            for d in st.decorator_list + st.bases + [k.value for k in st.keywords]:
+                self._read(d, env, scope)
+            self._block(st.body, env, scope, _PyScope(st, scope))   # class attributes stay in the class
+            env[st.name] = frozenset({_OPAQUE})
+            self._assign_defs(defs_scope, st.name, env[st.name])
+            return env
+        if isinstance(st, ast.If):
+            self._effects(self._read(st.test, env, scope), env)
+            return _env_union(self._block(st.body, env, scope, defs_scope), self._block(st.orelse, env, scope, defs_scope))
+        if isinstance(st, (ast.For, ast.AsyncFor, ast.While)):
+            head = st.test if isinstance(st, ast.While) else st.iter
+            self._effects(self._read(head, env, scope), env)
+            carried = {name: frozenset(defs) for name, defs in self._bindings(st.body).items()}
+            start = _env_union(env, carried)
+            if not isinstance(st, ast.While):
+                elements = self._literal_elements(st.iter) if isinstance(st.target, ast.Name) else None
+                for name in self._target_names(st.target):
+                    start[name] = frozenset(self._offset(e) for e in elements) if elements else frozenset({_OPAQUE})
+                    self._assign_defs(defs_scope, name, start[name])
+            end = _env_union(env, self._block(st.body, start, scope, defs_scope))
+            return _env_union(end, self._block(st.orelse, end, scope, defs_scope)) if st.orelse else end
+        if isinstance(st, (ast.With, ast.AsyncWith)):
+            for item in st.items:
+                self._effects(self._read(item.context_expr, env, scope), env)
+                for name in self._target_names(item.optional_vars) if item.optional_vars is not None else []:
+                    env[name] = frozenset({_OPAQUE})
+                    self._assign_defs(defs_scope, name, env[name])
+            return self._block(st.body, env, scope, defs_scope)
+        if _PY_TRY and isinstance(st, _PY_TRY):
+            body = self._block(st.body, env, scope, defs_scope)
+            ends = [body]
+            for handler in st.handlers:
+                start = _env_union(env, body)
+                if handler.name:
+                    start[handler.name] = frozenset({_OPAQUE})
+                ends.append(self._block(handler.body, start, scope, defs_scope))
+            if st.orelse:
+                ends.append(self._block(st.orelse, body, scope, defs_scope))
+            joined = _env_union(env, *ends)
+            return self._block(st.finalbody, joined, scope, defs_scope) if st.finalbody else joined
+        if _PY_MATCH and isinstance(st, _PY_MATCH):
+            self._effects(self._read(st.subject, env, scope), env)
+            ends = [env]
+            for case in st.cases:
+                start = dict(env)
+                for node in ast.walk(case.pattern):
+                    for name in [getattr(node, "name", None)] + list(getattr(node, "names", []) or []):
+                        if isinstance(name, str):
+                            start[name] = frozenset({_OPAQUE})
+                if case.guard is not None:
+                    self._read(case.guard, start, scope)
+                ends.append(self._block(case.body, start, scope, defs_scope))
+            return _env_union(*ends)
+        if isinstance(st, (ast.Global, ast.Nonlocal, ast.Pass, ast.Break, ast.Continue)):
+            return env
+        return self._effects(self._read(st, env, scope), env)
+
+    # -- defs and lambdas -----------------------------------------------------------------
+    @staticmethod
+    def _params(args) -> list:
+        names = [a.arg for a in getattr(args, "posonlyargs", []) + args.args + args.kwonlyargs]
+        return names + [a.arg for a in (args.vararg, args.kwarg) if a is not None]
+
+    def _arguments(self, fn) -> dict:
+        """Per parameter of `fn`, the offsets of what its calls pass for it: the argument
+        by position or keyword, else the parameter's default; _OPAQUE for a call that
+        omits it with no default or passes `*args`/`**kwargs`, and for a `*`/`**`
+        parameter. A function with no call by name gives its parameters nothing."""
+        args, calls = fn.args, self.calls.get(fn.name, [])     # and `map(fn, [...])` elements
+        positional = getattr(args, "posonlyargs", []) + args.args
+        defaults = dict(zip([a.arg for a in positional][len(positional) - len(args.defaults):], args.defaults))
+        defaults.update((a.arg, d) for a, d in zip(args.kwonlyargs, args.kw_defaults) if d is not None)
+        out: dict = {name: set() for name in self._params(args)}
+        for name in [a.arg for a in (args.vararg, args.kwarg) if a is not None]:
+            out[name] = {_OPAQUE}
+        if args.vararg is not None:
+            # `def f(x, *a)`: a call's argument list past the named ones is the tuple `a`
+            # holds; the list reader skips the first len(positional) of it.
+            parens = {self._call_parens(call) for call in calls}
+            self.vararg_skip.update((paren, len(positional)) for paren in parens)
+            out[args.vararg.arg] = parens or {_OPAQUE}
+        invocations = [(call.args, call.keywords) for call in calls]
+        invocations += [([element], []) for element in self.mapped.get(fn.name, [])]
+        for given_args, given_keywords in invocations:
+            unpacked = any(isinstance(a, ast.Starred) for a in given_args) or any(k.arg is None for k in given_keywords)
+            keywords = {k.arg: k.value for k in given_keywords}
+            for k, a in enumerate(positional + args.kwonlyargs):
+                given = given_args[k] if k < len(positional) and k < len(given_args) else keywords.get(a.arg, defaults.get(a.arg))
+                out[a.arg].add(_OPAQUE if unpacked or given is None else self._offset(given))
+        return {name: frozenset(defs) for name, defs in out.items()}
+
+    def _call_parens(self, call) -> int:
+        """The offset of the `(` that opens a call's argument list."""
+        k = self._offset(call.func) + len(call.func.id)
+        return self.code.index("(", k)
+
+    def _function(self, fn, outer: _PyScope) -> None:
+        scope = _PyScope(fn, outer)
+        declared = set(self.outer_writes[id(fn)])
+        params = self._params(fn.args)
+        scope.locals = (set(params) | set(self._bindings(fn.body))) - declared
+        env = self._arguments(fn)
+        self._block(fn.body, env, scope, scope)
+
+    def _lambda(self, lam, outer: _PyScope) -> None:
+        scope = _PyScope(lam, outer)
+        scope.locals = set(self._params(lam.args))
+        self._read(lam.body, {name: frozenset({_OPAQUE}) for name in scope.locals}, scope)
+
+
+@functools.lru_cache(maxsize=64)
+def _python_reaching(code: str) -> "_PyReach | None":
+    """A Python program's reaching definitions and call returns (see _PyReach), or None
+    when it does not parse. Warnings the parse raises about the program (an invalid
+    escape in its strings) are the program's, not the hook's, so none reaches stderr."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tree = ast.parse(code)
+    except (SyntaxError, ValueError, MemoryError):
+        return None
+    return _PyReach(code, tree)
+
+
+def _returned_values_at(head: str, code: str, i: int) -> tuple[list[int], int] | None:
+    """For a call at code[i] to a function the program defines, (the offsets of the
+    values it returns, offset past the call); None otherwise. A ruby method called with
+    no arguments needs no parentheses (`system(cmd)`)."""
+    if _PYTHON_HEAD_RE.match(head):
+        reach = _python_reaching(code)
+        values = sorted(reach.returns.get(i, ())) if reach else []
+    else:
+        callee = re.match(r"[A-Za-z_$][\w$.]*[?!]?(?=\s*\()" + (r"|[A-Za-z_]\w*[?!]?" if head.startswith("ruby") else ""), code[i:])
+        fn = _named_functions(code, head).get(callee.group()) if callee else None
+        values = sorted(fn.returns) if fn else []
+        if callee and values and code[callee.end() + i:].lstrip()[:1] != "(":
+            return values, i + callee.end()
+    callee = re.match(r"[A-Za-z_$][\w$.]*[?!]?\s*(?=\()", code[i:]) if values else None
+    end = _balanced_end(code, i + callee.end()) if callee else -1
+    return (values, end) if end > 0 else None
+
+
+def _named_values_at(head: str, code: str, i: int, shape: re.Pattern = _BARE_NAME_ARG_RE) -> tuple[list[int], int] | None:
+    """For a bare-name argument at code[i], (the offsets of the values of the name's
+    assignments that may reach the use, offset past the name); None when code[i] is not
+    a bare name of `shape` or no assignment with a value reaches it. A Python program
+    that parses is resolved by scope (_PyReach)."""
+    named = shape.match(code, i)
+    if not named:
+        return None
+    reach = _python_reaching(code) if _PYTHON_HEAD_RE.match(head) else None
+    if reach is not None:
+        values = sorted(v for v in reach.uses.get(i, ()) if v != _OPAQUE)
+        return (values, named.end()) if values else None
+    values = _span_reaching(head, code, i, named.group("name"))
+    return (values, named.end()) if values else None
+
+
+class _Span(NamedTuple):
+    """A function body: [start, end) of its text, its parameters, its parent's index
+    (-1 for the program)."""
+
+    start: int
+    end: int
+    params: frozenset
+    parent: int
+
+
+# Where a function's parameter list opens, per family; the body is the `{…}` after it.
+_BRACE_FUNCTION_RES = (
+    (re.compile(r"^(?:node|nodejs|bun|deno)"), re.compile(r"\bfunction\b\s*\*?\s*[\w$]*\s*\(")),
+    (re.compile(r"^php"), re.compile(r"\bfunction\b\s*&?\s*\w*\s*\(")),
+    (re.compile(r"^(?:R$|Rscript)"), re.compile(r"\bfunction\s*\(")),
+)
+_JS_HEAD_RE = re.compile(r"^(?:node|nodejs|bun|deno)")
+_ARROW_BODY_RE = re.compile(r"=>\s*\{")
+_PERL_SUB_RE = re.compile(r"\bsub\b\s*[\w:]*\s*\{")
+_PERL_PARAMS_RE = re.compile(r"\bmy\s*\(([^)]*)\)\s*=\s*@_")
+_PERL_SHIFT_RE = re.compile(r"\s*my\s+(\$\w+)\s*=\s*shift\b")
+_PY_DEF_RE = re.compile(r"(?m)^([ \t]*)(?:async[ \t]+)?def[ \t]+\w+[ \t]*\(([^)]*)\)[^\n]*:")
+_PY_LAMBDA_RE = re.compile(r"\blambda\b([^:\n]*):")
+
+
+def _param_names(text: str, head: str) -> frozenset:
+    """The names a parameter list binds: `$name` in perl and php, otherwise each
+    identifier outside a default value."""
+    text = ",".join(re.sub(r"=.*", "", part, flags=re.DOTALL) for part in _top_level_parts(text))
+    if re.match(r"^(?:perl|php)", head):
+        return frozenset(re.findall(r"[$@%]\w+", text))
+    return frozenset(re.findall(r"[A-Za-z_$][\w$]*", text))
+
+
+def _matching(view: str, i: int) -> int:
+    """Offset of the bracket closing the one at view[i], or -1 when it does not close."""
+    pairs, depth = {"(": ")", "{": "}", "[": "]"}, 0
+    opener, closer = view[i], pairs[view[i]]
+    for j in range(i, len(view)):
+        if view[j] == opener:
+            depth += 1
+        elif view[j] == closer:
+            depth -= 1
+            if depth == 0:
+                return j
+    return -1
+
+
+def _brace_spans(view: str, head: str) -> list:
+    """(start, end, params) of each `{…}` function body for a brace-delimited family."""
+    found = []
+    for head_re, opener_re in _BRACE_FUNCTION_RES:
+        if not head_re.match(head):
+            continue
+        for m in opener_re.finditer(view):
+            close = _matching(view, m.end() - 1)
+            body = re.match(r"\s*\{", view[close + 1:]) if close >= 0 else None
+            if body:
+                start = close + 1 + body.end() - 1
+                found.append((start, _matching(view, start), _param_names(view[m.end():close], head)))
+    if _JS_HEAD_RE.match(head):
+        for m in _ARROW_BODY_RE.finditer(view):
+            before = view[:m.start()].rstrip()
+            if before.endswith(")"):
+                depth, j = 0, len(before) - 1
+                while j >= 0:
+                    depth += {")": 1, "(": -1}.get(before[j], 0)
+                    if depth == 0:
+                        break
+                    j -= 1
+                params = _param_names(before[j + 1:-1], head) if j >= 0 else frozenset()
+            else:
+                name = re.search(r"[A-Za-z_$][\w$]*$", before)
+                params = frozenset([name.group()]) if name else frozenset()
+            start = m.end() - 1
+            found.append((start, _matching(view, start), params))
+    if head.startswith("perl"):
+        for m in _PERL_SUB_RE.finditer(view):
+            start = m.end() - 1
+            end = _matching(view, start)
+            params = set()
+            for pm in _PERL_PARAMS_RE.finditer(view, start + 1, end if end > 0 else len(view)):
+                params |= _param_names(pm.group(1), head)
+            shifted = _PERL_SHIFT_RE.match(view, start + 1)
+            if shifted:
+                params.add(shifted.group(1))
+            found.append((start, end, frozenset(params)))
+    return found
+
+
+# A JS method or object-literal shorthand: `name(params) {` at a statement start.
+_JS_METHOD_RE = re.compile(
+    r"(?:(?m:^)|(?<=[;},]))[ \t]*(?:(?:async|static|get|set)[ \t]+|\*[ \t]*)*(?P<name>[A-Za-z_$][\w$]*)[ \t]*\("
+)
+_JS_NOT_METHOD = frozenset({"if", "for", "while", "switch", "catch", "function", "with", "return"})
+
+
+def _js_method_spans(view: str) -> list:
+    """(start, end, params) of each JS method body."""
+    found = []
+    for m in _JS_METHOD_RE.finditer(view):
+        if m.group("name") in _JS_NOT_METHOD:
+            continue
+        close = _matching(view, m.end() - 1)
+        body = re.match(r"\s*\{", view[close + 1:]) if close >= 0 else None
+        if body:
+            start = close + 1 + body.end() - 1
+            found.append((start, _matching(view, start), _param_names(view[m.end():close], "node")))
+    return found
+
+
+# Block keywords. Lua: function, if and do open, end closes; repeat … until. Ruby: def,
+# class, module, begin, case and do open, and if/unless/while/until/for only at a
+# statement start; `.end` and `:end` are not keywords.
+_LUA_KEYWORD_RE = re.compile(r"(?<![\w.:])(function|if|do|end|repeat|until)(?!\w)")
+_RUBY_KEYWORD_RE = re.compile(
+    r"(?<![\w.:$@])(def|class|module|begin|case|do|if|unless|while|until|for|end)(?![\w?!:])"
+)
+_RUBY_STATEMENT_KEYWORDS = frozenset({"if", "unless", "while", "until", "for"})
+_RUBY_ENDLESS_DEF_RE = re.compile(r"def\s+[\w.?!]+\s*(?:\([^)]*\))?\s*=(?![=~>])")
+_KEYWORD_HEADER_RE = re.compile(r"[ \t]*[\w.:?!]*[ \t]*(?:\(((?:[^()]|\([^()]*\))*)\)|([^\n;]*))")
+_RUBY_BLOCK_PARAMS_RE = re.compile(r"[ \t]*\|([^|\n]*)\|")
+_RUBY_BRACE_BLOCK_RE = re.compile(r"\{[ \t]*\|([^|\n]*)\|")
+
+
+def _endless_def_end(view: str, line_start: int) -> int:
+    """The end of a ruby endless def whose line starts at view[line_start]: the end of
+    that line, extended over each following line indented deeper than it (a body
+    written on the next line). Blank lines do not end it."""
+    indent = len(view[line_start:]) - len(view[line_start:].lstrip(" \t"))
+    end = view.find("\n", line_start)
+    while end >= 0:
+        nxt = view.find("\n", end + 1)
+        line = view[end + 1:len(view) if nxt < 0 else nxt]
+        if line.strip() and len(line) - len(line.lstrip(" \t")) <= indent:
+            break
+        end = nxt
+    return len(view) if end < 0 else end
+
+
+def _keyword_blocks(view: str, head: str) -> tuple | None:
+    """For ruby and lua: (function spans, per-offset keyword depth), from counting
+    block keywords against `end`; None when they do not balance. A ruby statement
+    modifier (`x if y`), the `do` of a `while … do` header on its line and an endless
+    def (`def f(x) = …`, a span over its line and the lines indented deeper below it)
+    open nothing. A def or a lua
+    function is a span with its
+    parameters; a ruby `do |a, b|` or `{ |a, b|` block is a span with its block
+    parameters."""
+    lua = not head.startswith("ruby")
+    stack: list = []
+    spans: list = []
+    deltas: list = []
+    header_line = -1
+    for m in (_LUA_KEYWORD_RE if lua else _RUBY_KEYWORD_RE).finditer(view):
+        word, at = m.group(1), m.start()
+        line_start = view.rfind("\n", 0, at) + 1
+        if word == "end" or (lua and word == "until"):
+            if not stack or (stack[-1][0] == "repeat") != (word == "until"):
+                return None
+            _, start, params, is_function = stack.pop()
+            deltas.append((at, -1))
+            if is_function:
+                spans.append((start, at, params))
+            continue
+        if not lua and word in _RUBY_STATEMENT_KEYWORDS:
+            prefix = view[max(line_start, view.rfind(";", 0, at) + 1):at].strip()
+            if prefix and not prefix.endswith(("=", "(")):
+                continue                                 # a statement modifier
+            if word in ("while", "until", "for"):
+                header_line = line_start
+        elif not lua and word == "do" and header_line == line_start:
+            header_line = -1
+            continue                                     # the header's own `do`
+        elif not lua and word == "def" and _RUBY_ENDLESS_DEF_RE.match(view, at):
+            header = _KEYWORD_HEADER_RE.match(view, m.end())
+            spans.append((m.end(), _endless_def_end(view, line_start), _param_names(header.group(1) or "" if header else "", head)))
+            continue                                     # an endless def: no `end`
+        start, params, is_function = m.end(), frozenset(), False
+        if word in ("function", "def"):
+            header = _KEYWORD_HEADER_RE.match(view, m.end())
+            text = (header.group(1) or header.group(2) or "") if header else ""
+            start, params, is_function = header.end() if header else m.end(), _param_names(text, head), True
+        elif word == "do" and not lua:
+            bar = _RUBY_BLOCK_PARAMS_RE.match(view, m.end())
+            if bar:
+                start, params, is_function = bar.end(), _param_names(bar.group(1), head), True
+        stack.append((word, start, params, is_function))
+        deltas.append((m.end(), 1))
+    if stack:
+        return None
+    if not lua:
+        for m in _RUBY_BRACE_BLOCK_RE.finditer(view):
+            end = _matching(view, m.start())
+            if end < 0:
+                return None
+            spans.append((m.end(), end, _param_names(m.group(1), head)))
+    depth, out, k = 0, [], 0
+    deltas.sort()
+    for offset in range(len(view) + 1):
+        while k < len(deltas) and deltas[k][0] <= offset:
+            depth += deltas[k][1]
+            k += 1
+        out.append(depth)
+    return spans, tuple(out)
+
+
+_KEYWORD_FAMILY_RE = re.compile(r"^(?:ruby|lua|luajit)")
+
+
+def _python_fallback_spans(view: str) -> list:
+    """(start, end, params) of each def body (the lines indented deeper than the def
+    line) and each lambda, for Python that does not parse."""
+    found = []
+    for m in _PY_DEF_RE.finditer(view):
+        indent, end = len(m.group(1).expandtabs()), len(view)
+        for line in re.finditer(r"(?m)^([ \t]*)\S[^\n]*$", view[m.end():]):
+            if len(line.group(1).expandtabs()) <= indent:
+                end = m.end() + line.start()
+                break
+        found.append((m.end(), end, _param_names(m.group(2), "python")))
+    for m in _PY_LAMBDA_RE.finditer(view):
+        eol = view.find("\n", m.end())
+        found.append((m.end(), eol if eol >= 0 else len(view), _param_names(m.group(1), "python")))
+    return found
+
+
+@functools.lru_cache(maxsize=64)
+def _scope_spans(code: str, head: str) -> tuple:
+    """The function spans of a program without a parser, nested by containment. Empty
+    (the whole program is one span) when a body's brackets do not close."""
+    view = _index_view(code, head)
+    if _PYTHON_HEAD_RE.match(head):
+        raw = _python_fallback_spans(view)
+    elif _KEYWORD_FAMILY_RE.match(head):
+        blocks = _keyword_blocks(view, head)
+        raw = list(blocks[0]) if blocks else []
+    else:
+        raw = _brace_spans(view, head) + (_js_method_spans(view) if _JS_HEAD_RE.match(head) else [])
+    if any(end < 0 for _, end, _ in raw):
+        return ()
+    raw.sort(key=lambda span: (span[0], -span[1]))
+    spans: list = []
+    for start, end, params in raw:
+        parent = -1
+        for k in range(len(spans) - 1, -1, -1):
+            if spans[k].start <= start and end <= spans[k].end:
+                parent = k
+                break
+        spans.append(_Span(start, end, params, parent))
+    return tuple(spans)
+
+
+def _innermost(spans: tuple, i: int) -> int:
+    """Index of the innermost span containing offset i, or -1 for the program."""
+    found = -1
+    for k, span in enumerate(spans):
+        if span.start <= i < span.end:
+            found = k
+    return found
+
+
+@functools.lru_cache(maxsize=64)
+def _depths(code: str, head: str) -> tuple:
+    """Per offset, the nesting depth there: `{` minus `}` before it; for ruby and lua,
+    the block keywords open before it (0 everywhere when they do not balance); for
+    Python that does not parse, the indentation of its line."""
+    view = _index_view(code, head)
+    out, depth = [], 0
+    if _KEYWORD_FAMILY_RE.match(head):
+        blocks = _keyword_blocks(view, head)
+        return blocks[1] if blocks else (0,) * (len(view) + 1)
+    if _PYTHON_HEAD_RE.match(head):
+        for line in view.split("\n"):
+            indent = len(line) - len(line.lstrip(" \t"))
+            out += [indent] * (len(line) + 1)
+        return tuple(out)
+    for ch in view:
+        out.append(depth)
+        depth += {"{": 1, "}": -1}.get(ch, 0)
+    out.append(depth)
+    return tuple(out)
+
+
+def _block_of(code: str, head: str, i: int, floor: int) -> tuple:
+    """[open, close) of the innermost `{…}` containing offset i and opening at or after
+    floor, or (floor, len(code)) when there is none."""
+    view = _index_view(code, head)
+    depth, j = 0, i - 1
+    while j >= floor:
+        ch = view[j]
+        if ch == "}":
+            depth += 1
+        elif ch == "{":
+            if depth == 0:
+                close = _matching(view, j)
+                return j, close if close >= 0 else len(code)
+            depth -= 1
+        j -= 1
+    return floor, len(code)
+
+
+# A named JS function: `function name(params) {`, `const|let|var name = function(params) {`,
+# or `const|let|var name = (params) =>` / `name = param =>`, with a `{…}` body or an
+# expression body.
+_JS_NAMED_FUNCTION_RE = re.compile(
+    r"\bfunction\s*\*?\s*(?P<fname>[A-Za-z_$][\w$]*)\s*\((?P<fparams>[^()]*)\)\s*\{"
+    r"|\b(?:const|let|var)\s+(?P<ename>[A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?function\b\s*\*?\s*[\w$]*\s*"
+    r"\((?P<eparams>[^()]*)\)\s*\{"
+    r"|\b(?:const|let|var)\s+(?P<aname>[A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?"
+    r"(?:\((?P<aparams>[^()]*)\)|(?P<aparam>[A-Za-z_$][\w$]*))\s*=>\s*"
+)
+
+
+class _NamedFunction(NamedTuple):
+    """A named function: its parameters in order, its body, its return values, and its
+    rest parameter (`...a`, `*a`, perl's `@_`) with how many arguments come before it."""
+
+    params: tuple
+    start: int
+    end: int
+    returns: tuple
+    rest: str = ""
+    rest_at: int = 0
+
+
+def _expression_end(view: str, i: int) -> int:
+    """Offset where an expression starting at view[i] ends: a `;`, `,` or closing bracket
+    at its own depth, or a line break outside brackets."""
+    depth = 0
+    for j in range(i, len(view)):
+        ch = view[j]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return j
+            depth -= 1
+        elif depth == 0 and ch in ";,\n":
+            return j
+    return len(view)
+
+
+@functools.lru_cache(maxsize=64)
+def _js_functions(code: str, head: str) -> dict:
+    """Per name, the named functions a JS program declares. A name declared twice is
+    left out: which one a call reaches is not known."""
+    view = _index_view(code, head)
+    found: dict = {}
+    for m in _JS_NAMED_FUNCTION_RE.finditer(view):
+        block = m.group("fname") or m.group("ename")
+        name = block or m.group("aname")
+        params = (m.group("fparams") or m.group("eparams") or "") if block else (m.group("aparams") or m.group("aparam") or "")
+        names = tuple(
+            part.strip() if part.strip().startswith("{") else
+            (re.findall(r"^\s*(?:\.\.\.)?([A-Za-z_$][\w$]*)", part) or [""])[0]
+            for part in _top_level_parts(params)
+        ) if params.strip() else ()
+        if block or view[m.end():m.end() + 1] == "{":
+            start = m.end() - 1 if block else m.end()
+            end = _matching(view, start)
+            if end < 0:
+                continue
+            body = view[start + 1:end]
+            nested = [n.start() for n in _JS_NAMED_FUNCTION_RE.finditer(body)] + [n.start() for n in re.finditer(r"\bfunction\b|=>", body)]
+            returns = tuple(start + 1 + r.end() for r in re.finditer(r"\breturn\s+", body)
+                            if not any(n < r.start() for n in nested))
+        else:
+            start, end = m.end(), _expression_end(view, m.end())
+            returns = (start,)
+        rest = next(((k, n) for k, (part, n) in enumerate(zip(_top_level_parts(params), names))
+                     if part.strip().startswith("...")), (0, ""))
+        found.setdefault(name, []).append(_NamedFunction(names, start, end, returns, rest[1], rest[0]))
+    return {name: fns[0] for name, fns in found.items() if len(fns) == 1}
+
+
+# Named functions in the other families with function spans, as (header, how its
+# parameters are listed). A header ends where the function's span starts.
+_HELPER_HEAD_RE = re.compile(r"^(?:ruby|perl|lua|luajit|php|R$|Rscript)")
+_HELPER_HEADERS = (
+    (re.compile(r"^ruby"), re.compile(r"\bdef[ \t]+(?:self\.)?(?P<name>[A-Za-z_]\w*[?!]?)[ \t]*(?:\((?P<params>(?:[^()]|\([^()]*\))*)\)|(?P<bare>[^\n;=()]*))")),
+    (re.compile(r"^perl"), re.compile(r"\bsub\s+(?P<name>[A-Za-z_]\w*)\s*")),
+    (re.compile(r"^(?:lua|luajit)"), re.compile(r"\bfunction\s+(?P<name>[A-Za-z_][\w.]*)\s*\((?P<params>(?:[^()]|\([^()]*\))*)\)")),
+    (re.compile(r"^php"), re.compile(r"\bfunction\s+&?\s*(?P<name>[A-Za-z_]\w*)\s*\((?P<params>(?:[^()]|\([^()]*\))*)\)\s*")),
+    (re.compile(r"^(?:R$|Rscript)"), re.compile(r"(?<![\w.])(?P<name>[A-Za-z_.][\w.]*)\s*(?:<-|=)\s*function\s*\((?P<params>(?:[^()]|\([^()]*\))*)\)\s*")),
+)
+# Perl names its parameters inside the body: `my ($a, $b) = @_;` or `my $a = shift;`.
+_PERL_ARGS_RE = re.compile(r"\bmy\s*\(([^)]*)\)\s*=\s*@_|\bmy\s+(\$\w+)\s*=\s*shift\b")
+
+
+def _ordered_params(text: str, head: str) -> tuple:
+    """The parameter names a parameter list binds, in order (`$name` in perl and php). A
+    default value is not a name, and a comma inside one does not split the list."""
+    pattern = r"[$@%]\w+" if re.match(r"^(?:perl|php)", head) else r"[A-Za-z_.][\w.]*"
+    parts = [re.sub(r"=.*", "", part, flags=re.DOTALL) for part in _top_level_parts(text)]
+    return tuple((re.findall(pattern, part) or [""])[0] for part in parts) if text.strip() else ()
+
+
+def _last_statement(view: str, start: int, end: int) -> int:
+    """Offset of the last statement in view[start:end] at the body's own depth, or -1."""
+    depth, last = 0, -1
+    k = start
+    while k < end:
+        ch = view[k]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0 and ch in ";\n":
+            nxt = _skip(r"[ \t;\n]*", view, k)
+            if nxt < end:
+                last = nxt
+            k = nxt
+            continue
+        k += 1
+    first = _skip(r"[ \t;\n]*", view, start)
+    return last if last >= 0 else (first if first < end else -1)
+
+
+@functools.lru_cache(maxsize=64)
+def _other_functions(code: str, head: str) -> dict:
+    """Per name, the named functions a ruby, perl, lua, php or R program declares, each
+    with its parameters in order and its return values: every `return` value in its
+    own body, plus the last expression of a ruby or R body. A name declared twice is
+    left out."""
+    view = _index_view(code, head)
+    header = next((h for family, h in _HELPER_HEADERS if family.match(head)), None)
+    if header is None:
+        return {}
+    spans = _scope_spans(code, head)
+    found: dict = {}
+    for m in header.finditer(view):
+        params = _ordered_params(m.groupdict().get("params") or m.groupdict().get("bare") or "", head)
+        span = next((sp for sp in spans if m.end() - 1 <= sp.start <= _skip(r"\s*", view, m.end())), None)
+        endless = re.match(r"[ \t]*=", view[m.end():]) if re.match(r"^ruby", head) else None
+        if endless:                                      # `def f(x) = body`: the body is its value
+            start = m.end() + endless.end()
+            end = _endless_def_end(view, view.rfind("\n", 0, m.start()) + 1)
+        elif span is None and _R_HEAD_RE.match(head) and view[m.end():m.end() + 1] != "{":
+            start, end = m.end(), _expression_end(view, m.end())
+        elif span is None:
+            continue
+        else:
+            start, end = span.start, span.end
+        body = view[start:end]
+        if re.match(r"^perl", head):
+            given = _PERL_ARGS_RE.findall(body)
+            params = tuple(n for listed, one in given for n in (re.findall(r"[$@%]\w+", listed) if listed else [one]))
+        nested = [sp.start - start for sp in spans if start < sp.start < end]
+        returns = [start + r.end() for r in re.finditer(r"\breturn\b[ \t(]*", body) if not any(n < r.start() for n in nested)]
+        if re.match(r"^ruby|^R$|^Rscript", head):
+            body_start = start + 1 if view[start:start + 1] == "{" else start
+            last = _last_statement(view, body_start, end - (1 if view[end - 1:end] == "}" else 0))
+            if last >= 0 and not re.match(r"(?:return|if|unless|while|until|for|case|begin|end|puts|print)\b", view[last:]):
+                returns.append(last)
+        raw = _top_level_parts(m.groupdict().get("params") or m.groupdict().get("bare") or "")
+        rest = next(((k, n) for k, (part, n) in enumerate(zip(raw, params))
+                     if re.match(r"\s*\*(?!\*)|\s*\.\.\.\$", part)), (0, ""))
+        if re.match(r"^perl", head):                     # `@_` holds what `shift` left
+            rest = (_perl_shifts_before_args(body), "@_")
+        found.setdefault(m.group("name"), []).append(
+            _NamedFunction(params, start, end, tuple(sorted(set(returns))), rest[1], rest[0]))
+    return {name: fns[0] for name, fns in found.items() if len(fns) == 1}
+
+
+def _perl_shifts_before_args(body: str) -> int:
+    """How many elements of `@_` a perl sub body shifts off before it first reads `@_`:
+    a bare `shift` or `shift @_` at the body's own level. A shift inside a nested block
+    may not run, a shift of another array (`shift @ARGV`) leaves `@_` alone, and a shift
+    after the first read cannot change what that read saw."""
+    first = body.find("@_")
+    before = body if first < 0 else body[:first]
+    top = 1 if before.startswith("{") else 0
+    depth, count = 0, 0
+    for m in re.finditer(r"[{}]|\bshift\b(?!\s*\(?\s*@(?!_\b))", before):
+        if m.group() == "{":
+            depth += 1
+        elif m.group() == "}":
+            depth -= 1
+        elif depth == top:
+            count += 1
+    return count
+
+
+def _top_level_parts(text: str) -> list:
+    """`text` split at the commas outside brackets."""
+    parts, depth, last = [], 0, 0
+    for k, ch in enumerate(text):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(text[last:k])
+            last = k + 1
+    return parts + [text[last:]]
+
+
+def _destructured_key(pattern: str, name: str) -> str | None:
+    """For a `{…}` destructuring pattern, the key that binds `name` (`{cmd}` -> cmd,
+    `{c: cmd}` -> c, `{cmd = "x"}` -> cmd), or None."""
+    if not pattern.startswith("{"):
+        return None
+    for part in _top_level_parts(pattern[1:-1]):
+        m = re.match(r"\s*([A-Za-z_$][\w$]*)\s*(?::\s*([A-Za-z_$][\w$]*))?\s*(?:=.*)?$", part, re.S)
+        if m and (m.group(2) or m.group(1)) == name:
+            return m.group(1)
+    return None
+
+
+# A key of an object or dict literal at its top level: `cmd:`, `"cmd":`, `'cmd':`.
+def _object_key_values(head: str, code: str, i: int, key: str, _depth: int = 0) -> list[int]:
+    """For the object or dict literal starting at code[i] (after whitespace), the offsets
+    of the values its constant `key` may hold: a later entry wins, as at run time, so a
+    later `key:` replaces an earlier one and a spread (`...a`, `**a`) of a literal that
+    sets the key replaces it too; a spread that may or may not set it keeps the earlier
+    value as one of the possibilities. [] when there is no literal or no such key."""
+    i = _skip(r"\s*", code, i)
+    view = _mask_string_literals(code)
+    if view[i:i + 1] != "{":
+        return []
+    close = _matching(view, i)
+    if close < 0:
+        return []
+    starts, depth = [i + 1], 0
+    for k in range(i + 1, close):
+        if view[k] in "([{":
+            depth += 1
+        elif view[k] in ")]}":
+            depth -= 1
+        elif view[k] == "," and depth == 0:
+            starts.append(k + 1)
+    key_re = re.compile(r"\s*(?:([\"'])" + re.escape(key) + r"\1|" + re.escape(key) + r"(?![\w$]))\s*:\s*")
+    found: list[int] = []
+    for start in starts:
+        spread = re.match(r"\s*(?:\.\.\.|\*\*)\s*", view[start:close])
+        if spread:
+            at = start + spread.end()
+            named = _named_values_at(head, code, at, _NAME_OPERAND_RE) if _depth < _MAX_NAME_DEPTH else None
+            holders = named[0] if named else ([at] if view[at:at + 1] == "{" else [])
+            supplied = [_object_key_values(head, code, h, key, _depth + 1) for h in holders]
+            given = [v for values in supplied for v in values]
+            found = given if holders and all(supplied) else found + given
+            continue
+        m = key_re.match(code, start)
+        if m:
+            found = [m.end()]
+    return found
+
+
+# A constant-key read of a name: `opts["cmd"]`, `opts['cmd']`, `opts.get("cmd")` and,
+# outside Python, `opts.cmd`.
+_MEMBER_READ_RE = re.compile(
+    r"(?P<name>[A-Za-z_$][\w$]*)\s*(?:\[\s*(?P<q>[\"'])(?P<k1>[\w$-]+)(?P=q)\s*\]"
+    r"|\.\s*get\s*\(\s*(?P<q2>[\"'])(?P<k2>[\w$-]+)(?P=q2)\s*\)"
+    r"|\.(?P<k3>[A-Za-z_$][\w$]*)(?!\s*\())"
+)
+
+
+def _member_values_at(head: str, code: str, i: int) -> tuple[list[int], int] | None:
+    """For a constant-key read at code[i] of a name whose values are object or dict
+    literals, (the offsets of the values that key holds in them, offset past the read);
+    None otherwise. `.key` is a member read only outside Python."""
+    m = _MEMBER_READ_RE.match(code, i)
+    if not m or (m.group("k3") and _PYTHON_HEAD_RE.match(head)):
+        return None
+    key = m.group("k1") or m.group("k2") or m.group("k3")
+    reach = _python_reaching(code) if _PYTHON_HEAD_RE.match(head) else None
+    if reach is not None:
+        holders = [v for v in reach.uses.get(i, ()) if v != _OPAQUE]
+    else:
+        holders = _span_reaching(head, code, i, m.group("name"))
+    for _ in range(_MAX_NAME_DEPTH):                  # a holder that is itself a name
+        named = [_named_values_at(head, code, h) for h in holders]
+        if not any(named):
+            break
+        holders = [v for h, n in zip(holders, named) for v in (n[0] if n else [h])]
+    values = sorted({v for h in holders for v in _object_key_values(head, code, h, key)})
+    return (values, m.end()) if values else None
+
+
+def _named_functions(code: str, head: str) -> dict:
+    """The named functions a program declares, for the families whose helpers are read."""
+    if _JS_HEAD_RE.match(head):
+        return _js_functions(code, head)
+    return _other_functions(code, head) if _HELPER_HEAD_RE.match(head) else {}
+
+
+# A call that is not the function's own declaration.
+_DECLARATION_BEFORE_RE = re.compile(r"\b(?:function\s*\*?|def|sub)\s*&?\s*$")
+
+
+def _calls(code: str, head: str, name: str) -> list:
+    """The argument offsets of each call `name(…)` (and, in ruby and perl, `name "…"`
+    without parentheses) outside its own declaration; [] for a call with a spread or
+    splat argument. A JS `[…].forEach(name)` / `.map(name)` calls it once per element."""
+    view = _index_view(code, head)
+    out = [[e] for callee, elements in (_js_element_bindings(code, head)[1] if _JS_HEAD_RE.match(head) else ())
+           if callee == name for e in elements]
+    for m in re.finditer(r"(?<![\w$.:>@])" + re.escape(name) + r"(?:\s*\(|[ \t]+(?=[\"'$\[]))", view):
+        if _DECLARATION_BEFORE_RE.search(view[:m.start()]):
+            continue
+        if view[m.end() - 1] == "(":
+            close = _matching(view, m.end() - 1)
+        elif re.match(r"^(?:ruby|perl)", head):
+            close = _skip(r"[^;\n]*", view, m.end())
+        else:
+            continue
+        if close < 0:
+            continue
+        args, k = [], m.end()
+        while k < close:
+            k = _skip(r"\s*", view, k)
+            if k >= close:
+                break
+            args.append(k)
+            k = min(_expression_end(view, k), close)
+            k = k + 1 if view[k:k + 1] == "," else k
+        out.append([] if any(view[a:a + 3] == "..." or view[a:a + 1] == "*" or view[a:a + 2] == "@_" for a in args) else args)
+    return out
+
+
+def _literal_list_elements(view: str, i: int) -> list | None:
+    """The offsets of the elements of the `[…]` literal at view[i] (strings masked), or
+    None when it does not close (a `...` element reads nothing)."""
+    close = _matching(view, i) if view[i:i + 1] == "[" else -1
+    if close < 0:
+        return None
+    out, k = [], i + 1
+    while k < close:
+        k = _skip(r"\s*", view, k)
+        if k >= close:
+            break
+        out.append(k)
+        k = min(_expression_end(view, k), close)
+        k = k + 1 if view[k:k + 1] == "," else k
+    return out
+
+
+# A literal JS list handed element by element to a callback or a loop:
+# `[…].forEach(f)` / `.map(f)`, `[…].forEach((c) => …)` / `c => …` / `function (c) {…}`,
+# and `for (const c of […])`.
+_JS_EACH_RE = re.compile(r"\]\s*\.\s*(?:forEach|map)\s*\(\s*")
+_JS_FOR_OF_RE = re.compile(r"\bfor\s*\(\s*(?:const|let|var)\s+(?P<name>[A-Za-z_$][\w$]*)\s+of\s+(?=\[)")
+_JS_INLINE_CALLBACK_RE = re.compile(
+    r"(?:\(\s*(?P<p1>[A-Za-z_$][\w$]*)\s*\)|(?P<p2>[A-Za-z_$][\w$]*))\s*=>\s*"
+    r"|function\s*\(\s*(?P<p3>[A-Za-z_$][\w$]*)\s*\)\s*(?=\{)"
+)
+
+
+def _list_opening(view: str, close: int) -> int:
+    """The offset of the `[` that the `]` at view[close] closes, or -1."""
+    depth = 0
+    for k in range(close, -1, -1):
+        if view[k] in ")]}":
+            depth += 1
+        elif view[k] in "([{":
+            depth -= 1
+            if depth == 0:
+                return k if view[k] == "[" else -1
+    return -1
+
+
+@functools.lru_cache(maxsize=64)
+def _js_element_bindings(code: str, head: str) -> tuple:
+    """(name, body start, body end, element offsets) for each literal JS list whose
+    elements a loop or an inline callback binds to a name, and (callee name, element
+    offsets) pairs for a named callback (`[…].forEach(f)`)."""
+    view = _index_view(code, head)
+    bound, named = [], []
+    for m in _JS_EACH_RE.finditer(view):
+        opening = _list_opening(view, m.start())
+        elements = _literal_list_elements(view, opening) if opening >= 0 else None
+        if elements is None:
+            continue
+        callee = re.match(r"([A-Za-z_$][\w$]*)\s*\)", view[m.end():])
+        inline = _JS_INLINE_CALLBACK_RE.match(view, m.end())
+        if inline:
+            name = inline.group("p1") or inline.group("p2") or inline.group("p3")
+            start = inline.end()
+            bound.append((name, start, _expression_end(view, start), tuple(elements)))
+        elif callee:
+            named.append((callee.group(1), tuple(elements)))
+    for m in _JS_FOR_OF_RE.finditer(view):
+        elements = _literal_list_elements(view, m.end())
+        head_close = _matching(view, m.start() + view[m.start():].index("("))
+        if elements is None or head_close < 0:
+            continue
+        start = _skip(r"\s*", view, head_close + 1)
+        end = _matching(view, start) if view[start:start + 1] == "{" else _expression_end(view, start)
+        bound.append((m.group("name"), start, end, tuple(elements)))
+    return tuple(bound), tuple(named)
+
+
+def _call_parens(code: str, head: str, name: str) -> list:
+    """The offsets of the `(` of each parenthesised `name(…)`; the declaration's own
+    parameter list reads as no literal list, so it adds nothing."""
+    view = _index_view(code, head)
+    return [m.end() - 1 for m in re.finditer(r"(?<![\w$.:>@])" + re.escape(name) + r"\s*\(", view)]
+
+
+@functools.lru_cache(maxsize=64)
+def _rest_skips(code: str, head: str) -> dict:
+    """Per call `(` of a function with a rest parameter, how many of its arguments the
+    named parameters take before the rest."""
+    return {paren: fn.rest_at for name, fn in _named_functions(code, head).items() if fn.rest
+            for paren in _call_parens(code, head, name)}
+
+
+def _param_values(head: str, code: str, i: int, name: str) -> list | None:
+    """For a use at code[i] of a parameter of the innermost named function holding it,
+    the offsets of the arguments its calls pass in that position; None when the use is
+    not such a parameter, or the body assigns it before the use (perl's own
+    `my $x = shift` / `= @_` binding excepted). A name a JS `{…}` pattern destructures
+    reads the value its key holds in each literal object passed there."""
+    fns = [f for f in _named_functions(code, head).items() if f[1].start <= i < f[1].end
+           and (name in f[1].params or name == f[1].rest or any(_destructured_key(p, name) for p in f[1].params))]
+    if not fns:
+        return None
+    fname, fn = max(fns, key=lambda f: f[1].start)
+    if name == fn.rest:                                  # each call's argument list, past the named ones
+        return sorted(_call_parens(code, head, fname))
+    starts, values = _assignments(code, head).get(name, ([], []))
+    view = _index_view(code, head)
+    if any(fn.start <= at < i and not re.match(r"shift\b|@_", view[v:]) for at, v in zip(starts, values)):
+        return None                                      # reassigned in the body first
+    if name in fn.params:
+        position = fn.params.index(name)
+        return sorted({args[position] for args in _calls(code, head, fname) if position < len(args)})
+    position, key = next((k, key) for k, p in enumerate(fn.params) if (key := _destructured_key(p, name)))
+    calls = [args for args in _calls(code, head, fname) if position < len(args)]
+    return sorted({v for args in calls for v in _object_key_values(head, code, args[position], key)})
+
+
+def _span_reaching(head: str, code: str, i: int, name: str) -> list:
+    """The literal values of `name` reaching a use at code[i], for a program without a
+    parser: the assignments in the use's own function span (outside nested spans),
+    walked back from the use until one at the use's depth or shallower, which dominates
+    it; a parameter is unreadable; a name free in its span takes every assignment of it
+    in the enclosing span, outward until one has any; an assignment only after the use
+    leaves it unresolved. A JS `let`/`const` inside a block reaches only uses in that
+    block. Ruby and lua spans come from their block keywords. A parameter of a named
+    function (JS, ruby, perl, lua, php, R) reads the arguments its calls pass for it, and
+    a JS name a loop or inline callback binds to a literal list reads its elements."""
+    if _JS_HEAD_RE.match(head):
+        bound = [b for b in _js_element_bindings(code, head)[0] if b[0] == name and b[1] <= i < b[2]]
+        inner = max(bound, key=lambda b: b[1]) if bound else None
+        if inner and not any(inner[1] <= at < i for at in _assignments(code, head).get(name, ([], []))[0]):
+            return sorted(inner[3])
+    if _JS_HEAD_RE.match(head) or _HELPER_HEAD_RE.match(head):
+        passed = _param_values(head, code, i, name)
+        if passed is not None:
+            return passed
+    spans, depth = _scope_spans(code, head), _depths(code, head)
+    starts, values = _assignments(code, head).get(name, ([], []))
+    enclosing = _enclosing_assignments(code, head)
+
+    def home(k: int) -> int:
+        """The span an assignment binds in: an R `<<-` binds in its span's parent."""
+        inner = _innermost(spans, starts[k])
+        return spans[inner].parent if starts[k] in enclosing and inner >= 0 else inner
+
+    span = _innermost(spans, i)
+    floor = spans[span].start if span >= 0 else 0
+    own = [k for k in range(len(starts)) if home(k) == span]
+    params = spans[span].params if span >= 0 else frozenset()
+    if not own and name not in params:
+        while span >= 0:
+            span = spans[span].parent
+            outer = [values[k] for k in range(len(starts)) if home(k) == span]
+            if outer:
+                return sorted(outer)
+        return []
+    view = _index_view(code, head) if _JS_HEAD_RE.match(head) else ""
+    found = []
+    for k in sorted((k for k in own if starts[k] < i), key=lambda k: -starts[k]):
+        if view and re.search(r"\b(?:let|const)\s+$", view[floor:starts[k]]):
+            block = _block_of(code, head, starts[k], floor)
+            if not block[0] <= i < block[1]:
+                continue
+        found.append(values[k])
+        if depth[starts[k]] <= depth[i]:
+            break
+    return sorted(found)
+
+
+def _argument_readings(head: str, code: str, at: int) -> tuple[list[tuple[bool, list[str]]], int] | None:
+    """The readings of one call argument at code[at]: (is a string expression, the argv
+    items it adds), and the offset after it; None when it is neither a list nor a string
+    expression."""
+    lst = _list_expr_at(code, at, head)
+    if lst:
+        return [(False, items) for items in lst[0]], lst[1]
+    spread = re.match(r"\*(?!\*)|\.\.\.", code[at:])           # `*a`, `...a`: its elements, spliced
+    named = _named_values_at(head, code, at + spread.end()) if spread else None
+    lists = _named_lists(head, code, named[0]) if named else []
+    if lists and named:
+        return [(False, items) for items in lists], named[1]
+    expr = _string_expr_at(code, at, head)
+    if expr:
+        return [(True, [text]) for text in expr[0]], expr[1]
+    return None
+
+
+def _argument_commands(code: str, pos: int, skip_leading: int = 0, head: str = "") -> list[str]:
+    """The command a call's leading arguments spell. One string expression alone is a
+    shell command line (literal, f-string, concatenation, `.format`, `shlex.split`).
+    Otherwise consecutive string expressions and list literals are argv, joined
+    (`system('gh', 'pr', 'merge', '5')`, `spawnSync('gh', ['pr', 'merge'])`,
+    `run(['gh', 'pr', 'merge', '5'])`, `run(args=[…])`). An object literal ends the walk,
+    contributing its own `args:` or `cmd:` list (`new Deno.Command('gh', {args: […]})`,
+    `Deno.run({cmd: […]})`). Stops at the first other argument. Up to `skip_leading`
+    non-literal arguments before the first literal are skipped (a spawn mode, a perl
+    open3 handle). An argument that is a bare name reads as each literal value its
+    reaching assignments gave it (`cmd = ["gh", …]; run(cmd)`). Every reading is
+    returned twice over: a leading string alone as a shell line (`popen("…", "r")`),
+    and the whole argv."""
+    i = _skip(r"\s*", code, pos)
+    keyword = re.match(r"(?:args|cmd)\s*=(?!=)\s*", code[i:])
+    if keyword:
+        i += keyword.end()
+    for _ in range(skip_leading):
+        if code[i:i + 1] == "{" or _literal_list_at(code, i, head) or _PREFIXED_LITERAL_RE.match(code, i):
+            break
+        perl_var = re.match(r"(?:my\s+)?[$@%]\w+", code[i:])
+        end = i + perl_var.end() if perl_var else _operand_end(code, i)
+        sep = re.match(r"\s*,\s*", code[end:]) if end > 0 else None
+        if not sep:
+            return []
+        i = end + sep.end()
+    # Each state is one reading so far: (argv, the leading string when it led).
+    states: list[tuple[list[str], str | None]] = [([], None)]
+    while True:
+        named = _named_values_at(head, code, i)
+        readings: list[tuple[bool, list[str]]] = []
+        end = -1
+        for at in named[0] if named else [i]:
+            got = _argument_readings(head, code, at)
+            if got:
+                readings += got[0]
+                end = named[1] if named else got[1]
+        if not readings:
+            options = _object_argv_at(code, i, head)
+            if options:
+                states = [(argv + items, first) for argv, first in states for items in options]
+            break
+        states = [
+            (argv + items, first if argv else (items[0] if is_string else None))
+            for argv, first in states for is_string, items in readings
+        ][:_MAX_READINGS]
+        sep = re.match(r"\s*,\s*", code[end:])
+        if not sep:
+            break
+        i = end + sep.end()
+    cmds: list[str] = []
+    for argv, first in states[:_MAX_READINGS]:
+        for cmd in ([first] if first is not None else []) + ([shlex.join(argv)] if len(argv) > 1 else []):
+            if cmd not in cmds:
+                cmds.append(cmd)
+    return cmds
+
+
+# An interpreter's head word anywhere in a (quote-masked) command.
+_INTERPRETER_WORD_RE = re.compile(
+    r"(?<![\w./-])(?:[^\s|;&<>()]*/)?(?:" + _INTERPRETER_HEAD_ALTERNATION + r")(?=[ \t]|$)"
+)
+
+# Per interpreter family: the flags whose NEXT token is the program, the flags that take a
+# value (skipped with it), and whether a combined short flag ending in e/E/c carries code.
+_PROGRAM_FLAGS = (
+    (re.compile(r"^(?:python|pypy)"), {"-c"}, {"-W", "-X", "--check-hash-based-pycs"}, "c"),
+    (re.compile(r"^perl"), {"-e", "-E"}, {"-I", "-M", "-m", "-x"}, "eE"),
+    (re.compile(r"^ruby"), {"-e"}, {"-r", "-I", "-C", "-E", "-x"}, "e"),
+    (re.compile(r"^(?:node|nodejs|bun)"), {"-e", "--eval", "-p", "--print"},
+     {"-r", "--require", "--import", "--loader", "--conditions", "-C"}, ""),
+    (re.compile(r"^php"), {"-r"}, {"-c", "-d", "-z"}, ""),
+    (re.compile(r"^(?:lua|luajit)"), {"-e"}, {"-l"}, ""),
+    (re.compile(r"^(?:R|Rscript)$"), {"-e"}, set(), ""),
+    (re.compile(r"^osascript$"), {"-e"}, {"-l"}, ""),
+)
+_AWK_HEAD_RE = re.compile(r"^(?:awk|gawk|mawk|nawk)$")
+
+
+# deno flags that take a separate value (`deno eval --ext ts '…'`).
+_DENO_VALUE_FLAGS = frozenset({
+    "--ext", "--config", "-c", "--import-map", "-L", "--log-level", "--location", "--seed",
+    "--cert", "--env-file", "--lock",
+})
+
+
+def _program_from_tokens(head: str, tokens: list) -> str | None:
+    """The program text an interpreter is given on its command line, from its shell
+    tokens (tokens[0] is the interpreter), or None when it runs a script, a module or
+    stdin. Several -e programs are joined with newlines."""
+    if head == "deno":
+        rest, i = [], 1
+        while i < len(tokens):
+            t = tokens[i]
+            if t in _DENO_VALUE_FLAGS:
+                i += 2
+                continue
+            if not t.startswith("-"):
+                rest.append(t)
+            i += 1
+        return rest[1] if len(rest) >= 2 and rest[0] == "eval" else None
+    if _AWK_HEAD_RE.match(head):
+        i = 1
+        while i < len(tokens):
+            t = tokens[i]
+            if t == "--":
+                i += 1
+                break
+            if t in ("-f", "--file", "-E", "--exec") or t.startswith("-f"):
+                return None                              # the program is in a file
+            if t in ("-F", "-v", "-i", "-l", "--field-separator", "--assign", "--include", "--load"):
+                i += 2
+                continue
+            if not t.startswith("-") or t == "-":
+                break
+            i += 1
+        return tokens[i] if i < len(tokens) else None
+    for head_re, code_flags, value_flags, combined in _PROGRAM_FLAGS:
+        if not head_re.match(head):
+            continue
+        programs, i = [], 1
+        while i < len(tokens):
+            t = tokens[i]
+            if t in code_flags or (
+                combined and re.fullmatch(r"-[A-Za-z]+", t) and t[-1] in combined and len(t) > 2
+            ):
+                if i + 1 < len(tokens):
+                    programs.append(tokens[i + 1])
+                i += 2
+                continue
+            if t in value_flags:
+                i += 2
+                continue
+            if t.startswith("--") and "=" in t:
+                i += 1
+                continue
+            if t == "-" or not t.startswith("-") or t in ("-m",):
+                break
+            i += 1
+        return "\n".join(programs) if programs else None
+    return None
+
+
+# Call names whose last segment runs a process (any qualifier: os.system, Bun.spawn,
+# child_process's execSync, IO.popen, …). `execute` is Lua's os.execute only.
+_EXEC_CALL_NAMES = frozenset({
+    "system", "system2", "popen", "popen2", "popen3", "popen4", "exec", "execl", "execle",
+    "execlp", "execlpe", "execv", "execve", "execvp", "execvpe", "execsync", "execfile",
+    "execfilesync", "spawn", "spawnsync", "spawnl", "spawnle", "spawnlp", "spawnlpe",
+    "spawnv", "spawnve", "spawnvp", "spawnvpe", "posix_spawn", "posix_spawnp", "fork",
+    "forkpty", "shell_exec", "passthru", "proc_open", "pcntl_exec", "readpipe",
+    "getoutput", "getstatusoutput", "check_output", "check_call", "binding",
+    "create_subprocess_shell", "create_subprocess_exec",
+})
+# Modules every attribute of which is a process route (subprocess.run, Open3.capture2, …).
+_EXEC_MODULES = frozenset({"subprocess", "child_process", "pty", "commands", "open3", "open2", "ipc"})
+# Bare reflective calls that can reach any of the above by name.
+_REFLECTIVE_CALLS = frozenset({
+    "eval", "exec", "compile", "getattr", "vars", "globals", "locals", "__import__",
+    "methodcaller", "call_user_func", "call_user_func_array", "instance_eval", "class_eval",
+})
+_CALL_NAME_RE = re.compile(r"(?<![\w$])((?:[A-Za-z_$][\w$]*(?:\.|::))*[A-Za-z_$][\w$]*)\s*\(")
+_PY_FROM_IMPORT_RE = re.compile(
+    r"\bfrom\s+(subprocess|os|pty|commands)\s+import\s*(?:\(([^)]*)\)|([\w \t,*]+))"
+)
+_PY_IMPORT_AS_RE = re.compile(r"\bimport[ \t]+([\w \t,]+)")
+_JS_TAGGED_TEMPLATE_RE = re.compile(r"\$\s*`")
+_AWK_PIPE_RE = re.compile(r"\b(?:print|printf)\b[^;}\n]*(?<!\|)\|(?!\|)|\|\s*getline\b|\|&")
+_STATEMENT_FORMS = (
+    # ruby / perl run a command without parentheses: system "…", exec "…", spawn "…"
+    (re.compile(r"^(?:ruby|perl)"), re.compile(r"(?<![\w$.:])(?:system|exec|spawn)[ \t]+(?=[^\s=;,)\]}])")),
+    (re.compile(r"^perl"), re.compile(r"(?<![\w$])(?:qx\s*[^\w\s]|readpipe\b|open\s+[\w$]+\s*,|(?:use|require)\s+IPC::)")),
+    (re.compile(r"^ruby"), re.compile(r"%x\s*[^\w\s]|(?:__send__|public_send|send)\s*\(?\s*:(?:system|exec|spawn|`|popen)")),
+    (re.compile(r"^osascript$"), re.compile(r"\bdo\s+shell\s+script\b")),
+    (re.compile(r"^(?:python|pypy)"), re.compile(r"(?<![\w$])(?:__dict__|__builtins__|builtins)\b")),
+)
+
+
+# The process-starting names a `from <module> import *` brings in as bare calls.
+_STAR_IMPORT_CALLS = {
+    "subprocess": ("run", "call", "check_call", "check_output", "popen", "getoutput",
+                   "getstatusoutput"),
+    "commands": ("getoutput", "getstatusoutput"),
+    "pty": ("spawn", "fork"),
+    "os": (),  # every os process call is already a primitive by its own name
+}
+
+
+def _python_aliases(masked: str) -> tuple[set, set]:
+    """Names a Python program imported as process routes: bare names (`from subprocess
+    import run`, `from os import system`) and aliases of modules EVERY attribute of which
+    is a process route (`import subprocess as sp`). An os alias (`import os as o`) is not
+    one: `o.system(…)` already counts through its attribute name, `o.path.join` must not."""
+    bare, modules = set(), set()
+    for m in _PY_FROM_IMPORT_RE.finditer(masked):
+        for part in (m.group(2) or m.group(3) or "").split(","):
+            words = part.split()
+            if not words:
+                continue
+            if words == ["*"]:
+                bare.update(_STAR_IMPORT_CALLS.get(m.group(1), ()))
+                continue
+            name, alias = words[0], words[-1]
+            if m.group(1) != "os" or name.lower() in _EXEC_CALL_NAMES:
+                bare.add(alias.lower())
+    for m in _PY_IMPORT_AS_RE.finditer(masked):
+        for part in m.group(1).split(","):
+            words = part.split()
+            if len(words) == 3 and words[1] == "as" and words[0] in ("subprocess", "pty"):
+                modules.add(words[2].lower())
+    return bare, modules
+
+
+def _perl_aliases(masked: str) -> tuple[set, set]:
+    """Bare names a perl program imported as process routes (`use IPC::Run`)."""
+    bare = set()
+    if re.search(r"\buse\s+IPC::Run\b", masked):
+        bare |= {"run", "start"}
+    if re.search(r"\buse\s+IPC::Run3\b", masked):
+        bare.add("run3")
+    return bare, set()
+
+
+def _language_aliases(head: str, masked: str) -> tuple[set, set]:
+    if re.match(r"^(?:python|pypy)", head):
+        return _python_aliases(masked)
+    if head.startswith("perl"):
+        return _perl_aliases(masked)
+    return set(), set()
+
+
+def _is_primitive_call(name: str, head: str, aliases: tuple) -> bool:
+    segs = [x.lower() for x in re.split(r"\.|::", name)]
+    first, last = segs[0], segs[-1]
+    bare, modules = aliases
+    if len(segs) == 1 and (last in bare or last in _REFLECTIVE_CALLS):
+        return True
+    if first in _EXEC_MODULES or first in modules:
+        return True
+    if last in _EXEC_CALL_NAMES or last == "import_module":
+        return True
+    if last == "execute" and re.match(r"^(?:lua|luajit)", head):
+        return True
+    if first == "deno" and last in ("run", "command"):
+        return True
+    if last == "open" and re.match(r"^(?:perl|ruby)", head):
+        return True
+    return last == "pipe" and head in ("R", "Rscript")
+
+
+def _program_names_primitive(head: str, program: str) -> bool:
+    """True iff `head`'s program reaches a process: a call or statement shaped like one
+    of the language's exec primitives, judged OUTSIDE string literals (a primitive name
+    inside a string or a longer word is data), or a backtick / pipe in a language where
+    those run a command (ruby/perl/php backticks, a `$`-tagged JS template, awk's
+    print | and | getline)."""
+    masked = _mask_string_literals(program, head)
+    aliases = _language_aliases(head, masked)
+    for m in _CALL_NAME_RE.finditer(masked):
+        if _is_primitive_call(m.group(1), head, aliases):
+            return True
+    for head_re, form in _STATEMENT_FORMS:
+        if head_re.match(head) and form.search(masked):
+            return True
+    if _BACKTICK_EXEC_HEAD_RE.match(head) and "`" in masked:
+        return True
+    if re.match(r"^(?:node|nodejs|bun|deno)$", head) and _JS_TAGGED_TEMPLATE_RE.search(masked):
+        return True
+    if _AWK_HEAD_RE.match(head) and _AWK_PIPE_RE.search(masked):
+        return True
+    return bool(re.match(r"^(?:tclsh|wish)", head) and _TCL_EXEC_RE.search(masked))
+
+
+def _guarded_commands_directly(head: str, code: str, _depth: int = 0, found: list[str] | None = None) -> list[str]:
+    """Every guarded command `head`'s program `code` passes DIRECTLY to an exec
+    primitive, in program order: the first argument of a primitive-named call that is a
+    string or list literal the danger scan reads as a guarded command
+    (`os.system("gh pr merge 5")`, `subprocess.run(["gh", "pr", "merge", "5"])`,
+    `execSync('…')`), a Tcl `exec` line, a backtick span that runs a shell, a statement
+    form, and the same inside an eval/exec of a literal. Call names, backticks and Tcl
+    lines written inside a string literal are data. Every one is collected, not only
+    the first, so a reader can tell one guarded command from several. Each is appended
+    to `found` as it is read, so a caller's list keeps the ones read before a parser
+    defect raises."""
+    found = [] if found is None else found
+    if _depth >= _DIRECT_CALL_MAX_DEPTH or not _program_names_primitive(head, code):
+        return found
+    masked = _mask_string_literals(code, head)
+    aliases = _language_aliases(head, masked)
+    for m in re.finditer(r"(\$?)`([^`]*)`", masked):
+        if m.group(1) or _BACKTICK_EXEC_HEAD_RE.match(head):
+            span = code[m.start(2):m.end(2)]
+            if span and _is_dangerous_at_depth(span, _depth + 1):
+                found.append(span)
+    if re.match(r"^(?:tclsh|wish)[0-9.]*$", head):
+        for m in _TCL_EXEC_RE.finditer(masked):
+            line = code[m.start(1):m.end(1)].strip()
+            if _is_dangerous_at_depth(line, _depth + 1):
+                found.append(line)
+    for m in _PRIMITIVE_CALL_RE.finditer(masked):
+        if not _is_primitive_call(m.group(1), head, aliases):
+            continue
+        name = m.group(1).lower()
+        if _runs_own_code(name, head):
+            # eval (and Python's exec) of a literal runs it as the SAME language's code
+            expr = _string_expr_at(code, m.end(), head)
+            for text in expr[0] if expr else []:
+                _guarded_commands_directly(head, text, _depth + 1, found)
+            continue
+        last = re.split(r"\.|::", name)[-1]
+        cmds = _argument_commands(
+            code, m.end(),
+            skip_leading=3 if last in ("open2", "open3", "run3") or last.startswith("spawn") else 0,
+            head=head,
+        )
+        found += [c for c in cmds if _is_dangerous_at_depth(c, _depth + 1)]
+    found += [cmd for cmd in _statement_commands(head, code, masked) if _is_dangerous_at_depth(cmd, _depth + 1)]
+    return found
+
+
+def _runs_own_code(name: str, head: str) -> bool:
+    """A bare call that runs its string argument as the interpreter's OWN code: eval in
+    every language here, exec in Python only (elsewhere exec runs a shell command)."""
+    if name == "eval":
+        return bool(re.match(r"^(?:python|pypy|node|nodejs|bun|deno|ruby|perl|php|lua|luajit)", head))
+    return name == "exec" and bool(re.match(r"^(?:python|pypy)", head))
+
+
+# Statement-shaped routes whose command is not a call's first argument.
+_QX_RE = re.compile(r"(?<![\w$])(?:qx|%x)\s*(?P<open>[(\[{<|!/])")
+_CLOSERS = {"(": ")", "[": "]", "{": "}", "<": ">"}
+_OSASCRIPT_SHELL_RE = re.compile(r"\bdo\s+shell\s+script\s+")
+_AWK_PRINT_PIPE_RE = re.compile(r"\b(?:print|printf)\b[^;}\n|]*?(?<!\|)\|&?\s*")
+_AWK_GETLINE_RE = re.compile(r"\|&?\s*getline\b")
+_PERL_OPEN_RE = re.compile(r"(?<![\w$])open\s*\(?\s*(?:my\s+)?[\w$]+\s*,\s*")
+_RUBY_SEND_RE = re.compile(r"(?:__send__|public_send|send)\s*\(?\s*:(?:system|exec|spawn|`)\s*,\s*")
+
+
+def _perl_open_commands(code: str, i: int, head: str = "") -> list[str]:
+    """The commands a perl `open` runs: the 2-argument form's `"| cmd"` / `"cmd |"`, or
+    the 3-argument form's command after a `-|` / `|-` mode, for each reading."""
+    readings: list[list[str]] = [[]]
+    while True:
+        expr = _string_expr_at(code, i, head)
+        if not expr:
+            break
+        readings = _with_each(readings, expr[0])
+        sep = re.match(r"\s*,\s*", code[expr[1]:])
+        if not sep:
+            break
+        i = expr[1] + sep.end()
+    out = []
+    for texts in readings:
+        if len(texts) >= 2 and texts[0].strip() in ("-|", "|-"):
+            out.append(shlex.join(texts[1:]) if len(texts) > 2 else texts[1])
+        elif texts and re.search(r"^\s*\||\|\s*$", texts[0]):
+            out.append(texts[0].strip().strip("|").strip())
+    return out
+
+
+def _statement_commands(head: str, code: str, masked: str) -> list[str]:
+    """Commands run through a statement form rather than a call's first argument: perl
+    `qx(…)` and ruby `%x(…)`, osascript `do shell script "…"`, awk `print … | "cmd"` and
+    `"cmd" | getline`, perl `open(F, "| cmd")` / `open(F, "-|", …)`, ruby
+    `send(:system, …)`."""
+    out = []
+    if re.match(r"^(?:perl|ruby)", head):
+        for m in _QX_RE.finditer(masked):
+            close = _CLOSERS.get(m.group("open"), m.group("open"))
+            end = code.find(close, m.end())
+            if end > 0:
+                out.append(code[m.end():end])
+    if head == "osascript":
+        for m in _OSASCRIPT_SHELL_RE.finditer(masked):
+            expr = _string_expr_at(code, m.end(), head)
+            if expr:
+                out += expr[0]
+    if _AWK_HEAD_RE.match(head):
+        for m in _AWK_PRINT_PIPE_RE.finditer(masked):
+            expr = _string_expr_at(code, m.end(), head)
+            if expr:
+                out += expr[0]
+        for m in _AWK_GETLINE_RE.finditer(masked):
+            before = [lit for lit in _PREFIXED_LITERAL_RE.finditer(code, 0, m.start())]
+            if before:
+                out.append(_literal_body(before[-1]))
+    if head.startswith("perl"):
+        for m in _PERL_OPEN_RE.finditer(masked):
+            out += _perl_open_commands(code, m.end(), head)
+    if head.startswith("ruby"):
+        for m in _RUBY_SEND_RE.finditer(masked):
+            cmd = _first_argument_command(code, m.end(), head)
+            if cmd:
+                out.append(cmd)
+    return out
+
+
 # Path-qualified shell token. Trailing (?![\w/]) anchors the shell name as a
 # whole PATH-LEAF token: excludes prefix-of-name (`>(basht)`/`>(teehee)`) AND
 # `>(bash/foo)` (bash is a DIRECTORY, foo the executable) while KEEPING
@@ -2837,15 +5544,66 @@ _HEREDOC_BODY_RE = re.compile(
 )
 
 
+_HEREDOC_WORD_RE = re.compile(r"(?<!<)(<<-?\s*)((?:\w|\\\w|'\w*'|\"\w*\")+)")
+
+
+def _requote_heredoc_delimiters(command: str) -> str:
+    """Rewrite a partly quoted or backslashed heredoc delimiter word (`<<E"OF"`,
+    `<<E'O'F`, `<<\\EOF`) in the fully quoted form the heredoc grammar reads
+    (`<<'EOF'`). Any quoting in the word quotes the whole delimiter, so the body
+    stays inert and the closing line is the word with its quoting removed."""
+    def _requote(m: re.Match[str]) -> str:
+        word = m.group(2)
+        if not any(ch in word for ch in "'\"\\"):
+            return m.group(0)
+        return m.group(1) + "'" + re.sub(r"['\"\\]", "", word) + "'"
+    return _HEREDOC_WORD_RE.sub(_requote, command)
+
+
+def _heredoc_body_substitutions(opener: str, body: str) -> list[str]:
+    """The command substitutions the shell runs in a heredoc body: each `$(…)` and
+    backtick span, as written, when the delimiter word in `opener` (the `<<` text up to
+    the end of the word) has no quoting at all; none when it is quoted in any way
+    (`<<'EOF'`, `<<"EOF"`, `<<\\EOF`, `<<E'O'F`), since the shell then expands nothing.
+    At the body's own level quotes are literal characters and do not stop expansion, so
+    the spans are found quote-blind; only a backslash escapes `$` or a backtick there."""
+    if any(ch in opener for ch in "'\"\\"):
+        return []
+    spans: list[str] = []
+    i, n = 0, len(body)
+    while i < n:
+        ch = body[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if body.startswith("$(", i):
+            span, end = _extract_dollar_paren(body, i)
+        elif ch == "`":
+            span, end = _extract_backtick(body, i)
+        else:
+            i += 1
+            continue
+        if span is None:
+            # The shell refuses an unclosed span and runs nothing after it.
+            break
+        spans.append(span)
+        i = end
+    return spans
+
+
 def _excise_heredoc_bodies_for_routing_scan(command: str) -> str:
     if "<<" not in command:          # cheap short-circuit (perf: common case)
         return command
+    command = _requote_heredoc_delimiters(command)
 
     def _repl(m: "re.Match") -> str:
         preceding = command[: m.start()].rstrip()
-        if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
+        if _shell_reads_stdin(preceding):
             return m.group(0)        # shell-fed heredoc: body executes — keep
-        return m.group(1) + "HEREDOC_BODY_EXCISED\n" + m.group(3)
+        opener = m.group(1)
+        runs = _heredoc_body_substitutions(opener[:opener.index(m.group(2)) + len(m.group(2)) + 1],
+                                           m.group(0)[len(opener):-len(m.group(3))])
+        return opener + "HEREDOC_BODY_EXCISED\n" + "".join(span + "\n" for span in runs) + m.group(3)
 
     return _HEREDOC_BODY_RE.sub(_repl, command)
 
@@ -3055,7 +5813,9 @@ def _preserve_substitution_spans(value):
     "(?:[^"\\]|\\.)*") -> malformed -> fail-safe. In the UNQUOTED arm BOTH ' and " stay
     structural -> fail-safe. Return None -> FAIL-SAFE (caller preserves whole value = today's
     behavior) for: unterminated span, a preserved span carrying a quote, a " in dq-inner, or
-    either quote in the unquoted arm."""
+    either quote in the unquoted arm. A backtick span whose body runs nothing guarded
+    (`"`echo gh pr merge 5`"`) is literal text too, judged recursively, so a nested
+    substitution that runs a guarded command keeps its span."""
     def _scan(c, dq_inner):
         out = []; lit = False; i = 0; n = len(c)
         def flush():
@@ -3071,6 +5831,7 @@ def _preserve_substitution_spans(value):
             if ch == "`":
                 span, j = _extract_backtick(c, i)
                 if span is None or '"' in span or "'" in span: return None
+                if not _is_dangerous_at_depth(span[1:-1], 1): lit = True; i = j; continue
                 flush(); out.append(span); i = j; continue
             if ch == '"': return None              # structural dq terminator -> fail-safe (malformed in dq-inner)
             if ch == "'" and not dq_inner: return None   # unquoted: ' is structural -> fail-safe
@@ -3142,6 +5903,119 @@ def _strip_flag_values(span: str, flag_sep_regex: str, keep_fn) -> str:
     return span
 
 
+def _strip_shell_comments(text: str) -> str:
+    """`text` without its shell comments: a `#` that starts a word (line start, after
+    whitespace or `;`) outside quotes, to the end of its line. A `#` inside '…' or "…"
+    is text, and a quote inside a comment opens nothing. An unterminated quote leaves
+    the rest as text."""
+    out: list[str] = []
+    i, n, quote = 0, len(text), ""
+    while i < n:
+        c = text[i]
+        if quote:
+            if c == "\\" and quote == '"' and i + 1 < n:
+                out.append(text[i:i + 2])
+                i += 2
+                continue
+            if c == quote:
+                quote = ""
+        elif c == "\\" and i + 1 < n:
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        elif c in "'\"":
+            quote = c
+        elif c == "#" and (i == 0 or text[i - 1].isspace() or text[i - 1] == ";"):
+            end = text.find("\n", i)
+            i = n if end < 0 else end
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+# Words and marks that open or close a compound command on the pipeline view: a group,
+# a subshell or command substitution, a loop body, an if branch, a case.
+_COMPOUND_OPEN_RE = re.compile(r"(?<![\w$])\{(?=\s)|\(|(?<![\w-])(?:do|then|case)(?![\w-])")
+_COMPOUND_CLOSE_RE = re.compile(r"(?<![\w$])\}|\)|(?<![\w-])(?:done|fi|esac)(?![\w-])")
+
+
+def _output_reaches_shell_from(view: str, procsub_view: str, pos: int) -> bool | None:
+    """Whether the output of the simple command at `pos` reaches a shell: on the pipeline
+    view (quotes and heredoc bodies blanked), from `pos` to the next pipeline separator,
+    a `| shell` / `| xargs … shell` or an output-side `>(shell)`. None when `pos` sits
+    inside an open compound command, whose output a pipe after it may route; the caller
+    then keeps the whole-command flags."""
+    before = view[:pos]
+    if len(_COMPOUND_OPEN_RE.findall(before)) > len(_COMPOUND_CLOSE_RE.findall(before)):
+        return None
+    sep = _PIPELINE_SEPARATOR_RE.search(view, pos)
+    end = sep.start() if sep else len(view)
+    return bool(
+        _has_pipe_to_shell(view[pos:end])
+        or _has_process_substitution_to_shell(procsub_view[pos:end])
+    )
+
+
+def _is_leg_command_word(text: str, start: int) -> bool:
+    """Whether the word at `start` is the command word of its simple command: only
+    assignments, `command` or `builtin` stand between it and the last separator."""
+    segment = re.split(r"[;&|\n(){}]|(?<![\w-])(?:then|do|else)(?![\w-])", text[:start])[-1]
+    return re.fullmatch(r"\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:(?:command|builtin)\s+)?", segment) is not None
+
+
+def _blank_unquoted_print_words(span: str) -> str:
+    """An echo/printf span with each unquoted word blanked, keeping the verb and any word
+    holding a command or process substitution whose body runs something guarded, read
+    whole. A `${…}` other than a plain name keeps the rest of the span."""
+    verb = re.match(r"\S+\s+", span)
+    if verb is None:
+        return span                           # a bare verb prints nothing
+    out = [verb.group(0)]
+    i, n = verb.end(), len(span)
+    while i < n:
+        j = i
+        while j < n and span[j].isspace():
+            j += 1
+        if j > i:
+            out.append(span[i:j])
+            i = j
+            continue
+        runs = False
+        while j < n and not span[j].isspace():
+            if span.startswith(("$(", "<(", ">("), j):
+                sub, j = _extract_dollar_paren(span, j)
+                runs = runs or sub is None or _is_dangerous_at_depth(sub[2:-1], 1)
+            elif span.startswith("${", j):
+                plain = re.match(r"\$\{[A-Za-z_]\w*\}", span[j:])
+                j, runs = (j + plain.end(), runs) if plain else (n, True)
+            elif span[j] == "`":
+                sub, j = _extract_backtick(span, j)
+                runs = runs or sub is None or _is_dangerous_at_depth(sub[1:-1], 1)
+            else:
+                j += 2 if span[j] == "\\" else 1
+        j = min(j, n)
+        out.append(span[i:j] if runs else "STRIPPED")
+        i = j
+    return "".join(out)
+
+
+def _shell_reads_stdin(preceding: str) -> bool:
+    """Whether the text right before a heredoc or here-string operator ends in a shell that
+    may read its commands from stdin: `bash`, `bash -e`, `bash -s [args]`. A shell given -c
+    runs that string instead, and reads the heredoc as its input data."""
+    words = re.split(r"[;&|\n(]", preceding)[-1].split()
+    at = max((k for k, w in enumerate(words) if re.match(r"^(?:.*/)?(?:bash|sh|zsh)$", w)), default=None)
+    if at is None:
+        return False
+    for word in words[at + 1:]:
+        if word == "--" or not word.startswith("-"):
+            break
+        if re.match(r"^-[A-Za-z]*c", word):
+            return False
+    return True
+
+
 def _strip_non_executable_content(command: str) -> str:
     """Strip shell content that is clearly non-executable before pattern matching.
 
@@ -3162,6 +6036,7 @@ def _strip_non_executable_content(command: str) -> str:
     Returns:
         The command with non-executable content replaced by placeholders
     """
+    command = _requote_heredoc_delimiters(command)
     result = command
 
     # Output-side execution-routing flags — computed ONCE for ALL stdout-
@@ -3198,27 +6073,54 @@ def _strip_non_executable_content(command: str) -> str:
     #    is fed to a shell interpreter (e.g. bash << EOF ... EOF — body executes).
     #    GUARD (output-side): the outer piped/process-sub skip preserves the body
     #    when it is routed to a shell via `| bash` / `> >(bash)`. The two COMPOSE.
-    if not piped_to_shell and not process_sub_to_shell:
-        def _strip_heredoc(match: re.Match) -> str:
-            # Check what command precedes the heredoc operator
-            start = match.start()
-            preceding = command[:start].rstrip()
-            # If the preceding command is a shell interpreter, preserve content
-            if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
-                return match.group(0)  # Preserve — content executes
-            return "<<HEREDOC_STRIPPED"
+    #    The output-side guard is PER PIPELINE: a heredoc's body is routed to a shell
+    #    only when its OWN command's output reaches one (`cat <<EOF | bash`), not
+    #    because some other pipeline in the command pipes to a shell. A heredoc inside
+    #    a compound command (group, subshell, loop, if, case) keeps the whole-command
+    #    flags, since the compound's output may be piped.
+    #    GUARD (eval): a command whose eval is fed by a heredoc keeps its bodies, so
+    #    the approval for it mints from the command the eval runs.
+    eval_fed = _has_eval_with_heredoc(command)
+    routing_views = None
 
-        result = re.sub(
-            r"<<-?\s*['\"]?(\w+)['\"]?.*?\n.*?\n\t*\1\b",
-            _strip_heredoc,
-            result,
-            flags=re.DOTALL,
-        )
+    def _strip_heredoc(match: re.Match) -> str:
+        nonlocal routing_views
+        # Check what command precedes the heredoc operator
+        start = match.start()
+        preceding = command[:start].rstrip()
+        # If the preceding command is a shell interpreter, preserve content
+        if _shell_reads_stdin(preceding):
+            return match.group(0)  # Preserve — content executes
+        if eval_fed:
+            return match.group(0)  # Preserve — an eval runs this heredoc's text
+        if routing_views is None:
+            routing_views = (_pipeline_view(command)[0], _procsub_anchor_view(command))
+        routed = _output_reaches_shell_from(*routing_views, start)
+        if routed is None:
+            routed = piped_to_shell or process_sub_to_shell
+        if routed:
+            return match.group(0)  # Preserve — this heredoc's output runs in a shell
+        # The rest of the opening line is shell (`cat <<EOF | gh pr merge 5 …`): only
+        # the body is data, except the substitutions an unquoted body has the shell
+        # run, each kept on a line of its own.
+        whole = match.group(0)
+        body_start = whole.index("\n") + 1
+        runs = _heredoc_body_substitutions(whole[:match.start("tail") - match.start()],
+                                           whole[body_start:whole.rindex("\n") + 1])
+        return "<<HEREDOC_STRIPPED" + match.group("tail") + "".join("\n" + span for span in runs)
+
+    result = re.sub(
+        r"<<-?\s*['\"]?(\w+)['\"]?(?P<tail>[^\n]*)\n.*?\n\t*\1\b",
+        _strip_heredoc,
+        result,
+        flags=re.DOTALL,
+    )
 
     # 2. Strip comments: # to end of line
     #    Only strip when # appears at start of line or after whitespace/semicolon
-    #    (not inside words like issue#42 or URLs with #fragment).
-    result = re.sub(r"(?:^|(?<=\s)|(?<=;))\#.*$", "", result, flags=re.MULTILINE)
+    #    (not inside words like issue#42 or URLs with #fragment), and outside quotes
+    #    (`git commit -m 'fix #12' && …` keeps everything after the message).
+    result = _strip_shell_comments(result)
 
     # 3. Strip echo/printf quoted arguments
     #    Match echo/printf followed by flags then quoted strings.
@@ -3246,14 +6148,26 @@ def _strip_non_executable_content(command: str) -> str:
             transformed = _preserve_substitution_spans(m.group(0))
             return m.group(0) if transformed is None else transformed
 
+        echo_text = result
+
         def _strip_echo_span(span_match: re.Match) -> str:
             # Strip every quoted arg within the echo/printf span. dq FIRST, then sq, so a dq
             # value's embedded `'` is consumed before the sq pass runs (no cross-contamination);
             # sq -> bareword STRIPPED (sq $() is literal). The verb + flags sit OUTSIDE these
             # inner subs and stay intact.
             span = span_match.group(0)
+            # Inside php code, `echo` is php's statement, not the shell builtin:
+            # `php -r 'echo shell_exec("…");'` RUNS its argument. Leave such a span whole
+            # for the interpreter clause of carrier 10 to judge. Other interpreters have
+            # no `echo` statement, so an `echo` in their quoted text is data.
+            if _in_php_exec_code(echo_text, span_match.start()):
+                return span
             span = re.sub(r'"(?:[^"\\]|\\.)*"', _strip_echo_dq_arg, span)
             span = re.sub(r"'[^']*'", "STRIPPED", span)
+            # An echo/printf that is its leg's command prints its unquoted words too. Not
+            # when the word only follows `echo` inside another command (`env X=echo gh …`).
+            if _is_leg_command_word(echo_text, span_match.start()):
+                span = _blank_unquoted_print_words(span)
             return span
 
         # Span = verb + the shared quote-aware body that STOPS at the first UNQUOTED
@@ -3272,15 +6186,28 @@ def _strip_non_executable_content(command: str) -> str:
     #    GUARD: Skip stripping if $VAR or ${VAR} appears elsewhere in the
     #    command, because bare expansion executes the value as a command
     #    (e.g., CMD="gh pr merge 42" && $CMD).
-    has_eval = _has_eval_or_source(command)
+    # An eval of a variable whose value the guard reads (_rewrite_variable_evals) runs that
+    # value, which is judged there: when every eval is one of those, the assignments are
+    # read as the expansions that remain after it. An eval of a literal string runs no
+    # variable's value at all.
+    evaluated = _rewrite_variable_evals(command)
+    evals_read = (evaluated != command and not _VARIABLE_EVAL_RE.search(evaluated)
+                  and len(re.findall(r"\b(?:eval|source)\b", command)) == len(_VARIABLE_EVAL_RE.findall(command)))
+    expansions = evaluated if evals_read else command
+    # An eval of a literal string (no expansion in it) cannot run a variable's value.
+    literal_evals = not re.search(r"\bsource\b", command) and not any(
+        re.search(r"[$`]", leg) for leg in re.findall(r"\beval\b[^;&|\n]*", command))
+    has_eval = _has_eval_or_source(command) and not evals_read and not literal_evals
     if not has_eval:
         # Double-quoted: guard against command substitution and bare expansion
         def _strip_var_dq(match: re.Match) -> str:
             var_name = match.group(1)
+            if _is_graphql_merge_query(match):
+                return match.group(0)  # Preserve — the gh api graphql request runs it
             # ORDER LOAD-BEARING: a bare $VAR/${VAR} expansion word-splits and EXECUTES the
             # WHOLE value (the inert literal INCLUDED, not just a substitution), so an expanded
             # var preserves WHOLE — this MUST precede the substitution span-scope below.
-            if _var_is_expanded(var_name, command):
+            if _var_is_expanded(var_name, expansions):
                 return match.group(0)  # Preserve — $VAR executes the whole value
             if _has_command_substitution(match.group(0)):
                 # `git -c section.key=value` config injection is OUT OF SCOPE (#11): a git config
@@ -3312,7 +6239,9 @@ def _strip_non_executable_content(command: str) -> str:
         # Single-quoted: guard against bare expansion
         def _strip_var_sq(match: re.Match) -> str:
             var_name = match.group(1)
-            if _var_is_expanded(var_name, command):
+            if _is_graphql_merge_query(match):
+                return match.group(0)  # Preserve — the gh api graphql request runs it
+            if _var_is_expanded(var_name, expansions):
                 return match.group(0)  # Preserve — $VAR executes
             return var_name + "=STRIPPED"
 
@@ -3385,7 +6314,7 @@ def _strip_non_executable_content(command: str) -> str:
             # Check what command precedes the <<< (shell-interpreter guard stays FIRST).
             start = match.start()
             preceding = command[:start].rstrip()
-            if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
+            if _shell_reads_stdin(preceding):
                 return match.group(0)  # Preserve — a shell reads the here-string as stdin
             if not _has_command_substitution(match.group(0)):
                 return "<<<STRIPPED"                  # no-$() unchanged (bareword)
@@ -3408,7 +6337,7 @@ def _strip_non_executable_content(command: str) -> str:
             # Check what command precedes the <<<
             start = match.start()
             preceding = command[:start].rstrip()
-            if re.search(r"\b(?:bash|sh|zsh)\s*$", preceding):
+            if _shell_reads_stdin(preceding):
                 return match.group(0)  # Preserve — content executes
             return "<<<STRIPPED"
 
@@ -3761,6 +6690,11 @@ def _strip_non_executable_content(command: str) -> str:
             # strip removes the signal for a capital-case spelling -> under-block.
             if re.search(r"contents/", span, re.IGNORECASE):
                 return span
+            # GRAPHQL MERGE EXCEPTION: a gh api graphql query that calls a merge mutation
+            # IS the request, so the query value is kept for the read floor. A branch merge
+            # carries its target (`base=`) in the body, so its span is kept too.
+            if _graphql_merge_mutation(span) is not None or _gh_api_branch_merge_leg(span):
+                return span
 
             def _keep_flag_dq(m: re.Match) -> str:
                 # group(1) = the flag (+ key= for form b) up to the opening quote.
@@ -3919,6 +6853,962 @@ def _strip_non_executable_content(command: str) -> str:
     return result
 
 
+# The eval forms whose input the guard can read: `cat` (or `cat -`) emitting exactly one
+# heredoc, inside the eval's own substitution (i), feeding the eval's command (ii), or piped
+# into it (iii). `q` is the substitution's double quote, when it has one.
+_HEREDOC_OPENER = r"<<(?P<dash>-?)[ \t]*(?P<dq>['\"\\]?)(?P<tag>\w+)['\"]?"
+# eval, or a POSIX shell's -c, runs the string it is given.
+_RUNS_STRING = r"(?:eval|(?:ba|da|k|z)?sh[ \t]+-c)"
+_CAT = r"cat(?:[ \t]+-)?[ \t]*"
+_READABLE_EVAL_RES = (
+    re.compile(
+        r"(?<![\w-])" + _RUNS_STRING + r"[ \t]+(?P<q>\"?)\$\([ \t]*" + _CAT + _HEREDOC_OPENER
+        + r"[ \t]*\n(?P<body>.*?)\n(?P=tag)[ \t]*\n[ \t]*\)(?P=q)",
+        re.DOTALL,
+    ),
+    re.compile(
+        r"(?<![\w-])" + _RUNS_STRING + r"[ \t]+(?P<q>\"?)`[ \t]*" + _CAT + _HEREDOC_OPENER
+        + r"[ \t]*\n(?P<body>.*?)\n(?P=tag)[ \t]*\n[ \t]*`(?P=q)",
+        re.DOTALL,
+    ),
+    re.compile(
+        r"(?<![\w-])" + _RUNS_STRING + r"[ \t]+(?P<q>\"?)\$\([ \t]*" + _CAT + r"\)(?P=q)[ \t]*" + _HEREDOC_OPENER
+        + r"[ \t]*\n(?P<body>.*?)\n(?P=tag)(?=[ \t]*(?:\n|$))",
+        re.DOTALL,
+    ),
+    re.compile(
+        r"(?<![\w-])" + _CAT + _HEREDOC_OPENER + r"[ \t]*\|[ \t]*" + _RUNS_STRING + r"[ \t]+(?P<q>\"?)\$\([ \t]*"
+        + _CAT + r"\)(?P=q)[ \t]*\n(?P<body>.*?)\n(?P=tag)(?=[ \t]*(?:\n|$))",
+        re.DOTALL,
+    ),
+)
+
+
+def _unquoted_heredoc_text(body: str) -> tuple[str, bool] | None:
+    """The text an unquoted-delimiter heredoc body gives when its only expansions are
+    backslash escapes (of `$`, a backtick, a backslash, a newline) and plain `$NAME` /
+    `${NAME}` parameters, which stay as written, and whether it holds such a parameter;
+    None for any other expansion."""
+    out, i, n, params = [], 0, len(body), False
+    while i < n:
+        c = body[i]
+        if c == "\\" and i + 1 < n and body[i + 1] in "$`\\\n":
+            out.append("" if body[i + 1] == "\n" else body[i + 1])
+            i += 2
+            continue
+        if c == "`":
+            return None
+        if c == "$":
+            param = re.match(r"\$(?:[A-Za-z_]\w*|\{[A-Za-z_]\w*\})", body[i:])
+            if param is None:
+                return None
+            out.append(param.group(0))
+            params = True
+            i += param.end()
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out), params
+
+
+# A string eval or `sh -c` runs that a substitution gives it; the substitution's body is
+# read by _substitution_printed_text.
+_PRINTED_STRING_RE = re.compile(
+    r"(?<![\w-])" + _RUNS_STRING + r"[ \t]+(?P<q>\"?)\$\((?P<inner>(?:[^()'\"]|'[^']*'|\"[^\"()]*\")*)\)(?P=q)"
+)
+
+
+def _substitution_printed_text(body: str) -> str | None:
+    """The text a substitution body prints whole when all it does is print: an echo or a
+    printf the leg reader can read (quoted words and plain formats included), a shell's -c
+    (its positional words in place) or an eval whose program does one of these, or a
+    sequence of such statements joined by `;`, `&&` or newlines, which prints their outputs
+    in turn. None for anything else, including a body that runs a substitution of its own.
+    The trailing newlines are dropped, as a substitution drops them."""
+    printed = _printed_output(body, 0)
+    return None if printed is None else printed.rstrip("\n")
+
+
+def _printed_output(body: str, depth: int) -> str | None:
+    """What `body` writes when all it does is print (see _substitution_printed_text), or None."""
+    body = body.strip()
+    view = _mask_shell_quotes(body)
+    if "`" in body or any(ch in view for ch in "|<>") or re.search(r"(?<!&)&(?!&)", view):
+        return None
+    cuts = [m.span() for m in re.finditer(r";|&&|\n", view)]
+    if cuts:
+        starts, ends = [0] + [end for _, end in cuts], [start for start, _ in cuts] + [len(body)]
+        outputs = [_printed_output(body[a:b], depth) for a, b in zip(starts, ends) if body[a:b].strip()]
+        return None if not outputs or None in outputs else "".join(o for o in outputs if o is not None)
+    tokens = _shell_tokenize(body)
+    if not tokens:
+        return None
+    if tokens[0] in ("echo", "printf"):
+        return _printed_text(tokens)
+    if depth >= _MAX_WRAPPER_DEPTH:
+        return None
+    program = _string_runner_program(body, os.path.basename(tokens[0]), tokens)
+    return None if program is None else _printed_output(program, depth + 1)
+
+
+# git's global options that take the next word as their value.
+_GIT_VALUE_GLOBALS = frozenset({"-c", "-C", "--git-dir", "--work-tree", "--namespace", "--config-env"})
+# Subcommands git always runs as itself: an alias of one of these names is never used.
+_GIT_ALWAYS_BUILTIN = frozenset(
+    "add am apply archive bisect blame branch bundle cat-file checkout cherry-pick clean clone commit "
+    "config describe diff fetch for-each-ref format-patch gc grep init log ls-files ls-remote merge mv "
+    "notes pull push rebase reflog remote reset restore rev-parse revert rm shortlog show show-ref stash "
+    "status submodule switch symbolic-ref tag update-ref worktree".split()
+)
+
+
+# The directory the command runs in, from the hook payload (set_command_directory); None
+# reads from the process's own directory.
+_COMMAND_DIRECTORY: str | None = None
+
+
+def set_command_directory(cwd: str | None) -> None:
+    """Record the directory the command runs in, from the hook payload, as the base for
+    reading its git aliases."""
+    global _COMMAND_DIRECTORY
+    _COMMAND_DIRECTORY = cwd if isinstance(cwd, str) and cwd else None
+
+
+@functools.lru_cache(maxsize=32)
+def _git_config_aliases(cwd: str | None, git_dir: str | None = None,
+                        env: tuple[tuple[str, str], ...] = ()) -> dict[str, str]:
+    """The aliases in the git config seen from `cwd` (the process's directory when None),
+    with `git_dir` as the repository when given and the git variables `env` set, read with
+    `git config`; empty when it cannot be read in time."""
+    try:
+        done = subprocess.run(["git", *(["--git-dir", git_dir] if git_dir else []), "config", "--get-regexp",
+                               r"^alias\."], cwd=cwd, capture_output=True, text=True, timeout=1.0, check=False,
+                              env={**os.environ, **dict(env)} if env else None)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {}
+    aliases = {}
+    for line in done.stdout.splitlines():
+        key, _, value = line.partition(" ")
+        aliases[key[len("alias."):].lower()] = value
+    return aliases
+
+
+@functools.lru_cache(maxsize=8)
+def _git_commands(cwd: str | None) -> frozenset[str]:
+    """The commands git runs before it looks at aliases (built in or `git-NAME` on its path);
+    empty when they cannot be listed in time."""
+    try:
+        done = subprocess.run(["git", "--list-cmds=main,others"], cwd=cwd,
+                              capture_output=True, text=True, timeout=1.0, check=False)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return frozenset()
+    return frozenset(done.stdout.split())
+
+
+def _git_alias_value(name: str, inline: dict[str, str], cwd: str | None, git_dir: str | None,
+                     env: tuple[tuple[str, str], ...] = ()) -> str | None:
+    """The value of git alias `name` given inline or in the git config seen from `cwd` (with
+    `git_dir` and the git variables `env`), or None, including when `name` is a command git
+    runs as itself."""
+    value = inline.get(name) or _git_config_aliases(cwd, git_dir, env).get(name)
+    return None if not value or name in _git_commands(cwd) else value
+
+
+# The variables that change which git config an alias is read from.
+_GIT_ENV_NAME_RE = re.compile(r"GIT_DIR|GIT_WORK_TREE|GIT_CONFIG\w*")
+# A place git may run with: its directory (None: the command's own) and git variables.
+_GitPlace = tuple["str | None", tuple[tuple[str, str], ...]]
+_COMMAND_PLACE: _GitPlace = (None, ())
+# ponytail: a command moving through more places than this keeps the first ones; only a
+# constructed command reaches it.
+_MAX_GIT_PLACES = 8
+# Set while the union checks a candidate expansion, so that check reads one place only.
+_READING_ONE_PLACE = False
+
+
+def _git_env_assignments(words: list[str]) -> tuple[tuple[str, str], ...]:
+    """The literal assignments of git's config variables among `words`."""
+    found = []
+    for word in words:
+        name, eq, value = word.partition("=")
+        if eq and _GIT_ENV_NAME_RE.fullmatch(name) and not re.search(r"[$`]", value):
+            found.append((name, value))
+    return tuple(found)
+
+
+def _with_places(places: list[_GitPlace], more: list[_GitPlace]) -> list[_GitPlace]:
+    """`places` followed by those of `more` not already in it, at most _MAX_GIT_PLACES."""
+    return list(dict.fromkeys([*places, *more]))[:_MAX_GIT_PLACES]
+
+
+def _structural_view(command: str) -> "str | None":
+    """`command` with quoted spans, `$(…)`, `$((…))`, `<(…)`, `>(…)` and backtick spans
+    blanked, so the parentheses left are the shell's own grouping; None when a span is not
+    closed."""
+    view = list(_mask_shell_quotes(command))
+    i, n = 0, len(command)
+    while i < n:
+        if view[i] == "\\":
+            i += 2
+            continue
+        if "".join(view[i:i + 2]) in ("$(", "<(", ">("):
+            span, end = _extract_dollar_paren(command, i)
+        elif view[i] == "`":
+            span, end = _extract_backtick(command, i)
+        else:
+            i += 1
+            continue
+        if span is None:
+            return None
+        view[i:end] = " " * (end - i)
+        i = end
+    return "".join(view)
+
+
+def _expand_git_alias(leg: str, depth: int = 0, places: "list[_GitPlace] | None" = None) -> str:
+    """`leg` with a git invocation whose subcommand is an alias replaced by what the alias
+    runs: its value in the subcommand's place, or for a `!` alias its shell text followed by
+    the remaining words. The alias is read in each of `places` (the command's own directory
+    when None), moved by `-C`, with the repository a `--git-dir` names and the git variables
+    an assignment or `env` before git sets. Where the places read it differently, the first
+    reading that is guarded is used, else the first. Unchanged when the leg is not such an
+    invocation."""
+    places = places or [_COMMAND_PLACE]
+    if len(places) > 1 and not _READING_ONE_PLACE:
+        readings = list(dict.fromkeys(_expand_git_alias(leg, depth, [place]) for place in places))
+        return next((r for r in readings if _guarded_in_one_place(r)), readings[0])
+    cwd, env = places[0]
+    word = _leg_command_word(leg)
+    tokens = _shell_tokenize(word) if word else None
+    wrapper: list[str] = []
+    if tokens and tokens[0] == "env":
+        k = 1
+        while k < len(tokens) and (tokens[k].startswith("-") or "=" in tokens[k]):
+            k += 2 if tokens[k] in ("-u", "--unset", "-C", "--chdir", "-S", "--split-string") else 1
+        env = (*env, *_git_env_assignments(tokens[1:k]))
+        wrapper, tokens = tokens[:k], tokens[k:]
+    if not word or not tokens or os.path.basename(tokens[0]) != "git" or depth >= _MAX_WRAPPER_DEPTH:
+        return leg
+    env = tuple(dict.fromkeys((*env, *_git_env_assignments(_shell_tokenize(leg[:len(leg) - len(word)]) or []))))
+    git_dir = None
+    inline, i = {}, 1
+    while i < len(tokens) and tokens[i].startswith("-"):
+        if tokens[i] == "-c" and i + 1 < len(tokens) and tokens[i + 1].startswith("alias."):
+            key, _, value = tokens[i + 1][len("alias."):].partition("=")
+            inline[key.lower()] = value
+        if tokens[i] == "-C" and i + 1 < len(tokens):
+            cwd = os.path.join(cwd or _COMMAND_DIRECTORY or os.getcwd(), os.path.expanduser(tokens[i + 1]))
+        if tokens[i] == "--git-dir" and i + 1 < len(tokens):
+            git_dir = tokens[i + 1]
+        if tokens[i].startswith("--git-dir="):
+            git_dir = tokens[i][len("--git-dir="):]
+        i += 2 if tokens[i] in _GIT_VALUE_GLOBALS else 1
+    if i >= len(tokens) or tokens[i] in _GIT_ALWAYS_BUILTIN:
+        return leg
+    value = _git_alias_value(tokens[i].lower(), inline, cwd or _COMMAND_DIRECTORY,
+                             os.path.expanduser(git_dir) if git_dir else None, env)
+    if not value:
+        return leg
+    rest = " ".join(shlex.quote(t) for t in tokens[i + 1:])
+    if value.startswith("!"):
+        expanded = (value[1:] + " " + rest).strip()
+    else:
+        lead = " ".join(shlex.quote(t) for t in [*wrapper, *tokens[:i]])
+        expanded = lead + " " + value + (" " + rest if rest else "")
+    return leg[:len(leg) - len(word)] + _expand_git_alias(expanded, depth + 1, [(cwd, env)])
+
+
+def _guarded_in_one_place(reading: str) -> bool:
+    """Whether one place's reading of a git leg is a guarded command."""
+    global _READING_ONE_PLACE
+    if _READING_ONE_PLACE:
+        return False
+    _READING_ONE_PLACE = True
+    try:
+        return is_dangerous_command(reading)
+    finally:
+        _READING_ONE_PLACE = False
+
+
+def _rewrite_git_aliases(command: str) -> str:
+    """`command` with each git alias invocation replaced by what the alias runs, read in
+    every place git may run with there (see _expand_git_alias). A literal `cd` joined to
+    what follows by `&&` moves there (inside a `( … )` only until it closes); a `cd` joined
+    otherwise, or whose target is not literal, adds its directory to the places, and so
+    does an assignment or `export` of a git config variable on its own leg. When the
+    parentheses cannot be read as the shell's grouping, every leg is read in every place
+    the command reaches."""
+    # A reading checked for one place is already expanded there; reading it again would
+    # judge an alias that place does not define in the command's own directory.
+    if "git" not in command or _READING_ONE_PLACE:
+        return command
+    rewritten, ambiguous, reached = _rewrite_git_aliases_in(command, None)
+    return _rewrite_git_aliases_in(command, reached)[0] if ambiguous else rewritten
+
+
+def _rewrite_git_aliases_in(command: str, every: "list[_GitPlace] | None"):
+    """One pass of _rewrite_git_aliases: the rewritten command, whether its parentheses
+    were ambiguous, and every place reached. With `every`, each leg is read in all of it."""
+    view = _mask_shell_quotes(command)
+    structure = _structural_view(command)
+    ambiguous = structure is None
+    out, last, places, saved, before = [], 0, [_COMMAND_PLACE], [], None
+    reached = list(places)
+    for sep in [*_COMPOUND_OPS_RE.finditer(view), None]:
+        end = sep.start() if sep else len(command)
+        leg, after = command[last:end], sep.group() if sep else None
+        parens = structure[last:end] if structure else ""
+        head = len(parens) - len(parens.lstrip("( \t"))
+        for _ in range(parens[:head].count("(")):
+            saved.append(places)
+        words = _shell_tokenize(leg.strip().strip("() \t")) or []
+        if words[:1] == ["cd"]:
+            # A variable in the target reads each literal value the command may have given it
+            # before the cd; one it does not fix leaves the target unknown.
+            targets: list[str | None] = [words[1] if len(words) == 2 else None]
+            for var in re.finditer(r"\$(?:\{(\w+)\}|(\w+))", targets[0] or ""):
+                values = _assigned_literals(command, var.group(1) or var.group(2), last)
+                targets = list(dict.fromkeys(
+                    None if t is None or v is None else t.replace(var.group(0), v, 1)
+                    for t in targets for v in values))[:_MAX_GIT_PLACES]
+            known = [t for t in targets if t is not None and not any(ch in t for ch in "$`*?[")]
+            unknown = len(known) < len(targets)
+            # `cd` moves logically, as the shell does: `a/../b` is `b`.
+            moved: list[_GitPlace] = [
+                (os.path.normpath(os.path.join(cwd or _COMMAND_DIRECTORY or os.getcwd(), os.path.expanduser(t))), env)
+                for t in known for cwd, env in places]
+            if unknown:
+                moved += [(None, env) for _, env in places]
+            certain = len(known) == 1 and not unknown and after == "&&" and before in (None, ";", "&&", "\n")
+            places = moved if certain else _with_places(places, moved)
+        elif words and words[0] in ("export", "declare", "typeset", "readonly") or (
+                words and all(re.match(r"[A-Za-z_]\w*=", w) for w in words)):
+            assigned = _git_env_assignments(words)
+            if assigned:
+                places = _with_places(places, [(cwd, (*env, *assigned)) for cwd, env in places])
+        reached = _with_places(reached, places)
+        # A `)` closing nothing after at most one word ends a `case` pattern: the command
+        # starts after it. The leg runs before the parentheses after its first word close.
+        start, here = 0, places
+        for k, ch in enumerate(parens[head:], head):
+            if ch == "(":
+                saved.append(places)
+            elif ch == ")" and saved:
+                places = saved.pop()
+            elif ch == ")":
+                ambiguous = True
+                if len(re.sub(r"^\s*case\s+\S+\s+in\b", "", leg[start:k]).split()) <= 1:
+                    start = k + 1
+        out.append(leg[:start] + _expand_git_alias(leg[start:], places=every or here))
+        if sep:
+            out.append(command[sep.start():sep.end()])
+            last, before = sep.end(), after
+    return "".join(out), ambiguous or bool(saved), reached
+
+
+# A `set --` leg giving the positional words literally, ended by `;`, `&&` or a newline.
+_SET_POSITIONALS_RE = re.compile(r"(?:^|(?<=[;&\n]))[ \t]*set[ \t]+--(?P<words>[^;&|\n]*)(?:;|&&|\n)")
+
+
+def _rewrite_set_positionals(command: str) -> str:
+    """`command` with the text after a literal `set -- WORDS` reading those words for its
+    positional parameters, so `set -- "gh pr merge 5"; eval "$1"` reads as the eval of
+    `gh pr merge 5`, and the words themselves dropped from the `set` leg. Unchanged when
+    the words cannot be read."""
+    m = _SET_POSITIONALS_RE.search(command)
+    words = _shell_tokenize(m.group("words")) if m else None
+    if m is None or words is None:
+        return command
+    rest = _with_positional_words(command[m.end():], ["sh"] + words)
+    # The words are data once read in; left in place they would read as a command too.
+    return command if rest is None else command[:m.start("words")] + command[m.end("words"):m.end()] + rest
+
+
+# NAME=$(…) or NAME="$(…)": an assignment of a substitution's output.
+_PRINTED_ASSIGNMENT_RE = re.compile(
+    r"(?<!\w)(?P<name>[A-Za-z_]\w*)=(?P<q>\"?)\$\((?P<inner>(?:[^()'\"]|'[^']*'|\"[^\"()]*\")*)\)(?P=q)"
+)
+
+
+def _rewrite_printed_assignments(command: str) -> str:
+    """`command` with each variable assigned a substitution that only prints given the
+    printed text as a literal value instead, so `x=$(echo gh pr merge 5); $x` reads as the
+    literal assignment it amounts to."""
+    def _literal(m: re.Match) -> str:
+        printed = _substitution_printed_text(m.group("inner"))
+        return m.group(0) if printed is None else m.group("name") + "=" + shlex.quote(printed)
+
+    return _PRINTED_ASSIGNMENT_RE.sub(_literal, command)
+
+
+# `eval "$NAME"` or `eval $NAME`, the whole of an eval leg.
+_VARIABLE_EVAL_RE = re.compile(
+    r"(?<![\w-])eval[ \t]+(?P<q>\"?)\$(?:\{(?P<braced>[A-Za-z_]\w*)\}|(?P<bare>[A-Za-z_]\w*))(?P=q)"
+    r"(?=[ \t]*(?:$|[;&|)\n]))"
+)
+
+
+# A leg made only of literal assignments, which always succeeds.
+_LITERAL_ASSIGNMENTS_LEG_RE = re.compile(
+    r"[ \t]*(?:[A-Za-z_]\w*=(?:'[^']*'|\"[^\"$`\\]*\"|[^\s;&|$`'\"\\()]*)[ \t]*)+")
+
+
+def _assignment_is_conditional(command: str, start: int) -> bool:
+    """Whether the leg starting at `start` follows `&&` after a leg that is not a literal
+    assignment, so it runs only when that leg's test passes. (A leg after `||` is caught
+    by its callers' pipe check.)"""
+    view = _mask_shell_quotes(command)[:start].rstrip(" \t")
+    if not view.endswith("&&"):
+        return False
+    begin = max(view.rfind(sep, 0, len(view) - 2) for sep in (";", "\n", "(", "|"))
+    inner, raw = view[begin + 1:len(view) - 2], command[begin + 1:len(view) - 2]
+    cuts = [m.span() for m in re.finditer("&&", inner)]
+    starts, ends = [0, *[end for _, end in cuts]], [*[start for start, _ in cuts], len(inner)]
+    return not all(_LITERAL_ASSIGNMENTS_LEG_RE.fullmatch(raw[a:b]) for a, b in zip(starts, ends))
+
+
+def _literal_assignments(command: str, name: str, exported: bool = False) -> "list[re.Match] | None":
+    """The literal assignments of `name` that are legs of their own in `command`, with the
+    value in group `v` (with `exported`, `export NAME=…` and a `declare`, `typeset`,
+    `local` or `readonly` assignment count too, with or without flags); None when `name`
+    is also assigned some other way."""
+    assignment = (r"(?:^|(?<=[;&|(\n]))[ \t]*"
+                  + (r"(?:(?:export|declare|typeset|local|readonly)(?:[ \t]+-[A-Za-z]+)*[ \t]+)?" if exported else "")
+                  + name
+                  + r"=(?P<v>'[^']*'|\"[^\"$`\\]*\"|[^\s;&|$`'\"\\()]*)(?=[ \t]*(?:$|[;&|\n]))")
+    found = list(re.finditer(assignment, command))
+    return found if len(found) == len(re.findall(r"(?<![\w$])" + name + r"=", command)) else None
+
+
+def _assigned_literals(command: str, name: str, before: int) -> "list[str | None]":
+    """The values `name` may hold at offset `before`, from its literal assignments (or
+    `export`s) in `command` before it: the last one that always runs, and each after it
+    that may not (behind a test, after `||`, in a pipeline or a subshell). None stands
+    for a value the command does not fix (no assignment that always runs, or `name` also
+    assigned some other way)."""
+    found = [a for a in _literal_assignments(command, name, exported=True) or [] if a.end() <= before]
+    if not found:
+        return [None]
+    maybe = [re.search(r"(?:\||\()[ \t]*$", command[:a.start()]) is not None
+             or _assignment_is_conditional(command, a.start()) for a in found]
+    first = max((k for k, may in enumerate(maybe) if not may), default=None)
+    values: list[str | None] = [None] if first is None else []
+    for a in found[first or 0:]:
+        value = a.group("v")
+        values.append(value[1:-1] if value[:1] in ("'", '"') else value)
+    return list(dict.fromkeys(values))
+
+
+def _rewrite_variable_evals(command: str) -> str:
+    """`command` with each eval of a variable assigned earlier in the command a literal value
+    replaced by the eval of that value: kept whole when the expansion is quoted, split into
+    words when it is not. Every assignment of the variable must be a leg of its own; when
+    there are several, the last one before the eval that runs whatever came before it
+    gives the value, and each later one that may not run (after `||`, after `&&` behind a
+    test, in a pipeline or a subshell) is an alternative to it: the eval then reads as an
+    `if` whose branches eval each value. Unchanged otherwise."""
+    if "eval" not in command:
+        return command
+
+    def _value(m: re.Match) -> str:
+        name = m.group("braced") or m.group("bare")
+        everywhere = _literal_assignments(command, name)
+        found = [a for a in everywhere or [] if a.end() <= m.start()]
+        if not everywhere or not found:
+            return m.group(0)
+        # Several assignments: one in a pipeline or a subshell, or behind a test, may
+        # leave the value before it in place.
+        maybe = [len(everywhere) > 1 and (re.search(r"(?:\||\()[ \t]*$", command[:a.start()]) is not None
+                                          or _assignment_is_conditional(command, a.start())) for a in found]
+        first = max((k for k, may in enumerate(maybe) if not may), default=0)
+        values = []
+        for a in found[first:]:
+            value = a.group("v")
+            value = value[1:-1] if value[:1] in ("'", '"') else value
+            values.append("eval " + shlex.quote(value if m.group("q") else " ".join(value.split())))
+        values = list(dict.fromkeys(values))
+        if len(values) == 1:
+            return values[0]
+        branches = "".join(f"; elif :; then {v}" for v in values[1:-1])
+        return f"if :; then {values[0]}{branches}; else {values[-1]}; fi"
+
+    return _VARIABLE_EVAL_RE.sub(_value, command)
+
+
+# An eval leg whose words are literal: single-quoted, double-quoted with no command
+# substitution, or bare words with no quoting or expansion.
+_LITERAL_EVAL_RE = re.compile(
+    r"(?:^|(?<=[;&|(\n]))(?P<lead>[ \t]*)eval(?P<args>(?:[ \t]+(?:'[^']*'|\"[^\"`\\$]*(?:\$\{?\w+\}?[^\"`\\$]*)*\""
+    r"|[^\s;&|()<>'\"`\\$]+))+)(?=[ \t]*(?:$|[;&|)\n]))"
+)
+
+
+def _rewrite_literal_evals(command: str) -> str:
+    """`command` with each eval of literal words replaced by the command line eval runs:
+    the words unquoted and joined by spaces (`eval 'git push origin --delete x'` reads as
+    `git push origin --delete x`). A `$NAME` inside double quotes stays as written, as a
+    bare command's is read. An eval whose guarded command is typed as it stands keeps
+    that reading."""
+    if "eval" not in command:
+        return command
+    view = _mask_shell_quotes(command)
+
+    def _run(m: re.Match) -> str:
+        words = _shell_tokenize(m.group("args"))
+        if view[m.start("args") - 4] != "e" or not words:
+            return m.group(0)
+        # An eval whose guarded command is already typed as written keeps its reading.
+        if detect_command_operation_type(m.group(0).strip()) is not None:
+            return m.group(0)
+        return m.group("lead") + " ".join(words)
+
+    return _LITERAL_EVAL_RE.sub(_run, command)
+
+
+# A trap leg whose handler is a literal string: single-quoted, double-quoted with no
+# substitution or escape (a `$NAME` stays as written, as in a bare command), or one
+# double-quoted substitution.
+_LITERAL_TRAP_RE = re.compile(
+    r"(?:^|(?<=[;&|(\n]))(?P<lead>[ \t]*(?:(?:do|then|else|\{)[ \t]+)*)(?P<kw>trap)(?:[ \t]+--)?"
+    r"[ \t]+(?P<handler>'[^']*'|\"\$\((?:[^()'\"]|'[^']*'|\"[^\"()]*\")*\)\"|\"`[^`\"]*`\""
+    r"|\"[^\"`\\$]*(?:\$\{?\w+\}?[^\"`\\$]*)*\")(?P<signals>(?:[ \t]+[A-Za-z0-9_+-]+)+)(?=[ \t]*(?:$|[;&|)\n]))"
+)
+
+
+def _rewrite_trap_handlers(command: str) -> str:
+    """`command` with each trap of a literal handler string that runs a guarded command
+    read as a function holding the handler, which the trap then runs: `trap 'git push -f
+    origin main' EXIT` reads as `_trap1() { git push -f origin main; }; trap _trap1 EXIT`.
+    A handler that is one quoted variable runs the literal value assigned to it before
+    the trap (_assigned_literals), or reads as an `if` over each value it may hold there.
+    A handler that is one substitution runs what it prints (_substitution_printed_text).
+    The handler is code the shell runs when the trap fires, so it is judged and counted as
+    a function body (_fan_out_extra counts a handler on a signal other than EXIT as
+    repeating). A handler that runs nothing guarded (`rm -f tmp`) is left as data."""
+    if "trap" not in command:
+        return command
+    view = _mask_shell_quotes(command)
+    names = iter(range(1, len(command)))
+
+    def _read(m: re.Match) -> str:
+        body = m.group("handler")[1:-1].strip().rstrip(";").rstrip()
+        # `trap "$(printf %s '…')" EXIT` runs what the substitution prints, as an eval of it.
+        sub = re.fullmatch(r"\$\((.*)\)|`(.*)`", body, re.DOTALL) if m.group("handler")[0] == '"' else None
+        if sub:
+            body = _substitution_printed_text(sub.group(1) if sub.group(1) is not None else sub.group(2)) or ""
+        # `trap "$NAME" EXIT` runs the literal value NAME holds there.
+        var = re.fullmatch(r"\$(?:\{(\w+)\}|(\w+))", body) if m.group("handler")[0] == '"' and not sub else None
+        if var:
+            values = _assigned_literals(command, var.group(1) or var.group(2), m.start())
+            branches = "".join(f"; elif :; then {v}" for v in values[1:-1])
+            body = ("" if None in values else values[0] if len(values) == 1
+                    else f"if :; then {values[0]}{branches}; else {values[-1]}; fi")
+        if view[m.start("kw")] != "t" or not body or not is_dangerous_command(body):
+            return m.group(0)
+        name = f"_trap{next(names)}"
+        return f"{m.group('lead')}{name}() {{ {body}; }}; trap {name}{m.group('signals')}"
+
+    return _LITERAL_TRAP_RE.sub(_read, command)
+
+
+def _rewrite_readable_evals(command: str) -> str:
+    """`command` with each readable eval replaced by the text it runs: the body as written
+    when the substitution is double-quoted, or its words joined by single spaces when it is
+    unquoted (word splitting). Under an unquoted delimiter the body is read as the shell
+    expands it: a backslash escape gives its character and a plain `$NAME` stays as written.
+    Left as it is, so refused: such a body holding any other expansion (a substitution,
+    `${…}` with an operator, arithmetic), or a plain parameter while the text it reads as is
+    not guarded on its own; a body holding its own terminator line, where
+    the shell ends the heredoc first; an unquoted substitution whose body holds a glob
+    character, which the shell may expand to file names."""
+    command = _PRINTED_STRING_RE.sub(lambda m: _substitution_printed_text(m.group("inner")) or m.group(0),
+                                     _rewrite_literal_evals(_rewrite_variable_evals(_rewrite_printed_assignments(
+                                         _rewrite_set_positionals(_rewrite_git_aliases(_rewrite_trap_handlers(command)))))))
+    if "<<" not in command or not re.search(r"(?<![\w-])" + _RUNS_STRING, command):
+        return command
+
+    def _executed(m: re.Match) -> str:
+        body = m.group("body")
+        if not m.group("dq"):
+            read = _unquoted_heredoc_text(body)
+            # A parameter the heredoc expands is parsed again by eval, so its value could be
+            # code: such a body is read only when what it reads as is guarded on its own.
+            if read is None or (read[1] and detect_command_operation_type(read[0]) is None):
+                return m.group(0)
+            body = read[0]
+        tab = "\t" if m.group("dash") else ""
+        if any(line.lstrip(tab) == m.group("tag") for line in body.split("\n")):
+            return m.group(0)
+        if not m.group("q") and any(ch in body for ch in "*?["):
+            return m.group(0)
+        return body if m.group("q") else " ".join(body.split())
+
+    for pattern in _READABLE_EVAL_RES:
+        command = pattern.sub(_executed, command)
+    return command
+
+
+def rewritten_executed_command(command: str) -> str | None:
+    """The command as the guard judges it after its rewrites (each readable eval, and each
+    run of a file written earlier, replaced in place by the text it runs, then each literal
+    variable expanded; a script given a whole guarded command as one argument read as that
+    command), or None when nothing was rewritten. When nothing else is rewritten, a value a
+    literal variable keeps executing at a site the guard cannot read (an unknown program's
+    argument) is reported as the command: the value itself, whole. The approval side
+    reads it so the refusal and the approval share one rewrite. Never raises."""
+    try:
+        # A script given a whole guarded command, literally or through a literal variable,
+        # is judged as that command before a file run's rewrite drops its arguments.
+        script = (_script_argv_guarded_command(command)
+                  or _script_argv_guarded_command(_expand_literal_variables(command)))
+        if script is not None:
+            return script
+        rewritten = _rewrite_file_runs(_rewrite_readable_evals(command))
+        kept: list[str] = []
+        expanded = _expand_literal_variables(rewritten, kept)
+        if expanded == rewritten == command and kept:
+            return "; ".join(dict.fromkeys(kept))
+        rewritten = _script_argv_guarded_command(expanded) or expanded
+    except Exception:  # noqa: BLE001 - a reader for the approval side must not raise
+        return None
+    return rewritten if rewritten != command else None
+
+
+def unreadable_evald_heredoc(command: str) -> bool:
+    """True when an eval fed by a heredoc runs a body the guard cannot read, so the command
+    is refused on that alone, and nothing was rewritten (`rewritten_executed_command` is
+    None). The approval side binds such a command by its exact text. Never raises."""
+    try:
+        return _has_eval_with_heredoc(command) and rewritten_executed_command(command) is None
+    except Exception:  # noqa: BLE001 - a reader for the approval side must not raise
+        return False
+
+
+# A file written and then run in the same command. Writers whose text the guard can read:
+# echo, printf (`%s`/`%b` formats), `… | tee [-a] F` after one of those, and a heredoc fed to
+# `cat` redirected to F (`cat > F <<TAG`, `cat <<TAG > F`) or to `tee [-a] F <<TAG`.
+_FILE_RUN_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+_FILE_HEREDOC_WRITER_RE = re.compile(
+    r"(?:^|(?<=[;&|\n]))[ \t]*(?P<head>cat|tee)(?![\w-])(?P<before>[^\n<]*)"
+    r"<<(?P<dash>-?)[ \t]*(?P<q>['\"\\]?)(?P<tag>\w+)['\"]?(?P<after>[^\n]*)\n"
+    r"(?P<body>.*?)\n?(?P=tag)(?=[ \t]*(?:\n|$))",
+    re.DOTALL | re.MULTILINE,
+)
+
+
+def _heredoc_write_target(m: re.Match) -> tuple[str, str] | None:
+    """(file, mode) a heredoc writer line writes: `cat`'s `>`/`>>` redirect, or `tee`'s
+    first file argument (`>>` with -a). None when the line names no file this can read."""
+    words = _shell_tokenize(m.group("before") + " " + m.group("after"))
+    if not words:
+        return None
+    if m.group("head") == "cat":
+        for k, word in enumerate(words):
+            redirect = re.match(r"^(>>?)(.*)$", word)
+            if redirect:
+                target = redirect.group(2) or (words[k + 1] if k + 1 < len(words) else "")
+                return (target, redirect.group(1)) if target else None
+        return None
+    files = [w for k, w in enumerate(words)
+             if not w.startswith("-") and not re.match(r"^\d*>", w)
+             and not (k and re.match(r"^\d*>>?$", words[k - 1]))]
+    if not files:
+        return None
+    return files[0], ">>" if any(w in ("-a", "--append") for w in words) else ">"
+_PRINTF_READABLE_FORMAT_RE = re.compile(r"(?:[^%\\]|%[sb]|\\[nt\\])*")
+
+
+def _file_key(token: str) -> str:
+    return token[2:] if token.startswith("./") else token
+
+
+def _redirect_target(tokens: list) -> "tuple[list, str | None, str | None]":
+    """The tokens without their output redirection, the redirected file and its mode
+    (`>` or `>>`). A file descriptor redirect (`2>`, `>&2`) is left in place."""
+    words, target, mode = [], None, None
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        m = re.fullmatch(r"(>>?)(.*)", tok)
+        if m:
+            mode = m.group(1)
+            target = m.group(2) or (tokens[i + 1] if i + 1 < len(tokens) else None)
+            i += 1 if m.group(2) else 2
+            continue
+        words.append(tok)
+        i += 1
+    return words, target, mode
+
+
+def _printed_text(words: list) -> str | None:
+    """What an echo or printf leg prints, or None when the guard cannot read it."""
+    if words[0] == "echo":
+        args, newline, escapes = words[1:], True, False
+        while args and re.fullmatch(r"-[neE]+", args[0]):
+            newline = newline and "n" not in args[0]
+            escapes = "e" in args[0] or (escapes and "E" not in args[0])
+            args = args[1:]
+        text = " ".join(args)
+        if escapes:
+            text = text.replace("\\n", "\n").replace("\\t", "\t")
+        return text + ("\n" if newline else "")
+    if len(words) < 2 or not _PRINTF_READABLE_FORMAT_RE.fullmatch(words[1]):
+        return None
+    fmt = words[1].replace("\\n", "\n").replace("\\t", "\t").replace("\\\\", "\\")
+    slots = len(re.findall(r"%[sb]", fmt))
+    args = words[2:]
+    if not slots:
+        return fmt
+    out = []
+    for k in range(0, max(len(args), 1), slots):
+        chunk = args[k:k + slots] + [""] * (slots - len(args[k:k + slots]))
+        out.append(re.sub(r"%[sb]", lambda _m, it=iter(chunk): next(it), fmt))
+    return "".join(out)
+
+
+def _fill_substitutions(view: str) -> str:
+    """`view` with each unquoted `$(…)` or backtick span filled with `_`, so legs slice
+    around it as one word. Same length; an unterminated span fills the rest."""
+    out, i, n = list(view), 0, len(view)
+    while i < n:
+        if view[i] == "\\":
+            i += 2
+            continue
+        if view.startswith("$(", i):
+            _, end = _extract_dollar_paren(view, i)
+        elif view[i] == "`":
+            _, end = _extract_backtick(view, i)
+        else:
+            i += 1
+            continue
+        out[i:end] = "_" * (end - i)
+        i = end
+    return "".join(out)
+
+
+_FILE_RUN_TAG = "PACT_FILE_RUN"
+
+
+def _rewrite_file_runs(command: str) -> str:
+    """`command` with each run of a file it wrote earlier replaced, in place, by the text
+    written to that file (`echo 'gh pr merge 5' > f; bash f` is judged as `gh pr merge 5`;
+    an interpreter's run, `python3 f`, as its program read on stdin from a heredoc).
+    Writes and runs count only in command position on the top level of the command; a
+    `cd`, a compound command, or a leg the guard cannot tokenize leaves the command as it
+    is. A write holding a substitution or an expansion is read as its literal text, so a
+    guarded command written beside it is still judged where the file runs."""
+    if ">" not in command and "tee" not in command:
+        return command
+    flat = list(command)
+    writes_at: dict[int, tuple] = {}
+    bodies: list[tuple[int, int]] = []
+    for m in _FILE_HEREDOC_WRITER_RE.finditer(command):
+        target = _heredoc_write_target(m)
+        if target is None:
+            continue
+        bodies.append((m.start("body"), m.end("body")))
+        body = m.group("body")
+        if m.group("dash"):
+            body = "\n".join(line.lstrip("\t") for line in body.split("\n"))
+        writes_at[m.start("head")] = (_file_key(target[0]), target[1], body + "\n")
+        start = command.index("\n", m.end("tag"))
+        flat[start:m.end()] = " " * (m.end() - start)
+    flat_text = "".join(flat)
+    view = _fill_substitutions(_leg_slicing_view(flat_text))
+    if _COMPOUND_OPEN_RE.search(view):
+        return command
+    legs, last, seps = [], 0, []
+    for sep in _COMPOUND_OPS_RE.finditer(view):
+        legs.append((last, sep.start()))
+        seps.append(sep.group(0).strip())
+        last = sep.end()
+    legs.append((last, len(command)))
+    seps.append("")
+    files: dict[str, list] = {}
+    replacements: list[tuple[int, int, str]] = []
+    printed = None
+    for k, (a, b) in enumerate(legs):
+        text = flat_text[a:b]
+        tokens = _shell_tokenize(text)
+        if tokens is None:
+            return command
+        if not tokens:
+            continue
+        head = tokens[0]
+        here = next((v for pos, v in writes_at.items() if a <= pos < b), None)
+        if head == "cd":
+            return command
+        if here is not None:
+            key, mode, body = here
+            files[key] = ([] if mode == ">" else files.get(key, [])) + [body]
+            printed = None
+            continue
+        if head in ("echo", "printf"):
+            words, target, mode = _redirect_target(tokens)
+            text_out = _printed_text(words)
+            if target is not None:
+                key = _file_key(target)
+                files[key] = ([] if mode == ">" else files.get(key, [])) + [text_out]
+                printed = None
+            else:
+                printed = text_out if seps[k] == "|" else None
+            continue
+        if head == "tee" and k and seps[k - 1] == "|":
+            names = [t for t in tokens[1:] if not t.startswith("-")]
+            append = any(t in ("-a", "--append") for t in tokens[1:])
+            for name in names:
+                key = _file_key(name)
+                files[key] = (files.get(key, []) if append else []) + [printed]
+            printed = None
+            continue
+        printed = None
+        run_file, span, interpreter = None, (a, b), None
+        if head in _FILE_RUN_SHELLS and len(tokens) == 3 and tokens[1] == "<":
+            run_file = tokens[2]
+        elif head in ("source", ".") and len(tokens) == 2:
+            run_file = tokens[1]
+        elif head == "cat" and len(tokens) == 2 and seps[k] == "|" and k + 1 < len(legs):
+            nxt = _shell_tokenize(flat_text[legs[k + 1][0]:legs[k + 1][1]]) or []
+            if len(nxt) == 1 and nxt[0] in _FILE_RUN_SHELLS:
+                run_file, span = tokens[1], (a, legs[k + 1][1])
+        elif len(tokens) == 1 and _file_key(head) in files:
+            run_file = head
+        elif head in _FILE_RUN_SHELLS or _INTERPRETER_HEADS.match(os.path.basename(head)):
+            shell = head in _FILE_RUN_SHELLS
+            script = _launched_script(tokens, _SHELL_INLINE_FLAG_RE if shell else _INLINE_PROGRAM_FLAG_RE)
+            if script is not None:
+                run_file = tokens[script]
+                if shell and run_file.startswith("<") and len(run_file) > 1:
+                    run_file = run_file[1:]
+                interpreter = None if shell else head
+        if run_file is None:
+            continue
+        written = files.get(_file_key(run_file))
+        if written is None:
+            continue
+        readable = "".join(part for part in written if part is not None).rstrip("\n")
+        if interpreter is not None:
+            # An interpreter runs the file as its own program: judged as that program
+            # read on stdin from a quoted heredoc, where the interpreter rules read it.
+            if _FILE_RUN_TAG in readable.split("\n"):
+                continue
+            readable = f"{interpreter} <<'{_FILE_RUN_TAG}'\n{readable}\n{_FILE_RUN_TAG}"
+            if span[1] < len(command):
+                readable += "\n"
+        lead = len(text) - len(text.lstrip())
+        replacements.append((span[0] + lead, span[1], readable))
+    if not replacements:
+        return command
+    # The text a heredoc wrote now stands where the file runs, so the heredoc's own body
+    # is data: drop it, so the rewrite holds each command it runs once.
+    replacements += [(start, end, "") for start, end in bodies]
+    out = command
+    for start, end, literal in sorted(replacements, reverse=True):
+        out = out[:start] + literal + out[end:]
+    return out
+
+
+# A shell flag that gives the command on the command line (-c) or reads it from stdin (-s).
+_SHELL_INLINE_FLAG_RE = re.compile(r"^-$|^-[A-Za-z]*[cs]")
+
+
+# Interpreter flags known to take a value, by family: given separately (`-W ignore`) or
+# attached (`-Wignore`, `--max-old-space-size=4096`). Any other flag takes none.
+_VALUE_FLAGS = (
+    (re.compile(r"^(?:python|pypy)"), ("-W", "-X")),
+    (re.compile(r"^(?:node|nodejs)"), ("-r", "--require", "--max-old-space-size")),
+    (re.compile(r"^ruby"), ("-I", "-r")),
+    (re.compile(r"^perl"), ("-I", "-M", "-m")),
+)
+
+
+def _launched_script(tokens: list, inline_flag: re.Pattern) -> int | None:
+    """The index of the script path an interpreter or shell launch runs: the first word
+    after its flags, with the arguments after it. None when a flag gives the program
+    inline or on stdin instead (`inline_flag`), or no word follows the flags. A known
+    value-taking flag's value (`_VALUE_FLAGS`) is skipped; any other flag's separate
+    value before the path is read as the path."""
+    head = os.path.basename(tokens[0])
+    flags = next((names for family, names in _VALUE_FLAGS if family.match(head)), ())
+    k = 1
+    while k < len(tokens):
+        tok = tokens[k]
+        if not tok.startswith("-"):
+            return k
+        if tok in flags:
+            k += 2                            # the flag's separate value
+            continue
+        if any(tok.startswith(f) for f in flags):
+            k += 1                            # the value attached
+            continue
+        if inline_flag.match(tok):
+            return None
+        k += 1
+    return None
+
+
+def _script_launch_args(tokens: list) -> int | None:
+    """The index where a script-file launch's own arguments start, or None when `tokens`
+    is no script-file launch: `./x`, `../x`, a path to a file with a script extension, or
+    an interpreter given a script path (`_launched_script`)."""
+    head = os.path.basename(tokens[0])
+    if _INTERPRETER_HEADS.match(head):
+        script = _launched_script(tokens, _INLINE_PROGRAM_FLAG_RE)
+        if script is not None and _SCRIPT_PATH_RE.search(tokens[script]):
+            return script + 1
+        return None
+    if tokens[0].startswith(("./", "../")) or ("/" in tokens[0] and _SCRIPT_PATH_RE.search(head)):
+        return 1
+    return None
+
+
+def _script_argv_guarded_command(command: str, depth: int = 0) -> str | None:
+    """The guarded command a script-file launch is given whole, as one argument
+    (`./retry.sh "gh pr merge 5"`, `python3 retry.py "gh pr merge 5"`), or None. A
+    script-file launch is `./x`, `../x`, a path to a file with a script extension, or an
+    interpreter given a script path. The argument must itself be a guarded gh or git
+    command; one that is a flag's value (`--pattern 'gh pr merge'`) or that only names a
+    command in prose is not."""
+    view = _leg_slicing_view(command)
+    last, spans = 0, []
+    for sep in _COMPOUND_OPS_RE.finditer(view):
+        spans.append((last, sep.start()))
+        last = sep.end()
+    spans.append((last, len(command)))
+    for a, b in spans:
+        word = _leg_command_word(command[a:b])
+        tokens = _shell_tokenize(word) if word else None
+        if not tokens:
+            continue
+        start = _script_launch_args(tokens)
+        args: list[str] = [] if start is None else tokens[start:]
+        for k, arg in enumerate(args):
+            if k and args[k - 1].startswith("-"):
+                continue                      # a flag's value
+            arg_tokens = _shell_tokenize(arg) or []
+            if (arg_tokens and os.path.basename(arg_tokens[0]) in ("gh", "git")
+                    and _is_dangerous_at_depth(arg, depth + 1)):
+                return arg
+    return None
+
+
+def _eval_heredoc_verdict(command: str, depth: int) -> bool | None:
+    """None when no eval runs a heredoc. Otherwise whether the command is dangerous with
+    each readable eval (`_READABLE_EVAL_RES`) replaced, in place, by the text it runs: the
+    body as written when the substitution is double-quoted, or its words joined by single
+    spaces when it is unquoted (word splitting). Judging in place keeps the variables
+    assigned earlier in the command and the output's routing. A body with an unquoted
+    delimiter must not expand (`$`, backtick, backslash). Any eval fed by a heredoc the
+    guard cannot read (another reader, a file, several heredocs) is refused."""
+    if not _has_eval_with_heredoc(command):
+        return None
+
+    rewritten = _rewrite_readable_evals(command)
+    if _has_eval_with_heredoc(rewritten):
+        return True
+    return _is_dangerous_at_depth(rewritten, depth + 1)
+
+
 def _has_eval_with_heredoc(command: str) -> bool:
     """Detect eval (or backtick) command-substitution that wraps a heredoc.
 
@@ -3938,16 +7828,139 @@ def _has_eval_with_heredoc(command: str) -> bool:
     legitimate operator command flows do not use eval-wrapped heredoc as
     a delivery mechanism, so the false-positive risk is low.
 
-    Detects both the modern ``$(...)`` substitution form and the legacy
-    backtick form.
+    Judged on the executed surface (_eval_surface_view): an ``eval`` word in
+    command position, fed by a heredoc that also executes. The heredoc feeds
+    the eval when it is (i) inside the eval's ``$(...)``/backtick argument,
+    (ii) on the eval's own simple command (``eval "$(cat)" <<EOF``), (iii) on
+    an earlier leg of the eval's pipeline (``cat <<EOF | eval "$(cat)"``), or
+    (iv) written to a file earlier in the command (``cat > f <<EOF``, ``cat >>
+    f <<``, ``tee f <<``) with the eval after it. An eval word that only sits
+    in data (a quoted string, a comment, a non-shell heredoc body) never fires.
+    An unbalanced substitution after an executed eval fires (fail closed).
     """
-    # eval $(...) with a heredoc anywhere within the substitution
-    if re.search(r"\beval\s+\$\(", command) and "<<" in command:
-        return True
-    # eval `...` (backtick) wrapping a heredoc
-    if re.search(r"\beval\s+`[^`]*<<", command):
-        return True
+    if "eval" not in command or "<<" not in command:
+        return False
+    view = _eval_surface_view(command)
+    for m in _EXECUTED_EVAL_RE.finditer(view):
+        if _eval_is_fed_by_heredoc(view, m.start("eval"), m.end("eval")):
+            return True
     return False
+
+
+# An `eval` word in command position on the eval surface: at the start of a line,
+# or after a command separator, `(`, a backtick or `$(`, optionally after `builtin`
+# or `command`.
+_EXECUTED_EVAL_RE = re.compile(
+    r"(?:^|(?<=[;&|(\n`]))[ \t]*(?:(?:builtin|command)[ \t]+)*(?P<eval>eval)(?![\w-])",
+    re.MULTILINE,
+)
+
+# A heredoc written to a file: `cat > F <<`, `cat >> F <<`, `tee F <<`, in any order
+# of the redirect and the operator within one simple command.
+_HEREDOC_TO_FILE_RE = re.compile(
+    r"(?:^|(?<=[;&|(\n`]))[ \t]*(?:"
+    r"cat\b[^\n;&|]*?>>?[ \t]*[^\s(&][^\n;&|]*?<<|cat\b[^\n;&|]*?<<[^\n;&|]*?>>?[ \t]*[^\s(&]"
+    r"|tee\b[^\n;&|<]*?[ \t][^-\s<][^\n;&|]*?<<|tee\b[^\n;&|]*?<<[^\n;&|]*?[ \t][^-\s<]"
+    r")",
+    re.MULTILINE,
+)
+
+
+def _mask_quotes_keeping_substitutions(command: str) -> str:
+    """_mask_shell_quotes, except that an unescaped ``$(...)`` or backtick span
+    inside a DOUBLE-quoted span stays visible: the shell runs it. Same length as
+    the input. A backslash-escaped ``\\$(`` or backtick inside double quotes is
+    literal and stays masked; single-quoted text is masked whole."""
+    masked = _mask_shell_quotes(command)
+    if "$(" not in command and "`" not in command:
+        return masked
+    out = list(masked)
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "'":
+            j = command.find("'", i + 1)
+            if j == -1:
+                break
+            i = j + 1
+            continue
+        if c != '"':
+            i += 1
+            continue
+        j = i + 1
+        while j < n and command[j] != '"':
+            if command[j] == "\\":
+                j += 2
+                continue
+            if command[j] == "$" and j + 1 < n and command[j + 1] == "(":
+                _, end = _extract_dollar_paren(command, j)
+                end = min(end, n)
+                out[j:end] = command[j:end]
+                j = end
+                continue
+            if command[j] == "`":
+                _, end = _extract_backtick(command, j)
+                end = min(end, n)
+                out[j:end] = command[j:end]
+                j = end
+                continue
+            j += 1
+        i = j + 1
+    return "".join(out)
+
+
+def _eval_surface_view(command: str) -> str:
+    """The executed surface for the eval+heredoc rule: non-shell heredoc bodies
+    excised (opener line and closing marker kept; a shell-fed body stays), quoted
+    spans masked except the substitutions a double-quoted span runs, and comments
+    excised. Offsets of the excised command and the view align 1:1."""
+    excised = _excise_heredoc_bodies_for_routing_scan(command)
+    view = _mask_quotes_keeping_substitutions(excised)
+    return _excise_comments_view(excised, view)
+
+
+def _eval_is_fed_by_heredoc(view: str, start: int, end: int) -> bool:
+    """Whether the eval at view[start:end] is fed by an executed heredoc (arms
+    i-iv of _has_eval_with_heredoc). Walks the eval's simple command: a
+    substitution span is read whole, and the walk ends at an unquoted separator."""
+    i, n = end, len(view)
+    while i < n:
+        c = view[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "$" and i + 1 < n and view[i + 1] == "(":
+            span, i = _extract_dollar_paren(view, i)
+            if span is None or "<<" in span:
+                return True          # (i), or an unbalanced span: fail closed
+            continue
+        if c == "`":
+            span, i = _extract_backtick(view, i)
+            if span is None or "<<" in span:
+                return True
+            continue
+        if view.startswith("<<", i):
+            return True              # (ii)
+        if c in ";&|\n":
+            break
+        i += 1
+    # (iii): a heredoc on an earlier leg of the eval's pipeline.
+    k = start - 1
+    while k >= 0 and view[k] in " \t":
+        k -= 1
+    while k >= 4 and view[k - 6:k + 1] in ("builtin", "command"):
+        k -= 7
+        while k >= 0 and view[k] in " \t":
+            k -= 1
+    if k >= 0 and view[k] == "|" and (k == 0 or view[k - 1] != "|"):
+        leg_start = max(view.rfind(sep, 0, k) for sep in (";", "&", "\n", "||"))
+        if "<<" in view[leg_start + 1:k]:
+            return True
+    # (iv): a heredoc written to a file earlier in the command.
+    return bool(_HEREDOC_TO_FILE_RE.search(view, 0, start))
 
 
 def _shell_tokenize(command: str) -> list[str] | None:
@@ -4390,8 +8403,42 @@ _SHELL_STRING_EXECUTORS = re.compile(
     r"|hush|lash|msh"                                   # busybox exec-shell applets (run a -c string)
     r"|eval|expect|watch"                               # string runners
     r"|ssh|rsh|remsh|slogin|su"                         # remote / user-switch (-c / a command)
-    r"|python[0-9.]*|perl|ruby[0-9.]*|nodejs|node|php|awk|gawk"  # interpreters (-c/-e/-r)
     r")$"
+)
+
+# (a') Interpreters run their quoted text as program code, and that code reaches a shell only
+# through an exec primitive of its language. A leg headed by one preserves its quoted values
+# only when the leg text carries a primitive; without one, -c/-e code, a script's or -m
+# module's argv and an awk program are inert. The primitive list is deliberately over-wide (a
+# case-insensitive substring anywhere in the leg): a false match preserves, the over-block-safe
+# direction. The heads are _INTERPRETER_HEAD_ALTERNATION.
+_INTERPRETER_HEADS = re.compile(r"^(?:" + _INTERPRETER_HEAD_ALTERNATION + r")$")
+# Every non-obfuscated route to a process from each interpreter names one of these:
+#   python  os.system/popen, os.exec*/spawn*/posix_spawn*, subprocess (also asyncio's
+#           create_subprocess_*), pty.spawn, commands.get*, os.fork
+#   ruby    system, exec, spawn, backticks, %x, IO.popen, Open3, PTY.spawn, open("|cmd")
+#   perl    system, exec, qx, backticks, readpipe, IPC::Open2/Open3/Run, open with a pipe
+#   node    child_process (exec/execSync/spawn/fork/execFile), process.binding
+#   php     system, exec, shell_exec, passthru, popen, proc_open, pcntl_exec, backticks
+#   awk     system(), print | "cmd", "cmd" | getline, |& coprocesses
+#   bun     Bun.spawn/spawnSync, Bun.$`cmd` (a backtick template), child_process
+#   deno    Deno.run, new Deno.Command
+#   lua     os.execute, io.popen
+#   R       system, system2, pipe()
+#   osascript  do shell script
+# The reflective entries (eval, getattr, import_module, ...) catch an honest dynamic call.
+# A primitive name built at runtime (string arithmetic inside a reflective call) is not
+# matched: that needs deliberate obfuscation, an accepted adversarial-only residual.
+_INTERPRETER_EXEC_PRIMITIVES = (
+    "system", "exec", "spawn", "popen", "subprocess", "child_process", "open3", "open2",
+    "passthru", "proc_open", "pty", "fork", "readpipe", "ipc::", "binding",
+    "commands.get", "eval", "getattr", "__import__", "import_module", "compile", "vars",
+    "globals", "locals", "__dict__", "builtins", "methodcaller", ".send(", "public_send",
+    "call_user_func", "core::", "`", "qx", "%x", "|", "deno.run", "deno.command", "pipe(",
+    "shell script",
+)
+_INTERPRETER_EXEC_PRIMITIVE_RE = re.compile(
+    "|".join(re.escape(p) for p in _INTERPRETER_EXEC_PRIMITIVES), re.IGNORECASE
 )
 
 # (a) Modeled exec-WRAPPERS whose (possibly nested) executor's quoted arg executes. Split by
@@ -4491,9 +8538,10 @@ _TOOL_HEADS = frozenset({"git", "gh"})
 #     "never list a boolean" (`--invert-grep`, `--all-match`, `-w/--web`,
 #     `--draft`, shortlog `-e/--email` MUST NOT appear — listing an arity-0
 #     flag would consume the next real token). Ambiguous arity → exclude
-#     (fail-toward-preserve). `--format`/`--pretty` (git) and
-#     `--json`/`--jq`/`--template` (gh) stay OUT of every flag_arm (smallest
-#     certified vocabulary; preserved = status quo).
+#     (fail-toward-preserve). `--format`/`--pretty` (git) stay OUT of every
+#     flag_arm (smallest certified vocabulary; preserved = status quo), and
+#     `--json`/`--jq`/`--template` (gh) are in the flag_arm of `gh pr view` and
+#     `gh issue view` only: those two verbs never execute a value.
 #   - deny_re: an EXECUTING flag anywhere in the leg's shlex tokens preserves
 #     the WHOLE leg (fail-toward-preserve). git grep `-O[<pager>]` /
 #     `--open-files-in-pager[=…]` EXECUTES its attached value (`-Ovim` runs
@@ -4559,6 +8607,16 @@ _READ_VERB_SPECS: "dict[tuple[str, ...], _ReadVerbSpec]" = {
             r"|--mention|--type|--state|--limit|--repo)\s+"
             r"|(?<!\S)-[SAalmsLR]\s*)"
         ),
+        None, False,
+    ),
+    # gh pr view / gh issue view never execute a value: --jq is a jq filter and --template a
+    # Go template. The booleans -c/--comments and -w/--web are omitted; positionals stay.
+    ("gh", "pr", "view"): _ReadVerbSpec(
+        re.compile(r"((?<!\S)(?:--json|--jq|--template|--repo)\s+|(?<!\S)-[qtR]\s*)"),
+        None, False,
+    ),
+    ("gh", "issue", "view"): _ReadVerbSpec(
+        re.compile(r"((?<!\S)(?:--json|--jq|--template|--repo)\s+|(?<!\S)-[qtR]\s*)"),
         None, False,
     ),
     ("gh", "pr", "list"): _ReadVerbSpec(
@@ -4719,6 +8777,8 @@ def _stripped_surface_danger(stripped: str) -> bool:
     for _leg in legs:
         if any(arm.search(_leg) for arm in _API_LITERAL_ARMS):
             return True
+        if _graphql_merge_mutation(_leg) is not None or _update_branch_target(_leg) is not None:
+            return True
     for _leg in legs:
         if any(arm.search(_leg) for arm in _BRANCH_DELETE_LITERAL_ARMS):
             return True
@@ -4846,6 +8906,11 @@ def _wrapper_nested_command(leg: str, head: str) -> "str | None":
     return leg[cmd_start:]                        # nested command head (original, quotes intact)
 
 
+# Words that open a compound command or its body and are followed by a command on the
+# same leg: `do sh -c '…'`, `then eval '…'`, `{ bash -c '…'; }`, `( sh -c '…' )`.
+_COMPOUND_LEAD_WORDS = frozenset({"do", "then", "else", "elif", "if", "while", "until", "{", "(", "!"})
+
+
 def _leg_command_word(leg: str) -> "str | None":
     """Return the leg SUBSTRING starting at the TRUE command word — skipping any LEADING
     env-assignment (`NAME=value`, quoted OR bare: `LC_ALL=C`, `FOO="a b"`) and redirection
@@ -4866,7 +8931,7 @@ def _leg_command_word(leg: str) -> "str | None":
         # (`FOO=a=b`, `FOO=$HOME`, `FOO="a b"` → carrier-4-stripped to `FOO=STRIPPED`) stays inside
         # the skipped token. (carrier 4 already stripped a non-expanded quoted RHS to NAME=STRIPPED
         # BEFORE carrier 10, so quotes are not relied on surviving.)
-        if re.match(r"^[A-Za-z_]\w*\+?=", tok):
+        if re.match(r"^[A-Za-z_]\w*\+?=", tok) or tok in _COMPOUND_LEAD_WORDS:
             k += 1
             continue
         if re.match(r"^(?:[0-9]*(?:&?[<>]|<>)|&>>?)", tok):   # redirection operator
@@ -4882,6 +8947,578 @@ def _leg_command_word(leg: str) -> "str | None":
             continue
         return leg[start:]                               # the true command word
     return None                                          # only assignments/redirects → no command
+
+
+# What the interpreter-program parsers can raise on malformed or unexpected text.
+_PARSER_ERRORS = (AttributeError, TypeError, ValueError, IndexError, KeyError, RecursionError)
+
+
+def _interpreter_guarded_commands(command: str, depth: int) -> list[str]:
+    """Every guarded command the programs this command hands an interpreter (-c/-e and
+    stdin-fed code) pass directly to an exec primitive, read from the command as written
+    and, when it has line continuations, as the shell splices them too (`python3 \\`
+    then `-c '…'` on the next line), and inside the -c string a POSIX shell leg runs
+    (`bash -c "python3 -c '…'"`, `bash -c 'python3 - <<EOF … EOF'`). A parser defect must never raise: the pre-hook
+    turns a raised exception into a deny, which would block a good-faith command. When
+    the direct-call parser raises on one program, that program is judged by
+    `_guarded_literals_beside_primitive` as well, joined to the guarded commands read
+    before the defect, so a defect neither refuses outright nor allows outright."""
+    spliced = _normalize_line_continuations(command)
+    try:
+        programs = _stdin_fed_code(command) + _code_arg_programs(command)
+        if spliced != command:
+            programs += [p for p in _stdin_fed_code(spliced) + _code_arg_programs(spliced) if p not in programs]
+    except _PARSER_ERRORS:
+        return []
+    found: list[str] = []
+    for head, code in programs:
+        read: list[str] = []
+        try:
+            _guarded_commands_directly(head, code, depth, read)
+        except _PARSER_ERRORS:
+            read += _guarded_literals_beside_primitive(head, code, depth)   # with what was read before it
+        found += read
+    if depth < _MAX_WRAPPER_DEPTH:                       # programs a shell's -c string hands on
+        try:
+            for inner in _shell_c_programs(command):
+                found += _interpreter_guarded_commands(inner, depth + 1)
+        except _PARSER_ERRORS:
+            pass
+    return found
+
+
+# A POSIX shell's name as a word anywhere in a command: the cheap test before a -c read.
+_SHELL_WORD_RE = re.compile(r"(?<![\w.-])(?:sh|bash|zsh|dash|ash|ksh(?:93)?|rksh|mksh|hush|lash|msh|eval)(?![\w.-])")
+
+
+@functools.lru_cache(maxsize=256)
+def _shell_c_programs(command: str) -> tuple:
+    """The -c strings the POSIX shell legs of `command` run, as written. The legs are
+    the stripped command's, so a heredoc the outer shell feeds as data is not read; a
+    heredoc written inside the quoted -c string belongs to the inner shell, so that
+    string is taken from the command as written rather than from the strip."""
+    if not _SHELL_WORD_RE.search(command):
+        return ()
+    command = _normalize_line_continuations(command)
+    stripped = _neutralize_inert_help_legs(_strip_non_executable_content(command))
+    written: list[str] | None = None
+    out = []
+    for leg in _slice_stripped_legs(stripped):
+        inner = _shell_c_argument(leg, strict=False)
+        if inner is not None and "<<HEREDOC_STRIPPED" in inner:
+            if written is None:
+                written = [w for w in (_shell_c_argument(part, strict=False) for part in _slice_stripped_legs(command)) if w]
+            prefix = inner.split("<<HEREDOC_STRIPPED")[0]
+            inner = next((w for w in written if w.startswith(prefix + "<<")), inner)
+        if inner is not None:
+            out.append(inner)
+    # The stripped legs can blank text inside the -c string (a printf argument piped to a
+    # shell); the string as written, outside heredoc data and comments, is read too.
+    for leg in _slice_stripped_legs(_strip_shell_comments(_excise_heredoc_bodies_for_routing_scan(command))):
+        inner = _shell_c_argument(leg, strict=False)
+        if inner is not None and inner not in out:
+            out.append(inner)
+    return tuple(out)
+
+
+def _interpreter_code_runs_guarded(command: str, depth: int) -> bool:
+    """True iff a program this command hands an interpreter runs a guarded command
+    (see _interpreter_guarded_commands)."""
+    return bool(_interpreter_guarded_commands(command, depth))
+
+
+def normalize_command_text(command: str) -> str:
+    """A command's text for exact comparison: continuations spliced as the guard
+    splices them, whitespace runs collapsed, ends stripped."""
+    return " ".join(_normalize_line_continuations(command).split())
+
+
+# A leading `cd <dir> &&` or `cd <dir>;` step: the dir single-quoted, double-quoted
+# without expansions, or a bare word with no shell metacharacter.
+_LEADING_CD_RE = re.compile(
+    r"""cd[ \t]+(?P<dir>'[^']*'|"[^"$`\\]*"|[^\s;&|$`'"\\()<>*?\[]+)[ \t]*(?:&&|;)[ \t]*"""
+)
+
+
+def _cd_dir_resolves_to(word: str, cwd: str) -> bool:
+    """Whether `cd <word>` from `cwd` lands in `cwd`. The word is unquoted and
+    nothing else is expanded: it must be absolute, `~` or `~/...` (the home
+    directory, unquoted), or start with `.` (relative to cwd). A bare relative name is
+    looked up through CDPATH, and `-` names the previous directory, so neither
+    counts."""
+    if word[:1] in ("'", '"'):
+        word = word[1:-1]
+    elif word == "~" or word.startswith("~/"):
+        word = os.path.expanduser(word)
+    if not word or "$" in word or word.startswith("-"):
+        return False
+    if not (word.startswith("/") or word == "." or word == ".." or word.startswith(("./", "../"))):
+        return False
+    target = word if word.startswith("/") else os.path.join(cwd, word)
+    return os.path.realpath(target) == os.path.realpath(cwd)
+
+
+def exact_text_matches(command_text: str, command: str, cwd: str | None) -> bool:
+    """Whether an exact-command approval covers `command`. The approved text
+    must equal the command's, or reduce to it by dropping leading `cd <dir> &&`
+    or `cd <dir>;` steps whose dir is the directory the command runs in. The
+    harness drops such a step before a hook sees the command, and from that
+    directory the step changes nothing, so the command runs what was approved."""
+    text = normalize_command_text(command)
+    if text == command_text:
+        return True
+    if not isinstance(cwd, str) or not cwd:
+        return False
+    rest = command_text
+    while True:
+        m = _LEADING_CD_RE.match(rest)
+        if m is None or not _cd_dir_resolves_to(m.group("dir"), cwd):
+            return False
+        rest = rest[m.end():]
+        if rest == text:
+            return True
+
+
+def interpreter_command_context(command: str) -> dict | None:
+    """The extract_command_context of the ONE guarded command the interpreter programs
+    in `command` pass to an exec primitive, read the way is_dangerous_command reads them
+    (-c/-e and stdin-fed programs, eval/exec of a literal, backtick spans, Tcl exec,
+    statement forms). None when they pass none, when their distinct contexts number
+    more than one, or when the one has no operation_type. Never raises."""
+    try:
+        contexts: dict = {}
+        for text in _interpreter_guarded_commands(command, 0):
+            context = extract_command_context(text)
+            if context.get("operation_type") is None:
+                return None
+            contexts[repr(sorted(context.items()))] = context
+        return next(iter(contexts.values())) if len(contexts) == 1 else None
+    except _PARSER_ERRORS:
+        return None
+
+
+# The shells whose -c string is a shell command line (not eval/ssh/su, whose argument
+# is not read this way). Short flags a shell takes before -c without a value.
+_POSIX_SHELL_HEADS_RE = re.compile(r"^(?:sh|bash|zsh|dash|ash|ksh(?:93)?|rksh|mksh|hush|lash|msh)$")
+_SHELL_SHORT_BOOL_FLAGS = frozenset("abefhiklmnprstuvxBCEHPT")
+_SHELL_LONG_BOOL_FLAGS = frozenset({"--norc", "--noprofile", "--login", "--posix"})
+_REDIRECT_OPERATOR_RE = re.compile(r"^(?:\d*|&)(?:>>?|<)&?$")
+_REDIRECT_WITH_TARGET_RE = re.compile(r"^(?:\d*|&)(?:>>?|<)\S+$")
+
+
+def shell_c_string(command: str) -> str | None:
+    """The string a POSIX shell leg runs with -c, unquoted as the shell receives it:
+    `bash -lc 'gh pr merge 5'` gives `gh pr merge 5`. An eval leg gives the command line
+    its words make (`eval "gh pr merge 5 --admin"` gives `gh pr merge 5 --admin`). `command` is one leg. Leading
+    NAME=VALUE words and the modeled exec wrappers (env, timeout, nice, sudo, ...) are
+    walked past; the shell's own flags before -c may be bundled shorts (`-eu`, `-lc`),
+    `-o NAME`, or --norc/--noprofile/--login/--posix; redirects may follow the string.
+    Words after the string are its positional parameters (`sh -c '… "$1"' _ 5`): each
+    `$0`…`$9` / `${N}`, `$@`, `$*` and `$#` the string reads is replaced by its words,
+    quoted as the inner shell would see them. None for anything else: another head, no
+    -c, an unknown flag, an unbalanced quote, a parameter with no word or read as
+    `${N…}`, or a string or word holding a command substitution the calling shell runs first
+    (`$(…)` or a backtick outside single quotes). A `$VAR` is returned as written, as a
+    bare command's text is approved. Never raises."""
+    return _shell_c_argument(command, strict=True)
+
+
+def _with_positional_words(text: str, words: list[str]) -> str | None:
+    """`text`, a shell command line, with each `$N` / `${N}` it expands (outside single
+    quotes) replaced by `words[N]`, `$@` / `$*` by `words[1:]` and `$#` by their count,
+    quoted for where it sits; None when it reads a parameter with no word, `"$@"` with
+    no words, or a `${N…}` expansion. `${@}`, `${*}` and `${#}` read as `$@`, `$*` and
+    `$#`. A word that needs no quoting (`"5"` from `"$1"`) comes out bare, so the result
+    reads as the command the inner shell runs (`gh pr merge 5`). Outside double quotes a
+    parameter is split into words, as the shell splits it (`$1` holding `gh pr merge 5`
+    runs gh)."""
+    text = re.sub(r"\$\{([@*#])\}", r"$\1", text)
+    out, k, quote = [], 0, ""
+    while k < len(text):
+        ch = text[k]
+        if quote != '"' and ch == "'":
+            quote = "" if quote == "'" else "'"
+        elif quote != "'" and ch == '"':
+            quote = "" if quote == '"' else '"'
+        elif quote != "'" and ch == "\\":
+            out.append(text[k:k + 2])
+            k += 2
+            continue
+        elif quote != "'" and ch == "$":
+            m = re.compile(r"\$(?:(\d)|\{(\d)\})").match(text, k)
+            if m:
+                n = int(m.group(1) or m.group(2))
+                if n >= len(words):
+                    return None
+                word = words[n]
+                out.append(_SUBST_OPEN + re.sub(r'([\\"$`])', r"\\\1", word) + _SUBST_CLOSE
+                           if quote == '"' else " ".join(shlex.quote(w) for w in word.split()))
+                k = m.end()
+                continue
+            if text.startswith(("$@", "$*"), k):
+                rest = words[1:]
+                if quote != '"':
+                    out.append(" ".join(shlex.quote(part) for w in rest for part in w.split()))
+                elif text[k + 1] == "*":
+                    out.append(re.sub(r'([\\"$`])', r"\\\1", " ".join(rest)))
+                elif not rest:
+                    return None
+                else:                                    # "$@": one quoted word each
+                    out.append('" "'.join(_SUBST_OPEN + re.sub(r'([\\"$`])', r"\\\1", w) + _SUBST_CLOSE
+                                          for w in rest))
+                k += 2
+                continue
+            if text.startswith("$#", k):
+                out.append(str(len(words) - 1))
+                k += 2
+                continue
+            if text.startswith("${", k) and re.match(r"\d", text[k + 2:k + 3]):
+                return None
+        out.append(ch)
+        k += 1
+    joined = re.sub('"' + _SUBST_OPEN + r"([A-Za-z0-9_./:@%+=,-]+)" + _SUBST_CLOSE + '"', r"\1", "".join(out))
+    return joined.replace(_SUBST_OPEN, "").replace(_SUBST_CLOSE, "")
+
+
+# Marks around a word substituted into double quotes, so a quoted word that needs no
+# quoting can be written bare once the whole string is built.
+_SUBST_OPEN, _SUBST_CLOSE = "\x01", "\x02"
+
+
+def _shell_c_argument(command: str, strict: bool, _depth: int = 0) -> str | None:
+    """shell_c_string's reader. With `strict` False it also returns a string the calling
+    shell expands first, and one whose positional words cannot be read in (as written):
+    the text is still the command line the shell runs, for judging rather than minting."""
+    leg = _leg_command_word(command)
+    tokens = _shell_tokenize(leg) if leg else None
+    if not tokens or leg is None:
+        return None
+    head = os.path.basename(tokens[0])
+    if head in _EXEC_WRAPPERS_RECURSE:
+        nested = _wrapper_nested_command(leg, head) if _depth < _MAX_WRAPPER_DEPTH else None
+        return _shell_c_argument(nested, strict, _depth + 1) if nested else None
+    if head == "eval":
+        return _eval_argument(leg, tokens, strict)
+    if not _POSIX_SHELL_HEADS_RE.match(head):
+        return None
+    i, has_c = 1, False
+    while i < len(tokens) and not has_c:
+        tok = tokens[i]
+        i += 1
+        if tok in _SHELL_LONG_BOOL_FLAGS:
+            continue
+        if tok in ("-o", "+o"):
+            i += 1                                       # the option name
+        elif len(tok) > 1 and tok[0] == "-" and set(tok[1:]) <= _SHELL_SHORT_BOOL_FLAGS | {"c"}:
+            has_c = "c" in tok
+        else:
+            return None                                  # a script path or an unknown flag
+    spans = _leg_token_spans(leg)
+    if not has_c or i >= len(tokens) or len(spans) != len(tokens):
+        return None
+    j = i + 1
+    while j < len(tokens) and not (_REDIRECT_OPERATOR_RE.match(tokens[j]) or _REDIRECT_WITH_TARGET_RE.match(tokens[j])):
+        j += 1                                           # the string's positional words
+    program = _shell_word_value(leg[spans[i][0]:spans[i][1]])
+    string = _with_positional_words(program, tokens[i + 1:j]) if j > i + 1 else program
+    if not strict:
+        return program if string is None else string
+    if string is None or any(_calling_shell_substitutes(leg[spans[k][0]:spans[k][1]]) for k in range(i, j)):
+        return None
+    rest = tokens[j:]
+    while rest:
+        if _REDIRECT_OPERATOR_RE.match(rest[0]) and len(rest) > 1:
+            rest = rest[2:]
+        elif _REDIRECT_WITH_TARGET_RE.match(rest[0]):
+            rest = rest[1:]
+        else:
+            return None
+    return string
+
+
+def _shell_word_value(raw: str) -> str:
+    """The value one shell word passes on: its quotes removed, and each backslash the
+    shell removes (unquoted, before any character; in double quotes, before `$`, a
+    backtick, `"`, a backslash or a newline, a backslash-newline pair vanishing). shlex
+    keeps the backslash of a double-quoted `\\$`, so `bash -c "… \\$(gh pr merge 5) …"`
+    would read as escaped what the inner shell runs."""
+    out: list[str] = []
+    i, n, quote = 0, len(raw), ""
+    while i < n:
+        ch = raw[i]
+        if quote == "'":
+            if ch == "'":
+                quote = ""
+            else:
+                out.append(ch)
+        elif ch == "\\" and i + 1 < n and (not quote or raw[i + 1] in '$`"\\\n'):
+            if raw[i + 1] != "\n":
+                out.append(raw[i + 1])
+            i += 2
+            continue
+        elif ch in "'\"" and not quote:
+            quote = ch
+        elif ch == '"' and quote == '"':
+            quote = ""
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _calling_shell_substitutes(raw: str) -> bool:
+    """Whether the shell running one word expands a `$(…)` or backtick in it first: one
+    outside single quotes and not escaped by a backslash."""
+    i, n, quote = 0, len(raw), ""
+    while i < n:
+        ch = raw[i]
+        if quote == "'":
+            quote = "" if ch == "'" else quote
+        elif ch == "\\":
+            i += 2
+            continue
+        elif ch == "`" or raw.startswith("$(", i):
+            return True
+        elif ch in "'\"" and not quote:
+            quote = ch
+        elif ch == '"' and quote == '"':
+            quote = ""
+        i += 1
+    return False
+
+
+def _eval_argument(leg: str, tokens: list[str], strict: bool) -> str | None:
+    """The command line an eval leg runs: its words, unquoted and joined by spaces, up to a
+    redirect. None when there are none or they start with an expansion (the variable
+    reader's case); with `strict`, also when a word holds a command substitution the
+    calling shell runs first."""
+    spans = _leg_token_spans(leg)
+    j = 1
+    while j < len(tokens) and not (_REDIRECT_OPERATOR_RE.match(tokens[j]) or _REDIRECT_WITH_TARGET_RE.match(tokens[j])):
+        j += 1
+    words = tokens[1:j]
+    if not words or words[0].startswith("$") or len(spans) != len(tokens):
+        return None
+    if strict and any(_calling_shell_substitutes(leg[a:b]) for a, b in spans[1:j]):
+        return None
+    return " ".join(_shell_word_value(leg[a:b]) for a, b in spans[1:j])
+
+
+def _guarded_literals_beside_primitive(head: str, code: str, depth: int) -> list[str]:
+    """The coarse reading of a program the direct-call parser could not read: when it
+    names an exec primitive, its string literals, and its literal argv lists joined,
+    that read as a guarded command. A program whose calls cannot be told apart is
+    searched for primitive names."""
+    if depth >= _DIRECT_CALL_MAX_DEPTH:
+        return []
+    try:
+        names_primitive = _program_names_primitive(head, code)
+    except _PARSER_ERRORS:
+        names_primitive = bool(_INTERPRETER_EXEC_PRIMITIVE_RE.search(code))
+    if not names_primitive:
+        return []
+    texts = [_literal_body(lit) for lit in _PREFIXED_LITERAL_RE.finditer(code)]
+    try:
+        for opener in re.finditer(r"[\[(]", code):
+            lst = _literal_list_at(code, opener.start(), head)
+            texts += [shlex.join(items) for items in (lst[0] if lst else []) if len(items) > 1]
+    except _PARSER_ERRORS:
+        pass                                             # the list reader failed too: literals only
+    return [text for text in texts if _is_dangerous_at_depth(text, depth + 1)]
+
+
+def _interpreter_names_primitive(leg: str, head: str, tokens: list) -> bool:
+    """True iff an interpreter leg's program reaches a process. When the program given
+    on the command line can be read, it is judged by its calls and statements outside
+    string literals. Otherwise (a script, a module, an unusual launch form) the whole leg
+    is searched for any primitive substring, which preserves (the over-block-safe side).
+    `deno eval` is deno's one-liner SUBCOMMAND, not a call to eval."""
+    try:
+        program = _program_from_tokens(head, tokens)
+        verdict = False if program is not None else None
+    except _PARSER_ERRORS:
+        verdict = None                                   # a parser defect: whole-leg search
+    if verdict is not None:
+        # A readable program's quoted values are inert: whether it RUNS a guarded command
+        # is judged once, by the direct-call check over the whole command (calls and
+        # statement forms given the command, any string-expression shape).
+        return verdict
+    text = _script_launch_surface(leg, tokens)
+    if text is None:
+        text = _blank_literal_backticks(leg)
+    if head == "deno" and len(tokens) > 1 and tokens[1] == "eval":
+        text = re.sub(r"(?<![\w./-])deno\s+eval(?=\s|$)", "deno", text, count=1)
+    return bool(_INTERPRETER_EXEC_PRIMITIVE_RE.search(text))
+
+
+# A script file an interpreter runs: a path with a directory part or a script extension.
+_SCRIPT_PATH_RE = re.compile(
+    r"/|\.(?:py|pyw|js|mjs|cjs|ts|mts|rb|pl|pm|php|lua|r|tcl|sh|bash)$", re.IGNORECASE
+)
+# An interpreter flag that gives the program on the command line, or reads it from stdin
+# (a bundled short flag counts when any of its letters does).
+_INLINE_PROGRAM_FLAG_RE = re.compile(r"^-$|^-[A-Za-z]*[cemErpx]|^--(?:eval|print|command|exec)\b")
+
+
+def _script_launch_surface(leg: str, tokens: list) -> str | None:
+    """For a script-file launch (`<interpreter> [flags] path/to/x.py ARGS…`), the leg up to
+    the script path with each ARG blanked: the arguments are the script's argv data. A
+    shell substitution in them (unquoted, or unescaped in double quotes) runs before the
+    script starts, so it stays. None when the leg is not a script-file launch the guard can
+    place (an inline-program flag, a non-flag word before a path, a quoted path)."""
+    head_at = leg.find(tokens[0])
+    if head_at < 0:
+        return None
+    pos = head_at + len(tokens[0])
+    for tok in tokens[1:]:
+        if tok.startswith("-"):
+            if _INLINE_PROGRAM_FLAG_RE.match(tok):
+                return None
+            pos = leg.find(tok, pos)
+            if pos < 0:
+                return None
+            pos += len(tok)
+            continue
+        if not _SCRIPT_PATH_RE.search(tok):
+            return None
+        at = leg.find(tok, pos)
+        if at < 0:
+            return None
+        end = at + len(tok)
+        return leg[:end] + _substitution_spans_only(leg[end:])
+    return None
+
+
+def _substitution_spans_only(text: str) -> str:
+    """`text` blanked except the shell substitutions that run: unquoted, or unescaped in
+    double quotes. Same length; an unterminated substitution keeps the rest (fail closed)."""
+    view = _mask_quotes_keeping_substitutions(text)
+    out = [" "] * len(view)
+    i, n = 0, len(view)
+    while i < n:
+        c = view[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "$" and i + 1 < n and view[i + 1] == "(":
+            _, end = _extract_dollar_paren(view, i)
+        elif c == "`":
+            _, end = _extract_backtick(view, i)
+        else:
+            i += 1
+            continue
+        end = min(end, n)
+        out[i:end] = view[i:end]
+        i = max(end, i + 1)
+    return "".join(out)
+
+
+def _blank_literal_backticks(text: str) -> str:
+    """`text` with each LITERAL backtick replaced by a space: one inside single quotes, or
+    one escaped by an odd backslash run (inside double quotes or unquoted). Such a backtick
+    runs nothing, so it is not an exec primitive. An unescaped backtick in double quotes or
+    unquoted opens a command substitution and stays. Same length as the input; an
+    unterminated quote leaves the rest as it is."""
+    if "`" not in text:
+        return text
+    out = list(text)
+    i, n, quote = 0, len(text), None
+    while i < n:
+        c = text[i]
+        if quote == "'":
+            if c == "'":
+                quote = None
+            elif c == "`":
+                out[i] = " "
+            i += 1
+            continue
+        if c == "\\":
+            if i + 1 < n and text[i + 1] == "`":
+                out[i + 1] = " "
+            i += 2
+            continue
+        if c == '"':
+            quote = None if quote == '"' else '"'
+        elif c == "'" and quote is None:
+            quote = "'"
+        i += 1
+    return "".join(out)
+
+
+_PHP_HEAD_RE = re.compile(r"^php[0-9.]*(?:-cgi)?$")
+
+
+def _is_php_exec_leg(leg: str, _depth: int = 0) -> bool:
+    """True iff this leg runs php code that names an exec primitive, so a php `echo`
+    statement in that code can print the output of a shell call. Walks the modeled
+    wrappers like _is_preserve_leg, and FAILS SAFE to True when a coarse wrapper, an
+    uncertain wrapper boundary or the depth limit hides the head while php is named
+    in the leg (True keeps the echo argument for the preserve check to judge)."""
+    if not _INTERPRETER_EXEC_PRIMITIVE_RE.search(leg):
+        return False
+    cmd_leg = _leg_command_word(leg)
+    if cmd_leg is None:
+        return False
+    tokens = _shell_tokenize(cmd_leg)
+    if not tokens:
+        return False
+    names_php = any(_PHP_HEAD_RE.match(os.path.basename(t)) for t in tokens)
+    head = os.path.basename(tokens[0])
+    if _PHP_HEAD_RE.match(head):
+        return True
+    if head in _EXEC_WRAPPERS_COARSE:
+        return names_php
+    if head in _EXEC_WRAPPERS_RECURSE:
+        if _depth >= _MAX_WRAPPER_DEPTH:
+            return names_php
+        nested = _wrapper_nested_command(cmd_leg, head)
+        if nested is None:
+            return names_php
+        return _is_php_exec_leg(nested, _depth + 1)
+    return False
+
+
+def _leg_slicing_view(text: str) -> str:
+    """The view legs are sliced on: quotes masked and fd redirects (`2>&1`, `>&2`,
+    `&>`, `>|`) blanked, so only real shell operators separate legs. Same length as
+    `text`, so offsets carry over. Shared by carrier 10 and the echo carrier."""
+    return _FD_REDIRECT_RE.sub(lambda m: " " * len(m.group()), _mask_shell_quotes(text))
+
+
+def _in_php_exec_code(text: str, pos: int) -> bool:
+    """True iff offset `pos` of `text` sits inside a quoted span of a leg that
+    _is_php_exec_leg accepts, i.e. inside php code whose `echo` prints a shell call."""
+    view = _leg_slicing_view(text)
+    if view[pos] != " " or text[pos] == " ":
+        return False                                     # not inside a quoted span
+    start = 0
+    for m in _COMPOUND_OPS_RE.finditer(view):
+        if m.start() >= pos:
+            return _is_php_exec_leg(text[start:m.start()])
+        start = m.end()
+    return _is_php_exec_leg(text[start:])
+
+
+_QUOTED_ASSIGNMENT_RE = re.compile(r"""(?<!\w)[A-Za-z_]\w*=["']""")
+
+
+def _has_shell_quoted_assignment(leg: str) -> bool:
+    """True iff the leg holds a shell `NAME="…"` / `NAME='…'` assignment: one whose
+    `NAME=` sits in shell structure, not inside another quoted string. A perl
+    `$c="…"` inside `perl -e '…'` is program text. An unterminated quote leaves the
+    rest unmasked, so it still counts."""
+    view = _mask_shell_quotes(leg)
+    return any(view[m.start()] != " " for m in _QUOTED_ASSIGNMENT_RE.finditer(leg))
+
+
+def _string_runner_program(leg: str, head: str, tokens: list) -> str | None:
+    """The command line a POSIX shell's -c (its positional words in place) or an eval runs,
+    or None for another runner or a string that cannot be read."""
+    if _POSIX_SHELL_HEADS_RE.match(head):
+        return shell_c_string(leg)
+    if head == "eval" and len(tokens) > 1:
+        return " ".join(tokens[1:])
+    return None
 
 
 def _is_preserve_leg(leg: str, _depth: int = 0) -> bool:
@@ -4902,7 +9539,7 @@ def _is_preserve_leg(leg: str, _depth: int = 0) -> bool:
     # inside) — but carrier 4 pre-strips flag-attached literals before carrier 10, so it is a
     # no-op there; and either way the false-match direction is always PRESERVE (over-block-safe,
     # never under-block).
-    if re.search(r"""[A-Za-z_]\w*=["']""", leg):
+    if _has_shell_quoted_assignment(leg):
         return True
     # HEAD-DISPLACEMENT guard (#1178 SEC): compute the head clauses on the TRUE command word
     # (skip leading env-assignment / redirection prefixes) — else a leading `LC_ALL=C` / bare
@@ -4914,8 +9551,15 @@ def _is_preserve_leg(leg: str, _depth: int = 0) -> bool:
             head = os.path.basename(tokens[0])
             if head in _TOOL_HEADS:                      # (d2) git/gh → defer to carriers 5/7/8/9
                 return True
-            if _SHELL_STRING_EXECUTORS.match(head):      # (a) executor / interpreter
-                return True
+            if _INTERPRETER_HEADS.match(head):           # (a') interpreter
+                if _interpreter_names_primitive(leg, head, tokens):
+                    return True
+            elif _SHELL_STRING_EXECUTORS.match(head):    # (a) shell / string runner
+                # A -c string is a command line: kept only when it runs something guarded,
+                # so `sh -c 'echo gh pr merge 5'` prints as its bare command does.
+                inner = _string_runner_program(leg, head, tokens) if _depth < _MAX_WRAPPER_DEPTH else None
+                # A heredoc the strip already removed from the string cannot be judged here.
+                return inner is None or "HEREDOC_STRIPPED" in inner or _is_dangerous_at_depth(inner, _depth + 1)
             if head in _HTTP_CLIENT_HEADS:               # (b) curl/wget (quoted head via shlex)
                 return True
             if head in _EXEC_WRAPPERS_COARSE:            # (a) wrapper, boundary not skippable
@@ -5028,7 +9672,7 @@ def _strip_read_verb_values(leg: str, _depth: int = 0) -> "str | None":
     # ---- guards: ANY hit => return None (fall through to _is_preserve_leg) ----
     if _shell_tokenize(leg) is None:                 # g1 unbalanced quote (fail-safe)
         return None
-    if re.search(r"""[A-Za-z_]\w*=["']""", leg):     # g2 d1-replica: a NAME="…" survivor
+    if _has_shell_quoted_assignment(leg):            # g2 d1-replica: a NAME="…" survivor
         return None                                  #    is an expanded/eval'd value
     if _has_command_substitution(leg):               # g3 $()/backtick anywhere in the leg
         return None
@@ -5097,6 +9741,14 @@ def _maybe_strip_leg(leg: str) -> str:
         return rv                                    # already balance-checked inside
     if _is_preserve_leg(leg):
         return leg
+    # A -c program or eval string that runs nothing guarded takes its words as data: they
+    # are blanked whole, positional words and unquoted words included.
+    word = _leg_command_word(leg)
+    tokens = _shell_tokenize(word) if word else None
+    if word and tokens and _string_runner_program(leg, os.path.basename(tokens[0]), tokens) is not None:
+        head_end = len(leg) - len(word) + len(tokens[0]) if word.startswith(tokens[0]) else None
+        if head_end is not None:
+            return leg[:head_end] + " STRIPPED"
     stripped = _strip_quoted_positionals(leg)
     # QUOTE-BALANCE fail-safe (#1118 leg-merge guard): the per-span dq regex is NOT
     # $()-nesting-aware, so on an exotic nested-quote value (`"a $(b "c") d"`) it can mis-pair
@@ -5116,9 +9768,7 @@ def _strip_inert_positional_legs(result: str) -> str:
     legs verbatim. Rejoined with the ORIGINAL separators so a downstream re-slice of this
     result sees byte-unchanged leg boundaries. Slices via this in-line walk (NOT
     ``_split_into_legs``, which re-strips → recursion)."""
-    view = _FD_REDIRECT_RE.sub(
-        lambda m: " " * len(m.group()), _mask_shell_quotes(result)
-    )
+    view = _leg_slicing_view(result)
     out, last = [], 0
     for m in _COMPOUND_OPS_RE.finditer(view):
         out.append(_maybe_strip_leg(result[last:m.start()]))
@@ -5255,9 +9905,367 @@ def is_dangerous_command(command: str) -> bool:
     Returns:
         True if the command matches a dangerous pattern
     """
-    # Pre-strip detection: eval+heredoc shape obscures destructive ops via
-    # the heredoc-strip pipeline. Treat as dangerous before the strip runs.
-    if _has_eval_with_heredoc(command):
+    # Pre-strip detection: an eval fed by a heredoc runs the heredoc's text, which the
+    # heredoc strip below would hide. Judge it before the strip runs.
+    verdict = _eval_heredoc_verdict(command, 0)
+    if verdict is not None:
+        return verdict
+    return _is_dangerous_at_depth(command, 0)
+
+
+# A variable assigned a literal value is judged where the shell expands it, as if the value
+# of the last assignment before it were written there. Heads whose arguments the guard reads: data
+# tools (they print, match or store an argument) and the shells, wrappers and eval words
+# whose argument is a command the guard judges. Any other program's argument (a script
+# file, an unknown binary) is unreadable, so a variable passed there keeps the value
+# executing (the command stays refused, and a faithful approval mints it).
+_VAR_DATA_TOOL_HEADS = frozenset({
+    "echo", "printf", "grep", "egrep", "fgrep", "rg", "cat", "wc", "head", "tail", "test",
+    "[", "[[", "tee", "diff", "cmp", "jq", "git", "gh", "true", ":",
+})
+_VAR_RUNNER_HEADS = frozenset({
+    "sh", "bash", "zsh", "dash", "ksh", "eval", "source", ".", "ssh", "exec", "xargs",
+    "timeout", "env", "sudo", "nohup", "nice", "watch", "command", "time", "builtin",
+})
+_VAR_ASSIGNMENT_RE = re.compile(
+    r"(?<![\w$])(?P<name>[A-Za-z_]\w*)="
+    r"(?P<value>'[^']*'|\"(?:[^\"\\]|\\.)*\"|(?:[^\s;&|<>()'\"`$\\]|\\.)+)"
+)
+_VAR_SITE_RE = re.compile(r"\$(?:\{(?P<braced>[A-Za-z_]\w*)(?P<op>[^}]*)\}|(?P<bare>[A-Za-z_]\w*))")
+_VAR_BINDING_RE = r"(?<![\w-])(?:export|declare|typeset|local|readonly|read|mapfile|readarray|for|select|let|unset)(?![\w-])[^;&|\n]*?(?<![\w$])"
+
+
+def _quote_states(command: str) -> list[int] | None:
+    """Per character: 0 unquoted, 1 inside single quotes, 2 inside double quotes, 3 a
+    character a backslash makes literal. None when a quote is left open or a double-quoted
+    span holds a command substitution (its inner quoting is not modeled)."""
+    states = [0] * len(command)
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            if i + 1 < n:
+                states[i + 1] = 3
+            i += 2
+            continue
+        if c == "'":
+            j = command.find("'", i + 1)
+            if j == -1:
+                return None
+            for k in range(i, j + 1):
+                states[k] = 1
+            i = j + 1
+            continue
+        if c == '"':
+            j = i + 1
+            while j < n and command[j] != '"':
+                if command[j] == "\\" and j + 1 < n:
+                    states[j] = 2
+                    states[j + 1] = 3 if command[j + 1] in '$`"\\\n' else 2
+                    j += 2
+                    continue
+                if command[j] == "`" or command.startswith("$(", j):
+                    return None
+                states[j] = 2
+                j += 1
+            if j >= n:
+                return None
+            states[i] = states[j] = 2
+            i = j + 1
+            continue
+        i += 1
+    return states
+
+
+def _var_site_is_readable(cmd: str, offset: int, depth: int = 0) -> bool:
+    """Whether an expansion at `offset` of the simple command `cmd` sits where the guard
+    reads the result: the command word, an argument of a data tool or of a shell, wrapper
+    or eval word, or an interpreter's own program. False for an argument of anything
+    else, and for any position this cannot place."""
+    word = _leg_command_word(cmd)
+    if word is None:
+        return False
+    base = len(cmd) - len(word)
+    spans = _leg_token_spans(word)
+    k = next((k for k, (s, e) in enumerate(spans) if s <= offset - base < e), None)
+    if k is None:
+        return False
+    if k == 0:
+        return True
+    tokens = _shell_tokenize(word)
+    if not tokens:
+        return False
+    head = os.path.basename(tokens[0])
+    if head in _VAR_DATA_TOOL_HEADS or _POSIX_SHELL_HEADS_RE.match(head):
+        return True
+    if head in _WRAPPER_GRAMMAR and depth < _MAX_WRAPPER_DEPTH:
+        nested = _wrapper_nested_command(word, head)
+        if nested is None:
+            return False
+        start = len(word) - len(nested)
+        if offset - base < start:
+            return True                      # the wrapper's own argument
+        return _var_site_is_readable(nested, offset - base - start, depth + 1)
+    if head in _VAR_RUNNER_HEADS:
+        return True
+    # A script launch's words are read as its literal twin's are (the script-argument rule
+    # judges a whole guarded command there; other text is data).
+    if _script_launch_args(tokens) is not None:
+        return True
+    if _INTERPRETER_HEADS.match(head):
+        program = _program_from_tokens(head, tokens)
+        return program is not None and k < len(tokens) and tokens[k] == program
+    return False
+
+
+def _assignment_value(raw: str) -> str:
+    """An assignment's value after quote removal: a quoted value's inside, or an unquoted
+    word with its backslash escapes removed."""
+    if raw[0] in "'\"":
+        return raw[1:-1]
+    return re.sub(r"\\(.)", r"\1", raw)
+
+
+def _is_plain_literal_assignment(command: str, view: str, m: re.Match) -> bool:
+    """Whether an assignment stands as its own simple command at the top level (not in a
+    group, subshell, loop or branch, not a command prefix) with a value that does not
+    expand (a double-quoted `$`, backtick or backslash)."""
+    before = view[:m.start()]
+    if len(_COMPOUND_OPEN_RE.findall(before)) > len(_COMPOUND_CLOSE_RE.findall(before)):
+        return False
+    if re.split(r"[;&|\n]", before)[-1].strip():
+        return False                          # an argument (`-f query=…`), not an assignment
+    rest = command[m.end():].lstrip(" \t")
+    if rest and not rest.startswith((";", "\n", "&&", "||")):
+        return False                          # a prefix assignment, piped, or backgrounded
+    raw = m.group("value")
+    return not (raw[0] == '"' and any(ch in raw[1:-1] for ch in "$`\\"))
+
+
+def _expand_literal_variables(command: str, kept: list[str] | None = None) -> str:
+    """`command` with each literal variable's expansions replaced by the value of the last
+    assignment before them, written literally, when every expansion sits where the guard
+    reads it (_var_site_is_readable). A name is left as it is (every value keeps executing,
+    today's rule) when it is bound another way (export, read, a loop), assigned inside a
+    group, subshell or branch or as a command prefix, expanded before its first assignment
+    or with a parameter operator, or given a value that expands, or when an expansion sits
+    in a heredoc's body; and nothing is replaced when the command has an
+    eval or source, or quoting this cannot model. The value is inserted as literal text,
+    escaped for the site's quoting. Given a `kept` list, each value left executing at a
+    site the guard cannot read is appended to it."""
+    if "=" not in command or "$" not in command:
+        return command
+    states = _quote_states(command)
+    if states is None:
+        return command
+    # A heredoc's body is the heredoc's text, not the shell's: the surface is read with each
+    # body blanked in place (offsets match the command), so an expansion there is left.
+    bodies = [(h.start("body"), h.end("body")) for h in _ANY_HEREDOC_RE.finditer(command)]
+    if bodies:
+        blanked = list(command)
+        for a, b in bodies:
+            blanked[a:b] = " " * (b - a)
+        surface = _mask_shell_quotes("".join(blanked))
+    else:
+        surface = _executed_surface_view(command)
+    if _has_eval_or_source(surface):
+        return command
+    view = _leg_slicing_view(command)
+    legs = []
+    last = 0
+    for sep in _COMPOUND_OPS_RE.finditer(view):
+        legs.append((last, sep.start()))
+        last = sep.end()
+    legs.append((last, len(command)))
+    replacements: list[tuple[int, int, str]] = []
+    assignments: dict[str, list[re.Match]] = {}
+    for m in _VAR_ASSIGNMENT_RE.finditer(command):
+        if states[m.start()] == 0 and surface[m.start()] != " ":
+            assignments.setdefault(m.group("name"), []).append(m)
+    for name, found in assignments.items():
+        if len(re.findall(r"(?<![\w$])" + name + r"=", surface)) != len(found):
+            continue
+        if re.search(_VAR_BINDING_RE + name + r"(?![\w])", surface):
+            continue
+        if not all(_is_plain_literal_assignment(command, view, m) for m in found):
+            continue
+        sites = []
+        ok = True
+        for s in _VAR_SITE_RE.finditer(command):
+            if (s.group("braced") or s.group("bare")) != name:
+                continue
+            if states[s.start()] in (1, 3):
+                continue                      # single-quoted or escaped: literal text
+            if s.group("braced") and s.group("op"):
+                ok = False
+                break
+            reaching = [m for m in found if m.end() <= s.start()]
+            if not reaching or (states[s.start()] == 0 and surface[s.start()] == " "):
+                ok = False
+                break
+            leg = next((a, b) for a, b in legs if a <= s.start() < b)
+            leg_text = command[leg[0]:leg[1]]
+            leg_view = view[leg[0]:leg[1]]
+            if "$(" in leg_view or "`" in leg_view:
+                ok = False
+                break
+            if not _var_site_is_readable(leg_text, s.start() - leg[0]):
+                if kept is not None:
+                    kept.append(_assignment_value(reaching[-1].group("value")))
+                ok = False
+                break
+            sites.append((s, _assignment_value(reaching[-1].group("value"))))
+        if not ok:
+            continue
+        # Each value now sits, literally, at every site the shell expands it, so the
+        # assignments themselves run nothing: write them as the inert value carrier 4 gives
+        # a variable that is never expanded.
+        for m in found:
+            replacements.append((m.start("value"), m.end("value"), "STRIPPED"))
+        for s, value in sites:
+            special = '\\$`"' if states[s.start()] == 2 else "\\$`'\""
+            literal = "".join("\\" + ch if ch in special else ch for ch in value)
+            replacements.append((s.start(), s.end(), literal))
+    if not replacements:
+        return command
+    out = command
+    for start, end, literal in sorted(replacements, reverse=True):
+        out = out[:start] + literal + out[end:]
+    return out
+
+
+_XARGS_HEAD_RE = re.compile(r"(?:^|(?<=[;&|(\n]))[ \t]*xargs(?![\w-])", re.MULTILINE)
+_XARGS_HEREDOC_RE = re.compile(
+    r"<<-?[ \t]*(?P<q>['\"]?)(?P<tag>\w+)(?P=q)[^\n]*\n(?P<body>.*?)\n?[ \t]*(?P=tag)[ \t]*(?:\n|$)",
+    re.DOTALL,
+)
+_XARGS_POSITIONAL_SCRIPT = ("$@", "${@}", "$1", "${1}", "$*", "${*}")
+_XARGS_MAX_DEPTH = 3
+
+
+def _xargs_shell_stdin_items(command: str) -> list[str]:
+    """The input items an `xargs` leg hands a shell to run, when its stdin is a here-string
+    or a heredoc: `xargs -I{} sh -c "{}" <<< "CMD"` runs CMD, as its pipe form
+    `echo CMD | xargs -I{} sh -c "{}"` does. The leg's command must be a POSIX shell with
+    -c whose script holds the replacement token (-I/-i, default `{}`) or a positional
+    (`"$@"`, `"$1"`). Items are the input's lines, or its NUL- or -d-separated parts.
+    An xargs flag the grammar does not know makes the leg abstain (no items)."""
+    if "xargs" not in command or "<<" not in command:
+        return []
+    view = _mask_shell_quotes(command)
+    grammar = _WRAPPER_GRAMMAR["xargs"]
+    items: list[str] = []
+    for head in _XARGS_HEAD_RE.finditer(view):
+        end = head.end()
+        while end < len(view) and view[end] not in ";&|\n":
+            end += 1
+        here = view.find("<<<", head.end(), end)
+        if here != -1:
+            feed_tokens = _shell_tokenize(command[here + 3:end])
+            if not feed_tokens:
+                continue
+            feed = feed_tokens[0]
+            argv_end = here
+        else:
+            doc = _XARGS_HEREDOC_RE.search(command, head.end())
+            if doc is None or doc.start() >= end:
+                continue
+            feed = doc.group("body")
+            argv_end = doc.start()
+        argv = _shell_tokenize(command[head.end():argv_end])
+        if not argv:
+            continue
+        token, delim, i = None, "\n", 0
+        while i < len(argv) and argv[i].startswith("-"):
+            flag = argv[i]
+            if flag == "--":
+                i += 1
+                break
+            if flag in ("-0", "--null"):
+                delim = "\0"
+            elif flag.startswith("-I"):
+                token = flag[2:] or (argv[i + 1] if i + 1 < len(argv) else None)
+                i += 0 if flag[2:] else 1
+            elif flag.startswith(("-i", "--replace")):
+                token = flag.partition("=")[2] if flag.startswith("--") else flag[2:]
+                token = token or "{}"
+            elif flag in ("-d", "--delimiter") or flag.startswith(("-d", "--delimiter=")):
+                value = (argv[i + 1] if i + 1 < len(argv) else "") if flag in ("-d", "--delimiter") \
+                    else flag.partition("=")[2] if flag.startswith("--") else flag[2:]
+                delim = {"\\n": "\n", "\\0": "\0", "\\t": "\t"}.get(value, value) or "\n"
+                i += 1 if flag in ("-d", "--delimiter") else 0
+            elif flag in grammar.value_flags:
+                i += 1
+            elif flag[:2] in grammar.value_flags or flag.partition("=")[0] in grammar.value_flags:
+                pass
+            elif flag not in grammar.bool_flags:
+                break
+            i += 1
+        if i >= len(argv) or argv[i].startswith("-"):
+            continue
+        shell = argv[i]
+        if not _POSIX_SHELL_HEADS_RE.match(shell.rsplit("/", 1)[-1]):
+            continue
+        script = None
+        for j in range(i + 1, len(argv)):
+            flag = argv[j]
+            if flag.startswith("-") and not flag.startswith("--") and "c" in flag[1:]:
+                script = argv[j + 1] if j + 1 < len(argv) else None
+                break
+            if flag in _SHELL_LONG_BOOL_FLAGS or (flag.startswith("-") and set(flag[1:]) <= _SHELL_SHORT_BOOL_FLAGS):
+                continue
+            break
+        if not script:
+            continue
+        if not ((token and token in script) or any(p in script for p in _XARGS_POSITIONAL_SCRIPT)):
+            continue
+        items += [part.strip() for part in feed.split(delim) if part.strip()]
+    return items
+
+
+def _is_dangerous_at_depth(command: str, depth: int) -> bool:
+    """is_dangerous_command's body, with the recursion depth of the stdin-fed code check."""
+    if depth:
+        verdict = _eval_heredoc_verdict(command, depth)
+        if verdict is not None:
+            return verdict
+    # A gh api graphql request whose --input body the guard can read is judged by its query.
+    if _graphql_input_mutation(command) is not None:
+        return True
+    # A script given a whole guarded command as one argument runs it (a retry or run
+    # wrapper), as a variable passed there does.
+    if depth < _MAX_WRAPPER_DEPTH and _script_argv_guarded_command(command, depth) is not None:
+        return True
+    # A variable assigned a literal value is judged where it is expanded, as the value of
+    # the last assignment before it written there; a site the guard cannot read keeps the
+    # value executing. A script given the expanded value is judged as given the literal,
+    # before a file run's rewrite drops the script's arguments.
+    expanded = _expand_literal_variables(command)
+    if (expanded != command and depth < _MAX_WRAPPER_DEPTH
+            and _script_argv_guarded_command(expanded, depth) is not None):
+        return True
+    # A string a shell's -c (or an eval) is given by a substitution that prints it is
+    # judged as the printed text, as the approval reads it.
+    if depth < _MAX_WRAPPER_DEPTH:
+        printed = _rewrite_readable_evals(command)
+        if printed != command and _is_dangerous_at_depth(printed, depth + 1):
+            return True
+    # A file written with literal text and then run is judged as the text it runs.
+    if depth < _MAX_WRAPPER_DEPTH:
+        rewritten = _rewrite_file_runs(command)
+        if rewritten != command:
+            return _is_dangerous_at_depth(rewritten, depth + 1)
+    command = expanded
+    # Code an interpreter reads from stdin (heredoc, here-string, pipe) is that
+    # interpreter's program: it is refused when it passes a guarded command directly
+    # to an exec primitive. The carriers below see it only as inert text.
+    if _interpreter_code_runs_guarded(command, depth):
+        return True
+    # An xargs leg that runs a shell on each item of a here-string or heredoc runs those
+    # items as commands, the same as its `echo … | xargs sh -c` pipe form.
+    if depth < _XARGS_MAX_DEPTH and any(
+        _is_dangerous_at_depth(item, depth + 1) for item in _xargs_shell_stdin_items(command)
+    ):
         return True
 
     # Normalize bash line continuations (\<newline>) via the shared P0 SSOT before
@@ -5273,6 +10281,16 @@ def is_dangerous_command(command: str) -> bool:
     # selection (_single_destructive_leg) ALL route through is_dangerous_command, so
     # suppressing here makes every consumer agree the inert leg is non-gating.
     stripped = _neutralize_inert_help_legs(stripped)
+    # A POSIX shell's -c string is a command line: judge it as the bare command is.
+    if depth < _MAX_WRAPPER_DEPTH:
+        for inner in _shell_c_programs(command):
+            if _is_dangerous_at_depth(inner, depth + 1):
+                return True
+        # A command substitution runs its body: judge it as the bare command is, so a
+        # -c string, eval, or a pipe or here-string to a shell inside it is read too.
+        for body in _substitution_bodies(_strip_shell_comments(_excise_heredoc_bodies_for_routing_scan(command))):
+            if _is_dangerous_at_depth(body, depth + 1):
+                return True
     # The literal danger battery (DANGEROUS_PATTERNS + the four per-leg literal-arm families +
     # the additive normalized-flag condition) is the SSOT _stripped_surface_danger — factored
     # out so the #1178 general-strip preserve-predicate can consult the SAME predicate on a
@@ -5358,6 +10376,22 @@ def _split_into_legs(command: str) -> list[str]:
     return _slice_stripped_legs(stripped)
 
 
+def _legs_cut_to_substitutions(command: str) -> list[str]:
+    """The legs of `command`, a leg that starts inside a substitution and runs to its end
+    cut before the substitution's closing `)` or backtick: an unquoted `x=$(echo hi;
+    gh pr merge 5)` has the legs `x=$(echo hi` and `gh pr merge 5`."""
+    stripped = _strip_non_executable_content(_normalize_line_continuations(command))
+    subs = _substitution_spans(stripped)
+    legs = []
+    for start, end in _slice_stripped_leg_spans(stripped):
+        for s, e in subs:
+            if s < start < e <= end:
+                end = e - 1
+                break
+        legs.append(stripped[start:end])
+    return legs
+
+
 def _single_destructive_leg(command: str) -> str | None:
     """The UNIQUE is_dangerous_command leg of a command, or None.
 
@@ -5386,9 +10420,11 @@ def _single_destructive_leg(command: str) -> str | None:
     destructive op is a token of its OWN simple-command (leg), so it stays bound;
     only a different statement's flag (past an operator boundary) is dropped.
     """
+    # An eval's heredoc lines are the command it runs, not legs of their own.
+    command = _rewrite_readable_evals(command)
     dangerous = [
         leg.strip()
-        for leg in _split_into_legs(command)
+        for leg in _legs_cut_to_substitutions(command)
         if is_dangerous_command(leg.strip())
     ]
     return dangerous[0] if len(dangerous) == 1 else None
@@ -5409,10 +10445,246 @@ def _single_detectable_leg(command: str) -> str | None:
     """
     detectable = [
         leg.strip()
-        for leg in _split_into_legs(command)
+        for leg in _legs_cut_to_substitutions(command)
         if detect_command_operation_type(leg.strip()) is not None
     ]
     return detectable[0] if len(detectable) == 1 else None
+
+
+_TARGET_CHANGING_LEG_RE = re.compile(
+    r"^[({\s]*(?:[A-Za-z_]\w*=\S*\s+)*(?:command\s+)?"
+    r"(?:git(?:\s+-[Cc]\s+\S+|\s+--\S+)*\s+(?:checkout|switch|remote\s+(?:set-url|add|rename)"
+    r"|config|branch(?=[^\n]*\s(?:-u|--set-upstream-to|--unset-upstream|-m|-M|--move)\b)"
+    r"|push(?=[^\n]*\s(?:-[A-Za-z]*u[A-Za-z]*|--set-upstream)(?:\s|$)))\b"
+    r"|gh\s+(?:pr\s+checkout|co|repo\s+set-default)\b"
+    r"|cd\b|pushd\b|popd\b)"
+)
+
+_GIT_CONFIG_SUBCOMMANDS = frozenset({"get", "list", "set", "unset", "rename-section", "remove-section", "edit"})
+_GIT_CONFIG_READ_MODES = frozenset(
+    {"get", "list", "--get", "--get-all", "--get-regexp", "--get-urlmatch", "-l", "--list",
+     "--get-color", "--get-colorbool"}
+)
+_GIT_CONFIG_WRITE_MODES = frozenset(
+    {"set", "unset", "rename-section", "remove-section", "edit", "--unset", "--unset-all",
+     "--replace-all", "--add", "--rename-section", "--remove-section", "-e", "--edit"}
+)
+_GIT_CONFIG_VALUE_OPTIONS = frozenset(
+    {"-f", "--file", "--blob", "--type", "--value", "--default", "--url", "--comment"}
+)
+# Section and variable names are case-insensitive; the remote's name is not, so any
+# name matches.
+_GIT_CONFIG_REMOTE_KEY_RE = re.compile(
+    r"(?i)^(?:remote\..+\.(?:url|pushurl)|url\..+\.(?:insteadof|pushinsteadof))$"
+)
+_GIT_CONFIG_REMOTE_SECTION_RE = re.compile(r"(?i)^(?:remote|url)(?:\.|$)")
+# The keys that pick the remote a push naming no ref goes to, and the refs it updates.
+_GIT_CONFIG_PUSH_ROUTING_KEY_RE = re.compile(
+    r"(?i)^(?:branch\..+\.(?:remote|pushremote|merge)|remote\.pushdefault|push\.default|remote\..+\.push)$"
+)
+_GIT_CONFIG_PUSH_ROUTING_SECTION_RE = re.compile(r"(?i)^branch(?:\.|$)")
+
+
+def _git_config_changes_a_remote(
+    leg: str,
+    key_re: "re.Pattern[str]" = _GIT_CONFIG_REMOTE_KEY_RE,
+    section_re: "re.Pattern[str]" = _GIT_CONFIG_REMOTE_SECTION_RE,
+) -> bool:
+    """Whether a `git config` leg may change where a remote points: it sets, unsets or
+    replaces `remote.<name>.url`/`pushurl` or `url.<base>.insteadOf`/`pushInsteadOf`,
+    renames or removes a `remote` or `url` section, or opens the file in an editor.
+    Reads (`get`, `list`, `--get…`, `-l`, the key alone) change nothing. `key_re` and
+    `section_re` name other keys and sections to read the same way."""
+    _, words = _assignments_reaching_command(leg.rstrip(" \t)};"))
+    i = 1
+    while i < len(words) and words[i].startswith("-"):
+        i += 2 if words[i] in ("-C", "-c") else 1
+    if i >= len(words) or words[i] != "config":
+        return True
+    mode, names, i = None, [], i + 1
+    while i < len(words):
+        word = words[i]
+        if word in _GIT_CONFIG_VALUE_OPTIONS:
+            i += 1
+        elif word.startswith("-") and (word in _GIT_CONFIG_READ_MODES or word in _GIT_CONFIG_WRITE_MODES):
+            mode = mode or word
+        elif not word.startswith("-") or word == "-":
+            if mode is None and not names and word in _GIT_CONFIG_SUBCOMMANDS:
+                mode = word
+            else:
+                names.append(word)
+        i += 1
+    if mode in _GIT_CONFIG_READ_MODES:
+        return False
+    if mode in ("edit", "-e", "--edit"):
+        return True
+    if mode in ("rename-section", "remove-section", "--rename-section", "--remove-section"):
+        return any(section_re.match(name) for name in names)
+    if mode is None and len(names) < 2:
+        return False
+    return bool(names) and key_re.match(names[0]) is not None
+
+
+def _leg_names_another_repo(leg: str) -> bool:
+    """Whether a git leg runs in a repository it names itself: `git -C <dir>`,
+    `--git-dir`, `--work-tree`, or a `GIT_DIR=` / `GIT_WORK_TREE=` assignment that
+    reaches the command (as a prefix, through env, or past an exec wrapper). An
+    `env -C <dir>` / `--chdir` running the leg names another directory for any
+    command, git or gh."""
+    assigned, words = _assignments_reaching_command(leg)
+    if "GIT_DIR" in assigned or "GIT_WORK_TREE" in assigned or ENV_CHDIR in assigned:
+        return True
+    if not words or os.path.basename(words[0]) != "git":
+        return False
+    for word in words[1:]:
+        if not word.startswith("-"):
+            return False
+        if word.startswith(("-C", "--git-dir", "--work-tree")):
+            return True
+    return False
+
+
+def target_changes_before_guarded_leg(command: str, branch: bool = True) -> bool:
+    """Whether the command's guarded leg runs somewhere other than the current branch of
+    the current repository: a leg before it changes the branch, directory or gh's
+    default repository (`git checkout`, `git switch`, `gh pr checkout`, `gh repo
+    set-default`, `git remote set-url`/`add`/`rename`, a `git config` that changes
+    `remote.<name>.url` or `url.<base>.insteadOf`, `cd`, `pushd`, `popd`, also inside a
+    subshell), or the guarded leg names another repository (`git -C`, `--git-dir`,
+    `--work-tree`, `GIT_DIR=`, `GIT_WORK_TREE=`, or either exported in an earlier leg).
+    An op on an implicit target (`gh pr merge --squash`, `git push --force`) then acts
+    on another branch or repo than the one the bare op would. With `branch` False a
+    branch change does not count: a numbered op (`gh pr merge 5`) names its pull
+    request, so only a change of repository moves it. Before a force push naming no ref,
+    `git branch -u`/`--set-upstream-to`/`--unset-upstream` or a `git config` of
+    `branch.<b>.remote`/`pushRemote`/`merge`, `remote.pushDefault` or
+    `push.default` also counts."""
+    guarded = _single_destructive_leg(command) or _single_detectable_leg(command)
+    if guarded is None:
+        return False
+    # The string a shell runs with -c changes its own directory first.
+    body = shell_c_string(guarded)
+    if body and body != guarded and target_changes_before_guarded_leg(body, branch):
+        return True
+    if _leg_names_another_repo(guarded) or _exported_before_guarded_leg(command, ("GIT_DIR", "GIT_WORK_TREE")):
+        return True
+    for leg in (leg.strip() for leg in _split_into_legs(command)):
+        if leg == guarded:
+            return False
+        # `git checkout [<tree>] -- <paths>` restores files and leaves the branch;
+        # `gh repo set-default --view` only prints the default.
+        # A leg run through env or an exec wrapper (`env FOO=1 git checkout x`,
+        # `timeout 60 git config …`) changes the target as the bare leg does.
+        _, words = _assignments_reaching_command(leg)
+        change = _TARGET_CHANGING_LEG_RE.match(leg) or (
+            _TARGET_CHANGING_LEG_RE.match(shlex.join(words)) if words else None
+        )
+        if not change or re.search(r"\scheckout\b.*\s--(?:\s|$)|\sset-default\b.*\s(?:-v|--view)\b", leg):
+            continue
+        # An upstream or push-routing change (`git branch -u`, `git push -u`, a push
+        # setting in git config) moves only a force push that names no ref: it picks
+        # that push's remote and the ref it updates. A push naming its ref, and gh, do
+        # not read it.
+        # Renaming a branch (`git branch -m`/`-M`) is a branch change, as a checkout
+        # is: the text cannot tell whether the branch renamed is the current one.
+        renames = change.group(0).endswith("branch") and not re.search(
+            r"\s(?:-u|--set-upstream-to|--unset-upstream)\b", leg
+        )
+        sets_upstream = change.group(0).endswith(("branch", "push")) and not renames
+        routes = sets_upstream or (
+            change.group(0).endswith("config") and not _git_config_changes_a_remote(leg)
+        )
+        if routes and not (
+            (sets_upstream or _git_config_changes_a_remote(
+                leg, _GIT_CONFIG_PUSH_ROUTING_KEY_RE, _GIT_CONFIG_PUSH_ROUTING_SECTION_RE))
+            and extract_command_context(guarded).get("force_push_implicit") is not None
+        ):
+            continue
+        if branch or not (renames or re.search(r"(?:checkout|switch|\bco)$", change.group(0))):
+            return True
+    return False
+
+
+def binds_a_masked_value(context: dict) -> bool:
+    """Whether a bound flag's value was read as the inert-text placeholder, as a quoted
+    `--repo="o/b"` or `GH_REPO='o/b'` is: every quoted value then reads alike, so the
+    (op, target, flags) reading cannot tell one repository or commit from another."""
+    return any(
+        isinstance(flag, str) and "=" in flag and flag.split("=", 1)[1] == "STRIPPED"
+        for flag in context.get("bound_flags") or []
+    )
+
+
+# The ops whose target names a pull request or branch but not the repository it is in,
+# so a change of repository before one acts on a same-named target elsewhere.
+REPO_RELATIVE_OPS = frozenset(
+    {"merge", "close", "force-push", "branch-delete", "remote-ref-delete", "remote-mass-delete", "push-to-main"}
+)
+
+
+# `export`, or `declare` / `typeset` with an `-x` flag: the forms that pass a variable to
+# the commands the shell runs.
+_EXPORTING = r"(?:export|(?:declare|typeset)(?:[ \t]+-[A-Za-z]+)*[ \t]+-[A-Za-z]*x[A-Za-z]*)"
+
+
+# `set -a` / `set -o allexport` (also among other options, `set -ea`) and its `+` reverse:
+# while it is on, every assignment the shell makes is exported.
+_SET_OPTIONS = r"(?:^|[;&|({\n])[ \t]*set(?:[ \t]+[-+][A-Za-z]+|[ \t]+[-+]o[ \t]+\w+)*?[ \t]+"
+_ALLEXPORT_ON_RE = re.compile(_SET_OPTIONS + r"(?:-[A-Za-z]*a[A-Za-z]*|-o[ \t]+allexport)(?=[ \t;&|)\n]|$)")
+_ALLEXPORT_OFF_RE = re.compile(_SET_OPTIONS + r"(?:\+[A-Za-z]*a[A-Za-z]*|\+o[ \t]+allexport)(?=[ \t;&|)\n]|$)")
+
+
+def _assigned_while_allexport(head: str, name: str) -> bool:
+    """Whether `head` assigns `name` in a leg of its own while `set -a` is on."""
+    ons = [m.end() for m in _ALLEXPORT_ON_RE.finditer(head)]
+    if not ons:
+        return False
+    offs = [m.end() for m in _ALLEXPORT_OFF_RE.finditer(head)]
+    for assignment in re.finditer(
+        r"(?:^|[;&|({\n])[ \t]*(?:(?:declare|typeset|local|readonly)(?:[ \t]+-[A-Za-z]+)*[ \t]+)?" + name + "=", head
+    ):
+        on = max((p for p in ons if p <= assignment.start()), default=None)
+        if on is not None and not any(on < p <= assignment.start() for p in offs):
+            return True
+    return False
+
+
+def _exported_before_guarded_leg(command: str, names: tuple[str, ...]) -> bool:
+    """Whether a leg before the command's guarded leg exports one of `names`, so the
+    guarded command reads it from its environment: in the same command line, a
+    subshell or brace group, or the string a shell runs with -c. A variable assigned
+    without export is not passed on and does not count, unless `set -a` is on."""
+    guarded = _single_destructive_leg(command) or _single_detectable_leg(command)
+    body = shell_c_string(guarded) if guarded else None
+    if body and body != guarded and _exported_before_guarded_leg(body, names):
+        return True
+    start = command.find(guarded) if guarded else -1
+    if start <= 0:
+        return False
+    head = command[:start]
+    for name in names:
+        if name not in head:
+            continue
+        # `export NAME` with no value exports a variable assigned earlier.
+        if re.search(r"(?:^|[;&|({\n])[ \t]*" + _EXPORTING + r"[ \t]+(?:[^;&|\n]*[ \t])?" + name
+                     + r"(?=[ \t;&|)\n]|$)", head):
+            return True
+        found = _literal_assignments(head, name, exported=True)
+        if found is None:
+            if re.search(r"(?:^|[;&|({\n])[ \t]*" + _EXPORTING + r"[ \t][^;&|\n]*" + name + "=", head):
+                return True
+        elif any(re.match(r"[ \t]*" + _EXPORTING + r"[ \t]", a.group(0)) for a in found):
+            return True
+        if _assigned_while_allexport(head, name):
+            return True
+    return False
+
+
+def exported_gh_target_before_guarded_leg(command: str) -> bool:
+    """Whether a leg before the command's guarded leg exports GH_REPO, GH_HOST or
+    GH_CONFIG_DIR (`export GH_REPO=o/b; gh pr merge 5`), which gh then reads as its
+    repository, host or config."""
+    return _exported_before_guarded_leg(command, _GH_TARGET_VARIABLES)
 
 
 def is_compound_destructive_command(command: str) -> bool:
@@ -5436,8 +10708,18 @@ def is_compound_destructive_command(command: str) -> bool:
     `gh pr merge 5 && echo ok`, `gh pr merge 5 ; echo done`, `gh pr merge 5 &`,
     `gh pr merge 5 | tee log`, `gh pr merge 5 > out.log` are NOT compound-destructive
     (one destructive leg). Only >=2 destructive legs are refused (route to
-    one-op-at-a-time approval).
+    one-op-at-a-time approval). Each distinct guarded command an interpreter program
+    runs (`python3 -c '…run(["gh", "pr", "merge", "5"])'`) counts as one destructive
+    leg, so `A && gh pr merge 6` with A such a program is compound.
     """
+    # An eval of a variable runs the variable's value: the guarded commands in it count.
+    evaluated = _rewrite_variable_evals(_rewrite_printed_assignments(command))
+    if evaluated != command and is_compound_destructive_command(evaluated):
+        return True
+    # A trap's literal handler string is code the shell runs: its guarded commands count.
+    trapped = _rewrite_trap_handlers(command)
+    if trapped != command and is_compound_destructive_command(trapped):
+        return True
     # Legs come from the shared _split_into_legs SSOT (masked + FD-neutralized split
     # on _COMPOUND_OPS_RE, slices taken from `stripped`). A command with no operator
     # yields ONE leg, so the >=2 count below is False — identical to the prior
@@ -5452,4 +10734,1091 @@ def is_compound_destructive_command(command: str) -> bool:
     # already True (a git/gh op is present) at the read call site, so a bare `rm` or a
     # pure-rm chain — is_dangerous=False — never reaches it (the guard stays out of
     # pure-filesystem commands).
-    return sum(1 for leg in legs if _leg_is_destructive(leg)) >= 2
+    # A program handed to an interpreter is stripped from the legs above, so the
+    # guarded commands such programs run are counted from the programs: interpreter
+    # legs together count as the larger of their destructive legs and the distinct
+    # commands their programs run, so neither reading counts one command twice.
+    # When an eval runs a heredoc, the heredoc bodies stay in the legs, so the commands
+    # the eval runs are counted from their own legs; the eval's leg is not counted again
+    # for the eval+heredoc shape alone.
+    destructive = _destructive_legs(command, legs)
+    on_interpreters = sum(1 for leg in destructive if _INTERPRETER_WORD_RE.search(leg))
+    interpreted = {normalize_command_text(c) for c in _interpreter_guarded_commands(command, 0)}
+    # A shell's -c string or an eval's words are counted as written: the strip blanks a
+    # quoted string or heredoc body inside one that the inner shell runs, so such a leg
+    # can be destructive only as written.
+    written_legs = _legs_as_written(command, legs)
+    as_written = [
+        leg not in destructive and written != leg and _shell_c_argument(written, strict=False) is not None
+        and _leg_is_destructive(written)
+        for leg, written in zip(legs, written_legs)
+    ]
+    shell_counts = [
+        _shell_leg_destructive_count(written) if leg in destructive or flag else 0
+        for leg, written, flag in zip(legs, written_legs, as_written)
+    ]
+    in_shells = sum(shell_counts)
+    # Only one branch of an if/elif/else or one arm of a case runs, and one leg of a
+    # chain joined only by `||` succeeds.
+    in_shells -= _alternative_branch_walk(legs, shell_counts, _leg_operators(command))[0]
+    # Commands a substitution runs are counted from its body, as a program's are: legs
+    # holding a substitution count as the larger of their own number and the body's.
+    on_substitutions = _destructive_legs_on_substitutions(command, legs, destructive)
+    if any(as_written):
+        # Such a leg is on a substitution when it is a piece of one (inside its span, or
+        # closing more parentheses than it opens), or when the calling shell expands one
+        # in it before the inner shell runs.
+        stripped = _strip_non_executable_content(_normalize_line_continuations(command))
+        subs = _substitution_spans(stripped)
+        on_substitutions += sum(
+            1 for (start, end), written, flag in zip(_slice_stripped_leg_spans(stripped), written_legs, as_written)
+            if flag and (
+                _calling_shell_substitutes(written) or any(s < end and start < e for s, e in subs)
+                or _mask_shell_quotes(written).count(")") > _mask_shell_quotes(written).count("(")
+            )
+        )
+    in_shells += max(on_substitutions, _substitution_destructive_count(command)) - on_substitutions
+    in_shells += _repeat_extra(command)
+    return in_shells - on_interpreters + max(on_interpreters, len(interpreted)) >= 2
+
+
+_FOR_IN_LEG_RE = re.compile(r"\s*for\s+(?P<name>[A-Za-z_]\w*)\s+in\s+(?P<words>.*\S)\s*$", re.DOTALL)
+_LOOP_HEAD_LEG_RE = re.compile(r"\s*(?:for|while|until|select)\s")
+_DONE_LEG_RE = re.compile(r"\s*done(?![\w-])")
+_LEADING_KEYWORDS_RE = re.compile(r"^\s*(?:(?:do|then|else)\s+|\{\s+)*")
+
+
+# The gh pr merge/close flags whose value is prose (a subject, body or comment), never
+# which PR or repo the command acts on: the prose subset of _GH_PR_VALUE_TAKING_FLAGS
+# with the short aliases _INERT_HELP_EXTRA_VALUE_FLAGS lists for them.
+_GH_PROSE_VALUE_FLAGS = frozenset({"--subject", "-t", "--body", "-b", "--comment", "-c"})
+
+
+def _varies_with(leg: str, uses: "re.Pattern") -> bool:
+    """Whether `leg` reads the variable `uses` matches anywhere but in the value of a gh
+    prose flag (`--subject "try $i"`): only those values leave the operation the same."""
+    word = _leg_command_word(leg) or ""
+    tokens = _shell_tokenize(word)
+    if not tokens or os.path.basename(tokens[0]) != "gh":
+        return bool(uses.search(leg))
+    kept, skip = [], False
+    for token in tokens:
+        if skip:
+            skip = False
+        elif token in _GH_PROSE_VALUE_FLAGS:
+            skip = True
+        else:
+            kept.append(token)
+    return any(uses.search(token) for token in kept) or bool(uses.search(leg[:len(leg) - len(word)]))
+
+
+_BRANCH_WORD_RE = re.compile(r"\s*(if|then|elif|else|fi|case|esac)(?![\w-])")
+
+
+def _leg_operators(command: str) -> list[str]:
+    """The operator that ends each leg of `command` (`""` after the last), read from the
+    same spans `_split_into_legs` slices."""
+    stripped = _strip_non_executable_content(_normalize_line_continuations(command))
+    spans = _slice_stripped_leg_spans(stripped)
+    return [stripped[end:start] for (_, end), (start, _) in zip(spans, spans[1:])] + [""]
+
+
+def _leg_is_negated(leg: str) -> bool:
+    """True when `leg`, past any if/then/else word opening it, is a pipeline negated with `!`
+    an odd number of times (`! !` negates nothing)."""
+    rest = leg
+    while m := _BRANCH_WORD_RE.match(rest):
+        rest = rest[m.end():]
+    bangs = re.match(r"(?:\s*!(?=\s))*", rest)
+    return bangs is not None and bangs.group().count("!") % 2 == 1
+
+
+def _alternative_branch_walk(legs: list[str], counts: list[int], ops: list[str]) -> tuple[int, int]:
+    """Walk the if/elif/else and case groups and the `||` chains over per-leg destructive
+    counts, `ops` being the operator after each leg. Returns how much more the counts add up
+    to than the commands that can run together, and the most arms of one group, or legs of
+    one chain, that each hold a destructive command. A case runs one arm, so it counts as its
+    largest arm. An if runs one path: each branch's condition decides, by its last leg,
+    whether that branch or the next condition runs, and the group counts as its largest
+    path. A condition whose guarded command is its last leg, with nothing guarded before it,
+    counts on the path where its branch runs and not on the paths past it (its command
+    failed there), or the other way round when that leg is negated (`if ! gh pr merge 5;
+    then …`, or the same in an elif); any other condition counts on every path that
+    reaches it. Nested groups count by the same rule inside their arm. Legs joined only by
+    `||` run one after another only while each fails, so the chain counts as its largest
+    leg; a negated guarded leg (`! gh pr merge 5 || …`) fails when its op succeeds, so the
+    chain breaks after it and the parts add up. (0, 0) when a group does not close."""
+    stack: list[dict] = []
+    top = widest = 0
+    total, counts = sum(counts), list(counts)
+    i = 0
+    while i < len(legs):
+        j = i
+        while j < len(legs) - 1 and ops[j] == "||" and not (counts[j] and _leg_is_negated(legs[j])):
+            j += 1
+        # An && or a pipe on either side makes the chain's legs run together.
+        if j > i and (i == 0 or ops[i - 1] not in ("&&", "|", "|&")) and ops[j] not in ("&&", "|", "|&"):
+            run = counts[i:j + 1]
+            widest = max(widest, sum(1 for c in run if c))
+            counts[i:j + 1] = [max(run)] + [0] * (j - i)
+        i = j + 1
+
+    def outcomes(arm: dict) -> tuple[int, int]:
+        """What an if branch's condition counts on the paths past it and on its own."""
+        cond, parts = arm["cond"], arm["parts"]
+        if any(k for k, _ in parts[:-1]):
+            return cond, cond
+        if parts[-1][1]:
+            return cond, 0
+        return 0, cond
+
+    def close_if(frame: dict) -> tuple[int, list[int]]:
+        passed, paths = 0, []
+        for arm in frame["arms"]:
+            if arm["else"]:
+                paths.append(passed + arm["body"])
+                return max(paths), paths
+            past, own = outcomes(arm)
+            paths.append(passed + own + (arm["body"] or 0))
+            passed += past
+        paths.append(passed)
+        return max(paths), paths
+
+    def add(frame: dict, value: int, negated: bool) -> None:
+        if frame["case"]:
+            frame["cur"] = (frame["cur"] or 0) + value
+            return
+        arm = frame["arms"][-1]
+        if arm["body"] is None:
+            arm["cond"] += value
+            arm["parts"].append((value, negated))
+        else:
+            arm["body"] += value
+
+    def step(word: str, n: int, empty: bool, negated: bool) -> None:
+        nonlocal top, widest
+        frame = stack[-1] if stack else None
+        if word == "case":
+            stack.append({"case": True, "branches": [], "cur": n})
+        elif word == "if":
+            stack.append({"case": False, "arms": [{"cond": n, "parts": [(n, negated)], "body": None, "else": False}]})
+        elif frame is None:
+            top += n
+        elif word in ("fi", "esac"):
+            stack.pop()
+            if frame["case"]:
+                frame["branches"].append(frame["cur"] or 0)
+                paths = frame["branches"]
+                value = max(paths)
+            else:
+                value, paths = close_if(frame)
+            widest = max(widest, sum(1 for path in paths if path))
+            if stack:
+                add(stack[-1], value + n, False)
+            else:
+                top += value + n
+        elif frame["case"]:
+            if empty:
+                frame["branches"].append(frame["cur"] or 0)
+                frame["cur"] = 0
+            else:
+                frame["cur"] = (frame["cur"] or 0) + n
+        elif word == "then":
+            frame["arms"][-1]["body"] = n
+        elif word == "elif":
+            frame["arms"].append({"cond": n, "parts": [(n, negated)], "body": None, "else": False})
+        elif word == "else":
+            frame["arms"].append({"cond": 0, "parts": [], "body": n, "else": True})
+        else:
+            add(frame, n, negated)
+
+    for leg, n in zip(legs, counts):
+        # A leg can open with several words in a row (`then if b`, `else case ...`); the
+        # leg's commands belong to the last.
+        words, rest = [], leg
+        while m := _BRANCH_WORD_RE.match(rest):
+            words.append(m.group(1))
+            rest = rest[m.end():]
+        for word in words[:-1]:
+            step(word, 0, False, False)
+        step(words[-1] if words else "", n, not leg.strip(), _leg_is_negated(leg))
+    return (0, 0) if stack else (total - top, widest)
+
+
+def alternative_destructive_branch_count(command: str) -> int:
+    """The most branches of one if/elif/else or case group, or legs of one chain joined only
+    by `||`, in `command` that each run a destructive command: 2 for `if c; then gh pr
+    merge 5; else gh pr merge 6; fi` and for `gh pr merge 5 --squash || gh pr merge 5
+    --rebase`, 0 when there is none or a group does not close. Each such branch can run
+    on its own, so an approval of the command binds its whole text when this is 2 or more."""
+    legs = _split_into_legs(command)
+    destructive = _destructive_legs(command, legs)
+    return _alternative_branch_walk(legs, [
+        _shell_leg_destructive_count(leg) if leg in destructive else 0 for leg in legs
+    ], _leg_operators(command))[1]
+
+
+def _destructive_legs(command: str, legs: list[str]) -> list[str]:
+    """The legs of `command` that run a destructive command. When an eval runs a heredoc,
+    the heredoc bodies stay in the legs and each is judged as a command."""
+    if _has_eval_with_heredoc(command):
+        return [leg for leg in legs if _is_dangerous_at_depth(leg, 0) or _RM_HEAD_RE.match(leg)]
+    return [leg for leg in legs if _leg_is_destructive(leg)]
+
+
+_FIND_EXEC_RE = re.compile(r"\s-(?:exec|execdir|ok|okdir)(?![\w-])")
+_SHELL_FUNCTION_DEF_RE = re.compile(
+    r"^\s*(?:function\s+(?P<kw>[A-Za-z_][\w.-]*)\s*(?:\(\s*\))?|(?P<name>[A-Za-z_][\w.-]*)\s*\(\s*\))\s*\{"
+)
+_CLOSE_BRACE_LEG_RE = re.compile(r"\s*\}")
+
+
+def _leg_heads(leg: str) -> list[str]:
+    """The command words a leg runs through: its own head, then the head of the command
+    each exec wrapper it starts with runs (`env`, `nohup`, `timeout 5`, `xargs -I{}`, ...)."""
+    heads: list[str] = []
+    word = _leg_command_word(_LEADING_KEYWORDS_RE.sub("", leg))
+    for _ in range(_MAX_WRAPPER_DEPTH):
+        if not word:
+            break
+        tokens = _shell_tokenize(word) or word.split()
+        if not tokens:
+            break
+        head = os.path.basename(tokens[0])
+        heads.append(head)
+        if head not in _EXEC_WRAPPERS_RECURSE or head not in _WRAPPER_GRAMMAR:
+            break
+        word = _wrapper_nested_command(word, head)
+    return heads
+
+
+_REPEATING_RUNNERS = frozenset({"xargs", "parallel", "watch"})
+_AWK_HEADS = frozenset({"awk", "gawk", "mawk", "nawk"})
+
+
+def _awk_runs_per_record(leg: str) -> bool:
+    """Whether an awk leg (as written) runs a command once per input record: its program
+    calls system() or pipes to a command outside a BEGIN or END block. A program read from
+    a file (-f) cannot be read, so it counts as per record."""
+    tokens = _shell_tokenize(leg.strip()) or []
+    k = 1
+    while k < len(tokens) and tokens[k].startswith("-"):
+        if tokens[k] in ("-f", "--file") or tokens[k].startswith("-f"):
+            return True
+        k += 2 if tokens[k] in ("-F", "-v", "--assign", "--field-separator") else 1
+    if k >= len(tokens):
+        return True
+    program = tokens[k]
+    for block in re.finditer(r"\b(?:BEGIN|END)\s*\{", program):
+        depth, j = 1, block.end()
+        while j < len(program) and depth:
+            depth += {"{": 1, "}": -1}.get(program[j], 0)
+            j += 1
+        program = program[:block.start()] + " " * (j - block.start()) + program[j:]
+    return bool(re.search(r"\bsystem\s*\(|\|&?\s*[\"\w$]", program))
+
+
+def _feeds_one_literal_word(leg: str) -> bool:
+    """Whether `leg` (as written) is an echo or a printf of `%s` / `%s\\n` that prints
+    exactly one literal word, so an xargs it pipes into runs its command once."""
+    tokens = _shell_tokenize(leg.strip())
+    if not tokens:
+        return False
+    if tokens[0] == "echo" and len(tokens) == 2:
+        word = tokens[1]
+    elif tokens[0] == "printf" and len(tokens) == 3 and tokens[1] in ("%s", "%s\\n"):
+        word = tokens[2]
+    elif tokens[0] == "printf" and len(tokens) == 2 and "%" not in tokens[1]:
+        word = tokens[1]
+    else:
+        return False
+    return _one_literal_word(word)
+
+
+# Filters that pass on at most one line of their input.
+_ONE_RECORD_FILTERS = (
+    ["head", "-1"], ["head", "-n", "1"], ["head", "-n1"], ["head", "--lines=1"],
+    ["head", "-c", "1"], ["head", "-c1"],
+    ["tail", "-1"], ["tail", "-n", "1"], ["tail", "-n1"],
+    ["sed", "-n", "1p"], ["sed", "1q"], ["awk", "NR==1"],
+)
+# Commands that print exactly one line. A rev-parse rev must name one rev: no leading
+# `-` (an option such as --all), no range (`..`, `^`) and no `:` path.
+_ONE_LINE_PRODUCERS_RE = re.compile(
+    r"git rev-parse --abbrev-ref (?!-)(?:(?!\.\.)[^\s$`*?\[{^:])+|git branch --show-current"
+    r"|gh pr view(?: [^\s$`*?\[{-][^\s$`*?\[{]*)? --json number (?:-q|--jq) \.number"
+)
+_STATUS_ZERO_TEST_RE = re.compile(
+    r"\s*(?:if\s+)?(?:\[\s+(\"?)\$\?\1\s+(?:-eq|==?)\s+0\s+\]|test\s+(\"?)\$\?\2\s+(?:-eq|==?)\s+0"
+    r"|\(\(\s*\$\?\s*==\s*0\s*\)\))\s*$"
+)
+_LOOP_PREFIX_RE = re.compile(r"^\s*(?:(?:time(?:\s+-p)?|!)\s+)+")
+# One element of the first JSON document jq reads, by index, then by field or index.
+_JQ_INDEX_PATH_RE = re.compile(r"\.\[\d+\](?:\.[A-Za-z_]\w*|\[\d+\])*")
+# gh --json fields whose value is one line of text, so `jq -r` prints it on one line.
+_GH_ONE_LINE_FIELDS = frozenset({"number", "id", "url", "state", "headRefName", "baseRefName"})
+_XARGS_VALUE_OPTIONS = frozenset({"-I", "-L", "-n", "-P", "-s", "-d", "-a", "-E"})
+
+
+def _one_literal_word(word: str) -> bool:
+    return bool(word) and not re.search(r"[\s$`*?\[{\\]", word) and not word.startswith("-")
+
+
+def _emits_one_json_document(leg: str) -> bool:
+    """Whether `leg` (as written) is a gh command printing its --json output as is: one
+    JSON document."""
+    tokens = _shell_tokenize(leg.strip()) or []
+    return (tokens[:1] == ["gh"] and tokens[1:2] != ["api"]
+            and any(t == "--json" or t.startswith("--json=") for t in tokens)
+            and not any(t in ("-q", "--jq", "-t", "--template", "--paginate")
+                        or t.startswith(("--jq=", "--template=")) for t in tokens))
+
+
+_PRINTED_LITERAL_RE = re.compile(
+    r"\s*(?P<cmd>echo|printf)[ \t]+(?:'(?P<fmt>%s(?:\\n)?)'[ \t]+)?'(?P<text>[^']*)'\s*")
+
+
+def _printed_literal(leg: str) -> str | None:
+    """The text `leg` (as written) prints when it is an echo or a printf of one
+    single-quoted literal (a printf may give it a `%s` or `%s\\n` format), or None. A
+    printf format's `\\n` is expanded; any other escape, a `%` in a format, or a
+    backslash in an echo (bash and zsh print it differently) gives None."""
+    m = _PRINTED_LITERAL_RE.fullmatch(leg)
+    if m is None:
+        return None
+    text = m.group("text")
+    if m.group("cmd") == "echo":
+        return None if m.group("fmt") or "\\" in text else text + "\n"
+    if m.group("fmt"):
+        return text + ("\n" if m.group("fmt").endswith("n") else "")
+    if "%" in text or re.search(r"\\(?!n)", text):
+        return None
+    return text.replace("\\n", "\n")
+
+
+def _one_document_scalar(text: str, path: str) -> bool:
+    """Whether `text` holds exactly one JSON document in which `path` (_JQ_INDEX_PATH_RE)
+    names a number, a boolean, null or a one-line string, so jq prints it on one line."""
+    decoder, docs, i = json.JSONDecoder(), [], 0
+    while True:
+        while i < len(text) and text[i] in " \t\n\r":
+            i += 1
+        if i == len(text):
+            break
+        try:
+            doc, i = decoder.raw_decode(text, i)
+        except ValueError:
+            return False
+        docs.append(doc)
+    if len(docs) != 1:
+        return False
+    value = docs[0]
+    for index, name in re.findall(r"\[(\d+)\]|\.([A-Za-z_]\w*)", path):
+        if index and isinstance(value, list) and int(index) < len(value):
+            value = value[int(index)]
+        elif name and isinstance(value, dict) and name in value:
+            value = value[name]
+        else:
+            return False
+    return not isinstance(value, (list, dict)) and not (isinstance(value, str) and "\n" in value)
+
+
+def _feeds_one_record(leg: str, upstream: str) -> str:
+    """What `leg` (as written), piped into xargs, gives it: "word" for an echo or a printf
+    of one literal word (_feeds_one_literal_word), "line" for one line of text, else "".
+    One line comes from a filter passing on one line (`head -1`, `tail -n 1`, `sed -n 1p`,
+    `awk 'NR==1'`, `head -c 1`, ...), `grep -m1` with only -i -E -F -w -x -v over its
+    input, `jq -c` (or `jq -r` of a one-line gh field) of one element of the single JSON
+    document an `upstream` gh --json prints, `jq -c` / `jq -r` of a path naming a scalar in
+    the one JSON document a literal `upstream` echo or printf prints (_printed_literal), or a command that prints exactly one line
+    (_ONE_LINE_PRODUCERS_RE). A file, a variable or any other feed is not bounded."""
+    tokens = _shell_tokenize(leg.strip())
+    if not tokens:
+        return ""
+    if tokens in _ONE_RECORD_FILTERS:
+        return "line"
+    if tokens[0] == "grep":
+        max_one, operands, k = False, 0, 1
+        while k < len(tokens):
+            tok = tokens[k]
+            if tok in ("-m1", "--max-count=1"):
+                max_one = True
+            elif tok in ("-m", "--max-count") and tokens[k + 1:k + 2] == ["1"]:
+                max_one, k = True, k + 1
+            elif tok.startswith("-") and not re.fullmatch(r"-[iEFwxv]+", tok):
+                return ""
+            elif not tok.startswith("-"):
+                operands += 1
+            k += 1
+        return "line" if max_one and operands == 1 else ""
+    if tokens[0] == "jq":
+        flags = {t for t in tokens[1:] if t.startswith("-")}
+        paths = [t for t in tokens[1:] if not t.startswith("-")]
+        if (not flags or not flags <= {"-r", "-c", "-rc", "-cr", "--raw-output", "--compact-output"}
+                or len(paths) != 1 or not _JQ_INDEX_PATH_RE.fullmatch(paths[0])):
+            return ""
+        if not _emits_one_json_document(upstream):
+            printed = _printed_literal(upstream)
+            return "line" if printed is not None and _one_document_scalar(printed, paths[0]) else ""
+        raw = bool(flags & {"-r", "-rc", "-cr", "--raw-output"})
+        return "line" if not raw or paths[0].rsplit(".", 1)[-1] in _GH_ONE_LINE_FIELDS else ""
+    if _ONE_LINE_PRODUCERS_RE.fullmatch(" ".join(tokens)):
+        return "line"
+    return "word" if _feeds_one_literal_word(leg) else ""
+
+
+def _here_string_one_word(leg: str) -> bool:
+    """Whether `leg` (as written) reads its standard input from a here-string of one
+    literal word (`<<< 5`, `<<< "5"`)."""
+    tokens = _shell_tokenize(leg.strip()) or []
+    for k, tok in enumerate(tokens):
+        if tok == "<<<" and k + 1 < len(tokens):
+            return _one_literal_word(tokens[k + 1]) and k + 2 == len(tokens)
+        if tok.startswith("<<<") and len(tok) > 3:
+            return _one_literal_word(tok[3:]) and k + 1 == len(tokens)
+    return False
+
+
+def _xargs_runs_once(written: list[str], joins: list[str], k: int) -> bool:
+    """Whether the xargs in `written[k]` (legs as written; `joins[k]` is the operator
+    before leg k) runs its command once: it reads one literal word from a here-string or a
+    pipe (_feeds_one_record "word") and does not split it on a delimiter (-d) or read a
+    file (-a), or it reads one line from a pipe (_feeds_one_record "line") and runs once
+    per line (only -I, -i, -r, -t, -x, -L 1, -l). The pipe is its input only when the leg
+    has no stdin redirect of its own."""
+    tokens = _shell_tokenize(written[k].strip()) or []
+    names = [os.path.basename(t) for t in tokens]
+    if "xargs" not in names:
+        return False
+    options: list[str] = []
+    i = names.index("xargs") + 1
+    while i < len(tokens) and tokens[i].startswith("-") and tokens[i] not in ("-", "--"):
+        value = tokens[i + 1] if tokens[i] in _XARGS_VALUE_OPTIONS and i + 1 < len(tokens) else ""
+        options.append(tokens[i] + value)
+        i += 2 if value else 1
+    word_ok = not any(o.startswith(("-d", "-a", "--delimiter", "--arg-file")) for o in options)
+    if _here_string_one_word(written[k]):
+        return word_ok
+    if joins[k] != "|" or any(re.match(r"\d*<", t) for t in tokens):
+        return False
+    upstream = written[k - 2] if k >= 2 and joins[k - 1] == "|" else ""
+    kind = _feeds_one_record(written[k - 1], upstream)
+    line_ok = all(o.startswith(("-I", "-i")) or o in ("-L1", "-l", "-l1", "--no-run-if-empty", "--verbose")
+                  or re.fullmatch(r"-[rtx]+", o) for o in options)
+    return (kind == "word" and word_ok) or (kind == "line" and line_ok)
+
+
+def _find_runs_once(leg: str) -> bool:
+    """Whether a find leg (as written) runs its one action's command once, and that
+    command does not repeat (_repeat_extra) inside its own text: `-maxdepth 0` (every
+    -maxdepth 0) on a single literal start path, or one `-exec … {} +` action, which
+    batches every match into one run. An -execdir `+` runs once per directory, and -ok /
+    -okdir run once per match."""
+    # A `\;` terminator ends the leg, which keeps only its backslash.
+    tokens = _shell_tokenize(leg.strip().removesuffix("\\")) or leg.split()
+    if "find" not in tokens:
+        return False
+    rest = tokens[tokens.index("find") + 1:]
+    while rest[:1] and rest[0] in ("-L", "-H", "-P"):
+        rest = rest[1:]
+    starts = 0
+    while starts < len(rest) and not (rest[starts].startswith("-") or rest[starts] in ("(", "!", ")")):
+        starts += 1
+    actions = [k for k, tok in enumerate(rest) if tok in ("-exec", "-execdir", "-ok", "-okdir")]
+    if len(actions) != 1:
+        return False
+    end = next((k for k in range(actions[0] + 1, len(rest)) if rest[k] in (";", "+")), None)
+    if any(_repeat_extra(tok) for tok in rest[actions[0] + 1:len(rest) if end is None else end]):
+        return False
+    depths = [rest[k + 1] for k in range(len(rest) - 1) if rest[k] == "-maxdepth"]
+    if starts == 1 and depths and set(depths) == {"0"} and not re.search(r"[*?\[{$`]", rest[0]):
+        return True
+    return end is not None and rest[actions[0]] == "-exec" and rest[end] == "+" and rest[end - 1] == "{}"
+
+
+_LOOP_EXIT_LEG_RE = re.compile(r"\s*(?:break|exit|return)(?![\w-])")
+_IF_LEG_RE = re.compile(r"\s*if\s")
+
+
+def _exit_levels(part: str) -> int:
+    """How many enclosing loops a break / exit / return leg leaves: `break N` leaves N,
+    `break` one, and exit or return all of them. 0 for any other leg."""
+    m = re.match(r"\s*(break|exit|return)(?![\w-])\s*(\d*)", part)
+    if m is None:
+        return 0
+    return int(m.group(2) or 1) if m.group(1) == "break" else 1 << 30
+
+
+def _then_branch_exits(legs: list[str], joins: list[str], j: int, depth: int) -> bool:
+    """Whether the then branch of the `if` opened at `legs[j]` reaches a break / exit /
+    return leaving more than `depth` loops on every path through it."""
+    nest = loops = 0
+    for m in range(j + 1, len(legs)):
+        raw = legs[m]
+        if not nest and re.match(r"\s*(?:elif|else|fi)(?![\w-])", raw):
+            return False
+        part = _LEADING_KEYWORDS_RE.sub("", raw)
+        if _IF_LEG_RE.match(part):
+            nest += 1
+        elif re.match(r"\s*fi(?![\w-])", raw):
+            nest -= 1
+        if _LOOP_HEAD_LEG_RE.match(part):
+            loops += 1
+        elif _DONE_LEG_RE.match(part):
+            loops -= 1
+        if not nest and not loops and joins[m] not in ("&&", "||") and _exit_levels(part) > depth:
+            return True
+    return False
+
+
+def _loop_repeats(legs: list[str], written: list[str], joins: list[str], i: int,
+                  functions: "set[str]", bounded: bool) -> bool:
+    """Whether the loop opened at `legs[i]` can run a guarded leg of its body (itself, or
+    as a call to one of the guarded shell `functions`) to success more than once. `written`
+    holds the same legs as written and `joins[k]` the operator before leg k. A failed
+    attempt is not an operation, so a body whose guarded leg is followed by a success exit
+    (`op && break`, `if op; then …; break`, or `op; [ $? -eq 0 ] && break`) runs one
+    successful op, and a body holding an unconditional `break` / `exit` / `return` runs
+    once. An exit counts only when it leaves this loop: a plain break inside a nested
+    loop leaves the inner loop alone (`break 2` leaves two). `op || break` and
+    `if ! op; then break` exit on failure, so they repeat. A guarded leg behind `then`, in
+    a `case`, or on the right of `&&` / `||` runs only when its guard holds: in a
+    `bounded` loop (a for over literal words) that counts once, and anywhere else the text
+    cannot say how often the guard holds, so it repeats. A guarded op that is a plain
+    while condition runs again on each success, so it repeats too; an until condition or
+    a negated while condition ends the loop on its first success."""
+    and_or = [j in ("&&", "||") for j in joins]
+    head = _LOOP_PREFIX_RE.sub("", _LEADING_KEYWORDS_RE.sub("", legs[i]))
+    depth, branch = 0, 0
+    repeats = bool(re.match(r"\s*while\s+(?!!)", head)) and _leg_is_destructive(head)
+    for k in range(i + 1, len(legs)):
+        raw = legs[k]
+        part = _LOOP_PREFIX_RE.sub("", _LEADING_KEYWORDS_RE.sub("", raw))
+        if _DONE_LEG_RE.match(part):
+            if depth == 0:
+                break
+            depth -= 1
+        elif _LOOP_HEAD_LEG_RE.match(part):
+            depth += 1
+        if re.match(r"\s*(?:then|case)(?![\w-])", raw):
+            branch += 1
+        elif re.match(r"\s*(?:fi|esac)(?![\w-])", raw):
+            branch -= 1
+        if _exit_levels(part) > depth and not branch and not and_or[k]:
+            return False
+        heads = _leg_heads(written[k])
+        if not (_leg_is_destructive(part) or (heads and heads[0] in functions)):
+            continue
+        if bounded and (branch or and_or[k]):
+            continue
+        following = _LEADING_KEYWORDS_RE.sub("", written[k + 1]) if k + 1 < len(legs) else ""
+        if _exit_levels(following) > depth and joins[k + 1] == "&&":
+            continue
+        if re.match(r"\s*if\s+(?!!)", part) and _then_branch_exits(written, joins, k, depth):
+            continue
+        # `op; [ $? -eq 0 ] && break` (or `test $? = 0`, `(( $? == 0 ))`, `if [ $? -eq 0 ];
+        # then …; break`): the status test right after the op is the op's own success exit.
+        then = _LEADING_KEYWORDS_RE.sub("", written[k + 2]) if k + 2 < len(legs) else ""
+        if (k + 1 < len(legs) and not and_or[k + 1] and _STATUS_ZERO_TEST_RE.match(following)
+                and ((joins[k + 2:k + 3] == ["&&"] and _exit_levels(then) > depth)
+                     or (_IF_LEG_RE.match(following) and _then_branch_exits(written, joins, k + 1, depth)))):
+            continue
+        repeats = True
+    return repeats
+
+
+def _fan_out_extra(command: str) -> int:
+    """1 when the shell can run a guarded command in `command` more than once, else 0: a
+    guarded leg run by find -exec / -execdir / -ok / -okdir or by xargs (once per item), a
+    guarded leg in a loop that can run it to success more than once (_loop_repeats: a
+    while, until, select or C-style for loop, or a for loop over a non-literal list or over
+    several literal words), a guarded op that is a plain while condition, and a shell
+    function holding a guarded leg that is called more than once or from such a loop, a
+    guarded command GNU parallel or watch runs, and an awk program that runs one per input
+    record (_awk_runs_per_record). An
+    until condition or a negated while condition ends the loop on its first success. One
+    approval runs one operation, so such a command counts as more than one. A loop head
+    may carry a `time` or `!` prefix. A function on a call cycle (it calls itself, directly
+    or through other functions) repeats, and so does one whose body repeats its op. A trap
+    is one more run of its handler at exit, and a handler on any other signal can run
+    again. xargs that _xargs_runs_once reads
+    runs once, and so does a find that _find_runs_once reads."""
+    stripped = _strip_non_executable_content(_normalize_line_continuations(command))
+    spans = _slice_stripped_leg_spans(stripped)
+    legs = [stripped[a:b] for a, b in spans]
+    ops = [stripped[end:start].strip() for (_, end), (start, _) in zip(spans, spans[1:])]
+    joins = [""] + ops
+    written = _slice_stripped_legs(_strip_shell_comments(_normalize_line_continuations(command)))
+    aligned = len(written) == len(legs)
+    if not aligned:
+        written = legs
+    # Shell functions whose body holds a guarded leg, the functions each body calls, and
+    # the legs that are bodies.
+    guarded_functions: set[str] = set()
+    op_functions: set[str] = set()      # those whose body runs a guarded command (not a bare rm)
+    body_calls: dict[str, set[str]] = {}
+    repeating_bodies: set[str] = set()
+    in_body = [False] * len(legs)
+    i = 0
+    while i < len(legs):
+        m = _SHELL_FUNCTION_DEF_RE.match(legs[i])
+        if m is None:
+            i += 1
+            continue
+        name = m.group("kw") or m.group("name")
+        first = legs[i][m.end():]
+        depth, j, guarded = 1, i, _leg_is_destructive(first)
+        called: set[str] = set(_leg_heads(first)[:1])
+        while depth and j + 1 < len(legs):
+            j += 1
+            part = _LEADING_KEYWORDS_RE.sub("", legs[j])
+            if _CLOSE_BRACE_LEG_RE.match(legs[j]):
+                depth -= 1
+                continue
+            depth += part.count("{") - part.count("}")
+            guarded = guarded or _leg_is_destructive(part)
+            called.update(_leg_heads(written[j])[:1])
+        body_calls[name] = called
+        for k in range(i, j + 1):
+            in_body[k] = True
+        if guarded:
+            guarded_functions.add(name)
+            # A body that repeats its own guarded op (a loop, xargs, find) repeats it per call.
+            head = _SHELL_FUNCTION_DEF_RE.match(written[i])
+            end = j if _CLOSE_BRACE_LEG_RE.match(legs[j]) else j + 1
+            body = (written[i][head.end():] if head else first) + "".join(
+                f" {joins[x] or ';'} {written[x]}" for x in range(i + 1, end))
+            if is_dangerous_command(body):
+                op_functions.add(name)
+                if _repeat_extra(body):
+                    repeating_bodies.add(name)
+        i = j + 1
+    recursive: set[str] = set(repeating_bodies)
+    for name in body_calls:
+        seen, todo = set(), list(body_calls[name])
+        while todo:
+            callee = todo.pop()
+            if callee == name:
+                recursive.add(name)
+                break
+            if callee in body_calls and callee not in seen:
+                seen.add(callee)
+                todo.extend(body_calls[callee])
+    calls: dict[str, int] = {}
+    direct_ops = trap_ops = 0
+    loops: list[bool] = []          # one entry per open loop: True when it can repeat
+    for k, raw in enumerate(legs):
+        part = _LOOP_PREFIX_RE.sub("", _LEADING_KEYWORDS_RE.sub("", raw))
+        if _DONE_LEG_RE.match(part):
+            if loops:
+                loops.pop()
+            continue
+        if _LOOP_HEAD_LEG_RE.match(part):
+            m = _FOR_IN_LEG_RE.match(part)
+            literal = m is not None and not re.search(r"[$`*?\[{]", m.group("words"))
+            one_word = literal and m is not None and len(_shell_tokenize(m.group("words")) or []) <= 1
+            loops.append(not one_word and _loop_repeats(legs, written, joins, k, guarded_functions, literal))
+            # A guarded loop condition is read by _loop_repeats, or repeats with an outer loop.
+            if _leg_is_destructive(part) and any(loops):
+                return 1
+            continue
+        repeating = any(loops)
+        if in_body[k]:
+            continue
+        heads = _leg_heads(raw)
+        as_written = written[k]
+        handler_legs = [as_written]
+        if heads[:1] == ["trap"]:
+            # A trap runs its handler once more at exit, and again on each other signal.
+            args = (_shell_tokenize(as_written.strip()) or [""])[1:]
+            args = args[1:] if args[:1] == ["--"] else args
+            if not args or args[0].startswith("-"):
+                continue
+            handler_legs = _slice_stripped_legs(args[0])
+            # Only guarded commands count: a cleanup `rm` in a handler is not an operation.
+            ops_run = sum(1 for h in handler_legs if is_dangerous_command(h))
+            guarded = ops_run or any(_leg_heads(h)[:1] and _leg_heads(h)[0] in op_functions
+                                     for h in handler_legs)
+            if guarded and (_repeat_extra(args[0]) or not set(args[1:]) <= {"EXIT", "0", "SIGEXIT"}):
+                return 1
+            trap_ops += ops_run
+        for h in handler_legs:
+            callee = (_leg_heads(h) or [""])[0]
+            if callee in guarded_functions:
+                calls[callee] = calls.get(callee, 0) + 1
+                if repeating or calls[callee] > 1 or callee in recursive:
+                    return 1
+        # An awk program is blanked by the strip, so it is read as written.
+        if heads and heads[-1] in _AWK_HEADS and _leg_is_destructive(as_written) and _awk_runs_per_record(as_written):
+            return 1
+        if not _leg_is_destructive(part):
+            continue
+        direct_ops += 1
+        if "xargs" in heads and not (aligned and _xargs_runs_once(written, joins, k)):
+            return 1
+        if _REPEATING_RUNNERS.intersection(heads) - {"xargs"}:
+            return 1
+        if repeating or ("find" in heads and _FIND_EXEC_RE.search(raw) and not _find_runs_once(as_written)):
+            return 1
+    return 1 if trap_ops and trap_ops + direct_ops + sum(calls.values()) > 1 else 0
+
+
+def _repeat_extra(command: str) -> int:
+    """The guarded runs `command` adds past one per leg: a literal for loop's passes, or 1
+    for any other way the shell can repeat a guarded command (_fan_out_extra)."""
+    return max(_literal_loop_extra_passes(command), _fan_out_extra(command))
+
+
+def _literal_loop_extra_passes(command: str) -> int:
+    """The destructive legs a `for NAME in W1 W2 …; do …; done` loop over literal words
+    runs past its first pass: `for p in 5 6; do gh pr merge "$p"; done` runs two merges,
+    so it adds 1 to the one destructive leg its body holds. A leg counts only when it
+    reads the loop variable and runs on every pass: a retry loop around one command
+    (`for i in 1 2 3; do gh pr merge 5 && break; done`) repeats one operation, and a leg
+    after `then` / `else` / in a `case`, or on the right of `&&` / `||`, runs only when
+    its guard holds, so it counts once. A list that is not plain literal words (`$VAR`,
+    `$(…)`, a glob or brace) adds nothing."""
+    stripped = _strip_non_executable_content(_normalize_line_continuations(command))
+    spans = _slice_stripped_leg_spans(stripped)
+    legs, guarded, prev = [], [], 0
+    for start, end in spans:
+        guarded.append(stripped[prev:start].strip() in ("&&", "||"))
+        legs.append(stripped[start:end])
+        prev = end
+    extra = 0
+    for i, leg in enumerate(legs):
+        m = _FOR_IN_LEG_RE.match(_LEADING_KEYWORDS_RE.sub("", leg))
+        if m is None or re.search(r"[$`*?\[{]", m.group("words")):
+            continue
+        words = _shell_tokenize(m.group("words"))
+        if not words:
+            continue
+        uses = re.compile(r"\$\{?" + re.escape(m.group("name")) + r"(?!\w)")
+        depth, branch, body = 0, 0, 0
+        for k in range(i + 1, len(legs)):
+            raw = legs[k]
+            part = _LEADING_KEYWORDS_RE.sub("", raw)
+            if _DONE_LEG_RE.match(part):
+                if depth == 0:
+                    break
+                depth -= 1
+            elif _LOOP_HEAD_LEG_RE.match(part):
+                depth += 1
+            if re.match(r"\s*(?:then|case)(?![\w-])", raw):
+                branch += 1
+            elif re.match(r"\s*(?:fi|esac)(?![\w-])", raw):
+                branch -= 1
+            if not branch and not guarded[k] and _varies_with(part, uses) and _leg_is_destructive(part):
+                body += 1
+        extra += (len(words) - 1) * body
+    return extra
+
+
+_STRIPPED_TEXT_RE = re.compile(r"<<HEREDOC_STRIPPED|STRIPPED")
+
+
+def _legs_as_written(command: str, legs: list[str]) -> list[str]:
+    """Each of `legs` (the stripped command's) as written in `command` when the strip
+    blanked text in it: the written leg that starts with the text before the first blank,
+    the n-th such leg for the n-th stripped leg with that start. A leg the strip left
+    whole, or one with no such written leg, is returned as it is."""
+    written = _slice_stripped_legs(_strip_shell_comments(_normalize_line_continuations(command)))
+    seen: dict[str, int] = {}
+    out = []
+    for leg in legs:
+        blank = _STRIPPED_TEXT_RE.search(leg)
+        if blank is None:
+            out.append(leg)
+            continue
+        start = leg[:blank.start()].strip()
+        matches = [w for w in written if w.strip().startswith(start)]
+        n = seen.get(start, 0)
+        seen[start] = n + 1
+        out.append(matches[n] if start and n < len(matches) else leg)
+    return out
+
+
+def _shell_leg_destructive_count(leg: str, depth: int = 0) -> int:
+    """1 for a destructive leg, or for a POSIX shell leg the destructive legs its -c
+    string chains, as the bare command counts them: `bash -c 'gh pr merge 5 && git
+    branch -D x'` counts 2, and a string whose only guarded text is a comment counts 0.
+    An eval leg's words, joined as eval joins them, are counted the same way."""
+    inner = _shell_c_argument(leg, strict=False) if depth < _MAX_WRAPPER_DEPTH else None
+    if inner is None and depth < _MAX_WRAPPER_DEPTH:
+        tokens = _shell_tokenize(_leg_command_word(leg) or "")
+        inner = " ".join(tokens[1:]) if tokens and tokens[0] == "eval" and len(tokens) > 1 else None
+    if inner is None:
+        return 1
+    # The string's legs as written: the strip would blank a quoted eval string that
+    # the inner shell runs.
+    view = _strip_shell_comments(_excise_heredoc_bodies_for_routing_scan(inner))
+    inner_legs = _slice_stripped_legs(view)
+    inner_destructive = [part for part in inner_legs if _leg_is_destructive(part)]
+    count = sum(_shell_leg_destructive_count(part, depth + 1) for part in inner_destructive)
+    # The string's substitutions are counted from their bodies, as the bare command's are.
+    on_substitutions = _destructive_legs_on_substitutions(inner, inner_legs, inner_destructive, view)
+    count += max(on_substitutions, _substitution_destructive_count(inner, depth + 1)) - on_substitutions
+    return count + _repeat_extra(inner)
+
+
+def _both_present_equal(token_val: object, cmd_val: object) -> bool:
+    """True iff BOTH values are present (not None) and string-equal.
+
+    The positive-match primitive for the fail-closed read predicate: either
+    side absent -> False, so an unextractable target REFUSES rather than falls
+    through permissively. String comparison normalizes a numeric pr_number
+    stored as int/str on either side.
+    """
+    if token_val is None or cmd_val is None:
+        return False
+    return str(token_val) == str(cmd_val)
+
+
+def _inner_command_contexts(command: str) -> list[dict]:
+    """The (op, target, flags) of each command a wrapper around `command` runs: the
+    -c string of its guarded leg, the program an interpreter runs, and the command
+    the classifier reads after rewriting it. Empty for a plain command."""
+    leg = _single_destructive_leg(command) or _single_detectable_leg(command) or command
+    inner_texts = [shell_c_string(leg), rewritten_executed_command(command)]
+    contexts = [interpreter_command_context(command) or {}]
+    for text in inner_texts:
+        if text:
+            contexts.append(extract_command_context(
+                _single_destructive_leg(text) or _single_detectable_leg(text) or text
+            ))
+    return [ctx for ctx in contexts if ctx]
+
+
+def _token_matches_command(token: dict, command: str) -> bool:
+    """Check that a token's context POSITIVELY matches the command being executed.
+
+    Fail-closed (the #1031/#1032 mint-vs-read symmetry fix): the read side
+    authorizes ONLY when the token and the command-derived context agree on
+    BOTH the operation type AND that operation's target. Any axis that is
+    unextractable, absent, or mismatched -> REFUSE. There is NO terminal allow:
+    a malformed context, an untyped token, an unrecognized command shape, or a
+    missing target all deny (the operator re-approves via AskUserQuestion). This
+    closes the prior fall-through that let an untyped or target-less token
+    authorize an unrelated destructive command (e.g. token{op=None} authorizing
+    `git push --force origin main`).
+
+    The command is classified via the shared `extract_command_context` SSOT, so
+    the read side derives (op, target) the SAME way the mint side does — the two
+    arms cannot drift.
+
+    Args:
+        token: Token data dict with optional context fields
+        command: The bash command being authorized
+
+    Returns:
+        True ONLY when the operation type and the op's target both positively
+        match; False otherwise.
+    """
+    context = token.get("context", {})
+    if not isinstance(context, dict):
+        return False  # F-READ-1: a non-dict context proves nothing — REFUSE
+
+    # An exact-command token (minted for an interpreter program, whose split argv
+    # the (op, target) extractor cannot read) authorizes that command text and
+    # nothing else: no other target, flag or command can match it.
+    if "command_text" in context:
+        command_text = context["command_text"]
+        return isinstance(command_text, str) and exact_text_matches(command_text, command, _COMMAND_DIRECTORY)
+
+    # A token for an op on the current branch (`gh pr merge --squash`) covers that
+    # branch only: a command that first checks out another branch or changes
+    # directory acts on another target and needs its own approval.
+    if (context.get("merge_implicit") or context.get("force_push_implicit")) and (
+        target_changes_before_guarded_leg(command)
+    ):
+        return False
+
+    # A token covers the repository the command runs in by default: a merge or close
+    # after an export of GH_REPO, GH_HOST or GH_CONFIG_DIR, or any op on a named PR or
+    # branch after a change of directory or repository (`git -C ../other branch -D
+    # feat/x`), acts in another one, even under a token that names its target.
+    op = context.get("operation_type")
+    if (op in ("merge", "close") and exported_gh_target_before_guarded_leg(command)) or (
+        op in REPO_RELATIVE_OPS and target_changes_before_guarded_leg(command, branch=False)
+    ):
+        return False
+
+    token_op = context.get("operation_type")
+    # Derive (op, target, bound_flags) from the SINGLE destructive leg, not the
+    # whole command (#1069). When a faithful single destructive op carries a benign
+    # neighbor leg (`gh pr close 1058 ; gh pr view 1058 --repo o/x`), the whole-
+    # command context would (a) bind the neighbor's `--repo` into bound_flags and
+    # over-block the faithful click, AND (b) let _extract_pr_number's first-match-
+    # anywhere scan cross-contaminate the target (the latent under-block: a token
+    # for `gh pr close N1` authorizing `gh pr close N1\ngh pr merge N2`). Isolating
+    # the one is_dangerous leg closes BOTH. TWO-TIER fallback (#1083):
+    # _single_destructive_leg returns None on not-exactly-one dangerous leg (0,
+    # or — unreachably here, since is_compound REFUSES >=2 upstream — many);
+    # tier 2 (_single_detectable_leg) then handles the EMERGENT-danger case —
+    # whole-command danger from a cross-leg lookahead with NO individually-
+    # dangerous leg (the close arms) — by binding from the unique detect-positive
+    # leg, keeping the read bind symmetric with the mint's leg-bounded window.
+    # Only when BOTH tiers abstain (0 or >=2 candidate legs — ambiguity) do we
+    # fall back to the WHOLE command: the existing over-binding scan, the SAFE
+    # over-block direction; ambiguity can only collapse WIDER, never narrower.
+    # Op/target are still derived the SAME way the mint side does (mint isolates
+    # per-region via locate_command_regions AND per-leg via _extraction_surface,
+    # #1195 OBS-H), so the two arms cannot drift.
+    cmd = extract_command_context(
+        _single_destructive_leg(command)
+        or _single_detectable_leg(command)
+        or command
+    )
+    cmd_op = cmd.get("operation_type")
+
+    # (a) Operation-type axis — both present AND equal, else REFUSE. A token with
+    # operation_type=None (or a command whose destructive shape is unrecognized)
+    # can NEVER authorize: this denies the untyped-token fall-through (the A1/A2
+    # hole) on the read axis rather than skipping the guard for it.
+    if token_op is None or cmd_op is None or token_op != cmd_op:
+        return False
+
+    # (a2) NEVER-ESCALATE FLAG AXIS (#1042) — the executed command's binding-
+    # relevant flags must EXACTLY equal the approved set. ANY difference (an added
+    # privilege like --admin/-R, OR a dropped constraint) REFUSES. Both sides are
+    # computed by the shared extract_command_context SSOT, so they cannot drift.
+    # Checked AFTER op-type identity and BEFORE the per-op target returns so it
+    # applies uniformly to all four op-classes. A pre-fix token without the key
+    # defaults to the empty set, so any privileged execution mismatches -> REFUSE
+    # (over-block-safe; tokens expire after TOKEN_TTL, so no backward-compat is needed).
+    # bound_flags is an attribute checked here, never part of pair identity.
+    if set(context.get("bound_flags", [])) != set(cmd.get("bound_flags", [])):
+        return False
+    # A flag value read as the inert-text placeholder (a quoted `--repo="o/b"`) reads
+    # alike for every value, so only a token bound to the command's text runs it.
+    if binds_a_masked_value(cmd):
+        return False
+    # The same holds for the command a wrapper runs: a shell's -c string, an
+    # interpreter program, or the command the classifier reads after a rewrite. The
+    # outer leg reads `bash -c 'gh pr merge 5 --admin'` without the quoted flag, so
+    # each inner reading of the same op must carry exactly the approved flags too.
+    if any(
+        inner.get("operation_type") == token_op
+        and set(inner.get("bound_flags", [])) != set(context.get("bound_flags", []))
+        for inner in _inner_command_contexts(command)
+    ):
+        return False
+
+    # (b) Target axis, per op-class — require a POSITIVE, command-anchored target
+    # match. Unextractable or mismatched target -> REFUSE (over-block is the safe
+    # #1031 direction; the read side never under-blocks #1032).
+    if token_op in ("merge", "close"):
+        # #1203 — the faithful bare `gh pr merge` binds on the distinct target-blind
+        # `merge_implicit` sentinel, MERGE-ONLY. The `token_op == "merge"` guard keeps a
+        # close on the pr_number-only path (#1134: close was dissolved, and its
+        # populate-site never mints the sentinel, so this is defense-in-depth belt-and-
+        # suspenders on top of that). op-type-first (above) already fixed
+        # token_op == cmd_op; the DISTINCT key means an implicit-merge token (carries
+        # merge_implicit, not pr_number) can NOT authorize an explicit `gh pr merge 42`
+        # (carries pr_number, not merge_implicit) — the absent side fails
+        # _both_present_equal in BOTH directions — and never a close.
+        return (
+            _both_present_equal(context.get("pr_number"), cmd.get("pr_number"))
+            or (
+                token_op == "merge"
+                and _both_present_equal(
+                    context.get("merge_implicit"), cmd.get("merge_implicit")
+                )
+            )
+        )
+    if token_op == "branch-delete":
+        # #1129 R1: SINGLE-branch scalar OR MULTI-branch canonical SET (D1/D2
+        # set-EQUALITY). Exactly one key is present per command (1 positional ->
+        # `branch`; >=2 -> `branch_set`, built + canonicalized in the shared
+        # SSOT), so a scalar token can NOT authorize a set command or vice-versa
+        # (the absent-key side fails _both_present_equal), and a {a,b} token can
+        # NOT authorize {a,b,c} (unequal canonical strings) while a {b,a} reorder
+        # MATCHES (both canonicalize to the SAME string). The #1032 under-block is closed by
+        # equality; both sides derive via the ONE extract_command_context SSOT so
+        # mint and read cannot drift.
+        return (
+            _both_present_equal(context.get("branch"), cmd.get("branch"))
+            or _both_present_equal(context.get("branch_set"), cmd.get("branch_set"))
+        )
+    if token_op == "push-to-main":
+        # KD-6 target bind, widened for the MULTI-ref set (#1195 OBS-G — the
+        # branch/branch_set arm mirrored): SINGLE-ref scalar `target_ref` OR
+        # MULTI-ref canonical `push_set`, set-EQUALITY on the injective netstring
+        # identity — a {main,feature} token cannot authorize {main,feature,staging}
+        # (unequal canonical strings) while a {feature,main} reorder / dup MATCHES
+        # (both canonicalize to the SAME string). Exactly one key is present per
+        # command (the scalar: exactly remote+refspec; the set: >=2 refspecs —
+        # mutually exclusive in the ONE extract_command_context SSOT), so a scalar
+        # token can NOT authorize a set command or vice-versa (the absent-key side
+        # fails _both_present_equal). GAP3 stays closed: a force-push token and a
+        # push-to-main token are DISTINCT ops (op-type identity above), and a
+        # `+refspec` / `--force` multi-ref classifies force-push, so the
+        # push→force collapse cannot re-open through the set arm; the a2
+        # bound_flags equality above keeps a PLAIN push_set token from authorizing
+        # a --force-with-lease multi-ref push (lease is a push-to-main privileged
+        # flag).
+        return (
+            _both_present_equal(context.get("target_ref"), cmd.get("target_ref"))
+            or _both_present_equal(context.get("push_set"), cmd.get("push_set"))
+        )
+    if token_op == "force-push":
+        # KD-6 target bind, widened for the MULTI-ref set (#1195 OBS-I — the
+        # push-to-main/branch_set split precedent): SINGLE-ref scalar `target_ref`
+        # OR MULTI-ref canonical `force_push_set`, set-EQUALITY on the injective
+        # FORCED-NORMALIZED identity — the identity tracks WHICH refs get forced,
+        # so a plain-mixed token can NOT authorize the --force spelling of the
+        # same refs or vice versa (the plain->forced escalation stays closed),
+        # while `--force feature main` and `+feature +main` — the same operation
+        # — share one identity. The ALLOWLIST guard in the shared extractor means
+        # a delete/mass/scope-expander/unknown-flag EXECUTION derives
+        # force_push_set=None and is REFUSED here via the absent-side rule
+        # (mint and read are the same guarded extractor — the escalation closes
+        # in both directions by construction). Exactly one of target_ref /
+        # force_push_set / force_push_implicit is present per command; the a2
+        # bound_flags equality above still discriminates --no-verify.
+        #
+        # #1203 — the IMPLICIT current-branch force-push binds on the distinct
+        # target-blind `force_push_implicit` sentinel. op-type-first (checked above)
+        # already guarantees token_op == cmd_op == "force-push", and the sentinel is a
+        # DISTINCT key populated ONLY when target_ref/force_push_set are absent, so this
+        # clause can only match implicit↔implicit: an explicit-ref command has
+        # target_ref/force_push_set (not force_push_implicit) → the sentinel side is
+        # absent → _both_present_equal REFUSES, and vice-versa (no cross-authorization
+        # between an implicit-form token and an explicit `--force origin main`).
+        return (
+            _both_present_equal(context.get("target_ref"), cmd.get("target_ref"))
+            or _both_present_equal(context.get("force_push_set"), cmd.get("force_push_set"))
+            or _both_present_equal(
+                context.get("force_push_implicit"), cmd.get("force_push_implicit")
+            )
+        )
+    if token_op == "remote-ref-delete":
+        # KD-6 (SECURITY-RATIFICATION-PENDING): the destination ref must match
+        # explicitly — an op-type-only floor would let a delete-feature approval
+        # authorize a delete-main. An implicit/multi-ref/unparseable ref is
+        # ABSENT in extract_command_context, so this REFUSES it — delete stays
+        # SCALAR-ONLY and NEVER gains a set (deliberate: deleting refs in bulk is
+        # rarely good-faith; multi-ref delete spellings remain
+        # gated-but-unmintable).
+        # #1062a: remote-ref-delete binds on target_ref (the deleted ref); the
+        # op-type identity checked above keeps a remote-ref-delete token from
+        # cross-authorizing a force-push/push-to-main sharing the same target_ref
+        # (the lead Q1 distinct-op-class guarantee).
+        return _both_present_equal(context.get("target_ref"), cmd.get("target_ref"))
+    if token_op == "remote-mass-delete":
+        # #1062b: bind on the DISTINCT `mass_target` identity tuple (mass-flags +
+        # remote + sorted refspecs). Distinct invocations → distinct tuples, so a
+        # token minted for `git push --prune origin` (--prune@origin) does NOT
+        # authorize `git push --mirror origin` (--mirror@origin) — the lesser→greater
+        # / cross-form closure. An unextractable tuple is ABSENT → REFUSE.
+        return _both_present_equal(context.get("mass_target"), cmd.get("mass_target"))
+    if token_op == "branch-protection":
+        # #1063: bind on the protected branch (PATH-resident, branches/<b>/protection).
+        # op-type identity above keeps a branch-protection token from authorizing a
+        # branch-delete of the same branch name (distinct op-classes). An unextractable
+        # branch is ABSENT → REFUSE.
+        return _both_present_equal(context.get("protected_branch"), cmd.get("protected_branch"))
+
+    # Unknown op-class (a typed token whose op is not one of the handled classes)
+    # — REFUSE. No terminal allow exists on the read path.
+    return False

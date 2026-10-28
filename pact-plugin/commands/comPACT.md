@@ -457,14 +457,16 @@ JSON
   ```
 - [ ] **`TaskUpdate`**: Feature task status = "completed"
 
-> ⚠️ **Do NOT shut down specialists until the user decides the next step.** Ask first, then act.
+If `TaskList` shows an `in_progress` Review task whose subject ends with `({branch})`, where {branch} is the output of `git branch --show-current`, this comPACT is fixing review findings: skip the question below and return to that `/PACT:peer-review` at its verify-only re-review.
+
+> ⚠️ **When you ask the question below, do not shut down specialists before the user answers.**
 
 **Next steps** — After commit, use `AskUserQuestion` to ask: "Work committed. What next?"
 
 | User's decision | Specialists | Next action |
 |----------------|-------------|-------------|
-| **Yes, create PR** (Recommended) | **Keep alive** — review often needs the original specialist to fix findings | Invoke `/PACT:peer-review`. Shut down after all remediation complete + user merge decision (via `AskUserQuestion`). |
-| **Continue working** | **Keep alive** — apply Reuse vs. Spawn table for follow-up | Do nothing — let the user continue. More work may follow via `/PACT:comPACT` or `/PACT:orchestrate`. |
+| **Yes, create PR** (Recommended) | **Keep alive** — review often needs the original specialist to fix findings | Invoke `/PACT:peer-review`. `/PACT:wrap-up` on its end-session branch, or `/PACT:pause`, shuts the specialists down later. |
+| **Continue working** | **Keep alive** — apply Reuse vs. Spawn table for follow-up | Stay in this workflow; more work may follow via `/PACT:comPACT` or `/PACT:orchestrate`. |
 | **Pause work for now** | **Shut down after consolidation** — pause preserves knowledge | Invoke `/PACT:pause` — consolidates memory, persists state, shuts down teammates. Worktree persists; resume later. |
 
 **If blocker reported**:

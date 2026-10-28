@@ -3,8 +3,11 @@
 Location: pact-plugin/hooks/merge_guard_post.py
 Summary: PostToolUse hook matching AskUserQuestion + Bash — writes a short-lived
          authorization token on AskUserQuestion approval; retires the consuming
-         token on successful `gh pr merge` Bash invocation.
-Used by: hooks.json PostToolUse hook (matcher: AskUserQuestion|Bash)
+         token on successful `gh pr merge` Bash invocation. On PostToolUseFailure
+         (Bash) it retires the token once the guarded op has run, unless the
+         call's output shows that op's own failure.
+Used by: hooks.json PostToolUse hook (matcher: AskUserQuestion|Bash) and
+         PostToolUseFailure hook (matcher: Bash)
 
 This hook is part of the merge guard system. Two PostToolUse branches:
 
@@ -30,6 +33,9 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
+import secrets
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -100,12 +106,44 @@ try:
         # read hook uses, so mint and read can never disagree on danger/compound.
         is_dangerous_command,
         is_compound_destructive_command,
+        set_command_directory,
+        # An interpreter program's guarded command has no contiguous `gh pr merge`
+        # for the region finder; the pre-hook's own interpreter reading supplies its
+        # (op, target, flags), and the token binds the command's normalized text.
+        interpreter_command_context,
+        normalize_command_text,
+        exact_text_matches,
+        # The command the classifier judges after rewriting this one (an eval of
+        # readable text, a file written then run, a literal variable, a script
+        # given a whole command); the mint reads that command, binding its text.
+        rewritten_executed_command,
+        unreadable_evald_heredoc,
+        shell_c_string,
+        # A git alias's run retires as the command its value names.
+        _rewrite_git_aliases,
+        # An eval of an assigned variable retires as the eval of its value.
+        _rewrite_variable_evals,
+        # An if/elif/else or case whose branches run different guarded commands
+        # binds its text: no one branch's (op, target) stands for the command.
+        alternative_destructive_branch_count,
+        _has_command_substitution,
         # #1083: the mint flag-scan window runs the SAME two-tier leg selection
         # (unique dangerous leg -> unique detectable leg) the read bind seam runs,
         # so mint and read bind over identical leg semantics BY CONSTRUCTION —
         # not via two parallel reimplementations that can rot apart.
         _single_destructive_leg,
         _single_detectable_leg,
+        _split_into_legs,
+        # The mint's reading of a printed or eval'd string, for the dry-run check.
+        _rewrite_readable_evals,
+        # An op on the current branch run after a checkout or cd binds its text.
+        target_changes_before_guarded_leg,
+        REPO_RELATIVE_OPS,
+        binds_a_masked_value,
+        # A merge or close after an exported GH_REPO binds its text.
+        exported_gh_target_before_guarded_leg,
+        # The pre-hook's token match: a click mints a token that match accepts.
+        _token_matches_command,
     )
     from shared.tool_response import extract_tool_response
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-loud catch-all
@@ -321,6 +359,44 @@ def _leg_bounded_flag_scan_surface(flag_scan_text: str, the_command: str) -> str
 
 
 def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
+    """The token a click mints: the one `_mint_context_by_reading` binds, unless the
+    clicked option shows exactly one command, in a code span, that the pre-hook refuses
+    as a single operation and would not run under that token (or there is none). That
+    command binds its exact text, so the approval runs it, and only it. Every refusal
+    other than finding no command stands."""
+    result = _mint_context_by_reading(questions, answers)
+    if result.refusal_reason not in (None, "no_command"):
+        return result
+    command = _clicked_refused_command(questions, answers)
+    if command is None or (
+        result.context is not None and _token_matches_command({"context": result.context}, command)
+    ):
+        return result
+    operation = extract_command_context(
+        _single_destructive_leg(command) or _single_detectable_leg(command) or command
+    ).get("operation_type") or detect_command_operation_type(command) or "guarded command"
+    return MintResult({"operation_type": operation, "command_text": normalize_command_text(command)}, None)
+
+
+def _clicked_refused_command(questions: list, answers: dict) -> str | None:
+    """The one command the clicked options show in code spans that the pre-hook refuses
+    as a single operation, or None when they show none or several."""
+    found: dict[str, str] = {}
+    for q in questions:
+        if not isinstance(q, dict) or q.get("multiSelect", False):
+            continue
+        text = _selected_option_text(q.get("options"), answers.get(q.get("question", "")))
+        for _raw, content in _code_spans(text or ""):
+            span = content.strip()
+            if span and is_dangerous_command(span):
+                found[normalize_command_text(span)] = span
+    if len(found) != 1:
+        return None
+    command = next(iter(found.values()))
+    return None if is_compound_destructive_command(command) else command
+
+
+def _mint_context_by_reading(questions: list, answers: dict) -> MintResult:
     """Decide whether an AskUserQuestion bundle authorizes exactly ONE destructive
     command; return a `MintResult(context, refusal_reason)` — `context` is the dict
     to mint, or None (with a `refusal_reason` code) to refuse.
@@ -455,10 +531,44 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
             if is_compound_destructive_command(_region):
                 return MintResult(None, "compound_command")
 
+    # A guarded command written only as data inside a backticked command the pre-hook
+    # allows (the heredoc body of `gh issue create --body-file -`, the message of
+    # `git commit -F -`) is not a command the approval runs, so it binds nothing.
+    clicked_texts = selected_option_texts
+    selected_option_texts = [_without_allowed_spans(t) for t in selected_option_texts]
+    # A clicked option that quotes a guarded command in a code span (the spans
+    # left after the line above) names its command there; its prose binds
+    # nothing, so a guarded command or a flag it mentions outside the span is
+    # neither a second operation nor part of the binding.
+    quoted = [
+        [raw for raw, content in _code_spans(t) if content.strip()]
+        for t in selected_option_texts
+    ]
+    if any(quoted):
+        selected_option_texts = ["\n".join(raws) for raws in quoted if raws]
+
     # ── Step 3: distinct-(op,target) multiplicity over the CLICKED options ONLY
     # (pure-floor scope — the question prose is NOT cross-checked): ==1 mints, >1
     # refuses (a single click carrying 2 commands), ==0 yields no token. ──
     bundle_pairs = _collect_pairs(selected_option_texts)
+    # An interpreter program is read by the pre-hook's own interpreter reader and
+    # bound by its text, whether its guarded command is split argv the region finder
+    # cannot see (`subprocess.run(["gh", "pr", "merge", "5"])`) or a string it can
+    # (`os.system("gh pr merge 5 --admin")`, whose quoted flag the region reading
+    # misses). A located command with another (op, target) beside it is a second
+    # operation.
+    exact, exact_spans = _exact_text_mint_context(selected_option_texts)
+    if exact.refusal_reason != "no_command":
+        ctx = exact.context
+        beside = _collect_pairs([_without(t, exact_spans) for t in selected_option_texts])
+        if ctx is not None and any(
+            pair != (ctx.get("operation_type"), _target_value(ctx)) for pair in beside
+        ):
+            return MintResult(None, "multiple_commands")
+        return exact
+    if not bundle_pairs and _collect_pairs(clicked_texts):
+        # The only guarded command was data in a command the pre-hook allows.
+        return MintResult(None, "not_dangerous")
     if len(bundle_pairs) != 1:
         return MintResult(
             None, "no_command" if len(bundle_pairs) == 0 else "multiple_commands"
@@ -495,15 +605,408 @@ def _mint_context_from_bundle(questions: list, answers: dict) -> MintResult:
     # (_strip_command_wrapper, BEFORE the window's find-anchor, so the anchor sees
     # the same spacing the region parser produced — order is load-bearing) — the
     # #1042 set-equality stays EXACT, so an exec-time EXTRA flag still REFUSES. ──
-    return MintResult(
-        extract_command_context(
-            _extraction_surface(the_command),
-            flag_scan_text=_leg_bounded_flag_scan_surface(
-                _strip_command_wrapper(" ".join(selected_option_texts)), the_command
-            ),
+    ctx = extract_command_context(
+        _extraction_surface(the_command),
+        flag_scan_text=_leg_bounded_flag_scan_surface(
+            _strip_command_wrapper(" ".join(selected_option_texts)), the_command
         ),
-        None,
     )
+    if _DRY_RUN_RE.search(the_command) or _AUTO_RE.search(the_command):
+        # A dry run or an --auto merge is a different operation from the real one
+        # the (op, target) token would also run, so the approval binds the text of
+        # the code span that holds it. Unquoted prose has no span to bound the
+        # command, so a prose approval keeps its target binding.
+        spans = [
+            content.strip()
+            for text in selected_option_texts
+            for _raw, content in _code_spans(text)
+            if is_dangerous_command(content.strip())
+        ]
+        if len(spans) == 1:
+            ctx = {**ctx, "command_text": normalize_command_text(spans[0])}
+    return MintResult(ctx, None)
+
+
+_FENCED_BLOCK_RE = re.compile(r"```[^\n`]*\n(.*?)```", re.DOTALL)
+_BACKTICK_RUN_RE = re.compile(r"`+")
+
+
+def _ends_span(text: str, after: int) -> bool:
+    """Whether a backtick ending just before `after` can close a code span: it ends
+    the text or is followed by whitespace or punctuation, where a backtick opening a
+    substitution is followed by the command it runs."""
+    return after == len(text) or text[after].isspace() or text[after] in ".,;:!?)]}'\""
+
+
+def _substitution_span_end(text: str, early: int) -> int | None:
+    """The index of the backtick that closes a single-backtick code span whose
+    closer at `early` really opens a substitution (`origin `git branch``,
+    `x=`date``, `--body x`date``); None when the backticks after it do not read as
+    substitutions. Each substitution's closer follows a non-space character (a
+    backtick after a space opens a new span instead, as in prose), and the span's
+    closer is the first backtick after a substitution that is followed by
+    whitespace, punctuation or the end."""
+    ticks = [k for k in range(early, len(text)) if text[k] == "`"]
+    t = 0
+    while True:
+        if t + 1 >= len(ticks) or text[ticks[t + 1] - 1].isspace():
+            return None
+        if t + 2 >= len(ticks):
+            return None
+        nxt = ticks[t + 2]
+        if _ends_span(text, nxt + 1):
+            return nxt
+        t += 2
+
+
+def _code_spans(text: str) -> list[tuple[str, str]]:
+    """(raw, content) for each fenced block and inline code span in `text`. An inline
+    span opens with a run of backticks and closes at the next run of the same length
+    (`` cmd with `x` `` holds backticks). A single-backtick span whose closer is
+    followed by a word was closed early by a backtick opening a substitution: it
+    runs on past each substitution to the backtick that closes it (see
+    _substitution_span_end). A span of n > 1 backticks with no later run of n closes
+    at the first longer run, whose extra leading backticks are the command's own
+    (``cmd `x```). Inline spans may run over lines."""
+    spans = [(m.group(0), m.group(1)) for m in _FENCED_BLOCK_RE.finditer(text)]
+    rest = _FENCED_BLOCK_RE.sub(lambda m: " " * len(m.group(0)), text)
+    runs = list(_BACKTICK_RUN_RE.finditer(rest))
+    i = 0
+    while i < len(runs):
+        opener = runs[i]
+        width = len(opener.group(0))
+        close = next((j for j in range(i + 1, len(runs)) if len(runs[j].group(0)) == width), None)
+        if close is None and width > 1:
+            close = next((j for j in range(i + 1, len(runs)) if len(runs[j].group(0)) > width), None)
+        if close is None:
+            i += 1
+            continue
+        content = rest[opener.end():runs[close].end() - width]
+        end = runs[close].end()
+        if len(opener.group(0)) == 1 and not _ends_span(rest, end):
+            last = _substitution_span_end(rest, runs[close].start())
+            if last is not None:
+                content, end = rest[opener.end():last], last + 1
+        spans.append((text[opener.start():end], content))
+        i = next((k for k in range(close + 1, len(runs)) if runs[k].start() >= end), len(runs))
+    return spans
+
+
+# Ops the pre-hook binds only by exact text: a branch-merge's target is its base, and
+# its head is not part of the target, so an (op, target) token would run any head.
+_TEXT_BOUND_OPS = frozenset({"branch-merge"})
+
+
+def _mask_substitutions(text: str) -> str | None:
+    """`text` with each command substitution (`$(…)`, a backtick span) replaced by a
+    placeholder word, innermost first; None when one cannot be closed."""
+    previous = None
+    while previous != text:
+        previous = text
+        text = re.sub(r"\$\([^()]*\)|`[^`]*`", "_", text)
+    return None if "$(" in text or "`" in text else text
+
+
+def _guarded_substitution_count(text: str) -> int:
+    """How many command substitutions in `text` hold a guarded command, innermost
+    first, the way _mask_substitutions walks them."""
+    count, previous = 0, None
+    while previous != text:
+        previous = text
+        count += sum(is_dangerous_command(m.group(1) or m.group(2) or "")
+                     for m in re.finditer(r"\$\(([^()]*)\)|`([^`]*)`", text))
+        text = re.sub(r"\$\([^()]*\)|`[^`]*`", "_", text)
+    return count
+
+
+# The op an approval records for a command that picks one of several guarded commands;
+# it has no success line of its own, so a successful run retires it.
+_ALTERNATIVE_BRANCHES_OP = "choice between guarded commands"
+
+
+# `NAME="text"; eval "$NAME"`: an eval of a variable assigned the text just before.
+_ASSIGNED_EVAL_RE = re.compile(
+    r"""^\s*(?P<name>[A-Za-z_]\w*)=(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)')\s*;\s*"""
+    r"""eval\s+"?\$(?:\{(?P=name)\}|(?P=name)\b)"?\s*$"""
+)
+
+
+_LITERAL_ASSIGNMENT_RE = re.compile(r"""^([A-Za-z_]\w*)=("[^"`\\]*"|'[^']*'|[^\s;&|$`'"\\()]*)$""")
+_VARIABLE_REF_RE = re.compile(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
+
+
+def _resolved_evals(command: str) -> str:
+    """`command` with each eval of a single string whose variables earlier legs all
+    assign literal values replaced by the eval of the text those values give, so
+    `PR=5; c="gh pr merge $PR --squash"; eval "$c"` reads as `PR=5; c=...; eval
+    'gh pr merge 5 --squash'`. Only `;` and newlines may join the legs up to the
+    eval, so every assignment runs before it. Unchanged otherwise."""
+    if "eval" not in command or "<<" in command:
+        return command
+    split = _top_level_legs(command)
+    if split is None:
+        return command
+    legs, seps = split
+    env: dict[str, str] = {}
+
+    def expand(text: str) -> str | None:
+        names = [braced or bare for braced, bare in _VARIABLE_REF_RE.findall(text)]
+        if any(name not in env for name in names):
+            return None
+        return _VARIABLE_REF_RE.sub(lambda m: env[m.group(1) or m.group(2)], text)
+
+    changed = False
+    for k, leg in enumerate(legs):
+        if k and seps[k - 1] not in (";", "\n"):
+            break
+        word = leg.strip()
+        m = _LITERAL_ASSIGNMENT_RE.match(word)
+        if m:
+            name, value = m.groups()
+            text = value[1:-1] if value[:1] == "'" else expand(value[1:-1] if value[:1] == '"' else value)
+            if text is None:
+                env.pop(name, None)
+            else:
+                env[name] = text
+            continue
+        arg = word[4:].strip() if word.startswith(("eval ", "eval\t")) else ""
+        # eval parses its string again, so a single-quoted one expands too.
+        if arg[:1] in ("'", '"') and arg.endswith(arg[0]) and len(arg) > 1 and arg[0] not in arg[1:-1]:
+            text = expand(arg[1:-1])
+        elif arg and not any(ch in arg for ch in " \t'\"\\"):
+            text = expand(arg)
+        else:
+            text = None
+        if text is not None and text != arg:
+            legs[k] = leg[: len(leg) - len(leg.lstrip())] + "eval " + shlex.quote(text)
+            changed = True
+    if not changed:
+        return command
+    return legs[0] + "".join(sep + leg for sep, leg in zip(seps, legs[1:]))
+
+
+def _merge_reading(command: str) -> str:
+    """`command` as the guard reads the merge it runs: an eval of literal values
+    resolved by _resolved_evals, otherwise the classifier's own rewrite (a literal
+    variable expanded), otherwise the command itself."""
+    resolved = _resolved_evals(command)
+    if resolved != command:
+        return resolved
+    return rewritten_executed_command(command) or command
+
+
+def _target_is_a_variable(ctx: dict) -> bool:
+    """Whether the region reading's target is a shell variable (`gh pr merge "$PR"`,
+    `PR=5; gh pr merge $PR`). The same text runs another target once the command
+    assigns the variable another value, so only the command's text can bind it."""
+    target = _target_value(ctx)
+    return isinstance(target, str) and "$" in target
+
+
+def _implicit_target(ctx: dict) -> bool:
+    """Whether the region reading's target is the current branch the op leaves
+    implicit (`gh pr merge --squash`, `git push --force`)."""
+    target = _target_value(ctx)
+    return isinstance(target, str) and "\x00" in target
+
+
+def _evald_target(span: str) -> str | None:
+    """The target of the one guarded command `span` evals as a single string (`eval
+    "gh pr close 5 --delete-branch"`, or a variable assigned it just before): its
+    literal target, or a run-time one (a variable, the current branch it leaves
+    implicit). None when `span` is not such an eval or its command names no
+    target."""
+    m = _ASSIGNED_EVAL_RE.match(span)
+    if m:
+        text = m.group("dq") if m.group("dq") is not None else m.group("sq")
+    else:
+        try:
+            words = shlex.split(span)
+        except ValueError:
+            return None
+        if len(words) != 2 or words[0] != "eval":
+            return None
+        text = words[1]
+    target = _target_value(extract_command_context(text))
+    return target if isinstance(target, str) else None
+
+
+def _inner_flags_differ(leg: str, inner: str) -> bool:
+    """Whether the command a shell's -c string runs carries other flags than the outer
+    reading of its leg sees (`bash -c 'gh pr merge 5 --admin'` reads no --admin from
+    outside). The pre-hook holds a token to both readings, so such a command can only
+    be bound by its text."""
+    outer = extract_command_context(leg)
+    run = extract_command_context(_single_destructive_leg(inner) or _single_detectable_leg(inner) or inner)
+    return set(outer.get("bound_flags", [])) != set(run.get("bound_flags", []))
+
+
+def _exact_text_reading(span: str, located: str) -> dict | None:
+    """The (op, target, flags) of a backticked command the region reading cannot
+    bind, read the way the pre-hook reads it; None when the region reading binds
+    it where the option shows it (`located`, the span with its backticks) or no
+    single guarded op is found. The shapes:
+      - an interpreter program (`python3 -c 'subprocess.run(["gh", "pr", "merge",
+        "5"])'`), read by the interpreter reader, even where its merge text is
+        contiguous (a quoted flag the region reading misses is then bound);
+      - a command whose target is a substitution (`git push --force origin
+        $(git branch --show-current)`): its op is read with the substitutions
+        masked, so a substitution that itself runs guarded commands types nothing;
+      - a guarded op in a shell's -c string that the region reading locates nothing
+        in (`bash -c 'git push --force origin feat'`), read from that string, in the
+        command's one destructive leg when other legs surround it;
+      - a plain command whose target the pre-hook binds only by text (a
+        branch-merge, a GraphQL pull-request mutation);
+      - an eval of a heredoc the classifier refuses because it cannot read the
+        command it runs (`${N:-5}`, a substitution): bound by its text alone;
+      - an if/elif/else or case whose branches run different guarded commands:
+        bound by its text alone;
+      - an eval of a single string the region reading binds nothing in, whose
+        command names a target (`eval "gh pr merge $PR"`, `eval "gh pr merge
+        --squash"`, `eval "gh pr close 5 --delete-branch"`): bound by its text alone;
+      - a command the classifier judges after a rewrite (an eval of readable text,
+        a file written then run, a literal variable, a script given a whole
+        command) where the region reading binds nothing, read from the command
+        the classifier reports it runs.
+    Any other plain command is left to the region reading, so its own extraction
+    stays the only binding for those."""
+    ctx = interpreter_command_context(span)
+    if ctx and ctx.get("operation_type"):
+        return ctx
+    if unreadable_evald_heredoc(span):
+        # The classifier cannot read what this eval runs, so nothing but its text
+        # can bind it: the token runs exactly the command the user saw.
+        return {"operation_type": "heredoc eval"}
+    if alternative_destructive_branch_count(span) >= 2:
+        # Each branch runs its own guarded command, so no one (op, target) stands for
+        # the command: its text binds it, and a branch runs only as part of it.
+        return {"operation_type": _ALTERNATIVE_BRANCHES_OP}
+    pairs = _collect_pairs([located])
+    leg = _single_destructive_leg(span) or span
+    # The region reading binds only a command the pre-hook can type the same way; a
+    # pair found in a written file's text (`cat > f <<EOF … EOF; bash f`) cannot be.
+    region_binds = bool(pairs) and bool(
+        extract_command_context(_single_destructive_leg(span) or _single_detectable_leg(span) or span)
+        .get("operation_type")
+    )
+    rewritten = None if region_binds else rewritten_executed_command(span)
+    if rewritten is not None:
+        # A file the command writes and then runs is read as the program it holds.
+        ctx = interpreter_command_context(rewritten)
+        if ctx and ctx.get("operation_type"):
+            return ctx
+        if is_compound_destructive_command(rewritten):
+            return None
+        body = rewritten
+    # A `\$(` or `\`` escaped in the calling shell's double quotes is the -c string's
+    # or eval's own substitution, read with the string below.
+    elif _has_command_substitution(re.sub(r"\\[$`]", "", span)):
+        body = _mask_substitutions(leg)
+        if body is None:
+            return None
+        if not extract_command_context(
+            _single_destructive_leg(body) or _single_detectable_leg(body) or body
+        ).get("operation_type"):
+            # The guarded command is the substitution itself (`x.py "`gh pr merge 5`"`):
+            # masking removes it, so the classifier's reading of the command stands.
+            # Two guarded substitutions are two operations, which no approval runs.
+            if _guarded_substitution_count(leg) != 1:
+                return None
+            body = leg
+    else:
+        inner = shell_c_string(leg)
+        if inner is not None:
+            # A -c string that exports GH_REPO, GH_HOST or GH_CONFIG_DIR, or changes
+            # repository, before its merge or close binds by text, as the same command
+            # run directly does.
+            if is_compound_destructive_command(inner) or (
+                pairs and not _inner_flags_differ(leg, inner) and not exported_gh_target_before_guarded_leg(leg)
+                and not target_changes_before_guarded_leg(leg, branch=False)
+            ):
+                return None
+            body = inner
+        else:
+            body = leg
+    ctx = extract_command_context(
+        _single_destructive_leg(body) or _single_detectable_leg(body) or body
+    )
+    plain = body is leg and rewritten is None and not _has_command_substitution(span)
+    if not ctx.get("operation_type"):
+        return None
+    if plain and not (
+        ctx["operation_type"] in _TEXT_BOUND_OPS
+        or ctx.get("pr_node_id")
+        or "graphql_mutation" in ctx
+        # An eval of a string the region reading binds nothing in (a target read at
+        # run time, or a command it does not locate inside the quotes) has no
+        # (op, target) it can see; its text binds it, so the approval runs exactly
+        # the command shown.
+        or (not pairs and _evald_target(span) is not None)
+        # A variable target (`gh pr merge "$PR"`, `PR=5; gh pr merge $PR`) binds by
+        # text, so the command with another value assigned is not approved.
+        or _target_is_a_variable(ctx)
+        # An op on the current branch after a checkout or cd (`git checkout feat/y &&
+        # gh pr merge --squash`) binds by text, so another branch's is not approved.
+        or (_implicit_target(ctx) and target_changes_before_guarded_leg(span))
+        # A close of the current branch's PR (`gh pr close --delete-branch`) names
+        # no number the extractor reads, so no (op, target) binds it; its text does.
+        or (ctx["operation_type"] == "close" and _target_value(ctx) is None)
+        # A merge or close run after `export GH_REPO=…` (or GH_HOST, GH_CONFIG_DIR)
+        # acts in that repository, which the op's own reading does not see; its text
+        # binds it.
+        or (ctx["operation_type"] in ("merge", "close") and exported_gh_target_before_guarded_leg(span))
+        # So does an op on a named PR or branch run after a change of directory or
+        # repository (`cd ../other && gh pr merge 5`, `git -C ../other branch -D
+        # feat/x`), whose target names one of that repository.
+        or (ctx["operation_type"] in REPO_RELATIVE_OPS and target_changes_before_guarded_leg(span, branch=False))
+        # A quoted value of a bound flag (`--repo="o/b"`) reads as a placeholder that
+        # every value shares; its text binds it.
+        or binds_a_masked_value(ctx)
+    ):
+        return None
+    return ctx
+
+
+def _exact_text_mint_context(option_texts: list[str]) -> tuple[MintResult, list[str]]:
+    """The mint for a clicked option's backticked command that _exact_text_reading
+    reads, and the raw spans it read. The token carries the command's normalized
+    text, which is all the pre-hook then matches: the approval runs that command and
+    no other. One distinct command per approval; a compound never mints."""
+    found: dict[str, dict] = {}
+    spans: list[str] = []
+    for text in option_texts:
+        for raw, content in _code_spans(text):
+            span = content.strip()
+            if not span or not is_dangerous_command(span):
+                continue
+            rewritten = rewritten_executed_command(span)
+            if is_compound_destructive_command(span) or (
+                rewritten is not None and is_compound_destructive_command(rewritten)
+            ):
+                # One approval runs one guarded operation, also when the command
+                # carries several in a value it hands to something that runs it.
+                return MintResult(None, "compound_command"), []
+            ctx = _exact_text_reading(span, raw)
+            if ctx:
+                found[normalize_command_text(span)] = ctx
+                spans.append(raw)
+    if len(found) != 1:
+        return MintResult(None, "multiple_commands" if found else "no_command"), spans
+    command_text, ctx = next(iter(found.items()))
+    return MintResult({**ctx, "command_text": command_text}, None), spans
+
+
+def _without(text: str, spans: list[str]) -> str:
+    for span in spans:
+        text = text.replace(span, " ")
+    return text
+
+
+def _without_allowed_spans(text: str) -> str:
+    """`text` without each code span whose command the pre-hook allows; a guarded
+    command such a span holds is data it does not run."""
+    return _without(text, [raw for raw, content in _code_spans(text)
+                           if content.strip() and not is_dangerous_command(content.strip())])
 
 
 def _bundle_has_command(questions: list) -> bool:
@@ -541,13 +1044,101 @@ def _no_mint_advisory(refusal_reason: str) -> str:
         refusal_reason, "the approval did not match the canonical form"
     )
     return (
-        "PACT merge-guard: an AskUserQuestion approval was issued but NO "
-        "authorization token was minted — " + why + ". The merge is HELD until a "
-        "matching approval is given. Re-approve via the canonical template in "
-        "pact-plugin/commands/peer-review.md: a SINGLE-select question, a short "
-        '"Yes, merge" affirmative label, and the command in THAT option\'s '
-        "DESCRIPTION in backticks (e.g. Run `gh pr merge <N>` to merge this PR), "
-        "with <N> the only number anywhere in the prompt."
+        "PACT merge-guard: no approval was recorded from this question — " + why + ". "
+        "If it was meant to approve a guarded command, ask again as a single-select "
+        "question whose approving option has a short label and the command in "
+        "backticks in its description, for example Run `gh pr merge <N>` to merge "
+        "this PR (the merge checkpoint in peer-review.md). If it was not an "
+        "approval, ignore this note."
+    )
+
+
+# Target values carry NUL-framed sentinels for targets a command leaves implicit
+# (the current branch, the default remote), and multi-item targets are netstring
+# encoded (`<len>:<item>...`). The confirmation renders both readably.
+_SENTINEL_WORDS = (
+    ("\x00implicit-merge", "the current branch"),
+    ("\x00implicit-force-push", "the current branch"),
+    ("\x00implicit", "the default remote"),
+)
+_CONFIRMATION_TARGET_MAX = 200
+# The context keys whose values are netstring-encoded multi-item targets.
+_NETSTRING_TARGET_KEYS = ("branch_set", "push_set", "force_push_set", "mass_target")
+
+
+def _split_netstring(value: str) -> list[str] | None:
+    """The items of a `<len>:<item>...` encoding, or None when the value is not one."""
+    items, i = [], 0
+    while i < len(value):
+        colon = value.find(":", i)
+        length = value[i:colon]
+        # isdigit() alone accepts non-ASCII digits ("²") that int() rejects.
+        if colon <= i or not (length.isascii() and length.isdigit()):
+            return None
+        end = colon + 1 + int(length)
+        if end > len(value):
+            return None
+        items.append(value[colon + 1:end])
+        i = end
+    return items or None
+
+
+def _readable_item(item: str) -> str:
+    for sentinel, words in _SENTINEL_WORDS:
+        if item.startswith(sentinel):
+            rest = item[len(sentinel):]
+            parts = _split_netstring(rest) if rest else []
+            if parts is None:
+                parts = [rest]
+            return ", ".join([words] + [_readable_item(p) for p in parts])
+    return item
+
+
+def _plain(text: str) -> str:
+    """`text` with every control character (NUL included) dropped, capped in length."""
+    text = "".join(ch for ch in text if ch.isprintable())
+    if len(text) > _CONFIRMATION_TARGET_MAX:
+        text = text[:_CONFIRMATION_TARGET_MAX] + "..."
+    return text
+
+
+def _readable_target(value: str, is_netstring: bool) -> str:
+    """A minted target value as plain text: sentinels named, netstrings split, and
+    every control character (NUL included) dropped, capped in length."""
+    parts = (_split_netstring(value) if is_netstring else None) or [value]
+    return _plain(", ".join(_readable_item(p) for p in parts))
+
+
+def _mint_confirmation(context: dict) -> str:
+    """The notice printed after a successful mint, naming what the approval
+    authorizes, so a click that was not an approval of this command is caught
+    before the command runs. The bound flags (`--admin`, `--repo=…`,
+    `--delete-branch`, …) are part of what the token authorizes, so every one is
+    named."""
+    op = context.get("operation_type") or "destructive command"
+    target = _target_value(context)
+    is_netstring = any(
+        target is not None and context.get(k) == target for k in _NETSTRING_TARGET_KEYS
+    )
+    if (
+        isinstance(target, str) and target == context.get("pr_number")
+        and target.isascii() and target.isdigit()
+    ):
+        where = f" on PR #{target}"
+    elif "command_text" in context:
+        where = ""  # an exact-command token binds its text, not a readable target
+    elif isinstance(target, str):
+        where = " on " + _readable_target(target, is_netstring)
+    else:
+        where = ""
+    flags = context.get("bound_flags")
+    if isinstance(flags, list) and flags:
+        where += " with " + _plain(" ".join(str(f) for f in flags))
+    return (
+        f"PACT merge-guard: an approval was recorded for a {op}{where}. It "
+        f"authorizes that command for {TOKEN_TTL // 60} minutes, at most {MAX_USES} "
+        "times. If the option the user selected was not an approval of this "
+        "command, do not run it."
     )
 
 
@@ -631,7 +1222,9 @@ def write_token(context: dict, token_dir: Path | None = None) -> str | None:
     if session_id:
         token_data["session_id"] = session_id
 
-    token_path = token_dir / f"merge-authorized-{timestamp}"
+    # A random suffix makes every token's name its own, so two tokens minted in one
+    # second never share a name, nor do their `.consumed` records.
+    token_path = token_dir / f"merge-authorized-{timestamp}-{secrets.token_hex(4)}"
 
     # Layer 5 (invariant I-1): atomically retire any prior unused token
     # immediately before the new one is created. Placement BEFORE the
@@ -656,8 +1249,8 @@ def write_token(context: dict, token_dir: Path | None = None) -> str | None:
             raise
         return str(token_path)
     except FileExistsError:
-        # Extremely unlikely race — try with microsecond suffix
-        token_path = token_dir / f"merge-authorized-{timestamp}-{int(now * 1000) % 1000}"
+        # Extremely unlikely collision — try once more with a fresh suffix
+        token_path = token_dir / f"merge-authorized-{timestamp}-{secrets.token_hex(4)}"
         try:
             fd = os.open(str(token_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             try:
@@ -674,6 +1267,457 @@ def write_token(context: dict, token_dir: Path | None = None) -> str | None:
             return None
     except OSError:
         return None
+
+
+_CONFIRMING_STATE = {"merge": "MERGED", "close": "CLOSED"}
+
+# gh resolves the PR number against the repo of its working directory and its
+# GH_REPO / GH_HOST / GIT_DIR environment. A command that changes either can name
+# a PR in a different repo from the hook's own, so the state check would read the
+# wrong PR. Deliberately wide: a false match only keeps the token, today's
+# behaviour. One shape is followed instead of doubted: a single `cd <literal
+# absolute dir> &&` before the gh leg, where the check runs in that directory.
+_REPO_REDIRECT_RE = re.compile(
+    r"(?<![\w./-])pushd(?![\w./-])"
+    r"|\bgit\b[^;&|\n]*\s-C"
+    r"|(?<![\w])(?:GH_REPO|GH_HOST|GIT_DIR)="
+    r"|\bgh\s+repo\s+set-default\b"
+)
+_CD_WORD_RE = re.compile(r"(?<![\w./-])cd(?![\w./-])")
+# `&&` only: after `cd x;` or `cd x ||` the gh leg can run in the old directory.
+# The path class excludes every expansion and quoting character ($ ~ globs braces `).
+_LITERAL_CD_RE = re.compile(
+    r"(?<![\w./-])cd[ \t]+(/[^\s;&|<>(){}$~*?\[\]`'\"\\]*)[ \t]*&&"
+)
+_GH_PR_OP_RE = re.compile(r"\bgh\s+pr\s+(?:merge|close)\b")
+
+
+def _state_check_dir(
+    command: str, frame_cwd: object = None
+) -> tuple[bool, str | None]:
+    """Where the PR state check may run for this command: (True, <dir>) for the
+    session's directory (the hook frame's `cwd`, when it is an absolute existing
+    directory), (True, None) for the hook's own directory when the frame names
+    none, (True, <dir>) after a single literal absolute `cd`, and (False, None)
+    when the command may target another repo."""
+    if _REPO_REDIRECT_RE.search(command):
+        return False, None
+    cd_count = len(_CD_WORD_RE.findall(command))
+    if cd_count == 0:
+        # The command ran in the session's shell directory, which an earlier
+        # Bash call may have changed; the hook's own directory may differ.
+        if (
+            isinstance(frame_cwd, str)
+            and os.path.isabs(frame_cwd)
+            and os.path.isdir(frame_cwd)
+        ):
+            return True, frame_cwd
+        return True, None
+    literal = _LITERAL_CD_RE.search(command)
+    gh_leg = _GH_PR_OP_RE.search(command)
+    if cd_count != 1 or literal is None or gh_leg is None:
+        return False, None
+    path = literal.group(1)
+    if gh_leg.start() < literal.end() or ".." in path.split("/"):
+        return False, None
+    if not os.path.isdir(path):
+        return False, None
+    return True, path
+
+
+# A heredoc's body and closing marker, after the line that opens it.
+_HEREDOC_TAIL_RE = re.compile(
+    r"(<<-?[ \t]*['\"]?(\w+)['\"]?[^\n]*)\n(?:.*?\n)?\t*\2(?!\w)", re.DOTALL
+)
+
+
+def _top_level_legs(command: str, groups: bool = False) -> tuple[list[str], list[str]] | None:
+    """The legs of `command` and the list operators between them (`;`, newline,
+    `&&`, `||`, `|`, a background `&`), outside quotes. None when the command opens
+    a group or a substitution (`(`, `{`, `$(`, a backtick) or leaves a quote open.
+    With `groups`, a balanced subshell, brace group or substitution is part of the
+    leg it is in instead. A heredoc's body is part of the leg that opens it, not
+    later legs."""
+    command = _HEREDOC_TAIL_RE.sub(r"\1", command)
+    legs, seps, start, i, quote = [], [], 0, 0, ""
+    while i < len(command):
+        ch = command[i]
+        if quote:
+            if ch == "\\" and quote == '"':
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch == "\\":
+            i += 2
+            continue
+        elif ch in "'\"":
+            quote = ch
+        elif groups and ch in "({`":
+            end = _group_end(command, i)
+            if end is None:
+                return None
+            i = end + 1
+            continue
+        elif ch in "(){}`":
+            return None
+        elif ch in ";\n|&":
+            pair = command[i:i + 2]
+            redirect = ch == "&" and (
+                command[i - 1:i] in (">", "<") or command[i + 1:i + 2] == ">"
+            )
+            if not redirect:
+                op = pair if pair in ("&&", "||") else ch
+                legs.append(command[start:i])
+                seps.append(op)
+                i += len(op)
+                start = i
+                continue
+        i += 1
+    if quote:
+        return None
+    legs.append(command[start:])
+    return legs, seps
+
+
+def _group_end(command: str, start: int) -> int | None:
+    """The index of the `)`, `}` or backtick that closes the group, substitution or
+    backtick span opened at `start`, outside quotes; None when it is not closed."""
+    opener = command[start]
+    if opener == "`":
+        i = start + 1
+        while i < len(command):
+            if command[i] == "\\":
+                i += 2
+                continue
+            if command[i] == "`":
+                return i
+            i += 1
+        return None
+    closer = ")" if opener == "(" else "}"
+    depth, quote, i = 0, "", start
+    while i < len(command):
+        ch = command[i]
+        if quote:
+            if ch == "\\" and quote == '"':
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch == "\\":
+            i += 2
+            continue
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "`":
+            end = _group_end(command, i)
+            if end is None:
+                return None
+            i = end + 1
+            continue
+        elif ch == opener:
+            depth += 1
+        elif ch == closer:
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return None
+
+
+# --dry-run, or -n alone or bundled with git push's other flag-only short options
+# (`-fn`); a word like `-name` is not one.
+_DRY_RUN_RE = re.compile(r"(?<!\S)(?:--dry-run|-[46dfquv]*n[46dfquv]*)(?!\S)")
+_AUTO_RE = re.compile(r"(?<!\S)--auto(?!\S)")
+
+
+def _backgrounded(k: int, legs: list[str], seps: list[str]) -> bool:
+    """Whether leg `k` runs in the background past the command's end: it is
+    followed by `&`, and the next leg is not a `wait` (or `wait $!`) that waits
+    for it."""
+    if k >= len(seps) or seps[k] != "&":
+        return False
+    return k + 1 >= len(legs) or legs[k + 1].split() not in (["wait"], ["wait", "$!"])
+
+
+def _op_did_not_run(command: str) -> bool:
+    """Whether a leg that holds the guarded op is a dry run or runs in the
+    background without a `wait` for it, so the command's success says nothing
+    about the op. A shell's -c
+    string is read the same way, and a string a shell runs from a substitution
+    that only prints (`bash -c "$(echo -n '…')"`) is read as the mint reads it,
+    so the echo's -n is not the op's dry-run flag."""
+    try:
+        command = _rewrite_readable_evals(command)
+        inner = shell_c_string(command)
+        if inner is not None:
+            return _op_did_not_run(inner)
+        split = _top_level_legs(command)
+        if split is None:
+            return False
+        legs, seps = split
+        return any(
+            detect_command_operation_type(leg) is not None
+            and (_DRY_RUN_RE.search(leg) or _backgrounded(k, legs, seps))
+            for k, leg in enumerate(legs)
+        )
+    except Exception:  # noqa: BLE001 - doubt changes nothing here
+        return False
+
+
+def _group_body(command: str) -> str | None:
+    """The body of a command that is one subshell `( … )` or one brace group `{ …; }`,
+    whose exit status is its last command's; None for anything else, including a
+    group followed by more commands. Quoted text is skipped."""
+    text = command.strip()
+    if text[:1] == "(":
+        opener, closer = "(", ")"
+    elif re.match(r"\{\s", text):
+        opener, closer = "{", "}"
+    else:
+        return None
+    depth, quote, i = 0, "", 0
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\" and quote == '"':
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch == "\\":
+            i += 2
+            continue
+        elif ch in "'\"":
+            quote = ch
+        elif ch == opener:
+            depth += 1
+        elif ch == closer:
+            depth -= 1
+            if depth == 0:
+                if i != len(text) - 1:
+                    return None
+                body = text[1:-1].rstrip(" \t")
+                if closer == "}":
+                    if not body.endswith((";", "\n")):
+                        return None
+                    body = body[:-1]
+                return body
+        i += 1
+    return None
+
+
+def _run_succeeded_as_the_op(command: str, op_type: str, tool_response: object) -> bool:
+    """Whether this hook firing for `command` means its guarded op succeeded. It is
+    read on PostToolUse only, and a failed command reaches PostToolUseFailure, so a
+    response in the success shape (`stdout` text, not interrupted) means the
+    command exited 0. That is the op's own status when the op runs in the
+    foreground as the last leg, unnegated, no `||` before it could have skipped it,
+    and it is not a dry run. A shell's -c string, and a command that is one
+    subshell or brace group, are read the same way, and a group or substitution
+    inside a leg (`(set -a); GH_REPO=o/b gh pr merge 5`, `x=$(…); gh pr merge 5`)
+    is part of that leg. Any doubt is False."""
+    if not (
+        isinstance(tool_response, dict)
+        and isinstance(tool_response.get("stdout"), str)
+        and tool_response.get("interrupted") is False
+    ):
+        return False
+    try:
+        inner = shell_c_string(command)
+        if inner is not None:
+            return _run_succeeded_as_the_op(inner, op_type, tool_response)
+        body = _group_body(command)
+        if body is not None:
+            return _run_succeeded_as_the_op(body, op_type, tool_response)
+        split = _top_level_legs(command, groups=True)
+        if split is None:
+            return False
+        legs, seps = split
+        while len(legs) > 1 and not legs[-1].strip() and seps[-1] in (";", "\n"):
+            legs.pop()
+            seps.pop()
+        if "||" in seps or legs[-1].lstrip().startswith("!") or _DRY_RUN_RE.search(legs[-1]):
+            return False
+        if len(legs) > 1 and _group_body(legs[-1]) is not None:
+            return _run_succeeded_as_the_op(legs[-1], op_type, tool_response)
+        return detect_command_operation_type(legs[-1]) == op_type
+    except Exception:  # noqa: BLE001 - any doubt keeps the token
+        return False
+
+
+def _close_succeeded(command: str, op_type: str | None, tool_response: object) -> bool:
+    """Whether a PR close succeeded by the run's own status. Unlike a merge, which
+    can exit 0 into a merge queue or with --auto and leave the PR OPEN, a close
+    that exits 0 has done its work, so its token retires even when a lagging or
+    mismatched state read says otherwise."""
+    return op_type == "close" and _run_succeeded_as_the_op(command, op_type, tool_response)
+
+
+def _git_reports_ref_deleted(command: str, op_type: str, tool_response: object) -> bool:
+    """Whether git's own output, in the response's stdout or stderr, reports the
+    command's target ref deleted (` - [deleted]   feat/x`), which proves a remote
+    ref delete whose exit status is not its own (piped into tail, say). The line
+    must name exactly the ref the command deletes."""
+    if op_type != "remote-ref-delete" or not isinstance(tool_response, dict):
+        return False
+    target = extract_command_context(
+        _single_destructive_leg(command) or _single_detectable_leg(command) or command
+    ).get("target_ref")
+    if not isinstance(target, str) or not target:
+        return False
+    line = re.compile(r"^[ \t]*-[ \t]+\[deleted\][ \t]+" + re.escape(target) + r"[ \t]*$", re.M)
+    return any(
+        isinstance(tool_response.get(k), str) and line.search(tool_response[k])
+        for k in ("stdout", "stderr")
+    )
+
+
+def _pr_state(command: str, frame_cwd: object = None) -> str:
+    """The state GitHub reports for the PR the command named (OPEN, MERGED or
+    CLOSED), or "" when it cannot be read: any other answer, a URL, branch or implicit target, an -R/--repo target, a directory
+    change or repo env assignment other than one literal absolute `cd`, an
+    unreachable or slow gh, or any exception. A shell's -c string
+    is read as the command it runs, with its positional words in place, so a `cd`
+    inside it is followed the same way; a repo env assignment outside it still
+    doubts."""
+    try:
+        inner = shell_c_string(command)
+        if inner is not None and not _REPO_REDIRECT_RE.search(command):
+            command = inner
+        followable, cwd = _state_check_dir(command, frame_cwd)
+        if not followable:
+            return ""
+        ctx = extract_command_context(_extraction_surface(command))
+        pr = ctx.get("pr_number")
+        if not isinstance(pr, str) or not pr.isdigit():
+            return ""
+        if any(str(f).startswith("--repo") for f in ctx.get("bound_flags") or []):
+            return ""
+        from shared.gh_helpers import check_pr_state
+
+        state = check_pr_state(pr, cwd=cwd)
+        return state if state in ("OPEN", "MERGED", "CLOSED") else ""
+    except Exception:  # noqa: BLE001 - any doubt keeps the token
+        return ""
+
+
+def _token_in_session(token_data: dict, current_session: str) -> bool:
+    """Whether a token may be retired from this session.
+
+    SEC-S1 cycle-2: gate ONLY when current_session is populated. When
+    current_session=="" (no PACT context), preserve graceful-degradation per
+    architect §3 revised design. Cycle-1 fail-OPEN-on-either-empty
+    AND-short-circuit WAS itself the attack surface — populated current_session +
+    empty token_session let attacker-written tokens through. See
+    test_no_session_id_accepts_any_token (in test_merge_guard.py) for the
+    preserved invariant; its SEC-S1 inversion counterpart is the fix landing."""
+    if not current_session:
+        return True
+    token_session = token_data.get("session_id", "")
+    return bool(token_session) and current_session == token_session
+
+
+def _retire_exact_text_token(
+    command: str,
+    frame_cwd: object = None,
+    token_dir: Path | None = None,
+    stdout_text: object = "",
+    tool_response: object = None,
+) -> bool:
+    """Retire this session's exact-command token on the same success signal Layer 1
+    uses for its op: a merge or close of a numbered PR once GitHub reports it in the
+    state the command produces, an op with a LAYER1_SUCCESS_STDOUT_PATTERNS entry by
+    that output, and any other op (a branch-merge, a merge or close named by a
+    GraphQL node ID, an eval of a heredoc the classifier cannot read) by the
+    successful run itself, so the approval runs once. The operation classifier
+    cannot read such a command, so Layer 1 below never sees it. Any doubt keeps the
+    token; the TTL and MAX_USES bound still apply. Never raises."""
+    try:
+        current_session = get_session_id()
+        for path in glob.glob(str((token_dir or TOKEN_DIR) / f"{TOKEN_PREFIX}*")):
+            if path.endswith(".consumed") or USE_MARKER_SUFFIX in os.path.basename(path):
+                continue
+            try:
+                with open(path, "r") as f:
+                    token_data = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                continue
+            ctx = token_data.get("context") if isinstance(token_data, dict) else None
+            if not isinstance(ctx, dict):
+                continue
+            approved = ctx.get("command_text")
+            if not isinstance(approved, str) or not exact_text_matches(
+                approved, command, frame_cwd if isinstance(frame_cwd, str) else None
+            ):
+                continue
+            if not _token_in_session(token_data, current_session):
+                continue
+            op, pr = ctx.get("operation_type"), ctx.get("pr_number")
+            if op == "merge" and not (isinstance(pr, str) and pr.isascii() and pr.isdigit()):
+                # A merge bound by its text whose PR an earlier leg assigns a literal
+                # number (`PR=5; c="gh pr merge $PR"; eval "$c"`, `PR=5; gh pr merge
+                # $PR`) follows the merge rule below, as the plain command does.
+                resolved = _merge_reading(command)
+                named = extract_command_context(
+                    _single_destructive_leg(resolved) or _single_detectable_leg(resolved) or resolved
+                ).get("pr_number")
+                if resolved != command and isinstance(named, str) and named.isascii() and named.isdigit():
+                    pr = named
+            if op in _CONFIRMING_STATE and isinstance(pr, str) and pr.isascii() and pr.isdigit():
+                # The state is read where the command ran: the session's directory, or
+                # the one literal absolute `cd` before the op.
+                followable, cwd = _state_check_dir(command, frame_cwd)
+                if not followable or any(str(f).startswith("--repo") for f in ctx.get("bound_flags") or []):
+                    # The PR is in a repo this hook cannot read the state of; only
+                    # the run's own success can confirm it.
+                    if not _run_succeeded_as_the_op(command, op, tool_response):
+                        continue
+                else:
+                    from shared.gh_helpers import check_pr_state
+
+                    if not _close_succeeded(command, op, tool_response) and (
+                        check_pr_state(pr, cwd=cwd) != _CONFIRMING_STATE[op]
+                    ):
+                        continue
+            elif isinstance(op, str) and op not in _CONFIRMING_STATE:
+                pattern = LAYER1_SUCCESS_STDOUT_PATTERNS.get(op)
+                # As in Layer 1, the run's own success stands in for a missing
+                # success line; an eval of an assigned variable is read as the
+                # eval of its value so its run can be the op's.
+                if pattern is not None and not (
+                    (isinstance(stdout_text, str) and pattern in stdout_text)
+                    or _run_succeeded_as_the_op(_rewrite_variable_evals(command), op, tool_response)
+                ):
+                    continue
+            try:
+                os.rename(path, path + ".consumed")
+            except OSError:
+                pass  # a concurrent retire or cleanup won the race
+            print(
+                f"[security] merge-authorization token retired (exact command, op_type={op})",
+                file=sys.stderr,
+            )
+            return True
+    except Exception:  # noqa: BLE001 - any doubt keeps the token
+        return False
+    return False
+
+
+_RUN_TIME_TARGET_MARKS = ("$", "`", "\x00")
+
+
+def _target_set_at_run_time(command: str) -> bool:
+    """Whether the command's target is fixed only when it runs: a variable, a
+    substitution, or the implicit current branch (`gh pr merge "$PR"`, a variable
+    branch to delete, a bare `gh pr merge`). Its token retires on the successful run
+    itself, since no output line or PR state can say which target ran, and the same
+    approval must not run a second, different target."""
+    ctx = extract_command_context(
+        _single_destructive_leg(command) or _single_detectable_leg(command) or command
+    )
+    target = _target_value(ctx)
+    return isinstance(target, str) and any(mark in target for mark in _RUN_TIME_TARGET_MARKS)
 
 
 def _retire_token_for_command(
@@ -785,7 +1829,9 @@ def _retire_token_for_command(
         # PRE side's _token_matches_command; for Layer 1 retirement,
         # op_type match + session-scope is the minimum to retire (a
         # subsequent op of the same type would need a fresh token anyway).
-        if ctx.get("operation_type") != op_type:
+        # The mint binds the op its leg reads as, which can differ from the whole
+        # command's class (a forced push to main inside a trap's loop).
+        if ctx.get("operation_type") not in (op_type, cmd_ctx.get("operation_type")):
             continue
         # #1097: target-aware ONLY when the token carries a target (every PRODUCTION-
         # minted token does — _collect_pairs mints no pair without a non-None
@@ -832,19 +1878,8 @@ def _retire_token_for_command(
         if set(token_flags) != cmd_flags:
             continue
         # Session scoping (SEC-S1 cycle-2 revised asymmetric predicate).
-        token_session = token_data.get("session_id", "")
-        if current_session:
-            # SEC-S1 cycle-2: gate ONLY when current_session is populated.
-            # When current_session=="" (no PACT context), preserve
-            # graceful-degradation per architect §3 revised design.
-            # Cycle-1 fail-OPEN-on-either-empty AND-short-circuit WAS
-            # itself the attack surface — populated current_session +
-            # empty token_session let attacker-written tokens through.
-            # See test_no_session_id_accepts_any_token (in test_merge_guard.py)
-            # for the preserved invariant; its SEC-S1 inversion counterpart is
-            # the fix landing.
-            if not token_session or current_session != token_session:
-                continue
+        if not _token_in_session(token_data, current_session):
+            continue
         try:
             os.rename(path, path + ".consumed")
             print(
@@ -871,6 +1906,178 @@ def _retire_token_for_command(
     return False
 
 
+# gh's result line for a PR (`✓ Squashed and merged pull request #5 (…)`,
+# `✓ Closed pull request o/r#5 (…)`).
+_GH_RESULT_RE = re.compile(r"(?im)\b(merged|closed) pull request (?:[\w.-]+/[\w.-]+)?#(\d+)\b")
+# git push's line for a ref it updated (`+ a1...b2 feat/x -> feat/x (forced update)`,
+# `   a1..b2  main -> main`, ` * [new branch] x -> x`); a rejected ref's line starts `!`.
+_GIT_PUSH_UPDATE_RE = re.compile(r"(?m)^(?!\s*!).*?->\s*(\S+)")
+_GIT_DELETED_RE = re.compile(r"(?m)^[ \t]*-[ \t]+\[deleted\]")
+# A terminal colour code, which a coloured run's output carries.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+# A failure line any git command, or another program, can print.
+_GIT_FAILURE_LINE_RE = re.compile(r"^(?:fatal|error):")
+# A push's own failure lines, which name no ref.
+_GIT_PUSH_FAILURE_RE = re.compile(
+    r"^(?:error: failed to push some refs|error: unable to delete '|error: src refspec .* does not match)"
+)
+# A bad remote's line, which any git command reaching that remote prints.
+_GIT_NO_REMOTE_RE = re.compile(r"^fatal: '(.*)' does not appear to be a git repository")
+# A network, access or upstream failure, which other git commands print too, with
+# the remote's URL when it names one.
+_GIT_REMOTE_ACCESS_RE = re.compile(
+    r"^(?:fatal: unable to access '([^']*)'|fatal: repository '([^']*)' not found"
+    r"|fatal: Authentication failed for '([^']*)'"
+    r"|fatal: Could not read from remote repository|remote: Repository not found"
+    r"|fatal: The current branch .* has no upstream)"
+)
+# gh's failure lines for a PR (`X Pull request #5 is not mergeable: …`, `GraphQL: …`,
+# `HTTP 404: Not Found`, `no pull requests found for branch "x"`).
+_GH_FAILURE_LINE_RE = re.compile(
+    r"(?i)^\s*(?:[X\u2717\u00d7]\s|GraphQL:|HTTP \d{3}\b|(?:failed|could not|unable|error)\b)"
+    r"|\bnot mergeable\b|\bno pull requests? found\b"
+)
+
+
+def _failure_output_shows_success(command: str, op_type: str, output: str) -> bool:
+    """Whether a failed call's output shows its guarded op itself succeeded: gh's
+    merged or closed line for the op's PR, git push's update line for the op's ref
+    (any ref for a push that names none), git's deleted line for a remote ref, or
+    `Deleted branch <b>` for the op's branch. Anything else keeps the token."""
+    output = _ANSI_RE.sub("", output)
+    ctx = extract_command_context(
+        _single_destructive_leg(command) or _single_detectable_leg(command) or command
+    )
+    if op_type in ("merge", "close"):
+        verb = "merged" if op_type == "merge" else "closed"
+        pr = ctx.get("pr_number")
+        return any(
+            m.group(1).lower() == verb and (pr is None or m.group(2) == pr)
+            for m in _GH_RESULT_RE.finditer(output)
+        )
+    if op_type in ("force-push", "push-to-main"):
+        ref = ctx.get("target_ref")
+        updated = {m.group(1).removeprefix("refs/heads/") for m in _GIT_PUSH_UPDATE_RE.finditer(output)}
+        return bool(updated) if not isinstance(ref, str) else ref.removeprefix("refs/heads/") in updated
+    if op_type == "remote-ref-delete":
+        return _git_reports_ref_deleted(command, op_type, {"stderr": output})
+    if op_type == "remote-mass-delete":
+        return _GIT_DELETED_RE.search(output) is not None
+    if op_type == "branch-delete":
+        branch = ctx.get("branch")
+        return isinstance(branch, str) and re.search(
+            r"(?m)^Deleted branch " + re.escape(branch) + r" \(", output
+        ) is not None
+    return False
+
+
+def _names(line: str, name: str) -> bool:
+    """Whether `line` names the ref or branch `name` as a word of its own."""
+    return re.search(r"(?<![\w/.-])(?:refs/heads/)?" + re.escape(name) + r"(?![\w/.-])", line) is not None
+
+
+def _op_is_only_leg(command: str) -> bool:
+    """Whether the command is a single leg, and the string a shell's -c runs in it
+    is a single leg too, so any line in its output is the op's own. Any other leg,
+    before or after, may print git's lines through a wrapper, subshell or script."""
+    if len(_split_into_legs(command)) != 1:
+        return False
+    inner = shell_c_string(command)
+    return inner is None or len(_split_into_legs(inner)) == 1
+
+
+def _failure_output_shows_op_failed(command: str, op_type: str, output: str) -> bool:
+    """Whether a failed call's output shows its guarded op's own failure: for a
+    push, git's refused line (`!`) for the op's ref (any ref for a push that names
+    none), a failure line only a push prints that names the op's ref, or a
+    bad-remote, network, access or upstream line quoting the remote the push names;
+    for a branch delete, an `error:` line naming the branch; for a merge or close,
+    gh's failure line. Any other `fatal:` or `error:` line, and an unquoted remote
+    line, counts only when the op is the command's only leg, since another leg
+    could have printed it.
+    Colour codes are read past; splitlines() also ends a line at a carriage return."""
+    lines = _ANSI_RE.sub("", output).splitlines()
+    if op_type in ("merge", "close"):
+        return any(_GH_FAILURE_LINE_RE.search(line) for line in lines)
+    ctx = extract_command_context(
+        _single_destructive_leg(command) or _single_detectable_leg(command) or command
+    )
+    only_leg = _op_is_only_leg(command)
+    if op_type == "branch-delete":
+        branch = ctx.get("branch")
+        return any(
+            (_GIT_FAILURE_LINE_RE.match(line) and only_leg)
+            or (line.startswith("error:") and isinstance(branch, str) and _names(line, branch))
+            for line in lines
+        )
+    ref = ctx.get("target_ref")
+    own = [str(f)[len("remote="):].rstrip("/") for f in ctx.get("bound_flags") or [] if str(f).startswith("remote=")]
+
+    def quotes_own_remote(line: str) -> bool:
+        m = _GIT_NO_REMOTE_RE.match(line) or _GIT_REMOTE_ACCESS_RE.match(line)
+        quoted = next((g for g in m.groups() if g), "") if m else ""
+        return bool(quoted) and quoted.rstrip("/") in own
+
+    return any(
+        (only_leg and (_GIT_FAILURE_LINE_RE.match(line) or _GIT_REMOTE_ACCESS_RE.match(line)))
+        or (_GIT_PUSH_FAILURE_RE.match(line) and isinstance(ref, str) and _names(line, ref))
+        or quotes_own_remote(line)
+        or (line.lstrip().startswith("!") and (not isinstance(ref, str) or _names(line, ref)))
+        for line in lines
+    )
+
+
+def _failed_call_keeps_token(command: str, op_type: str, output: str, frame_cwd: object) -> bool:
+    """Whether a failed call's token stays for a retry: never when the op's own
+    success line shows; else, for a merge or close whose PR state can be read,
+    when that state is not the one the op produces, whatever the output says;
+    else when the op's own failure shows. Any other doubt retires it."""
+    if _failure_output_shows_success(command, op_type, output):
+        return False
+    if op_type in _CONFIRMING_STATE:
+        state = _pr_state(_merge_reading(command) if op_type == "merge" else command, frame_cwd)
+        if state:
+            return state != _CONFIRMING_STATE[op_type]
+    return _failure_output_shows_op_failed(command, op_type, output)
+
+
+def _retire_after_failed_call(input_data: dict) -> None:
+    """A Bash call whose guarded op ran and whose later step failed ends in
+    PostToolUseFailure. Its `error` text carries the call's stdout and stderr, cut to
+    its head and tail when long. A quiet, porcelain, coloured or truncated success
+    prints no success line, so the token retires unless the output or the PR state
+    shows the op failed (_failed_call_keeps_token): one approval, one op. A failed op
+    whose failure does not show, or an op an earlier `&&` leg kept from running,
+    costs one re-approval. An interrupted call or a dry run keeps the token. Never
+    raises."""
+    try:
+        tool_input = input_data.get("tool_input")
+        command = tool_input.get("command") if isinstance(tool_input, dict) else None
+        output = input_data.get("error")
+        if (
+            input_data.get("tool_name") != "Bash"
+            or not isinstance(command, str)
+            or not isinstance(output, str)
+            or input_data.get("is_interrupt") is True
+        ):
+            return
+        # Read as the mint reads it: an eval of an assigned variable runs its value, and
+        # a trap's handler, a printed string or a set of positionals run what they hold.
+        runs = _rewrite_readable_evals(command)
+        op_type = detect_command_operation_type(runs)
+        if (
+            op_type
+            and not _op_did_not_run(runs)
+            and not _failed_call_keeps_token(runs, op_type, output, input_data.get("cwd"))
+        ):
+            # A token bound to the command's text (a string run by `bash -c`, eval or a
+            # trap) retires on the same decision, as on the success path.
+            _retire_exact_text_token(command, input_data.get("cwd"))
+            _retire_token_for_command(runs, op_type)
+    except Exception:  # noqa: BLE001 - any doubt keeps the token
+        return
+
+
 def main():
     """Main entry point for the PostToolUse hook."""
     try:
@@ -881,7 +2088,14 @@ def main():
             sys.exit(0)
 
         pact_context.init(input_data)
+        # A failed call is not a successful run: only its output can retire a token.
+        if input_data.get("hook_event_name") == "PostToolUseFailure":
+            _retire_after_failed_call(input_data)
+            print(_SUPPRESS_OUTPUT)
+            sys.exit(0)
         tool_input = input_data.get("tool_input", {})
+        # The command's git aliases are read from the directory it runs in.
+        set_command_directory(input_data.get("cwd"))
         # Defense-in-depth via SSOT helper: prefers canonical `tool_response`,
         # falls back to legacy `tool_output` for envelope-rename robustness,
         # warns on dual-envelope payloads (envelope-confusion smell).
@@ -923,6 +2137,20 @@ def main():
             command = (
                 tool_input.get("command", "") if isinstance(tool_input, dict) else ""
             )
+            # A git alias runs the command its value names, which is how the
+            # classifier reads it, so its run retires as that command; an
+            # exact-command token still matches the text that was run.
+            runs = _rewrite_git_aliases(command) if isinstance(command, str) else command
+            if (
+                isinstance(command, str)
+                and tool_response.get("interrupted") is not True
+                and not _op_did_not_run(runs)
+            ):
+                _retire_exact_text_token(
+                    command, input_data.get("cwd"), stdout_text=tool_response.get("stdout", ""),
+                    tool_response=tool_response,
+                )
+            command = runs
 
             # Block 1 — Command-shape filter (SEC-S2: extends from merge-
             # only to all op_types in LAYER1_SUCCESS_STDOUT_PATTERNS).
@@ -931,19 +2159,26 @@ def main():
             # against the dict keys is the SSOT for which op_types Layer 1
             # observes.
             op_type = detect_command_operation_type(command)
-            if op_type not in LAYER1_SUCCESS_STDOUT_PATTERNS:
+            # An op with no row in the table (a remote ref delete) still retires
+            # when the run's own success shows the op succeeded.
+            if op_type not in LAYER1_SUCCESS_STDOUT_PATTERNS and not (
+                op_type
+                and (
+                    _run_succeeded_as_the_op(command, op_type, tool_response)
+                    or _git_reports_ref_deleted(command, op_type, tool_response)
+                )
+            ):
                 print(_SUPPRESS_OUTPUT)
                 sys.exit(0)
 
-            # Block 2 — Platform-level success signal (dict-shape +
-            # non-interrupted). PostToolUse only fires on tool-call
-            # success at the platform layer (failed Bash routes to
-            # PostToolUseFailure per Agent SDK); the dict-shape vs
-            # non-dict asymmetry is a structural success boundary.
-            if not isinstance(tool_response, dict):
-                print(_SUPPRESS_OUTPUT)
-                sys.exit(0)
-            if tool_response.get("interrupted") is True:
+            # Block 2 — Platform-level success signal (non-interrupted).
+            # PostToolUse only fires on tool-call success at the platform
+            # layer (failed Bash routes to PostToolUseFailure per Agent
+            # SDK). extract_tool_response always returns a dict: a
+            # non-dict or absent response arrives here as {}, carries no
+            # stdout, and so retires only if Block 3's state check
+            # confirms the PR's final state.
+            if tool_response.get("interrupted") is True or _op_did_not_run(command):
                 print(_SUPPRESS_OUTPUT)
                 sys.exit(0)
 
@@ -957,13 +2192,37 @@ def main():
             # implication is the load-bearing check for force-push
             # (fail-closed-on-no-signal — no retirement degrades to
             # TTL/MAX_USES safety net, NOT bypass).
-            expected_substring = LAYER1_SUCCESS_STDOUT_PATTERNS[op_type]
-            if expected_substring is not None:
+            expected_substring = LAYER1_SUCCESS_STDOUT_PATTERNS.get(op_type)
+            # A merge whose PR an earlier leg assigns a literal number is judged as
+            # that number, so the merge rule below applies to it.
+            judged = _merge_reading(command) if op_type == "merge" else command
+            if expected_substring is not None and not _target_set_at_run_time(judged):
                 stdout_text = tool_response.get("stdout", "")
                 if not isinstance(stdout_text, str):
                     print(_SUPPRESS_OUTPUT)
                     sys.exit(0)
-                if expected_substring not in stdout_text:
+                if op_type in _CONFIRMING_STATE:
+                    # A piped or non-TTY gh run prints no "Merged pull request"
+                    # line, so a missing substring falls back to asking GitHub
+                    # for the PR's state; any doubt there keeps the token.
+                    # A readable state outranks the exit status: a merge that
+                    # exits 0 into a merge queue or with --auto leaves the PR
+                    # OPEN and keeps its token. Only an unreadable state falls
+                    # back to the run's own success. A close has no deferred
+                    # form, so its successful run retires without the state.
+                    confirmed = expected_substring.lower() in stdout_text.lower() or _close_succeeded(
+                        command, op_type, tool_response
+                    )
+                    if not confirmed:
+                        state = _pr_state(judged, input_data.get("cwd"))
+                        confirmed = state == _CONFIRMING_STATE[op_type] or (
+                            not state and _run_succeeded_as_the_op(_resolved_evals(command), op_type, tool_response)
+                        )
+                else:
+                    confirmed = expected_substring in stdout_text or _run_succeeded_as_the_op(
+                        command, op_type, tool_response
+                    )
+                if not confirmed:
                     print(_SUPPRESS_OUTPUT)
                     sys.exit(0)
 
@@ -988,7 +2247,8 @@ def main():
             sys.exit(0)
 
         # tool_response: {"answers": {"<question text>": "<selected label>"}, ...}
-        answers = tool_response.get("answers", {}) if isinstance(tool_response, dict) else {}
+        # (extract_tool_response always returns a dict; the answers value may not be one.)
+        answers = tool_response.get("answers", {})
         if not isinstance(answers, dict):
             answers = {}
 
@@ -1019,6 +2279,16 @@ def main():
                     f"Merge authorization token written: {safe_token_path}",
                     file=sys.stderr,
                 )
+                # Observer-style confirmation (exit 0): name what the approval
+                # authorizes, so a click that was not an approval of this command
+                # is caught before the command runs. The token is unchanged.
+                print(json.dumps({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PostToolUse",
+                        "additionalContext": _mint_confirmation(context),
+                    }
+                }))
+                sys.exit(0)
         elif refusal_reason is not None and _bundle_has_command(questions):
             # B2 (#1052): an approval was issued for a command-bearing bundle but
             # minted NO token. Emit a self-teaching, OBSERVER-STYLE advisory that

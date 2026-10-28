@@ -509,8 +509,14 @@ _OPTIONAL_FIELDS_BY_TYPE: dict[str, dict[str, type]] = {
     # ACTIVATES this optional check — _validate_event_schema
     # short-circuits on unknown event types and would otherwise skip
     # the optional loop. Symmetric with the cleanup_summary registration
-    # shipped in the same PR (#412 Fix B).
-    "session_end": {"warning": str},
+    # shipped in the same PR (#412 Fix B). `source` is written by wrap-up
+    # step 5 as "wrap-up"; check_unpaused_pr reads it to tell a wrap-up's
+    # session_end from the SessionEnd hook's own. Wrap-up also records the
+    # PR state it read (`pr_state`: MERGED, OPEN, CLOSED, NONE or UNKNOWN)
+    # and, when there is a PR, its `pr_number`; wrap_up_closed reads both.
+    "session_end": {
+        "warning": str, "source": str, "pr_state": str, "pr_number": int, "pr_source": str,
+    },
     # shared/compaction_owner.py adds `latency_s`, the seconds from staging a
     # summary to resolving it, whenever the staged record's time is readable.
     "compaction_attributed": {"latency_s": float},
@@ -1356,6 +1362,40 @@ def _ts_ge(event_ts: Any, since: str | None) -> bool:
         return _parse_ts(event_ts) >= _parse_ts(since)
     except (ValueError, TypeError):
         return True
+
+
+def wrap_up_closed(events: list[dict[str, Any]], pr_number: Any, since_ts: str | None) -> bool:
+    """True iff /PACT:wrap-up recorded `pr_number` as MERGED at or after `since_ts`.
+
+    The one predicate both session hooks use for "wrap-up ran for this merged
+    PR". An event qualifies when it is a `session_end` with source "wrap-up",
+    pr_state "MERGED" and an int pr_number equal to `pr_number`, and, when
+    `since_ts` is not None, a ts that parses and is at or after it.
+
+    A bool or a non-int never matches on either side: callers convert a digit
+    string first. A missing or unparseable ts never qualifies, so a corrupt
+    record can only leave a reminder in place, never remove one.
+    """
+    if not isinstance(pr_number, int) or isinstance(pr_number, bool):
+        return False
+    for event in events:
+        if not (
+            event.get("type") == "session_end"
+            and event.get("source") == "wrap-up"
+            and event.get("pr_state") == "MERGED"
+        ):
+            continue
+        number = event.get("pr_number")
+        if not isinstance(number, int) or isinstance(number, bool) or number != pr_number:
+            continue
+        if since_ts is None:
+            return True
+        try:
+            if _parse_ts(event.get("ts")) >= _parse_ts(since_ts):
+                return True
+        except (ValueError, TypeError):
+            continue
+    return False
 
 
 def _read_events_at(

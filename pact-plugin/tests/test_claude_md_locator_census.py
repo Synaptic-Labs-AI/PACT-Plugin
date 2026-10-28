@@ -645,6 +645,7 @@ WHOLE_TEXT_PARSES = frozenset({
     ("scripts/archive_pin.py", "archive_pin", "post.replace(block, '', 1)"),
     ("scripts/check_pin_caps.py", "_resolve_pins", "content"),
     # Python source, through `ast.parse`.
+    ("hooks/shared/merge_guard_common.py", "_python_reaching", "code"),
     ("skills/pact-coding-standards/scripts/check_unused_imports.py", "find_unused_imports", "source"),
     ("skills/pact-memory/scripts/working_memory.py", "_parse_section", "content"),
     ("skills/pact-memory/scripts/working_memory.py", "sync_retrieved_to_claude_md", "content"),

@@ -99,7 +99,7 @@ def probe():
         def shell(command):
             done = subprocess.run(
                 [str(BASH), "-c", command.replace("{abs_worktree}", str(worktree))],
-                capture_output=True, text=True, env=carry_clock_shift({"PATH": SAFE_PATH}),
+                capture_output=True, text=True, env=carry_clock_shift({"PATH": SAFE_PATH, "HOME": os.environ["HOME"]}),
                 # Deliberately NOT the worktree: the step specifies an absolute
                 # path precisely so a wrong CWD cannot produce a false empty,
                 # and running from elsewhere is how that gets measured.

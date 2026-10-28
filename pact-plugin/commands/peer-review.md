@@ -15,7 +15,7 @@ Review the current work: $ARGUMENTS
 Create a review Task hierarchy:
 
 ```
-1. `TaskCreate`: Review task "Review: {feature}"
+1. `TaskCreate`: Review task "Review: {feature} ({branch})", where {branch} is the output of git branch --show-current
 2. `TaskUpdate`: Review task status = "in_progress"
 3. Analyze PR: Which reviewers needed?
 4. `TaskCreate`: Reviewer agent tasks (architect, test-engineer, domain specialists)
@@ -41,14 +41,15 @@ Create a review Task hierarchy:
 16. `TaskCreate`: "Awaiting merge decision" approval task
 17. Present to user, await approval
 18. On approval: `TaskUpdate` approval task status = "completed"
-19. `TaskUpdate`: Review task status = "completed", metadata.artifact = PR URL
+19. After the merge is verified: `TaskCreate` a lead-owned task "Invoke /PACT:wrap-up" (status `pending`)
+20. `TaskUpdate`: Review task status = "completed", metadata.artifact = PR URL
 ```
 
 > **Convention**: Synchronous user steps (step tasks, approval tasks) skip the `in_progress` transition — they go directly from `pending` to `completed` since the orchestrator handles them inline without background dispatch.
 
 **Example structure:**
 ```
-[Review] "Review: user authentication"
+[Review] "Review: user authentication (feature/user-auth)"
 ├── [Agent] "architect: design review"
 ├── [Agent] "test-engineer: coverage review"
 ├── [Agent] "backend-coder: implementation review"
@@ -73,7 +74,9 @@ Review task: in_progress (persists until merge-ready)
 
 **Key rules**: Review stays `in_progress` until merge-ready; fresh tasks per cycle; re-review is verify-only (minimal scope); imPACT escalation blocks (doesn't complete/delete) review; resume after resolution.
 
-**Persist `remediation_cycle_count`**: `TaskUpdate(reviewTaskId, metadata={"remediation_cycle_count": N})` — increment at each cycle start; default 0 if absent.
+**Failed cycle**: a remediation cycle fails when its verify-only re-review leaves a blocking finding open, OR raises a finding in a class an earlier cycle already closed, even if every finding the cycle listed was closed. A finding's class is one sentence naming the behaviour that fails, independent of the file, line or input that exposed it. Write that sentence beside each blocking finding when you synthesize findings; two findings share a class when one sentence describes both.
+
+**Persist the cycle state**: at each cycle start, read `remediation_cycle_count` (default 0) and `closed_finding_classes` (default empty) from the Review task's file (`TaskGet` does NOT surface metadata). Then write both in one call: `TaskUpdate(reviewTaskId, metadata={"remediation_cycle_count": N, "closed_finding_classes": [...]})`, with N incremented and the list holding the class sentence of every finding an earlier cycle closed. Write the whole list each time. Decide whether a cycle failed against that list.
 
 ### Verify-Only Re-Review
 
@@ -262,7 +265,7 @@ TaskCreate(subject="secretary: harvest pending HANDOFFs (primary trigger, pre-me
 TaskUpdate(taskId, owner="secretary")
 ```
 
-This is the **primary memory trigger** — fires unconditionally, after the reviewers report, and stays quiet: it banks the HANDOFFs to the store and writes no Working Memory block, because remediation after this point dispatches reviewers again and an agent inherits the block as it stood when it spawned. The block is rebuilt after the merge decision (`orchestrate` step 8) and at session end.
+This is the **primary memory trigger** — fires unconditionally, after the reviewers report, and stays quiet: it banks the HANDOFFs to the store and writes no Working Memory block, because remediation after this point dispatches reviewers again and an agent inherits the block as it stood when it spawned. The block is rebuilt by `/PACT:wrap-up` when the arc closes.
 
 Reviewer independence has a second surface that this ordering does not touch: see the
 REVIEWER-MEMORY-CHANNEL clause.
@@ -344,7 +347,7 @@ JSON
 JSON
        ```
      - After all fixes complete, re-run review to verify fixes only (see Verify-Only Re-Review above)
-     - **Termination**: If blocking items persist after 2 fix-verify cycles → escalate via `/PACT:imPACT`
+     - **Termination**: After 2 failed cycles (see **Failed cycle** above) → escalate via `/PACT:imPACT`
    - **Minor + Future**:
 
      **Greedy-fix mode** <!-- ANCHOR-STABLE: GREEDY-CONFIG-REF --> — consult the injected **PACT Runtime Config** block (resolved into the orchestrator's context at session start):
@@ -473,8 +476,8 @@ JSON
    Phrase the question so it names the exact command — what you approve is what executes. For example: `Merge this PR now? On approval the team runs gh pr merge <N>` (where `<N>` is the PR number and the only number in the prompt).
 
    Use that single `AskUserQuestion` (single-select) with these exact options:
-   - **"Yes, merge"** (description: "Run `gh pr merge <N>` to merge this PR") → On selection: run `gh pr merge <N>`, then invoke `/PACT:wrap-up`
-   - **"Continue reviewing"** (description: "Keep reviewing — no action needed yet") → On selection: do nothing — let the user continue their review
+   - **"Yes, merge"** (description: "Run `gh pr merge <N>` to merge this PR") → On selection: run `gh pr merge <N>`
+   - **"Continue reviewing"** (description: "Keep reviewing — no action needed yet") → On selection: when the user says the review is done, go to step 8
    - **"Pause work for now"** (description: "Save session knowledge and pause — resume later") → On selection: invoke `/PACT:pause`
 
    Put the command literal `gh pr merge <N>` in the "Yes, merge" option's description, with `<N>` the only number and no other framing. Use the same `<N>` — the actual PR number — wherever it appears (question prompt and option); if the question and the option name different PRs the approval is rejected as ambiguous. The runtime merge guard authorizes a merge by matching the command you approved against the command actually run, so an approval that names the exact command passes cleanly. The guard — not this template — is the enforcement boundary; this convention only produces an approval the guard can recognize.
@@ -483,7 +486,14 @@ JSON
 
    > **If a merge is blocked** — the guard found no matching approval, or the approved command and the run command disagree — re-request authorization through this same `AskUserQuestion` convention with the literal `gh pr merge <N>` embedded in the "Yes, merge" option. Do NOT work around the block by running a bare command outside the checkpoint or by reducing the question to a simpler prompt — that defeats the safeguard. In a channel/headless session (e.g. Telegram) `AskUserQuestion` is unavailable, so no approval can be formed and the merge is held until you approve it interactively in a terminal — this is the intended behavior, not a bug.
 
-> ⚠️ **Do NOT shut down reviewers here.** Teammates persist until after user-authorized merge. They may be needed for post-merge questions or if the user requests changes.
+8. **Check the PR state after the merge decision.** Run `gh api repos/{owner}/{repo}/pulls/<N> --jq '{state,merged,auto_merge}'`.
+   - The read fails (non-zero exit or no output) → report that the PR state could not be read and ask the user whether the merge completed. If it did, follow the `merged` bullet; if it did not, return to step 7. Do not return to step 7 before the user answers.
+   - `merged` is true → `TaskCreate` the "Invoke /PACT:wrap-up" task, complete the Review task, then invoke `/PACT:wrap-up`. Run project post-merge steps (tags, releases) alongside `/PACT:wrap-up`, never instead of it.
+   - `state` is `open` with `auto_merge` set, or the step-7 `gh pr merge <N>` output said the PR was added to a merge queue → report that the merge is queued and that wrap-up runs once it merges. Do not ask for approval again. When the user says the PR merged, return to step 8.
+   - `state` is `open` with no `auto_merge` → report that the PR is still open and ask the user whether it is waiting in a merge queue. If it is, follow the queued bullet; if it is not, return to step 7.
+   - `state` is `closed` and `merged` is false → report that the PR was closed without merging and return to step 7.
+
+> ⚠️ **Do NOT shut down reviewers here.** Teammates persist until `/PACT:wrap-up` ends the session or `/PACT:pause` shuts them down.
 
 ---
 

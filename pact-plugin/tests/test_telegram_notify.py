@@ -157,7 +157,7 @@ class TestGetProjectNameNotify:
     def test_returns_unknown_when_cwd_is_home(self):
         """Should return 'unknown' when cwd is the home directory."""
         home = os.path.expanduser("~")
-        with patch.dict("os.environ", {}, clear=True), \
+        with patch.dict("os.environ", {"HOME": home}, clear=True), \
              patch("os.getcwd", return_value=home):
             assert _get_project_name() == "unknown"
 

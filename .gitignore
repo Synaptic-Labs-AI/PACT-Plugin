@@ -5,7 +5,9 @@ skills-research/
 .env
 .env.*
 **/settings.local.json
-/.claude/
+!/.claude/
+/.claude/*
+!/.claude/settings.json
 
 # Test files
 **/pact-memory/tests/

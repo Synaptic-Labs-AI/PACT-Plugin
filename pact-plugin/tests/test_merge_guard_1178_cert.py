@@ -140,12 +140,14 @@ _BENIGN_CONTROLS = [
 # ── Bidirectional assertion helpers (non-vacuity baked in) ───────────────────────────────
 def _closure(cmd):
     """OVER-BLOCK CLOSURE: over-blocked at base (non-vacuous) -> freed at HEAD."""
+    assert D_BASE is not None
     assert D_BASE(cmd) is True, "vacuous: not over-blocked at c21eae19 base: %r" % (cmd,)
     assert D(cmd) is False, "over-block NOT closed at HEAD (faithful click still blocked): %r" % (cmd,)
 
 
 def _retention(cmd):
     """RETENTION: caught at base (non-vacuous) AND still caught at HEAD (no under-block)."""
+    assert D_BASE is not None
     assert D_BASE(cmd) is True, "vacuous: not caught at c21eae19 base: %r" % (cmd,)
     assert D(cmd) is True, "UNDER-BLOCK opened at HEAD (a real danger was freed): %r" % (cmd,)
 
@@ -230,12 +232,35 @@ class TestExecutorRetention:
     @pytest.mark.parametrize("head", [
         "bash -c", "sh -c", "zsh -c", "dash -c", "ksh -c", "ksh93 -c", "mksh -c", "ash -c",
         "csh -c", "tcsh -c", "fish -c", "rksh -c", "/bin/bash -c",
-        "eval", "su -c", "watch", "expect -c",
-        "python -c", "python3 -c", "python3.11 -c", "perl -e", "ruby -e", "node -e",
-        "nodejs -e", "php -r", "env -S",
+        "eval", "su -c", "watch", "expect -c", "env -S",
     ])
     def test_direct_executor_stays_caught(self, head):
         _retention('%s "%s"' % (head, BD))
+
+    # An interpreter leg without an exec primitive is inert: its quoted code reaches a shell
+    # only through a primitive of its language. With the danger as bare code text, each is
+    # freed; with the danger passed to a primitive, each stays caught.
+    @requires_history
+    @pytest.mark.parametrize("head", [
+        "python -c", "python3 -c", "python3.11 -c", "perl -e", "ruby -e", "node -e",
+        "nodejs -e", "php -r",
+    ])
+    def test_interpreter_without_primitive_frees(self, head):
+        _closure('%s "%s"' % (head, BD))
+
+    @requires_history
+    @pytest.mark.parametrize("label,cmd", [
+        ("python os.system",   'python -c "import os; os.system(\'%s\')"' % BD),
+        ("python3 subprocess", 'python3 -c "import subprocess; subprocess.run(\'%s\', shell=True)"' % BD),
+        ("python3.11 popen",   'python3.11 -c "import os; os.popen(\'%s\')"' % BD),
+        ("perl system",        'perl -e "system(\'%s\')"' % BD),
+        ("ruby backtick",      'ruby -e "`%s`"' % BD),
+        ("node child_process", 'node -e "require(\'child_process\').execSync(\'%s\')"' % BD),
+        ("nodejs exec",        'nodejs -e "require(\'child_process\').exec(\'%s\')"' % BD),
+        ("php shell_exec",     'php -r "shell_exec(\'%s\');"' % BD),
+    ])
+    def test_interpreter_with_primitive_stays_caught(self, label, cmd):
+        _retention(cmd)
 
     @requires_history
     @pytest.mark.parametrize("head", ["ssh host", "rsh host", "remsh host", "slogin host"])
@@ -300,7 +325,7 @@ class TestHeadDisplacementExecutor:
     @pytest.mark.parametrize("label,cmd", [
         ("single assign",       'FOO=bar bash -c "%s"' % BD),
         ("LC_ALL locale",       'LC_ALL=C bash -c "%s"' % BD),
-        ("PYTHONPATH + python3", 'PYTHONPATH=. python3 -c "%s"' % BD),
+        ("PYTHONPATH + python3", 'PYTHONPATH=. python3 -c "import os; os.system(\'%s\')"' % BD),
         ("VAR + sh + force-push", 'VAR=x sh -c "%s"' % PF),
         ("multi assign",        'FOO=1 BAR=2 bash -c "%s"' % BD),
         ("append assign +=",    'PATH+=/x bash -c "%s"' % BD),   # the += regex-gap the lead caught
@@ -310,7 +335,7 @@ class TestHeadDisplacementExecutor:
         ("quoted RHS",          'FOO="a=b" bash -c "%s"' % BD),
         ("sq value w/ space",   "FOO='x=y z' bash -c \"%s\"" % BD),
         ("PATH colon value",    'PATH=/a:/b bash -c "%s"' % BD),
-        ("path-exec nested",    'FOO=bar /usr/bin/python3 -c "%s"' % BD),
+        ("path-exec nested",    'FOO=bar /usr/bin/python3 -c "import os; os.system(\'%s\')"' % BD),
         ("non-bash zsh",        'ZDOTDIR=/tmp zsh -c "%s"' % BD),
         ("assign + wrapper + exec", 'FOO=bar timeout 5 bash -c "%s"' % BD),
         ("assign + wrapper nice",  'FOO=bar nice -n 5 bash -c "%s"' % BD),
@@ -400,6 +425,7 @@ class TestBindingInvariant:
     @requires_history
     def test_leg_locality_executing_tail_caught_at_base(self):
         # The base half: the same form was caught at c21eae19, so the HEAD pin is not vacuous.
+        assert D_BASE is not None
         assert D_BASE(_LEG_LOCALITY) is True, (
             "vacuous: not caught at c21eae19 base: %r" % (_LEG_LOCALITY,))
 
@@ -448,6 +474,7 @@ class TestControls:
     @requires_history
     @pytest.mark.parametrize("label,cmd", _BENIGN_CONTROLS)
     def test_benign_false_at_base(self, label, cmd):
+        assert D_BASE is not None
         assert D_BASE(cmd) is False, "benign control not False at c21eae19 base: %r" % (cmd,)
 
     @requires_history
@@ -477,6 +504,7 @@ class TestMonotonicity:
     @pytest.mark.parametrize("cmd", _MONOTONICITY_BATTERY)
     def test_no_new_over_block(self, cmd):
         # If it was NOT over-blocked at base, the strip must not newly block it.
+        assert D_BASE is not None
         if D_BASE(cmd) is False:
             assert D(cmd) is False, "MONOTONICITY VIOLATION: strip created a new over-block: %r" % (cmd,)
 
@@ -501,6 +529,7 @@ class TestIsDangerousByteIdentity:
     @requires_history
     @pytest.mark.parametrize("cmd", _BYTE_IDENTITY_BATTERY)
     def test_pre_existing_battery_unchanged(self, cmd):
+        assert D_BASE is not None
         assert D_BASE(cmd) == D(cmd), \
             "shared-predicate extraction changed a pre-existing classification: %r" % (cmd,)
 

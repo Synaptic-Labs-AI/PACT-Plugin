@@ -24,6 +24,30 @@ from pathlib import Path
 
 import pytest
 
+# A SANDBOX HOME FOR THE WHOLE SESSION, SET BEFORE ANY HOOK MODULE IS IMPORTED.
+#
+# The per-test `_isolate_config_root_to_tmp` fixture redirects `Path.home()` in
+# this process only. A hook or CLI a test starts as a child resolves its config
+# root from the environment it inherits, so without this every such child
+# reached the operator's real ~/.claude. Every child now inherits a HOME under a
+# throwaway directory, and `CLAUDE_CONFIG_DIR` is unset for the whole session (the
+# fixture then scrubs it per test as before, so the `Path.home()` fallthrough that
+# most tests rely on stays live). Set at import, not in `pytest_configure`, because
+# the hook modules imported below run module-level code before that hook.
+#
+# The HuggingFace cache is derived from HOME, so it is pinned to the real one
+# first: a sandbox HOME would otherwise hand every embedding test a cold cache
+# and a network download.
+if not os.environ.get("HF_HOME"):
+    os.environ["HF_HOME"] = os.path.join(
+        os.environ.get("XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")),
+        "huggingface",
+    )
+_SESSION_HOME_DIR = tempfile.mkdtemp(prefix="pact-home-suite-")
+os.makedirs(os.path.join(_SESSION_HOME_DIR, ".claude"))
+os.environ["HOME"] = _SESSION_HOME_DIR
+os.environ.pop("CLAUDE_CONFIG_DIR", None)
+
 # Add tests directory to path for helpers + fixtures module imports
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -563,23 +587,17 @@ def _isolate_config_root_to_tmp(tmp_path, monkeypatch):
        operator's real ``~/.claude``. This closes #1186's destructive leak (the
        marker writer is in-process).
 
-    WHY NOT ALSO SET ``HOME`` ENV (deliberate): ``monkeypatch.setattr`` does not
-    cross to subprocesses, so a subprocess test that needs its child to resolve
-    the SAME tmp root must set the env var ITSELF in-body (the established
+    CHILD PROCESSES: ``monkeypatch.setattr`` does not cross to subprocesses. A
+    child instead inherits the session-wide sandbox HOME this module sets at
+    import (and no CLAUDE_CONFIG_DIR), so it never reaches the operator's real
+    ``~/.claude``. A subprocess test that needs its child to resolve the SAME
+    per-test tmp root still sets the env var ITSELF in-body (the established
     pattern — see test_pact_harvest_cli's subprocess test that does
     ``monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))``
-    alongside its Path.home patch). A GLOBAL ``HOME`` env override here was
-    tried and REJECTED: it breaks the telegram tests
-    (``test_*_cwd_is_home``), which capture ``home = os.path.expanduser("~")``,
-    then ``patch.dict(os.environ, {}, clear=True)`` and assert the cwd-is-home
-    branch — under a ``HOME`` override the captured value is tmp but the
-    cleared-env ``expanduser`` falls back to the real pwd-home, so cwd no longer
-    equals home. A global ``HOME`` override trades ~3 legitimate tests for ~4
-    accidentally-consistent subprocess tests — a bad trade. Subprocess
-    hermeticity is per-test (the in-body env pattern), not a fixture
-    responsibility; residual non-isolated subprocess tests surface as findings
-    for per-test fixes, not as a fixture gap. #1186's destructive leak
-    (in-process marker writes) is fully closed by the setattr alone.
+    alongside its Path.home patch). A test that clears the environment and reads
+    the home directory must keep HOME in the cleared environment, or the lookup
+    falls back to the account's real home (the telegram ``test_*_cwd_is_home``
+    tests do).
 
     CRITICAL — DO NOT SET CLAUDE_CONFIG_DIR HERE. Precedence-1 makes it shadow
     ``Path.home()`` entirely. The suite's pervasive isolation convention patches
@@ -609,7 +627,7 @@ def _isolate_config_root_to_tmp(tmp_path, monkeypatch):
     never by re-pointing at the real home, weakening this redirect, or widening
     any reaper. ``Path.home`` is patched in-process (what
     ``get_claude_config_dir`` calls); subprocess tests that need their child to
-    resolve tmp set the env var themselves in-body (see "WHY NOT ALSO SET HOME"
+    resolve tmp set the env var themselves in-body (see "CHILD PROCESSES"
     above).
     """
     _UNSET = object()

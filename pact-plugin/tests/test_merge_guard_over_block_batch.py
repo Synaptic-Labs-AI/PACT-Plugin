@@ -93,7 +93,9 @@ def _execute(cmd: str, tmp_path) -> int:
          patch("sys.stdout", io.StringIO()):
         with pytest.raises(SystemExit) as exc_info:
             pre_main()
-    return exc_info.value.code
+    code = exc_info.value.code
+    assert isinstance(code, int), code
+    return code
 
 
 # ===========================================================================
@@ -402,6 +404,7 @@ class TestMintWindowAnchorFaithfulShapes:
         (an under-bind would mint [] → the faithful re-exec would DENY)."""
         n, ctx = _mint_ctx(desc, tmp_path)
         assert n == 1
+        assert ctx is not None
         assert ctx["bound_flags"] == ["--admin"], (
             f"faithful shape under-bound the truncation-recovery flag: {desc!r}"
         )
@@ -417,6 +420,7 @@ class TestMintWindowAnchorFaithfulShapes:
         as the boundary of the faithful-shape guarantee above."""
         n, ctx = _mint_ctx(f"On approval run: {{{self.TRUNC}}}", tmp_path)
         assert n == 1
+        assert ctx is not None
         assert ctx["bound_flags"] == []  # safe over-block: no --admin bound
         # over-block direction only: the faithful execution DENIES (never authorizes)
         assert _authorize(self.TRUNC, tmp_path) is not None
@@ -437,15 +441,9 @@ class TestTwoTierNoUnderBindRideAlong:
         "approve,execute,flags",
         [
             ("git push --force-with-lease origin main",
-             "cd /repo && git push --force-with-lease origin main", ["--force-with-lease"]),
-            ("git push --force-with-lease origin main",
              "git push --force-with-lease origin main && echo done", ["--force-with-lease"]),
-            ("git push --no-verify origin main --force",
-             "cd /repo && git push --no-verify origin main --force", ["--no-verify"]),
-            ("git push origin main",
-             "cd /repo && git push origin main", []),
         ],
-        ids=["lease-cd-prefix", "lease-continuation", "forcepush-noverify-cd", "plain-cd-prefix"],
+        ids=["lease-continuation"],
     )
     def test_single_approval_rides_benign_prefix_or_continuation(
             self, approve, execute, flags, tmp_path):
@@ -457,6 +455,27 @@ class TestTwoTierNoUnderBindRideAlong:
             f"benign-prefix/continuation compound over-blocked despite a faithful "
             f"single-command approval: approve={approve!r} execute={execute!r}"
         )
+
+    @pytest.mark.parametrize(
+        "single,compound",
+        [
+            ("git push --force-with-lease origin main", "cd /repo && git push --force-with-lease origin main"),
+            ("git push --no-verify origin main --force", "cd /repo && git push --no-verify origin main --force"),
+            ("git push origin main", "cd /repo && git push origin main"),
+        ],
+        ids=["lease-cd-prefix", "forcepush-noverify-cd", "plain-cd-prefix"],
+    )
+    def test_a_cd_prefixed_push_mints_on_its_own_approval(self, single, compound, tmp_path):
+        # After a cd the push may name a ref of another repository: the single
+        # command's approval does not cover it, and the compound's own approval
+        # mints and runs it, so there is no gated-but-unmintable dead end.
+        assert D(compound) is True
+        (tmp_path / "single").mkdir()
+        (tmp_path / "own").mkdir()
+        assert _mint_single(single, tmp_path / "single") == 1
+        assert _authorize(compound, tmp_path / "single") is not None
+        assert _mint_single(compound, tmp_path / "own") == 1
+        assert _authorize(compound, tmp_path / "own") is None
 
 
 class TestEmergentDangerClassIsCloseOnly:

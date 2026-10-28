@@ -18,6 +18,26 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
+## v4.8.13: wrap-up always follows a merge, and a merge-guard approval runs its command once (issue #1660)
+
+### Summary
+
+A merge is now always followed by `/PACT:wrap-up`, and the other weak hand-offs between PACT commands named in #1660 are closed. The merge guard's approvals were also tightened in both directions: fewer honest commands are refused, and one approval can no longer run its guarded command more than once.
+
+### What landed
+
+- Wrap-up owns everything after a merge. `/PACT:orchestrate` ends at peer review; `/PACT:peer-review` reads the PR state after a merge and, on `MERGED`, invokes wrap-up. Project post-merge steps (tags, releases) run alongside it, never instead of it.
+- A PostToolUse reminder after the lead's successful `gh pr merge`, and a session-end warning when a session ends with a merged PR and no wrap-up. Wrap-up's `session_end` journal event carries `"source": "wrap-up"`.
+- comPACT, imPACT and orchestrate return control to the workflow that invoked them; a remediation cycle that reopens a finding class counts as failed toward the imPACT escalation; teammate shutdown has one owner, and the workflow chain is stated once in `pact-workflows.md`.
+- Merge guard, approvals: a token retires once GitHub reports the PR merged or closed, once the command's own success shows, or, when a later step fails, unless the output or a readable PR state shows the guarded command itself failed. After an approval the lead sees what it authorizes.
+- Merge guard, one approval runs once: loops, `xargs`, `find -exec`, traps, recursive functions and other carriers that would run a guarded command several times are refused, while bounded single runs (`head -1 | xargs`, `find -maxdepth 0`, an exit-status `break`) still run on one click.
+- Merge guard, fewer false refusals and fewer misses: interpreter code is refused only when it calls an exec primitive; more interpreter heads, runtimes, wrappers and substitution forms are read, and pushes whose remote, upstream or push routing changed before them bind their text.
+- This repo's committed `.claude/settings.json` turns off commit and PR attribution for every session in it, cloud sessions included.
+
+### Why
+
+A merge with no wrap-up skipped the retrospective, harvest and propagation that only wrap-up runs, and a guard approval that could run its command twice turned one click into two destructive operations. Each guard change was checked by mutation and by an independent security re-verify against the real hooks.
+
 ## v4.8.12: backlog ref checks over REST when GraphQL is blocked, and releases cut by CI (issue #1667)
 
 ### Summary

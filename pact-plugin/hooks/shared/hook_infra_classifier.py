@@ -232,9 +232,11 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "subagent_meta",  # background_work's module-level edge
         "background_launch", "background_work",
         "claude_md_drift", "claude_md_manager", "claude_md_markers", "constants",
-        "error_output", "failure_cause", "git_helpers", "intentional_wait", "pact_context",
+        "error_output", "failure_cause", "git_helpers", "intentional_wait",
+        "merge_guard_common", "pact_context",
         "paths", "pin_caps", "pin_credit", "pin_growth", "project_scope", "session_journal",
         "session_registry", "session_state", "staleness", "state_file", "task_utils",
+        "tool_response",
         "actor_identity", "cloud_roster",  # cloud roster (#1670): intentional_wait's owner fallback
     }),  # regenerated from the live derivation, not hand-listed: the Layer 1
          # fold adds background_work + intentional_wait, and the rest were
@@ -243,7 +245,9 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # kernel and migration planners import the parser inside functions.
          # claude_md_drift and pin_growth reached via the pin-growth report and
          # record jobs, imported inside functions; pin_credit via the record
-         # job's credit confirm.
+         # job's credit confirm. merge_guard_common and tool_response are
+         # reached by the post-merge reminder job; a classifier change in
+         # merge_guard_common now changes this hook's reminder.
     "agent_handoff_emitter": frozenset({
         "agent_handoff_marker", "canonical_json", "constants",
         "pact_context", "paths",
@@ -435,11 +439,12 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
          # + the path/session helper spine; regenerated from the live AST
          # derivation (test_hook_infra_classifier oracle), KD-10.
     "merge_guard_post": frozenset({
-        "constants", "error_output", "merge_guard_common", "pact_context",
-        "paths", "session_journal", "session_registry", "session_state",
-        "tool_response",
-    }),  # post additionally reaches error_output (fail-loud alert) and
-         # tool_response (the canonical-envelope extractor).
+        "constants", "error_output", "gh_helpers", "merge_guard_common",
+        "pact_context", "paths", "session_journal", "session_registry",
+        "session_state", "tool_response",
+    }),  # post additionally reaches error_output (fail-loud alert),
+         # tool_response (the canonical-envelope extractor) and gh_helpers
+         # (the PR state check that confirms a merge or close).
     "wait_filler_gate": frozenset({
         "subagent_meta",  # background_work's module-level edge
         "background_launch", "background_work", "constants", "intentional_wait",

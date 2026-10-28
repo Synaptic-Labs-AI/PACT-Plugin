@@ -893,7 +893,7 @@ Derive agent state from progress signals (see agent-teams skill, Progress Signal
 > **Cybernetic basis**: Bateson's deutero-learning — the system learns to learn by comparing
 > predicted difficulty against actual outcomes, creating a feedback loop for scoring accuracy.
 
-At workflow completion (orchestrate wrap-up or comPACT completion), the secretary gathers calibration metrics during HANDOFF processing, asks the team-lead for a brief difficulty assessment, and saves the calibration record to pact-memory. Records feed back into Learning II pattern matching.
+At workflow completion (`/PACT:wrap-up` after orchestrate, or comPACT completion), the secretary gathers calibration metrics during HANDOFF processing, asks the team-lead for a brief difficulty assessment, and saves the calibration record to pact-memory. Records feed back into Learning II pattern matching.
 
 **Schema**:
 
@@ -1054,7 +1054,11 @@ The aggregation feeds back into Learning II calibration data alongside the featu
 | **comPACT** | Focused, independent tasks | Dispatch concurrent specialists for self-contained tasks. No PACT phases needed. |
 | **rePACT** | Complex sub-tasks within orchestration | Recursive nested P→A→C→T cycle (single or multi-domain) |
 | **imPACT** | When blocked or need to iterate | Triage: Redo prior phase? Additional agents needed? |
+| **peer-review** | Work committed, ready for review | Create the PR, run the multi-agent review, hold the merge checkpoint |
+| **wrap-up** | After a merge, or to end the session | Retrospective, memory consolidation, cleanup, session decision |
 | **pause** | PR open, not ready to merge | Consolidate memory, persist state, shut down teammates |
+
+**Chain**: `/PACT:orchestrate` or `/PACT:comPACT` → `/PACT:peer-review` → merge → `/PACT:wrap-up`. `/PACT:pause` and `/PACT:refresh` interrupt the chain; the session resumes it later. A workflow invoked by another workflow returns to its caller at the step that invoked it and skips its own next-step question: `/PACT:imPACT` returns to the workflow it was triaging, and `/PACT:comPACT` or `/PACT:orchestrate` dispatched to fix review findings returns to that `/PACT:peer-review`.
 
 ### Lead-vs-Teammate Completion Responsibilities (per workflow)
 
@@ -1229,10 +1233,12 @@ See the [Concurrent Audit Protocol](pact-audit.md) for full details.
 4. **Create atomic commit(s)** — stage and commit before proceeding
 5. **Calibration** — The secretary gathers calibration metrics during HANDOFF processing. When asked, provide a brief difficulty assessment: was actual difficulty higher, lower, or about the same as predicted? Which dimensions surprised you?
 
-**Next steps** — After commit, ask: "Work committed. Create PR?"
-- Yes (Recommended) → invoke `/PACT:peer-review`
-- Not yet / pause → invoke `/PACT:pause` — consolidates memory, persists state, shuts down teammates. Worktree persists; resume later.
-- More work → continue with comPACT or orchestrate
+If `TaskList` shows an `in_progress` Review task whose subject ends with `({branch})`, where {branch} is the output of `git branch --show-current`, this comPACT is fixing review findings: skip the question below and return to that `/PACT:peer-review` at its verify-only re-review.
+
+**Next steps** — After commit, use `AskUserQuestion` to ask: "Work committed. What next?"
+- Yes, create PR (Recommended) → invoke `/PACT:peer-review`
+- Continue working → stay in this workflow; more work may follow via `/PACT:comPACT` or `/PACT:orchestrate`
+- Pause work for now → invoke `/PACT:pause` — consolidates memory, persists state, shuts down teammates. Worktree persists; resume later.
 
 **If blocker reported**:
 1. Receive blocker from specialist
@@ -2490,11 +2496,11 @@ Events are JSONL entries with common fields `v` (schema version), `type`, and `t
 |------|-----------|--------|--------------|
 | `session_start` | session_init hook (lead sessions); bootstrap_prompt_gate hook (once, for a lead the session_init hook did not record, at the first prompt whose recording completes. A recording whose CLAUDE.md block rewrite fails in a way that may clear is retried on later prompts, and the third such failure records the lead anyway; a failed `session_start` append is retried quietly on later prompts) | `team`, `session_id`, `project_dir`, `worktree`, `source`; optional: `prev_session_dir` (the session this one follows, when it is another session) | Session boundary marker; `source` names the start that wrote it: `startup` (new session, or a start that reported no source), `resume` (resumed session), `compact` (after compaction), `clear` (after `/clear`), `fork` (session forked from another session), `unknown` (a start that reported any other source), `prompt` (recorded at a prompt instead of at the start) |
 | `team_realigned` | session_init hook (a resume or compaction that moves the session to the team the platform is using); bootstrap_marker_writer hook (a lead prompt or spawn that does so); the `realign_team` command | `from`, `to` | Locate the earlier team's task store, `tasks/{from}/`, for carry-across and harvest |
-| `session_end` | session_end hook | `warning` (optional) | Detect incomplete shutdowns |
+| `session_end` | session_end hook, wrap-up command | `warning` (optional, hook); `source`, `pr_state`, `pr_number`, `pr_source` (optional, wrap-up: `"wrap-up"`, one of `MERGED` / `OPEN` / `CLOSED` / `NONE` / `UNKNOWN`, the PR number as an int for the first three, and `cwd` when the current directory is that PR's worktree or `review` when the state came from the review record outside it) | Detect incomplete shutdowns. A wrap-up `session_end` with `pr_state` `MERGED` and a PR's `pr_number`, at or after the latest `review_dispatch` (at any time, when there is none), records that wrap-up closed that merged PR; one at or after a `session_paused` event for that PR also retires that paused claim |
 | `session_paused` | pause command | `pr_number`, `pr_url`, `branch`, `worktree_path`, `consolidation_completed`, `team_name` | Resume paused PR work |
 | `session_refreshed` | refresh command | `consolidation_completed`, `halt_active`; optional: `halt_task_ids`, `feature_task_id`, `feature_subject`, `team_name`, `next_phase`, `worktrees`, `pr_number` | Resume mid-workstream after context refresh |
 | `session_refresh_consumed` | bootstrap command | `refresh_ts` | Retire a consumed refresh prompt (fire-once) |
-| `session_consolidated` | wrap-up, pause commands | `pass`, `task_count`, `memories_saved` (all optional int) | Signal that Pass 2 memory consolidation ran this session — consumed by `check_unpaused_pr` so SessionEnd does not warn on consolidated sessions regardless of PR state |
+| `session_consolidated` | wrap-up, pause commands | `pass`, `task_count`, `memories_saved` (all optional int) | Signal that Pass 2 memory consolidation ran this session — consumed by `check_unpaused_pr`: one at or after the latest `review_dispatch` silences the SessionEnd warning for an open PR or one whose state cannot be read, never for a merged one; with no `review_dispatch`, any consolidation silences it |
 | `variety_assessed` | orchestrate, comPACT, rePACT commands (feature level); any dispatch path (per-dispatch mirror) | `task_id`, `variety`; optional: `scope` (= `dispatch` on per-dispatch mirrors) | Restore variety context |
 | `phase_transition` | orchestrate, comPACT | `phase`, `status` (`started`/`completed`) | Determine current phase |
 | `checkpoint` | orchestrate command | `phase` (+ workflow-specific snapshot) | Fast recovery point |

@@ -52,14 +52,15 @@ try:
     from shared.merge_guard_common import (
         is_dangerous_command,
         is_compound_destructive_command,
+        set_command_directory,
         TOKEN_DIR,
         TOKEN_PREFIX,
         USE_MARKER_SUFFIX,
         cleanup_consumed_tokens as _cleanup_consumed_tokens,
         cleanup_orphan_tokens as _cleanup_orphan_tokens,
-        extract_command_context,
-        _single_destructive_leg,
-        _single_detectable_leg,
+        # The token match is shared with the mint, which checks that the token it
+        # issues is one this match accepts.
+        _token_matches_command,
     )
     # Re-exports consumed by the test suite through this module's namespace
     # (module-level seam: tests import these via merge_guard_pre).
@@ -174,8 +175,8 @@ def find_valid_token(token_dir: Path | None = None) -> tuple[dict, str] | tuple[
     current_session = get_session_id()
 
     now = time.time()
-    valid_token = None
-    valid_path = None
+    # The token and its path, kept as one pair so neither is ever set without the other.
+    found: tuple[dict, str] | None = None
     token_pattern = str(token_dir / f"{TOKEN_PREFIX}*")
 
     for token_path in glob.glob(token_pattern):
@@ -249,8 +250,7 @@ def find_valid_token(token_dir: Path | None = None) -> tuple[dict, str] | tuple[
                     continue
 
             # Valid token found
-            valid_token = token_data
-            valid_path = token_path
+            found = (token_data, token_path)
 
         except (json.JSONDecodeError, OSError, KeyError, AttributeError, TypeError):
             # Corrupted or malformed token — clean up
@@ -266,7 +266,7 @@ def find_valid_token(token_dir: Path | None = None) -> tuple[dict, str] | tuple[
     # construction; cleanup_orphan_tokens swallows all OSError paths.
     _cleanup_orphan_tokens(token_dir)
 
-    return valid_token, valid_path
+    return found or (None, None)
 
 
 def _safe_remove(path: str):
@@ -456,215 +456,6 @@ def _consume_token(token_path: str, max_uses_default: int = 1) -> bool:
 # extraction); _extract_pr_number is imported back at the top of this module.
 
 
-def _both_present_equal(token_val: object, cmd_val: object) -> bool:
-    """True iff BOTH values are present (not None) and string-equal.
-
-    The positive-match primitive for the fail-closed read predicate: either
-    side absent -> False, so an unextractable target REFUSES rather than falls
-    through permissively. String comparison normalizes a numeric pr_number
-    stored as int/str on either side.
-    """
-    if token_val is None or cmd_val is None:
-        return False
-    return str(token_val) == str(cmd_val)
-
-
-def _token_matches_command(token: dict, command: str) -> bool:
-    """Check that a token's context POSITIVELY matches the command being executed.
-
-    Fail-closed (the #1031/#1032 mint-vs-read symmetry fix): the read side
-    authorizes ONLY when the token and the command-derived context agree on
-    BOTH the operation type AND that operation's target. Any axis that is
-    unextractable, absent, or mismatched -> REFUSE. There is NO terminal allow:
-    a malformed context, an untyped token, an unrecognized command shape, or a
-    missing target all deny (the operator re-approves via AskUserQuestion). This
-    closes the prior fall-through that let an untyped or target-less token
-    authorize an unrelated destructive command (e.g. token{op=None} authorizing
-    `git push --force origin main`).
-
-    The command is classified via the shared `extract_command_context` SSOT, so
-    the read side derives (op, target) the SAME way the mint side does — the two
-    arms cannot drift.
-
-    Args:
-        token: Token data dict with optional context fields
-        command: The bash command being authorized
-
-    Returns:
-        True ONLY when the operation type and the op's target both positively
-        match; False otherwise.
-    """
-    context = token.get("context", {})
-    if not isinstance(context, dict):
-        return False  # F-READ-1: a non-dict context proves nothing — REFUSE
-
-    token_op = context.get("operation_type")
-    # Derive (op, target, bound_flags) from the SINGLE destructive leg, not the
-    # whole command (#1069). When a faithful single destructive op carries a benign
-    # neighbor leg (`gh pr close 1058 ; gh pr view 1058 --repo o/x`), the whole-
-    # command context would (a) bind the neighbor's `--repo` into bound_flags and
-    # over-block the faithful click, AND (b) let _extract_pr_number's first-match-
-    # anywhere scan cross-contaminate the target (the latent under-block: a token
-    # for `gh pr close N1` authorizing `gh pr close N1\ngh pr merge N2`). Isolating
-    # the one is_dangerous leg closes BOTH. TWO-TIER fallback (#1083):
-    # _single_destructive_leg returns None on not-exactly-one dangerous leg (0,
-    # or — unreachably here, since is_compound REFUSES >=2 upstream — many);
-    # tier 2 (_single_detectable_leg) then handles the EMERGENT-danger case —
-    # whole-command danger from a cross-leg lookahead with NO individually-
-    # dangerous leg (the close arms) — by binding from the unique detect-positive
-    # leg, keeping the read bind symmetric with the mint's leg-bounded window.
-    # Only when BOTH tiers abstain (0 or >=2 candidate legs — ambiguity) do we
-    # fall back to the WHOLE command: the existing over-binding scan, the SAFE
-    # over-block direction; ambiguity can only collapse WIDER, never narrower.
-    # Op/target are still derived the SAME way the mint side does (mint isolates
-    # per-region via locate_command_regions AND per-leg via _extraction_surface,
-    # #1195 OBS-H), so the two arms cannot drift.
-    cmd = extract_command_context(
-        _single_destructive_leg(command)
-        or _single_detectable_leg(command)
-        or command
-    )
-    cmd_op = cmd.get("operation_type")
-
-    # (a) Operation-type axis — both present AND equal, else REFUSE. A token with
-    # operation_type=None (or a command whose destructive shape is unrecognized)
-    # can NEVER authorize: this denies the untyped-token fall-through (the A1/A2
-    # hole) on the read axis rather than skipping the guard for it.
-    if token_op is None or cmd_op is None or token_op != cmd_op:
-        return False
-
-    # (a2) NEVER-ESCALATE FLAG AXIS (#1042) — the executed command's binding-
-    # relevant flags must EXACTLY equal the approved set. ANY difference (an added
-    # privilege like --admin/-R, OR a dropped constraint) REFUSES. Both sides are
-    # computed by the shared extract_command_context SSOT, so they cannot drift.
-    # Checked AFTER op-type identity and BEFORE the per-op target returns so it
-    # applies uniformly to all four op-classes. A pre-fix token without the key
-    # defaults to the empty set, so any privileged execution mismatches -> REFUSE
-    # (over-block-safe; tokens expire after TOKEN_TTL, so no backward-compat is needed).
-    # bound_flags is an attribute checked here, never part of pair identity.
-    if set(context.get("bound_flags", [])) != set(cmd.get("bound_flags", [])):
-        return False
-
-    # (b) Target axis, per op-class — require a POSITIVE, command-anchored target
-    # match. Unextractable or mismatched target -> REFUSE (over-block is the safe
-    # #1031 direction; the read side never under-blocks #1032).
-    if token_op in ("merge", "close"):
-        # #1203 — the faithful bare `gh pr merge` binds on the distinct target-blind
-        # `merge_implicit` sentinel, MERGE-ONLY. The `token_op == "merge"` guard keeps a
-        # close on the pr_number-only path (#1134: close was dissolved, and its
-        # populate-site never mints the sentinel, so this is defense-in-depth belt-and-
-        # suspenders on top of that). op-type-first (above) already fixed
-        # token_op == cmd_op; the DISTINCT key means an implicit-merge token (carries
-        # merge_implicit, not pr_number) can NOT authorize an explicit `gh pr merge 42`
-        # (carries pr_number, not merge_implicit) — the absent side fails
-        # _both_present_equal in BOTH directions — and never a close.
-        return (
-            _both_present_equal(context.get("pr_number"), cmd.get("pr_number"))
-            or (
-                token_op == "merge"
-                and _both_present_equal(
-                    context.get("merge_implicit"), cmd.get("merge_implicit")
-                )
-            )
-        )
-    if token_op == "branch-delete":
-        # #1129 R1: SINGLE-branch scalar OR MULTI-branch canonical SET (D1/D2
-        # set-EQUALITY). Exactly one key is present per command (1 positional ->
-        # `branch`; >=2 -> `branch_set`, built + canonicalized in the shared
-        # SSOT), so a scalar token can NOT authorize a set command or vice-versa
-        # (the absent-key side fails _both_present_equal), and a {a,b} token can
-        # NOT authorize {a,b,c} (unequal canonical strings) while a {b,a} reorder
-        # MATCHES (both canonicalize to the SAME string). The #1032 under-block is closed by
-        # equality; both sides derive via the ONE extract_command_context SSOT so
-        # mint and read cannot drift.
-        return (
-            _both_present_equal(context.get("branch"), cmd.get("branch"))
-            or _both_present_equal(context.get("branch_set"), cmd.get("branch_set"))
-        )
-    if token_op == "push-to-main":
-        # KD-6 target bind, widened for the MULTI-ref set (#1195 OBS-G — the
-        # branch/branch_set arm mirrored): SINGLE-ref scalar `target_ref` OR
-        # MULTI-ref canonical `push_set`, set-EQUALITY on the injective netstring
-        # identity — a {main,feature} token cannot authorize {main,feature,staging}
-        # (unequal canonical strings) while a {feature,main} reorder / dup MATCHES
-        # (both canonicalize to the SAME string). Exactly one key is present per
-        # command (the scalar: exactly remote+refspec; the set: >=2 refspecs —
-        # mutually exclusive in the ONE extract_command_context SSOT), so a scalar
-        # token can NOT authorize a set command or vice-versa (the absent-key side
-        # fails _both_present_equal). GAP3 stays closed: a force-push token and a
-        # push-to-main token are DISTINCT ops (op-type identity above), and a
-        # `+refspec` / `--force` multi-ref classifies force-push, so the
-        # push→force collapse cannot re-open through the set arm; the a2
-        # bound_flags equality above keeps a PLAIN push_set token from authorizing
-        # a --force-with-lease multi-ref push (lease is a push-to-main privileged
-        # flag).
-        return (
-            _both_present_equal(context.get("target_ref"), cmd.get("target_ref"))
-            or _both_present_equal(context.get("push_set"), cmd.get("push_set"))
-        )
-    if token_op == "force-push":
-        # KD-6 target bind, widened for the MULTI-ref set (#1195 OBS-I — the
-        # push-to-main/branch_set split precedent): SINGLE-ref scalar `target_ref`
-        # OR MULTI-ref canonical `force_push_set`, set-EQUALITY on the injective
-        # FORCED-NORMALIZED identity — the identity tracks WHICH refs get forced,
-        # so a plain-mixed token can NOT authorize the --force spelling of the
-        # same refs or vice versa (the plain->forced escalation stays closed),
-        # while `--force feature main` and `+feature +main` — the same operation
-        # — share one identity. The ALLOWLIST guard in the shared extractor means
-        # a delete/mass/scope-expander/unknown-flag EXECUTION derives
-        # force_push_set=None and is REFUSED here via the absent-side rule
-        # (mint and read are the same guarded extractor — the escalation closes
-        # in both directions by construction). Exactly one of target_ref /
-        # force_push_set / force_push_implicit is present per command; the a2
-        # bound_flags equality above still discriminates --no-verify.
-        #
-        # #1203 — the IMPLICIT current-branch force-push binds on the distinct
-        # target-blind `force_push_implicit` sentinel. op-type-first (checked above)
-        # already guarantees token_op == cmd_op == "force-push", and the sentinel is a
-        # DISTINCT key populated ONLY when target_ref/force_push_set are absent, so this
-        # clause can only match implicit↔implicit: an explicit-ref command has
-        # target_ref/force_push_set (not force_push_implicit) → the sentinel side is
-        # absent → _both_present_equal REFUSES, and vice-versa (no cross-authorization
-        # between an implicit-form token and an explicit `--force origin main`).
-        return (
-            _both_present_equal(context.get("target_ref"), cmd.get("target_ref"))
-            or _both_present_equal(context.get("force_push_set"), cmd.get("force_push_set"))
-            or _both_present_equal(
-                context.get("force_push_implicit"), cmd.get("force_push_implicit")
-            )
-        )
-    if token_op == "remote-ref-delete":
-        # KD-6 (SECURITY-RATIFICATION-PENDING): the destination ref must match
-        # explicitly — an op-type-only floor would let a delete-feature approval
-        # authorize a delete-main. An implicit/multi-ref/unparseable ref is
-        # ABSENT in extract_command_context, so this REFUSES it — delete stays
-        # SCALAR-ONLY and NEVER gains a set (deliberate: deleting refs in bulk is
-        # rarely good-faith; multi-ref delete spellings remain
-        # gated-but-unmintable).
-        # #1062a: remote-ref-delete binds on target_ref (the deleted ref); the
-        # op-type identity checked above keeps a remote-ref-delete token from
-        # cross-authorizing a force-push/push-to-main sharing the same target_ref
-        # (the lead Q1 distinct-op-class guarantee).
-        return _both_present_equal(context.get("target_ref"), cmd.get("target_ref"))
-    if token_op == "remote-mass-delete":
-        # #1062b: bind on the DISTINCT `mass_target` identity tuple (mass-flags +
-        # remote + sorted refspecs). Distinct invocations → distinct tuples, so a
-        # token minted for `git push --prune origin` (--prune@origin) does NOT
-        # authorize `git push --mirror origin` (--mirror@origin) — the lesser→greater
-        # / cross-form closure. An unextractable tuple is ABSENT → REFUSE.
-        return _both_present_equal(context.get("mass_target"), cmd.get("mass_target"))
-    if token_op == "branch-protection":
-        # #1063: bind on the protected branch (PATH-resident, branches/<b>/protection).
-        # op-type identity above keeps a branch-protection token from authorizing a
-        # branch-delete of the same branch name (distinct op-classes). An unextractable
-        # branch is ABSENT → REFUSE.
-        return _both_present_equal(context.get("protected_branch"), cmd.get("protected_branch"))
-
-    # Unknown op-class (a typed token whose op is not one of the handled classes)
-    # — REFUSE. No terminal allow exists on the read path.
-    return False
-
-
 def check_merge_authorization(command: str, token_dir: Path | None = None) -> str | None:
     """Check if a dangerous command is authorized.
 
@@ -704,8 +495,9 @@ def check_merge_authorization(command: str, token_dir: Path | None = None) -> st
             "destructive op separately with its own approval."
         )
 
-    token, token_path = find_valid_token(token_dir)
-    if token is not None:
+    found = find_valid_token(token_dir)
+    if found[0] is not None:
+        token, token_path = found
         if _token_matches_command(token, command):
             # Consume the token — one approval = one operation
             # Uses rename for idempotent consumption: if a concurrent
@@ -758,6 +550,8 @@ def main():
         pact_context.init(input_data)
         tool_input = input_data.get("tool_input", {})
         command = tool_input.get("command", "")
+        # The command's git aliases are read from the directory it runs in.
+        set_command_directory(input_data.get("cwd"))
 
         if not command:
             print(_SUPPRESS_OUTPUT)

@@ -5,7 +5,8 @@ Summary: PostToolUse hook. It records the files that an Edit or a Write
          modified, it clears the pin-staleness marker once the condition that
          raised that marker is clear, it records a teammate's background Bash
          launch, and it reports pin growth in the project CLAUDE.md that the
-         pin-cap gate does not see (`shared.claude_md_drift`).
+         pin-cap gate does not see (`shared.claude_md_drift`); and on a lead's
+         `gh pr merge` it reminds the lead to run `/PACT:wrap-up`.
 Used by: pact-plugin/hooks/hooks.json: PostToolUse, matcher `Edit|Write|Bash`,
          and PostToolUseFailure, matcher `Bash`. The registrations live in
          that file and not in settings.json.
@@ -21,8 +22,9 @@ report, because it can still write. There is no Edit/Write tracking and no
 background-launch record.
 
 Input: JSON from stdin with hook_event_name, tool_name, tool_input, tool_response
-Output: a pin-growth report as hookSpecificOutput.additionalContext, else
-        nothing (suppressOutput). Never a permission decision.
+Output: a pin-growth report and/or the post-merge reminder, joined into one
+        hookSpecificOutput.additionalContext, else nothing (suppressOutput).
+        Never a permission decision.
 """
 
 from __future__ import annotations
@@ -375,6 +377,51 @@ def _report_pin_growth(input_data: dict) -> str | None:
         return None
 
 
+_POST_MERGE_REMINDER = (
+    "If the merge succeeded: inside /PACT:peer-review, continue at its step 8, "
+    "\"Check the PR state after the merge decision\", which invokes `/PACT:wrap-up` "
+    "on MERGED; outside /PACT:peer-review, invoke `/PACT:wrap-up` once the PR has merged. "
+    "Project post-merge steps (tags, releases) run alongside it, never instead of it."
+)
+
+
+def _post_merge_reminder(input_data: dict) -> str | None:
+    """The lead's reminder after a Bash call classified as `gh pr merge`, in a
+    try of its own: a failure here changes nothing else this hook does. It reads
+    stdin only, so it fires with no resolvable team or task store.
+
+    It does not test stdout: a successful `gh pr merge` prints nothing, and a
+    compound command's output says nothing about the merge leg. Hence the
+    conditional wording.
+
+    The operation classifier reads raw text, so a command that only mentions a
+    merge (`git commit -m '… gh pr merge 5 …'`, `echo`, `grep`) also classifies
+    as one; is_dangerous_command, which strips inert quoted text, must agree."""
+    try:
+        if not pact_context.is_lead(input_data):
+            return None
+        from shared.tool_response import extract_tool_response
+
+        # extract_tool_response maps an absent or non-dict response to {}.
+        response = extract_tool_response(input_data)
+        if not response or response.get("interrupted") is True:
+            return None
+        tool_input = input_data.get("tool_input")
+        command = tool_input.get("command") if isinstance(tool_input, dict) else None
+        if not isinstance(command, str):
+            return None
+        from shared.merge_guard_common import (
+            detect_command_operation_type,
+            is_dangerous_command,
+        )
+
+        if detect_command_operation_type(command) != "merge" or not is_dangerous_command(command):
+            return None
+        return _POST_MERGE_REMINDER
+    except Exception:  # noqa: BLE001 - the reminder is best-effort
+        return None
+
+
 def _record_pin_baseline(input_data: dict) -> None:
     """After an Edit or Write, update the pin-growth records, in a try of its
     own."""
@@ -442,7 +489,10 @@ def main():
                 record_background_launch(input_data)
             except Exception:
                 pass
-            _finish(event, _report_pin_growth(input_data))
+            # One additionalContext per call: the reminder joins the pin-growth
+            # report, never replaces it. Each job has its own try.
+            reports = [_report_pin_growth(input_data), _post_merge_reminder(input_data)]
+            _finish(event, "\n\n".join(r for r in reports if r) or None)
 
         # Only track Edit and Write tools
         if tool_name not in ("Edit", "Write"):

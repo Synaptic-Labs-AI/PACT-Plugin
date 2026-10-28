@@ -105,7 +105,9 @@ def _invoke_post(question: str, tmp, answer: str, options: list) -> int:
          patch("sys.stdin", io.StringIO(envelope)):
         with pytest.raises(SystemExit) as exc:
             _post_main()
-    return exc.value.code
+    code = exc.value.code
+    assert isinstance(code, int), code
+    return code
 
 
 def _invoke_pre(command: str, tmp) -> tuple[int, str]:
@@ -122,7 +124,9 @@ def _invoke_pre(command: str, tmp) -> tuple[int, str]:
          patch("sys.stdout", out):
         with pytest.raises(SystemExit) as exc:
             _pre_main()
-    return exc.value.code, out.getvalue()
+    code = exc.value.code
+    assert isinstance(code, int), code
+    return code, out.getvalue()
 
 
 # ═══════════════════════════════ #1059 — flag-scan wrapper strip ═════════════
@@ -408,7 +412,7 @@ class TestForcePushBranchDeleteDefensiveWrongTarget:
 
     def test_forcepush_matching_target_authorizes_companion(self, tmp_path):
         assert write_token(
-            {"operation_type": "force-push", "target_ref": "feature"}, token_dir=tmp_path
+            {"operation_type": "force-push", "target_ref": "feature", "bound_flags": ["remote=origin"]}, token_dir=tmp_path
         ) is not None
         assert check_merge_authorization(self._FP_EXEC, token_dir=tmp_path) is None  # AUTHORIZE
 
@@ -436,7 +440,9 @@ class TestMintReadParityCanary:
     def test_read_isolated_leg_context_equals_minted_command_context(self):
         executed = "gh pr merge 5 --admin ; gh pr view 5 --repo owner/x"
         minted_command = "gh pr merge 5 --admin"
-        read_ctx = extract_command_context(_single_destructive_leg(executed))
+        leg = _single_destructive_leg(executed)
+        assert leg is not None
+        read_ctx = extract_command_context(leg)
         mint_ctx = extract_command_context(minted_command)
         assert read_ctx == mint_ctx
         assert read_ctx["bound_flags"] == ["--admin"]  # the neighbor's --repo is NOT bound
@@ -445,7 +451,9 @@ class TestMintReadParityCanary:
         # A faithful force-push + redirect: read isolates the leg, both arms derive
         # target_ref=main with no bound flags.
         executed = "git push --force origin main > out.log"
-        read_ctx = extract_command_context(_single_destructive_leg(executed))
+        leg = _single_destructive_leg(executed)
+        assert leg is not None
+        read_ctx = extract_command_context(leg)
         mint_ctx = extract_command_context("git push --force origin main")
         assert read_ctx == mint_ctx
         assert read_ctx.get("target_ref") == "main"
@@ -632,7 +640,7 @@ class TestFixADigitGluedRedirectUnderBlock:
         # Non-vacuity control: a token for the ACTUAL ref (`main2`) AUTHORIZES the
         # same exec -> the refusal above is target-discrimination, not a no-match.
         assert write_token(
-            {"operation_type": "force-push", "target_ref": "main2"}, token_dir=tmp_path
+            {"operation_type": "force-push", "target_ref": "main2", "bound_flags": ["remote=origin"]}, token_dir=tmp_path
         ) is not None
         assert check_merge_authorization(
             "git push --force origin main2>log", token_dir=tmp_path
@@ -643,7 +651,7 @@ class TestFixADigitGluedRedirectUnderBlock:
         # authorizes a token-`main` — so it is the DIGIT that shifts the target
         # (`main2>log` REFUSES, just above), not the bare `>` redirect.
         assert write_token(
-            {"operation_type": "force-push", "target_ref": "main"}, token_dir=tmp_path
+            {"operation_type": "force-push", "target_ref": "main", "bound_flags": ["remote=origin"]}, token_dir=tmp_path
         ) is not None
         assert check_merge_authorization(
             "git push --force origin main>log", token_dir=tmp_path

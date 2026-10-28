@@ -216,6 +216,7 @@ class TestUnderBlockClosure:
     @requires_history
     def test_comma_identity_base_collides(self):
         # Base non-vacuity differential (skipped w/o history): base COLLIDES the two sets.
+        assert MT_BASE is not None
         assert MT_BASE(_COMMA_2) == MT_BASE(_COMMA_3) and MT_BASE(_COMMA_2) is not None
 
     def test_hash_identity_head_distinct(self):
@@ -225,6 +226,7 @@ class TestUnderBlockClosure:
     @requires_history
     def test_hash_identity_base_collides(self):
         # Base non-vacuity differential (skipped w/o history): base COLLIDES the two sets.
+        assert MT_BASE is not None
         assert MT_BASE(_HASH_2) == MT_BASE(_HASH_3) and MT_BASE(_HASH_2) is not None
 
     def test_comma_collision_closed_at_real_gate(self, tmp_path):
@@ -310,6 +312,7 @@ class TestDoubledSurfaceBaseVsHead:
         # mass_target: base(comma) COLLIDES -> HEAD(netstring) REFUSES (the #1136 flip).
         # Base-differential (skipped w/o history); the HEAD `!=` half runs unguarded in
         # test_comma_identity_head_distinct, so a fix-revert is still caught where the base commit is unreachable.
+        assert MT_BASE is not None
         assert MT_BASE(_COMMA_2) == MT_BASE(_COMMA_3)
         assert MT(_COMMA_2) != MT(_COMMA_3)
 
@@ -329,6 +332,7 @@ class TestDoubledSurfaceBaseVsHead:
         _D = "-" + "D"
         two = "git branch " + _D + ' "aa,bb" cc'
         three = "git branch " + _D + " aa bb cc"
+        assert _BASE is not None
         bset_base = _BASE._extract_branch_delete_set
         assert bset_base(two) != bset_base(three)  # already safe on base (NUL)
 

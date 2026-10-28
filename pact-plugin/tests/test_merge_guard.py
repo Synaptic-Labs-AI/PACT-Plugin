@@ -276,7 +276,10 @@ class TestPostMainEntryPoint:
 
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        assert json.loads(captured.out) == {"suppressOutput": True}
+        # A mint confirms what the approval authorizes: operation and target.
+        hso = json.loads(captured.out)["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PostToolUse"
+        assert "an approval was recorded for a merge on PR #42." in hso["additionalContext"]
         # Verify token was created
         tokens = list(tmp_path.glob("merge-authorized-*"))
         assert len(tokens) == 1
@@ -979,7 +982,7 @@ class TestNUseBoundedToken:
         # Second approval (different op): authorizes MAX_USES force-pushes
         with patch("merge_guard_post.time") as mock_time:
             mock_time.time.return_value = time.time() + 1
-            write_token({"operation_type": "force-push", "target_ref": "main"}, token_dir=tmp_path)
+            write_token({"operation_type": "force-push", "target_ref": "main", "bound_flags": ["remote=origin"]}, token_dir=tmp_path)
         for _ in range(MAX_USES):
             assert check_merge_authorization(
                 "git push --force origin main", token_dir=tmp_path
@@ -2251,42 +2254,53 @@ class TestTokenEdgeCases:
         result = write_token({"operation_type": "merge"}, token_dir=readonly_dir)
         assert result is None
 
+    def test_two_tokens_minted_in_one_second_keep_both_records(self, tmp_path):
+        """Each token's name is its own, so a second mint in the same second, which
+        retires the first token, and the second token's own retirement leave two
+        `.consumed` records instead of one renamed onto the other."""
+        from merge_guard_post import write_token
+
+        now = time.time()
+        with patch("merge_guard_post.time") as mock_time:
+            mock_time.time.return_value = now
+            first = write_token({"operation_type": "merge", "pr_number": "5"}, token_dir=tmp_path)
+            second = write_token({"operation_type": "merge", "pr_number": "6"}, token_dir=tmp_path)
+        assert first and second and first != second
+        os.rename(second, second + ".consumed")
+        assert sorted(p.name for p in tmp_path.glob("merge-authorized-*")) == sorted(
+            [Path(first).name + ".consumed", Path(second).name + ".consumed"])
+
     def test_write_token_collision_uses_fallback(self, tmp_path):
-        """O_EXCL fallback path remains reachable for true same-microsecond races.
+        """O_EXCL fallback path remains reachable when a token's name is taken.
 
-        Layer 5 (invariant I-1) retires unused tokens before O_EXCL, so an
-        unused pre-existing token cannot cause O_EXCL to fail under normal
-        use. The microsecond-suffix fallback path is still needed for the
-        true race between cleanup completion and O_EXCL, or for any
-        scenario where cleanup is bypassed (e.g., concurrent writer in a
-        different process landed a file in the microsecond window).
+        Layer 5 (invariant I-1) retires unused tokens before O_EXCL, and every
+        name carries a random suffix, so a collision needs both a cleanup that
+        did not run and a repeated suffix. The fallback still covers it: one more
+        try with a fresh suffix.
 
-        Simulate the latter by stubbing cleanup_unused_tokens to no-op
-        for the duration of one write_token call — this models a
-        cleanup-failure or concurrent-race scenario and pins the O_EXCL
+        Simulate it by stubbing cleanup_unused_tokens to no-op and fixing the
+        suffixes for the duration of one write_token call, which pins the O_EXCL
         fallback behavior independently of Layer 5.
         """
         import merge_guard_post
         from merge_guard_post import write_token
 
-        # Pre-create the file that write_token will try to create
+        # Pre-create the file that write_token will try to create first
         now = time.time()
         timestamp = int(now)
-        preexisting = tmp_path / f"merge-authorized-{timestamp}"
+        preexisting = tmp_path / f"merge-authorized-{timestamp}-aaaaaaaa"
         preexisting.write_text("taken")
 
-        # Stub Layer 5 cleanup so the collision survives to O_EXCL. This
-        # mirrors a transient cleanup failure or a true concurrent-writer
-        # race on the microsecond window.
         with patch.object(merge_guard_post, "_cleanup_unused_tokens", lambda _td: None), \
-             patch("merge_guard_post.time") as mock_time:
+             patch("merge_guard_post.time") as mock_time, \
+             patch("merge_guard_post.secrets.token_hex", side_effect=["aaaaaaaa", "bbbbbbbb"]):
             mock_time.time.return_value = now
             result = write_token({"test": True, "operation_type": "merge"}, token_dir=tmp_path)
 
-        # Must succeed with fallback name (not None)
+        # Must succeed with the fallback name (not None)
         assert result is not None
         assert Path(result).exists()
-        assert Path(result) != preexisting
+        assert Path(result) == tmp_path / f"merge-authorized-{timestamp}-bbbbbbbb"
 
 
 # =============================================================================
@@ -4511,30 +4525,39 @@ class TestToolSpecificFlagExclusion:
 # =============================================================================
 
 
-class TestVariableIndirectionBypass:
-    """Tests documenting that variable indirection bypasses regex detection.
+class TestVariableIndirection:
+    """A variable assigned once with a quoted value is judged where the shell
+    expands it, so an API path held in a variable is detected, and a faithful
+    approval of it mints and runs."""
 
-    This is an inherent limitation of command-line regex matching — when
-    the URL path is stored in a variable and expanded at runtime, the
-    regex cannot see the actual path. These tests document the limitation.
-    """
+    @staticmethod
+    def _approval_runs(cmd):
+        from merge_guard_post import _mint_context_from_bundle
+        from merge_guard_pre import _token_matches_command
 
-    def test_variable_url_bypasses_detection(self):
-        """Variable indirection: URL in variable is NOT detected (inherent regex limit)."""
+        question = "Run this?"
+        bundle = [{"question": question, "header": "Run", "multiSelect": False, "options": [
+            {"label": "Yes, run", "description": f"Run `{cmd}` now"},
+            {"label": "No", "description": "Hold."},
+        ]}]
+        result = _mint_context_from_bundle(bundle, {question: "Yes, run"})
+        return result.context is not None and _token_matches_command({"context": result.context}, cmd)
+
+    def test_variable_url_is_detected(self):
+        """Variable indirection: a destructive URL in a variable is detected."""
         from merge_guard_pre import is_dangerous_command
 
-        # The URL is in a variable — regex sees $URL, not the actual path
-        assert not is_dangerous_command(
-            'URL="repos/owner/repo/git/refs/heads/main" && gh api -X DELETE $URL'
-        )
+        cmd = 'URL="repos/owner/repo/git/refs/heads/main" && gh api -X DELETE $URL'
+        assert is_dangerous_command(cmd)
+        assert self._approval_runs(cmd)
 
-    def test_variable_endpoint_bypasses_detection(self):
-        """Variable endpoint: endpoint in variable is NOT detected."""
+    def test_variable_endpoint_is_detected(self):
+        """Variable endpoint: a destructive endpoint in a variable is detected."""
         from merge_guard_pre import is_dangerous_command
 
-        assert not is_dangerous_command(
-            'ENDPOINT="git/refs/heads/main" && gh api -X PATCH repos/owner/repo/$ENDPOINT'
-        )
+        cmd = 'ENDPOINT="git/refs/heads/main" && gh api -X PATCH repos/owner/repo/$ENDPOINT'
+        assert is_dangerous_command(cmd)
+        assert self._approval_runs(cmd)
 
 
 # =============================================================================
@@ -4720,7 +4743,7 @@ class TestDirectPushToDefaultBranch:
         from merge_guard_post import write_token
         from merge_guard_pre import check_merge_authorization
 
-        write_token({"operation_type": "push-to-main", "target_ref": "main"},
+        write_token({"operation_type": "push-to-main", "target_ref": "main", "bound_flags": ["remote=origin"]},
                     token_dir=tmp_path)
 
         result = check_merge_authorization("git push origin main", token_dir=tmp_path)
@@ -5192,23 +5215,23 @@ class TestTokenWriteExceptionHandling:
         unused token. This test pins the double-collision returns-None
         behavior independently of Layer 5 by stubbing cleanup so the
         collision survives to O_EXCL (mirroring a transient cleanup
-        failure or a concurrent same-microsecond race).
+        failure or a concurrent writer that drew the same suffixes).
         """
         import merge_guard_post
         from merge_guard_post import write_token
 
         now = time.time()
         timestamp = int(now)
-        ms_suffix = int(now * 1000) % 1000
 
         # Pre-create both the primary and fallback files
-        primary = tmp_path / f"merge-authorized-{timestamp}"
-        fallback = tmp_path / f"merge-authorized-{timestamp}-{ms_suffix}"
+        primary = tmp_path / f"merge-authorized-{timestamp}-aaaaaaaa"
+        fallback = tmp_path / f"merge-authorized-{timestamp}-bbbbbbbb"
         primary.write_text("taken")
         fallback.write_text("taken")
 
         with patch.object(merge_guard_post, "_cleanup_unused_tokens", lambda _td: None), \
-             patch("merge_guard_post.time") as mock_time:
+             patch("merge_guard_post.time") as mock_time, \
+             patch("merge_guard_post.secrets.token_hex", side_effect=["aaaaaaaa", "bbbbbbbb"]):
             mock_time.time.return_value = now
             result = write_token({"test": True, "operation_type": "merge"}, token_dir=tmp_path)
 
@@ -9315,13 +9338,15 @@ class TestGitGlobalFlagBypass:
     # --- Token matching: branch delete with git global flags ---
 
     def test_token_branch_match_with_C_flag(self):
-        """Typed branch-delete token matching works past a git -C flag."""
+        """A branch-delete past a git -C flag reads its branch, but a token minted
+        without the -C does not run it: the branch is one of the repository -C names."""
         from merge_guard_pre import _token_matches_command
+        from shared.merge_guard_common import extract_command_context
 
+        command = "git -C /tmp/repo branch -D feature"
+        assert extract_command_context(command).get("branch") == "feature"
         token = {"context": {"operation_type": "branch-delete", "branch": "feature"}}
-        assert _token_matches_command(
-            token, "git -C /tmp/repo branch -D feature"
-        )
+        assert not _token_matches_command(token, command)
 
     def test_token_branch_mismatch_with_C_flag(self):
         """Typed branch-delete token mismatch detected past a git -C flag."""
@@ -9333,13 +9358,15 @@ class TestGitGlobalFlagBypass:
         )
 
     def test_token_branch_delete_force_with_git_dir(self):
-        """Typed branch-delete token matches --delete --force past --git-dir."""
+        """A --delete --force past --git-dir reads its branch, but a token minted
+        without the --git-dir does not run it: the branch is one of that repository."""
         from merge_guard_pre import _token_matches_command
+        from shared.merge_guard_common import extract_command_context
 
+        command = "git --git-dir=/tmp/.git branch --delete --force feature"
+        assert extract_command_context(command).get("branch") == "feature"
         token = {"context": {"operation_type": "branch-delete", "branch": "feature"}}
-        assert _token_matches_command(
-            token, "git --git-dir=/tmp/.git branch --delete --force feature"
-        )
+        assert not _token_matches_command(token, command)
 
 
 # =============================================================================
@@ -9607,12 +9634,14 @@ class TestCompoundDestructiveCommandRejection:
             "gh pr merge 100 && gh pr merge 999 --admin"
         ) is True
 
-    def test_compound_double_pipe_still_matches(self):
+    def test_compound_double_pipe_is_one_op(self):
+        # Legs joined only by `||` run one after another only while each fails, so at most
+        # one succeeds; the approval of such a chain binds its whole text.
         from merge_guard_pre import is_compound_destructive_command
 
         assert is_compound_destructive_command(
             "gh pr merge 100 || gh pr merge 999 --admin"
-        ) is True
+        ) is False
 
     def test_compound_semicolon_still_matches(self):
         from merge_guard_pre import is_compound_destructive_command
@@ -9801,8 +9830,9 @@ class TestBenignContinuationGuarantee:
     # so they join merge / close in this guarantee. ``close`` carries
     # ``--delete-branch`` (its danger trigger), so its token context MUST bind
     # that flag — the read-side set-equality flag gate refuses otherwise — exactly
-    # as the mint side extracts it from the approval text. ``merge`` /
-    # ``force-push`` / ``branch-delete`` carry no privileged flag.
+    # as the mint side extracts it from the approval text. ``force-push`` binds its
+    # destination (``remote=origin``); ``merge`` / ``branch-delete`` carry no bound
+    # flag.
     _AUTHORIZED_OPS = [
         ("merge", "gh pr merge 5", {"operation_type": "merge", "pr_number": "5"}),
         (
@@ -9814,7 +9844,7 @@ class TestBenignContinuationGuarantee:
         (
             "force-push",
             "git push --force origin main",
-            {"operation_type": "force-push", "target_ref": "main"},
+            {"operation_type": "force-push", "target_ref": "main", "bound_flags": ["remote=origin"]},
         ),
         (
             "branch-delete",
@@ -10089,7 +10119,7 @@ class TestCrossOperationAuthorizationDenied:
         from merge_guard_post import write_token
         from merge_guard_pre import check_merge_authorization
 
-        write_token({"operation_type": "force-push", "target_ref": "feature"},
+        write_token({"operation_type": "force-push", "target_ref": "feature", "bound_flags": ["remote=origin"]},
                     token_dir=tmp_path)
         result = check_merge_authorization(
             "git push --force origin feature", token_dir=tmp_path
@@ -11283,7 +11313,7 @@ class TestLeaseToDefaultGateAndMint:
         ctx = self._mint(self.LEASE, tmp_path)
         assert ctx["operation_type"] == "push-to-main"
         assert ctx["target_ref"] == "main"
-        assert ctx["bound_flags"] == ["--force-with-lease"]
+        assert ctx["bound_flags"] == ["--force-with-lease", "remote=origin"]
         code, _out = self._pre(self.LEASE, tmp_path)
         assert code == 0
 
@@ -11295,7 +11325,7 @@ class TestLeaseToDefaultGateAndMint:
         ctx = self._mint(self.LEASE_VALUE, tmp_path)
         assert ctx["operation_type"] == "push-to-main"
         assert ctx["target_ref"] == "main"
-        assert ctx["bound_flags"] == ["--force-with-lease"]
+        assert ctx["bound_flags"] == ["--force-with-lease", "remote=origin"]
         code, _out = self._pre(self.LEASE_VALUE, tmp_path)
         assert code == 0
 
@@ -11304,7 +11334,7 @@ class TestLeaseToDefaultGateAndMint:
         push CAN rewrite history, so the minted plain token (bound_flags=[]) must
         not set-equal the executed {--force-with-lease}."""
         ctx = self._mint(self.PLAIN, tmp_path)
-        assert ctx["bound_flags"] == []
+        assert ctx["bound_flags"] == ["remote=origin"]
         code, out = self._pre(self.LEASE, tmp_path)
         assert code == 2
         assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
@@ -11313,7 +11343,7 @@ class TestLeaseToDefaultGateAndMint:
         """The symmetric direction: approve LEASE, execute PLAIN -> DENY (set-
         equality refuses dropped flags too; the operator re-approves)."""
         ctx = self._mint(self.LEASE, tmp_path)
-        assert ctx["bound_flags"] == ["--force-with-lease"]
+        assert ctx["bound_flags"] == ["--force-with-lease", "remote=origin"]
         code, out = self._pre(self.PLAIN, tmp_path)
         assert code == 2
         assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
@@ -12026,7 +12056,9 @@ class TestTokenLifecycleExtensions:
                 "interrupted": False,
             },
         })
+        # GitHub state unknown: this phase tests the envelope gate alone.
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("shared.gh_helpers.check_pr_state", return_value=""), \
              patch("sys.stdin", io.StringIO(envelope)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -12041,16 +12073,15 @@ class TestTokenLifecycleExtensions:
             "(false-positive on 'would merge' stdout framing)"
         )
 
-    def test_block3_over_broad_substring_caught_by_capitalization(self, tmp_path):
-        """Layer 1 Block 3 case-sensitivity pin: the stdout substring
-        `Merged pull request` is intentionally capitalized. Lowercasing
-        the gh CLI output (hypothetical future format change) MUST NOT
-        retire the token without a deliberate substring update.
+    def test_block3_merge_substring_matches_case_insensitively(self, tmp_path):
+        """Layer 1 Block 3 for merge: the stdout substring matches in any
+        case, so gh's lowercase "✓ Squashed and merged pull request" line
+        retires the token without a GitHub state call.
 
-        # counter-test: change `"Merged pull request"` to
-        #               `"Merged pull request".lower()` (or use
-        #               `stdout_text.lower()` in the comparison) → token
-        #               retired on lowercased stdout.
+        # counter-test: compare `expected_substring in stdout_text`
+        #               case-sensitively for merge → the lowercase stdout
+        #               falls to the state check, which raises here, and
+        #               the token stays unused.
         # expected RED cardinality: {1}
         """
         from merge_guard_post import write_token, main
@@ -12060,13 +12091,13 @@ class TestTokenLifecycleExtensions:
             "tool_name": "Bash",
             "tool_input": {"command": "gh pr merge 42 --squash"},
             "tool_response": {
-                # Lowercased (hypothetical gh future-format)
-                "stdout": "merged pull request #42",
+                "stdout": "✓ Squashed and merged pull request #42",
                 "stderr": "",
                 "interrupted": False,
             },
         })
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("shared.gh_helpers.check_pr_state", side_effect=AssertionError("gh called")), \
              patch("sys.stdin", io.StringIO(envelope)):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -12076,10 +12107,7 @@ class TestTokenLifecycleExtensions:
             t for t in tmp_path.glob("merge-authorized-*")
             if not str(t).endswith(".consumed") and ".use-" not in t.name
         ]
-        assert len(unused) == 1, (
-            "Layer 1 Block-3 case-sensitivity violated: lowercased stdout "
-            "retired the token"
-        )
+        assert unused == [], "lowercase merge stdout did not retire the token"
 
     # ------------------------------------------------------------------
     # Envelope-divergence detection (scope item 8 / §13.6)
@@ -12149,7 +12177,9 @@ class TestTokenLifecycleExtensions:
             "tool_input": {"command": "gh pr merge 42"},
             "tool_response": "Error: Exit code 1\nfailed to merge",
         })
+        # GitHub state unknown: this phase tests the envelope gate alone.
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("shared.gh_helpers.check_pr_state", return_value=""), \
              patch("sys.stdin", io.StringIO(string_envelope)):
             with pytest.raises(SystemExit):
                 main()
@@ -12214,7 +12244,9 @@ class TestTokenLifecycleExtensions:
             "tool_input": {"command": "gh pr merge 42"},
             "tool_response": {},
         })
+        # GitHub state unknown: this phase tests the envelope gate alone.
         with patch("merge_guard_post.TOKEN_DIR", tmp_path), \
+             patch("shared.gh_helpers.check_pr_state", return_value=""), \
              patch("sys.stdin", io.StringIO(empty_envelope)):
             with pytest.raises(SystemExit):
                 main()
@@ -12609,7 +12641,7 @@ class TestTokenLifecycleExtensions:
     # rule" applied to dict-key cardinality.
     # ------------------------------------------------------------------
 
-    def _write_session_token(self, tmp_path, op_type, session_id="test-session"):
+    def _write_session_token(self, tmp_path, op_type, session_id="test-session", **context):
         """Helper: directly write a token with the given op_type +
         session_id, bypassing write_token's sparse-context guard.
 
@@ -12626,7 +12658,7 @@ class TestTokenLifecycleExtensions:
         token_data = {
             "created_at": now,
             "expires_at": now + 300,
-            "context": {"operation_type": op_type},
+            "context": {"operation_type": op_type, **context},
             "session_id": session_id,
             "max_uses": MAX_USES,
             "uses_remaining": MAX_USES,
@@ -12847,7 +12879,7 @@ class TestTokenLifecycleExtensions:
         from merge_guard_post import main
 
         token = self._write_session_token(
-            tmp_path, "force-push", session_id="s-fp"
+            tmp_path, "force-push", session_id="s-fp", bound_flags=["remote=origin"]
         )
         envelope = json.dumps({
             "tool_name": "Bash",
@@ -12888,7 +12920,7 @@ class TestTokenLifecycleExtensions:
 
         # Phase 1 — positive
         self._write_session_token(
-            tmp_path, "force-push", session_id="s-pair-fp"
+            tmp_path, "force-push", session_id="s-pair-fp", bound_flags=["remote=origin"]
         )
         positive_envelope = json.dumps({
             "tool_name": "Bash",
@@ -12910,7 +12942,7 @@ class TestTokenLifecycleExtensions:
 
         # Phase 2 — negative: --force-with-lease is safe variant
         token2 = self._write_session_token(
-            tmp_path, "force-push", session_id="s-pair-fp"
+            tmp_path, "force-push", session_id="s-pair-fp", bound_flags=["remote=origin"]
         )
         token2_new = tmp_path / "merge-authorized-fp-phase2"
         token2.rename(token2_new)

@@ -314,6 +314,16 @@ def _execute(cmd, tok):
             return e.code if isinstance(e.code, int) else _ALLOW
 
 
+def _reading(cmd):
+    """What the mint's own reading binds for a click on an option showing `cmd`, before
+    the exact-text fallback."""
+    q = [{"question": "Proceed?", "options": [
+        {"label": "Yes", "description": "Run `%s`" % cmd},
+        {"label": "Cancel", "description": "Abort"},
+    ]}]
+    return mgpost._mint_context_by_reading(q, {"Proceed?": "Yes"}).context
+
+
 def _won_key(ctx):
     keys = _mint_keys(ctx)
     return keys[0] if len(keys) == 1 else keys
@@ -385,6 +395,7 @@ class TestDimAMintForcePush:
         assert _execute(cmd, tmp_path) == _DENY, "gated row ALLOWED with no token: %r" % cmd
         minted, ctx = _mint(cmd, tmp_path)
         assert minted == 1, "OVER-BLOCK persists — implicit force-push gates but does NOT mint: %r" % cmd
+        assert ctx is not None
         assert ctx.get("operation_type") == "force-push", "wrong op: %r" % ctx.get("operation_type")
         assert _won_key(ctx) == "force_push_implicit", (
             "implicit force-push bound the wrong key: %r (expected force_push_implicit): %r"
@@ -408,6 +419,7 @@ class TestDimAMintMerge:
         assert _execute(cmd, tmp_path) == _DENY, "gated bare merge ALLOWED with no token: %r" % cmd
         minted, ctx = _mint(cmd, tmp_path)
         assert minted == 1, "OVER-BLOCK persists — bare merge gates but does NOT mint: %r" % cmd
+        assert ctx is not None
         assert ctx.get("operation_type") == "merge", "wrong op: %r" % ctx.get("operation_type")
         assert _won_key(ctx) == "merge_implicit", (
             "bare merge bound the wrong key: %r (expected merge_implicit): %r" % (_won_key(ctx), cmd)
@@ -437,10 +449,13 @@ class TestDimAMintTargetNeuterKnownBad:
 
         monkeypatch.setattr(mgpost, "_target_value", _tv_without_sentinel)
         kb = tmp_path / "kb"; kb.mkdir()
-        m2, _ = _mint(row, kb)
-        assert m2 == 0, "the sentinel-drop did not stop the mint — the four-site enumeration is inert"
+        assert _reading(row) is None, "the sentinel-drop did not stop the reading — the four-site enumeration is inert"
         assert _execute(row, kb) == _DENY, (
-            "gated-but-unmintable row was not denied — the mint pin cannot see the over-block it exists to catch"
+            "gated row was not denied without a token — the mint pin cannot see the over-block it exists to catch"
+        )
+        m2, ctx2 = _mint(row, kb)
+        assert m2 == 1 and ctx2 is not None and ctx2.get("command_text") and not ctx2.get("force_push_implicit"), (
+            "the neutered row did not fall back to its exact text"
         )
 
 
@@ -459,6 +474,7 @@ class TestDimBOffTokenRoundTrip:
         assert _execute(cmd, tmp_path) == _DENY, "gate not live at exec time (no token): %r" % cmd
         minted, ctx = _mint(cmd, tmp_path)
         assert minted == 1, "did not mint: %r" % cmd
+        assert ctx is not None
         sentinel = ctx.get("force_push_implicit") or ctx.get("merge_implicit")
         # force_push_implicit may be the plain sentinel (truly-implicit 0-positional) OR a
         # cycle-4 netstring-qualified `SENTINEL + <_canonical_join([positional])>` (1-positional).
@@ -481,9 +497,12 @@ class TestDimBOffTokenRoundTrip:
         # binds no force_push_implicit → gated-but-unmintable.
         monkeypatch.setattr(mgc, "_implicit_force_push_identity", lambda c: None)
         assert _mint_keys(mgc.extract_command_context(row)) == [], "revert did not un-mint the row (vacuity guard)"
-        minted, _ = _mint(row, tmp_path)
-        assert minted == 0, "row still minted after the populate revert"
-        assert _execute(row, tmp_path) == _DENY, "unmintable row was not denied at exec"
+        assert _reading(row) is None, "the reading still bound the row after the populate revert"
+        assert _execute(row, tmp_path) == _DENY, "row was not denied at exec without a token"
+        minted, ctx = _mint(row, tmp_path)
+        assert minted == 1 and ctx is not None and ctx.get("command_text") and not ctx.get("force_push_implicit"), (
+            "the reverted row did not fall back to its exact text"
+        )
 
 
 # ═════════════════════════════════════════════════════════════════════════════════
@@ -535,13 +554,19 @@ class TestDimCNoCrossAuth:
             if ctx.get("force_push_implicit"):
                 ctx.pop("force_push_implicit")
                 ctx["target_ref"] = "main"    # runtime-resolve to the current branch
+                # ... pushed to the default remote, which the explicit push names
+                ctx["bound_flags"] = sorted(set(ctx.get("bound_flags", [])) | {"remote=origin"})
             return ctx
 
         monkeypatch.setattr(mgpost, "extract_command_context", _resolved)
-        minted, ctx = _mint(_PG + "--force", tmp_path)
-        assert minted == 1 and ctx.get("target_ref") == "main", (
+        # The mint checks its token against the pre-hook's match and would fall back to
+        # the exact text, a second closer; the known-bad is about the reading's binding,
+        # so its token is written as the reading binds it.
+        ctx = _reading(_PG + "--force")
+        assert ctx and ctx.get("target_ref") == "main", (
             "the runtime-resolve simulation did not bind target_ref='main' (known-bad inert)"
         )
+        assert mgpost.write_token(dict(ctx), token_dir=tmp_path)
         # The implicit token now AUTHORIZES the explicit push to main — cross-auth OPENED.
         assert _execute(_PG + "--force origin main", tmp_path) == _ALLOW, (
             "the runtime-resolve known-bad did NOT open the cross-auth — the distinct target-"

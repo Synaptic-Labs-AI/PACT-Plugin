@@ -66,6 +66,7 @@ from shared.session_journal import (
     make_event,
     read_events_from,
     read_last_event_from,
+    wrap_up_closed,
 )
 
 # The finder is imported inside the functions that use it: shared/__init__.py
@@ -1219,13 +1220,14 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
             )
         lines.append("")
 
-    # Check for warnings in session_end events
+    # A session_end warning shows only on the LATEST session_end in journal
+    # order: any later session_end (a wrap-up's, or a later session's end)
+    # supersedes it.
     end_events = [e for e in all_events if e.get("type") == "session_end"]
-    for end_event in end_events:
-        warning = end_event.get("warning")
-        if warning:
-            lines.append(f"**Warning**: {warning}")
-            lines.append("")
+    warning = end_events[-1].get("warning") if end_events else None
+    if warning:
+        lines.append(f"**Warning**: {warning}")
+        lines.append("")
 
     # Minimal output check
     if len(lines) <= 2:
@@ -1435,7 +1437,12 @@ def _interpret_paused_event(event: dict) -> str | None:
 
     # Active PR validation
     pr_state = _check_pr_state(pr_number)
-    if pr_state in ("MERGED", "CLOSED"):
+    if pr_state == "MERGED":
+        return (
+            f"Previously paused PR #{pr_number} has been merged. "
+            f"Run /PACT:wrap-up to close it out.{pause_key}"
+        )
+    if pr_state == "CLOSED":
         return (
             f"Previously paused PR #{pr_number} has been "
             f"{pr_state.lower()}.{pause_key}"
@@ -1709,6 +1716,16 @@ def check_resume_state(
         refreshed = None
     if paused is not None and _pause_is_spent(claim_dir, paused):
         paused = None
+    # A wrap-up that recorded this PR MERGED at or after the pause closed it:
+    # retire the claim with no gh call. Keyed on the PAUSE ts, so a wrap-up
+    # that recorded the PR OPEN (and paused it) never retires its own claim.
+    # A pause with no ts string keeps its claim: None would mean "any time".
+    if paused is not None and claim_dir:
+        pause_ts = paused.get("ts")
+        if isinstance(pause_ts, str) and pause_ts and wrap_up_closed(
+            read_events_from(claim_dir, "session_end"), paused.get("pr_number"), pause_ts
+        ):
+            paused = None
     paused_msg = (
         _interpret_paused_event(paused) if paused is not None else None
     )  # may be None (correct for pause)

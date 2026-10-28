@@ -286,17 +286,18 @@ DESTRUCTIVE = [
     "git grep $(sh -c '%s')" % M5,
     "git grep -f <(sh -c '%s')" % M5,
     "git grep pat -- %s" % M5,
-    # #1155 find retention + declared residuals.
+    # #1155 find retention + interpreters that pass the text to an exec primitive.
     "find . -name 'x' -exec sh -c '%s' \\;" % M5,
     "find . -name '%s' -exec cat {} \\;" % M5,
     "find . -name '%s' | sh" % M5,
-    "awk '/%s/ {print}' f" % M5,
-    "python -c \"print('%s')\"" % M5,
+    "awk 'BEGIN{system(\"%s\")}'" % M5,
+    "python -c \"import os; os.system('%s')\"" % M5,
     # NOTE: `find . -iname '<danger>'` was HERE (the declared -iname residual) but MOVED to
     # the closure set — OBS-A2 broadened find carrier-6b to -iname/-ipath/-regex/-iregex,
     # closing the inert match-pattern over-block (find matches a name/path, never executes).
-    # See the A2_CENSUS import in _CLOSURE_CMDS below. (awk / python -c STAY here — they
-    # EXECUTE their strings, so no view/vocab broadening may free them.)
+    # See the A2_CENSUS import in _CLOSURE_CMDS below. The awk pattern-print and python -c
+    # print rows MOVED to the closure set too (INTERPRETER_INERT below); their primitive
+    # forms above stay gated.
     # #1148 trap canaries (executing tails must stay caught).
     "git commit -m '%s # b' | sh" % M5,
     'echo "%s"# not-a-comment | sh' % M5,
@@ -328,6 +329,11 @@ DESTRUCTIVE = [
     "gh pr close 5 %s--delete-branch" % _F3_LC,
 ]
 
+INTERPRETER_INERT = [
+    "awk '/%s/ {print}' f" % M5,
+    "python -c \"print('%s')\"" % M5,
+]
+
 # The union of every enumerated intended closure — the ONLY commands the sweep permits
 # to transition base-True -> HEAD-False. Coupled to the certs via the imports above.
 # _R1_GENUINE are #1148 genuine-comment-excision closures (base-True -> HEAD-False): F1's
@@ -353,6 +359,10 @@ _CLOSURE_CMDS = (
     # -iname row from DESTRUCTIVE (verified: benign find patterns not gated on either tree;
     # the find -exec/-pipe executing forms + awk/python -c STILL gate; the 6-row floor holds).
     + [cmd for _, cmd in A2_CENSUS]
+    # An interpreter leg without an exec primitive is inert (its code reaches a shell only
+    # through a primitive of its language): RECLASSIFIED from DESTRUCTIVE, neither row runs
+    # anything. Their primitive forms stay in the destructive set above.
+    + INTERPRETER_INERT
 )
 _INTENDED_CLOSURE_SET = set(_CLOSURE_CMDS)
 
