@@ -182,7 +182,7 @@ class TestEndOfFlowCheckpoints:
                 if any(t in clause for t in terminal):
                     continue
                 if ("gh pr merge" in clause and next_step == _STEP_8_HEADING
-                        and "invoke `/PACT:wrap-up`" in _step_8_bullets()[1].get("`MERGED`", "")):
+                        and "invoke `/PACT:wrap-up`" in _step_8_bullets()[1].get(_MERGED, "")):
                     continue
                 bad.append((name, anchor, clause))
         assert not bad, bad
@@ -192,49 +192,73 @@ class TestEndOfFlowCheckpoints:
 # Merge -> wrap-up
 # ---------------------------------------------------------------------------
 
-_QUEUED = "`OPEN` with `autoMergeRequest` set or `isInMergeQueue` true"
+_READ_FAILED = "The read fails (non-zero exit or no output)"
+_MERGED = "`merged` is true"
+_QUEUED = ("`state` is `open` with `auto_merge` set, or the step-7 `gh pr merge <N>` output said the "
+           "PR was added to a merge queue")
+_OPEN = "`state` is `open` with no `auto_merge`"
+_CLOSED = "`state` is `closed` and `merged` is false"
 
 
 class TestStepEightStateGate:
-    def test_step_8_reads_the_pr_state_first(self):
-        """Reddens when step 8 stops reading the PR state (and the auto-merge
-        request and the merge-queue flag) before it routes, or puts a literal
-        number in the read. Mutation: delete the read sentence, or drop
-        `isInMergeQueue` from the query."""
+    def test_step_8_reads_the_pr_state_over_rest_first(self):
+        """Reddens when step 8 stops reading the PR state before it routes,
+        reads it through GraphQL, which cloud sessions refuse, or puts a literal
+        number in the read. Mutations: delete the read sentence; restore a
+        `gh api graphql` read."""
         section, _ = _step_8_bullets()
         first = section.split("\n", 1)[0]
-        assert "Run `gh api graphql -F owner='{owner}' -F repo='{repo}' -F n=<N> " in first, first
-        assert "pullRequest(number:$n){state isInMergeQueue autoMergeRequest{enabledAt}}" in first, first
+        assert "Run `gh api repos/{owner}/{repo}/pulls/<N> --jq '{state,merged,auto_merge}'`." in first, first
+        assert "graphql" not in section.lower(), "step 8 reads through GraphQL again"
         digits = [ch for ch in first.split("`")[1] if ch.isdigit()]
         assert not digits, ("<N> must be the only number in the read", digits)
 
     def test_only_merged_invokes_wrap_up(self):
-        """Reddens when a non-MERGED bullet invokes `/PACT:wrap-up`, or when the
-        MERGED bullet stops creating the wrap-up task and invoking wrap-up.
-        Mutation: change "`MERGED` →" to "Always →"."""
+        """Reddens when a non-merged bullet invokes `/PACT:wrap-up`, or when the
+        merged bullet stops creating the wrap-up task and invoking wrap-up.
+        Mutation: change "`merged` is true →" to "Always →"."""
         _, bullets = _step_8_bullets()
-        assert set(bullets) == {"`MERGED`", _QUEUED, "Any other state"}, sorted(bullets)
-        merged = bullets["`MERGED`"]
+        assert set(bullets) == {_READ_FAILED, _MERGED, _QUEUED, _OPEN, _CLOSED}, sorted(bullets)
+        merged = bullets[_MERGED]
         assert '`TaskCreate` the "Invoke /PACT:wrap-up" task' in merged, merged
         assert "invoke `/PACT:wrap-up`" in merged, merged
         for head, text in bullets.items():
-            if head != "`MERGED`":
+            if head != _MERGED:
                 assert not _EDGE_RE.search(text), (head, text)
 
+    def test_a_failed_read_never_returns_to_the_checkpoint_unasked(self):
+        """Reddens when an unreadable PR state sends the lead back to the merge
+        question before the user says whether the merge ran. Mutations: delete
+        the read-failed bullet; replace it with "report and return to step 7"."""
+        _, bullets = _step_8_bullets()
+        failed = bullets.get(_READ_FAILED, "")
+        assert "ask the user whether the merge completed" in failed, failed
+        assert "If it did, follow the `merged` bullet" in failed, failed
+        assert failed.rstrip().endswith("Do not return to step 7 before the user answers."), failed
+
     def test_a_queued_merge_is_not_reapproved(self):
-        """Reddens when a pending auto-merge loops back to the approval step.
-        Mutation: change the auto-merge bullet's "return to step 8" to "return
-        to step 7"."""
+        """Reddens when a pending auto-merge or a merge-queue add loops back to
+        the approval step. Mutations: change the queued bullet's "return to step
+        8" to "return to step 7"; drop the merge-queue output clause."""
         _, bullets = _step_8_bullets()
         queued = bullets[_QUEUED]
         assert "Do not ask for approval again." in queued, queued
         assert "return to step 8" in queued and "step 7" not in queued, queued
 
-    def test_any_other_state_returns_to_the_checkpoint(self):
-        """Reddens when a refused or unmerged PR stops returning to step 7.
-        Mutation: delete the "Any other state" bullet."""
+    def test_an_open_pr_asks_about_a_merge_queue_before_the_checkpoint(self):
+        """Reddens when an open PR with no auto-merge returns to the merge
+        question without asking whether it waits in a merge queue. Mutation:
+        replace the open bullet with "report and return to step 7"."""
         _, bullets = _step_8_bullets()
-        assert bullets.get("Any other state", "").endswith("return to step 7."), bullets
+        open_pr = bullets.get(_OPEN, "")
+        assert "ask the user whether it is waiting in a merge queue" in open_pr, open_pr
+        assert "If it is, follow the queued bullet" in open_pr, open_pr
+
+    def test_a_closed_pr_returns_to_the_checkpoint(self):
+        """Reddens when a PR closed without merging stops returning to step 7.
+        Mutation: delete the closed bullet."""
+        _, bullets = _step_8_bullets()
+        assert bullets.get(_CLOSED, "").endswith("return to step 7."), bullets
 
     def test_continue_reviewing_reaches_the_state_check(self):
         """Reddens when "Continue reviewing" skips step 8, so a PR merged on
@@ -266,7 +290,7 @@ class TestMergeHandsOffToWrapUp:
                 assert m.group(0) in step_7, "the merge option left step 7"
                 heading = _next_top_level_step(text, m.end())
                 assert heading == _STEP_8_HEADING, heading
-                merged = _step_8_bullets()[1].get("`MERGED`", "")
+                merged = _step_8_bullets()[1].get(_MERGED, "")
                 assert "invoke `/PACT:wrap-up`" in merged, merged
         assert found, "no option runs `gh pr merge`; the extraction stopped matching"
 

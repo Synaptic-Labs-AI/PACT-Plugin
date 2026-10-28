@@ -486,10 +486,12 @@ JSON
 
    > **If a merge is blocked** — the guard found no matching approval, or the approved command and the run command disagree — re-request authorization through this same `AskUserQuestion` convention with the literal `gh pr merge <N>` embedded in the "Yes, merge" option. Do NOT work around the block by running a bare command outside the checkpoint or by reducing the question to a simpler prompt — that defeats the safeguard. In a channel/headless session (e.g. Telegram) `AskUserQuestion` is unavailable, so no approval can be formed and the merge is held until you approve it interactively in a terminal — this is the intended behavior, not a bug.
 
-8. **Check the PR state after the merge decision.** Run `gh api graphql -F owner='{owner}' -F repo='{repo}' -F n=<N> -f query='query($owner:String!,$repo:String!,$n:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$n){state isInMergeQueue autoMergeRequest{enabledAt}}}}' --jq '.data.repository.pullRequest'`.
-   - `MERGED` → `TaskCreate` the "Invoke /PACT:wrap-up" task, complete the Review task, then invoke `/PACT:wrap-up`. Run project post-merge steps (tags, releases) alongside `/PACT:wrap-up`, never instead of it.
-   - `OPEN` with `autoMergeRequest` set or `isInMergeQueue` true → report that the merge is queued and that wrap-up runs once it merges. Do not ask for approval again. When the user says the PR merged, return to step 8.
-   - Any other state → report the state and return to step 7.
+8. **Check the PR state after the merge decision.** Run `gh api repos/{owner}/{repo}/pulls/<N> --jq '{state,merged,auto_merge}'`.
+   - The read fails (non-zero exit or no output) → report that the PR state could not be read and ask the user whether the merge completed. If it did, follow the `merged` bullet; if it did not, return to step 7. Do not return to step 7 before the user answers.
+   - `merged` is true → `TaskCreate` the "Invoke /PACT:wrap-up" task, complete the Review task, then invoke `/PACT:wrap-up`. Run project post-merge steps (tags, releases) alongside `/PACT:wrap-up`, never instead of it.
+   - `state` is `open` with `auto_merge` set, or the step-7 `gh pr merge <N>` output said the PR was added to a merge queue → report that the merge is queued and that wrap-up runs once it merges. Do not ask for approval again. When the user says the PR merged, return to step 8.
+   - `state` is `open` with no `auto_merge` → report that the PR is still open and ask the user whether it is waiting in a merge queue. If it is, follow the queued bullet; if it is not, return to step 7.
+   - `state` is `closed` and `merged` is false → report that the PR was closed without merging and return to step 7.
 
 > ⚠️ **Do NOT shut down reviewers here.** Teammates persist until `/PACT:wrap-up` ends the session or `/PACT:pause` shuts them down.
 
