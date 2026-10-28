@@ -151,7 +151,11 @@ class TestGhAnswerIsReadStrictly:
         cmd = f"{_MERGE} 5 --squash 2>&1 | tail -3"
         _mint(rig, f"{_MERGE} 5 --squash")
         _post(rig, cmd, _EMPTY, state=state, rc=rc)
-        assert _gh_calls(rig) == ["pr view 5 --json state --jq .state"]
+        # A failed `gh pr view` is retried once over REST, which this gh fails too.
+        expected = ["pr view 5 --json state --jq .state"]
+        if rc:
+            expected.append("api repos/{owner}/{repo}/pulls/5")
+        assert _gh_calls(rig) == expected
         assert not _retired(rig)
 
     def test_lowercase_merged_from_gh_still_confirms(self, rig):

@@ -21,6 +21,13 @@ current directory is that PR's worktree (its checked-out branch is the PR's
 head branch, and one of its remotes is the PR's repo), the PR read is the
 current directory's.
 
+Each read retries once over REST (gh_helpers.rest_json) when `gh pr view`
+reaches gh and fails for any reason other than "no pull requests found":
+some sessions refuse GraphQL, which `gh pr view` needs. The current
+directory's branch is looked up among the PRs whose head is that branch on
+the repo's owner, the newest first, as `gh pr view` picks for a branch. A
+REST answer that does not read leaves the read UNKNOWN, as before.
+
 Run by file path, not `python3 -m`: the current directory must stay the
 worktree (gh resolves the PR from it), and `-m` would put that directory
 first on sys.path, where a consumer repo's own `shared/` would shadow this
@@ -55,6 +62,7 @@ import json
 import os
 import re
 import sys
+from urllib.parse import quote
 
 if __name__ == "__main__":
     # Run as a file: put hooks/ (this file's grandparent) first, so `shared`
@@ -84,7 +92,15 @@ def read_pr(cwd: str | None = None) -> dict:
     CLOSED from gh; NONE when gh says no pull request exists; UNKNOWN on any
     other failure or an answer this cannot read. pr_number is an int, present
     only for the three gh states."""
-    return _map(gh_helpers.run_gh(GH_ARGS, timeout=GH_TIMEOUT_S, cwd=cwd))
+    result = gh_helpers.run_gh(GH_ARGS, timeout=GH_TIMEOUT_S, cwd=cwd)
+    if not _rest_retry(result):
+        return _map(result)
+    anchor = ["-C", cwd] if cwd else []
+    branch = git_helpers.run_git([*anchor, "symbolic-ref", "--short", "-q", "HEAD"])
+    if branch is None or branch.returncode != 0 or not branch.stdout.strip():
+        return _map(result)
+    path = f"repos/{{owner}}/{{repo}}/pulls?head={{owner}}:{quote(branch.stdout.strip(), safe='')}&state=all"
+    return _map_rest(gh_helpers.rest_json(path, timeout=GH_TIMEOUT_S, cwd=cwd))
 
 
 def read_reviewed_pr(session_dir: str, *, skip_if_wrapped: bool = False) -> dict | None:
@@ -120,7 +136,11 @@ def read_reviewed_pr(session_dir: str, *, skip_if_wrapped: bool = False) -> dict
         if session_journal.wrap_up_closed(ends, number, reviews[-1].get("ts")):
             return None
     args = ["pr", "view", str(number), "--repo", f"{match.group(1)}/{match.group(2)}"]
-    pr = _map(gh_helpers.run_gh([*args, *GH_JSON], timeout=GH_TIMEOUT_S))
+    result = gh_helpers.run_gh([*args, *GH_JSON], timeout=GH_TIMEOUT_S)
+    pr = _map(result)
+    if _rest_retry(result):
+        path = f"repos/{match.group(1)}/{match.group(2)}/pulls/{number}"
+        pr = _map_rest(gh_helpers.rest_json(path, timeout=GH_TIMEOUT_S))
     if pr["pr_state"] == "NONE" or pr.get("pr_number") != number:
         return {"pr_state": "UNKNOWN"}
     pr["base_repo"] = (match.group(1), match.group(2))
@@ -176,6 +196,41 @@ def _map(result) -> dict:
         head_repo=repo.get("name", "") if isinstance(repo, dict) else "",
     )
     return pr
+
+
+def _rest_retry(result) -> bool:
+    """Whether a `gh pr view` result is retried over REST: it reached gh,
+    exited non-zero, and did not say that no pull request exists."""
+    return (result is not None and result.returncode != 0
+            and NO_PR_MARKER not in (result.stderr or "").lower())
+
+
+def _map_rest(body) -> dict:
+    """Map a REST pull body, or a list of them newest first (the first is
+    taken, and an empty list is NONE), to the PR fields. Anything that does
+    not read is UNKNOWN, which is also what the retried fast read mapped to."""
+    if isinstance(body, list):
+        if not body:
+            return {"pr_state": "NONE"}
+        body = body[0]
+    state = gh_helpers.rest_pr_state(body)
+    number = body.get("number") if isinstance(body, dict) else None
+    if not state or not isinstance(number, int) or isinstance(number, bool):
+        return {"pr_state": "UNKNOWN"}
+    head = body.get("head")
+    head = head if isinstance(head, dict) else {}
+    repo = head.get("repo")
+    repo = repo if isinstance(repo, dict) else {}
+    owner = repo.get("owner")
+    branch, name = head.get("ref"), repo.get("name")
+    login = owner.get("login") if isinstance(owner, dict) else None
+    return {
+        "pr_state": state,
+        "pr_number": number,
+        "branch": branch if isinstance(branch, str) else "",
+        "head_owner": login if isinstance(login, str) else "",
+        "head_repo": name if isinstance(name, str) else "",
+    }
 
 
 def record(session_dir: str, pr: dict) -> str | None:

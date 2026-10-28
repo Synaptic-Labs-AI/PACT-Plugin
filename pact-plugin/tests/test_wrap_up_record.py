@@ -394,7 +394,12 @@ def test_outside_any_repo_a_failed_fallback_stays_unknown(tmp_path):
     result = _run(tmp_path)
 
     assert _lines(result)["pr_state"] == "UNKNOWN"
-    assert len(_argv(tmp_path)) == 2
+    # No branch outside a repo, so no REST retry of the cwd read; the
+    # numbered read is retried once over REST, which fails the same way.
+    assert _argv(tmp_path)[1:] == [
+        "pr view 61 --repo own/repo-x --json number,state,headRefName,headRepository,headRepositoryOwner",
+        "api repos/own/repo-x/pulls/61",
+    ]
 
 
 def test_outside_any_repo_with_no_review_stays_unknown_with_one_call(tmp_path):

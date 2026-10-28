@@ -791,7 +791,7 @@ class TestStateRecoveryEventsTable:
         none)" or the paused-claim clause."""
         row = self._rows()["`session_end`"]
         assert "`source`, `pr_state`, `pr_number`, `pr_source` (optional, wrap-up:" in row, row
-        assert "and `cwd` or `review` for where the state was read)" in row, row
+        assert "and `cwd` when the current directory is that PR's worktree or `review` when the state came from the review record outside it)" in row, row
         assert ("A wrap-up `session_end` with `pr_state` `MERGED` and a PR's `pr_number`, at or "
                 "after the latest `review_dispatch` (at any time, when there is none), records that "
                 "wrap-up closed that merged PR") in row, row
