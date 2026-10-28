@@ -24,9 +24,9 @@ current directory's.
 Each read retries once over REST (gh_helpers.rest_json) when `gh pr view`
 reaches gh and fails for any reason other than "no pull requests found":
 some sessions refuse GraphQL, which `gh pr view` needs. The current
-directory's branch is looked up among the PRs whose head is that branch on
-the repo's owner, the newest first, as `gh pr view` picks for a branch. A
-REST answer that does not read leaves the read UNKNOWN, as before.
+directory's branch is looked up the way `gh pr view` looks it up (see
+_read_branch_over_rest). A REST answer that does not read leaves the read
+UNKNOWN, as before.
 
 Run by file path, not `python3 -m`: the current directory must stay the
 worktree (gh resolves the PR from it), and `-m` would put that directory
@@ -71,7 +71,7 @@ if __name__ == "__main__":
 
 # Module imports, not names: a test that patches a function on its source
 # module (session_journal.append_event, gh_helpers.run_gh) must reach this too.
-from shared import gh_helpers, git_helpers, session_journal  # noqa: E402
+from shared import backlog, gh_helpers, git_helpers, session_journal  # noqa: E402
 
 GH_JSON = ["--json", "number,state,headRefName,headRepository,headRepositoryOwner"]
 GH_ARGS = ["pr", "view", *GH_JSON]
@@ -83,6 +83,7 @@ PR_URL_RE = re.compile(
 REMOTE_URL_RE = re.compile(r"[:/]([^/:]+)/([^/]+?)(?:\.git)?/?$")
 GH_TIMEOUT_S = 15
 NO_PR_MARKER = "no pull requests found"
+PULL_HEAD_REF_RE = re.compile(r"^refs/pull/(\d+)/head$")
 PR_STATES = ("MERGED", "OPEN", "CLOSED")
 FIELDS = ("pr_state", "pr_number", "branch", "head_owner", "head_repo", "pr_source")
 
@@ -95,12 +96,7 @@ def read_pr(cwd: str | None = None) -> dict:
     result = gh_helpers.run_gh(GH_ARGS, timeout=GH_TIMEOUT_S, cwd=cwd)
     if not _rest_retry(result):
         return _map(result)
-    anchor = ["-C", cwd] if cwd else []
-    branch = git_helpers.run_git([*anchor, "symbolic-ref", "--short", "-q", "HEAD"])
-    if branch is None or branch.returncode != 0 or not branch.stdout.strip():
-        return _map(result)
-    path = f"repos/{{owner}}/{{repo}}/pulls?head={{owner}}:{quote(branch.stdout.strip(), safe='')}&state=all"
-    return _map_rest(gh_helpers.rest_json(path, timeout=GH_TIMEOUT_S, cwd=cwd))
+    return _read_branch_over_rest(cwd)
 
 
 def read_reviewed_pr(session_dir: str, *, skip_if_wrapped: bool = False) -> dict | None:
@@ -196,6 +192,108 @@ def _map(result) -> dict:
         head_repo=repo.get("name", "") if isinstance(repo, dict) else "",
     )
     return pr
+
+
+def _git(cwd: str | None, *args: str) -> str | None:
+    """One git command's trimmed stdout in `cwd`, or None when it fails (an
+    unset config key exits 1)."""
+    anchor = ["-C", cwd] if cwd else []
+    out = git_helpers.run_git([*anchor, *args])
+    return out.stdout.strip() if out is not None and out.returncode == 0 else None
+
+
+def _obj(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _remote_value(cwd: str | None, value: str | None, *, name_only: bool = False):
+    """A remote config value, read as gh reads it. Returns False when it is
+    unset, else the github.com (owner, repo) it resolves to, or None when it
+    resolves to none (decline).
+
+    For branch.<b>.remote and pushRemote: a value holding ":" is a URL, and
+    "." or a path starting "./" or "/" counts as unset. Anything else (and
+    every remote.pushDefault value, which gh reads only as a name) names a
+    remote, whose URL `git remote get-url` reads with insteadOf applied, as
+    gh's remote list has it. The URL is parsed, never printed."""
+    if not value:
+        return False
+    if not name_only and (value == "." or value.startswith(("./", "/"))):
+        return False
+    url = value if ":" in value and not name_only else _git(cwd, "remote", "get-url", value)
+    return backlog._slug_from_remote_url(url)
+
+
+def _push_target(cwd: str | None, branch: str, merge: str) -> tuple[str, tuple[str, str] | None] | None:
+    """Where gh expects `branch` to be pushed, as gh's
+    tryDetermineDefaultPushTarget decides it: the remote branch name and the
+    head repo, or None to decline. The repo is None when no remote is set,
+    which gh reads as the base repo.
+
+    1. `<branch>@{push}` when it resolves to refs/remotes/<remote>/<branch>.
+    2. Otherwise the branch name is the local one, or the merge ref's branch
+       when push.default is upstream or tracking; and the remote is the first
+       set of branch.<b>.pushRemote, remote.pushDefault, branch.<b>.remote."""
+    pushed = _git(cwd, "rev-parse", "--symbolic-full-name", f"{branch}@{{push}}") or ""
+    parts = pushed.splitlines()[0].split("/", 3) if pushed else []
+    if len(parts) == 4 and parts[:2] == ["refs", "remotes"] and parts[2] and parts[3]:
+        repo = _remote_value(cwd, parts[2], name_only=True)
+        return (parts[3], repo) if repo else None
+    remote_branch = branch
+    if _git(cwd, "config", "--get", "push.default") in ("upstream", "tracking"):
+        remote_branch = merge.removeprefix("refs/heads/") or branch
+    for key in (f"branch.{branch}.pushremote", "remote.pushdefault", f"branch.{branch}.remote"):
+        repo = _remote_value(cwd, _git(cwd, "config", "--get", key), name_only=key == "remote.pushdefault")
+        if repo is not False:
+            return (remote_branch, repo) if repo else None
+    return (remote_branch, None)
+
+
+def _read_branch_over_rest(cwd: str | None) -> dict:
+    """The current branch's PR over REST, found as `gh pr view` (v2.103.3,
+    pkg/cmd/pr/shared/finder.go and find_refs_resolution.go) finds it.
+
+    A merge ref refs/pull/<N>/head names PR N. Otherwise the head is
+    `<owner>:<remote branch>` for a head repo other than the base, and the
+    bare remote branch for the base repo or no remote. Of the PRs on the base
+    repo with that head branch (30, newest first), the OPEN ones go first
+    (a stable sort), and the first whose head label matches is taken, unless
+    it is closed or merged and its head is the base's default branch. None
+    matching is NONE. A remote gh could not resolve to a github.com repo
+    declines (UNKNOWN), and so does no branch."""
+    unknown = {"pr_state": "UNKNOWN"}
+    branch = _git(cwd, "symbolic-ref", "--short", "-q", "HEAD")
+    if not branch:
+        return unknown
+    merge = _git(cwd, "config", "--get", f"branch.{branch}.merge") or ""
+    numbered = PULL_HEAD_REF_RE.match(merge)
+    if numbered:
+        return _map_rest(gh_helpers.rest_json(
+            f"repos/{{owner}}/{{repo}}/pulls/{numbered.group(1)}", timeout=GH_TIMEOUT_S, cwd=cwd))
+    target = _push_target(cwd, branch, merge)
+    if target is None:
+        return unknown
+    remote_branch, head = target
+    owner = head[0] if head else "{owner}"
+    pulls = gh_helpers.rest_json(
+        f"repos/{{owner}}/{{repo}}/pulls?head={owner}:{quote(remote_branch, safe='')}"
+        "&state=all&per_page=30", timeout=GH_TIMEOUT_S, cwd=cwd)
+    if not isinstance(pulls, list) or not all(isinstance(p, dict) for p in pulls):
+        return unknown
+    for pull in sorted(pulls, key=lambda p: p.get("state") != "open"):
+        head_part, base_part = _obj(pull.get("head")), _obj(pull.get("base"))
+        base_repo = str(_obj(base_part.get("repo")).get("full_name", "")).lower()
+        wanted = remote_branch
+        if head and f"{head[0]}/{head[1]}".lower() != base_repo:
+            wanted = f"{head[0]}:{remote_branch}"
+        cross = str(_obj(head_part.get("repo")).get("full_name", "")).lower() != base_repo
+        label = head_part.get("label") if cross else head_part.get("ref")
+        if label != wanted:
+            continue
+        if pull.get("state") != "open" and _obj(base_part.get("repo")).get("default_branch") == wanted:
+            continue
+        return _map_rest(pull)
+    return {"pr_state": "NONE"}
 
 
 def _rest_retry(result) -> bool:

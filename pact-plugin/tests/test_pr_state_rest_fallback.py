@@ -64,13 +64,16 @@ sys.exit(1)
 """
 
 
-def _pull(number=61, state="closed", merged=True, ref="feat/x", owner="own", repo="repo-x"):
+def _pull(number=61, state="closed", merged=True, ref="feat/x", owner="own", repo="repo-x",
+          base="own/repo-x", default_branch="main"):
     """A REST pull body: the single-PR endpoint carries `merged`, a list entry
-    only `merged_at`."""
+    only `merged_at`. A head repo other than `base` is a fork (cross-repo)."""
     return {
         "number": number, "state": state, "merged": merged,
         "merged_at": "2026-10-27T11:42:55Z" if merged else None,
-        "head": {"ref": ref, "repo": {"name": repo, "owner": {"login": owner}}},
+        "head": {"ref": ref, "label": f"{owner}:{ref}",
+                 "repo": {"name": repo, "full_name": f"{owner}/{repo}", "owner": {"login": owner}}},
+        "base": {"repo": {"full_name": base, "default_branch": default_branch}},
     }
 
 
@@ -307,7 +310,11 @@ def _review(tmp_path, number=61, url="https://github.com/own/repo-x/pull/61") ->
                                   "ts": "2026-04-17T12:00:00Z"}) + "\n")
 
 
-BRANCH_PATH = "repos/{owner}/{repo}/pulls?head={owner}:feat%2Fx&state=all"
+def _branch_path(head_owner="{owner}", branch="feat%2Fx"):
+    return f"repos/{{owner}}/{{repo}}/pulls?head={head_owner}:{branch}&state=all&per_page=30"
+
+
+BRANCH_PATH = _branch_path()
 EXPECTED = {"pr_state": "MERGED", "pr_number": "61", "branch": "feat/x",
             "head_owner": "own", "head_repo": "repo-x", "pr_source": "cwd"}
 
@@ -340,8 +347,7 @@ def test_the_cwd_read_with_no_pr_for_the_branch_is_none(tmp_path, fake_gh):
 def test_a_branch_name_is_quoted_into_the_rest_path(tmp_path, fake_gh):
     worktree = _checkout(tmp_path / "wt", "fix/a&b{owner}")
     _record(tmp_path, worktree)
-    assert "api repos/{owner}/{repo}/pulls?head={owner}:fix%2Fa%26b%7Bowner%7D&state=all" \
-        in fake_gh["calls"]()
+    assert f"api {_branch_path(branch='fix%2Fa%26b%7Bowner%7D')}" in fake_gh["calls"]()
 
 
 def test_the_numbered_read_gives_the_same_lines_over_rest(tmp_path, fake_gh):
@@ -382,3 +388,121 @@ def test_a_wrap_up_read_that_never_reached_gh_is_not_retried():
     assert wrap_up_record._rest_retry(None) is False
     assert wrap_up_record._rest_retry(
         subprocess.CompletedProcess(["gh"], 1, "", REFUSED)) is True
+
+
+# ---------------------------------------------------------------------------
+# The branch lookup mirrors gh v2.103.3 (pkg/cmd/pr/shared/finder.go
+# findForRefs, find_refs_resolution.go tryDetermineDefaultPushTarget)
+# ---------------------------------------------------------------------------
+
+def _git(path: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=path, check=True, capture_output=True)
+
+
+def _number(tmp_path, worktree) -> str:
+    return _record(tmp_path, worktree)["pr_number"]
+
+
+def test_an_open_pr_goes_before_a_newer_closed_one(tmp_path, fake_gh):
+    worktree = _checkout(tmp_path / "wt", "feat/x")
+    fake_gh["set"](rest={BRANCH_PATH: [_pull(number=76), _pull(number=74, state="open", merged=False),
+                                       _pull(number=72, state="open", merged=False)]})
+    assert _number(tmp_path, worktree) == "74"
+
+
+@pytest.mark.parametrize("pulls,expected", [
+    pytest.param([_pull(number=70, ref="main")], "NONE", id="merged-pr-from-the-default-branch"),
+    pytest.param([_pull(number=70, ref="main"), _pull(number=71, ref="main", state="open", merged=False)],
+                 "71", id="an-open-one-still-counts"),
+])
+def test_a_closed_pr_whose_head_is_the_default_branch_is_skipped(tmp_path, fake_gh, pulls, expected):
+    worktree = _checkout(tmp_path / "wt", "main")
+    fake_gh["set"](rest={_branch_path(branch="main"): pulls})
+    lines = _record(tmp_path, worktree)
+    assert (lines["pr_number"] or lines["pr_state"]) == expected
+
+
+def test_with_no_push_remote_only_a_same_repo_pr_matches(tmp_path, fake_gh):
+    worktree = _checkout(tmp_path / "wt", "feat/x")
+    fake_gh["set"](rest={BRANCH_PATH: [_pull(number=80, owner="own", repo="fork-of-x"),
+                                       _pull(number=60)]})
+    assert _number(tmp_path, worktree) == "60"
+
+
+def _fork_checkout(tmp_path) -> Path:
+    worktree = _checkout(tmp_path / "wt", "feat/x")
+    _git(worktree, "remote", "add", "origin", "https://github.com/own/repo-x.git")
+    _git(worktree, "remote", "add", "fork", "git@github.com:forker/repo-x.git")
+    _git(worktree, "remote", "add", "other", "https://github.com/other/repo-x.git")
+    return worktree
+
+
+FORK_PULLS = [_pull(number=60), _pull(number=81, owner="forker")]
+
+
+@pytest.mark.parametrize("config,owner", [
+    pytest.param({"branch.feat/x.pushRemote": "fork", "remote.pushDefault": "other",
+                  "branch.feat/x.remote": "other"}, "forker", id="pushRemote-first"),
+    pytest.param({"remote.pushDefault": "fork", "branch.feat/x.remote": "other"}, "forker",
+                 id="then-remote.pushDefault"),
+    pytest.param({"branch.feat/x.remote": "fork"}, "forker", id="then-branch.remote"),
+    pytest.param({"branch.feat/x.remote": "https://github.com/forker/repo-x.git"}, "forker",
+                 id="a-url-value"),
+    pytest.param({"branch.feat/x.pushRemote": ".", "branch.feat/x.remote": "fork"}, "forker",
+                 id="a-dot-value-is-unset"),
+    pytest.param({"branch.feat/x.remote": "origin"}, "own", id="the-base-repo-remote"),
+])
+def test_the_head_owner_follows_gh_push_target_order(tmp_path, fake_gh, config, owner):
+    worktree = _fork_checkout(tmp_path)
+    for key, value in config.items():
+        _git(worktree, "config", key, value)
+    fake_gh["set"](rest={_branch_path(head_owner=owner): FORK_PULLS})
+
+    lines = _record(tmp_path, worktree)
+
+    assert f"api {_branch_path(head_owner=owner)}" in fake_gh["calls"]()
+    assert lines["pr_number"] == ("81" if owner == "forker" else "60")
+
+
+def test_push_default_upstream_takes_the_merge_refs_branch(tmp_path, fake_gh):
+    worktree = _fork_checkout(tmp_path)
+    _git(worktree, "config", "push.default", "upstream")
+    _git(worktree, "config", "branch.feat/x.remote", "fork")
+    _git(worktree, "config", "branch.feat/x.merge", "refs/heads/up-x")
+    path = _branch_path(head_owner="forker", branch="up-x")
+    fake_gh["set"](rest={path: [_pull(number=82, owner="forker", ref="up-x")]})
+    assert _number(tmp_path, worktree) == "82"
+
+
+def test_a_resolving_push_ref_wins(tmp_path, fake_gh):
+    """`<branch>@{push}` names the remote and branch git would push to; a
+    push refspec maps local feat/x to the fork's pushed-x."""
+    worktree = _fork_checkout(tmp_path)
+    _git(worktree, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-q", "--allow-empty", "-m", "x")
+    _git(worktree, "config", "branch.feat/x.pushRemote", "fork")
+    _git(worktree, "config", "remote.fork.push", "refs/heads/feat/x:refs/heads/pushed-x")
+    _git(worktree, "update-ref", "refs/remotes/fork/pushed-x", "HEAD")
+    path = _branch_path(head_owner="forker", branch="pushed-x")
+    fake_gh["set"](rest={path: [_pull(number=83, owner="forker", ref="pushed-x")]})
+    assert _number(tmp_path, worktree) == "83"
+
+
+def test_a_pull_head_merge_ref_reads_that_pr_by_number(tmp_path, fake_gh):
+    worktree = _checkout(tmp_path / "wt", "pr-7")
+    _git(worktree, "config", "branch.pr-7.merge", "refs/pull/7/head")
+    fake_gh["set"](rest={"repos/{owner}/{repo}/pulls/7": _pull(number=7)})
+    assert _number(tmp_path, worktree) == "7"
+
+
+@pytest.mark.parametrize("key,value", [
+    pytest.param("branch.feat/x.pushRemote", "gone", id="a-remote-that-does-not-exist"),
+    pytest.param("branch.feat/x.remote", "https://gitlab.com/forker/repo-x.git", id="a-non-github-url"),
+    pytest.param("remote.pushDefault", "https://github.com/forker/repo-x.git",
+                 id="remote.pushDefault-is-only-a-name"),
+])
+def test_a_push_target_gh_could_not_resolve_declines(tmp_path, fake_gh, key, value):
+    worktree = _fork_checkout(tmp_path)
+    _git(worktree, "config", key, value)
+    fake_gh["set"](rest={BRANCH_PATH: [_pull()], _branch_path(head_owner="forker"): FORK_PULLS})
+    assert _record(tmp_path, worktree)["pr_state"] == "UNKNOWN"
+    assert not any(c.startswith("api") for c in fake_gh["calls"]())
