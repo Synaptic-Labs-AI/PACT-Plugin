@@ -134,8 +134,14 @@ class TestCheckPinSlotStatus_SessionInit:
 
     def test_returns_none_when_no_claude_md(self, monkeypatch):
         from session_init import check_pin_slot_status
+
+        # The wrapper resolves through the shared helper since #1653; on the
+        # non-worktree route that helper calls
+        # `staleness.get_project_claude_md_path`. Patching session_init's
+        # imported alias no longer reaches it, so the seeded project file was
+        # found and a 0/12 status was emitted. Stub the seam the helper uses.
         monkeypatch.setattr(
-            "session_init._get_project_claude_md_path", lambda: None
+            "staleness.get_project_claude_md_path", lambda *a, **k: None
         )
         assert check_pin_slot_status() is None
 

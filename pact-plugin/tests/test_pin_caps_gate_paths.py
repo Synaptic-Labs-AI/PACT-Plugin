@@ -84,8 +84,21 @@ def _git(cwd, *args):
     subprocess.run(["git", *args], cwd=cwd, env=env, check=True, capture_output=True, timeout=600)
 
 
-@pytest.mark.parametrize("pins, expected", [(13, "allow"), (14, "deny")])
-def test_a_worktree_write_is_compared_with_the_repository_roots_file(tmp_path, pins, expected):
+@pytest.mark.parametrize("pins", [13, 14])
+def test_a_worktree_write_is_not_the_managed_document(tmp_path, pins):
+    """A write to the WORKTREE's own copy is not gated, whatever its pins.
+
+    #1653 FLIPPED this arm. The pre-branch pin was
+    `test_a_worktree_write_is_compared_with_the_repository_roots_file`,
+    parametrized (13, "allow"), (14, "deny"), and it compared a write to the
+    worktree copy against the REPOSITORY ROOT's file. Since the one-rule
+    change, a worktree session's managed document is the repository root's
+    file, and the worktree copy is not it: `match_project_claude_md` and
+    `gate_target` return None for this target, so there is nothing to gate.
+    The old row compared one file's pins with another file's text; the arm
+    that replaced it is `test_a_worktree_session_write_to_the_root_is_gated`,
+    which pins that the managed document itself is still protected.
+    """
     if shutil.which("git") is None:
         pytest.skip("git is not installed")
     repo, worktree = tmp_path / "repo", tmp_path / "worktree"
@@ -96,7 +109,29 @@ def test_a_worktree_write_is_compared_with_the_repository_roots_file(tmp_path, p
     (repo / ".claude").mkdir()  # untracked, so the worktree has no CLAUDE.md of its own
     (repo / ".claude" / "CLAUDE.md").write_text(_pins(13), encoding="utf-8")
     assert not (worktree / ".claude").exists()
-    assert _gate(worktree, worktree / ".claude" / "CLAUDE.md", _write(_pins(pins))) == expected
+    assert _gate(worktree, worktree / ".claude" / "CLAUDE.md", _write(_pins(pins))) == "allow"
+
+
+@pytest.mark.parametrize("pins, expected", [(13, "allow"), (14, "deny")])
+def test_a_worktree_session_write_to_the_root_is_gated(tmp_path, pins, expected):
+    """The managed file is still gated when the session runs in a worktree.
+
+    Same layout as the arm above, but the write targets the REPOSITORY ROOT's
+    file -- the document a worktree session's writers and advisory readers
+    follow since #1653. 14 pins is growth past the cap and is denied; 13 is
+    not growth and is allowed.
+    """
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    repo, worktree = tmp_path / "repo", tmp_path / "worktree"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init")
+    _git(repo, "worktree", "add", "-q", str(worktree))
+    (repo / ".claude").mkdir()
+    (repo / ".claude" / "CLAUDE.md").write_text(_pins(13), encoding="utf-8")
+
+    assert _gate(worktree, repo / ".claude" / "CLAUDE.md", _write(_pins(pins))) == expected
 
 
 @pytest.mark.parametrize("call, expected", [
@@ -358,7 +393,7 @@ def test_gate_target_returns_none_when_the_resolver_fails(tmp_path, monkeypatch)
 
     point_resolver_at(monkeypatch, tmp_path)
 
-    def _fails(assume_present=None):
+    def _fails(*args, **kwargs):
         raise OSError("resolver failed")
 
     monkeypatch.setattr(staleness, "_resolve_project_claude_md_with_base", _fails)

@@ -1867,6 +1867,15 @@ def gate_target(file_path: str) -> GateTarget | None:
         # worktree-local copy is not what the pin cap protects. A non-worktree
         # session passes its own env dir, which the resolver treats as the
         # same first rung as before.
+        #
+        # A TRACKED-CLAUDE.md PROJECT KEEPS THE SAME-RELATIVE-PATH CONSEQUENCE,
+        # RECORDED HERE AND DELIBERATELY NOT GUARDED. The worktree copy sits at
+        # the same repo-relative path, so a commit from the worktree plus a
+        # merge changes MAIN's document without this gate seeing it. The cap is
+        # session-local hygiene, not a security boundary; delivery is a
+        # human-reviewed merge; and a same-path guard would reintroduce the
+        # worktree copy as a managed artifact in weaker form -- the assumption
+        # the one rule exists to remove. Do not build that guard.
         declared = os.environ.get("CLAUDE_PROJECT_DIR")
         memory_root = project_memory_root(declared) if declared else None
         resolved, base = _resolve_project_claude_md_with_base(
