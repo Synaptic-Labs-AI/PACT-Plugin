@@ -283,6 +283,56 @@ def test_drift_caches_nothing_when_git_cannot_answer(world, monkeypatch):
     )
 
 
+def test_drift_no_env_caches_nothing_when_git_cannot_answer(world, monkeypatch):
+    """#1653 task #61: with NO declared project dir, the fallback's cwd rung
+    is the only base that can be a linked worktree. A git-UNKNOWN must adopt
+    and cache nothing, on the same terms as the env rung."""
+    import shared.claude_md_drift as drift
+    from shared.paths import get_claude_config_dir
+
+    main, worktree = world
+    _write_doc(main, _doc())
+    _write_doc(worktree, _doc(_pin("2026-10-01", "Other")))
+    session_dir = get_claude_config_dir() / "pact-sessions" / "proj" / "sd-no-env"
+    session_dir.mkdir(parents=True)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.setenv("PATH", "")
+
+    path, base = drift._resolve(session_dir)
+
+    assert (path, base) == (None, None), (
+        f"the no-env fallback adopted a file: {path}"
+    )
+    assert not (session_dir / "claude-md-base.json").exists(), (
+        "the unknown base was CACHED, so the detector would watch it all session"
+    )
+
+
+def test_drift_no_env_still_resolves_main_with_live_git(world, monkeypatch):
+    """The same fixture with git answering keeps today's behaviour: the
+    fallback resolves MAIN's file through the git rung and caches its base."""
+    import json
+
+    import shared.claude_md_drift as drift
+    from shared.paths import get_claude_config_dir
+
+    main, worktree = world
+    main_md = _write_doc(main, _doc())
+    _write_doc(worktree, _doc(_pin("2026-10-01", "Other")))
+    session_dir = (
+        get_claude_config_dir() / "pact-sessions" / "proj" / "sd-no-env-live"
+    )
+    session_dir.mkdir(parents=True)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+
+    path, base = drift._resolve(session_dir)
+
+    assert path is not None and path.resolve() == main_md.resolve()
+    assert base is not None and base.resolve() == main.resolve()
+    cached = json.loads((session_dir / "claude-md-base.json").read_text())
+    assert Path(cached["base"]).resolve() == main.resolve()
+
+
 def test_the_pin_gate_does_not_take_the_worktree_as_before(world):
     """Bugbot (#57): with MAIN holding no file, the pin gate's `before` must
     be the target (absent), not the worktree copy the resolver's cwd rung
