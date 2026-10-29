@@ -90,6 +90,63 @@ _RECOVERY_BRANCHES = (
     ("H. **Stop on messaging failure.**", "team-formation/messaging"),
 )
 
+# Actor-local controls parallel to _RECOVERY_BRANCHES. Each pair is
+# (required markers, role-confusion markers forbidden in that branch).
+_RECOVERY_ROLE_CONTROLS = (
+    ((
+        "The actor missing Task tools runs",
+        "the teammate reports the exact missing tools and load result",
+        "then stops implementation work and idles",
+        "The lead's own successful ToolSearch proves only the lead's tool surface, never the teammate's.",
+    ), ()),
+    ((
+        "The lead checks its own four Task tools",
+        "the lead fixes the session opt-in/settings and must start the required new session",
+        "the teammate does not restart the session.",
+    ), ("the teammate must restart the session", "the teammate restarts the session")),
+    ((
+        "The lead compares its dispatch with the live schema",
+        "The lead corrects `Task(...)`",
+        "the teammate does not rewrite the lead's call.",
+    ), ("the teammate rewrites the lead's call", "the teammate must rewrite the lead's call")),
+    ((
+        "The lead uses platform spawn, roster, and messaging evidence",
+        "the lead corrects team enablement/registration instead.",
+    ), ()),
+    ((
+        "The lead checks the actual teammate display mode",
+        "the lead checks `--tools`/deny rules and environment forwarding through `--settings`",
+        "then corrects launch configuration before replacement; the teammate does not change it.",
+    ), ("the teammate changes launch configuration", "the teammate must change launch configuration")),
+    ((
+        "only the lead follows the single operational legacy note",
+        "the teammate never applies legacy dispatch.",
+    ), ("the teammate applies legacy dispatch", "the teammate must apply legacy dispatch")),
+    (("the teammate relays the teachback/HANDOFF content and the lead writes metadata.",), ()),
+    ((
+        "the teammate cannot relay and stops/idles.",
+        "The lead reports the team-formation/messaging blocker",
+    ), ()),
+)
+
+_ROOT_ROLE_MARKERS = (
+    "the teammate may load deferred tools",
+    "it reports exact evidence and stops implementation work while the lead takes over",
+    "The lead must not treat its own successful tool load as the teammate's",
+    "The lead must check the lead session",
+    "compare the dispatch with the live Agent schema",
+    "confirm registration and addressability",
+    "then apply display-mode inheritance",
+    "Only the lead may use the guarded legacy branch",
+    "the teammate relays the structured content for the lead to write",
+    "the teammate stops and the lead reports the team-formation/messaging blocker",
+)
+
+_STALE_SCHEMA_CLAIMS = (
+    "Prose says a parameter is not available, parameter list shows it: PASS IT.",
+    "Dispatch template and parameter list disagree: that is a FINDING. Report it. Do not select one.",
+)
+
 _STALE_FIRST_SPAWN_CLAIMS = (
     "the dispatch was malformed",
     "corrects the dispatch shape, and re-spawns",
@@ -163,6 +220,24 @@ def _current_recovery_regions() -> dict[str, str]:
             "## §4 Historical evidence",
         ),
     }
+
+
+def _recovery_branch_slices(region: str) -> dict[str, str]:
+    positions = []
+    for heading, _ in _RECOVERY_BRANCHES:
+        assert region.count(heading) == 1, f"recovery region lacks {heading}"
+        positions.append(region.index(heading))
+    assert positions == sorted(positions), "recovery branches are out of order"
+    slices = {}
+    for index, (heading, _) in enumerate(_RECOVERY_BRANCHES):
+        start = positions[index] + len(heading)
+        end = positions[index + 1] if index + 1 < len(positions) else len(region)
+        slices[heading] = region[start:end]
+    return slices
+
+
+def _collapsed(text: str) -> str:
+    return " ".join(text.split())
 
 
 def _root_first_spawn_summary(text: str) -> str:
@@ -278,6 +353,22 @@ class TestCurrentAgentDispatchContract:
             "MANDATORY Agent template carries an execution-mode parameter"
         )
 
+    def test_schema_disagreement_uses_contract_not_mechanical_key_selection(self):
+        region = _section(
+            _read(_PERSONA), "#### Which signal governs a tool call", "#### First-spawn verification"
+        )
+        for marker in (
+            "parameter is expressible, not required",
+            "never pass it merely because it appears in the schema",
+            "FINDING to diagnose, not a prohibition on choosing",
+            "follow the current named flagless contract",
+            "ordered legacy branch only when every guard matches",
+            "schema presence alone selects neither",
+        ):
+            assert marker in region, f"schema-selection contract lacks {marker!r}"
+        for stale in _STALE_SCHEMA_CLAIMS:
+            assert stale not in region, f"schema-selection contract retains {stale!r}"
+
 
 class TestNoTouchSurfacesSurvive:
     """Pre-decided dispositions (spec §6) pinned affirmatively."""
@@ -295,16 +386,23 @@ class TestCurrentRecoveryContract:
 
     def test_branch_markers_are_present_and_ordered(self):
         for name, region in _current_recovery_regions().items():
-            positions = []
-            for heading, _ in _RECOVERY_BRANCHES:
-                assert region.count(heading) == 1, f"{name} lacks {heading}"
-                positions.append(region.index(heading))
-            assert positions == sorted(positions), f"{name} branches are out of order"
-            for index, (heading, control) in enumerate(_RECOVERY_BRANCHES):
-                start = positions[index] + len(heading)
-                end = positions[index + 1] if index + 1 < len(positions) else len(region)
-                branch = region[start:end]
-                assert control in branch, f"{name} {heading} lacks its own control {control!r}"
+            branches = _recovery_branch_slices(region)
+            for heading, control in _RECOVERY_BRANCHES:
+                assert control in branches[heading], (
+                    f"{name} {heading} lacks its own control {control!r}"
+                )
+
+    def test_recovery_roles_are_actor_local(self):
+        for name, region in _current_recovery_regions().items():
+            branches = _recovery_branch_slices(region)
+            for (heading, _), (required, forbidden) in zip(
+                _RECOVERY_BRANCHES, _RECOVERY_ROLE_CONTROLS
+            ):
+                branch = _collapsed(branches[heading])
+                for marker in required:
+                    assert marker in branch, f"{name} {heading} lacks role marker {marker!r}"
+                for marker in forbidden:
+                    assert marker not in branch, f"{name} {heading} has role confusion {marker!r}"
 
     def test_root_first_spawn_summary_uses_ordered_recovery(self):
         summary = _root_first_spawn_summary(_read(_ROOT_README))
@@ -326,6 +424,17 @@ class TestCurrentRecoveryContract:
         assert positions == sorted(positions), "first-spawn recovery is out of order"
         for stale in _STALE_FIRST_SPAWN_CLAIMS:
             assert stale not in summary, f"first-spawn summary retains {stale!r}"
+
+    def test_root_first_spawn_summary_assigns_actor_roles(self):
+        summary = _collapsed(_root_first_spawn_summary(_read(_ROOT_README)))
+        positions = []
+        for marker in _ROOT_ROLE_MARKERS:
+            assert marker in summary, f"first-spawn summary lacks role marker {marker!r}"
+            positions.append(summary.index(marker))
+        assert positions == sorted(positions), "first-spawn actor roles are out of order"
+        for _, forbidden in _RECOVERY_ROLE_CONTROLS:
+            for marker in forbidden:
+                assert marker not in summary, f"first-spawn summary has role confusion {marker!r}"
 
     def test_current_regions_exclude_legacy_keys_and_flag_respawn(self):
         for name, region in _current_recovery_regions().items():
