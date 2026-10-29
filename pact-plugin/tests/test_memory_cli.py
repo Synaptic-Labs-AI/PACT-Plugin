@@ -661,6 +661,21 @@ class TestCliSearchCommand:
             "query", current_file=None, limit=3, sync_to_claude=False
         )
 
+    def test_api_search_default_limit_is_20(self):
+        """Pin the SECOND binding site: the module API's signature default.
+
+        The CLI default is pinned by test_search_limit_default and the
+        call-through pins above, but cmd_search always passes an explicit
+        limit, so none of them would redden if the API default drifted back
+        and the module stopped matching its own docs — the exact divergence
+        raising the default in both places exists to prevent. Signature
+        inspection, per the test_signature_mirrors_search pattern.
+        """
+        import inspect
+        params = inspect.signature(PACTMemory.search).parameters
+        assert "limit" in params
+        assert params["limit"].default == 20
+
     def test_search_empty_results(self, mock_pact_memory, capsys):
         parser = build_parser()
         args = parser.parse_args(["search", "nonexistent"])
@@ -1061,6 +1076,20 @@ class TestCliUpdateCommand:
         err_output = json.loads(capsys.readouterr().err)
         assert err_output["error"] == "MISSING_INPUT"
         assert "--stdin" in err_output["message"]
+
+    def test_update_empty_stdin_via_dash_is_missing_input(self, capsys, monkeypatch):
+        # The dash channel of the guard, mirroring the save-side pair: the
+        # plan's "empty-stdin via update mirrors save" row, second channel.
+        monkeypatch.setattr("sys.stdin", StringIO("  \n"))
+        parser = build_parser()
+        args = parser.parse_args(["update", "abc123", "-"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_update(args)
+        assert exc_info.value.code == 1
+        err_output = json.loads(capsys.readouterr().err)
+        assert err_output["error"] == "MISSING_INPUT"
+        assert "'-'" in err_output["message"]
 
     def test_update_invalid_json(self, capsys):
         parser = build_parser()
@@ -2333,6 +2362,74 @@ class TestCliSubprocess:
         # Status should include core fields from get_status()
         assert "memory_count" in output["result"]
         assert "project_id" in output["result"]
+
+
+@pytest.mark.requires_embedding_backend
+class TestSearchWindowContainment:
+    """The issue-#1647 mechanism, pinned at the real retriever (plan P1).
+
+    A ranked retriever always fills its window: a record ranked below the
+    limit is invisible and indistinguishable from not-in-store, because the
+    same query confidently returns a full page of other records. Seeding a
+    store where ten verbatim-vocabulary fillers outrank a zero-overlap
+    target makes that mechanism observable in both directions at once:
+
+      * at --limit 5 the window fills with fillers and the target is absent
+        (the invisible miss — the defect this PR raised the default over);
+      * at the new default 20 the same query returns the whole store,
+        target included (the record was never absent, only below five).
+
+    Assertions are CONTAINMENT ONLY (present/absent within the window), never
+    exact ranks: model2vec rank order across machines is unverified, and the
+    margins here (10 verbatim fillers vs a zero-overlap target for the
+    below-5 arm; an 11-record store against a 20 window for the visible arm)
+    are chosen so rank wobble inside those margins cannot flip either arm.
+    """
+
+    FILLER_QUERY = "orchestration cadence telemetry"
+    FILLERS = 10
+
+    def _seed(self, db_path):
+        """Seed in-process: one model load for all saves, not one per save."""
+        memory = PACTMemory(db_path=db_path)
+        for i in range(self.FILLERS):
+            memory.save(
+                {
+                    "context": f"{self.FILLER_QUERY} filler {i}",
+                    "goal": f"pad the rank window {i}",
+                },
+                sync_to_claude=False,
+            )
+        return memory.save(
+            {
+                "context": "zebra quorum calibration note",
+                "goal": "distinctive target marker",
+            },
+            sync_to_claude=False,
+        )
+
+    def _search(self, cli_script_path, db_path, *extra):
+        result = subprocess.run(
+            [sys.executable, cli_script_path, "search", self.FILLER_QUERY,
+             "--db-path", str(db_path), *extra],
+            capture_output=True, text=True, timeout=300,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        return json.loads(result.stdout)["result"]
+
+    def test_target_below_window_invisible_at_5_visible_at_default(
+        self, cli_script_path, cli_db
+    ):
+        target_id = self._seed(cli_db)
+
+        at_five = self._search(cli_script_path, cli_db, "--limit", "5")
+        # The window FILLS — that is the invisibility mechanism itself: no
+        # null, no empty page, nothing on the surface saying "clipped".
+        assert len(at_five) == 5
+        assert target_id not in [m["id"] for m in at_five]
+
+        at_default = self._search(cli_script_path, cli_db)
+        assert target_id in [m["id"] for m in at_default]
 
 
 # ---------------------------------------------------------------------------
