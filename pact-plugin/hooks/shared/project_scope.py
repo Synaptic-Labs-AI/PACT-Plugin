@@ -135,6 +135,37 @@ def same_repository(env_dir: Path, base: Path) -> bool:
         return False
 
 
+def _toplevel_path(directory: Path) -> Optional[Path]:
+    """`git -C <directory> rev-parse --show-toplevel` as a resolved path.
+
+    THE OUTPUT IS NOT STRIPPED, unlike `_git_output`. A path can end in
+    whitespace, and the worktree listing preserves it, so comparing a
+    strip()ped toplevel against the listing fails in BOTH directions: it
+    rejects a legitimate worktree at `.../wt ` (the stripped value is not
+    listed) and it admits a forged directory at `.../wt ` whose gitfile names
+    the real `.../wt` (the stripped value IS listed). Drop exactly one
+    trailing newline -- git's record terminator -- and keep every other byte;
+    resolving then applies the same normalisation to both sides.
+    """
+    result = run_git(
+        ["-C", str(directory), "rev-parse", "--show-toplevel"],
+        timeout=5,
+        env=git_env_without_location(),
+    )
+    if result is None or result.returncode != 0 or not result.stdout:
+        return None
+    raw = result.stdout
+    if raw.endswith("\n"):
+        raw = raw[:-1]
+    path = Path(raw)
+    if not path.is_absolute():
+        path = Path(directory) / path
+    try:
+        return path.resolve()
+    except OSError:
+        return None
+
+
 def project_memory_root(project_dir: str | os.PathLike[str]) -> Path:
     """Return the directory that owns this session's project memory file.
 
@@ -156,10 +187,11 @@ def project_memory_root(project_dir: str | os.PathLike[str]) -> Path:
     common dir are equal), and the candidate verification excludes a worktree
     of a bare repository, where the parent is not a checkout root either.
 
-    Composes `_git_output`, which runs `git -C <dir>` with
-    `git_env_without_location()` -- an inherited GIT_DIR would otherwise make
-    every directory report one repository, and a bare `git rev-parse` would
-    classify the hook's CWD instead of the project dir.
+    Composes `_git_output`, and `_toplevel_path` for the toplevel (whose
+    trailing whitespace the strip would remove), both running `git -C <dir>`
+    with `git_env_without_location()` -- an inherited GIT_DIR would otherwise
+    make every directory report one repository, and a bare `git rev-parse`
+    would classify the hook's CWD instead of the project dir.
     """
     given = Path(project_dir)
     git_dir = _rev_parse_path(given, "--git-dir")
@@ -167,7 +199,7 @@ def project_memory_root(project_dir: str | os.PathLike[str]) -> Path:
     if git_dir is None or common_dir is None or git_dir == common_dir:
         return given
     candidate = common_dir.parent
-    if _rev_parse_path(candidate, "--show-toplevel") != candidate:
+    if _toplevel_path(candidate) != candidate:
         return given
     if _rev_parse_path(candidate, "--git-common-dir") != common_dir:
         return given
@@ -178,7 +210,7 @@ def project_memory_root(project_dir: str | os.PathLike[str]) -> Path:
     # -- so a writer would target a project nobody named. The worktree records
     # git keeps must list this directory's own top level; a forged gitfile is
     # not listed. Fail-safe is the input.
-    toplevel = _rev_parse_path(given, "--show-toplevel")
+    toplevel = _toplevel_path(given)
     if toplevel is None or toplevel not in _listed_worktrees(
         candidate, resolve_against=candidate
     ):

@@ -235,3 +235,40 @@ def test_a11c_the_fallback_still_guards_forged_gitfiles(repo, tmp_path, monkeypa
 
     assert project_memory_root(forged_absolute) == forged_absolute
     assert project_memory_root(forged_relative) == forged_relative
+
+
+def test_a12_a_worktree_path_with_a_trailing_space_redirects_to_main(
+    repo, tmp_path
+):
+    """R-3 false rejection: the listing preserves a trailing space, the
+    stripped toplevel does not, so a legitimate worktree fell back to itself."""
+    path = tmp_path / "wt-space "
+    _git("worktree", "add", "-q", str(path), "-b", "space", cwd=repo)
+    assert project_memory_root(path) == repo.resolve()
+
+
+def test_a12b_a_main_checkout_path_with_a_trailing_space_is_a_valid_root(
+    tmp_path,
+):
+    """R-3 on the candidate side: a main root ending in a space must still
+    verify as a checkout root, or every worktree under it falls back."""
+    main = tmp_path / "main "
+    main.mkdir()
+    _git("init", "-q", ".", cwd=main)
+    (main / "README").write_text("seed\n")
+    _git("add", ".", cwd=main)
+    _git("commit", "-qm", "seed", cwd=main)
+    worktree = main / ".worktrees" / "wt"
+    _git("worktree", "add", "-q", str(worktree), "-b", "sp-main", cwd=main)
+    assert project_memory_root(worktree) == main.resolve()
+
+
+def test_a13_a_forged_path_one_space_away_is_not_admitted(repo):
+    """R-3 false admission: a forged gitfile at the real worktree path plus a
+    trailing space strips to a listed entry and returned the victim checkout."""
+    real = _worktree(repo, "wt-real-13")
+    admin = next((repo / ".git" / "worktrees").iterdir())
+    forged = real.parent / (real.name + " ")
+    forged.mkdir()
+    (forged / ".git").write_text(f"gitdir: {admin}\n")
+    assert project_memory_root(forged) == forged
