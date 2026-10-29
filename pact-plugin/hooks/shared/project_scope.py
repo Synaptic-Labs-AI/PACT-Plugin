@@ -171,6 +171,18 @@ def project_memory_root(project_dir: str | os.PathLike[str]) -> Path:
         return given
     if _rev_parse_path(candidate, "--git-common-dir") != common_dir:
         return given
+    # A GITFILE CAN BE FORGED. A directory carrying only a `.git` FILE whose
+    # `gitdir:` line names another repository's worktree admin dir makes every
+    # check above agree: git reports that repository's git dir, common dir and
+    # checkout root, while the asking directory is not a checkout of it at all
+    # -- so a writer would target a project nobody named. The worktree records
+    # git keeps must list this directory's own top level; a forged gitfile is
+    # not listed. Fail-safe is the input.
+    toplevel = _rev_parse_path(given, "--show-toplevel")
+    if toplevel is None or toplevel not in _listed_worktrees(
+        candidate, resolve_against=candidate
+    ):
+        return given
     return candidate
 
 
@@ -185,19 +197,30 @@ def _nearest_existing_directory(path: Path) -> Optional[Path]:
     return None
 
 
-def _listed_worktrees(checkout: Path) -> Set[Path]:
+def _listed_worktrees(
+    checkout: Path, resolve_against: Optional[Path] = None
+) -> Set[Path]:
     """Resolved paths of every worktree git records for the repository at `checkout`.
 
     Includes a PRUNABLE worktree, whose directory is gone but whose record
     remains until `git worktree prune`. `git worktree remove` deletes the
     record as well, so a worktree removed that way is not listed.
+
+    `resolve_against` is the directory a RELATIVE recorded path resolves
+    against. git records relative worktree paths against the main worktree
+    root, so a caller holding that root passes it; the default, the process
+    cwd, is what every pre-existing caller used.
     """
     output = _git_output(checkout, "worktree", "list", "--porcelain")
+    base = resolve_against or Path.cwd()
     listed: Set[Path] = set()
     for line in (output or "").splitlines():
         if line.startswith("worktree "):
             try:
-                listed.add(Path(line[len("worktree "):]).resolve())
+                path = Path(line[len("worktree "):])
+                if not path.is_absolute():
+                    path = base / path
+                listed.add(path.resolve())
             except OSError:
                 continue
     return listed

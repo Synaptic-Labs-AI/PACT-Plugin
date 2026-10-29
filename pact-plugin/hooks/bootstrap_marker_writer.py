@@ -422,10 +422,11 @@ def _write_back_aligned_team_name(input_data: dict) -> None:
     CLAUDE.md guard (HARD requirement): the target is resolved via
     ``resolve_project_claude_md_path`` and ``exists()``-guarded BEFORE calling
     ``update_session_info``. That function's Case-0 branch CREATES a brand-new
-    PACT-managed CLAUDE.md when the file is absent — which in a gitignored/
-    absent worktree would MATERIALIZE a file we must never create. So when the
-    CLAUDE.md is absent we SKIP the CLAUDE.md write entirely (the context-file
-    write-back still happens). When present, we pass the FULL correct tuple
+    PACT-managed CLAUDE.md when the file is absent — and at the project-memory
+    root this hook targets (the main checkout for a linked worktree, #1653)
+    that would MATERIALIZE a project CLAUDE.md we must never create. So when
+    the CLAUDE.md is absent we SKIP the CLAUDE.md write entirely (the
+    context-file write-back still happens). When present, we pass the FULL correct tuple
     (session_id / aligned team_name / session_dir / plugin_root) because
     ``update_session_info`` rewrites the WHOLE managed session block.
 
@@ -491,7 +492,7 @@ def _write_back_aligned_team_name(input_data: dict) -> None:
         memory_root = project_memory_root(project_dir)
         target_file, _source = resolve_project_claude_md_path(memory_root)
         if not target_file.exists():
-            # Absent (e.g. gitignored worktree CLAUDE.md): SKIP the CLAUDE.md
+            # Absent at the project-memory root: SKIP the CLAUDE.md
             # write. The context-file write-back above already happened; the
             # human-readable line just stays absent, which is correct here.
             return

@@ -6,15 +6,17 @@ Used by: session_init.py during SessionStart hook to scaffold the project
          PACT_MEMORY-wrapped memory sections) and to migrate legacy project
          CLAUDE.md files into the boundary structure.
 
-Manages the project CLAUDE.md at $CLAUDE_PROJECT_DIR — preferred at
-.claude/CLAUDE.md, legacy at ./CLAUDE.md — with the PACT_MANAGED outer
-boundary, optional SESSION_START/SESSION_END block, and PACT_MEMORY inner
-boundary wrapping memory sections.
+Manages the project CLAUDE.md at the caller's base directory — by default
+$CLAUDE_PROJECT_DIR, but a worktree-lead caller passes the main checkout,
+where project memory lives (#1653) — preferred at .claude/CLAUDE.md, legacy
+at ./CLAUDE.md, with the PACT_MANAGED outer boundary, optional
+SESSION_START/SESSION_END block, and PACT_MEMORY inner boundary wrapping
+memory sections.
 
 Project CLAUDE.md location resolution:
 Claude Code supports two locations for project-level memory:
-  - $CLAUDE_PROJECT_DIR/.claude/CLAUDE.md  (preferred / new default)
-  - $CLAUDE_PROJECT_DIR/CLAUDE.md          (legacy)
+  - <base>/.claude/CLAUDE.md  (preferred / new default)
+  - <base>/CLAUDE.md          (legacy)
 The resolve_project_claude_md_path() helper picks whichever exists, with
 .claude/CLAUDE.md taking priority. When neither exists, it returns the new
 default path so creators land at the preferred location.

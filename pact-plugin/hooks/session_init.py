@@ -148,6 +148,7 @@ from shared.session_resume import (
     RESUMPTION_MARKER_MISSING_DIRECTIVE,
     _extract_prev_session_dir,
     _same_dir,
+    _sanitize_prompt_field,
     _validate_under_pact_sessions,  # noqa: F401  # re-export: tests import it from session_init
     format_session_substitutions,
     update_session_info,
@@ -305,7 +306,10 @@ def _should_warn_unknown_role(input_data: dict) -> bool:
     return not is_registered_pact_specialist(stripped, plugin_root=plugin_root)
 
 
-def check_pinned_staleness():
+def check_pinned_staleness(
+    project_dir: str | os.PathLike[str] | None = None,
+    memory_root: Path | None = None,
+):
     """
     Thin wrapper around staleness.check_pinned_staleness().
 
@@ -314,10 +318,21 @@ def check_pinned_staleness():
 
     WORKTREE LEAD (#1653). When project memory belongs to the main checkout,
     the worktree path is wrong: staleness would mark a file that dies with the
-    worktree. The branch condition is `project_memory_root(project_dir)`
-    differing from `project_dir`; when it does NOT differ -- every non-worktree
-    session -- the alias above is used exactly as before, so the patched test
-    seam and the byte-identical output both hold.
+    worktree. The branch condition is `memory_root` differing from
+    `project_dir`; when it does NOT differ -- every non-worktree session --
+    the alias above is used exactly as before, so the patched test seam and
+    the byte-identical output both hold.
+
+    THE CALLER PASSES THE BASE IT ALREADY COMPUTED (main() derives
+    `project_dir` as env-or-cwd and `memory_root` from it). Re-deriving the
+    root here from the environment would agree only while the two call sites
+    happen to read the same value; a no-argument call falls back to today's
+    environment read for direct and test callers.
+
+    THE WORKTREE BRANCH BYPASSES `_get_project_claude_md_path`. An arm that
+    patches that alias drives only the non-worktree route; to exercise the
+    retarget it must pass a base pair, or set the environment and call this
+    with no arguments (which derives the pair from the environment).
 
     THE NO-MAIN-FILE BRANCH RETURNS None AND DOES NOT CALL THE CORE. Passing
     `claude_md_path=None` does NOT mean "nothing to mark": the core re-enters
@@ -327,14 +342,14 @@ def check_pinned_staleness():
     "main has no CLAUDE.md yet" path. This check marks an existing file; it
     never creates one, and with no main file there is nothing to mark.
     """
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    if project_dir:
-        memory_root = project_memory_root(project_dir)
-        if memory_root != Path(project_dir):
-            target, source = resolve_project_claude_md_path(memory_root)
-            if source == "new_default":
-                return None
-            return _staleness_check(claude_md_path=target)
+    if project_dir is None:
+        project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+        memory_root = project_memory_root(project_dir) if project_dir else None
+    if project_dir and memory_root is not None and memory_root != Path(project_dir):
+        target, source = resolve_project_claude_md_path(memory_root)
+        if source == "new_default":
+            return None
+        return _staleness_check(claude_md_path=target)
     path = _get_project_claude_md_path()
     return _staleness_check(claude_md_path=path)
 
@@ -349,18 +364,37 @@ def _worktree_memory_notice(memory_root: Path, project_dir: str) -> Optional[str
     absolute paths, states the durability consequence, and conditions the
     remedy on whether the file belongs to the branch -- it never tells the
     user to delete a tracked file, which is exactly the case it fires on.
+
+    THE MANAGED PATH IS PRESENT TENSE ONLY WHEN IT EXISTS. The resolver's
+    `new_default` source means step 3 could not create it (an unwritable main
+    checkout, a containment refusal), so the line says "will be managed in"
+    rather than asserting a file that was never written. The durability
+    warning still applies in that case -- the worktree copy is what the
+    session keeps reading and writing.
+
+    Both interpolated paths are path-derived text in a prompt field, so each
+    passes through `_sanitize_prompt_field`: control characters collapse to
+    spaces and the length is bounded. A path that carried a newline could
+    otherwise forge an extra line of context.
     """
     if memory_root == Path(project_dir):
         return None
     worktree_md, worktree_source = resolve_project_claude_md_path(project_dir)
     if worktree_source == "new_default":
         return None
-    managed_md, _managed_source = resolve_project_claude_md_path(memory_root)
+    managed_md, managed_source = resolve_project_claude_md_path(memory_root)
+    managed_path = _sanitize_prompt_field(str(managed_md))
+    stated_managed = (
+        f"Project memory is managed in {managed_path}."
+        if managed_source != "new_default"
+        else f"Project memory will be managed in {managed_path}."
+    )
     return (
-        f"Project memory is managed in {managed_md}. This worktree also carries "
-        f"{worktree_md}, and memory saves from this session still project into "
-        "it — entries written there are lost when the worktree is removed. If "
-        "that file is not meant to be part of the branch, remove or untrack it."
+        f"{stated_managed} This worktree also carries "
+        f"{_sanitize_prompt_field(str(worktree_md))}, and memory saves from this "
+        "session still project into it — entries written there are lost when the "
+        "worktree is removed. If that file is not meant to be part of the branch, "
+        "remove or untrack it."
     )
 
 
@@ -1807,7 +1841,7 @@ def main():
         # CLAUDE.md. Failed/skipped diagnostics go to system_messages, the
         # advisory to context.
         if frame_is_lead:
-            staleness_msg = check_pinned_staleness()
+            staleness_msg = check_pinned_staleness(project_dir, memory_root)
             if staleness_msg:
                 if "failed" in staleness_msg.lower() or "skipped" in staleness_msg.lower():
                     system_messages.append(staleness_msg)

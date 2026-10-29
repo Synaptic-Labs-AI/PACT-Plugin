@@ -255,6 +255,23 @@ def _plan_and_write() -> str:
         if path is None or base is None:
             return "noop_no_file"
 
+        # A SUPPLIED ROOT MUST CONTAIN THE TARGET (#1653, Bugbot). The
+        # resolver tries the supplied root first and then falls through to its
+        # git and cwd rungs. On a first-rung miss -- the main checkout has no
+        # CLAUDE.md while the worktree still carries one -- it returns the
+        # WORKTREE file, and the markers would land there: the committable
+        # worktree write this change exists to stop. The check is on the
+        # DIRECTORY THE WRITE BINDS INTO, not the leaf, because
+        # `_atomic_write_text` replaces the leaf ENTRY and never follows it,
+        # so a leaf symlink is not an escape. It cannot silently fall through:
+        # anything outside the memory root is a no-op, whatever rung produced
+        # it.
+        if memory_root is not None:
+            try:
+                path.parent.resolve().relative_to(memory_root.resolve())
+            except (ValueError, OSError):
+                return "noop_outside_memory_root"
+
         # Decoded with replacement, so a file that is not UTF-8 still gets the
         # ladder's own no-op. The text is NEVER WRITTEN as read: the write
         # below needs a strict re-read under the lock to equal it.

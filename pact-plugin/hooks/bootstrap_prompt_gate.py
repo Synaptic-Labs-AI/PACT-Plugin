@@ -409,8 +409,10 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
         session_id = str(input_data["session_id"])
         team = pact_context.get_team_name()
         plugin_root = pact_context.get_plugin_root()
-        # update_session_info writes the file CLAUDE_PROJECT_DIR names, so the
-        # block is looked for there, through the same resolver.
+        # update_session_info writes the PROJECT-MEMORY root's file (#1653):
+        # CLAUDE_PROJECT_DIR for a main checkout, the main checkout for a
+        # linked worktree. The block is looked for there, through the same
+        # resolver.
         env_project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
         project_dir = env_project_dir or os.getcwd()
         # The block is read AND rewritten at the project-memory root, so a

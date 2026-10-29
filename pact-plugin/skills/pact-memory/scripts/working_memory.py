@@ -1173,11 +1173,12 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
         # nothing under the worktree root, so the file the session reads is
         # the MAIN repo's. A worktree CAN be a session root (a lead started
         # there); branch 2 stays for a worktree that legitimately carries its
-        # own CLAUDE.md, where the display keeps updating that file. After
-        # #1653 the session-start writers target the main checkout while
-        # branch 2 still updates the worktree copy, so the two diverge for
-        # that session -- stated, not hidden. Do not delete branch 2: it is
-        # deliberate, not a leftover of the bug.
+        # own CLAUDE.md. After #1653 the session-start writers target the main
+        # checkout while the display resolver still updates the worktree copy
+        # -- through the ENV probe above when CLAUDE_PROJECT_DIR names that
+        # worktree, and through branch 2 only when that probe is reached and
+        # misses -- so the two diverge for that session, stated, not hidden.
+        # Do not delete branch 2: it is deliberate, not a leftover of the bug.
         # --git-common-dir points at the shared .git dir whether run from the
         # main repo or a linked worktree, so its parent is the main repo root
         # in both. This is _get_claude_md_path's exact anchor.
@@ -2246,7 +2247,9 @@ def _refuse_ambient_sync_from_a_redirected_store(
     worktree session whose worktree root holds no CLAUDE.md reads the MAIN
     checkout's file, so the branch is how an ordinary save reaches the file
     the session displays. A worktree that carries its own CLAUDE.md is served
-    by the display resolver's branch 2 instead and is not this branch's case.
+    by the display resolver instead -- the ENV probe when CLAUDE_PROJECT_DIR
+    names it, branch 2 when that probe is reached and misses -- and is not
+    this branch's case.
     Refusing it would lose every worktree save projection, which is the
     over-block this guard is shaped to avoid.
 

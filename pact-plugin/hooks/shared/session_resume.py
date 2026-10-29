@@ -405,7 +405,21 @@ def update_session_info(
     # first guarantees the parent gets the intended 0o700 mode. The call is
     # idempotent, so concurrent callers are safe: whichever thread creates
     # the directory wins with 0o700, others see `parent.exists()` and no-op.
-    ensure_dot_claude_parent(target_file)
+    #
+    # #1653/F8: A PERMISSION FAILURE HERE IS A WRITE FAILURE, NOT A CRASH.
+    # The parent now belongs to the project-memory root, which for a worktree
+    # lead is the MAIN checkout — a checkout this process may not be able to
+    # write. An OSError escaping here used to abort the rest of SessionStart
+    # through the caller's safety net; it returns the writer's own status
+    # instead, like every other failure below. The call stays OUTSIDE
+    # `file_lock` because the 0o700 guarantee above depends on it, so the
+    # failure is caught here rather than by the lock-acquisition handler
+    # further down, whose message would misreport a mkdir failure as a lock
+    # failure.
+    try:
+        ensure_dot_claude_parent(target_file)
+    except OSError as e:
+        return session_info_failure(e)
 
     # Concurrency guard: serialize read-mutate-write so two concurrent
     # session_init hooks on the same project CLAUDE.md cannot interleave
