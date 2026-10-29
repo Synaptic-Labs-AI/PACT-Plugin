@@ -261,6 +261,23 @@ class TestCurrentAgentDispatchContract:
             for lineno, block in sites:
                 assert TOOLSEARCH_LOAD in block, f"{rel}:{lineno} lacks the load line"
 
+    def test_mandatory_agent_template_is_named_team_scoped_and_flagless(self):
+        region = _section(
+            _read(_PERSONA), "## 11. Agent Teams Dispatch", "**Teachback-Gated Dispatch**"
+        )
+        assert "Specialists are spawned as teammates via `Agent(" in region
+        for marker in (
+            "name=...",
+            'team_name="{team_name}"',
+            "subagent_type=...",
+            "description=...",
+            "prompt=...",
+        ):
+            assert marker in region, f"MANDATORY Agent template lacks {marker!r}"
+        assert not _AGENT_PARAMETER.search(region), (
+            "MANDATORY Agent template carries an execution-mode parameter"
+        )
+
 
 class TestNoTouchSurfacesSurvive:
     """Pre-decided dispositions (spec §6) pinned affirmatively."""
@@ -279,11 +296,15 @@ class TestCurrentRecoveryContract:
     def test_branch_markers_are_present_and_ordered(self):
         for name, region in _current_recovery_regions().items():
             positions = []
-            for heading, control in _RECOVERY_BRANCHES:
+            for heading, _ in _RECOVERY_BRANCHES:
                 assert region.count(heading) == 1, f"{name} lacks {heading}"
-                assert control in region, f"{name} lacks control {control!r}"
                 positions.append(region.index(heading))
             assert positions == sorted(positions), f"{name} branches are out of order"
+            for index, (heading, control) in enumerate(_RECOVERY_BRANCHES):
+                start = positions[index] + len(heading)
+                end = positions[index + 1] if index + 1 < len(positions) else len(region)
+                branch = region[start:end]
+                assert control in branch, f"{name} {heading} lacks its own control {control!r}"
 
     def test_root_first_spawn_summary_uses_ordered_recovery(self):
         summary = _root_first_spawn_summary(_read(_ROOT_README))
