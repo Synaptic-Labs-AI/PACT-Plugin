@@ -393,6 +393,10 @@ class TestCurrentRecoveryContract:
                 )
 
     def test_recovery_roles_are_actor_local(self):
+        assert len(_RECOVERY_BRANCHES) == len(_RECOVERY_ROLE_CONTROLS), (
+            f"role-control cardinality mismatch: {len(_RECOVERY_BRANCHES)} branches vs "
+            f"{len(_RECOVERY_ROLE_CONTROLS)} control sets"
+        )
         for name, region in _current_recovery_regions().items():
             branches = _recovery_branch_slices(region)
             for (heading, _), (required, forbidden) in zip(
