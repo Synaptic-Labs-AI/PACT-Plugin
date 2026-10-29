@@ -90,6 +90,11 @@ _RECOVERY_BRANCHES = (
     ("H. **Stop on messaging failure.**", "team-formation/messaging"),
 )
 
+_STALE_FIRST_SPAWN_CLAIMS = (
+    "the dispatch was malformed",
+    "corrects the dispatch shape, and re-spawns",
+)
+
 # The realigned-name citation every documented raw-read path site must carry
 # within +/-3 lines (same line, or the sentence that explains the segment).
 CITATION = "pact-session-context.json"
@@ -158,6 +163,14 @@ def _current_recovery_regions() -> dict[str, str]:
             "## §4 Historical evidence",
         ),
     }
+
+
+def _root_first_spawn_summary(text: str) -> str:
+    return _section(
+        text,
+        "**First-spawn HARD-STOP verification**",
+        "**Structural verification discipline**",
+    )
 
 
 def _runbook_arms() -> dict[str, str]:
@@ -271,6 +284,27 @@ class TestCurrentRecoveryContract:
                 assert control in region, f"{name} lacks control {control!r}"
                 positions.append(region.index(heading))
             assert positions == sorted(positions), f"{name} branches are out of order"
+
+    def test_root_first_spawn_summary_uses_ordered_recovery(self):
+        summary = _root_first_spawn_summary(_read(_ROOT_README))
+        ordered = (
+            "load deferred tools",
+            "check the lead session",
+            "live Agent schema",
+            "named, interactive teammate",
+            "registration and addressability",
+            "display-mode inheritance",
+            "guarded legacy branch",
+            "`SendMessage` reaches the lead",
+            "messaging also fails",
+        )
+        positions = []
+        for marker in ordered:
+            assert marker in summary, f"first-spawn summary lacks {marker!r}"
+            positions.append(summary.index(marker))
+        assert positions == sorted(positions), "first-spawn recovery is out of order"
+        for stale in _STALE_FIRST_SPAWN_CLAIMS:
+            assert stale not in summary, f"first-spawn summary retains {stale!r}"
 
     def test_current_regions_exclude_legacy_keys_and_flag_respawn(self):
         for name, region in _current_recovery_regions().items():
