@@ -157,7 +157,7 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" save '{
 # "never" in that table are read-only and are rejected if you send them.
 
 # Search memories
-python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" search "rate limiting tokens"
+python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" search "rate limiting tokens" --limit 30
 
 # Search with graph-enhanced boosting for current file
 python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" search "auth tokens" --current-file src/auth/refresh.ts
@@ -256,7 +256,7 @@ field instead.
 | `save <json>` | Save a memory object; `--no-sync` leaves CLAUDE.md's Working Memory untouched | `{"memory_id": "<hex>", "sync_status": "..."}` |
 | `save --stdin` | Save from piped JSON | `{"memory_id": "<hex>", "sync_status": "..."}` |
 | `search <query>` | Semantic search | `[{"id": "...", "context": "...", ...}, ...]` |
-| `search <query> --limit N` | Search with limit | `[...]` (default: 5) |
+| `search <query> --limit N` | Search with limit | `[...]` (default: 20) |
 | `search <query> --current-file <path>` | Search with graph boosting | `[...]` (boosts file-related memories) |
 | `list` | List recent memories | `[{"id": "...", "context": "...", ...}, ...]` |
 | `list --limit N` | List with limit | `[...]` (default: 20) |
@@ -465,6 +465,10 @@ GOOD (comprehensive):
 python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" search "<query>"
 ```
 Returns semantically similar memories. Use natural language queries.
+Default limit: 20 (matches `list`). A ranked retriever always fills its
+window, so a miss below the limit is invisible and indistinguishable from
+not-in-store: raise `--limit` (25-50) to find or verify a specific record;
+lower it (e.g. 5) to save context on broad scans.
 
 ### List Command
 ```bash

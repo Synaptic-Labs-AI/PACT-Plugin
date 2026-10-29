@@ -997,7 +997,7 @@ def build_parser():
     search_parser._teach_example = examples["search"]
     search_parser.add_argument("query", help="Search query text")
     search_parser.add_argument(
-        "--limit", type=_positive_int, default=5, help="Max results (default: 5)"
+        "--limit", type=_positive_int, default=20, help="Max results (default: 20)"
     )
     # PLUMBED EVEN THOUGH THE SEARCH PATH CANNOT SYNC TODAY. `cmd_search`
     # passes `sync_to_claude=False`, so this is inert right now -- which is

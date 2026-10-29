@@ -182,7 +182,7 @@ class TestCliArgParsing:
     def test_search_limit_default(self):
         parser = build_parser()
         args = parser.parse_args(["search", "query"])
-        assert args.limit == 5
+        assert args.limit == 20
 
     def test_search_limit_custom(self):
         parser = build_parser()
@@ -647,7 +647,7 @@ class TestCliSearchCommand:
                 cmd_search(args)
         assert exc_info.value.code == 0
         mock_pact_memory.search.assert_called_once_with(
-            "auth tokens", current_file=None, limit=5, sync_to_claude=False
+            "auth tokens", current_file=None, limit=20, sync_to_claude=False
         )
 
     def test_search_with_limit(self, mock_pact_memory):
@@ -682,7 +682,7 @@ class TestCliSearchCommand:
                 cmd_search(args)
         assert exc_info.value.code == 0
         mock_pact_memory.search.assert_called_once_with(
-            "auth", current_file="/src/auth.py", limit=5, sync_to_claude=False
+            "auth", current_file="/src/auth.py", limit=20, sync_to_claude=False
         )
 
     def test_search_with_results(self, mock_pact_memory, capsys):
