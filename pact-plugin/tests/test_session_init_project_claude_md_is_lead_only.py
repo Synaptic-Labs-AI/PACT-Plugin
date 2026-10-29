@@ -503,18 +503,20 @@ class TestWorktreeTeammateWritesNothing:
         finally:
             os.chmod(main, 0o700)
 
-        # The permission failure reaches systemMessage on either route: today
-        # through session_init's safety net ("... Permission denied: <path>"),
-        # and after the coder moves ensure_dot_claude_parent inside
-        # update_session_info's try, through the writer's own status
-        # ("Session info failed: PermissionError (EACCES)"). The assertion is
-        # vocabulary-agnostic on purpose so this arm does not encode which
-        # route is in place; the absence of files below is the fail-closed
-        # claim.
-        assert "permission" in system_message.lower(), (
-            "the permission failure did not reach systemMessage on either "
-            f"route; context={context[:200]!r} "
-            f"system_message={system_message[:200]!r}"
+        # Route history: this arm was vocabulary-agnostic ("permission
+        # anywhere in the message") during the transition while the coder
+        # moved ensure_dot_claude_parent inside update_session_info's try; it
+        # is pinned to the returned-status route now that the route is stable.
+        # The no-abort control is the point of the fix: before it, this OSError
+        # escaped to session_init's safety net and skipped the rest of the
+        # start.
+        assert "Session info failed: PermissionError (EACCES)" in system_message, (
+            "the writer's own permission status did not reach systemMessage; "
+            f"context={context[:200]!r} system_message={system_message[:400]!r}"
+        )
+        assert "hook warning (session_init)" not in system_message.lower(), (
+            "the permission failure still aborted session_init through the "
+            "safety net instead of returning the writer's status"
         )
         assert not (main / ".claude" / "CLAUDE.md").exists(), (
             "a CLAUDE.md appeared in the read-only main checkout"
