@@ -150,8 +150,24 @@ def test_a9b_forged_gitfile_with_a_relative_path_returns_input(repo, tmp_path):
 
 
 def test_a10_a_repo_nested_in_a_worktree_returns_input(repo):
-    """A legitimate layout the new listing check must not reject: a nested
-    repository is its own main checkout, so it owns its own memory."""
+    """NON-REGRESSION GUARD, not a SEC-1 defect pin.
+
+    A legitimate layout the listing check must not reject: a nested repository
+    is its own main checkout, so it owns its own memory. It is labelled here
+    because it CANNOT redden on the SEC-1 code it sits beside: a nested repo
+    has git-dir == common-dir, so `project_memory_root` returns `given` at
+    that discriminator before the listing check or the candidate line can
+    run. MEASURED: removing the listing check leaves this arm green, and no
+    single-site mutation was found that reddens it, because every
+    implementation that returns either `given` or the nested candidate yields
+    the same answer.
+
+    What it does guard is a future refactor that anchors the listing check on
+    the OUTER repository, or computes the candidate from the enclosing
+    worktree: then a nested repo would resolve to its parent worktree and
+    this arm reddens. A10 and A9/A9b therefore hold different properties --
+    do not count this arm as coverage of the gitfile defence.
+    """
     worktree = _worktree(repo, "wt-nested")
     nested = worktree / "nested"
     nested.mkdir()
