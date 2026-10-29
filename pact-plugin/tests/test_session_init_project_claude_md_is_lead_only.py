@@ -61,12 +61,13 @@ def _live_registry(monkeypatch):
     )
 
 
-def _run(monkeypatch, project_dir, agent_type):
-    """Drive ``session_init.main()`` on ``startup`` with nothing stubbed."""
+def _run(monkeypatch, project_dir, agent_type, source="startup",
+         session_id=_SESSION_ID):
+    """Drive ``session_init.main()`` with nothing stubbed."""
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
     monkeypatch.chdir(project_dir)
     stdin_data = json.dumps(
-        {"session_id": _SESSION_ID, "source": "startup", "agent_type": agent_type}
+        {"session_id": session_id, "source": source, "agent_type": agent_type}
     )
     with patch("sys.stdin", io.StringIO(stdin_data)), \
          patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
@@ -440,3 +441,276 @@ class TestWorktreeTeammateWritesNothing:
             "a frame with no declared project dir created a CLAUDE.md in the "
             "main checkout"
         )
+
+    def test_a_compact_start_keeps_main_started(self, repo, monkeypatch):
+        """F1 from review: step 5b's `Started` read follows the memory root.
+
+        A compaction passes `started=_extract_session_started(memory_root)` so
+        the rewrite keeps the session's recorded start. Read from the worktree
+        instead, that returns None and the rewrite resets the line to now.
+        The assertion is the VALUE, and the new session id proves the block
+        was rewritten (otherwise the old value would survive trivially).
+        """
+        from shared.session_resume import update_session_info
+
+        main, git = repo
+        (main / "README").write_text("seed\n")
+        git("add", ".", cwd=main)
+        git("commit", "-qm", "seed", cwd=main)
+        old_started = "2026-10-19 07:00:00 UTC"
+        prev_dir = Path.home() / ".claude" / "pact-sessions" / "proj" / "f1"
+        prev_dir.mkdir(parents=True)
+        assert update_session_info(
+            "prev-session", "pact-old", str(prev_dir), started=old_started,
+            project_dir=str(main),
+        ) is not None
+        main_before = (main / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+        assert f"- Started: {old_started}" in main_before
+        assert _SESSION_ID not in main_before
+
+        worktree = self._worktree(main, git, "compact")
+        _run(monkeypatch, worktree, LEAD, source="compact")
+
+        main_text = (main / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+        assert _SESSION_ID in main_text, (
+            "control: the compact start did not rewrite MAIN's session block, "
+            "so the Started line below was never in play"
+        )
+        assert f"- Started: {old_started}" in main_text, (
+            "the compact start reset MAIN's recorded Started value"
+        )
+        assert not (worktree / ".claude" / "CLAUDE.md").exists()
+        assert not (worktree / "CLAUDE.md").exists()
+
+    def test_a_read_only_main_checkout_fails_closed(self, repo, monkeypatch):
+        """F8 from review: when MAIN's writers cannot run, nothing is written
+        anywhere and the failure reaches systemMessage.
+
+        The checkout is made unwritable with chmod (the suite runs as the
+        owning uid, not root), so the real OSError path runs; nothing is
+        mocked. If the platform ignored the mode bits the arm fails at the
+        status assertion rather than passing silently.
+        """
+        main, git = repo
+        (main / "README").write_text("seed\n")
+        git("add", ".", cwd=main)
+        git("commit", "-qm", "seed", cwd=main)
+        worktree = self._worktree(main, git, "readonly")
+
+        os.chmod(main, 0o500)
+        try:
+            context, system_message = _run(monkeypatch, worktree, LEAD)
+        finally:
+            os.chmod(main, 0o700)
+
+        # The permission failure reaches systemMessage on either route: today
+        # through session_init's safety net ("... Permission denied: <path>"),
+        # and after the coder moves ensure_dot_claude_parent inside
+        # update_session_info's try, through the writer's own status
+        # ("Session info failed: PermissionError (EACCES)"). The assertion is
+        # vocabulary-agnostic on purpose so this arm does not encode which
+        # route is in place; the absence of files below is the fail-closed
+        # claim.
+        assert "permission" in system_message.lower(), (
+            "the permission failure did not reach systemMessage on either "
+            f"route; context={context[:200]!r} "
+            f"system_message={system_message[:200]!r}"
+        )
+        assert not (main / ".claude" / "CLAUDE.md").exists(), (
+            "a CLAUDE.md appeared in the read-only main checkout"
+        )
+        assert not (worktree / ".claude" / "CLAUDE.md").exists(), (
+            "the failure was answered by planting a file in the worktree"
+        )
+        assert not (worktree / "CLAUDE.md").exists()
+
+    def test_b6_skipping_steps_3_and_3b_still_writes_nothing_in_the_worktree(
+        self, repo, monkeypatch
+    ):
+        """B6: the executable proof that option (b) cannot work.
+
+        Option (b) was "skip create/migrate when the project dir is a linked
+        worktree". With steps 3 and 3b no-oped, step 5b is still an
+        independent writer: if it kept the old target it would create or
+        rewrite the worktree file anyway, so skipping 3/3b alone cannot close
+        the defect. At HEAD 5b shares the memory root, so the worktree gains
+        nothing and MAIN gets the file.
+        """
+        main, git = repo
+        (main / "README").write_text("seed\n")
+        git("add", ".", cwd=main)
+        git("commit", "-qm", "seed", cwd=main)
+        worktree = self._worktree(main, git, "option-b")
+        monkeypatch.setattr(
+            session_init, "ensure_project_memory_md", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            session_init, "migrate_to_managed_structure", lambda *a, **k: None
+        )
+
+        context, _ = _run(monkeypatch, worktree, LEAD)
+
+        assert not (worktree / ".claude" / "CLAUDE.md").exists(), (
+            "with 3/3b skipped, step 5b still planted a CLAUDE.md in the "
+            "worktree, which is why option (b) cannot work alone"
+        )
+        assert not (worktree / "CLAUDE.md").exists()
+        assert (main / ".claude" / "CLAUDE.md").exists(), (
+            "the remaining writer (step 5b) did not reach MAIN"
+        )
+        assert "Session info created in new project CLAUDE.md" in context, (
+            "control: step 5b did not run, so the worktree's emptiness above "
+            "proves nothing"
+        )
+
+    def test_r8_a_second_start_in_the_same_worktree_is_idempotent(
+        self, repo, monkeypatch
+    ):
+        """R8: two consecutive lead starts in one worktree stay one block.
+
+        MAIN starts with a user-authored marker-less CLAUDE.md. The first
+        start migrates it and records the session; the second must rewrite the
+        block in place -- exactly one of each marker pair, the user's line
+        intact, the stale marking not duplicated -- and the worktree must gain
+        nothing either time.
+        """
+        main, git = repo
+        (main / ".claude").mkdir()
+        (main / ".claude" / "CLAUDE.md").write_text(USER_MD)
+        (main / "README").write_text("seed\n")
+        git("add", ".", cwd=main)
+        git("commit", "-qm", "seed", cwd=main)
+        worktree = self._worktree(main, git, "relaunch")
+
+        _run(monkeypatch, worktree, LEAD)
+        # A second start is a NEW session in the same worktree (a fresh
+        # launch, not a --resume), so the block must be replaced, not
+        # appended. Reusing the id would make the writer a legitimate no-op
+        # and the "updated" control below could not fire.
+        context, _ = _run(
+            monkeypatch, worktree, LEAD,
+            session_id="dddddddd-eeee-ffff-0000-111111111111",
+        )
+
+        main_text = (main / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+        assert "dddddddd-eeee-ffff-0000-111111111111" in main_text, (
+            "control: the second start did not replace the session block"
+        )
+        assert main_text.count("<!-- PACT_MANAGED_START") == 1, (
+            "the second start duplicated the managed boundary"
+        )
+        assert main_text.count("<!-- PACT_MANAGED_END") == 1
+        assert main_text.count("<!-- SESSION_START") == 1, (
+            "the second start duplicated the session block"
+        )
+        assert main_text.count("<!-- SESSION_END") == 1
+        assert main_text.count("<!-- PACT_MEMORY_START") == 1
+        assert "Build with make." in main_text, (
+            "the user's own content did not survive the second start"
+        )
+        assert main_text.count(STALE) == 1, (
+            "the stale marking was duplicated or lost on the second start"
+        )
+        assert "Session info updated in project CLAUDE.md" in context, (
+            "control: the second start did not rewrite the block, so the "
+            "single-block assertions above were never in play"
+        )
+        assert not (worktree / ".claude" / "CLAUDE.md").exists()
+        assert not (worktree / "CLAUDE.md").exists()
+
+    def test_r7_a_second_lead_waits_on_the_shared_lock_and_fails_open(
+        self, repo, monkeypatch
+    ):
+        """R7: the retarget concentrates every session of a project on MAIN's
+        lock, so the timeout path must be measured through the new target.
+
+        A separate process holds MAIN's sidecar lock; the lead start must take
+        the documented fail-open path -- "Failed to acquire lock" to
+        systemMessage, MAIN's file byte-identical, nothing in the worktree.
+        _LOCK_TIMEOUT_SECONDS is shortened so the arm does not cost 10s; the
+        lock, the poll and the timeout branch are the real ones.
+        """
+        import subprocess
+        import sys
+
+        from shared import claude_md_manager
+
+        main, git = repo
+        (main / ".claude").mkdir()
+        # A fresh pin date: no stale marking is due, so step 4 does not write
+        # (and therefore does not add a second timeout wait).
+        (main / ".claude" / "CLAUDE.md").write_text(
+            "# Project\n\n## Pinned Context\n\n"
+            "### A fresh pin 2026-10-20\n\nbody text\n"
+        )
+        (main / "README").write_text("seed\n")
+        git("add", ".", cwd=main)
+        git("commit", "-qm", "seed", cwd=main)
+        worktree = self._worktree(main, git, "lock")
+
+        lock_path = main / ".claude" / ".CLAUDE.md.lock"
+        holder_script = (
+            "import fcntl, sys, time\n"
+            "f = open(sys.argv[1], 'a')\n"
+            "fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+            "print('READY', flush=True)\n"
+            "time.sleep(60)\n"
+        )
+        holder = subprocess.Popen(
+            [sys.executable, "-c", holder_script, str(lock_path)],
+            stdout=subprocess.PIPE, text=True,
+        )
+        monkeypatch.setattr(claude_md_manager, "_LOCK_TIMEOUT_SECONDS", 0.3)
+        try:
+            assert holder.stdout.readline().strip() == "READY", (
+                "the lock holder never acquired MAIN's sidecar"
+            )
+            before = (main / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+            _context, system_message = _run(monkeypatch, worktree, LEAD)
+        finally:
+            holder.terminate()
+            holder.wait(timeout=10)
+
+        assert "Failed to acquire lock" in system_message, (
+            "the contended start did not report the lock timeout; "
+            f"system_message={system_message[:400]!r}"
+        )
+        after = (main / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+        assert after == before, "the contended start modified MAIN's file"
+        assert not (worktree / ".claude" / "CLAUDE.md").exists()
+        assert not (worktree / "CLAUDE.md").exists()
+
+    def test_the_notice_says_will_be_managed_when_main_has_no_file(self, repo):
+        """R5: a failed creation must not be asserted as an existing file."""
+        main, git = repo
+        worktree = self._worktree(main, git, "notice-future")
+        (worktree / "CLAUDE.md").write_text(USER_MD)
+
+        notice = session_init._worktree_memory_notice(main, str(worktree))
+
+        assert notice is not None, "the notice did not fire for a worktree file"
+        assert "Project memory will be managed in" in notice, (
+            "the notice asserted a managed file although the main checkout has "
+            "none (step 3 failed or had not run)"
+        )
+        assert "Project memory is managed in" not in notice
+
+    def test_the_notice_sanitises_both_paths(self, monkeypatch):
+        """SEC-2: a path carrying a newline must not forge a context line."""
+        main = Path("/tmp/main\ninject")
+        worktree = "/tmp/wt\ninject"
+
+        def fake_resolver(project_dir):
+            if str(project_dir) == str(main):
+                return Path("/tmp/main\ninject/.claude/CLAUDE.md"), "dot_claude"
+            return Path("/tmp/wt\ninject/CLAUDE.md"), "legacy"
+
+        monkeypatch.setattr(
+            session_init, "resolve_project_claude_md_path", fake_resolver
+        )
+        notice = session_init._worktree_memory_notice(main, worktree)
+
+        assert notice is not None
+        assert "\n" not in notice, "a path injected a newline into the notice"
+        assert "/tmp/main inject/.claude/CLAUDE.md" in notice
+        assert "/tmp/wt inject/CLAUDE.md" in notice

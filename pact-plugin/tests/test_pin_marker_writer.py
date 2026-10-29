@@ -2165,3 +2165,39 @@ def test_b12_pin_markers_from_a_worktree_land_in_main(tmp_path, monkeypatch):
     assert worktree_md.read_text(encoding="utf-8") == original, (
         "the pin writer edited the worktree's own CLAUDE.md"
     )
+
+
+def test_b12b_a_fallthrough_target_outside_the_memory_root_is_refused(
+    tmp_path, monkeypatch
+):
+    """Bugbot: a first-rung miss must not fall through to the worktree.
+
+    MAIN has NO CLAUDE.md, the worktree has one. The resolver's git/cwd rungs
+    return the WORKTREE file, so without the containment check the marker
+    pair lands there -- the committable worktree write this change exists to
+    stop. The outcome must be a no-op and the worktree file byte-identical.
+    """
+    import pin_marker_writer
+    from shared.pin_markers import plan_insertion, Insertion
+
+    main, worktree = _git_repo_with_worktree(tmp_path)
+    original = build_claude_md()
+    assert isinstance(plan_insertion(original), Insertion), (
+        "FIXTURE INVALID: the planner refused before the writer ran"
+    )
+    worktree_md = worktree / "CLAUDE.md"
+    worktree_md.write_text(original, encoding="utf-8")
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+    monkeypatch.chdir(worktree)
+
+    outcome = pin_marker_writer._plan_and_write()
+
+    assert outcome == "noop_outside_memory_root", (
+        f"the fall-through target was not refused: {outcome}"
+    )
+    assert worktree_md.read_text(encoding="utf-8") == original, (
+        "the pin writer edited the worktree's own CLAUDE.md"
+    )
+    assert not (main / "CLAUDE.md").exists()
+    assert not (main / ".claude" / "CLAUDE.md").exists()

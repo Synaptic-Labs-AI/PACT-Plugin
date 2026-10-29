@@ -1344,6 +1344,24 @@ class TestWorktreeLeadEndToEndClosure:
     `memory_id is not None`, which was insensitive to WHERE the sync landed.
     Every assertion below names content or location, never merely that a row
     was saved.
+
+    LEG INDEPENDENCE (review finding F7, kept here so it is not re-derived):
+    no leg fully carries another, but they are not all independent.
+      - Leg 1 (entry in MAIN) can fail while leg 2 passes (no worktree file,
+        sync skipped) and while leg 3 passes (row saved, no sync).
+      - Leg 2 (worktree has no CLAUDE.md) is independent both ways: a
+        step-5b-created worktree file reddens it while leg 1 passes.
+      - Leg 3 (DB key) is independent both ways: a project-id regression
+        reddens it while leg 1 passes; a skipped sync reddens leg 1 while the
+        row still keys to main.
+      - Leg 4 (probe order: last probe is MAIN, every earlier probe a miss)
+        is corroborative in the green direction -- in this fixture the
+        resolved probe is the only writer, so a passing leg 1 implies a MAIN
+        hit -- and independent in the failure direction: a route change that
+        still lands the entry in MAIN by another path reddens it.
+    The single-arm shape cannot report per-leg isolation: leg 1 failing stops
+    legs 2-4 from being evaluated. That is a limitation of the shape, not a
+    vacuous assertion.
     """
 
     _SESSION_ID = "cccccccc-dddd-eeee-ffff-000000000000"

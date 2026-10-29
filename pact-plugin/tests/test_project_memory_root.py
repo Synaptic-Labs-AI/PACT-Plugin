@@ -123,3 +123,37 @@ def test_a8_non_worktree_input_is_returned_exactly(tmp_path):
     makes is a string comparison."""
     given = str(tmp_path / "missing" / ".." / "also-missing")
     assert str(project_memory_root(given)) == given
+
+
+def test_a9_forged_gitfile_returns_input(repo, tmp_path):
+    """SEC-1: a `.git` FILE naming another repo's worktree admin dir makes
+    every git answer agree while the directory is not a checkout of it."""
+    _worktree(repo, "wt-forged")
+    admin = next((repo / ".git" / "worktrees").iterdir())
+    forged = tmp_path / "forged"
+    forged.mkdir()
+    (forged / ".git").write_text(f"gitdir: {admin}\n")
+    assert project_memory_root(forged) == forged
+
+
+def test_a9b_forged_gitfile_with_a_relative_path_returns_input(repo, tmp_path):
+    """SEC-1, the relative spelling: git resolves the gitfile's path against
+    the directory holding it, so the forged layout is identical."""
+    _worktree(repo, "wt-forged-rel")
+    admin = next((repo / ".git" / "worktrees").iterdir())
+    forged = tmp_path / "forged-rel"
+    forged.mkdir()
+    (forged / ".git").write_text(
+        f"gitdir: {os.path.relpath(admin, forged)}\n"
+    )
+    assert project_memory_root(forged) == forged
+
+
+def test_a10_a_repo_nested_in_a_worktree_returns_input(repo):
+    """A legitimate layout the new listing check must not reject: a nested
+    repository is its own main checkout, so it owns its own memory."""
+    worktree = _worktree(repo, "wt-nested")
+    nested = worktree / "nested"
+    nested.mkdir()
+    _git("init", "-q", ".", cwd=nested)
+    assert project_memory_root(nested) == nested

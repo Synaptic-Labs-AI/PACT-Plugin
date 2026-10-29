@@ -1252,3 +1252,63 @@ def test_b13p_the_gate_replaces_the_block_in_main_not_the_worktree(
     assert worktree_md.read_text(encoding="utf-8") == "# Worktree copy\n", (
         "the prompt gate rewrote the worktree's own CLAUDE.md"
     )
+
+
+def test_f2_the_gate_reads_the_previous_dir_from_main_and_surfaces_its_claim(
+    tmp_path, monkeypatch
+):
+    """F2 from review: the gate's `_extract_prev_session_dir` follows MAIN.
+
+    The value feeds check_resume_state; read from the worktree it is None and
+    the previous session's resume claim silently disappears. The arm asserts
+    the value the consumer RECEIVES and that the consumer's own output
+    reaches the gate's returned sentence, so the plumbing is measured end to
+    end rather than the read in isolation.
+    """
+    import bootstrap_prompt_gate as gate
+    from shared import session_resume
+    from shared.session_resume import update_session_info
+
+    main, worktree = _git_repo_with_worktree(tmp_path)
+    session_dir = tmp_path / "sd"
+    session_dir.mkdir()
+    prev_dir = Path.home() / ".claude" / "pact-sessions" / "proj" / "prev-f2"
+    prev_dir.mkdir(parents=True)
+    assert update_session_info(
+        "prev-session", "old-team", str(prev_dir), project_dir=str(main)
+    ) is not None
+    main_before = (main / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "prev-session" in main_before
+    assert "cccccccc-dddd-eeee-ffff-000000000000" not in main_before
+
+    seen = {}
+
+    def spy(prev_session_dir=None, **kwargs):
+        seen["prev"] = prev_session_dir
+        return "CLAIM-FROM-MAIN" if prev_session_dir else None
+
+    monkeypatch.setattr(session_resume, "check_resume_state", spy)
+    monkeypatch.setattr(
+        gate.pact_context, "get_team_name", lambda: "pact-testteam"
+    )
+    monkeypatch.setattr(gate.pact_context, "get_plugin_root", lambda: "/plugin")
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+    monkeypatch.chdir(worktree)
+
+    out = gate._record_unrecorded_lead(
+        {"session_id": "cccccccc-dddd-eeee-ffff-000000000000"}, str(session_dir)
+    )
+
+    assert seen.get("prev") == str(prev_dir), (
+        "the gate did not hand MAIN's previous session dir to "
+        "check_resume_state; the resume claim is silently lost"
+    )
+    assert "CLAIM-FROM-MAIN" in out, (
+        "the consumer's claim never reached the gate's returned sentence"
+    )
+    assert "cccccccc-dddd-eeee-ffff-000000000000" in (
+        main / ".claude" / "CLAUDE.md"
+    ).read_text(encoding="utf-8"), (
+        "control: the block rewrite did not run, so the claim path above was "
+        "never in play"
+    )
