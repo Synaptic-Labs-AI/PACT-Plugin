@@ -511,8 +511,18 @@ def _scrub(msg: str) -> str:
 
 def cmd_save(args, db_path=None):
     """Handle the 'save' subcommand."""
-    if args.stdin:
+    if args.stdin or args.json_data == "-":
+        # '-' is a stdin sentinel (Unix convention). Bare '-' is never
+        # valid JSON, so accepting it as "read stdin" carries no data
+        # meaning and saves a wasted INVALID_JSON round-trip.
         raw = sys.stdin.read()
+        if not raw.strip():
+            channel = "--stdin" if args.stdin else "'-'"
+            _error(
+                "MISSING_INPUT",
+                f"{channel} received empty input; provide JSON via stdin "
+                "or as an argument",
+            )
     elif args.json_data:
         raw = args.json_data
     else:
@@ -732,8 +742,17 @@ def cmd_update(args, db_path=None):
     Accepts a full 32-char memory ID or a unique prefix. Ambiguous prefix
     refuses the update and surfaces an AMBIGUOUS_PREFIX envelope.
     """
-    if args.stdin:
+    if args.stdin or args.json_data == "-":
+        # Same '-' stdin sentinel as cmd_save; the two sites are verbatim
+        # twins by house style (see the do-not-centralize notes below).
         raw = sys.stdin.read()
+        if not raw.strip():
+            channel = "--stdin" if args.stdin else "'-'"
+            _error(
+                "MISSING_INPUT",
+                f"{channel} received empty input; provide JSON via stdin "
+                "or as an argument",
+            )
     elif args.json_data:
         raw = args.json_data
     else:

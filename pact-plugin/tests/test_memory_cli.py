@@ -315,6 +315,45 @@ class TestCliSaveCommand:
         assert exc_info.value.code == 0
         mock_pact_memory.save.assert_called_once_with(memory_dict)
 
+    def test_save_sentinel_dash_reads_stdin(self, mock_pact_memory, monkeypatch):
+        memory_dict = make_cli_memory_dict()
+        json_str = json.dumps(memory_dict)
+        monkeypatch.setattr("sys.stdin", StringIO(json_str))
+        parser = build_parser()
+        args = parser.parse_args(["save", "-"])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_save(args)
+        assert exc_info.value.code == 0
+        mock_pact_memory.save.assert_called_once_with(memory_dict)
+
+    def test_save_empty_stdin_via_dash_is_missing_input(self, capsys, monkeypatch):
+        # Whitespace-only counts as empty: json.loads would raise the same
+        # Expecting-value error as truly empty input, so it is the same hole.
+        monkeypatch.setattr("sys.stdin", StringIO("   \n"))
+        parser = build_parser()
+        args = parser.parse_args(["save", "-"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_save(args)
+        assert exc_info.value.code == 1
+        err_output = json.loads(capsys.readouterr().err)
+        assert err_output["error"] == "MISSING_INPUT"
+        assert "'-'" in err_output["message"]
+
+    def test_save_empty_stdin_via_flag_is_missing_input(self, capsys, monkeypatch):
+        monkeypatch.setattr("sys.stdin", StringIO(""))
+        parser = build_parser()
+        args = parser.parse_args(["save", "--stdin"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_save(args)
+        assert exc_info.value.code == 1
+        err_output = json.loads(capsys.readouterr().err)
+        assert err_output["error"] == "MISSING_INPUT"
+        assert "--stdin" in err_output["message"]
+
     def test_save_outputs_memory_id(self, mock_pact_memory, capsys):
         memory_dict = make_cli_memory_dict()
         json_str = json.dumps(memory_dict)
@@ -996,6 +1035,32 @@ class TestCliUpdateCommand:
         mock_pact_memory.update.assert_called_once_with(
             "abc123", {"context": "from stdin"}, replace=False
         )
+
+    def test_update_sentinel_dash_reads_stdin(self, mock_pact_memory, monkeypatch):
+        mock_pact_memory.update.return_value = _FAKE_RESOLVED_ID
+        monkeypatch.setattr("sys.stdin", StringIO('{"context": "via dash"}'))
+        parser = build_parser()
+        args = parser.parse_args(["update", "abc123", "-"])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_update(args)
+        assert exc_info.value.code == 0
+        mock_pact_memory.update.assert_called_once_with(
+            "abc123", {"context": "via dash"}, replace=False
+        )
+
+    def test_update_empty_stdin_is_missing_input(self, capsys, monkeypatch):
+        monkeypatch.setattr("sys.stdin", StringIO(""))
+        parser = build_parser()
+        args = parser.parse_args(["update", "abc123", "--stdin"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_update(args)
+        assert exc_info.value.code == 1
+        err_output = json.loads(capsys.readouterr().err)
+        assert err_output["error"] == "MISSING_INPUT"
+        assert "--stdin" in err_output["message"]
 
     def test_update_invalid_json(self, capsys):
         parser = build_parser()
@@ -2021,6 +2086,21 @@ class TestCliSubprocess:
 
         result = subprocess.run(
             [sys.executable, cli_script_path, "save", "--stdin",
+             "--no-sync", "--db-path", str(cli_db)],
+            input=json_str,
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        output = json.loads(result.stdout)
+        assert output["ok"] is True
+        assert "memory_id" in output["result"]
+
+    def test_save_sentinel_dash_via_subprocess(self, cli_script_path, cli_db):
+        memory_dict = make_cli_memory_dict(context="dash sentinel test")
+        json_str = json.dumps(memory_dict)
+
+        result = subprocess.run(
+            [sys.executable, cli_script_path, "save", "-",
              "--no-sync", "--db-path", str(cli_db)],
             input=json_str,
             capture_output=True, text=True, timeout=60,
