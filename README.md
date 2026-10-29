@@ -405,10 +405,19 @@ select:TaskCreate,TaskUpdate,TaskList,TaskGet and tell me which of the four
 are present.
 ```
 
-- **Any of the four missing** — this is the problem, and the setting below fixes it.
-- **All four present** — this is *not* the problem, and the setting below will not help. Something else is refusing the spawn; this check rules out one cause, not the rest.
+- **Any of the four missing after the load attempt** — in the lead session, the opt-in setting below is required; start a new session after setting it. If only a spawned teammate is missing them, use the recovery tree below instead of assuming the lead setting is the cause.
+- **All four present** — this is *not* the lead-session availability problem, and the setting below will not help. Use the recovery tree to find the actual cause; this check rules out one cause, not the rest.
 
-**A different case: your session has the task tools, but spawned specialists do not.** Both `env` values (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` and `CLAUDE_CODE_ENABLE_TODO_TOOLS`) set, and the lead session holds `TaskCreate`, `TaskUpdate`, `TaskList` and `TaskGet`, yet every spawned teammate reports them missing? The cause is the spawn mode, not the settings. On non-TTY harnesses (Claude Code on the web, Claude Code Desktop), the platform withholds the task tools from background spawns. Dispatch each specialist with `run_in_background: false`, and include a `ToolSearch "select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage"` line in the spawn prompt — tools are fixed at spawn-request time, and a foreground-requested spawn keeps them for life even if the harness auto-backgrounds it. A teammate already spawned without the flag cannot be repaired in place; re-spawn it with the flag.
+**When the lead has the task tools but a teammate does not, or when the spawn shape is uncertain, use this ordered recovery tree.** Do not infer the cause from a harness label or start with a respawn.
+
+A. **Load deferred tools.** If Task tools are reported missing, run `ToolSearch "select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage"` when it has not already run. If the tools load, continue without a respawn.
+B. **Check the lead session.** If the lead lacks the four Task tools, fix the session opt-in/settings and start the required new session. Never respawn a teammate for this cause.
+C. **Compare the call with the live Agent schema.** Current teammate creation requires an interactive session, agent teams enabled, and a named, non-fork, non-isolation Agent call. Correct `Task(...)`, a missing `name`, fork/isolation, or non-interactive `-p` usage. Never add `background` or a parameter absent from the live schema.
+D. **Confirm named-teammate creation and addressability.** Use platform spawn, roster, and messaging evidence. A missing `config.json` alone is not failure in a config-less cloud session. A named `-p` agent is an ordinary subagent, not evidence of team formation; correct team enablement/registration instead.
+E. **Apply display-mode inheritance.** In-process teammates follow the lead session. For split-pane, check `--tools`/deny rules and environment forwarding through `--settings`; correct the launch configuration before replacement.
+F. **Use the legacy-only branch only after A–E.** For an older non-TTY runtime exhibiting the #1658 symptom, follow the single operational legacy note in `pact-plugin/README.md`. Do not copy its dispatch template into current guidance or treat schema presence alone as lifecycle evidence.
+G. **Relay residual structured content.** If Task tools remain absent but `SendMessage` reaches `team-lead` or `main`, relay the teachback/HANDOFF content and let the lead write metadata. Acceptance/rejection ordering is unchanged; no hook suppression logic or relay marker is involved, and no respawn loop follows.
+H. **Stop on messaging failure.** If `SendMessage` is also unavailable or unreachable, relay is impossible. Report the team-formation/messaging blocker with the evidence gathered above.
 
 **The setting.** Add `CLAUDE_CODE_ENABLE_TODO_TOOLS` to the `env` block of your `~/.claude/settings.json`, alongside the Agent Teams setting, then start a new session:
 

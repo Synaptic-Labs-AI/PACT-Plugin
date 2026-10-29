@@ -2,16 +2,19 @@
 
 **Purpose:** the pre-merge runtime-confirmation gate for the non-TTY harness
 support change (#1658 root fix + #1309 dual-key resolution / stamp; #1019
-verify-and-close). The CI suite proves the resolver keying matrix, the stamp
-truth table, the wiring through `session_init.main()`, and the prose pins —
-none of it can prove the four platform-side facts this change's value rests
-on: (1) that `run_in_background: false` keeps the Task tools for a teammate's
-life on the SHIPPED plugin build (not the raw behavior #1658 comment 3
-tested), (2) that the harness stamp actually lands `non_tty` in a real cloud
-session and says WHICH input fired, (3) that the full ceremony (teachback →
-work → HANDOFF → completion) runs with zero path misses under the UUID keying
-with the plugin's own hooks firing, and (4) whether hook subprocesses receive
-launcher-set env vars at all. A green suite is NECESSARY but NOT SUFFICIENT.
+verify-and-close), maintained under the current Agent Team contract (#1673).
+The CI suite proves the resolver keying matrix, the stamp truth table, the
+wiring through `session_init.main()`, and the prose pins — none of it can
+prove the four platform-side facts this change's value rests on: (1) that
+named, flagless Agent Team dispatch keeps the Task tools for a teammate's life
+on the installed plugin build under test, (2) that the harness stamp actually
+lands `non_tty` in a real cloud session and says WHICH input fired, (3) that
+the full ceremony (teachback → work → HANDOFF → completion) runs with zero
+path misses under the UUID keying with the plugin's own hooks firing, and (4)
+whether hook subprocesses receive launcher-set env vars at all. A green suite
+is NECESSARY but NOT SUFFICIENT. The dated #1658 measurements that motivated
+the original dispatch workaround are historical evidence (§4), not current
+dispatch guidance.
 
 **Closure criterion (two-harness convergent verdict, pact-memory `b4fc2626`):**
 the change is runtime-confirmed only when ARM 1 (local interactive TTY) AND
@@ -53,20 +56,27 @@ control beside it before concluding anything.
    scratch directory. Otherwise the child inherits the parent session's
    identity and writes into the parent's task list (observed in #1666 Track
    A's P2 probe).
+8. **Record the run identity before each arm.** Capture the launcher and
+   display mode, `claude --version`, the installed build's `gitCommitSha`, and
+   the live Agent schema. Keep the outputs with the run evidence. The live
+   schema shows what a call can express; it does not by itself prove teammate
+   lifecycle support.
 
-## §1 ARM 1 — local TTY no-op of the SHIPPED change
+## §1 ARM 1 — local interactive TTY, flagless named teammates
 
-Distinguishes this probe from #1658 comment 3 (which tested the raw
-platform behavior, not the plugin change): run the SAME checks against the
-marketplace build carrying this change.
+Verify that current named Agent Team dispatch does not regress local
+interactive team formation on the installed build. Attach the §0 item 8 run
+record to this arm.
 
 **Procedure.** Local interactive terminal session (`claude --agent
 PACT:pact-orchestrator`) on the probe build. `/PACT:bootstrap`, then spawn
-two `general-purpose` teammates (`t1`, `t2`) in ONE message, both dispatched
-with `run_in_background: false`. Each teammate: one `ToolSearch
-"select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage"` load, `TaskList`,
-a ~20s wait (`python3 -c 'import time; time.sleep(20)'` — the filler hook
-refuses bare `sleep`), then `SendMessage(to="team-lead")` with its findings.
+two `general-purpose` teammates (`t1`, `t2`) in ONE message. Use named Agent
+Team calls with `name`, `team_name`, `subagent_type`, `description`, and
+`prompt`; do not add an execution-mode argument. Each teammate: one
+`ToolSearch "select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage"`
+load, `TaskList`, a ~20s wait (`python3 -c 'import time; time.sleep(20)'` —
+the filler hook refuses bare `sleep`), then `SendMessage(to="team-lead")`
+with its findings.
 
 **PASS criteria (all must hold):**
 
@@ -79,21 +89,28 @@ refuses bare `sleep`), then `SendMessage(to="team-lead")` with its findings.
 | 5 | Zero NEW hook advisories | compare hook stderr/warnings against a pre-change control session |
 | 6 | Misstamp guard LIVE | `pact-session-context.json` `harness` is `""` (or transcript-mapped CLI) — NOT `non_tty` |
 | 7 | No name split | the SessionStart prose team name == context `team_name` (a realigned short name in TTY) |
+| 8 | Run identity recorded | §0 item 8 names the launcher/display mode, `claude --version` output, build SHA, and live Agent schema |
 
-If any check fails, run the matched negative control (a scratch session with
-one background-spawned agent, `run_in_background` omitted) to confirm the OLD
-symptom reproduces on this build — that separates "the change broke TTY" from
-"the control substrate was never TTY". Do not conclude from a lone null.
+If any check fails, follow §3 in order. For a failure inferred from missing
+output, run a matched positive control beside it on the same launcher and
+build: the lead's `ToolSearch` + `TaskList` checks session tool availability,
+and a `SendMessage` exchange with an already-registered teammate checks the
+messaging substrate. A null without a successful matched control is
+NOT-EXERCISED, not a platform finding. Do not conclude from a lone null or
+respawn before diagnosis.
 
-## §2 ARM 2 — one cloud run, full ceremony
+## §2 ARM 2 — one cloud run, flagless full ceremony
 
 **Procedure.** The user's Claude Code on the web session (`CLAUDE_CODE_ENTRYPOINT=remote`
-posture) with the probe build installed for that account. `/PACT:bootstrap`,
-then the lead dispatches a REAL `pact-preparer` on a trivial Task A (teachback)
-+ Task B (micro-consultation) pair, using the canonical dispatch form
-(`run_in_background: false` + the `ToolSearch` preamble). The teammate runs
-the full teachback → wait (end turn) → work → `metadata.handoff` → notify
-cycle; the lead accepts and completes.
+posture) with the probe build installed for that account. Attach the §0 item 8
+run record. `/PACT:bootstrap`, then the lead dispatches a REAL `pact-preparer`
+on a trivial Task A (teachback) + Task B (micro-consultation) pair. Use a named
+Agent Team call with `name`, `team_name`, `subagent_type`, `description`, and
+`prompt`; include
+`ToolSearch "select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage"`
+in the prompt and no execution-mode argument. The teammate loads the tools, confirms `TaskList`, then runs the
+full teachback → wait (end turn) → work → `metadata.handoff` → notify cycle;
+the lead accepts and completes.
 
 **PASS criteria (all must hold):**
 
@@ -107,6 +124,12 @@ cycle; the lead accepts and completes.
 | 6 | **MUST-RECORD: which stamp input fired** | see below |
 | 7 | Env-forwarding diagnostic | one-shot capture executed and read (see below) |
 | 8 | CLAUDE.md write-back skip-conditions | see below |
+| 9 | Run identity recorded | §0 item 8 names the cloud launcher/display mode, `claude --version` output, build SHA, and live Agent schema |
+
+Follow §3 for dispatch or messaging failures. As in ARM 1, prove any
+absence-based result with a successful matched positive control on the same
+cloud launcher and build; otherwise record NOT-EXERCISED rather than a
+platform finding.
 
 **§2.6 Stamp attribution (MUST-RECORD: which WRITER fired).** After the run,
 read the session's `session_start` journal event and the on-disk context, and
@@ -152,8 +175,8 @@ and the recorded `lead_address`. It is still NOT a harness-stamp input, and
 whether the project CLAUDE.md `Current Session` block was written during the
 cloud session. If `CLAUDE_PROJECT_DIR` is unset in the cloud hook env, or no
 `session_start` journal event fired, the `- Team:` line never converges.
-REPORT the observed shape as a finding — the fix rides this PR as a commit-2
-amendment if confirmed; do NOT pre-implement it during the probe.
+REPORT the observed shape as a finding for the owning harness change; do NOT
+pre-implement a fix during the probe.
 
 **§2.9 Main-fallback check (check 1) — sanctioned construction.** The
 `team-lead`-unreachable leg of check 1 is exercised by the cloud harness's
@@ -199,7 +222,71 @@ of `is_cloud_session()` inside the SessionStart hook process. Record one of:
     directive sentence verbatim and report it on #1666.
 If the probe launches a child `claude -p`, isolate it first (§0 item 7).
 
-## §3 Desktop arm / #1019 close-out
+## §3 Current Agent Team dispatch diagnostics (A–H)
+
+Use this ordered tree for a dispatch or messaging failure in either current
+arm. Record the branch and evidence in the run row. Do not start with a
+respawn, and do not treat a harness label as proof of the cause.
+
+A. **Load deferred tools.** If Task tools are reported missing, run
+   `ToolSearch "select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage"`
+   when it has not already run. If the tools load, continue without a respawn.
+B. **Check the lead session.** If the lead lacks the four Task tools, fix the
+   session opt-in/settings and start the required new session. Never respawn a
+   teammate for this cause.
+C. **Compare the call with the live Agent schema.** Current teammate creation
+   requires an interactive session, agent teams enabled, and a named,
+   non-fork, non-isolation Agent call. Correct `Task(...)`, a missing `name`,
+   fork/isolation, or non-interactive `-p` usage. Never add a parameter absent
+   from the live schema.
+D. **Confirm named-teammate creation and addressability.** Use platform
+   spawn, roster, and messaging evidence. A missing `config.json` alone is
+   not failure in a config-less cloud session. A named `-p` agent is an
+   ordinary subagent, not evidence of team formation; correct team
+   enablement/registration instead.
+E. **Apply display-mode inheritance.** In-process teammates follow the lead
+   session. For split-pane, check `--tools`/deny rules and environment
+   forwarding through `--settings`; correct the launch configuration before
+   replacement. This is the documented diagnostic path, not split-pane
+   runtime certification.
+F. **Use the legacy-only branch only after A–E.** For an older non-TTY runtime
+   exhibiting the #1658 symptom, follow the single operational legacy note in
+   `pact-plugin/README.md`. Do not copy its dispatch template into current
+   guidance or treat schema presence alone as lifecycle evidence.
+G. **Relay residual structured content.** If Task tools remain absent but
+   `SendMessage` reaches `team-lead` or `main`, relay the teachback/HANDOFF
+   content and let the lead write metadata. Acceptance/rejection ordering is
+   unchanged; do not enter a respawn loop.
+H. **Stop on messaging failure.** If `SendMessage` is also unavailable or
+   unreachable, relay is impossible. Report the team-formation/messaging
+   blocker with the evidence gathered above.
+
+## §4 Historical evidence — #1658 on Claude Code 2.1.303 (2026-10-19)
+
+**This dated region records measurements, not current dispatch guidance.**
+The probes used PACT 4.8.3 and Claude Code 2.1.303:
+
+- In cloud sessions, default asynchronous spawns lacked Task tools and could
+  not address `team-lead`. The measured `run_in_background: false` workaround
+  retained deferred Task tools after one `ToolSearch` load and through later
+  resumes, including when the harness later made a spawn asynchronous.
+- A real `pact-preparer` completed the teachback → work → HANDOFF → completion
+  ceremony with the `main` fallback and zero hook warnings. Multiple such
+  spawns ran concurrently, and a long-running probe retained Task tools.
+- A separate local interactive TTY probe found the old argument was a no-op
+  there on that build: registration, concurrency, `ToolSearch` + `TaskList`,
+  and delivery to `team-lead` all passed.
+
+These results are specific to the measured runtime. They do not certify
+unattended 2.1.303 operation, split-pane behavior, or the unknown
+2.1.304–2.1.309 schema boundary, and they set no minimum supported release.
+For an older environment exhibiting the same symptom after diagnostics A–E,
+the only operational compatibility path is the ordered legacy note in
+`pact-plugin/README.md`, including its live-schema, post-spawn `TaskList`, and
+full-ceremony guards. Schema presence is expressibility, not necessity; do
+not duplicate the legacy dispatch template here.
+
+## §5 Desktop arm / #1019 close-out
 
 Default disposition (presented to the user at plan presentation): close #1019
 on ARM 2's evidence plus #1309's posture-equivalence argument — both launchers
@@ -209,7 +296,7 @@ literal Desktop arm remains the alternative; if the user chooses it, run ARM
 2's procedure and pass table unchanged on a Desktop session (the transcript
 read must yield a value in `session_init._NON_TTY_ENTRYPOINTS`).
 
-## §4 Revert and restore
+## §6 Revert and restore
 
 Restore the checksummed backup; delete every file on the probe's delete-list;
 clear `__pycache__` under the plugin hooks tree (a stale `.pyc` survives a
@@ -218,12 +305,14 @@ checksums AND `git main`); smoke-test the hooks (a SessionStart fires with no
 stderr); uninstall the marketplace build, re-add the canonical marketplace,
 reinstall the released version, and verify `gitCommitSha` matches the release.
 
-## §5 Evidence recording
+## §7 Evidence recording
 
-Record the run in `RUNBOOK_RUN_DATES.md` per its row schema. Capture for each
-arm: journal path, `harness` value, `entrypoint` raw value, stamp-input
-attribution (§2.6), env-key presence booleans (§2.7), `config.json`
-absence/presence, marker path, the startup `session_start` event's
-`lead_address` and `team` with the §2.10 outcome (`remote-visible`,
-`remote-absent` or `mixed`), and any advisory text observed. These rows are
-the evidence #1309 / #1019 close on.
+Add a `RUNBOOK_RUN_DATES.md` row only for an actual authorized probe; a static
+documentation edit or test run is not a probe. Record each run per its row
+schema. Capture for each arm: launcher and display mode, CLI version, build
+SHA, live Agent schema, diagnostic branch/outcome (§3), journal path,
+`harness` value, `entrypoint` raw value, stamp-input attribution (§2.6),
+env-key presence booleans (§2.7), `config.json` absence/presence, marker path,
+the startup `session_start` event's `lead_address` and `team` with the §2.10
+outcome (`remote-visible`, `remote-absent` or `mixed`), and any advisory text
+observed. These rows are the evidence #1309 / #1019 close on.

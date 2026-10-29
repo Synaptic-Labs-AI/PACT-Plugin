@@ -8,7 +8,18 @@ You — the team-lead — are the **only** actor who marks teammate-owned tasks 
 
 `blockedBy` is pull-only at the platform level — the platform does NOT push a wake on blocker resolution; `blockedBy` is computed at `TaskList` query time. Idle teammates cannot self-wake to re-poll, so the wake-signal `SendMessage` is paired with each metadata or status write that resolves their wait.
 
-**Relay fallback (Task tools absent despite a foreground dispatch).** When a teammate's Task tools are absent even though the dispatch carried `run_in_background: false` (the residual case), the sanctioned fallback is the relay: the teammate delivers the structured content via `SendMessage`, and you perform the metadata writes (`teachback_submit` / `handoff`) on their behalf from the message copy. No hook suppression logic and no relay marker exist for this — acceptance and rejection flows are unchanged.
+### Dispatch recovery
+
+Use this ordered tree for a dispatch or messaging failure. Do not start with a respawn, and do not treat a harness label as proof of the cause.
+
+A. **Load deferred tools.** If Task tools are reported missing, run `ToolSearch "select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage"` when it has not already run. If the tools load, continue without a respawn.
+B. **Check the lead session.** If the lead lacks the four Task tools, fix the session opt-in/settings and start the required new session. Never respawn a teammate for this cause.
+C. **Compare the call with the live Agent schema.** Current teammate creation requires an interactive session, agent teams enabled, and a named, non-fork, non-isolation Agent call. Correct `Task(...)`, a missing `name`, fork/isolation, or non-interactive `-p` usage. Never add `background` or a parameter absent from the live schema.
+D. **Confirm named-teammate creation and addressability.** Use platform spawn, roster, and messaging evidence. A missing `config.json` alone is not failure in a config-less cloud session. A named `-p` agent is an ordinary subagent, not evidence of team formation; correct team enablement/registration instead.
+E. **Apply display-mode inheritance.** In-process teammates follow the lead session. For split-pane, check `--tools`/deny rules and environment forwarding through `--settings`; correct the launch configuration before replacement.
+F. **Use the legacy-only branch only after A–E.** For an older non-TTY runtime exhibiting the #1658 symptom, follow the single operational legacy note in `pact-plugin/README.md`. Do not copy its dispatch template into current guidance or treat schema presence alone as lifecycle evidence.
+G. **Relay residual structured content.** If Task tools remain absent but `SendMessage` reaches `team-lead` or `main`, relay the teachback/HANDOFF content and let the lead write metadata. Acceptance/rejection ordering is unchanged; no hook suppression logic or relay marker is involved, and no respawn loop follows.
+H. **Stop on messaging failure.** If `SendMessage` is also unavailable or unreachable, relay is impossible. Report the team-formation/messaging blocker with the evidence gathered above.
 
 ### Acceptance — two-call atomic pair (BOTH required, `TaskUpdate` FIRST)
 

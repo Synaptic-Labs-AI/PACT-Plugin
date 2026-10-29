@@ -394,7 +394,7 @@ For full detail, `Read(file_path="../protocols/pact-variety.md")` when calibrati
 
 ## 11. Agent Teams Dispatch
 
-> ⚠️ **MANDATORY**: Specialists are spawned as teammates via `Agent(name=..., team_name="{team_name}", subagent_type=..., description=..., run_in_background: false)`. The session team is pre-created by the platform at session start per INSTRUCTIONS step 1. The `session_init` hook provides the specific team name in your session context.
+> ⚠️ **MANDATORY**: Specialists are spawned as teammates via `Agent(name=..., team_name="{team_name}", subagent_type=..., description=..., prompt=...)`. The session team is pre-created by the platform at session start per INSTRUCTIONS step 1. The `session_init` hook provides the specific team name in your session context.
 >
 > ⚠️ **NEVER** use plain `Agent(subagent_type=...)` without `name` and `team_name` for specialist agents. This bypasses team coordination, task tracking, and `SendMessage` communication.
 
@@ -410,7 +410,7 @@ For non-exempt teammates (everyone except `pact-secretary`):
 2. `TaskCreate(subject="{name}: {primary work subject}", description="<full mission: CONTEXT / MISSION / INSTRUCTIONS / GUIDELINES per §13 Recommended Agent Prompting Structure>")` — create Task B (primary work).
 3. `TaskUpdate(A_id, owner="{name}", addBlocks=[B_id])` — assign Task A to the teammate and wire it as the gate that unblocks Task B.
 4. `TaskUpdate(B_id, owner="{name}", addBlockedBy=[A_id])` — assign Task B to the same teammate and explicitly mirror the block edge. Do NOT pre-set `status="in_progress"` on either task — the teammate self-claims on arrival. Ensure the Task A brief reminds the teammate to claim Task B (`status="in_progress"`) before any implementation tool-use once it unblocks, and states that Task B stays blocked until you accept Task A (the command dispatch templates carry both lines) — the teammate flips it, never you.
-5. `Agent(name="{name}", team_name="{team_name}", subagent_type="pact-{type}", description="Spawn {name} specialist", run_in_background: false, prompt="YOUR PACT ROLE: teammate ({name}).\n\nYou are joining team {team_name}. Send messages for your lead to `{lead_address}`. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. If the Task tools are deferred, load them with ToolSearch \"select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage\". Then check `TaskList` for tasks assigned to you.")` — spawn the teammate. Keep the prompt ≤ 800 chars and include the literal `TaskList` reference (or one of: `task list`, `tasks assigned`, `check your tasks`); the teammate reads the mission via `TaskGet(B_id)`, not from the prompt.
+5. `Agent(name="{name}", team_name="{team_name}", subagent_type="pact-{type}", description="Spawn {name} specialist", prompt="YOUR PACT ROLE: teammate ({name}).\n\nYou are joining team {team_name}. Send messages for your lead to `{lead_address}`. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. If the Task tools are deferred, load them with ToolSearch \"select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage\". Then check `TaskList` for tasks assigned to you.")` — spawn the teammate. Keep the prompt ≤ 800 chars and include the literal `TaskList` reference (or one of: `task list`, `tasks assigned`, `check your tasks`); the teammate reads the mission via `TaskGet(B_id)`, not from the prompt.
 
 #### Which signal governs a tool call
 
@@ -430,11 +430,18 @@ A different author writes each level at a different time, so a higher level can 
 
 #### First-spawn verification (HARD-RULE)
 
-**Before you conclude the dispatch was malformed, check the tools YOU hold.** If you cannot see `TaskCreate`, `TaskUpdate`, `TaskList` and `TaskGet`, the spawn shape is not the cause and a re-spawn will not help. The host withholds those tools from some model and client-version combinations unless a session opts in. Tell the user to see [If specialist agents will not spawn](https://github.com/Synaptic-Labs-AI/PACT-Plugin#if-specialist-agents-will-not-spawn). Do not re-spawn until you rule that out.
-
 After your first specialist spawn in a session — and after any subsequent spawn where you suspect dispatch tooling may be misconfigured — verify the teammate received the full PACT protocol surface. The teammate's first message MUST demonstrate access to `TaskList`, `TaskUpdate`, and `SendMessage`. If the teammate reports any of those tools "not available", "not loaded", or otherwise missing:
 
-> ⚠️ **HARD STOP — DISPATCH PROTOCOL VIOLATION**. This is **NOT** degraded mode. **NOT** something to "work around". Branch on the evidence you observe, never on an assumed cause. First check the dispatch you made: if it lacked `run_in_background: false`, the spawn request fixed the teammate's tool set without the Task tools — stop the teammate and re-spawn WITH the flag; a re-spawn is the only repair. Only if the dispatch already carried the flag is this the host-withheld path: the env-var remedy in [If specialist agents will not spawn](https://github.com/Synaptic-Labs-AI/PACT-Plugin#if-specialist-agents-will-not-spawn). A malformed shape (spawn used `Task(...)` instead of `Agent(...)`, or omitted `name=` / `team_name=`) remains a listed cause, no longer "almost always". Do **not** instruct the teammate to "make do" — they cannot self-recover from a tool set fixed at spawn.
+> ⚠️ **HARD STOP — DISPATCH PROTOCOL VIOLATION**. This is **NOT** degraded mode and **NOT** something to "work around". Branch on the evidence you observe, never on an assumed cause or a harness label. Use this ordered tree; do not instruct the teammate to "make do" and do not start with a respawn.
+
+A. **Load deferred tools.** If Task tools are reported missing, run `ToolSearch "select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage"` when it has not already run. If the tools load, continue without a respawn.
+B. **Check the lead session.** If the lead lacks the four Task tools, fix the session opt-in/settings and start the required new session. Never respawn a teammate for this cause.
+C. **Compare the call with the live Agent schema.** Current teammate creation requires an interactive session, agent teams enabled, and a named, non-fork, non-isolation Agent call. Correct a spawn that used `Task(...)` instead of `Agent(...)`, a missing `name`, fork/isolation, or non-interactive `-p` usage. Never add `background` or a parameter absent from the live schema.
+D. **Confirm named-teammate creation and addressability.** Use platform spawn, roster, and messaging evidence. A missing `config.json` alone is not failure in a config-less cloud session. A named `-p` agent is an ordinary subagent, not evidence of team formation; correct team enablement/registration instead.
+E. **Apply display-mode inheritance.** In-process teammates follow the lead session. For split-pane, check `--tools`/deny rules and environment forwarding through `--settings`; correct the launch configuration before replacement.
+F. **Use the legacy-only branch only after A–E.** For an older non-TTY runtime exhibiting the #1658 symptom, follow the single operational legacy note in `pact-plugin/README.md`. Do not copy its dispatch template into current guidance or treat schema presence alone as lifecycle evidence.
+G. **Relay residual structured content.** If Task tools remain absent but `SendMessage` reaches `team-lead` or `main`, relay the teachback/HANDOFF content and let the lead write metadata. Acceptance/rejection ordering is unchanged; no hook suppression logic or relay marker is involved, and no respawn loop follows.
+H. **Stop on messaging failure.** If `SendMessage` is also unavailable or unreachable, relay is impossible. Report the team-formation/messaging blocker with the evidence gathered above.
 
 #### Hook WARN signals are STOP signals
 

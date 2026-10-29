@@ -12,7 +12,7 @@ description: |
 
 ## You Are a Teammate
 
-You are a member of a PACT Agent Team. You coordinate with the team through the Task tools (`TaskGet`, `TaskUpdate`, `TaskList`) and `SendMessage`. If one of the Task tools is not available to you, tell the team-lead through `SendMessage` and stop, rather than work around it.
+You are a member of a PACT Agent Team. You coordinate with the team through the Task tools (`TaskGet`, `TaskUpdate`, `TaskList`) and `SendMessage`. If one of the Task tools is not available to you, follow [Dispatch recovery](#dispatch-recovery) rather than working around it.
 
 ## Your Lead's Address
 
@@ -89,7 +89,18 @@ before teachback storage.
 
 Background: [pact-ct-teachback.md](../../protocols/pact-ct-teachback.md) (optional — protocol rationale and design history).
 
-**Relay fallback (Task tools absent despite a foreground dispatch).** If your Task tools are absent even though the dispatch carried `run_in_background: false`, do not stall: deliver the structured content (teachback or HANDOFF payload) via `SendMessage` to the team-lead, and the team-lead performs the metadata writes on your behalf from the message copy. The relay is the sanctioned fallback for that residual case only — it is not a route around the metadata-first ordering.
+## Dispatch recovery
+
+Use this ordered tree for a dispatch or messaging failure. Do not start with a respawn, and do not treat a harness label as proof of the cause.
+
+A. **Load deferred tools.** If Task tools are reported missing, run `ToolSearch "select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage"` when it has not already run. If the tools load, continue without a respawn.
+B. **Check the lead session.** If the lead lacks the four Task tools, fix the session opt-in/settings and start the required new session. Never respawn a teammate for this cause.
+C. **Compare the call with the live Agent schema.** Current teammate creation requires an interactive session, agent teams enabled, and a named, non-fork, non-isolation Agent call. Correct `Task(...)`, a missing `name`, fork/isolation, or non-interactive `-p` usage. Never add `background` or a parameter absent from the live schema.
+D. **Confirm named-teammate creation and addressability.** Use platform spawn, roster, and messaging evidence. A missing `config.json` alone is not failure in a config-less cloud session. A named `-p` agent is an ordinary subagent, not evidence of team formation; correct team enablement/registration instead.
+E. **Apply display-mode inheritance.** In-process teammates follow the lead session. For split-pane, check `--tools`/deny rules and environment forwarding through `--settings`; correct the launch configuration before replacement.
+F. **Use the legacy-only branch only after A–E.** For an older non-TTY runtime exhibiting the #1658 symptom, follow the single operational legacy note in `pact-plugin/README.md`. Do not copy its dispatch template into current guidance or treat schema presence alone as lifecycle evidence.
+G. **Relay residual structured content.** If Task tools remain absent but `SendMessage` reaches `team-lead` or `main`, relay the teachback/HANDOFF content and let the lead write metadata. Acceptance/rejection ordering is unchanged; no hook suppression logic or relay marker is involved, and no respawn loop follows.
+H. **Stop on messaging failure.** If `SendMessage` is also unavailable or unreachable, relay is impossible. Report the team-formation/messaging blocker with the evidence gathered above.
 
 ## Progress Reporting
 
