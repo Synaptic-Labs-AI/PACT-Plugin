@@ -173,3 +173,65 @@ def test_a10_a_repo_nested_in_a_worktree_returns_input(repo):
     nested.mkdir()
     _git("init", "-q", ".", cwd=nested)
     assert project_memory_root(nested) == nested
+
+
+def test_a11_a_worktree_path_with_a_newline_redirects_to_main(repo, tmp_path):
+    """A path containing a newline must survive the worktree listing.
+
+    The line-based porcelain parser splits the record at the newline and
+    truncates the path, so the membership guard refuses and the session falls
+    back to writing the worktree. `-z` keeps the record whole.
+    """
+    path = tmp_path / "wt\nnl"
+    _git("worktree", "add", "-q", str(path), "-b", "nl", cwd=repo)
+    assert project_memory_root(path) == repo.resolve()
+
+
+def test_a11b_when_z_is_unsupported_the_line_parser_still_resolves(
+    repo, monkeypatch
+):
+    """The fallback is decided by the `-z` call failing, not by a version
+    string: an older git keeps today's line parser, which still resolves an
+    ordinary path."""
+    worktree = _worktree(repo, "wt-fallback")
+    real = project_scope.run_git
+
+    def fake_run_git(args, **kwargs):
+        if "-z" in args:
+            return subprocess.CompletedProcess(args, 129, "", "unknown option")
+        return real(args, **kwargs)
+
+    monkeypatch.setattr(project_scope, "run_git", fake_run_git)
+    assert project_memory_root(worktree) == repo.resolve()
+
+
+def test_a11c_the_fallback_still_guards_forged_gitfiles(repo, tmp_path, monkeypatch):
+    """The -z failure path must still apply the SEC-1 guard, not skip it.
+
+    A fallback that returned an empty set (or skipped the membership test)
+    would silently reopen the forged-gitfile hole on every git older than
+    2.36. Under the forced failure, BOTH forged spellings must still return
+    the started directory -- the line parser is doing the guarding.
+    """
+    _worktree(repo, "wt-fallback-guard")
+    admin = next((repo / ".git" / "worktrees").iterdir())
+    forged_absolute = tmp_path / "forged-fallback-abs"
+    forged_absolute.mkdir()
+    (forged_absolute / ".git").write_text(f"gitdir: {admin}\n")
+    forged_relative = tmp_path / "forged-fallback-rel"
+    forged_relative.mkdir()
+    (forged_relative / ".git").write_text(
+        f"gitdir: {os.path.relpath(admin, forged_relative)}\n"
+    )
+
+    real = project_scope.run_git
+
+    def fake_run_git(args, **kwargs):
+        if "-z" in args:
+            return subprocess.CompletedProcess(args, 129, "", "unknown option")
+        return real(args, **kwargs)
+
+    monkeypatch.setattr(project_scope, "run_git", fake_run_git)
+
+    assert project_memory_root(forged_absolute) == forged_absolute
+    assert project_memory_root(forged_relative) == forged_relative

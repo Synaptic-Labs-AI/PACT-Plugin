@@ -197,6 +197,40 @@ def _nearest_existing_directory(path: Path) -> Optional[Path]:
     return None
 
 
+def _worktree_list_paths(checkout: Path) -> Optional[list[str]]:
+    """The `worktree ` paths git records, or None when git cannot answer.
+
+    `-z` (git 2.36+) NUL-separates the porcelain FIELDS, so a path containing
+    a newline survives intact. The line-based form splits that record and
+    truncates the path, which a membership check would then refuse -- falling
+    back to the worktree and reopening the write this guard exists to stop.
+    For every path without a newline the two parsers yield the same records.
+
+    The fallback is decided by the CALL failing (a git that rejects `-z`, a
+    timeout, no git), never by parsing a version string, so an older git keeps
+    today's behaviour instead of losing the guard entirely.
+    """
+    result = run_git(
+        ["-C", str(checkout), "worktree", "list", "--porcelain", "-z"],
+        timeout=5,
+        env=git_env_without_location(),
+    )
+    if result is not None and result.returncode == 0:
+        return [
+            field[len("worktree "):]
+            for field in (result.stdout or "").split("\0")
+            if field.startswith("worktree ")
+        ]
+    output = _git_output(checkout, "worktree", "list", "--porcelain")
+    if output is None:
+        return None
+    return [
+        line[len("worktree "):]
+        for line in output.splitlines()
+        if line.startswith("worktree ")
+    ]
+
+
 def _listed_worktrees(
     checkout: Path, resolve_against: Optional[Path] = None
 ) -> Set[Path]:
@@ -211,18 +245,17 @@ def _listed_worktrees(
     root, so a caller holding that root passes it; the default, the process
     cwd, is what every pre-existing caller used.
     """
-    output = _git_output(checkout, "worktree", "list", "--porcelain")
+    paths = _worktree_list_paths(checkout)
     base = resolve_against or Path.cwd()
     listed: Set[Path] = set()
-    for line in (output or "").splitlines():
-        if line.startswith("worktree "):
-            try:
-                path = Path(line[len("worktree "):])
-                if not path.is_absolute():
-                    path = base / path
-                listed.add(path.resolve())
-            except OSError:
-                continue
+    for raw in paths or ():
+        try:
+            path = Path(raw)
+            if not path.is_absolute():
+                path = base / path
+            listed.add(path.resolve())
+        except OSError:
+            continue
     return listed
 
 
