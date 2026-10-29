@@ -353,6 +353,7 @@ def update_session_info(
     session_dir: str | None = None,
     plugin_root: str | None = None,
     started: str | None = None,
+    project_dir: str | os.PathLike[str] | None = None,
 ) -> str | None:
     """
     Write the Current Session section to the project's CLAUDE.md.
@@ -373,12 +374,18 @@ def update_session_info(
             can locate hook scripts without symlink traversal.
         started: The "Started" value to write; None writes now. A compaction is
             not a session start, so session_init passes the value already there.
+        project_dir: The base directory whose CLAUDE.md this call manages.
+            None (the default) reads `CLAUDE_PROJECT_DIR`, so every existing
+            caller is byte-identical. A worktree-lead caller passes
+            `project_scope.project_memory_root()` so the target AND the
+            containment anchors below are the main checkout.
 
     Returns:
         Status message or None if no action taken. A failure that may clear on
         its own returns a TransientSessionInfoFailure.
     """
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    if project_dir is None:
+        project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
     if not project_dir:
         return None
 

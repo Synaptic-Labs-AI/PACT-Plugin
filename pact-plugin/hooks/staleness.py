@@ -233,6 +233,7 @@ def _find_existing_claude_md(base: Path, assume_present: Optional[Path] = None) 
 
 def _resolve_project_claude_md_with_base(
     assume_present: Optional[Path] = None,
+    project_dir: Optional[Path] = None,
 ) -> Tuple[Optional[Path], Optional[Path]]:
     """
     Resolve the project-level CLAUDE.md AND the trusted base directory it was
@@ -260,11 +261,20 @@ def _resolve_project_claude_md_with_base(
     order (see `_find_existing_claude_md`). Without it, every caller resolves
     exactly as before.
 
+    `project_dir` replaces the `CLAUDE_PROJECT_DIR` rung (step 1 of the order
+    above) when supplied; None -- the default -- reads the environment, so
+    every no-arg caller is byte-identical. A worktree caller passes
+    `project_scope.project_memory_root()` so a read and its write land in the
+    main checkout. THE RETURNED PAIR IS DERIVED FROM ONE BRANCH: `base` is
+    always the directory the returned `path` was found under, never a
+    re-derivation, so a write caller's containment anchor contains its target.
+
     Returns:
         (path, base) where path is an existing project CLAUDE.md and base is
         the directory it was found under; (None, None) if none exists.
     """
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    if project_dir is None:
+        project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
     if project_dir:
         base = Path(project_dir)
         found = _find_existing_claude_md(base, assume_present)
@@ -328,7 +338,9 @@ def _lexical_base_of(claude_md_path: Path) -> Path:
     return claude_md_path.parent
 
 
-def get_project_claude_md_path() -> Optional[Path]:
+def get_project_claude_md_path(
+    project_dir: Optional[Path] = None,
+) -> Optional[Path]:
     """
     Get the path to the project-level CLAUDE.md (path only).
 
@@ -337,10 +349,16 @@ def get_project_claude_md_path() -> Optional[Path]:
     Path-only name, while the write caller (check_pinned_staleness) uses the
     with-base variant to get the containment anchor.
 
+    `project_dir` is forwarded verbatim: None -- the default -- reads
+    `CLAUDE_PROJECT_DIR`, so every no-arg caller is byte-identical. It is part
+    of the public signature so a future caller needing the main checkout
+    cannot reach the base by bypassing this wrapper, which is the
+    reader/writer drift this shape exists to close.
+
     Returns:
         Path to an existing project CLAUDE.md if found, None otherwise.
     """
-    return _resolve_project_claude_md_with_base()[0]
+    return _resolve_project_claude_md_with_base(project_dir=project_dir)[0]
 
 
 # Backward-compatible alias (tests and session_init patch the underscore name)

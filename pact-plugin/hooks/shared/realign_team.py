@@ -37,6 +37,7 @@ from shared import (
     claude_md_manager,
     pact_context,
     paths,
+    project_scope,
     session_journal,
     session_resume,
     session_state,
@@ -110,15 +111,20 @@ def _write_team_line(session_id: str, team_name: str, session_dir: str,
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
     if not project_dir or not session_dir:
         return
+    # The exists() guard and the write below must resolve the SAME target
+    # (#1653). On a worktree lead that target is the main checkout, so a guard
+    # left on the worktree would silently suppress the write.
+    memory_root = project_scope.project_memory_root(project_dir)
     target_file, _source = claude_md_manager.resolve_project_claude_md_path(
-        project_dir
+        memory_root
     )
     if (target_file.exists()
             and session_journal.read_last_event_from(
                 session_dir, "session_start") is not None):
         session_resume.update_session_info(
             session_id, team_name, session_dir, plugin_root,
-            started=session_resume.read_session_started(project_dir),
+            started=session_resume.read_session_started(memory_root),
+            project_dir=memory_root,
         )
 
 

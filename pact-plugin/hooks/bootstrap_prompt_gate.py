@@ -391,7 +391,7 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
             SESSION_START_MARKER,
             resolve_project_claude_md_path,
         )
-        from shared.project_scope import _record_worktree_identity
+        from shared.project_scope import _record_worktree_identity, project_memory_root
         from shared.session_journal import append_event, make_event
         from shared.session_resume import (
             RESUMPTION_MARKER_MISSING_DIRECTIVE,
@@ -413,13 +413,20 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
         # block is looked for there, through the same resolver.
         env_project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
         project_dir = env_project_dir or os.getcwd()
+        # The block is read AND rewritten at the project-memory root, so a
+        # worktree lead reads the main checkout's block (#1653). Non-worktree
+        # input is returned unchanged. Only the env-declared branch below
+        # reads a block, so only it needs the root.
+        memory_root = (
+            project_memory_root(env_project_dir) if env_project_dir else None
+        )
 
         claim = None
         prev_session_dir = None
         block_status = None
         try:
             if env_project_dir:
-                claude_md, source = resolve_project_claude_md_path(env_project_dir)
+                claude_md, source = resolve_project_claude_md_path(memory_root)
                 # Read-only here (markers and the Resume line are ASCII); the
                 # rewrite below decodes strictly and skips a file that is not
                 # UTF-8, reporting it in its status.
@@ -433,7 +440,7 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
                 if block.state is State.FOUND and (
                     recorded_session_id(content) != session_id
                 ):
-                    prev_session_dir = _extract_prev_session_dir(env_project_dir)
+                    prev_session_dir = _extract_prev_session_dir(memory_root)
                     claim = check_resume_state(prev_session_dir, launch=True)
                 if block.state not in (State.FOUND, State.ABSENT):
                     # Not read and not rewritten, and nothing is locked or
@@ -449,7 +456,8 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
                     # still returns the claim. A raise up to and inside this
                     # call is caught below and classified like its status.
                     block_status = update_session_info(
-                        session_id, team, session_dir, plugin_root
+                        session_id, team, session_dir, plugin_root,
+                        project_dir=memory_root,
                     )
         except Exception as e:  # noqa: BLE001 — classified and bounded below
             block_status = session_info_failure(e)

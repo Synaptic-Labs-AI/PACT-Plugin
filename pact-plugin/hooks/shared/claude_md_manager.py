@@ -1175,7 +1175,9 @@ def ensure_dot_claude_parent(path: Path) -> None:
         parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
 
-def ensure_project_memory_md() -> str | None:
+def ensure_project_memory_md(
+    project_dir: str | os.PathLike[str] | None = None,
+) -> str | None:
     """
     Ensure project has a CLAUDE.md with memory sections.
 
@@ -1192,10 +1194,18 @@ def ensure_project_memory_md() -> str | None:
     configuration). When neither exists, creates the file at the preferred
     `.claude/CLAUDE.md` location, creating the `.claude/` directory if needed.
 
+    Args:
+        project_dir: The base directory whose CLAUDE.md this call manages.
+            None (the default) reads `CLAUDE_PROJECT_DIR`, so every existing
+            caller is byte-identical. A worktree-lead caller passes
+            `project_scope.project_memory_root()` so the target AND the
+            containment anchor below are the main checkout.
+
     Returns:
         Status message or None if no action taken.
     """
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    if project_dir is None:
+        project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
     if not project_dir:
         return None
 
@@ -1269,7 +1279,9 @@ def ensure_project_memory_md() -> str | None:
         return f"Project CLAUDE.md failed: {failure_cause(e)}"
 
 
-def migrate_to_managed_structure() -> str | None:
+def migrate_to_managed_structure(
+    project_dir: str | os.PathLike[str] | None = None,
+) -> str | None:
     """
     One-time migration: wrap existing project CLAUDE.md content in the
     PACT_MANAGED boundary and add PACT_MEMORY markers around memory sections.
@@ -1303,12 +1315,20 @@ def migrate_to_managed_structure() -> str | None:
     preserved verbatim: every marker and heading is located by the
     fence-aware parser, so a fenced copy is never a real memory section.
 
+    Args:
+        project_dir: The base directory whose CLAUDE.md this call manages.
+            None (the default) reads `CLAUDE_PROJECT_DIR`, so every existing
+            caller is byte-identical. A worktree-lead caller passes
+            `project_scope.project_memory_root()` so the target AND the
+            containment anchor below are the main checkout.
+
     Returns:
         Status message on successful migration, None on no-op (already
         migrated or file doesn't exist), or a "failed"/"skipped" string
         on error (routed to systemMessages by session_init.py).
     """
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    if project_dir is None:
+        project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
     if not project_dir:
         return None
 

@@ -176,6 +176,7 @@ try:
     from bootstrap_gate import is_marker_set
     from shared import BOOTSTRAP_MARKER_NAME
     from shared.claude_md_manager import resolve_project_claude_md_path
+    from shared.project_scope import project_memory_root
     from shared.marker_schema import (
         MARKER_MAX_BYTES,
         MARKER_SCHEMA_VERSION,
@@ -484,7 +485,11 @@ def _write_back_aligned_team_name(input_data: dict) -> None:
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
         if not project_dir:
             return
-        target_file, _source = resolve_project_claude_md_path(project_dir)
+        # The exists() guard and the write below must resolve the SAME target
+        # (#1653). On a worktree lead that target is the main checkout, so a
+        # guard left on the worktree would silently suppress the write.
+        memory_root = project_memory_root(project_dir)
+        target_file, _source = resolve_project_claude_md_path(memory_root)
         if not target_file.exists():
             # Absent (e.g. gitignored worktree CLAUDE.md): SKIP the CLAUDE.md
             # write. The context-file write-back above already happened; the
@@ -503,7 +508,8 @@ def _write_back_aligned_team_name(input_data: dict) -> None:
         # team name + the full correct tuple.
         update_session_info(
             session_id, aligned, session_dir, plugin_root,
-            started=read_session_started(project_dir),
+            started=read_session_started(memory_root),
+            project_dir=memory_root,
         )
     except Exception as e:
         print(

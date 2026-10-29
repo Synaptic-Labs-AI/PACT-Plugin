@@ -225,6 +225,8 @@ def _plan_and_write() -> str:
         ContainmentError = _NeverRaised  # type: ignore[assignment,misc]
 
     try:
+        import os
+
         from shared.claude_md_manager import (
             _atomic_write_text,
             file_lock,
@@ -235,12 +237,21 @@ def _plan_and_write() -> str:
             certify_expel_nothing,
             plan_insertion,
         )
+        from shared.project_scope import project_memory_root
         from staleness import _resolve_project_claude_md_with_base
 
+        # Pin markers are project-memory content (#1653): a worktree lead's
+        # markers belong to the main checkout, where the display file survives
+        # the worktree. The resolver's (path, base) pair then BOTH derive from
+        # the memory root, so the containment anchor contains the target.
         # Returns (None, None) when no project CLAUDE.md exists, so this
         # resolver never brings one into being. Creating the file is not this
         # hook's business under any circumstance.
-        path, base = _resolve_project_claude_md_with_base()
+        env_project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+        memory_root = (
+            project_memory_root(env_project_dir) if env_project_dir else None
+        )
+        path, base = _resolve_project_claude_md_with_base(project_dir=memory_root)
         if path is None or base is None:
             return "noop_no_file"
 

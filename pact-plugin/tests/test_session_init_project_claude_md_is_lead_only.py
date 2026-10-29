@@ -11,8 +11,11 @@ CLAUDE.md inside the worktree. In the lead's own dir the lead has already
 written the file.
 
 Each absence arm runs a lead control on the same layout, so it cannot pass
-because the layout never reaches the writer. The lead control pins the
-lead's current behaviour, including inside a worktree.
+because the layout never reaches the writer. The worktree lead controls pin
+the #1653 contract: the writers target the MAIN checkout, and the worktree's
+own tracked CLAUDE.md is neither migrated nor marked. The controls that
+asserted the pre-fix behaviour (a CLAUDE.md planted inside the worktree) were
+FLIPPED, not deleted -- they still prove the layout reaches the writer.
 """
 import io
 import json
@@ -201,17 +204,31 @@ class TestWorktreeTeammateWritesNothing:
         git("worktree", "add", "-q", str(path), "-b", name, cwd=main)
         return path
 
-    def test_no_worktree_claude_md_is_created(self, repo, monkeypatch):
+    def test_a_worktree_lead_creates_the_claude_md_in_the_main_checkout(
+        self, repo, monkeypatch
+    ):
+        """The pre-#1653 control asserted `<worktree>/.claude/CLAUDE.md`
+        existed. That pin recorded the defect and is FLIPPED here, not
+        deleted: the lead must still reach the writer, in the main checkout.
+        """
         main, git = repo
         (main / "README").write_text("seed\n")
         git("add", ".", cwd=main)
         git("commit", "-qm", "seed", cwd=main)
 
         control = self._worktree(main, git, "control")
-        _run(monkeypatch, control, LEAD)
-        assert (control / ".claude" / "CLAUDE.md").exists(), (
-            "control: a lead start inside a worktree did not create "
-            "<worktree>/.claude/CLAUDE.md, so this layout never reaches the writer"
+        context, _ = _run(monkeypatch, control, LEAD)
+        assert (main / ".claude" / "CLAUDE.md").exists() and CREATED in context, (
+            "control: a lead start inside a worktree did not create the project "
+            "CLAUDE.md in the MAIN checkout, so this layout never reaches the writer"
+        )
+        assert not (control / ".claude" / "CLAUDE.md").exists(), (
+            "a lead start inside a worktree still planted "
+            "<worktree>/.claude/CLAUDE.md"
+        )
+        assert "This worktree also carries" not in context, (
+            "the pre-existing-file notice fired although the worktree holds no "
+            "CLAUDE.md of its own"
         )
 
         for agent_type in SPECIALIST:
@@ -224,20 +241,36 @@ class TestWorktreeTeammateWritesNothing:
     def test_a_tracked_claude_md_in_the_worktree_is_left_unmodified(
         self, repo, monkeypatch
     ):
+        """The pre-#1653 control asserted the WORKTREE file gained the migration
+        and the stale marking. That pin recorded the defect and is FLIPPED: the
+        main checkout's file is migrated and marked, and the worktree's tracked
+        copy is byte-identical with no diff on the branch.
+        """
         main, git = repo
         (main / "CLAUDE.md").write_text(USER_MD)
         git("add", ".", cwd=main)
         git("commit", "-qm", "seed", cwd=main)
 
         control = self._worktree(main, git, "control")
-        _run(monkeypatch, control, LEAD)
-        assert " M CLAUDE.md" in git("status", "--porcelain", cwd=control), (
-            "control: a lead start inside a worktree did not migrate the tracked "
-            "CLAUDE.md, so this layout never reaches the migration"
+        context, _ = _run(monkeypatch, control, LEAD)
+        assert " M CLAUDE.md" in git("status", "--porcelain", cwd=main), (
+            "control: a lead start inside a worktree did not migrate the MAIN "
+            "checkout's CLAUDE.md, so this layout never reaches the migration"
         )
-        assert STALE in (control / "CLAUDE.md").read_text(), (
-            "control: a lead start inside a worktree marked no stale pin, so this "
-            "layout never reaches the staleness writer"
+        assert STALE in (main / "CLAUDE.md").read_text(), (
+            "control: a lead start inside a worktree marked no stale pin in the "
+            "MAIN checkout, so this layout never reaches the staleness writer"
+        )
+        assert (control / "CLAUDE.md").read_text() == USER_MD, (
+            "the worktree's tracked CLAUDE.md was rewritten"
+        )
+        status = git("status", "--porcelain", cwd=control).splitlines()
+        assert not any(line[3:] == "CLAUDE.md" for line in status), (
+            f"the worktree's tracked CLAUDE.md gained a diff: {status}"
+        )
+        assert "This worktree also carries" in context, (
+            "the pre-existing-file notice did not fire although the worktree "
+            "carries its own CLAUDE.md"
         )
 
         for agent_type in SPECIALIST:
@@ -249,3 +282,77 @@ class TestWorktreeTeammateWritesNothing:
                 f"agent_type={agent_type!r} left a CLAUDE.md diff in its worktree: "
                 f"{status}"
             )
+
+    def test_step_4_marks_the_main_checkout_not_the_worktree(self, repo, monkeypatch):
+        """The step-4 wrapper has TWO routes: the patched alias for a
+        non-worktree project dir, and the retargeted resolver for a linked
+        worktree. This arm drives the second and asserts the destination."""
+        main, git = repo
+        (main / "CLAUDE.md").write_text(USER_MD)
+        git("add", ".", cwd=main)
+        git("commit", "-qm", "seed", cwd=main)
+        worktree = self._worktree(main, git, "step4")
+        assert STALE not in (main / "CLAUDE.md").read_text()
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+        monkeypatch.chdir(worktree)
+        session_init.check_pinned_staleness()
+
+        assert STALE in (main / "CLAUDE.md").read_text(), (
+            "step 4 did not mark the MAIN checkout's CLAUDE.md"
+        )
+        assert STALE not in (worktree / "CLAUDE.md").read_text(), (
+            "step 4 marked the worktree's CLAUDE.md"
+        )
+
+    def test_step_4_leaves_the_worktree_alone_when_main_has_no_file(
+        self, repo, monkeypatch
+    ):
+        """`main` has NO CLAUDE.md, so the worktree branch has nothing to mark.
+        Delegating None to the core would re-enter the env-first resolver and
+        mark the worktree file -- the defect this arm pins. The arm above
+        seeds main's file and never exercises this branch."""
+        main, git = repo
+        (main / "CLAUDE.md").write_text(USER_MD)
+        git("add", ".", cwd=main)
+        git("commit", "-qm", "seed", cwd=main)
+        worktree = self._worktree(main, git, "step4-no-main")
+        # Remove the MAIN checkout's copy from the working tree only; the
+        # worktree keeps the tracked file from HEAD.
+        (main / "CLAUDE.md").unlink()
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+        monkeypatch.chdir(worktree)
+        assert session_init.check_pinned_staleness() is None
+        assert (worktree / "CLAUDE.md").read_text() == USER_MD
+        assert STALE not in (worktree / "CLAUDE.md").read_text()
+
+    def test_a_lead_with_no_declared_project_dir_writes_nothing(
+        self, repo, monkeypatch
+    ):
+        """A frame with no CLAUDE_PROJECT_DIR falls back to the cwd, and the
+        writers keep their own no-op guard: a worktree-shaped cwd must not
+        cause a file to be created in either checkout."""
+        main, git = repo
+        (main / "README").write_text("seed\n")
+        git("add", ".", cwd=main)
+        git("commit", "-qm", "seed", cwd=main)
+        worktree = self._worktree(main, git, "envless")
+
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.chdir(worktree)
+        stdin_data = json.dumps(
+            {"session_id": _SESSION_ID, "source": "startup", "agent_type": LEAD}
+        )
+        with patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO):
+            with pytest.raises(SystemExit) as exc:
+                session_init.main()
+        assert exc.value.code == 0
+        assert not (worktree / ".claude" / "CLAUDE.md").exists(), (
+            "a frame with no declared project dir created a CLAUDE.md in the cwd"
+        )
+        assert not (main / ".claude" / "CLAUDE.md").exists(), (
+            "a frame with no declared project dir created a CLAUDE.md in the "
+            "main checkout"
+        )
