@@ -251,7 +251,10 @@ ROUTE_TOKENS = {
     "skills/pact-memory/scripts": "import: the store package",
     "cli.py": "the CLI, by module path",
     "cli command": "the CLI, by a verb instruction",
-    "search --query": "the CLI, by a verb instruction",
+    # The search route as a caller writes it post-#1647: the query is
+    # positional and quoted. Selects the two SKILL.md carriers that teach
+    # the invocation (and cli.py, which is outside the markdown walk).
+    'search "': "the CLI, by a verb instruction",
     "--limit": "the CLI, by a verb instruction",
     "archive_pin.py": "the CLI, at one remove",
     # THE IMPORT ROUTE, SPELLED AS A MODULE-LEVEL CALL. A page taught
@@ -1328,7 +1331,7 @@ def _model_tree(tmp_path: Path) -> Path:
         "reference/config.md": "The package is skills/pact-memory/scripts.",
         "protocols/pact-state-recovery.md": "The store file is memory.db.",
         "protocols/pact-protocols.md": "The store file is memory.db.",
-        "skills/pact-handoff-harvest/SKILL.md": "Run search --query for context.",
+        "skills/pact-handoff-harvest/SKILL.md": 'Run search "context" for context.',
         # THE MODEL MUST AGREE WITH THE TREE ON THIS ONE. archive_pin.py names
         # three route tokens OUTSIDE its marked region, so the alphabet is its
         # second net. A model that gave it no token would report a hole this
