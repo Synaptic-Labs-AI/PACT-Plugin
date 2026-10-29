@@ -114,7 +114,20 @@ def _write_team_line(session_id: str, team_name: str, session_dir: str,
     # The exists() guard and the write below must resolve the SAME target
     # (#1653). On a worktree lead that target is the main checkout, so a guard
     # left on the worktree would silently suppress the write.
-    memory_root = project_scope.project_memory_root(project_dir)
+    #
+    # A DECLARED project dir whose memory root is UNKNOWN must write nothing:
+    # `project_memory_root` fails SAFE TO ITS INPUT, which for a writer means
+    # planting in the worktree. stderr is this command's problem surface (the
+    # exit contract stays 0 -- a skip is not a refusal).
+    memory_root = project_scope.project_memory_root_or_none(project_dir)
+    if memory_root is None:
+        print(
+            "realign_team: project CLAUDE.md skipped: git could not answer, so "
+            "the project memory target is unknown; nothing was written to "
+            "either checkout.",
+            file=sys.stderr,
+        )
+        return
     target_file, _source = claude_md_manager.resolve_project_claude_md_path(
         memory_root
     )

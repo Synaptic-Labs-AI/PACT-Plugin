@@ -341,28 +341,41 @@ def _resolve(session_dir: Path) -> tuple[Path | None, Path | None]:
     """The project CLAUDE.md and its base directory, the resolver's answer,
     starting git at most once per session.
 
-    The resolver's first step, CLAUDE_PROJECT_DIR, needs no git, so it is
-    checked on every call and wins whatever is cached. Otherwise the cached
-    base is used with the two-file check, and a cached "no file" stays the
-    answer until a file appears under CLAUDE_PROJECT_DIR."""
+    #1653: the base is the PROJECT-MEMORY root, so a linked-worktree session
+    watches the MAIN checkout's file -- the document every writer targets.
+    Retargeting needs git, so the env rung is paid only when the cache is
+    being built; afterwards the cached base (already the memory root) is used
+    with the two-file check and starts no git. Within one session the
+    declaration is stable, so a changed CLAUDE_PROJECT_DIR is picked up by the
+    next session rather than mid-session. A cached "no file" means the memory
+    root had none when computed; it stays the answer for this session, which
+    is the same per-session horizon the cache already had."""
+    from shared.project_scope import project_memory_root
     from staleness import _find_existing_claude_md, _resolve_project_claude_md_with_base
 
     cache_path = session_dir / _BASE_CACHE
     cached = _read_json(cache_path)
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    if project_dir:
-        found = _find_existing_claude_md(Path(project_dir))
-        if found is not None:
-            if cached is None or cached.get("base") != project_dir:
-                _write_json(cache_path, {"base": project_dir})
-            return found, Path(project_dir)
     if cached is not None and "base" in cached:
         base = cached["base"]
+        if base is None:
+            return None, None
         if not isinstance(base, str):
             return None, None
         found = _find_existing_claude_md(Path(base))
         return (found, Path(base)) if found is not None else (None, None)
-    path, base = _resolve_project_claude_md_with_base()
+
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    if project_dir:
+        memory_root = project_memory_root(Path(project_dir))
+        found = _find_existing_claude_md(memory_root)
+        if found is not None:
+            _write_json(cache_path, {"base": str(memory_root)})
+            return found, memory_root
+    path, base = _resolve_project_claude_md_with_base(
+        project_dir=project_memory_root(Path(project_dir))
+        if project_dir
+        else None
+    )
     _write_json(cache_path, {"base": str(base) if base is not None else None})
     return path, base
 

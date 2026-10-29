@@ -3564,3 +3564,58 @@ class TestWorktreeLeadReadsTheMainSessionBlock:
             "the snapshot built from the previous session never reached the "
             "session context"
         )
+
+
+# ── #53: the restored summary names its source session, neutrally ───────────
+
+class TestRestoredSummaryNamesItsSource:
+    """The restored header names the journal's session as the FACT of where the
+    text came from. It must not say "resumed from" (a predecessor ordering
+    two concurrent leads can falsify) and it computes no liveness state."""
+
+    def test_the_header_names_the_source_session(self, tmp_path):
+        from shared.session_journal import append_event, make_event
+        from shared.session_resume import restore_last_session
+
+        session_dir = tmp_path / "prev-session"
+        assert append_event(
+            make_event(
+                "session_start", session_id="abc12345-source",
+                project_dir="/proj", source="startup",
+            ),
+            session_dir=str(session_dir),
+        )
+        assert append_event(
+            make_event(
+                "agent_handoff", agent="coder", task_id="t1",
+                task_subject="CODE: x", handoff={"decisions": ["d"]},
+            ),
+            session_dir=str(session_dir),
+        )
+
+        summary = restore_last_session(str(session_dir))
+
+        assert summary is not None
+        assert "Context from session abc12345-source." in summary, (
+            "the restored summary did not name its source session"
+        )
+        assert "resumed from" not in summary.lower(), (
+            "the header asserted a predecessor ordering"
+        )
+
+    def test_a_thin_journal_still_returns_none(self, tmp_path):
+        """The source line must not turn a too-thin journal into a summary:
+        the None/non-None boundary is unchanged by the header addition."""
+        from shared.session_journal import append_event, make_event
+        from shared.session_resume import restore_last_session
+
+        session_dir = tmp_path / "thin-session"
+        assert append_event(
+            make_event(
+                "session_start", session_id="thin-source",
+                project_dir="/proj", source="startup",
+            ),
+            session_dir=str(session_dir),
+        )
+
+        assert restore_last_session(str(session_dir)) is None

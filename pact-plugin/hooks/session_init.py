@@ -76,6 +76,7 @@ from staleness import (  # noqa: F401
     _get_project_claude_md_path,
     _estimate_tokens,
     locate_pinned,
+    resolve_session_claude_md_path,
 )
 from pin_caps import (  # noqa: F401
     PIN_COUNT_CAP,
@@ -123,7 +124,11 @@ from shared.pact_config import llm_options
 from shared.peer_context import get_peer_context
 from shared.session_registry import resolve as _registry_resolve
 from shared.paths import get_claude_config_dir
-from shared.project_scope import _record_worktree_identity, project_memory_root
+from shared.project_scope import (
+    _record_worktree_identity,
+    project_memory_root,
+    project_memory_root_or_none,
+)
 from shared import backlog_store
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
@@ -148,7 +153,6 @@ from shared.session_resume import (
     RESUMPTION_MARKER_MISSING_DIRECTIVE,
     _extract_prev_session_dir,
     _same_dir,
-    _sanitize_prompt_field,
     _validate_under_pact_sessions,  # noqa: F401  # re-export: tests import it from session_init
     format_session_substitutions,
     update_session_info,
@@ -354,51 +358,10 @@ def check_pinned_staleness(
     return _staleness_check(claude_md_path=path)
 
 
-def _worktree_memory_notice(memory_root: Path, project_dir: str) -> Optional[str]:
-    """Lead-visible line for a worktree that carries its own CLAUDE.md (#1653).
-
-    Fires only when project memory is managed in the main checkout
-    (`memory_root` differs from `project_dir`) AND the worktree holds a
-    CLAUDE.md of its own. The readers are untouched, so this session's memory
-    saves still project into the worktree file. The wording names both
-    absolute paths, states the durability consequence, and conditions the
-    remedy on whether the file belongs to the branch -- it never tells the
-    user to delete a tracked file, which is exactly the case it fires on.
-
-    THE MANAGED PATH IS PRESENT TENSE ONLY WHEN IT EXISTS. The resolver's
-    `new_default` source means step 3 could not create it (an unwritable main
-    checkout, a containment refusal), so the line says "will be managed in"
-    rather than asserting a file that was never written. The durability
-    warning still applies in that case -- the worktree copy is what the
-    session keeps reading and writing.
-
-    Both interpolated paths are path-derived text in a prompt field, so each
-    passes through `_sanitize_prompt_field`: control characters collapse to
-    spaces and the length is bounded. A path that carried a newline could
-    otherwise forge an extra line of context.
-    """
-    if memory_root == Path(project_dir):
-        return None
-    worktree_md, worktree_source = resolve_project_claude_md_path(project_dir)
-    if worktree_source == "new_default":
-        return None
-    managed_md, managed_source = resolve_project_claude_md_path(memory_root)
-    managed_path = _sanitize_prompt_field(str(managed_md))
-    stated_managed = (
-        f"Project memory is managed in {managed_path}."
-        if managed_source != "new_default"
-        else f"Project memory will be managed in {managed_path}."
-    )
-    return (
-        f"{stated_managed} This worktree also carries "
-        f"{_sanitize_prompt_field(str(worktree_md))}, and memory saves from this "
-        "session still project into it — entries written there are lost when the "
-        "worktree is removed. If that file is not meant to be part of the branch, "
-        "remove or untrack it."
-    )
-
-
-def check_pin_slot_status() -> Optional[str]:
+def check_pin_slot_status(
+    project_dir: str | os.PathLike[str] | None = None,
+    memory_root: Path | None = None,
+) -> Optional[str]:
     """Return a Tier-0 slot-status line for additionalContext, or None.
 
     Builds "Pin slots: N/12 used, K chars remaining on largest pin" via
@@ -412,9 +375,13 @@ def check_pin_slot_status() -> Optional[str]:
     regression, future parser change that raises outside the pin reader).
     Wrap the full body in a blanket try/except — mirrors the sibling
     check_pin_stale_block_directive pattern above.
+
+    FOLLOWS THE PROJECT-MEMORY ROOT (#1653): a worktree session's slots are
+    counted from the MAIN checkout's file, because that is the document every
+    writer targets. A non-worktree caller gets today's resolver unchanged.
     """
     try:
-        path = _get_project_claude_md_path()
+        path = resolve_session_claude_md_path(project_dir, memory_root)
         if path is None:
             return None
 
@@ -462,7 +429,10 @@ _SYNC_HEADINGS = (
 _REASON_LINE = re.compile(r"\blines? (\d+)")
 
 
-def check_claude_md_refusals() -> Optional[str]:
+def check_claude_md_refusals(
+    project_dir: str | os.PathLike[str] | None = None,
+    memory_root: Path | None = None,
+) -> Optional[str]:
     """Return the per-launch line for a project CLAUDE.md that PACT will not
     update, or None.
 
@@ -476,9 +446,12 @@ def check_claude_md_refusals() -> Optional[str]:
     checked. A missing, unreadable or non-UTF-8
     file gives None: the writers report those themselves. Read-only, and
     fail-open on the SessionStart hot path.
+
+    FOLLOWS THE PROJECT-MEMORY ROOT (#1653): the file named here is the one
+    PACT writes, so a worktree session names the MAIN checkout's file.
     """
     try:
-        path = _get_project_claude_md_path()
+        path = resolve_session_claude_md_path(project_dir, memory_root)
         if path is None:
             return None
         try:
@@ -536,7 +509,10 @@ def check_claude_md_refusals() -> Optional[str]:
         return None
 
 
-def check_pin_stale_block_directive() -> Optional[str]:
+def check_pin_stale_block_directive(
+    project_dir: str | os.PathLike[str] | None = None,
+    memory_root: Path | None = None,
+) -> Optional[str]:
     """Return an unconditional stale-block directive for additionalContext, or None.
 
     Fires only when check_pinned_block_signal reports positive detection.
@@ -555,8 +531,24 @@ def check_pin_stale_block_directive() -> Optional[str]:
     # its own contract, but session_init is on the SessionStart hot path —
     # a regression inside the callee should not propagate out of this
     # surfacing helper. Wrap in fail-open try/except.
+    #
+    # FOLLOWS THE PROJECT-MEMORY ROOT (#1653). In the worktree branch a None
+    # path means the main checkout has no file: return None HERE, because the
+    # callee re-resolves env-first when its path is None and would read the
+    # worktree copy (the step-4 lesson). The non-worktree route keeps today's
+    # delegation to the callee unchanged.
+    if project_dir is None:
+        project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+        memory_root = project_memory_root(project_dir) if project_dir else None
+    retargeted = bool(
+        project_dir
+        and memory_root is not None
+        and memory_root != Path(project_dir)
+    )
     try:
-        path = _get_project_claude_md_path()
+        path = resolve_session_claude_md_path(project_dir, memory_root)
+        if retargeted and path is None:
+            return None
         signal = _staleness_block_check(claude_md_path=path)
     except Exception:  # noqa: BLE001 — fail-open
         return None
@@ -692,7 +684,9 @@ _SESSION_STARTED_RE = re.compile(
 _STARTED_VALUE_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$")
 
 
-def _extract_session_started(project_dir: str) -> str | None:
+def _extract_session_started(
+    project_dir: str | os.PathLike[str],
+) -> str | None:
     """The "Started" value in the project CLAUDE.md's Current Session block.
 
     None when there is no CLAUDE.md, it cannot be read, or the line is not in
@@ -1755,7 +1749,21 @@ def main():
         # back unchanged, so those paths stay byte-identical. Computed for
         # every frame because the reads at 5a/5b must resolve the same root as
         # the writers they feed.
-        memory_root = project_memory_root(project_dir)
+        #
+        # GIT-FAILURE DIRECTION. `project_memory_root` fails safe to its input,
+        # which during a git failure would re-plant a CLAUDE.md in the
+        # worktree. A DECLARED project dir whose memory root is UNKNOWN must
+        # skip the writers instead; the reads keep the fail-safe. A non-git
+        # directory is a known answer (the directory), so it is not skipped.
+        declared_project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+        memory_unknown = False
+        if declared_project_dir:
+            memory_root = project_memory_root_or_none(declared_project_dir)
+            if memory_root is None:
+                memory_unknown = True
+                memory_root = project_memory_root(project_dir)
+        else:
+            memory_root = project_memory_root(project_dir)
 
         # The WRITERS keep their own "no project dir declared" guard. Passing
         # `memory_root` to them unconditionally would bypass that guard --
@@ -1764,15 +1772,22 @@ def main():
         # CLAUDE.md where it previously created none. None here means "read
         # the environment", which is empty, so the writer returns its no-op.
         # Reads may use `memory_root`: they already took the cwd fallback.
-        declared_project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
         write_root = memory_root if declared_project_dir else None
+
+        # One user-visible line for the skip; the writers never run below.
+        if frame_is_lead and memory_unknown:
+            system_messages.append(
+                "Project CLAUDE.md skipped: git could not answer, so the project "
+                "memory target is unknown; this start wrote nothing to either "
+                "checkout."
+            )
 
         # Steps 3/3b create and migrate the project CLAUDE.md, and only a lead
         # does. A teammate whose project dir is a worktree would otherwise plant
         # a template there that diverts every CLAUDE.md resolver away from the
         # main repo's file, or rewrite a tracked CLAUDE.md in the worktree; in
         # the lead's own dir the lead has already written it.
-        if frame_is_lead:
+        if frame_is_lead and not memory_unknown:
             # 3. Ensure project has CLAUDE.md with memory sections
             project_md_msg = ensure_project_memory_md(write_root)
             if project_md_msg:
@@ -1793,19 +1808,6 @@ def main():
                     system_messages.append(migration_msg)
                 else:
                     context_parts.append(migration_msg)
-
-            # A worktree that carries its own CLAUDE.md keeps the readers on
-            # that file (readers are untouched), so this session's memory
-            # saves still land there and die with the worktree. Say so once
-            # per lead start; the notice names the managed target, the
-            # worktree file, the consequence and a conditioned remedy. It does
-            # NOT tell the user to delete a file that may be tracked.
-            # No notice when no project dir was declared: no writer ran, so
-            # nothing is managed anywhere for this frame.
-            if write_root is not None:
-                worktree_notice = _worktree_memory_notice(memory_root, project_dir)
-                if worktree_notice:
-                    context_parts.append(worktree_notice)
 
         # Step 3c retired in v4.2.15 — orphan-stripper sunset; see git log for context.
 
@@ -1852,7 +1854,7 @@ def main():
         # update, on every launch until the file is fixed. Lead only, beside
         # each writer's own status; a compaction is not a launch.
         if frame_is_lead and source != "compact":
-            refusal_msg = check_claude_md_refusals()
+            refusal_msg = check_claude_md_refusals(project_dir, memory_root)
             if refusal_msg:
                 system_messages.append(refusal_msg)
 
@@ -1860,7 +1862,7 @@ def main():
         # architecturally binding, survives compaction. Fail-open: None
         # when CLAUDE.md cannot be resolved or parsed. m2: lead-only pin
         # telemetry — not surfaced to a teammate frame.
-        slot_status_msg = check_pin_slot_status()
+        slot_status_msg = check_pin_slot_status(project_dir, memory_root)
         if slot_status_msg and frame_role != "teammate":
             context_parts.append(slot_status_msg)
 
@@ -1869,7 +1871,7 @@ def main():
         # /resume per plan key-decisions row 6. m2: the "/PACT:prune-memory"
         # directive is a lead/orchestrator memory action — not surfaced to a
         # teammate frame (the helper's marker side-effect is unchanged).
-        stale_block_msg = check_pin_stale_block_directive()
+        stale_block_msg = check_pin_stale_block_directive(project_dir, memory_root)
         if stale_block_msg and frame_role != "teammate":
             context_parts.append(stale_block_msg)
 
@@ -2593,7 +2595,11 @@ def main():
         # CROSS-PROCESS CLOBBER — a teammate/plain frame writing it overwrites
         # the lead's session block in the shared project file. Gate on
         # frame_is_lead in addition to the existing sentinel guard.
-        if frame_is_lead and not _is_unknown_or_missing_session(session_id):
+        if (
+            frame_is_lead
+            and not memory_unknown
+            and not _is_unknown_or_missing_session(session_id)
+        ):
             session_msg = update_session_info(
                 session_id, team_name, session_dir, plugin_root,
                 started=_extract_session_started(memory_root) if source == "compact" else None,

@@ -33,9 +33,10 @@ from shared.claude_md_manager import (
     PINNED_END_MARKER,
     PINNED_START_MARKER,
     SESSION_BOUNDARY_PREFIX,
+    resolve_project_claude_md_path,
 )
 from shared.failure_cause import failure_cause
-from shared.project_scope import git_env_without_location
+from shared.project_scope import git_env_without_location, project_memory_root
 from pin_caps import (
     PIN_STALE_BLOCK_THRESHOLD,
     _PIN_HEADING_ROW,
@@ -363,6 +364,48 @@ def get_project_claude_md_path(
 
 # Backward-compatible alias (tests and session_init patch the underscore name)
 _get_project_claude_md_path = get_project_claude_md_path
+
+
+def resolve_session_claude_md_path(
+    project_dir: Optional[os.PathLike[str] | str] = None,
+    memory_root: Optional[Path] = None,
+) -> Optional[Path]:
+    """The project CLAUDE.md the SESSION's PACT state lives in (#1653).
+
+    ONE RULE FOR EVERY ADVISORY READER AND THE WRITERS: a linked-worktree
+    session's project file is the MAIN checkout's, so a reader that resolved
+    the worktree copy would describe a document nothing writes any more. When
+    the supplied base does not differ from the declaration -- every
+    non-worktree session, and every no-argument call -- today's resolver is
+    used unchanged, so those sessions stay byte-identical.
+
+    Returns None when the memory root has no file; callers treat that as
+    "nothing to read" rather than delegating None to a resolver that would
+    re-resolve env-first (the step-4 lesson: None is not "do nothing").
+
+    A caller that names a base is honoured: `project_dir` alone derives its
+    memory root here and the non-worktree route passes the same base to the
+    resolver. Otherwise the argument would be a no-op and the call would
+    silently read the environment instead -- the reader/writer trap this
+    helper exists to close. A no-argument call is unchanged: it reads the
+    environment, as today.
+    """
+    explicit_base = project_dir is not None
+    if project_dir is None:
+        project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+        memory_root = project_memory_root(project_dir) if project_dir else None
+    elif memory_root is None:
+        memory_root = project_memory_root(project_dir)
+    if (
+        project_dir
+        and memory_root is not None
+        and Path(memory_root) != Path(project_dir)
+    ):
+        target, source = resolve_project_claude_md_path(memory_root)
+        return target if source != "new_default" else None
+    if explicit_base and project_dir:
+        return get_project_claude_md_path(Path(project_dir))
+    return get_project_claude_md_path()
 
 
 def estimate_tokens(text: str) -> int:

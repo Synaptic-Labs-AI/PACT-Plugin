@@ -22,7 +22,7 @@ import subprocess
 import pytest
 
 import shared.project_scope as project_scope
-from shared.project_scope import project_memory_root
+from shared.project_scope import project_memory_root, project_memory_root_or_none
 
 
 def _git(*args, cwd):
@@ -272,3 +272,57 @@ def test_a13_a_forged_path_one_space_away_is_not_admitted(repo):
     forged.mkdir()
     (forged / ".git").write_text(f"gitdir: {admin}\n")
     assert project_memory_root(forged) == forged
+
+
+def test_a11d_a_newline_path_survives_a_forced_z_failure(repo, tmp_path, monkeypatch):
+    """Item 2: when `-z` is unavailable, the admin `gitdir` enumeration still
+    recovers a newline-containing path, so it redirects to MAIN.
+
+    The old line-parser fallback truncated the path and fell back to the
+    worktree. RED by reverting the admin enumeration to the line parser.
+    """
+    path = tmp_path / "wt\nnl-fallback"
+    _git("worktree", "add", "-q", str(path), "-b", "nlfb", cwd=repo)
+    real = project_scope.run_git
+
+    def fake_run_git(args, **kwargs):
+        if "-z" in args:
+            return subprocess.CompletedProcess(args, 129, "", "unknown option")
+        return real(args, **kwargs)
+
+    monkeypatch.setattr(project_scope, "run_git", fake_run_git)
+    assert project_memory_root(path) == repo.resolve()
+
+
+def test_a14_a_git_failure_is_reported_unknown(repo, monkeypatch):
+    """Item 4: `project_memory_root_or_none` returns None when git cannot run,
+    while `project_memory_root` keeps its fail-safe input for readers."""
+    worktree = _worktree(repo, "wt-unknown")
+    monkeypatch.setattr(project_scope, "run_git", lambda *args, **kwargs: None)
+    assert project_memory_root_or_none(worktree) is None
+    assert project_memory_root(worktree) == worktree
+
+
+def test_a14b_a_non_git_directory_is_a_known_answer(tmp_path):
+    """Item 4: "git answered: not a repository" is NOT "git could not answer";
+    a plain project directory must keep its writers."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert project_memory_root_or_none(plain) == plain
+
+
+def test_a15_a_separate_git_dir_with_a_trailing_space_returns_input(tmp_path):
+    """Item 5: the git-dir/common-dir reads keep a trailing space on the git
+    dir path, compared like with like.
+
+    NON-REGRESSION GUARD, not a RED pin: a separate-git-dir repo has
+    git-dir == common-dir and returns the input before the candidate check, so
+    the stripped read gave the same answer and no single-site ablation reddens
+    this arm on git 2.43. It guards a future change that compares a stripped
+    git dir against an unstripped one.
+    """
+    checkout = tmp_path / "sep-checkout"
+    checkout.mkdir()
+    _git("init", "-q", f"--separate-git-dir={tmp_path / 'sep.git '}", ".",
+         cwd=checkout)
+    assert project_memory_root(checkout) == checkout

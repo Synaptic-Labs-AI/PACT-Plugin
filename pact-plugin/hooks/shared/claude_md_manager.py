@@ -1779,9 +1779,12 @@ def match_project_claude_md(file_path_str: str) -> Path | None:
     sets on every session. If CLAUDE_PROJECT_DIR is unset, relative
     input returns None — safer than a silent cwd dependency.
 
-    Worktree-safe: imports `staleness.get_project_claude_md_path` lazily
-    to avoid circular-import and module-load cost on every Edit/Write.
-    That function already handles env-var / git-root / cwd fallbacks.
+    Worktree-safe: imports `staleness.resolve_session_claude_md_path` lazily
+    to avoid circular-import and module-load cost on every Edit/Write. That
+    function returns the SESSION's project-memory file (#1653: MAIN's for a
+    linked worktree) and on the non-worktree route delegates to
+    `get_project_claude_md_path`, whose env-var / git-root / cwd fallbacks are
+    unchanged.
 
     Fail-safe: any OSError / RuntimeError while resolving returns None.
     Callers treat None as "not our target; let the tool through."
@@ -1790,11 +1793,15 @@ def match_project_claude_md(file_path_str: str) -> Path | None:
         return None
 
     try:
-        from staleness import get_project_claude_md_path
+        from staleness import resolve_session_claude_md_path
     except ImportError:
         return None
 
-    project_md = get_project_claude_md_path()
+    # #1653: the SESSION's project-memory file. A linked-worktree session
+    # matches the MAIN checkout's file -- the document every writer targets --
+    # so a pin gate is not bypassed by a worktree-local copy. The non-worktree
+    # route is today's resolver unchanged.
+    project_md = resolve_session_claude_md_path()
     if project_md is None:
         return None
 
@@ -1850,14 +1857,24 @@ def gate_target(file_path: str) -> GateTarget | None:
     if not target.is_absolute() or target.name.casefold() != "claude.md":
         return None
     try:
+        from shared.project_scope import project_memory_root
         from staleness import _resolve_project_claude_md_with_base, same_path
     except ImportError:
         return None
     try:
-        resolved, base = _resolve_project_claude_md_with_base(assume_present=target)
+        # #1653: gate the SESSION's project-memory file. For a linked worktree
+        # that is MAIN's; the resolver is given that base, so an edit to the
+        # worktree-local copy is not what the pin cap protects. A non-worktree
+        # session passes its own env dir, which the resolver treats as the
+        # same first rung as before.
+        declared = os.environ.get("CLAUDE_PROJECT_DIR")
+        memory_root = project_memory_root(declared) if declared else None
+        resolved, base = _resolve_project_claude_md_with_base(
+            assume_present=target, project_dir=memory_root)
         if resolved is None or base is None or not same_path(resolved, target):
             return None
-        before, before_base = _resolve_project_claude_md_with_base()
+        before, before_base = _resolve_project_claude_md_with_base(
+            project_dir=memory_root)
         if before_base is not None and not same_path(before_base, base):
             from .project_scope import same_repository
 

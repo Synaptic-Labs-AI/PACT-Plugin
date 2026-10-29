@@ -227,10 +227,6 @@ class TestWorktreeTeammateWritesNothing:
             "a lead start inside a worktree still planted "
             "<worktree>/.claude/CLAUDE.md"
         )
-        assert "This worktree also carries" not in context, (
-            "the pre-existing-file notice fired although the worktree holds no "
-            "CLAUDE.md of its own"
-        )
 
         for agent_type in SPECIALIST:
             teammate = self._worktree(main, git, agent_type.replace(":", "-"))
@@ -269,10 +265,6 @@ class TestWorktreeTeammateWritesNothing:
         assert not any(line[3:] == "CLAUDE.md" for line in status), (
             f"the worktree's tracked CLAUDE.md gained a diff: {status}"
         )
-        assert "This worktree also carries" in context, (
-            "the pre-existing-file notice did not fire although the worktree "
-            "carries its own CLAUDE.md"
-        )
 
         for agent_type in SPECIALIST:
             teammate = self._worktree(main, git, agent_type.replace(":", "-"))
@@ -283,81 +275,6 @@ class TestWorktreeTeammateWritesNothing:
                 f"agent_type={agent_type!r} left a CLAUDE.md diff in its worktree: "
                 f"{status}"
             )
-
-    def test_a_dot_claude_worktree_file_gets_the_notice(self, repo, monkeypatch):
-        """A worktree carrying ONLY `.claude/CLAUDE.md` is the third layout.
-
-        The tracked-legacy arm above pins `./CLAUDE.md`; the creation arm pins
-        a worktree with no file at all (the notice's negative control). The
-        dot_claude source is the remaining branch of the notice's fire
-        condition: the worktree file exists, the managed target is main, and
-        the notice must name the DOT_CLAUDE path rather than the legacy one.
-        """
-        main, git = repo
-        (main / "README").write_text("seed\n")
-        git("add", ".", cwd=main)
-        git("commit", "-qm", "seed", cwd=main)
-
-        control = self._worktree(main, git, "dot-claude")
-        (control / ".claude").mkdir()
-        (control / ".claude" / "CLAUDE.md").write_text(USER_MD)
-
-        context, system_message = _run(monkeypatch, control, LEAD)
-
-        main_md = main / ".claude" / "CLAUDE.md"
-        worktree_md = control / ".claude" / "CLAUDE.md"
-        assert main_md.exists() and CREATED in context, (
-            "control: the lead start did not create MAIN's CLAUDE.md, so the "
-            "notice's managed target was never in play"
-        )
-        assert f"Project memory is managed in {main_md}." in context, (
-            "the notice did not name the managed file, or named a legacy path"
-        )
-        assert f"This worktree also carries {worktree_md}," in context, (
-            "the notice did not name the worktree's .claude/CLAUDE.md"
-        )
-        assert (
-            "entries written there are lost when the worktree is removed"
-            in context
-        ), "the notice did not state the durability consequence"
-        assert (
-            "If that file is not meant to be part of the branch, remove or "
-            "untrack it." in context
-        ), "the notice did not carry the conditioned remedy"
-        assert "Project memory is managed in" not in system_message, (
-            "the notice belongs in the lead's context, not systemMessages"
-        )
-        assert worktree_md.read_text() == USER_MD, (
-            "the worktree's own .claude/CLAUDE.md was rewritten"
-        )
-
-    def test_a_main_checkout_claude_md_gets_no_notice(self, repo, monkeypatch):
-        """The notice's other failure direction: noisy when it should not fire.
-
-        In a MAIN checkout the base equals the project dir, so nothing is
-        diverted and the notice must stay silent even though the checkout
-        carries a `.claude/CLAUDE.md`. The worktree arms cover the missing
-        direction; this one covers the noisy direction.
-        """
-        main, git = repo
-        (main / ".claude").mkdir()
-        (main / ".claude" / "CLAUDE.md").write_text(USER_MD)
-        (main / "README").write_text("seed\n")
-        git("add", ".", cwd=main)
-        git("commit", "-qm", "seed", cwd=main)
-
-        context, system_message = _run(monkeypatch, main, LEAD)
-
-        assert MIGRATED in context, (
-            "control: the lead start did not reach the migration in a main "
-            "checkout, so this layout never reaches the notice's guard"
-        )
-        assert "This worktree also carries" not in context, (
-            "the pre-existing-file notice fired in a MAIN checkout, where the "
-            "base and the project dir are the same"
-        )
-        assert "Project memory is managed in" not in context
-        assert "Project memory is managed in" not in system_message
 
     def test_step_4_marks_the_main_checkout_not_the_worktree(self, repo, monkeypatch):
         """The step-4 wrapper has TWO routes: the patched alias for a
@@ -682,37 +599,27 @@ class TestWorktreeTeammateWritesNothing:
         assert not (worktree / ".claude" / "CLAUDE.md").exists()
         assert not (worktree / "CLAUDE.md").exists()
 
-    def test_the_notice_says_will_be_managed_when_main_has_no_file(self, repo):
-        """R5: a failed creation must not be asserted as an existing file."""
+    def test_the_worktree_file_is_no_longer_a_write_target(self, repo, monkeypatch):
+        """#1653 residual closed: a worktree carrying its own CLAUDE.md is not
+        the project-memory target any more, and no notice exists to describe a
+        split that can no longer happen.
+
+        Replaces the retired notice arms (the "is managed in" negation and the
+        sanitisation arm, which tested a function that no longer exists).
+        """
         main, git = repo
-        worktree = self._worktree(main, git, "notice-future")
+        (main / "README").write_text("seed\n")
+        git("add", ".", cwd=main)
+        git("commit", "-qm", "seed", cwd=main)
+        worktree = self._worktree(main, git, "no-notice")
         (worktree / "CLAUDE.md").write_text(USER_MD)
 
-        notice = session_init._worktree_memory_notice(main, str(worktree))
+        context, _ = _run(monkeypatch, worktree, LEAD)
 
-        assert notice is not None, "the notice did not fire for a worktree file"
-        assert "Project memory will be managed in" in notice, (
-            "the notice asserted a managed file although the main checkout has "
-            "none (step 3 failed or had not run)"
+        assert (main / ".claude" / "CLAUDE.md").exists(), (
+            "control: the lead start did not create MAIN's CLAUDE.md"
         )
-        assert "Project memory is managed in" not in notice
-
-    def test_the_notice_sanitises_both_paths(self, monkeypatch):
-        """SEC-2: a path carrying a newline must not forge a context line."""
-        main = Path("/tmp/main\ninject")
-        worktree = "/tmp/wt\ninject"
-
-        def fake_resolver(project_dir):
-            if str(project_dir) == str(main):
-                return Path("/tmp/main\ninject/.claude/CLAUDE.md"), "dot_claude"
-            return Path("/tmp/wt\ninject/CLAUDE.md"), "legacy"
-
-        monkeypatch.setattr(
-            session_init, "resolve_project_claude_md_path", fake_resolver
+        assert "This worktree also carries" not in context, (
+            "a notice survived although the reader/writer split is closed"
         )
-        notice = session_init._worktree_memory_notice(main, worktree)
-
-        assert notice is not None
-        assert "\n" not in notice, "a path injected a newline into the notice"
-        assert "/tmp/main inject/.claude/CLAUDE.md" in notice
-        assert "/tmp/wt inject/CLAUDE.md" in notice
+        assert "Project memory is managed in" not in context

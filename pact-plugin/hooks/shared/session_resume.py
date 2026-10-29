@@ -577,7 +577,7 @@ _SESSION_STARTED_RE = re.compile(
 _STARTED_VALUE_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$")
 
 
-def read_session_started(project_dir: str) -> str | None:
+def read_session_started(project_dir: str | os.PathLike[str]) -> str | None:
     """The "Started" value in the project CLAUDE.md's Current Session block.
 
     Pass it as update_session_info's ``started`` to rewrite the block without
@@ -641,7 +641,9 @@ def _validate_under_pact_sessions(path: str) -> str | None:
     return None
 
 
-def _extract_prev_session_dir(project_dir: str) -> str | None:
+def _extract_prev_session_dir(
+    project_dir: str | os.PathLike[str],
+) -> str | None:
     """
     Extract the previous session's directory path from the project CLAUDE.md.
 
@@ -1137,6 +1139,26 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
 
     lines = ["Previous session summary (from journal -- read-only reference):", ""]
 
+    # NAME THE SOURCE SESSION NEUTRALLY. "Context from session X" states where
+    # this text came from; "resumed from" would assert a predecessor ordering
+    # that two concurrent leads can falsify, and NO liveness predicate is
+    # computed -- a session killed before writing session_end would read as
+    # live forever (the lineage assessment's crash case). Omitted when the
+    # journal carries no session_start, so the header is unchanged there.
+    source_session = next(
+        (
+            event.get("session_id")
+            for event in all_events
+            if event.get("type") == "session_start"
+            and isinstance(event.get("session_id"), str)
+            and event.get("session_id")
+        ),
+        "",
+    )
+    if source_session:
+        lines.append(f"Context from session {source_session}.")
+        lines.append("")
+
     # Extract completed handoffs. Every field access is guarded with
     # .get() and type checks — `decisions[0]` is the single historical
     # crash site (BugF1 secondary), now funneled through the helper.
@@ -1250,8 +1272,10 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
         lines.append(f"**Warning**: {warning}")
         lines.append("")
 
-    # Minimal output check
-    if len(lines) <= 2:
+    # Minimal output check. The source line adds two rows, counted out here so
+    # a journal that was too thin to summarize BEFORE #53 still returns None —
+    # the None/non-None boundary must not move with a header addition.
+    if len(lines) <= (4 if source_session else 2):
         return None
 
     return "\n".join(lines)

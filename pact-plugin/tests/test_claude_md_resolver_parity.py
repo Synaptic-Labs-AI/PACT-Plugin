@@ -281,26 +281,20 @@ def _init_repo_with_claude_md(root: Path) -> Path:
 
 
 class TestDisplayResolverParityInvariant:
-    """Pin the docstring claim Option C revised (working_memory:_resolve_display_...).
+    """Pin the invariant #1653 left between the two resolvers.
 
-    _resolve_display_claude_md_path anchors branch 2 on the WORKTREE root
-    (--show-toplevel) and falls back on the MAIN repo root (--git-common-dir)
-    in branch 3; _get_claude_md_path uses only the main-repo anchor. The claim:
-    they differ ONLY in that worktree-root branch.
+    _resolve_display_claude_md_path passes EVERY base through
+    project_memory_root; _get_claude_md_path does not. In a non-worktree
+    checkout both resolve the same directory, so they coincide (the
+    plain-checkout arm is the non-vacuity guard for that coincidence). In a
+    linked worktree the display resolver resolves the MAIN checkout even when
+    the worktree owns a CLAUDE.md — the closure this PR adds — so the
+    worktree-own-file case now also coincides with the main-repo resolver
+    instead of diverging.
 
-    Three cases together demonstrate the "only". Two of them predate Option C
-    and pin the CONTEXT that gives "only" its meaning; one is the actual
-    Option-C regression guard:
-
-      - coincide_in_non_worktree  -- CONTEXT (branch-3-independent): both
-        resolvers already coincided outside a worktree before Option C.
-      - diverge_when_worktree_owns_a_file -- CONTEXT (branch-3-independent):
-        the single legitimate divergence, in the worktree-root branch.
-      - coincide_in_pact_worktree_without_own_file -- LOAD-BEARING: this case
-        DIVERGED before Option C (display -> None, main -> the main file) and
-        COINCIDES after, purely because branch 3 was added. Deleting branch 3
-        flips only this case red; the other two stay green. It is the sole
-        member of this class that guards the Option-C change.
+    The former `diverge_when_worktree_owns_a_file` pin asserted that
+    divergence; it is FLIPPED, not deleted, and the worktree-own-file arm
+    below now asserts the closure.
 
     A sibling BEHAVIOURAL guard for the same case lives in
     test_working_memory_worktree_sync.py: that one asserts the concrete main
@@ -333,14 +327,17 @@ class TestDisplayResolverParityInvariant:
         assert os.path.realpath(display) == os.path.realpath(expected)
         assert os.path.realpath(display) == os.path.realpath(main)
 
-    def test_worktree_divergence_is_confined_to_the_worktree_root_branch(
+    def test_worktree_own_file_no_longer_diverges_from_the_main_resolver(
         self, tmp_path, monkeypatch
     ):
-        """Non-vacuity guard for the test above: the two resolvers CAN diverge,
-        and do so only in the worktree-root branch. A worktree that owns a
-        CLAUDE.md resolves the display path to its OWN file (branch 2) while the
-        main-repo resolver still points at the main file -- so the coincidence
-        above is a real property of the non-worktree case, not a constant."""
+        """#1653 closure: a worktree owning a CLAUDE.md no longer makes the
+        display resolver return it.
+
+        The old pin asserted the divergence (display -> the worktree file,
+        _get_claude_md_path -> the main file); it is FLIPPED, not deleted.
+        Both now resolve MAIN's file, and the worktree copy is not the
+        display answer.
+        """
         from scripts.working_memory import (
             _get_claude_md_path,
             _resolve_display_claude_md_path,
@@ -362,11 +359,10 @@ class TestDisplayResolverParityInvariant:
         main = _get_claude_md_path()
 
         assert display is not None and main is not None
-        # Display follows the worktree's OWN file (branch 2, --show-toplevel);
-        # the main-repo resolver stays on the main file (--git-common-dir).
-        assert os.path.realpath(display) == os.path.realpath(wt_file)
+        # Both resolvers stay on the MAIN file; the worktree copy is not it.
+        assert os.path.realpath(display) == os.path.realpath(main_file)
         assert os.path.realpath(main) == os.path.realpath(main_file)
-        assert os.path.realpath(display) != os.path.realpath(main)
+        assert os.path.realpath(display) != os.path.realpath(wt_file)
 
     def test_coincide_in_pact_worktree_without_own_file(self, tmp_path, monkeypatch):
         """LOAD-BEARING: the one case Option C changed, and the only test in this

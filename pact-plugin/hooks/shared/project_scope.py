@@ -135,25 +135,36 @@ def same_repository(env_dir: Path, base: Path) -> bool:
         return False
 
 
-def _toplevel_path(directory: Path) -> Optional[Path]:
-    """`git -C <directory> rev-parse --show-toplevel` as a resolved path.
+def _raw_rev_parse(directory: Path, flag: str) -> tuple[Optional[Path], bool]:
+    """`git -C <directory> rev-parse <flag>` as (resolved path, git RAN).
 
     THE OUTPUT IS NOT STRIPPED, unlike `_git_output`. A path can end in
     whitespace, and the worktree listing preserves it, so comparing a
-    strip()ped toplevel against the listing fails in BOTH directions: it
-    rejects a legitimate worktree at `.../wt ` (the stripped value is not
-    listed) and it admits a forged directory at `.../wt ` whose gitfile names
-    the real `.../wt` (the stripped value IS listed). Drop exactly one
-    trailing newline -- git's record terminator -- and keep every other byte;
-    resolving then applies the same normalisation to both sides.
+    strip()ped value against the listing fails in BOTH directions: it rejects
+    a legitimate worktree at `.../wt ` and it admits a forged directory at
+    `.../wt ` whose gitfile names the real `.../wt`. Drop exactly one
+    trailing newline -- git's record terminator -- and keep every other byte.
+
+    The boolean separates "git answered, and the answer is no path"
+    (None, True) from "git could not run" (None, False). The session-start
+    writers skip on the latter rather than fall back to planting a CLAUDE.md
+    in a worktree during a git failure.
     """
-    result = run_git(
-        ["-C", str(directory), "rev-parse", "--show-toplevel"],
-        timeout=5,
-        env=git_env_without_location(),
-    )
-    if result is None or result.returncode != 0 or not result.stdout:
-        return None
+    try:
+        result = run_git(
+            ["-C", str(directory), "rev-parse", flag],
+            timeout=5,
+            env=git_env_without_location(),
+        )
+    except OSError:
+        # `run_git` absorbs a timeout and a missing git but NOT a bare OSError
+        # from launching it; this helper must be total on a write-adjacent
+        # path, so an unlaunchable git is "could not answer".
+        return None, False
+    if result is None:
+        return None, False
+    if result.returncode != 0 or not result.stdout:
+        return None, True
     raw = result.stdout
     if raw.endswith("\n"):
         raw = raw[:-1]
@@ -161,9 +172,61 @@ def _toplevel_path(directory: Path) -> Optional[Path]:
     if not path.is_absolute():
         path = Path(directory) / path
     try:
-        return path.resolve()
+        return path.resolve(), True
     except OSError:
-        return None
+        return None, True
+
+
+def _toplevel_path(directory: Path) -> Optional[Path]:
+    """`--show-toplevel` via `_raw_rev_parse` (trailing whitespace preserved)."""
+    return _raw_rev_parse(directory, "--show-toplevel")[0]
+
+
+def _project_memory_root(
+    project_dir: str | os.PathLike[str],
+) -> tuple[Path, bool]:
+    """The memory root AND whether git could answer.
+
+    `project_memory_root` keeps the fail-safe answer (the input) for both
+    cases; `project_memory_root_or_none` reports the difference so a writer
+    can skip when the target is unknown instead of planting in a worktree.
+    """
+    given = Path(project_dir)
+    git_dir, ran = _raw_rev_parse(given, "--git-dir")
+    if not ran:
+        return given, False
+    common_dir, ran = _raw_rev_parse(given, "--git-common-dir")
+    if not ran:
+        return given, False
+    if git_dir is None or common_dir is None or git_dir == common_dir:
+        return given, True
+    candidate = common_dir.parent
+    toplevel_at_candidate, ran = _raw_rev_parse(candidate, "--show-toplevel")
+    if not ran:
+        return given, False
+    if toplevel_at_candidate != candidate:
+        return given, True
+    common_dir_again, ran = _raw_rev_parse(candidate, "--git-common-dir")
+    if not ran:
+        return given, False
+    if common_dir_again != common_dir:
+        return given, True
+    # A GITFILE CAN BE FORGED. A directory carrying only a `.git` FILE whose
+    # `gitdir:` line names another repository's worktree admin dir makes every
+    # check above agree: git reports that repository's git dir, common dir and
+    # checkout root, while the asking directory is not a checkout of it at all
+    # -- so a writer would target a project nobody named. The worktree records
+    # git keeps must list this directory's own top level; a forged gitfile is
+    # not listed. Fail-safe is the input.
+    toplevel, ran = _raw_rev_parse(given, "--show-toplevel")
+    if not ran:
+        return given, False
+    listed = _listed_worktrees_result(candidate, resolve_against=candidate)
+    if listed is None:
+        return given, False
+    if toplevel is None or toplevel not in listed:
+        return given, True
+    return candidate, True
 
 
 def project_memory_root(project_dir: str | os.PathLike[str]) -> Path:
@@ -187,35 +250,29 @@ def project_memory_root(project_dir: str | os.PathLike[str]) -> Path:
     common dir are equal), and the candidate verification excludes a worktree
     of a bare repository, where the parent is not a checkout root either.
 
-    Composes `_git_output`, and `_toplevel_path` for the toplevel (whose
-    trailing whitespace the strip would remove), both running `git -C <dir>`
-    with `git_env_without_location()` -- an inherited GIT_DIR would otherwise
-    make every directory report one repository, and a bare `git rev-parse`
-    would classify the hook's CWD instead of the project dir.
+    Composes `_raw_rev_parse` for every git field (unstripped, so a path's own
+    trailing whitespace survives, and reporting whether git actually ran) and
+    `_git_output` only for the listing's last-resort line parser, all running
+    `git -C <dir>` with `git_env_without_location()` -- an inherited GIT_DIR
+    would otherwise make every directory report one repository, and a bare
+    `git rev-parse` would classify the hook's CWD instead of the project dir.
     """
-    given = Path(project_dir)
-    git_dir = _rev_parse_path(given, "--git-dir")
-    common_dir = _rev_parse_path(given, "--git-common-dir")
-    if git_dir is None or common_dir is None or git_dir == common_dir:
-        return given
-    candidate = common_dir.parent
-    if _toplevel_path(candidate) != candidate:
-        return given
-    if _rev_parse_path(candidate, "--git-common-dir") != common_dir:
-        return given
-    # A GITFILE CAN BE FORGED. A directory carrying only a `.git` FILE whose
-    # `gitdir:` line names another repository's worktree admin dir makes every
-    # check above agree: git reports that repository's git dir, common dir and
-    # checkout root, while the asking directory is not a checkout of it at all
-    # -- so a writer would target a project nobody named. The worktree records
-    # git keeps must list this directory's own top level; a forged gitfile is
-    # not listed. Fail-safe is the input.
-    toplevel = _toplevel_path(given)
-    if toplevel is None or toplevel not in _listed_worktrees(
-        candidate, resolve_against=candidate
-    ):
-        return given
-    return candidate
+    return _project_memory_root(project_dir)[0]
+
+
+def project_memory_root_or_none(
+    project_dir: str | os.PathLike[str],
+) -> Optional[Path]:
+    """The memory root, or None when git could not answer.
+
+    A NON-GIT directory is a KNOWN answer and returns the directory itself;
+    only a git invocation that could not run (timeout, no git, an unreadable
+    worktree listing) returns None. Session-start writers pass this so an
+    unknown target is skipped rather than resolved to the worktree by the
+    fail-safe.
+    """
+    root, answered = _project_memory_root(project_dir)
+    return root if answered else None
 
 
 def _nearest_existing_directory(path: Path) -> Optional[Path]:
@@ -229,6 +286,53 @@ def _nearest_existing_directory(path: Path) -> Optional[Path]:
     return None
 
 
+def _worktree_paths_from_admin_gitdirs(checkout: Path) -> Optional[list[str]]:
+    """Raw worktree paths from `<common-dir>/worktrees/*/gitdir`.
+
+    THE FALLBACK FOR A GIT WITHOUT `-z` (pre-2.36). git records each linked
+    worktree's own `.git` path in its admin dir, and that file is not
+    line-quoted, so dropping exactly one trailing newline recovers a path
+    containing a newline. The recorded value is `<worktree>/.git`, so the
+    worktree root is its parent -- the record terminator follows `/.git`, not
+    the path, which is why an internal newline survives.
+
+    Returns None when git cannot answer at all (the caller keeps the line
+    parser as the last resort). An empty repository returns its own root.
+    LIMIT: a relative recorded path (`worktree.useRelativePaths`) is resolved
+    against the main root, unmeasured on the git available here (2.43).
+    """
+    common_dir, ran = _raw_rev_parse(checkout, "--git-common-dir")
+    if not ran:
+        return None
+    if common_dir is None:
+        return []
+    paths = [str(common_dir.parent)]
+    try:
+        admins = sorted((common_dir / "worktrees").iterdir())
+    except OSError:
+        return paths
+    for admin in admins:
+        try:
+            content = (admin / "gitdir").read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if content.endswith("\n"):
+            content = content[:-1]
+        # The admin `gitdir` file holds the worktree's `.git` path with NO
+        # `gitdir: ` prefix (unlike a worktree's own gitfile, which does).
+        # Accept either so a future format change cannot silently empty the
+        # fallback.
+        if content.startswith("gitdir: "):
+            content = content[len("gitdir: "):]
+        if not content:
+            continue
+        gitfile = Path(content)
+        if not gitfile.is_absolute():
+            gitfile = common_dir.parent / gitfile
+        paths.append(str(gitfile.parent))
+    return paths
+
+
 def _worktree_list_paths(checkout: Path) -> Optional[list[str]]:
     """The `worktree ` paths git records, or None when git cannot answer.
 
@@ -236,11 +340,13 @@ def _worktree_list_paths(checkout: Path) -> Optional[list[str]]:
     a newline survives intact. The line-based form splits that record and
     truncates the path, which a membership check would then refuse -- falling
     back to the worktree and reopening the write this guard exists to stop.
-    For every path without a newline the two parsers yield the same records.
 
-    The fallback is decided by the CALL failing (a git that rejects `-z`, a
-    timeout, no git), never by parsing a version string, so an older git keeps
-    today's behaviour instead of losing the guard entirely.
+    When `-z` is unavailable the admin `gitdir` files are the next choice:
+    they hold each linked worktree's full path and are not line-quoted. The
+    line parser remains only as the last resort, for a git that cannot answer
+    either; on it a newline-containing path is still truncated. That residue
+    is stated, not hidden: it needs a pre-2.36 git AND an unreadable admin
+    enumeration.
     """
     result = run_git(
         ["-C", str(checkout), "worktree", "list", "--porcelain", "-z"],
@@ -253,6 +359,9 @@ def _worktree_list_paths(checkout: Path) -> Optional[list[str]]:
             for field in (result.stdout or "").split("\0")
             if field.startswith("worktree ")
         ]
+    recorded = _worktree_paths_from_admin_gitdirs(checkout)
+    if recorded is not None:
+        return recorded
     output = _git_output(checkout, "worktree", "list", "--porcelain")
     if output is None:
         return None
@@ -263,10 +372,10 @@ def _worktree_list_paths(checkout: Path) -> Optional[list[str]]:
     ]
 
 
-def _listed_worktrees(
+def _listed_worktrees_result(
     checkout: Path, resolve_against: Optional[Path] = None
-) -> Set[Path]:
-    """Resolved paths of every worktree git records for the repository at `checkout`.
+) -> Optional[Set[Path]]:
+    """Resolved worktree paths, or None when git could not answer.
 
     Includes a PRUNABLE worktree, whose directory is gone but whose record
     remains until `git worktree prune`. `git worktree remove` deletes the
@@ -276,11 +385,17 @@ def _listed_worktrees(
     against. git records relative worktree paths against the main worktree
     root, so a caller holding that root passes it; the default, the process
     cwd, is what every pre-existing caller used.
+
+    The None/empty distinction is load-bearing for `project_memory_root`:
+    an EMPTY set is a real answer (no worktrees), while None means git could
+    not enumerate, which the session-start writers treat as unknown.
     """
     paths = _worktree_list_paths(checkout)
+    if paths is None:
+        return None
     base = resolve_against or Path.cwd()
     listed: Set[Path] = set()
-    for raw in paths or ():
+    for raw in paths:
         try:
             path = Path(raw)
             if not path.is_absolute():
@@ -289,6 +404,17 @@ def _listed_worktrees(
         except OSError:
             continue
     return listed
+
+
+def _listed_worktrees(
+    checkout: Path, resolve_against: Optional[Path] = None
+) -> Set[Path]:
+    """`_listed_worktrees_result`, with an unanswerable git reported as empty.
+
+    Every pre-existing caller keeps today's shape and signature; only
+    `project_memory_root` needs the None/empty distinction.
+    """
+    return _listed_worktrees_result(checkout, resolve_against) or set()
 
 
 def _recorded_common_dir(identity: Optional[dict], declared: Path) -> Optional[str]:

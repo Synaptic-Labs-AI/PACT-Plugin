@@ -1081,36 +1081,31 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
 
     Same resolution order as `_resolve_display_claude_md_path` (which is now a
     thin wrapper returning `[0]`):
-      1. CLAUDE_PROJECT_DIR env var, if set -> that dir's .claude/CLAUDE.md
-         (preferred) or ./CLAUDE.md (legacy).
+      1. CLAUDE_PROJECT_DIR env var, if set -> that dir's PROJECT-MEMORY root,
+         then its .claude/CLAUDE.md (preferred) or ./CLAUDE.md (legacy).
       1.5. Session record — the project_dir session_init recorded at
-         SessionStart -> the same probe under the recorded dir. Below env
-         (a present declaration wins), above the git derivations: in a
-         multi-repo workspace the cwd's git root can be the WRONG scope. The
+         SessionStart -> the same probe under that dir's project-memory root.
+         Below env (a present declaration wins), above the git derivations: in
+         a multi-repo workspace the cwd's git root can be the WRONG scope. The
          existence coupling is preserved — the record supplies the base to
          PROBE and a miss falls through; this resolver never creates
          CLAUDE.md. (Numbered 1.5, matching memory_api's Strategy 1.5, so the
          long-standing branch-2/branch-3 references to the git anchors below
          keep their meaning.)
-      2. Git worktree root via `git rev-parse --show-toplevel` -> the same
-         .claude/-then-legacy probe under the worktree root.
+      2. Git worktree root via `git rev-parse --show-toplevel` -> its
+         project-memory root, then the same probe.
       3. Main repo root via `git rev-parse --git-common-dir`.parent -> the
-         same probe. Reached when the worktree root holds no CLAUDE.md
-         (branch 2 found nothing), so the file the session reads is the main
-         repo's. A worktree CAN be a session root -- a lead started inside a
-         linked worktree is one -- and this branch is the fall-through for
-         that session when the worktree carries no CLAUDE.md of its own.
-         Without this branch that write is lost (returns None); with it the
-         write lands where the session reads.
-      4. Current working directory -> the same probe.
+         same probe.
+      4. Current working directory -> the same probe under its project-memory
+         root.
 
-    Branch 2 anchors the WORKTREE root (--show-toplevel) so a worktree that IS
-    a session root updates its OWN display file; branch 3 falls back to
-    _get_claude_md_path's MAIN-repo anchor (--git-common-dir) for the common
-    case where it is not. Because branch 2 precedes branch 3, the two resolvers
-    now differ ONLY in that worktree-root branch: in a non-worktree checkout
-    both branches resolve the same directory, so the [0] of this result is
-    identical to _get_claude_md_path's.
+    EVERY BASE IS PASSED THROUGH `project_scope.project_memory_root()` (#1653).
+    A session rooted in a linked worktree therefore resolves the MAIN
+    checkout's display file even when the worktree carries one of its own;
+    branch 2 no longer serves a worktree copy for such a session. A
+    non-worktree base is returned unchanged, so those layouts are
+    byte-identical. The session-start writers target the same root, so the
+    reader and writer split the earlier design documented is closed.
 
     The returned `base` is the branch's directory captured BEFORE descending
     into `.claude` (the arg passed to `_find_existing_claude_md`), NOT the
@@ -1130,9 +1125,13 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
     # CLAUDE_PROJECT_DIR value, an inaccessible probe target, or a deleted cwd)
     # return (None, None) so the caller skips the sync and the save still succeeds.
     try:
+        # Function-level: the shared package is importable only after
+        # pact_session's sys.path bootstrap has run at module import.
+        from shared.project_scope import git_env_without_location, project_memory_root
+
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
         if project_dir:
-            base = Path(project_dir)
+            base = project_memory_root(Path(project_dir))
             found = _find_existing_claude_md(base)
             if found is not None:
                 return found, base
@@ -1141,18 +1140,15 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
         # shape as the env branch; a miss falls through to the git anchors.
         record_dir = get_project_dir_from_session_record()
         if record_dir:
-            base = Path(record_dir)
+            base = project_memory_root(Path(record_dir))
             found = _find_existing_claude_md(base)
             if found is not None:
                 return found, base
 
         # Worktree root: --show-toplevel returns the worktree directory when run
-        # inside a worktree (and the main repo root otherwise), matching the
-        # directory session_init/session_resume target for the session's CLAUDE.md.
-        # Function-level: the shared package is importable only after
-        # pact_session's sys.path bootstrap has run at module import.
-        from shared.project_scope import git_env_without_location
-
+        # inside a worktree (and the main repo root otherwise). Its base is
+        # retargeted to the PROJECT-MEMORY root, so a linked-worktree session
+        # probes MAIN even when the worktree carries a CLAUDE.md of its own.
         try:
             result = subprocess.run(
                 ["git", "rev-parse", "--show-toplevel"],
@@ -1162,23 +1158,20 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
                 env=git_env_without_location(),
             )
             if result.returncode == 0 and result.stdout.strip():
-                worktree_root = Path(result.stdout.strip())
+                worktree_root = project_memory_root(Path(result.stdout.strip()))
                 found = _find_existing_claude_md(worktree_root)
                 if found is not None:
                     return found, worktree_root
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             pass
 
-        # Main-repo root via --git-common-dir. Reached when branch 2 found
-        # nothing under the worktree root, so the file the session reads is
-        # the MAIN repo's. A worktree CAN be a session root (a lead started
-        # there); branch 2 stays for a worktree that legitimately carries its
-        # own CLAUDE.md. After #1653 the session-start writers target the main
-        # checkout while the display resolver still updates the worktree copy
-        # -- through the ENV probe above when CLAUDE_PROJECT_DIR names that
-        # worktree, and through branch 2 only when that probe is reached and
-        # misses -- so the two diverge for that session, stated, not hidden.
-        # Do not delete branch 2: it is deliberate, not a leftover of the bug.
+        # Main-repo root via --git-common-dir. Since #1653 every branch above
+        # retargets its base to the PROJECT-MEMORY root, so for a linked
+        # worktree branch 2 has already probed MAIN; this branch is the
+        # fall-through for a non-worktree checkout whose worktree-root probe
+        # found nothing, and the main anchor for a session whose cwd is a
+        # worktree. A worktree CAN be a session root; it no longer reads or
+        # writes its own CLAUDE.md for project memory.
         # --git-common-dir points at the shared .git dir whether run from the
         # main repo or a linked worktree, so its parent is the main repo root
         # in both. This is _get_claude_md_path's exact anchor.
@@ -1208,8 +1201,8 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             pass
 
-        # Last resort: current working directory
-        cwd = Path.cwd()
+        # Last resort: current working directory, at its project-memory root
+        cwd = project_memory_root(Path.cwd())
         found = _find_existing_claude_md(cwd)
         return (found, cwd) if found is not None else (None, None)
     except Exception as e:
@@ -2244,14 +2237,12 @@ def _refuse_ambient_sync_from_a_redirected_store(
 
     THE CROSSING IS THE DEFECT, NOT THE RESOLUTION. Do NOT read this as a rule
     against the main-repo resolution branch. That branch is deliberate: a
-    worktree session whose worktree root holds no CLAUDE.md reads the MAIN
-    checkout's file, so the branch is how an ordinary save reaches the file
-    the session displays. A worktree that carries its own CLAUDE.md is served
-    by the display resolver instead -- the ENV probe when CLAUDE_PROJECT_DIR
-    names it, branch 2 when that probe is reached and misses -- and is not
-    this branch's case.
-    Refusing it would lose every worktree save projection, which is the
-    over-block this guard is shaped to avoid.
+    worktree session reads the MAIN checkout's file -- since #1653 every
+    display-resolver base is retargeted through project_memory_root, so this
+    branch and the session-start writers agree -- and it is how an ordinary
+    save reaches the file the session displays. Refusing it would lose every
+    worktree save projection, which is the over-block this guard is shaped to
+    avoid.
 
     SCOPE, mirroring the sibling guard deliberately rather than inventing a
     second shape:

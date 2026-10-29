@@ -904,27 +904,31 @@ def _worktree_subdirectory_worktree_document(t):
     main = _committed_repo(t / "main")
     worktree = _worktree_at(main, t / "worktree")
     (worktree / "sub").mkdir()
-    return worktree / "sub", worktree, _document_in(worktree), {}
+    _document_in(worktree)  # the worktree copy must NOT be the target (#1653)
+    return worktree / "sub", worktree, _document_in(main), {}
 
 
 def _declared_main_worktree_document(t):
     main = _committed_repo(t / "main")
     worktree = _worktree_at(main, t / "worktree")
-    return main, worktree, _document_in(worktree), {}
+    _document_in(worktree)  # the worktree copy must NOT be the target (#1653)
+    return main, worktree, _document_in(main), {}
 
 
 def _declared_main_subdirectory_worktree_document(t):
     main = _committed_repo(t / "main")
     (main / "sub").mkdir()
     worktree = _worktree_at(main, t / "worktree")
-    return main / "sub", worktree, _document_in(worktree), {}
+    _document_in(worktree)  # the worktree copy must NOT be the target (#1653)
+    return main / "sub", worktree, _document_in(main), {}
 
 
 def _sibling_worktrees(t):
     main = _committed_repo(t / "main")
     declared = _worktree_at(main, t / "w1")
     worktree = _worktree_at(main, t / "w2")
-    return declared, worktree, _document_in(worktree), {}
+    _document_in(worktree)  # the worktree copy must NOT be the target (#1653)
+    return declared, worktree, _document_in(main), {}
 
 
 def _removed_worktree_inside_its_repository(t):

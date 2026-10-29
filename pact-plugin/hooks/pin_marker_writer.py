@@ -237,7 +237,7 @@ def _plan_and_write() -> str:
             certify_expel_nothing,
             plan_insertion,
         )
-        from shared.project_scope import project_memory_root
+        from shared.project_scope import project_memory_root_or_none
         from staleness import _resolve_project_claude_md_with_base
 
         # Pin markers are project-memory content (#1653): a worktree lead's
@@ -249,8 +249,16 @@ def _plan_and_write() -> str:
         # hook's business under any circumstance.
         env_project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
         memory_root = (
-            project_memory_root(env_project_dir) if env_project_dir else None
+            project_memory_root_or_none(env_project_dir)
+            if env_project_dir else None
         )
+        if env_project_dir and memory_root is None:
+            # A DECLARED project dir whose memory root is UNKNOWN (#1653):
+            # `project_memory_root` fails SAFE TO ITS INPUT, so using it here
+            # would plant the markers in the worktree this change exists to
+            # stop. Write nothing. The outcome is journaled like every other
+            # confirmed invocation, which is this hook's status surface.
+            return "noop_memory_root_unknown"
         path, base = _resolve_project_claude_md_with_base(project_dir=memory_root)
         if path is None or base is None:
             return "noop_no_file"

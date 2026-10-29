@@ -441,7 +441,7 @@ def _verdict(raw, index):
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "CLAUDE.md"
         path.write_bytes(raw)
-        with mock.patch.object(archive_pin, "get_project_claude_md_path", lambda: path), \
+        with mock.patch.object(archive_pin, "resolve_session_claude_md_path", lambda: path), \
                 mock.patch.object(archive_pin, "_run_memory_cli", memory_cli):
             return archive_pin.build_verdict(index, db_path=None)
 
@@ -548,7 +548,7 @@ def test_the_archive_refuses_the_exposed_corpus_file_through_the_real_memory_cli
     raw = (_CORPUS / "hidden_declaration_closed_by_prose_ending_gt.md").read_bytes()
     path = tmp_path / "CLAUDE.md"
     path.write_bytes(raw)
-    monkeypatch.setattr(archive_pin, "get_project_claude_md_path", lambda: path)
+    monkeypatch.setattr(archive_pin, "resolve_session_claude_md_path", lambda: path)
     for key, value in hf_cache_env().items():
         monkeypatch.setenv(key, value)
     verdict = archive_pin.build_verdict(0, db_path=str(memory_store("archive.db")))

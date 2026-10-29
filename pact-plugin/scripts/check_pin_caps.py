@@ -133,6 +133,9 @@ format_slot_status = _pin_caps.format_slot_status
 section_pins = _pin_caps.section_pins
 locate_pinned = _staleness.locate_pinned
 get_project_claude_md_path = _staleness.get_project_claude_md_path
+# #1653: the session's project-memory file (MAIN's for a linked worktree),
+# so the listing agrees with the document the writers manage.
+resolve_session_claude_md_path = _staleness.resolve_session_claude_md_path
 
 # Age-threshold source. staleness.py owns PINNED_STALENESS_DAYS; this module
 # reads it rather than declaring its own, so "overdue" and the SessionStart
@@ -253,7 +256,7 @@ def _resolve_pins():
     list and a short reason string. Callers surface the reason in
     slot_status so the user sees "unknown (...)" instead of a fake "0/12".
     """
-    claude_md = get_project_claude_md_path()
+    claude_md = resolve_session_claude_md_path()
     if claude_md is None:
         return [], "claude.md not found"
 

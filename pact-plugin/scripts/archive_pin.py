@@ -376,6 +376,11 @@ _date_comment_row = _pin_caps._date_comment_row
 locate_pinned = _staleness.locate_pinned
 _pinned_body = _staleness._pinned_body
 get_project_claude_md_path = _staleness.get_project_claude_md_path
+# #1653: the session's project-memory file (MAIN's for a linked worktree).
+# archive_pin ARCHIVES A PIN, which writes the document through the memory
+# CLI -- so this is a writer, and it must follow the same root as every other
+# writer or it reopens the split the PR exists to close.
+resolve_session_claude_md_path = _staleness.resolve_session_claude_md_path
 # The (path, base) form. `base` is the directory the resolver ACTUALLY found
 # the file under, captured before descending into `.claude` -- a trusted
 # pre-resolve anchor rather than a re-derivation from the returned path.
@@ -547,14 +552,15 @@ def resolve_claude_md():
     worktree fall-through -- the case PACT itself depends on -- stays inside
     the same repository and is allowed through.
     """
-    # Resolve through `get_project_claude_md_path` -- the seam the rest of the
-    # suite already patches -- and derive the base LEXICALLY from the result,
-    # rather than taking the with-base form directly. Same answer in
-    # production (the with-base call is what this wraps), but it keeps one
-    # resolution seam for the whole codebase instead of introducing a second
-    # that fixtures would have to know about separately.
+    # Resolve through `resolve_session_claude_md_path` (#1653: the session's
+    # project-memory file -- MAIN's for a linked worktree; its non-worktree
+    # route is `get_project_claude_md_path`) and derive the base LEXICALLY
+    # from the result, rather than taking the with-base form directly. Same
+    # answer in production (the with-base call is what this wraps), but it
+    # keeps one resolution seam for the whole codebase. Tests that redirect
+    # the archive patch `resolve_session_claude_md_path` on THIS module.
     env_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-    path = get_project_claude_md_path()
+    path = resolve_session_claude_md_path()
     if path is None:
         raise _Unevaluable("CLAUDE.md not found")
     base = _lexical_base_of(path)
