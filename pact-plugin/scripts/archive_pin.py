@@ -560,6 +560,20 @@ def resolve_claude_md():
     # keeps one resolution seam for the whole codebase. Tests that redirect
     # the archive patch `resolve_session_claude_md_path` on THIS module.
     env_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    if env_dir:
+        # AN UNKNOWN memory root means the archive cannot identify the
+        # project's document. `project_memory_root` fails OPEN to the declared
+        # dir, so resolution would land on a worktree's own CLAUDE.md and the
+        # archive would edit the copy this rule keeps out of project memory.
+        # ARCHIVING WRITES (through the memory CLI), so this is a writer and
+        # takes the writer's rule: refuse rather than operate on a guess.
+        from shared.project_scope import project_memory_root_or_none
+
+        if project_memory_root_or_none(env_dir) is None:
+            raise _Unevaluable(
+                "project memory root unknown: git could not answer, so the "
+                "project CLAUDE.md cannot be identified; nothing was archived"
+            )
     path = resolve_session_claude_md_path()
     if path is None:
         raise _Unevaluable("CLAUDE.md not found")

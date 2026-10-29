@@ -228,6 +228,56 @@ def test_drift_watches_main(world):
     assert Path(base).resolve() == main.resolve()
 
 
+def test_drift_does_not_fall_through_to_the_worktree(world):
+    """Bugbot (#57): MAIN holds no file and the worktree does. The drift
+    watcher must answer "no file at the memory root", not cache the worktree
+    copy the fall-through rung finds."""
+    import json
+
+    import shared.claude_md_drift as drift
+    from shared.paths import get_claude_config_dir
+
+    main, worktree = world
+    _write_doc(worktree, _doc(_pin("2026-10-01", "Other")))  # MAIN: no file
+    session_dir = get_claude_config_dir() / "pact-sessions" / "proj" / "sd-nofile"
+    session_dir.mkdir(parents=True)
+
+    path, base = drift._resolve(session_dir)
+
+    assert path is None and base is None, (
+        f"the drift watcher took the worktree file: {path}"
+    )
+    cached = json.loads((session_dir / "claude-md-base.json").read_text())
+    assert Path(cached["base"]).resolve() == main.resolve(), (
+        "the session cached the wrong base, so a later MAIN file would be missed"
+    )
+
+
+def test_the_pin_gate_does_not_take_the_worktree_as_before(world):
+    """Bugbot (#57): with MAIN holding no file, the pin gate's `before` must
+    be the target (absent), not the worktree copy the resolver's cwd rung
+    finds.
+
+    The guard is `same_repository(base, before_base)`'s ASYMMETRY, not a
+    separate retarget check: called with the target's base first, a worktree
+    `before` answers False and is rejected. Swapping those arguments is the
+    plausible regression this arm pins (the ablation does exactly that).
+    """
+    from shared.claude_md_manager import gate_target
+
+    main, worktree = world
+    target = main / ".claude" / "CLAUDE.md"  # does not exist
+    _write_doc(worktree, _doc(_pin("2026-10-01", "Other")))
+
+    gated = gate_target(str(target))
+
+    assert gated is not None, "the gate did not recognise the memory-root target"
+    assert gated.target.resolve() == target.resolve()
+    assert gated.before is None, (
+        f"the gate took the worktree file as the pre-state: {gated.before}"
+    )
+
+
 def test_the_pin_gate_matches_main(world):
     from shared.claude_md_manager import gate_target, match_project_claude_md
 

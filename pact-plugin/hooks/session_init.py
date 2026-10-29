@@ -1842,7 +1842,13 @@ def main():
         # runs it: a teammate in a worktree would otherwise mark a tracked
         # CLAUDE.md. Failed/skipped diagnostics go to system_messages, the
         # advisory to context.
-        if frame_is_lead:
+        #
+        # AN UNKNOWN memory root skips this step for the same reason steps 3/3b
+        # skip: `memory_root` above is the fail-open worktree in that case, and
+        # marking a pin there is a project-memory write to the copy this change
+        # exists to keep out. The single "Project CLAUDE.md skipped" line
+        # already appended above covers this step too; do not add a second one.
+        if frame_is_lead and not memory_unknown:
             staleness_msg = check_pinned_staleness(project_dir, memory_root)
             if staleness_msg:
                 if "failed" in staleness_msg.lower() or "skipped" in staleness_msg.lower():

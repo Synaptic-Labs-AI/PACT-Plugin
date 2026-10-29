@@ -1099,13 +1099,21 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
       4. Current working directory -> the same probe under its project-memory
          root.
 
-    EVERY BASE IS PASSED THROUGH `project_scope.project_memory_root()` (#1653).
-    A session rooted in a linked worktree therefore resolves the MAIN
-    checkout's display file even when the worktree carries one of its own;
-    branch 2 no longer serves a worktree copy for such a session. A
+    EVERY BASE IS PASSED THROUGH `project_scope.project_memory_root_or_none()`
+    (#1653). A session rooted in a linked worktree therefore resolves the
+    MAIN checkout's display file even when the worktree carries one of its
+    own; branch 2 no longer serves a worktree copy for such a session. A
     non-worktree base is returned unchanged, so those layouts are
     byte-identical. The session-start writers target the same root, so the
     reader and writer split the earlier design documented is closed.
+
+    AN UNKNOWN BASE IS SKIPPED, NOT PROBED. `project_memory_root` fails OPEN to
+    its input, so on a git failure it would hand back the worktree directory
+    and this resolver would serve (or, through the sync writers, write) the
+    copy the rule exists to keep out of project memory. The unknown-aware
+    answer is used instead: an unknown base is not probed and resolution falls
+    through. When nothing else resolves, the writers report ROOT_UNKNOWN rather
+    than "not found", so the skip names its cause.
 
     The returned `base` is the branch's directory captured BEFORE descending
     into `.claude` (the arg passed to `_find_existing_claude_md`), NOT the
@@ -1127,23 +1135,28 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
     try:
         # Function-level: the shared package is importable only after
         # pact_session's sys.path bootstrap has run at module import.
-        from shared.project_scope import git_env_without_location, project_memory_root
+        from shared.project_scope import (
+            git_env_without_location,
+            project_memory_root_or_none,
+        )
 
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
         if project_dir:
-            base = project_memory_root(Path(project_dir))
-            found = _find_existing_claude_md(base)
-            if found is not None:
-                return found, base
+            base = project_memory_root_or_none(Path(project_dir))
+            if base is not None:
+                found = _find_existing_claude_md(base)
+                if found is not None:
+                    return found, base
 
         # Branch 1.5: session record (see the docstring's ordering). Same probe
         # shape as the env branch; a miss falls through to the git anchors.
         record_dir = get_project_dir_from_session_record()
         if record_dir:
-            base = project_memory_root(Path(record_dir))
-            found = _find_existing_claude_md(base)
-            if found is not None:
-                return found, base
+            base = project_memory_root_or_none(Path(record_dir))
+            if base is not None:
+                found = _find_existing_claude_md(base)
+                if found is not None:
+                    return found, base
 
         # Worktree root: --show-toplevel returns the worktree directory when run
         # inside a worktree (and the main repo root otherwise). Its base is
@@ -1158,10 +1171,13 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
                 env=git_env_without_location(),
             )
             if result.returncode == 0 and result.stdout.strip():
-                worktree_root = project_memory_root(Path(result.stdout.strip()))
-                found = _find_existing_claude_md(worktree_root)
-                if found is not None:
-                    return found, worktree_root
+                worktree_root = project_memory_root_or_none(
+                    Path(result.stdout.strip())
+                )
+                if worktree_root is not None:
+                    found = _find_existing_claude_md(worktree_root)
+                    if found is not None:
+                        return found, worktree_root
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             pass
 
@@ -1201,8 +1217,12 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             pass
 
-        # Last resort: current working directory, at its project-memory root
-        cwd = project_memory_root(Path.cwd())
+        # Last resort: current working directory, at its project-memory root.
+        # An UNKNOWN root is not probed (the fail-open answer is the cwd
+        # itself, which a worktree session would then read and write).
+        cwd = project_memory_root_or_none(Path.cwd())
+        if cwd is None:
+            return None, None
         found = _find_existing_claude_md(cwd)
         return (found, cwd) if found is not None else (None, None)
     except Exception as e:
@@ -1224,6 +1244,24 @@ def _resolve_display_claude_md_path() -> Optional[Path]:
         Path to the existing display CLAUDE.md, or None if none exists.
     """
     return _resolve_display_claude_md_with_base()[0]
+
+
+def _declared_display_root_unknown() -> bool:
+    """Whether the DECLARED project dir's project-memory root is UNKNOWN.
+
+    The display resolver skips an unknown base instead of probing it (its
+    fail-open answer is the declared directory, which for a worktree is the
+    copy the one-rule change keeps out of project memory). A None from the
+    resolver is therefore not always "no file", and the sync writers ask this
+    to report WHICH cause it was. The declared env base is the one the
+    resolver probes first, and PACT sets it on every session.
+    """
+    from shared.project_scope import project_memory_root_or_none
+
+    declared = os.environ.get("CLAUDE_PROJECT_DIR")
+    return bool(
+        declared and project_memory_root_or_none(Path(declared)) is None
+    )
 
 
 def _estimate_tokens(text: str) -> int:
@@ -1975,6 +2013,12 @@ class SyncResult:
     REFUSED = "refused"          # guard declined; raised, then caught upstream
     SUPPRESSED = "suppressed"    # caller passed sync_to_claude=False
     UNRESOLVED = "unresolved"    # no CLAUDE.md resolved
+    # The AMBIENT ROOT is UNKNOWN: a declared base exists but git could not
+    # answer, so the resolver refused to probe it (its fail-open answer may be
+    # a worktree copy the one-rule change keeps out of project memory).
+    # Distinct from UNRESOLVED: "no file exists" and "cannot tell where the
+    # file is" are different facts, and only this one is an environment fault.
+    ROOT_UNKNOWN = "root_unknown"
     MISSING = "missing"          # resolved a path that does not exist
     FAILED = "failed"            # the write itself raised
     EMPTY = "empty"              # nothing to write; caller passed no entries
@@ -2478,6 +2522,13 @@ def sync_to_claude_md(
     # silently anchors on a directory named `None` if one ever exists. Naming
     # both halves here costs one condition and depends on nobody's promise.
     if claude_md_path is None or project_root is None:
+        if _declared_display_root_unknown():
+            # No write: the resolver could not identify the project's file.
+            logger.warning(
+                "Not syncing memory to CLAUDE.md: git could not answer, so "
+                "the project memory target is unknown"
+            )
+            return SyncResult(SyncResult.ROOT_UNKNOWN)
         logger.debug("CLAUDE.md not found, skipping working memory sync")
         return SyncResult(SyncResult.UNRESOLVED)
 
@@ -2865,6 +2916,12 @@ def sync_retrieved_to_claude_md(
     )
 
     if claude_md_path is None or project_root is None:
+        if _declared_display_root_unknown():
+            logger.warning(
+                "Not syncing retrieved memories to CLAUDE.md: git could not "
+                "answer, so the project memory target is unknown"
+            )
+            return SyncResult(SyncResult.ROOT_UNKNOWN)
         logger.debug("CLAUDE.md not found, skipping retrieved context sync")
         return SyncResult(SyncResult.UNRESOLVED)
 

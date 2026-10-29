@@ -468,7 +468,10 @@ _GUARDED_RESOLVERS = (
     ),
     (
         "scripts/archive_pin.py",
-        "get_project_claude_md_path",
+        # #1653 task #54 moved the archive's resolution to the session helper
+        # (MAIN's file for a linked worktree). The census follows the call the
+        # code makes, so the unguarded-caller scan still reaches it.
+        "resolve_session_claude_md_path",
         "_stays_in_declared_project",
         frozenset(),
     ),

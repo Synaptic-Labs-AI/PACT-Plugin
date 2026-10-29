@@ -1878,6 +1878,15 @@ def gate_target(file_path: str) -> GateTarget | None:
         if before_base is not None and not same_path(before_base, base):
             from .project_scope import same_repository
 
+            # THE ARGUMENT ORDER IS THE GUARD, and it is not symmetric:
+            # `same_repository(env_dir, base)` asks "is base the MAIN repo of
+            # the checkout at env_dir". Called with the target's base first,
+            # a `before` that the resolver's cwd rung found in the WORKTREE
+            # answers False (a worktree is not a main repo), so the worktree
+            # copy is never taken as this target's pre-state (#1653). Swapping
+            # the arguments would answer True and silently restore that
+            # fall-through; `test_the_pin_gate_does_not_take_the_worktree_as_before`
+            # pins it.
             if not same_repository(base, before_base):
                 before = target if target.is_file() else None
     except (OSError, RuntimeError, ValueError):

@@ -548,6 +548,27 @@ class TestArchivedDeleteUnsafe:
         assert verdict["occurrences"] == 2
 
 
+def _fail_only_memory_cli(monkeypatch, make_exc):
+    """Make the MEMORY CLI call raise `make_exc()`, and let every other
+    `subprocess.run` through.
+
+    The seam is still `subprocess.run` (stubbing `_run_memory_cli` would bypass
+    the branch under test), but the stub must be SELECTIVE: git also runs
+    through this seam, and since #1653 task #57 the archive asks git for the
+    project-memory root BEFORE it resolves. A blanket stub would fail that
+    guard and report "root unknown" instead of the CLI failure under test.
+    """
+    real_run = subprocess.run
+
+    def _fail(*args, **kwargs):
+        argv = args[0] if args else kwargs.get("args", ())
+        if str(archive_pin._MEMORY_CLI) in [str(part) for part in argv]:
+            raise make_exc()
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _fail)
+
+
 class TestPostResolutionFailuresKeepPinContext:
     """A failure AFTER the pin resolved must not report LESS than one before.
 
@@ -566,7 +587,10 @@ class TestPostResolutionFailuresKeepPinContext:
     that depended on the contract rather than trusting it.
 
     Patched at the SUBPROCESS seam, not at `_run_memory_cli`: stubbing the
-    function under test would bypass the branch under test.
+    function under test would bypass the branch under test. The stub is
+    selective (`_fail_only_memory_cli`): it fails the CLI's argv and passes git
+    through, because since #1653 task #57 git runs first to identify the
+    project-memory root.
     """
 
     def _project(self, isolated, monkeypatch, name):
@@ -607,20 +631,17 @@ class TestPostResolutionFailuresKeepPinContext:
     def test_cli_timeout_keeps_context(self, isolated, monkeypatch):
         self._project(isolated, monkeypatch, "t1")
 
-        def _boom(*a, **k):
-            raise subprocess.TimeoutExpired(cmd="save", timeout=1)
-
-        monkeypatch.setattr(subprocess, "run", _boom)
+        _fail_only_memory_cli(
+            monkeypatch,
+            lambda: subprocess.TimeoutExpired(cmd="save", timeout=1),
+        )
         self._assert_full_context(archive_pin.build_verdict(0, db_path=None), "timeout",
                                   "timed out")
 
     def test_cli_launch_failure_keeps_context(self, isolated, monkeypatch):
         self._project(isolated, monkeypatch, "t2")
 
-        def _boom(*a, **k):
-            raise OSError("cannot launch")
-
-        monkeypatch.setattr(subprocess, "run", _boom)
+        _fail_only_memory_cli(monkeypatch, lambda: OSError("cannot launch"))
         self._assert_full_context(archive_pin.build_verdict(0, db_path=None), "launch",
                                   "could not launch")
 

@@ -391,7 +391,10 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
             SESSION_START_MARKER,
             resolve_project_claude_md_path,
         )
-        from shared.project_scope import _record_worktree_identity, project_memory_root
+        from shared.project_scope import (
+            _record_worktree_identity,
+            project_memory_root_or_none,
+        )
         from shared.session_journal import append_event, make_event
         from shared.session_resume import (
             RESUMPTION_MARKER_MISSING_DIRECTIVE,
@@ -419,15 +422,29 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
         # worktree lead reads the main checkout's block (#1653). Non-worktree
         # input is returned unchanged. Only the env-declared branch below
         # reads a block, so only it needs the root.
+        #
+        # AN UNKNOWN root means NO block read and NO rewrite, and it is
+        # REPORTED rather than silently skipped: `project_memory_root` fails
+        # OPEN to its input, so on a git failure this function would rewrite a
+        # worktree CLAUDE.md while returning "Session info updated" -- a
+        # success message about the wrong file. The journal recording below
+        # still runs; it is not project memory.
         memory_root = (
-            project_memory_root(env_project_dir) if env_project_dir else None
+            project_memory_root_or_none(env_project_dir)
+            if env_project_dir else None
         )
 
         claim = None
         prev_session_dir = None
         block_status = None
+        if env_project_dir and memory_root is None:
+            block_status = (
+                "Project CLAUDE.md skipped: git could not answer, so the "
+                "project memory target is unknown; the session block was not "
+                "rewritten."
+            )
         try:
-            if env_project_dir:
+            if env_project_dir and memory_root is not None:
                 claude_md, source = resolve_project_claude_md_path(memory_root)
                 # Read-only here (markers and the Resume line are ASCII); the
                 # rewrite below decodes strictly and skips a file that is not

@@ -235,6 +235,36 @@ class TestWorktreeTeammateWritesNothing:
                 f"agent_type={agent_type!r} planted a CLAUDE.md in its worktree"
             )
 
+    def test_a_worktree_lead_creates_main_when_the_worktree_pre_carries_a_file(
+        self, repo, monkeypatch
+    ):
+        """#1653 task #57 addendum: the deleted notice arm carried the property
+        that a session-start lead leaves a PRE-EXISTING worktree
+        `.claude/CLAUDE.md` byte-identical. The surviving controls use a
+        worktree with NO file or the LEGACY layout, so this combination -- a
+        lead start in a worktree that already has `.claude/CLAUDE.md` -- was
+        pinned nowhere.
+        """
+        main, git = repo
+        (main / "README").write_text("seed\n")
+        git("add", ".", cwd=main)
+        git("commit", "-qm", "seed", cwd=main)
+
+        worktree = self._worktree(main, git, "pre-carried")
+        worktree_md = worktree / ".claude" / "CLAUDE.md"
+        worktree_md.parent.mkdir()
+        worktree_md.write_text(USER_MD, encoding="utf-8")
+
+        context, _ = _run(monkeypatch, worktree, LEAD)
+
+        assert (main / ".claude" / "CLAUDE.md").exists() and CREATED in context, (
+            "a lead start inside a worktree with its own .claude/CLAUDE.md did "
+            "not create the project CLAUDE.md in the MAIN checkout"
+        )
+        assert worktree_md.read_text(encoding="utf-8") == USER_MD, (
+            "the worktree's pre-existing .claude/CLAUDE.md was rewritten"
+        )
+
     def test_a_tracked_claude_md_in_the_worktree_is_left_unmodified(
         self, repo, monkeypatch
     ):

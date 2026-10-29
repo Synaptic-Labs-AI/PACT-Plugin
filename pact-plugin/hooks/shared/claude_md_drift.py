@@ -371,6 +371,15 @@ def _resolve(session_dir: Path) -> tuple[Path | None, Path | None]:
         if found is not None:
             _write_json(cache_path, {"base": str(memory_root)})
             return found, memory_root
+        if memory_root != Path(project_dir):
+            # RETARGETED (#1653): do NOT fall through to the resolver's
+            # git/cwd rungs. With MAIN holding no file, that walk starts at
+            # MAIN and can return the WORKTREE copy through the cwd rung --
+            # the document this session must not watch. "No file at the
+            # memory root" is this session's answer; the base is cached so a
+            # file MAIN gains later is picked up by the two-file check.
+            _write_json(cache_path, {"base": str(memory_root)})
+            return None, None
     path, base = _resolve_project_claude_md_with_base(
         project_dir=project_memory_root(Path(project_dir))
         if project_dir

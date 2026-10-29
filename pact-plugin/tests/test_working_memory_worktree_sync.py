@@ -912,8 +912,17 @@ class TestDisplayTargetResolver:
             os.chdir(str(prev))
         assert resolved == plain / ".claude" / "CLAUDE.md"
 
-    def test_unavailable_git_binary_falls_through_to_cwd(self, tmp_path, clean_env):
-        """If git cannot be invoked the resolver degrades to the cwd probe."""
+    def test_unavailable_git_binary_reports_no_display_target(self, tmp_path, clean_env):
+        """Git unable to run means the cwd's memory root is UNKNOWN, not the cwd.
+
+        #1653 task #57 REVERSES the pin this arm used to hold: it asserted the
+        resolver "degrades to the cwd probe" and returned the cwd file when git
+        could not be invoked. That is the fail-open path a worktree save would
+        use to write the copy this change keeps out of project memory, so the
+        resolver now skips an unknown base and the writers report
+        ROOT_UNKNOWN. A directory that is merely OUTSIDE git is a different
+        case -- git runs and answers, so the cwd probe still resolves it (see
+        the test above)."""
         plain = tmp_path / "loose"
         (plain / ".claude").mkdir(parents=True)
         (plain / ".claude" / "CLAUDE.md").write_text(
@@ -927,7 +936,7 @@ class TestDisplayTargetResolver:
                 resolved = _resolve_display_claude_md_path()
         finally:
             os.chdir(str(prev))
-        assert resolved == plain / ".claude" / "CLAUDE.md"
+        assert resolved is None
 
     def test_env_outside_worktree_does_not_force_worktree_write(
         self, worktree_repo, tmp_path, monkeypatch
