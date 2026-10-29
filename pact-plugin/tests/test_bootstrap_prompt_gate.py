@@ -1172,3 +1172,83 @@ class TestJournalScanSurvivesAnUnparseableLine:
 
     def test_a_deep_line_alone_reads_as_no_session_start(self, tmp_path):
         assert self._scan(tmp_path, self._DEEP) is False
+
+
+# =============================================================================
+# #1653 B13p: the prompt gate's Case-0 creation lands in MAIN
+# =============================================================================
+
+def _git_repo_with_worktree(tmp_path):
+    """A real repo plus a linked worktree, git config isolated in-process."""
+    import subprocess
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+
+    def git(*args, cwd):
+        return subprocess.run(
+            ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+             "-c", "init.defaultBranch=main", *args],
+            cwd=str(cwd), env=env, capture_output=True, text=True,
+            timeout=30, check=True,
+        ).stdout
+
+    main = tmp_path / "main"
+    main.mkdir()
+    git("init", "-q", ".", cwd=main)
+    (main / "README").write_text("seed\n")
+    git("add", ".", cwd=main)
+    git("commit", "-qm", "seed", cwd=main)
+    worktree = tmp_path / "wt-b13p"
+    git("worktree", "add", "-q", str(worktree), "-b", "b13p", cwd=main)
+    return main, worktree
+
+
+def test_b13p_the_gate_replaces_the_block_in_main_not_the_worktree(
+    tmp_path, monkeypatch
+):
+    """The gate's read AND its update_session_info target resolve to MAIN.
+
+    The gate only calls update_session_info on a FOUND block, so the block it
+    replaces must be MAIN's -- the file it read. The worktree holds its own
+    (block-less) CLAUDE.md; a gate left on the worktree reads nothing there
+    and writes nothing, and a gate whose READ followed MAIN but whose WRITE
+    followed the worktree would rewrite the wrong checkout. Both halves are
+    asserted here.
+    """
+    import bootstrap_prompt_gate as gate
+    from shared.session_resume import update_session_info
+
+    main, worktree = _git_repo_with_worktree(tmp_path)
+    session_dir = tmp_path / "sd"
+    session_dir.mkdir()
+    assert update_session_info(
+        "prev-session", "old-team", str(session_dir), project_dir=str(main)
+    ) is not None
+    worktree_md = worktree / ".claude" / "CLAUDE.md"
+    worktree_md.parent.mkdir()
+    worktree_md.write_text("# Worktree copy\n")
+    main_before = (main / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "cccccccc-dddd-eeee-ffff-000000000000" not in main_before
+
+    monkeypatch.setattr(
+        gate.pact_context, "get_team_name", lambda: "pact-testteam"
+    )
+    monkeypatch.setattr(gate.pact_context, "get_plugin_root", lambda: "/plugin")
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+    monkeypatch.chdir(worktree)
+
+    gate._record_unrecorded_lead(
+        {"session_id": "cccccccc-dddd-eeee-ffff-000000000000"}, str(session_dir)
+    )
+
+    main_text = (main / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "cccccccc-dddd-eeee-ffff-000000000000" in main_text, (
+        "the gate did not rewrite MAIN's session block"
+    )
+    assert "- Team: `pact-testteam`" in main_text, (
+        "MAIN's block was replaced without this session's team"
+    )
+    assert worktree_md.read_text(encoding="utf-8") == "# Worktree copy\n", (
+        "the prompt gate rewrote the worktree's own CLAUDE.md"
+    )

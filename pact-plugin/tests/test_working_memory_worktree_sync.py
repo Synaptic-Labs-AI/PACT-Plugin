@@ -21,6 +21,8 @@ session; every test here builds an isolated synthetic repo under tmp_path and
 never touches real session state.
 """
 
+import io
+import json
 import logging
 import os
 import re
@@ -1328,3 +1330,105 @@ class TestEndToEndParity:
         assert memory_id is not None
         stored = mem.get(memory_id)
         assert stored is not None
+
+
+class TestWorktreeLeadEndToEndClosure:
+    """#1653 C1: a LEAD started inside a linked worktree keeps its memory in MAIN.
+
+    The decisive closure arm. A lead start in a fresh worktree now writes the
+    MAIN checkout's project CLAUDE.md and creates nothing in the worktree; the
+    real save() that follows must resolve MAIN's file through the worktree
+    fall-through (branch 3) and store the row keyed to the main repo.
+
+    The predecessor of this arm in this module asserted only
+    `memory_id is not None`, which was insensitive to WHERE the sync landed.
+    Every assertion below names content or location, never merely that a row
+    was saved.
+    """
+
+    _SESSION_ID = "cccccccc-dddd-eeee-ffff-000000000000"
+
+    @staticmethod
+    def _lead_start(monkeypatch, project_dir):
+        """Drive session_init.main() on a lead startup frame, nothing stubbed."""
+        import session_init
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+        monkeypatch.chdir(project_dir)
+        stdin_data = json.dumps(
+            {
+                "session_id": TestWorktreeLeadEndToEndClosure._SESSION_ID,
+                "source": "startup",
+                "agent_type": "PACT:pact-orchestrator",
+            }
+        )
+        with patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit) as exc:
+                session_init.main()
+        assert exc.value.code == 0
+        return json.loads(mock_stdout.getvalue())
+
+    def test_lead_start_then_save_lands_in_main(
+        self, tmp_path, monkeypatch, clean_env
+    ):
+        main = tmp_path / "mainproj"
+        worktree = tmp_path / "wt-1653"
+        _init_main_repo(main, with_dot_claude=False)
+        _add_worktree(main, worktree, with_dot_claude=False)
+
+        prev = Path.cwd()
+        try:
+            # 1. The lead start is the fix's write path: it must reach MAIN.
+            #    This is a precondition, not the claim under test -- without it
+            #    the save below has no main target and the arm would be
+            #    asserting a layout the fix never produced.
+            self._lead_start(monkeypatch, worktree)
+            assert (main / ".claude" / "CLAUDE.md").exists(), (
+                "the lead start did not create MAIN's CLAUDE.md, so the save "
+                "below has no main target to reach"
+            )
+            assert not (worktree / ".claude" / "CLAUDE.md").exists()
+            assert not (worktree / "CLAUDE.md").exists()
+
+            # 2. A real save from the worktree cwd, the cwd a worktree session
+            #    actually writes from. CLAUDE_PROJECT_DIR is unset so the
+            #    resolver falls through the git anchors, as it does for a save
+            #    outside a hook.
+            monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+            os.chdir(str(worktree))
+            calls = _install_find_spy(monkeypatch)
+            mem = PACTMemory(db_path=tmp_path / "memory.db")
+            memory_id = mem.save({"context": "Worktree lead closure entry"})
+        finally:
+            os.chdir(str(prev))
+
+        # 3. WHERE it landed: MAIN's Working Memory block, content asserted.
+        main_text = (main / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+        assert "Worktree lead closure entry" in _working_memory_block(main_text), (
+            "the memory entry did not land in MAIN's Working Memory block"
+        )
+        assert not (worktree / ".claude" / "CLAUDE.md").exists(), (
+            "the save created a CLAUDE.md in the worktree"
+        )
+        assert not (worktree / "CLAUDE.md").exists()
+
+        # 4. The row is keyed to the main repo, not the worktree.
+        stored = mem.get(memory_id)
+        assert stored is not None
+        assert stored.context == "Worktree lead closure entry"
+        assert stored.project_id == main.name
+
+        # 5. MECHANISM: the resolver's last probe was the MAIN root and it
+        #    produced the file; no earlier probe returned anything. A resolver
+        #    that preferred the worktree would fail here even if some other
+        #    file happened to receive the entry.
+        assert calls, "save() never probed a display target"
+        last_base, last_result = calls[-1]
+        assert last_base.resolve() == main.resolve(), (
+            f"the last resolver probe was {last_base}, not the main checkout"
+        )
+        assert last_result is not None
+        assert all(result is None for _base, result in calls[:-1]), (
+            f"a probe before the main-checkout hit returned a file: {calls}"
+        )

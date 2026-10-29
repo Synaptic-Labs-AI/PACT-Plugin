@@ -49,8 +49,12 @@ from __future__ import annotations
 
 import datetime as _dt
 import errno
+import io
+import json
 import os
+import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -3478,3 +3482,85 @@ class TestWrapUpRetiresAPausedClaim:
         _, gh = self._resolve(tmp_path, [paused, self._wrap_up("2026-07-10T13:00:00Z")])
 
         gh.assert_called_once()
+
+
+# ── #1653 B9: a worktree lead reads the previous session dir from MAIN ──────
+
+class TestWorktreeLeadReadsTheMainSessionBlock:
+    """Step 5a must read MAIN's Current Session block for a linked worktree.
+
+    A worktree lead that read its own checkout would get None -- there is no
+    file there -- silently breaking cross-session resume and paused-work
+    detection. The value is asserted where its consumer receives it
+    (`restore_last_session`), and the consumer's own output is marked so a
+    snapshot that never reached the context cannot pass.
+
+    RED evidence: on the pre-#1653 tree step 5a read `project_dir`, found
+    nothing in the worktree, and handed the consumer None.
+    """
+
+    @staticmethod
+    def _git(*args, cwd):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+        return subprocess.run(
+            ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+             "-c", "init.defaultBranch=main", *args],
+            cwd=str(cwd), env=env, capture_output=True, text=True,
+            timeout=30, check=True,
+        ).stdout
+
+    def test_a_worktree_lead_reads_the_previous_session_dir_from_main(
+        self, tmp_path, monkeypatch
+    ):
+        import session_init
+        from shared.session_resume import update_session_info
+
+        main = tmp_path / "main"
+        main.mkdir()
+        self._git("init", "-q", ".", cwd=main)
+        (main / "README").write_text("seed\n")
+        self._git("add", ".", cwd=main)
+        self._git("commit", "-qm", "seed", cwd=main)
+        worktree = tmp_path / "wt-b9"
+        self._git("worktree", "add", "-q", str(worktree), "-b", "b9", cwd=main)
+
+        # MAIN's block names a previous session whose directory exists, the
+        # shape _extract_prev_session_dir validates and returns.
+        prev_dir = Path.home() / ".claude" / "pact-sessions" / "proj" / "prev-b9"
+        prev_dir.mkdir(parents=True)
+        assert update_session_info(
+            "prev-b9", "pact-prev", str(prev_dir), project_dir=str(main)
+        ) is not None
+
+        seen = {}
+
+        def spy(prev_session_dir=None):
+            seen["prev"] = prev_session_dir
+            return "SNAPSHOT-FROM-MAIN"
+
+        monkeypatch.setattr(session_init, "restore_last_session", spy)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+        monkeypatch.chdir(worktree)
+        stdin_data = json.dumps({
+            "session_id": "cccccccc-dddd-eeee-ffff-000000000000",
+            "source": "startup",
+            "agent_type": "PACT:pact-orchestrator",
+        })
+        with patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO) as out:
+            with pytest.raises(SystemExit) as exc:
+                session_init.main()
+        assert exc.value.code == 0
+        context = json.loads(out.getvalue()).get(
+            "hookSpecificOutput", {}
+        ).get("additionalContext", "")
+
+        assert seen.get("prev") == str(prev_dir), (
+            "step 5a did not hand MAIN's previous session dir to "
+            "restore_last_session; a None silently breaks resume"
+        )
+        assert "SNAPSHOT-FROM-MAIN" in context, (
+            "the snapshot built from the previous session never reached the "
+            "session context"
+        )

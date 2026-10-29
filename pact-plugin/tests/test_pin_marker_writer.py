@@ -2099,3 +2099,69 @@ class TestACallerInfluencedValueCannotMoveTheWindow:
         )
         refused = plan_insertion(doc)
         assert isinstance(refused, Refusal) and refused.located.cause is Cause.STRAY
+
+
+# --------------------------------------------------------------------------
+# #1653 B12: a pin command in a worktree writes MAIN's file
+# --------------------------------------------------------------------------
+
+def _git_repo_with_worktree(tmp_path):
+    """A real repo plus a linked worktree, git config isolated in-process."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+
+    def git(*args, cwd):
+        return subprocess.run(
+            ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+             "-c", "init.defaultBranch=main", *args],
+            cwd=str(cwd), env=env, capture_output=True, text=True,
+            timeout=30, check=True,
+        ).stdout
+
+    main = tmp_path / "main"
+    main.mkdir()
+    git("init", "-q", ".", cwd=main)
+    (main / "README").write_text("seed\n")
+    git("add", ".", cwd=main)
+    git("commit", "-qm", "seed", cwd=main)
+    worktree = tmp_path / "wt-b12"
+    git("worktree", "add", "-q", str(worktree), "-b", "b12", cwd=main)
+    return main, worktree
+
+
+def test_b12_pin_markers_from_a_worktree_land_in_main(tmp_path, monkeypatch):
+    """The marker pair goes into MAIN's file even though the worktree holds
+    its own marker-less copy.
+
+    This is the ALWAYS-retarget case: the worktree copy is what a
+    retarget-left-on-the-worktree writer would edit, and it must stay
+    byte-identical. The outcome token proves the writer ran and the
+    destination content proves where the pair landed.
+    """
+    import pin_marker_writer
+    from shared.pin_markers import plan_insertion, Insertion
+
+    main, worktree = _git_repo_with_worktree(tmp_path)
+    original = build_claude_md()
+    assert isinstance(plan_insertion(original), Insertion), (
+        "FIXTURE INVALID: the planner refused before the writer ran"
+    )
+    (main / ".claude").mkdir()
+    main_md = main / ".claude" / "CLAUDE.md"
+    main_md.write_text(original, encoding="utf-8")
+    worktree_md = worktree / "CLAUDE.md"
+    worktree_md.write_text(original, encoding="utf-8")
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+    monkeypatch.chdir(worktree)
+
+    outcome = pin_marker_writer._plan_and_write()
+
+    assert outcome == "written", f"the pin writer did not run: {outcome}"
+    main_text = main_md.read_text(encoding="utf-8")
+    assert START_LINE in main_text, (
+        "the marker pair did not land in MAIN's file"
+    )
+    assert worktree_md.read_text(encoding="utf-8") == original, (
+        "the pin writer edited the worktree's own CLAUDE.md"
+    )

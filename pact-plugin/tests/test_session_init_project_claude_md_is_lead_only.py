@@ -283,6 +283,81 @@ class TestWorktreeTeammateWritesNothing:
                 f"{status}"
             )
 
+    def test_a_dot_claude_worktree_file_gets_the_notice(self, repo, monkeypatch):
+        """A worktree carrying ONLY `.claude/CLAUDE.md` is the third layout.
+
+        The tracked-legacy arm above pins `./CLAUDE.md`; the creation arm pins
+        a worktree with no file at all (the notice's negative control). The
+        dot_claude source is the remaining branch of the notice's fire
+        condition: the worktree file exists, the managed target is main, and
+        the notice must name the DOT_CLAUDE path rather than the legacy one.
+        """
+        main, git = repo
+        (main / "README").write_text("seed\n")
+        git("add", ".", cwd=main)
+        git("commit", "-qm", "seed", cwd=main)
+
+        control = self._worktree(main, git, "dot-claude")
+        (control / ".claude").mkdir()
+        (control / ".claude" / "CLAUDE.md").write_text(USER_MD)
+
+        context, system_message = _run(monkeypatch, control, LEAD)
+
+        main_md = main / ".claude" / "CLAUDE.md"
+        worktree_md = control / ".claude" / "CLAUDE.md"
+        assert main_md.exists() and CREATED in context, (
+            "control: the lead start did not create MAIN's CLAUDE.md, so the "
+            "notice's managed target was never in play"
+        )
+        assert f"Project memory is managed in {main_md}." in context, (
+            "the notice did not name the managed file, or named a legacy path"
+        )
+        assert f"This worktree also carries {worktree_md}," in context, (
+            "the notice did not name the worktree's .claude/CLAUDE.md"
+        )
+        assert (
+            "entries written there are lost when the worktree is removed"
+            in context
+        ), "the notice did not state the durability consequence"
+        assert (
+            "If that file is not meant to be part of the branch, remove or "
+            "untrack it." in context
+        ), "the notice did not carry the conditioned remedy"
+        assert "Project memory is managed in" not in system_message, (
+            "the notice belongs in the lead's context, not systemMessages"
+        )
+        assert worktree_md.read_text() == USER_MD, (
+            "the worktree's own .claude/CLAUDE.md was rewritten"
+        )
+
+    def test_a_main_checkout_claude_md_gets_no_notice(self, repo, monkeypatch):
+        """The notice's other failure direction: noisy when it should not fire.
+
+        In a MAIN checkout the base equals the project dir, so nothing is
+        diverted and the notice must stay silent even though the checkout
+        carries a `.claude/CLAUDE.md`. The worktree arms cover the missing
+        direction; this one covers the noisy direction.
+        """
+        main, git = repo
+        (main / ".claude").mkdir()
+        (main / ".claude" / "CLAUDE.md").write_text(USER_MD)
+        (main / "README").write_text("seed\n")
+        git("add", ".", cwd=main)
+        git("commit", "-qm", "seed", cwd=main)
+
+        context, system_message = _run(monkeypatch, main, LEAD)
+
+        assert MIGRATED in context, (
+            "control: the lead start did not reach the migration in a main "
+            "checkout, so this layout never reaches the notice's guard"
+        )
+        assert "This worktree also carries" not in context, (
+            "the pre-existing-file notice fired in a MAIN checkout, where the "
+            "base and the project dir are the same"
+        )
+        assert "Project memory is managed in" not in context
+        assert "Project memory is managed in" not in system_message
+
     def test_step_4_marks_the_main_checkout_not_the_worktree(self, repo, monkeypatch):
         """The step-4 wrapper has TWO routes: the patched alias for a
         non-worktree project dir, and the retargeted resolver for a linked
@@ -345,10 +420,19 @@ class TestWorktreeTeammateWritesNothing:
             {"session_id": _SESSION_ID, "source": "startup", "agent_type": LEAD}
         )
         with patch("sys.stdin", io.StringIO(stdin_data)), \
-             patch("sys.stdout", new_callable=io.StringIO):
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
             with pytest.raises(SystemExit) as exc:
                 session_init.main()
         assert exc.value.code == 0
+        # Positive control: an absence assertion cannot speak for a frame that
+        # never reached the lead branch. The byte-0 lead marker proves it did.
+        context = json.loads(mock_stdout.getvalue()).get(
+            "hookSpecificOutput", {}
+        ).get("additionalContext", "")
+        assert context.startswith("YOUR PACT ROLE: orchestrator."), (
+            "control: the lead frame did not reach the lead branch, so the "
+            "absence assertions below cannot speak for it"
+        )
         assert not (worktree / ".claude" / "CLAUDE.md").exists(), (
             "a frame with no declared project dir created a CLAUDE.md in the cwd"
         )
