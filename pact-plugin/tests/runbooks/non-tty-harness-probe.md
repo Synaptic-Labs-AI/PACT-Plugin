@@ -225,41 +225,53 @@ If the probe launches a child `claude -p`, isolate it first (§0 item 7).
 ## §3 Current Agent Team dispatch diagnostics (A–H)
 
 Use this ordered tree for a dispatch or messaging failure in either current
-arm. Record the branch and evidence in the run row. Do not start with a
-respawn, and do not treat a harness label as proof of the cause.
+arm. Record the branch, actor, and evidence in the run row. Roles are
+explicit: the subject teammate self-helps in A and relays in G; the lead
+observer owns B–F and the final blocker report. Do not start with a respawn,
+and do not treat a harness label as proof of the cause.
 
-A. **Load deferred tools.** If Task tools are reported missing, run
+A. **Load deferred tools.** The actor missing Task tools runs
    `ToolSearch "select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage"`
-   when it has not already run. If the tools load, continue without a respawn.
-B. **Check the lead session.** If the lead lacks the four Task tools, fix the
-   session opt-in/settings and start the required new session. Never respawn a
-   teammate for this cause.
-C. **Compare the call with the live Agent schema.** Current teammate creation
-   requires an interactive session, agent teams enabled, and a named,
-   non-fork, non-isolation Agent call. Correct `Task(...)`, a missing `name`,
+   when it has not already run. If a teammate's tools load, it continues
+   without a respawn. If they remain absent, the teammate reports the exact
+   missing tools and load result to its lead when messaging permits, then
+   stops implementation work and idles while the lead continues below. The
+   lead's own successful ToolSearch proves only the lead's tool surface,
+   never the teammate's.
+B. **Check the lead session.** The lead checks its own four Task tools. If
+   they are missing, the lead fixes the session opt-in/settings and must
+   start the required new session. Never respawn a teammate for this cause;
+   the teammate does not restart the session.
+C. **Compare the call with the live Agent schema.** The lead compares its
+   dispatch with the live schema. Current teammate creation requires an
+   interactive session, agent teams enabled, and a named, non-fork,
+   non-isolation Agent call. The lead corrects `Task(...)`, a missing `name`,
    fork/isolation, or non-interactive `-p` usage. Never add a parameter absent
-   from the live schema.
-D. **Confirm named-teammate creation and addressability.** Use platform
-   spawn, roster, and messaging evidence. A missing `config.json` alone is
-   not failure in a config-less cloud session. A named `-p` agent is an
-   ordinary subagent, not evidence of team formation; correct team
-   enablement/registration instead.
-E. **Apply display-mode inheritance.** In-process teammates follow the lead
-   session. For split-pane, check `--tools`/deny rules and environment
-   forwarding through `--settings`; correct the launch configuration before
-   replacement. This is the documented diagnostic path, not split-pane
-   runtime certification.
+   from the live schema or substitute subagent-definition frontmatter for an
+   Agent argument; the teammate does not rewrite the lead's call.
+D. **Confirm named-teammate creation and addressability.** The lead uses
+   platform spawn, roster, and messaging evidence, including the teammate's
+   exact report. A missing `config.json` alone is not failure in a config-less
+   cloud session. A named `-p` agent is an ordinary subagent, not evidence of
+   team formation; the lead corrects team enablement/registration instead.
+E. **Apply display-mode inheritance.** The lead checks the actual teammate
+   display mode. In-process teammates follow the lead session. For split-pane,
+   the lead checks `--tools`/deny rules and environment forwarding through
+   `--settings`, then corrects launch configuration before replacement; the
+   teammate does not change it. This is the documented diagnostic path, not
+   split-pane runtime certification.
 F. **Use the legacy-only branch only after A–E.** For an older non-TTY runtime
-   exhibiting the #1658 symptom, follow the single operational legacy note in
-   `pact-plugin/README.md`. Do not copy its dispatch template into current
-   guidance or treat schema presence alone as lifecycle evidence.
+   exhibiting the #1658 symptom, only the lead follows the
+   single operational legacy note in `pact-plugin/README.md`; the teammate never
+   applies legacy dispatch. Do not copy its dispatch template into current guidance or treat
+   schema presence alone as lifecycle evidence.
 G. **Relay residual structured content.** If Task tools remain absent but
-   `SendMessage` reaches `team-lead` or `main`, relay the teachback/HANDOFF
-   content and let the lead write metadata. Acceptance/rejection ordering is
-   unchanged; do not enter a respawn loop.
+   `SendMessage` reaches `team-lead` or `main`, the teammate relays the
+   teachback/HANDOFF content and the lead writes metadata. Acceptance/rejection
+   ordering is unchanged; do not enter a respawn loop.
 H. **Stop on messaging failure.** If `SendMessage` is also unavailable or
-   unreachable, relay is impossible. Report the team-formation/messaging
-   blocker with the evidence gathered above.
+   unreachable, the teammate cannot relay and stops/idles. The lead reports
+   the team-formation/messaging blocker with the evidence gathered above.
 
 ## §4 Historical evidence — #1658 on Claude Code 2.1.303 (2026-10-19)
 

@@ -422,8 +422,8 @@ A tool gives three signals about itself, and they can disagree. Trust them in th
 
 A different author writes each level at a different time, so a higher level can be stale.
 
-- Prose says a parameter is not available, parameter list shows it: PASS IT.
-- Dispatch template and parameter list disagree: that is a FINDING. Report it. Do not select one.
+- Prose says a parameter is not available, but the parameter list shows it: the parameter is expressible, not required. Decide from the applicable contract and behavioral evidence; never pass it merely because it appears in the schema.
+- Dispatch template and parameter list disagree: that is a FINDING to diagnose, not a prohibition on choosing. For Agent Team dispatch, follow the current named flagless contract, or the ordered legacy branch only when every guard matches; schema presence alone selects neither.
 - Your question is what the tool DOES: call the tool.
 
 **A gate that demands a parameter is evidence the parameter is available**, because a gate cannot demand what the interface cannot express. Check that belief before you look for a different tool.
@@ -434,15 +434,17 @@ After your first specialist spawn in a session — and after any subsequent spaw
 
 > ⚠️ **HARD STOP — DISPATCH PROTOCOL VIOLATION**. This is **NOT** degraded mode and **NOT** something to "work around". Branch on the evidence you observe, never on an assumed cause or a harness label. Use this ordered tree; do not instruct the teammate to "make do" and do not start with a respawn.
 
-A. **Load deferred tools.** If Task tools are reported missing, run `ToolSearch "select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage"` when it has not already run. If the tools load, continue without a respawn.
-B. **Check the lead session.** If the lead lacks the four Task tools, fix the session opt-in/settings and start the required new session. Never respawn a teammate for this cause.
-C. **Compare the call with the live Agent schema.** Current teammate creation requires an interactive session, agent teams enabled, and a named, non-fork, non-isolation Agent call. Correct a spawn that used `Task(...)` instead of `Agent(...)`, a missing `name`, fork/isolation, or non-interactive `-p` usage. Never add `background` or a parameter absent from the live schema.
-D. **Confirm named-teammate creation and addressability.** Use platform spawn, roster, and messaging evidence. A missing `config.json` alone is not failure in a config-less cloud session. A named `-p` agent is an ordinary subagent, not evidence of team formation; correct team enablement/registration instead.
-E. **Apply display-mode inheritance.** In-process teammates follow the lead session. For split-pane, check `--tools`/deny rules and environment forwarding through `--settings`; correct the launch configuration before replacement.
+Roles are explicit: the affected teammate self-helps in A and relays in G; the lead owns B–F and the final blocker report.
+
+A. **Load deferred tools.** The actor missing Task tools runs `ToolSearch "select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage"` when it has not already run. If a teammate's tools load, it continues without a respawn. If they remain absent, the teammate reports the exact missing tools and load result to its lead when messaging permits, then stops implementation work and idles while the lead continues below. The lead's own successful ToolSearch proves only the lead's tool surface, never the teammate's.
+B. **Check the lead session.** The lead checks its own four Task tools. If they are missing, the lead fixes the session opt-in/settings and must start the required new session. Never respawn a teammate for this cause; the teammate does not restart the session.
+C. **Compare the call with the live Agent schema.** The lead compares its dispatch with the live schema. Current teammate creation requires an interactive session, agent teams enabled, and a named, non-fork, non-isolation Agent call. The lead corrects `Task(...)`, a missing `name`, fork/isolation, or non-interactive `-p` usage. Never add a parameter absent from the live schema or substitute subagent-definition frontmatter for an Agent argument; the teammate does not rewrite the lead's call.
+D. **Confirm named-teammate creation and addressability.** The lead uses platform spawn, roster, and messaging evidence, including the teammate's exact report. A missing `config.json` alone is not failure in a config-less cloud session. A named `-p` agent is an ordinary subagent, not evidence of team formation; the lead corrects team enablement/registration instead.
+E. **Apply display-mode inheritance.** The lead checks the actual teammate display mode. In-process teammates follow the lead session. For split-pane, the lead checks `--tools`/deny rules and environment forwarding through `--settings`, then corrects launch configuration before replacement; the teammate does not change it.
 <!-- planning-artifact-exempt: historical issue reference for the measured legacy runtime -->
-F. **Use the legacy-only branch only after A–E.** For an older non-TTY runtime exhibiting the #1658 symptom, follow the single operational legacy note in `pact-plugin/README.md`. Do not copy its dispatch template into current guidance or treat schema presence alone as lifecycle evidence.
-G. **Relay residual structured content.** If Task tools remain absent but `SendMessage` reaches `team-lead` or `main`, relay the teachback/HANDOFF content and let the lead write metadata. Acceptance/rejection ordering is unchanged; no hook suppression logic or relay marker is involved, and no respawn loop follows.
-H. **Stop on messaging failure.** If `SendMessage` is also unavailable or unreachable, relay is impossible. Report the team-formation/messaging blocker with the evidence gathered above.
+F. **Use the legacy-only branch only after A–E.** For an older non-TTY runtime exhibiting the #1658 symptom, only the lead follows the single operational legacy note in `pact-plugin/README.md`; the teammate never applies legacy dispatch. Do not copy its dispatch template into current guidance or treat schema presence alone as lifecycle evidence.
+G. **Relay residual structured content.** If Task tools remain absent but `SendMessage` reaches `team-lead` or `main`, the teammate relays the teachback/HANDOFF content and the lead writes metadata. Acceptance/rejection ordering is unchanged; no hook suppression logic or relay marker is involved, and no respawn loop follows.
+H. **Stop on messaging failure.** If `SendMessage` is also unavailable or unreachable, the teammate cannot relay and stops/idles. The lead reports the team-formation/messaging blocker with the evidence gathered above.
 
 #### Hook WARN signals are STOP signals
 
