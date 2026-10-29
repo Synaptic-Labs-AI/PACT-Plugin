@@ -135,6 +135,45 @@ def same_repository(env_dir: Path, base: Path) -> bool:
         return False
 
 
+def project_memory_root(project_dir: str | os.PathLike[str]) -> Path:
+    """Return the directory that owns this session's project memory file.
+
+    For a linked worktree -- its root or a subdirectory of one -- that is the
+    main checkout's root; for everything else (a main checkout, a
+    subdirectory of one, a non-git directory, or any git failure) it is
+    `project_dir` EXACTLY as given.
+
+    THE EXACT RETURN IS LOAD-BEARING. Callers compare their output against the
+    pre-worktree behaviour, so a resolved or absolutised path would change a
+    status message for a reason that has nothing to do with worktrees. Return
+    the constructed `Path` untouched; never `resolve()`, `abspath` or normalise
+    here.
+
+    WHY `--git-common-dir`'s PARENT IS NOT ENOUGH. It is the main root for
+    both a worktree and a main checkout, but it is NOT a checkout root for a
+    submodule or a `--separate-git-dir` repository, whose common dir lives
+    elsewhere. The discriminator below excludes those two (their git dir and
+    common dir are equal), and the candidate verification excludes a worktree
+    of a bare repository, where the parent is not a checkout root either.
+
+    Composes `_git_output`, which runs `git -C <dir>` with
+    `git_env_without_location()` -- an inherited GIT_DIR would otherwise make
+    every directory report one repository, and a bare `git rev-parse` would
+    classify the hook's CWD instead of the project dir.
+    """
+    given = Path(project_dir)
+    git_dir = _rev_parse_path(given, "--git-dir")
+    common_dir = _rev_parse_path(given, "--git-common-dir")
+    if git_dir is None or common_dir is None or git_dir == common_dir:
+        return given
+    candidate = common_dir.parent
+    if _rev_parse_path(candidate, "--show-toplevel") != candidate:
+        return given
+    if _rev_parse_path(candidate, "--git-common-dir") != common_dir:
+        return given
+    return candidate
+
+
 def _nearest_existing_directory(path: Path) -> Optional[Path]:
     """Return `path` if it is a directory, else its closest ancestor that is."""
     for candidate in (path, *path.parents):
