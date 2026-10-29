@@ -349,8 +349,17 @@ def _resolve(session_dir: Path) -> tuple[Path | None, Path | None]:
     declaration is stable, so a changed CLAUDE_PROJECT_DIR is picked up by the
     next session rather than mid-session. A cached "no file" means the memory
     root had none when computed; it stays the answer for this session, which
-    is the same per-session horizon the cache already had."""
-    from shared.project_scope import project_memory_root
+    is the same per-session horizon the cache already had.
+
+    AN UNKNOWN MEMORY ROOT IS NOT PROBED AND NOT CACHED. `project_memory_root`
+    fails open to its input, so on a git failure this rung would read and then
+    CACHE the worktree copy ('#1653 task #59); the cache outlives the failure
+    and leaves the detector watching the wrong file for the rest of the
+    session. This module writes no project memory -- it writes session state --
+    so it is a reader, but the fail-open shape is the same one removed
+    everywhere else: answer "nothing" now, and let the next check, when git
+    answers, take the real base."""
+    from shared.project_scope import project_memory_root_or_none
     from staleness import _find_existing_claude_md, _resolve_project_claude_md_with_base
 
     cache_path = session_dir / _BASE_CACHE
@@ -366,7 +375,11 @@ def _resolve(session_dir: Path) -> tuple[Path | None, Path | None]:
 
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
     if project_dir:
-        memory_root = project_memory_root(Path(project_dir))
+        memory_root = project_memory_root_or_none(Path(project_dir))
+        if memory_root is None:
+            # UNKNOWN, and NOTHING IS CACHED: a transient failure here would
+            # otherwise pin the wrong file for the whole session.
+            return None, None
         found = _find_existing_claude_md(memory_root)
         if found is not None:
             _write_json(cache_path, {"base": str(memory_root)})
@@ -380,10 +393,11 @@ def _resolve(session_dir: Path) -> tuple[Path | None, Path | None]:
             # file MAIN gains later is picked up by the two-file check.
             _write_json(cache_path, {"base": str(memory_root)})
             return None, None
+    # `memory_root` is set (and known) whenever `project_dir` is: the unknown
+    # case returned above. Reusing it avoids a second git pair, and keeps this
+    # call on the SAME base the env rung used.
     path, base = _resolve_project_claude_md_with_base(
-        project_dir=project_memory_root(Path(project_dir))
-        if project_dir
-        else None
+        project_dir=memory_root if project_dir else None
     )
     _write_json(cache_path, {"base": str(base) if base is not None else None})
     return path, base

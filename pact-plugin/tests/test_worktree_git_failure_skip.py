@@ -29,6 +29,14 @@ Arms, one failing-git arm per writer plus a working-git control:
 
 `test_project_memory_root.py` pins the helper's None/answer distinction; this
 module pins the writer consequences.
+
+GIT UNAVAILABILITY, NOT "NOT A REPOSITORY". Every failing-git arm empties PATH
+(`_hide_git`), so the binary lookup fails in `project_scope.run_git` AND in
+every direct `subprocess.run(["git", ...])` an arm's code path can reach.
+Patching only `run_git` left those direct calls on the real binary (#59). A
+directory OUTSIDE git is a different, KNOWN answer -- git runs, exits non-zero,
+and the helper treats the directory itself as the root; no arm here simulates
+that.
 """
 from __future__ import annotations
 
@@ -41,7 +49,6 @@ from unittest.mock import patch
 import pytest
 
 import session_init
-import shared.project_scope as project_scope
 
 LEAD = "PACT:pact-orchestrator"
 SESSION_ID = "dddddddd-eeee-ffff-0000-111111111111"
@@ -75,6 +82,20 @@ def _worktree(repo, name):
     return path
 
 
+def _hide_git(monkeypatch):
+    """Make git genuinely UNAVAILABLE: an empty PATH fails every git call at
+    the binary lookup, both `project_scope.run_git` and the direct
+    `subprocess.run` calls in staleness's and working_memory's resolvers.
+
+    Patching only `run_git` leaves those direct calls on the real binary,
+    which can still answer from the actual repository -- a failing-git arm
+    that passes for the wrong reason (#1653 task #59). Note the distinction
+    the helper itself draws: git EXITING NON-ZERO means "not a repository", a
+    KNOWN answer that must keep working; git being ABSENT is the unknown case
+    this helper simulates."""
+    monkeypatch.setenv("PATH", "")
+
+
 def _run(monkeypatch, project_dir):
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
     monkeypatch.chdir(project_dir)
@@ -95,7 +116,7 @@ def _run(monkeypatch, project_dir):
 
 def test_a_git_failure_skips_the_session_start_writers(repo, monkeypatch):
     worktree = _worktree(repo, "failing-git")
-    monkeypatch.setattr(project_scope, "run_git", lambda *args, **kwargs: None)
+    _hide_git(monkeypatch)
 
     _context, system_message = _run(monkeypatch, worktree)
 
@@ -130,6 +151,7 @@ def test_the_control_with_a_working_git_creates_main(repo, monkeypatch):
 # ---------------------------------------------------------------------------
 # Prompt-time writers (#1653 item 4, widened by the lead's #54 note).
 # ---------------------------------------------------------------------------
+
 
 def _session_with_session_start(tmp_path):
     """A session dir whose journal already holds `session_start`, which is the
@@ -175,7 +197,7 @@ def test_a_git_failure_skips_the_pin_marker_writer(repo, monkeypatch):
     worktree_md.write_text(original, encoding="utf-8")
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
     monkeypatch.chdir(worktree)
-    monkeypatch.setattr(project_scope, "run_git", lambda *args, **kwargs: None)
+    _hide_git(monkeypatch)
 
     outcome = pin_marker_writer._plan_and_write()
 
@@ -223,7 +245,7 @@ def test_a_git_failure_skips_the_bootstrap_write_back(repo, monkeypatch):
     session_dir = _session_with_session_start(repo)
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
     monkeypatch.chdir(worktree)
-    monkeypatch.setattr(project_scope, "run_git", lambda *args, **kwargs: None)
+    _hide_git(monkeypatch)
     _patch_bootstrap_context(monkeypatch, writer, worktree, session_dir)
 
     status = writer._write_back_aligned_team_name({"agent_type": LEAD})
@@ -272,7 +294,7 @@ def test_a_git_failure_skips_the_realign_team_line(repo, monkeypatch, capsys):
     session_dir = _session_with_session_start(repo)
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
     monkeypatch.chdir(worktree)
-    monkeypatch.setattr(project_scope, "run_git", lambda *args, **kwargs: None)
+    _hide_git(monkeypatch)
 
     _write_team_line("sid", "session-new", str(session_dir), "/plugin")
 
@@ -349,7 +371,7 @@ def test_a_git_failure_skips_the_session_start_staleness_step(repo, monkeypatch)
     worktree_md = worktree / ".claude" / "CLAUDE.md"
     worktree_md.parent.mkdir()
     worktree_md.write_text(original, encoding="utf-8")
-    monkeypatch.setattr(project_scope, "run_git", lambda *args, **kwargs: None)
+    _hide_git(monkeypatch)
 
     _context, system_message = _run(monkeypatch, worktree)
 
@@ -412,7 +434,7 @@ def test_a_git_failure_skips_the_prompt_gate_block_rewrite(repo, monkeypatch):
     original = worktree_md.read_text(encoding="utf-8")
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
     monkeypatch.chdir(worktree)
-    monkeypatch.setattr(project_scope, "run_git", lambda *args, **kwargs: None)
+    _hide_git(monkeypatch)
 
     out = writer._record_unrecorded_lead(_prompt_gate_frame(), str(session_dir))
 
@@ -473,10 +495,7 @@ def test_a_git_failure_skips_the_memory_sync(repo, monkeypatch):
     monkeypatch.chdir(worktree)
     _align_memory_scope(monkeypatch, wm, worktree)
 
-    def _no_git(*args, **kwargs):
-        raise FileNotFoundError("git missing")
-
-    monkeypatch.setattr(wm.subprocess, "run", _no_git)
+    _hide_git(monkeypatch)
 
     result = wm.sync_to_claude_md({"context": "external entry"}, None, "id1")
 
@@ -525,7 +544,7 @@ def test_a_git_failure_refuses_the_archive_resolution(repo, monkeypatch):
     worktree_md.write_text(doc, encoding="utf-8")
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
     monkeypatch.chdir(worktree)
-    monkeypatch.setattr(project_scope, "run_git", lambda *args, **kwargs: None)
+    _hide_git(monkeypatch)
 
     with pytest.raises(archive_pin._Unevaluable) as excinfo:
         archive_pin.resolve_claude_md()

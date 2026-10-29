@@ -253,6 +253,36 @@ def test_drift_does_not_fall_through_to_the_worktree(world):
     )
 
 
+def test_drift_caches_nothing_when_git_cannot_answer(world, monkeypatch):
+    """#1653 task #59: a git-UNKNOWN first check must not adopt, or CACHE, the
+    worktree copy. The base cache outlives the failure, so caching a guess
+    would leave the detector on the wrong file for the whole session.
+
+    Git is made genuinely unavailable with an empty PATH: patching
+    `project_scope.run_git` alone leaves staleness's direct `subprocess.run`
+    calls on the real binary. The control with live git is
+    `test_drift_watches_main` (MAIN's file becomes the cached base).
+    """
+    import shared.claude_md_drift as drift
+    from shared.paths import get_claude_config_dir
+
+    main, worktree = world
+    _write_doc(main, _doc())
+    _write_doc(worktree, _doc(_pin("2026-10-01", "Other")))
+    session_dir = get_claude_config_dir() / "pact-sessions" / "proj" / "sd-unknown"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setenv("PATH", "")
+
+    path, base = drift._resolve(session_dir)
+
+    assert (path, base) == (None, None), (
+        f"an unknown root adopted a file: {path}"
+    )
+    assert not (session_dir / "claude-md-base.json").exists(), (
+        "the unknown base was CACHED, so the detector would watch it all session"
+    )
+
+
 def test_the_pin_gate_does_not_take_the_worktree_as_before(world):
     """Bugbot (#57): with MAIN holding no file, the pin gate's `before` must
     be the target (absent), not the worktree copy the resolver's cwd rung
