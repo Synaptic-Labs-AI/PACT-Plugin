@@ -670,7 +670,7 @@ class TestCliSearchCommand:
             "query", current_file=None, limit=3, sync_to_claude=False
         )
 
-    def test_api_search_default_limit_is_20(self):
+    def test_api_search_default_limit_matches_the_parser(self):
         """Pin the SECOND binding site: the module API's signature default.
 
         The CLI default is pinned by test_search_limit_default and the
@@ -678,12 +678,17 @@ class TestCliSearchCommand:
         limit, so none of them would redden if the API default drifted back
         and the module stopped matching its own docs — the exact divergence
         raising the default in both places exists to prevent. Signature
-        inspection, per the test_signature_mirrors_search pattern.
+        inspection, per the test_signature_mirrors_search pattern. Parser as
+        the single source of truth — no literal copy of the number.
         """
         import inspect
+        expected = build_parser().parse_args(["search", "q"]).limit
         params = inspect.signature(PACTMemory.search).parameters
         assert "limit" in params
-        assert params["limit"].default == 20
+        assert params["limit"].default == expected, (
+            f"PACTMemory.search defaults to {params['limit'].default}; "
+            f"the CLI ships {expected}"
+        )
 
     def test_search_helper_signature_defaults_match_parser(self):
         """Pin the third and fourth code copies of the search limit default.

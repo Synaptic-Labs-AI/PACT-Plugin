@@ -252,9 +252,15 @@ ROUTE_TOKENS = {
     "cli.py": "the CLI, by module path",
     "cli command": "the CLI, by a verb instruction",
     # The search route as a caller writes it post-#1647: the query is
-    # positional and quoted. Selects the two SKILL.md carriers that teach
-    # the invocation (and cli.py, which is outside the markdown walk).
-    'search "': "the CLI, by a verb instruction",
+    # positional and quoted. THE LEADING SPACE IS LOAD-BEARING: the matcher
+    # casefolds, and without it the token also matched `Search "` inside
+    # `ToolSearch "select:..."` prose, flagging files that name no store
+    # route. `search` must stand alone as a word. MEASURED on the live tree:
+    # this selects the pact-memory SKILL.md, whose invocations are
+    # space-preceded; the harvest SKILL.md quotes the verb inside backticks,
+    # which the space does not cross, and that carrier keeps its alphabet
+    # net through `cli command` named outside the bar.
+    ' search "': "the CLI, by a verb instruction",
     "--limit": "the CLI, by a verb instruction",
     "archive_pin.py": "the CLI, at one remove",
     # THE IMPORT ROUTE, SPELLED AS A MODULE-LEVEL CALL. A page taught
@@ -1622,7 +1628,7 @@ class TestArmTwoGoesRed:
 
 
 class TestArmThreeGoesRed:
-    """POPULATION, made to fail two ways.
+    """POPULATION, made to fail.
 
     WHAT THESE DO NOT PROVE: that the alphabet reaches a new surface written in
     WORDS OUTSIDE the token set. A file that teaches store access and names no
@@ -1648,6 +1654,46 @@ class TestArmThreeGoesRed:
                 root, ROUTE_TOKENS, POPULATION_EXEMPTIONS
             )
             == []
+        )
+
+    def test_compound_toolsearch_prose_is_not_selected(self, tmp_path):
+        """🔴 THE COMPOUND-WORD FALSE POSITIVE, closed by the leading space.
+
+        MEASURED ON THE LIVE TREE before this arm: the matcher casefolds, so
+        the token `search "` also matched `Search "` inside
+        `ToolSearch "select:..."` prose, and three files that name no store
+        route were flagged silent. The leading space in the token is what
+        excludes the compound, because a word boundary is the one thing a
+        casefold cannot blur.
+
+        THE OTHER DIRECTION IS THE SELECTIVITY HALF. A file that teaches the
+        verb as a real invocation, standing alone as a word, must still be
+        selected. A token narrowed past its carriers is decay, and the
+        equality below holds that half in one read: the compound file stays
+        out of the list and the real one is named.
+        """
+        root = _model_tree(tmp_path)
+        _write(
+            root,
+            "agents/pact-toolsearch.md",
+            'Load deferred tools: ToolSearch "select:TaskCreate".\n',
+        )
+        _write(
+            root,
+            "agents/pact-real-invoke.md",
+            'Run search "auth tokens" for prior decisions.\n',
+        )
+        selected = files_reaching_the_store(root, ROUTE_TOKENS)
+        assert "agents/pact-toolsearch.md" not in selected, (
+            "the token selected ToolSearch prose, so its leading space is "
+            "gone and the compound-word false positive is open again."
+        )
+        assert store_reaching_files_without_the_bar(
+            root, ROUTE_TOKENS, POPULATION_EXEMPTIONS
+        ) == ["agents/pact-real-invoke.md"], (
+            "EITHER the compound file entered the list, which is the false "
+            "positive this arm closes, OR the real invocation left it, which "
+            "is a token narrowed past its carriers."
         )
 
     def test_an_exemption_lifts_the_rule_for_one_file_only(self, tmp_path):
