@@ -56,7 +56,7 @@ exit 3 (arm F) — exit 1 from this arm is what proves the findings path.
 ```bash
 printf 'import sys\n' > "$SCRATCH/pact-plugin/_f401_probe_local_lint_red_trial.py"
 bash "$SCRATCH/scripts/verify-local-lint-gate.sh" > "$SCRATCH/out-f401.txt" 2>&1; echo "gate rc=$?"
-cd "$SCRATCH" && ruff check --select F821 --target-version py39 pact-plugin/ > "$SCRATCH/out-f401-leg2direct.txt" 2>&1; echo "leg2-direct rc=$?"
+cd "$SCRATCH" && ruff check --select F821 --target-version py312 pact-plugin/ > "$SCRATCH/out-f401-leg2direct.txt" 2>&1; echo "leg2-direct rc=$?"
 rm "$SCRATCH/pact-plugin/_f401_probe_local_lint_red_trial.py"
 ```
 
@@ -72,7 +72,7 @@ under the cycle-1 taxonomy (a ruff crash would map to exit 3 instead).
 ```bash
 printf 'print(undefined_name_for_f821_probe)\n' > "$SCRATCH/pact-plugin/_f821_probe_local_lint_red_trial.py"
 bash "$SCRATCH/scripts/verify-local-lint-gate.sh" > "$SCRATCH/out-f821.txt" 2>&1; echo "gate rc=$?"
-cd "$SCRATCH" && ruff check --select F821 --target-version py39 pact-plugin/ > "$SCRATCH/out-f821-leg2direct.txt" 2>&1; echo "leg2-direct rc=$?"
+cd "$SCRATCH" && ruff check --select F821 --target-version py312 pact-plugin/ > "$SCRATCH/out-f821-leg2direct.txt" 2>&1; echo "leg2-direct rc=$?"
 rm "$SCRATCH/pact-plugin/_f821_probe_local_lint_red_trial.py"
 ```
 
