@@ -403,9 +403,10 @@ _STDLIB_ALLOWLIST = frozenset({"__future__", "importlib", "json", "os", "re", "s
 
 def test_s3_module_level_imports_are_stdlib_only():
     """Module-level imports are stdlib only and never shared.*. The membership
-    check is an explicit allowlist rather than sys.stdlib_module_names (3.10+):
-    the CI matrix runs this suite on Python 3.9, where that attribute does not
-    exist.
+    check is an explicit allowlist rather than sys.stdlib_module_names: the
+    allowlist names the intent (a fixed stdlib surface), stays identical on
+    every interpreter, and is stricter than the attribute. It originated as a
+    3.9 workaround (the attribute is 3.10+) and is kept deliberately.
 
     `os` and `importlib` are allowed because the hook loads the shared launch
     predicate BY FILE PATH (`importlib.util` with an `os.path` join) instead of

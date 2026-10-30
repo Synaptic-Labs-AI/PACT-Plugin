@@ -13,57 +13,35 @@
 #   into any consumer project's session, so it carries zero consumer-pollution
 #   risk and may reference concrete project specifics freely.
 #
-# WHY THIS MATRIX, AND WHAT THE DECLARED FLOOR RESTS ON
-#   The dev runtime is 3.14.x. The matrix runs 3.9, 3.13 and 3.14: all three
-#   are GA on ubuntu-latest, 3.14 matches the dev runtime so a local green and
-#   a CI green are the same green, and 3.9 is the declared floor.
-#   The declared `requires-python = ">=3.9"` floor IS test-verified: the 3.9
-#   cell below runs the whole suite at the floor. That cell was added only
-#   after the suite was shown to pass there by execution, never on faith —
-#   the sequence was repair the test harness, demonstrate the pass, then add
-#   the cell, and it is the sequence any future downward extension takes.
+# WHY THIS INTERPRETER, AND WHAT THE DECLARED FLOOR RESTS ON
+#   CI runs ONE job on Python 3.12: the tested set and the declared floor
+#   coincide by design. 3.9-3.11 support was DROPPED deliberately, and the
+#   3.13/3.14 cells were removed rather than silently retained — a 3.12
+#   green certifies 3.12, so newer interpreters are UNVERIFIED, a known gap
+#   rather than an unnoticed one. Re-widening in either direction takes the
+#   measured sequence the old matrix taught: run the suite on the target
+#   interpreter, classify every failure as shipped-code, test-side, or
+#   dependency (those license different remedies, and only the first says
+#   anything about the declared floor), repair what is test-side and
+#   demonstrate the pass, and only then add the cell — a cell added before
+#   the demonstrated pass is adoption on faith.
+#   The declared `requires-python = ">=3.12"` floor IS test-verified: this
+#   job runs the whole suite at the floor. The collapsed shape was measured
+#   end-to-end (28619 passed, 27 skipped on 3.12.3, tree 8673aefd,
+#   reconciling exactly to the 28646-item collection), never assumed.
 #   Two STATIC checks remain and still earn their place, because a run and a
-#   scan fail differently: the 3.9 gate in tests/test_py39_annotation_compat.py
-#   and the `--target-version py39` lint below. That gate's own R0 note records
-#   that `feature_version` NARROWS rather than replaces live 3.9 verification,
-#   and it was measured false-passing PEP 701 f-strings that a 3.9 interpreter
-#   rejects — so the run is what backs the floor and the scan is what covers
-#   the three bare-python3 roots whether or not a test executes them. The scan
-#   checks syntax and annotation form only: a post-3.9 API call is invisible to
-#   it, which is the ceiling the next paragraph states.
-#   READ THE CELL WITH ITS BOUND: a green 3.9 cell certifies the suite's
-#   EXECUTED paths under the COLLECTED set, not the tree. A post-3.9 API on a
-#   path no test executes stays green forever. That ceiling is structural and
-#   no matrix cell can lift it.
-#   ONE GUARD INVERTS THAT BOUND FOR THE SKIP MECHANISM, and it is the one
-#   written for the defect
-#   class this matrix cell exists to catch. tests/test_memory_reachability.py
-#   runs its scanner under an interpreter OLDER than the running one, because
-#   a syntax parse cannot see a keyword that only exists in a newer runtime.
-#   On the 3.9 cell nothing is older, so it SKIPS there by construction: the
-#   differential guard aimed at `read_text(newline=)` is inert on the very
-#   cell added to catch `read_text(newline=)`. Its coverage lives on the
-#   HIGHER cells, where an older interpreter is on PATH; on the 3.9 cell the
-#   runtime IS the floor, so that class is covered by the run itself, under
-#   the bound stated above, rather than by the guard.
-#   The 3.9 cell necessarily resolves a different pytest major from the other
-#   cells: every 9.x release declares Requires-Python >=3.10, so 3.9 gets the
-#   newest 8.x the resolver offers. That divergence is FORCED, not chosen. It
-#   is why the cells are not interchangeable arms of one experiment. The plugin
-#   whole resolved set follows the runner down, so a red on the 3.9 cell alone
-#   differs from the others in FIVE measured variables: interpreter;
-#   runner major (pytest 8.4.2 against 9.1.1); plugin version (pytest-asyncio
-#   1.2.0 against 1.4.0); and TWO LIBRARIES UNDER TEST — model2vec 0.7.0
-#   against 0.9.0, numpy 2.0.2 against 2.5.2. The last two are the libraries
-#   this file names as backing the archive-pin and vector tests, so they are
-#   the likeliest source of a 3.9-only red rather than an afterthought.
-#   A SIXTH CAUSE IS NOT A VERSION AT ALL AND IS NOT DETERMINISTIC: 3.9 is
-#   absent from the runner tool cache, so setup-python DOWNLOADS the
-#   interpreter before the job does any work, while 3.13 and 3.14 resolve
-#   from cache. The floor cell therefore carries a network dependency the
-#   other two do not, and a transient red there is network weather rather
-#   than anything about the floor. Each cause licenses a different remedy.
-#   Classify which one before attributing it.
+#   scan fail differently: the 3.12 syntax-floor gate in tests/test_py312_syntax_floor.py
+#   and the `--target-version py312` lint below. The gate's notes record
+#   that `feature_version` NARROWS rather than replaces live verification —
+#   the old 3.9 gate was measured false-passing PEP 701 f-strings that a
+#   3.9 interpreter rejects — so the run is what backs the floor and the
+#   scan is what covers the scanned roots whether or not a test executes
+#   them. The scan checks syntax and annotation form only: a post-3.12 API
+#   call is invisible to it, which is the ceiling the next paragraph states.
+#   READ THE RUN WITH ITS BOUND: a green run certifies the suite's EXECUTED
+#   paths under the COLLECTED set, not the tree. A post-3.12 API on a path
+#   no test executes stays green forever. That ceiling is structural and no
+#   CI run can lift it.
 #   The earlier `>=3.7` declaration was REFUTED, not merely unmeasured: an
 #   assignment expression in hooks/shared/session_resume.py needs 3.8.
 #
@@ -89,9 +67,9 @@
 #                          and in telegram test modules → without it,
 #                          `python -m pytest` ERRORS at COLLECTION.
 #     - pytest-asyncio   : the suite has a large `@pytest.mark.asyncio` cohort.
-#                          An unhandled async test FAILS on both runner majors
-#                          the matrix installs. Without this plugin that whole
-#                          cohort is RED.
+#                          An unhandled async test FAILS (measured on pytest
+#                          8.4.2, one failure per async test). Without this
+#                          plugin that whole cohort is RED.
 #     - hypothesis       : property tests guard it with try/except + skipif, so
 #                          it is technically optional, but it is installed so the
 #                          property tests actually RUN rather than silently skip.
@@ -123,9 +101,22 @@
 #   `telegram` is the LOCAL package under pact-plugin/, NOT the pip library — it
 #   needs no install (it resolves via the working-directory on sys.path).
 #     - ruff             : the import-hygiene lint step ONLY (not a test dep).
-#                          Unpinned by design: the step's --select bounds the
-#                          rule surface, so new ruff releases cannot add rule
-#                          classes to it.
+#                          Pinned by constraints-ci.txt with the other direct
+#                          dependencies — ruff EXECUTES in CI, so a version
+#                          change is code-execution change, not lint noise.
+#                          The step's --select still bounds the rule surface,
+#                          which is what makes a deliberate ruff bump in the
+#                          constraints file low-risk rather than an audit.
+#
+#   CONSTRAINTS: the direct dependencies above are pinned in constraints-ci.txt
+#   at the repo root and applied by the install step's `pip install -c` — what
+#   CI runs is a reviewed commit, not whatever the index serves at merge time.
+#   Transitive dependencies float within those bounds; pip itself is
+#   unconstrained (pinned self-upgrades can deadlock the bootstrap). Refresh
+#   deliberately (quarterly, or on a red the pins explain): rebuild the
+#   environment from the package list above, run the suite green, commit the
+#   version diff. A pin that blocks a needed fix is a reason to refresh, not
+#   to delete the file.
 #
 #   VERIFICATION: every entry was proven by RUNNING the suite in a clean venv,
 #   never by grepping imports. This heading vouches for every entry beneath it,
@@ -133,9 +124,8 @@
 #   the evidence supports.
 #
 #   CURRENT WARRANT — the set was verified AS A WHOLE against the WIDENED
-#   collection, on ONE interpreter. The matrix now runs three, and they do not
-#   resolve the same distributions (see the cell note above), so this warrant
-#   covers the collection shape rather than every cell's resolved set. Two clean venvs
+#   collection, on ONE interpreter; CI runs that one interpreter, so the
+#   warrant and the CI resolved set are the same question. Two clean venvs
 #   differing ONLY in the pact-memory packages: with the full set the suite is
 #   green; with those packages removed the consequences are exactly these —
 #     - pyyaml removed            -> collection is INTERRUPTED, ZERO tests run.
@@ -195,37 +185,21 @@ jobs:
     runs-on: ubuntu-latest
     # THE TESTED SET. IT IS NOT THE SUPPORTED FLOOR, AND THE TWO ARE
     # DIFFERENT QUESTIONS THAT LIVE IN DIFFERENT FILES.
-    #   THE TESTED SET is this matrix: which interpreters CI runs.
+    #   THE TESTED SET is the interpreter this job runs: 3.12, set below.
     #   THE SUPPORTED FLOOR is `requires-python` in pyproject.toml at the
-    #   repository root. The lowest cell here now runs the suite AT that floor,
-    #   so the two questions coincide at the bottom of the matrix — but they
-    #   remain different questions: lowering the declared floor again would
-    #   take its own run on the new target, not an inference from this one.
+    #   repository root. The two coincide today — this job runs the suite
+    #   AT the floor — but they remain different questions: moving either
+    #   one takes its own run on the new target, not an inference from
+    #   this one.
     #
-    # WHY 3.14 JOINED 3.13. Local runs in the release arc before this change
-    # used 3.14 while CI pinned 3.13, so a local green and a CI green were
-    # not the same green; 3.14 closed that gap. The 3.9 cell was added later
-    # and for the other reason — it widens coverage down to the declared
-    # floor. NO VERSION LITERAL SITS IN THIS COMMENT ON PURPOSE: the
-    # plugin version lives in four pinned files, and one more copy here is
-    # one more thing a later bump can miss.
-    #
-    # `fail-fast: false` so a cell that reddens does not cancel the others
-    # and hide their results.
-    #
-    # CHECK NAMES, BECAUSE A MATRIX RENAMES THEM. A single job reports a
-    # check called `pytest`. This matrix reports `pytest (3.9)`,
-    # `pytest (3.13)` and `pytest (3.14)`, so the name `pytest` stops
-    # reporting. Measured on
-    # 2026-08-10 against this repository: NO required status check is
-    # configured, on classic branch protection or in the one active ruleset,
-    # so the rename blocks no pull request. IF SOMEBODY LATER REQUIRES A
-    # STATUS CHECK, require a stable aggregate name rather than a matrix
-    # cell, because each change to the matrix renames the cells.
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.9", "3.13", "3.14"]
+    # CHECK NAME. A scalar job reports a check called `pytest` — the
+    # stable name; a matrix renames its cells (`pytest (3.9)`, ...) on
+    # every change. Measured on 2026-08-10 against this repository: NO
+    # required status check is configured, on classic branch protection or
+    # in the one active ruleset, so a rename blocks no pull request. IF
+    # SOMEBODY LATER REQUIRES A STATUS CHECK, require a stable aggregate
+    # name rather than a matrix cell, because each change to a matrix
+    # renames the cells.
     steps:
       # Third-party actions are pinned to a full commit SHA (supply-chain
       # hardening: a moving tag like @v5 can be repointed to malicious code).
@@ -250,9 +224,9 @@ jobs:
 
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
-          # The value comes from the matrix above, which this file declares.
-          # It is not event input, so it carries no injection surface.
-          python-version: ${{ matrix.python-version }}
+          # A literal this file declares, not event input, so it carries no
+          # injection surface.
+          python-version: "3.12"
 
       # HuggingFace model cache. THE ONE PATH THE IN-TEST REMEDIES CANNOT REACH.
       #
@@ -276,11 +250,12 @@ jobs:
       # `HF_HOME` or `XDG_CACHE_HOME` is set anywhere in this workflow, so the
       # default applies.
       #
-      # KEY: includes the matrix interpreter because the cells resolve DIFFERENT
-      # model2vec majors (0.7.0 on 3.9 against 0.9.0 elsewhere, per the note
-      # above), and a cache written by one is not warranted for another. It
-      # hashes `embeddings.py` because `MODEL_NAME` lives there, so changing the
-      # model invalidates the entry rather than silently reusing the old blob.
+      # KEY: hashes `embeddings.py` because `MODEL_NAME` lives there, so
+      # changing the model invalidates the entry rather than silently reusing
+      # the old blob. (Keys of the old matrix carried the interpreter because
+      # the cells resolved different model2vec majors; the matrix is gone and
+      # the token with it — the changed key shape cannot collide with an old
+      # entry, which ages out by GitHub's own eviction.)
       # RESTORE-ONLY, WITH THE SAVE GATED BELOW. A plain `actions/cache` saves
       # unconditionally at post-job, and that is unsafe here for a reason we
       # measured: an INTERRUPTED transfer leaves a cache that looks warm and
@@ -296,7 +271,7 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/huggingface
-          key: hf-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('pact-plugin/skills/pact-memory/scripts/embeddings.py') }}
+          key: hf-${{ runner.os }}-${{ hashFiles('pact-plugin/skills/pact-memory/scripts/embeddings.py') }}
 
       - name: Install test dependencies
         # See the "DEPENDENCY SET" header note for why each lib is required.
@@ -306,7 +281,10 @@ jobs:
         # `Failed: async def functions are not natively supported`. Do NOT drop
         # it to "shorten" the line — the async cohort simply stops passing, and
         # it is a large fraction of the suite.
-        run: python -m pip install --upgrade pip pytest hypothesis httpx pytest-asyncio pyyaml pysqlite3 sqlite-vec model2vec ruff
+        # -c constraints-ci.txt pins the install line's direct deps to the
+        # TEST-verified versions (CONSTRAINTS paragraph in the DEPENDENCY SET
+        # header): drift is a reviewed change, not merge-time weather.
+        run: python -m pip install --upgrade -c constraints-ci.txt pip pytest hypothesis httpx pytest-asyncio pyyaml pysqlite3 sqlite-vec model2vec ruff
 
       # WARM THE MODEL ONCE, HERE, WHERE NOTHING IS TIMING IT.
       #
@@ -365,8 +343,9 @@ jobs:
       # backlog-dir exclusion) cannot silently drop F821 coverage.
       # Runs before pytest so a hygiene defect fails in seconds, not after
       # the multi-minute suite.
-      # --target-version py39 is LOAD-BEARING: ruff's py37 default false-errors
-      # on walrus operators used in the hooks — do not drop the flag.
+      # --target-version py312 pins the dialect explicitly: with the flag the
+      # legs are independent of any target ruff would infer from config, and
+      # the flag text is what the byte-parity test compares — do not drop it.
       # Where an editing session has an LSP server, its diagnostics complement
       # this check at edit time; this step is the mechanical guarantee.
       # `ruff --version` echoes the resolved version into the log: ruff is
@@ -380,8 +359,8 @@ jobs:
       - name: Import-hygiene lint (F401/F821)
         run: |
           ruff --version
-          ruff check --select F401,F821 --target-version py39 pact-plugin/
-          ruff check --select F821 --target-version py39 pact-plugin/
+          ruff check --select F401,F821 --target-version py312 pact-plugin/
+          ruff check --select F821 --target-version py312 pact-plugin/
 
       # The working directory must be pact-plugin/ (CWD-relative conftest
       # sys.path + local `telegram` package) — see the header note: this
@@ -414,8 +393,8 @@ jobs:
       #   `-ra` is a REPORTING flag, not a collection-scope change: it adds a
       #   short-summary section listing every non-passing outcome, and selects
       #   nothing. It is here so skip REASONS are readable from this log —
-      #   which is what settles both the older-interpreter question above and
-      #   any census of what the remaining skips actually are.
+      #   which is what settles any census of what the remaining skips
+      #   actually are.
       #   NEVER `-rs`. `-r` REPLACES the short-summary selection rather than
       #   adding to it, so `-rs` deletes the FAILED lines: measured here on a
       #   run carrying one real failure, where a `^FAILED` scan returned 0 AND
@@ -425,21 +404,3 @@ jobs:
       - name: Run test suite
         working-directory: pact-plugin
         run: python -m pytest -ra
-
-  # ---------------------------------------------------------------------------
-  # EXTENDING THE MATRIX DOWNWARD
-  #
-  # The floor is now a matrix cell, so this block records the SEQUENCE rather
-  # than a pending question. Any future extension below the current lowest cell
-  # takes the same three steps in the same order:
-  #   (1) run the gate form on the target interpreter and classify every
-  #       failure as shipped-code, test-side, or dependency — those three
-  #       license different remedies and only the first says anything about
-  #       the declared floor;
-  #   (2) repair whatever is test-side and demonstrate the pass, with
-  #       collection parity against the highest cell and dependency-equalised
-  #       environments, because an unequal collection is not a comparison;
-  #   (3) only then add the cell.
-  # A cell added before step (2) is adoption on faith, which is the thing this
-  # block has always forbidden.
-  # ---------------------------------------------------------------------------

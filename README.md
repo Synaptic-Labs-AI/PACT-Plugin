@@ -346,7 +346,7 @@ PACT uses Gordon Pask's Conversation Theory to ensure shared understanding betwe
 
 - **Claude Code** (the CLI tool): `npm install -g @anthropic-ai/claude-code`
 - **Agent Teams enabled** (see [Enabling Agent Teams](#enabling-agent-teams) below)
-- **Python 3.9+** (for memory system and hooks)
+- **Python 3.12+** (for memory system and hooks). Hooks launch on your host's `python3` whatever version it is — on a host whose bare `python3` is older than 3.12, a hook using 3.12 syntax exits 1 at parse time and deny-shaped hooks fail open. Migrate the interpreter before relying on hooks; pre-3.12 hosts are out of support, not protected.
 - **macOS or Linux** (Windows support coming soon)
 
 ### Enabling Agent Teams
@@ -665,7 +665,7 @@ When installed as a plugin, PACT lives in your plugin cache:
 │   └── cache/
 │       └── pact-plugin/
 │           └── PACT/
-│               └── 4.8.15/     # Plugin version
+│               └── 4.9.0/      # Plugin version
 │                   ├── agents/
 │                   ├── commands/
 │                   ├── skills/

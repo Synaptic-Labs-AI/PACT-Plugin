@@ -18,6 +18,23 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
+## v4.9.0: minimum Python 3.12, single 3.12 CI job (issue #1681)
+
+### Summary
+
+The plugin now requires Python 3.12 or newer and CI certifies exactly that interpreter. `requires-python` rises to 3.12, the 3.9/3.13/3.14 CI matrix collapses to one 3.12 job, and both lint mirrors target py312. Python 3.9, 3.10 and 3.11 support is dropped, and the separate 3.14 development-runtime cell is removed: newer interpreters are documented as unverified rather than silently retained.
+
+### What landed
+
+- `requires-python = ">=3.12"` in pyproject.toml and the README Python requirement; hosts whose bare python3 is older are out of support (the declaration does not change which interpreter launches an installed hook).
+- CI: matrix replaced by a scalar `python-version: "3.12"`, cache key de-matrixed, matrix/floor prose rewritten, and both ruff legs moved from `--target-version py39` to py312 in tests.yml and scripts/verify-local-lint-gate.sh together (the parity test stays unmodified and proves the mirror).
+- test_py39_annotation_compat.py replaced by test_py312_syntax_floor.py: file discovery and non-empty-root checks kept, count floor raised to 106, the four 3.9-only annotation rules deleted, and a measured non-vacuity pair added — PEP 695 parses at (3,12) and rejects at (3,11) (the boundary pin), while t-string and PEP 696 vectors prove the arm fires.
+- Real-3.9 discovery/smoke arms removed from test_bootstrap_gate, test_task_lifecycle_gate_degraded, test_containment_certification and the older-interpreter differential in test_memory_reachability, with their interpreter-neutral coverage retained on the dev interpreter; a dead skipif gate removed and stale floor comments reworded.
+
+### Why
+
+Three CI cells cost over 100 minutes per run while the 3.9 cell certified an interpreter being retired; the investigation machine's default python3 is 3.12.3 and the full unrestricted suite passes there (28,736 passed, 31 skipped). A single cell at the declared floor makes the run and the floor the same thing; newer-interpreter coverage is surrendered deliberately and recorded, not lost silently.
+
 ## v4.8.15: pact-memory search default 20, dash stdin sentinel, live dedup search (issue #1647)
 
 ### Summary

@@ -510,52 +510,6 @@ class TestCiInvocationCollectsTheWholeCorpus:
         )
 
 
-class TestMatrixAndProseAgreeOnTheVersionSet:
-    """The matrix and the prose naming its check names must desync together."""
-
-    def test_check_names_passage_enumerates_exactly_the_matrix_versions(self):
-        """Keep the check-names passage equal to the matrix it describes.
-
-        Editing `python-version` means editing the passage that names the
-        reported checks, and the reverse. Both operands are read from the
-        workflow, so neither is a literal this module owns.
-
-        Extraction is over the WHOLE file, never per line: the enumeration
-        spans a line break, so a line-scoped read sees a subset of it and
-        reports a mismatch that is an artifact of wrapping.
-        """
-        _, workflow_text = _require_checkout()
-
-        declared = re.search(r"python-version:\s*\[([^\]]*)\]", workflow_text)
-        assert declared is not None, (
-            "no `python-version: [...]` literal list found in the workflow. "
-            "The matrix side of this comparison is missing, so the check "
-            "below would compare against nothing. Report this as a parse "
-            "failure, not as agreement."
-        )
-        matrix = set(re.findall(r"[\"']([^\"']+)[\"']", declared.group(1)))
-
-        reported = set(re.findall(r"pytest \(([^)]+)\)", workflow_text))
-        assert reported, (
-            "the workflow names no `pytest (<version>)` check anywhere. That "
-            "passage is the prose side of this comparison; with it gone the "
-            "set equality below would hold vacuously against an empty read. "
-            "Either restore the enumeration or replace this arm with one "
-            "asserting no enumeration exists."
-        )
-
-        assert matrix == reported, (
-            f"THE MATRIX AND THE CHECK-NAMES PROSE DISAGREE.\n"
-            f"  python-version declares: {sorted(matrix)}\n"
-            f"  prose reports as checks: {sorted(reported)}\n"
-            f"  only in the matrix: {sorted(matrix - reported)}\n"
-            f"  only in the prose:  {sorted(reported - matrix)}\n"
-            f"A matrix job is named `pytest (<value>)` per cell, so these two "
-            f"sets are the same set by construction. Update whichever side "
-            f"you did not just edit."
-        )
-
-
 def test_no_second_checkout_sits_inside_the_collection_root():
     """A checkout under `pact-plugin/` makes pytest collect a SECOND copy.
 

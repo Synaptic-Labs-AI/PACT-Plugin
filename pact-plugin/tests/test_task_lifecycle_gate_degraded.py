@@ -51,7 +51,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_bootstrap_gate import _BREAKAGE_VECTORS, _find_python39
+from tests.test_bootstrap_gate import _BREAKAGE_VECTORS
 
 
 # =============================================================================
@@ -81,18 +81,13 @@ def _scaffold_env(tmp_path):
     return env
 
 
-def _run_degraded_subprocess(tmp_path, stdin_text, interpreter=None,
+def _run_degraded_subprocess(tmp_path, stdin_text,
                              vector="syntax-broken-init"):
     """Run task_lifecycle_gate.py as a subprocess inside a scaffold whose
     `shared` package is deliberately broken per ``vector`` (a
     _BREAKAGE_VECTORS key; default = the canonical syntax-broken
     __init__.py), forcing the import-stage crash path. Returns the
-    CompletedProcess.
-
-    ``interpreter`` defaults to the dev interpreter (sys.executable); the
-    py3.9-floor test passes a discovered 3.9 binary to exercise the
-    stdlib-only crash path on the production system interpreter
-    (GUI-launched macOS sessions run hooks on /usr/bin/python3 = 3.9.x).
+    CompletedProcess. Runs on the dev interpreter (sys.executable).
     """
     hook_src = Path(__file__).parent.parent / "hooks" / "task_lifecycle_gate.py"
     scaffold = tmp_path / "scaffold"
@@ -102,8 +97,7 @@ def _run_degraded_subprocess(tmp_path, stdin_text, interpreter=None,
     )
     _BREAKAGE_VECTORS[vector][0](scaffold)
     return subprocess.run(
-        [interpreter or sys.executable,
-         str(scaffold / "task_lifecycle_gate.py")],
+        [sys.executable, str(scaffold / "task_lifecycle_gate.py")],
         input=stdin_text,
         capture_output=True,
         text=True,
@@ -437,34 +431,6 @@ class TestImportStageJournalSuccess:
         assert not (session_dir / "session-journal.jsonl").exists(), (
             "truncated frame must not produce a journal event"
         )
-
-
-# =============================================================================
-# py3.9 floor exercise (conditional on an available interpreter)
-# =============================================================================
-
-
-class TestPython39Floor:
-
-    def test_crash_marker_emits_on_python39_floor(self, tmp_path):
-        """The crash path (stdlib preamble + advisory helper + marker
-        emit) must execute on the production system interpreter
-        (GUI-launched macOS sessions run hooks on /usr/bin/python3 =
-        3.9.x). Exercise the canonical syntax vector under a REAL 3.9
-        interpreter when one is discoverable; the static AST floor guard
-        (test_py39_annotation_compat.py) remains the unconditional gate
-        when none is."""
-        py39 = _find_python39()
-        if py39 is None:
-            pytest.skip(
-                "no Python 3.9 interpreter discoverable (python3.9 on PATH "
-                "or /usr/bin/python3 reporting 3.9.x); static floor guard "
-                "test_py39_annotation_compat.py covers the syntax floor"
-            )
-        result = _run_degraded_subprocess(
-            tmp_path, json.dumps(_make_gate_input()), interpreter=py39
-        )
-        _assert_crash_marker_shape(result, "SyntaxError")
 
 
 # =============================================================================

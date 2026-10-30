@@ -495,16 +495,21 @@ class TestDependencyDriftIsDetectable:
             f"{workflow} is missing. The drift detector cannot run. This is a "
             f"FAILURE, not a skip: inside a checkout the workflow is required."
         )
+        # Anchor on the `run:` line — the EXECUTED command — never on any
+        # line merely mentioning `pip install`: workflow comment prose may
+        # name the command (the CONSTRAINTS paragraph does), and prose is
+        # not a declaration.
         install_line = next(
             (ln for ln in workflow.read_text(encoding="utf-8").splitlines()
-             if "pip install" in ln),
+             if ln.lstrip().startswith("run:") and "pip install" in ln),
             None,
         )
         assert install_line is not None, (
             f"PARSE FAILURE, not dependency drift: {workflow} contains no "
-            f"'pip install' line, so the CI dependency declaration cannot be "
-            f"read. The workflow changed shape — re-point this parity test at "
-            f"the new shape; do not weaken it to a skip."
+            f"`run:` line carrying `pip install`, so the CI dependency "
+            f"declaration cannot be read. The workflow changed shape — "
+            f"re-point this parity test at the new shape; do not weaken it "
+            f"to a skip."
         )
 
         # Compare against TOKENS of the install line, never substrings of it.

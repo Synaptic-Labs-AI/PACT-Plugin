@@ -1828,8 +1828,8 @@ def _break_shared_missing_transitive(scaffold):
 # split must be IDENTICAL no matter HOW shared/ broke; the distinct
 # exception type names make each vector's diagnosability assertable. The
 # 2026-06-11 incident vector (py3.9 TypeError from annotation evaluation)
-# is exercised separately by test_degraded_path_runs_on_python39_floor on
-# a real 3.9 interpreter.
+# belongs to the retired pre-3.12 floor; the 3.12 syntax-floor guard
+# (test_py312_syntax_floor.py) now holds that class closed statically.
 _BREAKAGE_VECTORS = {
     "syntax-broken-init": (_break_shared_syntax, "SyntaxError"),
     "shared-package-absent": (_break_shared_absent, "ModuleNotFoundError"),
@@ -1839,18 +1839,13 @@ _BREAKAGE_VECTORS = {
 }
 
 
-def _run_degraded_subprocess(tmp_path, stdin_text, interpreter=None,
+def _run_degraded_subprocess(tmp_path, stdin_text,
                              vector="syntax-broken-init"):
     """Run bootstrap_gate.py as a subprocess inside a scaffold whose
     `shared` package is deliberately broken per ``vector`` (a
     _BREAKAGE_VECTORS key; default = the canonical syntax-broken
     __init__.py), forcing the import-stage degraded path. Returns the
-    CompletedProcess.
-
-    ``interpreter`` defaults to the dev interpreter (sys.executable); the
-    py3.9-floor test passes a discovered 3.9 binary to exercise the
-    stdlib-only degraded region on the production system interpreter
-    (GUI-launched macOS sessions run hooks on /usr/bin/python3 = 3.9.x).
+    CompletedProcess. Runs on the dev interpreter (sys.executable).
     """
     import subprocess
 
@@ -1862,42 +1857,13 @@ def _run_degraded_subprocess(tmp_path, stdin_text, interpreter=None,
     )
     _BREAKAGE_VECTORS[vector][0](scaffold)
     return subprocess.run(
-        [interpreter or sys.executable, str(scaffold / "bootstrap_gate.py")],
+        [sys.executable, str(scaffold / "bootstrap_gate.py")],
         input=stdin_text,
         capture_output=True,
         text=True,
         cwd=str(scaffold),
         timeout=600,
     )
-
-
-def _find_python39():
-    """Best-effort discovery of a Python 3.9 interpreter for the floor
-    exercise: an explicit ``python3.9`` on PATH, else the macOS system
-    ``/usr/bin/python3`` when it reports 3.9.x (the actual interpreter
-    GUI-launched sessions run hooks on). Returns None when unavailable —
-    callers skip; the static AST floor guard
-    (test_py39_annotation_compat.py) remains the unconditional gate.
-    """
-    import shutil
-    import subprocess
-
-    candidates = [shutil.which("python3.9"), "/usr/bin/python3"]
-    for candidate in candidates:
-        if not candidate or not Path(candidate).exists():
-            continue
-        try:
-            probe = subprocess.run(
-                [candidate, "--version"],
-                capture_output=True,
-                text=True,
-                timeout=600,
-            )
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if (probe.stdout + probe.stderr).strip().startswith("Python 3.9"):
-            return candidate
-    return None
 
 
 # Canonical degraded-allowlist literal — deliberately independent of
@@ -2390,50 +2356,6 @@ class TestDegradedMode:
             f"{vector}: stderr={result.stderr!r} stdout={result.stdout!r}"
         )
         assert result.stderr.strip()
-
-    # --- py3.9 floor exercise (conditional on an available interpreter) ---
-
-    def test_degraded_path_runs_on_python39_floor(self, tmp_path):
-        """The degraded region is stdlib-only and must execute on the
-        production system interpreter (GUI-launched macOS sessions run
-        hooks on /usr/bin/python3 = 3.9.x). Exercise the three behavior
-        classes — warn(defer), deny, fail-closed-stdin — under a REAL 3.9
-        interpreter when one is discoverable; the static AST floor guard
-        (test_py39_annotation_compat.py R0–R3) remains the unconditional
-        merge gate when none is."""
-        py39 = _find_python39()
-        if py39 is None:
-            pytest.skip(
-                "no Python 3.9 interpreter discoverable (python3.9 on PATH "
-                "or /usr/bin/python3 reporting 3.9.x); static floor guard "
-                "test_py39_annotation_compat.py covers the syntax floor"
-            )
-
-        warn = _run_degraded_subprocess(
-            tmp_path / "warn", json.dumps(_make_input(tool_name="Read")),
-            interpreter=py39,
-        )
-        out = json.loads(warn.stdout.strip().splitlines()[0])
-        assert out["hookSpecificOutput"]["permissionDecision"] == "defer"
-        assert "DEGRADED" in out["hookSpecificOutput"]["permissionDecisionReason"]
-        assert warn.returncode == 0, (
-            f"stderr={warn.stderr!r} stdout={warn.stdout!r}"
-        )
-
-        deny = _run_degraded_subprocess(
-            tmp_path / "deny", json.dumps(_make_input(tool_name="Edit")),
-            interpreter=py39,
-        )
-        out = json.loads(deny.stdout.strip().splitlines()[0])
-        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
-        assert deny.returncode == 2
-
-        malformed = _run_degraded_subprocess(
-            tmp_path / "malformed", "not valid json {", interpreter=py39,
-        )
-        out = json.loads(malformed.stdout.strip().splitlines()[0])
-        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
-        assert malformed.returncode == 2
 
 
 # =============================================================================

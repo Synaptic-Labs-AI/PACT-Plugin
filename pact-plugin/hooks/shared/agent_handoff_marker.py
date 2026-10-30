@@ -528,12 +528,14 @@ def _resolve_marker_target(
     # That argument is INVALID and is recorded here so it is not re-derived.
     # The declaration in pyproject.toml does not govern this. Nothing on the
     # install path consults requires-python, so the declaration is inert and
-    # its value decides nothing here. The ENFORCED floor governs: 3.9 (the CI
-    # lint target and the 3.9 AST gate), and the oldest interpreter a consumer
-    # plausibly runs the hooks under is 3.9.6. The declaration now names that
-    # same floor, so the two agree, which only strengthens this. is_relative_to
-    # is therefore available at the operative floor and rejects the prefix
-    # collision too, so either primitive would be correct -- the choice is not
+    # its value decides nothing here. The ENFORCED floor governs: 3.12 (the
+    # CI cell that runs the suite, the py312 lint target, and the 3.12 AST
+    # gate). The declaration names that same floor, which only strengthens
+    # this. Note the floor is a SUPPORT BOUNDARY, not a runtime guard: hooks
+    # launch on whatever bare python3 resolves to, and a host below 3.12 is
+    # out of support rather than protected. is_relative_to (3.9+) is
+    # available at the operative floor and rejects the prefix collision too,
+    # so either primitive would be correct -- the choice is not
     # load-bearing and only the stated reason was wrong.
     # On breach OR any resolution error: fail-open emit (return None) WITHOUT
     # writing a marker at the escaped path — consistent with the is_symlink()

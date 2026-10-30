@@ -76,8 +76,9 @@ def test_non_running_or_idless_entries_never_count():
 
 
 def test_the_module_imports_nothing():
-    """Nothing but the __future__ directive the py39 compatibility rule
-    requires. Any real import would reach the Stop hook's fast path, which
+    """Nothing but the __future__ directive (kept from the retired py39
+    annotation-compat era; the 3.12 floor neither requires nor forbids it).
+    Any real import would reach the Stop hook's fast path, which
     loads this file by path precisely to avoid importing `shared`."""
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
     imports = [
