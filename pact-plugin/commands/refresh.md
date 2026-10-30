@@ -74,17 +74,22 @@ case '{true_or_false}' in
       --type session_consolidated --session-dir '{session_dir}' --stdin <<'JSON'
 {"pass": 2, "task_count": {task_count}, "memories_saved": {memories_saved}}
 JSON
-    python3 - <<'PY'
-    import json
-    from pathlib import Path
+    python3 -c '
+import json
+import sys
+from pathlib import Path
 
-    path = Path("{session_dir}") / "session-journal.jsonl"
-    event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-    assert event.get("type") == "session_consolidated", event
-    assert event.get("pass") == 2, event
-    assert event.get("task_count") == {task_count}, event
-    assert event.get("memories_saved") == {memories_saved}, event
-PY
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"session_consolidated","pass":2,"task_count":{task_count},"memories_saved":{memories_saved}},"nonempty":[],"absent":[]}
+JSON
     ;;
   false)
     ;;  # intentional no-op
@@ -97,18 +102,22 @@ python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type session_refreshed --session-dir '{session_dir}' --stdin <<'JSON'
 {"consolidation_completed": {true_or_false}, "halt_active": {halt_active}, "halt_task_ids": {halt_task_ids}, "feature_task_id": "{feature_task_id}", "feature_subject": "{feature_subject}", "team_name": "{team_name}", "next_phase": "{next_phase}", "worktrees": {worktrees}, "pr_number": {pr_number}}
 JSON
-python3 - <<'PY'
+python3 -c '
 import json
+import sys
 from pathlib import Path
 
-path = Path("{session_dir}") / "session-journal.jsonl"
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
 event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-assert event.get("type") == "session_refreshed", event
-assert str(event.get("consolidation_completed")).lower() == "{true_or_false}", event
-assert str(event.get("halt_active")).lower() == "{halt_active}", event
-assert str(event.get("feature_task_id")) == "{feature_task_id}", event
-assert str(event.get("team_name")) == "{team_name}", event
-PY
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"session_refreshed","consolidation_completed":{true_or_false},"halt_active":{halt_active},"feature_task_id":"{feature_task_id}","team_name":"{team_name}"},"nonempty":[],"absent":[]}
+JSON
 ```
 
 **Degenerate case** (no active workstream): omit every optional field — write the two required fields only:
@@ -118,16 +127,22 @@ python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type session_refreshed --session-dir '{session_dir}' --stdin <<'JSON'
 {"consolidation_completed": {true_or_false}, "halt_active": false}
 JSON
-python3 - <<'PY'
+python3 -c '
 import json
+import sys
 from pathlib import Path
 
-path = Path("{session_dir}") / "session-journal.jsonl"
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
 event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-assert event.get("type") == "session_refreshed", event
-assert str(event.get("consolidation_completed")).lower() == "{true_or_false}", event
-assert event.get("halt_active") is False, event
-PY
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"session_refreshed","consolidation_completed":{true_or_false},"halt_active":false},"nonempty":[],"absent":[]}
+JSON
 ```
 
 > ⚠️ **Heredoc-stdin contract**: the writes use `--stdin <<'JSON' ... JSON` (quoted delimiter), so an apostrophe in a substituted value cannot close the shell quote and silently drop the event. The orchestrator must still produce JSON-valid string content (escape `\"`, `\\`, and control chars).

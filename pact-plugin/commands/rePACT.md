@@ -37,16 +37,22 @@ python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
 {"task_id": "{sub_feature_task_id}", "variety": {"total": N}}
 JSON
-python3 - <<'PY'
+python3 -c '
 import json
+import sys
 from pathlib import Path
 
-path = Path("{session_dir}") / "session-journal.jsonl"
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
 event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-assert event.get("type") == "variety_assessed", event
-assert str(event.get("task_id")) == "{sub_feature_task_id}", event
-assert "scope" not in event, event
-PY
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{sub_feature_task_id}"},"nonempty":[],"absent":["scope"]}
+JSON
 ```
 
 **Example structure (standard):**
@@ -297,16 +303,22 @@ For each specialist needed, follow the steps for [Teachback-Gated Dispatch](#tea
      --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
    {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
 JSON
-   python3 - <<'PY'
-   import json
-   from pathlib import Path
+   python3 -c '
+import json
+import sys
+from pathlib import Path
 
-   path = Path("{session_dir}") / "session-journal.jsonl"
-   event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-   assert event.get("type") == "variety_assessed", event
-   assert str(event.get("task_id")) == "{taskId}", event
-   assert event.get("scope") == "dispatch", event
-PY
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{taskId}","scope":"dispatch"},"nonempty":[],"absent":[]}
+JSON
    ```
 6. Spawn the specialist with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({scope-prefixed-name})` marker on its own line (team protocol + teachback content arrive via spawn-time skills frontmatter; the dispatch prompt additionally carries the registration first-action directive):
 

@@ -161,17 +161,22 @@ case '{consolidation_ran}' in
       --type session_consolidated --session-dir '{session_dir}' --stdin <<'JSON'
 {"pass": 2, "task_count": {task_count}, "memories_saved": {memories_saved}}
 JSON
-    python3 - <<'PY'
-    import json
-    from pathlib import Path
+    python3 -c '
+import json
+import sys
+from pathlib import Path
 
-    path = Path("{session_dir}") / "session-journal.jsonl"
-    event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-    assert event.get("type") == "session_consolidated", event
-    assert event.get("pass") == 2, event
-    assert event.get("task_count") == {task_count}, event
-    assert event.get("memories_saved") == {memories_saved}, event
-PY
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"session_consolidated","pass":2,"task_count":{task_count},"memories_saved":{memories_saved}},"nonempty":[],"absent":[]}
+JSON
     ;;
   false)
     ;;  # intentional no-op — step 1 was skipped per the trivial-session rule

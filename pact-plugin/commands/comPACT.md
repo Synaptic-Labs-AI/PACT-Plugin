@@ -43,16 +43,22 @@ Create a simpler Task hierarchy than full orchestrate:
 >   --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
 > {"task_id": "{feature_task_id}", "variety": {"total": N}}
 > JSON
-> python3 - <<'PY'
+> python3 -c '
 > import json
+> import sys
 > from pathlib import Path
 >
-> path = Path("{session_dir}") / "session-journal.jsonl"
+> spec = json.load(sys.stdin)
+> path = Path(spec["session_dir"]) / "session-journal.jsonl"
 > event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-> assert event.get("type") == "variety_assessed", event
-> assert str(event.get("task_id")) == "{feature_task_id}", event
-> assert "scope" not in event, event
-> PY
+> bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+> bad += [key for key in spec["nonempty"] if not event.get(key)]
+> bad += [key for key in spec["absent"] if key in event]
+> if bad:
+>     raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+> ' <<'JSON'
+> {"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{feature_task_id}"},"nonempty":[],"absent":["scope"]}
+> JSON
 > ```
 
 **Example structure:**
@@ -289,16 +295,22 @@ When the task contains multiple independent items, invoke multiple specialists t
      --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
    {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
 JSON
-   python3 - <<'PY'
-   import json
-   from pathlib import Path
+   python3 -c '
+import json
+import sys
+from pathlib import Path
 
-   path = Path("{session_dir}") / "session-journal.jsonl"
-   event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-   assert event.get("type") == "variety_assessed", event
-   assert str(event.get("task_id")) == "{taskId}", event
-   assert event.get("scope") == "dispatch", event
-PY
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{taskId}","scope":"dispatch"},"nonempty":[],"absent":[]}
+JSON
    ```
    Then `agent_dispatch`:
    ```bash
@@ -308,17 +320,22 @@ PY
      --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
    {"agent": "{specialist-name}", "task_id": "{taskId}", "phase": "CODE", "scope": ["{assigned_paths}"]}
 JSON
-   python3 - <<'PY'
-   import json
-   from pathlib import Path
+   python3 -c '
+import json
+import sys
+from pathlib import Path
 
-   path = Path("{session_dir}") / "session-journal.jsonl"
-   event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-   assert event.get("type") == "agent_dispatch", event
-   assert str(event.get("task_id")) == "{taskId}", event
-   assert str(event.get("agent")) == "{specialist-name}", event
-   assert event.get("phase") == "CODE", event
-PY
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"agent_dispatch","task_id":"{taskId}","agent":"{specialist-name}","phase":"CODE"},"nonempty":[],"absent":[]}
+JSON
    ```
 
 > ⚠️ **Heredoc-stdin contract**: All journal-event writes in this command file use `--stdin <<'JSON' ... JSON` (quoted delimiter, closing `JSON` on its own line at column 0 — bash heredocs do NOT strip leading whitespace from the delimiter line unless `<<-` with TABS is used). The quoted delimiter disables bash variable expansion so apostrophes, quotes, and backticks in template-substituted values (e.g., `{first_line}` from a commit message) pass through verbatim. The orchestrator must still produce JSON-valid string content (escape `\"`, `\\`, and control chars).
@@ -381,16 +398,22 @@ Use a single specialist agent only when:
      --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
    {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
 JSON
-   python3 - <<'PY'
-   import json
-   from pathlib import Path
+   python3 -c '
+import json
+import sys
+from pathlib import Path
 
-   path = Path("{session_dir}") / "session-journal.jsonl"
-   event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-   assert event.get("type") == "variety_assessed", event
-   assert str(event.get("task_id")) == "{taskId}", event
-   assert event.get("scope") == "dispatch", event
-PY
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{taskId}","scope":"dispatch"},"nonempty":[],"absent":[]}
+JSON
    ```
    Then `agent_dispatch`:
    ```bash
@@ -400,17 +423,22 @@ PY
      --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
    {"agent": "{specialist-name}", "task_id": "{taskId}", "phase": "CODE", "scope": []}
 JSON
-   python3 - <<'PY'
-   import json
-   from pathlib import Path
+   python3 -c '
+import json
+import sys
+from pathlib import Path
 
-   path = Path("{session_dir}") / "session-journal.jsonl"
-   event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-   assert event.get("type") == "agent_dispatch", event
-   assert str(event.get("task_id")) == "{taskId}", event
-   assert str(event.get("agent")) == "{specialist-name}", event
-   assert event.get("phase") == "CODE", event
-PY
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"agent_dispatch","task_id":"{taskId}","agent":"{specialist-name}","phase":"CODE"},"nonempty":[],"absent":[]}
+JSON
    ```
 6. Spawn the specialist with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({specialist-name})` marker on its own line (team protocol + teachback content arrive via spawn-time skills frontmatter; the dispatch prompt additionally carries the registration first-action directive):
 
@@ -482,16 +510,22 @@ When dispatching an auditor, create its task with `metadata: {"completion_type":
     --type commit --session-dir '{session_dir}' --stdin <<'JSON'
   {"sha": "{short_sha}", "message": "{first_line}", "phase": "CODE"}
 JSON
-  python3 - <<'PY'
-  import json
-  from pathlib import Path
+  python3 -c '
+import json
+import sys
+from pathlib import Path
 
-  path = Path("{session_dir}") / "session-journal.jsonl"
-  event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-  assert event.get("type") == "commit", event
-  assert str(event.get("sha")) == "{short_sha}", event
-  assert event.get("phase") == "CODE", event
-PY
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"commit","sha":"{short_sha}","phase":"CODE"},"nonempty":[],"absent":[]}
+JSON
   ```
 - [ ] **Calibration** — The secretary gathers calibration metrics during HANDOFF processing. When asked, provide a brief difficulty assessment: was actual difficulty higher, lower, or about the same as predicted? Which dimensions surprised you?
 - [ ] **Verify agent task completion**: On receiving each HANDOFF summary via `SendMessage`, check the agent's task status via `TaskList`. If still "in_progress", mark it completed: `TaskUpdate(taskId, status="completed")`.
@@ -514,16 +548,22 @@ PY
     --type phase_transition --session-dir '{session_dir}' --stdin <<'JSON'
   {"phase": "CODE", "status": "completed", "skip_reason": "", "metadata": {"workflow": "comPACT"}}
 JSON
-  python3 - <<'PY'
-  import json
-  from pathlib import Path
+  python3 -c '
+import json
+import sys
+from pathlib import Path
 
-  path = Path("{session_dir}") / "session-journal.jsonl"
-  event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-  assert event.get("type") == "phase_transition", event
-  assert event.get("phase") == "CODE", event
-  assert event.get("status") == "completed", event
-PY
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"phase_transition","phase":"CODE","status":"completed"},"nonempty":[],"absent":[]}
+JSON
   ```
 - [ ] **`TaskUpdate`**: Feature task status = "completed"
 

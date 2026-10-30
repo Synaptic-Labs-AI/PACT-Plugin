@@ -229,16 +229,22 @@ python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
 {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
 JSON
-python3 - <<'PY'
+python3 -c '
 import json
+import sys
 from pathlib import Path
 
-path = Path("{session_dir}") / "session-journal.jsonl"
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
 event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-assert event.get("type") == "variety_assessed", event
-assert str(event.get("task_id")) == "{taskId}", event
-assert event.get("scope") == "dispatch", event
-PY
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{taskId}","scope":"dispatch"},"nonempty":[],"absent":[]}
+JSON
 ```
 
 7. Spawn the reviewer with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({reviewer-name})` marker on its own line so routing detects the teammate spawn (team protocol + teachback content arrive via spawn-time skills frontmatter; the registration first-action is the sole per-prompt directive — it must explicitly invoke its skill because skill bodies are not preloaded):
@@ -263,15 +269,22 @@ python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type review_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
 {"pr_number": {pr_number}, "pr_url": "{pr_url}", "reviewers": ["{reviewer1}", "{reviewer2}"]}
 JSON
-python3 - <<'PY'
+python3 -c '
 import json
+import sys
 from pathlib import Path
 
-path = Path("{session_dir}") / "session-journal.jsonl"
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
 event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-assert event.get("type") == "review_dispatch", event
-assert event.get("pr_number") == {pr_number}, event
-PY
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"review_dispatch","pr_number":{pr_number}},"nonempty":[],"absent":[]}
+JSON
 ```
 
 > ⚠️ **Heredoc-stdin contract**: All journal-event writes use `--stdin <<'JSON' ... JSON` (quoted delimiter). This disables bash variable expansion so apostrophes, quotes, and backticks in template-substituted values (e.g. `{first_line}`, `{finding}`, `{branch}`) pass through verbatim — fixing the silent journal-drop bug where commit messages with `don't` would close the bash quote and abort the write under `set -e`. The orchestrator must still produce JSON-valid string content (escape `\"` and `\\` and control chars when constructing the body).
@@ -327,16 +340,22 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
        --type artifact_paths --session-dir '{session_dir}' --stdin <<'JSON'
      {"workflow": "peer-review", "feature": "{feature}", "paths": ["{absolute_review_doc_path}"]}
 JSON
-     python3 - <<'PY'
-     import json
-     from pathlib import Path
+     python3 -c '
+import json
+import sys
+from pathlib import Path
 
-     path = Path("{session_dir}") / "session-journal.jsonl"
-     event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-     assert event.get("type") == "artifact_paths", event
-     assert event.get("workflow") == "peer-review", event
-     assert bool(event.get("feature")), event
-PY
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"artifact_paths","workflow":"peer-review"},"nonempty":["feature"],"absent":[]}
+JSON
      ```
 2. **Journal events**: Write a `review_finding` event for each synthesized finding:
    ```bash
@@ -347,16 +366,22 @@ PY
      --type review_finding --session-dir '{session_dir}' --stdin <<'JSON'
    {"severity": "{blocking|suggestion|nitpick}", "finding": "{one-line description}", "reviewer": "{reviewer-name}", "task_id": "{reviewer_task_id}"}
 JSON
-   python3 - <<'PY'
-   import json
-   from pathlib import Path
+   python3 -c '
+import json
+import sys
+from pathlib import Path
 
-   path = Path("{session_dir}") / "session-journal.jsonl"
-   event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-   assert event.get("type") == "review_finding", event
-   assert str(event.get("task_id")) == "{reviewer_task_id}", event
-   assert str(event.get("reviewer")) == "{reviewer-name}", event
-PY
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"review_finding","task_id":"{reviewer_task_id}","reviewer":"{reviewer-name}"},"nonempty":[],"absent":[]}
+JSON
    ```
 3. Present **all** findings to user as a **markdown table** **before asking any questions** (blocking, minor, and future):
 
@@ -383,16 +408,22 @@ PY
          --type remediation --session-dir '{session_dir}' --stdin <<'JSON'
        {"cycle": {cycle_number}, "items": ["{finding_id1}"], "fixer": "{agent-name}", "task_id": "{fixer_task_id}"}
 JSON
-       python3 - <<'PY'
-       import json
-       from pathlib import Path
+       python3 -c '
+import json
+import sys
+from pathlib import Path
 
-       path = Path("{session_dir}") / "session-journal.jsonl"
-       event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-       assert event.get("type") == "remediation", event
-       assert event.get("cycle") == {cycle_number}, event
-       assert str(event.get("task_id")) == "{fixer_task_id}", event
-PY
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"remediation","cycle":{cycle_number},"task_id":"{fixer_task_id}"},"nonempty":[],"absent":[]}
+JSON
        ```
      - After all fixes complete, re-run review to verify fixes only (see Verify-Only Re-Review above)
      - **Termination**: After 2 failed cycles (see **Failed cycle** above) → escalate via `/PACT:imPACT`
@@ -503,16 +534,22 @@ PY
      --type pr_ready --session-dir '{session_dir}' --stdin <<'JSON'
    {"pr_number": {pr_number}, "pr_url": "{pr_url}", "commits": {total_commit_count}}
 JSON
-   python3 - <<'PY'
-   import json
-   from pathlib import Path
+   python3 -c '
+import json
+import sys
+from pathlib import Path
 
-   path = Path("{session_dir}") / "session-journal.jsonl"
-   event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-   assert event.get("type") == "pr_ready", event
-   assert event.get("pr_number") == {pr_number}, event
-   assert event.get("commits") == {total_commit_count}, event
-PY
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"pr_ready","pr_number":{pr_number},"commits":{total_commit_count}},"nonempty":[],"absent":[]}
+JSON
    ```
 
 6. **Calibration save**:
