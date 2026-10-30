@@ -190,6 +190,11 @@ For large JSON payloads (to avoid shell escaping issues), use `--stdin`:
 echo '{"context": "...", "goal": "..."}' | python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" save --stdin
 ```
 
+A bare `-` in place of the JSON argument is a stdin sentinel (Unix convention):
+`save -` and `update <id|prefix> -` read the payload from stdin, exactly like
+`--stdin`. Empty or whitespace-only input on either channel exits 1 with a
+`MISSING_INPUT` error.
+
 ## Memory Structure
 
 A memory record has more fields than a `save`/`update` payload accepts. The
@@ -255,6 +260,7 @@ field instead.
 |---------|-------------|--------|
 | `save <json>` | Save a memory object; `--no-sync` leaves CLAUDE.md's Working Memory untouched | `{"memory_id": "<hex>", "sync_status": "..."}` |
 | `save --stdin` | Save from piped JSON | `{"memory_id": "<hex>", "sync_status": "..."}` |
+| `save -` | Save from piped JSON (`-` = stdin sentinel) | `{"memory_id": "<hex>", "sync_status": "..."}` |
 | `search <query>` | Semantic search | `[{"id": "...", "context": "...", ...}, ...]` |
 | `search <query> --limit N` | Search with limit | `[...]` (default: 20) |
 | `search <query> --current-file <path>` | Search with graph boosting | `[...]` (boosts file-related memories) |
@@ -263,6 +269,7 @@ field instead.
 | `get <id\|prefix>` | Get memory by full ID or unique prefix (>= 7 chars, case-insensitive). Ambiguous prefix returns `AMBIGUOUS_PREFIX` with `matches: [...]`, `matches_capped`, `total_matches`; too-short returns `PREFIX_TOO_SHORT` | `{"id": "...", "context": "...", ...}` |
 | `update <id\|prefix> <json>` | Update memory fields (list fields merge additively). Same prefix-resolution rules as `get`; ambiguous prefix is refused | `{"memory_id": "<hex>"}` |
 | `update <id\|prefix> --stdin` | Update from piped JSON | `{"memory_id": "<hex>"}` |
+| `update <id\|prefix> -` | Update from piped JSON (`-` = stdin sentinel) | `{"memory_id": "<hex>"}` |
 | `update <id\|prefix> <json> --replace` | Replace list fields wholesale instead of merging | `{"memory_id": "<hex>"}` |
 | `delete <id\|prefix>` | Delete a memory. Same prefix-resolution rules as `get`; ambiguous prefix is refused | `{"deleted": true, "memory_id": "<hex>"}` |
 | `sync` | Rebuild CLAUDE.md's Working Memory from this project's newest 3 memories (replaces the section; `--claude-md-root` bounds the write) | `{"sync_status": "wrote", "projected": 3, "memory_ids": [...], "project_id": "..."}` |
