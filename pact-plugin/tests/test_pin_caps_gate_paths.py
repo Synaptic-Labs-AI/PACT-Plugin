@@ -398,3 +398,62 @@ def test_gate_target_returns_none_when_the_resolver_fails(tmp_path, monkeypatch)
 
     monkeypatch.setattr(staleness, "_resolve_project_claude_md_with_base", _fails)
     assert gate_target(str(tmp_path / ".claude" / "CLAUDE.md")) is None
+
+
+@pytest.mark.parametrize("pins", [13, 14])
+def test_a_worktree_write_with_no_main_file_is_not_the_managed_document(tmp_path, monkeypatch, pins):
+    """#1653 Bugbot: MAIN holds no CLAUDE.md and the worktree carries one.
+
+    The resolver's supplied-base rung and its git rung both miss, so its CWD
+    rung returns the WORKTREE copy, which `same_path` then accepts -- and the
+    cap would bound the file the one rule says it no longer bounds. RED by
+    resolving the root with `project_memory_root` alone, whose fail-safe hands
+    back the declared worktree.
+    """
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    repo, worktree = tmp_path / "repo", tmp_path / "worktree"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init")
+    _git(repo, "worktree", "add", "-q", str(worktree))
+    (worktree / ".claude").mkdir()
+    (worktree / ".claude" / "CLAUDE.md").write_text(_pins(pins), encoding="utf-8")
+    assert not (repo / ".claude").exists()
+
+    from helpers import point_resolver_at
+    from shared.claude_md_manager import gate_target
+
+    point_resolver_at(monkeypatch, worktree)
+    assert gate_target(str(worktree / ".claude" / "CLAUDE.md")) is None
+
+
+def test_a_plain_session_write_to_its_own_file_is_still_gated(tmp_path, monkeypatch):
+    """CONTROL for the arm above: containment must not switch the ordinary gate off."""
+    from helpers import point_resolver_at
+    from shared.claude_md_manager import gate_target
+
+    point_resolver_at(monkeypatch, tmp_path)
+    target = tmp_path / ".claude" / "CLAUDE.md"
+    gated = gate_target(str(target))
+    assert gated is not None
+    assert (gated.target, gated.base) == (target, tmp_path)
+
+
+def test_gate_target_returns_none_when_the_memory_root_is_unknown(tmp_path, monkeypatch):
+    """CONTROL for the unknown-root path: git unavailable is not a guess.
+
+    `project_memory_root` would fail safe to the declared directory; the gate
+    must not bound a document it cannot identify (#1653).
+    """
+    import shared.project_scope as project_scope
+    from helpers import point_resolver_at
+    from shared.claude_md_manager import gate_target
+
+    point_resolver_at(monkeypatch, tmp_path)
+    (tmp_path / "CLAUDE.md").write_text("x", encoding="utf-8")
+    target = tmp_path / ".claude" / "CLAUDE.md"
+    assert gate_target(str(target)) is not None  # the live resolver gates it
+
+    monkeypatch.setattr(project_scope, "run_git", lambda *args, **kwargs: None)
+    assert gate_target(str(target)) is None

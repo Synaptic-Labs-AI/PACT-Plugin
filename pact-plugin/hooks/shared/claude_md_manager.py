@@ -1837,19 +1837,22 @@ def gate_target(file_path: str) -> GateTarget | None:
     `file_path`, or None when it checks none.
 
     Gated: an absolute path whose name is `claude.md` in any case, which the
-    project resolver returns once the change exists. The resolver runs with
-    the target counted as present, so a Write that creates the file is gated,
-    and a Write to a file the resolver would not return (`./CLAUDE.md` while
-    `.claude/CLAUDE.md` exists) is not. `before` is what the resolver returns
-    now, which can be a different file from the target: the other location
-    under the target's base (`./CLAUDE.md` before a Write creates
-    `.claude/CLAUDE.md`), or the main checkout's file for a worktree that has
-    none. A file the resolver finds outside the target's repository (the
-    working directory's repository, when that is another one) is never
-    `before`: the target itself is, or None when it does not exist.
+    project resolver returns once the change exists AND which sits inside the
+    session's project-memory root. The resolver runs with the target counted
+    as present, so a Write that creates the file is gated, and a Write to a
+    file the resolver would not return (`./CLAUDE.md` while `.claude/CLAUDE.md`
+    exists) is not. `before` is what the resolver returns now, which can be a
+    different file from the target: the other location under the target's base
+    (`./CLAUDE.md` before a Write creates `.claude/CLAUDE.md`), or the main
+    checkout's file for a worktree that has none. A file the resolver finds
+    outside the target's repository (the working directory's repository, when
+    that is another one) is never `before`: the target itself is, or None when
+    it does not exist.
 
-    A relative path is not gated, and any failure while resolving returns
-    None: a path the gate is unsure of is allowed.
+    A relative path is not gated, a target outside the memory root is not
+    (a worktree's own copy is not the managed document), a declared project
+    dir whose memory root git cannot answer gates nothing, and any failure
+    while resolving returns None: a path the gate is unsure of is allowed.
     """
     if not isinstance(file_path, str) or not file_path:
         return None
@@ -1857,7 +1860,7 @@ def gate_target(file_path: str) -> GateTarget | None:
     if not target.is_absolute() or target.name.casefold() != "claude.md":
         return None
     try:
-        from shared.project_scope import project_memory_root
+        from shared.project_scope import project_memory_root_or_none
         from staleness import _resolve_project_claude_md_with_base, same_path
     except ImportError:
         return None
@@ -1877,11 +1880,35 @@ def gate_target(file_path: str) -> GateTarget | None:
         # worktree copy as a managed artifact in weaker form -- the assumption
         # the one rule exists to remove. Do not build that guard.
         declared = os.environ.get("CLAUDE_PROJECT_DIR")
-        memory_root = project_memory_root(declared) if declared else None
+        memory_root = project_memory_root_or_none(declared) if declared else None
+        if declared and memory_root is None:
+            # A DECLARED project dir whose memory root is UNKNOWN (#1653):
+            # `project_memory_root` fails SAFE TO ITS INPUT, so using it here
+            # would bound the worktree copy this change exists to stop. An
+            # unknown root cannot identify the managed document, so there is
+            # nothing for the cap to bound, and the writers write nothing on
+            # this path. The return must come BEFORE the resolver: passing
+            # None as `project_dir` would re-read the env var and resolve that
+            # same copy.
+            return None
         resolved, base = _resolve_project_claude_md_with_base(
             assume_present=target, project_dir=memory_root)
         if resolved is None or base is None or not same_path(resolved, target):
             return None
+        if memory_root is not None:
+            # A SUPPLIED ROOT MUST CONTAIN THE TARGET (#1653, Bugbot). The
+            # resolver tries the memory root first and then FALLS THROUGH to
+            # its git and cwd rungs. When MAIN has no CLAUDE.md while the
+            # worktree carries one, both earlier rungs miss and the cwd rung
+            # returns the WORKTREE copy -- which `same_path` above accepts.
+            # The check is on the DIRECTORY THE WRITE BINDS INTO, not the leaf,
+            # because `_atomic_write_text` replaces the leaf ENTRY and never
+            # follows it, so a leaf symlink is not an escape. Same shape as
+            # pin_marker_writer's `noop_outside_memory_root`.
+            try:
+                target.parent.resolve().relative_to(memory_root.resolve())
+            except (ValueError, OSError):
+                return None
         before, before_base = _resolve_project_claude_md_with_base(
             project_dir=memory_root)
         if before_base is not None and not same_path(before_base, base):
