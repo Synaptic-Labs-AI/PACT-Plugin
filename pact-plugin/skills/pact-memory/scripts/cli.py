@@ -520,8 +520,8 @@ def cmd_save(args, db_path=None):
             channel = "--stdin" if args.stdin else "'-'"
             _error(
                 "MISSING_INPUT",
-                f"{channel} received empty input; provide JSON via stdin "
-                "or as an argument",
+                f"{channel} received empty input; provide JSON via "
+                "--stdin or as an argument",
             )
     elif args.json_data:
         raw = args.json_data
@@ -750,8 +750,8 @@ def cmd_update(args, db_path=None):
             channel = "--stdin" if args.stdin else "'-'"
             _error(
                 "MISSING_INPUT",
-                f"{channel} received empty input; provide JSON via stdin "
-                "or as an argument",
+                f"{channel} received empty input; provide JSON via "
+                "--stdin or as an argument",
             )
     elif args.json_data:
         raw = args.json_data

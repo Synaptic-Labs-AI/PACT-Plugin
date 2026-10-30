@@ -18,6 +18,8 @@ Tests cover:
 """
 import json
 import os
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -341,6 +343,10 @@ class TestCliSaveCommand:
         err_output = json.loads(capsys.readouterr().err)
         assert err_output["error"] == "MISSING_INPUT"
         assert "'-'" in err_output["message"]
+        # F3: the tail must NAME the flag, not restate "via stdin".
+        assert err_output["message"].endswith(
+            "provide JSON via --stdin or as an argument"
+        )
 
     def test_save_empty_stdin_via_flag_is_missing_input(self, capsys, monkeypatch):
         monkeypatch.setattr("sys.stdin", StringIO(""))
@@ -353,6 +359,9 @@ class TestCliSaveCommand:
         err_output = json.loads(capsys.readouterr().err)
         assert err_output["error"] == "MISSING_INPUT"
         assert "--stdin" in err_output["message"]
+        assert err_output["message"].endswith(
+            "provide JSON via --stdin or as an argument"
+        )
 
     def test_save_outputs_memory_id(self, mock_pact_memory, capsys):
         memory_dict = make_cli_memory_dict()
@@ -720,6 +729,110 @@ class TestCliSearchCommand:
         assert output["result"][0]["id"] == "mem1"
 
 
+class TestSkillDocsParity:
+    """The skill docs are a second copy of the CLI surface, with no compiler.
+
+    Two drift classes, both with an observed instance in this repo:
+    a default bumped in code while the docs still taught the old number,
+    and an invocation a skill file taught that argparse rejects — the
+    pre-#1680 harvest SKILL.md taught `search --query "{topic}"`, which
+    exits 2, and no test noticed because nothing executed the taught
+    string. Both tests read the skill files AT RUN TIME, so they
+    validate whatever the docs teach today, including rows added after
+    this test was written.
+    """
+
+    SKILL_MD = (
+        Path(__file__).resolve().parent.parent
+        / "skills" / "pact-memory" / "SKILL.md"
+    )
+    HARVEST_MD = (
+        Path(__file__).resolve().parent.parent
+        / "skills" / "pact-handoff-harvest" / "SKILL.md"
+    )
+
+    # A bare `<name>` token is a synopsis placeholder (`search <query>`),
+    # never a value a caller would type: skip the span, do not parse it.
+    _ANGLE_PLACEHOLDER = re.compile(r"^<[a-z_-]+>$")
+
+    def test_search_default_in_skill_md_matches_parser(self):
+        """F1: both doc statements of the search default equal the parser's.
+
+        The default lives in cli.py (pinned) and memory_api.py (pinned);
+        SKILL.md states it twice more — the `--limit` table row and the
+        Search Command prose — and before this test nothing pinned either
+        copy, so a bump that skipped the docs would teach every consumer
+        a wrong number with the suite green.
+        """
+        actual = build_parser().parse_args(["search", "q"]).limit
+        text = self.SKILL_MD.read_text()
+
+        m = re.search(r"`search <query> --limit N`[^\n]*\(default: (\d+)\)", text)
+        assert m, "search --limit table row with (default: N) missing from SKILL.md"
+        assert int(m.group(1)) == actual, (
+            f"SKILL.md table teaches default {m.group(1)}; parser ships {actual}"
+        )
+
+        m = re.search(r"Default limit: (\d+)", text)
+        assert m, "'Default limit:' prose missing from SKILL.md"
+        assert int(m.group(1)) == actual, (
+            f"SKILL.md prose teaches default {m.group(1)}; parser ships {actual}"
+        )
+
+    def _taught_spans(self, text):
+        """Yield (line_no, args) for every single-line taught invocation.
+
+        Two shapes: a full `python3 .../cli.py <args>` line (code fences),
+        and a bare backtick span opening with a subcommand (prose). Table
+        rows are SKIPPED ON PURPOSE: they are syntax synopses carrying
+        meta-variables (`--limit N`) that argparse must reject, not
+        invocations a caller could paste.
+        """
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            m = re.search(r'cli\.py" (.+)$', line)
+            if m:
+                yield line_no, m.group(1)
+                continue
+            if line.lstrip().startswith("|"):
+                continue
+            for m in re.finditer(r"`(\w+) ([^`]+)`", line):
+                if m.group(1) in _COMMANDS:
+                    yield line_no, f"{m.group(1)} {m.group(2)}"
+
+    def test_taught_invocations_parse(self):
+        """F2: every single-line invocation the skill files teach parses."""
+        parser = build_parser()
+        checked = 0
+        for path in (self.SKILL_MD, self.HARVEST_MD):
+            for line_no, span in self._taught_spans(path.read_text()):
+                try:
+                    tokens = shlex.split(span)
+                except ValueError:
+                    # First line of a multi-line example (unbalanced quote):
+                    # a line-oriented reader cannot validate the whole
+                    # invocation, so it validates none of it.
+                    continue
+                if any(self._ANGLE_PLACEHOLDER.match(t) for t in tokens):
+                    continue
+                # Subcommand + ONLY flags (`update --replace`) names a flag
+                # in prose, not a runnable invocation — every runnable form
+                # these docs teach shows its positional payload. A bare `-`
+                # IS the payload (stdin sentinel), not a flag.
+                if all(t.startswith("-") and t != "-" for t in tokens[1:]):
+                    continue
+                try:
+                    parser.parse_args(tokens)
+                except SystemExit:
+                    pytest.fail(
+                        f"{path.parent.name}/SKILL.md:{line_no} teaches an "
+                        f"invocation the CLI rejects: `{span}`"
+                    )
+                checked += 1
+        # Non-empty control: an extractor that finds nothing would pass
+        # vacuously, which is the failure mode this assert exists to catch.
+        assert checked > 0, "no taught invocations found — extractor went blind"
+
+
 # ---------------------------------------------------------------------------
 # List Command
 # ---------------------------------------------------------------------------
@@ -1076,6 +1189,9 @@ class TestCliUpdateCommand:
         err_output = json.loads(capsys.readouterr().err)
         assert err_output["error"] == "MISSING_INPUT"
         assert "--stdin" in err_output["message"]
+        assert err_output["message"].endswith(
+            "provide JSON via --stdin or as an argument"
+        )
 
     def test_update_empty_stdin_via_dash_is_missing_input(self, capsys, monkeypatch):
         # The dash channel of the guard, mirroring the save-side pair: the
@@ -1090,6 +1206,9 @@ class TestCliUpdateCommand:
         err_output = json.loads(capsys.readouterr().err)
         assert err_output["error"] == "MISSING_INPUT"
         assert "'-'" in err_output["message"]
+        assert err_output["message"].endswith(
+            "provide JSON via --stdin or as an argument"
+        )
 
     def test_update_invalid_json(self, capsys):
         parser = build_parser()
@@ -2294,6 +2413,40 @@ class TestCliSubprocess:
         assert get_result.returncode == 0
         get_output = json.loads(get_result.stdout)
         assert get_output["result"]["context"] == "updated context"
+
+    def test_update_sentinel_dash_via_subprocess(self, cli_script_path, cli_db):
+        # F4: save has a subprocess round-trip for '-'; update is its
+        # verbatim twin, so it gets the same real-argc/real-stdin arm.
+        # The get-verify pins the EFFECT, not the envelope — a crashed
+        # update can still emit a plausible success envelope.
+        memory_dict = make_cli_memory_dict(context="dash update original")
+        save_result = subprocess.run(
+            [sys.executable, cli_script_path, "save", json.dumps(memory_dict),
+             "--no-sync", "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert save_result.returncode == 0, f"stderr: {save_result.stderr}"
+        memory_id = json.loads(save_result.stdout)["result"]["memory_id"]
+
+        update_result = subprocess.run(
+            [sys.executable, cli_script_path, "update", memory_id, "-",
+             "--db-path", str(cli_db)],
+            input='{"context": "updated via dash sentinel"}',
+            capture_output=True, text=True, timeout=60,
+        )
+        assert update_result.returncode == 0, f"stderr: {update_result.stderr}"
+        update_output = json.loads(update_result.stdout)
+        assert update_output["ok"] is True
+        assert update_output["result"]["memory_id"] == memory_id
+
+        get_result = subprocess.run(
+            [sys.executable, cli_script_path, "get", memory_id,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert get_result.returncode == 0
+        get_output = json.loads(get_result.stdout)
+        assert get_output["result"]["context"] == "updated via dash sentinel"
 
     def test_update_not_found_exits_1(self, cli_script_path, cli_db):
         result = subprocess.run(
