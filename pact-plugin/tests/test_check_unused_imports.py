@@ -308,15 +308,6 @@ class TestTryScopeStrictness:
         assert _names("import os\n", try_scope="strict") == ["os"]
         assert _names("import os\n", try_scope="advisory") == ["os"]
 
-    @pytest.mark.skipif(
-        sys.version_info < (3, 11),
-        reason=(
-            "except* (PEP 654) is unparseable by any interpreter below 3.11, so "
-            "the construct under test does not exist at the declared floor. The "
-            "shipped linter is fine there; what is absent is the capability, not "
-            "the code — a 3.9 run simply cannot analyse an except* file."
-        ),
-    )
     def test_try_star_scoped_import_strict_flags_advisory_skips(self):
         # try/except* (PEP 654, ast.TryStar) is try-scoped exactly like a
         # plain try/except — checked in strict, skipped in advisory.
