@@ -23,7 +23,7 @@
 #   the sequence was repair the test harness, demonstrate the pass, then add
 #   the cell, and it is the sequence any future downward extension takes.
 #   Two STATIC checks remain and still earn their place, because a run and a
-#   scan fail differently: the 3.9 gate in tests/test_py39_annotation_compat.py
+#   scan fail differently: the 3.12 syntax-floor gate in tests/test_py312_syntax_floor.py
 #   and the `--target-version py39` lint below. That gate's own R0 note records
 #   that `feature_version` NARROWS rather than replaces live 3.9 verification,
 #   and it was measured false-passing PEP 701 f-strings that a 3.9 interpreter
