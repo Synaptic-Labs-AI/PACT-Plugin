@@ -833,17 +833,23 @@ class TestWiring:
 # ---------------------------------------------------------------------------
 
 def _worktree_like(w):
-    """CLAUDE_PROJECT_DIR names a directory with no CLAUDE.md, as in a worktree
-    session, so the resolver reaches its git step. Returns (env, session dir)."""
+    """CLAUDE_PROJECT_DIR names a REAL linked worktree with no CLAUDE.md -- the
+    live worktree-session shape -- so the reader must retarget to the main
+    checkout. Returns (env, session dir)."""
     from shared.pact_context import project_slug
 
-    sub = w.repo / "sub"
-    sub.mkdir()
-    session_dir = w.cfg / "pact-sessions" / project_slug(str(sub)) / SID
+    worktree = w.repo / ".worktrees" / "drift-wt"
+    worktree.parent.mkdir()
+    added = subprocess.run(
+        ["git", "worktree", "add", "-q", str(worktree), "-b", "drift-wt"],
+        cwd=w.repo, env=w.env, capture_output=True, text=True, timeout=600,
+    )
+    assert added.returncode == 0, added.stderr
+    session_dir = w.cfg / "pact-sessions" / project_slug(str(worktree)) / SID
     session_dir.mkdir(parents=True)
     (session_dir / "pact-session-context.json").write_text(
-        json.dumps({"session_id": SID, "project_dir": str(sub)}), encoding="utf-8")
-    return dict(w.env, CLAUDE_PROJECT_DIR=str(sub)), session_dir
+        json.dumps({"session_id": SID, "project_dir": str(worktree)}), encoding="utf-8")
+    return dict(w.env, CLAUDE_PROJECT_DIR=str(worktree)), session_dir
 
 
 def _shim_git(env, tmp_path):
@@ -876,7 +882,9 @@ def test_a_cached_no_file_starts_no_git_process(world, tmp_path):
     env, session_dir = _worktree_like(world)
     world.claude_md.unlink()
     _hook(world, TRACK, _BASH_TRUE, env=env)
-    assert json.loads((session_dir / "claude-md-base.json").read_text()) == {"base": None}
+    # The KNOWN root is cached even when it holds no file (#1653), so a file
+    # MAIN gains later is picked up by the cached-base two-file check.
+    assert json.loads((session_dir / "claude-md-base.json").read_text()) == {"base": str(world.repo)}
     shim_env, log = _shim_git(env, tmp_path)
     _hook(world, TRACK, _BASH_TRUE, env=shim_env)
     assert not log.exists()

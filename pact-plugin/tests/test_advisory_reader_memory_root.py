@@ -253,6 +253,127 @@ def test_drift_does_not_fall_through_to_the_worktree(world):
     )
 
 
+def test_drift_declared_main_does_not_fall_through_to_the_worktree(world, monkeypatch):
+    """The LIVE shape: CLAUDE_PROJECT_DIR names MAIN while the process sits in
+    the linked worktree, and MAIN holds no CLAUDE.md.
+
+    The retarget guard's `memory_root != project_dir` test is FALSE here, so
+    the resolver's cwd rung used to hand back the worktree copy (#1653,
+    Bugbot). The reader must answer from the memory root only.
+    """
+    import json
+
+    import shared.claude_md_drift as drift
+    from shared.paths import get_claude_config_dir
+
+    main, worktree = world
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(main))
+    _write_doc(worktree, _doc(_pin("2026-10-01", "Other")))  # MAIN: no file
+    session_dir = get_claude_config_dir() / "pact-sessions" / "proj" / "sd-declared-main"
+    session_dir.mkdir(parents=True)
+
+    path, base = drift._resolve(session_dir)
+
+    assert (path, base) == (None, None), (
+        f"the drift watcher took the worktree file: {path}"
+    )
+    cached = json.loads((session_dir / "claude-md-base.json").read_text())
+    assert Path(cached["base"]).resolve() == main.resolve(), (
+        "the session cached the worktree base, so MAIN's file would never be watched"
+    )
+
+
+def test_drift_no_env_does_not_fall_through_to_the_worktree(world, monkeypatch):
+    """Same layout with CLAUDE_PROJECT_DIR ABSENT: the cwd-derived root is MAIN,
+    and the resolver's cwd rung must not be consulted either."""
+    import json
+
+    import shared.claude_md_drift as drift
+    from shared.paths import get_claude_config_dir
+
+    main, worktree = world
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    _write_doc(worktree, _doc(_pin("2026-10-01", "Other")))  # MAIN: no file
+    session_dir = get_claude_config_dir() / "pact-sessions" / "proj" / "sd-no-env-worktree"
+    session_dir.mkdir(parents=True)
+
+    path, base = drift._resolve(session_dir)
+
+    assert (path, base) == (None, None), (
+        f"the no-env drift watcher took the worktree file: {path}"
+    )
+    cached = json.loads((session_dir / "claude-md-base.json").read_text())
+    assert Path(cached["base"]).resolve() == main.resolve(), (
+        "the session cached the worktree base, so MAIN's file would never be watched"
+    )
+
+
+@pytest.mark.parametrize("env_var", ["main", "unset"], ids=["declared-main", "unset"])
+def test_drift_watches_main_when_main_holds_the_document(world, monkeypatch, env_var):
+    """CONTROL: the steady state must not regress into watching nothing."""
+    import shared.claude_md_drift as drift
+    from shared.paths import get_claude_config_dir
+
+    main, worktree = world
+    main_md = _write_doc(main, _doc())
+    _write_doc(worktree, _doc(_pin("2026-10-01", "Other")))
+    if env_var == "main":
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(main))
+    else:
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    session_dir = (
+        get_claude_config_dir() / "pact-sessions" / "proj" / f"sd-main-{env_var}"
+    )
+    session_dir.mkdir(parents=True)
+
+    path, base = drift._resolve(session_dir)
+
+    assert path is not None and base is not None
+    assert Path(path).resolve() == main_md.resolve()
+    assert Path(base).resolve() == main.resolve()
+
+
+def test_drift_plain_session_with_no_file_answers_nothing(tmp_path, monkeypatch):
+    """CONTROL: a plain non-git session with no CLAUDE.md answers nothing."""
+    import shared.claude_md_drift as drift
+    from shared.paths import get_claude_config_dir
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.chdir(plain)
+    session_dir = get_claude_config_dir() / "pact-sessions" / "proj" / "sd-plain-empty"
+    session_dir.mkdir(parents=True)
+
+    assert drift._resolve(session_dir) == (None, None)
+
+
+def test_drift_declared_subdirectory_watches_that_subdirectory(tmp_path, monkeypatch):
+    """A plain checkout's DECLARED dir is the writers' root (#1653), so a
+    session declared at repo/sub watches repo/sub -- not the repo-root
+    document the old fall-through found through its cwd rung."""
+    import json
+
+    import shared.claude_md_drift as drift
+    from shared.paths import get_claude_config_dir
+
+    repo = tmp_path / "repo"
+    (repo / "sub").mkdir(parents=True)
+    _write_doc(repo, _doc())  # repo-root doc exists; `sub` carries none
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo / "sub"))
+    monkeypatch.chdir(repo)
+    session_dir = get_claude_config_dir() / "pact-sessions" / "proj" / "sd-declared-sub"
+    session_dir.mkdir(parents=True)
+
+    path, base = drift._resolve(session_dir)
+
+    assert (path, base) == (None, None)
+    cached = json.loads((session_dir / "claude-md-base.json").read_text())
+    assert Path(cached["base"]).resolve() == (repo / "sub").resolve(), (
+        "the reader cached the repo root, the document no writer in this session touches"
+    )
+
+
 def test_drift_caches_nothing_when_git_cannot_answer(world, monkeypatch):
     """#1653 task #59: a git-UNKNOWN first check must not adopt, or CACHE, the
     worktree copy. The base cache outlives the failure, so caching a guess
