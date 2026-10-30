@@ -1,6 +1,6 @@
 # PACT — Orchestration Harness for Claude Code
 
-> **Version**: 4.8.13
+> **Version**: 4.8.14
 
 Turn a single Claude Code session into a managed team of specialist AI agents that prepare, design, build, and test your code systematically.
 
@@ -49,9 +49,32 @@ Then add `~/.claude/teams` and `~/.claude/pact-sessions` to your `additionalDire
 
 The two `env` values are prerequisites and they gate different things: Agent Teams, and the task tools PACT must have to bootstrap. If specialists will not spawn, see [If specialist agents will not spawn](https://github.com/Synaptic-Labs-AI/PACT-Plugin#if-specialist-agents-will-not-spawn).
 
-If both `env` values are set and the lead session holds the task tools but spawned specialists still report them missing, the cause is the spawn mode, not the settings: on non-TTY harnesses (web, Desktop), background spawns lose the task tools. Dispatch specialists with `run_in_background: false` plus a `ToolSearch "select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage"` line in the spawn prompt — details in [If specialist agents will not spawn](https://github.com/Synaptic-Labs-AI/PACT-Plugin#if-specialist-agents-will-not-spawn).
+If spawned specialists report Task tools missing, follow [current Agent Team dispatch recovery](#current-agent-team-dispatch-recovery) below rather than inferring a spawn-mode cause. The ordered checks cover deferred tools, lead-session settings, the live Agent schema, named-teammate creation, display mode, and messaging.
 
 Then restart Claude Code. Requires [Agent Teams enabled](https://github.com/Synaptic-Labs-AI/PACT-Plugin#enabling-agent-teams) and the `--agent` flag wired up — see [Loading PACT at session start](https://github.com/Synaptic-Labs-AI/PACT-Plugin#upgrading-from-v3x-to-v40) for the three convenience patterns (per-project `.claude/settings.json`, the `pact` shell wrapper, or manual `claude --agent PACT:pact-orchestrator`).
+
+### Current Agent Team dispatch recovery
+
+Use this ordered tree for a dispatch or messaging failure. Roles are explicit: the affected teammate self-helps in A and relays in G; the lead owns B–F and the final blocker report. Do not start with a respawn, and do not treat a harness label as proof of the cause.
+
+A. **Load deferred tools.** The actor missing Task tools runs `ToolSearch "select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage"` when it has not already run. If a teammate's tools load, it continues without a respawn. If they remain absent, the teammate reports the exact missing tools and load result to its lead when messaging permits, then stops implementation work and idles while the lead continues below. The lead's own successful ToolSearch proves only the lead's tool surface, never the teammate's.
+B. **Check the lead session.** The lead checks its own four Task tools. If they are missing, the lead fixes the session opt-in/settings and must start the required new session. Never respawn a teammate for this cause; the teammate does not restart the session.
+C. **Compare the call with the live Agent schema.** The lead compares its dispatch with the live schema. Current teammate creation requires an interactive session, agent teams enabled, and a named, non-fork, non-isolation Agent call. The lead corrects `Task(...)`, a missing `name`, fork/isolation, or non-interactive `-p` usage. Never add a parameter absent from the live schema or substitute subagent-definition frontmatter for an Agent argument; the teammate does not rewrite the lead's call.
+D. **Confirm named-teammate creation and addressability.** The lead uses platform spawn, roster, and messaging evidence, including the teammate's exact report. A missing `config.json` alone is not failure in a config-less cloud session. A named `-p` agent is an ordinary subagent, not evidence of team formation; the lead corrects team enablement/registration instead.
+E. **Apply display-mode inheritance.** The lead checks the actual teammate display mode. In-process teammates follow the lead session. For split-pane, the lead checks `--tools`/deny rules and environment forwarding through `--settings`, then corrects launch configuration before replacement; the teammate does not change it.
+F. **Use the legacy-only branch only after A–E.** For an older non-TTY runtime exhibiting the #1658 symptom, only the lead follows the single operational legacy note in `pact-plugin/README.md`; the teammate never applies legacy dispatch. Do not copy its dispatch template into current guidance or treat schema presence alone as lifecycle evidence.
+G. **Relay residual structured content.** If Task tools remain absent but `SendMessage` reaches `team-lead` or `main`, the teammate relays the teachback/HANDOFF content and the lead writes metadata. Acceptance/rejection ordering is unchanged; no hook suppression logic or relay marker is involved, and no respawn loop follows.
+H. **Stop on messaging failure.** If `SendMessage` is also unavailable or unreachable, the teammate cannot relay and stops/idles. The lead reports the team-formation/messaging blocker with the evidence gathered above.
+
+### Legacy non-TTY compatibility note
+
+**This is not current dispatch guidance.** It is only for an older non-TTY runtime exhibiting the #1658 Task-tool-loss symptom. Do not copy it into current Agent blocks; it never permits an Agent `background` replacement.
+
+1. Confirm that the runtime is an older non-TTY environment exhibiting the #1658 Task-tool-loss symptom.
+2. Complete current recovery branches A–E.
+3. Confirm that the live Agent schema exposes `run_in_background`. Schema presence is expressibility, not necessity; alone it neither satisfies this branch nor proves lifecycle support or justifies respawn.
+4. Only then, the measured #1658 `run_in_background: false` workaround MAY be used.
+5. Verify the result with a post-spawn `TaskList` check, and require a full teachback → work → HANDOFF → completion ceremony before any support claim.
 
 ## What You Get
 
