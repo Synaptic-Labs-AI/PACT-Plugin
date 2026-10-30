@@ -436,6 +436,26 @@ def _run_main_seam(tmp_path, monkeypatch):
         return result
 
     monkeypatch.setattr(session_init, "_resolve_aligned_team_name", _spy)
+    # RECORD THE ENV AT BOTH WRITE SITES. A red full-suite run once showed
+    # session_init writing the REAL main-checkout CLAUDE.md here, which requires
+    # CLAUDE_PROJECT_DIR to hold the ambient value inside a test that
+    # monkeypatches it to a tmp dir; it never reproduced. These spies make a
+    # recurrence name the environment it actually saw instead of leaving a
+    # FileNotFoundError to interpret.
+    import os
+
+    env_at_writes = []
+    real_migrate = session_init.migrate_to_managed_structure
+    real_persist = session_init.persist_context
+
+    def _spy_migrate(project_dir):
+        env_at_writes.append(os.environ.get("CLAUDE_PROJECT_DIR"))
+        return real_migrate(project_dir)
+
+    def _spy_persist(target, context):
+        env_at_writes.append(os.environ.get("CLAUDE_PROJECT_DIR"))
+        return real_persist(target, context)
+
     stdin = io.StringIO(json.dumps({
         "hook_event_name": "SessionStart", "source": "startup",
         "session_id": SESSION_ID, "agent_type": LEAD,
@@ -443,11 +463,19 @@ def _run_main_seam(tmp_path, monkeypatch):
     with patch("session_init.ensure_project_memory_md", return_value=None), \
          patch("session_init.update_session_info", return_value=None), \
          patch("session_init.setup_plugin_symlinks", return_value=None), \
+         patch("session_init.migrate_to_managed_structure", _spy_migrate), \
+         patch("session_init.persist_context", _spy_persist), \
          patch("sys.stdin", stdin), \
          patch("sys.stdout", new_callable=io.StringIO) as out:
         with pytest.raises(SystemExit) as exc_info:
             session_init.main()
     assert exc_info.value.code == 0
+    assert env_at_writes and all(
+        value == str(project) for value in env_at_writes
+    ), (
+        "CLAUDE_PROJECT_DIR changed during session_init.main(): "
+        f"{env_at_writes!r}, expected {str(project)!r} at every write"
+    )
     session_dir = (config_root / "pact-sessions" / pact_context.project_slug(
         str(project)) / SESSION_ID)
     persisted = json.loads(
