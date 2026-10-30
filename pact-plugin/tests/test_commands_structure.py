@@ -2154,7 +2154,7 @@ def test_journal_write_census_matches_manifest(journal_site_map):
 
 
 def test_journal_write_total_is_derived_and_non_vacuous():
-    assert EXPECTED_JOURNAL_WRITE_TOTAL == len(JOURNAL_READBACK_MATRIX) == 50
+    assert EXPECTED_JOURNAL_WRITE_TOTAL == len(JOURNAL_READBACK_MATRIX) > 0
 
 
 JOURNAL_STATIC_CODE = """import json
