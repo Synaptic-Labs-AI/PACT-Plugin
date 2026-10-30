@@ -193,24 +193,45 @@ def test_a_nested_worktree_write_with_env_set_to_main_is_allowed(tmp_path):
     assert _outcome(_run_hook_with_env(worktree, frame, repo)) == "allow"
 
 
-def test_a_nested_worktree_write_with_main_holding_the_document_is_allowed(tmp_path):
-    """STEADY STATE, CONTROL rather than evidence for the defect: MAIN already
-    holds its CLAUDE.md, so the resolver's own preference declines at
-    same_path before identity matters.
-
-    This cell also stays green on 6a53aa85; it pins only that the identity
-    binding does not newly gate the worktree copy against MAIN's file.
-    """
-    if shutil.which("git") is None:
-        pytest.skip("git is not installed")
+def _nested_worktree_with_main_document(tmp_path):
+    """A nested worktree where MAIN already holds the managed document, and the
+    worktree carries its own 13-pin copy to write over."""
     repo, worktree = _nested_worktree(tmp_path)
     (repo / ".claude").mkdir()
     (repo / ".claude" / "CLAUDE.md").write_text(_pins(13), encoding="utf-8")
     target = worktree / ".claude" / "CLAUDE.md"
     target.parent.mkdir()
     target.write_text(_pins(13), encoding="utf-8")
-    frame = _frame(target, *_write(_pins(14)))
+    return repo, worktree, _frame(target, *_write(_pins(14)))
+
+
+def test_a_nested_worktree_write_with_main_holding_the_document_and_env_set_to_the_worktree_is_allowed(tmp_path):
+    """CONTROL: MAIN holds the document and CLAUDE_PROJECT_DIR names the
+    WORKTREE, which is what `_run_hook` sets. The resolver's own preference
+    declines at same_path before identity matters, so this also stays green on
+    6a53aa85; it is coverage, not evidence for the defect."""
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    _, worktree, frame = _nested_worktree_with_main_document(tmp_path)
     assert _outcome(_run_hook(worktree, frame)) == "allow"
+
+
+def test_a_nested_worktree_write_with_main_holding_the_document_and_env_set_to_main_is_allowed(tmp_path):
+    """CONTROL: MAIN holds the document and CLAUDE_PROJECT_DIR names MAIN, the
+    literal production cell. Green on 6a53aa85 too; coverage, not evidence."""
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    repo, worktree, frame = _nested_worktree_with_main_document(tmp_path)
+    assert _outcome(_run_hook_with_env(worktree, frame, repo)) == "allow"
+
+
+def test_a_nested_worktree_write_with_main_holding_the_document_and_no_declared_dir_is_allowed(tmp_path):
+    """CONTROL: MAIN holds the document and CLAUDE_PROJECT_DIR is ABSENT.
+    Green on 6a53aa85 too; coverage, not evidence."""
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    _, worktree, frame = _nested_worktree_with_main_document(tmp_path)
+    assert _outcome(_run_hook_with_env(worktree, frame, None)) == "allow"
 
 
 def test_a_nested_worktree_session_write_to_main_is_still_denied(tmp_path):
