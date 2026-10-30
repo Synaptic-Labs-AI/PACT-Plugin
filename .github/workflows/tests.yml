@@ -26,9 +26,9 @@
 #   demonstrate the pass, and only then add the cell — a cell added before
 #   the demonstrated pass is adoption on faith.
 #   The declared `requires-python = ">=3.12"` floor IS test-verified: this
-#   job runs the whole suite at the floor. It was measured before the
-#   collapse (28736 passed, 31 skipped on 3.12.3, reconciling exactly to
-#   collection), never assumed.
+#   job runs the whole suite at the floor. The collapsed shape was measured
+#   end-to-end (28619 passed, 27 skipped on 3.12.3, tree 8673aefd,
+#   reconciling exactly to the 28646-item collection), never assumed.
 #   Two STATIC checks remain and still earn their place, because a run and a
 #   scan fail differently: the 3.12 syntax-floor gate in tests/test_py312_syntax_floor.py
 #   and the `--target-version py312` lint below. The gate's notes record
@@ -101,9 +101,22 @@
 #   `telegram` is the LOCAL package under pact-plugin/, NOT the pip library — it
 #   needs no install (it resolves via the working-directory on sys.path).
 #     - ruff             : the import-hygiene lint step ONLY (not a test dep).
-#                          Unpinned by design: the step's --select bounds the
-#                          rule surface, so new ruff releases cannot add rule
-#                          classes to it.
+#                          Pinned by constraints-ci.txt with the other direct
+#                          dependencies — ruff EXECUTES in CI, so a version
+#                          change is code-execution change, not lint noise.
+#                          The step's --select still bounds the rule surface,
+#                          which is what makes a deliberate ruff bump in the
+#                          constraints file low-risk rather than an audit.
+#
+#   CONSTRAINTS: the direct dependencies above are pinned in constraints-ci.txt
+#   at the repo root and applied by the install step's `pip install -c` — what
+#   CI runs is a reviewed commit, not whatever the index serves at merge time.
+#   Transitive dependencies float within those bounds; pip itself is
+#   unconstrained (pinned self-upgrades can deadlock the bootstrap). Refresh
+#   deliberately (quarterly, or on a red the pins explain): rebuild the
+#   environment from the package list above, run the suite green, commit the
+#   version diff. A pin that blocks a needed fix is a reason to refresh, not
+#   to delete the file.
 #
 #   VERIFICATION: every entry was proven by RUNNING the suite in a clean venv,
 #   never by grepping imports. This heading vouches for every entry beneath it,
@@ -268,7 +281,10 @@ jobs:
         # `Failed: async def functions are not natively supported`. Do NOT drop
         # it to "shorten" the line — the async cohort simply stops passing, and
         # it is a large fraction of the suite.
-        run: python -m pip install --upgrade pip pytest hypothesis httpx pytest-asyncio pyyaml pysqlite3 sqlite-vec model2vec ruff
+        # -c constraints-ci.txt pins the install line's direct deps to the
+        # TEST-verified versions (CONSTRAINTS paragraph in the DEPENDENCY SET
+        # header): drift is a reviewed change, not merge-time weather.
+        run: python -m pip install --upgrade -c constraints-ci.txt pip pytest hypothesis httpx pytest-asyncio pyyaml pysqlite3 sqlite-vec model2vec ruff
 
       # WARM THE MODEL ONCE, HERE, WHERE NOTHING IS TIMING IT.
       #

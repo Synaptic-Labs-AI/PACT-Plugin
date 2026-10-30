@@ -1,0 +1,19 @@
+# Constraints for the CI test-dependency install (.github/workflows/tests.yml):
+# the install line's direct dependencies pinned to the TEST-phase-verified
+# versions (pip freeze of the verified 3.12.3 venv, 2026-10-30 — the
+# environment the green full-suite run executed in). Merge-time resolution is
+# code execution in CI, so a version change is a reviewed change to this file,
+# not merge-time weather. Transitive dependencies float within these bounds.
+# pip itself is NOT constrained: `pip freeze` omits it, and a pinned
+# self-upgrade can deadlock the bootstrap. Refresh deliberately (quarterly, or
+# on a red a pin explains): rebuild from the workflow's package list, run the
+# suite green, commit the version diff.
+pytest==9.2.0
+hypothesis==6.170.14
+httpx==0.28.1
+pytest-asyncio==1.4.1
+pyyaml==6.0.3
+pysqlite3==0.6.1
+sqlite-vec==0.1.9
+model2vec==0.10.0
+ruff==0.17.3
