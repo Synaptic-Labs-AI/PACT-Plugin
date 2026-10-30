@@ -237,9 +237,12 @@ PHRASE_PINS = [
     (SKILL, "revise it on the same task without waiting to be asked"),
     # --- lead-side completion-authority (+ byte-mirrored SSOT region) ---
     (COMPLETION_AUTHORITY, "exactly ONE redundant confirm"),
-    # The behavioral no-hook non-goal note: the race cannot be closed with
-    # a synchronous hook (SendMessage fires no hook event; inbox writes are
-    # asynchronous-on-delivery; idle notifications are content-blind).
+    # The behavioral no-hook non-goal note: PreToolUse fires, but inbox
+    # delivery is asynchronous and PostToolUse remains unmeasured, so no
+    # synchronous hook can close the delivery-ordering race.
+    (COMPLETION_AUTHORITY, "SendMessage does fire PreToolUse"),
+    (COMPLETION_AUTHORITY, "PostToolUse remains unmeasured, not refuted"),
+    (COMPLETION_AUTHORITY, "inbox files are written asynchronously on delivery"),
     (COMPLETION_AUTHORITY, "Synchronous wake/send detection is therefore dead-by-construction"),
     (COMPLETION_AUTHORITY, "in-process and tmux teammateMode"),
     (COMPLETION_AUTHORITY, "boundary-drain: inbox empty"),
@@ -293,6 +296,9 @@ PHRASE_PINS = [
     # the sentence-initial capitalized form.
     (COMPLETION_AUTHORITY, "Delivery is not processing"),
     (PROTOCOLS_SSOT, "exactly ONE redundant confirm"),
+    (PROTOCOLS_SSOT, "SendMessage does fire PreToolUse"),
+    (PROTOCOLS_SSOT, "PostToolUse remains unmeasured, not refuted"),
+    (PROTOCOLS_SSOT, "inbox files are written asynchronously on delivery"),
     (PROTOCOLS_SSOT, "Synchronous wake/send detection is therefore dead-by-construction"),
     (PROTOCOLS_SSOT, "in-process and tmux teammateMode"),
     (PROTOCOLS_SSOT, "boundary-drain: inbox empty"),
@@ -475,6 +481,33 @@ def test_retired_inbox_grew_token_absent(doc_path: Path):
         f"Monitor event; do not reintroduce the event token into "
         f"instruction surfaces (if a future rule genuinely needs it, "
         f"update this guard deliberately)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Absence pin — retired SendMessage PreToolUse denial on every instruction surface.
+# ---------------------------------------------------------------------------
+
+
+def _llm_loaded_markdown():
+    """Every markdown instruction surface, including nested skill references."""
+    return [
+        path
+        for dirname in ("agents", "commands", "protocols", "skills")
+        for path in sorted((PLUGIN_ROOT / dirname).rglob("*.md"))
+    ]
+
+
+@pytest.mark.parametrize(
+    "doc_path",
+    _llm_loaded_markdown(),
+    ids=lambda p: p.relative_to(PLUGIN_ROOT).as_posix(),
+)
+def test_retired_sendmessage_no_pretooluse_claim_absent(doc_path: Path):
+    """The measured PreToolUse correction must not regress on any instruction surface."""
+    assert _phrase("fires no PreToolUse") not in _normalized(doc_path), (
+        f"{doc_path.relative_to(PLUGIN_ROOT)}: retired SendMessage PreToolUse denial "
+        "reappeared. PreToolUse fires; PostToolUse remains unmeasured."
     )
 
 
