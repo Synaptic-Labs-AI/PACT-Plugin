@@ -345,6 +345,12 @@ def check_pinned_staleness(
     the worktree file and marks it, defeating the retarget on exactly the
     "main has no CLAUDE.md yet" path. This check marks an existing file; it
     never creates one, and with no main file there is nothing to mark.
+
+    PASSING None IS A HAZARD, NOT AN OPTION. It re-derives the project dir
+    from the environment and, when that yields no file, the resolver's git and
+    cwd rungs can return a linked worktree's own CLAUDE.md -- a file that
+    belongs to the worktree, not to project memory. Callers resolve project
+    memory and pass it.
     """
     if project_dir is None:
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")

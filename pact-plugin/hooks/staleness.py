@@ -843,11 +843,17 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
     This function orchestrates detection (detect_stale_entries) and
     mutation (apply_staleness_markings) as separate steps for testability.
 
+    PASSING None IS A HAZARD, NOT AN OPTION. It delegates resolution to
+    `_resolve_project_claude_md_with_base()`, whose git and cwd rungs can
+    return a linked worktree's own CLAUDE.md -- a file that belongs to the
+    worktree, not to project memory. Callers resolve project memory and pass
+    the path.
+
     Args:
-        claude_md_path: Explicit path to CLAUDE.md. If None, resolved via
-            get_project_claude_md_path(). Callers (e.g. session_init.py)
-            may pass the path explicitly so their own resolution can be
-            patched independently in tests.
+        claude_md_path: Explicit path to CLAUDE.md. When None, this function
+            calls `_resolve_project_claude_md_with_base()` itself. Callers
+            (e.g. session_init.py) pass the path explicitly so their own
+            resolution can be patched independently in tests.
 
     Returns:
         Informational message about stale pins found, or None.
@@ -1054,8 +1060,13 @@ def check_pinned_block_signal(
     Fail-open: all I/O and parse errors yield None. The block directive
     ONLY fires on positive detection; ambiguous state never blocks.
 
+    PASSING None IS A HAZARD, NOT AN OPTION. It resolves through
+    get_project_claude_md_path(), whose git and cwd rungs can return a linked
+    worktree's own CLAUDE.md -- a file that belongs to the worktree, not to
+    project memory. Callers resolve project memory and pass the path.
+
     Args:
-        claude_md_path: Explicit path. If None, resolved via
+        claude_md_path: Explicit path. When None, it is resolved through
             get_project_claude_md_path(). Callers may patch resolution
             independently from this module.
 
