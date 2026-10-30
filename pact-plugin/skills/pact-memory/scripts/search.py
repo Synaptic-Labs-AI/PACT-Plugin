@@ -308,7 +308,7 @@ def graph_enhanced_search(
     query: str,
     current_file: Optional[str] = None,
     project_id: Optional[str] = None,
-    limit: int = 5
+    limit: int = 20
 ) -> List[MemoryObject]:
     """
     Search memories with graph-enhanced ranking.
@@ -353,7 +353,7 @@ def graph_enhanced_search(
 def find_similar_memories(
     memory_id: str,
     project_id: Optional[str] = None,
-    limit: int = 5
+    limit: int = 20
 ) -> List[MemoryObject]:
     """
     Find memories similar to a given memory.

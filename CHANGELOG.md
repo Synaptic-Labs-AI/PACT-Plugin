@@ -18,6 +18,23 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
+## v4.8.15: pact-memory search default 20, dash stdin sentinel, live dedup search (issue #1647)
+
+### Summary
+
+pact-memory `search` now returns 20 memories by default instead of 5, so recall-oriented consumers stop truncating at the old window. `save` and `update` accept `-` as the Unix stdin sentinel and report empty input as MISSING_INPUT naming the channel, instead of dying as INVALID_JSON. The handoff-harvest dedup search line now carries an invocation that actually runs, and tests pin the documented invocation shapes, the helper defaults, and the search window.
+
+### What landed
+
+- Default limit 5 to 20 everywhere the search surface exposes a default: `PACTMemory.search`, `graph_enhanced_search`, `find_similar_memories`, the CLI, and the pact-memory skill text (issue #1647).
+- `-` as the stdin sentinel at both stdin sites (`save` and `update`, verbatim twins by house style): bare `-` reads stdin, and empty or whitespace-only input on either channel fails as MISSING_INPUT naming `--stdin` or `'-'`.
+- Handoff-harvest dedup SOP fixed from `search --query "{topic}" --limit 5` (a flag argparse never accepted, so the step had never executed) to `search "{topic}"`, inheriting the new default 20; the store-access guard token moves to the live spelling so the guard net stays whole.
+- Review remediations: docs and invocation parity pins, the dash sentinel documented in the skill, helper signature defaults pinned to the parser default, and the harvest span corrected.
+
+### Why
+
+A 5-result default truncated recall: agents searching for prior decisions saw only the top slice and re-derived work already remembered. Bare `save -` reported INVALID_JSON, misattributing an invocation error to the data. The dead dedup line meant duplicate memories were never actually checked before a save. The parity pins keep the documented invocations and the code from drifting apart again.
+
 ## v4.8.14: align Agent Team dispatch with the current schema (issue #1673)
 
 ### Summary

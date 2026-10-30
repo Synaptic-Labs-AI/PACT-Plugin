@@ -1196,7 +1196,7 @@ class PACTMemory:
         self,
         query: str,
         current_file: Optional[str] = None,
-        limit: int = 5,
+        limit: int = 20,
         sync_to_claude: bool = True,
         claude_md_root: Optional[Path] = None
     ) -> List[MemoryObject]:
