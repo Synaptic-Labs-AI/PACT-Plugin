@@ -18,6 +18,24 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
+## v4.8.14: align Agent Team dispatch with the current schema (issue #1673)
+
+### Summary
+
+Agent Team dispatch now uses the current named, flagless Agent call shape at all 13 template sites. Recovery is evidence-ordered and role-aware instead of flag-first, while the measured #1658 workaround survives only in one guarded legacy note. The non-TTY runbook and structural pins now cover the same contract, including all review remediations for schema guidance, actor roles, malformed-dispatch diagnostics, and coverage controls.
+
+### What landed
+
+- Current dispatch: all 13 Agent Team call sites across seven templates omit the legacy `run_in_background` argument, with no Agent `background` substitute, new minimum release, or version-gated current path. Named teammates, `team_name`, and the deferred-tool `ToolSearch` preamble remain.
+- Role-aware recovery: the A–H tree in the persona, both READMEs, agent-teams skill, and mirrored protocol text checks deferred tools, the lead session, the live Agent schema, teammate creation, and display mode before relay or a blocker report. The affected teammate self-helps in A and relays in G; the lead owns B–F and the final blocker report.
+- Legacy and probe guidance: one plugin-README note gates the measured #1658 workaround on the older-runtime symptom, completed A–E diagnostics, live-schema support, post-spawn `TaskList`, and the full ceremony. The non-TTY runbook keeps current ARM 1 and ARM 2 flagless, adds the same diagnostics, and preserves dated 2.1.303 evidence outside current arms; historical references carry the approved scrub exemptions.
+- Review remediations: the first-spawn summary now matches the full recovery tree, schema presence is expressibility rather than necessity, the malformed `Task(...)` versus `Agent(...)` example is restored, and actor ownership is explicit. Structural pins retain the dynamic 13-site census and add scoped current/legacy regions, mandatory-template and branch controls, and role-cardinality checks without truncating their controls.
+- Preservation: Bash background-watch guidance, captured fixtures, `team_name`, and the protocol SSOT/extract mirror remain intact. No production hook, CI workflow, or runtime-permission surface changed.
+
+### Why
+
+The legacy Agent argument and flag-first recovery sent operators toward respawn loops instead of the actual session, schema, registration, display-mode, or messaging cause. The guarded note preserves the measured older-runtime workaround without presenting it as current dispatch guidance. Verification covers the static contract through focused and full suites, mutation and preservation controls, protocol-mirror checks, and review reruns; no new live-runtime, split-pane, or legacy-version certification is claimed.
+
 ## v4.8.13: wrap-up always follows a merge, and a merge-guard approval runs its command once (issue #1660)
 
 ### Summary
