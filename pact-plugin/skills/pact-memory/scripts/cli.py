@@ -511,8 +511,18 @@ def _scrub(msg: str) -> str:
 
 def cmd_save(args, db_path=None):
     """Handle the 'save' subcommand."""
-    if args.stdin:
+    if args.stdin or args.json_data == "-":
+        # '-' is a stdin sentinel (Unix convention). Bare '-' is never
+        # valid JSON, so accepting it as "read stdin" carries no data
+        # meaning and saves a wasted INVALID_JSON round-trip.
         raw = sys.stdin.read()
+        if not raw.strip():
+            channel = "--stdin" if args.stdin else "'-'"
+            _error(
+                "MISSING_INPUT",
+                f"{channel} received empty input; provide JSON via "
+                "--stdin or as an argument",
+            )
     elif args.json_data:
         raw = args.json_data
     else:
@@ -732,8 +742,17 @@ def cmd_update(args, db_path=None):
     Accepts a full 32-char memory ID or a unique prefix. Ambiguous prefix
     refuses the update and surfaces an AMBIGUOUS_PREFIX envelope.
     """
-    if args.stdin:
+    if args.stdin or args.json_data == "-":
+        # Same '-' stdin sentinel as cmd_save; the two sites are verbatim
+        # twins by house style (see the do-not-centralize notes below).
         raw = sys.stdin.read()
+        if not raw.strip():
+            channel = "--stdin" if args.stdin else "'-'"
+            _error(
+                "MISSING_INPUT",
+                f"{channel} received empty input; provide JSON via "
+                "--stdin or as an argument",
+            )
     elif args.json_data:
         raw = args.json_data
     else:
@@ -978,7 +997,7 @@ def build_parser():
     search_parser._teach_example = examples["search"]
     search_parser.add_argument("query", help="Search query text")
     search_parser.add_argument(
-        "--limit", type=_positive_int, default=5, help="Max results (default: 5)"
+        "--limit", type=_positive_int, default=20, help="Max results (default: 20)"
     )
     # PLUMBED EVEN THOUGH THE SEARCH PATH CANNOT SYNC TODAY. `cmd_search`
     # passes `sync_to_claude=False`, so this is inert right now -- which is

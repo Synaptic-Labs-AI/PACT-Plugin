@@ -18,6 +18,8 @@ Tests cover:
 """
 import json
 import os
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -182,7 +184,7 @@ class TestCliArgParsing:
     def test_search_limit_default(self):
         parser = build_parser()
         args = parser.parse_args(["search", "query"])
-        assert args.limit == 5
+        assert args.limit == 20
 
     def test_search_limit_custom(self):
         parser = build_parser()
@@ -314,6 +316,52 @@ class TestCliSaveCommand:
                 cmd_save(args)
         assert exc_info.value.code == 0
         mock_pact_memory.save.assert_called_once_with(memory_dict)
+
+    def test_save_sentinel_dash_reads_stdin(self, mock_pact_memory, monkeypatch):
+        memory_dict = make_cli_memory_dict()
+        json_str = json.dumps(memory_dict)
+        monkeypatch.setattr("sys.stdin", StringIO(json_str))
+        parser = build_parser()
+        args = parser.parse_args(["save", "-"])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_save(args)
+        assert exc_info.value.code == 0
+        mock_pact_memory.save.assert_called_once_with(memory_dict)
+
+    def test_save_empty_stdin_via_dash_is_missing_input(self, capsys, monkeypatch):
+        # Whitespace-only counts as empty: json.loads would raise the same
+        # Expecting-value error as truly empty input, so it is the same hole.
+        monkeypatch.setattr("sys.stdin", StringIO("   \n"))
+        parser = build_parser()
+        args = parser.parse_args(["save", "-"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_save(args)
+        assert exc_info.value.code == 1
+        err_output = json.loads(capsys.readouterr().err)
+        assert err_output["error"] == "MISSING_INPUT"
+        assert "'-'" in err_output["message"]
+        # F3: the tail must NAME the flag, not restate "via stdin".
+        assert err_output["message"].endswith(
+            "provide JSON via --stdin or as an argument"
+        )
+
+    def test_save_empty_stdin_via_flag_is_missing_input(self, capsys, monkeypatch):
+        monkeypatch.setattr("sys.stdin", StringIO(""))
+        parser = build_parser()
+        args = parser.parse_args(["save", "--stdin"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_save(args)
+        assert exc_info.value.code == 1
+        err_output = json.loads(capsys.readouterr().err)
+        assert err_output["error"] == "MISSING_INPUT"
+        assert "--stdin" in err_output["message"]
+        assert err_output["message"].endswith(
+            "provide JSON via --stdin or as an argument"
+        )
 
     def test_save_outputs_memory_id(self, mock_pact_memory, capsys):
         memory_dict = make_cli_memory_dict()
@@ -608,7 +656,7 @@ class TestCliSearchCommand:
                 cmd_search(args)
         assert exc_info.value.code == 0
         mock_pact_memory.search.assert_called_once_with(
-            "auth tokens", current_file=None, limit=5, sync_to_claude=False
+            "auth tokens", current_file=None, limit=20, sync_to_claude=False
         )
 
     def test_search_with_limit(self, mock_pact_memory):
@@ -621,6 +669,49 @@ class TestCliSearchCommand:
         mock_pact_memory.search.assert_called_once_with(
             "query", current_file=None, limit=3, sync_to_claude=False
         )
+
+    def test_api_search_default_limit_matches_the_parser(self):
+        """Pin the SECOND binding site: the module API's signature default.
+
+        The CLI default is pinned by test_search_limit_default and the
+        call-through pins above, but cmd_search always passes an explicit
+        limit, so none of them would redden if the API default drifted back
+        and the module stopped matching its own docs — the exact divergence
+        raising the default in both places exists to prevent. Signature
+        inspection, per the test_signature_mirrors_search pattern. Parser as
+        the single source of truth — no literal copy of the number.
+        """
+        import inspect
+        expected = build_parser().parse_args(["search", "q"]).limit
+        params = inspect.signature(PACTMemory.search).parameters
+        assert "limit" in params
+        assert params["limit"].default == expected, (
+            f"PACTMemory.search defaults to {params['limit'].default}; "
+            f"the CLI ships {expected}"
+        )
+
+    def test_search_helper_signature_defaults_match_parser(self):
+        """Pin the third and fourth code copies of the search limit default.
+
+        graph_enhanced_search and find_similar_memories carry their own
+        `limit` defaults; PACTMemory.search forwards an explicit limit so
+        no in-repo caller reads them, but a direct importer does, and a
+        default drifting from the shipped one is the same divergence the
+        pins above exist to prevent. Parser as the single source of
+        truth — no literal copy of the number.
+        """
+        import inspect
+
+        from scripts.search import find_similar_memories, graph_enhanced_search
+
+        expected = build_parser().parse_args(["search", "q"]).limit
+        for func in (graph_enhanced_search, find_similar_memories):
+            params = inspect.signature(func).parameters
+            assert "limit" in params, f"{func.__name__} lost its limit param"
+            assert params["limit"].default == expected, (
+                f"{func.__name__} defaults to {params['limit'].default}; "
+                f"the CLI ships {expected}"
+            )
 
     def test_search_empty_results(self, mock_pact_memory, capsys):
         parser = build_parser()
@@ -643,7 +734,7 @@ class TestCliSearchCommand:
                 cmd_search(args)
         assert exc_info.value.code == 0
         mock_pact_memory.search.assert_called_once_with(
-            "auth", current_file="/src/auth.py", limit=5, sync_to_claude=False
+            "auth", current_file="/src/auth.py", limit=20, sync_to_claude=False
         )
 
     def test_search_with_results(self, mock_pact_memory, capsys):
@@ -664,6 +755,110 @@ class TestCliSearchCommand:
         assert output["ok"] is True
         assert len(output["result"]) == 1
         assert output["result"][0]["id"] == "mem1"
+
+
+class TestSkillDocsParity:
+    """The skill docs are a second copy of the CLI surface, with no compiler.
+
+    Two drift classes, both with an observed instance in this repo:
+    a default bumped in code while the docs still taught the old number,
+    and an invocation a skill file taught that argparse rejects — the
+    pre-#1680 harvest SKILL.md taught `search --query "{topic}"`, which
+    exits 2, and no test noticed because nothing executed the taught
+    string. Both tests read the skill files AT RUN TIME, so they
+    validate whatever the docs teach today, including rows added after
+    this test was written.
+    """
+
+    SKILL_MD = (
+        Path(__file__).resolve().parent.parent
+        / "skills" / "pact-memory" / "SKILL.md"
+    )
+    HARVEST_MD = (
+        Path(__file__).resolve().parent.parent
+        / "skills" / "pact-handoff-harvest" / "SKILL.md"
+    )
+
+    # A bare `<name>` token is a synopsis placeholder (`search <query>`),
+    # never a value a caller would type: skip the span, do not parse it.
+    _ANGLE_PLACEHOLDER = re.compile(r"^<[a-z_-]+>$")
+
+    def test_search_default_in_skill_md_matches_parser(self):
+        """F1: both doc statements of the search default equal the parser's.
+
+        The default lives in cli.py (pinned) and memory_api.py (pinned);
+        SKILL.md states it twice more — the `--limit` table row and the
+        Search Command prose — and before this test nothing pinned either
+        copy, so a bump that skipped the docs would teach every consumer
+        a wrong number with the suite green.
+        """
+        actual = build_parser().parse_args(["search", "q"]).limit
+        text = self.SKILL_MD.read_text()
+
+        m = re.search(r"`search <query> --limit N`[^\n]*\(default: (\d+)\)", text)
+        assert m, "search --limit table row with (default: N) missing from SKILL.md"
+        assert int(m.group(1)) == actual, (
+            f"SKILL.md table teaches default {m.group(1)}; parser ships {actual}"
+        )
+
+        m = re.search(r"Default limit: (\d+)", text)
+        assert m, "'Default limit:' prose missing from SKILL.md"
+        assert int(m.group(1)) == actual, (
+            f"SKILL.md prose teaches default {m.group(1)}; parser ships {actual}"
+        )
+
+    def _taught_spans(self, text):
+        """Yield (line_no, args) for every single-line taught invocation.
+
+        Two shapes: a full `python3 .../cli.py <args>` line (code fences),
+        and a bare backtick span opening with a subcommand (prose). Table
+        rows are SKIPPED ON PURPOSE: they are syntax synopses carrying
+        meta-variables (`--limit N`) that argparse must reject, not
+        invocations a caller could paste.
+        """
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            m = re.search(r'cli\.py" (.+)$', line)
+            if m:
+                yield line_no, m.group(1)
+                continue
+            if line.lstrip().startswith("|"):
+                continue
+            for m in re.finditer(r"`(\w+) ([^`]+)`", line):
+                if m.group(1) in _COMMANDS:
+                    yield line_no, f"{m.group(1)} {m.group(2)}"
+
+    def test_taught_invocations_parse(self):
+        """F2: every single-line invocation the skill files teach parses."""
+        parser = build_parser()
+        checked = 0
+        for path in (self.SKILL_MD, self.HARVEST_MD):
+            for line_no, span in self._taught_spans(path.read_text()):
+                try:
+                    tokens = shlex.split(span)
+                except ValueError:
+                    # First line of a multi-line example (unbalanced quote):
+                    # a line-oriented reader cannot validate the whole
+                    # invocation, so it validates none of it.
+                    continue
+                if any(self._ANGLE_PLACEHOLDER.match(t) for t in tokens):
+                    continue
+                # Subcommand + ONLY flags (`update --replace`) names a flag
+                # in prose, not a runnable invocation — every runnable form
+                # these docs teach shows its positional payload. A bare `-`
+                # IS the payload (stdin sentinel), not a flag.
+                if all(t.startswith("-") and t != "-" for t in tokens[1:]):
+                    continue
+                try:
+                    parser.parse_args(tokens)
+                except SystemExit:
+                    pytest.fail(
+                        f"{path.parent.name}/SKILL.md:{line_no} teaches an "
+                        f"invocation the CLI rejects: `{span}`"
+                    )
+                checked += 1
+        # Non-empty control: an extractor that finds nothing would pass
+        # vacuously, which is the failure mode this assert exists to catch.
+        assert checked > 0, "no taught invocations found — extractor went blind"
 
 
 # ---------------------------------------------------------------------------
@@ -995,6 +1190,52 @@ class TestCliUpdateCommand:
         assert exc_info.value.code == 0
         mock_pact_memory.update.assert_called_once_with(
             "abc123", {"context": "from stdin"}, replace=False
+        )
+
+    def test_update_sentinel_dash_reads_stdin(self, mock_pact_memory, monkeypatch):
+        mock_pact_memory.update.return_value = _FAKE_RESOLVED_ID
+        monkeypatch.setattr("sys.stdin", StringIO('{"context": "via dash"}'))
+        parser = build_parser()
+        args = parser.parse_args(["update", "abc123", "-"])
+
+        with patch("scripts.cli.PACTMemory", return_value=mock_pact_memory):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_update(args)
+        assert exc_info.value.code == 0
+        mock_pact_memory.update.assert_called_once_with(
+            "abc123", {"context": "via dash"}, replace=False
+        )
+
+    def test_update_empty_stdin_is_missing_input(self, capsys, monkeypatch):
+        monkeypatch.setattr("sys.stdin", StringIO(""))
+        parser = build_parser()
+        args = parser.parse_args(["update", "abc123", "--stdin"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_update(args)
+        assert exc_info.value.code == 1
+        err_output = json.loads(capsys.readouterr().err)
+        assert err_output["error"] == "MISSING_INPUT"
+        assert "--stdin" in err_output["message"]
+        assert err_output["message"].endswith(
+            "provide JSON via --stdin or as an argument"
+        )
+
+    def test_update_empty_stdin_via_dash_is_missing_input(self, capsys, monkeypatch):
+        # The dash channel of the guard, mirroring the save-side pair: the
+        # plan's "empty-stdin via update mirrors save" row, second channel.
+        monkeypatch.setattr("sys.stdin", StringIO("  \n"))
+        parser = build_parser()
+        args = parser.parse_args(["update", "abc123", "-"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_update(args)
+        assert exc_info.value.code == 1
+        err_output = json.loads(capsys.readouterr().err)
+        assert err_output["error"] == "MISSING_INPUT"
+        assert "'-'" in err_output["message"]
+        assert err_output["message"].endswith(
+            "provide JSON via --stdin or as an argument"
         )
 
     def test_update_invalid_json(self, capsys):
@@ -2030,6 +2271,21 @@ class TestCliSubprocess:
         assert output["ok"] is True
         assert "memory_id" in output["result"]
 
+    def test_save_sentinel_dash_via_subprocess(self, cli_script_path, cli_db):
+        memory_dict = make_cli_memory_dict(context="dash sentinel test")
+        json_str = json.dumps(memory_dict)
+
+        result = subprocess.run(
+            [sys.executable, cli_script_path, "save", "-",
+             "--no-sync", "--db-path", str(cli_db)],
+            input=json_str,
+            capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        output = json.loads(result.stdout)
+        assert output["ok"] is True
+        assert "memory_id" in output["result"]
+
     def test_save_invalid_json_exits_1(self, cli_script_path, cli_db):
         result = subprocess.run(
             [sys.executable, cli_script_path, "save", "not{valid",
@@ -2186,6 +2442,40 @@ class TestCliSubprocess:
         get_output = json.loads(get_result.stdout)
         assert get_output["result"]["context"] == "updated context"
 
+    def test_update_sentinel_dash_via_subprocess(self, cli_script_path, cli_db):
+        # F4: save has a subprocess round-trip for '-'; update is its
+        # verbatim twin, so it gets the same real-argc/real-stdin arm.
+        # The get-verify pins the EFFECT, not the envelope — a crashed
+        # update can still emit a plausible success envelope.
+        memory_dict = make_cli_memory_dict(context="dash update original")
+        save_result = subprocess.run(
+            [sys.executable, cli_script_path, "save", json.dumps(memory_dict),
+             "--no-sync", "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert save_result.returncode == 0, f"stderr: {save_result.stderr}"
+        memory_id = json.loads(save_result.stdout)["result"]["memory_id"]
+
+        update_result = subprocess.run(
+            [sys.executable, cli_script_path, "update", memory_id, "-",
+             "--db-path", str(cli_db)],
+            input='{"context": "updated via dash sentinel"}',
+            capture_output=True, text=True, timeout=60,
+        )
+        assert update_result.returncode == 0, f"stderr: {update_result.stderr}"
+        update_output = json.loads(update_result.stdout)
+        assert update_output["ok"] is True
+        assert update_output["result"]["memory_id"] == memory_id
+
+        get_result = subprocess.run(
+            [sys.executable, cli_script_path, "get", memory_id,
+             "--db-path", str(cli_db)],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert get_result.returncode == 0
+        get_output = json.loads(get_result.stdout)
+        assert get_output["result"]["context"] == "updated via dash sentinel"
+
     def test_update_not_found_exits_1(self, cli_script_path, cli_db):
         result = subprocess.run(
             [sys.executable, cli_script_path, "update", "nonexistent_id",
@@ -2253,6 +2543,74 @@ class TestCliSubprocess:
         # Status should include core fields from get_status()
         assert "memory_count" in output["result"]
         assert "project_id" in output["result"]
+
+
+@pytest.mark.requires_embedding_backend
+class TestSearchWindowContainment:
+    """The issue-#1647 mechanism, pinned at the real retriever (plan P1).
+
+    A ranked retriever always fills its window: a record ranked below the
+    limit is invisible and indistinguishable from not-in-store, because the
+    same query confidently returns a full page of other records. Seeding a
+    store where ten verbatim-vocabulary fillers outrank a zero-overlap
+    target makes that mechanism observable in both directions at once:
+
+      * at --limit 5 the window fills with fillers and the target is absent
+        (the invisible miss — the defect this PR raised the default over);
+      * at the new default 20 the same query returns the whole store,
+        target included (the record was never absent, only below five).
+
+    Assertions are CONTAINMENT ONLY (present/absent within the window), never
+    exact ranks: model2vec rank order across machines is unverified, and the
+    margins here (10 verbatim fillers vs a zero-overlap target for the
+    below-5 arm; an 11-record store against a 20 window for the visible arm)
+    are chosen so rank wobble inside those margins cannot flip either arm.
+    """
+
+    FILLER_QUERY = "orchestration cadence telemetry"
+    FILLERS = 10
+
+    def _seed(self, db_path):
+        """Seed in-process: one model load for all saves, not one per save."""
+        memory = PACTMemory(db_path=db_path)
+        for i in range(self.FILLERS):
+            memory.save(
+                {
+                    "context": f"{self.FILLER_QUERY} filler {i}",
+                    "goal": f"pad the rank window {i}",
+                },
+                sync_to_claude=False,
+            )
+        return memory.save(
+            {
+                "context": "zebra quorum calibration note",
+                "goal": "distinctive target marker",
+            },
+            sync_to_claude=False,
+        )
+
+    def _search(self, cli_script_path, db_path, *extra):
+        result = subprocess.run(
+            [sys.executable, cli_script_path, "search", self.FILLER_QUERY,
+             "--db-path", str(db_path), *extra],
+            capture_output=True, text=True, timeout=300,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        return json.loads(result.stdout)["result"]
+
+    def test_target_below_window_invisible_at_5_visible_at_default(
+        self, cli_script_path, cli_db
+    ):
+        target_id = self._seed(cli_db)
+
+        at_five = self._search(cli_script_path, cli_db, "--limit", "5")
+        # The window FILLS — that is the invisibility mechanism itself: no
+        # null, no empty page, nothing on the surface saying "clipped".
+        assert len(at_five) == 5
+        assert target_id not in [m["id"] for m in at_five]
+
+        at_default = self._search(cli_script_path, cli_db)
+        assert target_id in [m["id"] for m in at_default]
 
 
 # ---------------------------------------------------------------------------
