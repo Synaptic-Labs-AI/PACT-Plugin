@@ -178,6 +178,41 @@ def test_a_nested_worktree_write_crossing_the_cap_is_allowed(tmp_path, env_var):
     assert _outcome(_run_hook_with_env(worktree, frame, declared)) == "allow"
 
 
+def test_a_nested_worktree_write_with_env_set_to_main_is_allowed(tmp_path):
+    """The LIVE production shape: CLAUDE_PROJECT_DIR names MAIN while the hook
+    runs in the nested worktree, and MAIN holds no CLAUDE.md.
+
+    The resolver's cwd rung returns the worktree copy here, so this is the
+    cell the identity binding exists to decline (#1653, security lane).
+    """
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    repo, worktree = _nested_worktree(tmp_path)
+    target = worktree / ".claude" / "CLAUDE.md"
+    frame = _frame(target, *_write(_pins(14)))
+    assert _outcome(_run_hook_with_env(worktree, frame, repo)) == "allow"
+
+
+def test_a_nested_worktree_write_with_main_holding_the_document_is_allowed(tmp_path):
+    """STEADY STATE, CONTROL rather than evidence for the defect: MAIN already
+    holds its CLAUDE.md, so the resolver's own preference declines at
+    same_path before identity matters.
+
+    This cell also stays green on 6a53aa85; it pins only that the identity
+    binding does not newly gate the worktree copy against MAIN's file.
+    """
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    repo, worktree = _nested_worktree(tmp_path)
+    (repo / ".claude").mkdir()
+    (repo / ".claude" / "CLAUDE.md").write_text(_pins(13), encoding="utf-8")
+    target = worktree / ".claude" / "CLAUDE.md"
+    target.parent.mkdir()
+    target.write_text(_pins(13), encoding="utf-8")
+    frame = _frame(target, *_write(_pins(14)))
+    assert _outcome(_run_hook(worktree, frame)) == "allow"
+
+
 def test_a_nested_worktree_session_write_to_main_is_still_denied(tmp_path):
     """CONTROL: the managed document is still protected from a nested worktree
     session."""
