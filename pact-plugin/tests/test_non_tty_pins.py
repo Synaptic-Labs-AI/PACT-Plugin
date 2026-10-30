@@ -1,21 +1,20 @@
 """
 Location: pact-plugin/tests/test_non_tty_pins.py
-Summary: ENUMERATE-AND-ASSERT prose pins for the non-TTY harness support wave
-(#1658/#1309): every `Agent(` dispatch site carries BOTH additions
-(`run_in_background: false` + the `ToolSearch` select preamble), every
-documented raw-read path site cites the realigned team-name source, the
-collapsed wait wording and relay-fallback paragraphs are present where W2
-landed them, and the pre-decided NO-TOUCH surfaces (the persona's Bash
-watcher flag) survive byte-identical. The sites are enumerated DYNAMICALLY
-from the tree, so a newly added command with an unamended dispatch site fails
-the per-site assertion without anyone remembering to extend a list; the
-counted baselines make additions deliberate (a census drift is a failure that
-names itself, never a silent pass).
+Summary: ENUMERATE-AND-ASSERT pins for the current Agent Team dispatch
+contract (#1673) and preserved non-TTY evidence (#1658/#1309). Every current
+Agent(...) dispatch site is named, team-scoped, ToolSearch-enabled, and free
+of legacy Agent execution-mode parameters. Ordered A–H recovery guidance is
+pinned by branch-specific markers inside stable structural regions. Exactly
+one operational legacy note lives in the plugin README; the root README and
+current probe arms carry none. Dated runbook evidence and the persona's Bash
+watcher flag remain intact. Sites are enumerated DYNAMICALLY from the tree,
+and the counted baselines make additions deliberate rather than silently
+passing an empty enumeration.
 Used by: the full-suite merge gate (`cd pact-plugin && python3 -m pytest -q`,
 no path argument).
 
-Census provenance (measured at HEAD c86d89b0, 2026-10-21, re-derived
-mechanically and reconciled against the W2 HANDOFF census):
+Census provenance (measured at HEAD 169c6907, 2026-10-29, re-derived
+mechanically against the approved plan and PREPARE census):
   Agent dispatch sites: 13 total — agents/pact-orchestrator.md 1,
     commands/bootstrap.md 1, commands/comPACT.md 2, commands/orchestrate.md 6,
     commands/peer-review.md 1, commands/plan-mode.md 1, commands/rePACT.md 1.
@@ -50,12 +49,22 @@ _DOC_SURFACE_FILES = [
     *sorted((_PLUGIN_ROOT / "protocols").glob("*.md")),
 ]
 _SSOT = _PLUGIN_ROOT / "protocols" / "pact-protocols.md"
+_REPO_ROOT = _PLUGIN_ROOT.parent
+_PERSONA = _PLUGIN_ROOT / "agents" / "pact-orchestrator.md"
+_PLUGIN_README = _PLUGIN_ROOT / "README.md"
+_ROOT_README = _REPO_ROOT / "README.md"
+_AGENT_TEAMS_SKILL = _PLUGIN_ROOT / "skills" / "pact-agent-teams" / "SKILL.md"
+_COMPLETION_AUTHORITY = _PLUGIN_ROOT / "protocols" / "pact-completion-authority.md"
+_RUNBOOK = _TESTS_DIR / "runbooks" / "non-tty-harness-probe.md"
 
-# The two additions every dispatch site must carry. The ToolSearch literal
-# carries the backslash-escaped quotes the templates embed inside the
-# Agent(...) prompt parameter — matched as a fixed string, never a regex.
-FOREGROUND_FLAG = "run_in_background: false"
+# The ToolSearch literal carries backslash-escaped quotes inside Agent(...)
+# prompt parameters; documentation regions use the unescaped form.
 TOOLSEARCH_LOAD = 'ToolSearch \\"select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage\\"'
+TOOLSEARCH_LITERAL = 'ToolSearch "select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage"'
+LEGACY_WORKAROUND = "run_in_background: false"
+_AGENT_PARAMETER = re.compile(r"(?<![\w-])(?:run_in_background|background)\s*[:=]")
+_AGENT_BACKGROUND_PARAMETER = re.compile(r"(?<![\w-])background\s*[:=]")
+_LEGACY_NOTE_HEADING = "### Legacy non-TTY compatibility note"
 
 # Measured per-file baseline of Agent dispatch sites (13 total).
 EXPECTED_AGENT_SITES = {
@@ -67,6 +76,81 @@ EXPECTED_AGENT_SITES = {
     "commands/plan-mode.md": 1,
     "commands/rePACT.md": 1,
 }
+
+# Each branch has a stable heading and a positive control from its own contract,
+# not a whole-paragraph snapshot shared by every documentation surface.
+_RECOVERY_BRANCHES = (
+    ("A. **Load deferred tools.**", TOOLSEARCH_LITERAL),
+    ("B. **Check the lead session.**", "start the required new session"),
+    ("C. **Compare the call with the live Agent schema.**", "non-interactive `-p`"),
+    ("D. **Confirm named-teammate creation and addressability.**", "ordinary subagent"),
+    ("E. **Apply display-mode inheritance.**", "`--settings`"),
+    ("F. **Use the legacy-only branch only after A–E.**", "single operational legacy note"),
+    ("G. **Relay residual structured content.**", "`SendMessage` reaches `team-lead` or `main`"),
+    ("H. **Stop on messaging failure.**", "team-formation/messaging"),
+)
+
+# Actor-local controls parallel to _RECOVERY_BRANCHES. Each pair is
+# (required markers, role-confusion markers forbidden in that branch).
+_RECOVERY_ROLE_CONTROLS = (
+    ((
+        "The actor missing Task tools runs",
+        "the teammate reports the exact missing tools and load result",
+        "then stops implementation work and idles",
+        "The lead's own successful ToolSearch proves only the lead's tool surface, never the teammate's.",
+    ), ()),
+    ((
+        "The lead checks its own four Task tools",
+        "the lead fixes the session opt-in/settings and must start the required new session",
+        "the teammate does not restart the session.",
+    ), ("the teammate must restart the session", "the teammate restarts the session")),
+    ((
+        "The lead compares its dispatch with the live schema",
+        "The lead corrects `Task(...)`",
+        "the teammate does not rewrite the lead's call.",
+    ), ("the teammate rewrites the lead's call", "the teammate must rewrite the lead's call")),
+    ((
+        "The lead uses platform spawn, roster, and messaging evidence",
+        "the lead corrects team enablement/registration instead.",
+    ), ()),
+    ((
+        "The lead checks the actual teammate display mode",
+        "the lead checks `--tools`/deny rules and environment forwarding through `--settings`",
+        "then corrects launch configuration before replacement; the teammate does not change it.",
+    ), ("the teammate changes launch configuration", "the teammate must change launch configuration")),
+    ((
+        "only the lead follows the single operational legacy note",
+        "the teammate never applies legacy dispatch.",
+    ), ("the teammate applies legacy dispatch", "the teammate must apply legacy dispatch")),
+    (("the teammate relays the teachback/HANDOFF content and the lead writes metadata.",), ()),
+    ((
+        "the teammate cannot relay and stops/idles.",
+        "The lead reports the team-formation/messaging blocker",
+    ), ()),
+)
+
+_ROOT_ROLE_MARKERS = (
+    "the teammate may load deferred tools",
+    "it reports exact evidence and stops implementation work while the lead takes over",
+    "The lead must not treat its own successful tool load as the teammate's",
+    "The lead must check the lead session",
+    "compare the dispatch with the live Agent schema",
+    "confirm registration and addressability",
+    "then apply display-mode inheritance",
+    "Only the lead may use the guarded legacy branch",
+    "the teammate relays the structured content for the lead to write",
+    "the teammate stops and the lead reports the team-formation/messaging blocker",
+)
+
+_STALE_SCHEMA_CLAIMS = (
+    "Prose says a parameter is not available, parameter list shows it: PASS IT.",
+    "Dispatch template and parameter list disagree: that is a FINDING. Report it. Do not select one.",
+)
+
+_STALE_FIRST_SPAWN_CLAIMS = (
+    "the dispatch was malformed",
+    "corrects the dispatch shape, and re-spawns",
+)
 
 # The realigned-name citation every documented raw-read path site must carry
 # within +/-3 lines (same line, or the sentence that explains the segment).
@@ -88,6 +172,90 @@ _COVERED_ADJACENT = {
 
 def _rel(path: Path) -> str:
     return str(path.relative_to(_PLUGIN_ROOT))
+
+
+def _read(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def _section(text: str, start: str, end: str) -> str:
+    """Return a non-empty structural region; missing delimiters fail loudly."""
+    assert text.count(start) == 1, f"expected one {start!r} delimiter"
+    after_start = text.split(start, 1)[1]
+    assert end in after_start, f"missing {end!r} after {start!r}"
+    section = after_start.split(end, 1)[0]
+    assert section.strip(), f"empty region between {start!r} and {end!r}"
+    return section
+
+
+def _current_recovery_regions() -> dict[str, str]:
+    return {
+        "persona": _section(
+            _read(_PERSONA),
+            "#### First-spawn verification (HARD-RULE)",
+            "#### Hook WARN signals are STOP signals",
+        ),
+        "plugin README": _section(
+            _read(_PLUGIN_README),
+            "### Current Agent Team dispatch recovery",
+            _LEGACY_NOTE_HEADING,
+        ),
+        "root README": _section(
+            _read(_ROOT_README),
+            "#### If specialist agents will not spawn",
+            "### Optional dependencies",
+        ),
+        "agent-teams skill": _section(
+            _read(_AGENT_TEAMS_SKILL), "## Dispatch recovery", "## Progress Reporting"
+        ),
+        "completion authority": _section(
+            _read(_COMPLETION_AUTHORITY), "### Dispatch recovery", "### Acceptance —"
+        ),
+        "protocol SSOT": _section(
+            _read(_SSOT), "### Dispatch recovery", "### Acceptance —"
+        ),
+        "runbook diagnostics": _section(
+            _read(_RUNBOOK),
+            "## §3 Current Agent Team dispatch diagnostics",
+            "## §4 Historical evidence",
+        ),
+    }
+
+
+def _recovery_branch_slices(region: str) -> dict[str, str]:
+    positions = []
+    for heading, _ in _RECOVERY_BRANCHES:
+        assert region.count(heading) == 1, f"recovery region lacks {heading}"
+        positions.append(region.index(heading))
+    assert positions == sorted(positions), "recovery branches are out of order"
+    slices = {}
+    for index, (heading, _) in enumerate(_RECOVERY_BRANCHES):
+        start = positions[index] + len(heading)
+        end = positions[index + 1] if index + 1 < len(positions) else len(region)
+        slices[heading] = region[start:end]
+    return slices
+
+
+def _collapsed(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _root_first_spawn_summary(text: str) -> str:
+    return _section(
+        text,
+        "**First-spawn HARD-STOP verification**",
+        "**Structural verification discipline**",
+    )
+
+
+def _runbook_arms() -> dict[str, str]:
+    text = _read(_RUNBOOK)
+    return {
+        "ARM 1": _section(text, "## §1 ARM 1", "## §2 ARM 2"),
+        "ARM 2": _section(
+            text, "## §2 ARM 2", "## §3 Current Agent Team dispatch diagnostics"
+        ),
+    }
 
 
 def _agent_dispatch_sites(text: str) -> list[tuple[int, str]]:
@@ -126,14 +294,13 @@ def _sites_with_citation(lines: list[str], pattern: re.Pattern) -> list[tuple[in
     return out
 
 
-class TestAgentDispatchSitesCarryBothAdditions:
-    """Every dispatch site requests the foreground (tools fixed at spawn) AND
-    teaches the deferred-tool load. Presence/shape pins, not line-%."""
+class TestCurrentAgentDispatchContract:
+    """Current Agent Team calls are named, flagless, and ToolSearch-enabled."""
 
     def _collect(self):
         per_file = {}
         for path in _AGENT_SURFACE_FILES:
-            sites = _agent_dispatch_sites(path.read_text(encoding="utf-8"))
+            sites = _agent_dispatch_sites(_read(path))
             if sites:
                 per_file[_rel(path)] = sites
         return per_file
@@ -142,35 +309,224 @@ class TestAgentDispatchSitesCarryBothAdditions:
         per_file = self._collect()
         assert {k: len(v) for k, v in per_file.items()} == EXPECTED_AGENT_SITES
 
-    def test_every_site_carries_the_foreground_flag(self):
+    def test_inline_and_multiline_sites_are_both_scanned(self):
+        blocks = [
+            block for sites in self._collect().values() for _, block in sites
+        ]
+        assert any("\n" not in block for block in blocks)
+        assert any("\n" in block for block in blocks)
+
+    def test_every_site_omits_legacy_agent_parameters(self):
         for rel, sites in self._collect().items():
             for lineno, block in sites:
-                assert FOREGROUND_FLAG in block, f"{rel}:{lineno} lacks the flag"
+                assert not _AGENT_PARAMETER.search(block), (
+                    f"{rel}:{lineno} carries an Agent execution-mode parameter"
+                )
+
+    def test_every_site_is_named_and_team_scoped(self):
+        for rel, sites in self._collect().items():
+            for lineno, block in sites:
+                assert re.search(r"(?<![\w-])name=", block), (
+                    f"{rel}:{lineno} lacks an explicit name parameter"
+                )
+                assert "team_name=" in block, f"{rel}:{lineno} lacks team_name"
 
     def test_every_site_teaches_the_toolsearch_load(self):
         for rel, sites in self._collect().items():
             for lineno, block in sites:
                 assert TOOLSEARCH_LOAD in block, f"{rel}:{lineno} lacks the load line"
 
+    def test_mandatory_agent_template_is_named_team_scoped_and_flagless(self):
+        region = _section(
+            _read(_PERSONA), "## 11. Agent Teams Dispatch", "**Teachback-Gated Dispatch**"
+        )
+        assert "Specialists are spawned as teammates via `Agent(" in region
+        for marker in (
+            "name=...",
+            'team_name="{team_name}"',
+            "subagent_type=...",
+            "description=...",
+            "prompt=...",
+        ):
+            assert marker in region, f"MANDATORY Agent template lacks {marker!r}"
+        assert not _AGENT_PARAMETER.search(region), (
+            "MANDATORY Agent template carries an execution-mode parameter"
+        )
+
+    def test_schema_disagreement_uses_contract_not_mechanical_key_selection(self):
+        region = _section(
+            _read(_PERSONA), "#### Which signal governs a tool call", "#### First-spawn verification"
+        )
+        for marker in (
+            "parameter is expressible, not required",
+            "never pass it merely because it appears in the schema",
+            "FINDING to diagnose, not a prohibition on choosing",
+            "follow the current named flagless contract",
+            "ordered legacy branch only when every guard matches",
+            "schema presence alone selects neither",
+        ):
+            assert marker in region, f"schema-selection contract lacks {marker!r}"
+        for stale in _STALE_SCHEMA_CLAIMS:
+            assert stale not in region, f"schema-selection contract retains {stale!r}"
+
 
 class TestNoTouchSurfacesSurvive:
     """Pre-decided dispositions (spec §6) pinned affirmatively."""
 
     def test_persona_bash_watcher_flag_survives_exactly_once(self):
-        persona = (_PLUGIN_ROOT / "agents" / "pact-orchestrator.md").read_text(
-            encoding="utf-8")
+        persona = _read(_PERSONA)
         assert persona.count("run_in_background: true") == 1
         # And it is NOT inside any dispatch site (different semantic).
         for _, block in _agent_dispatch_sites(persona):
             assert "run_in_background: true" not in block
 
-    def test_hard_rule_branches_on_the_dispatch_flag_first(self):
-        persona = (_PLUGIN_ROOT / "agents" / "pact-orchestrator.md").read_text(
-            encoding="utf-8")
-        assert (
-            "First check the dispatch you made: if it lacked "
-            "`run_in_background: false`" in persona
+
+class TestCurrentRecoveryContract:
+    """Every recovery surface carries the same ordered, diagnosable tree."""
+
+    def test_branch_markers_are_present_and_ordered(self):
+        for name, region in _current_recovery_regions().items():
+            branches = _recovery_branch_slices(region)
+            for heading, control in _RECOVERY_BRANCHES:
+                assert control in branches[heading], (
+                    f"{name} {heading} lacks its own control {control!r}"
+                )
+
+    def test_recovery_roles_are_actor_local(self):
+        assert len(_RECOVERY_BRANCHES) == len(_RECOVERY_ROLE_CONTROLS), (
+            f"role-control cardinality mismatch: {len(_RECOVERY_BRANCHES)} branches vs "
+            f"{len(_RECOVERY_ROLE_CONTROLS)} control sets"
         )
+        for name, region in _current_recovery_regions().items():
+            branches = _recovery_branch_slices(region)
+            for (heading, _), (required, forbidden) in zip(
+                _RECOVERY_BRANCHES, _RECOVERY_ROLE_CONTROLS
+            ):
+                branch = _collapsed(branches[heading])
+                for marker in required:
+                    assert marker in branch, f"{name} {heading} lacks role marker {marker!r}"
+                for marker in forbidden:
+                    assert marker not in branch, f"{name} {heading} has role confusion {marker!r}"
+
+    def test_root_first_spawn_summary_uses_ordered_recovery(self):
+        summary = _root_first_spawn_summary(_read(_ROOT_README))
+        ordered = (
+            "load deferred tools",
+            "check the lead session",
+            "live Agent schema",
+            "named, interactive teammate",
+            "registration and addressability",
+            "display-mode inheritance",
+            "guarded legacy branch",
+            "`SendMessage` reaches the lead",
+            "messaging also fails",
+        )
+        positions = []
+        for marker in ordered:
+            assert marker in summary, f"first-spawn summary lacks {marker!r}"
+            positions.append(summary.index(marker))
+        assert positions == sorted(positions), "first-spawn recovery is out of order"
+        for stale in _STALE_FIRST_SPAWN_CLAIMS:
+            assert stale not in summary, f"first-spawn summary retains {stale!r}"
+
+    def test_root_first_spawn_summary_assigns_actor_roles(self):
+        summary = _collapsed(_root_first_spawn_summary(_read(_ROOT_README)))
+        positions = []
+        for marker in _ROOT_ROLE_MARKERS:
+            assert marker in summary, f"first-spawn summary lacks role marker {marker!r}"
+            positions.append(summary.index(marker))
+        assert positions == sorted(positions), "first-spawn actor roles are out of order"
+        for _, forbidden in _RECOVERY_ROLE_CONTROLS:
+            for marker in forbidden:
+                assert marker not in summary, f"first-spawn summary has role confusion {marker!r}"
+
+    def test_current_regions_exclude_legacy_keys_and_flag_respawn(self):
+        for name, region in _current_recovery_regions().items():
+            assert "run_in_background" not in region, f"{name} retains a legacy key"
+            assert not _AGENT_BACKGROUND_PARAMETER.search(region), (
+                f"{name} permits an Agent background replacement"
+            )
+            assert "with the flag" not in region.lower(), (
+                f"{name} retains flag-first respawn guidance"
+            )
+
+
+class TestLegacyBoundaries:
+    """The only operational exception is ordered, scoped, and non-current."""
+
+    def test_plugin_legacy_note_has_the_ordered_guard(self):
+        note = _section(_read(_PLUGIN_README), _LEGACY_NOTE_HEADING, "## What You Get")
+        ordered = (
+            "1. Confirm that the runtime is an older non-TTY environment",
+            "2. Complete current recovery branches A–E.",
+            "3. Confirm that the live Agent schema exposes `run_in_background`.",
+            f"4. Only then, the measured #1658 `{LEGACY_WORKAROUND}` workaround MAY be used.",
+            "5. Verify the result with a post-spawn `TaskList` check",
+        )
+        positions = []
+        for marker in ordered:
+            assert marker in note, f"legacy guard lacks {marker!r}"
+            positions.append(note.index(marker))
+        assert positions == sorted(positions)
+        assert "full teachback → work → HANDOFF → completion ceremony" in note
+        assert "expressibility, not necessity" in note
+        assert "not current dispatch guidance" in note
+        assert "neither satisfies this branch nor proves lifecycle support or justifies respawn" in note
+        assert note.count(LEGACY_WORKAROUND) == 1
+        assert not _AGENT_BACKGROUND_PARAMETER.search(note)
+
+    def test_plugin_readme_outside_legacy_note_has_no_agent_key(self):
+        text = _read(_PLUGIN_README)
+        _section(text, _LEGACY_NOTE_HEADING, "## What You Get")
+        current = text.split(_LEGACY_NOTE_HEADING, 1)[0] + text.split("## What You Get", 1)[1]
+        assert "run_in_background" not in current
+        assert not _AGENT_BACKGROUND_PARAMETER.search(current)
+
+    def test_root_readme_has_no_legacy_region_or_agent_key(self):
+        root = _read(_ROOT_README)
+        assert _LEGACY_NOTE_HEADING not in root
+        assert "expressibility, not necessity" not in root
+        assert "run_in_background" not in root
+        assert not _AGENT_BACKGROUND_PARAMETER.search(root)
+
+    def test_runbook_history_is_dated_and_not_current_guidance(self):
+        history = _section(
+            _read(_RUNBOOK), "## §4 Historical evidence", "## §5 Desktop arm"
+        )
+        for marker in (
+            "#1658",
+            "2.1.303",
+            LEGACY_WORKAROUND,
+            "not current dispatch guidance",
+        ):
+            assert marker in history, f"historical region lacks {marker!r}"
+        assert not _AGENT_BACKGROUND_PARAMETER.search(history)
+
+
+class TestCurrentProbeArms:
+    """Current ARM slices are flagless and retain their positive controls."""
+
+    def test_current_arms_omit_legacy_parameters_and_keep_controls(self):
+        for name, arm in _runbook_arms().items():
+            assert "run_in_background" not in arm, f"{name} retains a legacy key"
+            assert not _AGENT_BACKGROUND_PARAMETER.search(arm), (
+                f"{name} permits an Agent background replacement"
+            )
+            for marker in (
+                TOOLSEARCH_LITERAL,
+                "TaskList",
+                "`name`",
+                "`team_name`",
+                "live Agent schema",
+                "claude --version",
+                "matched positive control",
+            ):
+                assert marker in arm, f"{name} lacks control {marker!r}"
+
+    def test_cloud_arm_keeps_the_full_ceremony(self):
+        arm = _runbook_arms()["ARM 2"]
+        for marker in ("full teachback", "`metadata.handoff`", "lead accepts and completes"):
+            assert marker in arm, f"ARM 2 lacks ceremony marker {marker!r}"
 
 
 class TestDocPathSitesCiteTheRealignedName:
@@ -259,20 +615,3 @@ class TestCollapsedWaitWording:
         skill = (_PLUGIN_ROOT / "skills" / "pact-teachback" / "SKILL.md").read_text(
             encoding="utf-8")
         assert "If `team-lead` is unreachable, send the notify to `main`." in skill
-
-
-class TestRelayFallbackParagraph:
-    """Relay is documented (skill + protocol), tied to the residual case, and
-    is not built as hook logic."""
-
-    def test_agent_teams_relay_paragraph_present(self):
-        skill = (_PLUGIN_ROOT / "skills" / "pact-agent-teams" / "SKILL.md").read_text(
-            encoding="utf-8")
-        assert "Relay fallback (Task tools absent despite a foreground dispatch)." in skill
-        assert "sanctioned fallback" in skill
-
-    def test_completion_authority_relay_paragraph_present(self):
-        proto = (_PLUGIN_ROOT / "protocols" / "pact-completion-authority.md").read_text(
-            encoding="utf-8")
-        assert "Relay fallback (Task tools absent despite a foreground dispatch)." in proto
-        assert "No hook suppression logic and no relay marker exist" in proto

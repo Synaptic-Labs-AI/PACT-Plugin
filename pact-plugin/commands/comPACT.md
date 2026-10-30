@@ -300,7 +300,6 @@ Agent(
   team_name="{team_name}",
   subagent_type="pact-{specialist-type}",
   description="Spawn {specialist-name} specialist",
-  run_in_background: false,
   prompt="YOUR PACT ROLE: teammate ({specialist-name}).\n\nYou are joining team {team_name}. Send messages for your lead to `{lead_address}`. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. If the Task tools are deferred, load them with ToolSearch \"select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage\". Then check `TaskList` for tasks assigned to you."
 )
 ```
@@ -369,7 +368,6 @@ Agent(
   team_name="{team_name}",
   subagent_type="pact-{specialist-type}",
   description="Spawn {specialist-name} specialist",
-  run_in_background: false,
   prompt="YOUR PACT ROLE: teammate ({specialist-name}).\n\nYou are joining team {team_name}. Send messages for your lead to `{lead_address}`. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. If the Task tools are deferred, load them with ToolSearch \"select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage\". Then check `TaskList` for tasks assigned to you."
 )
 ```
