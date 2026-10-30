@@ -75,6 +75,22 @@ case '{true_or_false}' in
       --type session_consolidated --session-dir '{session_dir}' --stdin <<'JSON'
 {"pass": 2, "task_count": {task_count}, "memories_saved": {memories_saved}}
 JSON
+    python3 -c '
+import json
+import sys
+from pathlib import Path
+
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"session_consolidated","pass":2,"task_count":{task_count},"memories_saved":{memories_saved}},"nonempty":[],"absent":[]}
+JSON
     ;;
   false)
     ;;  # intentional no-op
@@ -86,6 +102,22 @@ esac
 python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type session_paused --session-dir '{session_dir}' --stdin <<'JSON'
 {"pr_number": {pr_number}, "pr_url": "{pr_url}", "branch": "{branch}", "worktree_path": "{worktree_path}", "consolidation_completed": {true_or_false}, "team_name": "{team_name}"}
+JSON
+python3 -c '
+import json
+import sys
+from pathlib import Path
+
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"session_paused","pr_number":{pr_number},"consolidation_completed":{true_or_false},"team_name":"{team_name}"},"nonempty":[],"absent":[]}
 JSON
 ```
 

@@ -250,6 +250,22 @@ The teachback gate is lightweight ("understanding-confirm" with no implementatio
      --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
    {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
 JSON
+   python3 -c '
+import json
+import sys
+from pathlib import Path
+
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"variety_assessed","task_id":"{taskId}","scope":"dispatch"},"nonempty":[],"absent":[]}
+JSON
    ```
 6. Spawn the consultant with the canonical dispatch form:
 
@@ -376,6 +392,22 @@ trap 'rc=$?; echo "[JOURNAL WRITE FAILED] plan-mode.md (bash line $LINENO): \"${
 SJ="{plugin_root}/hooks/shared/session_journal.py"
 python3 "$SJ" write --type artifact_paths --session-dir '{session_dir}' --stdin <<'JSON'
 {"workflow": "plan-mode", "feature": "{feature-slug}", "paths": ["{absolute_plan_doc_path}"]}
+JSON
+python3 -c '
+import json
+import sys
+from pathlib import Path
+
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"artifact_paths","workflow":"plan-mode"},"nonempty":["feature"],"absent":[]}
 JSON
 ```
 

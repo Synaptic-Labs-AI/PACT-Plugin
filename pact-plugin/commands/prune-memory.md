@@ -412,6 +412,25 @@ python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
   --type pin_prune_skipped --session-dir '{session_dir}' --stdin <<'JSON'
 {"outcome": "cancelled", "pin_count": 12, "age_distribution": {"oldest": 60, "newest": 3, "median": 33}}
 JSON
+if ! python3 -c '
+import json
+import sys
+from pathlib import Path
+
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"pin_prune_skipped","outcome":"cancelled","pin_count":12},"nonempty":[],"absent":[]}
+JSON
+then
+  echo "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing" >&2
+fi
 ```
 
 The heredoc delimiter is quoted (`<<'JSON'`) so bash performs no expansion
@@ -432,6 +451,25 @@ python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
   --type pin_prune_skipped --session-dir '{session_dir}' --stdin <<'JSON'
 {"outcome": "no_candidates", "pin_count": 0, "age_distribution": {}}
 JSON
+if ! python3 -c '
+import json
+import sys
+from pathlib import Path
+
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"pin_prune_skipped","outcome":"no_candidates","pin_count":0},"nonempty":[],"absent":[]}
+JSON
+then
+  echo "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing" >&2
+fi
 ```
 
 `unknown_state`, where the CLI could not parse CLAUDE.md, so no age is known:
@@ -441,6 +479,25 @@ python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
   --type pin_prune_skipped --session-dir '{session_dir}' --stdin <<'JSON'
 {"outcome": "unknown_state", "pin_count": 12, "age_distribution": {}, "reason": "Pin slots: unknown (CLAUDE.md unparseable)"}
 JSON
+if ! python3 -c '
+import json
+import sys
+from pathlib import Path
+
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"pin_prune_skipped","outcome":"unknown_state","pin_count":12},"nonempty":[],"absent":[]}
+JSON
+then
+  echo "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing" >&2
+fi
 ```
 
 `archive_refused`, where the archive definitively failed and the pin survives:
@@ -450,6 +507,25 @@ python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
   --type pin_prune_skipped --session-dir '{session_dir}' --stdin <<'JSON'
 {"outcome": "archive_refused", "pin_count": 12, "age_distribution": {"oldest": 60, "newest": 3, "median": 33}, "reason": "memory CLI timed out"}
 JSON
+if ! python3 -c '
+import json
+import sys
+from pathlib import Path
+
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"pin_prune_skipped","outcome":"archive_refused","pin_count":12},"nonempty":[],"absent":[]}
+JSON
+then
+  echo "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing" >&2
+fi
 ```
 
 `delete_unsafe`, where the archive SUCCEEDED and only the automatic removal was
@@ -461,6 +537,25 @@ python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
   --type pin_prune_skipped --session-dir '{session_dir}' --stdin <<'JSON'
 {"outcome": "delete_unsafe", "pin_count": 12, "age_distribution": {"oldest": 60, "newest": 3, "median": 33}, "reason": "block occurs 2 times; removal would be ambiguous"}
 JSON
+if ! python3 -c '
+import json
+import sys
+from pathlib import Path
+
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"pin_prune_skipped","outcome":"delete_unsafe","pin_count":12},"nonempty":[],"absent":[]}
+JSON
+then
+  echo "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing" >&2
+fi
 ```
 
 `unverified_eviction` is emitted on the escape-hatch path, where the pin was
@@ -471,6 +566,25 @@ python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
   --type pin_prune_skipped --session-dir '{session_dir}' --stdin <<'JSON'
 {"outcome": "unverified_eviction", "pin_count": 12, "age_distribution": {"oldest": 60, "newest": 3, "median": 33}, "reason": "curator acknowledged the pin block was captured elsewhere"}
 JSON
+if ! python3 -c '
+import json
+import sys
+from pathlib import Path
+
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"pin_prune_skipped","outcome":"unverified_eviction","pin_count":12},"nonempty":[],"absent":[]}
+JSON
+then
+  echo "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing" >&2
+fi
 ```
 
 The success event is emitted at Step 5, once the removal Edit has landed:
@@ -482,6 +596,25 @@ python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
   --type pin_pruned --session-dir '{session_dir}' --stdin <<'JSON'
 {"heading": "First Pin", "memory_id": "0f3a9c1d7e2b48f6a5c04d8e1b7f2a93", "pin_count": 12}
 JSON
+if ! python3 -c '
+import json
+import sys
+from pathlib import Path
+
+spec = json.load(sys.stdin)
+path = Path(spec["session_dir"]) / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+bad = [key for key, want in spec["exact"].items() if type(event.get(key)) is not type(want) or event.get(key) != want]
+bad += [key for key in spec["nonempty"] if not event.get(key)]
+bad += [key for key in spec["absent"] if key in event]
+if bad:
+    raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{"type":"pin_pruned","memory_id":"0f3a9c1d7e2b48f6a5c04d8e1b7f2a93","pin_count":12},"nonempty":[],"absent":[]}
+JSON
+then
+  echo "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing" >&2
+fi
 ```
 
 Two things in that payload are deliberate and are the ones most likely to be

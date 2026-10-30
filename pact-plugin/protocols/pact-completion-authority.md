@@ -121,8 +121,8 @@ have acted on it yet — apply the redundant-confirm procedure:
 
 **Non-goal — no synchronous hook-based detection.** Do not attempt to close this race with a
 synchronous hook, and reject future proposals to reintroduce one: `SendMessage`
-fires no PreToolUse/PostToolUse event; inbox files are written asynchronously on
-delivery; TeammateIdle notifications fire at turn-end regardless of what has just
+does fire `PreToolUse`; `PostToolUse` remains unmeasured, not refuted; inbox
+files are written asynchronously on delivery; TeammateIdle notifications fire at turn-end regardless of what has just
 landed in the recipient's inbox. Synchronous wake/send detection is therefore
 dead-by-construction and historically produced near-100% false positives. The
 mitigation layer is: redundant-by-design wake handling on both sides (this rule

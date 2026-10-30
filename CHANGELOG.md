@@ -18,6 +18,22 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
+## v4.8.16: correct SendMessage hook guidance and verify journal writes (issue #1684)
+
+### Summary
+
+The wake guidance now states that `SendMessage` fires `PreToolUse`, keeps `PostToolUse` explicitly unmeasured, and preserves the asynchronous-inbox prohibition on synchronous wake detection. Every command-template session journal write now has an executable physical-last-line read-back, backed by dynamic structural, mutation, and real-journal coverage.
+
+### What landed
+
+- Corrected the `SendMessage` hook claim in the completion-authority protocol and its byte-mirrored consolidated region, plus the matching stale hook comment. Runtime and schema behavior are unchanged.
+- Added immediate quoted-Python read-backs to all 50 journal-write templates across ten command files. Each checks the physical last event's type and stable fields; prune-memory keeps its loud, nonblocking telemetry behavior.
+- Added dynamic per-site parsing, exact census reconciliation, mutation controls, and temporary-journal behavioral fixtures, plus positive and retired-claim protocol pins.
+
+### Why
+
+The old hook claim was false for `PreToolUse`, while a type-filtered journal read can certify an older same-type event. The corrected instructions and per-write physical-last-line checks make both contracts durable without adding a runtime helper or changing the journal interface.
+
 ## v4.8.15: pact-memory search default 20, dash stdin sentinel, live dedup search (issue #1647)
 
 ### Summary

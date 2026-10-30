@@ -146,7 +146,7 @@ def test_documented_payload_validates_against_the_shipped_schema(
     pairs = []
     for block in blocks:
         types = re.findall(r"--type\s+(\S+)", block)
-        payloads = re.findall(r"<<'JSON'\n(.*?)\nJSON", block, re.DOTALL)
+        payloads = re.findall(r"--stdin\s+<<'JSON'\n(.*?)\nJSON", block, re.DOTALL)
         if not types and not payloads:
             continue  # a fence that emits nothing (e.g. a plain CLI call)
         assert len(types) == 1 and len(payloads) == 1, (
@@ -174,6 +174,30 @@ def test_documented_payload_validates_against_the_shipped_schema(
         assert ok, (
             f"the payload prune-memory.md documents for {event_type!r} does "
             f"NOT validate against the shipped schema: {message}"
+        )
+
+
+def test_payload_selection_ignores_readback_but_not_duplicate_writes(
+    journal, pin_event_types
+):
+    write = """python3 "{plugin_root}/hooks/shared/session_journal.py" write \
+  --type pin_prune_skipped --session-dir '{session_dir}' --stdin <<'JSON'
+{"outcome":"cancelled","pin_count":12,"age_distribution":{}}
+JSON
+"""
+    readback = """python3 -c '
+import json
+' <<'JSON'
+{"session_dir":"{session_dir}","exact":{},"nonempty":[],"absent":[]}
+JSON
+"""
+    test_documented_payload_validates_against_the_shipped_schema(
+        journal, f"```bash\n{write}{readback}```\n", pin_event_types
+    )
+
+    with pytest.raises(AssertionError, match="exactly one"):
+        test_documented_payload_validates_against_the_shipped_schema(
+            journal, f"```bash\n{write}{write}```\n", pin_event_types
         )
 
 

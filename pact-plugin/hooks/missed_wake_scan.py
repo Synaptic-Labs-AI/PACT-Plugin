@@ -18,9 +18,9 @@ inject context into the turn the lead is about to take) and SessionStart covers
 cross-session recovery. (The earlier Stop carrier fired at turn-END and could
 only suppressOutput — it recorded but never surfaced; that was the B1 gap.)
 
-WHY DEFERRED / DURATION-KEYED: SendMessage fires no hookable event and the inbox
-is written async-on-delivery, so a synchronous wake-confirmation read is
-dead-by-construction (the retired completion_no_paired_send was ~100%
+WHY DEFERRED / DURATION-KEYED: SendMessage fires PreToolUse; PostToolUse is
+unmeasured. The inbox is written async-on-delivery, so a synchronous
+wake-confirmation read is dead-by-construction (the retired completion_no_paired_send was ~100%
 false-positive for exactly this). This alarm instead keys on the DURATION of the
 wait via wait_stale() (the existing 30-min threshold) — by which time a wake, if
 sent, would already have landed.
