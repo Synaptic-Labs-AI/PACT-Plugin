@@ -75,6 +75,17 @@ case '{true_or_false}' in
       --type session_consolidated --session-dir '{session_dir}' --stdin <<'JSON'
 {"pass": 2, "task_count": {task_count}, "memories_saved": {memories_saved}}
 JSON
+    python3 - <<'PY'
+    import json
+    from pathlib import Path
+
+    path = Path("{session_dir}") / "session-journal.jsonl"
+    event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+    assert event.get("type") == "session_consolidated", event
+    assert event.get("pass") == 2, event
+    assert event.get("task_count") == {task_count}, event
+    assert event.get("memories_saved") == {memories_saved}, event
+PY
     ;;
   false)
     ;;  # intentional no-op
@@ -87,6 +98,17 @@ python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type session_paused --session-dir '{session_dir}' --stdin <<'JSON'
 {"pr_number": {pr_number}, "pr_url": "{pr_url}", "branch": "{branch}", "worktree_path": "{worktree_path}", "consolidation_completed": {true_or_false}, "team_name": "{team_name}"}
 JSON
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+path = Path("{session_dir}") / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+assert event.get("type") == "session_paused", event
+assert event.get("pr_number") == {pr_number}, event
+assert str(event.get("consolidation_completed")).lower() == "{true_or_false}", event
+assert str(event.get("team_name")) == "{team_name}", event
+PY
 ```
 
 > ⚠️ **Heredoc-stdin contract**: This write uses `--stdin <<'JSON' ... JSON` (quoted delimiter). The quoted delimiter disables bash variable expansion, so an apostrophe in `{branch}` (e.g., `feat/o'connor-fix`) or in `{pr_url}` cannot close the shell quote and silently drop the event. The orchestrator must still produce JSON-valid string content (escape `\"`, `\\`, and control chars when constructing the body).

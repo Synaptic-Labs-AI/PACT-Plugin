@@ -43,6 +43,16 @@ Create a simpler Task hierarchy than full orchestrate:
 >   --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
 > {"task_id": "{feature_task_id}", "variety": {"total": N}}
 > JSON
+> python3 - <<'PY'
+> import json
+> from pathlib import Path
+>
+> path = Path("{session_dir}") / "session-journal.jsonl"
+> event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+> assert event.get("type") == "variety_assessed", event
+> assert str(event.get("task_id")) == "{feature_task_id}", event
+> assert "scope" not in event, event
+> PY
 > ```
 
 **Example structure:**
@@ -279,6 +289,16 @@ When the task contains multiple independent items, invoke multiple specialists t
      --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
    {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
 JSON
+   python3 - <<'PY'
+   import json
+   from pathlib import Path
+
+   path = Path("{session_dir}") / "session-journal.jsonl"
+   event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+   assert event.get("type") == "variety_assessed", event
+   assert str(event.get("task_id")) == "{taskId}", event
+   assert event.get("scope") == "dispatch", event
+PY
    ```
    Then `agent_dispatch`:
    ```bash
@@ -288,6 +308,17 @@ JSON
      --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
    {"agent": "{specialist-name}", "task_id": "{taskId}", "phase": "CODE", "scope": ["{assigned_paths}"]}
 JSON
+   python3 - <<'PY'
+   import json
+   from pathlib import Path
+
+   path = Path("{session_dir}") / "session-journal.jsonl"
+   event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+   assert event.get("type") == "agent_dispatch", event
+   assert str(event.get("task_id")) == "{taskId}", event
+   assert str(event.get("agent")) == "{specialist-name}", event
+   assert event.get("phase") == "CODE", event
+PY
    ```
 
 > ⚠️ **Heredoc-stdin contract**: All journal-event writes in this command file use `--stdin <<'JSON' ... JSON` (quoted delimiter, closing `JSON` on its own line at column 0 — bash heredocs do NOT strip leading whitespace from the delimiter line unless `<<-` with TABS is used). The quoted delimiter disables bash variable expansion so apostrophes, quotes, and backticks in template-substituted values (e.g., `{first_line}` from a commit message) pass through verbatim. The orchestrator must still produce JSON-valid string content (escape `\"`, `\\`, and control chars).
@@ -350,6 +381,16 @@ Use a single specialist agent only when:
      --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
    {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
 JSON
+   python3 - <<'PY'
+   import json
+   from pathlib import Path
+
+   path = Path("{session_dir}") / "session-journal.jsonl"
+   event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+   assert event.get("type") == "variety_assessed", event
+   assert str(event.get("task_id")) == "{taskId}", event
+   assert event.get("scope") == "dispatch", event
+PY
    ```
    Then `agent_dispatch`:
    ```bash
@@ -359,6 +400,17 @@ JSON
      --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
    {"agent": "{specialist-name}", "task_id": "{taskId}", "phase": "CODE", "scope": []}
 JSON
+   python3 - <<'PY'
+   import json
+   from pathlib import Path
+
+   path = Path("{session_dir}") / "session-journal.jsonl"
+   event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+   assert event.get("type") == "agent_dispatch", event
+   assert str(event.get("task_id")) == "{taskId}", event
+   assert str(event.get("agent")) == "{specialist-name}", event
+   assert event.get("phase") == "CODE", event
+PY
    ```
 6. Spawn the specialist with the canonical dispatch form. The `prompt` MUST lead with the `YOUR PACT ROLE: teammate ({specialist-name})` marker on its own line (team protocol + teachback content arrive via spawn-time skills frontmatter; the dispatch prompt additionally carries the registration first-action directive):
 
@@ -430,6 +482,16 @@ When dispatching an auditor, create its task with `metadata: {"completion_type":
     --type commit --session-dir '{session_dir}' --stdin <<'JSON'
   {"sha": "{short_sha}", "message": "{first_line}", "phase": "CODE"}
 JSON
+  python3 - <<'PY'
+  import json
+  from pathlib import Path
+
+  path = Path("{session_dir}") / "session-journal.jsonl"
+  event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+  assert event.get("type") == "commit", event
+  assert str(event.get("sha")) == "{short_sha}", event
+  assert event.get("phase") == "CODE", event
+PY
   ```
 - [ ] **Calibration** — The secretary gathers calibration metrics during HANDOFF processing. When asked, provide a brief difficulty assessment: was actual difficulty higher, lower, or about the same as predicted? Which dimensions surprised you?
 - [ ] **Verify agent task completion**: On receiving each HANDOFF summary via `SendMessage`, check the agent's task status via `TaskList`. If still "in_progress", mark it completed: `TaskUpdate(taskId, status="completed")`.
@@ -452,6 +514,16 @@ JSON
     --type phase_transition --session-dir '{session_dir}' --stdin <<'JSON'
   {"phase": "CODE", "status": "completed", "skip_reason": "", "metadata": {"workflow": "comPACT"}}
 JSON
+  python3 - <<'PY'
+  import json
+  from pathlib import Path
+
+  path = Path("{session_dir}") / "session-journal.jsonl"
+  event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+  assert event.get("type") == "phase_transition", event
+  assert event.get("phase") == "CODE", event
+  assert event.get("status") == "completed", event
+PY
   ```
 - [ ] **`TaskUpdate`**: Feature task status = "completed"
 

@@ -42,6 +42,15 @@ python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type session_refresh_consumed --session-dir '{session_dir}' --stdin <<'JSON'
 {"refresh_ts": "{refresh_ts}"}
 JSON
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+path = Path("{session_dir}") / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+assert event.get("type") == "session_refresh_consumed", event
+assert str(event.get("refresh_ts")) == "{refresh_ts}", event
+PY
 ```
 
 If the prompt said `refresh_ts=UNAVAILABLE`, skip the write (the prompt may re-surface once; its staleness downgrade bounds the repetition). Never write a consumption event when no refresh prompt surfaced.
@@ -53,6 +62,15 @@ python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type session_pause_consumed --session-dir '{session_dir}' --stdin <<'JSON'
 {"pause_ts": "{pause_ts}"}
 JSON
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+path = Path("{session_dir}") / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+assert event.get("type") == "session_pause_consumed", event
+assert str(event.get("pause_ts")) == "{pause_ts}", event
+PY
 ```
 
 Three conditions apply: skip the write if the prompt said `pause_ts=UNAVAILABLE`, never write a consumption event when no paused prompt surfaced, and expect the event in the NEW session's journal on a quit-then-new-session resume. Write it for EVERY paused prompt that surfaces — a stale one, one reporting a merged or closed PR, one mentioned only as the losing claim beside a newer refreshed one, and **one the user answers by starting fresh rather than resuming**. Surfacing is the whole trigger. Do NOT gate this write on the user choosing to continue the paused workflow: that choice decides your next-step dispatch and decides nothing about this write.

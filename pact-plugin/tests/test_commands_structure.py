@@ -9,7 +9,12 @@ Tests cover:
 5. Commands reference $ARGUMENTS where appropriate
 6. AskUserQuestion option labels and counts in wrap-up.md and peer-review.md
 """
+import json
 import re
+import subprocess
+import sys
+from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -928,20 +933,21 @@ class TestPerLoopDispatchSites:
     def _site_block(text: str, lead_in_line: int) -> str:
         """Return the block of lines following the lead-in.
 
-        Reads up to 55 lines after the lead-in (1-based). The canonical
+        Reads up to 80 lines after the lead-in (1-based). The canonical
         Teachback-Gated Dispatch sequence fits comfortably within that
         window across all observed sites; oversized windows that span into
         adjacent sections produce false positives, undersized windows miss
-        steps. 55 covers the widest site (comPACT's concurrent-dispatch
+        steps. 80 covers the widest site (comPACT's concurrent-dispatch
         loop, whose per-dispatch journal-events step — the variety_assessed
         mirror plus agent_dispatch — sits between the wiring writes and
-        the spawn) with margin; the next content past the spawn block
-        carries no TaskCreate/TaskUpdate/Agent( tokens, so the wider
-        window cannot inflate the counts.
+        the spawn) with margin, including both physical-last-line read-backs.
+        The next content past the spawn block carries no
+        TaskCreate/TaskUpdate/Agent( tokens, so the wider window cannot
+        inflate the counts.
         """
         lines = text.splitlines()
         start = lead_in_line  # 0-based index for the line AFTER the lead-in (lead_in_line is 1-based).
-        end = min(len(lines), start + 55)
+        end = min(len(lines), start + 80)
         return "\n".join(lines[start:end])
 
     def test_sites_accounts_for_every_dispatch_lead_in_in_the_tree(self):
@@ -1911,3 +1917,686 @@ class TestNextRoutesTheBacklogToolsActualExitCodes:
             f"branch headers cover {sorted(headers)} but the tool's non-success "
             f"codes are {sorted(defined - {backlog._EXIT_OK})}"
         )
+
+
+# =============================================================================
+# Journal-write physical-last-line read-back structure
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class JournalWriteSite:
+    filename: str
+    ordinal: int
+    line: int
+    event_type: str
+    segment: str
+
+    @property
+    def site_id(self) -> str:
+        return f"{self.filename}#{self.ordinal}"
+
+
+def _journal_line(line: str) -> str:
+    """Normalize indentation and an optional markdown blockquote for analysis."""
+    stripped = line.strip()
+    if stripped.startswith(">"):
+        stripped = stripped[1:].lstrip()
+    return stripped
+
+
+def _journal_shell_regions(text: str):
+    """Yield (start, end, lines) for shell fences; non-shell fences earn no credit."""
+    lines = text.splitlines()
+    active = None
+    for index, line in enumerate(lines):
+        marker = re.match(r"^(```|~~~)\s*([A-Za-z0-9_-]*)\s*$", _journal_line(line))
+        if marker is None:
+            continue
+        fence, language = marker.groups()
+        if active is None:
+            active = (fence, language, index + 1)
+            continue
+        open_fence, open_language, start = active
+        if fence == open_fence and not language:
+            if open_language.lower() in ("", "bash", "sh", "shell", "zsh"):
+                yield start, index, lines
+            active = None
+
+
+def _is_journal_write_candidate(line: str) -> bool:
+    """Broad anchored discovery: executable writes only, never prose or reads."""
+    stripped = _journal_line(line)
+    return bool(
+        re.match(r"^python3\s+", stripped)
+        and ("session_journal.py" in stripped or '"$SJ"' in stripped)
+        and re.search(r"\bwrite(?:\s|\\)", stripped)
+    )
+
+
+def _parse_journal_sites(filename: str, text: str) -> list[JournalWriteSite]:
+    """Strictly parse writes and reconcile them with the broad candidate census."""
+    parsed = []
+    broad_lines = set()
+    strict_lines = set()
+    for region_start, region_end, lines in _journal_shell_regions(text):
+        index = region_start
+        while index < region_end:
+            line = lines[index]
+            if not _is_journal_write_candidate(line):
+                index += 1
+                continue
+            start = index
+            broad_lines.add(start + 1)
+            header = []
+            heredoc_open = None
+            for cursor in range(start, min(start + 8, region_end)):
+                header.append(_journal_line(lines[cursor]))
+                if "--stdin <<'JSON'" in " ".join(header):
+                    heredoc_open = cursor
+                    break
+            if heredoc_open is None:
+                raise AssertionError(
+                    f"{filename}:{start + 1}: unrecognized journal-write/heredoc shape"
+                )
+            type_match = re.search(r"--type\s+([A-Za-z0-9_-]+)", " ".join(header))
+            if type_match is None:
+                raise AssertionError(f"{filename}:{start + 1}: missing journal event type")
+            heredoc_close = None
+            for cursor in range(heredoc_open + 1, region_end):
+                if _journal_line(lines[cursor]) == "JSON":
+                    heredoc_close = cursor
+                    break
+            if heredoc_close is None:
+                raise AssertionError(f"{filename}:{start + 1}: unclosed JSON heredoc")
+            segment_end = heredoc_close + 1
+            while segment_end < region_end and not _is_journal_write_candidate(
+                lines[segment_end]
+            ):
+                segment_end += 1
+            parsed.append(
+                (
+                    start + 1,
+                    type_match.group(1),
+                    "\n".join(lines[heredoc_close + 1:segment_end]),
+                )
+            )
+            strict_lines.add(start + 1)
+            index = segment_end
+    if broad_lines != strict_lines:
+        raise AssertionError(
+            f"{filename}: broad/strict journal-write census mismatch: "
+            f"broad={sorted(broad_lines)}, strict={sorted(strict_lines)}"
+        )
+    return [
+        JournalWriteSite(filename, ordinal, line, event_type, segment)
+        for ordinal, (line, event_type, segment) in enumerate(parsed, start=1)
+    ]
+
+
+def _expect(event_type, *assertions):
+    return event_type, assertions
+
+
+# Test-side SSOT for the architecture's exact (filename, ordinal) assertion matrix.
+JOURNAL_READBACK_MATRIX = {
+    ("bootstrap.md", 1): _expect("session_refresh_consumed", 'str(event.get("refresh_ts")) == "{refresh_ts}"'),
+    ("bootstrap.md", 2): _expect("session_pause_consumed", 'str(event.get("pause_ts")) == "{pause_ts}"'),
+    ("comPACT.md", 1): _expect("variety_assessed", 'str(event.get("task_id")) == "{feature_task_id}"', '"scope" not in event'),
+    ("comPACT.md", 2): _expect("variety_assessed", 'str(event.get("task_id")) == "{taskId}"', 'event.get("scope") == "dispatch"'),
+    ("comPACT.md", 3): _expect("agent_dispatch", 'str(event.get("task_id")) == "{taskId}"', 'str(event.get("agent")) == "{specialist-name}"', 'event.get("phase") == "CODE"'),
+    ("comPACT.md", 4): _expect("variety_assessed", 'str(event.get("task_id")) == "{taskId}"', 'event.get("scope") == "dispatch"'),
+    ("comPACT.md", 5): _expect("agent_dispatch", 'str(event.get("task_id")) == "{taskId}"', 'str(event.get("agent")) == "{specialist-name}"', 'event.get("phase") == "CODE"'),
+    ("comPACT.md", 6): _expect("commit", 'str(event.get("sha")) == "{short_sha}"', 'event.get("phase") == "CODE"'),
+    ("comPACT.md", 7): _expect("phase_transition", 'event.get("phase") == "CODE"', 'event.get("status") == "completed"'),
+    ("orchestrate.md", 1): _expect("variety_assessed", 'str(event.get("task_id")) == "{feature_task_id}"', '"scope" not in event'),
+    ("orchestrate.md", 2): _expect("phase_transition", 'str(event.get("phase")) == "{PHASE}"', 'event.get("status") == "started"'),
+    ("orchestrate.md", 3): _expect("phase_transition", 'str(event.get("phase")) == "{PHASE}"', 'event.get("status") == "completed"'),
+    ("orchestrate.md", 4): _expect("checkpoint", 'str(event.get("phase")) == "{PHASE}"', 'event.get("safe_to_retry") is True'),
+    ("orchestrate.md", 5): _expect("phase_transition", 'str(event.get("phase")) == "{PHASE}"', 'event.get("status") == "skipped"'),
+    ("orchestrate.md", 6): _expect("variety_assessed", 'str(event.get("task_id")) == "{taskId}"', 'event.get("scope") == "dispatch"'),
+    ("orchestrate.md", 7): _expect("agent_dispatch", 'str(event.get("task_id")) == "{taskId}"', 'event.get("agent") == "preparer"', 'event.get("phase") == "PREPARE"'),
+    ("orchestrate.md", 8): _expect("artifact_paths", 'event.get("workflow") == "prepare"', 'bool(event.get("feature"))', 'str(event.get("task_id")) == "{prepare_task_id}"'),
+    ("orchestrate.md", 9): _expect("variety_assessed", 'str(event.get("task_id")) == "{taskId}"', 'event.get("scope") == "dispatch"'),
+    ("orchestrate.md", 10): _expect("agent_dispatch", 'str(event.get("task_id")) == "{taskId}"', 'event.get("agent") == "architect"', 'event.get("phase") == "ARCHITECT"'),
+    ("orchestrate.md", 11): _expect("artifact_paths", 'event.get("workflow") == "architect"', 'bool(event.get("feature"))', 'str(event.get("task_id")) == "{architect_task_id}"'),
+    ("orchestrate.md", 12): _expect("s2_state_seeded", 'bool(event.get("worktree"))'),
+    ("orchestrate.md", 13): _expect("variety_assessed", 'str(event.get("task_id")) == "{taskId}"', 'event.get("scope") == "dispatch"'),
+    ("orchestrate.md", 14): _expect("agent_dispatch", 'str(event.get("task_id")) == "{taskId}"', 'str(event.get("agent")) == "{coder-name}"', 'event.get("phase") == "CODE"'),
+    ("orchestrate.md", 15): _expect("commit", 'str(event.get("sha")) == "{short_sha}"', 'event.get("phase") == "CODE"'),
+    ("orchestrate.md", 16): _expect("artifact_paths", 'event.get("workflow") == "code-auditor"', 'bool(event.get("feature"))'),
+    ("orchestrate.md", 17): _expect("variety_assessed", 'str(event.get("task_id")) == "{taskId}"', 'event.get("scope") == "dispatch"'),
+    ("orchestrate.md", 18): _expect("agent_dispatch", 'str(event.get("task_id")) == "{taskId}"', 'event.get("agent") == "test-engineer"', 'event.get("phase") == "TEST"'),
+    ("pause.md", 1): _expect("session_consolidated", 'event.get("pass") == 2', 'event.get("task_count") == {task_count}', 'event.get("memories_saved") == {memories_saved}'),
+    ("pause.md", 2): _expect("session_paused", 'event.get("pr_number") == {pr_number}', 'str(event.get("consolidation_completed")).lower() == "{true_or_false}"', 'str(event.get("team_name")) == "{team_name}"'),
+    ("peer-review.md", 1): _expect("variety_assessed", 'str(event.get("task_id")) == "{taskId}"', 'event.get("scope") == "dispatch"'),
+    ("peer-review.md", 2): _expect("review_dispatch", 'event.get("pr_number") == {pr_number}'),
+    ("peer-review.md", 3): _expect("artifact_paths", 'event.get("workflow") == "peer-review"', 'bool(event.get("feature"))'),
+    ("peer-review.md", 4): _expect("review_finding", 'str(event.get("task_id")) == "{reviewer_task_id}"', 'str(event.get("reviewer")) == "{reviewer-name}"'),
+    ("peer-review.md", 5): _expect("remediation", 'event.get("cycle") == {cycle_number}', 'str(event.get("task_id")) == "{fixer_task_id}"'),
+    ("peer-review.md", 6): _expect("pr_ready", 'event.get("pr_number") == {pr_number}', 'event.get("commits") == {total_commit_count}'),
+    ("plan-mode.md", 1): _expect("variety_assessed", 'str(event.get("task_id")) == "{taskId}"', 'event.get("scope") == "dispatch"'),
+    ("plan-mode.md", 2): _expect("artifact_paths", 'event.get("workflow") == "plan-mode"', 'bool(event.get("feature"))'),
+    ("prune-memory.md", 1): _expect("pin_prune_skipped", 'event.get("outcome") == "cancelled"', 'event.get("pin_count") == 12'),
+    ("prune-memory.md", 2): _expect("pin_prune_skipped", 'event.get("outcome") == "no_candidates"', 'event.get("pin_count") == 0'),
+    ("prune-memory.md", 3): _expect("pin_prune_skipped", 'event.get("outcome") == "unknown_state"', 'event.get("pin_count") == 12'),
+    ("prune-memory.md", 4): _expect("pin_prune_skipped", 'event.get("outcome") == "archive_refused"', 'event.get("pin_count") == 12'),
+    ("prune-memory.md", 5): _expect("pin_prune_skipped", 'event.get("outcome") == "delete_unsafe"', 'event.get("pin_count") == 12'),
+    ("prune-memory.md", 6): _expect("pin_prune_skipped", 'event.get("outcome") == "unverified_eviction"', 'event.get("pin_count") == 12'),
+    ("prune-memory.md", 7): _expect("pin_pruned", 'event.get("memory_id") == "0f3a9c1d7e2b48f6a5c04d8e1b7f2a93"', 'event.get("pin_count") == 12'),
+    ("rePACT.md", 1): _expect("variety_assessed", 'str(event.get("task_id")) == "{sub_feature_task_id}"', '"scope" not in event'),
+    ("rePACT.md", 2): _expect("variety_assessed", 'str(event.get("task_id")) == "{taskId}"', 'event.get("scope") == "dispatch"'),
+    ("refresh.md", 1): _expect("session_consolidated", 'event.get("pass") == 2', 'event.get("task_count") == {task_count}', 'event.get("memories_saved") == {memories_saved}'),
+    ("refresh.md", 2): _expect("session_refreshed", 'str(event.get("consolidation_completed")).lower() == "{true_or_false}"', 'str(event.get("halt_active")).lower() == "{halt_active}"', 'str(event.get("feature_task_id")) == "{feature_task_id}"', 'str(event.get("team_name")) == "{team_name}"'),
+    ("refresh.md", 3): _expect("session_refreshed", 'str(event.get("consolidation_completed")).lower() == "{true_or_false}"', 'event.get("halt_active") is False'),
+    ("wrap-up.md", 1): _expect("session_consolidated", 'event.get("pass") == 2', 'event.get("task_count") == {task_count}', 'event.get("memories_saved") == {memories_saved}'),
+}
+
+EXPECTED_JOURNAL_WRITE_COUNTS = {
+    "bootstrap.md": 2,
+    "comPACT.md": 7,
+    "orchestrate.md": 18,
+    "pause.md": 2,
+    "peer-review.md": 6,
+    "plan-mode.md": 2,
+    "prune-memory.md": 7,
+    "rePACT.md": 2,
+    "refresh.md": 3,
+    "wrap-up.md": 1,
+}
+
+
+@pytest.fixture(scope="module")
+def journal_site_map():
+    sites = []
+    for path in sorted(COMMANDS_DIR.glob("*.md")):
+        sites.extend(_parse_journal_sites(path.name, path.read_text(encoding="utf-8")))
+    return {(site.filename, site.ordinal): site for site in sites}
+
+
+def test_journal_write_census_matches_manifest(journal_site_map):
+    counts = Counter(filename for filename, _ordinal in journal_site_map)
+    assert counts == EXPECTED_JOURNAL_WRITE_COUNTS
+    assert len(journal_site_map) == 50
+    assert set(journal_site_map) == set(JOURNAL_READBACK_MATRIX)
+
+
+def _extract_readback_block(site: JournalWriteSite) -> str:
+    """Return only the immediate read-back, normalized for analysis/execution."""
+    lines = [
+        normalized
+        for line in site.segment.splitlines()
+        if (normalized := _journal_line(line))
+    ]
+    if not lines:
+        return ""
+    try:
+        close = lines.index("PY")
+    except ValueError:
+        return lines[0]
+    end = close + 1
+    if site.filename == "prune-memory.md":
+        for index in range(end, len(lines)):
+            if lines[index] == "fi":
+                end = index + 1
+                break
+    return "\n".join(lines[:end])
+
+
+def _readback_problems(site, expectation):
+    expected_type, field_assertions = expectation
+    problems = []
+    if site.event_type != expected_type:
+        problems.append(f"event type {site.event_type!r}, expected {expected_type!r}")
+    statements = [
+        normalized
+        for line in site.segment.splitlines()
+        if (normalized := _journal_line(line)) and not normalized.startswith("#")
+    ]
+    first = statements[0] if statements else "<none>"
+    required_start = (
+        "if ! python3 - <<'PY'"
+        if site.filename == "prune-memory.md"
+        else "python3 - <<'PY'"
+    )
+    if first != required_start:
+        problems.append(
+            f"missing immediate physical-last-line read-back; first statement is {first!r}"
+        )
+        return problems
+    segment = " ".join(
+        normalized
+        for line in _extract_readback_block(site).splitlines()
+        if (normalized := _journal_line(line)) and not normalized.startswith("#")
+    )
+    required = [
+        "import json",
+        "from pathlib import Path",
+        'path = Path("{session_dir}") / "session-journal.jsonl"',
+        'event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])',
+        f'assert event.get("type") == "{expected_type}", event',
+    ]
+    required.extend(f"assert {expression}, event" for expression in field_assertions)
+    for snippet in required:
+        if snippet not in segment:
+            problems.append(f"missing or mismatched `{snippet}`")
+    if "read-last" in segment:
+        problems.append("type-filtered read-last substituted for physical-last-line reading")
+    if site.filename == "prune-memory.md":
+        if "[JOURNAL READ-BACK FAILED]" not in segment or "continuing" not in segment:
+            problems.append("missing loud nonblocking prune-memory continuation")
+        if " then " not in f" {segment} " or " fi" not in segment:
+            problems.append("missing complete if ! wrapper")
+    return problems
+
+
+@pytest.mark.parametrize(
+    "site_key",
+    list(JOURNAL_READBACK_MATRIX),
+    ids=[f"{filename}#{ordinal}" for filename, ordinal in JOURNAL_READBACK_MATRIX],
+)
+def test_journal_write_readback_structure(site_key, journal_site_map):
+    site = journal_site_map.get(site_key)
+    assert site is not None, f"{site_key}: write site not discovered"
+    expectation = JOURNAL_READBACK_MATRIX[site_key]
+    problems = _readback_problems(site, expectation)
+    assert not problems, (
+        f"{site.site_id} ({site.event_type}, source line {site.line}):\n  - "
+        + "\n  - ".join(problems)
+    )
+
+
+def _canonical_readback(site_key):
+    """Build an isolated valid control from the same matrix under test."""
+    filename, _ordinal = site_key
+    event_type, assertions = JOURNAL_READBACK_MATRIX[site_key]
+    lines = [
+        "python3 - <<'PY'",
+        "import json",
+        "from pathlib import Path",
+        "",
+        'path = Path("{session_dir}") / "session-journal.jsonl"',
+        'event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])',
+        f'assert event.get("type") == "{event_type}", event',
+    ]
+    lines.extend(f"assert {expression}, event" for expression in assertions)
+    lines.append("PY")
+    if filename == "prune-memory.md":
+        lines[0] = "if ! python3 - <<'PY'"
+        lines.extend(
+            [
+                "then",
+                '  echo "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing" >&2',
+                "fi",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def _synthetic_command_text(writes, spelling="direct", prefix="", fence="bash"):
+    """Create isolated shell text with one (event type, read-back) tuple per write."""
+    lines = [f"{prefix}```{fence}"]
+    for event_type, readback in writes:
+        if spelling == "variable":
+            lines.append(f'{prefix}SJ="{{plugin_root}}/hooks/shared/session_journal.py"')
+            invocation = f'{prefix}python3 "$SJ" write --type {event_type} --session-dir \'{{session_dir}}\' --stdin <<\'JSON\''
+        else:
+            root = "{plugin_root}" if spelling == "direct" else "${CLAUDE_PLUGIN_ROOT}"
+            invocation = f'{prefix}python3 "{root}/hooks/shared/session_journal.py" write \\'
+        lines.append(invocation)
+        if spelling != "variable":
+            lines.append(
+                f"{prefix}  --type {event_type} --session-dir '{{session_dir}}' --stdin <<'JSON'"
+            )
+        lines.extend([f"{prefix}{{}}", f"{prefix}JSON"])
+        if readback:
+            lines.extend(f"{prefix}{line}" for line in readback.splitlines())
+    lines.append(f"{prefix}```")
+    return "\n".join(lines) + "\n"
+
+
+def _one_synthetic_site(site_key, readback, spelling="direct", prefix=""):
+    filename, _ordinal = site_key
+    event_type, _assertions = JOURNAL_READBACK_MATRIX[site_key]
+    text = _synthetic_command_text(
+        [(event_type, readback)], spelling=spelling, prefix=prefix
+    )
+    sites = _parse_journal_sites(filename, text)
+    assert len(sites) == 1
+    return sites[0]
+
+
+@pytest.mark.parametrize(
+    "site_key,spelling,prefix",
+    [
+        (("comPACT.md", 2), "direct", ""),
+        (("orchestrate.md", 3), "variable", ""),
+        (("comPACT.md", 2), "direct", "> "),
+        (("peer-review.md", 4), "direct", "    "),
+        (("prune-memory.md", 1), "plugin-root", ""),
+    ],
+    ids=["direct", "SJ", "blockquote", "nested", "claude-plugin-root"],
+)
+def test_readback_deletion_is_site_specific(site_key, spelling, prefix):
+    control = _one_synthetic_site(
+        site_key, _canonical_readback(site_key), spelling=spelling, prefix=prefix
+    )
+    assert _readback_problems(control, JOURNAL_READBACK_MATRIX[site_key]) == []
+    mutated = _one_synthetic_site(site_key, "", spelling=spelling, prefix=prefix)
+    problems = _readback_problems(mutated, JOURNAL_READBACK_MATRIX[site_key])
+    assert any("missing immediate physical-last-line read-back" in p for p in problems)
+
+
+def test_adjacent_write_cannot_borrow_next_readback():
+    first_key = ("orchestrate.md", 3)
+    second_key = ("orchestrate.md", 4)
+    first_type = JOURNAL_READBACK_MATRIX[first_key][0]
+    second_type = JOURNAL_READBACK_MATRIX[second_key][0]
+    control_text = _synthetic_command_text(
+        [
+            (first_type, _canonical_readback(first_key)),
+            (second_type, _canonical_readback(second_key)),
+        ],
+        spelling="variable",
+    )
+    control = _parse_journal_sites("orchestrate.md", control_text)
+    assert len(control) == 2
+    for site, key in zip(control, (first_key, second_key)):
+        assert _readback_problems(site, JOURNAL_READBACK_MATRIX[key]) == []
+
+    mutated_text = _synthetic_command_text(
+        [
+            (first_type, ""),
+            (
+                second_type,
+                _canonical_readback(first_key) + "\n" + _canonical_readback(second_key),
+            ),
+        ],
+        spelling="variable",
+    )
+    mutated = _parse_journal_sites("orchestrate.md", mutated_text)
+    first_problems = _readback_problems(mutated[0], JOURNAL_READBACK_MATRIX[first_key])
+    assert any("missing immediate physical-last-line read-back" in p for p in first_problems)
+
+
+def test_conditional_delimiter_cannot_move_readback_out_of_branch():
+    key = ("pause.md", 1)
+    body = ";;\n" + _canonical_readback(key)
+    site = _one_synthetic_site(key, body)
+    problems = _readback_problems(site, JOURNAL_READBACK_MATRIX[key])
+    assert any("first statement is ';;'" in p for p in problems)
+
+
+def test_non_bash_fence_readback_earns_no_credit():
+    key = ("comPACT.md", 2)
+    event_type = JOURNAL_READBACK_MATRIX[key][0]
+    text = _synthetic_command_text([(event_type, "")])
+    text += "```text\n" + _canonical_readback(key) + "\n```\n"
+    site = _parse_journal_sites("comPACT.md", text)[0]
+    problems = _readback_problems(site, JOURNAL_READBACK_MATRIX[key])
+    assert any("missing immediate physical-last-line read-back" in p for p in problems)
+
+
+def test_wrong_status_value_fails_assertion_contract():
+    key = ("orchestrate.md", 3)
+    body = _canonical_readback(key)
+    token = 'event.get("status") == "completed"'
+    assert token in body
+    mutated_body = body.replace(token, 'event.get("status") == "started"', 1)
+    assert mutated_body != body
+    site = _one_synthetic_site(key, mutated_body, spelling="variable")
+    problems = _readback_problems(site, JOURNAL_READBACK_MATRIX[key])
+    assert any(token in p for p in problems)
+
+
+def test_dropped_required_field_fails_assertion_contract():
+    key = ("comPACT.md", 2)
+    body = _canonical_readback(key)
+    assertion = 'assert event.get("scope") == "dispatch", event'
+    assert assertion in body
+    mutated_body = body.replace(assertion + "\n", "", 1)
+    assert mutated_body != body
+    site = _one_synthetic_site(key, mutated_body)
+    problems = _readback_problems(site, JOURNAL_READBACK_MATRIX[key])
+    assert any('event.get("scope") == "dispatch"' in p for p in problems)
+
+
+def test_commented_out_assertion_earns_no_credit():
+    key = ("comPACT.md", 2)
+    body = _canonical_readback(key)
+    control = _one_synthetic_site(key, body)
+    assert _readback_problems(control, JOURNAL_READBACK_MATRIX[key]) == []
+    assertion = 'assert event.get("scope") == "dispatch", event'
+    assert assertion in body
+    mutated_body = body.replace(assertion, "# " + assertion, 1)
+    assert mutated_body != body
+    site = _one_synthetic_site(key, mutated_body)
+    problems = _readback_problems(site, JOURNAL_READBACK_MATRIX[key])
+    assert any('event.get("scope") == "dispatch"' in p for p in problems)
+
+
+def test_commented_out_physical_read_earns_no_credit():
+    key = ("orchestrate.md", 3)
+    body = _canonical_readback(key)
+    control = _one_synthetic_site(key, body, spelling="variable")
+    assert _readback_problems(control, JOURNAL_READBACK_MATRIX[key]) == []
+    read = 'event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])'
+    assert read in body
+    mutated_body = body.replace(read, "# " + read, 1)
+    assert mutated_body != body
+    site = _one_synthetic_site(key, mutated_body, spelling="variable")
+    problems = _readback_problems(site, JOURNAL_READBACK_MATRIX[key])
+    assert any(read in p for p in problems)
+
+
+def test_wrong_event_type_fails_assertion_contract():
+    key = ("comPACT.md", 2)
+    body = _canonical_readback(key)
+    token = 'event.get("type") == "variety_assessed"'
+    assert token in body
+    mutated_body = body.replace(token, 'event.get("type") == "agent_dispatch"', 1)
+    site = _one_synthetic_site(key, mutated_body)
+    problems = _readback_problems(site, JOURNAL_READBACK_MATRIX[key])
+    assert any(token in p for p in problems)
+
+
+def test_type_filtered_readlast_fails_physical_read_contract():
+    key = ("orchestrate.md", 3)
+    body = _canonical_readback(key)
+    token = 'event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])'
+    assert token in body
+    mutated_body = body.replace(token, 'event = json.loads(Path("read-last").read_text())', 1)
+    site = _one_synthetic_site(key, mutated_body, spelling="variable")
+    problems = _readback_problems(site, JOURNAL_READBACK_MATRIX[key])
+    assert any("read-last" in p for p in problems)
+    assert any(token in p for p in problems)
+
+
+def test_prune_readback_must_remain_nonblocking():
+    key = ("prune-memory.md", 1)
+    body = _canonical_readback(key)
+    assert body.startswith("if ! python3")
+    mutated_body = body.replace("if ! python3", "python3", 1)
+    site = _one_synthetic_site(key, mutated_body, spelling="plugin-root")
+    problems = _readback_problems(site, JOURNAL_READBACK_MATRIX[key])
+    assert problems
+
+
+def test_unrecognized_write_shape_fails_discovery_loudly():
+    text = (
+        "```bash\n"
+        'python3 "{plugin_root}/hooks/shared/session_journal.py" write --type commit\n'
+        "```\n"
+    )
+    with pytest.raises(AssertionError, match="unrecognized journal-write/heredoc shape"):
+        _parse_journal_sites("orchestrate.md", text)
+
+
+def _render_live_readback(site_key, journal_site_map, session_dir, replacements=None):
+    """Execute the shipped block, not a reimplemented behavioral predicate."""
+    site = journal_site_map[site_key]
+    script = _extract_readback_block(site)
+    assert "session-journal.jsonl" in script
+    values = {"{session_dir}": str(session_dir), **(replacements or {})}
+    for token, value in values.items():
+        assert token in script, f"{site_key}: placeholder {token} missing from live block"
+        script = script.replace(token, value)
+    leftovers = re.findall(r"\{[A-Za-z_][A-Za-z0-9_-]*\}", script)
+    assert not leftovers, f"{site_key}: unrendered placeholders {leftovers}"
+    return script
+
+
+def _run_readback(script, session_dir):
+    return subprocess.run(
+        ["bash", "-c", script],
+        cwd=str(session_dir),
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+
+def _real_journal_write(session_dir, event_type, payload):
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(COMMANDS_DIR.parent / "hooks" / "shared" / "session_journal.py"),
+            "write",
+            "--type",
+            event_type,
+            "--session-dir",
+            str(session_dir),
+            "--data",
+            json.dumps(payload),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    return session_dir / "session-journal.jsonl"
+
+
+def _phase_completed_script(journal_site_map, session_dir):
+    return _render_live_readback(
+        ("orchestrate.md", 3),
+        journal_site_map,
+        session_dir,
+        {"{PHASE}": "CODE"},
+    )
+
+
+def test_journal_behavior_real_write_happy_path(tmp_path, journal_site_map):
+    _real_journal_write(
+        tmp_path,
+        "phase_transition",
+        {"phase": "CODE", "status": "completed", "skip_reason": "", "metadata": {}},
+    )
+    result = _run_readback(_phase_completed_script(journal_site_map, tmp_path), tmp_path)
+    assert result.returncode == 0, result.stderr
+
+
+def test_journal_behavior_physical_last_line_mismatch(tmp_path, journal_site_map):
+    journal = _real_journal_write(
+        tmp_path,
+        "phase_transition",
+        {"phase": "CODE", "status": "completed", "skip_reason": "", "metadata": {}},
+    )
+    _real_journal_write(tmp_path, "session_refresh_consumed", {"refresh_ts": "other"})
+    assert journal.is_file()
+    result = _run_readback(_phase_completed_script(journal_site_map, tmp_path), tmp_path)
+    assert result.returncode != 0
+    assert "session_refresh_consumed" in result.stderr
+
+
+def test_journal_behavior_stale_phase_status_fails_loudly(tmp_path, journal_site_map):
+    _real_journal_write(
+        tmp_path,
+        "phase_transition",
+        {"phase": "CODE", "status": "started", "skip_reason": "", "metadata": {}},
+    )
+    result = _run_readback(_phase_completed_script(journal_site_map, tmp_path), tmp_path)
+    assert result.returncode != 0
+    assert "phase_transition" in result.stderr
+    assert "started" in result.stderr
+
+
+@pytest.mark.parametrize("state", ["missing", "empty", "malformed"])
+def test_journal_behavior_bad_journal_inputs_fail_loudly(
+    state, tmp_path, journal_site_map
+):
+    journal = tmp_path / "session-journal.jsonl"
+    if state == "empty":
+        journal.write_text("", encoding="utf-8")
+    elif state == "malformed":
+        journal.write_text(
+            '{"v":1,"type":"phase_transition","phase":"CODE","status":"completed"}\n'
+            "not-json\n",
+            encoding="utf-8",
+        )
+    result = _run_readback(_phase_completed_script(journal_site_map, tmp_path), tmp_path)
+    assert result.returncode != 0
+    assert result.stderr
+
+
+def test_journal_behavior_wrong_exact_value_fails(tmp_path, journal_site_map):
+    _real_journal_write(
+        tmp_path,
+        "phase_transition",
+        {"phase": "TEST", "status": "completed", "skip_reason": "", "metadata": {}},
+    )
+    result = _run_readback(_phase_completed_script(journal_site_map, tmp_path), tmp_path)
+    assert result.returncode != 0
+    assert "TEST" in result.stderr
+
+
+def test_journal_behavior_prune_failure_is_loud_and_nonblocking(
+    tmp_path, journal_site_map
+):
+    _real_journal_write(tmp_path, "session_refresh_consumed", {"refresh_ts": "other"})
+    script = _render_live_readback(("prune-memory.md", 1), journal_site_map, tmp_path)
+    result = _run_readback(script, tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "[JOURNAL READ-BACK FAILED]" in result.stderr
+
+
+def test_journal_behavior_degenerate_refresh_passes(tmp_path, journal_site_map):
+    _real_journal_write(
+        tmp_path,
+        "session_refreshed",
+        {"consolidation_completed": True, "halt_active": False},
+    )
+    script = _render_live_readback(
+        ("refresh.md", 3),
+        journal_site_map,
+        tmp_path,
+        {"{true_or_false}": "true"},
+    )
+    result = _run_readback(script, tmp_path)
+    assert result.returncode == 0, result.stderr
+
+
+def test_journal_behavior_degenerate_refresh_missing_field_fails(
+    tmp_path, journal_site_map
+):
+    (tmp_path / "session-journal.jsonl").write_text(
+        json.dumps(
+            {
+                "v": 1,
+                "type": "session_refreshed",
+                "halt_active": False,
+                "ts": "2026-01-01T00:00:00Z",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    script = _render_live_readback(
+        ("refresh.md", 3),
+        journal_site_map,
+        tmp_path,
+        {"{true_or_false}": "true"},
+    )
+    result = _run_readback(script, tmp_path)
+    assert result.returncode != 0
+    assert "halt_active" in result.stderr

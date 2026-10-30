@@ -412,6 +412,19 @@ python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
   --type pin_prune_skipped --session-dir '{session_dir}' --stdin <<'JSON'
 {"outcome": "cancelled", "pin_count": 12, "age_distribution": {"oldest": 60, "newest": 3, "median": 33}}
 JSON
+if ! python3 - <<'PY'
+import json
+from pathlib import Path
+
+path = Path("{session_dir}") / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+assert event.get("type") == "pin_prune_skipped", event
+assert event.get("outcome") == "cancelled", event
+assert event.get("pin_count") == 12, event
+PY
+then
+  echo "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing" >&2
+fi
 ```
 
 The heredoc delimiter is quoted (`<<'JSON'`) so bash performs no expansion
@@ -432,6 +445,19 @@ python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
   --type pin_prune_skipped --session-dir '{session_dir}' --stdin <<'JSON'
 {"outcome": "no_candidates", "pin_count": 0, "age_distribution": {}}
 JSON
+if ! python3 - <<'PY'
+import json
+from pathlib import Path
+
+path = Path("{session_dir}") / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+assert event.get("type") == "pin_prune_skipped", event
+assert event.get("outcome") == "no_candidates", event
+assert event.get("pin_count") == 0, event
+PY
+then
+  echo "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing" >&2
+fi
 ```
 
 `unknown_state`, where the CLI could not parse CLAUDE.md, so no age is known:
@@ -441,6 +467,19 @@ python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
   --type pin_prune_skipped --session-dir '{session_dir}' --stdin <<'JSON'
 {"outcome": "unknown_state", "pin_count": 12, "age_distribution": {}, "reason": "Pin slots: unknown (CLAUDE.md unparseable)"}
 JSON
+if ! python3 - <<'PY'
+import json
+from pathlib import Path
+
+path = Path("{session_dir}") / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+assert event.get("type") == "pin_prune_skipped", event
+assert event.get("outcome") == "unknown_state", event
+assert event.get("pin_count") == 12, event
+PY
+then
+  echo "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing" >&2
+fi
 ```
 
 `archive_refused`, where the archive definitively failed and the pin survives:
@@ -450,6 +489,19 @@ python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
   --type pin_prune_skipped --session-dir '{session_dir}' --stdin <<'JSON'
 {"outcome": "archive_refused", "pin_count": 12, "age_distribution": {"oldest": 60, "newest": 3, "median": 33}, "reason": "memory CLI timed out"}
 JSON
+if ! python3 - <<'PY'
+import json
+from pathlib import Path
+
+path = Path("{session_dir}") / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+assert event.get("type") == "pin_prune_skipped", event
+assert event.get("outcome") == "archive_refused", event
+assert event.get("pin_count") == 12, event
+PY
+then
+  echo "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing" >&2
+fi
 ```
 
 `delete_unsafe`, where the archive SUCCEEDED and only the automatic removal was
@@ -461,6 +513,19 @@ python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
   --type pin_prune_skipped --session-dir '{session_dir}' --stdin <<'JSON'
 {"outcome": "delete_unsafe", "pin_count": 12, "age_distribution": {"oldest": 60, "newest": 3, "median": 33}, "reason": "block occurs 2 times; removal would be ambiguous"}
 JSON
+if ! python3 - <<'PY'
+import json
+from pathlib import Path
+
+path = Path("{session_dir}") / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+assert event.get("type") == "pin_prune_skipped", event
+assert event.get("outcome") == "delete_unsafe", event
+assert event.get("pin_count") == 12, event
+PY
+then
+  echo "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing" >&2
+fi
 ```
 
 `unverified_eviction` is emitted on the escape-hatch path, where the pin was
@@ -471,6 +536,19 @@ python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
   --type pin_prune_skipped --session-dir '{session_dir}' --stdin <<'JSON'
 {"outcome": "unverified_eviction", "pin_count": 12, "age_distribution": {"oldest": 60, "newest": 3, "median": 33}, "reason": "curator acknowledged the pin block was captured elsewhere"}
 JSON
+if ! python3 - <<'PY'
+import json
+from pathlib import Path
+
+path = Path("{session_dir}") / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+assert event.get("type") == "pin_prune_skipped", event
+assert event.get("outcome") == "unverified_eviction", event
+assert event.get("pin_count") == 12, event
+PY
+then
+  echo "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing" >&2
+fi
 ```
 
 The success event is emitted at Step 5, once the removal Edit has landed:
@@ -482,6 +560,19 @@ python3 "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py" write \
   --type pin_pruned --session-dir '{session_dir}' --stdin <<'JSON'
 {"heading": "First Pin", "memory_id": "0f3a9c1d7e2b48f6a5c04d8e1b7f2a93", "pin_count": 12}
 JSON
+if ! python3 - <<'PY'
+import json
+from pathlib import Path
+
+path = Path("{session_dir}") / "session-journal.jsonl"
+event = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+assert event.get("type") == "pin_pruned", event
+assert event.get("memory_id") == "0f3a9c1d7e2b48f6a5c04d8e1b7f2a93", event
+assert event.get("pin_count") == 12, event
+PY
+then
+  echo "[JOURNAL READ-BACK FAILED] prune-memory.md: telemetry verification failed; continuing" >&2
+fi
 ```
 
 Two things in that payload are deliberate and are the ones most likely to be
