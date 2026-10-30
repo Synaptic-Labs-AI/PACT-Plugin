@@ -280,7 +280,7 @@ Several PACT protocols are designed so that the system literally cannot fabricat
 
 **Two-call atomic acceptance pair** — From [`protocols/pact-completion-authority.md`](pact-plugin/protocols/pact-completion-authority.md): when accepting teammate work, the orchestrator MUST write `TaskUpdate(status="completed")` FIRST, then send the wake-signal `SendMessage`. The wake is load-bearing — `blockedBy` is pull-only, so an idle teammate cannot self-observe the status flip; the wake-signal is their content-arrival trigger, and the send is confirmed by a success receipt the orchestrator cannot forge.
 
-**First-spawn HARD-STOP verification** — From the orchestrator persona (§11 Agent Teams Dispatch): after the first specialist spawn in a session, the teammate's first message MUST demonstrate access to `TaskList`, `TaskUpdate`, and `SendMessage`. If any tool is reported missing, this is **not degraded mode** and **not something to work around** — the dispatch was malformed (typically `Task(...)` was used instead of `Agent(...)`, or `name=` / `team_name=` was omitted). The orchestrator stops the teammate, corrects the dispatch shape, and re-spawns. The teammate cannot self-recover from a malformed spawn.
+**First-spawn HARD-STOP verification** — From the orchestrator persona (§11 Agent Teams Dispatch): after the first specialist spawn in a session, the teammate's first message MUST demonstrate access to `TaskList`, `TaskUpdate`, and `SendMessage`. If a teammate reports any tool missing, stop and diagnose in order: the teammate may load deferred tools; if they remain absent, it reports exact evidence and stops implementation work while the lead takes over. The lead must not treat its own successful tool load as the teammate's. The lead must check the lead session; compare the dispatch with the live Agent schema and named, interactive teammate requirements; confirm registration and addressability; then apply display-mode inheritance. Only the lead may use the guarded legacy branch when it applies. If Task tools remain absent but `SendMessage` reaches the lead, the teammate relays the structured content for the lead to write; if messaging also fails, the teammate stops and the lead reports the team-formation/messaging blocker. Do not assume malformed dispatch or start with a respawn.
 
 **Structural verification discipline** — From [`protocols/pact-audit.md`](pact-plugin/protocols/pact-audit.md): before emitting GREEN on a structural acceptance criterion, the Auditor MUST verify the claim against `git diff` ground truth. Pattern-matching on HANDOFF prose, commit messages, or coder self-attestation is not sufficient evidence — four internally-consistent layers of prose can all be wrong together. The diff is evidence; prose is retrieval aid.
 
@@ -405,10 +405,21 @@ select:TaskCreate,TaskUpdate,TaskList,TaskGet and tell me which of the four
 are present.
 ```
 
-- **Any of the four missing** — this is the problem, and the setting below fixes it.
-- **All four present** — this is *not* the problem, and the setting below will not help. Something else is refusing the spawn; this check rules out one cause, not the rest.
+- **Any of the four missing after the load attempt** — in the lead session, the opt-in setting below is required; start a new session after setting it. If only a spawned teammate is missing them, use the recovery tree below instead of assuming the lead setting is the cause.
+- **All four present** — this is *not* the lead-session availability problem, and the setting below will not help. Use the recovery tree to find the actual cause; this check rules out one cause, not the rest.
 
-**A different case: your session has the task tools, but spawned specialists do not.** Both `env` values (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` and `CLAUDE_CODE_ENABLE_TODO_TOOLS`) set, and the lead session holds `TaskCreate`, `TaskUpdate`, `TaskList` and `TaskGet`, yet every spawned teammate reports them missing? The cause is the spawn mode, not the settings. On non-TTY harnesses (Claude Code on the web, Claude Code Desktop), the platform withholds the task tools from background spawns. Dispatch each specialist with `run_in_background: false`, and include a `ToolSearch "select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage"` line in the spawn prompt — tools are fixed at spawn-request time, and a foreground-requested spawn keeps them for life even if the harness auto-backgrounds it. A teammate already spawned without the flag cannot be repaired in place; re-spawn it with the flag.
+**When the lead has the task tools but a teammate does not, or when the spawn shape is uncertain, use this ordered recovery tree.** Do not infer the cause from a harness label or start with a respawn.
+
+Roles are explicit: the affected teammate self-helps in A and relays in G; the lead owns B–F and the final blocker report.
+
+A. **Load deferred tools.** The actor missing Task tools runs `ToolSearch "select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage"` when it has not already run. If a teammate's tools load, it continues without a respawn. If they remain absent, the teammate reports the exact missing tools and load result to its lead when messaging permits, then stops implementation work and idles while the lead continues below. The lead's own successful ToolSearch proves only the lead's tool surface, never the teammate's.
+B. **Check the lead session.** The lead checks its own four Task tools. If they are missing, the lead fixes the session opt-in/settings and must start the required new session. Never respawn a teammate for this cause; the teammate does not restart the session.
+C. **Compare the call with the live Agent schema.** The lead compares its dispatch with the live schema. Current teammate creation requires an interactive session, agent teams enabled, and a named, non-fork, non-isolation Agent call. The lead corrects `Task(...)`, a missing `name`, fork/isolation, or non-interactive `-p` usage. Never add a parameter absent from the live schema or substitute subagent-definition frontmatter for an Agent argument; the teammate does not rewrite the lead's call.
+D. **Confirm named-teammate creation and addressability.** The lead uses platform spawn, roster, and messaging evidence, including the teammate's exact report. A missing `config.json` alone is not failure in a config-less cloud session. A named `-p` agent is an ordinary subagent, not evidence of team formation; the lead corrects team enablement/registration instead.
+E. **Apply display-mode inheritance.** The lead checks the actual teammate display mode. In-process teammates follow the lead session. For split-pane, the lead checks `--tools`/deny rules and environment forwarding through `--settings`, then corrects launch configuration before replacement; the teammate does not change it.
+F. **Use the legacy-only branch only after A–E.** For an older non-TTY runtime exhibiting the #1658 symptom, only the lead follows the single operational legacy note in `pact-plugin/README.md`; the teammate never applies legacy dispatch. Do not copy its dispatch template into current guidance or treat schema presence alone as lifecycle evidence.
+G. **Relay residual structured content.** If Task tools remain absent but `SendMessage` reaches `team-lead` or `main`, the teammate relays the teachback/HANDOFF content and the lead writes metadata. Acceptance/rejection ordering is unchanged; no hook suppression logic or relay marker is involved, and no respawn loop follows.
+H. **Stop on messaging failure.** If `SendMessage` is also unavailable or unreachable, the teammate cannot relay and stops/idles. The lead reports the team-formation/messaging blocker with the evidence gathered above.
 
 **The setting.** Add `CLAUDE_CODE_ENABLE_TODO_TOOLS` to the `env` block of your `~/.claude/settings.json`, alongside the Agent Teams setting, then start a new session:
 
@@ -654,7 +665,7 @@ When installed as a plugin, PACT lives in your plugin cache:
 │   └── cache/
 │       └── pact-plugin/
 │           └── PACT/
-│               └── 4.8.13/     # Plugin version
+│               └── 4.8.14/     # Plugin version
 │                   ├── agents/
 │                   ├── commands/
 │                   ├── skills/

@@ -51,7 +51,6 @@ Agent(
   team_name="{team_name}",
   subagent_type="pact-{teammate-type}",
   description="Spawn {teammate-name} specialist",
-  run_in_background: false,
   prompt="YOUR PACT ROLE: teammate ({teammate-name}).\n\nYou are joining team {team_name}. Send messages for your lead to `{lead_address}`. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. If the Task tools are deferred, load them with ToolSearch \"select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage\". Then check `TaskList` for tasks assigned to you."
 )
 ```
@@ -506,7 +505,6 @@ Agent(
   team_name="{team_name}",
   subagent_type="pact-preparer",
   description="Spawn preparer specialist",
-  run_in_background: false,
   prompt="YOUR PACT ROLE: teammate (preparer).\n\nYou are joining team {team_name}. Send messages for your lead to `{lead_address}`. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. If the Task tools are deferred, load them with ToolSearch \"select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage\". Then check `TaskList` for tasks assigned to you."
 )
 ```
@@ -624,7 +622,6 @@ Agent(
   team_name="{team_name}",
   subagent_type="pact-architect",
   description="Spawn architect specialist",
-  run_in_background: false,
   prompt="YOUR PACT ROLE: teammate (architect).\n\nYou are joining team {team_name}. Send messages for your lead to `{lead_address}`. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. If the Task tools are deferred, load them with ToolSearch \"select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage\". Then check `TaskList` for tasks assigned to you."
 )
 ```
@@ -773,7 +770,6 @@ Agent(
   team_name="{team_name}",
   subagent_type="pact-{coder-type}",
   description="Spawn {coder-name} specialist",
-  run_in_background: false,
   prompt="YOUR PACT ROLE: teammate ({coder-name}).\n\nYou are joining team {team_name}. Send messages for your lead to `{lead_address}`. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. If the Task tools are deferred, load them with ToolSearch \"select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage\". Then check `TaskList` for tasks assigned to you."
 )
 ```
@@ -803,7 +799,6 @@ Agent(
   team_name="{team_name}",
   subagent_type="pact-auditor",
   description="Spawn auditor specialist",
-  run_in_background: false,
   prompt="YOUR PACT ROLE: teammate (auditor).\n\nYou are joining team {team_name}. Send messages for your lead to `{lead_address}`. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. If the Task tools are deferred, load them with ToolSearch \"select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage\". Then check `TaskList` for tasks assigned to you."
 )
 ```
@@ -933,7 +928,6 @@ Agent(
   team_name="{team_name}",
   subagent_type="pact-test-engineer",
   description="Spawn test-engineer specialist",
-  run_in_background: false,
   prompt="YOUR PACT ROLE: teammate (test-engineer).\n\nYou are joining team {team_name}. Send messages for your lead to `{lead_address}`. As your FIRST action, Invoke Skill(\"PACT:pact-team-registration\") to record your identity. If the Task tools are deferred, load them with ToolSearch \"select:TaskCreate,TaskUpdate,TaskList,TaskGet,SendMessage\". Then check `TaskList` for tasks assigned to you."
 )
 ```
