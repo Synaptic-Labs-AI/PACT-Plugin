@@ -685,6 +685,29 @@ class TestCliSearchCommand:
         assert "limit" in params
         assert params["limit"].default == 20
 
+    def test_search_helper_signature_defaults_match_parser(self):
+        """Pin the third and fourth code copies of the search limit default.
+
+        graph_enhanced_search and find_similar_memories carry their own
+        `limit` defaults; PACTMemory.search forwards an explicit limit so
+        no in-repo caller reads them, but a direct importer does, and a
+        default drifting from the shipped one is the same divergence the
+        pins above exist to prevent. Parser as the single source of
+        truth — no literal copy of the number.
+        """
+        import inspect
+
+        from scripts.search import find_similar_memories, graph_enhanced_search
+
+        expected = build_parser().parse_args(["search", "q"]).limit
+        for func in (graph_enhanced_search, find_similar_memories):
+            params = inspect.signature(func).parameters
+            assert "limit" in params, f"{func.__name__} lost its limit param"
+            assert params["limit"].default == expected, (
+                f"{func.__name__} defaults to {params['limit'].default}; "
+                f"the CLI ships {expected}"
+            )
+
     def test_search_empty_results(self, mock_pact_memory, capsys):
         parser = build_parser()
         args = parser.parse_args(["search", "nonexistent"])
