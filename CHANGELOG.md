@@ -27,11 +27,11 @@ A lead session started inside a linked git worktree now writes its project CLAUD
 ### What landed
 
 - One resolver: `project_memory_root` returns the main checkout root for a linked worktree and its input exactly as given otherwise. It verifies the candidate as a checkout root and requires the worktree to be listed, so a forged gitfile cannot redirect a write into another repository.
-- Writers: `session_init` steps 3, 3b, 4 and 5b, the two bootstrap hooks, `realign_team`, `pin_marker_writer`, `archive_pin` and the memory sync writers all target the memory root, and the containment anchors move with their targets.
+- Writers: `session_init` steps 3, 3b, 4 and 5b, the two bootstrap hooks, `realign_team`, `pin_marker_writer`, `archive_pin` and the memory sync writers all target the memory root, and each writer's targets and guards derive from that same root.
 - Readers: the display resolver and every advisory reader (pin-slot status, refusal reporting, stale-block directive, `track_files`, `check_pin_caps`, `claude_md_drift`, `match_project_claude_md`) resolve the same root, so no reader watches a file that nothing writes.
 - Unknown roots: a git that cannot answer is distinguished from a git that answers not-a-worktree. Every writer refuses on the unknown case and reports it, rather than planting in a worktree during a git failure.
 - Worktree listing: read NUL-separated so a path containing a newline survives, with an admin-gitdir fallback for a git without that option, and a raw toplevel read so paths ending in whitespace compare like with like.
-- Contract change: the pin-cap gate no longer denies a write into a worktree's own gitignored CLAUDE.md, because the cap bounds the managed document. A worktree session writing main's file is still denied at the cap.
+- Contract change: the pin-cap gate and the pin marker writer bind the managed document by IDENTITY -- the two canonical paths under the memory root -- not by containment, because PACT creates worktrees at `$REPO_ROOT/.worktrees/{branch}`, inside the root. A worktree's own gitignored CLAUDE.md is therefore never the managed document, whether the worktree sits beside or inside the main checkout, with or without `CLAUDE_PROJECT_DIR` set. A worktree session writing main's file is still denied at the cap.
 - Restored context names its source session neutrally and computes no liveness state, so a session killed before it recorded an end still restores.
 
 ### Why

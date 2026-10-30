@@ -238,47 +238,44 @@ def _plan_and_write() -> str:
             plan_insertion,
         )
         from shared.project_scope import project_memory_root_or_none
-        from staleness import _resolve_project_claude_md_with_base
+        from staleness import _resolve_project_claude_md_with_base, same_path
 
         # Pin markers are project-memory content (#1653): a worktree lead's
         # markers belong to the main checkout, where the display file survives
         # the worktree. The resolver's (path, base) pair then BOTH derive from
-        # the memory root, so the containment anchor contains the target.
-        # Returns (None, None) when no project CLAUDE.md exists, so this
-        # resolver never brings one into being. Creating the file is not this
-        # hook's business under any circumstance.
+        # the memory root. Returns (None, None) when no project CLAUDE.md
+        # exists, so this resolver never brings one into being. Creating the
+        # file is not this hook's business under any circumstance.
         env_project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-        memory_root = (
-            project_memory_root_or_none(env_project_dir)
-            if env_project_dir else None
-        )
-        if env_project_dir and memory_root is None:
-            # A DECLARED project dir whose memory root is UNKNOWN (#1653):
-            # `project_memory_root` fails SAFE TO ITS INPUT, so using it here
-            # would plant the markers in the worktree this change exists to
-            # stop. Write nothing. The outcome is journaled like every other
-            # confirmed invocation, which is this hook's status surface.
+        # DERIVED UNCONDITIONALLY (#1653, security lane): an absent variable
+        # must not skip the guard. `or os.getcwd()` is what session_init uses.
+        # An UNKNOWN root identifies nothing, so write nothing. The outcome is
+        # journaled like every other confirmed invocation, which is this
+        # hook's status surface.
+        memory_root = project_memory_root_or_none(env_project_dir or os.getcwd())
+        if memory_root is None:
             return "noop_memory_root_unknown"
         path, base = _resolve_project_claude_md_with_base(project_dir=memory_root)
         if path is None or base is None:
             return "noop_no_file"
 
-        # A SUPPLIED ROOT MUST CONTAIN THE TARGET (#1653, Bugbot). The
+        # IDENTITY, NOT ANCESTOR CONTAINMENT (#1653, security lane). The
         # resolver tries the supplied root first and then falls through to its
         # git and cwd rungs. On a first-rung miss -- the main checkout has no
         # CLAUDE.md while the worktree still carries one -- it returns the
         # WORKTREE file, and the markers would land there: the committable
-        # worktree write this change exists to stop. The check is on the
-        # DIRECTORY THE WRITE BINDS INTO, not the leaf, because
+        # worktree write this change exists to stop. Containment cannot see
+        # that: PACT creates worktrees at `$REPO_ROOT/.worktrees/{branch}`, so
+        # the worktree file is INSIDE the memory root. The resolved path must
+        # BE one of the two canonical managed-document paths, not merely sit
+        # under the root. `same_path` handles a symlinked parent;
         # `_atomic_write_text` replaces the leaf ENTRY and never follows it,
-        # so a leaf symlink is not an escape. It cannot silently fall through:
-        # anything outside the memory root is a no-op, whatever rung produced
-        # it.
-        if memory_root is not None:
-            try:
-                path.parent.resolve().relative_to(memory_root.resolve())
-            except (ValueError, OSError):
-                return "noop_outside_memory_root"
+        # so a leaf symlink is not an escape.
+        if not (
+            same_path(path, memory_root / ".claude" / "CLAUDE.md")
+            or same_path(path, memory_root / "CLAUDE.md")
+        ):
+            return "noop_outside_memory_root"
 
         # Decoded with replacement, so a file that is not UTF-8 still gets the
         # ladder's own no-op. The text is NEVER WRITTEN as read: the write

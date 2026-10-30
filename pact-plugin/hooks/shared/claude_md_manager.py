@@ -1849,10 +1849,11 @@ def gate_target(file_path: str) -> GateTarget | None:
     that is another one) is never `before`: the target itself is, or None when
     it does not exist.
 
-    A relative path is not gated, a target outside the memory root is not
-    (a worktree's own copy is not the managed document), a declared project
-    dir whose memory root git cannot answer gates nothing, and any failure
-    while resolving returns None: a path the gate is unsure of is allowed.
+    A relative path is not gated; a target that is not one of the two canonical
+    managed-document paths under the memory root is not (a worktree's own copy
+    is not the managed document, whether it sits BESIDE or INSIDE the root); an
+    unknown memory root gates nothing; and any failure while resolving returns
+    None: a path the gate is unsure of is allowed.
     """
     if not isinstance(file_path, str) or not file_path:
         return None
@@ -1880,35 +1881,31 @@ def gate_target(file_path: str) -> GateTarget | None:
         # worktree copy as a managed artifact in weaker form -- the assumption
         # the one rule exists to remove. Do not build that guard.
         declared = os.environ.get("CLAUDE_PROJECT_DIR")
-        memory_root = project_memory_root_or_none(declared) if declared else None
-        if declared and memory_root is None:
-            # A DECLARED project dir whose memory root is UNKNOWN (#1653):
-            # `project_memory_root` fails SAFE TO ITS INPUT, so using it here
-            # would bound the worktree copy this change exists to stop. An
-            # unknown root cannot identify the managed document, so there is
-            # nothing for the cap to bound, and the writers write nothing on
-            # this path. The return must come BEFORE the resolver: passing
-            # None as `project_dir` would re-read the env var and resolve that
-            # same copy.
+        # DERIVED UNCONDITIONALLY (#1653, security lane): an absent variable
+        # must not skip the guard. `or os.getcwd()` is what session_init uses,
+        # and a hook frame's cwd is the session's project dir in every observed
+        # shape, so a cwd that is not the project narrows the gate rather than
+        # binding a wrong document. An UNKNOWN root identifies nothing.
+        memory_root = project_memory_root_or_none(declared or os.getcwd())
+        if memory_root is None:
             return None
         resolved, base = _resolve_project_claude_md_with_base(
             assume_present=target, project_dir=memory_root)
         if resolved is None or base is None or not same_path(resolved, target):
             return None
-        if memory_root is not None:
-            # A SUPPLIED ROOT MUST CONTAIN THE TARGET (#1653, Bugbot). The
-            # resolver tries the memory root first and then FALLS THROUGH to
-            # its git and cwd rungs. When MAIN has no CLAUDE.md while the
-            # worktree carries one, both earlier rungs miss and the cwd rung
-            # returns the WORKTREE copy -- which `same_path` above accepts.
-            # The check is on the DIRECTORY THE WRITE BINDS INTO, not the leaf,
-            # because `_atomic_write_text` replaces the leaf ENTRY and never
-            # follows it, so a leaf symlink is not an escape. Same shape as
-            # pin_marker_writer's `noop_outside_memory_root`.
-            try:
-                target.parent.resolve().relative_to(memory_root.resolve())
-            except (ValueError, OSError):
-                return None
+        # IDENTITY, NOT ANCESTOR CONTAINMENT (#1653, security lane). PACT
+        # creates worktrees at `$REPO_ROOT/.worktrees/{branch}`, INSIDE the
+        # memory root, so containment admits a worktree's own copy whenever
+        # MAIN holds no CLAUDE.md. The managed document is exactly one of the
+        # two canonical paths under the root, so anything else is not it.
+        # `same_path` handles a not-yet-existing leaf and a symlinked parent;
+        # `_atomic_write_text` replaces the leaf ENTRY and never follows it,
+        # so a leaf symlink is not an escape.
+        if not (
+            same_path(target, memory_root / ".claude" / "CLAUDE.md")
+            or same_path(target, memory_root / "CLAUDE.md")
+        ):
+            return None
         before, before_base = _resolve_project_claude_md_with_base(
             project_dir=memory_root)
         if before_base is not None and not same_path(before_base, base):
