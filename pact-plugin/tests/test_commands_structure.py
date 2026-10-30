@@ -2127,6 +2127,8 @@ EXPECTED_JOURNAL_WRITE_COUNTS = {
     "wrap-up.md": 1,
 }
 
+EXPECTED_JOURNAL_WRITE_TOTAL = sum(EXPECTED_JOURNAL_WRITE_COUNTS.values())
+
 
 @pytest.fixture(scope="module")
 def journal_site_map():
@@ -2141,14 +2143,18 @@ def _journal_census_problems(sites):
     problems = []
     if counts != EXPECTED_JOURNAL_WRITE_COUNTS:
         problems.append(f"per-file counts {dict(counts)}, expected {EXPECTED_JOURNAL_WRITE_COUNTS}")
-    if len(sites) != 50:
-        problems.append(f"site count {len(sites)}, expected 50")
+    if len(sites) != EXPECTED_JOURNAL_WRITE_TOTAL:
+        problems.append(f"site count {len(sites)}, expected {EXPECTED_JOURNAL_WRITE_TOTAL}")
     return problems
 
 
 def test_journal_write_census_matches_manifest(journal_site_map):
     assert _journal_census_problems(list(journal_site_map.values())) == []
     assert set(journal_site_map) == set(JOURNAL_READBACK_MATRIX)
+
+
+def test_journal_write_total_is_derived_and_non_vacuous():
+    assert EXPECTED_JOURNAL_WRITE_TOTAL == len(JOURNAL_READBACK_MATRIX) == 50
 
 
 JOURNAL_STATIC_CODE = """import json
