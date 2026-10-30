@@ -346,7 +346,7 @@ PACT uses Gordon Pask's Conversation Theory to ensure shared understanding betwe
 
 - **Claude Code** (the CLI tool): `npm install -g @anthropic-ai/claude-code`
 - **Agent Teams enabled** (see [Enabling Agent Teams](#enabling-agent-teams) below)
-- **Python 3.9+** (for memory system and hooks)
+- **Python 3.12+** (for memory system and hooks)
 - **macOS or Linux** (Windows support coming soon)
 
 ### Enabling Agent Teams
