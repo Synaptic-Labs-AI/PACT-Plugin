@@ -589,18 +589,35 @@ def resolve_claude_md():
     # carries its own copy (#1653). (2) When the root holds no document, the
     # same git/cwd fall-through the sync sites use, because some same-project
     # layouts put the document beside the declared dir (a declared main
-    # subdirectory, a moved worktree). THE GUARD BELOW IS THE SAFETY PROPERTY
-    # FOR STEP 2: it refuses a resolution outside the declared project, so the
-    # fall-through cannot archive the worktree copy. The strict
-    # probe-the-root-only rule belongs to the UNGUARDED writer (session_init
-    # step 4); applying it here made archive_pin refuse same-project
-    # resolutions its siblings admit.
+    # subdirectory, a moved worktree).
+    #
+    # THE GUARD BELOW IS NOT ENOUGH FOR STEP 2, and this was measured, not
+    # reasoned: `stays_in_declared_project` deliberately admits the root of
+    # ANY checkout of the declaration's repository -- another worktree
+    # included (project_scope.py, "ADMITTED, and nothing else", rule 3). With
+    # declared MAIN empty and cwd in a worktree that carries a document, the
+    # fall-through returns the WORKTREE copy and the guard admits it. The
+    # memory-root check right after `base` is what keeps the shadow copy out;
+    # the sync sites never reach this shape because their resolver retargets
+    # every base through `project_memory_root` before probing.
     path, source = resolve_project_claude_md_path(memory_root)
     if source == "new_default":
         path = get_project_claude_md_path()
     if path is None:
         raise _Unevaluable("CLAUDE.md not found")
     base = _lexical_base_of(path)
+
+    # A WORKTREE COPY IS NEVER THE PROJECT-MEMORY DOCUMENT. A checkout whose
+    # memory root is not itself is a linked worktree (or a path inside one);
+    # project memory lives at the root it retargets to. Unknown here means
+    # git could not classify the base, and a writer refuses rather than
+    # guesses.
+    root_of_base = project_memory_root_or_none(base)
+    if root_of_base is None or Path(root_of_base) != base:
+        raise _Unevaluable(
+            f"resolution landed on a linked worktree copy ({path}); project "
+            "memory belongs to the main checkout, so nothing was archived"
+        )
 
     if env_dir:
         env_path = Path(env_dir)

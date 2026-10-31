@@ -923,6 +923,20 @@ def _declared_main_subdirectory_worktree_document(t):
     return main / "sub", worktree, _document_in(main), {}
 
 
+def _declared_main_worktree_shadow_copy(t):
+    """Declared MAIN holds NO document; the linked worktree carries one.
+
+    THE SHAPE THE PARITY POPULATION LACKED. `stays_in_declared_project`
+    admits the root of ANY checkout of the repository -- including another
+    worktree -- so a site that resolves by the raw fall-through and then
+    asks the guard will take this shadow copy. The rule under test is
+    absolute: no site takes it.
+    """
+    main = _committed_repo(t / "main")
+    worktree = _worktree_at(main, t / "worktree")
+    return main, worktree, _document_in(worktree), {}
+
+
 def _sibling_worktrees(t):
     main = _committed_repo(t / "main")
     declared = _worktree_at(main, t / "w1")
@@ -1213,6 +1227,44 @@ class TestEverySiteJudgesProjectScopeAlike:
         assert document.read_bytes() == before, (
             f"{site} wrote under a relative declaration that disagrees with the "
             "session record"
+        )
+
+
+class TestNoSiteTakesAWorktreeShadowCopy:
+    """THE ABSOLUTE RULE, and why parity alone was the wrong standard.
+
+    `TestEverySiteJudgesProjectScopeAlike` asks whether the three sites AGREE.
+    A set of sites can agree and all be wrong: `stays_in_declared_project`
+    admits the root of ANY checkout of the declaration's repository, another
+    worktree included, so a site that resolves by the raw fall-through and
+    then asks the guard takes the shadow copy -- and a parity assertion
+    comparing it with a sibling that does the same would be satisfied. This
+    class asserts the OUTCOME the branch exists for: on declared-MAIN /
+    cwd-in-worktree / MAIN-empty with a document in the worktree, NO site
+    takes it. The archive must refuse; the sync sites must leave both files
+    untouched. This is the invariant; parity is subordinate to it.
+    """
+
+    @pytest.mark.parametrize("site", _SITES)
+    def test_no_site_takes_the_shadow_copy(self, tmp_path, monkeypatch, site):
+        import archive_pin
+        import scripts.working_memory as wm
+
+        document = _arrange(_declared_main_worktree_shadow_copy, tmp_path, monkeypatch)
+        before = document.read_bytes()
+
+        if site == "archive_pin":
+            with pytest.raises(archive_pin._Unevaluable) as excinfo:
+                _run_site(site)
+            assert "worktree" in str(excinfo.value).lower(), excinfo.value.reason
+        else:
+            result = _run_site(site)
+            assert result.reason == wm.SyncResult.UNRESOLVED, (
+                f"{site} did not decline the shadow copy: {result.reason}"
+            )
+
+        assert document.read_bytes() == before, (
+            f"{site} wrote into the worktree shadow copy"
         )
 
 
