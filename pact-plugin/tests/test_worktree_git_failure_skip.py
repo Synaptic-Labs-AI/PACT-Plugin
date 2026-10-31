@@ -769,3 +769,48 @@ def test_d3b_the_archive_refuses_an_unknown_no_declared_root(repo, monkeypatch):
     with pytest.raises(archive_pin._Unevaluable) as exc:
         archive_pin.resolve_claude_md()
     assert "project memory root unknown" in str(exc.value)
+
+
+def test_d2b_the_exposure_persists_across_launches(repo, tmp_path, monkeypatch):
+    """D2 WINDOW CORRECTION, armed: the exposure does NOT self-heal.
+
+    MAIN's `.claude` is a symlink pointing OUTSIDE the root, so step 3's
+    creation is refused by containment and step 5b's Case-0 write meets the
+    same refusal -- MAIN never gains a file. On the pre-fix code that made
+    step 4's fall-through write the WORKTREE copy on launch 1 AND launch 2
+    (measured); the post-fix code leaves it unchanged on both. Two launches
+    are driven here because a one-launch arm cannot tell "heals next launch"
+    from "persists", and the difference is the urgency of the fix.
+    """
+    worktree = _worktree(repo, "d2b-persist")
+    doc = _managed_doc(_stale_capable_pin())
+    wt_md = worktree / ".claude" / "CLAUDE.md"
+    wt_md.parent.mkdir()
+    wt_md.write_text(doc, encoding="utf-8")
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    os.symlink(str(outside), str(repo / ".claude"), target_is_directory=True)
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
+    monkeypatch.chdir(worktree)
+    stdin_data = json.dumps(
+        {"session_id": SESSION_ID, "source": "startup", "agent_type": LEAD}
+    )
+
+    for launch in (1, 2):
+        with patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit) as exc:
+                session_init.main()
+        assert exc.value.code == 0
+        output = json.loads(mock_stdout.getvalue())
+        assert "Project CLAUDE.md skipped" in output.get("systemMessage", ""), (
+            f"launch {launch}: the containment refusal was not surfaced"
+        )
+        assert wt_md.read_text(encoding="utf-8") == doc, (
+            f"launch {launch}: step 4 wrote the worktree copy"
+        )
+        assert not (repo / ".claude" / "CLAUDE.md").exists(), (
+            f"launch {launch}: MAIN gained a file through the outside symlink"
+        )
