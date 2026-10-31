@@ -65,11 +65,26 @@ def git_env_without_location() -> dict:
     }
 
 
+def _fsdecode(data: bytes | str) -> str:
+    """Decode git output as filesystem text, preserving undecodable bytes.
+
+    `subprocess.run(text=True)` decodes with the LOCALE encoding and raises
+    UnicodeDecodeError on a path that is not valid in it -- and a Linux path
+    may contain any byte except NUL and `/`. os.fsdecode uses the filesystem
+    encoding with surrogateescape, so the bytes round-trip through Path and
+    os.fsencode and classify as the path git actually named.
+    """
+    return data if isinstance(data, str) else os.fsdecode(data)
+
+
 def _git_output(directory: Path, *args: str) -> Optional[str]:
     """Return the stripped stdout of `git -C <directory> <args>`, or None.
 
     None on a git error, a timeout, a non-repo directory or an OSError, so
     every rule built on it fails toward refusal.
+
+    Output is decoded with `_fsdecode`, never by `subprocess`, so a path git
+    prints is not locale-decoded (#1653).
     """
     # `run_git` absorbs TimeoutExpired and FileNotFoundError only. The original
     # predicate caught OSError entire, and that breadth is load-bearing here:
@@ -77,13 +92,19 @@ def _git_output(directory: Path, *args: str) -> Optional[str]:
     # would turn a fail-safe into a crash on a write path.
     try:
         result = run_git(
-            ["-C", str(directory), *args], timeout=5, env=git_env_without_location()
+            ["-C", str(directory), *args],
+            timeout=5,
+            text=False,
+            env=git_env_without_location(),
         )
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError covers a subprocess-level refusal (an embedded NUL and
+        # the like): "could not answer", not a crash on the write path.
         return None
-    if result is None or result.returncode != 0 or not result.stdout.strip():
+    if result is None or result.returncode != 0:
         return None
-    return result.stdout.strip()
+    stdout = _fsdecode(result.stdout).strip()
+    return stdout or None
 
 
 def _rev_parse_path(directory: Path, flag: str) -> Optional[Path]:
@@ -154,18 +175,20 @@ def _raw_rev_parse(directory: Path, flag: str) -> tuple[Optional[Path], bool]:
         result = run_git(
             ["-C", str(directory), "rev-parse", flag],
             timeout=5,
+            text=False,
             env=git_env_without_location(),
         )
-    except OSError:
+    except (OSError, ValueError):
         # `run_git` absorbs a timeout and a missing git but NOT a bare OSError
-        # from launching it; this helper must be total on a write-adjacent
-        # path, so an unlaunchable git is "could not answer".
+        # from launching it, nor a subprocess-level ValueError; this helper
+        # must be total on a write-adjacent path, so either is "could not
+        # answer".
         return None, False
     if result is None:
         return None, False
     if result.returncode != 0 or not result.stdout:
         return None, True
-    raw = result.stdout
+    raw = _fsdecode(result.stdout)
     if raw.endswith("\n"):
         raw = raw[:-1]
     path = Path(raw)
@@ -173,13 +196,10 @@ def _raw_rev_parse(directory: Path, flag: str) -> tuple[Optional[Path], bool]:
         path = Path(directory) / path
     try:
         return path.resolve(), True
-    except OSError:
+    except (OSError, RuntimeError):
+        # resolve() does not raise OSError for an unreadable parent, but a
+        # symlink loop raises RuntimeError; both are "answer unusable".
         return None, True
-
-
-def _toplevel_path(directory: Path) -> Optional[Path]:
-    """`--show-toplevel` via `_raw_rev_parse` (trailing whitespace preserved)."""
-    return _raw_rev_parse(directory, "--show-toplevel")[0]
 
 
 def _project_memory_root(
@@ -234,14 +254,15 @@ def project_memory_root(project_dir: str | os.PathLike[str]) -> Path:
 
     For a linked worktree -- its root or a subdirectory of one -- that is the
     main checkout's root; for everything else (a main checkout, a
-    subdirectory of one, a non-git directory, or any git failure) it is
-    `project_dir` EXACTLY as given.
+    subdirectory of one, a non-git directory, or any git failure) it is the
+    SAME Path as `project_dir`: never resolved, absolutised or normalised
+    here. (Constructing `Path` still drops a trailing separator and `.`
+    segments; callers compare Paths, so that spelling change is not
+    observable.)
 
-    THE EXACT RETURN IS LOAD-BEARING. Callers compare their output against the
-    pre-worktree behaviour, so a resolved or absolutised path would change a
-    status message for a reason that has nothing to do with worktrees. Return
-    the constructed `Path` untouched; never `resolve()`, `abspath` or normalise
-    here.
+    THE SAME-PATH RETURN IS LOAD-BEARING. Callers compare their output against
+    the pre-worktree behaviour, so a resolved or absolutised path would change
+    a status message for a reason that has nothing to do with worktrees.
 
     WHY `--git-common-dir`'s PARENT IS NOT ENOUGH. It is the main root for
     both a worktree and a main checkout, but it is NOT a checkout root for a
@@ -313,8 +334,10 @@ def _worktree_paths_from_admin_gitdirs(checkout: Path) -> Optional[list[str]]:
         return paths
     for admin in admins:
         try:
-            content = (admin / "gitdir").read_text(encoding="utf-8")
-        except OSError:
+            content = (admin / "gitdir").read_text(
+                encoding="utf-8", errors="surrogateescape"
+            )
+        except (OSError, ValueError):
             continue
         if content.endswith("\n"):
             content = content[:-1]
@@ -348,17 +371,23 @@ def _worktree_list_paths(checkout: Path) -> Optional[list[str]]:
     is stated, not hidden: it needs a pre-2.36 git AND an unreadable admin
     enumeration.
     """
-    result = run_git(
-        ["-C", str(checkout), "worktree", "list", "--porcelain", "-z"],
-        timeout=5,
-        env=git_env_without_location(),
-    )
-    if result is not None and result.returncode == 0:
-        return [
-            field[len("worktree "):]
-            for field in (result.stdout or "").split("\0")
-            if field.startswith("worktree ")
-        ]
+    try:
+        result = run_git(
+            ["-C", str(checkout), "worktree", "list", "--porcelain", "-z"],
+            timeout=5,
+            text=False,
+            env=git_env_without_location(),
+        )
+        if result is not None and result.returncode == 0:
+            return [
+                field[len("worktree "):]
+                for field in _fsdecode(result.stdout or b"").split("\0")
+                if field.startswith("worktree ")
+            ]
+    except (OSError, ValueError):
+        # Fall through to the admin-dir records: a subprocess refusal is
+        # "could not answer" here, and the next source may still answer.
+        pass
     recorded = _worktree_paths_from_admin_gitdirs(checkout)
     if recorded is not None:
         return recorded
@@ -401,7 +430,9 @@ def _listed_worktrees_result(
             if not path.is_absolute():
                 path = base / path
             listed.add(path.resolve())
-        except OSError:
+        except (OSError, RuntimeError):
+            # A symlink loop raises RuntimeError; an unusable record is
+            # skipped rather than aborting the listing.
             continue
     return listed
 

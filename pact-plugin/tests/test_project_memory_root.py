@@ -326,3 +326,60 @@ def test_a15_a_separate_git_dir_with_a_trailing_space_returns_input(tmp_path):
     _git("init", "-q", f"--separate-git-dir={tmp_path / 'sep.git '}", ".",
          cwd=checkout)
     assert project_memory_root(checkout) == checkout
+
+
+# --- F1 (#1653): undecodable path bytes must still classify -----------------
+# Four decode sites, each armed below. `os.fsdecode` is how a Linux path with
+# arbitrary bytes is carried as str; the helper must decode git's output the
+# same way (surrogateescape), never via subprocess's locale decoding.
+
+BAD_NAME = os.fsdecode(b"wt-\xff")
+
+
+def _bad_worktree(main):
+    """A linked worktree whose directory name is not valid UTF-8."""
+    path = main / ".worktrees" / BAD_NAME
+    _git("worktree", "add", "-q", str(path), "-b", "f1bad", cwd=main)
+    return path
+
+
+def test_f1_a_own_invalid_utf8_path_returns_main(repo):
+    """Site 1: `_raw_rev_parse` decodes git's --git-dir/--git-common-dir."""
+    worktree = _bad_worktree(repo)
+    assert project_memory_root(worktree) == repo.resolve()
+
+
+def test_f1_b_an_ascii_worktree_beside_an_invalid_one_returns_main(repo):
+    """Site 2: the worktree LISTING decodes every worktree path, so one bad
+    sibling poisons all of them. Different function, different fixture from
+    arm A -- an A-only fix leaves this red."""
+    _bad_worktree(repo)
+    worktree = _worktree(repo, "wt-f1b")
+    assert project_memory_root(worktree) == repo.resolve()
+
+
+def test_f1_c_admin_gitdir_fallback_decodes(repo, monkeypatch):
+    """Site 3: the admin `gitdir` file fallback, reached when the worktree
+    list cannot answer. It reads raw bytes from disk, not subprocess output."""
+    _bad_worktree(repo)
+    worktree = _worktree(repo, "wt-f1c")
+    real_run_git = project_scope.run_git
+
+    def failing_list(args, **kwargs):
+        if "worktree" in args and "list" in args:
+            return subprocess.CompletedProcess(
+                args, 1, stdout=b"", stderr=b"forced failure"
+            )
+        return real_run_git(args, **kwargs)
+
+    monkeypatch.setattr(project_scope, "run_git", failing_list)
+    assert project_memory_root(worktree) == repo.resolve()
+
+
+def test_f1_e_git_output_preserves_an_undecodable_path(repo):
+    """Site 4: `_git_output` -- the last-resort line parser and
+    `same_repository`'s launcher -- returns the path bytes round-tripped."""
+    worktree = _bad_worktree(repo)
+    out = project_scope._git_output(worktree, "rev-parse", "--show-toplevel")
+    assert out is not None
+    assert os.fsencode(out) == os.fsencode(str(worktree))
