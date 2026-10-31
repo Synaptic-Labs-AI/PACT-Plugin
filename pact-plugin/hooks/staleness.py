@@ -297,19 +297,22 @@ def _resolve_project_claude_md_with_base(
         result = subprocess.run(
             ["git", "rev-parse", "--git-common-dir"],
             capture_output=True,
-            text=True,
+            text=False,
             timeout=5,
             env=git_env_without_location(),
         )
         if result.returncode == 0 and result.stdout.strip():
-            common_dir = Path(result.stdout.strip())
+            # os.fsdecode, never subprocess's locale decoding: a path may
+            # contain bytes invalid in the locale, and UnicodeDecodeError
+            # would escape this reader (#1653 F1 twin site).
+            common_dir = Path(os.fsdecode(result.stdout).strip())
             if not common_dir.is_absolute():
                 common_dir = Path.cwd() / common_dir
             repo_root = common_dir.resolve().parent
             found = _find_existing_claude_md(repo_root, assume_present)
             if found is not None:
                 return found, repo_root
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         pass
 
     # Last resort: current working directory

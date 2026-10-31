@@ -1054,19 +1054,19 @@ def _get_claude_md_path() -> Optional[Path]:
         result = subprocess.run(
             ["git", "rev-parse", "--git-common-dir"],
             capture_output=True,
-            text=True,
+            text=False,
             timeout=5,
             env=git_env_without_location(),
         )
         if result.returncode == 0 and result.stdout.strip():
-            common_dir = Path(result.stdout.strip())
+            common_dir = Path(os.fsdecode(result.stdout).strip())
             if not common_dir.is_absolute():
                 common_dir = Path.cwd() / common_dir
             repo_root = common_dir.resolve().parent
             found = _find_existing_claude_md(repo_root)
             if found is not None:
                 return found
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         pass
 
     # Last resort: current working directory
@@ -1166,19 +1166,21 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
             result = subprocess.run(
                 ["git", "rev-parse", "--show-toplevel"],
                 capture_output=True,
-                text=True,
+                text=False,
                 timeout=5,
                 env=git_env_without_location(),
             )
             if result.returncode == 0 and result.stdout.strip():
+                # os.fsdecode: --show-toplevel prints the WORKTREE path, which
+                # is exactly where an undecodable byte lives (#1653 F1 twin).
                 worktree_root = project_memory_root_or_none(
-                    Path(result.stdout.strip())
+                    Path(os.fsdecode(result.stdout).strip())
                 )
                 if worktree_root is not None:
                     found = _find_existing_claude_md(worktree_root)
                     if found is not None:
                         return found, worktree_root
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
             pass
 
         # Main-repo root via --git-common-dir. Since #1653 every branch above
@@ -1202,19 +1204,19 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
             result = subprocess.run(
                 ["git", "rev-parse", "--git-common-dir"],
                 capture_output=True,
-                text=True,
+                text=False,
                 timeout=5,
                 env=git_env_without_location(),
             )
             if result.returncode == 0 and result.stdout.strip():
-                common_dir = Path(result.stdout.strip())
+                common_dir = Path(os.fsdecode(result.stdout).strip())
                 if not common_dir.is_absolute():
                     common_dir = Path.cwd() / common_dir
                 repo_root = common_dir.resolve().parent
                 found = _find_existing_claude_md(repo_root)
                 if found is not None:
                     return found, repo_root
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
             pass
 
         # Last resort: current working directory, at its project-memory root.

@@ -194,13 +194,16 @@ def main_repo_root(start: Optional[str] = None) -> Optional[Path]:
         result = subprocess.run(
             command,
             capture_output=True,
-            text=True,
+            text=False,
             timeout=5,
             env=git_env_without_location(),
         )
         if result.returncode != 0 or not result.stdout.strip():
             return None
-        common_dir = Path(result.stdout.strip())
+        # os.fsdecode, never subprocess's locale decoding: a path may contain
+        # bytes invalid in the locale, and UnicodeDecodeError would escape this
+        # reader (#1653 F1 twin site).
+        common_dir = Path(os.fsdecode(result.stdout).strip())
         if not common_dir.is_absolute():
             # git returns this path RELATIVE TO THE DIRECTORY IT RAN IN, at any
             # depth — measured in the main checkout: ".git" at the root,
@@ -218,9 +221,9 @@ def main_repo_root(start: Optional[str] = None) -> Optional[Path]:
             base = Path(start) if start is not None else Path.cwd()
             common_dir = base / common_dir
         return common_dir.resolve().parent
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        # git not installed, not a repo, command timed out, or the path could
-        # not be resolved.
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
+        # git not installed, not a repo, command timed out, an undecodable
+        # answer, or the path could not be resolved.
         return None
 
 
