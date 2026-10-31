@@ -468,10 +468,15 @@ _GUARDED_RESOLVERS = (
     ),
     (
         "scripts/archive_pin.py",
-        # #1653 task #54 moved the archive's resolution to the session helper
-        # (MAIN's file for a linked worktree). The census follows the call the
-        # code makes, so the unguarded-caller scan still reaches it.
-        "resolve_session_claude_md_path",
+        # The census follows the call the code makes, and that call moved
+        # again with the parity repair: the archive now probes the
+        # PROJECT-MEMORY root first (resolve_project_claude_md_path) and only
+        # falls through to the same-project resolver when that root holds no
+        # document. The escape guard still follows EITHER route, which is what
+        # this entry holds the caller to; pinning the primary call keeps
+        # `_KNOWN_GUARDED_CALLERS` loud if `resolve_claude_md` ever stops
+        # resolving at all.
+        "resolve_project_claude_md_path",
         "_stays_in_declared_project",
         frozenset(),
     ),
