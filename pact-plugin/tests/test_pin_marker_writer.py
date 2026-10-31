@@ -2219,7 +2219,7 @@ def test_b12b_a_fallthrough_target_outside_the_memory_root_is_refused(
 
     outcome = pin_marker_writer._plan_and_write()
 
-    assert outcome == "noop_outside_memory_root", (
+    assert outcome == "noop_not_the_managed_document", (
         f"the fall-through target was not refused: {outcome}"
     )
     assert worktree_md.read_text(encoding="utf-8") == original, (
@@ -2255,7 +2255,7 @@ def test_b12c_a_nested_worktree_target_is_refused(tmp_path, monkeypatch, env_var
 
     outcome = pin_marker_writer._plan_and_write()
 
-    assert outcome == "noop_outside_memory_root", (
+    assert outcome == "noop_not_the_managed_document", (
         f"the nested fall-through target was not refused: {outcome}"
     )
     assert worktree_md.read_text(encoding="utf-8") == original, (

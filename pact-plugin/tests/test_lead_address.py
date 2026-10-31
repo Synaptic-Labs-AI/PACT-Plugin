@@ -436,7 +436,10 @@ def _run_main_seam(tmp_path, monkeypatch):
         return result
 
     monkeypatch.setattr(session_init, "_resolve_aligned_team_name", _spy)
-    # RECORD THE ENV AT BOTH WRITE SITES. A red full-suite run once showed
+    # RECORD THE ENV AT BOTH WRITE SITES, and require BOTH to be reached (the
+    # assertion below does): a non-empty list on its own passes when one site
+    # never ran, so the instrument would claim coverage it did not have.
+    # A red full-suite run once showed
     # session_init writing the REAL main-checkout CLAUDE.md here, which requires
     # CLAUDE_PROJECT_DIR to hold the ambient value inside a test that
     # monkeypatches it to a tmp dir; it never reproduced. These spies make a
@@ -449,11 +452,11 @@ def _run_main_seam(tmp_path, monkeypatch):
     real_persist = session_init.persist_context
 
     def _spy_migrate(project_dir):
-        env_at_writes.append(os.environ.get("CLAUDE_PROJECT_DIR"))
+        env_at_writes.append(("migrate", os.environ.get("CLAUDE_PROJECT_DIR")))
         return real_migrate(project_dir)
 
     def _spy_persist(target, context):
-        env_at_writes.append(os.environ.get("CLAUDE_PROJECT_DIR"))
+        env_at_writes.append(("persist", os.environ.get("CLAUDE_PROJECT_DIR")))
         return real_persist(target, context)
 
     stdin = io.StringIO(json.dumps({
@@ -470,11 +473,14 @@ def _run_main_seam(tmp_path, monkeypatch):
         with pytest.raises(SystemExit) as exc_info:
             session_init.main()
     assert exc_info.value.code == 0
-    assert env_at_writes and all(
-        value == str(project) for value in env_at_writes
-    ), (
+    reached = {site for site, _value in env_at_writes}
+    assert reached == {"migrate", "persist"}, (
+        "both write sites must be observed, otherwise this instrument proves "
+        f"nothing about the one it missed; reached {sorted(reached)}"
+    )
+    assert all(value == str(project) for _site, value in env_at_writes), (
         "CLAUDE_PROJECT_DIR changed during session_init.main(): "
-        f"{env_at_writes!r}, expected {str(project)!r} at every write"
+        f"{env_at_writes!r}, expected {str(project)!r} at both writes"
     )
     session_dir = (config_root / "pact-sessions" / pact_context.project_slug(
         str(project)) / SESSION_ID)

@@ -275,7 +275,10 @@ def _plan_and_write() -> str:
 
         preferred, legacy = managed_document_paths(memory_root)
         if not (same_path(path, preferred) or same_path(path, legacy)):
-            return "noop_outside_memory_root"
+            # IDENTITY, not containment: the target may sit INSIDE the memory
+            # root (PACT nests worktrees there) and still not be the managed
+            # document, so the token names the rule that fired.
+            return "noop_not_the_managed_document"
 
         # Decoded with replacement, so a file that is not UTF-8 still gets the
         # ladder's own no-op. The text is NEVER WRITTEN as read: the write
