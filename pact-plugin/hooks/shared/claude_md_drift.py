@@ -341,30 +341,55 @@ def _resolve(session_dir: Path) -> tuple[Path | None, Path | None]:
     """The project CLAUDE.md and its base directory, the resolver's answer,
     starting git at most once per session.
 
-    The resolver's first step, CLAUDE_PROJECT_DIR, needs no git, so it is
-    checked on every call and wins whatever is cached. Otherwise the cached
-    base is used with the two-file check, and a cached "no file" stays the
-    answer until a file appears under CLAUDE_PROJECT_DIR."""
-    from staleness import _find_existing_claude_md, _resolve_project_claude_md_with_base
+    #1653: the base is the PROJECT-MEMORY root, so a linked-worktree session
+    watches the MAIN checkout's file -- the document every writer targets --
+    and the reader's anchor is the writers' anchor (`CLAUDE_PROJECT_DIR`, or
+    the cwd when it is absent). Retargeting needs git, so the root is paid
+    only when the cache is being built; afterwards the cached base (already
+    the memory root) is used with the two-file check and starts no git. Within
+    one session the declaration is stable, so a changed CLAUDE_PROJECT_DIR is
+    picked up by the next session rather than mid-session. A cached "no file"
+    means the memory root had none when computed; it stays the answer for this
+    session, which is the same per-session horizon the cache already had.
+
+    THE RESOLVER'S FALL-THROUGH IS NEVER CONSULTED (#1653, Bugbot). Its git
+    and cwd rungs can return the WORKTREE copy when the memory root holds no
+    file -- including when the declared dir IS MAIN and the process sits in
+    the worktree, the shape the old `memory_root != project_dir` guard did not
+    cover. A known root with no file therefore answers "no file", and the base
+    is cached so a file MAIN gains later is picked up by the two-file check.
+
+    AN UNKNOWN MEMORY ROOT IS NOT PROBED AND NOT CACHED. `project_memory_root`
+    fails open to its input, so on a git failure the env rung would read and
+    then CACHE the worktree copy ('#1653 task #59); the cache outlives the
+    failure and leaves the detector watching the wrong file for the rest of
+    the session. This module writes no project memory -- it writes session
+    state -- so it is a reader, but the fail-open shape is the same one
+    removed everywhere else: answer "nothing" now, and let the next check,
+    when git answers, take the real base."""
+    from shared.project_scope import project_memory_root_or_none
+    from staleness import _find_existing_claude_md
 
     cache_path = session_dir / _BASE_CACHE
     cached = _read_json(cache_path)
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-    if project_dir:
-        found = _find_existing_claude_md(Path(project_dir))
-        if found is not None:
-            if cached is None or cached.get("base") != project_dir:
-                _write_json(cache_path, {"base": project_dir})
-            return found, Path(project_dir)
     if cached is not None and "base" in cached:
         base = cached["base"]
         if not isinstance(base, str):
             return None, None
         found = _find_existing_claude_md(Path(base))
         return (found, Path(base)) if found is not None else (None, None)
-    path, base = _resolve_project_claude_md_with_base()
-    _write_json(cache_path, {"base": str(base) if base is not None else None})
-    return path, base
+
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    memory_root = project_memory_root_or_none(
+        Path(project_dir) if project_dir else Path.cwd()
+    )
+    if memory_root is None:
+        # UNKNOWN, and NOTHING IS CACHED: a transient failure here would
+        # otherwise pin the wrong file for the whole session.
+        return None, None
+    found = _find_existing_claude_md(memory_root)
+    _write_json(cache_path, {"base": str(memory_root)})
+    return (found, memory_root) if found is not None else (None, None)
 
 
 def _session_dir(frame: dict) -> Path | None:

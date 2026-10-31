@@ -1,26 +1,28 @@
 """
 Tests for syncing Working Memory to the display CLAUDE.md a session actually reads.
 
-A session rooted in a git worktree reads and is shown the WORKTREE's
-.claude/CLAUDE.md (the file session_init/session_resume create), but the
-database that backs memory search is keyed to the MAIN repository so every
-worktree session of a project shares one history. These two targets must be
-resolved independently: the display write follows the worktree, the database
-key follows the main repo.
+A session rooted in a git worktree reads and is shown the MAIN checkout's
+.claude/CLAUDE.md: since #1653 the display resolver retargets every base
+through `project_scope.project_memory_root`, so a worktree that carries its
+own file no longer shadows the project-memory target. The database that backs
+memory search is keyed to the MAIN repository too, so every worktree session
+of a project shares one history and one display target.
 
 This module exercises three surfaces with real, unmocked git repositories and
 worktrees wherever feasible:
 
   * the display-target resolver, _resolve_display_claude_md_path
   * the project-id detector's env branch, _detect_project_id
-  * the end-to-end save(), which must write the worktree display file AND store
-    the main-repo project_id on the database row
+  * the end-to-end save(), which must write the MAIN checkout's display file
+    AND store the main-repo project_id on the database row
 
 The repository's own .claude/CLAUDE.md is the live file for the running
 session; every test here builds an isolated synthetic repo under tmp_path and
 never touches real session state.
 """
 
+import io
+import json
 import logging
 import os
 import re
@@ -729,32 +731,31 @@ class TestExplicitSyncTarget:
 class TestDisplayTargetResolver:
     """The resolver returns the CLAUDE.md the current session displays."""
 
-    def test_worktree_session_resolves_worktree_file_when_env_unset(
+    def test_worktree_session_resolves_main_file_when_env_unset(
         self, worktree_repo, clean_env
     ):
-        """A worktree session with no env var resolves the worktree display file."""
-        _main, worktree = worktree_repo
-        resolved = _resolve_display_claude_md_path()
-        assert resolved == worktree / ".claude" / "CLAUDE.md"
+        """#1653: a worktree session with no env var resolves MAIN's file,
+        even though the worktree carries one of its own.
 
-    def test_worktree_without_own_file_resolves_main_via_branch_3(
+        The old pin asserted the WORKTREE file; it is FLIPPED, not deleted.
+        """
+        main, worktree = worktree_repo
+        resolved = _resolve_display_claude_md_path()
+        assert resolved is not None
+        assert resolved.resolve() == (main / ".claude" / "CLAUDE.md").resolve()
+
+    def test_worktree_without_own_file_resolves_main_via_the_retargeted_branch(
         self, tmp_path, clean_env
     ):
-        """Option C branch 3: a PACT-convention worktree with NO own CLAUDE.md
-        whose MAIN repo HAS one resolves to the MAIN file.
+        """#1653: a PACT-convention worktree with NO own CLAUDE.md resolves to
+        MAIN's file through branch 2, whose base is retargeted to the
+        project-memory root.
 
-        Pre-Option-C this returned None and the write was silently lost — the
-        worktree had no file and no branch could see the main one. Branch 3
-        (`--git-common-dir`.parent) closes that gap. This is the SOLE behavioral
-        guard for branch 3: reverting that branch makes this test fail, because the
-        worktree cwd has no CLAUDE.md so the resolver falls through to None
-        (verified by revert-and-fail, not merely watched pass).
+        The old pin asserted a worktree-miss-then-branch-3 sequence; it is
+        FLIPPED. The first probe is now the MAIN root and it hits.
 
-        A path-only assertion cannot prove branch 3 fired rather than branch 2
-        landing on the same file, so the call SEQUENCE is asserted: branch 2
-        (worktree root) was attempted and returned None BEFORE branch 3 (main root)
-        returned the file. Order matters — a change that made branch 2 wrongly
-        succeed must not read as a branch-3 hit.
+        A path-only assertion cannot prove the retarget fired, so the call
+        SEQUENCE is asserted: one probe, at the MAIN root, returning the file.
         """
         main = tmp_path / "mainproj"
         worktree = tmp_path / "wt-feature"
@@ -769,31 +770,24 @@ class TestDisplayTargetResolver:
         finally:
             os.chdir(str(prev))
 
-        # VALUE: the concrete MAIN file. Compare resolved forms — branch 3 calls
-        # Path.resolve(), so on a symlinked tmp (/var -> /private/var) a bare ==
-        # against the unresolved main path would false-fail.
+        # VALUE: the concrete MAIN file, compared in resolved form.
         assert resolved is not None
         assert resolved.resolve() == (main / ".claude" / "CLAUDE.md").resolve()
 
-        # MECHANISM: branch 2 (worktree root) probed and MISSED, THEN branch 3
-        # (main root) returned the file. The sequence, not mere membership.
-        assert len(calls) == 2, f"expected branch-2-then-branch-3, got {calls}"
-        (b2_base, b2_res), (b3_base, b3_res) = calls
-        assert b2_base.resolve() == worktree.resolve() and b2_res is None
-        assert b3_base.resolve() == main.resolve() and b3_res is not None
+        # MECHANISM: the worktree branch's base is MAIN and it hit first.
+        assert len(calls) == 1, f"expected one main-root probe, got {calls}"
+        (base, result), = calls
+        assert base.resolve() == main.resolve() and result is not None
 
-    def test_worktree_with_own_file_resolves_via_branch_2_not_shadowed_by_branch_3(
+    def test_worktree_with_own_file_resolves_to_main_not_its_own_file(
         self, tmp_path, clean_env
     ):
-        """#935 non-regression: a worktree that IS a session root (has its OWN
-        CLAUDE.md) still resolves to its own file via branch 2 — branch 3 must not
-        shadow it.
+        """#1653: a worktree carrying its OWN CLAUDE.md no longer shadows MAIN.
 
-        Both main and worktree carry a CLAUDE.md here, so a resolver that consulted
-        the main repo first would return the wrong file. Certified by revert-and-
-        fail on branch 2: with branch 2 removed the resolver falls to branch 3 and
-        returns the MAIN file, failing this test — so it is coupled to branch 2, not
-        merely to the worktree path.
+        The old pin (#935) asserted the worktree file won via branch 2; it is
+        FLIPPED, not deleted. Both files exist here, so the assertion is
+        discriminating: branch 2's base is retargeted to MAIN and hits on the
+        first probe; the worktree's copy is never consulted.
         """
         main = tmp_path / "mainproj"
         worktree = tmp_path / "wt-feature"
@@ -809,22 +803,25 @@ class TestDisplayTargetResolver:
             os.chdir(str(prev))
 
         assert resolved is not None
-        assert resolved.resolve() == (worktree / ".claude" / "CLAUDE.md").resolve()
+        assert resolved.resolve() == (main / ".claude" / "CLAUDE.md").resolve()
 
-        # MECHANISM: branch 2 returned the file on the FIRST probe; branch 3 (main
-        # root) was never reached, proving it does not shadow branch 2.
-        assert len(calls) == 1, f"branch 3 should not be reached; calls={calls}"
-        (b2_base, b2_res), = calls
-        assert b2_base.resolve() == worktree.resolve() and b2_res is not None
+        # MECHANISM: the first probe is the MAIN root and it returns the file.
+        assert len(calls) == 1, f"expected one main-root probe, got {calls}"
+        (base, result), = calls
+        assert base.resolve() == main.resolve() and result is not None
 
-    def test_worktree_session_resolves_worktree_file_when_env_is_worktree(
+    def test_worktree_session_resolves_main_file_when_env_is_worktree(
         self, worktree_repo, monkeypatch
     ):
-        """With CLAUDE_PROJECT_DIR set to the worktree, the worktree file wins."""
-        _main, worktree = worktree_repo
+        """#1653: with CLAUDE_PROJECT_DIR set to the worktree, MAIN's file wins.
+
+        The old pin asserted the worktree file; FLIPPED, not deleted.
+        """
+        main, worktree = worktree_repo
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
         resolved = _resolve_display_claude_md_path()
-        assert resolved == worktree / ".claude" / "CLAUDE.md"
+        assert resolved is not None
+        assert resolved.resolve() == (main / ".claude" / "CLAUDE.md").resolve()
 
     def test_main_checkout_resolves_main_file(self, tmp_path, clean_env):
         """In a plain (non-worktree) checkout the display target is the main file.
@@ -842,8 +839,11 @@ class TestDisplayTargetResolver:
             os.chdir(str(prev))
         assert resolved == main / ".claude" / "CLAUDE.md"
 
-    def test_resolves_legacy_root_file_when_no_dot_claude(self, tmp_path, clean_env):
-        """A worktree carrying only ./CLAUDE.md resolves that legacy location."""
+    def test_a_worktrees_legacy_root_file_does_not_win_over_main(
+        self, tmp_path, clean_env
+    ):
+        """#1653: a worktree carrying only ./CLAUDE.md no longer wins; MAIN's
+        .claude/CLAUDE.md is the project-memory target. Old pin FLIPPED."""
         main = tmp_path / "mainproj"
         worktree = tmp_path / "wt-legacy"
         _init_main_repo(main)
@@ -854,7 +854,8 @@ class TestDisplayTargetResolver:
             resolved = _resolve_display_claude_md_path()
         finally:
             os.chdir(str(prev))
-        assert resolved == worktree / "CLAUDE.md"
+        assert resolved is not None
+        assert resolved.resolve() == (main / ".claude" / "CLAUDE.md").resolve()
 
     def test_returns_none_when_no_display_file_exists(self, tmp_path, clean_env):
         """When neither display location exists, the resolver returns None so the
@@ -911,8 +912,17 @@ class TestDisplayTargetResolver:
             os.chdir(str(prev))
         assert resolved == plain / ".claude" / "CLAUDE.md"
 
-    def test_unavailable_git_binary_falls_through_to_cwd(self, tmp_path, clean_env):
-        """If git cannot be invoked the resolver degrades to the cwd probe."""
+    def test_unavailable_git_binary_reports_no_display_target(self, tmp_path, clean_env):
+        """Git unable to run means the cwd's memory root is UNKNOWN, not the cwd.
+
+        #1653 task #57 REVERSES the pin this arm used to hold: it asserted the
+        resolver "degrades to the cwd probe" and returned the cwd file when git
+        could not be invoked. That is the fail-open path a worktree save would
+        use to write the copy this change keeps out of project memory, so the
+        resolver now skips an unknown base and the writers report
+        ROOT_UNKNOWN. A directory that is merely OUTSIDE git is a different
+        case -- git runs and answers, so the cwd probe still resolves it (see
+        the test above)."""
         plain = tmp_path / "loose"
         (plain / ".claude").mkdir(parents=True)
         (plain / ".claude" / "CLAUDE.md").write_text(
@@ -926,25 +936,27 @@ class TestDisplayTargetResolver:
                 resolved = _resolve_display_claude_md_path()
         finally:
             os.chdir(str(prev))
-        assert resolved == plain / ".claude" / "CLAUDE.md"
+        assert resolved is None
 
     def test_env_outside_worktree_does_not_force_worktree_write(
         self, worktree_repo, tmp_path, monkeypatch
     ):
         """When the env points at an unrelated directory that has no CLAUDE.md,
-        the resolver does not invent a worktree write; it falls through to the
-        git/cwd probe and resolves the worktree the session is actually in.
+        the resolver falls through to the git/cwd probe and resolves the MAIN
+        checkout for the worktree session it is actually in (#1653).
 
         This guards the cwd-divergence degradation path: a stale or mismatched
-        CLAUDE_PROJECT_DIR must not silently redirect or suppress the sync.
+        CLAUDE_PROJECT_DIR must not silently suppress the sync.
         """
-        _main, worktree = worktree_repo
+        main, _worktree = worktree_repo
         stray = tmp_path / "stray-no-claude"
         stray.mkdir()
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(stray))
         resolved = _resolve_display_claude_md_path()
-        # Env dir has no CLAUDE.md -> probe falls through to the worktree (cwd).
-        assert resolved == worktree / ".claude" / "CLAUDE.md"
+        # Env dir has no CLAUDE.md -> falls through to the worktree probe,
+        # which is retargeted to MAIN.
+        assert resolved is not None
+        assert resolved.resolve() == (main / ".claude" / "CLAUDE.md").resolve()
 
 
 # ---------------------------------------------------------------------------
@@ -1065,15 +1077,14 @@ def _retrieved_context_block(text: str) -> str:
 class TestEndToEndParity:
     """save() writes the worktree display file and keys the row to the main repo."""
 
-    def test_worktree_save_populates_worktree_block_and_keys_to_main(
+    def test_worktree_save_populates_main_block_and_keys_to_main(
         self, worktree_repo, clean_env
     ):
-        """A worktree-rooted save() writes the WORKTREE Working Memory block and
-        stores the main-repo slug on the database row.
+        """#1653: a worktree-rooted save() writes MAIN's Working Memory block
+        and stores the main-repo slug on the database row.
 
-        This is the acceptance criterion: the display follows the worktree, the
-        database key follows the main repo. Driven through the real save() path
-        against a temporary database.
+        The old pin asserted the WORKTREE block; FLIPPED, not deleted. The
+        display and the database now share one target.
         """
         main, worktree = worktree_repo
         db_path = worktree.parent / "memory.db"
@@ -1084,24 +1095,24 @@ class TestEndToEndParity:
         worktree_text = (worktree / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
         main_text = (main / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
 
-        # Display write landed in the worktree, not the main repo.
-        assert "Worktree session entry" in _working_memory_block(worktree_text)
-        assert "Worktree session entry" not in main_text
+        # Display write landed in MAIN; the worktree's own copy is untouched.
+        assert "Worktree session entry" in _working_memory_block(main_text)
+        assert "Worktree session entry" not in worktree_text
 
         # Database row keyed to the main-repo slug, not the worktree name.
         stored = mem.get(memory_id)
         assert stored is not None
         assert stored.project_id == main.name
 
-    def test_worktree_save_writes_worktree_block_not_main(
+    def test_worktree_save_writes_main_block_not_the_worktree_file(
         self, worktree_repo, clean_env
     ):
-        """A worktree-rooted save() writes the display block to the WORKTREE file
-        and leaves the main repo untouched.
+        """#1653: a worktree-rooted save() writes the display block to the MAIN
+        file and leaves the worktree's own copy untouched.
 
-        This isolates the display leg of the acceptance criterion. Unlike the
-        joint test above, it asserts only the display target, so it stays coupled
-        to the display-target resolver even if the database-key path regresses.
+        The old pin asserted the WORKTREE block; FLIPPED. Isolates the display
+        leg, so it stays coupled to the display-target resolver even if the
+        database-key path regresses.
         """
         main, worktree = worktree_repo
         db_path = worktree.parent / "memory.db"
@@ -1111,8 +1122,8 @@ class TestEndToEndParity:
 
         worktree_text = (worktree / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
         main_text = (main / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
-        assert "Worktree display leg" in _working_memory_block(worktree_text)
-        assert "Worktree display leg" not in main_text
+        assert "Worktree display leg" in _working_memory_block(main_text)
+        assert "Worktree display leg" not in worktree_text
 
     def test_worktree_save_keys_db_row_to_main_repo(self, worktree_repo, clean_env):
         """A worktree-rooted save() keys the database row to the MAIN repo slug.
@@ -1153,11 +1164,12 @@ class TestEndToEndParity:
         assert stored.project_id == "soloproj"
 
     def test_worktree_and_main_saves_render_identical_entry(self, tmp_path, clean_env):
-        """Saving the same memory in a worktree session and a main session
-        produces the same rendered entry in each session's display block.
+        """Saving the same memory against a worktree display file and a main
+        display file produces the same rendered entry.
 
-        This is Option B's guarantee: a worktree session shows the same entries
-        a main-repo session would.
+        The resolver is patched here, so this pins the RENDERER, not the
+        target: after #1653 both real targets are the main checkout, and this
+        arm keeps rendering parity across the two file layouts.
         """
         # Main-repo session.
         main = tmp_path / "mainproj"
@@ -1191,20 +1203,25 @@ class TestEndToEndParity:
         assert worktree_entry == main_entry
         assert "Shared rendering check" in worktree_entry
 
-    def test_retrieved_context_sync_targets_worktree_display_file(
+    def test_retrieved_context_sync_targets_main_display_file(
         self, tmp_path, clean_env
     ):
-        """The retrieved-context sibling syncs to the worktree display file too.
+        """#1653: the retrieved-context sibling syncs to MAIN's display file.
 
-        sync_retrieved_to_claude_md shares the same display-target resolver, so a
-        worktree session's Retrieved Context block lands in the worktree file.
+        The old pin asserted the WORKTREE display file; FLIPPED, not deleted.
+        Both checkouts carry a Retrieved Context scaffold, so the destination
+        is discriminating.
         """
         from scripts.working_memory import sync_retrieved_to_claude_md
 
         main = tmp_path / "mainproj"
         worktree = tmp_path / "wt-feature"
-        _init_main_repo(main)
-        # Seed the worktree with a Retrieved Context scaffold instead of Working.
+        _init_main_repo(main, with_dot_claude=False, with_legacy=False)
+        main_dot = main / ".claude"
+        main_dot.mkdir(parents=True, exist_ok=True)
+        (main_dot / "CLAUDE.md").write_text(
+            RETRIEVED_CONTEXT_SCAFFOLD.format(title="Main"), encoding="utf-8"
+        )
         _add_worktree(main, worktree, with_dot_claude=False)
         dot = worktree / ".claude"
         dot.mkdir(parents=True, exist_ok=True)
@@ -1212,37 +1229,30 @@ class TestEndToEndParity:
             RETRIEVED_CONTEXT_SCAFFOLD.format(title="Worktree"), encoding="utf-8"
         )
 
-        retrieved = [{"context": "Recalled worktree note", "memory_id": "r1"}]
+        retrieved = [{"context": "Recalled main note", "memory_id": "r1"}]
         prev = Path.cwd()
         os.chdir(str(worktree))
         try:
-            sync_retrieved_to_claude_md(retrieved, query="worktree note")
+            sync_retrieved_to_claude_md(retrieved, query="main note")
         finally:
             os.chdir(str(prev))
 
+        main_text = (main_dot / "CLAUDE.md").read_text(encoding="utf-8")
         worktree_text = (dot / "CLAUDE.md").read_text(encoding="utf-8")
-        assert "Recalled worktree note" in _retrieved_context_block(worktree_text)
+        assert "Recalled main note" in _retrieved_context_block(main_text)
+        assert "Recalled main note" not in worktree_text
 
-    def test_worktree_save_with_no_own_file_lands_in_main_via_branch_3(
+    def test_worktree_save_with_no_own_file_lands_in_main(
         self, tmp_path, clean_env
     ):
         """A worktree-rooted save() with NO own CLAUDE.md, whose MAIN repo HAS
-        one, lands the Working Memory entry in the MAIN file via Option C
-        branch 3 — and the save still succeeds and persists the row.
+        one, lands the Working Memory entry in the MAIN file — and the save
+        still succeeds and persists the row.
 
-        Renamed + strengthened from a former test that claimed "the resolver
-        returns None when no CLAUDE.md exists" while its fixture created
-        main/.claude/CLAUDE.md via _init_main_repo's with_dot_claude=True default.
-        That is the branch-3 scenario mislabeled as the None scenario; the old
-        `assert memory_id is not None` was insensitive to WHERE the sync landed,
-        so it passed without pinning resolution at all. The genuine no-file-
-        anywhere None case is the separate test below.
-
-        END-TO-END companion to the resolver-unit branch-3 guard
-        (test_worktree_without_own_file_resolves_main_via_branch_3): that pins the
-        resolver in isolation; this pins that save() actually routes its sync
-        through the resolver and writes the resolved file. Both fail on a branch-3
-        revert, at different levels — defense in depth.
+        The old pin asserted a worktree-miss-then-branch-3 sequence; #1653
+        retargets the worktree branch itself, so the FIRST probe is the MAIN
+        root and it hits. The value assertions are unchanged; the mechanism
+        assertion is FLIPPED.
         """
         main = tmp_path / "mainproj"
         worktree = tmp_path / "wt-no-own-file"
@@ -1254,32 +1264,29 @@ class TestEndToEndParity:
             db_path = tmp_path / "memory.db"
             mem = PACTMemory(db_path=db_path)
             # Install the spy AFTER init so only the save()-time resolution is
-            # captured (empirically 2 calls: branch-2 miss then branch-3 hit).
+            # captured (empirically one probe: the retargeted worktree branch).
             calls = _install_find_spy(clean_env)
-            memory_id = mem.save({"context": "Branch-3 e2e entry"})
+            memory_id = mem.save({"context": "Retargeted-branch e2e entry"})
         finally:
             os.chdir(str(prev))
 
-        # Save succeeded and the row persisted — the original valid guarantee.
+        # Save succeeded and the row persisted.
         assert memory_id is not None
         stored = mem.get(memory_id)
         assert stored is not None
-        assert stored.context == "Branch-3 e2e entry"
+        assert stored.context == "Retargeted-branch e2e entry"
 
-        # VALUE: the entry physically landed in the MAIN file (branch 3); the
-        # worktree has no file at all, so the sync could not have gone elsewhere.
+        # VALUE: the entry physically landed in the MAIN file; the worktree has
+        # no file at all, so the sync could not have gone elsewhere.
         main_text = (main / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
-        assert "Branch-3 e2e entry" in _working_memory_block(main_text)
+        assert "Retargeted-branch e2e entry" in _working_memory_block(main_text)
         assert not (worktree / ".claude" / "CLAUDE.md").exists()
         assert not (worktree / "CLAUDE.md").exists()
 
-        # MECHANISM: save()'s sync resolved via branch 2 (worktree, None) THEN
-        # branch 3 (main, file) — confirms save() routes through the Option C
-        # branch, not merely that some file was written.
-        assert len(calls) == 2, f"expected branch-2-then-branch-3, got {calls}"
-        (b2_base, b2_res), (b3_base, b3_res) = calls
-        assert b2_base.resolve() == worktree.resolve() and b2_res is None
-        assert b3_base.resolve() == main.resolve() and b3_res is not None
+        # MECHANISM: save()'s sync probed the MAIN root first and hit.
+        assert len(calls) == 1, f"expected one main-root probe, got {calls}"
+        (base, result), = calls
+        assert base.resolve() == main.resolve() and result is not None
 
     def test_save_succeeds_when_no_display_file_anywhere(self, tmp_path, clean_env):
         """The genuine no-file case: NEITHER the worktree NOR the main repo has a
@@ -1328,3 +1335,123 @@ class TestEndToEndParity:
         assert memory_id is not None
         stored = mem.get(memory_id)
         assert stored is not None
+
+
+class TestWorktreeLeadEndToEndClosure:
+    """#1653 C1: a LEAD started inside a linked worktree keeps its memory in MAIN.
+
+    The decisive closure arm. A lead start in a fresh worktree now writes the
+    MAIN checkout's project CLAUDE.md and creates nothing in the worktree; the
+    real save() that follows must resolve MAIN's file through the worktree
+    fall-through (branch 3) and store the row keyed to the main repo.
+
+    The predecessor of this arm in this module asserted only
+    `memory_id is not None`, which was insensitive to WHERE the sync landed.
+    Every assertion below names content or location, never merely that a row
+    was saved.
+
+    LEG INDEPENDENCE (review finding F7, kept here so it is not re-derived):
+    no leg fully carries another, but they are not all independent.
+      - Leg 1 (entry in MAIN) can fail while leg 2 passes (no worktree file,
+        sync skipped) and while leg 3 passes (row saved, no sync).
+      - Leg 2 (worktree has no CLAUDE.md) is independent both ways: a
+        step-5b-created worktree file reddens it while leg 1 passes.
+      - Leg 3 (DB key) is independent both ways: a project-id regression
+        reddens it while leg 1 passes; a skipped sync reddens leg 1 while the
+        row still keys to main.
+      - Leg 4 (probe order: last probe is MAIN, every earlier probe a miss)
+        is corroborative in the green direction -- in this fixture the
+        resolved probe is the only writer, so a passing leg 1 implies a MAIN
+        hit -- and independent in the failure direction: a route change that
+        still lands the entry in MAIN by another path reddens it.
+    The single-arm shape cannot report per-leg isolation: leg 1 failing stops
+    legs 2-4 from being evaluated. That is a limitation of the shape, not a
+    vacuous assertion.
+    """
+
+    _SESSION_ID = "cccccccc-dddd-eeee-ffff-000000000000"
+
+    @staticmethod
+    def _lead_start(monkeypatch, project_dir):
+        """Drive session_init.main() on a lead startup frame, nothing stubbed."""
+        import session_init
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
+        monkeypatch.chdir(project_dir)
+        stdin_data = json.dumps(
+            {
+                "session_id": TestWorktreeLeadEndToEndClosure._SESSION_ID,
+                "source": "startup",
+                "agent_type": "PACT:pact-orchestrator",
+            }
+        )
+        with patch("sys.stdin", io.StringIO(stdin_data)), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            with pytest.raises(SystemExit) as exc:
+                session_init.main()
+        assert exc.value.code == 0
+        return json.loads(mock_stdout.getvalue())
+
+    def test_lead_start_then_save_lands_in_main(
+        self, tmp_path, monkeypatch, clean_env
+    ):
+        main = tmp_path / "mainproj"
+        worktree = tmp_path / "wt-1653"
+        _init_main_repo(main, with_dot_claude=False)
+        _add_worktree(main, worktree, with_dot_claude=False)
+
+        prev = Path.cwd()
+        try:
+            # 1. The lead start is the fix's write path: it must reach MAIN.
+            #    This is a precondition, not the claim under test -- without it
+            #    the save below has no main target and the arm would be
+            #    asserting a layout the fix never produced.
+            self._lead_start(monkeypatch, worktree)
+            assert (main / ".claude" / "CLAUDE.md").exists(), (
+                "the lead start did not create MAIN's CLAUDE.md, so the save "
+                "below has no main target to reach"
+            )
+            assert not (worktree / ".claude" / "CLAUDE.md").exists()
+            assert not (worktree / "CLAUDE.md").exists()
+
+            # 2. A real save from the worktree cwd, the cwd a worktree session
+            #    actually writes from. CLAUDE_PROJECT_DIR is unset so the
+            #    resolver falls through the git anchors, as it does for a save
+            #    outside a hook.
+            monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+            os.chdir(str(worktree))
+            calls = _install_find_spy(monkeypatch)
+            mem = PACTMemory(db_path=tmp_path / "memory.db")
+            memory_id = mem.save({"context": "Worktree lead closure entry"})
+        finally:
+            os.chdir(str(prev))
+
+        # 3. WHERE it landed: MAIN's Working Memory block, content asserted.
+        main_text = (main / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+        assert "Worktree lead closure entry" in _working_memory_block(main_text), (
+            "the memory entry did not land in MAIN's Working Memory block"
+        )
+        assert not (worktree / ".claude" / "CLAUDE.md").exists(), (
+            "the save created a CLAUDE.md in the worktree"
+        )
+        assert not (worktree / "CLAUDE.md").exists()
+
+        # 4. The row is keyed to the main repo, not the worktree.
+        stored = mem.get(memory_id)
+        assert stored is not None
+        assert stored.context == "Worktree lead closure entry"
+        assert stored.project_id == main.name
+
+        # 5. MECHANISM: the resolver's last probe was the MAIN root and it
+        #    produced the file; no earlier probe returned anything. A resolver
+        #    that preferred the worktree would fail here even if some other
+        #    file happened to receive the entry.
+        assert calls, "save() never probed a display target"
+        last_base, last_result = calls[-1]
+        assert last_base.resolve() == main.resolve(), (
+            f"the last resolver probe was {last_base}, not the main checkout"
+        )
+        assert last_result is not None
+        assert all(result is None for _base, result in calls[:-1]), (
+            f"a probe before the main-checkout hit returned a file: {calls}"
+        )

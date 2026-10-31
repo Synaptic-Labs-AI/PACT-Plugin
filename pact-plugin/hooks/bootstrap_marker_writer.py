@@ -176,6 +176,7 @@ try:
     from bootstrap_gate import is_marker_set
     from shared import BOOTSTRAP_MARKER_NAME
     from shared.claude_md_manager import resolve_project_claude_md_path
+    from shared.project_scope import project_memory_root_or_none
     from shared.marker_schema import (
         MARKER_MAX_BYTES,
         MARKER_SCHEMA_VERSION,
@@ -397,8 +398,12 @@ def _write_marker(session_dir: Path, session_id: str, plugin_root: str,
         raise
 
 
-def _write_back_aligned_team_name(input_data: dict) -> None:
+def _write_back_aligned_team_name(input_data: dict) -> str | None:
     """Self-heal the PERSISTED team name to the IDENTITY-MATCHED one (#989).
+
+    Returns a status line when a DECLARED project dir's memory root is
+    UNKNOWN, so the CLAUDE.md write was skipped; otherwise None. The caller
+    emits it as additionalContext (this hook's user-visible channel).
 
     Per-prompt, lead-gated write-back. ``get_team_name()`` resolves the REAL
     platform team via identity match (``config.json['leadSessionId']``);
@@ -421,10 +426,11 @@ def _write_back_aligned_team_name(input_data: dict) -> None:
     CLAUDE.md guard (HARD requirement): the target is resolved via
     ``resolve_project_claude_md_path`` and ``exists()``-guarded BEFORE calling
     ``update_session_info``. That function's Case-0 branch CREATES a brand-new
-    PACT-managed CLAUDE.md when the file is absent — which in a gitignored/
-    absent worktree would MATERIALIZE a file we must never create. So when the
-    CLAUDE.md is absent we SKIP the CLAUDE.md write entirely (the context-file
-    write-back still happens). When present, we pass the FULL correct tuple
+    PACT-managed CLAUDE.md when the file is absent — and at the project-memory
+    root this hook targets (the main checkout for a linked worktree, #1653)
+    that would MATERIALIZE a project CLAUDE.md we must never create. So when
+    the CLAUDE.md is absent we SKIP the CLAUDE.md write entirely (the
+    context-file write-back still happens). When present, we pass the FULL correct tuple
     (session_id / aligned team_name / session_dir / plugin_root) because
     ``update_session_info`` rewrites the WHOLE managed session block.
 
@@ -484,9 +490,25 @@ def _write_back_aligned_team_name(input_data: dict) -> None:
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
         if not project_dir:
             return
-        target_file, _source = resolve_project_claude_md_path(project_dir)
+        # The exists() guard and the write below must resolve the SAME target
+        # (#1653). On a worktree lead that target is the main checkout, so a
+        # guard left on the worktree would silently suppress the write.
+        #
+        # A DECLARED project dir whose memory root is UNKNOWN must write
+        # nothing: `project_memory_root` fails SAFE TO ITS INPUT, which for a
+        # writer means planting in the worktree. The skip is RETURNED so the
+        # caller emits it as additionalContext, the same user-visible channel
+        # session_init uses for its step 3/3b skip.
+        memory_root = project_memory_root_or_none(project_dir)
+        if memory_root is None:
+            return (
+                "Project CLAUDE.md skipped: git could not answer, so the project "
+                "memory target is unknown; this prompt wrote nothing to either "
+                "checkout."
+            )
+        target_file, _source = resolve_project_claude_md_path(memory_root)
         if not target_file.exists():
-            # Absent (e.g. gitignored worktree CLAUDE.md): SKIP the CLAUDE.md
+            # Absent at the project-memory root: SKIP the CLAUDE.md
             # write. The context-file write-back above already happened; the
             # human-readable line just stays absent, which is correct here.
             return
@@ -503,7 +525,8 @@ def _write_back_aligned_team_name(input_data: dict) -> None:
         # team name + the full correct tuple.
         update_session_info(
             session_id, aligned, session_dir, plugin_root,
-            started=read_session_started(project_dir),
+            started=read_session_started(memory_root),
+            project_dir=memory_root,
         )
     except Exception as e:
         print(
@@ -521,17 +544,25 @@ def _realign_team(input_data: dict) -> str | None:
     file, not the cache: write_context updates the cache even when its write
     to disk fails, and a move the disk does not show is no move.
 
+    A skip status from the write-back is returned when there is no move
+    notice to carry instead; when both occur, the move notice leads and the
+    skip follows it, so neither is lost.
+
     Never raises: the marker write after it is the load-bearing action.
     """
     try:
         before = pact_context.get_pact_context().get("team_name", "").lower()
-        _write_back_aligned_team_name(input_data)
+        skip_status = _write_back_aligned_team_name(input_data)
         after = recorded_team_of(pact_context.get_session_dir()).lower()
-        if not before or not after or before == after:
-            return None
-        # The lead's own write-back keeps its notice even when a racing
-        # compaction recorded the move first.
-        return record_team_realign(before, after, notify_if_already_recorded=True)
+        notice = None
+        if before and after and before != after:
+            # The lead's own write-back keeps its notice even when a racing
+            # compaction recorded the move first.
+            notice = record_team_realign(
+                before, after, notify_if_already_recorded=True
+            )
+        parts = [part for part in (notice, skip_status) if part]
+        return "\n".join(parts) or None
     except Exception as e:
         print(
             f"bootstrap_marker_writer: team realign report failed: {e}",

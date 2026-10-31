@@ -33,6 +33,20 @@ def _gate(project, target, call):
     return _outcome(_run_hook(project, _frame(target, tool, tool_input)))
 
 
+def _run_hook_with_env(project, frame, env_project_dir):
+    """Run the shipped hook with CLAUDE_PROJECT_DIR set, or ABSENT when None."""
+    env = {**os.environ, "HOME": str(project / "home")}
+    if env_project_dir is None:
+        env.pop("CLAUDE_PROJECT_DIR", None)
+    else:
+        env["CLAUDE_PROJECT_DIR"] = str(env_project_dir)
+    (project / "home").mkdir(exist_ok=True)
+    return subprocess.run(
+        [sys.executable, str(HOOK)], input=json.dumps(frame),
+        capture_output=True, text=True, env=env, cwd=str(project), timeout=600,
+    )
+
+
 def _case_insensitive_volume(directory):
     probe = directory / "CaseProbe"
     probe.write_text("x", encoding="utf-8")
@@ -84,8 +98,34 @@ def _git(cwd, *args):
     subprocess.run(["git", *args], cwd=cwd, env=env, check=True, capture_output=True, timeout=600)
 
 
-@pytest.mark.parametrize("pins, expected", [(13, "allow"), (14, "deny")])
-def test_a_worktree_write_is_compared_with_the_repository_roots_file(tmp_path, pins, expected):
+def _nested_worktree(tmp_path):
+    """A repo plus a linked worktree at repo/.worktrees/<branch> -- the layout
+    `pact-plugin/skills/worktree-setup` creates, NESTED inside the memory root."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init")
+    (repo / ".worktrees").mkdir()
+    worktree = repo / ".worktrees" / "branch"
+    _git(repo, "worktree", "add", "-q", str(worktree), "-b", "branch")
+    return repo, worktree
+
+
+@pytest.mark.parametrize("pins", [13, 14])
+def test_a_worktree_write_is_not_the_managed_document(tmp_path, pins):
+    """A write to the WORKTREE's own copy is not gated, whatever its pins.
+
+    #1653 FLIPPED this arm. The pre-branch pin was
+    `test_a_worktree_write_is_compared_with_the_repository_roots_file`,
+    parametrized (13, "allow"), (14, "deny"), and it compared a write to the
+    worktree copy against the REPOSITORY ROOT's file. Since the one-rule
+    change, a worktree session's managed document is the repository root's
+    file, and the worktree copy is not it: `match_project_claude_md` and
+    `gate_target` return None for this target, so there is nothing to gate.
+    The old row compared one file's pins with another file's text; the arm
+    that replaced it is `test_a_worktree_session_write_to_the_root_is_gated`,
+    which pins that the managed document itself is still protected.
+    """
     if shutil.which("git") is None:
         pytest.skip("git is not installed")
     repo, worktree = tmp_path / "repo", tmp_path / "worktree"
@@ -96,7 +136,114 @@ def test_a_worktree_write_is_compared_with_the_repository_roots_file(tmp_path, p
     (repo / ".claude").mkdir()  # untracked, so the worktree has no CLAUDE.md of its own
     (repo / ".claude" / "CLAUDE.md").write_text(_pins(13), encoding="utf-8")
     assert not (worktree / ".claude").exists()
-    assert _gate(worktree, worktree / ".claude" / "CLAUDE.md", _write(_pins(pins))) == expected
+    assert _gate(worktree, worktree / ".claude" / "CLAUDE.md", _write(_pins(pins))) == "allow"
+
+
+@pytest.mark.parametrize("pins, expected", [(13, "allow"), (14, "deny")])
+def test_a_worktree_session_write_to_the_root_is_gated(tmp_path, pins, expected):
+    """The managed file is still gated when the session runs in a worktree.
+
+    Same layout as the arm above, but the write targets the REPOSITORY ROOT's
+    file -- the document a worktree session's writers and advisory readers
+    follow since #1653. 14 pins is growth past the cap and is denied; 13 is
+    not growth and is allowed.
+    """
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    repo, worktree = tmp_path / "repo", tmp_path / "worktree"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init")
+    _git(repo, "worktree", "add", "-q", str(worktree))
+    (repo / ".claude").mkdir()
+    (repo / ".claude" / "CLAUDE.md").write_text(_pins(13), encoding="utf-8")
+
+    assert _gate(worktree, repo / ".claude" / "CLAUDE.md", _write(_pins(pins))) == expected
+
+
+@pytest.mark.parametrize("env_var", ["worktree", "unset"], ids=["declared", "unset"])
+def test_a_nested_worktree_write_crossing_the_cap_is_allowed(tmp_path, env_var):
+    """PACT's own layout is repo/.worktrees/<branch>, INSIDE the memory root.
+
+    Ancestor containment cannot tell that copy from the managed document, so
+    both a declared and an absent CLAUDE_PROJECT_DIR must leave it ungated
+    (#1653, security lane).
+    """
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    _, worktree = _nested_worktree(tmp_path)
+    target = worktree / ".claude" / "CLAUDE.md"
+    frame = _frame(target, *_write(_pins(14)))
+    declared = worktree if env_var == "worktree" else None
+    assert _outcome(_run_hook_with_env(worktree, frame, declared)) == "allow"
+
+
+def test_a_nested_worktree_write_with_env_set_to_main_is_allowed(tmp_path):
+    """The LIVE production shape: CLAUDE_PROJECT_DIR names MAIN while the hook
+    runs in the nested worktree, and MAIN holds no CLAUDE.md.
+
+    The resolver's cwd rung returns the worktree copy here, so this is the
+    cell the identity binding exists to decline (#1653, security lane).
+    """
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    repo, worktree = _nested_worktree(tmp_path)
+    target = worktree / ".claude" / "CLAUDE.md"
+    frame = _frame(target, *_write(_pins(14)))
+    assert _outcome(_run_hook_with_env(worktree, frame, repo)) == "allow"
+
+
+def _nested_worktree_with_main_document(tmp_path):
+    """A nested worktree where MAIN already holds the managed document, and the
+    worktree carries its own 13-pin copy to write over."""
+    repo, worktree = _nested_worktree(tmp_path)
+    (repo / ".claude").mkdir()
+    (repo / ".claude" / "CLAUDE.md").write_text(_pins(13), encoding="utf-8")
+    target = worktree / ".claude" / "CLAUDE.md"
+    target.parent.mkdir()
+    target.write_text(_pins(13), encoding="utf-8")
+    return repo, worktree, _frame(target, *_write(_pins(14)))
+
+
+def test_a_nested_worktree_write_with_main_holding_the_document_and_env_set_to_the_worktree_is_allowed(tmp_path):
+    """CONTROL: MAIN holds the document and CLAUDE_PROJECT_DIR names the
+    WORKTREE, which is what `_run_hook` sets. The resolver's own preference
+    declines at same_path before identity matters, so this also stays green on
+    6a53aa85; it is coverage, not evidence for the defect."""
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    _, worktree, frame = _nested_worktree_with_main_document(tmp_path)
+    assert _outcome(_run_hook(worktree, frame)) == "allow"
+
+
+def test_a_nested_worktree_write_with_main_holding_the_document_and_env_set_to_main_is_allowed(tmp_path):
+    """CONTROL: MAIN holds the document and CLAUDE_PROJECT_DIR names MAIN, the
+    literal production cell. Green on 6a53aa85 too; coverage, not evidence."""
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    repo, worktree, frame = _nested_worktree_with_main_document(tmp_path)
+    assert _outcome(_run_hook_with_env(worktree, frame, repo)) == "allow"
+
+
+def test_a_nested_worktree_write_with_main_holding_the_document_and_no_declared_dir_is_allowed(tmp_path):
+    """CONTROL: MAIN holds the document and CLAUDE_PROJECT_DIR is ABSENT.
+    Green on 6a53aa85 too; coverage, not evidence."""
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    _, worktree, frame = _nested_worktree_with_main_document(tmp_path)
+    assert _outcome(_run_hook_with_env(worktree, frame, None)) == "allow"
+
+
+def test_a_nested_worktree_session_write_to_main_is_still_denied(tmp_path):
+    """CONTROL: the managed document is still protected from a nested worktree
+    session."""
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    repo, worktree = _nested_worktree(tmp_path)
+    (repo / ".claude").mkdir()
+    (repo / ".claude" / "CLAUDE.md").write_text(_pins(13), encoding="utf-8")
+    frame = _frame(repo / ".claude" / "CLAUDE.md", *_write(_pins(14)))
+    assert _outcome(_run_hook(worktree, frame)) == "deny"
 
 
 @pytest.mark.parametrize("call, expected", [
@@ -358,8 +505,113 @@ def test_gate_target_returns_none_when_the_resolver_fails(tmp_path, monkeypatch)
 
     point_resolver_at(monkeypatch, tmp_path)
 
-    def _fails(assume_present=None):
+    def _fails(*args, **kwargs):
         raise OSError("resolver failed")
 
     monkeypatch.setattr(staleness, "_resolve_project_claude_md_with_base", _fails)
     assert gate_target(str(tmp_path / ".claude" / "CLAUDE.md")) is None
+
+
+@pytest.mark.parametrize("pins", [13, 14])
+def test_a_worktree_write_with_no_main_file_is_not_the_managed_document(tmp_path, monkeypatch, pins):
+    """#1653 Bugbot: MAIN holds no CLAUDE.md and the worktree carries one.
+
+    The resolver's supplied-base rung and its git rung both miss, so its CWD
+    rung returns the WORKTREE copy, which `same_path` then accepts -- and the
+    cap would bound the file the one rule says it no longer bounds. RED by
+    resolving the root with `project_memory_root` alone, whose fail-safe hands
+    back the declared worktree.
+    """
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    repo, worktree = tmp_path / "repo", tmp_path / "worktree"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init")
+    _git(repo, "worktree", "add", "-q", str(worktree))
+    (worktree / ".claude").mkdir()
+    (worktree / ".claude" / "CLAUDE.md").write_text(_pins(pins), encoding="utf-8")
+    assert not (repo / ".claude").exists()
+
+    from helpers import point_resolver_at
+    from shared.claude_md_manager import gate_target
+
+    point_resolver_at(monkeypatch, worktree)
+    assert gate_target(str(worktree / ".claude" / "CLAUDE.md")) is None
+
+
+def test_a_plain_session_write_to_its_own_file_is_still_gated(tmp_path, monkeypatch):
+    """CONTROL for the arm above: containment must not switch the ordinary gate off."""
+    from helpers import point_resolver_at
+    from shared.claude_md_manager import gate_target
+
+    point_resolver_at(monkeypatch, tmp_path)
+    target = tmp_path / ".claude" / "CLAUDE.md"
+    gated = gate_target(str(target))
+    assert gated is not None
+    assert (gated.target, gated.base) == (target, tmp_path)
+
+
+def test_a_plain_session_with_no_declared_dir_is_still_gated(tmp_path, monkeypatch):
+    """CONTROL for the unconditional derivation: an absent variable must not
+    switch the gate off for an ordinary project."""
+    from shared.claude_md_manager import gate_target
+
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "CLAUDE.md").write_text("x", encoding="utf-8")
+    target = tmp_path / ".claude" / "CLAUDE.md"
+    gated = gate_target(str(target))
+    assert gated is not None
+    assert (gated.target, gated.base) == (target, tmp_path)
+
+
+def test_gate_target_returns_none_when_the_memory_root_is_unknown(tmp_path, monkeypatch):
+    """CONTROL for the unknown-root path: git unavailable is not a guess.
+
+    `project_memory_root` would fail safe to the declared directory; the gate
+    must not bound a document it cannot identify (#1653).
+    """
+    import shared.project_scope as project_scope
+    from helpers import point_resolver_at
+    from shared.claude_md_manager import gate_target
+
+    point_resolver_at(monkeypatch, tmp_path)
+    (tmp_path / "CLAUDE.md").write_text("x", encoding="utf-8")
+    target = tmp_path / ".claude" / "CLAUDE.md"
+    assert gate_target(str(target)) is not None  # the live resolver gates it
+
+    monkeypatch.setattr(project_scope, "run_git", lambda *args, **kwargs: None)
+    assert gate_target(str(target)) is None
+
+
+@pytest.mark.parametrize("main_has_file", [False, True], ids=["main-absent", "main-present"])
+@pytest.mark.parametrize("env_var", ["main", "unset", "worktree"])
+def test_gate_target_declines_a_nested_worktree_copy_in_every_cell(
+    tmp_path, monkeypatch, main_has_file, env_var
+):
+    """The decline must not depend on MAIN's file or CLAUDE_PROJECT_DIR.
+
+    A worktree copy is never one of the two canonical managed-document paths,
+    so ALL cells expect None; the main-absent cells are the ones the ancestor
+    guard failed (#1653, security lane).
+    """
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    repo, worktree = _nested_worktree(tmp_path)
+    if main_has_file:
+        (repo / ".claude").mkdir()
+        (repo / ".claude" / "CLAUDE.md").write_text(_pins(13), encoding="utf-8")
+    (worktree / ".claude").mkdir()
+    target = worktree / ".claude" / "CLAUDE.md"
+    target.write_text(_pins(13), encoding="utf-8")
+
+    from shared.claude_md_manager import gate_target
+
+    declared = {"main": repo, "worktree": worktree}.get(env_var)
+    if declared is None:
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    else:
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(declared))
+    monkeypatch.chdir(worktree)
+    assert gate_target(str(target)) is None

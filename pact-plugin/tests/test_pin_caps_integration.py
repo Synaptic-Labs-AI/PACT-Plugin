@@ -134,8 +134,14 @@ class TestCheckPinSlotStatus_SessionInit:
 
     def test_returns_none_when_no_claude_md(self, monkeypatch):
         from session_init import check_pin_slot_status
+
+        # The wrapper resolves through the one-rule helper since #1653/D2,
+        # which probes the memory root directly and does not delegate to
+        # `staleness.get_project_claude_md_path` on any known route. Stub the
+        # helper the wrapper actually calls.
         monkeypatch.setattr(
-            "session_init._get_project_claude_md_path", lambda: None
+            "session_init.resolve_session_claude_md_path",
+            lambda *a, **k: None,
         )
         assert check_pin_slot_status() is None
 

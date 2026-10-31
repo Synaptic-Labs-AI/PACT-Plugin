@@ -76,6 +76,7 @@ from staleness import (  # noqa: F401
     _get_project_claude_md_path,
     _estimate_tokens,
     locate_pinned,
+    resolve_session_claude_md_path,
 )
 from pin_caps import (  # noqa: F401
     PIN_COUNT_CAP,
@@ -123,7 +124,11 @@ from shared.pact_config import llm_options
 from shared.peer_context import get_peer_context
 from shared.session_registry import resolve as _registry_resolve
 from shared.paths import get_claude_config_dir
-from shared.project_scope import _record_worktree_identity
+from shared.project_scope import (
+    _record_worktree_identity,
+    project_memory_root,
+    project_memory_root_or_none,
+)
 from shared import backlog_store
 
 # Import extracted modules (decomposed for maintainability per M5 audit finding).
@@ -305,18 +310,74 @@ def _should_warn_unknown_role(input_data: dict) -> bool:
     return not is_registered_pact_specialist(stripped, plugin_root=plugin_root)
 
 
-def check_pinned_staleness():
+def check_pinned_staleness(
+    project_dir: str | os.PathLike[str] | None = None,
+    memory_root: Path | None = None,
+):
     """
     Thin wrapper around staleness.check_pinned_staleness().
 
     Resolves the CLAUDE.md path via the module-level _get_project_claude_md_path
     (which tests can patch on session_init) and passes it to the core function.
+
+    WORKTREE LEAD (#1653). When project memory belongs to the main checkout,
+    the worktree path is wrong: staleness would mark a file that dies with the
+    worktree. The branch condition is `memory_root` differing from
+    `project_dir`; when it does NOT differ -- every non-worktree session --
+    the alias above is used exactly as before, so the patched test seam and
+    the byte-identical output both hold.
+
+    THE CALLER PASSES THE BASE IT ALREADY COMPUTED (main() derives
+    `project_dir` as env-or-cwd and `memory_root` from it). Re-deriving the
+    root here from the environment would agree only while the two call sites
+    happen to read the same value; a no-argument call falls back to today's
+    environment read for direct and test callers.
+
+    THE WORKTREE BRANCH BYPASSES `_get_project_claude_md_path`. An arm that
+    patches that alias drives only the non-worktree route; to exercise the
+    retarget it must pass a base pair, or set the environment and call this
+    with no arguments (which derives the pair from the environment).
+
+    THE NO-MAIN-FILE BRANCH RETURNS None AND DOES NOT CALL THE CORE. Passing
+    `claude_md_path=None` does NOT mean "nothing to mark": the core re-enters
+    `_resolve_project_claude_md_with_base()` when its path is None, and that
+    resolver is env-first -- so a None delegation resolves straight back to
+    the worktree file and marks it, defeating the retarget on exactly the
+    "main has no CLAUDE.md yet" path. This check marks an existing file; it
+    never creates one, and with no main file there is nothing to mark.
+
+    PASSING None IS A HAZARD, NOT AN OPTION. It re-derives the project dir
+    from the environment and, when that yields no file, the resolver's git and
+    cwd rungs can return a linked worktree's own CLAUDE.md -- a file that
+    belongs to the worktree, not to project memory. Callers resolve project
+    memory and pass it.
     """
+    if project_dir is None:
+        project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+        memory_root = project_memory_root(project_dir) if project_dir else None
+    if project_dir and memory_root is not None:
+        # THE WRITE-SAFE RULE (#1653/D2) BELONGS HERE, not in the shared
+        # helper: step 4 has NO scope guard, so it must probe the memory root
+        # and never consult the resolver's git/cwd fall-through, which returns
+        # the WORKTREE copy on the declared-MAIN / cwd-in-worktree /
+        # MAIN-empty shape and made this step write a STALE marker there.
+        # `new_default` means the memory root has no file: return without
+        # calling the core, whose None delegation re-resolves env-first.
+        # The SHARED helper keeps the fall-through for the sites that pair it
+        # with `stays_in_declared_project` (archive_pin and the sync writers),
+        # because there the guard, not the resolver, is the safety property.
+        target, source = resolve_project_claude_md_path(memory_root)
+        if source == "new_default":
+            return None
+        return _staleness_check(claude_md_path=target)
     path = _get_project_claude_md_path()
     return _staleness_check(claude_md_path=path)
 
 
-def check_pin_slot_status() -> Optional[str]:
+def check_pin_slot_status(
+    project_dir: str | os.PathLike[str] | None = None,
+    memory_root: Path | None = None,
+) -> Optional[str]:
     """Return a Tier-0 slot-status line for additionalContext, or None.
 
     Builds "Pin slots: N/12 used, K chars remaining on largest pin" via
@@ -330,9 +391,13 @@ def check_pin_slot_status() -> Optional[str]:
     regression, future parser change that raises outside the pin reader).
     Wrap the full body in a blanket try/except — mirrors the sibling
     check_pin_stale_block_directive pattern above.
+
+    FOLLOWS THE PROJECT-MEMORY ROOT (#1653): a worktree session's slots are
+    counted from the MAIN checkout's file, because that is the document every
+    writer targets. A non-worktree caller gets today's resolver unchanged.
     """
     try:
-        path = _get_project_claude_md_path()
+        path = resolve_session_claude_md_path(project_dir, memory_root)
         if path is None:
             return None
 
@@ -380,7 +445,10 @@ _SYNC_HEADINGS = (
 _REASON_LINE = re.compile(r"\blines? (\d+)")
 
 
-def check_claude_md_refusals() -> Optional[str]:
+def check_claude_md_refusals(
+    project_dir: str | os.PathLike[str] | None = None,
+    memory_root: Path | None = None,
+) -> Optional[str]:
     """Return the per-launch line for a project CLAUDE.md that PACT will not
     update, or None.
 
@@ -394,9 +462,12 @@ def check_claude_md_refusals() -> Optional[str]:
     checked. A missing, unreadable or non-UTF-8
     file gives None: the writers report those themselves. Read-only, and
     fail-open on the SessionStart hot path.
+
+    FOLLOWS THE PROJECT-MEMORY ROOT (#1653): the file named here is the one
+    PACT writes, so a worktree session names the MAIN checkout's file.
     """
     try:
-        path = _get_project_claude_md_path()
+        path = resolve_session_claude_md_path(project_dir, memory_root)
         if path is None:
             return None
         try:
@@ -454,7 +525,10 @@ def check_claude_md_refusals() -> Optional[str]:
         return None
 
 
-def check_pin_stale_block_directive() -> Optional[str]:
+def check_pin_stale_block_directive(
+    project_dir: str | os.PathLike[str] | None = None,
+    memory_root: Path | None = None,
+) -> Optional[str]:
     """Return an unconditional stale-block directive for additionalContext, or None.
 
     Fires only when check_pinned_block_signal reports positive detection.
@@ -473,8 +547,23 @@ def check_pin_stale_block_directive() -> Optional[str]:
     # its own contract, but session_init is on the SessionStart hot path —
     # a regression inside the callee should not propagate out of this
     # surfacing helper. Wrap in fail-open try/except.
+    #
+    # FOLLOWS THE PROJECT-MEMORY ROOT (#1653). In the worktree branch a None
+    # path means the main checkout has no file: return None HERE, because the
+    # callee re-resolves env-first when its path is None and would read the
+    # worktree copy (the step-4 lesson). The non-worktree route keeps today's
+    # delegation to the callee unchanged.
+    if project_dir is None:
+        project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+        memory_root = project_memory_root(project_dir) if project_dir else None
+    # A KNOWN root with no file means "nothing to read". None delegated to the
+    # callee re-resolves env-first and would read the worktree copy, so it is
+    # stopped here on EVERY known route, not only a retargeted one (#1653/D2).
+    known_root = bool(project_dir and memory_root is not None)
     try:
-        path = _get_project_claude_md_path()
+        path = resolve_session_claude_md_path(project_dir, memory_root)
+        if known_root and path is None:
+            return None
         signal = _staleness_block_check(claude_md_path=path)
     except Exception:  # noqa: BLE001 — fail-open
         return None
@@ -610,7 +699,9 @@ _SESSION_STARTED_RE = re.compile(
 _STARTED_VALUE_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$")
 
 
-def _extract_session_started(project_dir: str) -> str | None:
+def _extract_session_started(
+    project_dir: str | os.PathLike[str],
+) -> str | None:
     """The "Started" value in the project CLAUDE.md's Current Session block.
 
     None when there is no CLAUDE.md, it cannot be read, or the line is not in
@@ -1665,14 +1756,60 @@ def main():
         # share one verdict.
         frame_is_lead = frame_role == "lead"
 
+        # Where this session's project memory lives (#1653). A lead started
+        # inside a linked worktree belongs to the MAIN checkout: the writers
+        # below would otherwise plant or rewrite a CLAUDE.md inside the
+        # worktree, which every resolver then prefers over the real project
+        # file and which dies with the worktree. A non-worktree input comes
+        # back unchanged, so those paths stay byte-identical. Computed for
+        # every frame because the reads at 5a/5b must resolve the same root as
+        # the writers they feed.
+        #
+        # GIT-FAILURE DIRECTION. `project_memory_root` fails safe to its input,
+        # which during a git failure would re-plant a CLAUDE.md in the
+        # worktree. A DECLARED project dir whose memory root is UNKNOWN must
+        # skip the writers instead; the reads keep the fail-safe. A non-git
+        # directory is a known answer (the directory), so it is not skipped.
+        declared_project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+        memory_unknown = False
+        # D3 (#1653): the unknown-root rule holds on the NO-DECLARED-DIR
+        # route too. Before this, an env-absent session whose cwd was a
+        # worktree took the fail-open root and step 4 wrote a STALE marker
+        # into the worktree copy. The cwd is the anchor session_init already
+        # records when the platform declares nothing.
+        if declared_project_dir:
+            memory_root = project_memory_root_or_none(declared_project_dir)
+        else:
+            memory_root = project_memory_root_or_none(project_dir)
+        if memory_root is None:
+            memory_unknown = True
+            memory_root = project_memory_root(project_dir)
+
+        # The WRITERS keep their own "no project dir declared" guard. Passing
+        # `memory_root` to them unconditionally would bypass that guard --
+        # `project_dir` above falls back to the cwd and is never empty -- and
+        # a frame the platform handed no project dir would start creating a
+        # CLAUDE.md where it previously created none. None here means "read
+        # the environment", which is empty, so the writer returns its no-op.
+        # Reads may use `memory_root`: they already took the cwd fallback.
+        write_root = memory_root if declared_project_dir else None
+
+        # One user-visible line for the skip; the writers never run below.
+        if frame_is_lead and memory_unknown:
+            system_messages.append(
+                "Project CLAUDE.md skipped: git could not answer, so the project "
+                "memory target is unknown; this start wrote nothing to either "
+                "checkout."
+            )
+
         # Steps 3/3b create and migrate the project CLAUDE.md, and only a lead
         # does. A teammate whose project dir is a worktree would otherwise plant
         # a template there that diverts every CLAUDE.md resolver away from the
         # main repo's file, or rewrite a tracked CLAUDE.md in the worktree; in
         # the lead's own dir the lead has already written it.
-        if frame_is_lead:
+        if frame_is_lead and not memory_unknown:
             # 3. Ensure project has CLAUDE.md with memory sections
-            project_md_msg = ensure_project_memory_md()
+            project_md_msg = ensure_project_memory_md(write_root)
             if project_md_msg:
                 if "failed" in project_md_msg.lower() or "skipped" in project_md_msg.lower():
                     system_messages.append(project_md_msg)
@@ -1685,7 +1822,7 @@ def main():
             # already have the new structure, and before staleness checks
             # so the staleness parser sees the migrated layout.
             # Idempotent no-op when PACT_MANAGED_START marker is already present.
-            migration_msg = migrate_to_managed_structure()
+            migration_msg = migrate_to_managed_structure(write_root)
             if migration_msg:
                 if "failed" in migration_msg.lower() or "skipped" in migration_msg.lower():
                     system_messages.append(migration_msg)
@@ -1725,8 +1862,14 @@ def main():
         # runs it: a teammate in a worktree would otherwise mark a tracked
         # CLAUDE.md. Failed/skipped diagnostics go to system_messages, the
         # advisory to context.
-        if frame_is_lead:
-            staleness_msg = check_pinned_staleness()
+        #
+        # AN UNKNOWN memory root skips this step for the same reason steps 3/3b
+        # skip: `memory_root` above is the fail-open worktree in that case, and
+        # marking a pin there is a project-memory write to the copy this change
+        # exists to keep out. The single "Project CLAUDE.md skipped" line
+        # already appended above covers this step too; do not add a second one.
+        if frame_is_lead and not memory_unknown:
+            staleness_msg = check_pinned_staleness(project_dir, memory_root)
             if staleness_msg:
                 if "failed" in staleness_msg.lower() or "skipped" in staleness_msg.lower():
                     system_messages.append(staleness_msg)
@@ -1737,7 +1880,7 @@ def main():
         # update, on every launch until the file is fixed. Lead only, beside
         # each writer's own status; a compaction is not a launch.
         if frame_is_lead and source != "compact":
-            refusal_msg = check_claude_md_refusals()
+            refusal_msg = check_claude_md_refusals(project_dir, memory_root)
             if refusal_msg:
                 system_messages.append(refusal_msg)
 
@@ -1745,7 +1888,7 @@ def main():
         # architecturally binding, survives compaction. Fail-open: None
         # when CLAUDE.md cannot be resolved or parsed. m2: lead-only pin
         # telemetry — not surfaced to a teammate frame.
-        slot_status_msg = check_pin_slot_status()
+        slot_status_msg = check_pin_slot_status(project_dir, memory_root)
         if slot_status_msg and frame_role != "teammate":
             context_parts.append(slot_status_msg)
 
@@ -1754,7 +1897,7 @@ def main():
         # /resume per plan key-decisions row 6. m2: the "/PACT:prune-memory"
         # directive is a lead/orchestrator memory action — not surfaced to a
         # teammate frame (the helper's marker side-effect is unchanged).
-        stale_block_msg = check_pin_stale_block_directive()
+        stale_block_msg = check_pin_stale_block_directive(project_dir, memory_root)
         if stale_block_msg and frame_role != "teammate":
             context_parts.append(stale_block_msg)
 
@@ -2077,7 +2220,7 @@ def main():
         # otherwise it reads back the just-written current session dir and
         # silently breaks cross-session resume (step 7) and paused/refreshed-
         # work detection (step 8).
-        prev_session_dir = _extract_prev_session_dir(project_dir)
+        prev_session_dir = _extract_prev_session_dir(memory_root)
 
         if not session_id_was_missing:
             # Write session_start event to journal (after build_context_cache so
@@ -2478,10 +2621,15 @@ def main():
         # CROSS-PROCESS CLOBBER — a teammate/plain frame writing it overwrites
         # the lead's session block in the shared project file. Gate on
         # frame_is_lead in addition to the existing sentinel guard.
-        if frame_is_lead and not _is_unknown_or_missing_session(session_id):
+        if (
+            frame_is_lead
+            and not memory_unknown
+            and not _is_unknown_or_missing_session(session_id)
+        ):
             session_msg = update_session_info(
                 session_id, team_name, session_dir, plugin_root,
-                started=_extract_session_started(project_dir) if source == "compact" else None,
+                started=_extract_session_started(memory_root) if source == "compact" else None,
+                project_dir=write_root,
             )
             if session_msg:
                 if "failed" in session_msg.lower() or "skipped" in session_msg.lower():

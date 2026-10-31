@@ -33,9 +33,10 @@ from shared.claude_md_manager import (
     PINNED_END_MARKER,
     PINNED_START_MARKER,
     SESSION_BOUNDARY_PREFIX,
+    resolve_project_claude_md_path,
 )
 from shared.failure_cause import failure_cause
-from shared.project_scope import git_env_without_location
+from shared.project_scope import git_env_without_location, project_memory_root
 from pin_caps import (
     PIN_STALE_BLOCK_THRESHOLD,
     _PIN_HEADING_ROW,
@@ -233,6 +234,7 @@ def _find_existing_claude_md(base: Path, assume_present: Optional[Path] = None) 
 
 def _resolve_project_claude_md_with_base(
     assume_present: Optional[Path] = None,
+    project_dir: Optional[Path] = None,
 ) -> Tuple[Optional[Path], Optional[Path]]:
     """
     Resolve the project-level CLAUDE.md AND the trusted base directory it was
@@ -260,11 +262,20 @@ def _resolve_project_claude_md_with_base(
     order (see `_find_existing_claude_md`). Without it, every caller resolves
     exactly as before.
 
+    `project_dir` replaces the `CLAUDE_PROJECT_DIR` rung (step 1 of the order
+    above) when supplied; None -- the default -- reads the environment, so
+    every no-arg caller is byte-identical. A worktree caller passes
+    `project_scope.project_memory_root()` so a read and its write land in the
+    main checkout. THE RETURNED PAIR IS DERIVED FROM ONE BRANCH: `base` is
+    always the directory the returned `path` was found under, never a
+    re-derivation, so a write caller's containment anchor contains its target.
+
     Returns:
         (path, base) where path is an existing project CLAUDE.md and base is
         the directory it was found under; (None, None) if none exists.
     """
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    if project_dir is None:
+        project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
     if project_dir:
         base = Path(project_dir)
         found = _find_existing_claude_md(base, assume_present)
@@ -286,19 +297,22 @@ def _resolve_project_claude_md_with_base(
         result = subprocess.run(
             ["git", "rev-parse", "--git-common-dir"],
             capture_output=True,
-            text=True,
+            text=False,
             timeout=5,
             env=git_env_without_location(),
         )
         if result.returncode == 0 and result.stdout.strip():
-            common_dir = Path(result.stdout.strip())
+            # os.fsdecode, never subprocess's locale decoding: a path may
+            # contain bytes invalid in the locale, and UnicodeDecodeError
+            # would escape this reader (#1653 F1 twin site).
+            common_dir = Path(os.fsdecode(result.stdout).strip())
             if not common_dir.is_absolute():
                 common_dir = Path.cwd() / common_dir
             repo_root = common_dir.resolve().parent
             found = _find_existing_claude_md(repo_root, assume_present)
             if found is not None:
                 return found, repo_root
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         pass
 
     # Last resort: current working directory
@@ -328,7 +342,9 @@ def _lexical_base_of(claude_md_path: Path) -> Path:
     return claude_md_path.parent
 
 
-def get_project_claude_md_path() -> Optional[Path]:
+def get_project_claude_md_path(
+    project_dir: Optional[Path] = None,
+) -> Optional[Path]:
     """
     Get the path to the project-level CLAUDE.md (path only).
 
@@ -337,14 +353,61 @@ def get_project_claude_md_path() -> Optional[Path]:
     Path-only name, while the write caller (check_pinned_staleness) uses the
     with-base variant to get the containment anchor.
 
+    `project_dir` is forwarded verbatim: None -- the default -- reads
+    `CLAUDE_PROJECT_DIR`, so every no-arg caller is byte-identical. It is part
+    of the public signature so a future caller needing the main checkout
+    cannot reach the base by bypassing this wrapper, which is the
+    reader/writer drift this shape exists to close.
+
     Returns:
         Path to an existing project CLAUDE.md if found, None otherwise.
     """
-    return _resolve_project_claude_md_with_base()[0]
+    return _resolve_project_claude_md_with_base(project_dir=project_dir)[0]
 
 
 # Backward-compatible alias (tests and session_init patch the underscore name)
 _get_project_claude_md_path = get_project_claude_md_path
+
+
+def resolve_session_claude_md_path(
+    project_dir: Optional[os.PathLike[str] | str] = None,
+    memory_root: Optional[Path] = None,
+) -> Optional[Path]:
+    """The project CLAUDE.md the SESSION's PACT state lives in (#1653).
+
+    ONE RULE FOR EVERY ADVISORY READER AND THE WRITERS: a linked-worktree
+    session's project file is the MAIN checkout's, so a reader that resolved
+    the worktree copy would describe a document nothing writes any more. When
+    the supplied base does not differ from the declaration -- every
+    non-worktree session, and every no-argument call -- today's resolver is
+    used unchanged, so those sessions stay byte-identical.
+
+    Returns None when the memory root has no file; callers treat that as
+    "nothing to read" rather than delegating None to a resolver that would
+    re-resolve env-first (the step-4 lesson: None is not "do nothing").
+
+    A caller that names a base is honoured: `project_dir` alone derives its
+    memory root here and the non-worktree route passes the same base to the
+    resolver. Otherwise the argument would be a no-op and the call would
+    silently read the environment instead -- the reader/writer trap this
+    helper exists to close. A no-argument call is unchanged: it reads the
+    environment, as today.
+    """
+    if project_dir is None:
+        project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+        memory_root = project_memory_root(project_dir) if project_dir else None
+    elif memory_root is None:
+        memory_root = project_memory_root(project_dir)
+    if project_dir and memory_root is not None:
+        # ONE RULE (#1653/D2): probe the memory root and take ONLY its
+        # answer. The resolver's git/cwd fall-through is never consulted on
+        # this route -- it can return a linked worktree's own copy, the
+        # document this rule keeps out of project memory, and on the
+        # declared-MAIN / cwd-in-worktree / MAIN-empty shape it did exactly
+        # that to check_pinned_staleness, which wrote a STALE marker there.
+        target, source = resolve_project_claude_md_path(memory_root)
+        return target if source != "new_default" else None
+    return get_project_claude_md_path()
 
 
 def estimate_tokens(text: str) -> int:
@@ -782,11 +845,17 @@ def check_pinned_staleness(claude_md_path: Optional[Path] = None) -> Optional[st
     This function orchestrates detection (detect_stale_entries) and
     mutation (apply_staleness_markings) as separate steps for testability.
 
+    PASSING None IS A HAZARD, NOT AN OPTION. It delegates resolution to
+    `_resolve_project_claude_md_with_base()`, whose git and cwd rungs can
+    return a linked worktree's own CLAUDE.md -- a file that belongs to the
+    worktree, not to project memory. Callers resolve project memory and pass
+    the path.
+
     Args:
-        claude_md_path: Explicit path to CLAUDE.md. If None, resolved via
-            get_project_claude_md_path(). Callers (e.g. session_init.py)
-            may pass the path explicitly so their own resolution can be
-            patched independently in tests.
+        claude_md_path: Explicit path to CLAUDE.md. When None, this function
+            calls `_resolve_project_claude_md_with_base()` itself. Callers
+            (e.g. session_init.py) pass the path explicitly so their own
+            resolution can be patched independently in tests.
 
     Returns:
         Informational message about stale pins found, or None.
@@ -993,8 +1062,13 @@ def check_pinned_block_signal(
     Fail-open: all I/O and parse errors yield None. The block directive
     ONLY fires on positive detection; ambiguous state never blocks.
 
+    PASSING None IS A HAZARD, NOT AN OPTION. It resolves through
+    get_project_claude_md_path(), whose git and cwd rungs can return a linked
+    worktree's own CLAUDE.md -- a file that belongs to the worktree, not to
+    project memory. Callers resolve project memory and pass the path.
+
     Args:
-        claude_md_path: Explicit path. If None, resolved via
+        claude_md_path: Explicit path. When None, it is resolved through
             get_project_claude_md_path(). Callers may patch resolution
             independently from this module.
 

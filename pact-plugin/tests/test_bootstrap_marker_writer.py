@@ -2508,3 +2508,148 @@ class TestDerivedTeamRenameDetector:
         # Direct unit call — must not raise.
         from bootstrap_marker_writer import _debug_log_if_derived_team_dir_missing
         _debug_log_if_derived_team_dir_missing(_TEAM_NAME)
+
+
+# =============================================================================
+# #1653 B11/B13/B14: the per-prompt write-back from a worktree
+# =============================================================================
+#
+# The write-back is the hidden second writer of the session block. Three
+# properties are pinned here, each with its own revert:
+#   B13w - the exists() guard and the write resolve the SAME target (main).
+#   B11  - a rewrite keeps MAIN's recorded Started value.
+#   B14  - with no session_start, the CLAUDE.md write is skipped while the
+#          context file is still written (the deliberate cosmetic residual).
+
+_OLD_STARTED = "2026-10-19 07:00:00 UTC"
+
+
+def _git_repo_with_worktree(tmp_path):
+    """A real repo plus a linked worktree, git config isolated in-process."""
+    import subprocess
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+
+    def git(*args, cwd):
+        return subprocess.run(
+            ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+             "-c", "init.defaultBranch=main", *args],
+            cwd=str(cwd), env=env, capture_output=True, text=True,
+            timeout=30, check=True,
+        ).stdout
+
+    main = tmp_path / "main"
+    main.mkdir()
+    git("init", "-q", ".", cwd=main)
+    (main / "README").write_text("seed\n")
+    git("add", ".", cwd=main)
+    git("commit", "-qm", "seed", cwd=main)
+    worktree = tmp_path / "wt-b11"
+    git("worktree", "add", "-q", str(worktree), "-b", "b11", cwd=main)
+    return main, worktree
+
+
+def _arm_write_back(tmp_path, monkeypatch, *, with_session_start):
+    """Seed MAIN's block, arm the write-back, and drive it from a worktree."""
+    import bootstrap_marker_writer as bmw
+    from shared.session_journal import append_event
+    from shared.session_resume import update_session_info
+
+    main, worktree = _git_repo_with_worktree(tmp_path)
+    session_dir = tmp_path / "sd"
+    session_dir.mkdir()
+    if with_session_start:
+        assert append_event(
+            {"v": 1, "type": "session_start", "session_id": "prev",
+             "project_dir": str(main), "source": "startup"},
+            session_dir=str(session_dir),
+        )
+    assert update_session_info(
+        "prev", "old-team", str(session_dir), started=_OLD_STARTED,
+        project_dir=str(main),
+    ) is not None
+
+    written = []
+    monkeypatch.setattr(bmw.pact_context, "is_lead", lambda frame: True)
+    monkeypatch.setattr(bmw.pact_context, "get_team_name", lambda: "new-team")
+    monkeypatch.setattr(
+        bmw.pact_context, "get_pact_context",
+        lambda: {"team_name": "old-team", "started_at": _OLD_STARTED},
+    )
+    monkeypatch.setattr(bmw.pact_context, "get_session_id", lambda: "cur")
+    monkeypatch.setattr(
+        bmw.pact_context, "get_session_dir", lambda: str(session_dir)
+    )
+    monkeypatch.setattr(bmw.pact_context, "get_plugin_root", lambda: "/plugin")
+    monkeypatch.setattr(
+        bmw.pact_context, "get_project_dir", lambda: str(worktree)
+    )
+    monkeypatch.setattr(
+        bmw.pact_context, "write_context",
+        lambda *args, **kwargs: written.append((args, kwargs)),
+    )
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+    monkeypatch.chdir(worktree)
+    bmw._write_back_aligned_team_name({"agent_type": "PACT:pact-orchestrator"})
+    return main, worktree, written
+
+
+def test_b13_a_worktree_lead_write_back_reaches_main(tmp_path, monkeypatch):
+    """The exists() guard and the write resolve the same target.
+
+    The worktree has NO CLAUDE.md, MAIN has one. A guard left on the worktree
+    finds nothing there and silently suppresses the write; the arm asserts
+    the destination content, so a skip cannot pass.
+    """
+    main, worktree, _written = _arm_write_back(
+        tmp_path, monkeypatch, with_session_start=True
+    )
+
+    main_text = (main / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "- Team: `new-team`" in main_text, (
+        "the write-back did not reach MAIN's CLAUDE.md; a guard on the "
+        "worktree suppressed it"
+    )
+    assert not (worktree / ".claude" / "CLAUDE.md").exists()
+    assert not (worktree / "CLAUDE.md").exists()
+
+
+def test_b11_a_worktree_lead_write_back_keeps_the_main_started(
+    tmp_path, monkeypatch
+):
+    """The rewrite keeps MAIN's recorded Started rather than resetting it."""
+    main, _worktree, _written = _arm_write_back(
+        tmp_path, monkeypatch, with_session_start=True
+    )
+
+    main_text = (main / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+    assert f"- Started: {_OLD_STARTED}" in main_text, (
+        "the write-back reset MAIN's Started line instead of reading it back"
+    )
+    assert "- Team: `new-team`" in main_text, "precondition: the rewrite ran"
+
+
+def test_b14_no_session_start_skips_the_block_but_writes_the_context(
+    tmp_path, monkeypatch
+):
+    """The ordering gate: until session_start exists, the block is not ours.
+
+    bootstrap_prompt_gate reads the old block before replacing it, so this
+    hook must not rewrite it first. The context file above the gate is still
+    written -- that is the deliberate cosmetic residual, pinned here so a
+    later simplification cannot convert it into a lost resume claim.
+    """
+    main, _worktree, written = _arm_write_back(
+        tmp_path, monkeypatch, with_session_start=False
+    )
+
+    main_text = (main / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "- Team: `new-team`" not in main_text, (
+        "the write-back rewrote the block before session_start existed"
+    )
+    assert "- Team: `old-team`" in main_text, "precondition: the seeded block"
+    assert written and written[0][0][0] == "new-team", (
+        "the context file was not written; the residual is a stale cosmetic "
+        "line ONLY because the context write still happens"
+    )

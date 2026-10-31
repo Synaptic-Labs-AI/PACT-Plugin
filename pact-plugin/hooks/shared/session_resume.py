@@ -353,6 +353,7 @@ def update_session_info(
     session_dir: str | None = None,
     plugin_root: str | None = None,
     started: str | None = None,
+    project_dir: str | os.PathLike[str] | None = None,
 ) -> str | None:
     """
     Write the Current Session section to the project's CLAUDE.md.
@@ -373,12 +374,18 @@ def update_session_info(
             can locate hook scripts without symlink traversal.
         started: The "Started" value to write; None writes now. A compaction is
             not a session start, so session_init passes the value already there.
+        project_dir: The base directory whose CLAUDE.md this call manages.
+            None (the default) reads `CLAUDE_PROJECT_DIR`, so every existing
+            caller is byte-identical. A worktree-lead caller passes
+            `project_scope.project_memory_root()` so the target AND the
+            containment anchors below are the main checkout.
 
     Returns:
         Status message or None if no action taken. A failure that may clear on
         its own returns a TransientSessionInfoFailure.
     """
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    if project_dir is None:
+        project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
     if not project_dir:
         return None
 
@@ -398,7 +405,21 @@ def update_session_info(
     # first guarantees the parent gets the intended 0o700 mode. The call is
     # idempotent, so concurrent callers are safe: whichever thread creates
     # the directory wins with 0o700, others see `parent.exists()` and no-op.
-    ensure_dot_claude_parent(target_file)
+    #
+    # #1653/F8: A PERMISSION FAILURE HERE IS A WRITE FAILURE, NOT A CRASH.
+    # The parent now belongs to the project-memory root, which for a worktree
+    # lead is the MAIN checkout — a checkout this process may not be able to
+    # write. An OSError escaping here used to abort the rest of SessionStart
+    # through the caller's safety net; it returns the writer's own status
+    # instead, like every other failure below. The call stays OUTSIDE
+    # `file_lock` because the 0o700 guarantee above depends on it, so the
+    # failure is caught here rather than by the lock-acquisition handler
+    # further down, whose message would misreport a mkdir failure as a lock
+    # failure.
+    try:
+        ensure_dot_claude_parent(target_file)
+    except OSError as e:
+        return session_info_failure(e)
 
     # Concurrency guard: serialize read-mutate-write so two concurrent
     # session_init hooks on the same project CLAUDE.md cannot interleave
@@ -556,7 +577,7 @@ _SESSION_STARTED_RE = re.compile(
 _STARTED_VALUE_RE = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$")
 
 
-def read_session_started(project_dir: str) -> str | None:
+def read_session_started(project_dir: str | os.PathLike[str]) -> str | None:
     """The "Started" value in the project CLAUDE.md's Current Session block.
 
     Pass it as update_session_info's ``started`` to rewrite the block without
@@ -620,7 +641,9 @@ def _validate_under_pact_sessions(path: str) -> str | None:
     return None
 
 
-def _extract_prev_session_dir(project_dir: str) -> str | None:
+def _extract_prev_session_dir(
+    project_dir: str | os.PathLike[str],
+) -> str | None:
     """
     Extract the previous session's directory path from the project CLAUDE.md.
 
@@ -1116,6 +1139,26 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
 
     lines = ["Previous session summary (from journal -- read-only reference):", ""]
 
+    # NAME THE SOURCE SESSION NEUTRALLY. "Context from session X" states where
+    # this text came from; "resumed from" would assert a predecessor ordering
+    # that two concurrent leads can falsify, and NO liveness predicate is
+    # computed -- a session killed before writing session_end would read as
+    # live forever (the lineage assessment's crash case). Omitted when the
+    # journal carries no session_start, so the header is unchanged there.
+    source_session = next(
+        (
+            event.get("session_id")
+            for event in all_events
+            if event.get("type") == "session_start"
+            and isinstance(event.get("session_id"), str)
+            and event.get("session_id")
+        ),
+        "",
+    )
+    if source_session:
+        lines.append(f"Context from session {source_session}.")
+        lines.append("")
+
     # Extract completed handoffs. Every field access is guarded with
     # .get() and type checks — `decisions[0]` is the single historical
     # crash site (BugF1 secondary), now funneled through the helper.
@@ -1229,8 +1272,10 @@ def _build_journal_resume_inner(session_dir: str) -> str | None:
         lines.append(f"**Warning**: {warning}")
         lines.append("")
 
-    # Minimal output check
-    if len(lines) <= 2:
+    # Minimal output check. The source line adds two rows, counted out here so
+    # a journal that was too thin to summarize BEFORE #53 still returns None —
+    # the None/non-None boundary must not move with a header addition.
+    if len(lines) <= (4 if source_session else 2):
         return None
 
     return "\n".join(lines)

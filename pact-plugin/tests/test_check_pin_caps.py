@@ -140,13 +140,12 @@ class TestCheckPinCaps_Advisory_FailOpen:
     """
 
     def test_no_claude_md_fails_open(self, monkeypatch):
-        import staleness
         import check_pin_caps
+        # #1653/D2: the listing resolves through the one-rule helper, so the
+        # seam to stub is that helper (the old get_project_claude_md_path
+        # patch no longer reaches the equal-base route).
         monkeypatch.setattr(
-            staleness, "get_project_claude_md_path", lambda: None
-        )
-        monkeypatch.setattr(
-            check_pin_caps, "get_project_claude_md_path", lambda: None
+            check_pin_caps, "resolve_session_claude_md_path", lambda *a, **k: None
         )
         rc, payload = _run_cli(["--status"])
         assert rc == 0

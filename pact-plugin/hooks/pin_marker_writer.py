@@ -225,6 +225,8 @@ def _plan_and_write() -> str:
         ContainmentError = _NeverRaised  # type: ignore[assignment,misc]
 
     try:
+        import os
+
         from shared.claude_md_manager import (
             _atomic_write_text,
             file_lock,
@@ -235,14 +237,48 @@ def _plan_and_write() -> str:
             certify_expel_nothing,
             plan_insertion,
         )
-        from staleness import _resolve_project_claude_md_with_base
+        from shared.project_scope import project_memory_root_or_none
+        from staleness import _resolve_project_claude_md_with_base, same_path
 
-        # Returns (None, None) when no project CLAUDE.md exists, so this
-        # resolver never brings one into being. Creating the file is not this
-        # hook's business under any circumstance.
-        path, base = _resolve_project_claude_md_with_base()
+        # Pin markers are project-memory content (#1653): a worktree lead's
+        # markers belong to the main checkout, where the display file survives
+        # the worktree. The resolver's (path, base) pair then BOTH derive from
+        # the memory root. Returns (None, None) when no project CLAUDE.md
+        # exists, so this resolver never brings one into being. Creating the
+        # file is not this hook's business under any circumstance.
+        env_project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+        # DERIVED UNCONDITIONALLY (#1653, security lane): an absent variable
+        # must not skip the guard. `or os.getcwd()` is what session_init uses.
+        # An UNKNOWN root identifies nothing, so write nothing. The outcome is
+        # journaled like every other confirmed invocation, which is this
+        # hook's status surface.
+        memory_root = project_memory_root_or_none(env_project_dir or os.getcwd())
+        if memory_root is None:
+            return "noop_memory_root_unknown"
+        path, base = _resolve_project_claude_md_with_base(project_dir=memory_root)
         if path is None or base is None:
             return "noop_no_file"
+
+        # IDENTITY, NOT ANCESTOR CONTAINMENT (#1653, security lane). The
+        # resolver tries the supplied root first and then falls through to its
+        # git and cwd rungs. On a first-rung miss -- the main checkout has no
+        # CLAUDE.md while the worktree still carries one -- it returns the
+        # WORKTREE file, and the markers would land there: the committable
+        # worktree write this change exists to stop. Containment cannot see
+        # that: PACT creates worktrees at `$REPO_ROOT/.worktrees/{branch}`, so
+        # the worktree file is INSIDE the memory root. The resolved path must
+        # BE one of the two canonical managed-document paths, not merely sit
+        # under the root. `same_path` handles a symlinked parent;
+        # `_atomic_write_text` replaces the leaf ENTRY and never follows it,
+        # so a leaf symlink is not an escape.
+        from shared.claude_md_manager import managed_document_paths
+
+        preferred, legacy = managed_document_paths(memory_root)
+        if not (same_path(path, preferred) or same_path(path, legacy)):
+            # IDENTITY, not containment: the target may sit INSIDE the memory
+            # root (PACT nests worktrees there) and still not be the managed
+            # document, so the token names the rule that fired.
+            return "noop_not_the_managed_document"
 
         # Decoded with replacement, so a file that is not UTF-8 still gets the
         # ladder's own no-op. The text is NEVER WRITTEN as read: the write

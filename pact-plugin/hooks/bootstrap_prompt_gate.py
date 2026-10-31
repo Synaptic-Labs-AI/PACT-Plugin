@@ -391,7 +391,10 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
             SESSION_START_MARKER,
             resolve_project_claude_md_path,
         )
-        from shared.project_scope import _record_worktree_identity
+        from shared.project_scope import (
+            _record_worktree_identity,
+            project_memory_root_or_none,
+        )
         from shared.session_journal import append_event, make_event
         from shared.session_resume import (
             RESUMPTION_MARKER_MISSING_DIRECTIVE,
@@ -409,17 +412,40 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
         session_id = str(input_data["session_id"])
         team = pact_context.get_team_name()
         plugin_root = pact_context.get_plugin_root()
-        # update_session_info writes the file CLAUDE_PROJECT_DIR names, so the
-        # block is looked for there, through the same resolver.
+        # update_session_info writes the PROJECT-MEMORY root's file (#1653):
+        # CLAUDE_PROJECT_DIR for a main checkout, the main checkout for a
+        # linked worktree. The block is looked for there, through the same
+        # resolver.
         env_project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
         project_dir = env_project_dir or os.getcwd()
+        # The block is read AND rewritten at the project-memory root, so a
+        # worktree lead reads the main checkout's block (#1653). Non-worktree
+        # input is returned unchanged. Only the env-declared branch below
+        # reads a block, so only it needs the root.
+        #
+        # AN UNKNOWN root means NO block read and NO rewrite, and it is
+        # REPORTED rather than silently skipped: `project_memory_root` fails
+        # OPEN to its input, so on a git failure this function would rewrite a
+        # worktree CLAUDE.md while returning "Session info updated" -- a
+        # success message about the wrong file. The journal recording below
+        # still runs; it is not project memory.
+        memory_root = (
+            project_memory_root_or_none(env_project_dir)
+            if env_project_dir else None
+        )
 
         claim = None
         prev_session_dir = None
         block_status = None
+        if env_project_dir and memory_root is None:
+            block_status = (
+                "Project CLAUDE.md skipped: git could not answer, so the "
+                "project memory target is unknown; the session block was not "
+                "rewritten."
+            )
         try:
-            if env_project_dir:
-                claude_md, source = resolve_project_claude_md_path(env_project_dir)
+            if env_project_dir and memory_root is not None:
+                claude_md, source = resolve_project_claude_md_path(memory_root)
                 # Read-only here (markers and the Resume line are ASCII); the
                 # rewrite below decodes strictly and skips a file that is not
                 # UTF-8, reporting it in its status.
@@ -433,7 +459,7 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
                 if block.state is State.FOUND and (
                     recorded_session_id(content) != session_id
                 ):
-                    prev_session_dir = _extract_prev_session_dir(env_project_dir)
+                    prev_session_dir = _extract_prev_session_dir(memory_root)
                     claim = check_resume_state(prev_session_dir, launch=True)
                 if block.state not in (State.FOUND, State.ABSENT):
                     # Not read and not rewritten, and nothing is locked or
@@ -449,7 +475,8 @@ def _record_unrecorded_lead(input_data: dict, session_dir: str) -> str:
                     # still returns the claim. A raise up to and inside this
                     # call is caught below and classified like its status.
                     block_status = update_session_info(
-                        session_id, team, session_dir, plugin_root
+                        session_id, team, session_dir, plugin_root,
+                        project_dir=memory_root,
                     )
         except Exception as e:  # noqa: BLE001 — classified and bounded below
             block_status = session_info_failure(e)

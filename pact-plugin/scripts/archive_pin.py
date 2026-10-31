@@ -376,6 +376,12 @@ _date_comment_row = _pin_caps._date_comment_row
 locate_pinned = _staleness.locate_pinned
 _pinned_body = _staleness._pinned_body
 get_project_claude_md_path = _staleness.get_project_claude_md_path
+# #1653: the session's project-memory file (MAIN's for a linked worktree).
+# archive_pin ARCHIVES A PIN, which writes the document through the memory
+# CLI -- so this is a writer, and it must follow the same root as every other
+# writer or it reopens the split the PR exists to close.
+resolve_session_claude_md_path = _staleness.resolve_session_claude_md_path
+resolve_project_claude_md_path = _staleness.resolve_project_claude_md_path
 # The (path, base) form. `base` is the directory the resolver ACTUALLY found
 # the file under, captured before descending into `.claude` -- a trusted
 # pre-resolve anchor rather than a re-derivation from the returned path.
@@ -547,14 +553,52 @@ def resolve_claude_md():
     worktree fall-through -- the case PACT itself depends on -- stays inside
     the same repository and is allowed through.
     """
-    # Resolve through `get_project_claude_md_path` -- the seam the rest of the
-    # suite already patches -- and derive the base LEXICALLY from the result,
-    # rather than taking the with-base form directly. Same answer in
-    # production (the with-base call is what this wraps), but it keeps one
-    # resolution seam for the whole codebase instead of introducing a second
-    # that fixtures would have to know about separately.
+    # PARITY WITH THE SYNC SITES, NOT THE STRICT READER RULE (#1653/D2). The
+    # archive belongs to the population that resolves through the git/cwd
+    # fall-through and then judges scope with `stays_in_declared_project`; the
+    # GUARD is this site's safety property, and it refuses a worktree copy
+    # (`same_repository(declared, worktree)` is False) before anything is
+    # archived. The strict probe-the-memory-root-only rule belongs to the
+    # UNGUARDED writer (session_init step 4); applying it here made
+    # archive_pin refuse same-project resolutions its siblings admit, which is
+    # the disagreement TestEverySiteJudgesProjectScopeAlike pins.
+    # Derive the base LEXICALLY from the result, rather than taking the
+    # with-base form directly. Tests that redirect the archive patch
+    # `get_project_claude_md_path` on THIS module.
+    # AN UNKNOWN memory root means the archive cannot identify the project's
+    # document. `project_memory_root` fails OPEN to its input, so resolution
+    # would land on a worktree's own CLAUDE.md and the archive would edit the
+    # copy this rule keeps out of project memory. ARCHIVING WRITES (through
+    # the memory CLI), so this is a writer and takes the writer's rule:
+    # refuse rather than operate on a guess.
+    #
+    # #1653/D3: the rule holds on the NO-DECLARED-DIR route too -- the cwd is
+    # the anchor the resolver falls back to, so an unknown root there would
+    # archive the worktree copy just the same.
+    from shared.project_scope import project_memory_root_or_none
+
     env_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-    path = get_project_claude_md_path()
+    anchor = Path(env_dir) if env_dir else Path.cwd()
+    memory_root = project_memory_root_or_none(anchor)
+    if memory_root is None:
+        raise _Unevaluable(
+            "project memory root unknown: git could not answer, so the "
+            "project CLAUDE.md cannot be identified; nothing was archived"
+        )
+    # THE SYNC SITES' MODEL, in two steps. (1) The PROJECT-MEMORY root first:
+    # a worktree session archives MAIN's document even when the worktree
+    # carries its own copy (#1653). (2) When the root holds no document, the
+    # same git/cwd fall-through the sync sites use, because some same-project
+    # layouts put the document beside the declared dir (a declared main
+    # subdirectory, a moved worktree). THE GUARD BELOW IS THE SAFETY PROPERTY
+    # FOR STEP 2: it refuses a resolution outside the declared project, so the
+    # fall-through cannot archive the worktree copy. The strict
+    # probe-the-root-only rule belongs to the UNGUARDED writer (session_init
+    # step 4); applying it here made archive_pin refuse same-project
+    # resolutions its siblings admit.
+    path, source = resolve_project_claude_md_path(memory_root)
+    if source == "new_default":
+        path = get_project_claude_md_path()
     if path is None:
         raise _Unevaluable("CLAUDE.md not found")
     base = _lexical_base_of(path)

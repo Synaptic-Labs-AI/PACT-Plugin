@@ -2107,8 +2107,16 @@ class TestArchivePin_Unevaluable:
         """A hang must refuse (pin survives), never proceed."""
         claude_md(_two_pin_file())
 
+        # Fail ONLY the memory CLI call. A blanket subprocess.run stub also
+        # fails git, which now precedes resolution (the unknown-root guard),
+        # so the test would exercise that guard instead of the CLI timeout.
+        real_run = subprocess.run
+
         def _boom(*a, **k):
-            raise subprocess.TimeoutExpired(cmd="save", timeout=1)
+            argv = a[0] if a else k.get("args", ())
+            if str(archive_pin._MEMORY_CLI) in [str(part) for part in argv]:
+                raise subprocess.TimeoutExpired(cmd="save", timeout=1)
+            return real_run(*a, **k)
 
         monkeypatch.setattr(subprocess, "run", _boom)
         verdict = archive_pin.build_verdict(0, db_path=None)

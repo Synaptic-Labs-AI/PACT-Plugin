@@ -269,7 +269,10 @@ def clear_pin_staleness_marker_if_resolved(
         # and leaves the dependency in place.
         from shared.constants import PIN_STALENESS_MARKER_NAME
         from shared.pact_context import get_session_dir
-        from staleness import check_pinned_block_signal, get_project_claude_md_path
+        from staleness import (
+            check_pinned_block_signal,
+            resolve_session_claude_md_path,
+        )
 
         session_dir = get_session_dir()
         if not session_dir:
@@ -348,7 +351,10 @@ def clear_pin_staleness_marker_if_resolved(
         # determinate. TERM ONE: is that shape reachable. TERM TWO: is an
         # outside editor in the writer population this project guards. Neither
         # term is measured, and one answer does not settle the other.
-        claude_md_path = get_project_claude_md_path()
+        # #1653: follow the project-memory root, like every writer. A
+        # worktree session reads MAIN's file; a non-worktree session keeps
+        # today's resolver, and None means "nothing to read".
+        claude_md_path = resolve_session_claude_md_path()
         if claude_md_path is None:
             return
         try:

@@ -4018,7 +4018,9 @@ class TestSessionInitSlotAIntegration:
         """
         import session_init as _session_init
 
-        monkeypatch.setattr(_session_init, "check_pin_slot_status", lambda: None)
+        monkeypatch.setattr(
+            _session_init, "check_pin_slot_status", lambda *args, **kwargs: None
+        )
 
         plugin_root = tmp_path / "installed-cache"
         additional = self._run_main(

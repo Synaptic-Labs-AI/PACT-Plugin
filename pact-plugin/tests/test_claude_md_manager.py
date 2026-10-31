@@ -2324,12 +2324,15 @@ class TestSessionInitMigrationIntegration:
     """
 
     def test_session_init_calls_migration(self):
-        """session_init.py must contain a call to migrate_to_managed_structure."""
+        """session_init.py must call migrate_to_managed_structure() with the
+        WRITER base (#1653): the project-memory root when the platform
+        declared a project dir, else None so the writer keeps its own no-op
+        guard for a frame it was handed no project dir."""
         session_init_path = (
             Path(__file__).parent.parent / "hooks" / "session_init.py"
         )
         source = session_init_path.read_text(encoding="utf-8")
-        assert "migrate_to_managed_structure()" in source
+        assert "migrate_to_managed_structure(write_root)" in source
 
     def test_migration_result_routing_failed(self):
         """session_init routes 'failed'/'skipped' migration messages to

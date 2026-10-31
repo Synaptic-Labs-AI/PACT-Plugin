@@ -18,6 +18,28 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
+## v4.8.16: a worktree lead writes project memory to the main checkout (issue #1653)
+
+### Summary
+
+A lead session started inside a linked git worktree now writes its project CLAUDE.md in the main checkout instead of planting one in the worktree. One rule decides where project memory lives: the writers, the memory sync and every advisory reader resolve the main checkout for a worktree session, and a plain session is byte-identical to before. When git cannot answer, no writer writes at all, and each reports the skip on its own channel.
+
+### What landed
+
+- One resolver: `project_memory_root` returns the main checkout root for a linked worktree and its input exactly as given otherwise. It verifies the candidate as a checkout root and requires the worktree to be listed, so a forged gitfile cannot redirect a write into another repository.
+- Writers: `session_init` steps 3, 3b, 4 and 5b, the two bootstrap hooks, `realign_team`, `pin_marker_writer`, `archive_pin` and the memory sync writers all target the memory root, and each writer's targets and guards derive from that same root.
+- Readers: the display resolver and every advisory reader (pin-slot status, refusal reporting, stale-block directive, `track_files`, `check_pin_caps`, `claude_md_drift`, `match_project_claude_md`) resolve the same root, so no reader watches a file that nothing writes.
+- Unknown roots: a git that cannot answer is distinguished from a git that answers not-a-worktree. Every writer refuses on the unknown case and reports it, rather than planting in a worktree during a git failure.
+- Worktree listing: read NUL-separated so a path containing a newline survives, with an admin-gitdir fallback for a git without that option, and a raw toplevel read so paths ending in whitespace compare like with like.
+- Path bytes: every git call that returns a path decodes with `surrogateescape`, so a project or worktree whose path is not valid UTF-8 classifies normally instead of failing session start. One such worktree no longer breaks the classification for every worktree of that repository.
+- Contract change: the pin-cap gate and the pin marker writer bind the managed document by IDENTITY -- the two canonical paths under the memory root -- not by containment, because PACT creates worktrees at `$REPO_ROOT/.worktrees/{branch}`, inside the root. For a linked worktree of a main checkout, in an untampered checkout, its own gitignored CLAUDE.md is therefore never the managed document, whether the worktree sits beside or inside the main checkout, with or without `CLAUDE_PROJECT_DIR` set. A worktree session writing main's file is still denied at the cap.
+- Restored context names its source session neutrally and computes no liveness state, so a session killed before it recorded an end still restores.
+- Journal token: the pin marker writer's `pin_marker_write.outcome` for a target that is not the managed document is now `noop_not_the_managed_document`, replacing a name that described containment while the guard is identity. The hook prints nothing; that field is the only surface, and nothing in this plugin reads it.
+
+### Why
+
+The worktree copy was a shadow document: every resolver preferred it, memory syncs landed in a file deleted with the worktree, and the pin gates stopped recognising the real project file. An earlier change had stopped teammates doing this, and the lead case needed a decision about where that memory belongs; the answer is the main checkout. The obvious fix, skipping creation in a worktree, cannot work, because the session-resume writer creates the file on its own. Verification covers a census of the writers and readers, per-arm ablations that revert a production site, a 47-module symbol census run locally, and the full suite in CI on three interpreter versions.
+
 ## v4.8.15: pact-memory search default 20, dash stdin sentinel, live dedup search (issue #1647)
 
 ### Summary

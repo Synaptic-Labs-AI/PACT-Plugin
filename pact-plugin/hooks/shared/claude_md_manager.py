@@ -6,15 +6,17 @@ Used by: session_init.py during SessionStart hook to scaffold the project
          PACT_MEMORY-wrapped memory sections) and to migrate legacy project
          CLAUDE.md files into the boundary structure.
 
-Manages the project CLAUDE.md at $CLAUDE_PROJECT_DIR — preferred at
-.claude/CLAUDE.md, legacy at ./CLAUDE.md — with the PACT_MANAGED outer
-boundary, optional SESSION_START/SESSION_END block, and PACT_MEMORY inner
-boundary wrapping memory sections.
+Manages the project CLAUDE.md at the caller's base directory — by default
+$CLAUDE_PROJECT_DIR, but a worktree-lead caller passes the main checkout,
+where project memory lives (#1653) — preferred at .claude/CLAUDE.md, legacy
+at ./CLAUDE.md, with the PACT_MANAGED outer boundary, optional
+SESSION_START/SESSION_END block, and PACT_MEMORY inner boundary wrapping
+memory sections.
 
 Project CLAUDE.md location resolution:
 Claude Code supports two locations for project-level memory:
-  - $CLAUDE_PROJECT_DIR/.claude/CLAUDE.md  (preferred / new default)
-  - $CLAUDE_PROJECT_DIR/CLAUDE.md          (legacy)
+  - <base>/.claude/CLAUDE.md  (preferred / new default)
+  - <base>/CLAUDE.md          (legacy)
 The resolve_project_claude_md_path() helper picks whichever exists, with
 .claude/CLAUDE.md taking priority. When neither exists, it returns the new
 default path so creators land at the preferred location.
@@ -1105,6 +1107,19 @@ def extract_managed_region(content: str) -> tuple[str, int] | None:
     return content[region_start:_marker_span(doc, last)[0]], region_start
 
 
+def managed_document_paths(base: str | os.PathLike[str]) -> tuple[Path, Path]:
+    """The two canonical managed-document paths under `base`.
+
+    ONE DEFINITION for the identity rule: gate_target and pin_marker_writer
+    each hand-built `<base>/.claude/CLAUDE.md` and `<base>/CLAUDE.md`, so a
+    third canonical location would have had to be added in every copy without
+    the parity test seeing it. Order is preferred-then-legacy, matching
+    `resolve_project_claude_md_path`.
+    """
+    root = Path(base)
+    return root / _DOT_CLAUDE_RELATIVE, root / _LEGACY_RELATIVE
+
+
 def resolve_project_claude_md_path(
     project_dir: str | os.PathLike[str],
 ) -> tuple[Path, str]:
@@ -1175,7 +1190,9 @@ def ensure_dot_claude_parent(path: Path) -> None:
         parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
 
-def ensure_project_memory_md() -> str | None:
+def ensure_project_memory_md(
+    project_dir: str | os.PathLike[str] | None = None,
+) -> str | None:
     """
     Ensure project has a CLAUDE.md with memory sections.
 
@@ -1192,10 +1209,18 @@ def ensure_project_memory_md() -> str | None:
     configuration). When neither exists, creates the file at the preferred
     `.claude/CLAUDE.md` location, creating the `.claude/` directory if needed.
 
+    Args:
+        project_dir: The base directory whose CLAUDE.md this call manages.
+            None (the default) reads `CLAUDE_PROJECT_DIR`, so every existing
+            caller is byte-identical. A worktree-lead caller passes
+            `project_scope.project_memory_root()` so the target AND the
+            containment anchor below are the main checkout.
+
     Returns:
         Status message or None if no action taken.
     """
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    if project_dir is None:
+        project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
     if not project_dir:
         return None
 
@@ -1269,7 +1294,9 @@ def ensure_project_memory_md() -> str | None:
         return f"Project CLAUDE.md failed: {failure_cause(e)}"
 
 
-def migrate_to_managed_structure() -> str | None:
+def migrate_to_managed_structure(
+    project_dir: str | os.PathLike[str] | None = None,
+) -> str | None:
     """
     One-time migration: wrap existing project CLAUDE.md content in the
     PACT_MANAGED boundary and add PACT_MEMORY markers around memory sections.
@@ -1303,12 +1330,20 @@ def migrate_to_managed_structure() -> str | None:
     preserved verbatim: every marker and heading is located by the
     fence-aware parser, so a fenced copy is never a real memory section.
 
+    Args:
+        project_dir: The base directory whose CLAUDE.md this call manages.
+            None (the default) reads `CLAUDE_PROJECT_DIR`, so every existing
+            caller is byte-identical. A worktree-lead caller passes
+            `project_scope.project_memory_root()` so the target AND the
+            containment anchor below are the main checkout.
+
     Returns:
         Status message on successful migration, None on no-op (already
         migrated or file doesn't exist), or a "failed"/"skipped" string
         on error (routed to systemMessages by session_init.py).
     """
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    if project_dir is None:
+        project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
     if not project_dir:
         return None
 
@@ -1757,9 +1792,12 @@ def match_project_claude_md(file_path_str: str) -> Path | None:
     sets on every session. If CLAUDE_PROJECT_DIR is unset, relative
     input returns None — safer than a silent cwd dependency.
 
-    Worktree-safe: imports `staleness.get_project_claude_md_path` lazily
-    to avoid circular-import and module-load cost on every Edit/Write.
-    That function already handles env-var / git-root / cwd fallbacks.
+    Worktree-safe: imports `staleness.resolve_session_claude_md_path` lazily
+    to avoid circular-import and module-load cost on every Edit/Write. That
+    function returns the SESSION's project-memory file (#1653: MAIN's for a
+    linked worktree) and on the non-worktree route delegates to
+    `get_project_claude_md_path`, whose env-var / git-root / cwd fallbacks are
+    unchanged.
 
     Fail-safe: any OSError / RuntimeError while resolving returns None.
     Callers treat None as "not our target; let the tool through."
@@ -1768,11 +1806,15 @@ def match_project_claude_md(file_path_str: str) -> Path | None:
         return None
 
     try:
-        from staleness import get_project_claude_md_path
+        from staleness import resolve_session_claude_md_path
     except ImportError:
         return None
 
-    project_md = get_project_claude_md_path()
+    # #1653: the SESSION's project-memory file. A linked-worktree session
+    # matches the MAIN checkout's file -- the document every writer targets --
+    # so a pin gate is not bypassed by a worktree-local copy. The non-worktree
+    # route is today's resolver unchanged.
+    project_md = resolve_session_claude_md_path()
     if project_md is None:
         return None
 
@@ -1808,18 +1850,22 @@ def gate_target(file_path: str) -> GateTarget | None:
     `file_path`, or None when it checks none.
 
     Gated: an absolute path whose name is `claude.md` in any case, which the
-    project resolver returns once the change exists. The resolver runs with
-    the target counted as present, so a Write that creates the file is gated,
-    and a Write to a file the resolver would not return (`./CLAUDE.md` while
-    `.claude/CLAUDE.md` exists) is not. `before` is what the resolver returns
-    now, which can be a different file from the target: the other location
-    under the target's base (`./CLAUDE.md` before a Write creates
-    `.claude/CLAUDE.md`), or the main checkout's file for a worktree that has
-    none. A file the resolver finds outside the target's repository (the
-    working directory's repository, when that is another one) is never
-    `before`: the target itself is, or None when it does not exist.
+    project resolver returns once the change exists AND which sits inside the
+    session's project-memory root. The resolver runs with the target counted
+    as present, so a Write that creates the file is gated, and a Write to a
+    file the resolver would not return (`./CLAUDE.md` while `.claude/CLAUDE.md`
+    exists) is not. `before` is what the resolver returns now, which can be a
+    different file from the target: the other location under the target's base
+    (`./CLAUDE.md` before a Write creates `.claude/CLAUDE.md`), or the main
+    checkout's file for a worktree that has none. A file the resolver finds
+    outside the target's repository (the working directory's repository, when
+    that is another one) is never `before`: the target itself is, or None when
+    it does not exist.
 
-    A relative path is not gated, and any failure while resolving returns
+    A relative path is not gated; a target that is not one of the two canonical
+    managed-document paths under the memory root is not (a worktree's own copy
+    is not the managed document, whether it sits BESIDE or INSIDE the root); an
+    unknown memory root gates nothing; and any failure while resolving returns
     None: a path the gate is unsure of is allowed.
     """
     if not isinstance(file_path, str) or not file_path:
@@ -1828,17 +1874,66 @@ def gate_target(file_path: str) -> GateTarget | None:
     if not target.is_absolute() or target.name.casefold() != "claude.md":
         return None
     try:
+        from shared.project_scope import project_memory_root_or_none
         from staleness import _resolve_project_claude_md_with_base, same_path
     except ImportError:
         return None
     try:
-        resolved, base = _resolve_project_claude_md_with_base(assume_present=target)
+        # #1653: gate the SESSION's project-memory file. For a linked worktree
+        # that is MAIN's; the resolver is given that base, so an edit to the
+        # worktree-local copy is not what the pin cap protects. A non-worktree
+        # session passes its own env dir, which the resolver treats as the
+        # same first rung as before.
+        #
+        # A TRACKED-CLAUDE.md PROJECT KEEPS THE SAME-RELATIVE-PATH CONSEQUENCE,
+        # RECORDED HERE AND DELIBERATELY NOT GUARDED. The worktree copy sits at
+        # the same repo-relative path, so a commit from the worktree plus a
+        # merge changes MAIN's document without this gate seeing it. ALIASING
+        # IS THE SAME HOLE FROM THE OTHER SIDE: a hardlink or symlink to the
+        # same inode under another path edits the document without passing
+        # through this target either. The cap is session-local hygiene, not a
+        # security boundary; delivery is a human-reviewed merge; and an
+        # inode-identity guard would reintroduce the worktree copy as a
+        # managed artifact in weaker form -- the assumption the one rule
+        # exists to remove. Do not build that guard.
+        declared = os.environ.get("CLAUDE_PROJECT_DIR")
+        # DERIVED UNCONDITIONALLY (#1653, security lane): an absent variable
+        # must not skip the guard. `or os.getcwd()` is what session_init uses,
+        # and a hook frame's cwd is the session's project dir in every observed
+        # shape, so a cwd that is not the project narrows the gate rather than
+        # binding a wrong document. An UNKNOWN root identifies nothing.
+        memory_root = project_memory_root_or_none(declared or os.getcwd())
+        if memory_root is None:
+            return None
+        resolved, base = _resolve_project_claude_md_with_base(
+            assume_present=target, project_dir=memory_root)
         if resolved is None or base is None or not same_path(resolved, target):
             return None
-        before, before_base = _resolve_project_claude_md_with_base()
+        # IDENTITY, NOT ANCESTOR CONTAINMENT (#1653, security lane). PACT
+        # creates worktrees at `$REPO_ROOT/.worktrees/{branch}`, INSIDE the
+        # memory root, so containment admits a worktree's own copy whenever
+        # MAIN holds no CLAUDE.md. The managed document is exactly one of the
+        # two canonical paths under the root, so anything else is not it.
+        # `same_path` handles a not-yet-existing leaf and a symlinked parent;
+        # `_atomic_write_text` replaces the leaf ENTRY and never follows it,
+        # so a leaf symlink is not an escape.
+        preferred, legacy = managed_document_paths(memory_root)
+        if not (same_path(target, preferred) or same_path(target, legacy)):
+            return None
+        before, before_base = _resolve_project_claude_md_with_base(
+            project_dir=memory_root)
         if before_base is not None and not same_path(before_base, base):
             from .project_scope import same_repository
 
+            # THE ARGUMENT ORDER IS THE GUARD, and it is not symmetric:
+            # `same_repository(env_dir, base)` asks "is base the MAIN repo of
+            # the checkout at env_dir". Called with the target's base first,
+            # a `before` that the resolver's cwd rung found in the WORKTREE
+            # answers False (a worktree is not a main repo), so the worktree
+            # copy is never taken as this target's pre-state (#1653). Swapping
+            # the arguments would answer True and silently restore that
+            # fall-through; `test_the_pin_gate_does_not_take_the_worktree_as_before`
+            # pins it.
             if not same_repository(base, before_base):
                 before = target if target.is_file() else None
     except (OSError, RuntimeError, ValueError):
