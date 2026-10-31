@@ -374,8 +374,6 @@ def _resolve(session_dir: Path) -> tuple[Path | None, Path | None]:
     cached = _read_json(cache_path)
     if cached is not None and "base" in cached:
         base = cached["base"]
-        if base is None:
-            return None, None
         if not isinstance(base, str):
             return None, None
         found = _find_existing_claude_md(Path(base))

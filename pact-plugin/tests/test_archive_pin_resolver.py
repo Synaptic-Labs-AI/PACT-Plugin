@@ -24,11 +24,14 @@ WITHIN a file; nothing catches a wrong FILE.
 
 WHY THE REFUSAL IS NARROW, and why that matters more than making it strict.
 PACT's own primary workflow sets CLAUDE_PROJECT_DIR to a WORKTREE, where
-CLAUDE.md is gitignored and therefore absent, and depends on the git
-fall-through to reach the main checkout's file. A blanket "env dir has no
-CLAUDE.md -> refuse" rule would break that on every single invocation — a
-cardinal over-block. `test_same_repository_fallthrough_is_allowed` is the
-guard on that, and it is the more important half of this file.
+CLAUDE.md is gitignored and therefore absent. #1653/D2 retargets that base to
+the MAIN checkout's PROJECT-MEMORY root, so the primary workflow still finds
+the file — without the resolver's fall-through. A blanket "env dir has no
+CLAUDE.md -> refuse" rule would break it on every invocation — a cardinal
+over-block. `test_a_worktree_session_resolves_the_main_checkout` is the guard
+on that, and it is the more important half of this file. A SUBDIRECTORY of a
+main checkout is not the worktree case: it is its own memory root, so the
+ruled change stops it reading the repo-root file.
 
 `db_path` IS REQUIRED AND KEYWORD-ONLY on `build_verdict`. Every bare
 `build_verdict` call in this file passes `db_path=None`, and every one of
@@ -124,8 +127,14 @@ class TestResolutionIsDriven:
 
 
 class TestCrossProjectFallthroughIsRefused:
-    """THE F-B GUARD. Fails on the pre-fix code, which returned project_a's
-    file for an invocation that named project_b."""
+    """THE F-B GUARD, now enforced one layer earlier (#1653/D2).
+
+    The one rule probes the PROJECT-MEMORY root and never consults the
+    resolver's git/cwd fall-through, so the other project's file is not even
+    resolved: the invocation refuses with "CLAUDE.md not found". The
+    `_stays_in_declared_project` guard below still runs and remains the
+    defence-in-depth layer if a resolution ever returns a foreign file.
+    """
 
     def test_cross_project_fallthrough_raises(self, isolated, monkeypatch):
         a = _make_project(isolated / "project_a", "PIN A")
@@ -140,13 +149,10 @@ class TestCrossProjectFallthroughIsRefused:
 
         with pytest.raises(archive_pin._Unevaluable) as exc:
             archive_pin.resolve_claude_md()
-        reason = exc.value.reason
-        assert str(b) in reason, "refusal must name the directory that was set"
-        assert "different project" in reason
-        assert "project_a" in reason, (
-            "refusal must name the file it would otherwise have used, or the "
-            "curator cannot tell what was about to happen"
-        )
+        # Refused at the one rule: the memory root (b) has no file, and the
+        # cwd's project_a file is never consulted.
+        assert "not found" in exc.value.reason
+        assert "PIN A" not in exc.value.reason
 
     def test_the_fallthrough_target_really_was_reachable(
         self, isolated, monkeypatch
@@ -173,38 +179,81 @@ class TestCrossProjectFallthroughIsRefused:
         )
 
 
-class TestSameRepositoryFallthroughIsAllowed:
+class TestTheWorktreeWorkflowStillResolves:
     """THE OVER-BLOCK GUARD, and the more important half of this file.
 
-    PACT sets CLAUDE_PROJECT_DIR to a worktree where CLAUDE.md is gitignored
-    and absent, and relies on the git fall-through to reach the main
-    checkout. If the refusal above were written as "env dir has no CLAUDE.md
-    -> refuse", it would fire on every PACT invocation. This proves it does
-    not.
+    PACT sets CLAUDE_PROJECT_DIR to a linked worktree whose CLAUDE.md is
+    gitignored and absent. The one rule retargets that base to the main
+    checkout, so the primary workflow still finds the file WITHOUT the
+    resolver's fall-through. A subdirectory of a main checkout is a
+    different layout: it IS its own memory root, so it does not read the
+    repo-root file -- that is the ruled change, pinned separately below.
     """
 
-    def test_same_repository_fallthrough_is_allowed(
-        self, isolated, monkeypatch
-    ):
-        repo = isolated / "repo"
-        _make_project(repo, "PIN ROOT")
+    def _repo_with_worktree(self, isolated, name):
+        repo = isolated / name
+        repo.mkdir(parents=True, exist_ok=True)
         init = subprocess.run(["git", "init", "-q", str(repo)],
                               capture_output=True, text=True, timeout=30)
         assert init.returncode == 0, f"git init failed: {init.stderr}"
+        (repo / "README").write_text("seed\n")
+        commit = subprocess.run(
+            ["git", "-c", "user.email=t@example.invalid",
+             "-c", "user.name=t", "add", "README"],
+            capture_output=True, text=True, timeout=30, cwd=str(repo),
+        )
+        assert commit.returncode == 0, commit.stderr
+        commit = subprocess.run(
+            ["git", "-c", "user.email=t@example.invalid",
+             "-c", "user.name=t", "commit", "-qm", "seed"],
+            capture_output=True, text=True, timeout=30, cwd=str(repo),
+        )
+        assert commit.returncode == 0, commit.stderr
+        # The project file is written AFTER the commit, so it stays untracked
+        # and the worktree checkout does not receive it -- the PACT layout.
+        _make_project(repo, "PIN ROOT")
+        wt = repo / ".worktrees" / "wt"
+        add = subprocess.run(
+            ["git", "worktree", "add", "-q", str(wt), "-b", name],
+            capture_output=True, text=True, timeout=30, cwd=str(repo),
+        )
+        assert add.returncode == 0, add.stderr
+        assert not (wt / ".claude" / "CLAUDE.md").exists()
+        assert not (wt / "CLAUDE.md").exists()
+        return repo, wt
 
-        # A subdirectory of the SAME repo, with no CLAUDE.md of its own --
-        # structurally the worktree case: env names it, resolution falls
-        # through to the repo root, and the root is the same project.
-        sub = repo / "subproject"
-        sub.mkdir()
-        assert not (sub / "CLAUDE.md").exists()
+    def test_a_worktree_session_resolves_the_main_checkout(
+        self, isolated, monkeypatch
+    ):
+        repo, wt = self._repo_with_worktree(isolated, "repo")
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(sub))
-        monkeypatch.chdir(sub)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(wt))
+        monkeypatch.chdir(wt)
 
         path, base = archive_pin.resolve_claude_md()   # must NOT raise
         assert "PIN ROOT" in path.read_text(encoding="utf-8")
         assert Path(base).resolve() == repo.resolve()
+
+    def test_a_subdirectory_does_not_fall_through(
+        self, isolated, monkeypatch
+    ):
+        """#1653/D2: a subdirectory is its own memory root. The writers already
+        target it (ensure_project_memory_md reads the declared dir), so the old
+        fall-through to the repo root was the reader/writer split, not a
+        rescue. Refused rather than archived from a file nothing writes."""
+        repo = isolated / "repo-sub"
+        _make_project(repo, "PIN ROOT")
+        subprocess.run(["git", "init", "-q", str(repo)],
+                       capture_output=True, timeout=30)
+        sub = repo / "subproject"
+        sub.mkdir()
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(sub))
+        monkeypatch.chdir(sub)
+
+        with pytest.raises(archive_pin._Unevaluable) as exc:
+            archive_pin.resolve_claude_md()
+        assert "not found" in exc.value.reason
 
     def test_same_repository_predicate_is_true_for_a_subdir(
         self, isolated

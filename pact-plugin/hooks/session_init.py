@@ -355,9 +355,15 @@ def check_pinned_staleness(
     if project_dir is None:
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
         memory_root = project_memory_root(project_dir) if project_dir else None
-    if project_dir and memory_root is not None and memory_root != Path(project_dir):
-        target, source = resolve_project_claude_md_path(memory_root)
-        if source == "new_default":
+    if project_dir and memory_root is not None:
+        # ONE RULE (#1653/D2): probe the memory root; NEVER consult the
+        # resolver's git/cwd fall-through, which returns the WORKTREE copy on
+        # the declared-MAIN / cwd-in-worktree / MAIN-empty shape and made this
+        # step write a STALE marker there. A None here means the memory root
+        # has no file: return without calling the core, whose None delegation
+        # re-resolves env-first and would read the worktree copy.
+        target = resolve_session_claude_md_path(project_dir, memory_root)
+        if target is None:
             return None
         return _staleness_check(claude_md_path=target)
     path = _get_project_claude_md_path()
@@ -546,14 +552,13 @@ def check_pin_stale_block_directive(
     if project_dir is None:
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
         memory_root = project_memory_root(project_dir) if project_dir else None
-    retargeted = bool(
-        project_dir
-        and memory_root is not None
-        and memory_root != Path(project_dir)
-    )
+    # A KNOWN root with no file means "nothing to read". None delegated to the
+    # callee re-resolves env-first and would read the worktree copy, so it is
+    # stopped here on EVERY known route, not only a retargeted one (#1653/D2).
+    known_root = bool(project_dir and memory_root is not None)
     try:
         path = resolve_session_claude_md_path(project_dir, memory_root)
-        if retargeted and path is None:
+        if known_root and path is None:
             return None
         signal = _staleness_block_check(claude_md_path=path)
     except Exception:  # noqa: BLE001 — fail-open
@@ -1763,12 +1768,17 @@ def main():
         # directory is a known answer (the directory), so it is not skipped.
         declared_project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
         memory_unknown = False
+        # D3 (#1653): the unknown-root rule holds on the NO-DECLARED-DIR
+        # route too. Before this, an env-absent session whose cwd was a
+        # worktree took the fail-open root and step 4 wrote a STALE marker
+        # into the worktree copy. The cwd is the anchor session_init already
+        # records when the platform declares nothing.
         if declared_project_dir:
             memory_root = project_memory_root_or_none(declared_project_dir)
-            if memory_root is None:
-                memory_unknown = True
-                memory_root = project_memory_root(project_dir)
         else:
+            memory_root = project_memory_root_or_none(project_dir)
+        if memory_root is None:
+            memory_unknown = True
             memory_root = project_memory_root(project_dir)
 
         # The WRITERS keep their own "no project dir declared" guard. Passing

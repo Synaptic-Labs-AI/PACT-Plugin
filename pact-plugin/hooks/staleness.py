@@ -390,21 +390,20 @@ def resolve_session_claude_md_path(
     helper exists to close. A no-argument call is unchanged: it reads the
     environment, as today.
     """
-    explicit_base = project_dir is not None
     if project_dir is None:
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
         memory_root = project_memory_root(project_dir) if project_dir else None
     elif memory_root is None:
         memory_root = project_memory_root(project_dir)
-    if (
-        project_dir
-        and memory_root is not None
-        and Path(memory_root) != Path(project_dir)
-    ):
+    if project_dir and memory_root is not None:
+        # ONE RULE (#1653/D2): probe the memory root and take ONLY its
+        # answer. The resolver's git/cwd fall-through is never consulted on
+        # this route -- it can return a linked worktree's own copy, the
+        # document this rule keeps out of project memory, and on the
+        # declared-MAIN / cwd-in-worktree / MAIN-empty shape it did exactly
+        # that to check_pinned_staleness, which wrote a STALE marker there.
         target, source = resolve_project_claude_md_path(memory_root)
         return target if source != "new_default" else None
-    if explicit_base and project_dir:
-        return get_project_claude_md_path(Path(project_dir))
     return get_project_claude_md_path()
 
 

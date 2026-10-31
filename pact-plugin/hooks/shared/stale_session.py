@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import os
 import re
-from pathlib import Path
 
 import shared.pact_context as pact_context
 
@@ -138,22 +137,27 @@ def detect_stale_session_block(input_data: dict) -> str | None:
     if not project_dir:
         return None
     try:
-        content = None
-        for candidate in (
-            Path(project_dir) / ".claude" / "CLAUDE.md",
-            Path(project_dir) / "CLAUDE.md",
-        ):
-            if candidate.exists():
-                # Read-only: a byte that is not UTF-8 (a latin-1 byte from a
-                # wrong-editor save, say) decodes to U+FFFD, so the Resume
-                # line is still compared and nothing raises. A raise here
-                # would reach a consumer's fail-open and suppress the whole
-                # injection, the load-bearing bootstrap instruction included.
-                content = candidate.read_text(encoding="utf-8", errors="replace")
-                break
-        if content is None:
+        # #1653/D1: ONE RULE. The document is resolved at the session's
+        # PROJECT-MEMORY root, not at the raw env dir: a linked-worktree
+        # lead's session block lives in MAIN, and a worktree copy nothing
+        # manages must not be reported. A known root with no file is
+        # "nothing to read" -- the resolver's fall-through is not consulted.
+        from shared.claude_md_manager import resolve_project_claude_md_path
+        from shared.project_scope import project_memory_root_or_none
+
+        base = project_memory_root_or_none(project_dir)
+        if base is None:
             return None
-    except OSError:
+        candidate, source = resolve_project_claude_md_path(base)
+        if source == "new_default":
+            return None
+        # Read-only: a byte that is not UTF-8 (a latin-1 byte from a
+        # wrong-editor save, say) decodes to U+FFFD, so the Resume line is
+        # still compared and nothing raises. A raise here would reach a
+        # consumer's fail-open and suppress the whole injection, the
+        # load-bearing bootstrap instruction included.
+        content = candidate.read_text(encoding="utf-8", errors="replace")
+    except (OSError, ImportError):
         return None
     try:
         recorded = recorded_session_id(content)

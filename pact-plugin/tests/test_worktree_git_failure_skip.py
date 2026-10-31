@@ -30,13 +30,19 @@ Arms, one failing-git arm per writer plus a working-git control:
 `test_project_memory_root.py` pins the helper's None/answer distinction; this
 module pins the writer consequences.
 
-GIT UNAVAILABILITY, NOT "NOT A REPOSITORY". Every failing-git arm empties PATH
-(`_hide_git`), so the binary lookup fails in `project_scope.run_git` AND in
-every direct `subprocess.run(["git", ...])` an arm's code path can reach.
-Patching only `run_git` left those direct calls on the real binary (#59). A
-directory OUTSIDE git is a different, KNOWN answer -- git runs, exits non-zero,
-and the helper treats the directory itself as the root; no arm here simulates
-that.
+GIT UNAVAILABILITY IS ONE FAILURE SHAPE, NOT ALL OF THEM. Every failing-git
+arm here empties PATH (`_hide_git`), so the binary lookup fails in
+`project_scope.run_git` AND in every direct `subprocess.run(["git", ...])` an
+arm's code path can reach. Patching only `run_git` left those direct calls on
+the real binary (#59). THIS COVERS "COULD NOT RUN" ONLY. A git that RUNS and
+exits non-zero is a KNOWN answer -- the helper treats the directory itself as
+the root -- which is correct for a directory OUTSIDE git, but NOT for a real
+worktree whose repo is broken: a moved or deleted main checkout, a
+dubious-ownership refusal, a permission-denied .git. There the fallback
+re-plants the worktree copy. That residual is the ACCEPTED TRADE-OFF (the
+alternative skips project-memory maintenance on every repo hiccup), and it is
+pinned by `test_a_moved_main_checkout_is_a_known_root_and_creates_the_copy`
+so it stays visible rather than implied.
 """
 from __future__ import annotations
 
@@ -90,9 +96,10 @@ def _hide_git(monkeypatch):
     Patching only `run_git` leaves those direct calls on the real binary,
     which can still answer from the actual repository -- a failing-git arm
     that passes for the wrong reason (#1653 task #59). Note the distinction
-    the helper itself draws: git EXITING NON-ZERO means "not a repository", a
-    KNOWN answer that must keep working; git being ABSENT is the unknown case
-    this helper simulates."""
+    the helper itself draws: git EXITING NON-ZERO is a KNOWN answer that must
+    keep working -- correct for a non-git directory, and for a broken real
+    repo it falls back to the input, the documented residual -- while git
+    being ABSENT is the unknown case this helper simulates."""
     monkeypatch.setenv("PATH", "")
 
 
@@ -573,3 +580,192 @@ def test_the_archive_resolution_still_names_main(repo, monkeypatch):
     assert path.resolve() == main_md.resolve(), (
         f"control: the archive resolved {path}, not MAIN's file"
     )
+
+
+def test_a_moved_main_checkout_is_a_known_root_and_creates_the_copy(
+    repo, monkeypatch
+):
+    """R-2: exit 128 is a KNOWN answer, not "git could not answer".
+
+    A worktree whose gitfile names a moved or deleted main checkout exits 128
+    on every rev-parse. `project_memory_root_or_none` therefore returns the
+    directory itself, and a lead SessionStart writes `.claude/CLAUDE.md` there
+    -- the worktree write #1653 exists to keep out. THIS IS THE ACCEPTED
+    TRADE-OFF, asserted rather than implied: making exit 128 "unknown" would
+    skip project-memory maintenance in every repo on any git hiccup. The
+    comment at the top of this module names the other causes in this class
+    (dubious ownership, permission-denied .git) that the PATH-emptied arms do
+    not cover.
+    """
+    from shared.project_scope import project_memory_root_or_none
+
+    gone = repo / ".worktrees" / "moved-main"
+    gone.mkdir(parents=True)
+    (gone / ".git").write_text(
+        "gitdir: /nonexistent-main-checkout/.git/worktrees/moved-main\n",
+        encoding="utf-8",
+    )
+    probe = subprocess.run(
+        ["git", "-C", str(gone), "rev-parse", "--git-dir"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert probe.returncode != 0, "precondition: a broken gitfile must fail"
+
+    assert project_memory_root_or_none(str(gone)) == gone, (
+        "exit 128 stopped being a known answer; if that is the new rule, "
+        "re-rate this arm and the module's trade-off paragraph"
+    )
+
+    _context, system_message = _run(monkeypatch, gone)
+
+    assert "Project CLAUDE.md skipped" not in system_message
+    assert (gone / ".claude" / "CLAUDE.md").exists(), (
+        "the documented residual changed: the broken-repo worktree no longer "
+        "receives the copy, so the trade-off text is stale"
+    )
+
+
+def test_an_invalid_utf8_worktree_path_still_starts_the_session(repo, monkeypatch):
+    """F1 arm D: an undecodable path must not fail the SessionStart.
+
+    Before the fix, `project_memory_root_or_none` raised UnicodeDecodeError
+    inside session_init, the safety net emitted "PACT hook warning ... codec
+    can't decode byte", and the team was NOT generated. Now the root
+    classifies and the launch is normal.
+    """
+    name = os.fsdecode(b"f1-\xff")
+    worktree = repo / ".worktrees" / name
+    _git(
+        "worktree", "add", "-q", str(worktree), "-b", "f1-d",
+        cwd=repo,
+    )
+    context, system_message = _run(monkeypatch, worktree)
+
+    assert "codec" not in system_message, system_message[:300]
+    assert "NOT GENERATED" not in context, context[:300]
+    assert "Your team is `session-" in context
+
+
+# --- D1/D2/D3 (#1653): one ANCHOR, not yet one document-resolution rule -----
+
+_D1_LIVE = "11111111-2222-4000-8000-000000000000"
+_D1_RECORDED = "99999999-8888-4000-8000-000000000000"
+
+
+def _session_block(recorded_id: str) -> str:
+    from shared.claude_md_manager import SESSION_END_MARKER, SESSION_START_MARKER
+
+    return (
+        f"{SESSION_START_MARKER}\n## Current Session\n"
+        f"- Resume: `claude --resume {recorded_id}`\n"
+        f"{SESSION_END_MARKER}\n"
+    )
+
+
+def test_d1_the_stale_block_reader_follows_the_memory_root(repo, monkeypatch):
+    """D1: the reader built the path from the raw env var. Declared WORKTREE
+    with no file, MAIN holding the block -- pre-fix it answered None and the
+    stale block was never seen."""
+    from shared.stale_session import detect_stale_session_block
+
+    worktree = _worktree(repo, "d1-reader")
+    main_md = repo / ".claude" / "CLAUDE.md"
+    main_md.parent.mkdir()
+    main_md.write_text(
+        _managed_doc() + _session_block(_D1_RECORDED), encoding="utf-8"
+    )
+    assert not (worktree / ".claude" / "CLAUDE.md").exists()
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+    monkeypatch.chdir(worktree)
+
+    warning = detect_stale_session_block({"session_id": _D1_LIVE})
+    assert warning is not None, "MAIN's stale block was not seen"
+    assert _D1_RECORDED in warning
+
+
+def test_d1b_a_worktree_copy_is_not_reported(repo, monkeypatch):
+    """D1's other half: a worktree copy nothing manages must not be reported
+    when MAIN holds no file."""
+    from shared.stale_session import detect_stale_session_block
+
+    worktree = _worktree(repo, "d1b-reader")
+    wt_md = worktree / ".claude" / "CLAUDE.md"
+    wt_md.parent.mkdir()
+    wt_md.write_text(_managed_doc() + _session_block(_D1_RECORDED))
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+    monkeypatch.chdir(worktree)
+
+    assert detect_stale_session_block({"session_id": _D1_LIVE}) is None
+
+
+def test_d2_step4_never_writes_the_worktree_copy(repo, monkeypatch):
+    """D2: declared MAIN, cwd in the worktree, MAIN empty. The resolver's
+    git/cwd fall-through reached the worktree copy and step 4 wrote a STALE
+    marker there."""
+    from session_init import check_pinned_staleness
+    from shared.project_scope import project_memory_root
+
+    worktree = _worktree(repo, "d2-write")
+    doc = _managed_doc(_stale_capable_pin())
+    wt_md = worktree / ".claude" / "CLAUDE.md"
+    wt_md.parent.mkdir()
+    wt_md.write_text(doc, encoding="utf-8")
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
+    monkeypatch.chdir(worktree)
+
+    check_pinned_staleness(repo, project_memory_root(str(repo)))
+
+    assert wt_md.read_text(encoding="utf-8") == doc, (
+        "step 4 wrote into the worktree copy through the fall-through"
+    )
+
+
+def test_d3_no_declared_dir_and_no_git_writes_nothing(repo, monkeypatch):
+    """D3: with the variable ABSENT the unknown-root rule did not hold, so an
+    env-absent + no-git session in a worktree marked the worktree copy."""
+    worktree = _worktree(repo, "d3-write")
+    doc = _managed_doc(_stale_capable_pin())
+    wt_md = worktree / ".claude" / "CLAUDE.md"
+    wt_md.parent.mkdir()
+    wt_md.write_text(doc, encoding="utf-8")
+
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.chdir(worktree)
+    _hide_git(monkeypatch)
+
+    stdin_data = json.dumps(
+        {"session_id": SESSION_ID, "source": "startup", "agent_type": LEAD}
+    )
+    with patch("sys.stdin", io.StringIO(stdin_data)), \
+         patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        with pytest.raises(SystemExit) as exc:
+            session_init.main()
+    assert exc.value.code == 0
+    output = json.loads(mock_stdout.getvalue())
+    system_message = output.get("systemMessage", "")
+
+    assert "Project CLAUDE.md skipped" in system_message, system_message[:300]
+    assert wt_md.read_text(encoding="utf-8") == doc, (
+        "a no-declared-dir git failure let step 4 mark the worktree"
+    )
+
+
+def test_d3b_the_archive_refuses_an_unknown_no_declared_root(repo, monkeypatch):
+    """D3 in archive_pin: the guard ran only inside the env branch."""
+    import archive_pin
+
+    worktree = _worktree(repo, "d3-archive")
+    wt_md = worktree / ".claude" / "CLAUDE.md"
+    wt_md.parent.mkdir()
+    wt_md.write_text(_managed_doc(_stale_capable_pin()), encoding="utf-8")
+
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.chdir(worktree)
+    _hide_git(monkeypatch)
+
+    with pytest.raises(archive_pin._Unevaluable) as exc:
+        archive_pin.resolve_claude_md()
+    assert "project memory root unknown" in str(exc.value)

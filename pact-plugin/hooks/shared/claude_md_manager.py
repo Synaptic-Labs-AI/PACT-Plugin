@@ -1107,6 +1107,19 @@ def extract_managed_region(content: str) -> tuple[str, int] | None:
     return content[region_start:_marker_span(doc, last)[0]], region_start
 
 
+def managed_document_paths(base: str | os.PathLike[str]) -> tuple[Path, Path]:
+    """The two canonical managed-document paths under `base`.
+
+    ONE DEFINITION for the identity rule: gate_target and pin_marker_writer
+    each hand-built `<base>/.claude/CLAUDE.md` and `<base>/CLAUDE.md`, so a
+    third canonical location would have had to be added in every copy without
+    the parity test seeing it. Order is preferred-then-legacy, matching
+    `resolve_project_claude_md_path`.
+    """
+    root = Path(base)
+    return root / _DOT_CLAUDE_RELATIVE, root / _LEGACY_RELATIVE
+
+
 def resolve_project_claude_md_path(
     project_dir: str | os.PathLike[str],
 ) -> tuple[Path, str]:
@@ -1875,11 +1888,14 @@ def gate_target(file_path: str) -> GateTarget | None:
         # A TRACKED-CLAUDE.md PROJECT KEEPS THE SAME-RELATIVE-PATH CONSEQUENCE,
         # RECORDED HERE AND DELIBERATELY NOT GUARDED. The worktree copy sits at
         # the same repo-relative path, so a commit from the worktree plus a
-        # merge changes MAIN's document without this gate seeing it. The cap is
-        # session-local hygiene, not a security boundary; delivery is a
-        # human-reviewed merge; and a same-path guard would reintroduce the
-        # worktree copy as a managed artifact in weaker form -- the assumption
-        # the one rule exists to remove. Do not build that guard.
+        # merge changes MAIN's document without this gate seeing it. ALIASING
+        # IS THE SAME HOLE FROM THE OTHER SIDE: a hardlink or symlink to the
+        # same inode under another path edits the document without passing
+        # through this target either. The cap is session-local hygiene, not a
+        # security boundary; delivery is a human-reviewed merge; and an
+        # inode-identity guard would reintroduce the worktree copy as a
+        # managed artifact in weaker form -- the assumption the one rule
+        # exists to remove. Do not build that guard.
         declared = os.environ.get("CLAUDE_PROJECT_DIR")
         # DERIVED UNCONDITIONALLY (#1653, security lane): an absent variable
         # must not skip the guard. `or os.getcwd()` is what session_init uses,
@@ -1901,10 +1917,8 @@ def gate_target(file_path: str) -> GateTarget | None:
         # `same_path` handles a not-yet-existing leaf and a symlinked parent;
         # `_atomic_write_text` replaces the leaf ENTRY and never follows it,
         # so a leaf symlink is not an escape.
-        if not (
-            same_path(target, memory_root / ".claude" / "CLAUDE.md")
-            or same_path(target, memory_root / "CLAUDE.md")
-        ):
+        preferred, legacy = managed_document_paths(memory_root)
+        if not (same_path(target, preferred) or same_path(target, legacy)):
             return None
         before, before_base = _resolve_project_claude_md_with_base(
             project_dir=memory_root)

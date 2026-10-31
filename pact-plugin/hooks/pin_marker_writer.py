@@ -271,10 +271,10 @@ def _plan_and_write() -> str:
         # under the root. `same_path` handles a symlinked parent;
         # `_atomic_write_text` replaces the leaf ENTRY and never follows it,
         # so a leaf symlink is not an escape.
-        if not (
-            same_path(path, memory_root / ".claude" / "CLAUDE.md")
-            or same_path(path, memory_root / "CLAUDE.md")
-        ):
+        from shared.claude_md_manager import managed_document_paths
+
+        preferred, legacy = managed_document_paths(memory_root)
+        if not (same_path(path, preferred) or same_path(path, legacy)):
             return "noop_outside_memory_root"
 
         # Decoded with replacement, so a file that is not UTF-8 still gets the

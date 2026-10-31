@@ -559,21 +559,25 @@ def resolve_claude_md():
     # answer in production (the with-base call is what this wraps), but it
     # keeps one resolution seam for the whole codebase. Tests that redirect
     # the archive patch `resolve_session_claude_md_path` on THIS module.
-    env_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-    if env_dir:
-        # AN UNKNOWN memory root means the archive cannot identify the
-        # project's document. `project_memory_root` fails OPEN to the declared
-        # dir, so resolution would land on a worktree's own CLAUDE.md and the
-        # archive would edit the copy this rule keeps out of project memory.
-        # ARCHIVING WRITES (through the memory CLI), so this is a writer and
-        # takes the writer's rule: refuse rather than operate on a guess.
-        from shared.project_scope import project_memory_root_or_none
+    # AN UNKNOWN memory root means the archive cannot identify the project's
+    # document. `project_memory_root` fails OPEN to its input, so resolution
+    # would land on a worktree's own CLAUDE.md and the archive would edit the
+    # copy this rule keeps out of project memory. ARCHIVING WRITES (through
+    # the memory CLI), so this is a writer and takes the writer's rule:
+    # refuse rather than operate on a guess.
+    #
+    # #1653/D3: the rule holds on the NO-DECLARED-DIR route too -- the cwd is
+    # the anchor `resolve_session_claude_md_path()` falls back to, so an
+    # unknown root there would archive the worktree copy just the same.
+    from shared.project_scope import project_memory_root_or_none
 
-        if project_memory_root_or_none(env_dir) is None:
-            raise _Unevaluable(
-                "project memory root unknown: git could not answer, so the "
-                "project CLAUDE.md cannot be identified; nothing was archived"
-            )
+    env_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    anchor = Path(env_dir) if env_dir else Path.cwd()
+    if project_memory_root_or_none(anchor) is None:
+        raise _Unevaluable(
+            "project memory root unknown: git could not answer, so the "
+            "project CLAUDE.md cannot be identified; nothing was archived"
+        )
     path = resolve_session_claude_md_path()
     if path is None:
         raise _Unevaluable("CLAUDE.md not found")
