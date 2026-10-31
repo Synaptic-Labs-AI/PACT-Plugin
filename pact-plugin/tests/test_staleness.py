@@ -1680,8 +1680,8 @@ class TestCheckPinnedStalenessHardening:
         os.symlink(str(outside_victim), str(managed_path))
         assert managed_path.is_symlink()
 
-        with patch("session_init.resolve_session_claude_md_path",
-                   return_value=managed_path), \
+        with patch("session_init.resolve_project_claude_md_path",
+                   return_value=(managed_path, "legacy")), \
              patch("session_init._get_project_claude_md_path",
                    return_value=managed_path), \
              patch("staleness._get_project_claude_md_path",
@@ -1727,8 +1727,8 @@ class TestCheckPinnedStalenessHardening:
         os.symlink(str(sibling), str(managed_path))
         assert managed_path.is_symlink()
 
-        with patch("session_init.resolve_session_claude_md_path",
-                   return_value=managed_path), \
+        with patch("session_init.resolve_project_claude_md_path",
+                   return_value=(managed_path, "legacy")), \
              patch("session_init._get_project_claude_md_path",
                    return_value=managed_path), \
              patch("staleness._get_project_claude_md_path",
@@ -1772,8 +1772,8 @@ class TestCheckPinnedStalenessHardening:
         managed_path.write_text(self._stale_pinned_content(), encoding="utf-8")
         before = (outside / "CLAUDE.md").read_text(encoding="utf-8")
 
-        with patch("session_init.resolve_session_claude_md_path",
-                   return_value=managed_path), \
+        with patch("session_init.resolve_project_claude_md_path",
+                   return_value=(managed_path, "legacy")), \
              patch("session_init._get_project_claude_md_path",
                    return_value=managed_path), \
              patch("staleness._get_project_claude_md_path",

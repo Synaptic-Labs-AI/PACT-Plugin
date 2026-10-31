@@ -356,14 +356,18 @@ def check_pinned_staleness(
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
         memory_root = project_memory_root(project_dir) if project_dir else None
     if project_dir and memory_root is not None:
-        # ONE RULE (#1653/D2): probe the memory root; NEVER consult the
-        # resolver's git/cwd fall-through, which returns the WORKTREE copy on
-        # the declared-MAIN / cwd-in-worktree / MAIN-empty shape and made this
-        # step write a STALE marker there. A None here means the memory root
-        # has no file: return without calling the core, whose None delegation
-        # re-resolves env-first and would read the worktree copy.
-        target = resolve_session_claude_md_path(project_dir, memory_root)
-        if target is None:
+        # THE WRITE-SAFE RULE (#1653/D2) BELONGS HERE, not in the shared
+        # helper: step 4 has NO scope guard, so it must probe the memory root
+        # and never consult the resolver's git/cwd fall-through, which returns
+        # the WORKTREE copy on the declared-MAIN / cwd-in-worktree /
+        # MAIN-empty shape and made this step write a STALE marker there.
+        # `new_default` means the memory root has no file: return without
+        # calling the core, whose None delegation re-resolves env-first.
+        # The SHARED helper keeps the fall-through for the sites that pair it
+        # with `stays_in_declared_project` (archive_pin and the sync writers),
+        # because there the guard, not the resolver, is the safety property.
+        target, source = resolve_project_claude_md_path(memory_root)
+        if source == "new_default":
             return None
         return _staleness_check(claude_md_path=target)
     path = _get_project_claude_md_path()

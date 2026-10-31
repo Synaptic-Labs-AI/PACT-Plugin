@@ -811,7 +811,9 @@ class TestTwoLegCompositionThroughProductionEntryPoints:
         target.write_text(self._STALE, encoding="utf-8")
         victim_before = (project / "real.md").read_bytes()
 
-        with patch("session_init._get_project_claude_md_path", return_value=target), \
+        with patch("session_init.resolve_project_claude_md_path",
+                   return_value=(target, "legacy")), \
+             patch("session_init._get_project_claude_md_path", return_value=target), \
              patch("staleness._get_project_claude_md_path", return_value=target):
             result = check_pinned_staleness()
 

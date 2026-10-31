@@ -338,7 +338,12 @@ class TestSourceEquivalence:
         assert helper_body is not None, "main_repo_root must exist in memory_api.py"
         assert '"rev-parse", "--git-common-dir"' in helper_body
         assert "timeout=5" in helper_body
-        assert "(subprocess.TimeoutExpired, FileNotFoundError, OSError)" in helper_body
+        # ValueError joined the tuple with the #1653 path-byte fix: an
+        # undecodable git answer is "could not answer", not a crash.
+        assert (
+            "(subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError)"
+            in helper_body
+        )
         assert "if not common_dir.is_absolute():" in helper_body
 
     def test_main_repo_root_bases_a_relative_result_on_its_start_argument(self):

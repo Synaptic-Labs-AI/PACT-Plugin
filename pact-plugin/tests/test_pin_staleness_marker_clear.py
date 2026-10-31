@@ -80,7 +80,8 @@ def _patch_the_resolver(monkeypatch, staleness, replacement):
     them. `raising=True` is the default and it is wanted: if a name goes, this
     raises rather than patch nothing in silence.
     """
-    for name in ("get_project_claude_md_path", "_get_project_claude_md_path"):
+    for name in ("get_project_claude_md_path", "_get_project_claude_md_path",
+                 "resolve_session_claude_md_path"):
         monkeypatch.setattr(staleness, name, replacement)
 
 
