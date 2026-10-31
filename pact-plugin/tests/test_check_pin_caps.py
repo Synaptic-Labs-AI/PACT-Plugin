@@ -43,7 +43,7 @@ def patched_claude_md(tmp_path, monkeypatch):
         claude_md.write_text(content, encoding="utf-8")
         import check_pin_caps
         monkeypatch.setattr(
-            check_pin_caps, "get_project_claude_md_path", lambda: claude_md
+            check_pin_caps, "resolve_session_claude_md_path", lambda: claude_md
         )
         return claude_md
     return _write
@@ -513,7 +513,7 @@ class TestCheckPinCaps_Advisory_NeverExit2:
             staleness, "get_project_claude_md_path", lambda: None
         )
         monkeypatch.setattr(
-            check_pin_caps, "get_project_claude_md_path", lambda: None
+            check_pin_caps, "resolve_session_claude_md_path", lambda: None
         )
         rc, _ = _run_cli(["--status"])
         assert rc != 2

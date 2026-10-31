@@ -132,7 +132,6 @@ _staleness = _load_hook_module("staleness")
 format_slot_status = _pin_caps.format_slot_status
 section_pins = _pin_caps.section_pins
 locate_pinned = _staleness.locate_pinned
-get_project_claude_md_path = _staleness.get_project_claude_md_path
 # #1653: the session's project-memory file (MAIN's for a linked worktree),
 # so the listing agrees with the document the writers manage.
 resolve_session_claude_md_path = _staleness.resolve_session_claude_md_path

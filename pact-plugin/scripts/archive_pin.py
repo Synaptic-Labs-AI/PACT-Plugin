@@ -380,7 +380,6 @@ get_project_claude_md_path = _staleness.get_project_claude_md_path
 # archive_pin ARCHIVES A PIN, which writes the document through the memory
 # CLI -- so this is a writer, and it must follow the same root as every other
 # writer or it reopens the split the PR exists to close.
-resolve_session_claude_md_path = _staleness.resolve_session_claude_md_path
 resolve_project_claude_md_path = _staleness.resolve_project_claude_md_path
 # The (path, base) form. `base` is the directory the resolver ACTUALLY found
 # the file under, captured before descending into `.claude` -- a trusted

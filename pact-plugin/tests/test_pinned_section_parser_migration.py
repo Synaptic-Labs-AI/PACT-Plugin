@@ -187,7 +187,7 @@ class TestReadersStaySilentOnAnUncertainSection:
         import check_pin_caps
         path = tmp_path / "CLAUDE.md"
         path.write_text(UNCLOSED, encoding="utf-8")
-        monkeypatch.setattr(check_pin_caps, "get_project_claude_md_path", lambda: path)
+        monkeypatch.setattr(check_pin_caps, "resolve_session_claude_md_path", lambda: path)
         pins, reason = check_pin_caps._resolve_pins()
         assert pins == [] and reason is not None
         assert reason.startswith("pinned section unreadable: ")
