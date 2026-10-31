@@ -814,3 +814,105 @@ def test_d2b_the_exposure_persists_across_launches(repo, tmp_path, monkeypatch):
         assert not (repo / ".claude" / "CLAUDE.md").exists(), (
             f"launch {launch}: MAIN gained a file through the outside symlink"
         )
+
+
+# --- Tester-lane coverage gaps, armed rather than deferred -------------------
+
+def _two_stale_pins() -> str:
+    """Two pins carrying the STALE marker: `is_stale` reads the marker row,
+    not the date, and the block-signal threshold is 2."""
+    marker = "<!-- STALE: Last relevant 2020-01-05 -->\n"
+    return (
+        "<!-- pinned: 2026-10-01 -->\n### Old A\n" + marker
+        + "Last relevant 2020-01-05, PR #1, merged 2020-01-05\n\n"
+        + "<!-- pinned: 2026-10-01 -->\n### Old B\n" + marker
+        + "Last relevant 2020-01-05, PR #2, merged 2020-01-05\n\n"
+    )
+
+
+def test_the_stale_block_directive_never_reads_the_worktree_copy(
+    repo, monkeypatch
+):
+    """The known-root short-circuit is load-bearing, not decorative.
+
+    Declared MAIN, cwd in a worktree, MAIN empty, and the WORKTREE copy carries
+    two stale pins -- enough to fire the block signal. The directive must return
+    None: the memory root has no document, and delegating None to the callee
+    re-resolves env-first and reads the worktree copy. The non-vacuity line
+    proves that fallback WOULD fire, so the guard is what changes the answer;
+    the control then puts the document in MAIN and requires the directive.
+    """
+    from session_init import _staleness_block_check, check_pin_stale_block_directive
+    from shared.project_scope import project_memory_root
+
+    worktree = _worktree(repo, "directive-guard")
+    doc = _managed_doc(_two_stale_pins())
+    wt_md = worktree / ".claude" / "CLAUDE.md"
+    wt_md.parent.mkdir()
+    wt_md.write_text(doc, encoding="utf-8")
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
+    monkeypatch.chdir(worktree)
+    root = project_memory_root(str(repo))
+
+    assert _staleness_block_check(claude_md_path=None) is not None, (
+        "the fixture no longer fires the block signal through the fallback, "
+        "so the guard below proves nothing"
+    )
+    assert check_pin_stale_block_directive(repo, root) is None, (
+        "the directive read the worktree copy through a None delegation"
+    )
+
+    main_md = repo / ".claude" / "CLAUDE.md"
+    main_md.parent.mkdir()
+    main_md.write_text(doc, encoding="utf-8")
+    assert check_pin_stale_block_directive(repo, root) is not None, (
+        "control: the same document in MAIN must fire the directive"
+    )
+
+
+def test_the_retrieved_sync_names_an_unknown_root(repo, monkeypatch):
+    """`sync_retrieved_to_claude_md`'s ROOT_UNKNOWN branch, asserted rather
+    than left diagnostic-only in a comment."""
+    import scripts.working_memory as wm
+
+    worktree = _worktree(repo, "retrieved-sync-git-failure")
+    worktree_md = worktree / ".claude" / "CLAUDE.md"
+    worktree_md.parent.mkdir()
+    original = _display_doc()
+    worktree_md.write_text(original, encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+    monkeypatch.chdir(worktree)
+    _align_memory_scope(monkeypatch, wm, worktree)
+    _hide_git(monkeypatch)
+
+    result = wm.sync_retrieved_to_claude_md(
+        [{"id": "0" * 32, "context": "external entry"}], query="a query"
+    )
+
+    assert result.reason == wm.SyncResult.ROOT_UNKNOWN, (
+        f"the unknown root was not named: {result.reason}"
+    )
+    assert worktree_md.read_text(encoding="utf-8") == original, (
+        "a git failure let the retrieved-context sync write the worktree"
+    )
+
+
+def test_the_retrieved_sync_unknown_root_is_not_unresolved(repo, monkeypatch):
+    """Control: with git answering and no document anywhere, the reason is
+    UNRESOLVED -- the two causes are distinguishable."""
+    import scripts.working_memory as wm
+
+    plain = repo / "plain-no-document"
+    plain.mkdir()
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(plain))
+    monkeypatch.chdir(repo)
+    _align_memory_scope(monkeypatch, wm, repo)
+
+    result = wm.sync_retrieved_to_claude_md(
+        [{"id": "0" * 32, "context": "external entry"}], query="a query"
+    )
+
+    assert result.reason == wm.SyncResult.UNRESOLVED, (
+        f"expected UNRESOLVED, got {result.reason}"
+    )
