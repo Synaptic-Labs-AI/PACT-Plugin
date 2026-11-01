@@ -147,16 +147,23 @@ def in_pr_worktree(pr: dict) -> bool:
     """Whether the current directory is this PR's worktree: its checked-out
     branch is exactly the PR's head branch, and one of its remotes names
     exactly the PR's base or head owner/repo."""
-    branch = git_helpers.run_git(["symbolic-ref", "--short", "-q", "HEAD"])
+    # Bytes plus `os.fsdecode`, as in `_git`: a branch name and a LOCAL remote
+    # URL may hold bytes that are not valid UTF-8, and the default text mode
+    # would raise inside the wrap-up hook instead of comparing them.
+    branch = git_helpers.run_git(
+        ["symbolic-ref", "--short", "-q", "HEAD"], text=False
+    )
     if branch is None or branch.returncode != 0 or not pr.get("branch"):
         return False
-    if branch.stdout.strip() != pr["branch"]:
+    if os.fsdecode(branch.stdout or b"").strip() != pr["branch"]:
         return False
-    urls = git_helpers.run_git(["config", "--get-regexp", r"^remote\..*\.url$"])
+    urls = git_helpers.run_git(
+        ["config", "--get-regexp", r"^remote\..*\.url$"], text=False
+    )
     if urls is None or urls.returncode != 0:
         return False
     repos = {pr.get("base_repo"), (pr.get("head_owner"), pr.get("head_repo"))}
-    for line in urls.stdout.splitlines():
+    for line in os.fsdecode(urls.stdout or b"").splitlines():
         found = REMOTE_URL_RE.search(line.split(" ", 1)[-1].strip())
         if found and (found.group(1), found.group(2)) in repos:
             return True
@@ -196,10 +203,18 @@ def _map(result) -> dict:
 
 def _git(cwd: str | None, *args: str) -> str | None:
     """One git command's trimmed stdout in `cwd`, or None when it fails (an
-    unset config key exits 1)."""
+    unset config key exits 1).
+
+    BYTES, THEN `os.fsdecode` (#1653). A branch name, a config value and a
+    local `remote get-url` are all bytes git may print without UTF-8 validity;
+    `run_git`'s default text mode would raise UnicodeDecodeError inside the
+    wrap-up hook. `fsdecode` round-trips them and changes nothing for ASCII.
+    """
     anchor = ["-C", cwd] if cwd else []
-    out = git_helpers.run_git([*anchor, *args])
-    return out.stdout.strip() if out is not None and out.returncode == 0 else None
+    out = git_helpers.run_git([*anchor, *args], text=False)
+    if out is None or out.returncode != 0:
+        return None
+    return os.fsdecode(out.stdout or b"").strip()
 
 
 def _obj(value) -> dict:

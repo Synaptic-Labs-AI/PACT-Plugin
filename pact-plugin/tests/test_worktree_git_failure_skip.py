@@ -141,6 +141,88 @@ def test_a_git_failure_skips_the_session_start_writers(repo, monkeypatch):
     )
 
 
+def test_a_declared_directory_that_does_not_exist_is_not_re_created(
+    tmp_path, monkeypatch
+):
+    """F1: `git -C <missing>` exits 128 exactly as `git -C <non-repo>` does,
+    so the classifier called the missing dir a KNOWN root and SessionStart
+    created it. THE ASSERTION IS ON THE DIRECTORY, not only on a planted file:
+    a session that re-creates the path and then writes nothing leaves the
+    check for `.claude/CLAUDE.md` green while the bug is still present."""
+    missing = tmp_path / "deleted-project"
+    assert not missing.exists()
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(missing))
+    monkeypatch.chdir(tmp_path)
+
+    stdin_data = json.dumps(
+        {"session_id": SESSION_ID, "source": "startup", "agent_type": LEAD}
+    )
+    with patch("sys.stdin", io.StringIO(stdin_data)), \
+         patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        with pytest.raises(SystemExit) as exc:
+            session_init.main()
+
+    assert exc.value.code == 0
+    assert not missing.exists(), (
+        "SessionStart re-created a declared directory that does not exist"
+    )
+    system_message = json.loads(mock_stdout.getvalue()).get("systemMessage", "")
+    assert "Project CLAUDE.md skipped" in system_message
+
+
+def _run_with_declaration(monkeypatch, cwd, declared):
+    """Run SessionStart with `cwd` as the process directory and `declared` as
+    CLAUDE_PROJECT_DIR. Separate from `_run` because the declared directory
+    may not exist, and `_run` chdirs into it."""
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(declared))
+    monkeypatch.chdir(cwd)
+    stdin_data = json.dumps(
+        {"session_id": SESSION_ID, "source": "startup", "agent_type": LEAD}
+    )
+    with patch("sys.stdin", io.StringIO(stdin_data)), \
+         patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        with pytest.raises(SystemExit) as exc:
+            session_init.main()
+    assert exc.value.code == 0
+    return json.loads(mock_stdout.getvalue())
+
+
+def test_a_removed_worktree_declaration_leaves_main_clean(repo, monkeypatch):
+    """F1, the runtime lane's stronger shape: a worktree that `git worktree
+    remove --force` deleted. The DIRECTORY assertion alone would pass on a
+    re-created path with nothing in it, so this also asserts MAIN's working
+    tree stays clean -- that catches a planted directory, and any future
+    variant that plants something other than CLAUDE.md."""
+    worktree = _worktree(repo, "f1-removed")
+    _git("worktree", "remove", "--force", str(worktree), cwd=repo)
+    assert not worktree.exists()
+
+    _run_with_declaration(monkeypatch, repo, worktree)
+
+    assert not worktree.exists(), (
+        "SessionStart re-created a removed worktree directory"
+    )
+    status = _git("status", "--porcelain", cwd=repo)
+    assert ".worktrees/" not in status, (
+        f"SessionStart planted something in MAIN's worktrees dir: {status!r}"
+    )
+
+
+def test_a_ghost_worktree_declaration_leaves_main_clean(repo, monkeypatch):
+    """The trigger is the DECLARATION, not the cwd: a path that never existed
+    must not be created either."""
+    ghost = repo / ".worktrees" / "never-created"
+    assert not ghost.exists()
+
+    _run_with_declaration(monkeypatch, repo, ghost)
+
+    assert not ghost.exists()
+    status = _git("status", "--porcelain", cwd=repo)
+    assert ".worktrees/" not in status, (
+        f"SessionStart planted something for a ghost declaration: {status!r}"
+    )
+
+
 def test_the_control_with_a_working_git_creates_main(repo, monkeypatch):
     worktree = _worktree(repo, "working-git")
 
@@ -404,6 +486,100 @@ def test_the_session_start_staleness_step_still_marks_main(repo, monkeypatch):
         "control: the same start did not mark MAIN's stale pin"
     )
     assert worktree_md.read_text(encoding="utf-8") == original
+
+
+def _stale_marked_pin(heading: str = "Old A") -> str:
+    """A pin the stale-block reader counts: it reads the STALE marker in the
+    body, not the pin date, so step 4 cannot be what puts it there. Two of
+    them are needed to reach PIN_STALE_BLOCK_THRESHOLD."""
+    return (
+        f"<!-- pinned: 2026-10-01 -->\n### {heading}\n"
+        "body <!-- STALE: Last relevant 2020-01-05 -->\n\n"
+    )
+
+
+def _stale_pair() -> str:
+    return _stale_marked_pin("Old A") + _stale_marked_pin("Old B")
+
+
+def test_a_git_failure_emits_no_pin_advisories_from_the_worktree_copy(
+    repo, monkeypatch
+):
+    """F2: the unknown-root refusal covered the writers but not the three
+    advisory readers. A start that said it wrote nothing to either checkout
+    then read the WORKTREE copy through the substituted fail-open root and
+    told the user to run /PACT:prune-memory -- whose own guard refuses on the
+    same root."""
+    worktree = _worktree(repo, "f2-pin-advisories")
+    wt_md = worktree / ".claude" / "CLAUDE.md"
+    wt_md.parent.mkdir()
+    wt_md.write_text(_managed_doc(_stale_pair()), encoding="utf-8")
+    _hide_git(monkeypatch)
+
+    context, system_message = _run(monkeypatch, worktree)
+
+    assert "Project CLAUDE.md skipped" in system_message
+    assert "prune-memory" not in context, (
+        "the start recommended a command that refuses on this root: "
+        f"{context[:400]!r}"
+    )
+    assert "Pin slots" not in context
+
+
+def test_the_pin_advisories_still_follow_main_with_working_git(repo, monkeypatch):
+    """Control for the arm above: with a known root the same readers DO
+    report MAIN's stale pin, so the absence there is a measured skip rather
+    than a fixture that never reached the reader."""
+    worktree = _worktree(repo, "f2-pin-control")
+    main_md = repo / ".claude" / "CLAUDE.md"
+    main_md.parent.mkdir()
+    main_md.write_text(_managed_doc(_stale_pair()), encoding="utf-8")
+
+    context, _system_message = _run(monkeypatch, worktree)
+
+    assert "prune-memory" in context
+    assert "Pin slots" in context
+
+
+def test_a_git_failure_emits_no_refusal_report_from_the_worktree_copy(
+    repo, monkeypatch
+):
+    """F2, third reader: `check_claude_md_refusals` also read the substituted
+    root, so it named the worktree copy's malformed blocks as the document
+    PACT would not update."""
+    from shared.claude_md_manager import MANAGED_END_MARKER, MANAGED_START_MARKER
+
+    worktree = _worktree(repo, "f2-refusals")
+    wt_md = worktree / ".claude" / "CLAUDE.md"
+    wt_md.parent.mkdir()
+    wt_md.write_text(
+        _managed_doc() + f"{MANAGED_START_MARKER}\n{MANAGED_END_MARKER}\n",
+        encoding="utf-8",
+    )
+    _hide_git(monkeypatch)
+
+    _context, system_message = _run(monkeypatch, worktree)
+
+    assert "Project CLAUDE.md skipped" in system_message
+    assert "PACT could not update" not in system_message
+
+
+def test_the_refusal_report_still_names_main_with_working_git(repo, monkeypatch):
+    """Control for the arm above."""
+    from shared.claude_md_manager import MANAGED_END_MARKER, MANAGED_START_MARKER
+
+    worktree = _worktree(repo, "f2-refusals-control")
+    main_md = repo / ".claude" / "CLAUDE.md"
+    main_md.parent.mkdir()
+    main_md.write_text(
+        _managed_doc() + f"{MANAGED_START_MARKER}\n{MANAGED_END_MARKER}\n",
+        encoding="utf-8",
+    )
+
+    _context, system_message = _run(monkeypatch, worktree)
+
+    assert "PACT could not update" in system_message
+    assert str(main_md) in system_message
 
 
 def _prompt_gate_frame():
@@ -721,6 +897,37 @@ def test_d2_step4_never_writes_the_worktree_copy(repo, monkeypatch):
     assert wt_md.read_text(encoding="utf-8") == doc, (
         "step 4 wrote into the worktree copy through the fall-through"
     )
+
+
+def test_f4_no_env_step4_marks_the_memory_root(repo, monkeypatch):
+    """F4 MEASUREMENT: with no declared dir and the cwd in the worktree, step
+    4 marks MAIN -- the memory root -- and not the worktree copy. The code is
+    right on this shape; the comment claiming the no-declared-dir rule stops
+    every writer was the defect, so the comment was corrected rather than the
+    asymmetry."""
+    from session_init import check_pinned_staleness
+    from shared.project_scope import project_memory_root_or_none
+
+    worktree = _worktree(repo, "f4-no-env")
+    main_md = repo / ".claude" / "CLAUDE.md"
+    main_md.parent.mkdir()
+    main_md.write_text(_managed_doc(_stale_capable_pin()), encoding="utf-8")
+    wt_md = worktree / ".claude" / "CLAUDE.md"
+    wt_md.parent.mkdir()
+    original = _managed_doc(_stale_capable_pin())
+    wt_md.write_text(original, encoding="utf-8")
+
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.chdir(worktree)
+    memory_root = project_memory_root_or_none(os.getcwd())
+    assert memory_root == repo.resolve(), "the cwd-derived root is not MAIN"
+
+    check_pinned_staleness(os.getcwd(), memory_root)
+
+    assert "<!-- STALE" in main_md.read_text(encoding="utf-8"), (
+        "step 4 did not reach the memory root on the no-declared-dir shape"
+    )
+    assert wt_md.read_text(encoding="utf-8") == original
 
 
 def test_d3_no_declared_dir_and_no_git_writes_nothing(repo, monkeypatch):

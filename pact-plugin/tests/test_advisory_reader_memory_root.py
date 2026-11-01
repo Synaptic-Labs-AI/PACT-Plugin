@@ -492,3 +492,63 @@ def test_the_pin_gate_matches_main(world):
     target = gate_target(str(main_md))
     assert target is not None and target.target.resolve() == main_md.resolve()
     assert match_project_claude_md(str(worktree / ".claude" / "CLAUDE.md")) is None
+
+
+# --- F3: a supplied memory root is honoured, and a falsy base is like None ---
+
+
+def _supplied_root(tmp_path: Path) -> Path:
+    """A directory that is neither the env base nor the cwd, with its own doc."""
+    supplied = tmp_path / "supplied"
+    supplied.mkdir()
+    _write_doc(supplied, _doc())
+    return supplied
+
+
+def test_f3_an_empty_base_with_no_root_does_not_return_the_worktree_copy(
+    world, monkeypatch
+):
+    """The no-declaration route gets the cwd's MEMORY root, not the raw
+    fall-through, so a worktree copy is never the answer."""
+    from staleness import resolve_session_claude_md_path
+
+    main, worktree = world
+    main_md = _write_doc(main, _doc())
+    _write_doc(worktree, _doc())
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR")
+
+    assert resolve_session_claude_md_path("", None) == main_md, (
+        "an empty base fell through to the worktree copy"
+    )
+
+
+def test_f3_an_empty_base_still_honours_a_supplied_root(world, tmp_path):
+    """F3: the branch that probed a root required a TRUTHY base, so `("", root)`
+    ignored the supplied root and re-read the environment -- which here names
+    the worktree."""
+    from staleness import resolve_session_claude_md_path
+
+    main, worktree = world
+    _write_doc(main, _doc())
+    _write_doc(worktree, _doc())
+    supplied = _supplied_root(tmp_path)
+
+    assert resolve_session_claude_md_path("", supplied) == (
+        supplied / ".claude" / "CLAUDE.md"
+    ), "an empty base discarded the supplied memory root"
+
+
+def test_f3_a_none_base_still_honours_a_supplied_root(world, tmp_path):
+    """The same defect one branch over: a None base re-derived the root from
+    the environment and REPLACED the supplied one."""
+    from staleness import resolve_session_claude_md_path
+
+    main, worktree = world
+    main_md = _write_doc(main, _doc())
+    _write_doc(worktree, _doc())
+    supplied = _supplied_root(tmp_path)
+
+    assert resolve_session_claude_md_path(None, supplied) == (
+        supplied / ".claude" / "CLAUDE.md"
+    ), "a None base discarded the supplied memory root"
+    assert main_md != supplied / ".claude" / "CLAUDE.md"

@@ -1792,13 +1792,21 @@ def main():
             memory_unknown = True
             memory_root = project_memory_root(project_dir)
 
-        # The WRITERS keep their own "no project dir declared" guard. Passing
-        # `memory_root` to them unconditionally would bypass that guard --
-        # `project_dir` above falls back to the cwd and is never empty -- and
-        # a frame the platform handed no project dir would start creating a
-        # CLAUDE.md where it previously created none. None here means "read
-        # the environment", which is empty, so the writer returns its no-op.
-        # Reads may use `memory_root`: they already took the cwd fallback.
+        # THE CREATING WRITERS keep their own "no project dir declared" guard.
+        # Passing `memory_root` to them unconditionally would bypass that
+        # guard -- `project_dir` above falls back to the cwd and is never
+        # empty -- and a frame the platform handed no project dir would start
+        # CREATING a CLAUDE.md where it previously created none. None here
+        # means "read the environment", which is empty, so the writer returns
+        # its no-op.
+        #
+        # THIS IS NOT A RULE FOR EVERY WRITE, and the earlier wording ("the
+        # writers") claimed it was. Step 4 reads and marks a document that
+        # already exists at the memory root; it creates nothing, and on the
+        # no-declared-dir shape it deliberately follows the cwd-derived root.
+        # That is the RIGHT document, so the asymmetry is correct and this
+        # comment was the error. Folding step 4 into this guard would stop
+        # marking stale pins on a legitimate shape.
         write_root = memory_root if declared_project_dir else None
 
         # One user-visible line for the skip; the writers never run below.
@@ -1883,10 +1891,16 @@ def main():
                 else:
                     context_parts.append(staleness_msg)
 
+        # THE THREE ADVISORY READERS FOLLOW THE UNKNOWN ANSWER TOO. They used
+        # to receive the substituted fail-open root and describe the worktree
+        # copy: a start that had just said it wrote nothing to either checkout
+        # still told the user to run /PACT:prune-memory, whose own guard then
+        # refused on the same root. Nothing here reads a target it cannot
+        # identify; the single skip line above already reports the condition.
         # 4d. Name the project CLAUDE.md's blocks and sections PACT will not
         # update, on every launch until the file is fixed. Lead only, beside
         # each writer's own status; a compaction is not a launch.
-        if frame_is_lead and source != "compact":
+        if frame_is_lead and not memory_unknown and source != "compact":
             refusal_msg = check_claude_md_refusals(project_dir, memory_root)
             if refusal_msg:
                 system_messages.append(refusal_msg)
@@ -1895,7 +1909,10 @@ def main():
         # architecturally binding, survives compaction. Fail-open: None
         # when CLAUDE.md cannot be resolved or parsed. m2: lead-only pin
         # telemetry — not surfaced to a teammate frame.
-        slot_status_msg = check_pin_slot_status(project_dir, memory_root)
+        slot_status_msg = (
+            check_pin_slot_status(project_dir, memory_root)
+            if not memory_unknown else None
+        )
         if slot_status_msg and frame_role != "teammate":
             context_parts.append(slot_status_msg)
 
@@ -1904,7 +1921,10 @@ def main():
         # /resume per plan key-decisions row 6. m2: the "/PACT:prune-memory"
         # directive is a lead/orchestrator memory action — not surfaced to a
         # teammate frame (the helper's marker side-effect is unchanged).
-        stale_block_msg = check_pin_stale_block_directive(project_dir, memory_root)
+        stale_block_msg = (
+            check_pin_stale_block_directive(project_dir, memory_root)
+            if not memory_unknown else None
+        )
         if stale_block_msg and frame_role != "teammate":
             context_parts.append(stale_block_msg)
 

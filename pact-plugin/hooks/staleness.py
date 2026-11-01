@@ -399,12 +399,27 @@ def resolve_session_claude_md_path(
     helper exists to close. A no-argument call reads the environment, and
     when it is absent it derives the CWD's memory root through the
     unknown-aware helper instead of the raw fall-through.
+
+    A SUPPLIED `memory_root` IS ALWAYS HONOURED, including with no base or an
+    empty one; a falsy `project_dir` is treated exactly like None. The base is
+    only consulted when no root was supplied.
     """
-    if project_dir is None:
-        project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-        if project_dir:
-            memory_root = project_memory_root(project_dir)
-        else:
+    if memory_root is None:
+        # A SUPPLIED MEMORY ROOT IS THE CALLER'S ANSWER AND IS NEVER DERIVED
+        # OVER. Guarding the derivation on `memory_root is None` rather than
+        # on `project_dir is None` is the F3 fix: a supplied root used to be
+        # REPLACED when the base was None, and IGNORED entirely when it was
+        # falsy, because the branch below required a truthy `project_dir` and
+        # the fall-through re-resolved the environment. A caller that hands in
+        # a root has already answered the question this function would
+        # otherwise guess at.
+        #
+        # A FALSY BASE IS TREATED EXACTLY LIKE None. An empty string is not a
+        # directory anyone named, and letting it take a different route is how
+        # a future env-derived base could reach the worktree copy again.
+        if not project_dir:
+            project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+        if not project_dir:
             # NO DECLARATION: the CWD is the anchor, and it gets the SAME rule
             # (the D3 shape). Deriving it through the unknown-aware helper is
             # what stops this route returning the worktree shadow copy; an
@@ -418,18 +433,16 @@ def resolve_session_claude_md_path(
             memory_root = project_memory_root_or_none(project_dir)
             if memory_root is None:
                 return None
-    elif memory_root is None:
-        memory_root = project_memory_root(project_dir)
-    if project_dir and memory_root is not None:
-        # ONE RULE (#1653/D2): probe the memory root and take ONLY its
-        # answer. The resolver's git/cwd fall-through is never consulted on
-        # this route -- it can return a linked worktree's own copy, the
-        # document this rule keeps out of project memory, and on the
-        # declared-MAIN / cwd-in-worktree / MAIN-empty shape it did exactly
-        # that to check_pinned_staleness, which wrote a STALE marker there.
-        target, source = resolve_project_claude_md_path(memory_root)
-        return target if source != "new_default" else None
-    return get_project_claude_md_path()
+        else:
+            memory_root = project_memory_root(project_dir)
+    # ONE RULE (#1653/D2): probe the memory root and take ONLY its answer. The
+    # resolver's git/cwd fall-through is never consulted on this route -- it
+    # can return a linked worktree's own copy, the document this rule keeps
+    # out of project memory, and on the declared-MAIN / cwd-in-worktree /
+    # MAIN-empty shape it did exactly that to check_pinned_staleness, which
+    # wrote a STALE marker there.
+    target, source = resolve_project_claude_md_path(memory_root)
+    return target if source != "new_default" else None
 
 
 def estimate_tokens(text: str) -> int:

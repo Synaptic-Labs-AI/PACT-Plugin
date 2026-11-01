@@ -1193,6 +1193,35 @@ class TestEverySiteJudgesProjectScopeAlike:
             f"{layout}: {site} wrote into a document outside the declared project"
         )
 
+    @pytest.mark.parametrize("site", _SITES)
+    def test_an_unanswerable_root_is_a_different_refusal_from_an_escape(
+        self, tmp_path, monkeypatch, site
+    ):
+        """TWO CAUSES, TWO SHAPES, AND A CALLER CAN TELL THEM APART. A
+        resolution outside the declared project raises the scope refusal with
+        "different project" (the arms above). An EXISTING base that git cannot
+        answer for returns `root_unknown` at the sync sites and names
+        "project memory root unknown" at the archive. Neither may collapse
+        into the other: the first is a scope verdict, the second is an
+        environment fault.
+        """
+        project = _committed_repo(tmp_path / "project")
+        _document_in(project)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+        monkeypatch.chdir(project)
+        monkeypatch.setenv("PATH", "")  # git is genuinely unavailable
+
+        if site == "archive_pin":
+            import archive_pin
+
+            with pytest.raises(archive_pin._Unevaluable) as excinfo:
+                _run_site(site)
+            assert "project memory root unknown" in excinfo.value.reason
+            assert "different project" not in excinfo.value.reason
+        else:
+            result = _run_site(site)
+            assert result == SyncResult(SyncResult.ROOT_UNKNOWN), result
+
     @pytest.mark.parametrize("site", _SITES[:2])
     def test_a_relative_declaration_disagreeing_with_the_record_is_refused(
         self, tmp_path, monkeypatch, site
@@ -1270,6 +1299,80 @@ class TestNoSiteTakesAWorktreeShadowCopy:
 
         assert document.read_bytes() == before, (
             f"{site} wrote into the worktree shadow copy"
+        )
+
+    @pytest.mark.parametrize("site", _SITES)
+    def test_a_missing_declaration_never_resolves_a_sibling_worktree(
+        self, tmp_path, monkeypatch, site
+    ):
+        """THE FALL-THROUGH'S HARD EDGE, and the shape no record covers: the
+        declared worktree path is GONE, a SIBLING worktree of the same
+        repository carries its own CLAUDE.md, there is no session record, and
+        the cwd is inside that sibling. A missing declaration may fall through
+        only because every rung retargets a worktree root to MAIN. So the sync
+        sites must write MAIN's document, and the archive must resolve MAIN or
+        refuse -- it must NEVER return the sibling's copy.
+        """
+        main = _committed_repo(tmp_path / "main")
+        main_document = _document_in(main)
+        sibling = _worktree_at(main, main / ".worktrees" / "sibling")
+        sibling_document = _document_in(sibling)
+        missing = main / ".worktrees" / "gone"
+        assert not missing.exists()
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(missing))
+        monkeypatch.chdir(sibling)
+
+        if site == "archive_pin":
+            path, _base = _run_site(site)
+            assert Path(path).resolve() == main_document.resolve(), (
+                f"archive_pin resolved {path}, not MAIN's document"
+            )
+            assert sibling_document.read_bytes() == _SEED_DOCUMENT.encode(), (
+                "archive_pin touched the sibling worktree's copy"
+            )
+            return
+
+        before_main = main_document.read_bytes()
+        result = _run_site(site)
+
+        assert result == SyncResult(SyncResult.WROTE), (
+            f"{site} returned {result!r} for a missing declaration whose "
+            "enclosing checkout holds the document"
+        )
+        assert main_document.read_bytes() != before_main, (
+            f"{site} reported WROTE but MAIN's document did not change"
+        )
+        assert sibling_document.read_bytes() == _SEED_DOCUMENT.encode(), (
+            f"{site} wrote the sibling worktree's copy"
+        )
+
+    def test_a_missing_declaration_with_no_main_document_still_refuses_the_sibling(
+        self, tmp_path, monkeypatch
+    ):
+        """THE PAIR, AND THE ARM THAT PROVES THE RETARGET WAS ADDED UNDER THE
+        CHECK RATHER THAN REPLACING IT. Same missing declaration and sibling
+        copy, but MAIN holds no document: the retarget lands on MAIN and finds
+        nothing, the raw fall-through reaches the sibling's copy, and the
+        base-identity check must still refuse it with its own message.
+        """
+        import archive_pin
+
+        main = _committed_repo(tmp_path / "main")
+        sibling = _worktree_at(main, main / ".worktrees" / "sibling")
+        sibling_document = _document_in(sibling)
+        missing = main / ".worktrees" / "gone"
+        assert not missing.exists()
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(missing))
+        monkeypatch.chdir(sibling)
+
+        with pytest.raises(archive_pin._Unevaluable) as excinfo:
+            _run_site("archive_pin")
+
+        assert "linked worktree copy" in excinfo.value.reason, excinfo.value.reason
+        assert sibling_document.read_bytes() == _SEED_DOCUMENT.encode(), (
+            "archive_pin wrote the sibling worktree's copy while refusing it"
         )
 
 

@@ -896,9 +896,37 @@ def _gate(input_data: dict):
 
     target = gate_target(file_path)
     if target is None:
-        return None
+        return _unknown_root_decision(tool_name)
     decision = _decide(target, tool_name, tool_input, input_data, frame)
     return _member_reason(decision) if frame == "member" else decision
+
+
+def _unknown_root_decision(tool_name: str):
+    """The advisory when a target was NOT gated because the session's memory
+    root is unknown, or None when that is not the reason.
+
+    THE CAP IS OFF AND THE GATE MUST SAY SO. `gate_target` returns None for
+    several ordinary reasons (a worktree copy, the non-preferred of the two
+    canonical paths), and those stay silent. An unknown root is different: no
+    document can be identified for the whole session, so every later edit
+    passes unchecked. The sibling `check_claude_md_refusals` names this
+    condition on the SessionStart channel; this is the PreToolUse channel.
+    """
+    try:
+        from shared.claude_md_manager import session_memory_root
+
+        if session_memory_root() is not None:
+            return None
+    except Exception:  # noqa: BLE001 — fail-open: report nothing
+        return None
+    from shared.pin_growth import PinDecision
+
+    return PinDecision(
+        "ALLOW_ADVISORY", 0, 0, None, "unknown_root",
+        "PACT could not determine this session's project-memory root (git "
+        "could not identify it), so the pin cap was not checked for this "
+        f"{tool_name}.",
+    )
 
 
 def _decide(target, tool_name: str, tool_input: dict, input_data: Optional[dict] = None,

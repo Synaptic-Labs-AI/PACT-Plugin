@@ -1997,7 +1997,12 @@ class TestWriteContextIntegration:
         """
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
+        # A REAL DIRECTORY: a nonexistent declaration is now correctly UNKNOWN
+        # and step 5b is skipped, so update_session_info would never be called
+        # and this arm would measure the skip instead of the session-id path.
+        project_dir = tmp_path / "project"
+        project_dir.mkdir(exist_ok=True)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         real_session_id = "aabb1122-0000-0000-0000-000000000000"
@@ -5684,7 +5689,14 @@ class TestM2TeammateAdvisoryGating:
 
         monkeypatch.setattr(pact_context, "_context_path", None)
         monkeypatch.setattr(pact_context, "_cache", None)
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
+        # A REAL DIRECTORY: this class's subject is the m2 frame gate. A
+        # nonexistent declaration is now correctly UNKNOWN and skips the three
+        # advisory steps the lead arm asserts on (and would make the teammate
+        # arm's absence assertions pass for the wrong reason). The old path
+        # classified as a known root only because a missing one used to.
+        project_dir = tmp_path / "project"
+        project_dir.mkdir(exist_ok=True)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         stdin_data = json.dumps({
@@ -6021,7 +6033,13 @@ class TestMainExceptionSafetyNet:
         team-lead can reuse it instead of creating a new one."""
         from session_init import main
 
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/example/Sites/test-project")
+        # A REAL DIRECTORY: a nonexistent declaration is now correctly UNKNOWN
+        # and step 5b is skipped, so the late failure this arm injects would
+        # never fire. The old path was a known root only because a missing one
+        # used to be.
+        project_dir = tmp_path / "project"
+        project_dir.mkdir(exist_ok=True)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         # #877: lead frame so the is_lead-gated update_session_info runs and the

@@ -578,12 +578,19 @@ def resolve_claude_md():
     # #1653/D3: the rule holds on the NO-DECLARED-DIR route too -- the cwd is
     # the anchor the resolver falls back to, so an unknown root there would
     # archive the worktree copy just the same.
-    from shared.project_scope import project_memory_root_or_none
+    from shared.project_scope import (
+        anchor_directory_is_missing,
+        cwd_checkout_memory_root,
+        project_memory_root_or_none,
+    )
 
     env_dir = os.environ.get("CLAUDE_PROJECT_DIR")
     anchor = Path(env_dir) if env_dir else Path.cwd()
     memory_root = project_memory_root_or_none(anchor)
-    if memory_root is None:
+    if memory_root is None and not anchor_directory_is_missing(anchor):
+        # AN EXISTING BASE THAT CANNOT BE IDENTIFIED STILL REFUSES: git did
+        # not run, or the base is a forged gitfile / unverifiable worktree.
+        # Probing on could archive another repository's document.
         raise _Unevaluable(
             "project memory root unknown: git could not answer, so the "
             "project CLAUDE.md cannot be identified; nothing was archived"
@@ -604,9 +611,30 @@ def resolve_claude_md():
     # memory-root check right after `base` is what keeps the shadow copy out;
     # the sync sites never reach this shape because their resolver retargets
     # every base through `project_memory_root` before probing.
-    path, source = resolve_project_claude_md_path(memory_root)
-    if source == "new_default":
-        path = get_project_claude_md_path()
+    if memory_root is None:
+        # A MISSING DECLARATION: nothing exists to plant or archive at the
+        # vanished path. RETARGET FIRST, through the CWD's checkout memory
+        # root -- the same retargeting rung the sync sites use -- so a cwd
+        # inside a SIBLING WORKTREE probes MAIN rather than that sibling's
+        # own copy. A raw resolver here measured exactly that wrong answer:
+        # it returned `<main>/.worktrees/sibling/.claude/CLAUDE.md`.
+        #
+        # THE BASE-IDENTITY CHECK BELOW STILL RUNS ON THE RESULT, and this
+        # fall-through keeps it load-bearing: when MAIN holds no file, the raw
+        # resolver is tried and can still reach the cwd's own worktree copy,
+        # which the check then refuses with the same message as always. Do not
+        # move the retarget past the check or replace the check with it.
+        retarget = cwd_checkout_memory_root()
+        if retarget is not None:
+            path, source = resolve_project_claude_md_path(retarget)
+            if source == "new_default":
+                path = get_project_claude_md_path()
+        else:
+            path = get_project_claude_md_path()
+    else:
+        path, source = resolve_project_claude_md_path(memory_root)
+        if source == "new_default":
+            path = get_project_claude_md_path()
     if path is None:
         raise _Unevaluable("CLAUDE.md not found")
     base = _lexical_base_of(path)

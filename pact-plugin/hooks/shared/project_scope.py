@@ -174,7 +174,21 @@ def _raw_rev_parse(directory: Path, flag: str) -> tuple[Optional[Path], bool]:
     (None, True) from "git could not run" (None, False). The session-start
     writers skip on the latter rather than fall back to planting a CLAUDE.md
     in a worktree during a git failure.
+
+    A MISSING DIRECTORY IS "GIT COULD NOT RUN", NOT A GIT ANSWER. `git -C`
+    refuses to change into a directory that is not there, so it exits 128
+    BEFORE it looks for a repository -- the same status, and no better
+    information, than the 128 it gives for an existing non-git directory.
+    Reading that status as "git answered, no path" classified a deleted
+    project dir as a KNOWN root, and the session-start writers then created
+    the directory and planted a CLAUDE.md inside it. The two shapes differ
+    only in stderr text, which is not a contract, so the check is the
+    filesystem fact instead. `is_dir()` swallows OSError, so a directory that
+    cannot be stat'ed also reads as could-not-run, which is the safe
+    direction: the writers skip.
     """
+    if not Path(directory).is_dir():
+        return None, False
     try:
         result = run_git(
             ["-C", str(directory), "rev-parse", flag],
@@ -335,16 +349,60 @@ def project_memory_root_or_none(
 
     A NON-GIT directory is a KNOWN answer and returns the directory itself.
     None is returned when git could not run (timeout, no git, an unreadable
-    worktree listing) AND when a linked worktree's candidate main root could
-    not be verified and the repository is not bare -- a `--separate-git-dir`
-    worktree (whose git dir lives elsewhere, so common-dir's parent is not a
-    checkout) or a forged gitfile (which names a repository the directory is
-    not part of). A BARE repository's worktree stays a KNOWN root: it is a
-    genuine checkout. Session-start writers pass this so an unknown target is
-    skipped rather than resolved to the worktree by the fail-safe.
+    worktree listing, or a directory that does not exist) AND when a linked
+    worktree's candidate main root could not be verified and the repository is
+    not bare -- a `--separate-git-dir` worktree (whose git dir lives elsewhere,
+    so common-dir's parent is not a checkout) or a forged gitfile (which names
+    a repository the directory is not part of). A BARE repository's worktree
+    stays a KNOWN root: it is a genuine checkout. Session-start writers pass
+    this so an unknown target is skipped rather than resolved to the worktree
+    by the fail-safe.
     """
     root, answered = _project_memory_root(project_dir)
     return root if answered else None
+
+
+def anchor_directory_is_missing(project_dir: str | os.PathLike[str]) -> bool:
+    """True when the declared project directory does not exist.
+
+    THE READER-SIDE HALF OF THE UNKNOWN ANSWER, and not a classifier change.
+    `project_memory_root_or_none` returns None for two different facts:
+    a base that EXISTS but cannot be identified (git did not run, or a forged
+    gitfile / unverifiable worktree), and a base that is not a directory at
+    all. A WRITER must skip on both -- there is nowhere safe to plant. A READER
+    that resolves and then judges scope may continue on the second: a vanished
+    declaration holds no copy, and `stays_in_declared_project` already maps it
+    through its nearest existing ancestor. An EXISTING but unanswerable base
+    keeps the refusal, because that is the forged-gitfile and git-failure
+    class.
+
+    This is exactly `_raw_rev_parse`'s precheck, exposed: a missing directory
+    is what makes that function answer could-not-run. Anything unexpected
+    (None, a non-path) answers False, so a caller keeps the refusal.
+    """
+    try:
+        return not Path(project_dir).is_dir()
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def cwd_checkout_memory_root() -> Optional[Path]:
+    """The project-memory root of the process's current checkout, or None.
+
+    THE RETARGETING RUNG, NOT THE RAW RESOLVER. `--show-toplevel` from the cwd
+    names the checkout root (a main checkout or a linked worktree), and
+    `project_memory_root_or_none` then maps a linked worktree to the MAIN
+    checkout. A raw env/cwd resolver run from inside a sibling worktree
+    returns that sibling's own CLAUDE.md; this answers the root project memory
+    belongs to, which is what a reader that has only the cwd left should probe.
+
+    None when git cannot answer or the checkout root cannot be identified, so
+    a caller keeps its own refusal rather than guessing.
+    """
+    toplevel, ran = _raw_rev_parse(Path.cwd(), "--show-toplevel")
+    if not ran or toplevel is None:
+        return None
+    return project_memory_root_or_none(toplevel)
 
 
 def _nearest_existing_directory(path: Path) -> Optional[Path]:

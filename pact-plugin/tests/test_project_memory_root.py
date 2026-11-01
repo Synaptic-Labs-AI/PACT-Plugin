@@ -303,6 +303,24 @@ def test_a14_a_git_failure_is_reported_unknown(repo, monkeypatch):
     assert project_memory_root(worktree) == worktree
 
 
+def test_f1_f_a_missing_directory_is_unknown_while_a_non_git_one_is_known(tmp_path):
+    """A deleted project dir and an existing non-git dir both make `git -C`
+    exit 128, differing ONLY in stderr. They are different answers: the
+    missing one is could-not-run (UNKNOWN), the existing one is a known root.
+    Before the fix both were KNOWN, so SessionStart created the missing
+    directory and planted `.claude/CLAUDE.md` inside it."""
+    missing = tmp_path / "deleted-project"
+    present = tmp_path / "present"
+    present.mkdir()
+
+    assert not missing.exists()
+    assert project_memory_root_or_none(missing) is None
+    assert project_memory_root_or_none(present) == present, (
+        "the control shape -- an existing non-git directory -- stopped being "
+        "a known root"
+    )
+
+
 def test_a14b_a_non_git_directory_is_a_known_answer(tmp_path):
     """Item 4: "git answered: not a repository" is NOT "git could not answer";
     a plain project directory must keep its writers."""
@@ -383,6 +401,35 @@ def test_f1_e_git_output_preserves_an_undecodable_path(repo):
     out = project_scope._git_output(worktree, "rev-parse", "--show-toplevel")
     assert out is not None
     assert os.fsencode(out) == os.fsencode(str(worktree))
+
+
+def test_d2_a_relative_admin_gitdir_record_resolves(repo, monkeypatch):
+    """The `worktree.useRelativePaths` shape: the admin `gitdir` file holds a
+    path RELATIVE to the main checkout, not an absolute one. The fallback
+    resolves it against the common dir's parent. This is COVERAGE, not a
+    discriminating arm -- the branch is pre-existing and this test passes on
+    the same tree; no test wrote such a record before it."""
+    worktree = _worktree(repo, "d2-relative")
+    admin = repo / ".git" / "worktrees" / "d2-relative"
+    assert admin.is_dir(), "the admin record for the new worktree is missing"
+    # Exactly the record git writes with worktree.useRelativePaths: the
+    # worktree's .git file, relative to the main worktree root.
+    (admin / "gitdir").write_text(".worktrees/d2-relative/.git\n", encoding="utf-8")
+
+    real_run_git = project_scope.run_git
+
+    def failing_list(args, **kwargs):
+        if "worktree" in args and "list" in args:
+            return subprocess.CompletedProcess(
+                args, 1, stdout=b"", stderr=b"forced failure"
+            )
+        return real_run_git(args, **kwargs)
+
+    monkeypatch.setattr(project_scope, "run_git", failing_list)
+
+    assert project_memory_root(worktree) == repo.resolve(), (
+        "the relative admin-gitdir record was not resolved against the main root"
+    )
 
 
 def test_the_admin_gitdir_read_preserves_a_carriage_return_path(repo, monkeypatch):

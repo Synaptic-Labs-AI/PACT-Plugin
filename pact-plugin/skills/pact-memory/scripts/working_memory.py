@@ -1197,6 +1197,7 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
         # Function-level: the shared package is importable only after
         # pact_session's sys.path bootstrap has run at module import.
         from shared.project_scope import (
+            anchor_directory_is_missing,
             git_env_without_location,
             project_memory_root_or_none,
         )
@@ -1217,8 +1218,17 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
         else:
             record_dir = get_project_dir_from_session_record()
             anchor = Path(record_dir) if record_dir else Path.cwd()
-        if project_memory_root_or_none(anchor) is None:
+        if (project_memory_root_or_none(anchor) is None
+                and not anchor_directory_is_missing(anchor)):
+            # AN EXISTING BASE THAT CANNOT BE IDENTIFIED STILL STOPS HERE.
+            # That is the forged-gitfile and git-failure class; probing on
+            # could reach a repository this session does not belong to.
             return None, None
+        # A MISSING BASE FALLS THROUGH, and it is safe because every rung
+        # below RETARGETS a worktree root to the project-memory root before
+        # probing: a cwd in a sibling worktree yields MAIN's document, never
+        # the sibling's own copy. The scope guard still judges the result, so
+        # a resolution into another project is refused.
 
         project_dir = declared_project_dir
         if project_dir:
@@ -2132,12 +2142,13 @@ class SyncResult:
     # From `sync_to_claude_md` it reaches `sync_status` on the structured
     # channel with no handler change, because `PACTMemory.save` assigns the
     # reason to `last_sync_status` and `cmd_save` puts that field in the
-    # success envelope. From `sync_retrieved_to_claude_md` IT REACHES NOBODY:
-    # its one caller, `PACTMemory.search`, discards the returned object, so
-    # the reason is produced and dropped. THAT IS A PROPERTY OF THE CALLER
-    # AND NOT OF THIS ENUM, so it holds for each reason here rather than for
-    # this one alone. Do not read the first sentence as covering the two
-    # writers together.
+    # success envelope. `sync_retrieved_to_claude_md` is reached only from
+    # `PACTMemory.search`, which now assigns the reason to `last_sync_status`
+    # too; before that it discarded the object, so every reason here was
+    # produced and dropped. THAT WAS A PROPERTY OF THE CALLER AND NOT OF THIS
+    # ENUM, so it held for each reason here rather than for this one alone.
+    # The search CLI passes `sync_to_claude=False`, so that channel is for a
+    # caller that enables the sync, not for the shipped CLI path.
     NO_WINDOW = "no_window"      # no write window resolved; see _resolve_write_scope
     # The window resolved, but the parser cannot say with certainty where the
     # section goes: its only heading is inside an HTML comment. The reason,

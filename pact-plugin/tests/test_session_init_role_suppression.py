@@ -65,7 +65,13 @@ def _run_main_with(stdin_data: str, monkeypatch, tmp_path):
     """
     from session_init import main
 
-    monkeypatch.setenv("CLAUDE_PROJECT_DIR", _PROJECT_DIR)
+    # A REAL DIRECTORY: these arms assert which writes RUN, and a nonexistent
+    # declaration is now correctly UNKNOWN, which skips the steps they count.
+    # `_PROJECT_DIR` classified as a known root only because a missing
+    # directory used to be one.
+    project_dir = tmp_path / "project"
+    project_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project_dir))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
     with patch("session_init.setup_plugin_symlinks", return_value=None), \

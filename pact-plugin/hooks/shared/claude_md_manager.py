@@ -1837,6 +1837,27 @@ def match_project_claude_md(file_path_str: str) -> Path | None:
     return canonical
 
 
+def session_memory_root() -> Path | None:
+    """The directory that owns this session's project memory, or None when it
+    is unknown.
+
+    ONE ANCHOR FOR BOTH: `gate_target` resolves through it, and the pin-cap
+    gate asks it why a target was NOT gated, so an unknown root is reported
+    instead of silently allowing the edit with the cap off. An absent
+    `CLAUDE_PROJECT_DIR` must not skip the guard; `or os.getcwd()` is the
+    anchor session_init records when the platform declares nothing.
+
+    Fail-safe is None (refuse to identify a document), and an import failure
+    is the same answer.
+    """
+    try:
+        from .project_scope import project_memory_root_or_none
+    except ImportError:
+        return None
+    declared = os.environ.get("CLAUDE_PROJECT_DIR")
+    return project_memory_root_or_none(declared or os.getcwd())
+
+
 class GateTarget(NamedTuple):
     """The project CLAUDE.md an Edit or Write lands on (`target`), the file the
     resolver returns before the change (`before`, None when none resolves),
@@ -1879,7 +1900,6 @@ def gate_target(file_path: str) -> GateTarget | None:
     if not target.is_absolute() or target.name.casefold() != "claude.md":
         return None
     try:
-        from shared.project_scope import project_memory_root_or_none
         from staleness import _resolve_project_claude_md_with_base, same_path
     except ImportError:
         return None
@@ -1901,13 +1921,13 @@ def gate_target(file_path: str) -> GateTarget | None:
         # inode-identity guard would reintroduce the worktree copy as a
         # managed artifact in weaker form -- the assumption the one rule
         # exists to remove. Do not build that guard.
-        declared = os.environ.get("CLAUDE_PROJECT_DIR")
         # DERIVED UNCONDITIONALLY (#1653, security lane): an absent variable
-        # must not skip the guard. `or os.getcwd()` is what session_init uses,
-        # and a hook frame's cwd is the session's project dir in every observed
-        # shape, so a cwd that is not the project narrows the gate rather than
-        # binding a wrong document. An UNKNOWN root identifies nothing.
-        memory_root = project_memory_root_or_none(declared or os.getcwd())
+        # must not skip the guard. `session_memory_root` anchors on the cwd
+        # exactly as session_init does, and a hook frame's cwd is the session's
+        # project dir in every observed shape, so a cwd that is not the project
+        # narrows the gate rather than binding a wrong document. An UNKNOWN
+        # root identifies nothing.
+        memory_root = session_memory_root()
         if memory_root is None:
             return None
         resolved, base = _resolve_project_claude_md_with_base(

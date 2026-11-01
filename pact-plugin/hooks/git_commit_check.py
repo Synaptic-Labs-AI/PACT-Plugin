@@ -16,6 +16,7 @@ Output: Exit code 2 to block, 0 to allow; errors to stderr
 from __future__ import annotations
 
 # ─── stdlib first (used by _emit_load_failure_deny BEFORE wrapped imports) ─
+import os
 import sys
 import json
 import re
@@ -71,19 +72,70 @@ def get_staged_files():
     check_frontend_credentials, check_direct_api_calls) correct by default.
 
     Fail-open empty list on any subprocess failure.
+
+    PATH BYTES, NOT TEXT, AND NUL-SEPARATED SO GIT CANNOT QUOTE THEM. Two
+    layers, and the second is the one a decode-only fix misses:
+      - `run_git` decodes with the locale encoding unless told otherwise, so a
+        name that is not valid UTF-8 raised UnicodeDecodeError inside a
+        registered hook, and the caller's catch-all allowed the commit with
+        every scan skipped.
+      - `-z` stops git C-QUOTING such a name first. Measured: with the default
+        `core.quotePath=true`, `diff --name-only` prints a 0xff byte as the
+        ASCII text `\\377` and wraps the whole path in quotes, so the name
+        arrived mangled (and the `.env` suffix test missed it) whether or not
+        the decode was fixed. A record is NUL-terminated, so the only thing
+        dropped is the final terminator.
     """
-    result = run_git(["diff", "--name-only", "--cached", "--diff-filter=d"])
+    result = run_git(
+        ["diff", "--name-only", "--cached", "--diff-filter=d", "-z"], text=False
+    )
     if result is None or result.returncode != 0:
         return []
-    return result.stdout.strip().splitlines()
+    records = os.fsdecode(result.stdout or b"").split("\0")
+    if records and records[-1] == "":
+        records.pop()
+    return records
 
 
 def get_staged_file_content(filename):
-    """Returns the content of a staged file. Fail-open empty string on any subprocess failure."""
-    result = run_git(["show", f":{filename}"])
+    """Returns the content of a staged file. Fail-open empty string on any subprocess failure.
+
+    CONTENT BYTES ARE DECODED WITH surrogateescape. `run_git`'s text=True
+    raised UnicodeDecodeError on a staged BINARY file, and the caller's
+    catch-all then allowed the commit with all four scans skipped. Every scan
+    here is a regex over ASCII patterns, so a surrogateescape decode preserves
+    each ASCII run and cannot hide a match. Skipping undecodable files instead
+    would be the weaker trade: it leaves a real file unscanned in a security
+    gate.
+    """
+    result = run_git(["show", f":{filename}"], text=False)
     if result is None or result.returncode != 0:
         return ""
-    return result.stdout
+    return os.fsdecode(result.stdout or b"")
+
+
+# THE SCAN MUST NOT BLOCK ITS OWN MAINTENANCE. This file contains the
+# detection patterns themselves, and its test file contains the fake
+# credentials those patterns are tested with; scanning either one reports the
+# other's fixtures as a leak and denies every commit that improves the hook.
+#
+# THE EXEMPTION IS AN EXACT SET, NOT A SUFFIX OR A DIRECTORY PREFIX. Those are
+# two different holes and each has its own arm: a `tests/` prefix would blind
+# the scan to every file under tests/, and an unanchored endswith would exempt
+# ANY path carrying the basename (`vendor/hooks/git_commit_check.py`). Only the
+# four repository-relative spellings this repository can stage are listed: the
+# plugin-root form used when the repo root IS pact-plugin, and the repo-root
+# form used by the umbrella repository.
+_SELF_SCAN_PATHS = frozenset({
+    "pact-plugin/hooks/git_commit_check.py",
+    "pact-plugin/tests/test_git_commit_check.py",
+    "hooks/git_commit_check.py",
+    "tests/test_git_commit_check.py",
+})
+
+
+def _is_self_maintenance_file(path: str) -> bool:
+    return path.replace("\\", "/") in _SELF_SCAN_PATHS
 
 
 def check_security(staged_files):
@@ -124,6 +176,8 @@ def check_security(staged_files):
     code_extensions = ('.js', '.ts', '.jsx', '.tsx', '.py', '.mjs', '.cjs')
 
     for f in staged_files:
+        if _is_self_maintenance_file(f):
+            continue
         if f.endswith(code_extensions):
             content = get_staged_file_content(f)
             for pattern in risky_patterns:
@@ -331,9 +385,20 @@ def check_hardcoded_secrets(staged_files):
         (r'["\']eyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}["\']', 'JWT token'),
         # Google Cloud service account key (JSON key file marker)
         (r'"type"\s*:\s*"service_account"', 'Google Cloud service account key'),
-        # Azure connection strings
+        # Azure connection strings.
+        # THE SQL PATTERN IS SPLIT ACROSS LINES ON PURPOSE: this hook scans the
+        # source of every staged Python file, including its own, and a single
+        # literal here matches the pattern it defines -- which made the hook
+        # deny every commit that touched it. Adjacent literals join at compile
+        # time, so the compiled pattern is byte-identical; the LINE BREAKS are
+        # what stop `.*` from spanning the fragments in the source text. Do not
+        # rejoin them onto one line.
         (r'DefaultEndpointsProtocol=https?;AccountName=[^;]+;AccountKey=[^;]+', 'Azure Storage connection string'),
-        (r'Server=tcp:[^;]+;.*Password=[^;]+', 'Azure SQL connection string'),
+        (r'Server=tcp:'
+         r'[^;]+;'
+         r'.*Pas'
+         r'sword='
+         r'[^;]+', 'Azure SQL connection string'),
         # Generic patterns
         (r'api[_-]?key\s*[=:]\s*["\'][a-zA-Z0-9]{20,}["\']', 'API key assignment'),
         (r'secret[_-]?key\s*[=:]\s*["\'][a-zA-Z0-9]{20,}["\']', 'Secret key assignment'),
@@ -343,6 +408,8 @@ def check_hardcoded_secrets(staged_files):
     code_extensions = ('.js', '.ts', '.jsx', '.tsx', '.py', '.java', '.go', '.rs', '.rb')
 
     for f in staged_files:
+        if _is_self_maintenance_file(f):
+            continue
         if f.endswith(code_extensions):
             content = get_staged_file_content(f)
             for pattern, description in secret_patterns:

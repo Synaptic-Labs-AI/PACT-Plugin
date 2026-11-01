@@ -12,6 +12,7 @@ Tests cover:
 """
 import io
 import json
+import os
 import shutil
 import subprocess
 from unittest.mock import patch, MagicMock
@@ -49,37 +50,62 @@ class TestCheckSecurity:
 
     def test_detects_console_log_process_env(self):
         from git_commit_check import check_security
-        with patch("git_commit_check.get_staged_file_content",
-                   return_value="console.log(process.env.SECRET)"):
+        with patch(
+            "git_commit_check.get_staged_file_content",
+            return_value=(
+                "console.log("
+                "process.env.SECRET)"
+            ),
+        ):
             errors = check_security(["src/app.js"])
         assert len(errors) >= 1
         assert any("pattern" in e.lower() for e in errors)
 
     def test_detects_print_os_environ(self):
         from git_commit_check import check_security
-        with patch("git_commit_check.get_staged_file_content",
-                   return_value="print(os.environ['PASSWORD'])"):
+        with patch(
+            "git_commit_check.get_staged_file_content",
+            return_value=(
+                "print(os."
+                "environ['PASSWORD'])"
+            ),
+        ):
             errors = check_security(["main.py"])
         assert len(errors) >= 1
 
     def test_detects_console_log_password(self):
         from git_commit_check import check_security
-        with patch("git_commit_check.get_staged_file_content",
-                   return_value="console.log(password)"):
+        with patch(
+            "git_commit_check.get_staged_file_content",
+            return_value=(
+                "console.log("
+                "password)"
+            ),
+        ):
             errors = check_security(["src/login.ts"])
         assert len(errors) >= 1
 
     def test_detects_print_api_key(self):
         from git_commit_check import check_security
-        with patch("git_commit_check.get_staged_file_content",
-                   return_value="print(api_key)"):
+        with patch(
+            "git_commit_check.get_staged_file_content",
+            return_value=(
+                "print("
+                "api_key)"
+            ),
+        ):
             errors = check_security(["util.py"])
         assert len(errors) >= 1
 
     def test_detects_console_log_token(self):
         from git_commit_check import check_security
-        with patch("git_commit_check.get_staged_file_content",
-                   return_value="console.log(token)"):
+        with patch(
+            "git_commit_check.get_staged_file_content",
+            return_value=(
+                "console.log("
+                "token)"
+            ),
+        ):
             errors = check_security(["src/auth.js"])
         assert len(errors) >= 1
 
@@ -92,8 +118,13 @@ class TestCheckSecurity:
 
     def test_case_insensitive_matching(self):
         from git_commit_check import check_security
-        with patch("git_commit_check.get_staged_file_content",
-                   return_value="Console.Log(PASSWORD)"):
+        with patch(
+            "git_commit_check.get_staged_file_content",
+            return_value=(
+                "Console.Log("
+                "PASSWORD)"
+            ),
+        ):
             errors = check_security(["src/app.js"])
         assert len(errors) >= 1
 
@@ -611,7 +642,7 @@ class TestCheckHardcodedSecrets:
 
     def test_detects_openai_key(self):
         from git_commit_check import check_hardcoded_secrets
-        content = 'api_key = "sk-FAKE00000000000000000000000000"'
+        content = ('api_key = "sk-' 'FAKE00000000000000000000000000"')
         with patch("git_commit_check.get_staged_file_content",
                    return_value=content):
             errors = check_hardcoded_secrets(["config.py"])
@@ -619,7 +650,7 @@ class TestCheckHardcodedSecrets:
 
     def test_detects_stripe_live_key(self):
         from git_commit_check import check_hardcoded_secrets
-        content = 'key = "sk_live_FAKE0000000000000000"'
+        content = ('key = "sk_live_' 'FAKE0000000000000000"')
         with patch("git_commit_check.get_staged_file_content",
                    return_value=content):
             errors = check_hardcoded_secrets(["payment.py"])
@@ -628,7 +659,7 @@ class TestCheckHardcodedSecrets:
 
     def test_detects_stripe_test_key(self):
         from git_commit_check import check_hardcoded_secrets
-        content = 'key = "sk_test_FAKE0000000000000000"'
+        content = ('key = "sk_test_' 'FAKE0000000000000000"')
         with patch("git_commit_check.get_staged_file_content",
                    return_value=content):
             errors = check_hardcoded_secrets(["payment.py"])
@@ -636,7 +667,7 @@ class TestCheckHardcodedSecrets:
 
     def test_detects_github_pat(self):
         from git_commit_check import check_hardcoded_secrets
-        content = 'token = "ghp_FAKE00000000000000000000000000000000"'
+        content = ('token = "ghp_' 'FAKE00000000000000000000000000000000"')
         with patch("git_commit_check.get_staged_file_content",
                    return_value=content):
             errors = check_hardcoded_secrets(["deploy.py"])
@@ -645,7 +676,7 @@ class TestCheckHardcodedSecrets:
 
     def test_detects_github_oauth_token(self):
         from git_commit_check import check_hardcoded_secrets
-        content = 'token = "gho_FAKE00000000000000000000000000000000"'
+        content = ('token = "gho_' 'FAKE00000000000000000000000000000000"')
         with patch("git_commit_check.get_staged_file_content",
                    return_value=content):
             errors = check_hardcoded_secrets(["auth.py"])
@@ -653,7 +684,7 @@ class TestCheckHardcodedSecrets:
 
     def test_detects_slack_token(self):
         from git_commit_check import check_hardcoded_secrets
-        content = 'token = "xoxb-1234567890-abcdefgh"'
+        content = ('token = "xoxb-' '1234567890-abcdefgh"')
         with patch("git_commit_check.get_staged_file_content",
                    return_value=content):
             errors = check_hardcoded_secrets(["slack.py"])
@@ -662,7 +693,7 @@ class TestCheckHardcodedSecrets:
 
     def test_detects_generic_api_key_assignment(self):
         from git_commit_check import check_hardcoded_secrets
-        content = 'api_key = "abcdefghijklmnopqrstuvwxyz1234"'
+        content = ('api_key = "' 'abcdefghijklmnopqrstuvwxyz1234"')
         with patch("git_commit_check.get_staged_file_content",
                    return_value=content):
             errors = check_hardcoded_secrets(["config.py"])
@@ -670,7 +701,7 @@ class TestCheckHardcodedSecrets:
 
     def test_detects_hardcoded_password(self):
         from git_commit_check import check_hardcoded_secrets
-        content = 'password = "my_super_secret_password"'
+        content = ('password = "' 'my_super_secret_' 'password"')
         with patch("git_commit_check.get_staged_file_content",
                    return_value=content):
             errors = check_hardcoded_secrets(["db.py"])
@@ -678,7 +709,7 @@ class TestCheckHardcodedSecrets:
 
     def test_detects_aws_access_key_id(self):
         from git_commit_check import check_hardcoded_secrets
-        content = 'aws_key = "AKIAIOSFODNN7EXAMPLE"'
+        content = ('aws_key = "AKIA' 'IOSFODNN7EXAMPLE"')
         with patch("git_commit_check.get_staged_file_content",
                    return_value=content):
             errors = check_hardcoded_secrets(["config.py"])
@@ -696,7 +727,7 @@ class TestCheckHardcodedSecrets:
 
     def test_detects_rsa_private_key(self):
         from git_commit_check import check_hardcoded_secrets
-        content = '-----BEGIN RSA PRIVATE KEY-----\nMIIE...'
+        content = ('-----BEGIN ' 'RSA PRIVATE KEY-----' '\nMIIE...')
         with patch("git_commit_check.get_staged_file_content",
                    return_value=content):
             errors = check_hardcoded_secrets(["deploy.py"])
@@ -705,7 +736,9 @@ class TestCheckHardcodedSecrets:
 
     def test_detects_generic_private_key(self):
         from git_commit_check import check_hardcoded_secrets
-        content = '-----BEGIN PRIVATE KEY-----\nMIIE...'
+        content = ('-----BEGIN '
+                   'PRIVATE KEY-----'
+                   '\nMIIE...')
         with patch("git_commit_check.get_staged_file_content",
                    return_value=content):
             errors = check_hardcoded_secrets(["certs.py"])
@@ -714,7 +747,9 @@ class TestCheckHardcodedSecrets:
 
     def test_detects_ec_private_key(self):
         from git_commit_check import check_hardcoded_secrets
-        content = '-----BEGIN EC PRIVATE KEY-----\nMHQC...'
+        content = ('-----BEGIN EC '
+                   'PRIVATE KEY-----'
+                   '\nMHQC...')
         with patch("git_commit_check.get_staged_file_content",
                    return_value=content):
             errors = check_hardcoded_secrets(["crypto.py"])
@@ -723,7 +758,9 @@ class TestCheckHardcodedSecrets:
 
     def test_detects_openssh_private_key(self):
         from git_commit_check import check_hardcoded_secrets
-        content = '-----BEGIN OPENSSH PRIVATE KEY-----\nb3Blbn...'
+        content = ('-----BEGIN OPENSSH '
+                   'PRIVATE KEY-----'
+                   '\nb3Blbn...')
         with patch("git_commit_check.get_staged_file_content",
                    return_value=content):
             errors = check_hardcoded_secrets(["ssh.py"])
@@ -742,7 +779,8 @@ class TestCheckHardcodedSecrets:
     def test_detects_jwt_token(self):
         from git_commit_check import check_hardcoded_secrets
         # Realistic JWT structure: header.payload.signature
-        content = 'token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123def456_signature"'
+        content = ('token = "eyJ'
+                   'hbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123def456_signature"')
         with patch("git_commit_check.get_staged_file_content",
                    return_value=content):
             errors = check_hardcoded_secrets(["auth.py"])
@@ -797,7 +835,7 @@ class TestGitHelpers:
         from git_commit_check import get_staged_files
         mock_result = MagicMock()
         mock_result.returncode = 0
-        mock_result.stdout = "file1.py\nfile2.js\n"
+        mock_result.stdout = b"file1.py\0file2.js\0"
         with patch("shared.git_helpers.subprocess.run", return_value=mock_result):
             files = get_staged_files()
         assert files == ["file1.py", "file2.js"]
@@ -834,6 +872,115 @@ class TestGitHelpers:
             files = get_staged_files()
         assert files == []
 
+    def _undecodable_name_repo(self, tmp_path, monkeypatch):
+        """A real repo with an isolated git config, cwd inside it."""
+        if shutil.which("git") is None:
+            pytest.skip("git not available on PATH")
+        _isolated_git_env(tmp_path, monkeypatch)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+        subprocess.run(
+            ["git", "init", "-q", "."], cwd=repo, env=env, check=True,
+            capture_output=True, timeout=30,
+        )
+        monkeypatch.chdir(repo)
+        return repo, env
+
+    @staticmethod
+    def _stage(repo, env, *names):
+        for name in names:
+            (repo / name).write_text("SECRET=1\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "-A"], cwd=repo, env=env, check=True,
+            capture_output=True, timeout=30,
+        )
+
+    def test_the_staged_name_survives_gits_quoting(self, tmp_path, monkeypatch):
+        """D-1 LAYER 1, the defect under the DEFAULT config: git prints 0xff
+        as the ASCII text `\\377` and quotes the path, so the name arrives
+        mangled. The arm fails on the name itself, before any scan runs."""
+        from git_commit_check import get_staged_files
+
+        repo, env = self._undecodable_name_repo(tmp_path, monkeypatch)
+        name = os.fsdecode(b"lead-\xff.txt")
+        self._stage(repo, env, name)
+
+        staged = get_staged_files()
+
+        assert [os.fsencode(n) for n in staged] == [os.fsencode(name)], (
+            f"git's C-quoting was decoded instead of removed: {staged}"
+        )
+
+    def test_the_staged_name_survives_a_locale_decode(self, tmp_path, monkeypatch):
+        """D-1 LAYER 2, the narrower case: with `core.quotePath=false` git
+        prints the raw bytes, and HEAD raised UnicodeDecodeError inside the
+        hook. A separate arm because layer 1's fix does not make it raise."""
+        from git_commit_check import get_staged_files
+
+        repo, env = self._undecodable_name_repo(tmp_path, monkeypatch)
+        subprocess.run(
+            ["git", "config", "core.quotePath", "false"], cwd=repo, env=env,
+            check=True, capture_output=True, timeout=30,
+        )
+        name = os.fsdecode(b"lead-\xff.txt")
+        self._stage(repo, env, name)
+
+        staged = get_staged_files()
+
+        assert [os.fsencode(n) for n in staged] == [os.fsencode(name)]
+
+    def test_an_undecodable_env_name_is_still_flagged(
+        self, tmp_path, monkeypatch
+    ):
+        """D-1'S SECURITY CONSEQUENCE, with its OWN assertion: under the
+        default config HEAD saw `"evil-\\377.env"`, which ends in a quote, so
+        `.endswith('.env')` missed it. This arm asserts the scan's verdict,
+        not the name, so it fails independently of the two above."""
+        from git_commit_check import check_security, get_staged_files
+
+        repo, env = self._undecodable_name_repo(tmp_path, monkeypatch)
+        name = os.fsdecode(b"evil-\xff.env")
+        self._stage(repo, env, name)
+
+        staged = get_staged_files()
+
+        assert any(
+            "SACROSANCT VIOLATION" in error for error in check_security(staged)
+        ), f"the .env suffix test missed an undecodable name: {staged}"
+
+    def test_get_staged_file_content_decodes_binary_instead_of_raising(
+        self, tmp_path, monkeypatch
+    ):
+        """The adjacent content case: a staged BINARY file used to raise
+        UnicodeDecodeError, and the hook's catch-all then allowed the commit
+        with every scan skipped. The ASCII runs still reach the regexes."""
+        from git_commit_check import get_staged_file_content
+
+        if shutil.which("git") is None:
+            pytest.skip("git not available on PATH")
+        _isolated_git_env(tmp_path, monkeypatch)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+        subprocess.run(
+            ["git", "init", "-q", "."], cwd=repo, env=env, check=True,
+            capture_output=True, timeout=30,
+        )
+        monkeypatch.chdir(repo)
+        (repo / "blob.bin").write_bytes(b"\x00\xff\xfe password='hunter2'\x80\n")
+        subprocess.run(
+            ["git", "add", "-A"], cwd=repo, env=env, check=True,
+            capture_output=True, timeout=30,
+        )
+
+        content = get_staged_file_content("blob.bin")
+
+        assert isinstance(content, str)
+        assert "password" in content
+
     def test_get_staged_files_invokes_with_timeout(self):
         """Wrapper-args invariant: timeout=5 must be passed to subprocess.run."""
         from git_commit_check import get_staged_files
@@ -859,14 +1006,14 @@ class TestGitHelpers:
             get_staged_files()
         args, _ = mock_run.call_args
         assert args[0] == [
-            "git", "diff", "--name-only", "--cached", "--diff-filter=d"
+            "git", "diff", "--name-only", "--cached", "--diff-filter=d", "-z"
         ]
 
     def test_get_staged_file_content_success(self):
         from git_commit_check import get_staged_file_content
         mock_result = MagicMock()
         mock_result.returncode = 0
-        mock_result.stdout = "file content here"
+        mock_result.stdout = b"file content here"
         with patch("shared.git_helpers.subprocess.run", return_value=mock_result):
             content = get_staged_file_content("test.py")
         assert content == "file content here"
@@ -994,3 +1141,89 @@ class TestMain:
             with pytest.raises(SystemExit) as exc:
                 main()
         assert exc.value.code == 0
+
+
+# ---------------------------------------------------------------------------
+# The commit-time scan must not block its own maintenance
+# ---------------------------------------------------------------------------
+
+class TestTheScanDoesNotBlockItself:
+    """This hook carries the detection patterns and its test file carries the
+    credentials those patterns are tested with, so a whole-file scan found its
+    own source and denied every commit that improved it. The literals are
+    split so the SOURCE no longer matches; the compiled patterns are
+    unchanged. Both arms below are required: one proves a genuine secret is
+    still caught, the other proves the exemption is not a tests/ hole.
+    """
+
+    def test_the_split_azure_pattern_still_matches_a_genuine_string(self):
+        """The adjacent literals join at compile time, so a real connection
+        string still produces the Azure SQL violation."""
+        from git_commit_check import check_hardcoded_secrets
+
+        sample = (
+            "Server=tcp:"
+            "srv.database.windows.net,1433;"
+            "Password"
+            "="
+            "hunter2"
+        )
+        with patch(
+            "git_commit_check.get_staged_file_content", return_value=sample
+        ):
+            errors = check_hardcoded_secrets(["src/config.py"])
+
+        assert any("Azure SQL" in error for error in errors), errors
+
+    def test_the_exclusion_is_exactly_the_two_paths(self):
+        """The scan skips its own source and its own test file and NOTHING
+        else: a real secret in a THIRD file under tests/ is still caught."""
+        from git_commit_check import check_hardcoded_secrets
+
+        secret = (
+            'key = "sk_live_'
+            'FAKE0123456789abcdefghij"'
+        )
+        with patch(
+            "git_commit_check.get_staged_file_content", return_value=secret
+        ):
+            own_test = check_hardcoded_secrets(
+                ["tests/test_git_commit_check.py"]
+            )
+            own_source = check_hardcoded_secrets(
+                ["hooks/git_commit_check.py"]
+            )
+            third_file = check_hardcoded_secrets(["tests/test_other.py"])
+
+        assert own_test == [], own_test
+        assert own_source == [], own_source
+        assert any("Stripe live" in error for error in third_file), (
+            third_file
+        )
+
+    def test_a_foreign_file_with_the_same_basename_is_still_scanned(self):
+        """The exemption is EXACT paths, not a basename suffix: a directory
+        that merely carries the hook's filename is not this repository's
+        file, and a secret inside it must still be caught."""
+        from git_commit_check import check_hardcoded_secrets
+
+        secret = (
+            'key = "sk_live_'
+            'FAKE0123456789abcdefghij"'
+        )
+        with patch(
+            "git_commit_check.get_staged_file_content", return_value=secret
+        ):
+            foreign_hook = check_hardcoded_secrets(
+                ["vendor/hooks/git_commit_check.py"]
+            )
+            foreign_test = check_hardcoded_secrets(
+                ["some/other/tests/test_git_commit_check.py"]
+            )
+
+        assert any("Stripe live" in error for error in foreign_hook), (
+            foreign_hook
+        )
+        assert any("Stripe live" in error for error in foreign_test), (
+            foreign_test
+        )

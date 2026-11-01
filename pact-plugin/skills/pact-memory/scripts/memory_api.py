@@ -611,13 +611,15 @@ class PACTMemory:
 
     @property
     def last_sync_status(self) -> Optional[str]:
-        """Outcome of the most recent save() or sync() CLAUDE.md write.
+        """Outcome of the most recent save(), sync() or search() CLAUDE.md write.
 
         One of `SyncResult`'s reasons: `wrote`, `refused`, `suppressed`,
         `unresolved`, `missing`, `failed`, `no_window` or `uncertain`, plus
         `empty` on the sync() path (this project has no records; the file was
-        not touched).
-        None means neither has run yet on this instance.
+        not touched) and `root_unknown` when a retrieved-context sync could
+        not identify the project's memory root.
+        None means no such write has run yet on this instance, or the most
+        recent search did not sync (no results, or `sync_to_claude=False`).
 
         THIS LIST IS THE REACHABLE SET AND NOT THE FULL ENUM. `empty` never
         arrives from a save, and `suppressed` never arrives from a sync. A
@@ -1236,11 +1238,20 @@ class PACTMemory:
                 memory_dicts = [r.to_dict() for r in results]
                 memory_ids = [r.id for r in results]
                 # graph_enhanced_search doesn't return scores, so pass None
-                sync_retrieved_to_claude_md(
+                #
+                # KEEP THE RESULT (F5). This call used to discard it, so the
+                # reason it produced -- including ROOT_UNKNOWN, "git could not
+                # answer, so the project memory target is unknown" -- reached
+                # no reader. Clearing first mirrors save(): a status left from
+                # an earlier write must not be read as this one's.
+                self._last_sync_status = None
+                result = sync_retrieved_to_claude_md(
                     memory_dicts, query, None, memory_ids,
                     claude_md_root=claude_md_root
                 )
+                self._last_sync_status = result.reason
             except Exception as e:
+                self._last_sync_status = SyncResult.FAILED
                 logger.warning(f"Failed to sync retrieved context to CLAUDE.md: {e}")
 
         return results

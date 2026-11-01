@@ -647,14 +647,15 @@ def cmd_search(args, db_path=None):
     # PROPERTY. As of 2026-08-04 this call passes `sync_to_claude=False`
     # unconditionally, so no sync can happen on the search path. The sync
     # `search` would otherwise perform is `sync_retrieved_to_claude_md`, the
-    # SIBLING writer, AND THE GAP THERE IS IN THE CONSUMER RATHER THAN IN THE
-    # PRODUCER. That function is annotated `-> SyncResult` and all six of its
-    # returns are `SyncResult`, so the reason IS produced. Its one caller,
-    # `PACTMemory.search`, discards the returned object, so the reason feeds
-    # no channel and reaches nobody. Both facts can change. If this argument
-    # ever becomes caller-controlled, or that caller keeps what it is handed,
-    # this envelope needs the field too. Do not read its absence as
-    # "search never syncs".
+    # SIBLING writer. That function is annotated `-> SyncResult` and all six of
+    # its returns are `SyncResult`, so the reason IS produced, and
+    # `PACTMemory.search` now keeps it on `last_sync_status` instead of
+    # discarding it. THIS ENVELOPE STILL HAS NO `sync_status` FIELD because the
+    # call below cannot sync at all: with `sync_to_claude=False` the writer is
+    # never reached, so the field would report a write that was suppressed by
+    # the caller for every invocation. If that argument ever becomes
+    # caller-controlled, this envelope needs the field too. Do not read its
+    # absence as "search never syncs".
     # Conditional kwarg, for the reason `cmd_save` states two functions up: an
     # unflagged call must stay BYTE-IDENTICAL, not merely equivalent, because
     # the suite pins these calls exactly. Passing `claude_md_root=None`
