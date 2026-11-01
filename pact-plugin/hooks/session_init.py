@@ -125,10 +125,12 @@ from shared.peer_context import get_peer_context
 from shared.session_registry import resolve as _registry_resolve
 from shared.paths import get_claude_config_dir
 from shared.project_scope import (
+    ROOT_CAUSE_MISSING,
+    ROOT_CAUSE_UNVERIFIED,
     _record_worktree_identity,
-    anchor_directory_is_missing,
     project_memory_root,
     project_memory_root_or_none,
+    unknown_root_cause,
 )
 from shared import backlog_store
 
@@ -1811,17 +1813,26 @@ def main():
         write_root = memory_root if declared_project_dir else None
 
         # One user-visible line for the skip; the writers never run below.
-        # THE TEXT NAMES THE CAUSE THAT OCCURRED. A declared directory that is
-        # gone never reached git, so the git wording was false on the shape
-        # users hit most -- a removed worktree. The anchor is the declaration,
-        # else the cwd (the same one resolved above); "project", not
-        # "declared", because "declared" is false on the no-declared-dir route.
+        # THE TEXT NAMES THE CAUSE THAT OCCURRED, of three: a directory that is
+        # gone never reached git; a directory whose answer failed verification
+        # DID reach git, and saying it could not answer was false; a git that
+        # did not run or could not enumerate is the third. The anchor is the
+        # declaration, else the cwd (the same one resolved above); "project",
+        # not "declared", because "declared" is false on the no-declared-dir
+        # route. `unknown_root_cause` decides all three in one place.
         if frame_is_lead and memory_unknown:
             anchor = declared_project_dir or project_dir
-            if anchor_directory_is_missing(anchor):
+            root_cause = unknown_root_cause(anchor)
+            if root_cause == ROOT_CAUSE_MISSING:
                 skip_reason = (
                     f"the project directory {anchor} no longer exists, so the "
                     "project memory target is unknown"
+                )
+            elif root_cause == ROOT_CAUSE_UNVERIFIED:
+                skip_reason = (
+                    f"the project directory {anchor} exists but could not be "
+                    "verified as a checkout of a repository, so the project "
+                    "memory target is unknown"
                 )
             else:
                 skip_reason = (

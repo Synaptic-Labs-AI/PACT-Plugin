@@ -733,6 +733,39 @@ def test_a_removed_declaration_names_the_missing_directory_in_the_sync(
     assert str(missing) in caplog.text, caplog.text
 
 
+def test_a_forged_gitfile_names_the_verification_failure_in_the_sync(
+    repo, tmp_path, monkeypatch, caplog
+):
+    """THE THIRD CAUSE. A directory whose `.git` FILE names another
+    repository's worktree admin dir: git RAN and answered, and the answer
+    failed verification. Saying "git could not answer" there is false, and so
+    is saying the directory is gone -- it exists."""
+    import scripts.working_memory as wm
+
+    real = _worktree(repo, "forge-target-sync")
+    admin = _git("rev-parse", "--absolute-git-dir", cwd=real).strip()
+    forged = tmp_path / "forged-sync"
+    forged.mkdir()
+    (forged / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(forged))
+    monkeypatch.chdir(forged)
+    monkeypatch.setattr(wm, "get_project_dir_from_session_record", lambda: None)
+    monkeypatch.setattr(wm, "env_record_project_dir_disagreement", lambda: None)
+
+    with caplog.at_level(logging.WARNING):
+        result = wm.sync_to_claude_md({"context": "external entry"}, None, "forge1")
+
+    assert result.reason == wm.SyncResult.ROOT_UNKNOWN, result.reason
+    assert (
+        "exists but could not be verified as a checkout of a repository"
+        in caplog.text
+    ), caplog.text
+    assert "no longer exists" not in caplog.text, caplog.text
+    assert "git could not answer" not in caplog.text, caplog.text
+    assert str(forged) in caplog.text, caplog.text
+
+
 def test_the_memory_sync_still_writes_main(repo, monkeypatch):
     import scripts.working_memory as wm
 
@@ -1036,6 +1069,85 @@ def test_a_removed_declaration_names_the_missing_directory(repo, monkeypatch):
     assert "git could not answer" not in system_message, system_message[:300]
     # NAMED, NOT JUST DESCRIBED: the user must be able to tell WHICH directory.
     assert str(worktree) in system_message, system_message[:300]
+
+
+def test_a_forged_gitfile_names_the_verification_failure(repo, tmp_path, monkeypatch):
+    """THE THIRD CAUSE at SessionStart. A directory whose `.git` FILE names
+    another repository's worktree admin dir: git RAN and answered, and the
+    answer failed verification. The skip must say that -- not that git could
+    not answer, and not that the directory is gone."""
+    real = _worktree(repo, "forge-target-session")
+    admin = _git("rev-parse", "--absolute-git-dir", cwd=real).strip()
+    forged = tmp_path / "forged-session"
+    forged.mkdir()
+    (forged / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(forged))
+    monkeypatch.chdir(forged)
+
+    stdin_data = json.dumps(
+        {"session_id": SESSION_ID, "source": "startup", "agent_type": LEAD}
+    )
+    with patch("sys.stdin", io.StringIO(stdin_data)), \
+         patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        with pytest.raises(SystemExit) as exc:
+            session_init.main()
+    assert exc.value.code == 0
+    system_message = json.loads(mock_stdout.getvalue()).get("systemMessage", "")
+
+    assert (
+        "exists but could not be verified as a checkout of a repository"
+        in system_message
+    ), system_message[:300]
+    assert "no longer exists" not in system_message, system_message[:300]
+    assert "git could not answer" not in system_message, system_message[:300]
+    assert str(forged) in system_message, system_message[:300]
+
+
+def test_a_bare_worktree_resolves_and_prints_no_skip(tmp_path, monkeypatch):
+    """THE THIRD TEXT MUST NOT SWALLOW A LEGITIMATE CHECKOUT.
+
+    A worktree of a BARE repository fails the same candidate verification a
+    forged gitfile does, and `_failed_verification_root` answers (given, True)
+    for it: it IS a genuine checkout. This arm pins that at the message layer,
+    where a careless mapping to the new "could not be verified" text would
+    show up as the absence it is supposed to keep."""
+    from shared.project_scope import project_memory_root_or_none
+
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    _git("init", "-q", ".", cwd=seed)
+    (seed / "README").write_text("seed\n")
+    _git("add", ".", cwd=seed)
+    _git("commit", "-qm", "seed", cwd=seed)
+    bare = tmp_path / "bare.git"
+    _git("clone", "-q", "--bare", str(seed), str(bare), cwd=tmp_path)
+    worktree = tmp_path / "bare-wt"
+    _git("worktree", "add", "-q", str(worktree), "main", cwd=bare)
+
+    assert project_memory_root_or_none(worktree) is not None, (
+        "a bare repository's worktree is a genuine checkout, not an unknown root"
+    )
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+    monkeypatch.chdir(worktree)
+
+    stdin_data = json.dumps(
+        {"session_id": SESSION_ID, "source": "startup", "agent_type": LEAD}
+    )
+    with patch("sys.stdin", io.StringIO(stdin_data)), \
+         patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        with pytest.raises(SystemExit) as exc:
+            session_init.main()
+    assert exc.value.code == 0
+    system_message = json.loads(mock_stdout.getvalue()).get("systemMessage", "")
+
+    assert "Project CLAUDE.md skipped" not in system_message, system_message[:300]
+    assert "no longer exists" not in system_message, system_message[:300]
+    assert (
+        "could not be verified as a checkout of a repository"
+        not in system_message
+    ), system_message[:300]
+    assert "git could not answer" not in system_message, system_message[:300]
 
 
 def test_d3b_the_archive_refuses_an_unknown_no_declared_root(repo, monkeypatch):

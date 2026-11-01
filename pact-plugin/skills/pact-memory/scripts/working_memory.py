@@ -1373,12 +1373,12 @@ def _display_root_unknown_reason() -> Optional[str]:
     """WHY the session's project-memory anchor is UNKNOWN, as the phrase the
     warning renders, or None when the root is known.
 
-    Two causes, named rather than collapsed: a directory that no longer exists
-    (named IN the phrase -- several worktrees can be in play and the user
-    needs to know which one), and one that exists but whose root git could
-    not identify. A bool could not make that distinction: every caller was
-    told "unknown" and none could tell a removed directory from a git
-    failure, so the warning blamed git on a shape where git never ran.
+    Three causes, named rather than collapsed: a directory that no longer
+    exists (named IN the phrase -- several worktrees can be in play and the
+    user needs to know which one); one that exists but whose answer FAILED
+    verification, where git did run; and one git could not run or enumerate.
+    A bool could make none of those distinctions. The three are decided by
+    `unknown_root_cause`, so this function only renders them.
 
     The display resolver skips an unknown base instead of probing it (its
     fail-open answer is the base itself, which for a worktree is the copy the
@@ -1395,8 +1395,9 @@ def _display_root_unknown_reason() -> Optional[str]:
     nothing yet report the wrong cause.
     """
     from shared.project_scope import (
-        anchor_directory_is_missing,
-        project_memory_root_or_none,
+        ROOT_CAUSE_MISSING,
+        ROOT_CAUSE_UNVERIFIED,
+        unknown_root_cause,
     )
 
     declared = os.environ.get("CLAUDE_PROJECT_DIR")
@@ -1405,10 +1406,16 @@ def _display_root_unknown_reason() -> Optional[str]:
     else:
         record = get_project_dir_from_session_record()
         anchor = Path(record) if record else Path.cwd()
-    if project_memory_root_or_none(anchor) is not None:
+    cause = unknown_root_cause(anchor)
+    if cause is None:
         return None
-    if anchor_directory_is_missing(anchor):
+    if cause == ROOT_CAUSE_MISSING:
         return f"the project directory {anchor} no longer exists"
+    if cause == ROOT_CAUSE_UNVERIFIED:
+        return (
+            f"the project directory {anchor} exists but could not be verified "
+            "as a checkout of a repository"
+        )
     return "git could not answer"
 
 

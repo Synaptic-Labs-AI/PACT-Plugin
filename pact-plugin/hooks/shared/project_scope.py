@@ -160,6 +160,33 @@ def same_repository(env_dir: Path, base: Path) -> bool:
         return False
 
 
+# THE THREE FACTS BEHIND AN UNKNOWN PROJECT-MEMORY ROOT. Callers that render a
+# message must name the one that occurred: a directory that is gone was never
+# offered to git, a directory whose answer failed verification was, and a
+# git that never ran or could not enumerate is a third case again. Collapsing
+# them to one "unknown" produced a message that blamed git on the first and
+# third-vs-second ambiguity. These are the values `unknown_root_cause` returns
+# (plus None for a KNOWN root); compare against the constants, never literals.
+ROOT_CAUSE_OK = "ok"
+ROOT_CAUSE_MISSING = "missing"
+ROOT_CAUSE_UNVERIFIED = "unverified"
+ROOT_CAUSE_UNANSWERABLE = "unanswerable"
+
+
+def _unanswered_cause(given: Path) -> str:
+    """Why a `not ran` step leaves the root unknown: missing or unanswerable.
+
+    The DECLARATION decides, not the step's own directory: a `not ran` on the
+    verification CANDIDATE still leaves a declaration that exists, and that is
+    a git failure, not a missing directory.
+    """
+    return (
+        ROOT_CAUSE_MISSING
+        if anchor_directory_is_missing(given)
+        else ROOT_CAUSE_UNANSWERABLE
+    )
+
+
 def _raw_rev_parse(directory: Path, flag: str) -> tuple[Optional[Path], bool]:
     """`git -C <directory> rev-parse <flag>` as (resolved path, git RAN).
 
@@ -246,46 +273,57 @@ def _repository_is_bare(common_dir: Path) -> bool:
 
 def _failed_verification_root(
     given: Path, common_dir: Path
-) -> tuple[Path, bool]:
+) -> tuple[Path, str]:
     """The answer when the candidate main root could not be verified.
 
     A bare repository's worktree is a genuine checkout, so it stays a KNOWN
-    root (the input). Every other unverified linked worktree is UNKNOWN: a
+    root (the input) and the cause is ROOT_CAUSE_OK -- NOT "unverified", which
+    would make the message false for a legitimate checkout. Every other
+    unverified linked worktree is ROOT_CAUSE_UNVERIFIED: a
     `--separate-git-dir` worktree has no resolvable main checkout, and a
     forged gitfile names a repository this directory is not part of. Writers
-    must skip on UNKNOWN rather than target the worktree copy, which is the
-    whole point of the distinction.
+    must skip on it rather than target the worktree copy, which is the whole
+    point of the distinction.
     """
-    return (given, True) if _repository_is_bare(common_dir) else (given, False)
+    return (
+        (given, ROOT_CAUSE_OK)
+        if _repository_is_bare(common_dir)
+        else (given, ROOT_CAUSE_UNVERIFIED)
+    )
 
 
-def _project_memory_root(
+def _project_memory_root_cause(
     project_dir: str | os.PathLike[str],
-) -> tuple[Path, bool]:
-    """The memory root AND whether git could answer.
+) -> tuple[Path, str]:
+    """The memory root AND the CAUSE when it is unknown.
 
-    `project_memory_root` keeps the fail-safe answer (the input) for both
-    cases; `project_memory_root_or_none` reports the difference so a writer
-    can skip when the target is unknown instead of planting in a worktree.
+    THE ONE PLACE THE THREE CAUSES ARE DECIDED. `_project_memory_root` folds
+    this back into a boolean for the existing callers, and
+    `unknown_root_cause` exposes the cause for the callers that render a
+    message. Deciding here rather than in each consumer is what keeps the
+    three branches unable to disagree.
+
+    `_failed_verification_root` answers in the same vocabulary, so the bare
+    repository's worktree -- a genuine checkout -- stays ROOT_CAUSE_OK.
     """
     given = Path(project_dir)
     git_dir, ran = _raw_rev_parse(given, "--git-dir")
     if not ran:
-        return given, False
+        return given, _unanswered_cause(given)
     common_dir, ran = _raw_rev_parse(given, "--git-common-dir")
     if not ran:
-        return given, False
+        return given, _unanswered_cause(given)
     if git_dir is None or common_dir is None or git_dir == common_dir:
-        return given, True
+        return given, ROOT_CAUSE_OK
     candidate = common_dir.parent
     toplevel_at_candidate, ran = _raw_rev_parse(candidate, "--show-toplevel")
     if not ran:
-        return given, False
+        return given, _unanswered_cause(given)
     if toplevel_at_candidate != candidate:
         return _failed_verification_root(given, common_dir)
     common_dir_again, ran = _raw_rev_parse(candidate, "--git-common-dir")
     if not ran:
-        return given, False
+        return given, _unanswered_cause(given)
     if common_dir_again != common_dir:
         return _failed_verification_root(given, common_dir)
     # A GITFILE CAN BE FORGED. A directory carrying only a `.git` FILE whose
@@ -297,17 +335,34 @@ def _project_memory_root(
     # not listed. Fail-safe is the input.
     toplevel, ran = _raw_rev_parse(given, "--show-toplevel")
     if not ran:
-        return given, False
+        return given, _unanswered_cause(given)
     listed = _listed_worktrees_result(candidate, resolve_against=candidate)
     if listed is None:
-        return given, False
+        # git could not ENUMERATE: a failed answer, not a failed verification.
+        return given, ROOT_CAUSE_UNANSWERABLE
     if toplevel is None or toplevel not in listed:
         # The anti-forgery failure: a `.git` FILE naming another repository's
         # worktree admin dir. Not a bare repo, so this is UNKNOWN rather than
         # a known root -- otherwise the archive's fall-through can walk to the
         # named repository's document and accept a project nobody declared.
         return _failed_verification_root(given, common_dir)
-    return candidate, True
+    return candidate, ROOT_CAUSE_OK
+
+
+def _project_memory_root(
+    project_dir: str | os.PathLike[str],
+) -> tuple[Path, bool]:
+    """The memory root AND whether git could answer.
+
+    `project_memory_root` keeps the fail-safe answer (the input) for both
+    cases; `project_memory_root_or_none` reports the difference so a writer
+    can skip when the target is unknown instead of planting in a worktree.
+
+    A thin fold of `_project_memory_root_cause`: every cause except
+    ROOT_CAUSE_OK is an unknown root, which is exactly the old boolean.
+    """
+    root, cause = _project_memory_root_cause(project_dir)
+    return root, cause == ROOT_CAUSE_OK
 
 
 def project_memory_root(project_dir: str | os.PathLike[str]) -> Path:
@@ -384,6 +439,34 @@ def anchor_directory_is_missing(project_dir: str | os.PathLike[str]) -> bool:
         return not Path(project_dir).is_dir()
     except (OSError, TypeError, ValueError):
         return False
+
+
+def unknown_root_cause(
+    project_dir: str | os.PathLike[str],
+) -> Optional[str]:
+    """WHY this directory's project-memory root is UNKNOWN, or None if known.
+
+    The reader-side companion to `project_memory_root_or_none`, and the same
+    exposure `anchor_directory_is_missing` made for ONE of the three causes.
+    A caller that renders a message uses this rather than inferring the cause
+    from the path itself: the three facts are decided in one place
+    (`_project_memory_root_cause`), so no consumer can order them wrongly or
+    disagree with the resolver.
+
+    Returns:
+        None            -- the root is KNOWN (including a non-git directory,
+                           which git answered as "no repository").
+        "missing"       -- the directory does not exist; git never ran on it.
+        "unverified"    -- the directory exists and git ANSWERED, but the
+                           answer failed verification: a forged gitfile, or a
+                           --separate-git-dir worktree whose main checkout
+                           cannot be identified. A BARE repository's worktree
+                           is a genuine checkout and is NOT this case.
+        "unanswerable"  -- the directory exists but git could not run, or
+                           could not enumerate the worktree records.
+    """
+    _root, cause = _project_memory_root_cause(project_dir)
+    return None if cause == ROOT_CAUSE_OK else cause
 
 
 def cwd_checkout_memory_root() -> Optional[Path]:
