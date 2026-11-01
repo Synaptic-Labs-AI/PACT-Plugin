@@ -22,6 +22,12 @@
 # transitive here AND name it on the install line in the same change: the
 # coverage arms then hold it at both endpoints, which a pin alone (reads as
 # dead) or a bare exclusion line cannot.
+# What CI does NOT certify: consumers never read this file. pact-memory's
+# runtime install (skills/pact-memory/scripts/memory_init.py) runs a bare
+# `pip install <pkg>`, so a consumer resolves the newest pysqlite3,
+# sqlite-vec and model2vec the index serves. A breaking upstream release
+# therefore reaches consumers while CI stays green on these pins; a refresh
+# is the step that would surface it.
 pytest==9.2.0
 hypothesis==6.170.14
 httpx==0.28.1
