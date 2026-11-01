@@ -450,6 +450,130 @@ class TestDependencyDriftIsDetectable:
                 return base
         return None
 
+    # pip flags whose VALUE is a separate argv word (`-c constraints-ci.txt`):
+    # the value names a file, URL or option target — not a package — so the
+    # tokeniser must consume it. `--flag=value` forms carry the value inline
+    # and need no entry here. shortcut: a future value-taking flag unknown to
+    # this set leaves its value counted as a package operand, which is
+    # harmless for the declared-missing direction (extra tokens create no
+    # false drift); extend the set when the install line gains such a flag.
+    _PIP_FLAGS_WITH_VALUE = frozenset({
+        "-c", "--constraint", "-r", "--requirement", "-e", "--editable",
+        "-i", "--index-url", "--extra-index-url", "-f", "--find-links",
+        "-t", "--target", "--prefix", "--src", "--platform",
+        "--python-version", "--implementation", "--abi", "--root",
+        "--cert", "--client-cert", "--proxy", "--cache-dir",
+        "--no-binary", "--only-binary", "--config-settings",
+        "--global-option", "--install-option", "--build-option",
+        "--progress-bar", "--retries", "--timeout", "--exists-action",
+        "--hash",
+    })
+
+    @staticmethod
+    def _normalise_pin_name(name):
+        """PEP 503 normalisation: lowercase, [-_.] runs collapse to '-'.
+
+        Applied on BOTH sides of every comparison, so a legitimate
+        'sqlite_vec'/'sqlite-vec' spelling difference does not read as
+        drift. Version specifiers and extras are stripped first so
+        'pytest>=8' still matches 'pytest'.
+        """
+        head = re.split(r"[=<>!~;\[]", name)[0]
+        return re.sub(r"[-_.]+", "-", head).strip().lower()
+
+    def _ci_install_package_tokens(self, workflow):
+        """Package-name tokens of the workflow's single `pip install` line.
+
+        Compared as TOKENS of the install line, never substrings of it. A
+        substring test fails OPEN on the most plausible next edit: this
+        suite does `import pysqlite3 as sqlite3`, so an editor adding
+        'sqlite3' to a package list would find it inside 'pysqlite3', pass,
+        and assert a package is installed that is not. Measured against the
+        real install line, 'sqlite3', 'sqlite', 'vec', 'yaml' and 'asyncio'
+        are ALL substrings of it and none is a package operand.
+
+        The parse anchors on the `run:` line — the EXECUTED command — never
+        on any line merely mentioning `pip install`: workflow comment prose
+        may name the command (the CONSTRAINTS paragraph does), and prose is
+        not a declaration.
+        """
+        install_lines = [
+            ln for ln in workflow.read_text(encoding="utf-8").splitlines()
+            if ln.lstrip().startswith("run:") and "pip install" in ln
+        ]
+        assert install_lines, (
+            f"PARSE FAILURE, not dependency drift: {workflow} contains no "
+            f"`run:` line carrying `pip install`, so the CI dependency "
+            f"declaration cannot be read. The workflow changed shape — "
+            f"re-point this parity test at the new shape; do not weaken it "
+            f"to a skip."
+        )
+        assert len(install_lines) == 1, (
+            f"PARSE AMBIGUITY, not dependency drift: {len(install_lines)} "
+            f"`run:` lines carrying `pip install` were read from {workflow} "
+            f"({install_lines}). This guard reasons about THE CI install "
+            f"line, singular — a second install step must be reconciled "
+            f"here, not silently first-matched."
+        )
+        install_line = install_lines[0]
+
+        # Model how pip itself reads argv: package operands are the words
+        # after the `install` verb that are neither flags nor the VALUE of a
+        # flag that takes one. Everything before the verb is the invocation
+        # (`run:`, `python`, `-m`, `pip`) and is not an operand; deriving
+        # the boundary structurally beats filtering a hand-maintained list
+        # of command words, which would need updating and would turn a
+        # package legitimately named after a command into false drift.
+        words = install_line.split()
+        operands = words[words.index("install") + 1:] if "install" in words else []
+        package_words = []
+        consume_value = False
+        for tok in operands:
+            if consume_value:
+                consume_value = False
+                continue
+            if tok.startswith("-"):
+                # `--flag=value` carries its value inline; a bare flag in
+                # _PIP_FLAGS_WITH_VALUE takes its value as the NEXT word.
+                if "=" not in tok and tok in self._PIP_FLAGS_WITH_VALUE:
+                    consume_value = True
+                continue
+            package_words.append(tok)
+        install_tokens = {
+            self._normalise_pin_name(tok) for tok in package_words if tok
+        }
+
+        # PARSE NON-VACUITY — asserted before any comparison built on the
+        # tokens, and with DISTINCT messages, because "I could not read the
+        # line" and "a package is missing" must never produce the same
+        # outcome. If a workflow refactor defeats this parser,
+        # `install_tokens` silently empties and every set difference over it
+        # passes VACUOUSLY: the guard would be dead while green, which is
+        # the exact failure it exists to prevent.
+        #
+        # The anchor has GROUND TRUTH INDEPENDENT OF THE PARSE: this code is
+        # executing under pytest, so CI demonstrably installs pytest. If a
+        # correct parse of the CI install line does not contain it, the
+        # parse is wrong — not the dependency set.
+        _PARSE_ANCHOR = "pytest"
+        assert install_tokens, (
+            f"PARSE FAILURE, not dependency drift: no package operands could "
+            f"be read from the CI install line. The line is "
+            f"{install_line.strip()!r}. The tokeniser models "
+            f"`pip install <flags> <packages>`; a refactor to a "
+            f"requirements file or a multi-line form defeats it. Re-point "
+            f"the parser — do NOT relax the assertions built on the token "
+            f"set, which would pass vacuously over an empty one."
+        )
+        assert _PARSE_ANCHOR in install_tokens, (
+            f"PARSE FAILURE, not dependency drift: the parsed operands "
+            f"{sorted(install_tokens)} do not contain {_PARSE_ANCHOR!r}, but "
+            f"this test is RUNNING under pytest, so CI installs it. The "
+            f"parse is therefore wrong, not the dependency set. Re-point "
+            f"the parser."
+        )
+        return install_tokens
+
     def test_declared_packages_match_the_ci_install_line(self):
         """Every package memory_init would install must be declared by CI.
 
@@ -495,81 +619,9 @@ class TestDependencyDriftIsDetectable:
             f"{workflow} is missing. The drift detector cannot run. This is a "
             f"FAILURE, not a skip: inside a checkout the workflow is required."
         )
-        # Anchor on the `run:` line — the EXECUTED command — never on any
-        # line merely mentioning `pip install`: workflow comment prose may
-        # name the command (the CONSTRAINTS paragraph does), and prose is
-        # not a declaration.
-        install_line = next(
-            (ln for ln in workflow.read_text(encoding="utf-8").splitlines()
-             if ln.lstrip().startswith("run:") and "pip install" in ln),
-            None,
-        )
-        assert install_line is not None, (
-            f"PARSE FAILURE, not dependency drift: {workflow} contains no "
-            f"`run:` line carrying `pip install`, so the CI dependency "
-            f"declaration cannot be read. The workflow changed shape — "
-            f"re-point this parity test at the new shape; do not weaken it "
-            f"to a skip."
-        )
+        install_tokens = self._ci_install_package_tokens(workflow)
 
-        # Compare against TOKENS of the install line, never substrings of it.
-        # A substring test fails OPEN on the most plausible next edit: this
-        # module does `import pysqlite3 as sqlite3`, so an editor adding
-        # 'sqlite3' to the package list above would find it inside 'pysqlite3',
-        # pass, and assert a package is installed that is not. Measured against
-        # the real install line, 'sqlite3', 'sqlite', 'vec', 'yaml' and
-        # 'asyncio' are ALL substrings of it and none is declared by CI.
-        #
-        # Names are normalised per PEP 503 (lowercase, [-_.] runs collapse to
-        # '-') on BOTH sides, so a legitimate 'sqlite_vec'/'sqlite-vec' spelling
-        # difference does not read as drift. Version specifiers and extras are
-        # stripped so 'pytest>=8' still matches 'pytest'.
-        def _normalise(name):
-            head = re.split(r"[=<>!~;\[]", name)[0]
-            return re.sub(r"[-_.]+", "-", head).strip().lower()
-
-        # Model how pip itself reads argv: the package operands are the
-        # non-flag words AFTER the `install` verb. Everything before it is the
-        # invocation (`run:`, `python`, `-m`, `pip`) and is not an operand.
-        # Deriving the boundary structurally beats filtering a hand-maintained
-        # list of command words, which would need updating and would turn a
-        # package legitimately named after a command into false drift.
-        words = install_line.split()
-        operands = words[words.index("install") + 1:] if "install" in words else []
-        install_tokens = {
-            _normalise(tok) for tok in operands
-            if tok and not tok.startswith("-")
-        }
-
-        # PARSE NON-VACUITY — asserted BEFORE the drift comparison, and with a
-        # DISTINCT message, because "I could not read the line" and "a package
-        # is missing" must never produce the same outcome. If a workflow
-        # refactor defeats this parser, `install_tokens` silently empties and
-        # the set difference below passes VACUOUSLY: the guard would be dead
-        # while green, which is the exact failure it exists to prevent.
-        #
-        # The anchor has GROUND TRUTH INDEPENDENT OF THE PARSE: this code is
-        # executing under pytest, so CI demonstrably installs pytest. If a
-        # correct parse of the CI install line does not contain it, the parse
-        # is wrong — not the dependency set. That is what makes this a real
-        # non-vacuity check rather than a restatement of the thing being tested.
-        _PARSE_ANCHOR = "pytest"
-        assert install_tokens, (
-            f"PARSE FAILURE, not dependency drift: no package operands could be "
-            f"read from the CI install line. The line is {install_line.strip()!r}. "
-            f"The tokeniser models `pip install <flags> <packages>`; a refactor "
-            f"to a requirements file or a multi-line form defeats it. Re-point "
-            f"the parser — do NOT relax the assertion below, which would pass "
-            f"vacuously over an empty token set."
-        )
-        assert _PARSE_ANCHOR in install_tokens, (
-            f"PARSE FAILURE, not dependency drift: the parsed operands "
-            f"{sorted(install_tokens)} do not contain {_PARSE_ANCHOR!r}, but "
-            f"this test is RUNNING under pytest, so CI installs it. The parse "
-            f"is therefore wrong, not the dependency set. Re-point the parser."
-        )
-
-        declared_tokens = {_normalise(p) for p in declared}
+        declared_tokens = {self._normalise_pin_name(p) for p in declared}
         missing = sorted(declared_tokens - install_tokens)
         assert not missing, (
             f"DEPENDENCY DRIFT: {missing} are installed by "
@@ -578,6 +630,78 @@ class TestDependencyDriftIsDetectable:
             f"these would be absent at runtime and the branch reports it "
             f"NOWHERE (it is deliberately silent — the CLI's stderr is a JSON "
             f"contract). Add them to the workflow, or remove them here."
+        )
+
+    def test_constraints_pins_cover_the_install_line(self):
+        """constraints-ci.txt and the CI install line must cover each other.
+
+        The constrained install is only as good as its coverage. A direct
+        dependency the install line requests with NO pin floats on the
+        index — the exact merge-time weather the constraints file exists to
+        prevent — and a pin for a package the line never requests is dead
+        weight that misleads a refresh. `pip` is the ONE deliberate
+        exception in the unpinned direction (a pinned self-upgrade can
+        deadlock the bootstrap), named in both the workflow's CONSTRAINTS
+        note and the file's own header.
+        """
+        root = self._source_repo_root()
+        if root is None:
+            pytest.skip(
+                "SKIPPED, NOT PASSED — no .claude-plugin/marketplace.json "
+                f"above {Path(__file__).resolve()}, so this is not a PACT "
+                "source checkout. The expected case is an INSTALLED PLUGIN "
+                "CACHE, which has no .github/ tree by design. This skip is "
+                "NO INFORMATION about constraint coverage — never read it "
+                "as a pass."
+            )
+        constraints = root / "constraints-ci.txt"
+        assert constraints.exists(), (
+            f"source checkout detected at {root} (marketplace.json present) "
+            f"but {constraints} is missing. The CI install line's `-c` "
+            f"names it, so CI's own install step would fail — this is a "
+            f"FAILURE, not a skip."
+        )
+        workflow = root / ".github" / "workflows" / "tests.yml"
+        assert workflow.exists(), (
+            f"source checkout detected at {root} (marketplace.json present) "
+            f"but {workflow} is missing. The coverage guard cannot run. "
+            f"This is a FAILURE, not a skip: inside a checkout the "
+            f"workflow is required."
+        )
+        install_tokens = self._ci_install_package_tokens(workflow)
+
+        pins = {}
+        for raw in constraints.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            assert "==" in line, (
+                f"PARSE FAILURE, not coverage drift: {constraints} carries "
+                f"a non-pin line {line!r}. The file's contract is one "
+                f"`name==version` pin per direct dependency — a line with "
+                f"no `==` is either prose that lost its `#` or a range "
+                f"constraint, and both must be reconciled by hand."
+            )
+            name, _, _version = line.partition("==")
+            pins[self._normalise_pin_name(name)] = line
+
+        unpinned = sorted(install_tokens - set(pins) - {"pip"})
+        assert not unpinned, (
+            f"CONSTRAINT COVERAGE DRIFT: {unpinned} are requested by the "
+            f"CI install line but NOT pinned in {constraints}. An unpinned "
+            f"direct dependency resolves to whatever the index serves at "
+            f"merge time — the exact weather the constraints file exists "
+            f"to prevent. Pin it (pip freeze of a verified venv) or remove "
+            f"it from the install line."
+        )
+        dead_pins = sorted(set(pins) - install_tokens - {"pip"})
+        assert not dead_pins, (
+            f"CONSTRAINT COVERAGE DRIFT: pins for {dead_pins} sit in "
+            f"{constraints} but the CI install line never requests them. A "
+            f"dead pin constrains nothing (an unrequested package resolves "
+            f"only as a transitive, which these `==` pins do not bound "
+            f"for) and misleads a refresh into re-verifying it. Remove the "
+            f"pin or add the package to the install line."
         )
 
     def test_ci_branch_emits_nothing_to_stderr(self):
