@@ -1488,22 +1488,30 @@ class TestDependencyDriftIsDetectable:
 
     @staticmethod
     def _pip_environment_keys(workflow_text):
-        """PIP_* keys from every `env:` mapping, read STRUCTURALLY.
+        """PIP_* keys from every `env:` mapping that reaches the job
+        process, read STRUCTURALLY.
 
         The mappings are enumerated from yaml.safe_load's parse — the
         same ground truth the round-5/6 probes used — not from line
         shapes: block form, trailing comment, single-line flow and
         WRAPPED flow (`env: {` with keys on later lines, the cycle-12
         Bugbot shape) are one mapping node to the parser, so no spelling
-        arm chases the next spelling. Workflow-, job- and step-level env
-        mappings are all walked; `environment:` is a different key and
-        is never consulted. Keys are compared case-insensitively
-        (over-catch: pip itself reads only uppercase, but a lowercase
-        `pip_*` key reads as intended-for-pip to every future reader
-        even if pip ignores it). A workflow that does not PARSE is a
-        PARSE FAILURE, not a clean read — an unparseable workflow cannot
-        run on GitHub, so a loud red is the honest outcome, never a
-        green line-scan over text no runner would accept.
+        arm chases the next spelling. The channels walked are the ones
+        whose variables end up in the process that runs the install:
+        workflow-level env, job-level env, a job CONTAINER's env (it
+        applies to every step in a containerized job), and each step's
+        env. SERVICE containers' env (`jobs.<id>.services.<id>.env`) is
+        deliberately NOT harvested: a service container runs a support
+        process the job talks TO over the network, and its environment
+        never reaches the job's own process. `environment:` is a
+        different key and is never consulted. Keys are compared
+        case-insensitively (over-catch: pip itself reads only uppercase,
+        but a lowercase `pip_*` key reads as intended-for-pip to every
+        future reader even if pip ignores it). A workflow that does not
+        PARSE is a PARSE FAILURE, not a clean read — an unparseable
+        workflow cannot run on GitHub, so a loud red is the honest
+        outcome, never a green line-scan over text no runner would
+        accept.
         """
         try:
             doc = yaml.safe_load(workflow_text)
@@ -1528,6 +1536,9 @@ class TestDependencyDriftIsDetectable:
                 if not isinstance(job, dict):
                     continue
                 harvest(job.get("env"))
+                container = job.get("container")
+                if isinstance(container, dict):
+                    harvest(container.get("env"))
                 for step in job.get("steps") or []:
                     if isinstance(step, dict):
                         harvest(step.get("env"))
@@ -1590,10 +1601,14 @@ class TestDependencyDriftIsDetectable:
         cycle-12 Bugbot shape) — reddens the shipped tripwire with
         PIP_INDEX_URL named, because the detector reads the env
         mappings STRUCTURALLY (yaml.safe_load), the way a runner does;
-        a workflow-level env: shape reddens the same way; a deployment
-        `environment:` key is NOT an env: mapping and stays unflagged;
-        and an unparseable workflow reddens as PARSE FAILURE rather
-        than line-scanning green over text no runner would accept.
+        a workflow-level env: shape and a job CONTAINER's env (the
+        cycle-13 Bugbot channel — it applies to every step in a
+        containerized job, the install included) redden the same way;
+        a deployment `environment:` key is NOT an env: mapping and
+        stays unflagged, and so does a SERVICE container's env (its
+        variables never reach the job's own process); and an
+        unparseable workflow reddens as PARSE FAILURE rather than
+        line-scanning green over text no runner would accept.
         The comment and flow spellings rode the cycle-10 line scanner
         green (Bugbot, cycle 11), the wrapped flow rode the cycle-11
         same-line scan green (Bugbot, cycle 12) — the structural read
@@ -1648,11 +1663,26 @@ class TestDependencyDriftIsDetectable:
         assert_reddens("workflow-level", real_text.replace(
             "on:\n",
             "env:\n  PIP_INDEX_URL: https://evil.example/simple\non:\n", 1))
+        assert_reddens("container-env", real_text.replace(
+            "    steps:",
+            "    container:\n"
+            "      image: ubuntu:24.04\n"
+            "      env:\n"
+            "        PIP_INDEX_URL: https://evil.example/simple\n"
+            "    steps:", 1))
 
         # CONTROL: `environment:` (a deployment target) is a different
         # key from `env` and stays unflagged.
         assert self._pip_environment_keys(
             "jobs:\n  release:\n    environment: production\n") == []
+
+        # BOUND: a SERVICE container's env never reaches the job's own
+        # process — deliberately unharvested, and pinned here so a
+        # future widening cannot silently change that decision.
+        assert self._pip_environment_keys(
+            "jobs:\n  x:\n    services:\n"
+            "      redis:\n        env:\n"
+            "          PIP_INDEX_URL: https://evil.example/simple\n") == []
 
         # PARSE FAILURE: an unparseable workflow reddens rather than
         # reading green over text GitHub would refuse to run.
