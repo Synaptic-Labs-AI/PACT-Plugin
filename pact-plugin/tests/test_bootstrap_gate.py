@@ -1828,8 +1828,12 @@ def _break_shared_missing_transitive(scaffold):
 # split must be IDENTICAL no matter HOW shared/ broke; the distinct
 # exception type names make each vector's diagnosability assertable. The
 # 2026-06-11 incident vector (py3.9 TypeError from annotation evaluation)
-# belongs to the retired pre-3.12 floor; the 3.12 syntax-floor guard
-# (test_py312_syntax_floor.py) now holds that class closed statically.
+# belongs to the retired pre-3.12 floor. That direction (host OLDER than
+# the code requires) is closed by the SUPPORT BOUNDARY, not by a static
+# guard: hooks launch on whatever bare python3 resolves to, and a host
+# below 3.12 is out of support rather than protected (README states
+# this). test_py312_syntax_floor.py holds the OTHER direction --
+# syntax newer than 3.12 that a supported host cannot parse.
 _BREAKAGE_VECTORS = {
     "syntax-broken-init": (_break_shared_syntax, "SyntaxError"),
     "shared-package-absent": (_break_shared_absent, "ModuleNotFoundError"),

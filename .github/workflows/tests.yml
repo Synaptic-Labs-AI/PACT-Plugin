@@ -68,8 +68,8 @@
 #                          `python -m pytest` ERRORS at COLLECTION.
 #     - pytest-asyncio   : the suite has a large `@pytest.mark.asyncio` cohort.
 #                          An unhandled async test FAILS (measured on pytest
-#                          8.4.2, one failure per async test). Without this
-#                          plugin that whole cohort is RED.
+#                          9.2.0, the pinned runner: one failure per async
+#                          test). Without this plugin that whole cohort is RED.
 #     - hypothesis       : property tests guard it with try/except + skipif, so
 #                          it is technically optional, but it is installed so the
 #                          property tests actually RUN rather than silently skip.
@@ -287,8 +287,9 @@ jobs:
         # See the "DEPENDENCY SET" header note for why each lib is required.
         # pytest-asyncio is REQUIRED, not optional: the suite has a large
         # @pytest.mark.asyncio cohort, and without this plugin that whole
-        # cohort is RED. Measured on pytest 8.4.2: one failure per async test,
-        # `Failed: async def functions are not natively supported`. Do NOT drop
+        # cohort is RED. Measured on pytest 9.2.0 (the pinned runner): one
+        # failure per async test, `async def functions are not natively
+        # supported.` Do NOT drop
         # it to "shorten" the line — the async cohort simply stops passing, and
         # it is a large fraction of the suite.
         # -c constraints-ci.txt pins the install line's direct deps to the

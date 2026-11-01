@@ -13,10 +13,12 @@ THE PASSING VECTORS ARE THE PIN, NOT THE CORPUS ARM. Every corpus file
 also parses at (3, 11) today, so the corpus arm alone cannot catch a
 stale floor constant -- only the synthetic PASSING vectors can. PEP 695
 (type statement + type-parameter lists) parses at (3, 12) and is
-measured REJECTED at (3, 9), (3, 10) and (3, 11) with "Type statement is
-only supported in Python 3.12 and greater", so reverting the constant to
-any pre-3.12 value reddens the PEP 695 arm. It is the only true boundary
-discriminator in this file.
+measured REJECTED at (3, 9), (3, 10) and (3, 11). The two forms carry
+DIFFERENT CPython messages: "Type statement is only supported in Python
+3.12 and greater" (type statement) and "Type parameter lists are only
+supported in Python 3.12 and greater" (generic def/class), so reverting
+the constant to any pre-3.12 value reddens the PEP 695 arm. It is the
+only true boundary discriminator in this file.
 
 HONESTY CAVEAT ON THE FAILING VECTORS, measured on this 3.12.3
 interpreter: the t-string (PEP 750) and type-parameter-default (PEP 696)
