@@ -987,48 +987,65 @@ class TestPreExistingJournalCompat:
 # ---------------------------------------------------------------------------
 
 
-def _run_pause_bash(session_dir, *, true_or_false):
-    """Execute the pause.md step-5 bash template against a tmp session_dir.
+def _literal_command_template(filename, marker, *, readback_count, values):
+    """Return one current command fence, rendered only with safe test values."""
+    text = (_PACT_PLUGIN_DIR / "commands" / filename).read_text(encoding="utf-8")
+    blocks = [
+        match.group(1)
+        for match in re.finditer(r"```bash\n(.*?)\n```", text, re.DOTALL)
+        if marker in match.group(1)
+    ]
+    assert len(blocks) == 1, f"{filename}: expected one literal bash block containing {marker!r}"
+    template = blocks[0] + "\n"
+    actual_readbacks = template.count("python3 -I -c '")
+    assert actual_readbacks == readback_count, (
+        f"{filename}: literal source read-back count {actual_readbacks}, "
+        f"expected {readback_count}; refusing to execute a drifted template"
+    )
+    for token, value in values.items():
+        template = template.replace("{" + token + "}", str(value))
+    leftovers = re.findall(r"\{[A-Za-z_][A-Za-z0-9_-]*\}", template)
+    assert not leftovers, f"{filename}: unrendered placeholders {leftovers}"
+    return template
 
-    Substitutes the shell-clamp's {true_or_false} with the literal string
-    argument so the case/esac validator takes the path under test (`true`
-    emits, `false` is a no-op, anything else fails fast). All other
-    placeholders get safe test values so the session_paused write
-    succeeds regardless of which valid branch was taken.
 
-    Note: the session_paused write uses the string 'true' or 'false' for
-    `consolidation_completed` only under the two valid branches — when
-    the validator hits the `*` branch it exits 1 before the write, so
-    any non-JSON-parseable value in {true_or_false} would not reach the
-    session_paused write. Tests that pass an invalid value therefore
-    observe the clamp's fail-fast exit, not a session_paused schema
-    error.
+def _inject_wrong_event_before_readback(template, session_dir, ordinal):
+    """Put a valid wrong final event immediately before one literal read-back."""
+    starts = list(re.finditer(r"^[ \t]*python3 -I -c '", template, re.MULTILINE))
+    assert 1 <= ordinal <= len(starts)
+    wrong_write = (
+        f'python3 "{_SESSION_JOURNAL_PY}" write \\\n'
+        f"  --type session_refresh_consumed --session-dir '{session_dir}' --stdin <<'JSON'\n"
+        '{"refresh_ts":"wrong-final-event"}\n'
+        "JSON\n"
+    )
+    start = starts[ordinal - 1].start()
+    return template[:start] + wrong_write + template[start:]
 
-    Returns the subprocess CompletedProcess so callers can assert on
-    returncode, stdout, and stderr. The bash envelope mirrors pause.md's
-    `set -e` + ERR trap exactly.
-    """
-    template = f"""set -e
-trap 'rc=$?; echo "[JOURNAL WRITE FAILED] pause.md (bash line $LINENO): \\"${{BASH_COMMAND%%$'\\''\\n'\\''*}}\\" exit=$rc" >&2; exit $rc' ERR
-case '{true_or_false}' in
-  true)
-    python3 "{_SESSION_JOURNAL_PY}" write \\
-      --type session_consolidated --session-dir '{session_dir}' --stdin <<'JSON'
-{{"pass": 2, "task_count": 7, "memories_saved": 3}}
-JSON
-    ;;
-  false)
-    ;;
-  *)
-    echo "[pause.md] invalid {{true_or_false}} flag: '{true_or_false}' (expected literal 'true' or 'false')" >&2
-    exit 1
-    ;;
-esac
-python3 "{_SESSION_JOURNAL_PY}" write \\
-  --type session_paused --session-dir '{session_dir}' --stdin <<'JSON'
-{{"pr_number": 123, "pr_url": "https://github.com/org/repo/pull/123", "branch": "feat/test", "worktree_path": "/tmp/wt", "consolidation_completed": {true_or_false}, "team_name": "pact-test"}}
-JSON
-"""
+
+def _run_pause_bash(session_dir, *, true_or_false, wrong_readback=None):
+    """Execute pause.md's literal step-5 block against a tmp session_dir."""
+    template = _literal_command_template(
+        "pause.md",
+        "case '{true_or_false}' in",
+        readback_count=2,
+        values={
+            "plugin_root": _PACT_PLUGIN_DIR,
+            "session_dir": session_dir,
+            "true_or_false": true_or_false,
+            "task_count": 7,
+            "memories_saved": 3,
+            "pr_number": 123,
+            "pr_url": "https://github.com/org/repo/pull/123",
+            "branch": "feat/test",
+            "worktree_path": "/tmp/wt",
+            "team_name": "pact-test",
+        },
+    )
+    if wrong_readback is not None:
+        template = _inject_wrong_event_before_readback(
+            template, session_dir, wrong_readback
+        )
     return subprocess.run(
         ["bash", "-c", template],
         capture_output=True,
@@ -1036,6 +1053,24 @@ JSON
         timeout=15,
         check=False,
     )
+
+
+def test_literal_extraction_rejects_missing_source_readback(tmp_path, monkeypatch):
+    """A removed command-source read-back fails before the integration run."""
+    source = (_PACT_PLUGIN_DIR / "commands" / "pause.md").read_text(encoding="utf-8")
+    mutated = source.replace("python3 -I -c '", "python3 -I -c# removed", 1)
+    assert mutated != source
+    (tmp_path / "commands").mkdir()
+    (tmp_path / "commands" / "pause.md").write_text(mutated, encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "_PACT_PLUGIN_DIR", tmp_path)
+
+    with pytest.raises(AssertionError, match="read-back count 1, expected 2"):
+        _literal_command_template(
+            "pause.md",
+            "case '{true_or_false}' in",
+            readback_count=2,
+            values={},
+        )
 
 
 class TestPauseBashConditionalEmission:
@@ -1105,6 +1140,17 @@ class TestPauseBashConditionalEmission:
             f"false branch MUST still emit session_paused. Got types: {types}"
         )
 
+    @pytest.mark.parametrize("ordinal", [1, 2])
+    def test_literal_readback_rejects_wrong_final_event(self, tmp_path, ordinal):
+        """Both literal pause read-backs reject a different physical last event."""
+        result = _run_pause_bash(
+            str(tmp_path), true_or_false="true", wrong_readback=ordinal
+        )
+
+        assert result.returncode != 0
+        assert "Journal read-back failed" in result.stderr
+        assert "session_refresh_consumed" in result.stderr
+
     def test_guard_invalid_value_fails_fast(self, tmp_path):
         """{true_or_false}='True' → case `*` branch exits 1 with stderr message; no writes.
 
@@ -1170,7 +1216,7 @@ _STUB_GH_MERGED = (
 )
 
 
-def _run_wrap_up_bash(session_dir, *, consolidation_ran):
+def _run_wrap_up_bash(session_dir, *, consolidation_ran, wrong_readback=None):
     """Execute the wrap-up.md step-5 bash template against a tmp session_dir.
 
     Substitutes the shell-clamp's {consolidation_ran} with the literal
@@ -1184,24 +1230,22 @@ def _run_wrap_up_bash(session_dir, *, consolidation_ran):
     returncode, stdout, and stderr. Mirrors _run_pause_bash's structure
     for symmetric coverage.
     """
-    template = f"""set -e
-trap 'rc=$?; echo "[JOURNAL WRITE FAILED] wrap-up.md (bash line $LINENO): \\"${{BASH_COMMAND%%$'\\''\\n'\\''*}}\\" exit=$rc" >&2; exit $rc' ERR
-{_WRAP_UP_RECORD_CALL.format(plugin_root=_PACT_PLUGIN_DIR, session_dir=session_dir)}
-case '{consolidation_ran}' in
-  true)
-    python3 "{_SESSION_JOURNAL_PY}" write \\
-      --type session_consolidated --session-dir '{session_dir}' --stdin <<'JSON'
-{{"pass": 2, "task_count": 7, "memories_saved": 3}}
-JSON
-    ;;
-  false)
-    ;;
-  *)
-    echo "[wrap-up.md] invalid {{consolidation_ran}} flag: '{consolidation_ran}' (expected literal 'true' or 'false')" >&2
-    exit 1
-    ;;
-esac
-"""
+    template = _literal_command_template(
+        "wrap-up.md",
+        _WRAP_UP_RECORD_CALL,
+        readback_count=1,
+        values={
+            "plugin_root": _PACT_PLUGIN_DIR,
+            "session_dir": session_dir,
+            "consolidation_ran": consolidation_ran,
+            "task_count": 7,
+            "memories_saved": 3,
+        },
+    )
+    if wrong_readback is not None:
+        template = _inject_wrong_event_before_readback(
+            template, session_dir, wrong_readback
+        )
     bindir = Path(session_dir) / "stub-bin"
     bindir.mkdir(parents=True, exist_ok=True)
     gh = bindir / "gh"
@@ -1283,6 +1327,16 @@ class TestWrapUpBashConditionalEmission:
         assert "session_consolidated" not in types, (
             f"false branch MUST NOT emit session_consolidated. Got types: {types}"
         )
+
+    def test_literal_readback_rejects_wrong_final_event(self, tmp_path):
+        """The literal wrap-up read-back rejects a different physical last event."""
+        result = _run_wrap_up_bash(
+            str(tmp_path), consolidation_ran="true", wrong_readback=1
+        )
+
+        assert result.returncode != 0
+        assert "Journal read-back failed" in result.stderr
+        assert "session_refresh_consumed" in result.stderr
 
     def test_consolidation_invalid_value_fails_fast(self, tmp_path):
         """{consolidation_ran}='True' → case `*` branch exits 1 with stderr; session_end already written.
@@ -1450,13 +1504,9 @@ class TestPauseBashTemplateShapeDriftGuard:
     """Pin the case/esac shape of pause.md's step-5 bash block against silent drift.
 
     The behavioral tests above (TestPauseBashConditionalEmission) execute a
-    template the test helper assembles in Python — if a future refactor
-    moved pause.md away from the case/esac shape (e.g. back to if/then/fi
-    or to a different validator) without updating _run_pause_bash, those
-    tests would keep passing against the stale helper while production
-    actually behaved differently. This test reads pause.md from disk at
-    test time and asserts the three-branch shape is still present, so
-    the drift surfaces loudly instead of silently.
+    literal command block extracted from pause.md. This guard independently
+    pins its case/esac shape so a validator redesign fails with a targeted
+    diagnostic rather than only changing behavior.
 
     Review cycle-3 Fix 4 — test-layer pin for the cycle-2 M2 clamp's
     structural invariant.
