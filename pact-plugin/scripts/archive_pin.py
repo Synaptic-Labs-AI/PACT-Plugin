@@ -582,6 +582,8 @@ def resolve_claude_md():
         anchor_directory_is_missing,
         cwd_checkout_memory_root,
         project_memory_root_or_none,
+        record_is_for_declaration,
+        recorded_main_root,
     )
 
     env_dir = os.environ.get("CLAUDE_PROJECT_DIR")
@@ -611,20 +613,36 @@ def resolve_claude_md():
     # memory-root check right after `base` is what keeps the shadow copy out;
     # the sync sites never reach this shape because their resolver retargets
     # every base through `project_memory_root` before probing.
+    # Inside this branch the declaration is MISSING: an existing-but-
+    # unanswerable anchor raised above.
+    anchor_is_missing = memory_root is None and anchor_directory_is_missing(anchor)
     if memory_root is None:
         # A MISSING DECLARATION: nothing exists to plant or archive at the
-        # vanished path. RETARGET FIRST, through the CWD's checkout memory
-        # root -- the same retargeting rung the sync sites use -- so a cwd
-        # inside a SIBLING WORKTREE probes MAIN rather than that sibling's
-        # own copy. A raw resolver here measured exactly that wrong answer:
-        # it returned `<main>/.worktrees/sibling/.claude/CLAUDE.md`.
-        #
-        # THE BASE-IDENTITY CHECK BELOW STILL RUNS ON THE RESULT, and this
-        # fall-through keeps it load-bearing: when MAIN holds no file, the raw
-        # resolver is tried and can still reach the cwd's own worktree copy,
-        # which the check then refuses with the same message as always. Do not
-        # move the retarget past the check or replace the check with it.
-        retarget = cwd_checkout_memory_root()
+        # vanished path. THE SESSION RECORD IS THE FIRST ANSWER, and the only
+        # one that works when the cwd is not in the enclosing checkout; it is
+        # verified against the candidate MAIN root, never the dead worktree,
+        # so `git worktree prune` -- the normal cleanup path -- cannot reject
+        # it. A record that was written FOR this declaration and does not
+        # verify is an integrity failure, not a fall-through: refusing keeps
+        # a forged record from redirecting the archive.
+        identity = _get_worktree_identity_from_session_record()
+        retarget = None
+        if anchor_is_missing:
+            retarget = recorded_main_root(anchor, identity)
+            if retarget is None and record_is_for_declaration(identity, anchor):
+                raise _Unevaluable(
+                    "the declared project directory no longer exists and the "
+                    "session record written for it does not verify against a "
+                    "checkout, so the project CLAUDE.md cannot be identified; "
+                    "nothing was archived"
+                )
+        if retarget is None:
+            # NEXT, the CWD's checkout memory root -- the same retargeting rung
+            # the sync sites use -- so a cwd inside a SIBLING WORKTREE probes
+            # MAIN rather than that sibling's own copy. A raw resolver here
+            # measured exactly that wrong answer: it returned
+            # `<main>/.worktrees/sibling/.claude/CLAUDE.md`.
+            retarget = cwd_checkout_memory_root()
         if retarget is not None:
             path, source = resolve_project_claude_md_path(retarget)
             if source == "new_default":
@@ -636,6 +654,12 @@ def resolve_claude_md():
         if source == "new_default":
             path = get_project_claude_md_path()
     if path is None:
+        if anchor_is_missing:
+            raise _Unevaluable(
+                "the declared project directory no longer exists and no "
+                "session record or working directory identified a main "
+                "checkout holding CLAUDE.md; nothing was archived"
+            )
         raise _Unevaluable("CLAUDE.md not found")
     base = _lexical_base_of(path)
 
@@ -663,9 +687,15 @@ def resolve_claude_md():
                     env_path, base, path,
                     worktree_identity=_get_worktree_identity_from_session_record(),
                 )):
+            removed_note = (
+                f"The declared directory no longer exists, so only a session "
+                f"record could have identified its main checkout. "
+                if anchor_is_missing else ""
+            )
             raise _Unevaluable(
                 f"CLAUDE_PROJECT_DIR={env_dir} contains no CLAUDE.md, and "
                 f"resolution fell through to {path} in a different project. "
+                f"{removed_note}"
                 f"Refusing rather than archiving a pin the invocation never "
                 f"named. Set CLAUDE_PROJECT_DIR to the project that owns the "
                 f"pin, or unset it to resolve from the working directory."

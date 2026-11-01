@@ -187,7 +187,7 @@ def _raw_rev_parse(directory: Path, flag: str) -> tuple[Optional[Path], bool]:
     cannot be stat'ed also reads as could-not-run, which is the safe
     direction: the writers skip.
     """
-    if not Path(directory).is_dir():
+    if anchor_directory_is_missing(directory):
         return None, False
     try:
         result = run_git(
@@ -562,12 +562,72 @@ def _listed_worktrees(
     return _listed_worktrees_result(checkout, resolve_against) or set()
 
 
+def _record_names_declaration(identity: Optional[dict], declared: Path) -> bool:
+    """Whether the record was written for exactly this declaration."""
+    return isinstance(identity, dict) and identity.get(
+        "declared"
+    ) == os.path.realpath(declared)
+
+
 def _recorded_common_dir(identity: Optional[dict], declared: Path) -> Optional[str]:
     """The common dir a session record names, when it was written for exactly `declared`."""
-    if not isinstance(identity, dict) or identity.get("declared") != os.path.realpath(declared):
+    if not _record_names_declaration(identity, declared):
         return None
     common_dir = identity.get("common_dir")
     return common_dir if isinstance(common_dir, str) and os.path.isabs(common_dir) else None
+
+
+def record_is_for_declaration(identity: Optional[dict], declared: Path) -> bool:
+    """Whether a session record for this exact declaration EXISTS.
+
+    Separate from `recorded_main_root` because the two answers differ: "no
+    record" keeps a caller's normal fall-through, while "a record for this
+    declaration that does not verify" is an integrity failure and must
+    refuse. Collapsing them lets a forged record fall through to the very
+    resolution it was written to redirect.
+    """
+    return _record_names_declaration(identity, declared)
+
+
+def recorded_main_root(
+    declared: Path, identity: Optional[dict]
+) -> Optional[Path]:
+    """The MAIN checkout root a session record proves for a REMOVED declaration,
+    or None when there is no record for it or the record does not verify.
+
+    THE RECORD IS THE SUBSTITUTE FOR THE WORKTREE LISTING, NOT A SUPPLEMENT.
+    Verified against the CANDIDATE MAIN ROOT and never against the dead
+    worktree: `git worktree prune` deletes both the listing entry and its
+    admin dir, and it is the normal cleanup path, so a listing check would
+    reject the record exactly where it is needed. The candidate checks are
+    `_failed_verification_root`'s minus the listing, and they reject a forged
+    record by construction -- a `common_dir` whose parent is not a checkout
+    fails them.
+
+    A live declaration never needs this: git answers for it directly.
+    """
+    common_dir_str = _recorded_common_dir(identity, declared)
+    if common_dir_str is None:
+        return None
+    try:
+        common_dir = Path(common_dir_str)
+        candidate = common_dir.parent.resolve()
+        if not candidate.is_dir():
+            return None
+    except (OSError, RuntimeError):
+        return None
+    toplevel, ran = _raw_rev_parse(candidate, "--show-toplevel")
+    if not ran or toplevel != candidate:
+        return None
+    common_again, ran = _raw_rev_parse(candidate, "--git-common-dir")
+    if not ran or common_again is None:
+        return None
+    try:
+        if common_again != common_dir.resolve():
+            return None
+    except (OSError, RuntimeError):
+        return None
+    return candidate
 
 
 def stays_in_declared_project(

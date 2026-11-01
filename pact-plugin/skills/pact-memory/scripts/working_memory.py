@@ -1198,8 +1198,10 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
         # pact_session's sys.path bootstrap has run at module import.
         from shared.project_scope import (
             anchor_directory_is_missing,
+            get_worktree_identity_from_session_record,
             git_env_without_location,
             project_memory_root_or_none,
+            recorded_main_root,
         )
 
         # THE SESSION ANCHOR DECIDES FIRST (#1653, Copilot HIGH). A forged
@@ -1224,6 +1226,21 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
             # That is the forged-gitfile and git-failure class; probing on
             # could reach a repository this session does not belong to.
             return None, None
+        # A MISSING BASE IS RESOLVED FROM THE SESSION RECORD FIRST. The record
+        # is the substitute for the worktree listing -- `git worktree prune`
+        # deletes both, and it is the normal cleanup path -- and it is the
+        # only answer available when the cwd is not in the enclosing checkout.
+        # It is verified against the candidate MAIN root, never the dead
+        # worktree, and a record that does not verify is ignored here: this
+        # resolver falls through to the scope guard rather than redirecting.
+        if anchor_directory_is_missing(anchor):
+            recorded = recorded_main_root(
+                anchor, get_worktree_identity_from_session_record()
+            )
+            if recorded is not None:
+                found = _find_existing_claude_md(recorded)
+                if found is not None:
+                    return found, recorded
         # A MISSING BASE FALLS THROUGH, and it is safe because every rung
         # below RETARGETS a worktree root to the project-memory root before
         # probing: a cwd in a sibling worktree yields MAIN's document, never
@@ -2255,7 +2272,10 @@ def _refuse_ambient_sync_on_declared_scope_escape(
         return
     # Function-level: the shared package is importable only after
     # pact_session's sys.path bootstrap has run at module import.
-    from shared.project_scope import stays_in_declared_project
+    from shared.project_scope import (
+        anchor_directory_is_missing,
+        stays_in_declared_project,
+    )
 
     if stays_in_declared_project(
         Path(declared),
@@ -2264,10 +2284,16 @@ def _refuse_ambient_sync_on_declared_scope_escape(
         worktree_identity=get_worktree_identity_from_session_record(),
     ):
         return
+    removed_note = (
+        "The declared directory no longer exists, so only a session record "
+        "could have identified its main checkout. "
+        if anchor_directory_is_missing(declared) else ""
+    )
     raise AmbientSyncRefused(
         f"the declared project scope ({declared}) resolved to a CLAUDE.md "
         f"under a different project ({resolved_root}); the projection was "
-        "refused. Point CLAUDE_PROJECT_DIR at the project you mean, or pass "
+        f"refused. {removed_note}"
+        "Point CLAUDE_PROJECT_DIR at the project you mean, or pass "
         "an explicit target= / claude_md_root= to name the destination."
     )
 

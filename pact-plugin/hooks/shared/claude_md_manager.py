@@ -1847,15 +1847,33 @@ def session_memory_root() -> Path | None:
     `CLAUDE_PROJECT_DIR` must not skip the guard; `or os.getcwd()` is the
     anchor session_init records when the platform declares nothing.
 
+    A MISSING DECLARATION IS RESOLVED FROM THE SESSION RECORD. Without this,
+    the gate declares the root unknown and the pin cap goes DARK on MAIN's
+    document for a session whose worktree was removed -- the silent-off
+    failure this rule exists to remove. The record is used only when the
+    declared directory no longer exists, and only after it verifies against
+    the candidate main root.
+
     Fail-safe is None (refuse to identify a document), and an import failure
     is the same answer.
     """
     try:
-        from .project_scope import project_memory_root_or_none
+        from .project_scope import (
+            anchor_directory_is_missing,
+            get_worktree_identity_from_session_record,
+            project_memory_root_or_none,
+            recorded_main_root,
+        )
     except ImportError:
         return None
     declared = os.environ.get("CLAUDE_PROJECT_DIR")
-    return project_memory_root_or_none(declared or os.getcwd())
+    anchor = declared or os.getcwd()
+    root = project_memory_root_or_none(anchor)
+    if root is None and anchor_directory_is_missing(anchor):
+        root = recorded_main_root(
+            Path(anchor), get_worktree_identity_from_session_record()
+        )
+    return root
 
 
 class GateTarget(NamedTuple):

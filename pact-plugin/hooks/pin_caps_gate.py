@@ -913,20 +913,38 @@ def _unknown_root_decision(tool_name: str):
     condition on the SessionStart channel; this is the PreToolUse channel.
     """
     try:
+        import os
+
         from shared.claude_md_manager import session_memory_root
+        from shared.project_scope import anchor_directory_is_missing
 
         if session_memory_root() is not None:
             return None
+        declared = os.environ.get("CLAUDE_PROJECT_DIR")
+        declared_gone = anchor_directory_is_missing(declared or os.getcwd())
     except Exception:  # noqa: BLE001 — fail-open: report nothing
         return None
     from shared.pin_growth import PinDecision
 
-    return PinDecision(
-        "ALLOW_ADVISORY", 0, 0, None, "unknown_root",
-        "PACT could not determine this session's project-memory root (git "
-        "could not identify it), so the pin cap was not checked for this "
-        f"{tool_name}.",
-    )
+    if declared_gone:
+        # THE REMOVED-WORKTREE SHAPE NAMES ITSELF. A user whose declaration
+        # was deleted must not read a message describing a git failure. The
+        # wording stays TRUE when a record reader exists: this advisory fires
+        # only after `session_memory_root` produced nothing, which includes
+        # every record that did not verify.
+        reason = (
+            "PACT could not identify this session's project memory: the "
+            "declared directory no longer exists and the session record did "
+            "not verify a main checkout for it, so the pin cap was not "
+            f"checked for this {tool_name}."
+        )
+    else:
+        reason = (
+            "PACT could not determine this session's project-memory root "
+            "(git could not identify it), so the pin cap was not checked for "
+            f"this {tool_name}."
+        )
+    return PinDecision("ALLOW_ADVISORY", 0, 0, None, "unknown_root", reason)
 
 
 def _decide(target, tool_name: str, tool_input: dict, input_data: Optional[dict] = None,

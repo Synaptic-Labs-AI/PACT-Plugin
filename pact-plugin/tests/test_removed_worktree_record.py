@@ -26,6 +26,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -501,3 +502,195 @@ class TestArchivePinReadsTheRecordToo:
         with pytest.raises(archive_pin._Unevaluable) as excinfo:
             archive_pin.resolve_claude_md()
         assert "different project" in excinfo.value.reason, excinfo.value.reason
+
+
+# ---------------------------------------------------------------------------
+# #114: the record resolves all THREE call sites after `git worktree prune`
+# ---------------------------------------------------------------------------
+
+def _pruned_worktree(root: Path):
+    """R holds the document; W is a linked worktree removed by rmtree+prune.
+
+    `git worktree prune` deletes the listing entry AND the admin dir, and it
+    is the normal cleanup path. A record verified against the worktree LISTING
+    would be rejected here, which is the shape this class exists for.
+    """
+    main = _repo(root / "R", document=True)
+    worktree = _worktree(main, root / "W")
+    identity = _identity_for(worktree)
+    shutil.rmtree(worktree)
+    _git("worktree", "prune", cwd=main)
+    listing = _git("worktree", "list", "--porcelain", cwd=main).stdout
+    assert str(worktree) not in listing, "the prune left the worktree listed"
+    return main, worktree, identity
+
+
+def _outside_the_repository(root: Path) -> Path:
+    """A cwd that is not in any checkout, so the fall-through cannot answer."""
+    path = root / "elsewhere"
+    path.mkdir()
+    probe = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--git-dir"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert probe.returncode != 0, probe.stdout
+    return path
+
+
+class TestTheRecordResolvesAllThreeSites:
+    """One prune shape, three call sites, the record as the only answer.
+
+    The cwd is OUTSIDE the repository in every arm, so the #113 fall-through
+    cannot resolve MAIN. What is measured is the record fallback itself.
+    """
+
+    def test_the_archive_resolves_main(self, tmp_path, monkeypatch):
+        import archive_pin
+
+        main, removed, identity = _pruned_worktree(tmp_path / "layout")
+        _plant(removed, identity)
+        _enable_record_reading(monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(removed))
+        monkeypatch.chdir(_outside_the_repository(tmp_path))
+
+        path, base = archive_pin.resolve_claude_md()
+
+        assert Path(path).resolve() == (main / ".claude" / "CLAUDE.md").resolve()
+        assert Path(base).resolve() == main.resolve()
+
+    def test_the_sync_writes_main(self, tmp_path, monkeypatch):
+        from scripts import working_memory as wm
+
+        main, removed, identity = _pruned_worktree(tmp_path / "layout")
+        _plant(removed, identity)
+        _enable_record_reading(monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(removed))
+        monkeypatch.chdir(_outside_the_repository(tmp_path))
+
+        result = wm.sync_to_claude_md(
+            {"context": "record-arm", "goal": "record-arm"}, memory_id="0" * 32
+        )
+
+        assert result == wm.SyncResult(wm.SyncResult.WROTE), result
+        assert "record-arm" in (main / ".claude" / "CLAUDE.md").read_text()
+
+    def test_the_pin_cap_gate_is_live_on_mains_document(self, tmp_path, monkeypatch):
+        from shared.claude_md_manager import gate_target
+
+        main, removed, identity = _pruned_worktree(tmp_path / "layout")
+        _plant(removed, identity)
+        _enable_record_reading(monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(removed))
+        monkeypatch.chdir(_outside_the_repository(tmp_path))
+
+        target = gate_target(str(main / ".claude" / "CLAUDE.md"))
+
+        assert target is not None, "the pin cap is DARK on the removed-worktree shape"
+        assert target.target.resolve() == (main / ".claude" / "CLAUDE.md").resolve()
+
+
+class TestTheRecordCannotBeTrusted:
+    def test_an_absent_record_names_the_removed_worktree(self, tmp_path, monkeypatch):
+        """No record: the archive refuses, and the message says the declared
+        directory is gone rather than describing a git failure."""
+        import archive_pin
+
+        _main, removed, _identity = _pruned_worktree(tmp_path / "layout")
+        _enable_record_reading(monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(removed))
+        monkeypatch.chdir(_outside_the_repository(tmp_path))
+
+        with pytest.raises(archive_pin._Unevaluable) as excinfo:
+            archive_pin.resolve_claude_md()
+
+        assert "no longer exists" in excinfo.value.reason, excinfo.value.reason
+        assert "session record" in excinfo.value.reason, excinfo.value.reason
+
+    def test_a_forged_record_refuses_and_never_redirects(self, tmp_path, monkeypatch):
+        """A record naming this declaration whose common dir is not a checkout
+        is an integrity failure, not a fall-through."""
+        import archive_pin
+
+        main, removed, identity = _pruned_worktree(tmp_path / "layout")
+        not_a_checkout = tmp_path / "not-a-checkout"
+        not_a_checkout.mkdir()
+        _plant(
+            removed,
+            dict(identity, common_dir=str(not_a_checkout / ".git")),
+        )
+        _enable_record_reading(monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(removed))
+        monkeypatch.chdir(main)
+
+        with pytest.raises(archive_pin._Unevaluable) as excinfo:
+            archive_pin.resolve_claude_md()
+
+        assert "does not verify" in excinfo.value.reason, excinfo.value.reason
+
+    def test_the_pin_gate_advisory_names_the_removed_worktree(
+        self, tmp_path, monkeypatch
+    ):
+        from pin_caps_gate import _gate
+
+        main, removed, _identity = _pruned_worktree(tmp_path / "layout")
+        _enable_record_reading(monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(removed))
+        monkeypatch.chdir(main)
+
+        decision = _gate({
+            "tool_name": "Write",
+            "agent_type": "pact-orchestrator",
+            "tool_input": {
+                "file_path": str(main / ".claude" / "CLAUDE.md"),
+                "content": "# notes\n",
+            },
+        })
+
+        assert decision is not None
+        assert decision.verdict == "ALLOW_ADVISORY"
+        assert "no longer exists" in decision.reason, decision.reason
+        assert "session record" in decision.reason, decision.reason
+
+    def test_the_save_admits_the_resolved_main_end_to_end(
+        self, tmp_path, monkeypatch, memory_store
+    ):
+        """THE RUNTIME LANE'S REFUSAL, driven through the same child the
+        archive launches: the child's CLAUDE_PROJECT_DIR is pinned to MAIN
+        while the session record names the removed worktree. Resolution alone
+        is not the claim; the SAVE must not answer SCOPE_DISAGREEMENT."""
+        import archive_pin
+
+        main, removed, identity = _pruned_worktree(tmp_path / "layout")
+        # THE CHILD NEEDS A CONFIG ROOT IT CAN SEE. The autouse redirect
+        # patches `Path.home` IN THIS PROCESS only; a spawned child reads the
+        # operator's real home unless CLAUDE_CONFIG_DIR names the sandbox. With
+        # the default redirect the child found no record and this arm passed
+        # without exercising the admission at all.
+        config_root = tmp_path / "config"
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_root))
+        session_dir = _record_path(removed).parent
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "pact-session-context.json").write_text(json.dumps({
+            "session_id": SID,
+            "project_dir": str(removed),
+        }))
+        (session_dir / "worktree-identity.json").write_text(json.dumps(identity))
+        _enable_record_reading(monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(removed))
+        monkeypatch.chdir(_outside_the_repository(tmp_path))
+
+        _path, base = archive_pin.resolve_claude_md()
+        assert Path(base).resolve() == main.resolve()
+
+        rc, _stdout, stderr = archive_pin._run_memory_cli(
+            ["save", "--stdin"],
+            db_path=str(memory_store("mem.db")),
+            stdin_data=json.dumps(
+                {"context": "record-arm", "goal": "record-arm"}
+            ),
+            cwd=base,
+        )
+
+        assert rc == 0, (rc, stderr)
+        assert "SCOPE_DISAGREEMENT" not in stderr, stderr
+        assert "disagrees with this session" not in stderr, stderr
