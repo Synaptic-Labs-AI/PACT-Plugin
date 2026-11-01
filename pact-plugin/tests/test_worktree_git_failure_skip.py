@@ -48,7 +48,9 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
+import shutil
 import subprocess
 from unittest.mock import patch
 
@@ -663,7 +665,7 @@ def _align_memory_scope(monkeypatch, wm, worktree):
     monkeypatch.setattr(wm, "env_record_project_dir_disagreement", lambda: None)
 
 
-def test_a_git_failure_skips_the_memory_sync(repo, monkeypatch):
+def test_a_git_failure_skips_the_memory_sync(repo, monkeypatch, caplog):
     import scripts.working_memory as wm
 
     worktree = _worktree(repo, "memory-sync-git-failure")
@@ -680,14 +682,52 @@ def test_a_git_failure_skips_the_memory_sync(repo, monkeypatch):
 
     _hide_git(monkeypatch)
 
-    result = wm.sync_to_claude_md({"context": "external entry"}, None, "id1")
+    with caplog.at_level(logging.WARNING):
+        result = wm.sync_to_claude_md({"context": "external entry"}, None, "id1")
 
     assert result.reason == wm.SyncResult.ROOT_UNKNOWN, (
         f"the unknown root was not named: {result.reason}"
     )
+    # THE ANCHOR EXISTS HERE, so the warning must name the git failure and NOT
+    # the missing directory.
+    assert "git could not answer" in caplog.text, caplog.text
+    assert "no longer exists" not in caplog.text, caplog.text
     assert "external entry" not in worktree_md.read_text(encoding="utf-8"), (
         "a git failure let the memory sync write the worktree"
     )
+
+
+def test_a_removed_declaration_names_the_missing_directory_in_the_sync(
+    tmp_path, monkeypatch, caplog
+):
+    """The sync warning names the cause that OCCURRED.
+
+    A declared directory that is gone was never offered to git, so "git could
+    not answer" was false there. Git stays available here for the same reason
+    as the SessionStart arm: the discrimination must come from the anchor, not
+    from a git that happened to be broken too."""
+    import scripts.working_memory as wm
+
+    missing = tmp_path / "gone-declaration"
+    # A subdirectory, not tmp_path: the suite's autouse CLAUDE.md redirect
+    # seeds tmp_path/CLAUDE.md, and the resolver's last-resort probe reads the
+    # cwd exactly, so a cwd of tmp_path would find that seed and refuse on
+    # scope escape before the warning this arm is about.
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(missing))
+    monkeypatch.chdir(work)
+    monkeypatch.setattr(wm, "get_project_dir_from_session_record", lambda: None)
+    monkeypatch.setattr(wm, "env_record_project_dir_disagreement", lambda: None)
+
+    with caplog.at_level(logging.WARNING):
+        result = wm.sync_to_claude_md(
+            {"context": "external entry"}, None, "missing1"
+        )
+
+    assert result.reason == wm.SyncResult.ROOT_UNKNOWN, result.reason
+    assert "no longer exists" in caplog.text, caplog.text
+    assert "git could not answer" not in caplog.text, caplog.text
 
 
 def test_the_memory_sync_still_writes_main(repo, monkeypatch):
@@ -959,9 +999,38 @@ def test_d3_no_declared_dir_and_no_git_writes_nothing(repo, monkeypatch):
     system_message = output.get("systemMessage", "")
 
     assert "Project CLAUDE.md skipped" in system_message, system_message[:300]
+    # THE OTHER CAUSE, AND ONLY IT: this anchor EXISTS, so the skip is a git
+    # failure and must not claim the directory is gone.
+    assert "git could not answer" in system_message, system_message[:300]
+    assert "no longer exists" not in system_message, system_message[:300]
     assert wt_md.read_text(encoding="utf-8") == doc, (
         "a no-declared-dir git failure let step 4 mark the worktree"
     )
+
+
+def test_a_removed_declaration_names_the_missing_directory(repo, monkeypatch):
+    """The SessionStart skip names the cause that OCCURRED.
+
+    Git is deliberately LEFT AVAILABLE: the declaration is gone, so the root
+    is unknown before any git call, and the git wording was false on exactly
+    this shape (a removed worktree, the one users hit most)."""
+    worktree = _worktree(repo, "removed-declaration")
+    shutil.rmtree(worktree)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+    monkeypatch.chdir(repo)
+
+    stdin_data = json.dumps(
+        {"session_id": SESSION_ID, "source": "startup", "agent_type": LEAD}
+    )
+    with patch("sys.stdin", io.StringIO(stdin_data)), \
+         patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        with pytest.raises(SystemExit) as exc:
+            session_init.main()
+    assert exc.value.code == 0
+    system_message = json.loads(mock_stdout.getvalue()).get("systemMessage", "")
+
+    assert "no longer exists" in system_message, system_message[:300]
+    assert "git could not answer" not in system_message, system_message[:300]
 
 
 def test_d3b_the_archive_refuses_an_unknown_no_declared_root(repo, monkeypatch):

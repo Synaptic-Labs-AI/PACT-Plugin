@@ -126,6 +126,7 @@ from shared.session_registry import resolve as _registry_resolve
 from shared.paths import get_claude_config_dir
 from shared.project_scope import (
     _record_worktree_identity,
+    anchor_directory_is_missing,
     project_memory_root,
     project_memory_root_or_none,
 )
@@ -1810,11 +1811,25 @@ def main():
         write_root = memory_root if declared_project_dir else None
 
         # One user-visible line for the skip; the writers never run below.
+        # THE TEXT NAMES THE CAUSE THAT OCCURRED. A declared directory that is
+        # gone never reached git, so the git wording was false on the shape
+        # users hit most -- a removed worktree. The anchor is the declaration,
+        # else the cwd (the same one resolved above); "project", not
+        # "declared", because "declared" is false on the no-declared-dir route.
         if frame_is_lead and memory_unknown:
+            if anchor_directory_is_missing(declared_project_dir or project_dir):
+                skip_reason = (
+                    "the project directory no longer exists, so the project "
+                    "memory target is unknown"
+                )
+            else:
+                skip_reason = (
+                    "git could not answer, so the project memory target is "
+                    "unknown"
+                )
             system_messages.append(
-                "Project CLAUDE.md skipped: git could not answer, so the project "
-                "memory target is unknown; this start wrote nothing to either "
-                "checkout."
+                f"Project CLAUDE.md skipped: {skip_reason}; this start wrote "
+                "nothing to either checkout."
             )
 
         # Steps 3/3b create and migrate the project CLAUDE.md, and only a lead
