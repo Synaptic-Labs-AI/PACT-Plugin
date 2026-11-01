@@ -27,16 +27,18 @@ fi
 # shellcheck disable=SC1091
 . .venv/bin/activate
 
-python -m pip install --upgrade pip
+python -m pip install --upgrade -c constraints-ci.txt pip
 
 # CI-parity install: the command below mirrors the install line in
 # .github/workflows/tests.yml — the authoritative copy; read it there rather
 # than here. The package-set parity arm in
 # pact-plugin/tests/test_memory_init.py reddens if the two surfaces drift.
 # constraints-ci.txt pins the direct deps to the TEST-verified versions, so a
-# local green and a CI green resolve the same set. pip stays unconstrained
-# (pinned self-upgrades can deadlock the bootstrap); it is upgraded separately
-# above, mirroring the CI line's `pip` operand.
+# local green and a CI green resolve the same direct-dependency set.
+# pip stays unconstrained (no pin in constraints-ci.txt; a pinned
+# self-upgrade can deadlock the bootstrap). Its upgrade line above carries
+# the same `-c` — inert for pip, uniform with the package line — so every
+# install command applies the constraints file.
 python -m pip install --upgrade -c constraints-ci.txt \
   pytest \
   hypothesis \

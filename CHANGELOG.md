@@ -33,7 +33,7 @@ The plugin now requires Python 3.12 or newer and CI certifies exactly that inter
 
 ### Why
 
-Three CI cells cost over 100 minutes per run while the 3.9 cell certified an interpreter being retired; the investigation machine's default python3 is 3.12.3 and the full unrestricted suite passes there (28,736 passed, 31 skipped). A single cell at the declared floor makes the run and the floor the same thing; newer-interpreter coverage is surrendered deliberately and recorded, not lost silently.
+Three CI cells cost over 100 minutes per run while the 3.9 cell certified an interpreter being retired; the investigation machine's default python3 is 3.12.3 and the full unrestricted suite passes there (28,736 passed, 31 skipped at the pre-collapse tree). A single cell at the declared floor makes the run and the floor the same thing; newer-interpreter coverage is surrendered deliberately and recorded, not lost silently.
 
 ## v4.8.15: pact-memory search default 20, dash stdin sentinel, live dedup search (issue #1647)
 

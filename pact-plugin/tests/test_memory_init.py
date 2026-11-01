@@ -561,6 +561,46 @@ class TestDependencyDriftIsDetectable:
         )
         return install_lines[0]
 
+    @staticmethod
+    def _workflow_executed_pip_install_lines(workflow_text):
+        """Every EXECUTED line bearing `pip install`, in either run form.
+
+        Two executed forms exist in a workflow: an inline `run: <command>`
+        line, and the body of a `run: |` block scalar — the standard idiom
+        for multi-command steps, already used twice in this workflow (the
+        model warm-up and the lint legs). Comment lines are dropped in
+        BOTH positions: workflow-header prose and in-block shell comments
+        are never executed, and the header names pip commands (prose is
+        not a declaration). pipx is BOUNDED OUT structurally: `pipx
+        install` does not contain the `pip install` substring and installs
+        into isolated environments, so `-c` cannot constrain it and it is
+        not this census's surface. `uv pip install` DOES carry the
+        substring and censuses like any other pip install — it resolves
+        packages into the same environment unconstrained.
+        """
+        executed = []
+        block_indent = None
+        for raw in workflow_text.splitlines():
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#"):
+                # Blank and comment lines never execute and never end a
+                # block: only a dedented line closes one.
+                continue
+            indent = len(raw) - len(raw.lstrip(" "))
+            if block_indent is not None:
+                if indent > block_indent:
+                    if "pip install" in stripped:
+                        executed.append(raw)
+                    continue
+                block_indent = None
+            # `[|>]` covers literal and folded scalars; a trailing chomping
+            # indicator (`|-`, `>-`) still matches the single class digit.
+            if re.match(r"^\s*-?\s*run:\s*[|>]", raw):
+                block_indent = indent
+            elif re.match(r"^\s*-?\s*run:", raw) and "pip install" in raw:
+                executed.append(raw)
+        return executed
+
     def _ci_install_package_tokens(self, workflow):
         """Package-name tokens of the workflow's single `pip install` line.
 
@@ -808,7 +848,8 @@ class TestDependencyDriftIsDetectable:
         of both installs to each other, `pip` excepted — the script
         upgrades pip in its own earlier command by design, mirroring the
         CI line's `pip` operand. Version parity follows from set parity:
-        both installs apply the same constraints-ci.txt.
+        every install command in the script applies the same
+        constraints-ci.txt.
         """
         root = self._source_repo_root()
         if root is None:
@@ -838,12 +879,8 @@ class TestDependencyDriftIsDetectable:
 
         commands = self._script_pip_install_commands(script)
         script_tokens = set()
-        package_commands = []
         for cmd in commands:
-            cmd_tokens = self._package_tokens_from_pip_argv(cmd)
-            script_tokens |= cmd_tokens
-            if cmd_tokens - {"pip"}:
-                package_commands.append(cmd)
+            script_tokens |= self._package_tokens_from_pip_argv(cmd)
 
         ci_side = ci_tokens - {"pip"}
         script_side = script_tokens - {"pip"}
@@ -859,10 +896,14 @@ class TestDependencyDriftIsDetectable:
         # script ever dropped its `-c` — the same silent-break shape wearing
         # a different flag. _applies_constraints is the same check
         # the workflow side runs, so one spelling contract covers both.
-        assert package_commands and all(
-            self._applies_constraints(cmd) for cmd in package_commands
+        # EVERY command, the pip-upgrade command included: a zero-package
+        # install carries no operands, so a token-based filter would exempt
+        # exactly the command a re-pointed or missing `-c` could ride while
+        # the set comparison stays green.
+        assert commands and all(
+            self._applies_constraints(cmd) for cmd in commands
         ), (
-            f"LOCAL-MIRROR DRIFT: a package-install command in {script} "
+            f"LOCAL-MIRROR DRIFT: an install command in {script} "
             f"does not apply constraints-ci.txt (`-c`/`--constraint`). The "
             f"package sets still match, so the set comparison above cannot "
             f"see this — but local versions float, silently undoing the "
@@ -953,6 +994,195 @@ class TestDependencyDriftIsDetectable:
                     f"reconcile the coverage arms to read the referenced "
                     f"file in the same change."
                 )
+
+    def test_every_executed_pip_install_is_the_canonical_install_line(self):
+        """Census: no pip install hides from the canonical parse.
+
+        `_ci_install_line` anchors on run:-PREFIXED single lines — the
+        executed INLINE form only. A second install written inside a
+        `run: |` block matches that anchor by construction, so every arm
+        built on it (declared-match, coverage, constraints-APPLIED, the
+        -r/-e tripwire) keeps reading only the canonical line while the
+        block install floats free: probed at 68ef5021, a block-form
+        `pip install some-unpinned-tool` parsed CLEAN through the shipped
+        helpers. The census closes that hole — every executed
+        pip-install line, inline OR block body, must BE the one canonical
+        line, so a block install reddens here even though the canonical
+        parse still succeeds. The other direction needs no arm: moving
+        the canonical install INTO a block reddens `_ci_install_line`
+        itself (PARSE FAILURE, no run:-prefixed match).
+        """
+        root = self._source_repo_root()
+        if root is None:
+            pytest.skip(
+                "SKIPPED, NOT PASSED — no .claude-plugin/marketplace.json "
+                f"above {Path(__file__).resolve()}, so this is not a PACT "
+                "source checkout. The expected case is an INSTALLED PLUGIN "
+                "CACHE, which has no .github/ tree by design. This skip is "
+                "NO INFORMATION about block-form installs — never read it "
+                "as a pass."
+            )
+        workflow = root / ".github" / "workflows" / "tests.yml"
+        assert workflow.exists(), (
+            f"source checkout detected at {root} (marketplace.json present) "
+            f"but {workflow} is missing. The census cannot run. This is a "
+            f"FAILURE, not a skip: inside a checkout the workflow is "
+            f"required."
+        )
+        canonical = self._ci_install_line(workflow)
+        census = self._workflow_executed_pip_install_lines(
+            workflow.read_text(encoding="utf-8")
+        )
+        assert census, (
+            "PARSE FAILURE, not census agreement: the canonical parse read "
+            "an install line but the census found no executed pip-install "
+            "line, so the census no longer models the workflow. Re-point "
+            "it; do not delete it."
+        )
+        assert census == [canonical], (
+            "BLOCK-FORM INSTALL DRIFT: executed pip-install lines exist "
+            "beyond the canonical install step:\n"
+            + "\n".join(
+                f"  {ln.strip()!r}" for ln in census if ln != canonical
+            )
+            + "\nThe canonical parser reads run:-prefixed lines only, so "
+            "every coverage / constraints / tripwire arm above reads just "
+            "the canonical line while these installs resolve unpinned. "
+            "Fold them into the canonical install step, or reconcile the "
+            "arms to read them in the same change."
+        )
+
+    def test_the_three_floor_literals_agree(self):
+        """Declared floor, CI cell and AST guard must move together.
+
+        Three surfaces state the Python floor: `requires-python` in
+        pyproject.toml (the SUPPORT BOUNDARY), `python-version` in the
+        workflow (the tested set), and the `feature_version=(3, N)`
+        literal the syntax-floor guard parses at
+        (test_py312_syntax_floor.py). Before this arm nothing bound them:
+        the alignment was claimed in COMMENTS only, so editing any one
+        literal reddened nothing while the declared and enforced floors
+        diverged silently. All three are read as TEXT and compared.
+
+        The guard file MENTIONS several feature_version values by design —
+        its own boundary arm parses a PEP 695 sample at (3, 11) to prove
+        the detector discriminates — so this arm cannot compare every
+        mention. It anchors on the two occurrences that STATE the enforced
+        floor: the detector's `ast.parse(source, feature_version=(X, Y))`
+        call, and the violation-message echo of the same value. A message
+        left at the old floor when the call moves is exactly the silent
+        divergence this arm exists to catch.
+        """
+        root = self._source_repo_root()
+        if root is None:
+            pytest.skip(
+                "SKIPPED, NOT PASSED — no .claude-plugin/marketplace.json "
+                f"above {Path(__file__).resolve()}, so this is not a PACT "
+                "source checkout. The expected case is an INSTALLED PLUGIN "
+                "CACHE, which ships no pyproject/workflow pair by design. "
+                "This skip is NO INFORMATION about floor-literal alignment "
+                "— never read it as a pass."
+            )
+        pyproject = root / "pyproject.toml"
+        assert pyproject.exists(), (
+            f"source checkout detected at {root} (marketplace.json present) "
+            f"but {pyproject} is missing. The floor alignment arm cannot "
+            f"run. This is a FAILURE, not a skip: inside a checkout the "
+            f"declaration is required."
+        )
+        workflow = root / ".github" / "workflows" / "tests.yml"
+        assert workflow.exists(), (
+            f"source checkout detected at {root} (marketplace.json present) "
+            f"but {workflow} is missing. The floor alignment arm cannot "
+            f"run. This is a FAILURE, not a skip: inside a checkout the "
+            f"workflow is required."
+        )
+        guard = Path(__file__).resolve().parent / "test_py312_syntax_floor.py"
+        assert guard.exists(), (
+            f"the syntax-floor guard {guard} is missing beside this file. "
+            f"The floor alignment arm cannot run — this is a FAILURE, not "
+            f"a skip."
+        )
+
+        declared = re.findall(
+            r'requires-python\s*=\s*">=(\d+)\.(\d+)"',
+            pyproject.read_text(encoding="utf-8"),
+        )
+        assert declared, (
+            f"PARSE FAILURE, not floor drift: no `requires-python = "
+            f"\">=X.Y\"` literal found in {pyproject}. The declaration "
+            f"changed shape — re-point this arm; do not weaken it to a "
+            f"skip."
+        )
+        assert len(declared) == 1, (
+            f"PARSE AMBIGUOUS, not floor drift: {len(declared)} "
+            f"`requires-python` declarations found in {pyproject}. "
+            f"Reconcile them before this arm can compare."
+        )
+        cell = re.findall(
+            r'python-version:\s*"(\d+)\.(\d+)"',
+            workflow.read_text(encoding="utf-8"),
+        )
+        assert cell, (
+            f"PARSE FAILURE, not floor drift: no `python-version: \"X.Y\"` "
+            f"literal found in {workflow}. The CI cell changed shape — "
+            f"re-point this arm; do not weaken it to a skip."
+        )
+        assert len(cell) == 1, (
+            f"PARSE AMBIGUOUS, not floor drift: {len(cell)} "
+            f"`python-version: \"X.Y\"` literals found in {workflow}. "
+            f"Reconcile them before this arm can compare."
+        )
+        # The enforced constant: the detector's parse of the scanned
+        # corpus. Anchored on `ast.parse(source,` so the boundary arm's
+        # deliberate (3, 11) sample parse cannot masquerade as the floor.
+        enforced = re.findall(
+            r"ast\.parse\(\s*source,\s*feature_version=\((\d+),\s*(\d+)\)",
+            guard.read_text(encoding="utf-8"),
+        )
+        assert enforced, (
+            f"PARSE FAILURE, not floor drift: no "
+            f"`ast.parse(source, feature_version=(X, Y))` call found in "
+            f"{guard}. The detector changed shape — re-point this arm; do "
+            f"not weaken it to a skip."
+        )
+        assert len(enforced) == 1, (
+            f"PARSE AMBIGUOUS, not floor drift: {len(enforced)} "
+            f"`ast.parse(source, ...)` calls found in {guard}. The "
+            f"detector must state ONE floor; reconcile the copies."
+        )
+        echo = re.findall(
+            r"not parseable at feature_version=\((\d+),\s*(\d+)\)",
+            guard.read_text(encoding="utf-8"),
+        )
+        assert len(echo) == 1, (
+            f"PARSE AMBIGUOUS, not floor drift: {len(echo)} "
+            f"violation-message floor echoes found in {guard}; expected "
+            f"exactly one. Re-point this arm."
+        )
+
+        declared_pair = tuple(int(part) for part in declared[0])
+        cell_pair = tuple(int(part) for part in cell[0])
+        guard_pair = tuple(int(part) for part in enforced[0])
+        echo_pair = tuple(int(part) for part in echo[0])
+        assert echo_pair == guard_pair, (
+            f"GUARD-INTERNAL DRIFT: the detector enforces "
+            f"{'.'.join(map(str, guard_pair))} but its violation message "
+            f"reports {'.'.join(map(str, echo_pair))}. A message left at "
+            f"the old floor misreports every violation it prints; move "
+            f"both in the same change."
+        )
+        assert declared_pair == cell_pair == guard_pair, (
+            f"FLOOR-LITERAL DRIFT: the three floor surfaces disagree.\n"
+            f"  pyproject requires-python: {'.'.join(map(str, declared_pair))}\n"
+            f"  workflow python-version:  {'.'.join(map(str, cell_pair))}\n"
+            f"  syntax-floor guard:       {'.'.join(map(str, guard_pair))}\n"
+            f"Each is a different QUESTION (support boundary, tested set, "
+            f"scan dialect) that happens to share one value today; moving "
+            f"any one of them takes its own run on the new target, and "
+            f"then all three move in the same change — this red is the "
+            f"reminder, not a bug."
+        )
 
     def test_ci_branch_emits_nothing_to_stderr(self):
         """The silence is the CONTRACT, so pin it — a log line here breaks 15
