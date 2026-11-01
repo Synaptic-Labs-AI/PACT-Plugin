@@ -473,17 +473,22 @@ class TestDependencyDriftIsDetectable:
         "--hash",
     })
 
-    # The census anchor: `pip install` OR `pip3 install`. pip3 is the stock
-    # spelling on GitHub's Ubuntu runners, so a one-word honest edit switches
-    # spelling and every substring-anchored extractor goes blind at once
-    # (round-5 security probe: `pip3 install evilpkg` evaded the census,
-    # exactly-one, coverage, constraints-APPLIED AND the -r/-e tripwire
-    # simultaneously). `pipx install` still does NOT match — pipx installs
-    # into isolated environments `-c` cannot constrain and stays outside
-    # this census by design — while `uv pip install` DOES match and is
-    # censused deliberately: it resolves packages into the same
-    # environment unconstrained.
-    _PIP_INSTALL_COMMAND_RE = re.compile(r"\bpip3? install\b")
+    # The census anchor: `pip install` OR `pip3 install`, over ANY run of
+    # spaces/tabs between the two words. pip3 is the stock spelling on
+    # GitHub's Ubuntu runners, so a one-word honest edit switches spelling
+    # and every substring-anchored extractor goes blind at once (round-5
+    # security probe: `pip3 install evilpkg` evaded the census, exactly-one,
+    # coverage, constraints-APPLIED AND the -r/-e tripwire simultaneously).
+    # The whitespace run is equally deliberate (round-6 probes): the shell
+    # collapses `pip  install` (double space) and reads a TAB as IFS, so
+    # both spellings execute while a literal-single-space anchor reads
+    # neither — an inline tab is invalid YAML and dies at parse, so only
+    # the block-body spellings were live holes. `pipx install` still does
+    # NOT match — pipx installs into isolated environments `-c` cannot
+    # constrain and stays outside this census by design — while
+    # `uv pip install` DOES match and is censused deliberately: it
+    # resolves packages into the same environment unconstrained.
+    _PIP_INSTALL_COMMAND_RE = re.compile(r"\bpip3?[ \t]+install\b")
 
     @staticmethod
     def _normalise_pin_name(name):
@@ -581,31 +586,78 @@ class TestDependencyDriftIsDetectable:
         )
         return install_lines[0]
 
+    @staticmethod
+    def _logical_commands_from_block_body(body_lines, folded):
+        """Block-body lines -> the shell strings they actually execute.
+
+        A literal (`|`) body runs ONE shell line per body line, EXCEPT a
+        trailing backslash joins the next line into the same command
+        (round-6 probes P3/P3b: `pip \\` + `install evilpkg` executes as
+        `pip install evilpkg` — argv ground-truthed — while a line-local
+        anchor reads neither half). A folded (`>`) body is ONE scalar:
+        YAML folds each newline into a space, so the whole body executes
+        as one string (round-6 probe P2: pip and install split across
+        body lines fold back together). Real folded scalars keep newlines
+        at blank lines and deeper indentation; joining everything on one
+        space regardless only ever reads MORE as one command — over-catch,
+        never under-catch, for an anchor test.
+        """
+        if folded:
+            return [" ".join(body_lines)]
+        commands = []
+        current = ""
+        for line in body_lines:
+            current = f"{current} {line}".strip()
+            if current.endswith("\\"):
+                current = current.rstrip("\\").strip()
+                continue
+            commands.append(current)
+            current = ""
+        if current:
+            commands.append(current)
+        return commands
+
     @classmethod
     def _workflow_executed_pip_install_lines(cls, workflow_text):
-        """Every EXECUTED line bearing a pip/pip3 install, in either run form.
+        """Every EXECUTED command bearing a pip/pip3 install, in either run
+        form — normalised to the string the shell executes BEFORE the
+        anchor runs.
 
         Two executed forms exist in a workflow: an inline `run: <command>`
-        line, and the body of a `run: |` block scalar — the standard idiom
-        for multi-command steps, already used twice in this workflow (the
-        model warm-up and the lint legs). Comment lines are dropped in
-        BOTH positions: workflow-header prose and in-block shell comments
-        are never executed, and the header names pip commands (prose is
-        not a declaration). `pip3` is censused with `pip` — the same
-        package manager under its runner-stock spelling, invisible to
-        every arm while installing until the round-5 probe (probed live:
-        all arms green with `pip3 install evilpkg`). pipx is BOUNDED OUT
-        structurally: `pipx install` does not match the census anchor and
-        installs into isolated environments, so `-c` cannot constrain it
-        and it is not this census's surface. `uv pip install` DOES match
-        the anchor and censuses like any other pip install — it resolves
-        packages into the same environment unconstrained. A THIRD executed
-        form, the folded plain scalar, is REFUSED outright before the
-        census runs — see `_refuse_plain_scalar_run_continuations`.
+        line, and the body of a `run: |`/`run: >` block — the standard
+        idiom for multi-command steps, already used twice in this workflow
+        (the model warm-up and the lint legs). Block bodies pass through
+        `_logical_commands_from_block_body` first, so a backslash-joined
+        install (`pip \\` + `install pkg`, the natural wrap for the
+        130-char canonical line) and a folded body that splits the words
+        across lines both anchor like their one-line spelling. Comment
+        lines are dropped in BOTH positions: workflow-header prose and
+        in-block shell comments are never executed, and the header names
+        pip commands (prose is not a declaration). `pip3` is censused
+        with `pip` — the same package manager under its runner-stock
+        spelling, invisible to every arm while installing until the
+        round-5 probe (probed live: all arms green with
+        `pip3 install evilpkg`). pipx is BOUNDED OUT structurally:
+        `pipx install` does not match the census anchor and installs into
+        isolated environments, so `-c` cannot constrain it and it is not
+        this census's surface. `uv pip install` DOES match the anchor and
+        censuses like any other pip install — it resolves packages into
+        the same environment unconstrained. A THIRD executed form, the
+        folded plain scalar, is REFUSED outright before the census runs —
+        see `_refuse_plain_scalar_run_continuations`.
         """
         cls._refuse_plain_scalar_run_continuations(workflow_text)
         executed = []
         block_indent = None
+        block_folded = False
+        block_body = []
+
+        def flush_block():
+            for command in cls._logical_commands_from_block_body(
+                    block_body, block_folded):
+                if cls._PIP_INSTALL_COMMAND_RE.search(command):
+                    executed.append(command)
+
         for raw in workflow_text.splitlines():
             stripped = raw.strip()
             if not stripped or stripped.startswith("#"):
@@ -615,17 +667,22 @@ class TestDependencyDriftIsDetectable:
             indent = len(raw) - len(raw.lstrip(" "))
             if block_indent is not None:
                 if indent > block_indent:
-                    if cls._PIP_INSTALL_COMMAND_RE.search(stripped):
-                        executed.append(raw)
+                    block_body.append(stripped)
                     continue
+                flush_block()
                 block_indent = None
+                block_body = []
             # `[|>]` covers literal and folded scalars; a trailing chomping
             # indicator (`|-`, `>-`) still matches the single class digit.
-            if re.match(r"^\s*-?\s*run:\s*[|>]", raw):
+            header = re.match(r"^\s*-?\s*run:\s*([|>])", raw)
+            if header:
                 block_indent = indent
+                block_folded = header.group(1) == ">"
             elif re.match(r"^\s*-?\s*run:", raw) \
                     and cls._PIP_INSTALL_COMMAND_RE.search(raw):
                 executed.append(raw)
+        if block_indent is not None:
+            flush_block()
         return executed
 
     @staticmethod
@@ -879,38 +936,44 @@ class TestDependencyDriftIsDetectable:
         """The script's pip/pip3 install commands, from EXECUTED text only.
 
         Comment lines are dropped FIRST (the script's prose may quote pip
-        commands — prose is not a declaration), and a command starting a
-        pip or pip3 install extends through its backslash continuations.
-        `pip3` enumerates with `pip`: the round-5 probe showed a
-        `pip3 install` line in the script reading as no command at all,
-        riding past the constraints-APPLIED all() and the set parity while
-        floating an unpinned package into the local mirror. Shared by
-        every arm that reasons about the script surface, so one parse
-        contract covers them all.
+        commands — prose is not a declaration), and a command extends
+        through its backslash continuations BEFORE the anchor runs, so a
+        wrapped `python -m pip \\` + `install pkg` enumerates like its
+        one-line spelling (round-6 probe S1: the per-line start condition
+        let the wrapped form ride every script arm while installing). The
+        anchor is then applied to each JOINED command, and only
+        anchor-matching joins are returned — the script's other continued
+        commands (the apt-get bootstrap lines) are joined and released
+        without ever reaching the arms. `pip3` enumerates with `pip`:
+        the round-5 probe showed a `pip3 install` line in the script
+        reading as no command at all, riding past the constraints-APPLIED
+        all() and the set parity while floating an unpinned package into
+        the local mirror. Shared by every arm that reasons about the
+        script surface, so one parse contract covers them all.
         """
-        commands = []
-        saw_install_command = False
-        collecting = False
-        command = ""
+        logical = []
+        pending = None
         for raw in script.read_text(encoding="utf-8").splitlines():
             line = raw.strip()
-            if collecting:
-                command += " " + line.rstrip("\\").strip()
-                collecting = raw.rstrip().endswith("\\")
-                if not collecting:
-                    commands.append(command)
-                    command = ""
+            if pending is not None:
+                pending = f"{pending} {line.rstrip(chr(92)).strip()}".strip()
+                if not raw.rstrip().endswith("\\"):
+                    logical.append(pending)
+                    pending = None
                 continue
-            if line.startswith("#") \
-                    or not self._PIP_INSTALL_COMMAND_RE.search(line):
+            if line.startswith("#"):
                 continue
-            saw_install_command = True
-            command = line.rstrip("\\").strip()
-            collecting = raw.rstrip().endswith("\\")
-            if not collecting:
-                commands.append(command)
-                command = ""
-        assert saw_install_command, (
+            if not raw.rstrip().endswith("\\"):
+                logical.append(line)
+                continue
+            pending = line.rstrip("\\").strip()
+        if pending is not None:
+            logical.append(pending)
+        commands = [
+            cmd for cmd in logical
+            if self._PIP_INSTALL_COMMAND_RE.search(cmd)
+        ]
+        assert commands, (
             f"PARSE FAILURE, not parity drift: no non-comment pip/pip3 "
             f"install command could be read from {script}. The script "
             f"changed shape (a requirements file, a variable-driven loop) "
@@ -1322,6 +1385,102 @@ class TestDependencyDriftIsDetectable:
             + "\npip3 install evilpkg\n"
         copy = self._repo_copy_carrying(
             tmp_path / "script", script_text=mutated)
+        monkeypatch.setattr(type(self), "_source_repo_root", lambda self: copy)
+        with pytest.raises(AssertionError, match="does not apply constraints"):
+            self.test_cursor_install_sh_matches_the_ci_install_line()
+
+    def test_joined_install_spells_are_censused(self, tmp_path, monkeypatch):
+        """MUTATION ARM (join class): every wrapped/widened install spell
+        reddens through a shipped arm.
+
+        Round-6 probes (architect A6-1, tester T6-1, security S6-1/S6-2)
+        shared one root cause: every extractor anchored on a LINE-LOCAL
+        literal `pip install` substring, so shapes that execute an install
+        read as no install at all. The normalization fixes the class —
+        backslash continuations joined in `|` bodies and script commands,
+        `>` bodies unfolded, the anchor's space widened to any whitespace
+        run — and this arm certifies each probed shape against the
+        SHIPPED arm that must kill it, never a reimplementation.
+        """
+        root = self._source_repo_root()
+        if root is None:
+            pytest.skip("SKIPPED, NOT PASSED — not a source checkout; see "
+                        "_repo_copy_carrying for the full wording.")
+        workflow = root / ".github" / "workflows" / "tests.yml"
+        real_text = workflow.read_text(encoding="utf-8")
+        canonical = self._ci_install_line(workflow)
+
+        def against(workflow_text, name):
+            copy = self._repo_copy_carrying(
+                tmp_path / name, workflow_text=workflow_text)
+            monkeypatch.setattr(
+                type(self), "_source_repo_root", lambda self: copy)
+
+        # P1 — double space on an inline second step: the shell collapses
+        # the run, so only the widened anchor can count the line, and the
+        # exactly-one parse must be the kill.
+        against(real_text.replace(
+            canonical,
+            canonical + "\n      - name: Rogue double-spaced installer\n"
+                        "        run: pip  install evilpkg",
+            1), "p1")
+        with pytest.raises(AssertionError, match="PARSE AMBIGUITY"):
+            self.test_declared_packages_match_the_ci_install_line()
+
+        # P2 — a folded (`>-`) body splitting pip and install across body
+        # lines: YAML folds them into one executed scalar, so only the
+        # unfold can see the install, and the census equality must kill.
+        against(real_text.replace(
+            canonical,
+            canonical + "\n      - name: Rogue folded installer\n"
+                        "        run: >-\n"
+                        "          pip\n"
+                        "          install evilpkg",
+            1), "p2")
+        with pytest.raises(AssertionError, match="BLOCK-FORM INSTALL DRIFT"):
+            self.test_every_executed_pip_install_is_the_canonical_install_line()
+
+        # P3 — backslash continuation inside a `|` body: bash joins
+        # `pip \` + `install evilpkg` into one argv, so the census must
+        # read the JOIN, not the lines.
+        against(real_text.replace(
+            "          ruff --version\n",
+            "          ruff --version\n          pip \\\n"
+            "          install evilpkg\n",
+            1), "p3")
+        with pytest.raises(AssertionError, match="BLOCK-FORM INSTALL DRIFT"):
+            self.test_every_executed_pip_install_is_the_canonical_install_line()
+
+        # P3b — the natural wrap of the 130-char canonical spelling:
+        # `python -m pip \` + `install evilpkg` joins the same way.
+        against(real_text.replace(
+            "          ruff --version\n",
+            "          ruff --version\n          python -m pip \\\n"
+            "          install evilpkg\n",
+            1), "p3b")
+        with pytest.raises(AssertionError, match="BLOCK-FORM INSTALL DRIFT"):
+            self.test_every_executed_pip_install_is_the_canonical_install_line()
+
+        # S6-2 — a TAB as the separator in a `|` body: tab is IFS to the
+        # shell, so the widened anchor must match what a literal space
+        # missed. Inline tabs are invalid YAML and die at parse; the
+        # block body is the live spelling.
+        against(real_text.replace(
+            "          ruff --version\n",
+            "          ruff --version\n          pip\tinstall evilpkg\n",
+            1), "tab")
+        with pytest.raises(AssertionError, match="BLOCK-FORM INSTALL DRIFT"):
+            self.test_every_executed_pip_install_is_the_canonical_install_line()
+
+        # S1 — the script twin: a wrapped `python -m pip \` + `install
+        # evilpkg` in .cursor/install.sh enumerates after the join, so the
+        # constraints-APPLIED all() reddens naming the constraint the
+        # rogue command fails to apply.
+        script = root / ".cursor" / "install.sh"
+        mutated = script.read_text(encoding="utf-8") \
+            + "\npython -m pip \\\ninstall evilpkg\n"
+        copy = self._repo_copy_carrying(
+            tmp_path / "s1", script_text=mutated)
         monkeypatch.setattr(type(self), "_source_repo_root", lambda self: copy)
         with pytest.raises(AssertionError, match="does not apply constraints"):
             self.test_cursor_install_sh_matches_the_ci_install_line()
