@@ -2085,23 +2085,23 @@ JOURNAL_READBACK_MATRIX = {
     ("orchestrate.md", 9): _expect("variety_assessed", 'str(event.get("task_id")) == "{taskId}"', 'event.get("scope") == "dispatch"'),
     ("orchestrate.md", 10): _expect("agent_dispatch", 'str(event.get("task_id")) == "{taskId}"', 'event.get("agent") == "architect"', 'event.get("phase") == "ARCHITECT"'),
     ("orchestrate.md", 11): _expect("artifact_paths", 'event.get("workflow") == "architect"', 'bool(event.get("feature"))', 'str(event.get("task_id")) == "{architect_task_id}"'),
-    ("orchestrate.md", 12): _expect("s2_state_seeded", 'bool(event.get("worktree"))'),
+    ("orchestrate.md", 12): _expect("s2_state_seeded", 'str(event.get("worktree")) == "{worktree_path}"'),
     ("orchestrate.md", 13): _expect("variety_assessed", 'str(event.get("task_id")) == "{taskId}"', 'event.get("scope") == "dispatch"'),
     ("orchestrate.md", 14): _expect("agent_dispatch", 'str(event.get("task_id")) == "{taskId}"', 'str(event.get("agent")) == "{coder-name}"', 'event.get("phase") == "CODE"'),
     ("orchestrate.md", 15): _expect("commit", 'str(event.get("sha")) == "{short_sha}"', 'event.get("phase") == "CODE"'),
-    ("orchestrate.md", 16): _expect("artifact_paths", 'event.get("workflow") == "code-auditor"', 'bool(event.get("feature"))'),
+    ("orchestrate.md", 16): _expect("artifact_paths", 'event.get("workflow") == "code-auditor"', 'str(event.get("feature")) == "{feature}"'),
     ("orchestrate.md", 17): _expect("variety_assessed", 'str(event.get("task_id")) == "{taskId}"', 'event.get("scope") == "dispatch"'),
     ("orchestrate.md", 18): _expect("agent_dispatch", 'str(event.get("task_id")) == "{taskId}"', 'event.get("agent") == "test-engineer"', 'event.get("phase") == "TEST"'),
     ("pause.md", 1): _expect("session_consolidated", 'event.get("pass") == 2', 'event.get("task_count") == {task_count}', 'event.get("memories_saved") == {memories_saved}'),
     ("pause.md", 2): _expect("session_paused", 'event.get("pr_number") == {pr_number}', 'str(event.get("consolidation_completed")).lower() == "{true_or_false}"', 'str(event.get("team_name")) == "{team_name}"'),
     ("peer-review.md", 1): _expect("variety_assessed", 'str(event.get("task_id")) == "{taskId}"', 'event.get("scope") == "dispatch"'),
     ("peer-review.md", 2): _expect("review_dispatch", 'event.get("pr_number") == {pr_number}'),
-    ("peer-review.md", 3): _expect("artifact_paths", 'event.get("workflow") == "peer-review"', 'bool(event.get("feature"))'),
+    ("peer-review.md", 3): _expect("artifact_paths", 'event.get("workflow") == "peer-review"', 'str(event.get("feature")) == "{feature}"'),
     ("peer-review.md", 4): _expect("review_finding", 'str(event.get("task_id")) == "{reviewer_task_id}"', 'str(event.get("reviewer")) == "{reviewer-name}"'),
     ("peer-review.md", 5): _expect("remediation", 'event.get("cycle") == {cycle_number}', 'str(event.get("task_id")) == "{fixer_task_id}"'),
     ("peer-review.md", 6): _expect("pr_ready", 'event.get("pr_number") == {pr_number}', 'event.get("commits") == {total_commit_count}'),
     ("plan-mode.md", 1): _expect("variety_assessed", 'str(event.get("task_id")) == "{taskId}"', 'event.get("scope") == "dispatch"'),
-    ("plan-mode.md", 2): _expect("artifact_paths", 'event.get("workflow") == "plan-mode"', 'bool(event.get("feature"))'),
+    ("plan-mode.md", 2): _expect("artifact_paths", 'event.get("workflow") == "plan-mode"', 'str(event.get("feature")) == "{feature-slug}"'),
     ("prune-memory.md", 1): _expect("pin_prune_skipped", 'event.get("outcome") == "cancelled"', 'event.get("pin_count") == 12'),
     ("prune-memory.md", 2): _expect("pin_prune_skipped", 'event.get("outcome") == "no_candidates"', 'event.get("pin_count") == 0'),
     ("prune-memory.md", 3): _expect("pin_prune_skipped", 'event.get("outcome") == "unknown_state"', 'event.get("pin_count") == 12'),
@@ -2405,7 +2405,7 @@ def _synthetic_command_text(writes, spelling="direct", prefix="", fence="bash"):
             verb = "" if spelling == "split-write" else "write "
             invocation = f'{prefix}python3 "{root}/hooks/shared/session_journal.py" {verb}\\'
         lines.append(invocation)
-        if spelling != "variable":
+        if spelling not in ("variable", "variable-unquoted"):
             continuation = "write --type" if spelling == "split-write" else "--type"
             lines.append(
                 f"{prefix}  {continuation} {event_type} --session-dir '{{session_dir}}' --stdin <<'JSON'"
@@ -2817,8 +2817,46 @@ def test_raw_readback_executes_and_verifies_under_isolation(
         assert wrong.returncode == 0, f"{site_key} wrong event: {wrong.stderr}"
         assert "[JOURNAL READ-BACK FAILED]" in wrong.stderr
     else:
-        assert wrong.returncode != 0, f"{site_key} wrong final event passed under optimize"
+        assert wrong.returncode != 0, f"{site_key} wrong final event passed under isolation"
         assert "wrong_final_event" in wrong.stderr
+
+
+@pytest.mark.parametrize(
+    "site_key,identity_field,placeholder",
+    [
+        (("orchestrate.md", 12), "worktree", "{worktree_path}"),
+        (("orchestrate.md", 16), "feature", "{feature}"),
+        (("peer-review.md", 3), "feature", "{feature}"),
+        (("plan-mode.md", 2), "feature", "{feature-slug}"),
+    ],
+    ids=["s2-worktree", "code-auditor-feature", "peer-review-feature", "plan-mode-feature"],
+)
+def test_raw_readback_rejects_wrong_final_identity(
+    site_key, identity_field, placeholder, tmp_path, journal_site_map
+):
+    """A same-type final event for another feature/worktree must not verify."""
+    intended = "intended-" + identity_field
+    unrelated = "unrelated-" + identity_field
+    replacements = {placeholder: intended}
+    expectation = JOURNAL_READBACK_MATRIX[site_key]
+    spec = _expected_spec(expectation, tmp_path, replacements=replacements)
+    matching_event = _matching_journal_event(spec)
+    assert matching_event[identity_field] == intended
+    script = _render_live_readback(
+        site_key, journal_site_map, tmp_path, replacements=replacements
+    )
+
+    _write_journal_event(tmp_path, matching_event)
+    matching = _run_readback(script, tmp_path)
+    assert matching.returncode == 0, matching.stderr
+
+    wrong_event = dict(matching_event, **{identity_field: unrelated})
+    assert wrong_event[identity_field] != intended
+    _write_journal_event(tmp_path, wrong_event)
+    wrong = _run_readback(script, tmp_path)
+    assert wrong.returncode != 0
+    assert identity_field in wrong.stderr
+    assert unrelated in wrong.stderr
 
 
 def test_isolated_readback_ignores_hostile_cwd_json_module(tmp_path, journal_site_map):

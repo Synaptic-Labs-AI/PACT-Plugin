@@ -354,7 +354,7 @@ bad += [key for key in spec["absent"] if key in event]
 if bad:
     raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
 ' <<'JSON'
-{"session_dir":"{session_dir}","exact":{"type":"artifact_paths","workflow":"peer-review"},"nonempty":["feature"],"absent":[]}
+{"session_dir":"{session_dir}","exact":{"type":"artifact_paths","workflow":"peer-review","feature":"{feature}"},"nonempty":[],"absent":[]}
 JSON
      ```
 2. **Journal events**: Write a `review_finding` event for each synthesized finding:

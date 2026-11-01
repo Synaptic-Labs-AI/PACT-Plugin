@@ -914,7 +914,7 @@ bad += [key for key in spec["absent"] if key in event]
 if bad:
     raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
 ' <<'JSON'
-{"session_dir":"{session_dir}","exact":{"type":"s2_state_seeded"},"nonempty":["worktree"],"absent":[]}
+{"session_dir":"{session_dir}","exact":{"type":"s2_state_seeded","worktree":"{worktree_path}"},"nonempty":[],"absent":[]}
 JSON
 ```
 
@@ -1087,7 +1087,7 @@ bad += [key for key in spec["absent"] if key in event]
 if bad:
     raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
 ' <<'JSON'
-{"session_dir":"{session_dir}","exact":{"type":"artifact_paths","workflow":"code-auditor"},"nonempty":["feature"],"absent":[]}
+{"session_dir":"{session_dir}","exact":{"type":"artifact_paths","workflow":"code-auditor","feature":"{feature}"},"nonempty":[],"absent":[]}
 JSON
   ```
 - [ ] **HANDOFF acceptance**: on receiving each Task-complete `SendMessage`, accept on the HANDOFF payload the notify carries. If the notify carries no HANDOFF payload, `SendMessage` the agent to submit one before downstream dispatch proceeds. The disk copy is the deferred audit, not the acceptance surface — see [pact-completion-authority.md §Read-Trigger Precondition](../protocols/pact-completion-authority.md#read-trigger-precondition) point 4 for the audit, the integrity finding and the repair.

@@ -407,7 +407,7 @@ bad += [key for key in spec["absent"] if key in event]
 if bad:
     raise SystemExit("Journal read-back failed for " + repr(bad) + ": " + repr(event))
 ' <<'JSON'
-{"session_dir":"{session_dir}","exact":{"type":"artifact_paths","workflow":"plan-mode"},"nonempty":["feature"],"absent":[]}
+{"session_dir":"{session_dir}","exact":{"type":"artifact_paths","workflow":"plan-mode","feature":"{feature-slug}"},"nonempty":[],"absent":[]}
 JSON
 ```
 
