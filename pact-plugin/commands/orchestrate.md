@@ -545,7 +545,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
   {"workflow": "prepare", "feature": "{feature}", "paths": ["{absolute_path_1}", "{absolute_path_2}"], "task_id": "{prepare_task_id}"}
 JSON
   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
-{"session_dir":"{session_dir}","exact":{"type":"artifact_paths","workflow":"prepare","task_id":"{prepare_task_id}"},"nonempty":["feature"],"absent":[]}
+{"session_dir":"{session_dir}","exact":{"type":"artifact_paths","workflow":"prepare","feature":"{feature}","task_id":"{prepare_task_id}"},"nonempty":[],"absent":[]}
 JSON
   ```
 - [ ] **Complete the PREPARE phase task** — ONLY after the artifact check and the `artifact_paths` emit above: `TaskUpdate(prepareTaskId, status="completed")`. This ordering is load-bearing: the emit MUST land before the phase-task completion so the durability pointer is on disk by the time completion is observed. (A skipped PREPARE phase completes earlier with `metadata.skipped=true` and runs neither the check nor the emit.)
@@ -671,7 +671,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
   {"workflow": "architect", "feature": "{feature}", "paths": ["{absolute_path_1}", "{absolute_path_2}"], "task_id": "{architect_task_id}"}
 JSON
   python3 -I "{plugin_root}/hooks/shared/session_journal.py" verify-last --stdin <<'JSON'
-{"session_dir":"{session_dir}","exact":{"type":"artifact_paths","workflow":"architect","task_id":"{architect_task_id}"},"nonempty":["feature"],"absent":[]}
+{"session_dir":"{session_dir}","exact":{"type":"artifact_paths","workflow":"architect","feature":"{feature}","task_id":"{architect_task_id}"},"nonempty":[],"absent":[]}
 JSON
   ```
 - [ ] **Complete the ARCHITECT phase task** — ONLY after the artifact check and the `artifact_paths` emit above: `TaskUpdate(architectTaskId, status="completed")`. This ordering is load-bearing: the emit MUST land before the phase-task completion so the durability pointer is on disk by the time completion is observed. (A skipped ARCHITECT phase completes earlier with `metadata.skipped=true` and runs neither the check nor the emit.)

@@ -2090,10 +2090,10 @@ JOURNAL_READBACK_MATRIX = {
     ("orchestrate.md", 5): _expect("phase_transition", 'str(event.get("phase")) == "{PHASE}"', 'event.get("status") == "skipped"'),
     ("orchestrate.md", 6): _expect("variety_assessed", 'str(event.get("task_id")) == "{taskId}"', 'event.get("scope") == "dispatch"'),
     ("orchestrate.md", 7): _expect("agent_dispatch", 'str(event.get("task_id")) == "{taskId}"', 'event.get("agent") == "preparer"', 'event.get("phase") == "PREPARE"'),
-    ("orchestrate.md", 8): _expect("artifact_paths", 'event.get("workflow") == "prepare"', 'bool(event.get("feature"))', 'str(event.get("task_id")) == "{prepare_task_id}"'),
+    ("orchestrate.md", 8): _expect("artifact_paths", 'event.get("workflow") == "prepare"', 'str(event.get("feature")) == "{feature}"', 'str(event.get("task_id")) == "{prepare_task_id}"'),
     ("orchestrate.md", 9): _expect("variety_assessed", 'str(event.get("task_id")) == "{taskId}"', 'event.get("scope") == "dispatch"'),
     ("orchestrate.md", 10): _expect("agent_dispatch", 'str(event.get("task_id")) == "{taskId}"', 'event.get("agent") == "architect"', 'event.get("phase") == "ARCHITECT"'),
-    ("orchestrate.md", 11): _expect("artifact_paths", 'event.get("workflow") == "architect"', 'bool(event.get("feature"))', 'str(event.get("task_id")) == "{architect_task_id}"'),
+    ("orchestrate.md", 11): _expect("artifact_paths", 'event.get("workflow") == "architect"', 'str(event.get("feature")) == "{feature}"', 'str(event.get("task_id")) == "{architect_task_id}"'),
     ("orchestrate.md", 12): _expect("s2_state_seeded", 'str(event.get("worktree")) == "{worktree_path}"'),
     ("orchestrate.md", 13): _expect("variety_assessed", 'str(event.get("task_id")) == "{taskId}"', 'event.get("scope") == "dispatch"'),
     ("orchestrate.md", 14): _expect("agent_dispatch", 'str(event.get("task_id")) == "{taskId}"', 'str(event.get("agent")) == "{coder-name}"', 'event.get("phase") == "CODE"'),
@@ -3108,6 +3108,46 @@ def test_raw_readback_rejects_wrong_final_identity(
     wrong = _run_readback(script, tmp_path)
     assert wrong.returncode != 0
     assert identity_field in wrong.stderr
+    assert unrelated in wrong.stderr
+
+
+@pytest.mark.parametrize(
+    "site_key,task_placeholder,wrong_field",
+    [
+        (("orchestrate.md", 8), "{prepare_task_id}", "feature"),
+        (("orchestrate.md", 8), "{prepare_task_id}", "task_id"),
+        (("orchestrate.md", 11), "{architect_task_id}", "feature"),
+        (("orchestrate.md", 11), "{architect_task_id}", "task_id"),
+    ],
+    ids=["prepare-feature", "prepare-task-id", "architect-feature", "architect-task-id"],
+)
+def test_phase_artifact_readback_rejects_wrong_identity(
+    site_key, task_placeholder, wrong_field, tmp_path, journal_site_map
+):
+    """PREPARE/ARCHITECT reject same-type events for another feature or task."""
+    intended_feature = "intended-phase-feature"
+    intended_task_id = "intended-phase-task"
+    replacements = {"{feature}": intended_feature, task_placeholder: intended_task_id}
+    expectation = JOURNAL_READBACK_MATRIX[site_key]
+    spec = _expected_spec(expectation, tmp_path, replacements=replacements)
+    matching_event = _matching_journal_event(spec)
+    assert matching_event["feature"] == intended_feature
+    assert matching_event["task_id"] == intended_task_id
+    script = _render_live_readback(
+        site_key, journal_site_map, tmp_path, replacements=replacements
+    )
+
+    _write_journal_event(tmp_path, matching_event)
+    matching = _run_readback(script, tmp_path)
+    assert matching.returncode == 0, matching.stderr
+
+    unrelated = "unrelated-" + wrong_field
+    wrong_event = dict(matching_event, **{wrong_field: unrelated})
+    assert wrong_event[wrong_field] != matching_event[wrong_field]
+    _write_journal_event(tmp_path, wrong_event)
+    wrong = _run_readback(script, tmp_path)
+    assert wrong.returncode != 0
+    assert wrong_field in wrong.stderr
     assert unrelated in wrong.stderr
 
 
