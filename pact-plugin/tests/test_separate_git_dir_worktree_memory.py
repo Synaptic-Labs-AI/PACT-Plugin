@@ -173,6 +173,59 @@ def test_the_archive_refuses(sep_worktree, monkeypatch):
     assert wt_md.read_text(encoding="utf-8") == original
 
 
+def test_the_archive_base_refusal_fires_when_only_the_base_is_unknown(
+    tmp_path, monkeypatch
+):
+    """The base-level refusal is defence-in-depth BEHIND the anchor-level one.
+
+    Nothing in the population reached it: replacing its raise with a marker
+    left the suite green. This arm faults ONLY the second classification --
+    the anchor answers with a real root -- so the base refusal is the one
+    that fires, and its own message (not the anchor's) is what is asserted.
+    """
+    import archive_pin
+    import shared.project_scope as project_scope
+
+    main = tmp_path / "base-unknown-main"
+    main.mkdir()
+    _git("init", "-q", str(main))
+    _seed(main)
+    main_md = main / ".claude" / "CLAUDE.md"
+    main_md.parent.mkdir()
+    main_md.write_text(_managed_doc(_stale_capable_pin()), encoding="utf-8")
+
+    real = project_scope.project_memory_root_or_none
+    classified = []
+
+    def anchor_known_base_unknown(candidate):
+        classified.append(candidate)
+        if len(classified) == 1:
+            return real(candidate)   # the ANCHOR classification succeeds
+        return None                  # the BASE classification cannot answer
+
+    # The archive imports the classifier INSIDE resolve_claude_md, so the
+    # source-module attribute is what the import re-reads; patching
+    # `archive_pin.project_memory_root_or_none` would be inert.
+    monkeypatch.setattr(
+        project_scope, "project_memory_root_or_none", anchor_known_base_unknown
+    )
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(main))
+    monkeypatch.chdir(main)
+
+    with pytest.raises(archive_pin._Unevaluable) as excinfo:
+        archive_pin.resolve_claude_md()
+
+    assert classified == [main, main], (
+        f"expected the anchor then the base classification, saw {classified}"
+    )
+    reason = excinfo.value.reason
+    assert "could not classify" in reason, reason
+    assert "cannot be verified" in reason, reason
+    assert "cannot be identified" not in reason, (
+        f"the ANCHOR refusal fired, not the base one: {reason}"
+    )
+
+
 def test_a_bare_repository_worktree_stays_a_known_root(tmp_path, monkeypatch):
     """A bare repository's worktree IS a genuine checkout: it keeps today's
     behaviour (its own root, writers act there), not the unknown the non-bare

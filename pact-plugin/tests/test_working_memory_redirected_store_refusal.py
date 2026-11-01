@@ -1256,7 +1256,12 @@ class TestNoSiteTakesAWorktreeShadowCopy:
         if site == "archive_pin":
             with pytest.raises(archive_pin._Unevaluable) as excinfo:
                 _run_site(site)
-            assert "worktree" in str(excinfo.value).lower(), excinfo.value.reason
+            # The fixture builds the worktree at `<tmp>/worktree`, so a bare
+            # "worktree" token is supplied by the PATH in the message. Assert
+            # a phrase only the refusal itself can supply.
+            assert "project memory belongs to the main checkout" in (
+                excinfo.value.reason
+            ), excinfo.value.reason
         else:
             result = _run_site(site)
             assert result.reason == wm.SyncResult.UNRESOLVED, (
