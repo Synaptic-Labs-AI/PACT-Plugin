@@ -134,8 +134,12 @@ def same_repository(env_dir: Path, base: Path) -> bool:
         same_repository(subdir,    repo_root) -> True
         same_repository(repo_root, subdir)    -> False  (a subdir is not one)
 
-    Its one production caller, `stays_in_declared_project`, passes the
-    DECLARATION first. Put the declaration first or invert the meaning.
+    TWO production callers, and each chooses its order.
+    `stays_in_declared_project` passes the DECLARATION first. `gate_target`
+    passes the TARGET's base first DELIBERATELY: it asks "is the declared
+    base the main repo of the checkout this target sits in", which is the
+    direction that refuses a worktree copy as the pre-state (a test pins that
+    order). Swapping either caller's arguments inverts its meaning.
 
     `--git-common-dir` is shared by every worktree of a repo, so its parent is
     the main root for both the worktree and the main checkout. It is NOT a

@@ -1812,8 +1812,10 @@ def match_project_claude_md(file_path_str: str) -> Path | None:
 
     # #1653: the SESSION's project-memory file. A linked-worktree session
     # matches the MAIN checkout's file -- the document every writer targets --
-    # so a pin gate is not bypassed by a worktree-local copy. The non-worktree
-    # route is today's resolver unchanged.
+    # so a pin gate is not bypassed by a worktree-local copy. For a
+    # non-worktree session the helper probes the declared base's own memory
+    # root; when it holds no document it answers None rather than falling
+    # through to another repository's file.
     project_md = resolve_session_claude_md_path()
     if project_md is None:
         return None
@@ -1850,11 +1852,14 @@ def gate_target(file_path: str) -> GateTarget | None:
     `file_path`, or None when it checks none.
 
     Gated: an absolute path whose name is `claude.md` in any case, which the
-    project resolver returns once the change exists AND which sits inside the
-    session's project-memory root. The resolver runs with the target counted
-    as present, so a Write that creates the file is gated, and a Write to a
-    file the resolver would not return (`./CLAUDE.md` while `.claude/CLAUDE.md`
-    exists) is not. `before` is what the resolver returns now, which can be a
+    project resolver returns once the change exists AND whose IDENTITY is one
+    of the two canonical managed-document paths under the session's
+    project-memory root (`.claude/CLAUDE.md` or `CLAUDE.md`). CONTAINMENT IS
+    NOT ENOUGH: the resolver returns a nested worktree's copy through its cwd
+    rung, which sits inside the root, and only identity refuses it. The
+    resolver runs with the target counted as present, so a Write that creates
+    the file is gated, and a Write to a file the resolver would not return
+    (`./CLAUDE.md` while `.claude/CLAUDE.md` exists) is not. `before` is what the resolver returns now, which can be a
     different file from the target: the other location under the target's base
     (`./CLAUDE.md` before a Write creates `.claude/CLAUDE.md`), or the main
     checkout's file for a worktree that has none. A file the resolver finds

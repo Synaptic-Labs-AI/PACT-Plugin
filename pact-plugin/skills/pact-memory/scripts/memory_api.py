@@ -222,8 +222,10 @@ def main_repo_root(start: Optional[str] = None) -> Optional[Path]:
             common_dir = base / common_dir
         return common_dir.resolve().parent
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
-        # git not installed, not a repo, command timed out, an undecodable
-        # answer, or the path could not be resolved.
+        # git not installed, not a repo, command timed out, a subprocess-level
+        # refusal (ValueError: e.g. an embedded NUL), or the path could not be
+        # resolved. NOT an undecodable answer: stdout is bytes and decoded by
+        # os.fsdecode, which cannot raise.
         return None
 
 

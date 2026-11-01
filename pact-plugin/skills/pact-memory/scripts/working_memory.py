@@ -1073,6 +1073,56 @@ def _get_claude_md_path() -> Optional[Path]:
     return _find_existing_claude_md(Path.cwd())
 
 
+def _git_path_under(base: Path, *args: str) -> Optional[Path]:
+    """`git <args>` as a resolved path, or None.
+
+    Output is decoded with os.fsdecode, never subprocess's locale decoding
+    (#1653), and a relative result resolves against `base` -- the directory
+    git ran in.
+    """
+    from shared.project_scope import git_env_without_location
+
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            capture_output=True,
+            text=False,
+            timeout=5,
+            env=git_env_without_location(),
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    value = Path(os.fsdecode(result.stdout).strip())
+    if not value.is_absolute():
+        value = base / value
+    try:
+        return value.resolve()
+    except OSError:
+        return None
+
+
+def _is_checkout_root_of(candidate: Path, common_dir: Path) -> bool:
+    """Whether `candidate` is a checkout root of the repository whose common
+    dir is `common_dir` -- a directory the resolver may probe as a checkout.
+
+    A `--separate-git-dir` checkout's common dir lives elsewhere, so its
+    parent is some unrelated directory (or another repository) that may hold
+    a CLAUDE.md. Probing it resolved a document OUTSIDE the checkout, which
+    the scope guard then admitted via `same_repository`. Verified here rather
+    than assumed from `project_memory_root_or_none`: a non-repo parent is a
+    KNOWN root that helper returns as itself, so retargeting alone cannot
+    reject it.
+    """
+    return (
+        _git_path_under(candidate, "-C", str(candidate), "rev-parse", "--show-toplevel")
+        == candidate
+        and _git_path_under(candidate, "-C", str(candidate), "rev-parse", "--git-common-dir")
+        == common_dir
+    )
+
+
 def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Path]]:
     """
     Resolve the display CLAUDE.md AND the trusted base directory it was found
@@ -1212,10 +1262,16 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
                 common_dir = Path(os.fsdecode(result.stdout).strip())
                 if not common_dir.is_absolute():
                     common_dir = Path.cwd() / common_dir
-                repo_root = common_dir.resolve().parent
-                found = _find_existing_claude_md(repo_root)
-                if found is not None:
-                    return found, repo_root
+                common_dir = common_dir.resolve()
+                repo_root = common_dir.parent
+                # THE PARENT IS A CANDIDATE ONLY IF IT IS THIS REPOSITORY'S
+                # CHECKOUT ROOT (#1653). For a --separate-git-dir checkout
+                # the common dir lives elsewhere and its parent is unrelated;
+                # probing it returned a document OUTSIDE the checkout.
+                if _is_checkout_root_of(repo_root, common_dir):
+                    found = _find_existing_claude_md(repo_root)
+                    if found is not None:
+                        return found, repo_root
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
             pass
 
@@ -1249,21 +1305,26 @@ def _resolve_display_claude_md_path() -> Optional[Path]:
 
 
 def _declared_display_root_unknown() -> bool:
-    """Whether the DECLARED project dir's project-memory root is UNKNOWN.
+    """Whether the session's project-memory anchor is UNKNOWN.
 
     The display resolver skips an unknown base instead of probing it (its
-    fail-open answer is the declared directory, which for a worktree is the
-    copy the one-rule change keeps out of project memory). A None from the
-    resolver is therefore not always "no file", and the sync writers ask this
-    to report WHICH cause it was. The declared env base is the one the
-    resolver probes first, and PACT sets it on every session.
+    fail-open answer is the base itself, which for a worktree is the copy the
+    one-rule change keeps out of project memory). A None from the resolver is
+    therefore not always "no file", and the sync writers ask this to report
+    WHICH cause it was.
+
+    THE ANCHOR IS THE DECLARED DIR, OR THE CWD WHEN THE VARIABLE IS ABSENT --
+    the same last anchor the resolver falls back to. Without the cwd case the
+    status was unreachable with the variable unset: the resolver returned
+    (None, None) because the cwd's root was unknown, and the sync reported
+    UNRESOLVED ("no file found") instead of ROOT_UNKNOWN ("cannot tell where
+    the file is").
     """
     from shared.project_scope import project_memory_root_or_none
 
     declared = os.environ.get("CLAUDE_PROJECT_DIR")
-    return bool(
-        declared and project_memory_root_or_none(Path(declared)) is None
-    )
+    anchor = Path(declared) if declared else Path.cwd()
+    return project_memory_root_or_none(anchor) is None
 
 
 def _estimate_tokens(text: str) -> int:

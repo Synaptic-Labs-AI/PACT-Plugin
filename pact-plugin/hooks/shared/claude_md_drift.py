@@ -348,9 +348,11 @@ def _resolve(session_dir: Path) -> tuple[Path | None, Path | None]:
     only when the cache is being built; afterwards the cached base (already
     the memory root) is used with the two-file check and starts no git. Within
     one session the declaration is stable, so a changed CLAUDE_PROJECT_DIR is
-    picked up by the next session rather than mid-session. A cached "no file"
-    means the memory root had none when computed; it stays the answer for this
-    session, which is the same per-session horizon the cache already had.
+    picked up by the next session rather than mid-session. THE CACHE STORES
+    THE BASE, NOT A FILE ANSWER: the two-file check re-probes that base on
+    every call, so a document that appears later in the session is picked up.
+    "No document" is not cached separately -- there is nothing to cache it in,
+    and a cached base that later disappears simply probes to no file.
 
     THE RESOLVER'S FALL-THROUGH IS NEVER CONSULTED (#1653, Bugbot). Its git
     and cwd rungs can return the WORKTREE copy when the memory root holds no

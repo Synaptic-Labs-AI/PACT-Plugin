@@ -546,11 +546,15 @@ def resolve_claude_md():
     wrong file and every heading matches. That check catches an index shift
     WITHIN a file; nothing catches a wrong FILE.
 
-    THE REFUSAL IS NARROW BY CONSTRUCTION. It fires only when
-    CLAUDE_PROJECT_DIR is explicitly set, names a directory with no CLAUDE.md,
-    AND the resolver landed outside that directory's own repository. The
-    worktree fall-through -- the case PACT itself depends on -- stays inside
-    the same repository and is allowed through.
+    TWO REFUSALS, NEITHER NARROW BY CONSTRUCTION. (1) An UNKNOWN or
+    unverified memory root refuses whether or not CLAUDE_PROJECT_DIR is set:
+    the anchor is the declaration, or the CWD when it is absent. (2) A
+    resolution whose base is a LINKED WORKTREE refuses even when the scope
+    guard would admit it -- `stays_in_declared_project` admits the root of
+    ANY checkout of the repository, another worktree included, so the guard
+    alone let the shadow copy through. A same-project fall-through still
+    resolves (the project-memory root is probed FIRST, then the guarded
+    fall-through), and a main checkout's own document is admitted.
     """
     # PARITY WITH THE SYNC SITES, NOT THE STRICT READER RULE (#1653/D2). The
     # archive belongs to the population that resolves through the git/cwd

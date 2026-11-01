@@ -24,6 +24,8 @@ import pytest
 
 from tests.test_worktree_git_failure_skip import (
     _align_memory_scope,
+    _display_doc,
+    _hide_git,
     _managed_doc,
     _run,
     _session_with_session_start,
@@ -241,3 +243,130 @@ def test_a_forged_gitfile_is_unknown_and_the_archive_refuses(
     assert victim_md.read_bytes() == victim_before, (
         "the forged gitfile redirected the archive to another project"
     )
+
+
+def test_a_moved_worktree_is_unknown_and_the_archive_refuses(
+    tmp_path, monkeypatch
+):
+    """MOVED worktree (`mv` aside, not `git worktree move`).
+
+    Every rev-parse still answers from the moved directory, but
+    `git worktree list` names the OLD path, so the listing verification
+    fails. The separate-git-dir fix (unverified non-bare linked worktree =
+    UNKNOWN) closes this too -- MEASURED, not assumed: the same predicate
+    branch decides both. RED before that fix, green with it.
+    """
+    import archive_pin
+    from shared.project_scope import project_memory_root_or_none
+
+    main = tmp_path / "moved-main"
+    main.mkdir()
+    _git("init", "-q", str(main))
+    _seed(main)
+    wt = tmp_path / "moved-wt"
+    assert _git("worktree", "add", "-q", str(wt), "-b", "wt",
+                cwd=main).returncode == 0
+    moved = tmp_path / "moved-wt-new"
+    os.rename(wt, moved)
+    wt_md = moved / ".claude" / "CLAUDE.md"
+    wt_md.parent.mkdir()
+    wt_md.write_text(_managed_doc(_stale_capable_pin()), encoding="utf-8")
+
+    assert project_memory_root_or_none(moved) is None, (
+        "a moved worktree still verified as its own root"
+    )
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(moved))
+    monkeypatch.chdir(moved)
+    with pytest.raises(archive_pin._Unevaluable) as excinfo:
+        archive_pin.resolve_claude_md()
+    assert "project memory root unknown" in excinfo.value.reason
+
+
+def test_the_no_argument_reader_answers_nothing_on_a_worktree_cwd(
+    tmp_path, monkeypatch
+):
+    """F1: with the variable unset and cwd inside a linked worktree whose
+    MAIN holds no document, the no-arg helper used the raw git/cwd
+    fall-through and returned the worktree copy. Three production consumers
+    take that route: check_pin_caps, match_project_claude_md, track_files."""
+    import check_pin_caps
+    import staleness
+    from shared.claude_md_manager import match_project_claude_md
+
+    main = tmp_path / "f1-main"
+    main.mkdir()
+    _git("init", "-q", str(main))
+    _seed(main)
+    wt = tmp_path / "f1-wt"
+    assert _git("worktree", "add", "-q", str(wt), "-b", "f1wt",
+                cwd=main).returncode == 0
+    wt_md = wt / ".claude" / "CLAUDE.md"
+    wt_md.parent.mkdir()
+    wt_md.write_text(_managed_doc(_stale_capable_pin()), encoding="utf-8")
+
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.chdir(wt)
+
+    assert staleness.resolve_session_claude_md_path() is None
+    assert match_project_claude_md(str(wt_md)) is None, (
+        "the pin gate matched the worktree copy the no-arg reader returned"
+    )
+    pins, reason = check_pin_caps._resolve_pins()
+    assert pins == [] and reason == "claude.md not found"
+
+
+def test_the_display_resolver_rejects_a_document_outside_the_checkout(
+    tmp_path, monkeypatch
+):
+    """F3: a --separate-git-dir checkout with a canonical document at the
+    common-dir parent. Branch 3 probed that parent unconditionally and
+    returned a document OUTSIDE the checkout, which the scope guard admitted
+    via `same_repository` rule 2. The parent is now probed only when it is
+    THIS repository's checkout root."""
+    import scripts.working_memory as wm
+
+    base = tmp_path / "f3"
+    base.mkdir()
+    outside = base / "CLAUDE.md"
+    outside.write_text(_display_doc(), encoding="utf-8")
+    sep = base / "sep.git"
+    work = base / "work"
+    work.mkdir()
+    assert _git("init", "-q", f"--separate-git-dir={sep}", str(work)).returncode == 0
+    _seed(work)
+
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(work))
+    monkeypatch.chdir(work)
+    monkeypatch.setattr(wm, "get_project_dir_from_session_record", lambda: None)
+    monkeypatch.setattr(wm, "env_record_project_dir_disagreement", lambda: None)
+
+    found, found_base = wm._resolve_display_claude_md_with_base()
+    assert (found, found_base) == (None, None), (
+        f"the resolver took a document outside the checkout: {found}"
+    )
+    result = wm.sync_to_claude_md(
+        {"context": "OUTSIDE-TOKEN", "goal": "g"}, memory_id="0" * 32
+    )
+    assert result.reason == wm.SyncResult.UNRESOLVED, result.reason
+    assert "OUTSIDE-TOKEN" not in outside.read_text(encoding="utf-8")
+
+
+def test_an_env_absent_unknown_root_reports_root_unknown(tmp_path, monkeypatch):
+    """F4: with the variable UNSET, an unknown cwd root was reported as
+    UNRESOLVED ("no file found") because `_declared_display_root_unknown`
+    only looked at the declared env base. It now anchors on the cwd -- the
+    resolver's last anchor -- so "cannot tell where the file is" is reported
+    as ROOT_UNKNOWN."""
+    import scripts.working_memory as wm
+
+    plain = tmp_path / "f4-plain"
+    plain.mkdir()
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.chdir(plain)
+    _hide_git(monkeypatch)
+
+    result = wm.sync_retrieved_to_claude_md(
+        [{"id": "0" * 32, "context": "external entry"}], query="q"
+    )
+
+    assert result.reason == wm.SyncResult.ROOT_UNKNOWN, result.reason

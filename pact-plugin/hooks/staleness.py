@@ -36,7 +36,11 @@ from shared.claude_md_manager import (
     resolve_project_claude_md_path,
 )
 from shared.failure_cause import failure_cause
-from shared.project_scope import git_env_without_location, project_memory_root
+from shared.project_scope import (
+    git_env_without_location,
+    project_memory_root,
+    project_memory_root_or_none,
+)
 from pin_caps import (
     PIN_STALE_BLOCK_THRESHOLD,
     _PIN_HEADING_ROW,
@@ -377,10 +381,13 @@ def resolve_session_claude_md_path(
 
     ONE RULE FOR EVERY ADVISORY READER AND THE WRITERS: a linked-worktree
     session's project file is the MAIN checkout's, so a reader that resolved
-    the worktree copy would describe a document nothing writes any more. When
-    the supplied base does not differ from the declaration -- every
-    non-worktree session, and every no-argument call -- today's resolver is
-    used unchanged, so those sessions stay byte-identical.
+    the worktree copy would describe a document nothing writes any more.
+    EVERY known base is probed at its PROJECT-MEMORY root and the raw
+    git/cwd fall-through is never consulted; a non-worktree session is
+    unchanged only while its own root holds a document. A no-argument call
+    with the variable absent derives the CWD's memory root and answers
+    nothing when it is unknown, rather than falling through to a worktree
+    copy.
 
     Returns None when the memory root has no file; callers treat that as
     "nothing to read" rather than delegating None to a resolver that would
@@ -390,12 +397,23 @@ def resolve_session_claude_md_path(
     memory root here and the non-worktree route passes the same base to the
     resolver. Otherwise the argument would be a no-op and the call would
     silently read the environment instead -- the reader/writer trap this
-    helper exists to close. A no-argument call is unchanged: it reads the
-    environment, as today.
+    helper exists to close. A no-argument call reads the environment, and
+    when it is absent it derives the CWD's memory root through the
+    unknown-aware helper instead of the raw fall-through.
     """
     if project_dir is None:
         project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
-        memory_root = project_memory_root(project_dir) if project_dir else None
+        if project_dir:
+            memory_root = project_memory_root(project_dir)
+        else:
+            # NO DECLARATION: the CWD is the anchor, and it gets the SAME rule
+            # (the D3 shape). Deriving it through the unknown-aware helper is
+            # what stops this route returning the worktree shadow copy; an
+            # unknown root answers NOTHING rather than falling through.
+            project_dir = Path.cwd()
+            memory_root = project_memory_root_or_none(project_dir)
+            if memory_root is None:
+                return None
     elif memory_root is None:
         memory_root = project_memory_root(project_dir)
     if project_dir and memory_root is not None:

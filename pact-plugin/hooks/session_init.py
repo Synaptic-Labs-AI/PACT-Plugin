@@ -322,16 +322,23 @@ def check_pinned_staleness(
 
     WORKTREE LEAD (#1653). When project memory belongs to the main checkout,
     the worktree path is wrong: staleness would mark a file that dies with the
-    worktree. The branch condition is `memory_root` differing from
-    `project_dir`; when it does NOT differ -- every non-worktree session --
-    the alias above is used exactly as before, so the patched test seam and
-    the byte-identical output both hold.
+    worktree. THE BRANCH CONDITION IS TRUTHINESS -- both `project_dir` and a
+    known `memory_root` -- NOT `memory_root != project_dir`. The inequality IS
+    the pre-fix behaviour and restoring it reopens the defect: on
+    declared-MAIN / cwd-in-worktree / MAIN-empty it takes the alias route and
+    falls through to the worktree copy. On the known-base route this probes
+    the memory root and never consults the raw fall-through; when the root
+    holds no document it returns None instead of using another resolver's
+    answer.
 
     THE CALLER PASSES THE BASE IT ALREADY COMPUTED (main() derives
     `project_dir` as env-or-cwd and `memory_root` from it). Re-deriving the
     root here from the environment would agree only while the two call sites
     happen to read the same value; a no-argument call falls back to today's
-    environment read for direct and test callers.
+    environment read for direct and test callers. A non-worktree session's
+    output is unchanged ONLY while its declared base holds a document; when
+    it holds none, this answers None rather than reading another repository's
+    file.
 
     THE WORKTREE BRANCH BYPASSES `_get_project_claude_md_path`. An arm that
     patches that alias drives only the non-worktree route; to exercise the
