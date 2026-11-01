@@ -979,7 +979,16 @@ def test_d3b_the_archive_refuses_an_unknown_no_declared_root(repo, monkeypatch):
 
     with pytest.raises(archive_pin._Unevaluable) as exc:
         archive_pin.resolve_claude_md()
-    assert "project memory root unknown" in str(exc.value)
+    reason = str(exc.value)
+    assert "project memory root unknown" in reason
+    # THE ANCHOR REFUSAL, NOT ITS BASE SIBLING. The anchor EXISTS on this
+    # shape, so with the anchor refusal removed the missing branch is skipped,
+    # the cwd resolver fails (git hidden), the raw resolver finds the worktree
+    # copy, and the BASE refusal raises with the same prefix. The absence
+    # assertion is what tells the two mechanisms apart.
+    assert "git could not answer" in reason, reason
+    assert "cannot be identified" in reason, reason
+    assert "could not classify" not in reason, reason
 
 
 def test_d2b_the_exposure_persists_across_launches(repo, tmp_path, monkeypatch):
