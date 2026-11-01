@@ -1931,6 +1931,7 @@ class JournalWriteSite:
     ordinal: int
     line: int
     event_type: str
+    payload: str
     segment: str
 
     @property
@@ -1974,15 +1975,8 @@ def _journal_shell_regions(text: str):
 
 
 def _is_journal_invocation_start(line: str) -> bool:
-    """Discover journal CLI starts without requiring a same-line verb."""
-    stripped = _journal_line(line)
-    return bool(
-        re.match(r"^python3\s+", stripped)
-        and (
-            "session_journal.py" in stripped
-            or re.search(r'(?<!\S)"?\$SJ"?(?!\S)', stripped)
-        )
-    )
+    """Start on a bare python3 token; the journal path may be continued."""
+    return re.match(r"^python3(?:\s|$)", _journal_line(line)) is not None
 
 
 def _parse_journal_sites(filename: str, text: str) -> list[JournalWriteSite]:
@@ -1998,17 +1992,28 @@ def _parse_journal_sites(filename: str, text: str) -> list[JournalWriteSite]:
             header = []
             heredoc_open = None
             verb = None
+            has_journal_path = False
             for cursor in range(start, min(start + 8, region_end)):
-                header.append(_journal_line(lines[cursor]))
+                current = _journal_line(lines[cursor])
+                header.append(current)
                 joined = " ".join(header)
-                verb_match = re.search(r"(?:^|\s)(write|read-last|read)(?:\s|$)", joined)
-                if verb_match and verb is None:
-                    verb = verb_match.group(1)
-                if verb in ("read", "read-last"):
+                has_journal_path = (
+                    "session_journal.py" in joined
+                    or re.search(r'(?<!\S)"?\$SJ"?(?!\S)', joined) is not None
+                )
+                if has_journal_path:
+                    verb_match = re.search(r"(?:^|\s)(write|read-last|read)(?:\s|$)", joined)
+                    if verb_match and verb is None:
+                        verb = verb_match.group(1)
+                    if verb in ("read", "read-last"):
+                        break
+                    if "--stdin <<'JSON'" in joined:
+                        heredoc_open = cursor
+                        break
+                if not current.rstrip().endswith("\\"):
                     break
-                if "--stdin <<'JSON'" in joined:
-                    heredoc_open = cursor
-                    break
+            if not has_journal_path:
+                continue
             if verb is None:
                 raise AssertionError(
                     f"{filename}:{start + 1}: unrecognized journal invocation/verb"
@@ -2044,6 +2049,10 @@ def _parse_journal_sites(filename: str, text: str) -> list[JournalWriteSite]:
                 (
                     start + 1,
                     type_match.group(1),
+                    "\n".join(
+                        _journal_raw_line(line)
+                        for line in lines[heredoc_open + 1:heredoc_close]
+                    ),
                     "\n".join(lines[heredoc_close + 1:segment_end]),
                 )
             )
@@ -2054,8 +2063,8 @@ def _parse_journal_sites(filename: str, text: str) -> list[JournalWriteSite]:
             f"broad={sorted(broad_lines)}, strict={sorted(strict_lines)}"
         )
     return [
-        JournalWriteSite(filename, ordinal, line, event_type, segment)
-        for ordinal, (line, event_type, segment) in enumerate(parsed, start=1)
+        JournalWriteSite(filename, ordinal, line, event_type, payload, segment)
+        for ordinal, (line, event_type, payload, segment) in enumerate(parsed, start=1)
     ]
 
 
@@ -2182,7 +2191,8 @@ _NUMERIC_PLACEHOLDERS = {
     "{total_commit_count}",
 }
 _BOOLEAN_PLACEHOLDERS = {"{true_or_false}", "{halt_active}"}
-_RAW_PLACEHOLDERS = _NUMERIC_PLACEHOLDERS | _BOOLEAN_PLACEHOLDERS
+_ARRAY_PLACEHOLDERS = {"{halt_task_ids}", "{worktrees}"}
+_RAW_PLACEHOLDERS = _NUMERIC_PLACEHOLDERS | _BOOLEAN_PLACEHOLDERS | _ARRAY_PLACEHOLDERS
 _STRUCTURE_SESSION_DIR = "/tmp/journal-structure"
 
 
@@ -2242,12 +2252,18 @@ def _placeholder_value(token, session_dir, replacements):
         value = 1
     elif token in _BOOLEAN_PLACEHOLDERS:
         value = True
+    elif token in _ARRAY_PLACEHOLDERS:
+        value = []
+    elif token.startswith("{absolute_"):
+        value = "/tmp/journal-structure/artifact"
     else:
         value = "value-" + token[1:-1]
     if token in _NUMERIC_PLACEHOLDERS and isinstance(value, str):
         value = int(value)
     if token in _BOOLEAN_PLACEHOLDERS and isinstance(value, str):
         value = value.lower() == "true"
+    if token in _ARRAY_PLACEHOLDERS and isinstance(value, str):
+        value = json.loads(value)
     return value
 
 
@@ -2264,6 +2280,27 @@ def _render_json_placeholders(text, session_dir, replacements=None, escape=True)
     return re.sub(r"\{[A-Za-z_][A-Za-z0-9_-]*\}", replace, text)
 
 
+def _writer_replacements(*texts):
+    """Schema-valid values needed by real writes, limited to tokens in use."""
+    candidates = {
+        "{PHASE}": "CODE",
+        "{short_sha}": "0123456789abcdef0123456789abcdef01234567",
+    }
+    return {
+        token: value
+        for token, value in candidates.items()
+        if any(token in text for text in texts)
+    }
+
+
+def _render_write_payload(text, session_dir, replacements=None):
+    """Render an actual write payload with the spec's typed value rules."""
+    rendered = _render_json_placeholders(text, session_dir, replacements)
+    rendered = rendered.replace("{blocking|suggestion|nitpick}", "blocking")
+    rendered = re.sub(r"\bN\b", "1", rendered)
+    return rendered.replace("VARIETY_DICT_OR_NULL", "null").replace("[...]", "[]")
+
+
 def _expected_spec(expectation, session_dir=_STRUCTURE_SESSION_DIR, replacements=None):
     text = _canonical_spec_text(expectation)
     return json.loads(_render_json_placeholders(text, session_dir, replacements))
@@ -2278,6 +2315,25 @@ def _json_same(got, want):
     if isinstance(got, list):
         return len(got) == len(want) and all(_json_same(a, b) for a, b in zip(got, want))
     return got == want
+
+
+def _payload_spec_problems(payload, spec):
+    """Reconcile asserted read-back fields with the actual write payload."""
+    problems = []
+    for key, want in spec["exact"].items():
+        if key == "type":
+            continue
+        if key not in payload:
+            problems.append(f"{key}: missing from write payload")
+        elif not _json_same(payload[key], want):
+            problems.append(f"{key}: write value {payload[key]!r}, read-back expects {want!r}")
+    for key in spec["nonempty"]:
+        if not payload.get(key):
+            problems.append(f"{key}: write value {payload.get(key)!r} is not nonempty")
+    for key in spec["absent"]:
+        if key in payload:
+            problems.append(f"{key}: unexpectedly present in write payload")
+    return problems
 
 
 def _parse_readback_block(site):
@@ -2331,15 +2387,34 @@ def _readback_problems(site, expectation):
         return problems + [f"missing immediate physical-last-line read-back: {exc}"]
     if block["code"] != JOURNAL_STATIC_CODE:
         problems.append("static Python differs from the placeholder-free optimized-safe contract")
+    replacements = _writer_replacements(site.payload, block["spec_text"])
+    actual_spec = None
     try:
-        rendered = _render_json_placeholders(block["spec_text"], _STRUCTURE_SESSION_DIR)
+        rendered = _render_json_placeholders(
+            block["spec_text"], _STRUCTURE_SESSION_DIR, replacements
+        )
         actual_spec = json.loads(rendered)
     except (AssertionError, ValueError, TypeError) as exc:
         problems.append(f"invalid JSON-data spec: {exc}")
     else:
-        expected_spec = _expected_spec(expectation)
+        expected_spec = _expected_spec(expectation, replacements=replacements)
         if not _json_same(actual_spec, expected_spec):
             problems.append(f"JSON-data spec {actual_spec!r}, expected {expected_spec!r}")
+    try:
+        payload = json.loads(
+            _render_write_payload(site.payload, _STRUCTURE_SESSION_DIR, replacements)
+        )
+    except (AssertionError, ValueError, TypeError) as exc:
+        problems.append(f"invalid write payload after safe substitution: {exc}")
+    else:
+        if not isinstance(payload, dict):
+            problems.append("write payload is not a JSON object")
+        elif isinstance(actual_spec, dict):
+            mismatches = _payload_spec_problems(payload, actual_spec)
+            if mismatches:
+                problems.append(
+                    "write payload/read-back spec mismatch: " + "; ".join(mismatches)
+                )
     if site.filename == "prune-memory.md":
         expected_trailer = [
             "then",
@@ -2392,6 +2467,21 @@ def _canonical_readback(site_key):
     return "\n".join(lines)
 
 
+def _synthetic_write_payload(readback):
+    """Build the fixture payload from its spec so each mutation isolates its target."""
+    if not readback:
+        return {}
+    spec_text = readback.split("' <<'JSON'\n", 1)[1].split("\nJSON", 1)[0]
+    spec = json.loads(
+        _render_json_placeholders(
+            spec_text, _STRUCTURE_SESSION_DIR, _writer_replacements(spec_text)
+        )
+    )
+    event = _matching_journal_event(spec)
+    event.pop("type", None)
+    return event
+
+
 def _synthetic_command_text(writes, spelling="direct", prefix="", fence="bash"):
     """Create isolated shell text with one (event type, read-back) tuple per write."""
     lines = [f"{prefix}```{fence}"]
@@ -2401,16 +2491,21 @@ def _synthetic_command_text(writes, spelling="direct", prefix="", fence="bash"):
             sj = '"$SJ"' if spelling == "variable" else "$SJ"
             invocation = f'{prefix}python3 {sj} write --type {event_type} --session-dir \'{{session_dir}}\' --stdin <<\'JSON\''
         else:
-            root = "{plugin_root}" if spelling in ("direct", "split-write") else "${CLAUDE_PLUGIN_ROOT}"
-            verb = "" if spelling == "split-write" else "write "
-            invocation = f'{prefix}python3 "{root}/hooks/shared/session_journal.py" {verb}\\'
+            root = "{plugin_root}" if spelling in ("direct", "split-write", "split-path") else "${CLAUDE_PLUGIN_ROOT}"
+            if spelling == "split-path":
+                lines.append(f"{prefix}python3 \\")
+                invocation = f'{prefix}  "{root}/hooks/shared/session_journal.py" write \\'
+            else:
+                verb = "" if spelling == "split-write" else "write "
+                invocation = f'{prefix}python3 "{root}/hooks/shared/session_journal.py" {verb}\\'
         lines.append(invocation)
         if spelling not in ("variable", "variable-unquoted"):
             continuation = "write --type" if spelling == "split-write" else "--type"
             lines.append(
                 f"{prefix}  {continuation} {event_type} --session-dir '{{session_dir}}' --stdin <<'JSON'"
             )
-        lines.extend([f"{prefix}{{}}", f"{prefix}JSON"])
+        payload = json.dumps(_synthetic_write_payload(readback), separators=(",", ":"))
+        lines.extend([f"{prefix}{payload}", f"{prefix}JSON"])
         if readback:
             for index, line in enumerate(readback.splitlines()):
                 line_prefix = prefix if prefix.startswith(">") or index == 0 else ""
@@ -2596,6 +2691,23 @@ def test_unrecognized_write_shape_fails_discovery_loudly():
         _parse_journal_sites("orchestrate.md", text)
 
 
+def test_actual_write_payload_drift_fails_association():
+    """The live source control stays green; its payload-only mutation is rejected."""
+    path = COMMANDS_DIR / "orchestrate.md"
+    source = path.read_text(encoding="utf-8")
+    key = ("orchestrate.md", 12)
+    control = _parse_journal_sites(path.name, source)[11]
+    assert _readback_problems(control, JOURNAL_READBACK_MATRIX[key]) == []
+
+    needle = '{"worktree": "{worktree_path}", "agents":'
+    assert source.count(needle) == 1
+    mutated = source.replace(needle, '{"worktree": "{different_worktree}", "agents":', 1)
+    drifted = _parse_journal_sites(path.name, mutated)[11]
+    problems = _readback_problems(drifted, JOURNAL_READBACK_MATRIX[key])
+    assert any("write payload/read-back spec mismatch" in problem for problem in problems)
+    assert any("worktree" in problem for problem in problems)
+
+
 def _render_live_readback(site_key, journal_site_map, session_dir, replacements=None):
     """Render only JSON data in the literal shipped block, never Python source."""
     site = journal_site_map[site_key]
@@ -2642,6 +2754,51 @@ def _real_journal_write(session_dir, event_type, payload):
     )
     assert result.returncode == 0, result.stderr
     return session_dir / "session-journal.jsonl"
+
+
+@pytest.mark.parametrize(
+    "site_key",
+    list(JOURNAL_READBACK_MATRIX),
+    ids=[f"{filename}#{ordinal}" for filename, ordinal in JOURNAL_READBACK_MATRIX],
+)
+def test_real_write_payload_passes_literal_readback(site_key, tmp_path, journal_site_map):
+    """Every actual payload validates and satisfies its literal read-back."""
+    site = journal_site_map[site_key]
+    block = _parse_readback_block(site)
+    replacements = _writer_replacements(site.payload, block["spec_text"])
+    payload = json.loads(
+        _render_write_payload(site.payload, tmp_path, replacements)
+    )
+    _real_journal_write(tmp_path, site.event_type, payload)
+    script = _render_live_readback(
+        site_key, journal_site_map, tmp_path, replacements=replacements
+    )
+    result = _run_readback(script, tmp_path)
+    assert result.returncode == 0, result.stderr
+
+
+def test_real_writer_readback_rejects_payload_identity_drift(tmp_path, journal_site_map):
+    """A real write and a differently-rendered read-back must not agree."""
+    key = ("orchestrate.md", 12)
+    site = journal_site_map[key]
+    intended = {"{worktree_path}": "intended-worktree"}
+    payload = json.loads(_render_write_payload(site.payload, tmp_path, intended))
+    _real_journal_write(tmp_path, site.event_type, payload)
+
+    matching_script = _render_live_readback(
+        key, journal_site_map, tmp_path, replacements=intended
+    )
+    matching = _run_readback(matching_script, tmp_path)
+    assert matching.returncode == 0, matching.stderr
+
+    drifted_script = _render_live_readback(
+        key, journal_site_map, tmp_path,
+        replacements={"{worktree_path}": "unrelated-worktree"},
+    )
+    drifted = _run_readback(drifted_script, tmp_path)
+    assert drifted.returncode != 0
+    assert "worktree" in drifted.stderr
+    assert "intended-worktree" in drifted.stderr
 
 
 def _phase_completed_script(journal_site_map, session_dir):
@@ -2989,6 +3146,27 @@ def test_split_before_write_discovers_and_validates():
     deleted = _one_synthetic_site(key, "", spelling="split-write")
     problems = _readback_problems(deleted, JOURNAL_READBACK_MATRIX[key])
     assert any("missing immediate physical-last-line read-back" in p for p in problems)
+
+
+def test_split_before_path_discovers_and_validates():
+    key = ("orchestrate.md", 3)
+    site = _one_synthetic_site(key, _canonical_readback(key), spelling="split-path")
+    assert site.event_type == "phase_transition"
+    assert _readback_problems(site, JOURNAL_READBACK_MATRIX[key]) == []
+    deleted = _one_synthetic_site(key, "", spelling="split-path")
+    problems = _readback_problems(deleted, JOURNAL_READBACK_MATRIX[key])
+    assert any("missing immediate physical-last-line read-back" in p for p in problems)
+
+
+def test_split_before_path_corrupt_header_fails_loudly():
+    text = (
+        "```bash\n"
+        "python3 \\\n"
+        '  "{plugin_root}/hooks/shared/session_journal.py" write --type commit\n'
+        "```\n"
+    )
+    with pytest.raises(AssertionError, match="unrecognized journal-write/heredoc shape"):
+        _parse_journal_sites("orchestrate.md", text)
 
 
 def test_split_corrupt_header_fails_loudly():
