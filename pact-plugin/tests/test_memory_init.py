@@ -893,8 +893,11 @@ class TestDependencyDriftIsDetectable:
         constraints-APPLIED arms never see, while constraints-ci.txt pins
         none of them (it mirrors the install line's direct names only). An
         innocent refactor to a `-r requirements-dev.txt` install is exactly
-        the honest mistake this class exists for, so the flags are refused
-        outright on BOTH surfaces. Introducing one legitimately means
+        the honest mistake this class exists for, so the flags are refused on
+        both parsed surfaces: the workflow's install line and EVERY
+        pip-install command in the script — the pip-upgrade command included,
+        where a flag would otherwise ride with no package operands to betray
+        it. Introducing one legitimately means
         reconciling the coverage arms to read the referenced file in the
         same change — the red here is the reminder, not a bug.
         """
@@ -925,13 +928,12 @@ class TestDependencyDriftIsDetectable:
             f"script is required."
         )
         script_commands = self._script_pip_install_commands(script)
-        package_commands = [
-            cmd for cmd in script_commands
-            if self._package_tokens_from_pip_argv(cmd) - {"pip"}
-        ]
+        # EVERY command, not just those with package operands: the pip-upgrade
+        # command has none, so a flag riding it is invisible to any
+        # token-based filter — exactly where it would float silently.
         surfaces = [
             ("the CI install line", [self._ci_install_line(workflow)]),
-            (f"{script} install commands", package_commands),
+            (f"{script} install commands", script_commands),
         ]
         for where, commands in surfaces:
             for cmd in commands:
