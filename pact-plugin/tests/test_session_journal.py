@@ -101,6 +101,7 @@ CLI (main()):
 import json
 import multiprocessing
 import os
+import shlex
 import subprocess
 import sys
 import threading
@@ -5889,7 +5890,7 @@ class TestVerifyLastCLI:
         result = self._run({}, "verify-last")
         assert result.returncode == 2
         assert "error:" in result.stderr
-        assert f'python3 "{_SJ_SCRIPT}" verify-last --stdin' in result.stderr
+        assert f'python3 -I "{_SJ_SCRIPT}" verify-last --stdin' in result.stderr
 
     def test_unknown_argument_is_argparse_exit_2(self):
         result = self._run({}, "verify-last", "--stdin", "--nope")
@@ -5913,7 +5914,7 @@ class TestJournalTeachExamples:
             f'python3 "{_SJ_SCRIPT}" read-last'
             " --type phase_transition --session-dir /abs/session"
         ),
-        "verify-last": f'python3 "{_SJ_SCRIPT}" verify-last --stdin',
+        "verify-last": f'python3 -I "{_SJ_SCRIPT}" verify-last --stdin',
     }
 
     def test_top_level_help_lists_every_example_line(self):
@@ -5933,6 +5934,70 @@ class TestJournalTeachExamples:
             )
             assert result.returncode == 0, verb
             assert line in result.stdout, verb
+
+    def test_verify_last_example_ignores_hostile_pythonpath(self, tmp_path):
+        help_result = subprocess.run(
+            [sys.executable, _SJ_SCRIPT, "verify-last", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert help_result.returncode == 0
+        examples = [
+            line.strip()
+            for line in help_result.stdout.splitlines()
+            if "verify-last --stdin" in line
+        ]
+        assert len(examples) == 1
+        example = examples[0]
+        assert example == self._EXAMPLES["verify-last"]
+
+        marker = tmp_path / "HELP_EXAMPLE_EXECUTED"
+        (tmp_path / "json.py").write_text(
+            "from pathlib import Path\n"
+            f"Path({str(marker)!r}).touch()\n"
+            "raise RuntimeError('hostile help example json')\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "session-journal.jsonl").write_text(
+            '{"type":"x"}\n', encoding="utf-8"
+        )
+        spec = {
+            "session_dir": str(tmp_path),
+            "exact": {"type": "x"},
+            "nonempty": [],
+            "absent": [],
+        }
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(tmp_path)
+
+        isolated = subprocess.run(
+            shlex.split(example),
+            input=json.dumps(spec),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            cwd=tmp_path,
+            env=env,
+        )
+        assert isolated.returncode == 0, isolated.stderr
+        assert not marker.exists()
+
+        vulnerable = shlex.split(example)
+        assert vulnerable[:2] == ["python3", "-I"]
+        del vulnerable[1]
+        control = subprocess.run(
+            vulnerable,
+            input=json.dumps(spec),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            cwd=tmp_path,
+            env=env,
+        )
+        assert control.returncode != 0
+        assert marker.exists()
+        assert "hostile help example json" in control.stderr
 
     def test_write_missing_flags_exits_2_with_example(self):
         result = subprocess.run(

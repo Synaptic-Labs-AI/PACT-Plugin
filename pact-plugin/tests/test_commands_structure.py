@@ -12,6 +12,7 @@ Tests cover:
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from collections import Counter
@@ -1933,6 +1934,8 @@ class JournalWriteSite:
     event_type: str
     payload: str
     segment: str
+    writer_script: str
+    session_dir: str
 
     @property
     def site_id(self) -> str:
@@ -2039,6 +2042,19 @@ def _parse_journal_sites(filename: str, text: str) -> list[JournalWriteSite]:
                     break
             if heredoc_close is None:
                 raise AssertionError(f"{filename}:{start + 1}: unclosed JSON heredoc")
+            try:
+                tokens = [
+                    token for token in shlex.split(header.replace("\\ ", " "))
+                    if token.strip() and token != "\\"
+                ]
+                session_dir = tokens[tokens.index("--session-dir") + 1]
+            except (ValueError, IndexError) as exc:
+                raise AssertionError(
+                    f"{filename}:{start + 1}: invalid journal-write header"
+                ) from exc
+            if len(tokens) < 2 or tokens[0] != "python3":
+                raise AssertionError(f"{filename}:{start + 1}: invalid journal writer")
+            writer_script = tokens[1]
             later_starts = [
                 candidate[0]
                 for candidate in invocations[position + 1:]
@@ -2054,6 +2070,8 @@ def _parse_journal_sites(filename: str, text: str) -> list[JournalWriteSite]:
                         for line in lines[heredoc_open + 1:heredoc_close]
                     ),
                     "\n".join(lines[heredoc_close + 1:segment_end]),
+                    writer_script,
+                    session_dir,
                 )
             )
             strict_lines.add(start + 1)
@@ -2063,8 +2081,10 @@ def _parse_journal_sites(filename: str, text: str) -> list[JournalWriteSite]:
             f"broad={sorted(broad_lines)}, strict={sorted(strict_lines)}"
         )
     return [
-        JournalWriteSite(filename, ordinal, line, event_type, payload, segment)
-        for ordinal, (line, event_type, payload, segment) in enumerate(parsed, start=1)
+        JournalWriteSite(
+            filename, ordinal, line, event_type, payload, segment, writer_script, session_dir
+        )
+        for ordinal, (line, event_type, payload, segment, writer_script, session_dir) in enumerate(parsed, start=1)
     ]
 
 
@@ -2428,11 +2448,24 @@ def _extract_readback_block(site):
     return _parse_readback_block(site)["raw"]
 
 
+_JOURNAL_WRITER_SCRIPTS = {
+    "{plugin_root}/hooks/shared/session_journal.py",
+    "${CLAUDE_PLUGIN_ROOT}/hooks/shared/session_journal.py",
+    "$SJ",
+}
+
+
 def _readback_problems(site, expectation):
     expected_type, _field_assertions = expectation
     problems = []
     if site.event_type != expected_type:
         problems.append(f"event type {site.event_type!r}, expected {expected_type!r}")
+    if site.writer_script not in _JOURNAL_WRITER_SCRIPTS:
+        problems.append(f"non-canonical writer script: {site.writer_script!r}")
+    if site.session_dir != "{session_dir}":
+        problems.append(
+            f"writer/read-back session-dir mismatch: {site.session_dir!r}"
+        )
     try:
         block = _parse_readback_block(site)
     except AssertionError as exc:
@@ -2726,6 +2759,38 @@ def test_unrecognized_write_shape_fails_discovery_loudly():
     )
     with pytest.raises(AssertionError, match="unrecognized journal-write/heredoc shape"):
         _parse_journal_sites("orchestrate.md", text)
+
+
+@pytest.mark.parametrize(
+    "replacement_header,expected_problem",
+    [
+        (
+            'python3 "/tmp/unrelated/session_journal.py" write --type phase_transition --session-dir \'{session_dir}\'',
+            "non-canonical writer script",
+        ),
+        (
+            'python3 "$SJ" write --type phase_transition --session-dir \'{other_session_dir}\'',
+            "writer/read-back session-dir mismatch",
+        ),
+    ],
+    ids=["writer-script", "session-dir"],
+)
+def test_writer_header_identity_mutations_fail(replacement_header, expected_problem):
+    path = COMMANDS_DIR / "orchestrate.md"
+    source = path.read_text(encoding="utf-8")
+    key = (path.name, 3)
+    header = 'python3 "$SJ" write --type phase_transition --session-dir \'{session_dir}\''
+    needle = header + " --stdin <<'JSON'\n" + '{"phase": "{PHASE}", "status": "completed",'
+    replacement = needle.replace(header, replacement_header, 1)
+    control = _parse_journal_sites(path.name, source)[2]
+    assert _readback_problems(control, JOURNAL_READBACK_MATRIX[key]) == []
+
+    assert source.count(needle) == 1
+    mutated = source.replace(needle, replacement, 1)
+    assert mutated != source
+    drifted = _parse_journal_sites(path.name, mutated)[2]
+    problems = _readback_problems(drifted, JOURNAL_READBACK_MATRIX[key])
+    assert any(expected_problem in problem for problem in problems)
 
 
 @pytest.mark.parametrize(

@@ -2010,7 +2010,7 @@ def _build_cli():
         f'python3 "{prog}" read-last'
         " --type phase_transition --session-dir /abs/session"
     )
-    verify_ex = f'python3 "{prog}" verify-last --stdin'
+    verify_ex = f'python3 -I "{prog}" verify-last --stdin'
 
     parser = _TeachParser(
         prog=prog,
