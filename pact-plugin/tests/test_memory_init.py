@@ -473,6 +473,18 @@ class TestDependencyDriftIsDetectable:
         "--hash",
     })
 
+    # The census anchor: `pip install` OR `pip3 install`. pip3 is the stock
+    # spelling on GitHub's Ubuntu runners, so a one-word honest edit switches
+    # spelling and every substring-anchored extractor goes blind at once
+    # (round-5 security probe: `pip3 install evilpkg` evaded the census,
+    # exactly-one, coverage, constraints-APPLIED AND the -r/-e tripwire
+    # simultaneously). `pipx install` still does NOT match — pipx installs
+    # into isolated environments `-c` cannot constrain and stays outside
+    # this census by design — while `uv pip install` DOES match and is
+    # censused deliberately: it resolves packages into the same
+    # environment unconstrained.
+    _PIP_INSTALL_COMMAND_RE = re.compile(r"\bpip3? install\b")
+
     @staticmethod
     def _normalise_pin_name(name):
         """PEP 503 normalisation: lowercase, [-_.] runs collapse to '-'.
@@ -533,37 +545,45 @@ class TestDependencyDriftIsDetectable:
         return False
 
     def _ci_install_line(self, workflow):
-        """The workflow's single `run:` line carrying `pip install`.
+        """The workflow's single `run:` line carrying a pip/pip3 install.
 
         The parse anchors on the `run:` line — the EXECUTED command — never
-        on any line merely mentioning `pip install`: workflow comment prose
+        on any line merely mentioning an install: workflow comment prose
         may name the command (the CONSTRAINTS paragraph does), and prose is
-        not a declaration. Exactly-one is asserted here so every consumer
-        (tokens, coverage, application) shares one parse contract.
+        not a declaration. `pip3` matches too — it is the same package
+        manager under its runner-stock spelling, and an install that
+        switches spelling must not fall outside the parse (round-5 probe).
+        Exactly-one is asserted here so every consumer (tokens, coverage,
+        application) shares one parse contract. Folded plain scalars are
+        REFUSED before the filter runs — see
+        `_refuse_plain_scalar_run_continuations`.
         """
+        text = workflow.read_text(encoding="utf-8")
+        self._refuse_plain_scalar_run_continuations(text)
         install_lines = [
-            ln for ln in workflow.read_text(encoding="utf-8").splitlines()
-            if ln.lstrip().startswith("run:") and "pip install" in ln
+            ln for ln in text.splitlines()
+            if ln.lstrip().startswith("run:")
+            and self._PIP_INSTALL_COMMAND_RE.search(ln)
         ]
         assert install_lines, (
             f"PARSE FAILURE, not dependency drift: {workflow} contains no "
-            f"`run:` line carrying `pip install`, so the CI dependency "
+            f"`run:` line carrying a pip/pip3 install, so the CI dependency "
             f"declaration cannot be read. The workflow changed shape — "
             f"re-point this parity test at the new shape; do not weaken it "
             f"to a skip."
         )
         assert len(install_lines) == 1, (
             f"PARSE AMBIGUITY, not dependency drift: {len(install_lines)} "
-            f"`run:` lines carrying `pip install` were read from {workflow} "
-            f"({install_lines}). This guard reasons about THE CI install "
-            f"line, singular — a second install step must be reconciled "
-            f"here, not silently first-matched."
+            f"`run:` lines carrying a pip/pip3 install were read from "
+            f"{workflow} ({install_lines}). This guard reasons about THE CI "
+            f"install line, singular — a second install step must be "
+            f"reconciled here, not silently first-matched."
         )
         return install_lines[0]
 
-    @staticmethod
-    def _workflow_executed_pip_install_lines(workflow_text):
-        """Every EXECUTED line bearing `pip install`, in either run form.
+    @classmethod
+    def _workflow_executed_pip_install_lines(cls, workflow_text):
+        """Every EXECUTED line bearing a pip/pip3 install, in either run form.
 
         Two executed forms exist in a workflow: an inline `run: <command>`
         line, and the body of a `run: |` block scalar — the standard idiom
@@ -571,13 +591,19 @@ class TestDependencyDriftIsDetectable:
         model warm-up and the lint legs). Comment lines are dropped in
         BOTH positions: workflow-header prose and in-block shell comments
         are never executed, and the header names pip commands (prose is
-        not a declaration). pipx is BOUNDED OUT structurally: `pipx
-        install` does not contain the `pip install` substring and installs
-        into isolated environments, so `-c` cannot constrain it and it is
-        not this census's surface. `uv pip install` DOES carry the
-        substring and censuses like any other pip install — it resolves
-        packages into the same environment unconstrained.
+        not a declaration). `pip3` is censused with `pip` — the same
+        package manager under its runner-stock spelling, invisible to
+        every arm while installing until the round-5 probe (probed live:
+        all arms green with `pip3 install evilpkg`). pipx is BOUNDED OUT
+        structurally: `pipx install` does not match the census anchor and
+        installs into isolated environments, so `-c` cannot constrain it
+        and it is not this census's surface. `uv pip install` DOES match
+        the anchor and censuses like any other pip install — it resolves
+        packages into the same environment unconstrained. A THIRD executed
+        form, the folded plain scalar, is REFUSED outright before the
+        census runs — see `_refuse_plain_scalar_run_continuations`.
         """
+        cls._refuse_plain_scalar_run_continuations(workflow_text)
         executed = []
         block_indent = None
         for raw in workflow_text.splitlines():
@@ -589,7 +615,7 @@ class TestDependencyDriftIsDetectable:
             indent = len(raw) - len(raw.lstrip(" "))
             if block_indent is not None:
                 if indent > block_indent:
-                    if "pip install" in stripped:
+                    if cls._PIP_INSTALL_COMMAND_RE.search(stripped):
                         executed.append(raw)
                     continue
                 block_indent = None
@@ -597,9 +623,58 @@ class TestDependencyDriftIsDetectable:
             # indicator (`|-`, `>-`) still matches the single class digit.
             if re.match(r"^\s*-?\s*run:\s*[|>]", raw):
                 block_indent = indent
-            elif re.match(r"^\s*-?\s*run:", raw) and "pip install" in raw:
+            elif re.match(r"^\s*-?\s*run:", raw) \
+                    and cls._PIP_INSTALL_COMMAND_RE.search(raw):
                 executed.append(raw)
         return executed
+
+    @staticmethod
+    def _refuse_plain_scalar_run_continuations(workflow_text):
+        """REFUSE a `run:` plain scalar written across folded lines.
+
+        YAML folds a deeper-indented bare line after `run: <text>` into
+        ONE executed string, while every arm in this class reads line by
+        line — so an operand, or a whole `pip3 install`, named only on the
+        fold executes invisible to the census (round-5 probe, ground-
+        truthed with yaml.safe_load: all arms green with the fold
+        carrying the package). The shape is refused outright rather than
+        modelled, per the round-5 security recommendation: this workflow
+        has no legitimate use for it (`run: |` is the multi-command idiom
+        it already uses twice), and a refusal reddens on the next honest
+        fold the moment it lands instead of silently reading half a
+        command. Block scalars (`run: |`, `run: >`) are legal — their
+        bodies are handled by the block tracking in
+        `_workflow_executed_pip_install_lines`, which runs after this
+        check and would otherwise misread a folded body as two lines.
+        """
+        run_indent = None
+        for raw in workflow_text.splitlines():
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#"):
+                # Blank and comment lines never execute. They do not end
+                # the plain scalar for this check either: a comment cannot
+                # continue one, but the next deeper line still folds (as
+                # whitespace at worst) — keep the check armed past them.
+                continue
+            indent = len(raw) - len(raw.lstrip(" "))
+            if run_indent is not None:
+                if indent > run_indent:
+                    raise AssertionError(
+                        f"PLAIN-SCALAR RUN CONTINUATION, not a readable "
+                        f"command: {stripped!r} is folded by YAML into the "
+                        f"plain `run:` scalar above it, so it EXECUTES "
+                        f"while every line-oriented arm in this class "
+                        f"reads the first line only — an install or "
+                        f"operand named there is invisible to the census "
+                        f"(probed: all arms green with the fold carrying "
+                        f"the package). Write the step as ONE line or a "
+                        f"`run: |` block; do not fold plain scalars."
+                    )
+                run_indent = None  # a dedented line ends the scalar
+            if re.match(r"^\s*-?\s*run:\s*[|>]", raw):
+                continue  # block scalar: deeper body lines are legal
+            if re.match(r"^\s*-?\s*run:", raw):
+                run_indent = indent
 
     def _ci_install_package_tokens(self, workflow):
         """Package-name tokens of the workflow's single `pip install` line.
@@ -801,11 +876,15 @@ class TestDependencyDriftIsDetectable:
         )
 
     def _script_pip_install_commands(self, script):
-        """The script's pip-install commands, from its EXECUTED text only.
+        """The script's pip/pip3 install commands, from EXECUTED text only.
 
         Comment lines are dropped FIRST (the script's prose may quote pip
-        commands — prose is not a declaration), and a command starting with
-        `pip install` extends through its backslash continuations. Shared by
+        commands — prose is not a declaration), and a command starting a
+        pip or pip3 install extends through its backslash continuations.
+        `pip3` enumerates with `pip`: the round-5 probe showed a
+        `pip3 install` line in the script reading as no command at all,
+        riding past the constraints-APPLIED all() and the set parity while
+        floating an unpinned package into the local mirror. Shared by
         every arm that reasons about the script surface, so one parse
         contract covers them all.
         """
@@ -822,7 +901,8 @@ class TestDependencyDriftIsDetectable:
                     commands.append(command)
                     command = ""
                 continue
-            if line.startswith("#") or "pip install" not in line:
+            if line.startswith("#") \
+                    or not self._PIP_INSTALL_COMMAND_RE.search(line):
                 continue
             saw_install_command = True
             command = line.rstrip("\\").strip()
@@ -831,10 +911,11 @@ class TestDependencyDriftIsDetectable:
                 commands.append(command)
                 command = ""
         assert saw_install_command, (
-            f"PARSE FAILURE, not parity drift: no non-comment `pip install` "
-            f"command could be read from {script}. The script changed shape "
-            f"(a requirements file, a variable-driven loop) — re-point the "
-            f"arms at the new shape; do not weaken them to a skip."
+            f"PARSE FAILURE, not parity drift: no non-comment pip/pip3 "
+            f"install command could be read from {script}. The script "
+            f"changed shape (a requirements file, a variable-driven loop) "
+            f"— re-point the arms at the new shape; do not weaken them "
+            f"to a skip."
         )
         return commands
 
@@ -936,7 +1017,7 @@ class TestDependencyDriftIsDetectable:
         innocent refactor to a `-r requirements-dev.txt` install is exactly
         the honest mistake this class exists for, so the flags are refused on
         both parsed surfaces: the workflow's install line and EVERY
-        pip-install command in the script — the pip-upgrade command included,
+        pip/pip3 install command in the script — the pip-upgrade command included,
         where a flag would otherwise ride with no package operands to betray
         it. Introducing one legitimately means
         reconciling the coverage arms to read the referenced file in the
@@ -996,7 +1077,7 @@ class TestDependencyDriftIsDetectable:
                 )
 
     def test_every_executed_pip_install_is_the_canonical_install_line(self):
-        """Census: no pip install hides from the canonical parse.
+        """Census: no pip or pip3 install hides from the canonical parse.
 
         `_ci_install_line` anchors on run:-PREFIXED single lines — the
         executed INLINE form only. A second install written inside a
@@ -1010,7 +1091,11 @@ class TestDependencyDriftIsDetectable:
         line, so a block install reddens here even though the canonical
         parse still succeeds. The other direction needs no arm: moving
         the canonical install INTO a block reddens `_ci_install_line`
-        itself (PARSE FAILURE, no run:-prefixed match).
+        itself (PARSE FAILURE, no run:-prefixed match). The census counts
+        BOTH pip spellings — a `pip3 install` is an install under the
+        runner-stock spelling (round-5 probe: invisible to every arm while
+        installing) — and folded plain scalars are REFUSED before it runs,
+        so neither shape can carry an install past the equality below.
         """
         root = self._source_repo_root()
         if root is None:
@@ -1051,6 +1136,195 @@ class TestDependencyDriftIsDetectable:
             "Fold them into the canonical install step, or reconcile the "
             "arms to read them in the same change."
         )
+
+    def _repo_copy_carrying(self, tmp_path, workflow_text=None, script_text=None):
+        """A minimal repo copy over a POSITIVE marker, for the mutation arms.
+
+        The arms in this class find the repo root by marker
+        (`.claude-plugin/marketplace.json`); this rig plants that marker
+        over a scratch tree so a mutation lands on a COPY — never the
+        checkout — while constraints-ci.txt ships verbatim, because every
+        arm compares the mutated surface against the REAL pins. The
+        workflow and install script default to their real bytes so a
+        mutation is one targeted substitution on top of the shipped
+        state, not a hand-retyped fixture that can drift from it.
+        """
+        root = self._source_repo_root()
+        if root is None:
+            pytest.skip(
+                "SKIPPED, NOT PASSED — no .claude-plugin/marketplace.json "
+                f"above {Path(__file__).resolve()}, so this is not a PACT "
+                "source checkout and the mutation arms cannot copy the "
+                "real surfaces to mutate. This skip is NO INFORMATION "
+                "about the guards — never read it as a pass."
+            )
+        (tmp_path / ".claude-plugin").mkdir(parents=True)
+        (tmp_path / ".claude-plugin" / "marketplace.json").write_text(
+            "{}", encoding="utf-8")
+        (tmp_path / ".github" / "workflows").mkdir(parents=True)
+        (tmp_path / ".github" / "workflows" / "tests.yml").write_text(
+            workflow_text
+            if workflow_text is not None
+            else (root / ".github" / "workflows" / "tests.yml")
+            .read_text(encoding="utf-8"),
+            encoding="utf-8")
+        (tmp_path / "constraints-ci.txt").write_text(
+            (root / "constraints-ci.txt").read_text(encoding="utf-8"),
+            encoding="utf-8")
+        (tmp_path / ".cursor").mkdir(parents=True)
+        (tmp_path / ".cursor" / "install.sh").write_text(
+            script_text
+            if script_text is not None
+            else (root / ".cursor" / "install.sh").read_text(encoding="utf-8"),
+            encoding="utf-8")
+        return tmp_path
+
+    def test_pip3_spelling_cannot_sidestep_the_install_arms(
+            self, tmp_path, monkeypatch):
+        """MUTATION ARM (pip3): the runner-stock spelling must redden.
+
+        Probed at 74cc1d59 by the round-5 security lane: `pip3 install
+        evilpkg` evaded the census, exactly-one, coverage,
+        constraints-APPLIED AND the -r/-e tripwire simultaneously, because
+        every extractor defined 'an install' as the literal substring
+        `pip install`. pip3 is the stock spelling on GitHub's Ubuntu
+        runners — the most plausible one-word honest edit. Three shapes,
+        each a targeted substitution on a COPY of the real workflow, each
+        asserting the SHIPPED arm that kills it (never a reimplementation
+        beside it): a second inline install step reddens the exactly-one
+        parse; an install inside an existing `run: |` block reddens the
+        census equality; and the canonical spelling switched to pip3
+        while smuggling `-r` past the value-taking-flag tokenizer reddens
+        the tripwire — the arm that exists precisely for that flag, which
+        an install-line spelling change must not slip past.
+        """
+        root = self._source_repo_root()
+        if root is None:
+            pytest.skip("SKIPPED, NOT PASSED — not a source checkout; see "
+                        "_repo_copy_carrying for the full wording.")
+        workflow = root / ".github" / "workflows" / "tests.yml"
+        real_text = workflow.read_text(encoding="utf-8")
+        canonical = self._ci_install_line(workflow)
+
+        # Shape 1: a SECOND inline install step (key-form `run:` line), so
+        # the exactly-one parse is the arm that must fire.
+        inline_second = real_text.replace(
+            canonical,
+            canonical + "\n      - name: Rogue installer\n"
+                        "        run: pip3 install evilpkg",
+            1,
+        )
+        copy1 = self._repo_copy_carrying(
+            tmp_path / "inline", workflow_text=inline_second)
+        monkeypatch.setattr(
+            type(self), "_source_repo_root", lambda self: copy1)
+        with pytest.raises(AssertionError, match="PARSE AMBIGUITY"):
+            self.test_declared_packages_match_the_ci_install_line()
+
+        # Shape 2: an install inside an EXISTING run: | block body — the
+        # canonical parse still sees exactly one line, so only the census
+        # equality can fire.
+        block_second = real_text.replace(
+            "          ruff --version\n",
+            "          ruff --version\n          pip3 install evilpkg\n",
+            1,
+        )
+        copy2 = self._repo_copy_carrying(
+            tmp_path / "block", workflow_text=block_second)
+        monkeypatch.setattr(
+            type(self), "_source_repo_root", lambda self: copy2)
+        with pytest.raises(AssertionError, match="BLOCK-FORM INSTALL DRIFT"):
+            self.test_every_executed_pip_install_is_the_canonical_install_line()
+
+        # Shape 3: the canonical spelling switched to pip3 with `-r`
+        # smuggled aboard — every other arm stays green (the flag's VALUE
+        # is consumed by the tokenizer), so the tripwire must be the kill.
+        switched = real_text.replace(
+            canonical,
+            canonical.replace("python -m pip install", "pip3 install")
+            + " -r requirements-evil.txt",
+            1,
+        )
+        copy3 = self._repo_copy_carrying(
+            tmp_path / "tripwire", workflow_text=switched)
+        monkeypatch.setattr(
+            type(self), "_source_repo_root", lambda self: copy3)
+        with pytest.raises(AssertionError, match="REQUIREMENTS-FLAG DRIFT"):
+            self.test_install_lines_admit_no_requirements_or_editable_flags()
+
+    def test_plain_scalar_run_continuation_is_refused(
+            self, tmp_path, monkeypatch):
+        """MUTATION ARM (folded scalar): the shape is refused, not modelled.
+
+        Probed at 74cc1d59: YAML folds a deeper-indented bare line after a
+        plain `run: <command>` into ONE executed scalar (ground-truthed
+        with yaml.safe_load — the folded text IS the step's run string),
+        while every line-oriented arm reads the first line only. Both
+        probe directions must redden under the refusal: the fold carrying
+        a rogue OPERAND (every pinned operand stays on the first line, so
+        the pre-fix arms were green throughout), and the fold carrying a
+        whole `pip3 install` that no census line ever sees. The shipped
+        arms are invoked against the copy, so the kill is theirs, not a
+        beside-the-point reimplementation.
+        """
+        root = self._source_repo_root()
+        if root is None:
+            pytest.skip("SKIPPED, NOT PASSED — not a source checkout; see "
+                        "_repo_copy_carrying for the full wording.")
+        workflow = root / ".github" / "workflows" / "tests.yml"
+        real_text = workflow.read_text(encoding="utf-8")
+        canonical = self._ci_install_line(workflow)
+
+        # Probe 1: the fold carries a rogue OPERAND.
+        folded_operand = real_text.replace(
+            canonical, canonical + "\n          evilpkg", 1)
+        copy1 = self._repo_copy_carrying(
+            tmp_path / "operand", workflow_text=folded_operand)
+        monkeypatch.setattr(
+            type(self), "_source_repo_root", lambda self: copy1)
+        with pytest.raises(
+                AssertionError, match="PLAIN-SCALAR RUN CONTINUATION"):
+            self.test_constraints_pins_cover_the_install_line()
+
+        # Probe 2: the fold carries the INSTALL ITSELF — neither the run
+        # line nor any census line contains a pip command, so only the
+        # shape refusal can see it.
+        folded_install = real_text.replace(
+            canonical,
+            "        run: echo warming\n"
+            "          && pip3 install evilpkg",
+            1,
+        )
+        copy2 = self._repo_copy_carrying(
+            tmp_path / "install", workflow_text=folded_install)
+        monkeypatch.setattr(
+            type(self), "_source_repo_root", lambda self: copy2)
+        with pytest.raises(
+                AssertionError, match="PLAIN-SCALAR RUN CONTINUATION"):
+            self.test_every_executed_pip_install_is_the_canonical_install_line()
+
+    def test_script_pip3_install_is_enumerated(self, tmp_path, monkeypatch):
+        """MUTATION ARM (script surface): a script `pip3 install` reddens.
+
+        The script extractor shared the substring anchor, so a
+        `pip3 install evilpkg` line in .cursor/install.sh read as no
+        command at all — riding past the constraints-APPLIED all() and
+        the set parity while floating an unpinned package into the local
+        mirror. The shipped cursor-parity arm must redden naming the
+        constraint the command fails to apply.
+        """
+        root = self._source_repo_root()
+        if root is None:
+            pytest.skip("SKIPPED, NOT PASSED — not a source checkout; see "
+                        "_repo_copy_carrying for the full wording.")
+        script = root / ".cursor" / "install.sh"
+        mutated = script.read_text(encoding="utf-8") \
+            + "\npip3 install evilpkg\n"
+        copy = self._repo_copy_carrying(
+            tmp_path / "script", script_text=mutated)
+        monkeypatch.setattr(type(self), "_source_repo_root", lambda self: copy)
+        with pytest.raises(AssertionError, match="does not apply constraints"):
+            self.test_cursor_install_sh_matches_the_ci_install_line()
 
     def test_the_three_floor_literals_agree(self):
         """Declared floor, CI cell and AST guard must move together.
