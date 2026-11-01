@@ -202,6 +202,45 @@ def _raw_rev_parse(directory: Path, flag: str) -> tuple[Optional[Path], bool]:
         return None, True
 
 
+def _repository_is_bare(common_dir: Path) -> bool:
+    """Whether the repository whose common dir this is has no checkout.
+
+    A linked worktree of a BARE repository is a real checkout and legitimately
+    owns its project memory. A worktree of a NON-bare repository whose git dir
+    lives elsewhere (`--separate-git-dir`) is not the main checkout, and a
+    forged gitfile names a repository the asking directory does not belong to
+    -- neither may be treated as the project's root. Read only after candidate
+    verification has already failed.
+    """
+    try:
+        result = run_git(
+            ["--git-dir", str(common_dir), "config", "--get", "core.bare"],
+            timeout=5,
+            text=False,
+            env=git_env_without_location(),
+        )
+    except (OSError, ValueError):
+        return False
+    if result is None or result.returncode != 0:
+        return False
+    return _fsdecode(result.stdout).strip().lower() == "true"
+
+
+def _failed_verification_root(
+    given: Path, common_dir: Path
+) -> tuple[Path, bool]:
+    """The answer when the candidate main root could not be verified.
+
+    A bare repository's worktree is a genuine checkout, so it stays a KNOWN
+    root (the input). Every other unverified linked worktree is UNKNOWN: a
+    `--separate-git-dir` worktree has no resolvable main checkout, and a
+    forged gitfile names a repository this directory is not part of. Writers
+    must skip on UNKNOWN rather than target the worktree copy, which is the
+    whole point of the distinction.
+    """
+    return (given, True) if _repository_is_bare(common_dir) else (given, False)
+
+
 def _project_memory_root(
     project_dir: str | os.PathLike[str],
 ) -> tuple[Path, bool]:
@@ -225,12 +264,12 @@ def _project_memory_root(
     if not ran:
         return given, False
     if toplevel_at_candidate != candidate:
-        return given, True
+        return _failed_verification_root(given, common_dir)
     common_dir_again, ran = _raw_rev_parse(candidate, "--git-common-dir")
     if not ran:
         return given, False
     if common_dir_again != common_dir:
-        return given, True
+        return _failed_verification_root(given, common_dir)
     # A GITFILE CAN BE FORGED. A directory carrying only a `.git` FILE whose
     # `gitdir:` line names another repository's worktree admin dir makes every
     # check above agree: git reports that repository's git dir, common dir and
@@ -245,7 +284,11 @@ def _project_memory_root(
     if listed is None:
         return given, False
     if toplevel is None or toplevel not in listed:
-        return given, True
+        # The anti-forgery failure: a `.git` FILE naming another repository's
+        # worktree admin dir. Not a bare repo, so this is UNKNOWN rather than
+        # a known root -- otherwise the archive's fall-through can walk to the
+        # named repository's document and accept a project nobody declared.
+        return _failed_verification_root(given, common_dir)
     return candidate, True
 
 
@@ -286,11 +329,15 @@ def project_memory_root_or_none(
 ) -> Optional[Path]:
     """The memory root, or None when git could not answer.
 
-    A NON-GIT directory is a KNOWN answer and returns the directory itself;
-    only a git invocation that could not run (timeout, no git, an unreadable
-    worktree listing) returns None. Session-start writers pass this so an
-    unknown target is skipped rather than resolved to the worktree by the
-    fail-safe.
+    A NON-GIT directory is a KNOWN answer and returns the directory itself.
+    None is returned when git could not run (timeout, no git, an unreadable
+    worktree listing) AND when a linked worktree's candidate main root could
+    not be verified and the repository is not bare -- a `--separate-git-dir`
+    worktree (whose git dir lives elsewhere, so common-dir's parent is not a
+    checkout) or a forged gitfile (which names a repository the directory is
+    not part of). A BARE repository's worktree stays a KNOWN root: it is a
+    genuine checkout. Session-start writers pass this so an unknown target is
+    skipped rather than resolved to the worktree by the fail-safe.
     """
     root, answered = _project_memory_root(project_dir)
     return root if answered else None

@@ -613,7 +613,12 @@ def resolve_claude_md():
     # git could not classify the base, and a writer refuses rather than
     # guesses.
     root_of_base = project_memory_root_or_none(base)
-    if root_of_base is None or Path(root_of_base) != base:
+    if root_of_base is None:
+        raise _Unevaluable(
+            f"project memory root unknown: git could not classify {base}, so "
+            "the resolved document cannot be verified; nothing was archived"
+        )
+    if Path(root_of_base) != base:
         raise _Unevaluable(
             f"resolution landed on a linked worktree copy ({path}); project "
             "memory belongs to the main checkout, so nothing was archived"
