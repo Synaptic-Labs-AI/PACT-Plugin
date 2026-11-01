@@ -2301,6 +2301,59 @@ def _render_write_payload(text, session_dir, replacements=None):
     return rendered.replace("VARIETY_DICT_OR_NULL", "null").replace("[...]", "[]")
 
 
+_PLACEHOLDER_TOKEN_RE = re.compile(r"\{[A-Za-z_][A-Za-z0-9_-]*\}")
+
+
+def _template_identity_loads(text):
+    """Parse JSON templates without collapsing placeholder or JSON value identity."""
+    pieces = []
+    index = 0
+    in_string = False
+    escaped = False
+    while index < len(text):
+        char = text[index]
+        if in_string:
+            pieces.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            pieces.append(char)
+            index += 1
+            continue
+        match = _PLACEHOLDER_TOKEN_RE.match(text, index)
+        if match:
+            token = match.group(0)
+            pieces.append(json.dumps({"__pact_placeholder__": token}, separators=(",", ":")))
+            index = match.end()
+            continue
+        if text.startswith("VARIETY_DICT_OR_NULL", index):
+            pieces.append("null")
+            index += len("VARIETY_DICT_OR_NULL")
+            continue
+        if text.startswith("[...]", index):
+            pieces.append("[]")
+            index += len("[...]")
+            continue
+        if (
+            char == "N"
+            and (index == 0 or not (text[index - 1].isalnum() or text[index - 1] == "_"))
+            and (index + 1 == len(text) or not (text[index + 1].isalnum() or text[index + 1] == "_"))
+        ):
+            pieces.append("0")
+            index += 1
+            continue
+        pieces.append(char)
+        index += 1
+    return json.loads("".join(pieces))
+
+
 def _expected_spec(expectation, session_dir=_STRUCTURE_SESSION_DIR, replacements=None):
     text = _canonical_spec_text(expectation)
     return json.loads(_render_json_placeholders(text, session_dir, replacements))
@@ -2387,6 +2440,16 @@ def _readback_problems(site, expectation):
         return problems + [f"missing immediate physical-last-line read-back: {exc}"]
     if block["code"] != JOURNAL_STATIC_CODE:
         problems.append("static Python differs from the placeholder-free optimized-safe contract")
+    template_spec = None
+    try:
+        template_spec = _template_identity_loads(block["spec_text"])
+        expected_template = _template_identity_loads(_canonical_spec_text(expectation))
+        if not _json_same(template_spec, expected_template):
+            problems.append(
+                f"JSON-data template {template_spec!r}, expected {expected_template!r}"
+            )
+    except (AssertionError, ValueError, TypeError) as exc:
+        problems.append(f"invalid JSON-data template: {exc}")
     replacements = _writer_replacements(site.payload, block["spec_text"])
     actual_spec = None
     try:
@@ -2401,16 +2464,14 @@ def _readback_problems(site, expectation):
         if not _json_same(actual_spec, expected_spec):
             problems.append(f"JSON-data spec {actual_spec!r}, expected {expected_spec!r}")
     try:
-        payload = json.loads(
-            _render_write_payload(site.payload, _STRUCTURE_SESSION_DIR, replacements)
-        )
+        payload = _template_identity_loads(site.payload)
     except (AssertionError, ValueError, TypeError) as exc:
-        problems.append(f"invalid write payload after safe substitution: {exc}")
+        problems.append(f"invalid write payload template: {exc}")
     else:
         if not isinstance(payload, dict):
             problems.append("write payload is not a JSON object")
-        elif isinstance(actual_spec, dict):
-            mismatches = _payload_spec_problems(payload, actual_spec)
+        elif isinstance(template_spec, dict):
+            mismatches = _payload_spec_problems(payload, template_spec)
             if mismatches:
                 problems.append(
                     "write payload/read-back spec mismatch: " + "; ".join(mismatches)
@@ -2472,11 +2533,7 @@ def _synthetic_write_payload(readback):
     if not readback:
         return {}
     spec_text = readback.split("' <<'JSON'\n", 1)[1].split("\nJSON", 1)[0]
-    spec = json.loads(
-        _render_json_placeholders(
-            spec_text, _STRUCTURE_SESSION_DIR, _writer_replacements(spec_text)
-        )
-    )
+    spec = _template_identity_loads(spec_text)
     event = _matching_journal_event(spec)
     event.pop("type", None)
     return event
@@ -2691,21 +2748,78 @@ def test_unrecognized_write_shape_fails_discovery_loudly():
         _parse_journal_sites("orchestrate.md", text)
 
 
-def test_actual_write_payload_drift_fails_association():
-    """The live source control stays green; its payload-only mutation is rejected."""
+@pytest.mark.parametrize(
+    "ordinal,needle,replacement",
+    [
+        (3, '{"phase": "{PHASE}", "status": "completed",', '{"phase": "CODE", "status": "completed",'),
+        (3, '{"phase": "{PHASE}", "status": "completed",', '{"phase": "{OTHER_PHASE}", "status": "completed",'),
+        (15, '{"sha": "{short_sha}", "message":', '{"sha": "0123456789abcdef0123456789abcdef01234567", "message":'),
+        (15, '{"sha": "{short_sha}", "message":', '{"sha": "{different_sha}", "message":'),
+        (16, '{"workflow": "code-auditor", "feature": "{feature}"', '{"workflow": "code-auditor", "feature": "literal-feature"'),
+        (16, '{"workflow": "code-auditor", "feature": "{feature}"', '{"workflow": "code-auditor", "feature": "{different_feature}"'),
+        (12, '{"worktree": "{worktree_path}", "agents":', '{"worktree": "literal-worktree", "agents":'),
+        (12, '{"worktree": "{worktree_path}", "agents":', '{"worktree": "{different_worktree}", "agents":'),
+    ],
+    ids=["phase-literal", "phase-distinct", "sha-literal", "sha-distinct", "feature-literal", "feature-distinct", "worktree-literal", "worktree-distinct"],
+)
+def test_payload_template_identity_mutations_fail(ordinal, needle, replacement):
+    """Literal and distinct-placeholder drift must survive shared test rendering."""
     path = COMMANDS_DIR / "orchestrate.md"
     source = path.read_text(encoding="utf-8")
-    key = ("orchestrate.md", 12)
-    control = _parse_journal_sites(path.name, source)[11]
+    key = (path.name, ordinal)
+    control = _parse_journal_sites(path.name, source)[ordinal - 1]
     assert _readback_problems(control, JOURNAL_READBACK_MATRIX[key]) == []
 
-    needle = '{"worktree": "{worktree_path}", "agents":'
     assert source.count(needle) == 1
-    mutated = source.replace(needle, '{"worktree": "{different_worktree}", "agents":', 1)
-    drifted = _parse_journal_sites(path.name, mutated)[11]
+    mutated = source.replace(needle, replacement, 1)
+    assert mutated != source
+    drifted = _parse_journal_sites(path.name, mutated)[ordinal - 1]
     problems = _readback_problems(drifted, JOURNAL_READBACK_MATRIX[key])
     assert any("write payload/read-back spec mismatch" in problem for problem in problems)
-    assert any("worktree" in problem for problem in problems)
+
+
+@pytest.mark.parametrize(
+    "ordinal,needle,replacement",
+    [
+        (3, '"phase":"{PHASE}","status":"completed"', '"phase":"CODE","status":"completed"'),
+        (15, '"sha":"{short_sha}"', '"sha":"0123456789abcdef0123456789abcdef01234567"'),
+    ],
+    ids=["phase-literal", "sha-literal"],
+)
+def test_readback_literal_cannot_replace_matrix_placeholder(ordinal, needle, replacement):
+    """A literal read-back value cannot stand in for the matrix's placeholder."""
+    path = COMMANDS_DIR / "orchestrate.md"
+    source = path.read_text(encoding="utf-8")
+    key = (path.name, ordinal)
+    control = _parse_journal_sites(path.name, source)[ordinal - 1]
+    assert _readback_problems(control, JOURNAL_READBACK_MATRIX[key]) == []
+
+    assert source.count(needle) == 1
+    mutated = source.replace(needle, replacement, 1)
+    drifted = _parse_journal_sites(path.name, mutated)[ordinal - 1]
+    problems = _readback_problems(drifted, JOURNAL_READBACK_MATRIX[key])
+    assert any("JSON-data template" in problem for problem in problems)
+
+
+def test_distinct_placeholders_do_not_collapse_when_rendered_equal():
+    """Different numeric placeholders must not pass because both render as 1."""
+    path = COMMANDS_DIR / "pause.md"
+    source = path.read_text(encoding="utf-8")
+    key = (path.name, 1)
+    control = _parse_journal_sites(path.name, source)[0]
+    assert _readback_problems(control, JOURNAL_READBACK_MATRIX[key]) == []
+
+    needle = '"task_count": {task_count}'
+    assert source.count(needle) == 1
+    mutated = source.replace(needle, '"task_count": {memories_saved}', 1)
+    drifted = _parse_journal_sites(path.name, mutated)[0]
+    block = _parse_readback_block(drifted)
+    payload = json.loads(_render_write_payload(drifted.payload, _STRUCTURE_SESSION_DIR))
+    spec = json.loads(_render_json_placeholders(block["spec_text"], _STRUCTURE_SESSION_DIR))
+    assert payload["task_count"] == spec["exact"]["task_count"] == 1
+
+    problems = _readback_problems(drifted, JOURNAL_READBACK_MATRIX[key])
+    assert any("write payload/read-back spec mismatch" in problem for problem in problems)
 
 
 def _render_live_readback(site_key, journal_site_map, session_dir, replacements=None):
