@@ -2384,13 +2384,19 @@ def build_context_cache(
     return target, context
 
 
-def persist_context(target: Path, context: dict) -> None:
+def persist_context(target: Path, context: dict) -> bool:
     """Atomically write the session context to disk. The impure half of the seam.
 
     Writes ``context`` to ``target`` via a temp file + ``os.rename`` (crash-safe
     atomic write), 0o600 permissions. Called ONLY for a lead frame (the on-disk
     session-context file is a lead-only artifact a teammate/plain frame must NOT
     clobber — #877). Fail-open: any error is logged and swallowed.
+
+    RETURNS THE OUTCOME, because the caller is the only one that can surface it.
+    The log line this function writes goes to hook stderr, which the platform
+    does not show to users, so a swallowed failure reached nobody; session_init
+    now reports the False on the user-visible channel. Callers that do not read
+    the value keep their behaviour unchanged.
 
     DOES NOT touch ``_cache`` / ``_context_path`` — ``build_context_cache`` is the
     sole owner of cache state (Option A). A persist failure therefore leaves the
@@ -2421,7 +2427,7 @@ def persist_context(target: Path, context: dict) -> None:
             if target.read_bytes() == serialized.encode("utf-8"):
                 if target.stat().st_mode & 0o077:
                     os.chmod(target, 0o600)
-                return
+                return True
         except OSError:
             pass  # absent or unreadable: write it
         context_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -2449,6 +2455,8 @@ def persist_context(target: Path, context: dict) -> None:
             f"pact_context: could not write context file: {e}",
             file=sys.stderr,
         )
+        return False
+    return True
 
 
 def write_context(

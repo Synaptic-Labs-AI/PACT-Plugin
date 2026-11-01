@@ -2177,6 +2177,14 @@ def main():
         # mid-session, and the next SessionStart corrects the record then.
         lead_address = resolve_lead_address()
 
+        # THE SESSION-STATE WRITES REPORT ON THE USER-VISIBLE CHANNEL. Their
+        # own log lines go to hook stderr, which the platform does not show,
+        # and the journal cannot record its own failure. A start that loses
+        # this state otherwise tells the user everything is well while leaving
+        # a session directory that contains nothing. Both writes are tracked
+        # separately because they fail separately.
+        context_state_ok = True
+        journal_state_ok = True
         if not session_id_was_missing:
             try:
                 # SEAM (#877): compose the two halves directly. ALWAYS build +
@@ -2205,10 +2213,16 @@ def main():
                     harness=harness,
                     lead_address=lead_address,
                 )
-                if frame_is_lead and _ctx_result is not None:
-                    persist_context(*_ctx_result)
+                if frame_is_lead:
+                    if _ctx_result is None:
+                        # The context could not even be composed and cached:
+                        # nothing was persisted either.
+                        context_state_ok = False
+                    else:
+                        context_state_ok = persist_context(*_ctx_result)
             except Exception as e:
                 # Fail-open: context file is best-effort; hooks fall back to empty strings
+                context_state_ok = False
                 print(f"session_init: could not write context file: {e}", file=sys.stderr)
 
         # Resolve session_dir early so substitution instructions can include it.
@@ -2273,7 +2287,7 @@ def main():
                 # startup fire nothing is carried, so this field records
                 # whether CLAUDE_CODE_REMOTE reached the SessionStart hook.
                 _start_fields["lead_address"] = lead_address
-                append_event(
+                journal_state_ok = append_event(
                     make_event(
                         "session_start",
                         team=team_name,
@@ -2284,6 +2298,19 @@ def main():
                         **_start_fields,
                     ),
                 )
+
+        if not context_state_ok or not journal_state_ok:
+            lost = []
+            if not context_state_ok:
+                lost.append("the session context file")
+            if not journal_state_ok:
+                lost.append("the session journal")
+            system_messages.append(
+                "PACT could not write " + " and ".join(lost)
+                + f" in {session_dir}. The session continues, but the state "
+                "recorded there will be missing next time; check that the "
+                "session directory is writable."
+            )
 
         # Build context message based on source (post-collapse: the team always
         # exists — the platform pre-creates exactly one team per session).
