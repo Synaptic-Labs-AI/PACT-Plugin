@@ -577,57 +577,96 @@ def _recorded_common_dir(identity: Optional[dict], declared: Path) -> Optional[s
     return common_dir if isinstance(common_dir, str) and os.path.isabs(common_dir) else None
 
 
-def record_is_for_declaration(identity: Optional[dict], declared: Path) -> bool:
-    """Whether a session record for this exact declaration EXISTS.
+RECORD_ABSENT = "absent"
+RECORD_CORRUPT = "corrupt"
+RECORD_CONTAINED = "contained"
+RECORD_UNRELATED = "unrelated"
 
-    Separate from `recorded_main_root` because the two answers differ: "no
-    record" keeps a caller's normal fall-through, while "a record for this
-    declaration that does not verify" is an integrity failure and must
-    refuse. Collapsing them lets a forged record fall through to the very
-    resolution it was written to redirect.
-    """
+
+def record_is_for_declaration(identity: Optional[dict], declared: Path) -> bool:
+    """Whether a session record for this exact declaration EXISTS."""
     return _record_names_declaration(identity, declared)
+
+
+def record_resolution(
+    declared: Path, identity: Optional[dict]
+) -> tuple[str, Optional[Path]]:
+    """Classify what a session record proves for `declared`, and the root.
+
+    THE ONE DECISION EVERY RECORD CONSUMER USES. Four outcomes:
+
+    absent     -- no record for this declaration. The caller's normal path.
+    corrupt    -- a record for this declaration whose paths are unusable, or
+                  whose candidate is not a self-reporting checkout: refuse,
+                  never follow.
+    contained  -- the record verifies AND the candidate checkout CONTAINS the
+                  declaration. The only outcome that trusts the record.
+    unrelated  -- a record for this declaration, naming a real checkout that
+                  does NOT contain the declaration. NOT TRUSTED: a genuine
+                  out-of-tree worktree and a forged redirect are identical
+                  after `git worktree prune`, so the caller falls through and
+                  the scope guard decides without this record's help.
+
+    CONTAINMENT IS THE TRUST TEST. At read time it cannot be proved that an
+    out-of-tree worktree belonged to the recorded repository -- the listing
+    entry and its admin dir are gone -- so trusting it would trust any
+    repository the record names. `_record_worktree_identity` proves the
+    relationship when it is still provable and refuses to write a record
+    otherwise; this is the defence for records written before that check and
+    for writers that bypass it.
+
+    The `worktree` field is corroborated too: it must be the declaration
+    itself (or an ancestor, for a subdirectory declaration) on real paths.
+    """
+    if not _record_names_declaration(identity, declared):
+        return RECORD_ABSENT, None
+    common_dir_str = _recorded_common_dir(identity, declared)
+    if common_dir_str is None:
+        return RECORD_CORRUPT, None
+    recorded_worktree = identity.get("worktree")
+    if not isinstance(recorded_worktree, str) or not os.path.isabs(recorded_worktree):
+        return RECORD_CORRUPT, None
+    try:
+        declared_real = Path(os.path.realpath(declared))
+        worktree_real = Path(os.path.realpath(recorded_worktree))
+    except (OSError, ValueError):
+        return RECORD_CORRUPT, None
+    if declared_real != worktree_real and worktree_real not in declared_real.parents:
+        return RECORD_CORRUPT, None
+    try:
+        common_dir = Path(common_dir_str)
+        candidate = common_dir.parent.resolve()
+        if not candidate.is_dir():
+            return RECORD_CORRUPT, None
+    except (OSError, RuntimeError):
+        return RECORD_CORRUPT, None
+    toplevel, ran = _raw_rev_parse(candidate, "--show-toplevel")
+    if not ran or toplevel != candidate:
+        return RECORD_CORRUPT, None
+    common_again, ran = _raw_rev_parse(candidate, "--git-common-dir")
+    if not ran or common_again is None:
+        return RECORD_CORRUPT, None
+    try:
+        if common_again != common_dir.resolve():
+            return RECORD_CORRUPT, None
+    except (OSError, RuntimeError):
+        return RECORD_CORRUPT, None
+    if candidate == declared_real or candidate in declared_real.parents:
+        return RECORD_CONTAINED, candidate
+    return RECORD_UNRELATED, None
 
 
 def recorded_main_root(
     declared: Path, identity: Optional[dict]
 ) -> Optional[Path]:
-    """The MAIN checkout root a session record proves for a REMOVED declaration,
-    or None when there is no record for it or the record does not verify.
+    """The MAIN root a record proves for `declared`, or None unless CONTAINED.
 
-    THE RECORD IS THE SUBSTITUTE FOR THE WORKTREE LISTING, NOT A SUPPLEMENT.
-    Verified against the CANDIDATE MAIN ROOT and never against the dead
-    worktree: `git worktree prune` deletes both the listing entry and its
-    admin dir, and it is the normal cleanup path, so a listing check would
-    reject the record exactly where it is needed. The candidate checks are
-    `_failed_verification_root`'s minus the listing, and they reject a forged
-    record by construction -- a `common_dir` whose parent is not a checkout
-    fails them.
-
-    A live declaration never needs this: git answers for it directly.
+    Thin wrapper over `record_resolution` for callers that only need the root.
+    A caller that must distinguish a corrupt record (refuse) from an unrelated
+    one (fall through) uses the status directly.
     """
-    common_dir_str = _recorded_common_dir(identity, declared)
-    if common_dir_str is None:
-        return None
-    try:
-        common_dir = Path(common_dir_str)
-        candidate = common_dir.parent.resolve()
-        if not candidate.is_dir():
-            return None
-    except (OSError, RuntimeError):
-        return None
-    toplevel, ran = _raw_rev_parse(candidate, "--show-toplevel")
-    if not ran or toplevel != candidate:
-        return None
-    common_again, ran = _raw_rev_parse(candidate, "--git-common-dir")
-    if not ran or common_again is None:
-        return None
-    try:
-        if common_again != common_dir.resolve():
-            return None
-    except (OSError, RuntimeError):
-        return None
-    return candidate
+    status, root = record_resolution(declared, identity)
+    return root if status == RECORD_CONTAINED else None
 
 
 def stays_in_declared_project(
@@ -707,8 +746,15 @@ def stays_in_declared_project(
         try:
             if declared.resolve() in _listed_worktrees(resolved):
                 return True
-            recorded_common_dir = _recorded_common_dir(worktree_identity, declared)
-            if recorded_common_dir is not None:
+            # THE RECORD IS TRUSTED ONLY WHEN THE RECORDED CHECKOUT CONTAINS
+            # THE DECLARATION (`record_resolution`'s containment). Without
+            # that, a record naming ANY real repository admits a resolution
+            # into it: with the cwd inside repository B and a forged record
+            # naming B, the guard would admit B and would refuse without the
+            # record -- the record doing the admitting, which is the redirect.
+            status, _recorded_root = record_resolution(declared, worktree_identity)
+            if status == RECORD_CONTAINED:
+                recorded_common_dir = _recorded_common_dir(worktree_identity, declared)
                 return _rev_parse_path(resolved, "--show-toplevel") == resolved and (
                     _rev_parse_path(resolved, "--git-common-dir")
                     == Path(recorded_common_dir)
@@ -820,6 +866,22 @@ def _record_worktree_identity(session_id: str, project_dir: str) -> None:
             return
         worktree = _rev_parse_path(directory, "--show-toplevel")
         if worktree is None:
+            return
+        # WRITE-TIME VERIFICATION, AND IT IS THE REASON THE CLASS GOES AWAY.
+        # The relationship this record will later be trusted for is provable
+        # NOW and gone after `git worktree prune`. Require the declaration's
+        # own toplevel to be a worktree git LISTS for the candidate repository,
+        # and require the declaration to BE that worktree or inside it: a
+        # forged gitfile names a worktree the asking directory does not belong
+        # to, and it is not listed for that repository either. Refusing the
+        # write leaves the session on the no-record path, which is the safe
+        # fall-through rather than a redirect.
+        candidate = common_dir.parent
+        listed = _listed_worktrees_result(candidate, resolve_against=candidate)
+        if listed is None or worktree not in listed:
+            return
+        declared_real = Path(os.path.realpath(project_dir))
+        if declared_real != worktree and worktree not in declared_real.parents:
             return
         record = {
             "session_id": session_id,

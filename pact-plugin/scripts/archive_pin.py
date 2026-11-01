@@ -579,11 +579,12 @@ def resolve_claude_md():
     # the anchor the resolver falls back to, so an unknown root there would
     # archive the worktree copy just the same.
     from shared.project_scope import (
+        RECORD_CONTAINED,
+        RECORD_CORRUPT,
         anchor_directory_is_missing,
         cwd_checkout_memory_root,
         project_memory_root_or_none,
-        record_is_for_declaration,
-        recorded_main_root,
+        record_resolution,
     )
 
     env_dir = os.environ.get("CLAUDE_PROJECT_DIR")
@@ -622,20 +623,26 @@ def resolve_claude_md():
         # one that works when the cwd is not in the enclosing checkout; it is
         # verified against the candidate MAIN root, never the dead worktree,
         # so `git worktree prune` -- the normal cleanup path -- cannot reject
-        # it. A record that was written FOR this declaration and does not
-        # verify is an integrity failure, not a fall-through: refusing keeps
-        # a forged record from redirecting the archive.
+        # it.
+        #
+        # THE RECORD IS TRUSTED ONLY WHEN THE RECORDED CHECKOUT CONTAINS THE
+        # DECLARATION. A record naming a real checkout that does not contain it
+        # is NOT trusted -- a genuine out-of-tree worktree and a forged
+        # redirect are identical after prune -- so this falls through to the
+        # guarded git/cwd rungs like an absent record. A record for this
+        # declaration that names no checkout at all is corrupt and refuses.
         identity = _get_worktree_identity_from_session_record()
-        retarget = None
-        if anchor_is_missing:
-            retarget = recorded_main_root(anchor, identity)
-            if retarget is None and record_is_for_declaration(identity, anchor):
-                raise _Unevaluable(
-                    "the declared project directory no longer exists and the "
-                    "session record written for it does not verify against a "
-                    "checkout, so the project CLAUDE.md cannot be identified; "
-                    "nothing was archived"
-                )
+        status, recorded = (
+            record_resolution(anchor, identity) if anchor_is_missing
+            else ("absent", None)
+        )
+        if status == RECORD_CORRUPT:
+            raise _Unevaluable(
+                "the declared project directory no longer exists and its "
+                "session record does not verify against any checkout, so the "
+                "project CLAUDE.md cannot be identified; nothing was archived"
+            )
+        retarget = recorded if status == RECORD_CONTAINED else None
         if retarget is None:
             # NEXT, the CWD's checkout memory root -- the same retargeting rung
             # the sync sites use -- so a cwd inside a SIBLING WORKTREE probes

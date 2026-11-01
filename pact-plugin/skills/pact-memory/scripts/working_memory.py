@@ -1197,11 +1197,13 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
         # Function-level: the shared package is importable only after
         # pact_session's sys.path bootstrap has run at module import.
         from shared.project_scope import (
+            RECORD_CONTAINED,
+            RECORD_CORRUPT,
             anchor_directory_is_missing,
             get_worktree_identity_from_session_record,
             git_env_without_location,
             project_memory_root_or_none,
-            recorded_main_root,
+            record_resolution,
         )
 
         # THE SESSION ANCHOR DECIDES FIRST (#1653, Copilot HIGH). A forged
@@ -1226,18 +1228,23 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
             # That is the forged-gitfile and git-failure class; probing on
             # could reach a repository this session does not belong to.
             return None, None
-        # A MISSING BASE IS RESOLVED FROM THE SESSION RECORD FIRST. The record
-        # is the substitute for the worktree listing -- `git worktree prune`
-        # deletes both, and it is the normal cleanup path -- and it is the
-        # only answer available when the cwd is not in the enclosing checkout.
-        # It is verified against the candidate MAIN root, never the dead
-        # worktree, and a record that does not verify is ignored here: this
-        # resolver falls through to the scope guard rather than redirecting.
+        # A MISSING BASE IS RESOLVED FROM THE SESSION RECORD ONLY WHEN THE
+        # RECORD IS PROVEN TO COVER IT. The record is the substitute for the
+        # worktree listing -- `git worktree prune` deletes both, and it is the
+        # normal cleanup path -- but at read time nothing can prove an
+        # out-of-tree worktree belonged to the recorded repository, so the
+        # record is trusted only when the recorded checkout CONTAINS the
+        # declaration. A record that names a checkout not containing it is not
+        # trusted: this resolver falls through and the scope guard decides. A
+        # record for this declaration naming no checkout is corrupt and
+        # refuses instead.
         if anchor_directory_is_missing(anchor):
-            recorded = recorded_main_root(
+            status, recorded = record_resolution(
                 anchor, get_worktree_identity_from_session_record()
             )
-            if recorded is not None:
+            if status == RECORD_CORRUPT:
+                return None, None
+            if status == RECORD_CONTAINED and recorded is not None:
                 found = _find_existing_claude_md(recorded)
                 if found is not None:
                     return found, recorded
