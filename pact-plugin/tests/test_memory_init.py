@@ -454,9 +454,13 @@ class TestDependencyDriftIsDetectable:
     # the value names a file, URL or option target — not a package — so the
     # tokeniser must consume it. `--flag=value` forms carry the value inline
     # and need no entry here. shortcut: a future value-taking flag unknown to
-    # this set leaves its value counted as a package operand, which is
+    # this set leaves its value counted as a package operand. That is
     # harmless for the declared-missing direction (extra tokens create no
-    # false drift); extend the set when the install line gains such a flag.
+    # false drift) but the coverage arm turns it into a TRIPWIRE: it reports
+    # the value as an UNPINNED package and reddens naming it — the value's
+    # name in the message is the tell. So adding such a flag to the install
+    # line requires extending this set in the same change; the red is the
+    # reminder, not a bug.
     _PIP_FLAGS_WITH_VALUE = frozenset({
         "-c", "--constraint", "-r", "--requirement", "-e", "--editable",
         "-i", "--index-url", "--extra-index-url", "-f", "--find-links",
@@ -480,6 +484,35 @@ class TestDependencyDriftIsDetectable:
         """
         head = re.split(r"[=<>!~;\[]", name)[0]
         return re.sub(r"[-_.]+", "-", head).strip().lower()
+
+    @classmethod
+    def _package_tokens_from_pip_argv(cls, command):
+        """Package-name tokens of one `pip install` command string.
+
+        Model how pip itself reads argv: package operands are the words
+        after the `install` verb that are neither flags nor the VALUE of a
+        flag that takes one. Everything before the verb is the invocation
+        (`run:`, `python`, `-m`, `pip`) and is not an operand; deriving
+        the boundary structurally beats filtering a hand-maintained list
+        of command words, which would need updating and would turn a
+        package legitimately named after a command into false drift.
+        """
+        words = command.split()
+        operands = words[words.index("install") + 1:] if "install" in words else []
+        package_words = []
+        consume_value = False
+        for tok in operands:
+            if consume_value:
+                consume_value = False
+                continue
+            if tok.startswith("-"):
+                # `--flag=value` carries its value inline; a bare flag in
+                # _PIP_FLAGS_WITH_VALUE takes its value as the NEXT word.
+                if "=" not in tok and tok in cls._PIP_FLAGS_WITH_VALUE:
+                    consume_value = True
+                continue
+            package_words.append(tok)
+        return {cls._normalise_pin_name(tok) for tok in package_words if tok}
 
     def _ci_install_package_tokens(self, workflow):
         """Package-name tokens of the workflow's single `pip install` line.
@@ -516,32 +549,7 @@ class TestDependencyDriftIsDetectable:
             f"here, not silently first-matched."
         )
         install_line = install_lines[0]
-
-        # Model how pip itself reads argv: package operands are the words
-        # after the `install` verb that are neither flags nor the VALUE of a
-        # flag that takes one. Everything before the verb is the invocation
-        # (`run:`, `python`, `-m`, `pip`) and is not an operand; deriving
-        # the boundary structurally beats filtering a hand-maintained list
-        # of command words, which would need updating and would turn a
-        # package legitimately named after a command into false drift.
-        words = install_line.split()
-        operands = words[words.index("install") + 1:] if "install" in words else []
-        package_words = []
-        consume_value = False
-        for tok in operands:
-            if consume_value:
-                consume_value = False
-                continue
-            if tok.startswith("-"):
-                # `--flag=value` carries its value inline; a bare flag in
-                # _PIP_FLAGS_WITH_VALUE takes its value as the NEXT word.
-                if "=" not in tok and tok in self._PIP_FLAGS_WITH_VALUE:
-                    consume_value = True
-                continue
-            package_words.append(tok)
-        install_tokens = {
-            self._normalise_pin_name(tok) for tok in package_words if tok
-        }
+        install_tokens = self._package_tokens_from_pip_argv(install_line)
 
         # PARSE NON-VACUITY — asserted before any comparison built on the
         # tokens, and with DISTINCT messages, because "I could not read the
@@ -702,6 +710,133 @@ class TestDependencyDriftIsDetectable:
             f"only as a transitive, which these `==` pins do not bound "
             f"for) and misleads a refresh into re-verifying it. Remove the "
             f"pin or add the package to the install line."
+        )
+
+    def test_cursor_install_sh_matches_the_ci_install_line(self):
+        """`.cursor/install.sh` mirrors the CI install line — asserted now.
+
+        The script's header claims lockstep with the workflow's install
+        line, and before this arm that claim was PROSE ONLY: when CI gained
+        `-c constraints-ci.txt` the claim broke silently (round-2 finding
+        F2) because nothing read the script. This arm holds the package SET
+        of both installs to each other, `pip` excepted — the script
+        upgrades pip in its own earlier command by design, mirroring the
+        CI line's `pip` operand. Version parity follows from set parity:
+        both installs apply the same constraints-ci.txt.
+        """
+        root = self._source_repo_root()
+        if root is None:
+            pytest.skip(
+                "SKIPPED, NOT PASSED — no .claude-plugin/marketplace.json "
+                f"above {Path(__file__).resolve()}, so this is not a PACT "
+                "source checkout. The expected case is an INSTALLED PLUGIN "
+                "CACHE, which has no .github/ or .cursor/ tree by design. "
+                "This skip is NO INFORMATION about install-line parity — "
+                "never read it as a pass."
+            )
+        script = root / ".cursor" / "install.sh"
+        assert script.exists(), (
+            f"source checkout detected at {root} (marketplace.json present) "
+            f"but {script} is missing. The local-mirror parity guard cannot "
+            f"run. This is a FAILURE, not a skip: inside a checkout the "
+            f"bootstrap script is required."
+        )
+        workflow = root / ".github" / "workflows" / "tests.yml"
+        assert workflow.exists(), (
+            f"source checkout detected at {root} (marketplace.json present) "
+            f"but {workflow} is missing. The parity guard cannot run. "
+            f"This is a FAILURE, not a skip: inside a checkout the "
+            f"workflow is required."
+        )
+        ci_tokens = self._ci_install_package_tokens(workflow)
+
+        # Reconstruct the script's pip-install commands from its EXECUTED
+        # text: comment lines are dropped FIRST (the script's own header
+        # quotes the CI install line in comments — prose is not a
+        # declaration), and a command starting with `pip install` extends
+        # through its backslash continuations.
+        commands = []
+        saw_install_command = False
+        collecting = False
+        command = ""
+        for raw in script.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if collecting:
+                command += " " + line.rstrip("\\").strip()
+                collecting = raw.rstrip().endswith("\\")
+                if not collecting:
+                    commands.append(command)
+                    command = ""
+                continue
+            if line.startswith("#") or "pip install" not in line:
+                continue
+            saw_install_command = True
+            command = line.rstrip("\\").strip()
+            collecting = raw.rstrip().endswith("\\")
+            if not collecting:
+                commands.append(command)
+                command = ""
+        assert saw_install_command, (
+            f"PARSE FAILURE, not parity drift: no non-comment `pip install` "
+            f"command could be read from {script}. The script changed shape "
+            f"(a requirements file, a variable-driven loop) — re-point this "
+            f"arm at the new shape; do not weaken it to a skip."
+        )
+        script_tokens = set()
+        package_commands = []
+        for cmd in commands:
+            cmd_tokens = self._package_tokens_from_pip_argv(cmd)
+            script_tokens |= cmd_tokens
+            if cmd_tokens - {"pip"}:
+                package_commands.append(cmd)
+
+        ci_side = ci_tokens - {"pip"}
+        script_side = script_tokens - {"pip"}
+        assert script_side, (
+            f"PARSE FAILURE, not parity drift: the `pip install` commands in "
+            f"{script} yielded no package operands. The CI mirror is the "
+            f"point of those commands, so an empty read means the parse no "
+            f"longer models the script."
+        )
+
+        # The constraints file must be APPLIED, not merely present in the
+        # repo: the package SETS can match while versions float, if the
+        # script ever dropped its `-c` — round-2 F2's silent-break shape
+        # wearing a different flag. Accept the separate-word and inline
+        # spellings pip does; anything else is a re-point, not a pass.
+        def _applies_constraints(cmd):
+            words = cmd.split()
+            for i, tok in enumerate(words):
+                if tok in ("-c", "--constraint") \
+                        and words[i + 1:i + 2] == ["constraints-ci.txt"]:
+                    return True
+                if tok == "--constraint=constraints-ci.txt":
+                    return True
+            return False
+
+        assert package_commands and all(
+            _applies_constraints(cmd) for cmd in package_commands
+        ), (
+            f"LOCAL-MIRROR DRIFT: a package-install command in {script} "
+            f"does not apply constraints-ci.txt (`-c`/`--constraint`). The "
+            f"package sets still match, so the set comparison above cannot "
+            f"see this — but local versions float, silently undoing the "
+            f"lockstep the script's header claims. Restore the flag."
+        )
+        missing_locally = sorted(ci_side - script_side)
+        assert not missing_locally, (
+            f"LOCAL-MIRROR DRIFT: {missing_locally} are installed by CI's "
+            f"install line but NOT by {script}. A local green and a CI green "
+            f"then run different dependency sets — the exact divergence the "
+            f"script's lockstep header exists to prevent. Add them to the "
+            f"script, or remove them from the workflow."
+        )
+        extra_locally = sorted(script_side - ci_side)
+        assert not extra_locally, (
+            f"LOCAL-MIRROR DRIFT: {extra_locally} are installed by "
+            f"{script} but NOT by CI's install line. The local environment "
+            f"carries packages CI never sees, so a local green certifies "
+            f"more than the CI green does. Reconcile the two lists."
         )
 
     def test_ci_branch_emits_nothing_to_stderr(self):
