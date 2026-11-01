@@ -23,6 +23,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 
 
 class TestEnsureMemoryReady:
@@ -1485,45 +1486,51 @@ class TestDependencyDriftIsDetectable:
         with pytest.raises(AssertionError, match="does not apply constraints"):
             self.test_cursor_install_sh_matches_the_ci_install_line()
 
-    def _pip_environment_keys(self, workflow_text):
-        """`env:` keys configuring pip, from job- and step-level blocks.
+    @staticmethod
+    def _pip_environment_keys(workflow_text):
+        """PIP_* keys from every `env:` mapping, read STRUCTURALLY.
 
-        A PIP_* key is a pip configuration channel that operates
-        INDEPENDENTLY of the install line this class reads. The `env:`
-        line matches as a PREFIX (`env: # comment` and the flow mapping
-        `env: {K: V}` are both valid spellings an end-of-line anchor
-        would miss — Bugbot, cycle 11); `environment:` never matches
-        because it does not start with `env:`. Keys are compared
-        case-insensitively (over-catch: pip itself reads only uppercase,
-        but a lowercase `pip_*` key reads as intended-for-pip to every
-        future reader even if pip ignores it).
+        The mappings are enumerated from yaml.safe_load's parse — the
+        same ground truth the round-5/6 probes used — not from line
+        shapes: block form, trailing comment, single-line flow and
+        WRAPPED flow (`env: {` with keys on later lines, the cycle-12
+        Bugbot shape) are one mapping node to the parser, so no spelling
+        arm chases the next spelling. Workflow-, job- and step-level env
+        mappings are all walked; `environment:` is a different key and
+        is never consulted. Keys are compared case-insensitively
+        (over-catch: pip itself reads only uppercase, but a lowercase
+        `pip_*` key reads as intended-for-pip to every future reader
+        even if pip ignores it). A workflow that does not PARSE is a
+        PARSE FAILURE, not a clean read — an unparseable workflow cannot
+        run on GitHub, so a loud red is the honest outcome, never a
+        green line-scan over text no runner would accept.
         """
+        try:
+            doc = yaml.safe_load(workflow_text)
+        except yaml.YAMLError as exc:
+            raise AssertionError(
+                f"PARSE FAILURE, not a clean env read: the workflow does "
+                f"not parse as YAML ({exc.__class__.__name__}), so its "
+                f"env: mappings cannot be enumerated. GitHub would refuse "
+                f"to run this workflow; fix the syntax."
+            ) from exc
         offenders = []
-        env_indent = None
-        for raw in workflow_text.splitlines():
-            stripped = raw.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            indent = len(raw) - len(raw.lstrip(" "))
-            if env_indent is not None:
-                if indent > env_indent:
-                    key = stripped.split(":", 1)[0].strip()
-                    if key.upper().startswith("PIP_"):
-                        offenders.append(key)
+
+        def harvest(env):
+            if isinstance(env, dict):
+                offenders.extend(
+                    str(k) for k in env if str(k).upper().startswith("PIP_")
+                )
+
+        if isinstance(doc, dict):
+            harvest(doc.get("env"))
+            for job in (doc.get("jobs") or {}).values():
+                if not isinstance(job, dict):
                     continue
-                env_indent = None
-            header = re.match(r"^\s*-?\s*env:(.*)$", raw)
-            if header:
-                tail = header.group(1).strip()
-                if tail.startswith("{"):
-                    # Flow mapping: the keys live on this line.
-                    for tok in re.findall(r"[\w.-]+(?=\s*:)", tail):
-                        if tok.upper().startswith("PIP_"):
-                            offenders.append(tok)
-                else:
-                    # Block form (bare, or with a trailing comment): the
-                    # keys are the deeper-indented lines that follow.
-                    env_indent = indent
+                harvest(job.get("env"))
+                for step in job.get("steps") or []:
+                    if isinstance(step, dict):
+                        harvest(step.get("env"))
         return offenders
 
     def test_no_pip_environment_key_redirects_the_install(self):
@@ -1576,14 +1583,21 @@ class TestDependencyDriftIsDetectable:
         """MUTATION ARM (env): every env: spelling of a PIP_ key reddens by
         name.
 
-        PREDICTIONS (written before the probes run): each of the four
+        PREDICTIONS (written before the probes run): each of the five
         shapes below — step-level block, job-level block, trailing
-        comment on the `env:` line, and the single-line flow mapping —
-        reddens the shipped tripwire with PIP_INDEX_URL named; a
-        deployment `environment:` key is NOT an env: mapping and stays
-        unflagged. The comment and flow spellings rode the cycle-10
-        detector green (Bugbot, cycle 11): both are valid YAML an
-        end-of-line anchor cannot see.
+        comment on the `env:` line, single-line flow mapping, and the
+        WRAPPED flow mapping (`env: {` with keys on later lines, the
+        cycle-12 Bugbot shape) — reddens the shipped tripwire with
+        PIP_INDEX_URL named, because the detector reads the env
+        mappings STRUCTURALLY (yaml.safe_load), the way a runner does;
+        a workflow-level env: shape reddens the same way; a deployment
+        `environment:` key is NOT an env: mapping and stays unflagged;
+        and an unparseable workflow reddens as PARSE FAILURE rather
+        than line-scanning green over text no runner would accept.
+        The comment and flow spellings rode the cycle-10 line scanner
+        green (Bugbot, cycle 11), the wrapped flow rode the cycle-11
+        same-line scan green (Bugbot, cycle 12) — the structural read
+        retires the spelling class.
         """
         root = self._source_repo_root()
         if root is None:
@@ -1625,11 +1639,30 @@ class TestDependencyDriftIsDetectable:
             canonical + "\n        env: "
                         "{PIP_INDEX_URL: https://evil.example/simple}",
             1))
+        assert_reddens("wrapped-flow", real_text.replace(
+            canonical,
+            canonical + "\n        env: {\n"
+                        "          PIP_INDEX_URL: https://evil.example/simple\n"
+                        "}",
+            1))
+        assert_reddens("workflow-level", real_text.replace(
+            "on:\n",
+            "env:\n  PIP_INDEX_URL: https://evil.example/simple\non:\n", 1))
 
-        # CONTROL: `environment:` (a deployment target) does not start
-        # with `env:` and must stay unflagged.
+        # CONTROL: `environment:` (a deployment target) is a different
+        # key from `env` and stays unflagged.
         assert self._pip_environment_keys(
             "jobs:\n  release:\n    environment: production\n") == []
+
+        # PARSE FAILURE: an unparseable workflow reddens rather than
+        # reading green over text GitHub would refuse to run.
+        broken = real_text.replace(
+            canonical, canonical + "\n        env: {unclosed", 1)
+        copy = self._repo_copy_carrying(
+            tmp_path / "unparseable", workflow_text=broken)
+        monkeypatch.setattr(type(self), "_source_repo_root", lambda self: copy)
+        with pytest.raises(AssertionError, match="PARSE FAILURE"):
+            self.test_no_pip_environment_key_redirects_the_install()
 
     def test_the_three_floor_literals_agree(self):
         """Declared floor, CI cell and AST guard must move together.
