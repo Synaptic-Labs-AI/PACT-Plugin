@@ -39,7 +39,6 @@ from shared.failure_cause import failure_cause
 from shared.project_scope import (
     git_env_without_location,
     project_memory_root,
-    project_memory_root_or_none,
 )
 from pin_caps import (
     PIN_STALE_BLOCK_THRESHOLD,
@@ -411,6 +410,11 @@ def resolve_session_claude_md_path(
             # what stops this route returning the worktree shadow copy; an
             # unknown root answers NOTHING rather than falling through.
             project_dir = Path.cwd()
+            # Late-bound: a module-level copy would keep whatever function was
+            # bound at first import, so a test that patches the source module
+            # before this one is imported would bind its stand-in here.
+            from shared.project_scope import project_memory_root_or_none
+
             memory_root = project_memory_root_or_none(project_dir)
             if memory_root is None:
                 return None
