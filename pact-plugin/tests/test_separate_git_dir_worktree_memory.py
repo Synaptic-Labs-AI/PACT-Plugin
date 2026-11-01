@@ -427,7 +427,7 @@ def test_the_display_resolver_rejects_a_document_outside_the_checkout(
 
 def test_an_env_absent_unknown_root_reports_root_unknown(tmp_path, monkeypatch):
     """F4: with the variable UNSET, an unknown cwd root was reported as
-    UNRESOLVED ("no file found") because `_display_root_unknown_kind`
+    UNRESOLVED ("no file found") because `_display_root_unknown_reason`
     only looked at the declared env base. It now anchors on the cwd -- the
     resolver's last anchor -- so "cannot tell where the file is" is reported
     as ROOT_UNKNOWN."""

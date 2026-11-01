@@ -1369,18 +1369,22 @@ def _resolve_display_claude_md_path() -> Optional[Path]:
     return _resolve_display_claude_md_with_base()[0]
 
 
-def _display_root_unknown_kind() -> Optional[str]:
-    """WHY the session's project-memory anchor is UNKNOWN: "missing" when the
-    anchor directory no longer exists, "unanswerable" when it exists but git
-    could not identify it, None when the root is known.
+def _display_root_unknown_reason() -> Optional[str]:
+    """WHY the session's project-memory anchor is UNKNOWN, as the phrase the
+    warning renders, or None when the root is known.
+
+    Two causes, named rather than collapsed: a directory that no longer exists
+    (named IN the phrase -- several worktrees can be in play and the user
+    needs to know which one), and one that exists but whose root git could
+    not identify. A bool could not make that distinction: every caller was
+    told "unknown" and none could tell a removed directory from a git
+    failure, so the warning blamed git on a shape where git never ran.
 
     The display resolver skips an unknown base instead of probing it (its
     fail-open answer is the base itself, which for a worktree is the copy the
     one-rule change keeps out of project memory). A None from the resolver is
     therefore not always "no file", and the sync writers ask this to report
-    WHICH cause it was. A bool could not: every caller was told "unknown" and
-    none could tell a removed directory from a git failure, so the warning
-    blamed git on a shape where git never ran.
+    WHICH cause it was.
 
     THE ANCHOR IS THE DECLARED DIR, ELSE THE SESSION RECORD, ELSE THE CWD --
     the same precedence the resolver uses. Without the cwd case the status
@@ -1403,15 +1407,9 @@ def _display_root_unknown_kind() -> Optional[str]:
         anchor = Path(record) if record else Path.cwd()
     if project_memory_root_or_none(anchor) is not None:
         return None
-    return "missing" if anchor_directory_is_missing(anchor) else "unanswerable"
-
-
-# ONE SOURCE FOR THE CAUSE WORDING: both sync writers render it, so a change
-# cannot land on one channel and not the other.
-_DISPLAY_ROOT_UNKNOWN_TEXT = {
-    "missing": "the project directory no longer exists",
-    "unanswerable": "git could not answer",
-}
+    if anchor_directory_is_missing(anchor):
+        return f"the project directory {anchor} no longer exists"
+    return "git could not answer"
 
 
 def _estimate_tokens(text: str) -> int:
@@ -2682,13 +2680,13 @@ def sync_to_claude_md(
     # silently anchors on a directory named `None` if one ever exists. Naming
     # both halves here costs one condition and depends on nobody's promise.
     if claude_md_path is None or project_root is None:
-        unknown_kind = _display_root_unknown_kind()
-        if unknown_kind is not None:
+        unknown_reason = _display_root_unknown_reason()
+        if unknown_reason is not None:
             # No write: the resolver could not identify the project's file.
             logger.warning(
                 "Not syncing memory to CLAUDE.md: %s, so the project memory "
                 "target is unknown",
-                _DISPLAY_ROOT_UNKNOWN_TEXT[unknown_kind],
+                unknown_reason,
             )
             return SyncResult(SyncResult.ROOT_UNKNOWN)
         logger.debug("CLAUDE.md not found, skipping working memory sync")
@@ -3078,12 +3076,12 @@ def sync_retrieved_to_claude_md(
     )
 
     if claude_md_path is None or project_root is None:
-        unknown_kind = _display_root_unknown_kind()
-        if unknown_kind is not None:
+        unknown_reason = _display_root_unknown_reason()
+        if unknown_reason is not None:
             logger.warning(
                 "Not syncing retrieved memories to CLAUDE.md: %s, so the "
                 "project memory target is unknown",
-                _DISPLAY_ROOT_UNKNOWN_TEXT[unknown_kind],
+                unknown_reason,
             )
             return SyncResult(SyncResult.ROOT_UNKNOWN)
         logger.debug("CLAUDE.md not found, skipping retrieved context sync")

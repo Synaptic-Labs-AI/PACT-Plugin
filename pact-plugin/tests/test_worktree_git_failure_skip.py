@@ -728,6 +728,9 @@ def test_a_removed_declaration_names_the_missing_directory_in_the_sync(
     assert result.reason == wm.SyncResult.ROOT_UNKNOWN, result.reason
     assert "no longer exists" in caplog.text, caplog.text
     assert "git could not answer" not in caplog.text, caplog.text
+    # NAMED, NOT JUST DESCRIBED: several worktrees can be in play and the user
+    # must be able to tell which one the message is about.
+    assert str(missing) in caplog.text, caplog.text
 
 
 def test_the_memory_sync_still_writes_main(repo, monkeypatch):
@@ -1031,6 +1034,8 @@ def test_a_removed_declaration_names_the_missing_directory(repo, monkeypatch):
 
     assert "no longer exists" in system_message, system_message[:300]
     assert "git could not answer" not in system_message, system_message[:300]
+    # NAMED, NOT JUST DESCRIBED: the user must be able to tell WHICH directory.
+    assert str(worktree) in system_message, system_message[:300]
 
 
 def test_d3b_the_archive_refuses_an_unknown_no_declared_root(repo, monkeypatch):

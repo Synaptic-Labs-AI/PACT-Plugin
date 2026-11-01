@@ -1817,10 +1817,11 @@ def main():
         # else the cwd (the same one resolved above); "project", not
         # "declared", because "declared" is false on the no-declared-dir route.
         if frame_is_lead and memory_unknown:
-            if anchor_directory_is_missing(declared_project_dir or project_dir):
+            anchor = declared_project_dir or project_dir
+            if anchor_directory_is_missing(anchor):
                 skip_reason = (
-                    "the project directory no longer exists, so the project "
-                    "memory target is unknown"
+                    f"the project directory {anchor} no longer exists, so the "
+                    "project memory target is unknown"
                 )
             else:
                 skip_reason = (
