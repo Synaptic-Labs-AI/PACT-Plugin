@@ -85,10 +85,11 @@
 #                          began collecting `skills/`, which it now does
 #                          unconditionally — see "WHY THERE ARE NO PATH
 #                          ARGUMENTS" at the test step below.
-#     - pysqlite3 /      : the pact-memory suite. Without them the
+#     - pysqlite3 /      : the pact-memory suite. Without the first two the
 #       sqlite-vec /       vector-migration tests FAIL (not skip) and the
-#       model2vec          `TestSqliteVecIntegration` class SKIPS — ROUND 2 below
-#                          names which library causes which. The memory CLI
+#       model2vec          `TestSqliteVecIntegration` class SKIPS; without
+#                          model2vec the model-warm step below fails. CURRENT
+#                          WARRANT below gives the measured results. The memory CLI
 #                          subprocess tests are NOT affected: their fixture falls
 #                          back to stdlib sqlite3, so do not "fix" them here.
 #                          Declared here so CI does not install
@@ -131,18 +132,23 @@
 #   so read both paragraphs — no reader should inherit a stronger warrant than
 #   the evidence supports.
 #
-#   CURRENT WARRANT — the set was verified AS A WHOLE against the WIDENED
-#   collection, on ONE interpreter; CI runs that one interpreter, so the
-#   warrant and the CI resolved set are the same question. Two clean venvs
-#   differing ONLY in the pact-memory packages: with the full set the suite is
-#   green; with those packages removed the consequences are exactly these —
-#     - pyyaml removed            -> collection is INTERRUPTED, ZERO tests run.
-#     - pysqlite3 + sqlite-vec    -> the `TestSqliteVecIntegration` class SKIPS
-#       removed                      and the `maybe_migrate_embeddings` tests
-#                                    FAIL, both in
-#                                    `tests/test_vector_dimension_fixes.py`.
-#     - model2vec removed         -> the real-CLI probe in
-#                                    `tests/test_archive_pin.py` FAILS.
+#   CURRENT WARRANT — the full set is green against the WIDENED collection on
+#   Python 3.12.3 under the constraints-ci.txt pins, the interpreter and pins
+#   CI runs. Each result below was measured on that interpreter and pin set by
+#   removing the named packages from an otherwise complete venv:
+#     - pyyaml removed            -> collection is INTERRUPTED (4 collection
+#                                    errors), ZERO tests run.
+#     - pysqlite3 + sqlite-vec    -> in `tests/test_vector_dimension_fixes.py`
+#       removed                      the `TestSqliteVecIntegration` class SKIPS,
+#                                    and the `maybe_migrate_embeddings` tests
+#                                    and `TestGetSearchCapabilities::
+#                                    test_semantic_search_mode_when_available`
+#                                    FAIL.
+#     - model2vec removed         -> the "Warm and verify the embedding model"
+#                                    step fails at its `model2vec` import,
+#                                    before any test runs. (It is not the
+#                                    archive-pin probe: `tests/test_archive_pin.py`
+#                                    passes without it.)
 #
 #   WHY THE EARLIER DERIVATION CANNOT CARRY THIS HEADING ALONE. The original set
 #   was derived by running the SCOPED `pytest tests/`. That path argument encoded
