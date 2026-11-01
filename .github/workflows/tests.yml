@@ -117,8 +117,11 @@
 #   environment from the package list above WITHOUT `-c` — a constrained
 #   rebuild reproduces the current pins exactly, so it can only re-confirm
 #   them and reads as nothing-to-do — freeze the result into
-#   constraints-ci.txt, run the suite green under the new pins, and commit
-#   the version diff. A pin that blocks a needed fix is a reason to refresh,
+#   constraints-ci.txt as the direct dependencies above ONLY, pip excepted
+#   (a whole-venv `pip freeze` would pin transitives too, which this file
+#   deliberately lets float; the dead-pin coverage arm reddens on the
+#   surplus), run the suite green under the new pins, and commit the
+#   version diff. A pin that blocks a needed fix is a reason to refresh,
 #   not to delete the file.
 #
 #   VERIFICATION: every entry was proven by RUNNING the suite in a clean venv,

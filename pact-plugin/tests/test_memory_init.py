@@ -514,21 +514,32 @@ class TestDependencyDriftIsDetectable:
             package_words.append(tok)
         return {cls._normalise_pin_name(tok) for tok in package_words if tok}
 
-    def _ci_install_package_tokens(self, workflow):
-        """Package-name tokens of the workflow's single `pip install` line.
+    @staticmethod
+    def _applies_constraints(command):
+        """Does a pip-install command APPLY constraints-ci.txt?
 
-        Compared as TOKENS of the install line, never substrings of it. A
-        substring test fails OPEN on the most plausible next edit: this
-        suite does `import pysqlite3 as sqlite3`, so an editor adding
-        'sqlite3' to a package list would find it inside 'pysqlite3', pass,
-        and assert a package is installed that is not. Measured against the
-        real install line, 'sqlite3', 'sqlite', 'vec', 'yaml' and 'asyncio'
-        are ALL substrings of it and none is a package operand.
+        Accepts the separate-word spellings (`-c constraints-ci.txt`,
+        `--constraint constraints-ci.txt`) and the inline one
+        (`--constraint=constraints-ci.txt`) that pip documents; anything
+        else is a re-point, not a pass.
+        """
+        words = command.split()
+        for i, tok in enumerate(words):
+            if tok in ("-c", "--constraint") \
+                    and words[i + 1:i + 2] == ["constraints-ci.txt"]:
+                return True
+            if tok == "--constraint=constraints-ci.txt":
+                return True
+        return False
+
+    def _ci_install_line(self, workflow):
+        """The workflow's single `run:` line carrying `pip install`.
 
         The parse anchors on the `run:` line — the EXECUTED command — never
         on any line merely mentioning `pip install`: workflow comment prose
         may name the command (the CONSTRAINTS paragraph does), and prose is
-        not a declaration.
+        not a declaration. Exactly-one is asserted here so every consumer
+        (tokens, coverage, application) shares one parse contract.
         """
         install_lines = [
             ln for ln in workflow.read_text(encoding="utf-8").splitlines()
@@ -548,7 +559,20 @@ class TestDependencyDriftIsDetectable:
             f"line, singular — a second install step must be reconciled "
             f"here, not silently first-matched."
         )
-        install_line = install_lines[0]
+        return install_lines[0]
+
+    def _ci_install_package_tokens(self, workflow):
+        """Package-name tokens of the workflow's single `pip install` line.
+
+        Compared as TOKENS of the install line, never substrings of it. A
+        substring test fails OPEN on the most plausible next edit: this
+        suite does `import pysqlite3 as sqlite3`, so an editor adding
+        'sqlite3' to a package list would find it inside 'pysqlite3', pass,
+        and assert a package is installed that is not. Measured against the
+        real install line, 'sqlite3', 'sqlite', 'vec', 'yaml' and 'asyncio'
+        are ALL substrings of it and none is a package operand.
+        """
+        install_line = self._ci_install_line(workflow)
         install_tokens = self._package_tokens_from_pip_argv(install_line)
 
         # PARSE NON-VACUITY — asserted before any comparison built on the
@@ -676,7 +700,25 @@ class TestDependencyDriftIsDetectable:
             f"This is a FAILURE, not a skip: inside a checkout the "
             f"workflow is required."
         )
+        install_line = self._ci_install_line(workflow)
+        # Tokens come through the shared helper so the non-vacuity anchors
+        # (ground truth: this test runs under pytest) fire on this path too.
         install_tokens = self._ci_install_package_tokens(workflow)
+
+        # The install line must APPLY the constraints file, not merely ship
+        # it beside the workflow: without `-c` every pin in the file is dead
+        # at install time and every direct dependency floats — while the
+        # coverage comparison below still passes, because it compares the
+        # line's package NAMES against the pin names and never looks at the
+        # line's flags. The script-side twin of this check runs in
+        # test_cursor_install_sh_matches_the_ci_install_line.
+        assert self._applies_constraints(install_line), (
+            f"CONSTRAINT APPLICATION DRIFT: the CI install line "
+            f"{install_line.strip()!r} does not apply constraints-ci.txt "
+            f"(`-c`/`--constraint`). Merge-time resolution then floats — "
+            f"the exact weather the file exists to prevent. Restore the "
+            f"flag."
+        )
 
         pins = {}
         for raw in constraints.read_text(encoding="utf-8").splitlines():
@@ -802,20 +844,10 @@ class TestDependencyDriftIsDetectable:
         # The constraints file must be APPLIED, not merely present in the
         # repo: the package SETS can match while versions float, if the
         # script ever dropped its `-c` — round-2 F2's silent-break shape
-        # wearing a different flag. Accept the separate-word and inline
-        # spellings pip does; anything else is a re-point, not a pass.
-        def _applies_constraints(cmd):
-            words = cmd.split()
-            for i, tok in enumerate(words):
-                if tok in ("-c", "--constraint") \
-                        and words[i + 1:i + 2] == ["constraints-ci.txt"]:
-                    return True
-                if tok == "--constraint=constraints-ci.txt":
-                    return True
-            return False
-
+        # wearing a different flag. _applies_constraints is the same check
+        # the workflow side runs, so one spelling contract covers both.
         assert package_commands and all(
-            _applies_constraints(cmd) for cmd in package_commands
+            self._applies_constraints(cmd) for cmd in package_commands
         ), (
             f"LOCAL-MIRROR DRIFT: a package-install command in {script} "
             f"does not apply constraints-ci.txt (`-c`/`--constraint`). The "
