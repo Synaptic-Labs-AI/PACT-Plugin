@@ -1978,7 +1978,10 @@ def _is_journal_invocation_start(line: str) -> bool:
     stripped = _journal_line(line)
     return bool(
         re.match(r"^python3\s+", stripped)
-        and ("session_journal.py" in stripped or '"$SJ"' in stripped)
+        and (
+            "session_journal.py" in stripped
+            or re.search(r'(?<!\S)"?\$SJ"?(?!\S)', stripped)
+        )
     )
 
 
@@ -2286,7 +2289,7 @@ def _parse_readback_block(site):
     )
     if start is None:
         raise AssertionError("missing read-back")
-    required_start = "if ! python3 -c '" if site.filename == "prune-memory.md" else "python3 -c '"
+    required_start = "if ! python3 -I -c '" if site.filename == "prune-memory.md" else "python3 -I -c '"
     if lines[start].strip() != required_start:
         raise AssertionError(f"first statement is {lines[start].strip()!r}")
     try:
@@ -2370,7 +2373,7 @@ def _canonical_readback(site_key):
     """Build an isolated valid control from the same matrix under test."""
     filename, _ordinal = site_key
     expectation = JOURNAL_READBACK_MATRIX[site_key]
-    first = "if ! python3 -c '" if filename == "prune-memory.md" else "python3 -c '"
+    first = "if ! python3 -I -c '" if filename == "prune-memory.md" else "python3 -I -c '"
     lines = [
         first,
         *JOURNAL_STATIC_CODE.splitlines(),
@@ -2393,9 +2396,10 @@ def _synthetic_command_text(writes, spelling="direct", prefix="", fence="bash"):
     """Create isolated shell text with one (event type, read-back) tuple per write."""
     lines = [f"{prefix}```{fence}"]
     for event_type, readback in writes:
-        if spelling == "variable":
+        if spelling in ("variable", "variable-unquoted"):
             lines.append(f'{prefix}SJ="{{plugin_root}}/hooks/shared/session_journal.py"')
-            invocation = f'{prefix}python3 "$SJ" write --type {event_type} --session-dir \'{{session_dir}}\' --stdin <<\'JSON\''
+            sj = '"$SJ"' if spelling == "variable" else "$SJ"
+            invocation = f'{prefix}python3 {sj} write --type {event_type} --session-dir \'{{session_dir}}\' --stdin <<\'JSON\''
         else:
             root = "{plugin_root}" if spelling in ("direct", "split-write") else "${CLAUDE_PLUGIN_ROOT}"
             verb = "" if spelling == "split-write" else "write "
@@ -2431,11 +2435,12 @@ def _one_synthetic_site(site_key, readback, spelling="direct", prefix=""):
     [
         (("comPACT.md", 2), "direct", ""),
         (("orchestrate.md", 3), "variable", ""),
+        (("orchestrate.md", 3), "variable-unquoted", ""),
         (("comPACT.md", 2), "direct", "> "),
         (("peer-review.md", 4), "direct", "    "),
         (("prune-memory.md", 1), "plugin-root", ""),
     ],
-    ids=["direct", "SJ", "blockquote", "nested", "claude-plugin-root"],
+    ids=["direct", "SJ", "unquoted-SJ", "blockquote", "nested", "claude-plugin-root"],
 )
 def test_readback_deletion_is_site_specific(site_key, spelling, prefix):
     control = _one_synthetic_site(
@@ -2816,6 +2821,37 @@ def test_raw_readback_executes_and_verifies_under_optimize(
         assert "wrong_final_event" in wrong.stderr
 
 
+def test_isolated_readback_ignores_hostile_cwd_json_module(tmp_path, journal_site_map):
+    """The literal isolated block validates a real journal without importing cwd code.
+
+    The temp session directory is also the caller's project-cwd surrogate. The
+    non-isolated negative control changes only the interpreter flag in that same
+    literal block, proving the marker is live without touching production files.
+    """
+    key = ("comPACT.md", 2)
+    spec = _expected_spec(JOURNAL_READBACK_MATRIX[key], tmp_path)
+    _write_journal_event(tmp_path, _matching_journal_event(spec))
+    marker = tmp_path / "CWD_JSON_EXECUTED"
+    (tmp_path / "json.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).touch()\n"
+        "raise RuntimeError('hostile cwd json.py imported')\n",
+        encoding="utf-8",
+    )
+    script = _render_live_readback(key, journal_site_map, tmp_path)
+
+    isolated = _run_readback(script, tmp_path)
+    assert isolated.returncode == 0, isolated.stderr
+    assert not marker.exists()
+
+    vulnerable = script.replace("python3 -I -c", "python3 -c", 1)
+    assert vulnerable != script
+    control = _run_readback(vulnerable, tmp_path)
+    assert control.returncode != 0
+    assert marker.exists()
+    assert "hostile cwd json.py imported" in control.stderr
+
+
 def test_hostile_placeholders_remain_json_data(tmp_path, journal_site_map):
     key = ("comPACT.md", 2)
     marker = tmp_path / "PWNED"
@@ -2933,6 +2969,8 @@ def test_read_verbs_are_excluded_from_write_census():
         "```bash\n"
         'python3 "$SJ" read --type commit\n'
         'python3 "$SJ" read-last --type commit\n'
+        'python3 $SJ read --type commit\n'
+        'python3 $SJ read-last --type commit\n'
         "```\n"
     )
     assert _parse_journal_sites("orchestrate.md", text) == []

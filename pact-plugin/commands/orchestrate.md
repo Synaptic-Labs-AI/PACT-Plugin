@@ -219,7 +219,7 @@ python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
 {"task_id": "{feature_task_id}", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
 JSON
-python3 -c '
+python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -311,7 +311,7 @@ SJ="{plugin_root}/hooks/shared/session_journal.py"
 python3 "$SJ" write --type phase_transition --session-dir '{session_dir}' --stdin <<'JSON'
 {"phase": "{PHASE}", "status": "started", "skip_reason": "", "metadata": {}}
 JSON
-python3 -c '
+python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -337,7 +337,7 @@ SJ="{plugin_root}/hooks/shared/session_journal.py"
 python3 "$SJ" write --type phase_transition --session-dir '{session_dir}' --stdin <<'JSON'
 {"phase": "{PHASE}", "status": "completed", "skip_reason": "", "metadata": {}}
 JSON
-python3 -c '
+python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -356,7 +356,7 @@ JSON
 python3 "$SJ" write --type checkpoint --session-dir '{session_dir}' --stdin <<'JSON'
 {"phase": "{PHASE}", "completed_phases": [...], "active_agents": [{"name": "...", "task_id": "...", "status": "..."}], "variety": VARIETY_DICT_OR_NULL, "pending_phases": [...], "safe_to_retry": true}
 JSON
-python3 -c '
+python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -382,7 +382,7 @@ SJ="{plugin_root}/hooks/shared/session_journal.py"
 python3 "$SJ" write --type phase_transition --session-dir '{session_dir}' --stdin <<'JSON'
 {"phase": "{PHASE}", "status": "skipped", "skip_reason": "{reason}", "metadata": {}}
 JSON
-python3 -c '
+python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -567,7 +567,7 @@ When a phase is skipped but a coder encounters a decision that would have been h
      --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
    {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
 JSON
-   python3 -c '
+   python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -592,7 +592,7 @@ JSON
      --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
    {"agent": "preparer", "task_id": "{taskId}", "phase": "PREPARE", "scope": []}
 JSON
-   python3 -c '
+   python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -635,7 +635,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
   python3 "$SJ" write --type artifact_paths --session-dir '{session_dir}' --stdin <<'JSON'
   {"workflow": "prepare", "feature": "{feature}", "paths": ["{absolute_path_1}", "{absolute_path_2}"], "task_id": "{prepare_task_id}"}
 JSON
-  python3 -c '
+  python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -732,7 +732,7 @@ When detection fires (score >= threshold), follow the evaluation response protoc
      --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
    {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
 JSON
-   python3 -c '
+   python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -757,7 +757,7 @@ JSON
      --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
    {"agent": "architect", "task_id": "{taskId}", "phase": "ARCHITECT", "scope": []}
 JSON
-   python3 -c '
+   python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -800,7 +800,7 @@ Completed-phase teammates remain as consultants. Do not shutdown during this wor
   python3 "$SJ" write --type artifact_paths --session-dir '{session_dir}' --stdin <<'JSON'
   {"workflow": "architect", "feature": "{feature}", "paths": ["{absolute_path_1}", "{absolute_path_2}"], "task_id": "{architect_task_id}"}
 JSON
-  python3 -c '
+  python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -900,7 +900,7 @@ python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type s2_state_seeded --session-dir '{session_dir}' --stdin <<'JSON'
 {"worktree": "{worktree_path}", "agents": ["{agent1}", "{agent2}"], "boundaries": {"{agent1}": ["path/"], "{agent2}": ["path/"]}}
 JSON
-python3 -c '
+python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -944,7 +944,7 @@ JSON
      --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
    {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
 JSON
-   python3 -c '
+   python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -969,7 +969,7 @@ JSON
      --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
    {"agent": "{coder-name}", "task_id": "{taskId}", "phase": "CODE", "scope": ["{assigned_paths}"]}
 JSON
-   python3 -c '
+   python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -1047,7 +1047,7 @@ Pass through whatever the coder's stage-ready message claimed about the staged w
     --type commit --session-dir '{session_dir}' --stdin <<'JSON'
   {"sha": "{short_sha}", "message": "{first_line}", "phase": "CODE"}
 JSON
-  python3 -c '
+  python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -1073,7 +1073,7 @@ JSON
   python3 "$SJ" write --type artifact_paths --session-dir '{session_dir}' --stdin <<'JSON'
   {"workflow": "code-auditor", "feature": "{feature}", "paths": ["{absolute_decision_log_path}"]}
 JSON
-  python3 -c '
+  python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -1166,7 +1166,7 @@ Execute the [CONSOLIDATE Phase protocol](../protocols/pact-scope-phases.md#conso
      --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
    {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
 JSON
-   python3 -c '
+   python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -1191,7 +1191,7 @@ JSON
      --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
    {"agent": "test-engineer", "task_id": "{taskId}", "phase": "TEST", "scope": []}
 JSON
-   python3 -c '
+   python3 -I -c '
 import json
 import sys
 from pathlib import Path

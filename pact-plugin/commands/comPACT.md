@@ -43,7 +43,7 @@ Create a simpler Task hierarchy than full orchestrate:
 >   --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
 > {"task_id": "{feature_task_id}", "variety": {"total": N}}
 > JSON
-> python3 -c '
+> python3 -I -c '
 > import json
 > import sys
 > from pathlib import Path
@@ -295,7 +295,7 @@ When the task contains multiple independent items, invoke multiple specialists t
      --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
    {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
 JSON
-   python3 -c '
+   python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -320,7 +320,7 @@ JSON
      --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
    {"agent": "{specialist-name}", "task_id": "{taskId}", "phase": "CODE", "scope": ["{assigned_paths}"]}
 JSON
-   python3 -c '
+   python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -398,7 +398,7 @@ Use a single specialist agent only when:
      --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
    {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
 JSON
-   python3 -c '
+   python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -423,7 +423,7 @@ JSON
      --type agent_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
    {"agent": "{specialist-name}", "task_id": "{taskId}", "phase": "CODE", "scope": []}
 JSON
-   python3 -c '
+   python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -510,7 +510,7 @@ When dispatching an auditor, create its task with `metadata: {"completion_type":
     --type commit --session-dir '{session_dir}' --stdin <<'JSON'
   {"sha": "{short_sha}", "message": "{first_line}", "phase": "CODE"}
 JSON
-  python3 -c '
+  python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -548,7 +548,7 @@ JSON
     --type phase_transition --session-dir '{session_dir}' --stdin <<'JSON'
   {"phase": "CODE", "status": "completed", "skip_reason": "", "metadata": {"workflow": "comPACT"}}
 JSON
-  python3 -c '
+  python3 -I -c '
 import json
 import sys
 from pathlib import Path

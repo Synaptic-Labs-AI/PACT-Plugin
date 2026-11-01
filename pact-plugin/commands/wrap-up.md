@@ -161,7 +161,7 @@ case '{consolidation_ran}' in
       --type session_consolidated --session-dir '{session_dir}' --stdin <<'JSON'
 {"pass": 2, "task_count": {task_count}, "memories_saved": {memories_saved}}
 JSON
-    python3 -c '
+    python3 -I -c '
 import json
 import sys
 from pathlib import Path

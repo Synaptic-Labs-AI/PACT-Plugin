@@ -37,7 +37,7 @@ python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
 {"task_id": "{sub_feature_task_id}", "variety": {"total": N}}
 JSON
-python3 -c '
+python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -303,7 +303,7 @@ For each specialist needed, follow the steps for [Teachback-Gated Dispatch](#tea
      --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
    {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
 JSON
-   python3 -c '
+   python3 -I -c '
 import json
 import sys
 from pathlib import Path

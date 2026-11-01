@@ -229,7 +229,7 @@ python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
 {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
 JSON
-python3 -c '
+python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -269,7 +269,7 @@ python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type review_dispatch --session-dir '{session_dir}' --stdin <<'JSON'
 {"pr_number": {pr_number}, "pr_url": "{pr_url}", "reviewers": ["{reviewer1}", "{reviewer2}"]}
 JSON
-python3 -c '
+python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -340,7 +340,7 @@ See also: [Communication Charter](../protocols/pact-communication-charter.md) fo
        --type artifact_paths --session-dir '{session_dir}' --stdin <<'JSON'
      {"workflow": "peer-review", "feature": "{feature}", "paths": ["{absolute_review_doc_path}"]}
 JSON
-     python3 -c '
+     python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -366,7 +366,7 @@ JSON
      --type review_finding --session-dir '{session_dir}' --stdin <<'JSON'
    {"severity": "{blocking|suggestion|nitpick}", "finding": "{one-line description}", "reviewer": "{reviewer-name}", "task_id": "{reviewer_task_id}"}
 JSON
-   python3 -c '
+   python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -408,7 +408,7 @@ JSON
          --type remediation --session-dir '{session_dir}' --stdin <<'JSON'
        {"cycle": {cycle_number}, "items": ["{finding_id1}"], "fixer": "{agent-name}", "task_id": "{fixer_task_id}"}
 JSON
-       python3 -c '
+       python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -534,7 +534,7 @@ JSON
      --type pr_ready --session-dir '{session_dir}' --stdin <<'JSON'
    {"pr_number": {pr_number}, "pr_url": "{pr_url}", "commits": {total_commit_count}}
 JSON
-   python3 -c '
+   python3 -I -c '
 import json
 import sys
 from pathlib import Path

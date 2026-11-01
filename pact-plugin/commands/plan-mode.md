@@ -250,7 +250,7 @@ The teachback gate is lightweight ("understanding-confirm" with no implementatio
      --type variety_assessed --session-dir '{session_dir}' --stdin <<'JSON'
    {"task_id": "{taskId}", "scope": "dispatch", "variety": {"novelty": N, "scope": N, "uncertainty": N, "risk": N, "total": N}}
 JSON
-   python3 -c '
+   python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -393,7 +393,7 @@ SJ="{plugin_root}/hooks/shared/session_journal.py"
 python3 "$SJ" write --type artifact_paths --session-dir '{session_dir}' --stdin <<'JSON'
 {"workflow": "plan-mode", "feature": "{feature-slug}", "paths": ["{absolute_plan_doc_path}"]}
 JSON
-python3 -c '
+python3 -I -c '
 import json
 import sys
 from pathlib import Path

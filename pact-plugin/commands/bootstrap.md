@@ -42,7 +42,7 @@ python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type session_refresh_consumed --session-dir '{session_dir}' --stdin <<'JSON'
 {"refresh_ts": "{refresh_ts}"}
 JSON
-python3 -c '
+python3 -I -c '
 import json
 import sys
 from pathlib import Path
@@ -69,7 +69,7 @@ python3 "{plugin_root}/hooks/shared/session_journal.py" write \
   --type session_pause_consumed --session-dir '{session_dir}' --stdin <<'JSON'
 {"pause_ts": "{pause_ts}"}
 JSON
-python3 -c '
+python3 -I -c '
 import json
 import sys
 from pathlib import Path
