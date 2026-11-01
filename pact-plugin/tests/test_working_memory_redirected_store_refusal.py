@@ -1216,7 +1216,10 @@ class TestEverySiteJudgesProjectScopeAlike:
 
             with pytest.raises(archive_pin._Unevaluable) as excinfo:
                 _run_site(site)
-            assert "project memory root unknown" in excinfo.value.reason
+            reason = excinfo.value.reason
+            assert "project memory root unknown" in reason
+            assert "git could not answer" in reason, reason
+            assert "could not classify" not in reason, reason
             assert "different project" not in excinfo.value.reason
         else:
             result = _run_site(site)

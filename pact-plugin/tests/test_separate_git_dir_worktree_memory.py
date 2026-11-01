@@ -169,7 +169,14 @@ def test_the_archive_refuses(sep_worktree, monkeypatch):
     with pytest.raises(archive_pin._Unevaluable) as excinfo:
         archive_pin.resolve_claude_md()
 
-    assert "project memory root unknown" in excinfo.value.reason
+    reason = excinfo.value.reason
+    assert "project memory root unknown" in reason
+    # THE ANCHOR REFUSAL, NOT ITS BASE SIBLING. Both begin with the same
+    # prefix, so a prefix-only assertion passes when the anchor refusal is
+    # removed and the fall-through reaches the base refusal instead.
+    assert "git could not answer" in reason, reason
+    assert "cannot be identified" in reason, reason
+    assert "could not classify" not in reason, reason
     assert wt_md.read_text(encoding="utf-8") == original
 
 
@@ -292,7 +299,14 @@ def test_a_forged_gitfile_is_unknown_and_the_archive_refuses(
     with pytest.raises(archive_pin._Unevaluable) as excinfo:
         archive_pin.resolve_claude_md()
 
-    assert "project memory root unknown" in excinfo.value.reason
+    reason = excinfo.value.reason
+    assert "project memory root unknown" in reason
+    # THE ANCHOR REFUSAL, NOT ITS BASE SIBLING. Both begin with the same
+    # prefix, so a prefix-only assertion passes when the anchor refusal is
+    # removed and the fall-through reaches the base refusal instead.
+    assert "git could not answer" in reason, reason
+    assert "cannot be identified" in reason, reason
+    assert "could not classify" not in reason, reason
     assert victim_md.read_bytes() == victim_before, (
         "the forged gitfile redirected the archive to another project"
     )
@@ -332,7 +346,14 @@ def test_a_moved_worktree_is_unknown_and_the_archive_refuses(
     monkeypatch.chdir(moved)
     with pytest.raises(archive_pin._Unevaluable) as excinfo:
         archive_pin.resolve_claude_md()
-    assert "project memory root unknown" in excinfo.value.reason
+    reason = excinfo.value.reason
+    assert "project memory root unknown" in reason
+    # THE ANCHOR REFUSAL, NOT ITS BASE SIBLING. Both begin with the same
+    # prefix, so a prefix-only assertion passes when the anchor refusal is
+    # removed and the fall-through reaches the base refusal instead.
+    assert "git could not answer" in reason, reason
+    assert "cannot be identified" in reason, reason
+    assert "could not classify" not in reason, reason
 
 
 def test_the_no_argument_reader_answers_nothing_on_a_worktree_cwd(

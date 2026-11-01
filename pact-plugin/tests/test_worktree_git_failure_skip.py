@@ -732,7 +732,11 @@ def test_a_git_failure_refuses_the_archive_resolution(repo, monkeypatch):
     with pytest.raises(archive_pin._Unevaluable) as excinfo:
         archive_pin.resolve_claude_md()
 
-    assert "project memory root unknown" in str(excinfo.value)
+    reason = str(excinfo.value)
+    assert "project memory root unknown" in reason
+    # The anchor refusal specifically; the base sibling shares the prefix.
+    assert "git could not answer" in reason, reason
+    assert "could not classify" not in reason, reason
     assert worktree_md.read_text(encoding="utf-8") == doc
     assert main_md.read_text(encoding="utf-8") == doc
 

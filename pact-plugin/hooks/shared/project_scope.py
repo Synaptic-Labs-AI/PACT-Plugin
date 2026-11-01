@@ -604,8 +604,9 @@ def record_resolution(
     unrelated  -- a record for this declaration, naming a real checkout that
                   does NOT contain the declaration. NOT TRUSTED: a genuine
                   out-of-tree worktree and a forged redirect are identical
-                  after `git worktree prune`, so the caller falls through and
-                  the scope guard decides without this record's help.
+                  after `git worktree prune`, so the caller resolves WITHOUT
+                  this record; a caller that owns a scope guard judges the
+                  result itself, and this function only reports the status.
 
     CONTAINMENT IS THE TRUST TEST. At read time it cannot be proved that an
     out-of-tree worktree belonged to the recorded repository -- the listing

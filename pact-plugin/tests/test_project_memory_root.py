@@ -467,3 +467,28 @@ def test_the_admin_gitdir_read_preserves_a_carriage_return_path(repo, monkeypatc
     assert project_memory_root_or_none(forged) is None, (
         "a forged directory at the newline spelling was admitted"
     )
+
+
+def test_r9_the_z_listing_is_the_only_source_that_keeps_a_newline_path(
+    repo, monkeypatch
+):
+    """THE `-z` ARM, pinned by removing every fallback that could absorb it.
+
+    The admin-gitdir fallback also preserves a newline, and it absorbed every
+    existing fixture, so disabling `-z` reddened nothing. Here the fallback is
+    unavailable and the path contains a newline: only the NUL-separated
+    listing can produce a record that matches the resolved toplevel. Without
+    `-z` the line parser splits the path and the membership check fails.
+    """
+    worktrees = repo / ".worktrees"
+    worktrees.mkdir(exist_ok=True)
+    real = worktrees / "wt\nname"
+    _git("worktree", "add", "-q", str(real), "-b", "r9wt", cwd=repo)
+
+    monkeypatch.setattr(
+        project_scope,
+        "_worktree_paths_from_admin_gitdirs",
+        lambda _checkout: None,
+    )
+
+    assert project_memory_root(real) == repo.resolve()

@@ -1235,9 +1235,10 @@ def _resolve_display_claude_md_with_base() -> Tuple[Optional[Path], Optional[Pat
         # out-of-tree worktree belonged to the recorded repository, so the
         # record is trusted only when the recorded checkout CONTAINS the
         # declaration. A record that names a checkout not containing it is not
-        # trusted: this resolver falls through and the scope guard decides. A
-        # record for this declaration naming no checkout is corrupt and
-        # refuses instead.
+        # trusted: this resolver falls through to the git/cwd rungs, and the
+        # sync's scope guard -- not this function, which only returns a path --
+        # judges the result. A record for this declaration naming no checkout
+        # is corrupt and refuses instead.
         if anchor_directory_is_missing(anchor):
             status, recorded = record_resolution(
                 anchor, get_worktree_identity_from_session_record()
