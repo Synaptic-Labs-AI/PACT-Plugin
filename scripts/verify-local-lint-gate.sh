@@ -75,8 +75,8 @@ fi
 
 if ! command -v ruff >/dev/null 2>&1; then
     printf 'GATE REFUSED: ruff is not available, so the lint legs cannot run.\n' >&2
-    printf '  A missing linter must not read as a pass. Install or upgrade ruff:\n' >&2
-    printf '    python3 -m pip install --upgrade ruff\n' >&2
+    printf '  A missing linter must not read as a pass. Install the ruff version CI pins, from the repo root:\n' >&2
+    printf '    python3 -m pip install -c constraints-ci.txt ruff\n' >&2
     printf '  To lint without this gate, run the CI legs directly from the repo root:\n' >&2
     printf '    ruff check --select F401,F821 --target-version py312 pact-plugin/\n' >&2
     printf '    ruff check --select F821 --target-version py312 pact-plugin/\n' >&2
